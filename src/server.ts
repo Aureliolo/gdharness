@@ -14130,6 +14130,7 @@ class GodotServer {
     } = {};
     const reloadedFirst: ReloadedFirst[] = [];
     let builtOn: string | undefined;
+    let builtOnUnchecked = false;
     // A @tool script is refused for the reason reloadDependents gives: it runs inside the editor, and
     // reloading one from inside a call the editor is serving can take the editor down.
     const reloadingSource =
@@ -14156,6 +14157,7 @@ class GodotServer {
             answer = await reloadAsked();
           }
           builtOn = first.said;
+          builtOnUnchecked = first.unchecked === true;
         }
         const methods = readArray(answer, 'methods');
         const listed = (field: string): Record<string, string[]> => {
@@ -14187,6 +14189,7 @@ class GodotServer {
               restored: answer['restored'] === true,
               restoredAs: readString(answer, 'restoredAs') ?? '',
               ...(builtOn === undefined ? {} : { builtOn }),
+              ...(builtOnUnchecked ? { builtOnUnchecked } : {}),
             }),
           };
         } else {
@@ -14497,13 +14500,14 @@ class GodotServer {
   private async reloadWhatItIsBuiltOn(
     projectPath: string,
     scriptPath: string,
-  ): Promise<{ reloaded: ReloadedFirst[]; said?: string }> {
+  ): Promise<{ reloaded: ReloadedFirst[]; said?: string; unchecked?: true }> {
     const against = this.scriptsCompiledAgainst(projectPath, scriptPath);
     const held = await this.scriptsHeldBehind(against);
     if ('unchecked' in held) {
       return {
         reloaded: [],
         said: `Whether the editor holds the scripts it is compiled against behind their files could not be checked: ${held.unchecked}.`,
+        unchecked: true,
       };
     }
     const reloadedFor = scriptPath.startsWith('res://')

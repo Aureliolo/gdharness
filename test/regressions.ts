@@ -55772,10 +55772,13 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
         );
         return;
       }
+      // Nothing held behind its file, as the editor addon answers for scripts it compiled from disk.
       const result =
         tool === 'rescan_filesystem'
           ? { ok: true, scanning: false, importing: false, pending: false }
-          : { ok: true, classes: holds };
+          : tool === 'scripts_behind'
+            ? { ok: true, behind: [], unsavedInEditor: [] }
+            : { ok: true, classes: holds };
       socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
     });
     socket.send(JSON.stringify(greeting(project)));
@@ -55819,9 +55822,9 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
     );
     // Answered as a call that ran, and still not a reload: the methods it carries are what the copy
     // kept, and counting them as reloaded is the mistake this guards.
-    assert.match(
+    assert.equal(
       problemOf('res://refuses.gd'),
-      /^it did not compile: Godot answered error 43, Parse error$/,
+      'it did not compile: Godot answered error 43, Parse error. The editor holds none of what it is compiled against, CharteredRun (res://base.gd), behind its file, so no stale copy is what it fails on.',
       said,
     );
     for (const tool of ['res://marked.gd', 'res://tooling.gd']) {
@@ -55858,7 +55861,7 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
     );
     assert.equal(
       get(asked, 'reloadProblem'),
-      "res://refuses.gd did not compile: Godot answered error 43, Parse error. The copy the editor holds was compiled again from the text it was built from, which puts it back as it was, with the members it held before, which listMembers lists. script_diagnostics on it gives the errors. If they deny a member of CharteredRun that its file declares, the editor's copy of that class is behind: reload that class first with reloadScript and then this script, the order that cleared it in the one project that has met this.",
+      'res://refuses.gd did not compile: Godot answered error 43, Parse error. The copy the editor holds was compiled again from the text it was built from, which puts it back as it was, with the members it held before, which listMembers lists. script_diagnostics on it gives the errors. The editor holds none of what it is compiled against, CharteredRun (res://base.gd), behind its file, so no stale copy is what it fails on.',
       JSON.stringify(asked),
     );
     assert.deepEqual(
@@ -56221,7 +56224,9 @@ async function testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt(): Promise<
     );
 
     // An editor that will not say what it holds behind is said to, rather than read as holding
-    // nothing: the refusal left the problem with no word on the scripts the loader is built on.
+    // nothing: the refusal left the problem with no word on the scripts the loader is built on. The
+    // advice on order stays beside it, since reading the errors is then the one way to find such a
+    // class.
     loaderBroken = true;
     behindRefused = true;
     reloadsAskedFor.length = 0;
@@ -56229,7 +56234,7 @@ async function testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt(): Promise<
     assert.deepEqual(reloadsAskedFor, ['res://kit/loader.gd'], unasked.said);
     assert.match(
       text(get(unasked.answer, 'reloadProblem')),
-      / Whether the editor holds the scripts it is compiled against behind their files could not be checked: the editor would not say: a stand-in refusal\.$/,
+      / Whether the editor holds the scripts it is compiled against behind their files could not be checked: the editor would not say: a stand-in refusal\. If they deny a member of \w+ .*that its file declares, the editor's copy of that class is behind: reload that class first with reloadScript and then this script, the order that cleared it in the one project that has met this\.$/,
       unasked.said,
     );
     assert.equal(get(unasked.answer, 'ok'), false, unasked.said);
@@ -61097,21 +61102,27 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
   }
 }
 
+/** What `withAnAnimationProject` hands a fixture. */
+interface AnimationStage {
+  readonly server: ServerProcess;
+  readonly project: string;
+  /** scene_animation on moves.tscn, unless the arguments name another scene. */
+  readonly call: (args: Record<string, unknown>) => Promise<JsonRpcMessage>;
+  /** The same call, held to have been written by a headless engine, answered with its payload. */
+  readonly written: (args: Record<string, unknown>) => Promise<unknown>;
+  readonly fileOf: (file: string) => string;
+}
+
 /**
  * scene_animation's writes with no editor, through the server and a real engine, as the other scene
- * tools write: each op lands in the file that keeps it, root.gd's _init (position) is not saved by
- * a write that never asked for it, and a library in its own file whose animation carries a script
- * that is not a tool is refused, since that file is saved without being compared with its text.
+ * tools write. The project every animation fixture starts from, with [param files] written over
+ * its own, is imported and handed to [param body], and removed after it whatever [param body] did.
  */
-async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
-  const godotPath = resolveGodotPath();
-  if (!godotPath) {
-    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
-      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
-    }
-    console.log('animation without an editor regression skipped (Godot not found)');
-    return;
-  }
+async function withAnAnimationProject(
+  godotPath: string,
+  files: Readonly<Record<string, string>>,
+  body: (stage: AnimationStage) => Promise<void>,
+): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-animation-engine-'));
   const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-animation-engine-rt-'));
   const player = (library: string) =>
@@ -61123,7 +61134,7 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     '[node name="Player" type="AnimationPlayer" parent="."]\nlibraries = {\n&"moves": ExtResource("1_library")\n}\n\n' +
     '[node name="Tree" type="AnimationTree" parent="."]\ntree_root = SubResource("StateMachine_1")\n' +
     'anim_player = NodePath("../Player")\n\n[node name="Bare" type="AnimationTree" parent="."]\n';
-  const files: Record<string, string> = {
+  const own: Record<string, string> = {
     'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Animation"\n',
     'root.gd':
       'extends Node2D\n\n\nfunc _init() -> void:\n\tposition = Vector2(9, 9)\n\n\n' +
@@ -61192,7 +61203,7 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       '[gd_scene format=3]\n\n[ext_resource type="Script" uid="uid://kwuaqmq5q26f" path="res://warned.gd" id="1_warned"]\n\n' +
       '[node name="Warned" type="Node2D"]\nscript = ExtResource("1_warned")\n',
   };
-  for (const [path, content] of Object.entries(files)) {
+  for (const [path, content] of Object.entries({ ...own, ...files })) {
     writeFileSync(join(project, path), content);
   }
   const server = new ServerProcess({
@@ -61225,7 +61236,28 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     const imported = await runImport(godotPath, project);
     assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
     await server.initialize('animation-engine');
+    await body({ server, project, call, written, fileOf });
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
 
+/**
+ * An animation's tracks, keys and length written with no editor: each op lands in the file that
+ * keeps it, and root.gd's _init (position) is not saved by a write that never asked for it.
+ */
+async function testAnAnimationsKeysAndLengthAreWrittenWithNoEditor(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('animation keys and length without an editor regression skipped (Godot not found)');
+    return;
+  }
+  await withAnAnimationProject(godotPath, {}, async ({ call, written, fileOf }) => {
     await written({ op: 'create', playerNodePath: 'Player', animationName: 'spin', length: 0.5 });
     const track = await written({
       op: 'add_track',
@@ -61410,7 +61442,47 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       JSON.stringify(listed),
     );
     await written({ op: 'remove', playerNodePath: 'Player', animationName: 'beat' });
+  });
+}
 
+/**
+ * An animation renamed and removed with no editor, in the player's own library and in one kept
+ * apart, and a library made for an animation named into it. A library in its own file whose
+ * animation carries a script that is not a tool is refused, since that file is saved without being
+ * compared with its text.
+ */
+async function testAnAnimationIsRenamedAndRemovedWithNoEditor(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('animation rename and removal without an editor regression skipped (Godot not found)');
+    return;
+  }
+  // The player's own library holds spin, which Tree's Spin state plays, and the library kept apart
+  // holds idle and hop, so a rename has an autoplay, a state and a second library to keep in step.
+  const files = {
+    'moves.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="AnimationLibrary" path="res://library.tres" id="1_library"]\n' +
+      '[ext_resource type="Script" path="res://root.gd" id="2_root"]\n\n' +
+      '[sub_resource type="Animation" id="Animation_1"]\nresource_name = "spin"\nlength = 2.0\n\n' +
+      '[sub_resource type="AnimationLibrary" id="AnimationLibrary_1"]\n_data = {\n&"spin": SubResource("Animation_1")\n}\n\n' +
+      '[sub_resource type="AnimationNodeAnimation" id="Plays_1"]\nanimation = &"spin"\n\n' +
+      '[sub_resource type="AnimationNodeStateMachine" id="StateMachine_1"]\n' +
+      'states/Spin/node = SubResource("Plays_1")\nstates/Spin/position = Vector2(300, 100)\n\n' +
+      '[node name="Root" type="Node2D"]\nscript = ExtResource("2_root")\n\n' +
+      '[node name="Body" type="Sprite2D" parent="."]\n\n' +
+      '[node name="Player" type="AnimationPlayer" parent="."]\nlibraries = {\n&"": SubResource("AnimationLibrary_1"),\n' +
+      '&"moves": ExtResource("1_library")\n}\n\n' +
+      '[node name="Tree" type="AnimationTree" parent="."]\ntree_root = SubResource("StateMachine_1")\n' +
+      'anim_player = NodePath("../Player")\n\n[node name="Bare" type="AnimationTree" parent="."]\n',
+    'library.tres':
+      '[gd_resource type="AnimationLibrary" format=3]\n\n[sub_resource type="Animation" id="Animation_idle"]\n' +
+      'resource_name = "idle"\n\n[sub_resource type="Animation" id="Animation_hop"]\nresource_name = "hop"\n\n' +
+      '[resource]\n_data = {\n&"hop": SubResource("Animation_hop"),\n&"idle": SubResource("Animation_idle")\n}\n',
+  };
+  await withAnAnimationProject(godotPath, files, async ({ server, project, call, written, fileOf }) => {
     // A rename takes the player's autoplay and the state that plays it along: a state naming an
     // animation the player lacks plays nothing.
     const autoplay = await server.request(
@@ -61536,7 +61608,23 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       scripted,
     );
     assert.equal(fileOf('stretched.tres'), before, 'and the library file is as it was');
+  });
+}
 
+/**
+ * A scene_animation call whose player or tree is not where its path leads, with no editor, is told
+ * how paths are read, where the path left the scene, and where the scene keeps the node it wanted.
+ */
+async function testAnAnimationNodeNotFoundIsToldWhereToLook(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('animation node not found without an editor regression skipped (Godot not found)');
+    return;
+  }
+  await withAnAnimationProject(godotPath, {}, async ({ server, project, call }) => {
     // A path from the root's own name, as a tree lists the root, is answered with how paths are read:
     // by a write, by a read with no editor, and by the scene tools, which share the sentence.
     const fromRoot =
@@ -61627,6 +61715,47 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       'Parent node not found: Root. Paths go from the root, Root, whose own path is ".".',
       JSON.stringify(asParent),
     );
+  });
+}
+
+/**
+ * A state machine written with no editor: states and transitions in and out, each state saying
+ * whether the player its tree points at has the animation it plays, and a tree with no root or no
+ * player told what it lacks.
+ */
+async function testAStateMachineIsWrittenWithNoEditor(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('state machine without an editor regression skipped (Godot not found)');
+    return;
+  }
+  // Tree as a rename and a removal leave it: Spin plays turn, which the player no longer has, Idle
+  // plays moves/idle, and Spin goes to Idle. The library kept apart holds idle and leap.
+  const files = {
+    'moves.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="AnimationLibrary" path="res://library.tres" id="1_library"]\n' +
+      '[ext_resource type="Script" path="res://root.gd" id="2_root"]\n\n' +
+      '[sub_resource type="AnimationNodeAnimation" id="Plays_1"]\nanimation = &"turn"\n\n' +
+      '[sub_resource type="AnimationNodeAnimation" id="Plays_2"]\nanimation = &"moves/idle"\n\n' +
+      '[sub_resource type="AnimationNodeStateMachineTransition" id="Transition_1"]\nadvance_mode = 2\n\n' +
+      '[sub_resource type="AnimationNodeStateMachine" id="StateMachine_1"]\n' +
+      'states/Spin/node = SubResource("Plays_1")\nstates/Spin/position = Vector2(300, 100)\n' +
+      'states/Idle/node = SubResource("Plays_2")\nstates/Idle/position = Vector2(500, 100)\n' +
+      'transitions = ["Spin", "Idle", SubResource("Transition_1")]\n\n' +
+      '[node name="Root" type="Node2D"]\nscript = ExtResource("2_root")\n\n' +
+      '[node name="Body" type="Sprite2D" parent="."]\n\n' +
+      '[node name="Player" type="AnimationPlayer" parent="."]\nlibraries = {\n&"moves": ExtResource("1_library")\n}\n\n' +
+      '[node name="Tree" type="AnimationTree" parent="."]\ntree_root = SubResource("StateMachine_1")\n' +
+      'anim_player = NodePath("../Player")\n\n[node name="Bare" type="AnimationTree" parent="."]\n',
+    'library.tres':
+      '[gd_resource type="AnimationLibrary" format=3]\n\n[sub_resource type="Animation" id="Animation_idle"]\n' +
+      'resource_name = "idle"\n\n[sub_resource type="Animation" id="Animation_leap"]\nresource_name = "leap"\n\n' +
+      '[resource]\n_data = {\n&"idle": SubResource("Animation_idle"),\n&"leap": SubResource("Animation_leap")\n}\n',
+  };
+  await withAnAnimationProject(godotPath, files, async ({ server, project, call, written, fileOf }) => {
     const bare = textOf(await call({ op: 'read_states', animTreePath: 'Bare' })) ?? '';
     assert.match(
       bare,
@@ -61828,7 +61957,23 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
         .includes('Spin'),
       'and the states not named stay',
     );
+  });
+}
 
+/**
+ * A track, or keys out of one, removed with no editor: by its type, node and property as read
+ * gives them, the other tracks and keys kept.
+ */
+async function testATrackAndItsKeysComeOutWithNoEditor(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('track removal without an editor regression skipped (Godot not found)');
+    return;
+  }
+  await withAnAnimationProject(godotPath, {}, async ({ call, written, fileOf }) => {
     // A track comes out by its type, node and property as read gives them, so a track read back is
     // passed as it stands; the others stay.
     await written({ op: 'create', playerNodePath: 'Player', animationName: 'sway' });
@@ -61999,7 +62144,23 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       [1, 3, 1],
       `the track goes with its last key: ${JSON.stringify(unturned)}`,
     );
+  });
+}
 
+/**
+ * A method track written with no editor: each key judged against the method root.gd declares, and
+ * its keys removed by the method they call.
+ */
+async function testAMethodKeyIsJudgedAgainstItsMethodWithNoEditor(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('method track without an editor regression skipped (Godot not found)');
+    return;
+  }
+  await withAnAnimationProject(godotPath, {}, async ({ call, written, fileOf }) => {
     // A method key whose arguments the method cannot take is written, as one calling a missing
     // method is, and says why; add_track puts every method called on a node in one track.
     await written({ op: 'create', playerNodePath: 'Player', animationName: 'calls', length: 2 });
@@ -62104,7 +62265,20 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
       /"args": \[1\.0\]/,
       `unless it takes a float: ${fileOf('moves.tscn')}`,
     );
+  });
+}
 
+/** A state machine written with no editor moves as it was written when the engine runs it. */
+async function testAStateMachineWrittenWithNoEditorRunsAsWritten(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('state machine run without an editor regression skipped (Godot not found)');
+    return;
+  }
+  await withAnAnimationProject(godotPath, {}, async ({ server, project, call, written }) => {
     // A machine written here is run, since the mode the engine reads is what decides whether it
     // moves: written as the default enabled, it sat in Start with its condition true.
     const machine = { scenePath: 'machine.tscn', animTreePath: 'Tree' };
@@ -62174,32 +62348,37 @@ async function testAnAnimationIsWrittenWithNoEditor(): Promise<void> {
     );
     const said = JSON.stringify(get(ran, 'entries'));
     assert.match(said, /in Idle.*then in Hop/, JSON.stringify(ran));
-  } finally {
-    await server.stop();
-    rmSync(project, { recursive: true, force: true });
-    rmSync(runtimeDir, { recursive: true, force: true });
-  }
+  });
+}
+
+/** What `withAKinProject` hands a fixture. */
+interface KinStage {
+  readonly project: string;
+  /** Every file the project started with. */
+  readonly files: Readonly<Record<string, string>>;
+  readonly call: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>;
+  /** The same call, held to have been written by a headless engine, answered with its payload. */
+  readonly written: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  readonly fileOf: (file: string) => string;
 }
 
 /**
  * An inherited scene and an instance with editable children, with no editor, through the server and
  * a real engine: the two ways a scene keeps its own values for nodes another scene makes. The base
  * scene's root script is not a tool and tints the root in _init, which a headless engine runs, so
- * no write here may save a modulate.
+ * no write here may save a modulate. The project every such fixture starts from, with [param files]
+ * written over its own, is imported and handed to [param body], and removed after it whatever
+ * [param body] did.
  */
-async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void> {
-  const godotPath = resolveGodotPath();
-  if (!godotPath) {
-    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
-      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
-    }
-    console.log('inherited and editable scenes without an editor regression skipped (Godot not found)');
-    return;
-  }
+async function withAKinProject(
+  godotPath: string,
+  files: Readonly<Record<string, string>>,
+  body: (stage: KinStage) => Promise<void>,
+): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kin-engine-'));
   const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-kin-engine-rt-'));
   mkdirSync(join(project, 'parts'));
-  const files: Record<string, string> = {
+  const own: Record<string, string> = {
     'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Kin"\n',
     'crate.gd':
       'extends StaticBody2D\n\n\nfunc _init() -> void:\n\tmodulate = Color(1, 0, 0)\n' +
@@ -62247,7 +62426,8 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       '[node name="Crate1" parent="." instance=ExtResource("1_crate")]\n\n' +
       '[node name="Crate2" parent="." instance=ExtResource("1_crate")]\nposition = Vector2(30, 0)\n',
   };
-  for (const [path, content] of Object.entries(files)) {
+  const laid = { ...own, ...files };
+  for (const [path, content] of Object.entries(laid)) {
     writeFileSync(join(project, path), content);
   }
   const server = new ServerProcess({
@@ -62274,14 +62454,36 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
     return payload;
   };
   const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
-  const inheriting = { op: 'create', inherits: 'parts/crate.tscn' };
-  const crateByUid =
-    /\[ext_resource type="PackedScene" uid="uid:\/\/dcratehw2x" path="res:\/\/parts\/crate\.tscn" id="[^"]+"\]/;
   try {
     const imported = await runImport(godotPath, project);
     assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
     await server.initialize('kin-engine');
+    await body({ project, files: laid, call, written, fileOf });
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
 
+/**
+ * An inherited scene made with no editor names the scene it inherits as the uid cache allows, takes
+ * a script of its own, and sends a write about a node another scene makes to the scene that makes
+ * it, past a base that only sets values on it.
+ */
+async function testAnInheritedSceneIsMadeWithNoEditor(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('inherited scene without an editor regression skipped (Godot not found)');
+    return;
+  }
+  const inheriting = { op: 'create', inherits: 'parts/crate.tscn' };
+  const crateByUid =
+    /\[ext_resource type="PackedScene" uid="uid:\/\/dcratehw2x" path="res:\/\/parts\/crate\.tscn" id="[^"]+"\]/;
+  await withAKinProject(godotPath, {}, async ({ project, call, written, fileOf }) => {
     const made = await written('scene_create', { ...inheriting, scenePath: 'parts/big_crate.tscn' });
     assert.deepEqual(
       [get(made, 'inherits'), get(made, 'rootNodeType'), get(made, 'rootNodeName')],
@@ -62432,6 +62634,120 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       assert.ok(!existsSync(join(project, 'parts', 'refused.tscn')), `and nothing is written for ${refusal}`);
     }
 
+    // Each node an inherited scene is given names the file that makes it, past a base that only
+    // sets values on it, and a node of the scene's own names none.
+    await written('scene_node', {
+      op: 'add',
+      scenePath: 'parts/big_crate.tscn',
+      nodeType: 'Node2D',
+      nodeName: 'Tag',
+    });
+    await written('scene_node', {
+      op: 'add',
+      scenePath: 'parts/bigger_crate.tscn',
+      nodeType: 'Node2D',
+      nodeName: 'Own',
+    });
+    const sources = (tree: unknown): unknown[] =>
+      asArray(get(tree, 'children')).map((child) => [
+        get(child, 'name'),
+        get(child, 'inheritedFrom') ?? null,
+      ]);
+    const biggerTree = get(
+      parseTextContent(await call('scene_tree', { scenePath: 'parts/bigger_crate.tscn' })),
+      'tree',
+    );
+    assert.deepEqual(
+      [get(biggerTree, 'inherits'), get(biggerTree, 'inheritedFrom'), sources(biggerTree)],
+      [
+        'res://parts/big_crate.tscn',
+        undefined,
+        [
+          ['Look', 'res://parts/crate.tscn'],
+          ['Hit', 'res://parts/crate.tscn'],
+          ['Bolt', 'res://parts/crate.tscn'],
+          ['Mark', 'res://parts/crate.tscn'],
+          ['Tag', 'res://parts/big_crate.tscn'],
+          ['Own', null],
+        ],
+      ],
+      JSON.stringify(biggerTree),
+    );
+    const mainTree = get(parseTextContent(await call('scene_tree', { scenePath: 'main.tscn' })), 'tree');
+    assert.deepEqual(
+      [get(mainTree, 'inherits'), sources(mainTree)],
+      [
+        undefined,
+        [
+          ['Floor', null],
+          ['Crate1', null],
+          ['Crate2', null],
+        ],
+      ],
+      `a scene inheriting nothing says so by leaving both out: ${JSON.stringify(mainTree)}`,
+    );
+    assert.equal(
+      get(asArray(get(asArray(get(mainTree, 'children'))[1], 'children'))[0], 'inheritedFrom'),
+      undefined,
+      `and the nodes an instance brings are named by instanceOf alone: ${JSON.stringify(mainTree)}`,
+    );
+
+    // A node inside an instance is sent to the file that makes it, which for an inherited scene can
+    // be a scene it inherits; editable children would let this scene keep values and no more.
+    writeFileSync(
+      join(project, 'yard.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://parts/bigger_crate.tscn" id="1_bigger"]\n\n' +
+        '[node name="Yard" type="Node2D"]\n\n' +
+        '[node name="Open" parent="." instance=ExtResource("1_bigger")]\n\n' +
+        '[node name="Shut" parent="." instance=ExtResource("1_bigger")]\n\n[editable path="Open"]\n',
+    );
+    const yard = { scenePath: 'yard.tscn' };
+    const deleting = [
+      ['Open/Look', 'Open', 'res://parts/crate.tscn'],
+      ['Open/Tag', 'Open', 'res://parts/big_crate.tscn'],
+      ['Open/Own', 'Open', 'res://parts/bigger_crate.tscn'],
+      ['Shut/Look', 'Shut', 'res://parts/crate.tscn'],
+    ] as const;
+    for (const [nodePath, instance, maker] of deleting) {
+      assert.equal(
+        textOf(await call('scene_node', { ...yard, op: 'delete', nodePath })),
+        `${nodePath} is inside the scene instanced at ${instance} (res://parts/bigger_crate.tscn), which creates it again on load. No scene can delete a node another scene makes: set its visible to false here to hide it in this scene alone, or delete it in ${maker}, which removes it from every scene using that one.`,
+      );
+    }
+    assert.equal(
+      textOf(
+        await call('scene_node', { ...yard, op: 'set', nodePath: 'Shut/Tag', properties: { name: 'Label' } }),
+      ),
+      'Shut/Tag is inside the scene instanced at Shut (res://parts/bigger_crate.tscn), which creates it again on load. Edit res://parts/big_crate.tscn instead.',
+      'a rename inside an instance whose children are not editable is not offered editable children',
+    );
+    assert.equal(
+      textOf(
+        await call('scene_node', { ...yard, op: 'reparent', nodePath: 'Open/Bolt/Head', newParentPath: '.' }),
+      ),
+      'Open/Bolt/Head is inside the scene instanced at Open/Bolt (res://parts/bolt.tscn), which creates it again on load. Edit res://parts/bolt.tscn instead.',
+      'a node of an instance nested in one is sent to the nested scene',
+    );
+  });
+}
+
+/**
+ * An instance whose children are made editable with no editor keeps values of its own for them,
+ * which a value built into the scene it instances cannot take, and a value set back to what the node
+ * has without it is left out of the file.
+ */
+async function testAnInstanceKeepsItsOwnValuesWithNoEditor(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('instance values without an editor regression skipped (Godot not found)');
+    return;
+  }
+  const crateByUid =
+    /\[ext_resource type="PackedScene" uid="uid:\/\/dcratehw2x" path="res:\/\/parts\/crate\.tscn" id="[^"]+"\]/;
+  await withAKinProject(godotPath, {}, async ({ call, written, fileOf }) => {
     const inside = {
       op: 'set',
       scenePath: 'main.tscn',
@@ -62517,6 +62833,75 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       'Crate2/Look is inside the scene instanced at Crate2 (res://parts/crate.tscn), which creates it again on load. No scene can delete a node another scene makes: set its visible to false here to hide it in this scene alone, or delete it in res://parts/crate.tscn, which removes it from every scene using that one.',
     );
 
+    // A value set back to what the node has without it is left out of the file, and the answer
+    // says so, with what the node follows from then on.
+    const moved = await written('scene_node', {
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Crate2',
+      properties: { position: [7, 0] },
+    });
+    assert.equal(get(moved, 'notStored'), undefined, JSON.stringify(moved));
+    assert.match(fileOf('main.tscn'), /\[node name="Crate2"[^\]]*\]\nposition = Vector2\(7, 0\)\n/);
+    const back = await written('scene_node', {
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Crate2',
+      properties: { position: [0, 0], 'scale:x': 1, 'scale:y': 1 },
+    });
+    assert.deepEqual(
+      [get(back, 'notStored'), get(back, 'notStoredNote')],
+      [
+        ['position', 'scale'],
+        'position, scale now hold what res://parts/crate.tscn gives this node, so the file does not store them, and a change there reaches this node.',
+      ],
+      JSON.stringify(back),
+    );
+    assert.doesNotMatch(fileOf('main.tscn'), /\[node name="Crate2"[^\]]*\]\n(?:[a-z_]+ = .*\n)*position = /);
+    const floor = await written('scene_node', {
+      op: 'set',
+      scenePath: 'main.tscn',
+      nodePath: 'Floor',
+      properties: { rotation: 0, z_index: 2 },
+    });
+    assert.deepEqual(
+      [get(floor, 'notStored'), get(floor, 'notStoredNote')],
+      [['rotation'], 'rotation now holds the default, so the file does not store it.'],
+      `a node this scene makes follows its defaults, and a value kept is not named: ${JSON.stringify(floor)}`,
+    );
+    assert.match(fileOf('main.tscn'), /\[node name="Floor"[^\]]*\]\nz_index = 2\n/);
+  });
+}
+
+/**
+ * Editable children opened and closed with no editor: an instance nested in an editable one opened
+ * in turn, which instances are editable read back through an inherited scene and an instancing one,
+ * the refusals for nodes no editable children reach, and closing them dropping what they kept.
+ */
+async function testEditableChildrenAreOpenedAndClosedWithNoEditor(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('editable children without an editor regression skipped (Godot not found)');
+    return;
+  }
+  // main.tscn as the writes giving Crate2 values of its own leave it: its children editable, Look
+  // scaled, and Hit given a shape of this scene's own, all of which closing them drops.
+  const files = {
+    'main.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" uid="uid://dcratehw2x" path="res://parts/crate.tscn" id="1_crate"]\n\n' +
+      '[sub_resource type="CircleShape2D" id="CircleShape2D_own"]\nradius = 11.0\n\n' +
+      '[node name="Main" type="Node2D"]\n\n[node name="Floor" type="Node2D" parent="."]\n\n' +
+      '[node name="Crate1" parent="." instance=ExtResource("1_crate")]\n\n' +
+      '[node name="Crate2" parent="." instance=ExtResource("1_crate")]\nposition = Vector2(30, 0)\n\n' +
+      '[node name="Look" parent="Crate2"]\nscale = Vector2(3, 3)\n\n' +
+      '[node name="Hit" parent="Crate2"]\nshape = SubResource("CircleShape2D_own")\n\n' +
+      '[editable path="Crate2"]\n',
+  };
+  const inside = { op: 'set', scenePath: 'main.tscn' };
+  await withAKinProject(godotPath, files, async ({ call, written, fileOf }) => {
     const head = { ...inside, nodePath: 'Crate2/Bolt/Head', properties: { scale: [4, 4] } };
     assert.equal(
       textOf(await call('scene_node', head)),
@@ -62672,140 +63057,24 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       ],
       `a node cut off by depth says how many children it has: ${JSON.stringify(shallow)}`,
     );
+  });
+}
 
-    // Each node an inherited scene is given names the file that makes it, past a base that only
-    // sets values on it, and a node of the scene's own names none.
-    await written('scene_node', {
-      op: 'add',
-      scenePath: 'parts/big_crate.tscn',
-      nodeType: 'Node2D',
-      nodeName: 'Tag',
-    });
-    await written('scene_node', {
-      op: 'add',
-      scenePath: 'parts/bigger_crate.tscn',
-      nodeType: 'Node2D',
-      nodeName: 'Own',
-    });
-    const sources = (tree: unknown): unknown[] =>
-      asArray(get(tree, 'children')).map((child) => [
-        get(child, 'name'),
-        get(child, 'inheritedFrom') ?? null,
-      ]);
-    const biggerTree = get(
-      parseTextContent(await call('scene_tree', { scenePath: 'parts/bigger_crate.tscn' })),
-      'tree',
-    );
-    assert.deepEqual(
-      [get(biggerTree, 'inherits'), get(biggerTree, 'inheritedFrom'), sources(biggerTree)],
-      [
-        'res://parts/big_crate.tscn',
-        undefined,
-        [
-          ['Look', 'res://parts/crate.tscn'],
-          ['Hit', 'res://parts/crate.tscn'],
-          ['Bolt', 'res://parts/crate.tscn'],
-          ['Mark', 'res://parts/crate.tscn'],
-          ['Tag', 'res://parts/big_crate.tscn'],
-          ['Own', null],
-        ],
-      ],
-      JSON.stringify(biggerTree),
-    );
-    const mainTree = get(parseTextContent(await call('scene_tree', { scenePath: 'main.tscn' })), 'tree');
-    assert.deepEqual(
-      [get(mainTree, 'inherits'), sources(mainTree)],
-      [
-        undefined,
-        [
-          ['Floor', null],
-          ['Crate1', null],
-          ['Crate2', null],
-        ],
-      ],
-      `a scene inheriting nothing says so by leaving both out: ${JSON.stringify(mainTree)}`,
-    );
-    assert.equal(
-      get(asArray(get(asArray(get(mainTree, 'children'))[1], 'children'))[0], 'inheritedFrom'),
-      undefined,
-      `and the nodes an instance brings are named by instanceOf alone: ${JSON.stringify(mainTree)}`,
-    );
-
-    // A node inside an instance is sent to the file that makes it, which for an inherited scene can
-    // be a scene it inherits; editable children would let this scene keep values and no more.
-    writeFileSync(
-      join(project, 'yard.tscn'),
-      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://parts/bigger_crate.tscn" id="1_bigger"]\n\n' +
-        '[node name="Yard" type="Node2D"]\n\n' +
-        '[node name="Open" parent="." instance=ExtResource("1_bigger")]\n\n' +
-        '[node name="Shut" parent="." instance=ExtResource("1_bigger")]\n\n[editable path="Open"]\n',
-    );
-    const yard = { scenePath: 'yard.tscn' };
-    const deleting = [
-      ['Open/Look', 'Open', 'res://parts/crate.tscn'],
-      ['Open/Tag', 'Open', 'res://parts/big_crate.tscn'],
-      ['Open/Own', 'Open', 'res://parts/bigger_crate.tscn'],
-      ['Shut/Look', 'Shut', 'res://parts/crate.tscn'],
-    ] as const;
-    for (const [nodePath, instance, maker] of deleting) {
-      assert.equal(
-        textOf(await call('scene_node', { ...yard, op: 'delete', nodePath })),
-        `${nodePath} is inside the scene instanced at ${instance} (res://parts/bigger_crate.tscn), which creates it again on load. No scene can delete a node another scene makes: set its visible to false here to hide it in this scene alone, or delete it in ${maker}, which removes it from every scene using that one.`,
-      );
+/**
+ * An inherited scene finds its base as the engine does with no editor: by the uid the import kept,
+ * when a copy carries the same one, and a value entry by the unique_id of a node renamed in the
+ * scene it comes from.
+ */
+async function testAnInheritedSceneFindsItsBaseAsTheEngineDoes(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
     }
-    assert.equal(
-      textOf(
-        await call('scene_node', { ...yard, op: 'set', nodePath: 'Shut/Tag', properties: { name: 'Label' } }),
-      ),
-      'Shut/Tag is inside the scene instanced at Shut (res://parts/bigger_crate.tscn), which creates it again on load. Edit res://parts/big_crate.tscn instead.',
-      'a rename inside an instance whose children are not editable is not offered editable children',
-    );
-    assert.equal(
-      textOf(
-        await call('scene_node', { ...yard, op: 'reparent', nodePath: 'Open/Bolt/Head', newParentPath: '.' }),
-      ),
-      'Open/Bolt/Head is inside the scene instanced at Open/Bolt (res://parts/bolt.tscn), which creates it again on load. Edit res://parts/bolt.tscn instead.',
-      'a node of an instance nested in one is sent to the nested scene',
-    );
-
-    // A value set back to what the node has without it is left out of the file, and the answer
-    // says so, with what the node follows from then on.
-    const moved = await written('scene_node', {
-      op: 'set',
-      scenePath: 'main.tscn',
-      nodePath: 'Crate2',
-      properties: { position: [7, 0] },
-    });
-    assert.equal(get(moved, 'notStored'), undefined, JSON.stringify(moved));
-    assert.match(fileOf('main.tscn'), /\[node name="Crate2"[^\]]*\]\nposition = Vector2\(7, 0\)\n/);
-    const back = await written('scene_node', {
-      op: 'set',
-      scenePath: 'main.tscn',
-      nodePath: 'Crate2',
-      properties: { position: [0, 0], 'scale:x': 1, 'scale:y': 1 },
-    });
-    assert.deepEqual(
-      [get(back, 'notStored'), get(back, 'notStoredNote')],
-      [
-        ['position', 'scale'],
-        'position, scale now hold what res://parts/crate.tscn gives this node, so the file does not store them, and a change there reaches this node.',
-      ],
-      JSON.stringify(back),
-    );
-    assert.doesNotMatch(fileOf('main.tscn'), /\[node name="Crate2"[^\]]*\]\n(?:[a-z_]+ = .*\n)*position = /);
-    const floor = await written('scene_node', {
-      op: 'set',
-      scenePath: 'main.tscn',
-      nodePath: 'Floor',
-      properties: { rotation: 0, z_index: 2 },
-    });
-    assert.deepEqual(
-      [get(floor, 'notStored'), get(floor, 'notStoredNote')],
-      [['rotation'], 'rotation now holds the default, so the file does not store it.'],
-      `a node this scene makes follows its defaults, and a value kept is not named: ${JSON.stringify(floor)}`,
-    );
-    assert.match(fileOf('main.tscn'), /\[node name="Floor"[^\]]*\]\nz_index = 2\n/);
-
+    console.log('inherited scene base without an editor regression skipped (Godot not found)');
+    return;
+  }
+  await withAKinProject(godotPath, {}, async ({ project, files, call, written, fileOf }) => {
     // A scene copied whole carries the uid of the one it was copied from, so one of the two names a
     // uid the loader resolves to the other, whichever the import kept.
     writeFileSync(
@@ -62867,11 +63136,7 @@ async function testASceneKeepsItsOwnValuesForAnotherScenesNodes(): Promise<void>
       ['res://parts/plank.tscn', ['res://parts/plank.tscn', 'res://parts/plank.tscn']],
       `an inherited scene's tree says what it inherits and where its nodes come from: ${JSON.stringify(wide)}`,
     );
-  } finally {
-    await server.stop();
-    rmSync(project, { recursive: true, force: true });
-    rmSync(runtimeDir, { recursive: true, force: true });
-  }
+  });
 }
 
 /**
@@ -65327,14 +65592,23 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMoveWithNoEditorLeavesTheProjectLoading,
   testAReadWithNoEditorAnswersFromTheFile,
   testAWriteWithNoEditorGoesThroughAHeadlessEngine,
-  testAnAnimationIsWrittenWithNoEditor,
+  testAnAnimationsKeysAndLengthAreWrittenWithNoEditor,
+  testAnAnimationIsRenamedAndRemovedWithNoEditor,
+  testAnAnimationNodeNotFoundIsToldWhereToLook,
+  testAStateMachineIsWrittenWithNoEditor,
+  testATrackAndItsKeysComeOutWithNoEditor,
+  testAMethodKeyIsJudgedAgainstItsMethodWithNoEditor,
+  testAStateMachineWrittenWithNoEditorRunsAsWritten,
   testANodeKeepsItsGroupsAndItsPlace,
   testAThemeAndATilesetWithNoEditor,
   testAControlIsLaidOutAsTheEditorLaysItOut,
   testAProjectsFilesAndLayersAreNamedWithNoEditor,
   testANavigationRegionIsBakedWithNoEditor,
   testA3DLevelIsReadAsItIsWritten,
-  testASceneKeepsItsOwnValuesForAnotherScenesNodes,
+  testAnInheritedSceneIsMadeWithNoEditor,
+  testAnInstanceKeepsItsOwnValuesWithNoEditor,
+  testEditableChildrenAreOpenedAndClosedWithNoEditor,
+  testAnInheritedSceneFindsItsBaseAsTheEngineDoes,
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,
   testAMovedNodeKeepsThePathsNamingIt,
   testAMovedNodeNamesTheScriptLinesReadingIt,
