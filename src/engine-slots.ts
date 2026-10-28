@@ -47,7 +47,7 @@ import { join, resolve } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
-import { callProgress, callSignal } from './call-signal.js';
+import { callProgress, callSignal, callSlotWaits } from './call-signal.js';
 import { EngineUsageError } from './engine-launch.js';
 import { startTimesOf } from './process-children.js';
 import { removeWhole } from './whole-file.js';
@@ -291,9 +291,14 @@ export class EngineSlots {
 
   /**
    * Takes a slot, waiting for one to come free, and answers its lock's path. A take that finds every
-   * slot held keeps a mark of its wait until it ends, however it ends.
+   * slot held keeps a mark of its wait until it ends, however it ends, and calls [param blocked]
+   * once, as it begins waiting.
    */
-  async take(signal?: AbortSignal, waiting?: (waitedMs: number) => void): Promise<string> {
+  async take(
+    signal?: AbortSignal,
+    waiting?: (waitedMs: number) => void,
+    blocked?: () => void,
+  ): Promise<string> {
     mkdirSync(this.directory, { recursive: true });
     const began = Date.now();
     let said = Number.NEGATIVE_INFINITY;
@@ -306,7 +311,10 @@ export class EngineSlots {
         if (lock !== null) {
           return lock;
         }
-        mark ??= this.waitMarked();
+        if (mark === undefined) {
+          mark = this.waitMarked();
+          blocked?.();
+        }
         const now = Date.now();
         if (waiting !== undefined) {
           if (now - said >= WAIT_SAID_MS) {
@@ -535,12 +543,49 @@ export function slotWaitSaid(
     count === 1
       ? `the one engine slot on this machine (${directory}) is in use`
       : `all ${String(count)} engine slots on this machine (${directory}) are in use`;
+  const named = holdersNamed(count, holders);
+  const waiting = `Waiting${waitedMs >= 1000 ? ` ${String(Math.round(waitedMs / 1000))} s so far` : ''} for an engine: ${slots}`;
+  if (named.length === 0) {
+    return `${waiting}, by a gate or another tool, and the engine starts when one is given back.`;
+  }
+  if (count === 1) {
+    return `${waiting}, by ${named.join(', ')}, and the engine starts when it is given back.`;
+  }
+  return `${waiting}: ${listed(named)}. The engine starts when one is given back.`;
+}
+
+/**
+ * What a call's answer says of its waits for slots, [param waitedMs] in all: [param holders] are
+ * who held the slots when it first waited.
+ */
+export function slotWaitedSaid(
+  waitedMs: number,
+  count: number,
+  directory: string,
+  holders: readonly SlotHolder[],
+): string {
+  const waited = `This call waited ${String(Math.round(waitedMs / 1000))} s for an engine slot in all.`;
+  const slots =
+    count === 1
+      ? `the one engine slot on this machine (${directory}) was in use`
+      : `all ${String(count)} engine slots on this machine (${directory}) were in use`;
+  const named = holdersNamed(count, holders);
+  if (named.length === 0) {
+    return `${waited} When it first waited, ${slots}, by a gate or another tool.`;
+  }
+  return count === 1
+    ? `${waited} When it first waited, ${slots}, by ${named.join(', ')}.`
+    : `${waited} When it first waited, ${slots}: ${listed(named)}.`;
+}
+
+/** [param holders] named one entry a process, with how many slots each holds when there are several. */
+function holdersNamed(count: number, holders: readonly SlotHolder[]): string[] {
   const held = new Map<number, { by: string | undefined; slots: number }>();
   for (const holder of holders) {
     const known = held.get(holder.pid);
     held.set(holder.pid, { by: known?.by ?? holder.by, slots: (known?.slots ?? 0) + 1 });
   }
-  const named = [...held].map(([pid, { by, slots: taken }]) => {
+  return [...held].map(([pid, { by, slots: taken }]) => {
     const who =
       pid === process.pid
         ? `this process (pid ${String(pid)})`
@@ -549,16 +594,10 @@ export function slotWaitSaid(
           : `${by} (pid ${String(pid)})`;
     return count === 1 ? who : `${String(taken)} by ${who}`;
   });
-  const waiting = `Waiting${waitedMs >= 1000 ? ` ${String(Math.round(waitedMs / 1000))} s so far` : ''} for an engine: ${slots}`;
-  if (named.length === 0) {
-    return `${waiting}, by a gate or another tool, and the engine starts when one is given back.`;
-  }
-  if (count === 1) {
-    return `${waiting}, by ${named.join(', ')}, and the engine starts when it is given back.`;
-  }
-  const list =
-    named.length === 1 ? named.join('') : `${named.slice(0, -1).join(', ')} and ${named.at(-1) ?? ''}`;
-  return `${waiting}: ${list}. The engine starts when one is given back.`;
+}
+
+function listed(named: readonly string[]): string {
+  return named.length === 1 ? named.join('') : `${named.slice(0, -1).join(', ')} and ${named.at(-1) ?? ''}`;
 }
 
 /**
@@ -569,6 +608,9 @@ export function slotWaitSaid(
 export async function slotForCall(): Promise<{ readonly release: () => void }> {
   const slots = await processSlots();
   const progress = callProgress();
+  const waits = callSlotWaits();
+  const began = Date.now();
+  let blockedBy: readonly SlotHolder[] | undefined;
   const lock = await slots.take(
     callSignal(),
     progress === undefined
@@ -576,7 +618,15 @@ export async function slotForCall(): Promise<{ readonly release: () => void }> {
       : (waitedMs) => {
           progress(waitedMs / 1000, slotWaitSaid(waitedMs, slots.count, slots.directory, slots.holders()));
         },
+    () => {
+      blockedBy = slots.holders();
+    },
   );
+  if (waits !== undefined && blockedBy !== undefined) {
+    waits.ms += Date.now() - began;
+    const heldBy = blockedBy;
+    waits.said ??= (waitedMs) => slotWaitedSaid(waitedMs, slots.count, slots.directory, heldBy);
+  }
   return {
     release: () => {
       slots.release(lock);

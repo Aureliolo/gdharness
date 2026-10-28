@@ -15,9 +15,20 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 /** Tells the client how far a call has got, as a message, with a number that only goes up. */
 export type CallProgress = (progress: number, message: string) => void;
 
+/**
+ * How long a call has waited for engine slots in all, and what its answer says of that wait, from
+ * who held the slots when it first waited: what it was told while waiting went only to a client
+ * that asked for progress.
+ */
+export interface SlotWaits {
+  ms: number;
+  said: ((waitedMs: number) => string) | undefined;
+}
+
 interface Call {
   readonly signal: AbortSignal | undefined;
   readonly progress: CallProgress | undefined;
+  readonly slotWaits: SlotWaits | undefined;
 }
 
 const current = new AsyncLocalStorage<Call>();
@@ -47,16 +58,20 @@ export interface StillGoing {
  * reports, which is there only when the client asked for progress with a token. Such a call is
  * also sent [param still] whenever it has said nothing for its interval: only the calls that
  * reported for themselves were heard during a long wait, so a game watched for forty-five minutes
- * was cut off at thirty while it was still running.
+ * was cut off at thirty while it was still running. Every wait for an engine slot during the call
+ * is added to [param slotWaits].
  */
 export async function withCallSignal<T>(
   signal: AbortSignal | undefined,
   answer: () => Promise<T>,
   progress?: CallProgress,
   still?: StillGoing,
+  slotWaits?: SlotWaits,
 ): Promise<T> {
   if (progress === undefined) {
-    return signal === undefined ? answer() : current.run({ signal, progress: undefined }, answer);
+    return signal === undefined && slotWaits === undefined
+      ? answer()
+      : current.run({ signal, progress: undefined, slotWaits }, answer);
   }
   const began = Date.now();
   const rising = risingOnly(progress);
@@ -80,7 +95,7 @@ export async function withCallSignal<T>(
   };
   rearm();
   try {
-    return await current.run({ signal, progress: told }, answer);
+    return await current.run({ signal, progress: told, slotWaits }, answer);
   } finally {
     // A ticker of the call's own can still fire once after it has answered.
     going = undefined;
@@ -109,4 +124,9 @@ export function callSignal(): AbortSignal | undefined {
 /** How the call being answered reports progress, or undefined when its client asked for none. */
 export function callProgress(): CallProgress | undefined {
   return current.getStore()?.progress;
+}
+
+/** Where the call being answered adds up its waits for engine slots, or undefined. */
+export function callSlotWaits(): SlotWaits | undefined {
+  return current.getStore()?.slotWaits;
 }
