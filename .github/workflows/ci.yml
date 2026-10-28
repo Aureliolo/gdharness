@@ -35,7 +35,7 @@ jobs:
         uses: ./.github/actions/install-bun # zizmor: ignore[self-repository]
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: bun scripts/install-packages.ts
 
       - name: Check formatting
         run: bun run format:check
@@ -298,7 +298,7 @@ jobs:
         uses: ./.github/actions/install-bun # zizmor: ignore[self-repository]
 
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: bun scripts/install-packages.ts
 
       - name: Biome
         run: bun run lint:biome
@@ -334,7 +334,7 @@ jobs:
       # No package cache: restoring and saving one took twelve seconds against an install of one,
       # and an entry any pull request can write is bytes whose provenance is a cache key.
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: bun scripts/install-packages.ts
 
       - name: Build
         run: bun run build
