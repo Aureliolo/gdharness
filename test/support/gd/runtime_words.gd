@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## What a running screen says, read the way a player reads it: rich text as its words, a line being
 ## typed out as far as it is drawn, the items of the controls that draw a list, and translations,
 ## capitals and masks as they are drawn. Nothing is in the tree until the main loop starts, so the
@@ -20,7 +19,9 @@ func _init() -> void:
 	OS.set_environment("GDHARNESS_RUNTIME_DIR", directory)
 	node = Runtime.new()
 	root.add_child(node)
-	Checked.done(process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame")
+	Checked.done(
+		process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame"
+	)
 
 
 func _run() -> void:
@@ -39,7 +40,7 @@ func _run() -> void:
 	var _took_directory: Error = DirAccess.remove_absolute(directory)
 
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 
@@ -65,18 +66,18 @@ func _check_a_long_screen() -> void:
 	await process_frame
 	# Hidden ones included, since all but the first twenty lines sit below the window.
 	var all: Dictionary = await node._execute_command(
-		"read_text", {"root": "/root/Long", "limit": 1200, "include_hidden": true}
+		"read_text", { "root": "/root/Long", "limit": 1200, "include_hidden": true }
 	)
 	if all.get("count") != 1200 or all.get("omitted") != 0:
 		_fail("a limit above the default reads that many lines: %s" % str(all.get("count")))
 	var many: Dictionary = await node._execute_command(
-		"find_nodes", {"class": "Label", "root": "/root/Long", "limit": 1500}
+		"find_nodes", { "class": "Label", "root": "/root/Long", "limit": 1500 }
 	)
 	if many.get("count") != 1200:
 		_fail("and a find past the old ceiling answers every match: %s" % str(many.get("count")))
 	for command: String in ["read_text", "find_nodes"]:
 		var too_many: Dictionary = await node._execute_command(
-			command, {"class": "Label", "root": "/root/Long", "limit": 6000}
+			command, { "class": "Label", "root": "/root/Long", "limit": 6000 }
 		)
 		if too_many.get("type") != "error" or not str(too_many.get("message", "")).contains("5000"):
 			_fail("%s past the ceiling is refused, naming it: %s" % [command, str(too_many)])
@@ -99,24 +100,25 @@ func _check_a_near_miss_counts_what_would_be_found() -> void:
 	await process_frame
 
 	var by_name: Dictionary = await node._execute_command(
-		"find_nodes", {"name": "Enemy", "include_hidden": false}
+		"find_nodes", { "name": "Enemy", "include_hidden": false }
 	)
 	var said: String = str(by_name.get("note", ""))
 	if not (
 		said
 		. contains(
-			'2 hidden or out-of-view node names contain "Enemy", which "*Enemy*" with includeHidden true would find'
+			'2 hidden or out-of-view node names contain "Enemy", which "*Enemy*" with '
+			+ "includeHidden true would find"
 		)
 	):
 		_fail("a near miss on hidden nodes names the query that finds them: %s" % str(by_name))
 	var by_words: Dictionary = await node._execute_command(
-		"find_nodes", {"says": "dragon*", "include_hidden": false}
+		"find_nodes", { "says": "dragon*", "include_hidden": false }
 	)
 	if not str(by_words.get("note", "")).contains(
 		'"*dragon*" with includeHidden true would find 2 hidden or out-of-view nodes'
 	):
 		_fail("and so does one on the words they hold: %s" % str(by_words))
-	var shown_too: Dictionary = await node._execute_command("find_nodes", {"name": "Enemy"})
+	var shown_too: Dictionary = await node._execute_command("find_nodes", { "name": "Enemy" })
 	if not str(shown_too.get("note", "")).contains(
 		'2 node names contain "Enemy", which "*Enemy*" would find'
 	):
@@ -124,9 +126,9 @@ func _check_a_near_miss_counts_what_would_be_found() -> void:
 	shut.queue_free()
 
 
-## A name given as alternatives, the way `says` beside it takes them. Read as one glob, `Hero|Dragon`
-## matched no node, and the near-miss count looked for a name containing the bar, so the empty answer
-## came with no note at all.
+## A name given as alternatives, the way `says` beside it takes them. Read as one glob,
+## `Hero|Dragon` matched no node, and the near-miss count looked for a name containing the bar, so
+## the empty answer came with no note at all.
 func _check_names_as_alternatives() -> void:
 	var cast: Node2D = Node2D.new()
 	cast.name = "Cast"
@@ -143,7 +145,9 @@ func _check_names_as_alternatives() -> void:
 	barred.name = "Left|Right"
 	cast.add_child(barred)
 	if str(barred.name) != "Left|Right":
-		_fail("the engine kept the bar in the name, which the rest of this assumes: %s" % barred.name)
+		_fail(
+			"the engine kept the bar in the name, which the rest of this assumes: %s" % barred.name
+		)
 	await process_frame
 
 	var either: Dictionary = await _find_in_cast("Hero|Dragon")
@@ -163,10 +167,18 @@ func _check_names_as_alternatives() -> void:
 		or not said.contains('3 node names contain "ero" or "Dock"')
 		or not said.contains('"*ero*|*Dock*" would find')
 	):
-		_fail("a near miss is counted over every alternative and the glob offered keeps them: %s" % str(near))
+		_fail(
+			(
+				"a near miss is counted over every alternative and the glob offered keeps them: %s"
+				% str(near)
+			)
+		)
 
 	var nothing: Dictionary = await _find_in_cast("|")
-	if nothing.get("type") != "error" or not str(nothing.get("message", "")).contains("names no node"):
+	if (
+		nothing.get("type") != "error"
+		or not str(nothing.get("message", "")).contains("names no node")
+	):
 		_fail("a name of bars alone is refused rather than read as no filter: %s" % str(nothing))
 
 	var escaped: Dictionary = await _find_in_cast("Left\\|Right")
@@ -177,13 +189,21 @@ func _check_names_as_alternatives() -> void:
 		_fail("and one written bare separates two names neither of which is there: %s" % str(split))
 	# The glob offered is read back by the same split, so a bar inside a word stays escaped in it.
 	var inside: Dictionary = await _find_in_cast("eft\\|Ri")
-	if inside.get("count") != 0 or not str(inside.get("note", "")).contains('"*eft\\|Ri*" would find'):
-		_fail("a near miss on a word with a bar in it offers a glob that keeps the bar: %s" % str(inside))
+	if (
+		inside.get("count") != 0
+		or not str(inside.get("note", "")).contains('"*eft\\|Ri*" would find')
+	):
+		_fail(
+			(
+				"a near miss on a word with a bar in it offers a glob that keeps the bar: %s"
+				% str(inside)
+			)
+		)
 	cast.queue_free()
 
 
 func _find_in_cast(name_pattern: String) -> Dictionary:
-	return await node._execute_command("find_nodes", {"name": name_pattern, "root": "/root/Cast"})
+	return await node._execute_command("find_nodes", { "name": name_pattern, "root": "/root/Cast" })
 
 
 func _paths(reply: Dictionary) -> Array[String]:
@@ -201,13 +221,16 @@ func _paths(reply: Dictionary) -> Array[String]:
 func _check_reading_rich_text() -> void:
 	var dossier: VBoxContainer = VBoxContainer.new()
 	dossier.name = "Dossier"
-	# Wide enough to read: with no width, rich text wraps at every character and runs off the window.
+	# Wide enough to read: with no width, rich text wraps at every character and runs off the
+	# window.
 	dossier.custom_minimum_size = Vector2(600, 0)
 	root.add_child(dossier)
 	var marked: RichTextLabel = RichTextLabel.new()
 	marked.bbcode_enabled = true
 	marked.fit_content = true
-	marked.text = "[b][color=#4fc2d4]Mollum Telken[/color], [/b][color=#c2ae92]a thief-taker[/color]"
+	marked.text = (
+		"[b][color=#4fc2d4]Mollum Telken[/color], [/b][color=#c2ae92]a thief-taker[/color]"
+	)
 	dossier.add_child(marked)
 	var appended: RichTextLabel = RichTextLabel.new()
 	appended.fit_content = true
@@ -215,31 +238,32 @@ func _check_reading_rich_text() -> void:
 	dossier.add_child(appended)
 	await process_frame
 
-	var said: Dictionary = await node._execute_command("read_text", {"root": "/root/Dossier"})
+	var said: Dictionary = await node._execute_command("read_text", { "root": "/root/Dossier" })
 	var lines: Array = said.get("lines", [])
 	if lines != ["Mollum Telken, a thief-taker", "Docket 72, an errand"]:
 		_fail("rich text reads as what is drawn, with no tags in it: %s" % str(said))
 
 	var found: Dictionary = await node._execute_command(
-		"find_nodes", {"says": "Telken, a thief", "root": "/root/Dossier"}
+		"find_nodes", { "says": "Telken, a thief", "root": "/root/Dossier" }
 	)
 	if found.get("count") != 1:
 		_fail("a phrase running across a tag is found: %s" % str(found))
 
 	# A line being typed out says as much of itself as is drawn, so a wait for its words is not met
-	# before the player can read them. A Label by count, a RichTextLabel by ratio, which sets the count.
+	# before the player can read them. A Label by count, a RichTextLabel by ratio, which sets the
+	# count.
 	var typed: Label = Label.new()
 	typed.text = "Spring 17"
 	typed.visible_characters = 6
 	dossier.add_child(typed)
 	marked.visible_ratio = 0.5
 	await process_frame
-	var partway: Dictionary = await node._execute_command("read_text", {"root": "/root/Dossier"})
+	var partway: Dictionary = await node._execute_command("read_text", { "root": "/root/Dossier" })
 	var shown: Array = partway.get("lines", [])
 	if shown != ["Mollum Telken,", "Docket 72, an errand", "Spring"]:
 		_fail("text being typed out reads as far as it is drawn: %s" % str(partway))
 	var early: Dictionary = await node._execute_command(
-		"find_nodes", {"says": "Spring 17", "root": "/root/Dossier"}
+		"find_nodes", { "says": "Spring 17", "root": "/root/Dossier" }
 	)
 	if early.get("count") != 0:
 		_fail("and its words are not found before they are shown: %s" % str(early))
@@ -247,9 +271,9 @@ func _check_reading_rich_text() -> void:
 	dossier.free()
 
 
-## The controls that draw a list of text rather than holding one `text`: tab titles, list items, tree
-## rows and an open menu's items. Each read as nothing, so a screen of tabs and lists came back as its
-## labels alone and a wait for a tab's title was never met.
+## The controls that draw a list of text rather than holding one `text`: tab titles, list items,
+## tree rows and an open menu's items. Each read as nothing, so a screen of tabs and lists came back
+## as its labels alone and a wait for a tab's title was never met.
 func _check_reading_lists() -> void:
 	var board: VBoxContainer = VBoxContainer.new()
 	board.name = "Board"
@@ -281,20 +305,28 @@ func _check_reading_lists() -> void:
 	board.add_child(menu)
 	await process_frame
 
-	var closed: Dictionary = await node._execute_command("read_text", {"root": "/root/Board"})
+	var closed: Dictionary = await node._execute_command("read_text", { "root": "/root/Board" })
 	if closed.get("lines", []) != ["Roster", "Ledger", "Ada", "Bram", "Guild", "Cass"]:
-		_fail("tabs, list items and tree rows read as lines, and not under a collapsed row: %s" % str(closed))
+		_fail(
+			(
+				"tabs, list items and tree rows read as lines, and not under a collapsed row: %s"
+				% str(closed)
+			)
+		)
 
 	menu.show()
 	await process_frame
-	var opened: Dictionary = await node._execute_command("read_text", {"root": "/root/Board"})
+	var opened: Dictionary = await node._execute_command("read_text", { "root": "/root/Board" })
 	var lines: Array = opened.get("lines", [])
-	# A titled separator is drawn as a heading and read in its place; one with no title draws no words.
+	# A titled separator is drawn as a heading and read in its place; one with no title draws no
+	# words.
 	if lines.slice(-3) != ["Hire", "Staff", "Dismiss"]:
-		_fail("an open menu reads as its items and its separators' titles, in order: %s" % str(opened))
+		_fail(
+			"an open menu reads as its items and its separators' titles, in order: %s" % str(opened)
+		)
 
 	var found: Dictionary = await node._execute_command(
-		"find_nodes", {"says": "Ledger", "root": "/root/Board"}
+		"find_nodes", { "says": "Ledger", "root": "/root/Board" }
 	)
 	var matched: Array = found.get("nodes", [])
 	var first: Dictionary = matched[0] if not matched.is_empty() else {}
@@ -376,7 +408,7 @@ func _check_reading_as_drawn() -> void:
 	orders.show()
 	await process_frame
 
-	var read: Dictionary = await node._execute_command("read_text", {"root": "/root/Desk"})
+	var read: Dictionary = await node._execute_command("read_text", { "root": "/root/Desk" })
 	var expected: Array[String] = [
 		"Hire",
 		"ROSTER",
@@ -399,7 +431,7 @@ func _check_reading_as_drawn() -> void:
 		_fail("a secret field's words are not read back: %s" % str(read))
 
 	var found: Dictionary = await node._execute_command(
-		"find_nodes", {"says": "Hire", "root": "/root/Desk", "class": "Button"}
+		"find_nodes", { "says": "Hire", "root": "/root/Desk", "class": "Button" }
 	)
 	if found.get("count") != 1:
 		_fail("a button is found by the translation it draws: %s" % str(found))

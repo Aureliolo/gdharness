@@ -1,6 +1,5 @@
 @tool
 extends RefCounted
-
 ## Where else in a scene a resource built into it is held, since such a resource is one object
 ## wherever the scene uses it.
 
@@ -25,17 +24,22 @@ static func holders(scene: GdhSceneFile, node: Node, key: String) -> Array[Dicti
 	for at: Node in nodes:
 		for declared: Dictionary in at.get_property_list():
 			var property: String = str(declared.get("name", ""))
-			if property.is_empty() or not (GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE):
+			if (
+				property.is_empty()
+				or not (GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE)
+			):
 				continue
 			for found: String in _paths_to(at.get(property), property, wanted, {}):
 				if at != node or not key.begins_with(found + "/"):
-					found_at.append({"node": scene.path_of(at), "property": found})
+					found_at.append({ "node": scene.path_of(at), "property": found })
 	return found_at
 
 
 ## The paths below [param path] at which [param value] holds a resource of [param wanted], by
 ## instance id, stepping into lists and into resources built into a scene.
-static func _paths_to(value: Variant, path: String, wanted: Dictionary, seen: Dictionary) -> Array[String]:
+static func _paths_to(
+	value: Variant, path: String, wanted: Dictionary, seen: Dictionary
+) -> Array[String]:
 	var paths: Array[String] = []
 	if value is Array:
 		var items: Array = value
@@ -54,6 +58,9 @@ static func _paths_to(value: Variant, path: String, wanted: Dictionary, seen: Di
 	seen[id] = true
 	for declared: Dictionary in held.get_property_list():
 		var property: String = str(declared.get("name", ""))
-		if not property.is_empty() and GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
+		if (
+			not property.is_empty()
+			and GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE
+		):
 			paths.append_array(_paths_to(held.get(property), path + "/" + property, wanted, seen))
 	return paths

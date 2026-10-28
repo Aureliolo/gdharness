@@ -30,12 +30,12 @@ func names_taken(params: Dictionary) -> Dictionary:
 			as_what.append("a built-in type")
 		if singletons.has(name):
 			as_what.append("an engine singleton")
-		var entry: Dictionary = {"as": as_what, "declaredBy": null}
+		var entry: Dictionary = { "as": as_what, "declaredBy": null }
 		var declared_by: String = _declared_in_chain(base, name)
 		if not declared_by.is_empty():
 			entry["declaredBy"] = declared_by
 		taken[name] = entry
-	return {"taken": taken}
+	return { "taken": taken }
 
 
 # The native class from [param base] upwards that declares [param name] as a method, property,

@@ -1,6 +1,5 @@
 @tool
 extends Node
-
 ## The global classes the running editor is holding.
 ##
 ## The editor fixes this list when it starts and adds to it only from a filesystem scan, and
@@ -51,10 +50,10 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 func reload_script(args: Dictionary) -> Dictionary:
 	var asked: String = str(args.get("scriptPath", ""))
 	if asked.is_empty():
-		return {"ok": false, "error": "scriptPath is required"}
+		return { "ok": false, "error": "scriptPath is required" }
 	var path: String = _spelled_as_on_disk(asked)
 	if not ResourceLoader.exists(path):
-		return {"ok": false, "error": "No script at " + path}
+		return { "ok": false, "error": "No script at " + path }
 
 	# The copy the editor holds, when it holds one, and otherwise a load that reads the file, rather
 	# than load(): a load recompiles a script whose base has been reloaded from the text it holds,
@@ -63,11 +62,13 @@ func reload_script(args: Dictionary) -> Dictionary:
 	# the reload below compiled it clean.
 	var cached: Resource = ResourceLoader.get_cached_ref(path)
 	var loaded: Resource = (
-		cached if cached != null else ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_IGNORE)
+		cached
+		if cached != null
+		else ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_IGNORE)
 	)
 	var script: GDScript = loaded as GDScript
 	if script == null:
-		return {"ok": false, "error": path + " is not a GDScript"}
+		return { "ok": false, "error": path + " is not a GDScript" }
 
 	# What the copy had before anything touched it, which is the reading that shows the fault rather
 	# than the one that mends it. Without it a caller cannot tell a copy that was already current
@@ -82,7 +83,10 @@ func reload_script(args: Dictionary) -> Dictionary:
 	# method added since is still absent from the method list.
 	var reader: FileAccess = FileAccess.open(path, FileAccess.READ)
 	if reader == null:
-		return {"ok": false, "error": "Could not read " + path + ": " + str(FileAccess.get_open_error())}
+		return {
+			"ok": false,
+			"error": "Could not read " + path + ": " + str(FileAccess.get_open_error()),
+		}
 	var previous: String = script.source_code
 	var text: String = reader.get_as_text()
 	reader.close()
@@ -90,11 +94,11 @@ func reload_script(args: Dictionary) -> Dictionary:
 	# Godot keeps one parse of each script for other scripts to resolve its class through, and a
 	# reload drops that parse only when the text it compiles differs from the text that was parsed.
 	# A parse that failed because a class it names was not yet known has the file's own text, so it
-	# outlived every reload: the class answered with all its methods while each script naming it read
-	# "because of a parser error" until the editor restarted, for as long as anything held the parse,
-	# such as a file open in an editor's language server. Compiling once with a line more makes the
-	# texts differ, which drops that parse and those of the scripts that resolved through it; the
-	# file's own text is compiled below.
+	# outlived every reload: the class answered with all its methods while each script naming it
+	# read "because of a parser error" until the editor restarted, for as long as anything held the
+	# parse, such as a file open in an editor's language server. Compiling once with a line more
+	# makes the texts differ, which drops that parse and those of the scripts that resolved through
+	# it; the file's own text is compiled below.
 	script.source_code = text + "\n"
 	var _dropped: Error = script.reload(true)
 	script.source_code = text
@@ -103,11 +107,11 @@ func reload_script(args: Dictionary) -> Dictionary:
 	# caller needs then: a failure travels back as its message alone, and a project met one and
 	# could not tell whether the copy had been damaged by it or before it.
 	#
-	# And the old text is compiled again. A failed reload leaves the object unusable while its member
-	# lists read as before, measured on 4.7.2: it can make no instance, and an instance it already made
-	# has lost its methods, and the old text put back uncompiled leaves it that way. Compiling the text
-	# it was built from puts it back, and whether that worked is said, since the text may no longer
-	# compile against what it names.
+	# And the old text is compiled again. A failed reload leaves the object unusable while its
+	# member lists read as before, measured on 4.7.2: it can make no instance, and an instance it
+	# already made has lost its methods, and the old text put back uncompiled leaves it that way.
+	# Compiling the text it was built from puts it back, and whether that worked is said, since the
+	# text may no longer compile against what it names.
 	var failed: Error = script.reload(true)
 	var answer: Dictionary = {
 		"ok": true,
@@ -129,8 +133,8 @@ func reload_script(args: Dictionary) -> Dictionary:
 	return answer
 
 
-## Which of [code]scriptPaths[/code] the editor holds a compiled copy of whose text is not the file's,
-## without loading or reloading anything. A script compiled against such a copy fails on the
+## Which of [code]scriptPaths[/code] the editor holds a compiled copy of whose text is not the
+## file's, without loading or reloading anything. A script compiled against such a copy fails on the
 ## members the file has gained, and a reload of it fails the same way until the copy is reloaded
 ## first; the rescan that met this blamed the new classes the script also named, which were fine.
 ##
@@ -140,7 +144,7 @@ func reload_script(args: Dictionary) -> Dictionary:
 func scripts_behind(args: Dictionary) -> Dictionary:
 	var given: Variant = args.get("scriptPaths", [])
 	if not given is Array:
-		return {"ok": false, "error": "scriptPaths must be a list of res:// paths"}
+		return { "ok": false, "error": "scriptPaths must be a list of res:// paths" }
 	var asked: Array = given
 	var unsaved: PackedStringArray = []
 	if Engine.is_editor_hint():
@@ -163,13 +167,13 @@ func scripts_behind(args: Dictionary) -> Dictionary:
 			edited.append(path)
 		else:
 			behind.append(path)
-	return {"ok": true, "behind": behind, "unsavedInEditor": edited}
+	return { "ok": true, "behind": behind, "unsavedInEditor": edited }
 
 
-## Has the script editor's tabs reread what changed on disk, as the editor does when its window takes
-## the focus, which a hidden editor's never does. A tab with unsaved edits is left alone and named:
-## saving it writes its text over the file, and rereading would ask a question nobody can answer in a
-## hidden editor's dialog.
+## Has the script editor's tabs reread what changed on disk, as the editor does when its window
+## takes the focus, which a hidden editor's never does. A tab with unsaved edits is left alone and
+## named: saving it writes its text over the file, and rereading would ask a question nobody can
+## answer in a hidden editor's dialog.
 func _reread_open_tabs(path: String, answer: Dictionary) -> void:
 	# The engine fixtures reload from a script run outside any editor, where there are no tabs and
 	# EditorInterface has none of its methods.
@@ -223,11 +227,11 @@ func _method_names(script: GDScript) -> Array[String]:
 
 
 ## The script's constants, those of the scripts it extends included as its methods include theirs,
-## and the keys of each one that is a Dictionary as `Kind.SHORT`, which is how the copy holds a named
-## enum: a stale enum member is denied as a member of the enum rather than of the class. A constant
-## Dictionary that is not an enum is listed the same way, since the map does not tell the two apart.
-## The engine's map holds only the script's own, so a script extending a class_name listed every
-## method it inherited and none of the constants.
+## and the keys of each one that is a Dictionary as `Kind.SHORT`, which is how the copy holds a
+## named enum: a stale enum member is denied as a member of the enum rather than of the class. A
+## constant Dictionary that is not an enum is listed the same way, since the map does not tell the
+## two apart. The engine's map holds only the script's own, so a script extending a class_name
+## listed every method it inherited and none of the constants.
 func _constant_names(script: GDScript) -> Array[String]:
 	var names: Array[String] = []
 	var holder: Script = script
@@ -250,7 +254,7 @@ func _constant_names(script: GDScript) -> Array[String]:
 
 func global_classes(_args: Dictionary) -> Dictionary:
 	if not _editor_plugin:
-		return {"ok": false, "error": "Editor plugin unavailable"}
+		return { "ok": false, "error": "Editor plugin unavailable" }
 
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
 	var names: Array[String] = []

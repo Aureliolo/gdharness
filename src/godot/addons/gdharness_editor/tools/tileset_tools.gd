@@ -1,6 +1,5 @@
 @tool
 extends "resource_tools.gd"
-
 ## TileSets and the cells of tile maps, beside the resource files the script it extends writes,
 ## whose helpers it shares.
 
@@ -30,7 +29,10 @@ func _xy(value: Variant, label: String) -> Array:
 		):
 			return [
 				false,
-				'%s must be two whole numbers, {"x": .., "y": ..}, not %s.' % [label, JSON.stringify(value)]
+				(
+					'%s must be two whole numbers, {"x": .., "y": ..}, not %s.'
+					% [label, JSON.stringify(value)]
+				),
 			]
 	return [true, Vector2i(GdhRead.as_int(x), GdhRead.as_int(y))]
 
@@ -38,36 +40,36 @@ func _xy(value: Variant, label: String) -> Array:
 func create_tileset(args: Dictionary) -> Dictionary:
 	var tileset_path: String = _ensure_res_path(str(args.get("resourcePath", "")))
 	if tileset_path == "res://":
-		return {"ok": false, "error": "resourcePath is required"}
+		return { "ok": false, "error": "resourcePath is required" }
 	# modify sets properties and builds no atlas, so the other path is the only way on offered.
 	var taken: String = (
 		""
 		if not FileAccess.file_exists(tileset_path)
 		else (
 			(
-				"%s already exists, and create_tileset builds a whole new TileSet, which would replace "
-				+ "everything in it, the tiles a scene paints with among them. Give resourcePath a path "
-				+ "nothing is at."
+				"%s already exists, and create_tileset builds a whole new TileSet, which would "
+				+ "replace everything in it, the tiles a scene paints with among them. Give "
+				+ "resourcePath a path nothing is at."
 			)
 			% tileset_path
 		)
 	)
 	if not taken.is_empty():
-		return {"ok": false, "error": taken}
+		return { "ok": false, "error": taken }
 
 	var given: Variant = args.get("sources", [])
 	if not given is Array:
-		return {"ok": false, "error": "sources must list at least one atlas"}
+		return { "ok": false, "error": "sources must list at least one atlas" }
 	var sources: Array = given
 	if sources.is_empty():
-		return {"ok": false, "error": "sources must list at least one atlas"}
+		return { "ok": false, "error": "sources must list at least one atlas" }
 
 	var tileset: TileSet = TileSet.new()
 	var made: Array = []
 	for index: int in sources.size():
 		var built: Array = _atlas(sources[index], index)
 		if not built[0]:
-			return {"ok": false, "error": built[1]}
+			return { "ok": false, "error": built[1] }
 		var atlas: TileSetAtlasSource = built[1]
 		# The first source sets the tile set's own tile size, which is what a TileMapLayer draws
 		# cells at; left at its default of 16 it did not match the atlas.
@@ -77,10 +79,12 @@ func create_tileset(args: Dictionary) -> Dictionary:
 		if added < 0:
 			return {
 				"ok": false,
-				"error": "The TileSet did not take the atlas for %s" % atlas.texture.resource_path
+				"error": "The TileSet did not take the atlas for %s" % atlas.texture.resource_path,
 			}
 		var entry: Dictionary = {
-			"sourceId": added, "texture": atlas.texture.resource_path, "tiles": atlas.get_tiles_count()
+			"sourceId": added,
+			"texture": atlas.texture.resource_path,
+			"tiles": atlas.get_tiles_count(),
 		}
 		var blank: Array = built[2]
 		if not blank.is_empty():
@@ -92,18 +96,20 @@ func create_tileset(args: Dictionary) -> Dictionary:
 
 	var folder: String = GdhSceneFile.make_folder_for(tileset_path)
 	if not folder.is_empty():
-		return {"ok": false, "error": folder}
+		return { "ok": false, "error": folder }
 	var saving: Error = GdhSceneUids.save_keeping_uid(tileset, tileset_path)
 	if saving != OK:
-		return {"ok": false, "error": "Failed to save %s: %s" % [tileset_path, error_string(saving)]}
+		return {
+			"ok": false, "error": "Failed to save %s: %s" % [tileset_path, error_string(saving)],
+		}
 
 	_written(tileset_path)
 	# The size cells are drawn at, which the file leaves out when it is the default 16 by 16.
 	return {
 		"ok": true,
 		"tilesetPath": tileset_path,
-		"tileSize": {"x": tileset.tile_size.x, "y": tileset.tile_size.y},
-		"sources": made
+		"tileSize": { "x": tileset.tile_size.x, "y": tileset.tile_size.y },
+		"sources": made,
 	}
 
 
@@ -127,18 +133,22 @@ func _atlas(entry: Variant, index: int) -> Array:
 	if texture_path.split("/").has(".."):
 		return [false, "sources[%d].texture leaves the project: %s" % [index, texture_path]]
 	if not ResourceLoader.exists(texture_path):
-		# An image the engine has not imported loads as nothing, where "no texture" would send a caller
-		# looking for a file that is there.
-		if FileAccess.file_exists(texture_path) and not FileAccess.file_exists(texture_path + ".import"):
+		# An image the engine has not imported loads as nothing, where "no texture" would send a
+		# caller looking for a file that is there.
+		if (
+			FileAccess.file_exists(texture_path)
+			and not FileAccess.file_exists(texture_path + ".import")
+		):
 			return [
 				false,
 				(
 					(
-						"sources[%d].texture: %s has not been imported, so the engine has no texture for it "
-						+ "yet. project_import reimport with resourcePath %s imports it."
+						"sources[%d].texture: %s has not been imported, so the engine has no "
+						+ "texture for it yet. project_import reimport with resourcePath %s "
+						+ "imports it."
 					)
 					% [index, texture_path, texture_path]
-				)
+				),
 			]
 		return [false, "sources[%d].texture: no texture at %s" % [index, texture_path]]
 	var texture: Texture2D = load(texture_path) as Texture2D
@@ -173,7 +183,7 @@ func _atlas(entry: Variant, index: int) -> Array:
 			(
 				"sources[%d]: a %s tile does not fit in %s, which is %s"
 				% [index, tile_size, texture_path, texture.get_size()]
-			)
+			),
 		]
 	var image: Image = texture.get_image()
 	var blank: Array = []
@@ -186,10 +196,12 @@ func _atlas(entry: Variant, index: int) -> Array:
 				atlas.texture_region_size
 			)
 			if image != null and _blank(image, region):
-				blank.append({"x": x, "y": y})
+				blank.append({ "x": x, "y": y })
 				continue
 			atlas.create_tile(cell)
-	var covered: Vector2i = atlas.margins + grid * tile_size + (grid - Vector2i.ONE) * atlas.separation
+	var covered: Vector2i = (
+		atlas.margins + grid * tile_size + (grid - Vector2i.ONE) * atlas.separation
+	)
 	var left: Vector2i = Vector2i(texture.get_size()) - covered
 	var sides: PackedStringArray = []
 	if left.x > 0:
@@ -208,7 +220,7 @@ func _atlas(entry: Variant, index: int) -> Array:
 				" and ".join(sides),
 				"is" if sides.size() == 1 else "are",
 				tile_size.x,
-				tile_size.y
+				tile_size.y,
 			]
 		)
 	)
@@ -236,16 +248,16 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 	var scene_path: String = _ensure_res_path(str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", ""))
 	if scene_path == "res://":
-		return {"ok": false, "error": "scenePath is required"}
+		return { "ok": false, "error": "scenePath is required" }
 
 	var cells: Variant = args.get("cells", [])
 	# Refused rather than skipped: placing nothing and answering success is indistinguishable
 	# from placing everything, and the caller only finds out by opening the scene.
 	if typeof(cells) != TYPE_ARRAY:
-		return {"ok": false, "error": "cells must be an array of cells to place"}
+		return { "ok": false, "error": "cells must be an array of cells to place" }
 	var placed: Array = cells
 	if placed.is_empty():
-		return {"ok": false, "error": "cells is empty, so there is nothing to place"}
+		return { "ok": false, "error": "cells is empty, so there is nothing to place" }
 
 	var scene: GdhSceneFile = GdhSceneFile.new()
 	var refused: Dictionary = scene.open(scene_path, true)
@@ -260,14 +272,14 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 	var layered: TileMap = node as TileMap
 	var single: TileMapLayer = node as TileMapLayer
 
-	# set_cell stores a cell whatever it is given, and a cell naming no tile simply draws nothing, so
-	# the source, the tile and its alternative are checked here: the alternative is a call that
+	# set_cell stores a cell whatever it is given, and a cell naming no tile simply draws nothing,
+	# so the source, the tile and its alternative are checked here: the alternative is a call that
 	# reports placing tiles and a scene that shows none.
 	var tile_set: TileSet = layered.tile_set if layered != null else single.tile_set
 
 	scene.asked(node, ["layer_%d/tile_data" % layer if layered != null else "tile_map_data"])
-	# Every cell is checked before any is placed, and every one refused is named: stopping at the first
-	# left a caller fixing one cell a call.
+	# Every cell is checked before any is placed, and every one refused is named: stopping at the
+	# first left a caller fixing one cell a call.
 	var checked: Array = []
 	var refusals: PackedStringArray = []
 	for index: int in placed.size():
@@ -311,7 +323,7 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 		"layer": layer,
 		"placed": wanted.size() - erased,
 		"erased": erased,
-		"requested": placed.size()
+		"requested": placed.size(),
 	}
 
 
@@ -319,7 +331,9 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 ## TileMapLayer is the node since 4.3, and TileMap the one it replaced, which keeps its layers.
 func _tile_node(scene: GdhSceneFile, node_path: String, layer: int) -> Array:
 	var node: Node = (
-		scene.root if node_path == "." or node_path == "" else scene.root.get_node_or_null(node_path)
+		scene.root
+		if node_path == "." or node_path == ""
+		else scene.root.get_node_or_null(node_path)
 	)
 	if node == null:
 		return [null, "No node at %s in %s" % [node_path, scene.path]]
@@ -331,20 +345,27 @@ func _tile_node(scene: GdhSceneFile, node_path: String, layer: int) -> Array:
 	if not foreign.is_empty():
 		return [null, foreign]
 	if single != null and layer != 0:
-		return [null, "%s is a TileMapLayer, which is one layer; layer applies to a TileMap" % node_path]
+		return [
+			null,
+			"%s is a TileMapLayer, which is one layer; layer applies to a TileMap" % node_path,
+		]
 	if layered != null and (layer < 0 or layer >= layered.get_layers_count()):
-		return [null, "%s has %d layers, and no layer %d" % [node_path, layered.get_layers_count(), layer]]
+		return [
+			null,
+			"%s has %d layers, and no layer %d" % [node_path, layered.get_layers_count(), layer],
+		]
 	var tile_set: TileSet = layered.tile_set if layered != null else single.tile_set
 	if tile_set == null:
 		return [
 			null,
 			(
 				(
-					'%s has no TileSet, so no cell can name a source. scene_node set with properties {"tile_set": '
-					+ '"res://..."} on %s gives it one, a TileSet file such as resource_edit create_tileset makes.'
+					"%s has no TileSet, so no cell can name a source. scene_node set with "
+					+ 'properties {"tile_set": "res://..."} on %s gives it one, a TileSet file '
+					+ "such as resource_edit create_tileset makes."
 				)
 				% [node_path, node_path]
-			)
+			),
 		]
 	return [node, ""]
 
@@ -369,7 +390,8 @@ func _cell(entry: Variant, index: int, tile_set: TileSet) -> Array:
 		return [true, coords, -1, Vector2i(-1, -1), -1]
 	if not cell.has("atlasCoords"):
 		return [
-			false, "%s has no atlasCoords, which every cell but an erased one (sourceId -1) needs" % named
+			false,
+			"%s has no atlasCoords, which every cell but an erased one (sourceId -1) needs" % named,
 		]
 	var atlas_at: Array = _xy(cell["atlasCoords"], "cells[%d].atlasCoords" % index)
 	if not atlas_at[0]:
@@ -380,7 +402,7 @@ func _cell(entry: Variant, index: int, tile_set: TileSet) -> Array:
 			(
 				"%s names source %d, and the TileSet has %s; sourceId -1 erases a cell"
 				% [named, source_id, _sources_of(tile_set)]
-			)
+			),
 		]
 	var source: TileSetSource = tile_set.get_source(source_id)
 	var atlas_coords: Vector2i = atlas_at[1]
@@ -388,7 +410,10 @@ func _cell(entry: Variant, index: int, tile_set: TileSet) -> Array:
 	if not source.has_tile(atlas_coords):
 		return [
 			false,
-			"%s: source %d has no tile at %s; it has %s" % [named, source_id, atlas_coords, _tiles_of(source)]
+			(
+				"%s: source %d has no tile at %s; it has %s"
+				% [named, source_id, atlas_coords, _tiles_of(source)]
+			),
 		]
 	if not source.has_alternative_tile(atlas_coords, alternative):
 		return [
@@ -396,7 +421,7 @@ func _cell(entry: Variant, index: int, tile_set: TileSet) -> Array:
 			(
 				"%s: the tile at %s in source %d has no alternative %d"
 				% [named, atlas_coords, source_id, alternative]
-			)
+			),
 		]
 	return [true, coords, source_id, atlas_coords, alternative]
 
@@ -452,17 +477,19 @@ static func cells_of(node: Node) -> Dictionary:
 				listed.append(entry)
 	else:
 		return {}
-	var answer: Dictionary = {"cellCount": count, "cells": listed}
+	var answer: Dictionary = { "cellCount": count, "cells": listed }
 	if count > listed.size():
 		answer["cellsNote"] = "The first %d of %d cells are listed." % [listed.size(), count]
 	return answer
 
 
-static func _cell_entry(at: Vector2i, source_id: int, atlas: Vector2i, alternative: int) -> Dictionary:
+static func _cell_entry(
+	at: Vector2i, source_id: int, atlas: Vector2i, alternative: int
+) -> Dictionary:
 	return {
-		"coords": {"x": at.x, "y": at.y},
+		"coords": { "x": at.x, "y": at.y },
 		"sourceId": source_id,
-		"atlasCoords": {"x": atlas.x, "y": atlas.y},
+		"atlasCoords": { "x": atlas.x, "y": atlas.y },
 		"alternativeTile": alternative,
 	}
 
@@ -473,13 +500,13 @@ func _cell_at(node: Node, layer: int, at: Vector2i) -> Array:
 		return [
 			layered.get_cell_source_id(layer, at),
 			layered.get_cell_atlas_coords(layer, at),
-			layered.get_cell_alternative_tile(layer, at)
+			layered.get_cell_alternative_tile(layer, at),
 		]
 	var single: TileMapLayer = node as TileMapLayer
 	if single != null:
 		return [
 			single.get_cell_source_id(at),
 			single.get_cell_atlas_coords(at),
-			single.get_cell_alternative_tile(at)
+			single.get_cell_alternative_tile(at),
 		]
 	return []

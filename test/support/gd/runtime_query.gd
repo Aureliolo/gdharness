@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## The questions an agent asks of a running tree without dumping it: which nodes match, where
 ## one is on screen, and what a node-valued property points at. All against a small tree built
 ## here, with the answers checked against what was built. Nothing is in the tree until the
@@ -9,7 +8,6 @@ const Checked = preload("checked.gd")
 const GdhRead = preload("res://addons/gdharness_runtime/reading.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 const HERO_SCRIPT: String = "res://query_hero.gd"
-
 ## What the hero carries, which is the shape a game keeps everything in: objects hanging off a
 ## node rather than properties of it. Two deep, because one is the easy case and a guild's clock
 ## speed is two.
@@ -86,7 +84,9 @@ func _init() -> void:
 	OS.set_environment("GDHARNESS_RUNTIME_DIR", directory)
 	node = Runtime.new()
 	root.add_child(node)
-	Checked.done(process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame")
+	Checked.done(
+		process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame"
+	)
 
 
 func _run() -> void:
@@ -97,7 +97,7 @@ func _run() -> void:
 	var _took_script: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(HERO_SCRIPT))
 
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 
@@ -152,7 +152,7 @@ func _check_reading_the_screen(panel: Panel) -> void:
 	panel.add_child(choices)
 	await process_frame
 
-	var said: Dictionary = await node._execute_command("read_text", {"root": "/root/Panel"})
+	var said: Dictionary = await node._execute_command("read_text", { "root": "/root/Panel" })
 	var lines: Array = said.get("lines", [])
 	if lines != ["Your guild", "Sign", "4", "Everything"]:
 		_fail("the screen should read as what is drawn on it, in order: %s" % str(said))
@@ -161,7 +161,9 @@ func _check_reading_the_screen(panel: Panel) -> void:
 
 	# The first few lines rather than all of them, which is how the top of a screen is read
 	# without the room under it. It was named in the schema, taken by the call and thrown away.
-	var few: Dictionary = await node._execute_command("read_text", {"root": "/root/Panel", "limit": 2})
+	var few: Dictionary = await node._execute_command(
+		"read_text", { "root": "/root/Panel", "limit": 2 }
+	)
 	var first_lines: Array = few.get("lines", [])
 	if first_lines != ["Your guild", "Sign"]:
 		_fail("a limit should be the first lines and no more: %s" % str(few))
@@ -173,18 +175,24 @@ func _check_reading_the_screen(panel: Panel) -> void:
 
 	# And a limit the screen exactly fits is a screen that was read whole, which is what the count
 	# of what is past the limit settles rather than the length of the answer.
-	var exactly: Dictionary = await node._execute_command("read_text", {"root": "/root/Panel", "limit": 4})
-	if exactly.get("count") != 4 or exactly.get("truncated") != false or exactly.get("omitted") != 0:
+	var exactly: Dictionary = await node._execute_command(
+		"read_text", { "root": "/root/Panel", "limit": 4 }
+	)
+	if (
+		exactly.get("count") != 4
+		or exactly.get("truncated") != false
+		or exactly.get("omitted") != 0
+	):
 		_fail("a limit nothing overran should not read as cut short: %s" % str(exactly))
 
 	var everything: Dictionary = await node._execute_command(
-		"read_text", {"root": "/root/Panel", "include_hidden": true}
+		"read_text", { "root": "/root/Panel", "include_hidden": true }
 	)
 	var every_line: Array = everything.get("lines", [])
 	if not every_line.has("Nothing posted"):
 		_fail("and hidden text should be there for the asking: %s" % str(everything))
 
-	var nowhere: Dictionary = await node._execute_command("read_text", {"root": "/root/Nowhere"})
+	var nowhere: Dictionary = await node._execute_command("read_text", { "root": "/root/Nowhere" })
 	if nowhere.get("type") != "error":
 		_fail("a read from a root that is not there is refused: %s" % str(nowhere))
 
@@ -203,23 +211,26 @@ func _check_reading_the_screen(panel: Panel) -> void:
 ## the wrong question. The note says how many the name was the only thing standing between the find
 ## and, and only when it would have changed the answer.
 func _check_a_name_written_as_a_word() -> void:
-	var partial: Dictionary = await node._execute_command("find_nodes", {"name": "ero"})
+	var partial: Dictionary = await node._execute_command("find_nodes", { "name": "ero" })
 	if partial.get("count") != 0 or not str(partial.get("note", "")).contains("2 node names"):
 		_fail("a name with no wildcard says what a glob would have matched: %s" % str(partial))
 
-	var nowhere: Dictionary = await node._execute_command("find_nodes", {"name": "Dragon"})
+	var nowhere: Dictionary = await node._execute_command("find_nodes", { "name": "Dragon" })
 	if nowhere.get("count") != 0 or nowhere.has("note"):
 		_fail("and a name nothing is near stays a plain nothing: %s" % str(nowhere))
 
 	# Counted past the other filters rather than over the whole tree, or the note offers a glob
 	# that would answer nothing either.
 	var elsewhere: Dictionary = await node._execute_command(
-		"find_nodes", {"name": "ero", "script": "query_hero.gd"}
+		"find_nodes", { "name": "ero", "script": "query_hero.gd" }
 	)
-	if elsewhere.get("count") != 0 or not str(elsewhere.get("note", "")).contains("1 node name contains"):
+	if (
+		elsewhere.get("count") != 0
+		or not str(elsewhere.get("note", "")).contains("1 node name contains")
+	):
 		_fail("the count is of what every other filter already matched: %s" % str(elsewhere))
 
-	var matched: Dictionary = await node._execute_command("find_nodes", {"name": "Hero"})
+	var matched: Dictionary = await node._execute_command("find_nodes", { "name": "Hero" })
 	if _paths(matched) != ["/root/Level/Hero"] or matched.has("note"):
 		_fail("and a whole name that matches is not a near miss: %s" % str(matched))
 
@@ -265,18 +276,21 @@ func _check_a_label_past_a_plain_node() -> void:
 	await process_frame
 
 	for from: String in ["/root/Menu", "/root/World"]:
-		var read: Dictionary = await node._execute_command("read_text", {"root": from})
+		var read: Dictionary = await node._execute_command("read_text", { "root": from })
 		var lines: Array = read.get("lines", [])
-		var expected: Array = ["a popup over the menu"] if from == "/root/Menu" else ["a hud over the level"]
+		var expected: Array = (
+			["a popup over the menu"] if from == "/root/Menu" else ["a hud over the level"]
+		)
 		if lines != expected:
 			_fail("the words the engine draws past a hidden %s are read: %s" % [from, str(read)])
 	var found: Dictionary = await node._execute_command(
-		"find_nodes", {"class": "Label", "root": "/root/Menu", "include_hidden": false}
+		"find_nodes", { "class": "Label", "root": "/root/Menu", "include_hidden": false }
 	)
 	if _paths(found) != ["/root/Menu/Popups/Popped"] or found.get("hidden") != 1:
 		_fail("and found as shown, with the one under the menu counted hidden: %s" % str(found))
 
-	# Visible in tree yet undrawn, measured: via a Node under a hidden layer, and 3D in a hidden window.
+	# Visible in tree yet undrawn, measured: via a Node under a hidden layer, and 3D in a hidden
+	# window.
 	var layer: CanvasLayer = CanvasLayer.new()
 	layer.name = "PauseLayer"
 	layer.visible = false
@@ -292,11 +306,14 @@ func _check_a_label_past_a_plain_node() -> void:
 	root.add_child(window)
 	window.add_child(Node3D.new())
 	await process_frame
-	var layered: Dictionary = await node._execute_command("read_text", {"root": "/root/PauseLayer"})
+	var layered: Dictionary = await node._execute_command(
+		"read_text",
+		{ "root": "/root/PauseLayer" },
+	)
 	if layered.get("lines") != []:
 		_fail("a hidden layer hides what is drawn on it through a plain Node: %s" % str(layered))
 	var shut: Dictionary = await node._execute_command(
-		"find_nodes", {"class": "Node3D", "root": "/root/Shut", "include_hidden": false}
+		"find_nodes", { "class": "Node3D", "root": "/root/Shut", "include_hidden": false }
 	)
 	if shut.get("count") != 0 or shut.get("hidden") != 1:
 		_fail("a 3D node in a hidden window is hidden: %s" % str(shut))
@@ -335,7 +352,7 @@ func _check_hidden_nodes_can_be_left_out() -> void:
 	closed.add_child(inside)
 
 	var everything: Dictionary = await node._execute_command(
-		"find_nodes", {"class": "Label", "root": "/root/Shelf"}
+		"find_nodes", { "class": "Label", "root": "/root/Shelf" }
 	)
 	if (
 		_paths(everything)
@@ -346,19 +363,24 @@ func _check_hidden_nodes_can_be_left_out() -> void:
 		_fail("and counts nothing out when it left nothing out: %s" % str(everything))
 
 	var on_screen: Dictionary = await node._execute_command(
-		"find_nodes", {"class": "Label", "root": "/root/Shelf", "include_hidden": false}
+		"find_nodes", { "class": "Label", "root": "/root/Shelf", "include_hidden": false }
 	)
 	if _paths(on_screen) != ["/root/Shelf/ShownRow"]:
 		_fail("include_hidden false answers with what is on screen: %s" % str(on_screen))
 	if on_screen.get("hidden") != 2:
-		_fail("a node under a hidden parent is hidden too, and both are counted: %s" % str(on_screen))
+		_fail(
+			"a node under a hidden parent is hidden too, and both are counted: %s" % str(on_screen)
+		)
 	if not str(on_screen.get("note", "")).contains("hidden and left out"):
-		_fail("and the answer says so, so none does not read as an empty screen: %s" % str(on_screen))
+		_fail(
+			"and the answer says so, so none does not read as an empty screen: %s" % str(on_screen)
+		)
 
 	# The property goes on being read off each match, which is the whole reason to filter here
 	# rather than by asking each node afterwards.
 	var with_text: Dictionary = await node._execute_command(
-		"find_nodes", {"class": "Label", "root": "/root/Shelf", "include_hidden": false, "property": "text"}
+		"find_nodes",
+		{ "class": "Label", "root": "/root/Shelf", "include_hidden": false, "property": "text" }
 	)
 	var rows: Array = with_text.get("nodes", [])
 	var values: Array[String] = []
@@ -378,7 +400,7 @@ func _check_hidden_nodes_can_be_left_out() -> void:
 ## unless asked for, since one row of a form answered seventy-six thousand characters with it.
 func _check_a_tree_reads_the_properties_named(shelf: Control) -> void:
 	var named: Dictionary = await node._execute_command(
-		"get_tree", {"root": "/root/Shelf", "depth": 2, "properties": ["text", "visible"]}
+		"get_tree", { "root": "/root/Shelf", "depth": 2, "properties": ["text", "visible"] }
 	)
 	var top: Dictionary = named.get("root", {})
 	var top_properties: Dictionary = top.get("properties", {})
@@ -389,14 +411,16 @@ func _check_a_tree_reads_the_properties_named(shelf: Control) -> void:
 		var child_properties: Dictionary = child.get("properties", {})
 		if child_properties.has("text"):
 			texts[str(child.get("name", ""))] = child_properties.get("text")
-	if texts != {"ShownRow": "scouted twice", "HiddenRow": "never scouted"}:
+	if texts != { "ShownRow": "scouted twice", "HiddenRow": "never scouted" }:
 		_fail("each label carries its text and the drawer none: %s" % str(named))
-	var whole: Dictionary = await node._execute_command("get_tree", {"root": "/root/Shelf", "depth": 1})
+	var whole: Dictionary = await node._execute_command(
+		"get_tree", { "root": "/root/Shelf", "depth": 1 }
+	)
 	var whole_top: Dictionary = whole.get("root", {})
 	if whole_top.has("properties"):
 		_fail("a tree asked for no properties carries none: %s" % str(whole))
 	var refused: Dictionary = await node._execute_command(
-		"get_tree", {"root": "/root/Shelf", "properties": "text"}
+		"get_tree", { "root": "/root/Shelf", "properties": "text" }
 	)
 	if refused.get("type") != "error" or not str(refused.get("message", "")).contains("list"):
 		_fail("a properties that is not a list is refused: %s" % str(refused))
@@ -413,38 +437,43 @@ func _check_a_tree_reads_the_properties_named(shelf: Control) -> void:
 ## a missing step from a null one is back to guessing.
 func _check_reading_through_a_path() -> void:
 	var through: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "held:inner:depth"}
+		"get_property", { "path": "/root/Level/Hero", "property": "held:inner:depth" }
 	)
 	if through.get("type") != "property" or through.get("value") != 7:
 		_fail("a property path reads through what it names: %s" % str(through))
 
 	var plain: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "visible"}
+		"get_property", { "path": "/root/Level/Hero", "property": "visible" }
 	)
 	if plain.get("type") != "property" or plain.get("value") != true:
 		_fail("a name with no colon in it is the node's own property: %s" % str(plain))
 
 	var astray: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "held:nowhere:depth"}
+		"get_property", { "path": "/root/Level/Hero", "property": "held:nowhere:depth" }
 	)
 	var said: String = str(astray.get("message", ""))
 	if astray.get("type") != "error" or not said.contains("nowhere"):
 		_fail("a step that is not there names the step rather than the path: %s" % str(astray))
 
 	var flat: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "visible:deeper"}
+		"get_property", { "path": "/root/Level/Hero", "property": "visible:deeper" }
 	)
 	if flat.get("type") != "error" or not str(flat.get("message", "")).contains("deeper"):
 		_fail("a step holding no object says so, naming what could not be read: %s" % str(flat))
 
 	var written: Dictionary = await node._execute_command(
-		"set_property", {"path": "/root/Level/Hero", "property": "held:inner:depth", "value": 9}
+		"set_property", { "path": "/root/Level/Hero", "property": "held:inner:depth", "value": 9 }
 	)
 	if written.get("type") != "property_set" or written.get("new_value") != 9:
-		_fail("a path is written through as well, and read back off the same holder: %s" % str(written))
+		_fail(
+			(
+				"a path is written through as well, and read back off the same holder: %s"
+				% str(written)
+			)
+		)
 
 	var found: Dictionary = await node._execute_command(
-		"find_nodes", {"name": "Hero", "property": "held:inner:depth"}
+		"find_nodes", { "name": "Hero", "property": "held:inner:depth" }
 	)
 	var entries: Array = found.get("nodes", [])
 	var first: Dictionary = entries[0] if not entries.is_empty() else {}
@@ -466,45 +495,51 @@ func _check_reading_through_a_path() -> void:
 ## property 0" about a list sends somebody looking for a property.
 func _check_reading_into_a_list() -> void:
 	var person: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "roster:0:called"}
+		"get_property", { "path": "/root/Level/Hero", "property": "roster:0:called" }
 	)
 	if person.get("type") != "property" or person.get("value") != "Ada":
 		_fail("an index walks into a list the way a name walks into an object: %s" % str(person))
 
 	var last: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "roster:-1:called"}
+		"get_property", { "path": "/root/Level/Hero", "property": "roster:-1:called" }
 	)
 	if last.get("value") != "Bram":
-		_fail("a negative index counts from the end, so the last needs no count first: %s" % str(last))
+		_fail(
+			"a negative index counts from the end, so the last needs no count first: %s" % str(last)
+		)
 
 	var keyed: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "tray:wages"}
+		"get_property", { "path": "/root/Level/Hero", "property": "tray:wages" }
 	)
 	if keyed.get("value") != 12:
 		_fail("a key walks into a map: %s" % str(keyed))
 
 	var past_end: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "roster:5:called"}
+		"get_property", { "path": "/root/Level/Hero", "property": "roster:5:called" }
 	)
 	var said: String = str(past_end.get("message", ""))
 	if past_end.get("type") != "error" or not said.contains("list of 2"):
 		_fail("an index a list has not got says how long the list is: %s" % str(past_end))
 
 	var no_key: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "tray:rent"}
+		"get_property", { "path": "/root/Level/Hero", "property": "tray:rent" }
 	)
 	var missing: String = str(no_key.get("message", ""))
 	if no_key.get("type") != "error" or not missing.contains("post"):
 		_fail("a key a map has not got says what it is keyed by: %s" % str(no_key))
 
 	var written: Dictionary = await node._execute_command(
-		"set_property", {"path": "/root/Level/Hero", "property": "roster:1:called", "value": "Cass"}
+		"set_property", {
+			"path": "/root/Level/Hero",
+			"property": "roster:1:called",
+			"value": "Cass",
+		}
 	)
 	if written.get("type") != "property_set" or written.get("new_value") != "Cass":
 		_fail("an element is written through the same path it is read through: %s" % str(written))
 
 	var called: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Level/Hero", "method": "roster:0:loudly"}
+		"call_method", { "path": "/root/Level/Hero", "method": "roster:0:loudly" }
 	)
 	if called.get("result") != "ADA":
 		_fail("a method is called on an element of a list: %s" % str(called))
@@ -512,7 +547,7 @@ func _check_reading_into_a_list() -> void:
 	# A list answers the calls that read it and nothing else, and saying "has no method" would read
 	# as a misspelling.
 	var on_the_list: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Level/Hero", "method": "roster:loudly"}
+		"call_method", { "path": "/root/Level/Hero", "method": "roster:loudly" }
 	)
 	var refused: String = str(on_the_list.get("message", ""))
 	if (
@@ -520,7 +555,12 @@ func _check_reading_into_a_list() -> void:
 		or not refused.contains("is a list")
 		or not refused.contains("size()")
 	):
-		_fail("a path stopping on a list says so in those terms, with what it answers: %s" % str(on_the_list))
+		_fail(
+			(
+				"a path stopping on a list says so in those terms, with what it answers: %s"
+				% str(on_the_list)
+			)
+		)
 
 	await _check_calling_a_list()
 
@@ -538,24 +578,27 @@ func _check_calling_a_list() -> void:
 	]
 	for case: Array in cases:
 		var read: Dictionary = await node._execute_command(
-			"get_property", {"path": "/root/Level/Hero", "property": case[0]}
+			"get_property", { "path": "/root/Level/Hero", "property": case[0] }
 		)
 		if read.get("type") != "property" or read.get("value") != case[1]:
 			_fail("%s reads %s: %s" % [case[0], str(case[1]), str(read)])
 
 	var counted: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Level/Hero", "method": "roster:size"}
+		"call_method", { "path": "/root/Level/Hero", "method": "roster:size" }
 	)
 	if counted.get("type") != "method_result" or counted.get("result") != 2:
 		_fail("the call op makes the same call on a list: %s" % str(counted))
 
 	var emptied: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "roster:clear()"}
+		"get_property", { "path": "/root/Level/Hero", "property": "roster:clear()" }
 	)
 	var kept: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "roster:size()"}
+		"get_property", { "path": "/root/Level/Hero", "property": "roster:size()" }
 	)
-	if emptied.get("type") != "error" or not str(emptied.get("message", "")).contains("not one of the calls"):
+	if (
+		emptied.get("type") != "error"
+		or not str(emptied.get("message", "")).contains("not one of the calls")
+	):
 		_fail("a call that changes the list is refused: %s" % str(emptied))
 	if kept.get("value") != 2:
 		_fail("and the list is as it was: %s" % str(kept))
@@ -563,7 +606,7 @@ func _check_calling_a_list() -> void:
 	# And the list itself, which was twelve copies of the word RefCounted with nothing to tell them
 	# apart. Each element carries what the game calls it, so a roster reads as people.
 	var whole: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "roster"}
+		"get_property", { "path": "/root/Level/Hero", "property": "roster" }
 	)
 	var people: Array = whole.get("value", [])
 	var says: Array[String] = []
@@ -573,7 +616,7 @@ func _check_calling_a_list() -> void:
 		_fail("a list of objects is rendered so its elements can be told apart: %s" % str(whole))
 
 	var absent: Dictionary = await node._execute_command(
-		"find_nodes", {"name": "Heroine", "property": "held:inner:depth"}
+		"find_nodes", { "name": "Heroine", "property": "held:inner:depth" }
 	)
 	var missed: Array = absent.get("nodes", [])
 	var only: Dictionary = missed[0] if not missed.is_empty() else {}
@@ -583,25 +626,35 @@ func _check_calling_a_list() -> void:
 
 ## How long a call or a write took inside the game, measured around it there: the bridge's round
 ## trip is a second or more, so timing from outside measures the bridge. A method and a setter that
-## take a known time, and a quick call beside them, so a constant or a round trip would fail.
-## A write of the value a property already holds is a write that changed nothing, not one the engine
-## refused. #780: Camera3D.h_offset holding -1.1, stored as -1.10000002384186, was given -1.1 and the
-## answer said the engine kept what it had. Beside it, the refusal it was confused with: a property
-## whose setter ignores every write still refuses a change, and a real change is still made.
+## take a known time, and a quick call beside them, so a constant or a round trip would fail. A
+## write of the value a property already holds is a write that changed nothing, not one the engine
+## refused. #780: Camera3D.h_offset holding -1.1, stored as -1.10000002384186, was given -1.1 and
+## the answer said the engine kept what it had. Beside it, the refusal it was confused with: a
+## property whose setter ignores every write still refuses a change, and a real change is still
+## made.
 func _check_writing_what_a_property_holds() -> void:
 	var camera: Camera3D = Camera3D.new()
 	camera.name = "Eye"
 	camera.h_offset = -1.1
 	root.add_child(camera)
 	var same: Dictionary = await node._execute_command(
-		"set_property", {"path": "/root/Eye", "property": "h_offset", "value": -1.1}
+		"set_property", { "path": "/root/Eye", "property": "h_offset", "value": -1.1 }
 	)
 	if same.get("type") != "property_set" or same.get("unchanged") != true:
-		_fail("a float written as the value it holds is unchanged, not refused: %s" % JSON.stringify(same))
+		_fail(
+			(
+				"a float written as the value it holds is unchanged, not refused: %s"
+				% JSON.stringify(same)
+			)
+		)
 	var moved: Dictionary = await node._execute_command(
-		"set_property", {"path": "/root/Eye", "property": "h_offset", "value": -2.5}
+		"set_property", { "path": "/root/Eye", "property": "h_offset", "value": -2.5 }
 	)
-	if moved.get("type") != "property_set" or moved.has("unchanged") or moved.get("new_value") != -2.5:
+	if (
+		moved.get("type") != "property_set"
+		or moved.has("unchanged")
+		or moved.get("new_value") != -2.5
+	):
 		_fail("a real change is made and not called unchanged: %s" % JSON.stringify(moved))
 	camera.free()
 
@@ -613,17 +666,20 @@ func _check_writing_what_a_property_holds() -> void:
 	holder.set_script(ignoring)
 	root.add_child(holder)
 	var refused: Dictionary = await node._execute_command(
-		"set_property", {"path": "/root/Locked", "property": "locked", "value": 2.0}
+		"set_property", { "path": "/root/Locked", "property": "locked", "value": 2.0 }
 	)
 	# Refused by what was seen: the setter ran, so a sentence saying the engine would not write the
 	# property names a cause that did not happen.
 	var seen: String = str(refused.get("message", ""))
-	if refused.get("type") != "error" or not seen.contains("reads 1.0 afterwards, as it did before"):
+	if (
+		refused.get("type") != "error"
+		or not seen.contains("reads 1.0 afterwards, as it did before")
+	):
 		_fail("a write the setter ignores is still refused: %s" % JSON.stringify(refused))
 	if seen.contains("will not write"):
 		_fail("and not put down to the engine: %s" % seen)
 	var unasked: Dictionary = await node._execute_command(
-		"set_property", {"path": "/root/Locked", "property": "locked", "value": 1.0}
+		"set_property", { "path": "/root/Locked", "property": "locked", "value": 1.0 }
 	)
 	if unasked.get("type") != "property_set" or unasked.get("unchanged") != true:
 		_fail("and writing what it holds asked nothing of it: %s" % JSON.stringify(unasked))
@@ -647,18 +703,23 @@ func _check_emptying_an_object_slot() -> void:
 
 	for said: Variant in ["null", null]:
 		var held: Dictionary = await node._execute_command(
-			"set_property", {"path": "/root/Holder", "property": "clock", "value": "/root/Level"}
+			"set_property", { "path": "/root/Holder", "property": "clock", "value": "/root/Level" }
 		)
 		if held.get("type") != "property_set" or holder.get("clock") != root.get_node("Level"):
 			_fail("an object slot takes an object by its path: %s" % JSON.stringify(held))
 		var emptied: Dictionary = await node._execute_command(
-			"set_property", {"path": "/root/Holder", "property": "clock", "value": said}
+			"set_property", { "path": "/root/Holder", "property": "clock", "value": said }
 		)
 		if emptied.get("type") != "property_set" or holder.get("clock") != null:
-			_fail("an object slot is emptied by %s: %s" % [JSON.stringify(said), JSON.stringify(emptied)])
+			_fail(
+				(
+					"an object slot is emptied by %s: %s"
+					% [JSON.stringify(said), JSON.stringify(emptied)]
+				)
+			)
 
 	var called: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Holder", "method": "take", "args": ["null"]}
+		"call_method", { "path": "/root/Holder", "method": "take", "args": ["null"] }
 	)
 	if called.get("result") != "none":
 		_fail("an object parameter is given null by the text null: %s" % JSON.stringify(called))
@@ -667,24 +728,24 @@ func _check_emptying_an_object_slot() -> void:
 
 func _check_the_time_work_takes() -> void:
 	var slow: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Level/Hero", "method": "linger", "args": [30000]}
+		"call_method", { "path": "/root/Level/Hero", "method": "linger", "args": [30000] }
 	)
 	var slow_usec: int = GdhRead.as_int(slow.get("elapsed_usec", -1), -1)
-	if slow.get("result") != 30000 or slow_usec < 30000 or slow_usec > 1000000:
+	if slow.get("result") != 30000 or slow_usec < 30000 or slow_usec > 1_000_000:
 		_fail("a call says how long the method took inside the game: %s" % str(slow))
 
 	var quick: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Level/Hero", "method": "linger", "args": [0]}
+		"call_method", { "path": "/root/Level/Hero", "method": "linger", "args": [0] }
 	)
 	var quick_usec: int = GdhRead.as_int(quick.get("elapsed_usec", -1), -1)
 	if quick_usec < 0 or quick_usec >= 30000:
 		_fail("and a quick one says it was quick: %s" % str(quick))
 
 	var written: Dictionary = await node._execute_command(
-		"set_property", {"path": "/root/Level/Hero", "property": "burden", "value": 5}
+		"set_property", { "path": "/root/Level/Hero", "property": "burden", "value": 5 }
 	)
 	var written_usec: int = GdhRead.as_int(written.get("elapsed_usec", -1), -1)
-	if written.get("new_value") != 5 or written_usec < 15000 or written_usec > 1000000:
+	if written.get("new_value") != 5 or written_usec < 15000 or written_usec > 1_000_000:
 		_fail("a write says how long it took, its setter included: %s" % str(written))
 
 
@@ -696,34 +757,36 @@ func _check_the_time_work_takes() -> void:
 ## again would be a call to something else that happened to return one.
 func _check_calling_through_a_path() -> void:
 	var before: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "held:inner:depth"}
+		"get_property", { "path": "/root/Level/Hero", "property": "held:inner:depth" }
 	)
 	var was: int = GdhRead.as_int(before.get("value", 0))
 
 	var called: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Level/Hero", "method": "held:inner:deepen", "args": [3]}
+		"call_method", { "path": "/root/Level/Hero", "method": "held:inner:deepen", "args": [3] }
 	)
 	if called.get("type") != "method_result" or called.get("result") != was + 3:
 		_fail("a method path calls what it names, with its arguments: %s" % str(called))
 
 	var after: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "held:inner:depth"}
+		"get_property", { "path": "/root/Level/Hero", "property": "held:inner:depth" }
 	)
 	if after.get("value") != was + 3:
 		_fail("and it lands on the holder the path walked to: %s" % str(after))
 
 	var astray: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Level/Hero", "method": "held:nowhere:deepen"}
+		"call_method", { "path": "/root/Level/Hero", "method": "held:nowhere:deepen" }
 	)
 	if astray.get("type") != "error" or not str(astray.get("message", "")).contains("nowhere"):
 		_fail("a step that is not there names the step rather than the path: %s" % str(astray))
 
 	var unknown: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Level/Hero", "method": "held:inner:shallow"}
+		"call_method", { "path": "/root/Level/Hero", "method": "held:inner:shallow" }
 	)
 	var said: String = str(unknown.get("message", ""))
 	if unknown.get("type") != "error" or not said.contains("held:inner has no method shallow; "):
-		_fail("and a method the holder has not got names the holder it looked on: %s" % str(unknown))
+		_fail(
+			"and a method the holder has not got names the holder it looked on: %s" % str(unknown)
+		)
 
 
 ## A step written as a call walks into what the method returned.
@@ -734,66 +797,77 @@ func _check_calling_through_a_path() -> void:
 ## property the control has not got, then found the answer by knowing which window the control was
 ## in. The brackets are what make a step a call, so a method spelled bare is refused with the
 ## spelling that would have worked, a method that needs an argument is refused as one, and a call is
-## walked through by a read, a write, a method call and a wait alike. A write onto the call itself is
-## refused, since what a method returns is not a place.
+## walked through by a read, a write, a method call and a wait alike. A write onto the call itself
+## is refused, since what a method returns is not a place.
 ##
 ## The wait is the one that walks again every frame: the holder a path found at the start is not
 ## the one the game holds a frame later when the game replaces it, so a run object built afresh each
 ## day would leave a wait watching the day before.
 func _check_calling_a_step_along_the_path(hero: Node2D, button: Button) -> void:
 	var before: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "held:inner:depth"}
+		"get_property", { "path": "/root/Level/Hero", "property": "held:inner:depth" }
 	)
 	var was: int = GdhRead.as_int(before.get("value", 0))
 
 	var through: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "keeper():inner:depth"}
+		"get_property", { "path": "/root/Level/Hero", "property": "keeper():inner:depth" }
 	)
 	if through.get("type") != "property" or through.get("value") != was:
 		_fail("a step written as a call walks into what the method returned: %s" % str(through))
 
 	button.grab_focus()
 	var focused: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Panel/Go", "method": "get_viewport():gui_get_focus_owner"}
+		"call_method", { "path": "/root/Panel/Go", "method": "get_viewport():gui_get_focus_owner" }
 	)
 	var owner: Dictionary = focused.get("result", {}) if focused.get("result") is Dictionary else {}
 	if focused.get("type") != "method_result" or owner.get("path") != "/root/Panel/Go":
 		_fail("who holds the focus in the viewport a control is in is one call: %s" % str(focused))
 
 	var bare: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "keeper:inner:depth"}
+		"get_property", { "path": "/root/Level/Hero", "property": "keeper:inner:depth" }
 	)
 	var hinted: String = str(bare.get("message", ""))
 	if bare.get("type") != "error" or not hinted.contains("which a path calls as keeper()"):
-		_fail("a method spelled as a property is refused with the spelling that calls it: %s" % str(bare))
+		_fail(
+			(
+				"a method spelled as a property is refused with the spelling that calls it: %s"
+				% str(bare)
+			)
+		)
 
 	var needing: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "first():called"}
+		"get_property", { "path": "/root/Level/Hero", "property": "first():called" }
 	)
 	var refused: String = str(needing.get("message", ""))
 	if needing.get("type") != "error" or not refused.contains("first is the game's own and a path"):
 		_fail("a method that needs an argument is refused as one: %s" % str(needing))
 
 	var defaulted: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "anyone():called"}
+		"get_property", { "path": "/root/Level/Hero", "property": "anyone():called" }
 	)
 	if defaulted.get("value") != "Ada":
 		_fail("a method whose arguments all have defaults is called with none: %s" % str(defaulted))
 
 	var no_such: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Level/Hero", "property": "nobody():called"}
+		"get_property", { "path": "/root/Level/Hero", "property": "nobody():called" }
 	)
-	if no_such.get("type") != "error" or not str(no_such.get("message", "")).contains("nobody; its script"):
-		_fail("a call to a method the holder has not got says so, and what it has: %s" % str(no_such))
+	if (
+		no_such.get("type") != "error"
+		or not str(no_such.get("message", "")).contains("nobody; its script")
+	):
+		_fail(
+			"a call to a method the holder has not got says so, and what it has: %s" % str(no_such)
+		)
 
 	var written: Dictionary = await node._execute_command(
-		"set_property", {"path": "/root/Level/Hero", "property": "keeper():inner:depth", "value": was + 10}
+		"set_property",
+		{ "path": "/root/Level/Hero", "property": "keeper():inner:depth", "value": was + 10 }
 	)
 	if written.get("type") != "property_set" or written.get("new_value") != was + 10:
 		_fail("a write walks through a call to the place it names: %s" % str(written))
 
 	var onto_the_call: Dictionary = await node._execute_command(
-		"set_property", {"path": "/root/Level/Hero", "property": "keeper()", "value": 1}
+		"set_property", { "path": "/root/Level/Hero", "property": "keeper()", "value": 1 }
 	)
 	if (
 		onto_the_call.get("type") != "error"
@@ -802,10 +876,16 @@ func _check_calling_a_step_along_the_path(hero: Node2D, button: Button) -> void:
 		_fail("a write onto the call itself is refused: %s" % str(onto_the_call))
 
 	var called: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Level/Hero", "method": "keeper():inner:deepen()", "args": [1]}
+		"call_method",
+		{ "path": "/root/Level/Hero", "method": "keeper():inner:deepen()", "args": [1] }
 	)
 	if called.get("type") != "method_result" or called.get("result") != was + 11:
-		_fail("a call is walked through by a method call, with or without its own brackets: %s" % str(called))
+		_fail(
+			(
+				"a call is walked through by a method call, with or without its own brackets: %s"
+				% str(called)
+			)
+		)
 
 	# The holder is swapped after the wait has read it once: the read happens on the call, the swap
 	# at the end of the frame, and the next look walks from the node again and finds the new one.
@@ -817,10 +897,20 @@ func _check_calling_a_step_along_the_path(hero: Node2D, button: Button) -> void:
 	hero.set_deferred("held", swapped)
 	var waited: Dictionary = await node._execute_command(
 		"wait_until",
-		{"path": "/root/Level/Hero", "property": "keeper():inner:depth", "value": 100, "timeout_ms": 2000}
+		{
+			"path": "/root/Level/Hero",
+			"property": "keeper():inner:depth",
+			"value": 100,
+			"timeout_ms": 2000,
+		}
 	)
 	if waited.get("type") != "condition" or waited.get("met") != true or waited.get("value") != 100:
-		_fail("a wait walks the path again each frame, so a replaced holder is followed: %s" % str(waited))
+		_fail(
+			(
+				"a wait walks the path again each frame, so a replaced holder is followed: %s"
+				% str(waited)
+			)
+		)
 
 
 ## A node path with colons in it, which is where a caller puts the path to what a node holds before
@@ -832,10 +922,16 @@ func _check_calling_a_step_along_the_path(hero: Node2D, button: Button) -> void:
 ## argument each belongs in.
 func _check_a_node_path_that_reaches_past_a_node() -> void:
 	var asked: Array[Dictionary] = [
-		{"command": "call_method", "params": {"path": "/root/Level/Hero:held:inner", "method": "deepen"}},
-		{"command": "get_property", "params": {"path": "/root/Level/Hero:held", "property": "inner"}},
-		{"command": "get_rect", "params": {"path": "/root/Level/Hero:held"}},
-		{"command": "get_tree", "params": {"root": "/root/Level:held"}},
+		{
+			"command": "call_method",
+			"params": { "path": "/root/Level/Hero:held:inner", "method": "deepen" },
+		},
+		{
+			"command": "get_property",
+			"params": { "path": "/root/Level/Hero:held", "property": "inner" },
+		},
+		{ "command": "get_rect", "params": { "path": "/root/Level/Hero:held" } },
+		{ "command": "get_tree", "params": { "root": "/root/Level:held" } },
 	]
 	for one: Dictionary in asked:
 		var command: String = str(one["command"])
@@ -886,90 +982,113 @@ func _check() -> void:
 	level.add_child(docket)
 
 	var by_class: Dictionary = await node._execute_command(
-		"find_nodes", {"class": "Node2D", "root": "/root/Level"}
+		"find_nodes", { "class": "Node2D", "root": "/root/Level" }
 	)
 	if _paths(by_class) != ["/root/Level", "/root/Level/Hero", "/root/Level/Heroine"]:
 		_fail("find by class: %s" % str(by_class))
-	var by_subclass: Dictionary = await node._execute_command("find_nodes", {"class": "BaseButton"})
+	var by_subclass: Dictionary = await node._execute_command(
+		"find_nodes",
+		{ "class": "BaseButton" },
+	)
 	if _paths(by_subclass) != ["/root/Panel/Go"]:
 		_fail("find by a base class should match subclasses: %s" % str(by_subclass))
-	var by_script: Dictionary = await node._execute_command("find_nodes", {"script": "query_hero.gd"})
+	var by_script: Dictionary = await node._execute_command(
+		"find_nodes", { "script": "query_hero.gd" }
+	)
 	if _paths(by_script) != ["/root/Level/Hero"]:
 		_fail("find by script, with or without res://: %s" % str(by_script))
-	var by_name: Dictionary = await node._execute_command("find_nodes", {"name": "hero*"})
+	var by_name: Dictionary = await node._execute_command("find_nodes", { "name": "hero*" })
 	if _paths(by_name) != ["/root/Level/Hero", "/root/Level/Heroine"]:
 		_fail("find by name glob, case-insensitive: %s" % str(by_name))
 	await _check_a_name_written_as_a_word()
 	var by_group: Dictionary = await node._execute_command(
-		"find_nodes", {"group": "heroes", "name": "Heroine"}
+		"find_nodes", { "group": "heroes", "name": "Heroine" }
 	)
 	if _paths(by_group) != ["/root/Level/Heroine"]:
 		_fail("filters combine: %s" % str(by_group))
 	# The word on a control, which is what a caller is actually looking at. A screen built in code
 	# is @Button@1412 all the way down, and reaching one meant listing every button on it and
 	# reading them back one at a time to find the one saying "Post".
-	var by_words: Dictionary = await node._execute_command("find_nodes", {"says": "sign THE"})
+	var by_words: Dictionary = await node._execute_command("find_nodes", { "says": "sign THE" })
 	if _paths(by_words) != ["/root/Level/Docket"]:
 		_fail("find by what a node says, in part and whatever the case: %s" % str(by_words))
-	var unsaid: Dictionary = await node._execute_command("find_nodes", {"says": "turn away"})
+	var unsaid: Dictionary = await node._execute_command("find_nodes", { "says": "turn away" })
 	if unsaid.get("count") != 0:
 		_fail("and nothing at all when nothing says it: %s" % str(unsaid))
 	# A glob, because the field beside this one takes one and nobody writes `*sign*` in the two of
 	# them meaning different things. As a contains only, a pattern matched nothing and the empty
 	# answer read as a control that is not on the screen.
-	var by_glob: Dictionary = await node._execute_command("find_nodes", {"says": "*THE dock*"})
+	var by_glob: Dictionary = await node._execute_command("find_nodes", { "says": "*THE dock*" })
 	if _paths(by_glob) != ["/root/Level/Docket"]:
 		_fail("a pattern in says is a glob rather than characters to find: %s" % str(by_glob))
-	var whole_thing: Dictionary = await node._execute_command("find_nodes", {"says": "docket*"})
+	var whole_thing: Dictionary = await node._execute_command("find_nodes", { "says": "docket*" })
 	if whole_thing.get("count") != 0:
 		_fail("and a glob is matched against the whole of what is said: %s" % str(whole_thing))
-	# Written as a prefix by habit for words in the middle of a label, which is the miss that read as
-	# the words not being on screen: the answer says what the glob open at both ends would find.
+	# Written as a prefix by habit for words in the middle of a label, which is the miss that read
+	# as the words not being on screen: the answer says what the glob open at both ends would find.
 	if not str(whole_thing.get("note", "")).contains('"*docket*" would find 1 node'):
-		_fail("a glob that missed words further in says which glob finds them: %s" % str(whole_thing))
+		_fail(
+			"a glob that missed words further in says which glob finds them: %s" % str(whole_thing)
+		)
 	# Alternatives: either one finds the node, and a glob among them that missed words further in is
 	# widened in the note with the other alternative kept.
-	var either: Dictionary = await node._execute_command("find_nodes", {"says": "turn away|sign THE"})
+	var either: Dictionary = await node._execute_command(
+		"find_nodes", { "says": "turn away|sign THE" }
+	)
 	if _paths(either) != ["/root/Level/Docket"]:
 		_fail("says finds what any one of its alternatives finds: %s" % str(either))
-	var either_prefix: Dictionary = await node._execute_command("find_nodes", {"says": "dragon|docket*"})
+	var either_prefix: Dictionary = await node._execute_command(
+		"find_nodes", { "says": "dragon|docket*" }
+	)
 	if not str(either_prefix.get("note", "")).contains('"dragon|*docket*" would find 1 node'):
-		_fail("and a missed glob among alternatives is widened in the note: %s" % str(either_prefix))
-	var stray_bar: Dictionary = await node._execute_command("find_nodes", {"says": "dragon|"})
+		_fail(
+			"and a missed glob among alternatives is widened in the note: %s" % str(either_prefix)
+		)
+	var stray_bar: Dictionary = await node._execute_command("find_nodes", { "says": "dragon|" })
 	if stray_bar.get("count") != 0 or stray_bar.has("note"):
-		_fail("a stray bar names no alternative, and suggests no pattern for one: %s" % str(stray_bar))
-	var said_nowhere: Dictionary = await node._execute_command("find_nodes", {"says": "dragon*"})
+		_fail(
+			"a stray bar names no alternative, and suggests no pattern for one: %s" % str(stray_bar)
+		)
+	var said_nowhere: Dictionary = await node._execute_command("find_nodes", { "says": "dragon*" })
 	if said_nowhere.get("count") != 0 or said_nowhere.has("note"):
 		_fail("and a glob whose words are nowhere stays a plain nothing: %s" % str(said_nowhere))
-	var its_own: Dictionary = await node._execute_command("find_nodes", {"says": "sign the", "name": "Level"})
+	var its_own: Dictionary = await node._execute_command(
+		"find_nodes", { "says": "sign the", "name": "Level" }
+	)
 	if its_own.get("count") != 0:
 		_fail("what a node says is its own, not what is said under it: %s" % str(its_own))
 	await _check_hidden_nodes_can_be_left_out()
 	await _check_a_label_past_a_plain_node()
-	var limited: Dictionary = await node._execute_command("find_nodes", {"class": "Node", "limit": 2})
+	var limited: Dictionary = await node._execute_command(
+		"find_nodes", { "class": "Node", "limit": 2 }
+	)
 	if limited.get("count") != 2 or limited.get("truncated") != true:
 		_fail("a limit truncates and says so: %s" % str(limited))
 	var nothing: Dictionary = await node._execute_command("find_nodes", {})
 	if nothing.get("type") != "error" or not str(nothing.get("message", "")).contains("says"):
 		_fail("a find with no filter is refused, naming every filter there is: %s" % str(nothing))
 	var missing: Dictionary = await node._execute_command(
-		"find_nodes", {"class": "Node", "root": "/root/Nowhere"}
+		"find_nodes", { "class": "Node", "root": "/root/Nowhere" }
 	)
 	if missing.get("type") != "error":
 		_fail("a find from a root that is not there is refused: %s" % str(missing))
 
 	await _check_reading_the_screen(panel)
 
-	var rect: Dictionary = await node._execute_command("get_rect", {"path": "/root/Panel/Go"})
+	var rect: Dictionary = await node._execute_command("get_rect", { "path": "/root/Panel/Go" })
 	var canvas: Dictionary = rect.get("canvas", {})
 	var canvas_position: Dictionary = canvas.get("position", {})
-	if rect.get("type") != "rect" or canvas_position.get("x") != 40.0 or canvas_position.get("y") != 60.0:
+	if (
+		rect.get("type") != "rect"
+		or canvas_position.get("x") != 40.0
+		or canvas_position.get("y") != 60.0
+	):
 		_fail("a Control's rect is its global rect: %s" % str(rect))
-	var point: Dictionary = await node._execute_command("get_rect", {"path": "/root/Level/Hero"})
+	var point: Dictionary = await node._execute_command("get_rect", { "path": "/root/Level/Hero" })
 	var hero_canvas: Dictionary = point.get("canvas", {})
 	if point.get("type") != "point" or hero_canvas.get("x") != 40.0 or hero_canvas.get("y") != 60.0:
 		_fail("a Node2D's place is its global position: %s" % str(point))
-	var placeless: Dictionary = await node._execute_command("get_rect", {"path": "/root"})
+	var placeless: Dictionary = await node._execute_command("get_rect", { "path": "/root" })
 	if placeless.get("type") != "error":
 		_fail("a node with no place on screen is refused: %s" % str(placeless))
 
@@ -982,14 +1101,19 @@ func _check() -> void:
 	await _check_a_node_path_that_reaches_past_a_node()
 
 	var serialised: Variant = node.values.call(&"serialize", hero)
-	if serialised != {"_type": "Node", "class": "Node2D", "path": "/root/Level/Hero"}:
+	if serialised != { "_type": "Node", "class": "Node2D", "path": "/root/Level/Hero" }:
 		_fail("a node in the tree serialises with its path: %s" % str(serialised))
 	var loose: Node = Node.new()
 	var loose_fields: Dictionary = node.values.call(&"serialize", loose)
 	if loose_fields.get("_type") != "Object" or loose_fields.get("class") != "Node":
 		_fail("a node outside the tree serialises as a plain object: %s" % str(loose_fields))
 	if loose_fields.has("path"):
-		_fail("a node outside the tree has no path to give, and must not invent one: %s" % str(loose_fields))
+		_fail(
+			(
+				"a node outside the tree has no path to give, and must not invent one: %s"
+				% str(loose_fields)
+			)
+		)
 	# Checked for being there rather than for a value, since it is different per object, which is
 	# the point of it: a list of a dozen of these used to be a dozen identical answers.
 	if not loose_fields.has("id"):

@@ -10,7 +10,6 @@ extends RefCounted
 
 ## How long [method until] and [method still] wait by default, in milliseconds.
 const MOST_MS: int = 30000
-
 ## Frames in a row with no tween running before [method still] counts the tree as still. A layout
 ## often starts its slide a frame after the change that asks for it, so the frame straight after
 ## had no tween yet and passed for still.
@@ -28,7 +27,9 @@ static func until(tree: SceneTree, done: Callable, most_ms: int = MOST_MS) -> bo
 
 
 ## Whether the tree ran no tween for [param quiet_frames] frames in a row within [param most_ms].
-static func still(tree: SceneTree, quiet_frames: int = QUIET_FRAMES, most_ms: int = MOST_MS) -> bool:
+static func still(
+	tree: SceneTree, quiet_frames: int = QUIET_FRAMES, most_ms: int = MOST_MS
+) -> bool:
 	var began: int = Time.get_ticks_msec()
 	var quiet: int = 0
 	while quiet < quiet_frames:

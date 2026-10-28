@@ -1,6 +1,5 @@
 @tool
 extends RefCounted
-
 ## One scene file opened for a tool, read past the resource cache and written back only once what
 ## would be saved has been checked.
 ##
@@ -26,7 +25,6 @@ extends RefCounted
 ## anything is saved, and a write is refused when that does not hold. See [GdhHeadlessCheck].
 
 const GdhHeadlessCheck = preload("headless_check.gd")
-
 ## How many times what scripts changed is put back before a write is refused for it.
 const PUTTING_BACK_PASSES: int = 4
 const GdhRead = preload("reading.gd")
@@ -87,19 +85,19 @@ var _engine_kept: Dictionary = {}
 func open(scene_path: String, for_writing: bool) -> Dictionary:
 	path = scene_path
 	if not FileAccess.file_exists(path):
-		return {"ok": false, "error": "Scene not found: " + path}
+		return { "ok": false, "error": "Scene not found: " + path }
 	if for_writing:
 		var held_back: String = unsaved_in_editor(path)
 		if not held_back.is_empty():
-			return {"ok": false, "error": held_back}
+			return { "ok": false, "error": held_back }
 	var packed: PackedScene = (
 		ResourceLoader.load(path, "PackedScene", ResourceLoader.CACHE_MODE_IGNORE) as PackedScene
 	)
 	if packed == null:
-		return {"ok": false, "error": "Failed to load %s as a scene" % path}
+		return { "ok": false, "error": "Failed to load %s as a scene" % path }
 	root = packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
 	if root == null:
-		return {"ok": false, "error": "Failed to instantiate " + path}
+		return { "ok": false, "error": "Failed to instantiate " + path }
 	_state = packed.get_state()
 	_base_paths = makers(_state)
 	# On a read as well, which would otherwise answer what the scripts set as what the file holds.
@@ -144,15 +142,16 @@ func asked(node: Node, names: Array) -> void:
 		GdhHeadlessCheck.spare(_reached, GdhHeadlessCheck.reached(node, property))
 
 
-## Takes [param resource], built into the scene, as one the tool changed, which a write saves as it is.
+## Takes [param resource], built into the scene, as one the tool changed, which a write saves as it
+## is.
 func reached_into(resource: Resource) -> void:
 	var id: String = resource.get_scene_unique_id()
 	if not id.is_empty():
 		_reached[id] = true
 
 
-## Takes each copy in [param copies], keyed by the node it was made from, as holding what that node's
-## file entry holds.
+## Takes each copy in [param copies], keyed by the node it was made from, as holding what that
+## node's file entry holds.
 func copied(copies: Dictionary) -> void:
 	for source: Variant in copies:
 		var original: Node = source
@@ -166,8 +165,9 @@ static func unsaved_in_editor(scene_path: String) -> String:
 		return ""
 	return (
 		(
-			"%s has unsaved changes in the editor, and writing the file would discard them when the "
-			+ "editor reloads it. Save it first (scene_create op=save) or close it without saving."
+			"%s has unsaved changes in the editor, and writing the file would discard them when "
+			+ "the editor reloads it. Save it first (scene_create op=save) or close it without "
+			+ "saving."
 		)
 		% scene_path
 	)
@@ -176,7 +176,7 @@ static func unsaved_in_editor(scene_path: String) -> String:
 ## Frees [member root] and answers [param error] as a refusal.
 func refuse(error: String) -> Dictionary:
 	close()
-	return {"ok": false, "error": error}
+	return { "ok": false, "error": error }
 
 
 ## [param said], the refusal for [param node_path] found nowhere in this scene, with how a path is
@@ -213,10 +213,10 @@ func close() -> void:
 
 
 ## What the file holds under the instance at [param at] that goes once its children are not
-## editable, as {values, nodes}: the paths of the instance's nodes it sets values on, which stay with
-## the instance's own values, and of the nodes the scene added below one of them, which are gone,
-## since the packer skips everything below a node of an instance that is not editable. A node added
-## straight under [param at] is the scene's own and stays.
+## editable, as {values, nodes}: the paths of the instance's nodes it sets values on, which stay
+## with the instance's own values, and of the nodes the scene added below one of them, which are
+## gone, since the packer skips everything below a node of an instance that is not editable. A node
+## added straight under [param at] is the scene's own and stays.
 func held_under(at: String) -> Dictionary:
 	var values: Array[String] = []
 	var nodes: Array[String] = []
@@ -230,7 +230,7 @@ func held_under(at: String) -> Dictionary:
 			values.append(entry)
 		elif not values_only and parent.begins_with(at + "/"):
 			nodes.append(entry)
-	return {"values": values, "nodes": nodes}
+	return { "values": values, "nodes": nodes }
 
 
 ## The path of [param node] as a tool names it: "." for the root.
@@ -241,7 +241,7 @@ func path_of(node: Node) -> String:
 ## The class of [param node] as a read answers it: nodeType the engine class, and scriptClass the
 ## class its script declares, when it declares one.
 static func class_of(node: Node) -> Dictionary:
-	var named: Dictionary = {"nodeType": node.get_class()}
+	var named: Dictionary = { "nodeType": node.get_class() }
 	var script: Script = node.get_script()
 	if script != null and not str(script.get_global_name()).is_empty():
 		named["scriptClass"] = str(script.get_global_name())
@@ -271,8 +271,8 @@ static func node_at(top: Node, at: String) -> Node:
 ## Why the property or signal [param missing] could not be found on [param node], adding the one
 ## cause the name alone does not show: a script that does not compile leaves the editor holding a
 ## placeholder with no properties or signals at all, and the refusal named the property instead.
-## Such a script has no engine class beneath it. Compiling a copy of the source to find out failed on
-## every script with a class_name, since the copy hides the global class the original declares.
+## Such a script has no engine class beneath it. Compiling a copy of the source to find out failed
+## on every script with a class_name, since the copy hides the global class the original declares.
 static func missing_on(node: Node, missing: String) -> String:
 	var script: Script = node.get_script()
 	if script == null or not str(script.get_instance_base_type()).is_empty():
@@ -290,15 +290,18 @@ func foreign(node: Node) -> String:
 		return ""
 	if node.owner == null:
 		return (
-			"%s is made by a script as the scene is instanced, and no scene file saves anything about it."
+			(
+				"%s is made by a script as the scene is instanced, and no scene file saves "
+				+ "anything about it."
+			)
 			% path_of(node)
 		)
 	if root.is_editable_instance(node.owner):
 		return ""
 	var said: String = (
 		(
-			"%s belongs to the scene instanced at %s (%s), and this scene saves nothing about it. Edit "
-			+ "that scene instead, which changes every instance of it"
+			"%s belongs to the scene instanced at %s (%s), and this scene saves nothing about it. "
+			+ "Edit that scene instead, which changes every instance of it"
 		)
 		% [path_of(node), path_of(node.owner), node.owner.scene_file_path]
 	)
@@ -349,19 +352,22 @@ func fixed(node: Node, deleting: bool = false) -> String:
 			"%s is inside the scene instanced at %s (%s), which creates it again on load."
 			% [path_of(node), path_of(node.owner), instanced]
 		)
-		return inside + (_deleted_elsewhere(node, maker) if deleting else " Edit %s instead." % maker)
+		return (
+			inside + (_deleted_elsewhere(node, maker) if deleting else " Edit %s instead." % maker)
+		)
 	var at: String = path_of(node)
 	if _base_paths.has(at):
 		var maker: String = str(_base_paths[at])
 		var made: String = (
-			"%s is made by %s, a scene %s inherits, which creates it again on load." % [at, maker, path]
+			"%s is made by %s, a scene %s inherits, which creates it again on load."
+			% [at, maker, path]
 		)
 		return made + (_deleted_elsewhere(node, maker) if deleting else " Edit that scene instead.")
 	return ""
 
 
-## Each node the scenes [param state] inherits give it, by path, with the deepest file making it more
-## than values; a node [param state] makes itself is not in it.
+## Each node the scenes [param state] inherits give it, by path, with the deepest file making it
+## more than values; a node [param state] makes itself is not in it.
 static func makers(state: SceneState) -> Dictionary:
 	var made_by: Dictionary = {}
 	var at: SceneState = state.get_base_scene_state()
@@ -380,20 +386,22 @@ static func makers(state: SceneState) -> Dictionary:
 ## What a caller can do with [param node], made by [param maker], instead of deleting it here.
 static func _deleted_elsewhere(node: Node, maker: String) -> String:
 	var hidden: String = (
-		"set its visible to false here to hide it in this scene alone, or " if "visible" in node else ""
+		"set its visible to false here to hide it in this scene alone, or "
+		if "visible" in node
+		else ""
 	)
 	return (
 		(
-			" No scene can delete a node another scene makes: %sdelete it in %s, which removes it from "
-			+ "every scene using that one."
+			" No scene can delete a node another scene makes: %sdelete it in %s, which removes it "
+			+ "from every scene using that one."
 		)
 		% [hidden, maker]
 	)
 
 
-## Why the folder a new file at [param file_path] goes in cannot be made, or "" once it is there. The
-## engine makes no folder when it saves, so a create into one not yet made failed with no more than
-## the engine's error, while script_edit create made its folder and went ahead.
+## Why the folder a new file at [param file_path] goes in cannot be made, or "" once it is there.
+## The engine makes no folder when it saves, so a create into one not yet made failed with no more
+## than the engine's error, while script_edit create made its folder and went ahead.
 static func make_folder_for(file_path: String) -> String:
 	var folder: String = file_path.get_base_dir()
 	if DirAccess.dir_exists_absolute(folder):
@@ -402,10 +410,10 @@ static func make_folder_for(file_path: String) -> String:
 	return "" if made == OK else "Could not make the folder %s: %s" % [folder, error_string(made)]
 
 
-## Why [param script], loaded from [param script_path], cannot be attached because the editor could not
-## compile it, or "". A script that did not compile has no base type, and the refusal built from that
-## said "start.gd extends , so it cannot be on a Control root" about a script that was fine, whose
-## failure was a class it called being behind in the editor. A headless engine compiles every
+## Why [param script], loaded from [param script_path], cannot be attached because the editor could
+## not compile it, or "". A script that did not compile has no base type, and the refusal built from
+## that said "start.gd extends , so it cannot be on a Control root" about a script that was fine,
+## whose failure was a class it called being behind in the editor. A headless engine compiles every
 ## script from its file, so only an editor can hold a copy that is behind.
 static func uncompiled(script: Script, script_path: String) -> String:
 	if not str(script.get_instance_base_type()).is_empty():
@@ -421,9 +429,9 @@ static func uncompiled(script: Script, script_path: String) -> String:
 	return (
 		(
 			"%s does not compile in the editor, so it cannot be attached. script_diagnostics on it "
-			+ "gives the parser's errors. If they deny a member that another class's file declares, "
-			+ "the editor's copy of that class is behind: editor_rescan with reloadScript on that "
-			+ "class, then ask again."
+			+ "gives the parser's errors. If they deny a member that another class's file "
+			+ "declares, the editor's copy of that class is behind: editor_rescan with "
+			+ "reloadScript on that class, then ask again."
 		)
 		% script_path
 	)
@@ -441,21 +449,29 @@ static func script_class(type_name: String, kind: String) -> Dictionary:
 		if entry.get("is_abstract", false) == true:
 			return {
 				"error":
-				"%s, declared in %s, is abstract, so nothing can be made of it." % [type_name, declaring]
+				(
+					"%s, declared in %s, is abstract, so nothing can be made of it."
+					% [type_name, declaring]
+				),
 			}
 		var script: Script = load(declaring) as Script
 		if script == null:
-			return {"error": "%s is declared in %s, which does not load." % [type_name, declaring]}
+			return {
+				"error": "%s is declared in %s, which does not load." % [type_name, declaring],
+			}
 		var failed: String = uncompiled(script, declaring)
 		if not failed.is_empty():
-			return {"error": failed}
+			return { "error": failed }
 		var base: String = str(script.get_instance_base_type())
 		if not ClassDB.is_parent_class(base, kind):
 			return {
 				"error":
-				"%s, declared in %s, extends %s, which is not a %s." % [type_name, declaring, base, kind]
+				(
+					"%s, declared in %s, extends %s, which is not a %s."
+					% [type_name, declaring, base, kind]
+				),
 			}
-		return {"script": script, "path": declaring, "base": base}
+		return { "script": script, "path": declaring, "base": base }
 	return {}
 
 
@@ -465,12 +481,12 @@ static func script_class(type_name: String, kind: String) -> Dictionary:
 ## argument the type came in, for the refusal when the call also named another script.
 static func made_as(type_name: String, given: String, kind: String, argument: String) -> Dictionary:
 	if ClassDB.class_exists(type_name):
-		return {"type": type_name, "script": given}
+		return { "type": type_name, "script": given }
 	var declared: Dictionary = script_class(type_name, kind)
 	if declared.has("error"):
 		return declared
 	if declared.is_empty():
-		return {"type": type_name, "script": given}
+		return { "type": type_name, "script": given }
 	var declaring: String = str(declared["path"])
 	if not given.is_empty() and given != declaring:
 		return {
@@ -478,9 +494,9 @@ static func made_as(type_name: String, given: String, kind: String, argument: St
 			(
 				"%s %s is the class %s declares, and script names %s: pass one of them."
 				% [argument, type_name, declaring, given]
-			)
+			),
 		}
-	return {"type": str(declared["base"]), "script": declaring}
+	return { "type": str(declared["base"]), "script": declaring }
 
 
 ## Why no node can be called [param node_name], wherever it sits, or "".
@@ -550,7 +566,9 @@ func set_at(at: String) -> Dictionary:
 		if _relative(str(_state.get_node_path(index))) != at:
 			continue
 		for p: int in _state.get_node_property_count(index):
-			held[str(_state.get_node_property_name(index, p))] = _state.get_node_property_value(index, p)
+			held[str(_state.get_node_property_name(index, p))] = _state.get_node_property_value(
+				index, p
+			)
 	return held
 
 
@@ -607,15 +625,17 @@ func write(check: Callable = Callable()) -> Dictionary:
 		packed = settled[0]
 		if not path.ends_with(".tscn") and _holds_scripted_embedded():
 			var binary: String = (
-				"Nothing was written: %s is a binary scene holding an embedded resource with a script "
-				+ "that is not a tool, and what that script changed when a headless engine loaded it "
-				+ "cannot be told apart from the file here. "
+				"Nothing was written: %s is a binary scene holding an embedded resource with a "
+				+ "script that is not a tool, and what that script changed when a headless engine "
+				+ "loaded it cannot be told apart from the file here. "
 			)
 			return refuse(binary % path + GdhHeadlessCheck.REMEDY)
 	if check.is_valid():
 		var saved: Node = packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
 		if saved == null:
-			return refuse("The packed copy of %s did not instantiate, so nothing was written." % path)
+			return refuse(
+				"The packed copy of %s did not instantiate, so nothing was written." % path
+			)
 		_checked_pack = packed
 		var missing: String = str(check.call(saved))
 		saved.free()
@@ -637,30 +657,33 @@ func write(check: Callable = Callable()) -> Dictionary:
 		if written.is_empty():
 			also_saved.append_array(also)
 		return written
+	var just_saved: GdhHeadlessCheck.GdhSaved = GdhHeadlessCheck.GdhSaved.new(
+		path, _text, func() -> Error: return GdhSceneUids.save_keeping_uid(packed, path)
+	)
 	var unkept: String = GdhHeadlessCheck.settle_saved(
-		path,
-		_text,
+		just_saved,
 		values,
 		null,
 		{},
 		_reached,
 		carried,
-		func() -> Error: return GdhSceneUids.save_keeping_uid(packed, path)
 	)
 	if unkept.is_empty():
 		also_saved.append_array(also)
 		return {}
 	return {
-		"ok": false, "error": "Nothing was written: " + unkept + GdhHeadlessCheck.put_back(path, previous)
+		"ok": false,
+		"error": "Nothing was written: " + unkept + GdhHeadlessCheck.put_back(path, previous),
 	}
 
 
 ## Each property [param state] stores differently from the file, on a node the file held, that the
-## call neither asked for nor changed, as {node, property, was, saved}: was left out where the file did
-## not set it, saved where the write does not. The engine writes a node as it holds it once the file
-## has loaded, and one property can set others as it loads, as anchors_preset gives a centred Control
-## both grow directions, so a file not written by the editor gains lines on any node, the one a set
-## names among them. What the call's own change moved on that node is its answer's alsoChanged.
+## call neither asked for nor changed, as {node, property, was, saved}: was left out where the file
+## did not set it, saved where the write does not. The engine writes a node as it holds it once the
+## file has loaded, and one property can set others as it loads, as anchors_preset gives a centred
+## Control both grow directions, so a file not written by the editor gains lines on any node, the
+## one a set names among them. What the call's own change moved on that node is its answer's
+## alsoChanged.
 func _also_saved(state: SceneState) -> Array[Dictionary]:
 	var noted: Array[Dictionary] = []
 	var values: GdhSerialisation = GdhSerialisation.new()
@@ -685,7 +708,7 @@ func _also_saved(state: SceneState) -> Array[Dictionary]:
 			var held: bool = filed.has(name)
 			if held == stored.has(name) and (not held or GdhSame.same(stored[name], filed[name])):
 				continue
-			var entry: Dictionary = {"node": path_of(node), "property": name}
+			var entry: Dictionary = { "node": path_of(node), "property": name }
 			if held:
 				entry["was"] = values.serialize_value(filed[name])
 			if stored.has(name):
@@ -712,10 +735,15 @@ static func save_packed(packed: PackedScene, scene_path: String) -> Dictionary:
 	if not DirAccess.dir_exists_absolute(directory):
 		var made: Error = DirAccess.make_dir_recursive_absolute(directory)
 		if made != OK:
-			return {"ok": false, "error": "Could not create %s: %s" % [directory, error_string(made)]}
+			return {
+				"ok": false, "error": "Could not create %s: %s" % [directory, error_string(made)],
+			}
 	var saving: Error = GdhSceneUids.save_keeping_uid(packed, scene_path)
 	if saving != OK:
-		return {"ok": false, "error": "Failed to save %s: %s" % [scene_path, error_string(saving)]}
+		return {
+			"ok": false,
+			"error": "Failed to save %s: %s" % [scene_path, error_string(saving)],
+		}
 	refresh(scene_path)
 	return {}
 
@@ -724,7 +752,9 @@ static func save_packed(packed: PackedScene, scene_path: String) -> Dictionary:
 ## the editor's file list, and the tab showing it, whether current or not.
 static func refresh(scene_path: String) -> void:
 	if ResourceLoader.has_cached(scene_path):
-		var _replaced: Resource = ResourceLoader.load(scene_path, "", ResourceLoader.CACHE_MODE_REPLACE)
+		var _replaced: Resource = ResourceLoader.load(
+			scene_path, "", ResourceLoader.CACHE_MODE_REPLACE
+		)
 	if not Engine.is_editor_hint():
 		return
 	scan_later()
@@ -773,11 +803,11 @@ static func unsaved(scene_path: String) -> bool:
 
 ## [param packed] with what the scene's scripts changed put back, as [pack, ""], or [null, why not].
 ##
-## On a node the tool did not ask to change, a difference is put back to what the file holds, or, for
-## a property the file does not set, to what the node would load with without it. On a node it did
-## ask to change, through a script that is not a tool, every property it did not name is put back to
-## what it held before. Packed again afterwards and put back again until nothing differs, since
-## putting one property back can run a setter that changes another already put back (a script
+## On a node the tool did not ask to change, a difference is put back to what the file holds, or,
+## for a property the file does not set, to what the node would load with without it. On a node it
+## did ask to change, through a script that is not a tool, every property it did not name is put
+## back to what it held before. Packed again afterwards and put back again until nothing differs,
+## since putting one property back can run a setter that changes another already put back (a script
 ## setting speed in _init, whose setter tints modulate), and refused if something still does.
 func _settled(packed: PackedScene) -> Array:
 	var current: PackedScene = packed
@@ -819,8 +849,8 @@ func _settled(packed: PackedScene) -> Array:
 	return [null, _stray_text(stray_node, named)]
 
 
-## Each node the tool asked to change through a script that is not a tool, with the properties it did
-## not name that no longer hold what they held before, as [node, names].
+## Each node the tool asked to change through a script that is not a tool, with the properties it
+## did not name that no longer hold what they held before, as [node, names].
 func _moved_by_scripts() -> Array[Array]:
 	var moved: Array[Array] = []
 	for key: Variant in _asked:
@@ -882,8 +912,8 @@ func _stray_text(node: Node, name: String) -> String:
 		return (
 			(
 				(
-					"the script of %s did not start when a headless engine instanced %s, so the node would be "
-					+ "saved without it; the engine's messages give its errors. "
+					"the script of %s did not start when a headless engine instanced %s, so the "
+					+ "node would be saved without it; the engine's messages give its errors. "
 				)
 				% [at, path]
 			)
@@ -892,9 +922,9 @@ func _stray_text(node: Node, name: String) -> String:
 	return (
 		(
 			(
-				"%s.%s would be saved differently from what %s holds, and the call did not ask for it: the "
-				+ "scene's scripts ran when a headless engine instanced it, as they do in the game and not in "
-				+ "an editor. "
+				"%s.%s would be saved differently from what %s holds, and the call did not ask for "
+				+ "it: the scene's scripts ran when a headless engine instanced it, as they do in "
+				+ "the game and not in an editor. "
 			)
 			% [at, name, path]
 		)

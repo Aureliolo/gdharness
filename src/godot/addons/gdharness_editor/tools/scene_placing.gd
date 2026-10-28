@@ -1,6 +1,5 @@
 @tool
 extends RefCounted
-
 ## What a new node in a scene is made or copied from, what the scene owns of it, and where among its
 ## siblings a node may go.
 
@@ -15,7 +14,8 @@ static func what_to_add(node_type: String, instance_path: String, scene_path: St
 	if node_type.is_empty() == instance_path.is_empty():
 		return [
 			null,
-			"add takes nodeType for a node of a class, or instancePath for a scene, and one of them only."
+			"add takes nodeType for a node of a class, or instancePath for a scene, and one of "
+			+ "them only.",
 		]
 	if not instance_path.is_empty():
 		# Asked before the cycle walk, which reads the file's dependencies and so loaded a file that
@@ -35,9 +35,12 @@ static func what_to_add(node_type: String, instance_path: String, scene_path: St
 		return [
 			null,
 			(
-				"nodeType must be a node class, and %s is a scene: pass it as instancePath to instance it."
+				(
+					"nodeType must be a node class, and %s is a scene: pass it as instancePath to "
+					+ "instance it."
+				)
 				% node_type
-			)
+			),
 		]
 	if not ClassDB.class_exists(node_type) or not ClassDB.is_parent_class(node_type, "Node"):
 		return [null, not_a_node_class("nodeType", node_type)]
@@ -73,10 +76,12 @@ static func made(packed: PackedScene, node_type: String) -> Node:
 static func copied(source: Node, root: Node, copies: Dictionary) -> Node:
 	var copy: Node = null
 	if not source.scene_file_path.is_empty():
-		# An instanced scene made again from its file, so the copy is an instance too. Node.duplicate
-		# makes a plain node of the instance's class, and the pack saved it with every property of the
-		# instance's root frozen into this scene.
-		var packed: PackedScene = ResourceLoader.load(source.scene_file_path, "PackedScene") as PackedScene
+		# An instanced scene made again from its file, so the copy is an instance too.
+		# Node.duplicate makes a plain node of the instance's class, and the pack saved it with
+		# every property of the instance's root frozen into this scene.
+		var packed: PackedScene = (
+			ResourceLoader.load(source.scene_file_path, "PackedScene") as PackedScene
+		)
 		if packed == null:
 			return null
 		copy = packed.instantiate(PackedScene.GEN_EDIT_STATE_INSTANCE)
@@ -123,7 +128,11 @@ static func reconnect(copies: Dictionary, top: Node) -> void:
 				if not flags & Object.CONNECT_PERSIST or target == null:
 					continue
 				var to: Object = copies.get(target, target)
-				if to == target and target is Node and (target == top or top.is_ancestor_of(target as Node)):
+				if (
+					to == target
+					and target is Node
+					and (target == top or top.is_ancestor_of(target as Node))
+				):
 					continue
 				var aimed: Callable = Callable(to, callable.get_method())
 				if (
@@ -131,7 +140,10 @@ static func reconnect(copies: Dictionary, top: Node) -> void:
 					and copy.connect(signal_name, aimed, flags) != OK
 				):
 					push_error(
-						"gdharness: could not copy the connection %s of %s" % [signal_name, source.name]
+						(
+							"gdharness: could not copy the connection %s of %s"
+							% [signal_name, source.name]
+						)
 					)
 
 
@@ -150,7 +162,9 @@ static func own(node: Node, root: Node) -> void:
 static func unplaceable(parent: Node, node: Node, asked: Variant) -> String:
 	if asked == null:
 		return ""
-	var others: int = parent.get_child_count() - (1 if node != null and node.get_parent() == parent else 0)
+	var others: int = (
+		parent.get_child_count() - (1 if node != null and node.get_parent() == parent else 0)
+	)
 	var at: int = GdhRead.as_int(asked, -1)
 	if at < 0 or at > others:
 		return (
@@ -159,7 +173,7 @@ static func unplaceable(parent: Node, node: Node, asked: Variant) -> String:
 				str(at) if asked is int or asked is float else JSON.stringify(asked),
 				others,
 				parent.name,
-				others
+				others,
 			]
 		)
 	return ""
@@ -234,7 +248,8 @@ static func _spatial_space(parent: Node) -> Transform3D:
 	return space
 
 
-## Where the children of [param parent] are drawn in 2D, as [method _spatial_space] works it out in 3D.
+## Where the children of [param parent] are drawn in 2D, as [method _spatial_space] works it out in
+## 3D.
 static func _canvas_space(parent: Node) -> Transform2D:
 	var space: Transform2D = Transform2D.IDENTITY
 	var at: Node = parent

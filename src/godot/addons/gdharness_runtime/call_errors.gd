@@ -1,5 +1,4 @@
 extends Logger
-
 ## What the engine reports on the main thread while one call runs, added for that call alone.
 ##
 ## A call the engine refuses, given too few arguments or one it will not convert, comes back from
@@ -27,7 +26,7 @@ func _log_message(_message: String, _error: bool) -> void:
 
 
 # The engine's own signature for a Logger, eight parameters and not this project's to shape.
-# gdlint:ignore = function-arguments-number
+# gdstyle:ignore=quality/max-parameters
 func _log_error(
 	function: String,
 	file: String,

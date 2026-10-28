@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## What crosses the wire between the game and the server, in both directions: Godot values
 ## as JSON-safe dictionaries, and JSON back into the values a property or parameter wants.
 ##
@@ -12,7 +11,6 @@ const GdhDeclared = preload("declared_values.gd")
 const GdhRead = preload("reading.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhShapes = preload("value_shapes.gd")
-
 ## The engine singletons a call, a write or a read may name instead of a node: what the engine
 ## measures, and the engine settings that are the game's own. Not every singleton: OS runs programs
 ## and opens files, DisplayServer switches the keyboard's layout and Input moves the real pointer,
@@ -61,7 +59,7 @@ func deserialize(value: Variant) -> Variant:
 ## that take them are the property and the method.
 static func node_at(root: Node, path: String) -> Dictionary:
 	if path.is_empty():
-		return {"type": "error", "message": "Node path required"}
+		return { "type": "error", "message": "Node path required" }
 
 	if path.contains(":"):
 		var shape: String = (
@@ -75,8 +73,8 @@ static func node_at(root: Node, path: String) -> Dictionary:
 
 	var node: Node = root.get_node_or_null(path)
 	if node == null:
-		return {"type": "error", "message": _not_found(root, path)}
-	return {"node": node}
+		return { "type": "error", "message": _not_found(root, path) }
+	return { "node": node }
 
 
 ## "Node not found" for [param path], with the deepest node of it the game has and the children that
@@ -90,7 +88,10 @@ static func _not_found(root: Node, path: String) -> String:
 		var meant: Node = scene.get_node_or_null(path)
 		if meant != null:
 			return (
-				"%s. Paths here go from the root, /root, not from the current scene, so this one is %s."
+				(
+					"%s. Paths here go from the root, /root, not from the current scene, so this "
+					+ "one is %s."
+				)
 				% [said, str(meant.get_path())]
 			)
 	var parts: PackedStringArray = path.split("/", false)
@@ -111,7 +112,9 @@ static func _not_found(root: Node, path: String) -> String:
 	var names: PackedStringArray = []
 	for child: Node in at.get_children():
 		var _named: bool = names.append(str(child.name))
-	return GdhRead.missing_below(said, "", PackedStringArray([str(at.get_path())]), parts[step], names)
+	return GdhRead.missing_below(
+		said, "", PackedStringArray([str(at.get_path())]), parts[step], names
+	)
 
 
 ## How many process frames a whole press holds before its release, from `holdFrames`: one unless
@@ -150,7 +153,7 @@ static func hold(tree: SceneTree, frames: int) -> Dictionary:
 	for _frame: int in frames:
 		await tree.process_frame
 	return {
-		"seconds": snappedf((Time.get_ticks_usec() - began_usec) / 1000000.0, 0.001),
+		"seconds": snappedf((Time.get_ticks_usec() - began_usec) / 1_000_000.0, 0.001),
 		"physics_frames": Engine.get_physics_frames() - began_tick,
 	}
 
@@ -169,9 +172,9 @@ static func glyph_of(keycode: Key, shifted: bool) -> int:
 	return keycode
 
 
-## The refusal for [param name], which no key is called, with the key names nearest it. Read from the
-## engine's own names, printable keys and the special ones above [constant KEY_SPECIAL], since the
-## game takes any name OS.find_keycode_from_string does.
+## The refusal for [param name], which no key is called, with the key names nearest it. Read from
+## the engine's own names, printable keys and the special ones above [constant KEY_SPECIAL], since
+## the game takes any name OS.find_keycode_from_string does.
 static func unknown_key(name: String) -> String:
 	var close: PackedStringArray = GdhRead.nearest(name, _key_names())
 	var said: String = "No key is called %s." % name
@@ -205,8 +208,9 @@ static func _key_names() -> PackedStringArray:
 
 
 ## The refusal for [param action], which the input map lacks, with the nearest of the project's own
-## actions, or else all of them. The engine's ui_ ones are in every project, and offered for any name
-## they only buried the project's ("dance" is near ui_cancel), so they are offered for a ui_ name only.
+## actions, or else all of them. The engine's ui_ ones are in every project, and offered for any
+## name they only buried the project's ("dance" is near ui_cancel), so they are offered for a ui_
+## name only.
 static func no_action(action: String) -> String:
 	var engine: PackedStringArray = []
 	var own: PackedStringArray = []
@@ -217,12 +221,23 @@ static func no_action(action: String) -> String:
 			var _owned: bool = own.append(str(named))
 	own.sort()
 	var said: String = "Action not found: %s" % action
-	var close: PackedStringArray = GdhRead.nearest(action, engine if action.begins_with("ui_") else own)
+	var close: PackedStringArray = GdhRead.nearest(
+		action, engine if action.begins_with("ui_") else own
+	)
 	if not close.is_empty():
-		return "%s; the nearest %s %s." % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+		return (
+			"%s; the nearest %s %s."
+			% [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+		)
 	if own.is_empty():
-		return "%s; the project defines no actions of its own, and the engine's are the ui_ ones." % said
-	return "%s; the project's own actions are %s, beside the engine's ui_ ones." % [said, ", ".join(own)]
+		return (
+			"%s; the project defines no actions of its own, and the engine's are the ui_ ones."
+			% said
+		)
+	return (
+		"%s; the project's own actions are %s, beside the engine's ui_ ones."
+		% [said, ", ".join(own)]
+	)
 
 
 ## The actions of the input map that [param event] stands for, as Input reads it for
@@ -248,10 +263,11 @@ static func focus_path(host: Node) -> String:
 	return "" if holding == null else str(holding.get_path())
 
 
-## [param said] with [param focused], the Control that had the focus, under focused. A key, an action
-## or a pad's event reaches that Control before the game's _unhandled_input: Space on a focused Button
-## pressed it and the game's own handler counted the key as well, and a stick pushed down moved a
-## focused list's selection and never reached the game, with nothing in the answer saying why.
+## [param said] with [param focused], the Control that had the focus, under focused. A key, an
+## action or a pad's event reaches that Control before the game's _unhandled_input: Space on a
+## focused Button pressed it and the game's own handler counted the key as well, and a stick pushed
+## down moved a focused list's selection and never reached the game, with nothing in the answer
+## saying why.
 ##
 ## Where the focus is once the event has been handled goes under focused_after when it moved, null
 ## when nothing holds it then: ui_down on a focused button hands the focus to its neighbour, and an
@@ -314,7 +330,7 @@ static func press_shortcuts(root: Node, action: String) -> Dictionary:
 	var pressed: Variant = null
 	if not taken.is_empty():
 		pressed = taken[0]
-	return {"shortcuts": paths, "shortcut_pressed": pressed}
+	return { "shortcuts": paths, "shortcut_pressed": pressed }
 
 
 ## The methods [param object] answers to, as the engine lists them: for a script itself, the static
@@ -336,16 +352,16 @@ static func methods_of(object: Object) -> Array[Dictionary]:
 ## named in a value are found from, which for a singleton is [param root].
 static func target_at(root: Node, path: String) -> Dictionary:
 	if SINGLETONS.has(path):
-		return {"object": Engine.get_singleton(path), "node": root}
+		return { "object": Engine.get_singleton(path), "node": root }
 	if not path.contains("/") and Engine.has_singleton(path):
 		return {
 			"type": "error",
 			"message":
 			(
 				(
-					"%s is an engine singleton, and the ones that can be reached are %s. The rest act"
-					+ " on the machine rather than the game: OS runs programs, DisplayServer switches the"
-					+ " keyboard's layout and Input moves the real pointer."
+					"%s is an engine singleton, and the ones that can be reached are %s. The rest "
+					+ "act on the machine rather than the game: OS runs programs, DisplayServer "
+					+ "switches the keyboard's layout and Input moves the real pointer."
 				)
 				% [path, ", ".join(SINGLETONS)]
 			),
@@ -353,7 +369,7 @@ static func target_at(root: Node, path: String) -> Dictionary:
 	var standing: Dictionary = node_at(root, path)
 	if standing.has("message"):
 		return standing
-	return {"object": standing["node"], "node": standing["node"]}
+	return { "object": standing["node"], "node": standing["node"] }
 
 
 ## The script [param path] names for a call of one of its static functions, as [method target_at]
@@ -379,7 +395,7 @@ static func class_at(root: Node, path: String) -> Dictionary:
 			"type": "error",
 			"message": "No script is at %s to call a static function of." % script_path,
 		}
-	return {"object": loaded, "node": root}
+	return { "object": loaded, "node": root }
 
 
 ## Whether two values can be compared without the comparison itself failing.
@@ -424,7 +440,8 @@ static func inexact(given: Variant, type: int) -> String:
 	return GdhSerialisation.inexact(given, type)
 
 
-## What a refusal of [param value] where a [param type] goes ends with: see [method GdhShapes.remedy].
+## What a refusal of [param value] where a [param type] goes ends with: see
+## [method GdhShapes.remedy].
 static func remedy(value: Variant, type: int) -> String:
 	return GdhShapes.remedy(value, type)
 
@@ -444,8 +461,8 @@ func parameter_type(object: Object, method: String, index: int) -> int:
 
 
 ## The values of the enum argument [param index] of [param method] declares, by name, as
-## `{"enum": "Mood", "values": {...}}`, or {} when it declares none. The engine gives such an argument
-## the type int and the enum's name, as res://main.gd.Mood or Node.ProcessMode.
+## `{"enum": "Mood", "values": {...}}`, or {} when it declares none. The engine gives such an
+## argument the type int and the enum's name, as res://main.gd.Mood or Node.ProcessMode.
 func parameter_enum(object: Object, method: String, index: int) -> Dictionary:
 	for entry: Dictionary in methods_of(object):
 		if entry.get("name", "") != method:
@@ -463,12 +480,12 @@ func parameter_enum(object: Object, method: String, index: int) -> Dictionary:
 			values = _enum_along(object if object is Script else object.get_script(), enum_name)
 		if values.is_empty():
 			return {}
-		return {"enum": enum_name, "values": values}
+		return { "enum": enum_name, "values": values }
 	return {}
 
 
-## The enum [param named] declared by [param script] or a script it extends, or {}. A script built in
-## a scene or made at run time names its enums by an id nothing loads, gdscript://-92233….gd.Mood
+## The enum [param named] declared by [param script] or a script it extends, or {}. A script built
+## in a scene or made at run time names its enums by an id nothing loads, gdscript://-92233….gd.Mood
 ## measured on 4.7.2, and a method of the object called declares its enums along this chain.
 static func _enum_along(script: Variant, named: String) -> Dictionary:
 	if not script is Script:
@@ -506,12 +523,12 @@ func parameter_class(object: Object, method: String, index: int) -> String:
 	return ""
 
 
-## What the slot [param named] on [param holder] declares it holds, as `{"type": int, "class":
-## String, "script": Script or null, "declared": Dictionary}`: a property's declaration, or the
-## element type of a typed list or the value type of a typed map. TYPE_NIL when nothing is declared,
-## which is also what a property declared as Variant or left untyped reads as: either way it takes
-## anything. declared is the property's entry in the property list, which carries its enum or
-## range, and empty for anything that is not a property.
+## What the slot [param named] on [param holder] declares it holds, as
+## `{"type": int, "class": String, "script": Script or null, "declared": Dictionary}`: a property's
+## declaration, or the element type of a typed list or the value type of a typed map. TYPE_NIL when
+## nothing is declared, which is also what a property declared as Variant or left untyped reads as:
+## either way it takes anything. declared is the property's entry in the property list, which
+## carries its enum or range, and empty for anything that is not a property.
 ##
 ## Asked rather than read off the value in the slot, because an object slot can be empty: a
 ## property typed `Gear` holding null reads as TYPE_NIL, and anything written into it passed the
@@ -525,7 +542,7 @@ static func slot_declared(holder: Variant, named: String) -> Dictionary:
 	# form's an integer, a rectangle's size a vector of the same form.
 	if named in GdhSerialisation.components_of(holder):
 		var component: Variant = holder[named]
-		return {"type": typeof(component), "class": "", "script": null, "declared": {}}
+		return { "type": typeof(component), "class": "", "script": null, "declared": {} }
 	if holder is Array:
 		var items: Array = holder
 		if items.is_typed():
@@ -540,7 +557,8 @@ static func slot_declared(holder: Variant, named: String) -> Dictionary:
 		if map.is_typed_value():
 			return {
 				"type": map.get_typed_value_builtin(),
-				"class": _typed_class(map.get_typed_value_script(), map.get_typed_value_class_name()),
+				"class":
+				_typed_class(map.get_typed_value_script(), map.get_typed_value_class_name()),
 				"script": _script_or_null(map.get_typed_value_script()),
 				"declared": {},
 			}
@@ -554,7 +572,7 @@ static func slot_declared(holder: Variant, named: String) -> Dictionary:
 					"script": null,
 					"declared": entry,
 				}
-	return {"type": TYPE_NIL, "class": "", "script": null, "declared": {}}
+	return { "type": TYPE_NIL, "class": "", "script": null, "declared": {} }
 
 
 static func _script_or_null(typed: Variant) -> Script:
@@ -574,10 +592,10 @@ static func _typed_class(script: Variant, engine_class: StringName) -> String:
 ## Whether [param object] is a [param declared]: an engine class, or a script class by its global
 ## name anywhere along the script's inheritance.
 ##
-## Against [param declared_script] itself when there is one. A script with no global name is named by
-## the engine class it extends, so an object of that class with another script, or none, passes the
-## name, and a typed list built with it drops the element: measured on 4.7.2, an Array[Walker] given
-## a plain Node3D comes out empty, the engine's errors going to the game's output alone.
+## Against [param declared_script] itself when there is one. A script with no global name is named
+## by the engine class it extends, so an object of that class with another script, or none, passes
+## the name, and a typed list built with it drops the element: measured on 4.7.2, an Array[Walker]
+## given a plain Node3D comes out empty, the engine's errors going to the game's output alone.
 static func is_a(object: Object, declared: String, declared_script: Script = null) -> bool:
 	if declared_script != null:
 		var own: Variant = object.get_script()
@@ -667,7 +685,13 @@ func parameter_container(object: Object, method: String, index: int) -> Variant:
 			var value_builtin: int = entry_type["builtin"]
 			var value_class: StringName = entry_type["class"]
 			return Dictionary(
-				{}, key_builtin, key_class, key["script"], value_builtin, value_class, entry_type["script"]
+				{},
+				key_builtin,
+				key_class,
+				key["script"],
+				value_builtin,
+				value_class,
+				entry_type["script"]
 			)
 		return null
 	return null
@@ -679,15 +703,17 @@ func parameter_container(object: Object, method: String, index: int) -> Variant:
 static func _element_type(named: String) -> Dictionary:
 	for type: int in TYPE_MAX:
 		if type != TYPE_OBJECT and type_string(type) == named:
-			return {"builtin": type, "class": &"", "script": null}
+			return { "builtin": type, "class": &"", "script": null }
 	if ClassDB.class_exists(named):
-		return {"builtin": TYPE_OBJECT, "class": StringName(named), "script": null}
+		return { "builtin": TYPE_OBJECT, "class": StringName(named), "script": null }
 	for global: Dictionary in ProjectSettings.get_global_class_list():
 		if str(global.get("class", "")) == named:
 			var script: Script = load(str(global.get("path", "")))
 			if script == null:
 				return {}
-			return {"builtin": TYPE_OBJECT, "class": script.get_instance_base_type(), "script": script}
+			return {
+				"builtin": TYPE_OBJECT, "class": script.get_instance_base_type(), "script": script,
+			}
 	return {}
 
 
@@ -708,7 +734,7 @@ func typed_like(given: Variant, like: Variant, resolve: Callable) -> Dictionary:
 	if like is Array and given is Array:
 		var template: Array = like
 		if not template.is_typed():
-			return {"value": given}
+			return { "value": given }
 		var items: Array = given
 		var built: Array = []
 		for index: int in items.size():
@@ -720,18 +746,21 @@ func typed_like(given: Variant, like: Variant, resolve: Callable) -> Dictionary:
 				resolve
 			)
 			if element.has("message"):
-				return {"message": "element %d %s" % [index, element["message"]]}
+				return { "message": "element %d %s" % [index, element["message"]] }
 			built.append(element["value"])
 		var typed: Array = Array(
-			built, template.get_typed_builtin(), template.get_typed_class_name(), template.get_typed_script()
+			built,
+			template.get_typed_builtin(),
+			template.get_typed_class_name(),
+			template.get_typed_script()
 		)
 		if typed.size() != built.size():
-			return {"message": "the engine would not take its elements as what the list holds."}
-		return {"value": typed}
+			return { "message": "the engine would not take its elements as what the list holds." }
+		return { "value": typed }
 	if like is Dictionary and given is Dictionary:
 		var map_like: Dictionary = like
 		if not map_like.is_typed():
-			return {"value": given}
+			return { "value": given }
 		var entries: Dictionary = given
 		var rebuilt: Dictionary = {}
 		for key: Variant in entries:
@@ -743,16 +772,18 @@ func typed_like(given: Variant, like: Variant, resolve: Callable) -> Dictionary:
 				resolve
 			)
 			if key_fitted.has("message"):
-				return {"message": "key %s %s" % [str(key), key_fitted["message"]]}
+				return { "message": "key %s %s" % [str(key), key_fitted["message"]] }
 			var value_fitted: Dictionary = _element(
 				entries[key],
 				map_like.get_typed_value_builtin(),
-				_typed_class(map_like.get_typed_value_script(), map_like.get_typed_value_class_name()),
+				_typed_class(
+					map_like.get_typed_value_script(), map_like.get_typed_value_class_name()
+				),
 				_script_or_null(map_like.get_typed_value_script()),
 				resolve
 			)
 			if value_fitted.has("message"):
-				return {"message": "the value under %s %s" % [str(key), value_fitted["message"]]}
+				return { "message": "the value under %s %s" % [str(key), value_fitted["message"]] }
 			rebuilt[key_fitted["value"]] = value_fitted["value"]
 		var typed_map: Dictionary = Dictionary(
 			rebuilt,
@@ -764,9 +795,9 @@ func typed_like(given: Variant, like: Variant, resolve: Callable) -> Dictionary:
 			map_like.get_typed_value_script()
 		)
 		if typed_map.size() != rebuilt.size():
-			return {"message": "the engine would not take its entries as what the map holds."}
-		return {"value": typed_map}
-	return {"value": given}
+			return { "message": "the engine would not take its entries as what the map holds." }
+		return { "value": typed_map }
+	return { "value": given }
 
 
 ## One element fitted to a container's element type, as `{"value"}` or `{"message"}` saying what it
@@ -775,14 +806,16 @@ func typed_like(given: Variant, like: Variant, resolve: Callable) -> Dictionary:
 ##
 ## An object element given as a record goes to [param resolve] as a path would, which says how an
 ## object is named, rather than being refused as a map that cannot become the class.
-func _element(item: Variant, builtin: int, declared: String, script: Script, resolve: Callable) -> Dictionary:
+func _element(
+	item: Variant, builtin: int, declared: String, script: Script, resolve: Callable
+) -> Dictionary:
 	if builtin == TYPE_NIL:
-		return {"value": item}
+		return { "value": item }
 	if builtin == TYPE_OBJECT and (item is String or item is Dictionary):
 		var named: Dictionary = resolve.call(item, declared, script)
 		if named.has("message"):
-			return {"message": str(named["message"]) + "."}
-		return {"value": named["object"]}
+			return { "message": str(named["message"]) + "." }
+		return { "value": named["object"] }
 	# Fitted alone, 4.5 into an Array[int] went in as 4, as a single value is refused for.
 	if cuts(item, builtin):
 		return {
@@ -790,18 +823,20 @@ func _element(item: Variant, builtin: int, declared: String, script: Script, res
 			(
 				"is %s, which %s cannot hold without changing it."
 				% [JSON.stringify(serialize(item), "", false), cut_by(builtin)]
-			)
+			),
 		}
 	var rounded: String = inexact(item, builtin)
 	if not rounded.is_empty():
-		return {"message": "is too large to be sure of: %s." % rounded}
+		return { "message": "is too large to be sure of: %s." % rounded }
 	var fitted_item: Variant = fitted(item, builtin)
 	if not acceptable(fitted_item, builtin):
-		# The value as it was sent rather than its engine type: JSON numbers arrive as floats, so a 7
-		# the caller wrote was named "float".
+		# The value as it was sent rather than its engine type: JSON numbers arrive as floats, so a
+		# 7 the caller wrote was named "float".
 		var wanted: String = type_string(builtin)
 		if builtin == TYPE_OBJECT:
 			wanted = declared if script == null else script_named(script)
 		var sent: String = JSON.stringify(serialize(item), "", false)
-		return {"message": "is %s, which cannot become %s.%s" % [sent, wanted, remedy(item, builtin)]}
-	return {"value": fitted_item}
+		return {
+			"message": "is %s, which cannot become %s.%s" % [sent, wanted, remedy(item, builtin)],
+		}
+	return { "value": fitted_item }

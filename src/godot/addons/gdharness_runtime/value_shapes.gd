@@ -1,12 +1,10 @@
 extends RefCounted
-
 ## How each engine type built from fields is written: the fields it needs, the ones it reads when
 ## they are there, and what a refusal says about a value that is not one.
 ##
 ## This file is the one beside the operations, and `bun run sync:gd` copies it into each addon.
 
 const GdhRead = preload("reading.gd")
-
 ## The classes that store what the inspector shows, and a write takes, under other names: a Curve
 ## keeps its points as _data, numbers and modes in one list, and its range as _limits, where the
 ## inspector and resource_edit modify have point_count, point_0/position and min_value. A read
@@ -17,7 +15,6 @@ const STORED_APART: Dictionary[String, Array] = {
 	"Curve3D": ["_data"],
 }
 const HEADINGS: int = PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP
-
 ## What each packed array holds, one value of which every element is fitted to.
 const PACKED_ELEMENTS: Dictionary = {
 	TYPE_PACKED_BYTE_ARRAY: TYPE_INT,
@@ -43,7 +40,6 @@ const LIST_TAGS: Dictionary = {
 	"PackedVector4Array": TYPE_PACKED_VECTOR4_ARRAY,
 	"PackedColorArray": TYPE_PACKED_COLOR_ARRAY,
 }
-
 # What each tag has to carry before it is built. A tag naming a type whose keys are not there is a
 # tag somebody wrote by mistake or wrote for a different shape, and building one out of defaults
 # answers with a Transform2D of zeros where the caller meant something else entirely. Unbuilt, it
@@ -254,7 +250,9 @@ static func remedy(value: Variant, type: int) -> String:
 	if shape.is_empty():
 		return ""
 	return (
-		_unread(value, type) + _no_number(value, type) + " A %s is sent as %s." % [type_string(type), shape]
+		_unread(value, type)
+		+ _no_number(value, type)
+		+ " A %s is sent as %s." % [type_string(type), shape]
 	)
 
 
@@ -288,7 +286,8 @@ static func _unread(value: Variant, type: int) -> String:
 		var _named: bool = named.append('"%s"' % key)
 	var fields_called: String = "field called" if named.size() == 1 else "fields called"
 	var note: String = (
-		" A %s has no %s %s, so the value is not read as one" % [tag, fields_called, " or ".join(named)]
+		" A %s has no %s %s, so the value is not read as one"
+		% [tag, fields_called, " or ".join(named)]
 	)
 	if left.has("type") and not fields.has("_type"):
 		return note + ': a value names its type under "_type".'

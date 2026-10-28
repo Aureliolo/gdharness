@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## Which control a click means when it names the control by the words on it rather than by path.
 
 const GdhItems = preload("runtime_items.gd")
@@ -9,12 +8,10 @@ const GdhSays = preload("runtime_says.gd")
 const GdhScreen = preload("runtime_screen.gd")
 const GdhValues = preload("runtime_values.gd")
 const GdhWords = preload("runtime_words.gd")
-
 ## How many of the controls saying the same words a refusal names, with the index for each.
 const LISTED_CANDIDATES: int = 10
 ## How many hidden controls saying the words a refusal names.
 const NAMED_HIDDEN: int = 3
-
 ## Node.ProcessMode as its names, for a refusal to say which one is in force.
 const PROCESS_MODES: Dictionary[int, String] = {
 	Node.PROCESS_MODE_INHERIT: "INHERIT",
@@ -23,11 +20,9 @@ const PROCESS_MODES: Dictionary[int, String] = {
 	Node.PROCESS_MODE_ALWAYS: "ALWAYS",
 	Node.PROCESS_MODE_DISABLED: "DISABLED",
 }
-
 ## What a game started without a window gets whatever the project settings say, and the usual
 ## reason a control is out of reach. Only worth telling somebody when it is what they have.
 const HEADLESS_VIEWPORT: Vector2 = Vector2(64, 64)
-
 ## What a match's rank is made of, one bit each, the highest deciding first.
 const TAKES_POINTER: int = 4
 const ENABLED_BUTTON: int = 2
@@ -55,7 +50,9 @@ const WHOLE: int = 1
 ## A control with something drawn over its centre that a pointer there would reach instead is not
 ## on screen for a player, and a click at it lands on the thing on top. The screen a game shows
 ## over its hall covers the hall's drawers without hiding them, so their words matched as well.
-static func control_saying(root: Node, root_path: String, wanted: String, which: Variant) -> Dictionary:
+static func control_saying(
+	root: Node, root_path: String, wanted: String, which: Variant
+) -> Dictionary:
 	var reached: Dictionary = GdhValues.node_at(root, root_path)
 	if reached.has("message"):
 		return reached
@@ -66,8 +63,8 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 	# Whether the words are only inside longer words there, "out" in "Scout".
 	var inside: Array[bool] = []
 	var hidden: Array[Node] = []
-	# Controls saying exactly the words that a click cannot reach, kept to say what a match on screen
-	# that only says them as part of more stands in for.
+	# Controls saying exactly the words that a click cannot reach, kept to say what a match on
+	# screen that only says them as part of more stands in for.
 	var exact_out_of_reach: Array[Node] = []
 	var out_of_reach_as: Array[String] = []
 	# The item of a control drawing a list that matched, null for a control matched as a whole, and
@@ -84,8 +81,8 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 					exact_out_of_reach.append(node)
 					out_of_reach_as.append("hidden")
 			elif GdhWords.draws_a_list(node):
-				# Each item a match of its own, so the words of one tab are matched as a whole and the
-				# index picks between two items saying them as it does between two buttons.
+				# Each item a match of its own, so the words of one tab are matched as a whole and
+				# the index picks between two items saying them as it does between two buttons.
 				var drawing: Control = node
 				for entry: Dictionary in GdhWords.items_of(drawing):
 					var words: String = entry["says"]
@@ -98,10 +95,14 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 					exact.append(whole)
 					inside.append(not whole and _inside_a_word(words, wanted))
 					items.append(entry["item"])
-					# An item drawn nowhere yet, scrolled out of its list, is judged at the list's middle,
-					# which is where the click scrolls it towards.
+					# An item drawn nowhere yet, scrolled out of its list, is judged at the list's
+					# middle, which is where the click scrolls it towards.
 					aims.append(
-						drawing.size * 0.5 if drawn_at_now.size == Vector2.ZERO else drawn_at_now.get_center()
+						(
+							drawing.size * 0.5
+							if drawn_at_now.size == Vector2.ZERO
+							else drawn_at_now.get_center()
+						)
 					)
 			else:
 				var control: Control = node
@@ -148,9 +149,9 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 				out_of_reach_as.append("under %s, which is drawn over it" % over.get_path())
 			if cover == null:
 				cover = over
-	# Stable, so matches of one rank keep the order they are drawn in. Words only inside longer words
-	# come after everything else: ranked as a button saying them as part of more, "Scout, 90" was
-	# pressed for "Out" over a control saying exactly "Out", and spent a game's silver.
+	# Stable, so matches of one rank keep the order they are drawn in. Words only inside longer
+	# words come after everything else: ranked as a button saying them as part of more, "Scout, 90"
+	# was pressed for "Out" over a control saying exactly "Out", and spent a game's silver.
 	open.sort_custom(
 		func(a: int, b: int) -> bool:
 			if inside[a] != inside[b]:
@@ -190,7 +191,7 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 					_open_menu_note(root, wanted),
 					_offered_note(from, drawn, areas),
 				]
-			)
+			),
 		}
 	var best: int = 0
 	for at: int in targets.size():
@@ -204,7 +205,7 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 			(
 				"%s, so which to click is not clear; pass index, counting from 0%s: %s"
 				% [_described(best, ranks[0], wanted, under), order, _candidates(targets, lines)]
-			)
+			),
 		}
 	var index: int = 0 if which == null else GdhRead.as_int(which, -1)
 	if index < 0 or index >= targets.size():
@@ -220,31 +221,36 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 		)
 		return {
 			"type": "error",
-			"message": "index %s picks nothing: %s: %s" % [given, among, _candidates(targets, lines)]
+			"message":
+			"index %s picks nothing: %s: %s" % [given, among, _candidates(targets, lines)],
 		}
-	# A match saying the words as part of more, while another control says exactly them, is a stand-in
-	# for that one, not the control meant: a tab reading "Out" sat in a collapsed drawer and a dispatch
-	# saying somebody "fell out in the hall" was pressed, and with the tab's own words on screen in a
-	# control that is not a button, a card reading "Scout, 90" was. Pressed only when asked for by
-	# index, which is the caller saying the match is what they meant.
+	# A match saying the words as part of more, while another control says exactly them, is a
+	# stand-in for that one, not the control meant: a tab reading "Out" sat in a collapsed drawer
+	# and a dispatch saying somebody "fell out in the hall" was pressed, and with the tab's own
+	# words on screen in a control that is not a button, a card reading "Scout, 90" was. Pressed
+	# only when asked for by index, which is the caller saying the match is what they meant.
 	var exact_elsewhere: Array[Node] = exact_out_of_reach.duplicate()
 	var elsewhere_as: Array[String] = out_of_reach_as.duplicate()
 	# On screen only when it takes clicks itself: a heading saying exactly "Onward" beside a button
 	# saying "Onward now" is not what a click on "Onward" is for, and the button is pressed.
 	for other: int in targets.size():
-		var taking: bool = targets[other].get_mouse_filter_with_override() != Control.MOUSE_FILTER_IGNORE
+		var taking: bool = (
+			targets[other].get_mouse_filter_with_override() != Control.MOUSE_FILTER_IGNORE
+		)
 		if other != index and wholes[other] and taking:
 			exact_elsewhere.append(targets[other])
 			elsewhere_as.append("on screen, taking clicks but not an enabled button")
-	var best_one: String = "the one on screen," if targets.size() == 1 else "the best match on screen,"
+	var best_one: String = (
+		"the one on screen," if targets.size() == 1 else "the best match on screen,"
+	)
 	if which == null and not wholes[index] and not exact_elsewhere.is_empty():
 		return {
 			"type": "error",
 			"message":
 			(
 				(
-					'no %s on screen%s says exactly "%s", so nothing was clicked: %s %s says it as part of'
-					+ ' "%s", while %s; pass index %d to press that one anyway'
+					'no %s on screen%s says exactly "%s", so nothing was clicked: %s %s says it as '
+					+ 'part of "%s", while %s; pass index %d to press that one anyway'
 				)
 				% [
 					"button" if exact_elsewhere.size() > exact_out_of_reach.size() else "control",
@@ -256,7 +262,7 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 					_out_of_reach_exactly(exact_elsewhere, elsewhere_as),
 					index,
 				]
-			)
+			),
 		}
 	if which == null and insides[index]:
 		return {
@@ -264,15 +270,23 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 			"message":
 			(
 				(
-					'no control on screen%s says "%s" as a word of its own, so nothing was clicked: %s %s has'
-					+ ' it only inside a longer word, "%s"; pass index %d to press that one anyway'
+					'no control on screen%s says "%s" as a word of its own, so nothing was '
+					+ 'clicked: %s %s has it only inside a longer word, "%s"; pass index %d to '
+					+ "press that one anyway"
 				)
-				% [under, wanted, best_one, targets[index].get_path(), _shortened(lines[index]), index]
-			)
+				% [
+					under,
+					wanted,
+					best_one,
+					targets[index].get_path(),
+					_shortened(lines[index]),
+					index,
+				]
+			),
 		}
 	# Words in a sentence on a control that lets the pointer through: the press lands on whatever is
-	# under it, which is nothing the words name. A line saying what "is out there" was the best match
-	# left for "Out" once the cards saying "Scout" were passed over.
+	# under it, which is nothing the words name. A line saying what "is out there" was the best
+	# match left for "Out" once the cards saying "Scout" were passed over.
 	if (
 		which == null
 		and not wholes[index]
@@ -283,14 +297,21 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 			"message":
 			(
 				(
-					'no control on screen%s that takes a click says "%s", so nothing was clicked: %s %s says it'
-					+ ' as part of "%s" and lets the pointer through to what is under it; pass index %d to'
-					+ " click there anyway"
+					'no control on screen%s that takes a click says "%s", so nothing was clicked: '
+					+ '%s %s says it as part of "%s" and lets the pointer through to what is under '
+					+ "it; pass index %d to click there anyway"
 				)
-				% [under, wanted, best_one, targets[index].get_path(), _shortened(lines[index]), index]
-			)
+				% [
+					under,
+					wanted,
+					best_one,
+					targets[index].get_path(),
+					_shortened(lines[index]),
+					index,
+				]
+			),
 		}
-	var found: Dictionary = {"says": wanted, "index": index, "of": targets.size()}
+	var found: Dictionary = { "says": wanted, "index": index, "of": targets.size() }
 	if not wholes[index]:
 		found["partOf"] = _shortened(lines[index])
 	if which == null and targets.size() > 1:
@@ -305,7 +326,7 @@ static func control_saying(root: Node, root_path: String, wanted: String, which:
 		found["picked"] = "%s; %s" % [_described(1, ranks[0], wanted, under), others]
 	if covered > 0:
 		found["covered"] = covered
-	var answer: Dictionary = {"path": str(targets[index].get_path()), "found": found}
+	var answer: Dictionary = { "path": str(targets[index].get_path()), "found": found }
 	if picked_items[index] != null:
 		answer["item"] = picked_items[index]
 		found["item"] = GdhItems.item_named(targets[index], picked_items[index], lines[index])
@@ -392,11 +413,14 @@ static func _inside_a_word(written: String, wanted: String) -> bool:
 	return found
 
 
-## Whether the character [param code] is part of a word: a letter, a digit or an underscore. A letter
-## is told by having a case, which leaves scripts without one counted as breaks between words.
+## Whether the character [param code] is part of a word: a letter, a digit or an underscore. A
+## letter is told by having a case, which leaves scripts without one counted as breaks between
+## words.
 static func _in_a_word(code: int) -> bool:
 	var character: String = String.chr(code)
-	return character.to_lower() != character.to_upper() or character.is_valid_int() or character == "_"
+	return (
+		character.to_lower() != character.to_upper() or character.is_valid_int() or character == "_"
+	)
 
 
 ## [param count] matches of [param rank], as the start of a sentence.
@@ -432,7 +456,8 @@ static func _passed_over(best: int, others: Array[int], one: bool) -> String:
 		reasons.append("is not an enabled button" if one else "are not enabled buttons")
 	if lacking & WHOLE:
 		reasons.append("says it as part of more" if one else "say it as part of more")
-	# Ranked level with the best, a match was passed over for having the words only inside longer ones.
+	# Ranked level with the best, a match was passed over for having the words only inside longer
+	# ones.
 	if reasons.is_empty():
 		return "says it only inside a longer word" if one else "say it only inside longer words"
 	if reasons.size() == 1:
@@ -476,7 +501,8 @@ static func _outside_note(outside: int, root: Node) -> String:
 	if outside == 0:
 		return ""
 	var note: String = (
-		"; %d control%s it outside what the screen shows" % [outside, " says" if outside == 1 else "s say"]
+		"; %d control%s it outside what the screen shows"
+		% [outside, " says" if outside == 1 else "s say"]
 	)
 	var window: Window = root as Window
 	return note if window == null else note + no_window_note(window, window)
@@ -499,7 +525,9 @@ static func no_window_note(viewport: Viewport, root: Window) -> String:
 			". This game has no window, and a game with no window has a 64 by 64 viewport whatever "
 			+ "the project settings say: run it with a window to reach this control"
 		)
-	return ". This game has no window, and its viewport is %d by %d" % [roundi(size.x), roundi(size.y)]
+	return (
+		". This game has no window, and its viewport is %d by %d" % [roundi(size.x), roundi(size.y)]
+	)
 
 
 ## What to add to a refusal that found nothing on screen, when the controls saying it are covered.
@@ -508,7 +536,10 @@ static func _covered_note(covered: int, cover: Node) -> String:
 		return ""
 	if covered == 1:
 		return "; 1 control says it under %s, which is drawn over it" % cover.get_path()
-	return "; %d controls say it under what is drawn over them, such as %s" % [covered, cover.get_path()]
+	return (
+		"; %d controls say it under what is drawn over them, such as %s"
+		% [covered, cover.get_path()]
+	)
 
 
 ## [param control], or the button holding it when it is not one itself, which is what a click on
@@ -552,7 +583,10 @@ static func why_hidden(node: Node) -> String:
 	var control: Control = node as Control
 	var instead: Node = null if control == null else drawn_at(control)
 	if instead != null:
-		return " (%s; a click where it would be reaches %s)" % [", and ".join(named), instead.get_path()]
+		return (
+			" (%s; a click where it would be reaches %s)"
+			% [", and ".join(named), instead.get_path()]
+		)
 	var outermost: Node = hiding.back()
 	var beside: Array[String] = []
 	var parent: Node = outermost.get_parent()
@@ -702,7 +736,9 @@ static func _areas_of(drawn: Array[Node]) -> Array[Rect2]:
 			areas.append(Rect2(window.position, window.size))
 		else:
 			var control: Control = each
-			areas.append(control.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, control.size))
+			areas.append(
+				control.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, control.size)
+			)
 	return areas
 
 
@@ -717,16 +753,18 @@ static func _areas_of(drawn: Array[Node]) -> Array[Rect2]:
 ## the click scrolls it into view first: what is drawn over its place now is not what it will land
 ## under. Judged not covered at all instead, a button below the fold of a roster that a full-screen
 ## page covered was picked over the ones in view, scrolled up under the page and pressed there.
-## Whatever else the scroll holds moves with it and is judged where it goes. Judged where it sat, the
-## card at the top of a tray scrolled down was drawn over a button above the view, because a later
-## card is drawn over an earlier one, and a button below the view was passed by the same card only
-## because the cards beside the bottom edge come before it.
+## Whatever else the scroll holds moves with it and is judged where it goes. Judged where it sat,
+## the card at the top of a tray scrolled down was drawn over a button above the view, because a
+## later card is drawn over an earlier one, and a button below the view was passed by the same card
+## only because the cards beside the bottom edge come before it.
 ##
 ## [param areas] holds the box around each of [param drawn], so everything whose box misses the
 ## point is passed over before anything costlier is asked of it. A window's box is in the space of
 ## the viewport it is embedded in, which is not the target's when the target is in another window,
 ## so a window is judged by [method _window_over] instead.
-static func _cover_of(target: Control, drawn: Array[Node], areas: Array[Rect2], aim: Vector2) -> Node:
+static func _cover_of(
+	target: Control, drawn: Array[Node], areas: Array[Rect2], aim: Vector2
+) -> Node:
 	var viewport: Viewport = target.get_viewport()
 	var moves: Dictionary[ScrollContainer, Vector2] = _scrolls_for(target)
 	var point: Vector2 = target.get_global_transform_with_canvas() * aim + _moved_by(target, moves)
@@ -826,7 +864,9 @@ static func _holds(control: Control, point: Vector2) -> bool:
 ## inside each, innermost first, which is how one brings a control into view. A target larger than a
 ## container is centred in it. Only a ScrollContainer, because that is all a click scrolls: another
 ## container clipping what it holds, a collapsed section for one, leaves the target where it is.
-static func _where_it_lands(target: Control, point: Vector2) -> Dictionary[ScrollContainer, Vector2]:
+static func _where_it_lands(
+	target: Control, point: Vector2
+) -> Dictionary[ScrollContainer, Vector2]:
 	var drawn: Transform2D = target.get_global_transform_with_canvas()
 	var half: Vector2 = (drawn * Rect2(Vector2.ZERO, target.size)).size * 0.5
 	var moves: Dictionary[ScrollContainer, Vector2] = {}
@@ -835,7 +875,9 @@ static func _where_it_lands(target: Control, point: Vector2) -> Dictionary[Scrol
 	while walk != null and not (walk is Viewport):
 		var holder: ScrollContainer = walk as ScrollContainer
 		if holder != null:
-			var shown: Rect2 = holder.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, holder.size)
+			var shown: Rect2 = (
+				holder.get_global_transform_with_canvas() * Rect2(Vector2.ZERO, holder.size)
+			)
 			var low: Vector2 = shown.position + half
 			var high: Vector2 = shown.end - half
 			var next: Vector2 = Vector2(
@@ -857,7 +899,10 @@ static func _where_it_lands(target: Control, point: Vector2) -> Dictionary[Scrol
 static func _off_screen(target: Control, aim: Vector2) -> bool:
 	var moves: Dictionary[ScrollContainer, Vector2] = _scrolls_for(target)
 	var point: Vector2 = target.get_global_transform_with_canvas() * aim + _moved_by(target, moves)
-	if _clipped_away(target, point, moves) or not target.get_viewport().get_visible_rect().has_point(point):
+	if (
+		_clipped_away(target, point, moves)
+		or not target.get_viewport().get_visible_rect().has_point(point)
+	):
 		return true
 	var reached: Dictionary = GdhScreen.reach(target.get_viewport(), point)
 	var viewport: Viewport = reached["viewport"]
@@ -877,7 +922,11 @@ static func _clipped_away(
 	var walk: Node = control.get_parent()
 	while walk != null and not (walk is Viewport):
 		var holder: Control = walk as Control
-		if holder != null and holder.clip_contents and not _holds(holder, point - _moved_by(holder, moves)):
+		if (
+			holder != null
+			and holder.clip_contents
+			and not _holds(holder, point - _moved_by(holder, moves))
+		):
 			return true
 		walk = walk.get_parent()
 	return false
@@ -901,9 +950,9 @@ static func _candidates(targets: Array[Control], said: Array[String]) -> String:
 
 
 ## What to add to a refusal that found nothing on screen, when an open menu has an item saying the
-## words: a menu draws its items rather than holding a control for each, so a click finds none, while
-## a wait for the words finds the item. A wait met on "Leave the hall" was followed by a click on it
-## refused as nothing on screen saying it, with no word of the call that chooses it.
+## words: a menu draws its items rather than holding a control for each, so a click finds none,
+## while a wait for the words finds the item. A wait met on "Leave the hall" was followed by a click
+## on it refused as nothing on screen saying it, with no word of the call that chooses it.
 static func _open_menu_note(root: Node, wanted: String) -> String:
 	var pending: Array[Node] = [root]
 	while not pending.is_empty():
@@ -914,11 +963,13 @@ static func _open_menu_note(root: Node, wanted: String) -> String:
 				var text: String = menu.get_item_text(item)
 				if GdhSays.matches(text, wanted):
 					var owner: Node = menu.get_parent()
-					var named: Node = owner if owner is MenuButton or owner is OptionButton else menu
+					var named: Node = (
+						owner if owner is MenuButton or owner is OptionButton else menu
+					)
 					return (
 						(
-							'; the open menu %s has an item saying it, "%s", which a click cannot reach:'
-							+ ' choose it with runtime_input choose, path %s and text "%s"'
+							'; the open menu %s has an item saying it, "%s", which a click cannot '
+							+ 'reach: choose it with runtime_input choose, path %s and text "%s"'
 						)
 						% [menu.get_path(), text, named.get_path(), text]
 					)

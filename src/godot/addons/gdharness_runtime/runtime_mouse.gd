@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## What a pointer call names: a point, the stroke of a drag, a mouse button and its mask bit. Read
 ## here and sent from runtime_input.gd, which keeps where the pointer is.
 
@@ -29,14 +28,17 @@ static func point_in(params: Dictionary, node: Node, node_path: String, has_item
 		return null
 	if node is Node3D:
 		return (
-			"%s is a 3D node, clicked where it is drawn; x and y name a point in a Control's own space"
+			(
+				"%s is a 3D node, clicked where it is drawn; x and y name a point in a Control's "
+				+ "own space"
+			)
 			% node_path
 		)
 	if has_item:
 		return (
 			(
-				"the words name an item %s draws, which is pressed where it is drawn, and x and y a point in it:"
-				+ " give one of them"
+				"the words name an item %s draws, which is pressed where it is drawn, and x and y "
+				+ "a point in it: give one of them"
 			)
 			% node_path
 		)
@@ -58,17 +60,17 @@ static func aim_of(params: Dictionary, root: Window) -> Variant:
 		return standing["message"]
 	var node: Node = standing["node"]
 	if node is CanvasItem or node is Viewport:
-		return {"node": node, "path": path}
+		return { "node": node, "path": path }
 	return (
 		"%s is a %s, and the points are in a Control's, a Node2D's or a Window's own space"
 		% [path, node.get_class()]
 	)
 
 
-## Where [param local], in the space of the node [param aim] names, arrives: {"viewport", "position"},
-## the viewport the pointer reaches it through and the point in that viewport's pixels, which is what
-## an event sent there names. A Window's space is its own pixels, as the game's window pixels are the
-## root's; a canvas item's is its own, the one it draws and reads _gui_input in.
+## Where [param local], in the space of the node [param aim] names, arrives: {"viewport",
+## "position"}, the viewport the pointer reaches it through and the point in that viewport's pixels,
+## which is what an event sent there names. A Window's space is its own pixels, as the game's window
+## pixels are the root's; a canvas item's is its own, the one it draws and reads _gui_input in.
 static func carried(aim: Dictionary, local: Vector2, root: Window) -> Dictionary:
 	var node: Node = aim.get("node", root)
 	var reached: Dictionary = {}
@@ -77,10 +79,12 @@ static func carried(aim: Dictionary, local: Vector2, root: Window) -> Dictionary
 		reached = GdhScreen.reach(viewport, viewport.get_final_transform().affine_inverse() * local)
 	else:
 		var item: CanvasItem = node
-		reached = GdhScreen.reach(item.get_viewport(), item.get_global_transform_with_canvas() * local)
+		reached = GdhScreen.reach(
+			item.get_viewport(), item.get_global_transform_with_canvas() * local
+		)
 	var arriving: Viewport = reached["viewport"]
 	var point: Vector2 = reached["point"]
-	return {"viewport": arriving, "position": arriving.get_final_transform() * point}
+	return { "viewport": arriving, "position": arriving.get_final_transform() * point }
 
 
 ## What a pointer answer says of where [param points] went in [param viewport]: the node they were
@@ -102,7 +106,9 @@ static func stroke_of(params: Dictionary, op: String = "mouse_drag") -> Variant:
 	for key: String in ["x", "y", "toX", "toY"]:
 		if not params.has(key):
 			return "%s needs x, y, toX and toY: %s is missing." % [op, key]
-	var points: Array[Vector2] = [Vector2(GdhRead.as_float(params["x"]), GdhRead.as_float(params["y"]))]
+	var points: Array[Vector2] = [
+		Vector2(GdhRead.as_float(params["x"]), GdhRead.as_float(params["y"])),
+	]
 	var via: Variant = params.get("via", [])
 	if not via is Array:
 		return "via must be a list of [x, y] points."
@@ -172,7 +178,9 @@ static func button_event(
 ##
 ## The points are window pixels and the visible rect is canvas units, which differ by the window's
 ## content scale and any letterbox offset, so the rect is taken into window pixels first.
-static func outside_noted(answer: Dictionary, viewport: Viewport, points: Array[Vector2]) -> Dictionary:
+static func outside_noted(
+	answer: Dictionary, viewport: Viewport, points: Array[Vector2]
+) -> Dictionary:
 	var shown: Rect2 = viewport.get_final_transform() * viewport.get_visible_rect()
 	var which: String = (
 		"the window's" if viewport == viewport.get_tree().root else "%s's" % viewport.get_path()
@@ -196,9 +204,12 @@ static func no_such_button(named: Variant) -> Dictionary:
 		"type": "error",
 		"message":
 		(
-			"%s is not a mouse button. It takes: left, right, middle, wheel_up, wheel_down, or the number of one."
+			(
+				"%s is not a mouse button. It takes: left, right, middle, wheel_up, wheel_down, or "
+				+ "the number of one."
+			)
 			% JSON.stringify(named)
-		)
+		),
 	}
 
 
@@ -239,7 +250,10 @@ static func button_of(raw: Variant) -> int:
 ## whether the game is.
 static func takes_no_click(control: Control, node_path: String, paused: bool) -> String:
 	if not control.is_visible_in_tree():
-		return "%s is not visible%s, so nothing can click it" % [node_path, GdhTargets.why_hidden(control)]
+		return (
+			"%s is not visible%s, so nothing can click it"
+			% [node_path, GdhTargets.why_hidden(control)]
+		)
 	var button: BaseButton = control as BaseButton
 	if button != null and button.disabled:
 		return "%s is disabled, so clicking it presses nothing" % node_path
@@ -259,7 +273,10 @@ static func takes_no_click(control: Control, node_path: String, paused: bool) ->
 		var cover: String = "" if over == null else "; %s is drawn over it" % over.get_path()
 		if paused:
 			return (
-				"the game is paused and %s does not process while it is (%s), so clicking it does nothing%s"
+				(
+					"the game is paused and %s does not process while it is (%s), so clicking it "
+					+ "does nothing%s"
+				)
 				% [node_path, why, cover]
 			)
 		return "%s does not process (%s), so clicking it does nothing%s" % [node_path, why, cover]

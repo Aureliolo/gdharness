@@ -1,12 +1,10 @@
 @tool
 extends RefCounted
-
 ## Whether a value read back is the value that was given, as the tools that write properties judge
 ## what a write kept and what it changed besides.
 
 const GdhRead = preload("reading.gd")
 const GdhSerialisation = preload("serialisation.gd")
-
 # The types made of floats, which a read back compares within float precision: a Vector2 property
 # stores 32-bit components, so 0.1 comes back as 0.100000001.
 const FLOAT_SHAPES: Array[int] = [
@@ -23,7 +21,6 @@ const FLOAT_SHAPES: Array[int] = [
 	TYPE_AABB,
 	TYPE_PROJECTION,
 ]
-
 const PACKED: Array[int] = [
 	TYPE_PACKED_BYTE_ARRAY,
 	TYPE_PACKED_INT32_ARRAY,
@@ -63,7 +60,10 @@ static func same(held: Variant, given: Variant) -> bool:
 			return held_type == given_type and held == given
 		var held_number: float = GdhRead.as_float(held)
 		var given_number: float = GdhRead.as_float(given)
-		return (is_nan(held_number) and is_nan(given_number)) or is_equal_approx(held_number, given_number)
+		return (
+			(is_nan(held_number) and is_nan(given_number))
+			or is_equal_approx(held_number, given_number)
+		)
 	if GdhSerialisation.TEXTS.has(held_type) and GdhSerialisation.TEXTS.has(given_type):
 		return str(held) == str(given)
 	if _listed(held_type) and _listed(given_type):

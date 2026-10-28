@@ -1,13 +1,11 @@
 @tool
 extends Node
-
 ## Signal connections in a scene file, made, removed and listed on a copy of the file as the other
 ## scene tools edit one.
 
 const GdhRead = preload("../reading.gd")
 const GdhSceneFile = preload("../scene_file.gd")
 const GdhSerialisation = preload("../serialisation.gd")
-
 ## What every emission meets when a connection cannot call its method.
 const FAILS: String = ", so every emission fails to call it."
 ## The engine's CONNECT_INHERITED, which GDScript is not given: on a connection an instanced or
@@ -54,10 +52,10 @@ func connect_signal(args: Dictionary) -> Dictionary:
 		or target_node_path.is_empty()
 		or method_name.is_empty()
 	):
-		return {"ok": false, "error": "Missing required signal connection arguments"}
+		return { "ok": false, "error": "Missing required signal connection arguments" }
 	var unasked: String = _unasked(given_flags)
 	if not unasked.is_empty():
-		return {"ok": false, "error": unasked}
+		return { "ok": false, "error": unasked }
 
 	var scene: GdhSceneFile = GdhSceneFile.new()
 	var refused: Dictionary = scene.open(scene_path, true)
@@ -73,8 +71,8 @@ func connect_signal(args: Dictionary) -> Dictionary:
 	# Reconnected rather than left alone when the flags differ, so the connection saved is the one
 	# asked for. Left alone, the answer gave the flags asked for and the file kept the old ones.
 	# Found by its object and method, as the engine finds it: a connection carrying binds is another
-	# callable, so comparing callables missed it, and the engine's is_connected then found it, took it
-	# out and put a bare one in its place, losing the binds without a word.
+	# callable, so comparing callables missed it, and the engine's is_connected then found it, took
+	# it out and put a bare one in its place, losing the binds without a word.
 	var before: Dictionary = _held(source, signal_name, target, method_name)
 	var binds: Array = []
 	var unbinds: int = 0
@@ -85,7 +83,9 @@ func connect_signal(args: Dictionary) -> Dictionary:
 		unbinds = GdhRead.as_int(args["unbinds"])
 	if args.has("binds"):
 		var given: Array = args["binds"]
-		binds = _bound_values(given, source, signal_name, Callable(target, method_name), unbinds, flags)
+		binds = _bound_values(
+			given, source, signal_name, Callable(target, method_name), unbinds, flags
+		)
 	var callable: Callable = Callable(target, method_name)
 	if not binds.is_empty():
 		callable = callable.bindv(binds)
@@ -125,7 +125,7 @@ func connect_signal(args: Dictionary) -> Dictionary:
 		"flagNames": flag_names(saved_flags),
 		# Connected either way, as the editor's own dialog allows, since the method may be written
 		# next; a caller told nothing learnt of a misspelt one only when the signal fired.
-		"methodFound": method_found
+		"methodFound": method_found,
 	}
 	# Written all the same, for the reason a missing method is: the method may be changed next.
 	if method_found:
@@ -192,7 +192,9 @@ func _bound_values(
 			declared = GdhRead.as_int(parameter.get("type", TYPE_NIL))
 		if value is float and declared != TYPE_FLOAT:
 			var number: float = value
-			if is_finite(number) and number == floorf(number) and absf(number) < 9007199254740992.0:
+			if (is_finite(number)
+					and number == floorf(number)
+					and absf(number) < 9_007_199_254_740_992.0):
 				value = int(number)
 		values.append(value)
 	return values
@@ -244,9 +246,13 @@ func _connection_ends(
 	var source: Node = GdhSceneFile.node_at(scene.root, source_node_path)
 	var target: Node = GdhSceneFile.node_at(scene.root, target_node_path)
 	if not source:
-		return [null, scene.not_found("Source node not found: " + source_node_path, source_node_path)]
+		return [
+			null, scene.not_found("Source node not found: " + source_node_path, source_node_path),
+		]
 	if not target:
-		return [null, scene.not_found("Target node not found: " + target_node_path, target_node_path)]
+		return [
+			null, scene.not_found("Target node not found: " + target_node_path, target_node_path),
+		]
 	# pack drops a connection with either end inside an instanced scene, and the answer said it was
 	# made or removed.
 	for end: Node in [source, target]:
@@ -262,7 +268,9 @@ func _connection_ends(
 
 ## The persistent connection from [param from]'s [param signal_name] to [param method] on [param to]
 ## in the tree under [param root], as [method _held] answers it, or {} when there is none.
-static func _saved(root: Node, from: String, signal_name: String, to: String, method: String) -> Dictionary:
+static func _saved(
+	root: Node, from: String, signal_name: String, to: String, method: String
+) -> Dictionary:
 	var source: Node = root.get_node_or_null(from)
 	var target: Node = root.get_node_or_null(to)
 	if source == null or target == null or not source.has_signal(signal_name):
@@ -273,11 +281,11 @@ static func _saved(root: Node, from: String, signal_name: String, to: String, me
 	return held
 
 
-## Why what [param signal_name] of [param source] passes cannot reach [param callable], or "" when it
-## can or the method is not there to judge. Only what fails on every emission is named: too few or
-## too many arguments, an object passed where the method takes a value or the reverse, and an engine
-## class unrelated to the one the method takes. Anything that may convert or narrow when it runs is
-## left alone, since a warning about a connection that works is one nobody can act on.
+## Why what [param signal_name] of [param source] passes cannot reach [param callable], or "" when
+## it can or the method is not there to judge. Only what fails on every emission is named: too few
+## or too many arguments, an object passed where the method takes a value or the reverse, and an
+## engine class unrelated to the one the method takes. Anything that may convert or narrow when it
+## runs is left alone, since a warning about a connection that works is one nobody can act on.
 static func _misfit(source: Node, signal_name: String, callable: Callable, flags: int) -> String:
 	var target: Object = callable.get_object()
 	var method: String = str(callable.get_method())
@@ -295,7 +303,7 @@ static func _misfit(source: Node, signal_name: String, callable: Callable, flags
 				passed.append(argument)
 			break
 	if flags & Object.CONNECT_APPEND_SOURCE_OBJECT:
-		passed.append({"name": "source", "type": TYPE_OBJECT, "class_name": source.get_class()})
+		passed.append({ "name": "source", "type": TYPE_OBJECT, "class_name": source.get_class() })
 	var emitted: int = passed.size()
 	var unbound: int = callable.get_unbound_arguments_count()
 	passed = passed.slice(0, maxi(emitted - unbound, 0))
@@ -305,7 +313,7 @@ static func _misfit(source: Node, signal_name: String, callable: Callable, flags
 		if bound is Object:
 			var object: Object = bound
 			bound_class = object.get_class()
-		passed.append({"name": "bound", "type": typeof(bound), "class_name": bound_class})
+		passed.append({ "name": "bound", "type": typeof(bound), "class_name": bound_class })
 	var binds: int = passed.size() - from_signal
 
 	# What the method is called with, said in the parts that make it: an answer counting the bound
@@ -331,9 +339,10 @@ static func _misfit(source: Node, signal_name: String, callable: Callable, flags
 		return "%s needs %d%s" % [called, needed, FAILS]
 	if passed.size() > parameters.size():
 		var most: String = "none" if parameters.is_empty() else "at most %d" % parameters.size()
-		# Said with the misfit, since unbinds is what a connection to a method wanting less is for, and
-		# only when the extra arguments are the signal's: a scene's connection unbinds the arguments
-		# the signal passes before it adds the bound ones, so a bound one is never dropped.
+		# Said with the misfit, since unbinds is what a connection to a method wanting less is for,
+		# and only when the extra arguments are the signal's: a scene's connection unbinds the
+		# arguments the signal passes before it adds the bound ones, so a bound one is never
+		# dropped.
 		var extra: int = passed.size() - parameters.size()
 		var remedy: String = (
 			(
@@ -362,7 +371,7 @@ static func _misfit(source: Node, signal_name: String, callable: Callable, flags
 				method,
 				str(parameter.get("name", "")),
 				_type_named(parameter),
-				FAILS
+				FAILS,
 			]
 		)
 	return ""
@@ -437,7 +446,7 @@ func disconnect_signal(args: Dictionary) -> Dictionary:
 		or target_node_path.is_empty()
 		or method_name.is_empty()
 	):
-		return {"ok": false, "error": "Missing required signal disconnection arguments"}
+		return { "ok": false, "error": "Missing required signal disconnection arguments" }
 
 	var scene: GdhSceneFile = GdhSceneFile.new()
 	var refused: Dictionary = scene.open(scene_path, true)
@@ -473,11 +482,14 @@ func disconnect_signal(args: Dictionary) -> Dictionary:
 			"The connection from %s.%s to %s.%s is made by %s"
 			% [named_from, signal_name, named_to, method_name, made_in]
 		)
-		return scene.refuse(
-			(
-				made_by
-				+ ", and this scene saves nothing about it: disconnect it there, which changes every"
-				+ " scene using it."
+		return (
+			scene
+			. refuse(
+				(
+					made_by
+					+ ", and this scene saves nothing about it: disconnect it there, which changes "
+					+ "every scene using it."
+				)
 			)
 		)
 	var callable: Callable = held["callable"]
@@ -550,8 +562,8 @@ func list_connections(args: Dictionary) -> Dictionary:
 				if target_obj is Node:
 					target_path = str(root.get_path_to(target_obj as Node))
 					editable = editable and scene.foreign(target_obj as Node).is_empty()
-				# A connection an instanced scene makes on its own root sits on a node this scene owns,
-				# so the ends alone read it as one this scene could change.
+				# A connection an instanced scene makes on its own root sits on a node this scene
+				# owns, so the ends alone read it as one this scene could change.
 				var made_in: String = _made_in(scene, node, flags)
 				var listed: Dictionary = {
 					"sourceNodePath": path,
@@ -561,7 +573,8 @@ func list_connections(args: Dictionary) -> Dictionary:
 					"flags": flags,
 					"flagNames": flag_names(flags),
 					"editable": editable and made_in.is_empty(),
-					"methodFound": target_obj != null and target_obj.has_method(callable.get_method()),
+					"methodFound":
+					target_obj != null and target_obj.has_method(callable.get_method()),
 				}
 				if not made_in.is_empty():
 					listed["madeIn"] = made_in
@@ -576,14 +589,14 @@ func list_connections(args: Dictionary) -> Dictionary:
 				connections.append(listed)
 
 	scene.close()
-	var answer: Dictionary = {"ok": true, "connections": connections}
+	var answer: Dictionary = { "ok": true, "connections": connections }
 	if Engine.is_editor_hint():
 		answer["unsavedInEditor"] = GdhSceneFile.unsaved(scene_path)
 	return answer
 
 
 func _collect_nodes_recursive(node: Node, path: String, out_nodes: Array) -> void:
-	out_nodes.append({"path": path, "node": node})
+	out_nodes.append({ "path": path, "node": node })
 	for child: Node in node.get_children():
 		var child_path: String = str(child.name) if path == "." else path + "/" + str(child.name)
 		_collect_nodes_recursive(child, child_path, out_nodes)

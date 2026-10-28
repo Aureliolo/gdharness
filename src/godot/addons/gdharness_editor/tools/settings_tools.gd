@@ -1,6 +1,5 @@
 @tool
 extends Node
-
 ## Project settings read from the open editor, for a caller that asked for the editor's answer, and
 ## taken up by it after a write to the file.
 ##
@@ -29,7 +28,9 @@ func get_project_setting(args: Dictionary) -> Dictionary:
 
 	var setting: String = str(args.get("setting", ""))
 	if setting.is_empty():
-		return {"ok": false, "error": "setting is required, or prefix to read every setting under one"}
+		return {
+			"ok": false, "error": "setting is required, or prefix to read every setting under one",
+		}
 
 	var result: Dictionary = GdhSettingReads.one(setting, _values)
 	result["ok"] = true
@@ -46,11 +47,11 @@ func adopt_project_settings(args: Dictionary) -> Dictionary:
 	var file: ConfigFile = ConfigFile.new()
 	var loaded: Error = file.load("res://project.godot")
 	if loaded != OK:
-		return {"ok": false, "error": "Could not read project.godot: " + error_string(loaded)}
+		return { "ok": false, "error": "Could not read project.godot: " + error_string(loaded) }
 	var adopted: Array[String] = []
 	var named: Variant = args.get("settings", [])
 	if not named is Array:
-		return {"ok": false, "error": "settings must be a list of setting names"}
+		return { "ok": false, "error": "settings must be a list of setting names" }
 	var settings: Array = named
 	for entry: Variant in settings:
 		var setting: String = str(entry)
@@ -66,19 +67,21 @@ func adopt_project_settings(args: Dictionary) -> Dictionary:
 		else:
 			ProjectSettings.set_setting(setting, null)
 		adopted.append(setting)
-	return {"ok": true, "adopted": adopted}
+	return { "ok": true, "adopted": adopted }
 
 
 ## Loads the bus layout the project names into the editor's audio server, after something else
 ## wrote it: the editor holds the layout it loaded and saves that one when its audio panel changes.
 func adopt_audio_bus_layout(_args: Dictionary) -> Dictionary:
 	var path: String = str(
-		ProjectSettings.get_setting("audio/buses/default_bus_layout", "res://default_bus_layout.tres")
+		ProjectSettings.get_setting(
+			"audio/buses/default_bus_layout", "res://default_bus_layout.tres"
+		)
 	)
 	var layout: AudioBusLayout = ResourceLoader.load(
 		path, "AudioBusLayout", ResourceLoader.CACHE_MODE_REPLACE
 	)
 	if layout == null:
-		return {"ok": false, "error": "Could not load the bus layout at " + path}
+		return { "ok": false, "error": "Could not load the bus layout at " + path }
 	AudioServer.set_bus_layout(layout)
-	return {"ok": true, "layout": path}
+	return { "ok": true, "layout": path }

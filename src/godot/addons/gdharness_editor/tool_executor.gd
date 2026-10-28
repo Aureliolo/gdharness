@@ -1,6 +1,5 @@
 @tool
 extends Node
-
 ## Routes each command the server sends to the tool module that answers it. The modules are
 ## preloaded rather than looked up on disk at runtime, so a missing one fails to parse here
 ## instead of leaving a command silently unanswered.
@@ -20,7 +19,6 @@ const GdhFilesystemTools = preload("tools/filesystem_tools.gd")
 const GdhProfileTools = preload("tools/profile_tools.gd")
 
 var _editor_plugin: EditorPlugin = null
-
 var _scene_tools: GdhSceneTools = null
 var _signal_tools: GdhSignalTools = null
 var _resource_tools: GdhResourceTools = null
@@ -33,7 +31,6 @@ var _class_tools: GdhClassTools = null
 var _settings_tools: GdhSettingsTools = null
 var _filesystem_tools: GdhFilesystemTools = null
 var _profile_tools: GdhProfileTools = null
-
 var _tool_map: Dictionary = {}
 var _initialized: bool = false
 
@@ -169,14 +166,14 @@ func _init_tools() -> void:
 
 func execute_tool(tool_name: String, args: Dictionary) -> Dictionary:
 	if not _tool_map.has(tool_name):
-		return {"ok": false, "error": "Unknown tool: " + tool_name}
+		return { "ok": false, "error": "Unknown tool: " + tool_name }
 
 	var handler: Array = _tool_map[tool_name]
 	var node: Node = handler[0]
 	var method: String = handler[1]
 
 	if not node.has_method(method):
-		return {"ok": false, "error": "Tool method not found: %s.%s" % [node.name, method]}
+		return { "ok": false, "error": "Tool method not found: %s.%s" % [node.name, method] }
 
 	GdhSceneFile.also_saved.clear()
 	var result: Variant = node.call(method, args)
@@ -187,4 +184,4 @@ func execute_tool(tool_name: String, args: Dictionary) -> Dictionary:
 			GdhSceneFile.also_saved.clear()
 		return answered
 
-	return {"ok": false, "error": "Invalid tool result from: " + tool_name}
+	return { "ok": false, "error": "Invalid tool result from: " + tool_name }

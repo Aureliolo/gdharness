@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## The editor addon's scripts_behind: a held copy compiled from a text the file no longer has is
 ## named, and one held unchanged, one never loaded, and the first once reloaded are not.
 ##
@@ -26,11 +25,11 @@ func _initialize() -> void:
 	_write(HELD, GOOD + "\n\nstatic func who_of() -> int:\n\treturn 0\n")
 	var tools: GdhClassTools = GdhClassTools.new()
 
-	var asked: Dictionary = {"scriptPaths": [HELD, SAME, NEVER]}
+	var asked: Dictionary = { "scriptPaths": [HELD, SAME, NEVER] }
 	var before: Dictionary = tools.scripts_behind(asked)
 	if before.get("behind") != [HELD] or before.get("unsavedInEditor") != []:
 		_fail("only the copy compiled from an older text is behind: %s" % JSON.stringify(before))
-	var mended: Dictionary = tools.reload_script({"scriptPath": HELD})
+	var mended: Dictionary = tools.reload_script({ "scriptPath": HELD })
 	if mended.get("failed") != OK:
 		_fail("the held copy reloads: %s" % JSON.stringify(mended))
 	var after: Dictionary = tools.scripts_behind(asked)
@@ -43,7 +42,7 @@ func _initialize() -> void:
 	for path: String in [HELD, SAME, NEVER]:
 		var _removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 	printerr("\n".join(failures))

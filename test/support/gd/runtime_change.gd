@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## Writes and calls on declarations the engine describes less than fully: a script class with no
 ## `class_name`, which it names by the engine class the script extends; a slot declared as Variant,
 ## which takes anything; a map keyed by numbers; a method given the wrong number of arguments. Each
@@ -132,7 +131,9 @@ func _init() -> void:
 	OS.set_environment("GDHARNESS_RUNTIME_DIR", directory)
 	node = Runtime.new()
 	root.add_child(node)
-	Checked.done(process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame")
+	Checked.done(
+		process_frame.connect(_run, CONNECT_ONE_SHOT) as Error, "waiting for the next frame"
+	)
 
 
 func _run() -> void:
@@ -149,11 +150,13 @@ func _run() -> void:
 	node._cleanup()
 	# Not checked: both are gone either way by the time the fixture tears itself down.
 	var _took_directory: Error = DirAccess.remove_absolute(directory)
-	var _took_script: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(WALKER_SCRIPT))
+	var _took_script: Error = DirAccess.remove_absolute(
+		ProjectSettings.globalize_path(WALKER_SCRIPT)
+	)
 	var _took_moods: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(MOODS_SCRIPT))
 
 	if failures.is_empty():
-		print(JSON.stringify({"ok": true}))
+		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 
@@ -191,13 +194,13 @@ func _build() -> void:
 
 func _write(property: String, value: Variant) -> Dictionary:
 	return await node._execute_command(
-		"set_property", {"path": "/root/Holder", "property": property, "value": value}
+		"set_property", { "path": "/root/Holder", "property": property, "value": value }
 	)
 
 
 func _invoke(method: String, args: Array) -> Dictionary:
 	return await node._execute_command(
-		"call_method", {"path": "/root/Holder", "method": method, "args": args}
+		"call_method", { "path": "/root/Holder", "method": method, "args": args }
 	)
 
 
@@ -209,19 +212,29 @@ func _check_a_script_class_without_a_name() -> void:
 	for stranger: String in ["/root/Plain", "/root/Other"]:
 		var refused: Dictionary = await _write("squad", [stranger])
 		var said: String = str(refused.get("message", ""))
-		if refused.get("type") != "error" or not said.contains("not an instance of %s" % WALKER_SCRIPT):
-			_fail("a list of Walker refuses %s by its script: %s" % [stranger, JSON.stringify(refused)])
+		if (
+			refused.get("type") != "error"
+			or not said.contains("not an instance of %s" % WALKER_SCRIPT)
+		):
+			_fail(
+				(
+					"a list of Walker refuses %s by its script: %s"
+					% [stranger, JSON.stringify(refused)]
+				)
+			)
 		if holder.get("squad") != [walker]:
 			_fail("and the game's list is as it was: %s" % str(holder.get("squad")))
 	# The guard behind that check: a resolver that lets any object through, so the engine drops the
 	# element while building the list, and the list that comes back shorter is refused, not written.
 	var lax: Callable = func(_given: Variant, _declared: String, _script: Script) -> Dictionary:
-		return {"object": root.get_node("Plain")}
-	var built: Dictionary = node.values.call(&"typed_like", ["/root/Plain"], holder.get("squad"), lax)
+		return { "object": root.get_node("Plain") }
+	var built: Dictionary = node.values.call(
+		&"typed_like", ["/root/Plain"], holder.get("squad"), lax
+	)
 	if not str(built.get("message", "")).contains("would not take its elements"):
 		_fail("a typed list the engine builds shorter is refused: %s" % str(built))
 	var built_map: Dictionary = node.values.call(
-		&"typed_like", {"a": "/root/Plain"}, holder.get("by_name"), lax
+		&"typed_like", { "a": "/root/Plain" }, holder.get("by_name"), lax
 	)
 	if not str(built_map.get("message", "")).contains("would not take its entries"):
 		_fail("and so is a typed map: %s" % str(built_map))
@@ -229,10 +242,13 @@ func _check_a_script_class_without_a_name() -> void:
 	if taken.get("type") != "property_set" or holder.get("squad") != [walker, null]:
 		_fail("a list of Walker takes a Walker: %s" % JSON.stringify(taken))
 
-	var mapped: Dictionary = await _write("by_name", {"a": "/root/Plain"})
-	if mapped.get("type") != "error" or not str(mapped.get("message", "")).contains("not an instance of"):
+	var mapped: Dictionary = await _write("by_name", { "a": "/root/Plain" })
+	if (
+		mapped.get("type") != "error"
+		or not str(mapped.get("message", "")).contains("not an instance of")
+	):
 		_fail("a map of Walker refuses a Node3D by its script: %s" % JSON.stringify(mapped))
-	var mapped_right: Dictionary = await _write("by_name", {"a": "/root/Walker"})
+	var mapped_right: Dictionary = await _write("by_name", { "a": "/root/Walker" })
 	var by_name: Dictionary = holder.get("by_name")
 	if mapped_right.get("type") != "property_set" or by_name.get("a") != walker:
 		_fail("and takes a Walker: %s" % JSON.stringify(mapped_right))
@@ -254,7 +270,12 @@ func _check_a_script_class_without_a_name() -> void:
 	var slot: Dictionary = await _write("quarrel", "/root/Plain")
 	var slot_said: String = str(slot.get("message", ""))
 	if slot.get("type") != "error" or not slot_said.contains("script class with no class_name"):
-		_fail("a Walker slot given a plain Node3D says why it may be refused: %s" % JSON.stringify(slot))
+		_fail(
+			(
+				"a Walker slot given a plain Node3D says why it may be refused: %s"
+				% JSON.stringify(slot)
+			)
+		)
 	var slot_right: Dictionary = await _write("quarrel", "/root/Walker")
 	if slot_right.get("type") != "property_set" or holder.get("quarrel") != walker:
 		_fail("and takes a Walker: %s" % JSON.stringify(slot_right))
@@ -292,9 +313,14 @@ func _check_the_argument_count() -> void:
 		var method: String = case[0]
 		var args: Array = case[1]
 		var refused: Dictionary = await _invoke(method, args)
-		if refused.get("type") != "error" or not str(refused.get("message", "")).ends_with(str(case[2])):
+		if (
+			refused.get("type") != "error"
+			or not str(refused.get("message", "")).ends_with(str(case[2]))
+		):
 			_fail("%s with %s is refused: %s" % [method, str(args), JSON.stringify(refused)])
-	for case: Array in [["pair", [1], 3], ["pair", [1, 5], 6], ["many", [1], 1], ["many", [1, 7, 7, 7], 4]]:
+	for case: Array in [
+		["pair", [1], 3], ["pair", [1, 5], 6], ["many", [1], 1], ["many", [1, 7, 7, 7], 4],
+	]:
 		var method: String = case[0]
 		var args: Array = case[1]
 		var ran: Dictionary = await _invoke(method, args)
@@ -305,9 +331,19 @@ func _check_the_argument_count() -> void:
 	var noisy: Dictionary = await _invoke("noisy", [])
 	var raised: Array = noisy.get("errors", [])
 	if noisy.get("type") != "method_result" or noisy.get("result") != 1:
-		_fail("a method that reports an error still answers what it returned: %s" % JSON.stringify(noisy))
+		_fail(
+			(
+				"a method that reports an error still answers what it returned: %s"
+				% JSON.stringify(noisy)
+			)
+		)
 	if raised.size() != 1 or not str(raised[0]).contains("noisy said so"):
-		_fail("with the error it reported, and no warning among the errors: %s" % JSON.stringify(noisy))
+		_fail(
+			(
+				"with the error it reported, and no warning among the errors: %s"
+				% JSON.stringify(noisy)
+			)
+		)
 	var warned: Array = noisy.get("warnings", [])
 	if warned.size() != 1 or str(warned[0]) != "noisy only warned":
 		_fail("and the warning under warnings: %s" % JSON.stringify(noisy))
@@ -317,11 +353,13 @@ func _check_the_argument_count() -> void:
 ## read as a Vector2 by a call and a write, and a nested one inside a Rect2 too. The tagged form
 ## still works beside it, and one missing a field is refused naming the shape that is read.
 func _check_a_value_given_by_its_fields() -> void:
-	for point: Variant in [{"x": 140, "y": 300}, {"_type": "Vector2", "x": 140, "y": 300}]:
+	for point: Variant in [{ "x": 140, "y": 300 }, { "_type": "Vector2", "x": 140, "y": 300 }]:
 		var pressed: Dictionary = await _invoke("press", [point, true])
 		if pressed.get("type") != "method_result" or pressed.get("result") != true:
-			_fail("press takes %s as a Vector2: %s" % [JSON.stringify(point), JSON.stringify(pressed)])
-	var moved: Dictionary = await _write("spot", {"x": 1.5, "y": -2})
+			_fail(
+				"press takes %s as a Vector2: %s" % [JSON.stringify(point), JSON.stringify(pressed)]
+			)
+	var moved: Dictionary = await _write("spot", { "x": 1.5, "y": -2 })
 	if moved.get("type") != "property_set" or holder.get("spot") != Vector2(1.5, -2):
 		_fail(
 			(
@@ -329,7 +367,9 @@ func _check_a_value_given_by_its_fields() -> void:
 				% [JSON.stringify(moved), holder.get("spot")]
 			)
 		)
-	var framed: Dictionary = await _write("area", {"position": {"x": 1, "y": 2}, "size": {"x": 3, "y": 4}})
+	var framed: Dictionary = await _write(
+		"area", { "position": { "x": 1, "y": 2 }, "size": { "x": 3, "y": 4 } }
+	)
 	if framed.get("type") != "property_set" or holder.get("area") != Rect2(1, 2, 3, 4):
 		_fail(
 			(
@@ -337,33 +377,47 @@ func _check_a_value_given_by_its_fields() -> void:
 				% [JSON.stringify(framed), holder.get("area")]
 			)
 		)
-	var short: Dictionary = await _invoke("press", [{"x": 140}, true])
+	var short: Dictionary = await _invoke("press", [{ "x": 140 }, true])
 	var said: String = str(short.get("message", ""))
-	if short.get("type") != "error" or not said.ends_with('A Vector2 is sent as {"x": ..., "y": ...}.'):
+	if (
+		short.get("type") != "error"
+		or not said.ends_with('A Vector2 is sent as {"x": ..., "y": ...}.')
+	):
 		_fail("one missing a field is refused naming the shape: %s" % JSON.stringify(short))
 	var shape: String = 'A Vector2 is sent as {"x": ..., "y": ...}.'
-	var deep: Dictionary = await _write("spot", {"x": 7, "y": 8, "z": 9})
+	var deep: Dictionary = await _write("spot", { "x": 7, "y": 8, "z": 9 })
 	var deep_said: String = str(deep.get("message", ""))
 	if not deep_said.ends_with(
 		'A Vector2 has no field called "z", so the value is not read as one. ' + shape
 	):
-		_fail("one carrying a field a Vector2 has not is refused naming it: %s" % JSON.stringify(deep))
-	var deeper: Dictionary = await _write("spot", {"x": 7, "y": 8, "z": 9, "w": 1})
-	if not str(deeper.get("message", "")).contains('A Vector2 has no fields called "z" or "w", so the value'):
+		_fail(
+			"one carrying a field a Vector2 has not is refused naming it: %s" % JSON.stringify(deep)
+		)
+	var deeper: Dictionary = await _write("spot", { "x": 7, "y": 8, "z": 9, "w": 1 })
+	if not str(deeper.get("message", "")).contains(
+		'A Vector2 has no fields called "z" or "w", so the value'
+	):
 		_fail("and two of them both: %s" % JSON.stringify(deeper))
 	if holder.get("spot") != Vector2(1.5, -2):
 		_fail("and the slot keeps what it held: %s" % holder.get("spot"))
-	var named: Dictionary = await _write("spot", {"type": "Vector2", "x": 7, "y": 8})
+	var named: Dictionary = await _write("spot", { "type": "Vector2", "x": 7, "y": 8 })
 	var named_said: String = str(named.get("message", ""))
-	if not named_said.contains(
-		(
-			'A Vector2 has no field called "type", so the value is not read as one: a value names its '
-			+ 'type under "_type". '
+	if not (
+		named_said
+		. contains(
+			(
+				'A Vector2 has no field called "type", so the value is not read as one: a value '
+				+ 'names its type under "_type". '
+			)
 		)
 	):
 		_fail("a type named under type is refused saying where it goes: %s" % JSON.stringify(named))
-	var tagged: Dictionary = await _invoke("press", [{"_type": "Vector2", "x": 1, "y": 2, "w": 3}, true])
-	if not str(tagged.get("message", "")).contains('A Vector2 has no field called "w", so the value is not'):
+	var tagged: Dictionary = await _invoke(
+		"press", [{ "_type": "Vector2", "x": 1, "y": 2, "w": 3 }, true]
+	)
+	if not str(tagged.get("message", "")).contains(
+		'A Vector2 has no field called "w", so the value is not'
+	):
 		_fail("and an argument tagged as one: %s" % JSON.stringify(tagged))
 	var unshaped: Dictionary = await _write("spot", "east")
 	if not str(unshaped.get("message", "")).ends_with('A Vector2 is sent as {"x": ..., "y": ...}.'):
@@ -373,41 +427,57 @@ func _check_a_value_given_by_its_fields() -> void:
 		_fail("a number names no shape: %s" % JSON.stringify(counted))
 	var coded: Dictionary = await _write("tint", "#00ff0080")
 	if coded.get("type") != "property_set" or holder.get("tint") != Color.html("#00ff0080"):
-		_fail("a colour takes its html code: %s, holding %s" % [JSON.stringify(coded), holder.get("tint")])
-	var alpha: Dictionary = await _write("tint", {"r": 1, "g": 0, "b": 0, "alpha": 0.5})
-	var colour_shape: String = 'A Color is sent as {"r": ..., "g": ..., "b": ..., "a": ...} or as its html code'
+		_fail(
+			(
+				"a colour takes its html code: %s, holding %s"
+				% [JSON.stringify(coded), holder.get("tint")]
+			)
+		)
+	var alpha: Dictionary = await _write("tint", { "r": 1, "g": 0, "b": 0, "alpha": 0.5 })
+	var colour_shape: String = (
+		'A Color is sent as {"r": ..., "g": ..., "b": ..., "a": ...} or as its html code'
+	)
 	if not str(alpha.get("message", "")).contains(
 		'A Color has no field called "alpha", so the value is not read as one. ' + colour_shape
 	):
 		_fail(
-			"one naming its alpha otherwise is refused with the key it goes under: %s" % JSON.stringify(alpha)
+			(
+				"one naming its alpha otherwise is refused with the key it goes under: %s"
+				% JSON.stringify(alpha)
+			)
 		)
 	var uncoded: Dictionary = await _write("tint", "#00ff0")
 	if uncoded.get("type") != "error" or holder.get("tint") != Color.html("#00ff0080"):
 		_fail("and a word that is no html code is refused: %s" % JSON.stringify(uncoded))
 
-	# An element of a typed list or map is fitted as a single value is, so its refusal names the field
-	# too: item 0 below has the keys item 1 has but one, and is taken.
-	var unread: String = 'which cannot become Vector2. A Vector2 has no field called "z", so the value'
-	var listed: Dictionary = await _write("trail", [{"x": 1, "y": 2}, {"x": 3, "y": 4, "z": 5}])
+	# An element of a typed list or map is fitted as a single value is, so its refusal names the
+	# field too: item 0 below has the keys item 1 has but one, and is taken.
+	var unread: String = (
+		'which cannot become Vector2. A Vector2 has no field called "z", so the value'
+	)
+	var listed: Dictionary = await _write("trail", [{ "x": 1, "y": 2 }, { "x": 3, "y": 4, "z": 5 }])
 	var listed_said: String = str(listed.get("message", ""))
 	if not listed_said.contains("element 1 is ") or not listed_said.contains(unread):
 		_fail("an element of a typed list carrying a field it has not is told it: %s" % listed_said)
 	if not listed_said.ends_with(shape):
 		_fail("and ends on the shape, with one full stop: %s" % listed_said)
-	var keyed: Dictionary = await _write("marks", {"a": {"x": 3, "y": 4, "z": 5}})
+	var keyed: Dictionary = await _write("marks", { "a": { "x": 3, "y": 4, "z": 5 } })
 	var keyed_said: String = str(keyed.get("message", ""))
 	if not keyed_said.contains("the value under a is ") or not keyed_said.contains(unread):
 		_fail("and so is a value of a typed map: %s" % JSON.stringify(keyed))
-	var traced: Dictionary = await _write("trail", [{"x": 1, "y": 2}])
+	var traced: Dictionary = await _write("trail", [{ "x": 1, "y": 2 }])
 	if traced.get("type") != "property_set" or holder.get("trail") != [Vector2(1, 2)]:
 		_fail(
-			"while a list of points is taken: %s, holding %s" % [JSON.stringify(traced), holder.get("trail")]
+			(
+				"while a list of points is taken: %s, holding %s"
+				% [JSON.stringify(traced), holder.get("trail")]
+			)
 		)
 
 
 ## A slot declared as Variant takes what it is given, as the engine does; one declared as a number
-## still refuses a word. The text null empties a Variant slot holding nothing, as a wait on it reads.
+## still refuses a word. The text null empties a Variant slot holding nothing, as a wait on it
+## reads.
 func _check_a_slot_that_takes_anything() -> void:
 	var numbered: Dictionary = await _write("shifting", 7)
 	if numbered.get("type") != "property_set" or typeof(holder.get("shifting")) != TYPE_INT:
@@ -416,15 +486,29 @@ func _check_a_slot_that_takes_anything() -> void:
 	if worded.get("type") != "property_set" or holder.get("shifting") != "idle":
 		_fail("and takes a word: %s" % JSON.stringify(worded))
 	var back: Dictionary = await _write("shifting", 5)
-	if back.get("type") != "property_set" or typeof(holder.get("shifting")) not in [TYPE_INT, TYPE_FLOAT]:
+	if (
+		back.get("type") != "property_set"
+		or typeof(holder.get("shifting")) not in [TYPE_INT, TYPE_FLOAT]
+	):
 		_fail("and a number back as a number, not its text: %s" % JSON.stringify(back))
 	# One that ignores every write, holding a number and given a word it cannot be compared with, is
 	# still refused by what it reads back.
 	var ignored: Dictionary = await _write("mood", "cheerful")
-	if ignored.get("type") != "error" or not str(ignored.get("message", "")).contains("reads 3 afterwards"):
-		_fail("a write the property ignores is refused whatever its kind: %s" % JSON.stringify(ignored))
+	if (
+		ignored.get("type") != "error"
+		or not str(ignored.get("message", "")).contains("reads 3 afterwards")
+	):
+		_fail(
+			(
+				"a write the property ignores is refused whatever its kind: %s"
+				% JSON.stringify(ignored)
+			)
+		)
 	var counted: Dictionary = await _write("counted", "idle")
-	if counted.get("type") != "error" or not str(counted.get("message", "")).contains("cannot become one"):
+	if (
+		counted.get("type") != "error"
+		or not str(counted.get("message", "")).contains("cannot become one")
+	):
 		_fail("an int slot still refuses a word: %s" % JSON.stringify(counted))
 
 	var emptied: Dictionary = await _write("loose", "null")
@@ -434,13 +518,17 @@ func _check_a_slot_that_takes_anything() -> void:
 		or typeof(holder.get("loose")) != TYPE_NIL
 	):
 		_fail(
-			"the text null leaves a Variant slot holding nothing, not the word: %s" % JSON.stringify(emptied)
+			(
+				"the text null leaves a Variant slot holding nothing, not the word: %s"
+				% JSON.stringify(emptied)
+			)
 		)
 	var worded_loose: Dictionary = await _write("loose", "idle")
 	if worded_loose.get("type") != "property_set" or holder.get("loose") != "idle":
 		_fail("and any other word is stored as the word: %s" % JSON.stringify(worded_loose))
 	var met: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Holder", "property": "loose", "value": "idle", "timeout_ms": 1000}
+		"wait_until",
+		{ "path": "/root/Holder", "property": "loose", "value": "idle", "timeout_ms": 1000 }
 	)
 	if met.get("met") != true:
 		_fail("a wait reads the same slot the same way: %s" % JSON.stringify(met))
@@ -449,9 +537,12 @@ func _check_a_slot_that_takes_anything() -> void:
 	# number, ends the wait with what it holds. Comparing them is an error raised inside the game.
 	holder.set("loose", "waiting")
 	var turn: Callable = func() -> void: holder.set("loose", 3)
-	Checked.done(process_frame.connect(turn, CONNECT_ONE_SHOT) as Error, "turning the slot mid-wait")
+	Checked.done(
+		process_frame.connect(turn, CONNECT_ONE_SHOT) as Error, "turning the slot mid-wait"
+	)
 	var turned: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Holder", "property": "loose", "value": "done", "timeout_ms": 3000}
+		"wait_until",
+		{ "path": "/root/Holder", "property": "loose", "value": "done", "timeout_ms": 3000 }
 	)
 	if (
 		turned.get("met") != false
@@ -466,21 +557,33 @@ func _check_a_slot_that_takes_anything() -> void:
 ## is told objects go by their path.
 func _check_an_element_declared_as_an_object() -> void:
 	var impossible: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Holder", "property": "nodes:0", "value": 5, "timeout_ms": 3000}
+		"wait_until",
+		{ "path": "/root/Holder", "property": "nodes:0", "value": 5, "timeout_ms": 3000 }
 	)
 	if (
 		impossible.get("type") != "error"
 		or not str(impossible.get("message", "")).contains("declared to hold an object")
 	):
-		_fail("a wait for a number on an object element is refused: %s" % JSON.stringify(impossible))
+		_fail(
+			"a wait for a number on an object element is refused: %s" % JSON.stringify(impossible)
+		)
 	var emptied: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Holder", "property": "nodes:0", "value": "null", "timeout_ms": 1000}
+		"wait_until",
+		{ "path": "/root/Holder", "property": "nodes:0", "value": "null", "timeout_ms": 1000 }
 	)
 	if emptied.get("met") != true or emptied.get("frames") != 0:
 		_fail("and the text null meets the empty element at once: %s" % JSON.stringify(emptied))
-	var recorded: Dictionary = await _write("nodes", [{"_type": "Node", "path": "/root/Plain"}])
-	if recorded.get("type") != "error" or not str(recorded.get("message", "")).contains("named by its path"):
-		_fail("a record for an object element is told how objects are named: %s" % JSON.stringify(recorded))
+	var recorded: Dictionary = await _write("nodes", [{ "_type": "Node", "path": "/root/Plain" }])
+	if (
+		recorded.get("type") != "error"
+		or not str(recorded.get("message", "")).contains("named by its path")
+	):
+		_fail(
+			(
+				"a record for an object element is told how objects are named: %s"
+				% JSON.stringify(recorded)
+			)
+		)
 
 
 ## A map typed by its key, stepped into by that key written as text, logs nothing in the game.
@@ -493,19 +596,21 @@ func _check_an_element_declared_as_an_object() -> void:
 func _check_maps_typed_by_key() -> void:
 	for case: Array in [["counts:68", 6], ["weights:2", "two"], ["tagged:gold", 3]]:
 		var read: Dictionary = await node._execute_command(
-			"get_property", {"path": "/root/Holder", "property": case[0]}
+			"get_property", { "path": "/root/Holder", "property": case[0] }
 		)
 		if read.get("value") != case[1]:
 			_fail("%s reads its entry: %s" % [case[0], JSON.stringify(read)])
 	var absent: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Holder", "property": "counts:1"}
+		"get_property", { "path": "/root/Holder", "property": "counts:1" }
 	)
 	if absent.get("type") != "error" or not str(absent.get("message", "")).contains("no key 1"):
 		_fail("a key a typed map has not got is refused: %s" % JSON.stringify(absent))
 	var written: Dictionary = await _write("counts:68", 7)
 	var counts: Dictionary = holder.get("counts")
 	if written.get("type") != "property_set" or counts.get(68) != 7 or counts.size() != 1:
-		_fail("counts:68 is written under the number: %s, %s" % [JSON.stringify(written), str(counts)])
+		_fail(
+			"counts:68 is written under the number: %s, %s" % [JSON.stringify(written), str(counts)]
+		)
 
 
 ## A key holding a colon, a quote or a bracket, written in double quotes, is one step: read, written
@@ -514,33 +619,41 @@ func _check_maps_typed_by_key() -> void:
 ## one, quoted or not.
 func _check_a_key_holding_a_colon() -> void:
 	var read: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Holder", "property": 'stock:"base:dew"'}
+		"get_property", { "path": "/root/Holder", "property": 'stock:"base:dew"' }
 	)
 	if read.get("value") != 1:
 		_fail('stock:"base:dew" reads its entry: %s' % JSON.stringify(read))
 	var written: Dictionary = await _write('stock:"base:dew"', 2)
 	var stock: Dictionary = holder.get("stock")
 	if written.get("type") != "property_set" or stock.get("base:dew") != 2 or stock.size() != 4:
-		_fail('stock:"base:dew" is written under its key: %s, %s' % [JSON.stringify(written), str(stock)])
+		_fail(
+			(
+				'stock:"base:dew" is written under its key: %s, %s'
+				% [JSON.stringify(written), str(stock)]
+			)
+		)
 	var met: Dictionary = await node._execute_command(
-		"wait_until", {"path": "/root/Holder", "property": 'stock:"base:dew"', "value": 2, "timeout_ms": 1000}
+		"wait_until",
+		{ "path": "/root/Holder", "property": 'stock:"base:dew"', "value": 2, "timeout_ms": 1000 }
 	)
 	if met.get("met") != true or GdhRead.as_int(met.get("elapsed_ms"), 1000) >= 1000:
 		_fail('a wait on stock:"base:dew" is met at once: %s' % JSON.stringify(met))
 	var split: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Holder", "property": "stock:base:dew"}
+		"get_property", { "path": "/root/Holder", "property": "stock:base:dew" }
 	)
-	var listed: String = 'has no key base; it is keyed by "base:dew", "base:salt", "say \\"hi\\"", "pick(1)"'
+	var listed: String = (
+		'has no key base; it is keyed by "base:dew", "base:salt", "say \\"hi\\"", "pick(1)"'
+	)
 	if split.get("type") != "error" or not str(split.get("message", "")).contains(listed):
 		_fail("the refusal writes each key as the step reaching it: %s" % JSON.stringify(split))
 	for case: Array in [
 		['stock:"say \\"hi\\""', 3],
 		['stock:"pick(1)"', 4],
 		['named_stock:"base:dew"', 5],
-		['by_id:"4.5"', "four and a half"]
+		['by_id:"4.5"', "four and a half"],
 	]:
 		var reached: Dictionary = await node._execute_command(
-			"get_property", {"path": "/root/Holder", "property": case[0]}
+			"get_property", { "path": "/root/Holder", "property": case[0] }
 		)
 		if reached.get("value") != case[1]:
 			_fail("%s reads its entry: %s" % [case[0], JSON.stringify(reached)])
@@ -551,7 +664,7 @@ func _check_a_key_holding_a_colon() -> void:
 func _check_a_map_keyed_by_numbers() -> void:
 	for case: Array in [["3", "three"], ["4.5", "four and a half"]]:
 		var read: Dictionary = await node._execute_command(
-			"get_property", {"path": "/root/Holder", "property": "by_id:" + str(case[0])}
+			"get_property", { "path": "/root/Holder", "property": "by_id:" + str(case[0]) }
 		)
 		if read.get("value") != case[1]:
 			_fail("by_id:%s reads its entry: %s" % [case[0], JSON.stringify(read)])
@@ -560,25 +673,28 @@ func _check_a_map_keyed_by_numbers() -> void:
 	if written.get("type") != "property_set" or map.get(3) != "drei" or map.size() != 3:
 		_fail("by_id:3 is written under the number: %s, %s" % [JSON.stringify(written), str(map)])
 	var paired: Dictionary = await node._execute_command(
-		"get_property", {"path": "/root/Holder", "property": "by_id:(1, 2)"}
+		"get_property", { "path": "/root/Holder", "property": "by_id:(1, 2)" }
 	)
 	var said: String = str(paired.get("message", ""))
-	if paired.get("type") != "error" or not said.contains("has a key that reads (1, 2), but it is Vector2i"):
+	if (
+		paired.get("type") != "error"
+		or not said.contains("has a key that reads (1, 2), but it is Vector2i")
+	):
 		_fail("a key a step cannot spell is named by its type: %s" % JSON.stringify(paired))
 
 
 ## A packed list fitted element by element, an element of a typed list held to what a single value
 ## is, an enum argument given by name, and a setter's own report beside the write it refused.
 func _check_packed_lists_enums_and_setters() -> void:
-	var walked: Dictionary = await _invoke("length_of", [[{"x": 0, "y": 0}, {"x": 3, "y": 4}]])
+	var walked: Dictionary = await _invoke("length_of", [[{ "x": 0, "y": 0 }, { "x": 3, "y": 4 }]])
 	if walked.get("result") != 5.0:
 		_fail("a packed list of points takes each as its fields: %s" % JSON.stringify(walked))
-	var stray: Dictionary = await _invoke("length_of", [[{"x": 0, "y": 0}, "east"]])
+	var stray: Dictionary = await _invoke("length_of", [[{ "x": 0, "y": 0 }, "east"]])
 	if (
 		str(stray.get("message", ""))
 		!= (
-			'/root/Holder.length_of takes PackedVector2Array as argument 1: element 1 is "east", which cannot'
-			+ ' become Vector2. A Vector2 is sent as {"x": ..., "y": ...}.'
+			'/root/Holder.length_of takes PackedVector2Array as argument 1: element 1 is "east", '
+			+ 'which cannot become Vector2. A Vector2 is sent as {"x": ..., "y": ...}.'
 		)
 	):
 		_fail("and names the element that is no point: %s" % JSON.stringify(stray))
@@ -594,8 +710,8 @@ func _check_packed_lists_enums_and_setters() -> void:
 	if (
 		str(counted.get("message", ""))
 		!= (
-			"/root/Holder.add_counts takes a typed list as argument 1: element 0 is 4.5, which an int cannot"
-			+ " hold without changing it."
+			"/root/Holder.add_counts takes a typed list as argument 1: element 0 is 4.5, which an "
+			+ "int cannot hold without changing it."
 		)
 	):
 		_fail("a fraction in a typed list of ints is refused: %s" % JSON.stringify(counted))
@@ -607,7 +723,7 @@ func _check_packed_lists_enums_and_setters() -> void:
 		"element 0 is 2.5, which an int cannot hold without changing it."
 	):
 		_fail("and so is one written into a typed list: %s" % JSON.stringify(written_cut))
-	var drawn: Dictionary = await _write("path_points", [{"x": 1, "y": 2}])
+	var drawn: Dictionary = await _write("path_points", [{ "x": 1, "y": 2 }])
 	if (
 		drawn.get("type") != "property_set"
 		or holder.get("path_points") != PackedVector2Array([Vector2(1, 2)])
@@ -625,13 +741,16 @@ func _check_packed_lists_enums_and_setters() -> void:
 	for given: Array in [["ANGRY", 1], ["sleepy", 5], [5, 5]]:
 		var felt: Dictionary = await _invoke("feel", [given[0]])
 		if felt.get("result") != given[1] or felt.has("outside_declared"):
-			_fail("an enum argument takes %s: %s" % [JSON.stringify(given[0]), JSON.stringify(felt)])
+			_fail(
+				"an enum argument takes %s: %s" % [JSON.stringify(given[0]), JSON.stringify(felt)]
+			)
 	var misspelt: Dictionary = await _invoke("feel", ["ANGRYY"])
 	if (
 		str(misspelt.get("message", ""))
 		!= (
-			"/root/Holder.feel takes the enum Mood as argument 1, and ANGRYY is none of its values: send CALM"
-			+ " (0), ANGRY (1), SLEEPY (5) by name or by number. The nearest is ANGRY."
+			"/root/Holder.feel takes the enum Mood as argument 1, and ANGRYY is none of its "
+			+ "values: send CALM (0), ANGRY (1), SLEEPY (5) by name or by number. The nearest is "
+			+ "ANGRY."
 		)
 	):
 		_fail("a name the enum has not is refused naming its values: %s" % JSON.stringify(misspelt))
@@ -640,7 +759,10 @@ func _check_packed_lists_enums_and_setters() -> void:
 		past.get("result") != 7
 		or (
 			past.get("outside_declared")
-			!= ("argument 1, 7, is none of the values Mood declares: CALM (0), ANGRY (1), SLEEPY (5).")
+			!= (
+				"argument 1, 7, is none of the values Mood declares: CALM (0), ANGRY (1), "
+				+ "SLEEPY (5)."
+			)
 		)
 	):
 		_fail("a number the enum has not runs and is said: %s" % JSON.stringify(past))
@@ -656,7 +778,7 @@ func _check_packed_lists_enums_and_setters() -> void:
 	var healed: Dictionary = await _write("health", 5)
 	if healed.get("type") != "property_set" or healed.has("errors") or holder.get("health") != 5:
 		_fail("while one it takes reports nothing: %s" % JSON.stringify(healed))
-	var huge: Dictionary = await _invoke("add_counts", [[9007199254740993.0]])
+	var huge: Dictionary = await _invoke("add_counts", [[9_007_199_254_740_993.0]])
 	var huge_said: String = str(huge.get("message", ""))
 	if (
 		not huge_said.contains("element 0 is too large to be sure of: ")
@@ -666,8 +788,8 @@ func _check_packed_lists_enums_and_setters() -> void:
 	):
 		_fail("a whole number past 2^53 in a typed list is refused: %s" % JSON.stringify(huge))
 
-	# A saved script's enum, and one of a class inside it, which the engine names by the path and the
-	# inner class: res://change_moods.gd.Inner.Size.
+	# A saved script's enum, and one of a class inside it, which the engine names by the path and
+	# the inner class: res://change_moods.gd.Inner.Size.
 	var file: FileAccess = FileAccess.open(MOODS_SCRIPT, FileAccess.WRITE)
 	var source: PackedStringArray = [
 		"extends Node",
@@ -690,7 +812,7 @@ func _check_packed_lists_enums_and_setters() -> void:
 	moody.set_script(load(MOODS_SCRIPT))
 	root.add_child(moody)
 	var sized: Dictionary = await node._execute_command(
-		"call_method", {"path": "/root/Moody", "method": "size_of", "args": ["BIG"]}
+		"call_method", { "path": "/root/Moody", "method": "size_of", "args": ["BIG"] }
 	)
 	if sized.get("result") != 9:
 		_fail("an inner class's enum takes its name: %s" % JSON.stringify(sized))
@@ -698,4 +820,9 @@ func _check_packed_lists_enums_and_setters() -> void:
 
 	var high: Dictionary = await _write("level", 12)
 	if high.get("type") != "property_set" or high.get("warnings") != ["level is high"]:
-		_fail("and a warning from a setter that took the value is beside it: %s" % JSON.stringify(high))
+		_fail(
+			(
+				"and a warning from a setter that took the value is beside it: %s"
+				% JSON.stringify(high)
+			)
+		)

@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## An announcement that does not answer is set aside, and the editor falls back to the port it
 ## was configured with.
 ##
@@ -16,11 +15,10 @@ extends SceneTree
 const GdhBridgeClient = preload("res://addons/gdharness_editor/bridge_client.gd")
 const ANNOUNCEMENT: String = "res://.godot/gdharness-bridge.json"
 const PROTOCOL: int = 1
-
 const DEADLINE_MSEC: int = 60000
+const LATE: String = "the client never fell back in %d ms"
 
 var failures: Array[String] = []
-
 var _client: GdhBridgeClient
 var _stuck: TCPServer = TCPServer.new()
 var _configured: TCPServer = TCPServer.new()
@@ -32,25 +30,9 @@ var _arrived: bool = false
 var _started: int = 0
 
 
-func _initialize() -> void:
-	var stuck_port: int = _listen(_stuck)
-	var configured_port: int = _listen(_configured)
-	if stuck_port == 0 or configured_port == 0:
-		_stop("the fixture could not listen")
-		return
-
-	OS.set_environment("GDHARNESS_BRIDGE_PORT", str(configured_port))
-	_announce(stuck_port)
-
-	_client = GdhBridgeClient.new()
-	root.add_child(_client)
-	_client.connect_to_server()
-	_started = Time.get_ticks_msec()
-
-
 func _process(_delta: float) -> bool:
 	if Time.get_ticks_msec() - _started > DEADLINE_MSEC:
-		_stop("the client never fell back in %d ms" % DEADLINE_MSEC)
+		_stop(LATE % DEADLINE_MSEC)
 		return true
 
 	while _stuck.is_connection_available():
@@ -70,6 +52,22 @@ func _process(_delta: float) -> bool:
 		return false
 	_finish(0)
 	return true
+
+
+func _initialize() -> void:
+	var stuck_port: int = _listen(_stuck)
+	var configured_port: int = _listen(_configured)
+	if stuck_port == 0 or configured_port == 0:
+		_stop("the fixture could not listen")
+		return
+
+	OS.set_environment("GDHARNESS_BRIDGE_PORT", str(configured_port))
+	_announce(stuck_port)
+
+	_client = GdhBridgeClient.new()
+	root.add_child(_client)
+	_client.connect_to_server()
+	_started = Time.get_ticks_msec()
 
 
 func _read_arrival() -> void:
@@ -109,7 +107,7 @@ func _announce(port: int) -> void:
 				"port": port,
 				"pid": OS.get_process_id(),
 				"version": "fixture",
-				"startedAt": Time.get_datetime_string_from_system(true)
+				"startedAt": Time.get_datetime_string_from_system(true),
 			}
 		)
 	)
@@ -141,5 +139,5 @@ func _finish(code: int) -> void:
 		printerr("\n".join(failures))
 		quit(1)
 		return
-	print(JSON.stringify({"ok": true, "fell_back_after_msec": Time.get_ticks_msec() - _started}))
+	print(JSON.stringify({ "ok": true, "fell_back_after_msec": Time.get_ticks_msec() - _started }))
 	quit(code)

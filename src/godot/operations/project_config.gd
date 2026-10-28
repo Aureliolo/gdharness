@@ -100,9 +100,9 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 	var in_file: bool = GdhProjectFile.sets(setting_path)
 
 	var wanted: int = _wanted_type(setting_path, old_value if had_value else null)
-	# A value of fields or a colour's html code is fitted as a property write fits it, so a value one
-	# of them takes the other takes too. A number is left to the check below, which refuses one the
-	# setting would cut where fitting it would cut it.
+	# A value of fields or a colour's html code is fitted as a property write fits it, so a value
+	# one of them takes the other takes too. A number is left to the check below, which refuses one
+	# the setting would cut where fitting it would cut it.
 	var final_value: Variant = _values.deserialize_value(value)
 	if final_value is Dictionary or (wanted == TYPE_COLOR and final_value is String):
 		final_value = _values.fitted(value, wanted)
@@ -110,8 +110,8 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 		if not _converts_faithfully(final_value, wanted):
 			return _log.failure(_cannot_hold(setting_path, wanted, final_value))
 		final_value = type_convert(final_value, wanted)
-	# JSON carries every number as a float and a new setting has no declared type to fit one to, so a
-	# whole number was saved as 800.0 beside an answer saying 800.
+	# JSON carries every number as a float and a new setting has no declared type to fit one to, so
+	# a whole number was saved as 800.0 beside an answer saying 800.
 	if not had_value and wanted == TYPE_NIL and final_value is float:
 		var number: float = final_value
 		if number == floorf(number) and absf(number) < 9.0e15:
@@ -132,7 +132,8 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 		"saved": true,
 	}
 	# The same value in the same type is no change, and the file is left alone: a save rewrites it
-	# whole. The type is compared as well, so an int setting the file holds as 50.0 is still put right.
+	# whole. The type is compared as well, so an int setting the file holds as 50.0 is still put
+	# right.
 	if had_value and typeof(old_value) == typeof(final_value) and old_value == final_value:
 		answer["saved"] = false
 		answer["unchanged"] = true
@@ -173,7 +174,9 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 		)
 		var made: Array[String] = _translations_made_by(missing)
 		if not made.is_empty():
-			said += ("; project_import reimport makes the translation files from " + ", ".join(made))
+			said += (
+				"; project_import reimport makes the translation files from " + ", ".join(made)
+			)
 		answer["note"] = (str(answer["note"]) + " " if answer.has("note") else "") + said + "."
 	ProjectSettings.set_setting(setting_path, final_value)
 	var err: Error = GdhProjectFile.save([setting_path])
@@ -193,7 +196,10 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 				)
 			)
 		answer["overridesNote"] = (
-			"Not every build reads what was written: %s. Set or unset an override to change what its builds read."
+			(
+				"Not every build reads what was written: %s. Set or unset an override to change "
+				+ "what its builds read."
+			)
 			% "; ".join(parts)
 		)
 	return answer
@@ -238,8 +244,9 @@ static func _translations_made_by(missing: Array[String]) -> Array[String]:
 	return sources
 
 
-# Takes a setting's line out of project.godot, so the engine's default holds again, or nothing at all
-# for one the engine does not declare: the way back from a set, which writes a misspelt name as given.
+# Takes a setting's line out of project.godot, so the engine's default holds again, or nothing at
+# all for one the engine does not declare: the way back from a set, which writes a misspelt name as
+# given.
 func unset_project_setting(params: Dictionary) -> Dictionary:
 	var setting_path: String = str(params.get("setting", ""))
 	if setting_path.is_empty():
@@ -256,7 +263,9 @@ func unset_project_setting(params: Dictionary) -> Dictionary:
 	if not held or not GdhProjectFile.sets(setting_path):
 		answer["removed"] = false
 		answer["saved"] = false
-		answer["note"] = "project.godot does not set %s, so there was nothing to take out." % setting_path
+		answer["note"] = (
+			"project.godot does not set %s, so there was nothing to take out." % setting_path
+		)
 		var near: PackedStringArray = PackedStringArray() if held else _settings_near(setting_path)
 		if not near.is_empty():
 			answer["note"] += (
@@ -265,8 +274,8 @@ func unset_project_setting(params: Dictionary) -> Dictionary:
 			)
 		return _with_what_holds(answer, setting_path)
 	answer["old_value"] = _values.serialize_value(value)
-	# The default rather than null for a setting the engine declares: null takes the declaration away
-	# as well, and a value at its default is left out of the file all the same.
+	# The default rather than null for a setting the engine declares: null takes the declaration
+	# away as well, and a value at its default is left out of the file all the same.
 	ProjectSettings.set_setting(setting_path, default_value)
 	var err: Error = GdhProjectFile.save([setting_path])
 	if err != OK:
@@ -340,7 +349,10 @@ static func _cannot_hold(setting_path: String, wanted: int, value: Variant) -> S
 	var declared: String = "%s is declared as %s" % [setting_path, type_string(wanted)]
 	var cost: String = " Setting it would save a different value than the one asked for."
 	if wanted == TYPE_INT and typeof(value) == TYPE_FLOAT:
-		return "%s, which holds whole numbers, and %s would be cut to fit.%s" % [declared, str(value), cost]
+		return (
+			"%s, which holds whole numbers, and %s would be cut to fit.%s"
+			% [declared, str(value), cost]
+		)
 	if wanted in numbers and typeof(value) in numbers:
 		return "%s, and %s is not the same number as one.%s" % [declared, str(value), cost]
 	var given: String = type_string(typeof(value))
@@ -348,8 +360,8 @@ static func _cannot_hold(setting_path: String, wanted: int, value: Variant) -> S
 	return "%s, and %s (%s) cannot become one.%s" % [declared, JSON.stringify(value), given, remedy]
 
 
-## Why [param tagged], a value whose tag could not be built, was not written to [param setting_path],
-## and how a value of that tag is written.
+## Why [param tagged], a value whose tag could not be built, was not written to
+## [param setting_path], and how a value of that tag is written.
 static func _unbuilt(setting_path: String, tagged: Dictionary) -> String:
 	var tag: String = str(tagged["_type"])
 	var refused: String = (
@@ -362,7 +374,9 @@ static func _unbuilt(setting_path: String, tagged: Dictionary) -> String:
 	var keys: Array = shapes[0]
 	var parts: Array[String] = ['"_type": "%s"' % tag]
 	for key: Variant in keys:
-		parts.append('"%s": %s' % [key, "[...]" if tag.begins_with("Packed") and key == "value" else "..."])
+		parts.append(
+			'"%s": %s' % [key, "[...]" if tag.begins_with("Packed") and key == "value" else "..."]
+		)
 	return refused + " One is written as {%s}." % ", ".join(parts)
 
 
@@ -376,11 +390,14 @@ func add_autoload(params: Dictionary) -> Dictionary:
 	# every start. `enabled: false` used to write the entry without its asterisk and answer that it
 	# was disabled, and the autoload ran all the same.
 	if not GdhRead.as_bool(params.get("enabled", true), true):
-		return _log.failure(
-			(
-				"An autoload cannot be added disabled: Godot loads every autoload in the list at every"
-				+ " start. global: false keeps its name out of the global scope and still loads it;"
-				+ " remove_autoload is what stops it loading"
+		return (
+			_log
+			. failure(
+				(
+					"An autoload cannot be added disabled: Godot loads every autoload in the list "
+					+ "at every start. global: false keeps its name out of the global scope and "
+					+ "still loads it; remove_autoload is what stops it loading"
+				)
 			)
 		)
 
@@ -414,7 +431,7 @@ func add_autoload(params: Dictionary) -> Dictionary:
 			"enabled": true,
 			"global": global,
 			"action": "unchanged",
-			"saved": false
+			"saved": false,
 		}
 	ProjectSettings.set_setting(setting, entry)
 	var err: Error = GdhProjectFile.save([setting])
@@ -452,7 +469,10 @@ static func _autoload_name_refusal(name: String) -> String:
 	if reason.is_empty():
 		return ""
 	return (
-		"%s cannot name an autoload: %s. Nothing was written; the editor's Autoload tab refuses it too."
+		(
+			"%s cannot name an autoload: %s. Nothing was written; the editor's Autoload tab "
+			+ "refuses it too."
+		)
 		% [JSON.stringify(name), reason]
 	)
 
@@ -473,7 +493,7 @@ func remove_autoload(params: Dictionary) -> Dictionary:
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 
-	return {"name": name, "removed": true, "old_path": old_value.trim_prefix("*")}
+	return { "name": name, "removed": true, "old_path": old_value.trim_prefix("*") }
 
 
 # List all autoload singletons
@@ -500,7 +520,7 @@ func list_autoloads(_params: Dictionary) -> Dictionary:
 		}
 		autoloads.append(autoload_info)
 
-	return {"autoloads": autoloads, "count": autoloads.size()}
+	return { "autoloads": autoloads, "count": autoloads.size() }
 
 
 # Set the main scene
@@ -514,7 +534,9 @@ func set_main_scene(params: Dictionary) -> Dictionary:
 
 	if not FileAccess.file_exists(scene_path):
 		return _log.failure(
-			GdhFileWalk.new().with_nearest_files("Scene file does not exist: " + scene_path, scene_path)
+			GdhFileWalk.new().with_nearest_files(
+				"Scene file does not exist: " + scene_path, scene_path
+			)
 		)
 
 	# The engine starts the game by instancing the main scene, so a script or any other resource set
@@ -526,7 +548,9 @@ func set_main_scene(params: Dictionary) -> Dictionary:
 			"%s is %s, not a scene, and the main scene has to be one"
 			% [scene_path, "a " + kind if not kind.is_empty() else "no resource the engine loads"]
 		)
-		return _log.failure(GdhFileWalk.new().with_nearest_files(said, scene_path.get_basename() + ".tscn"))
+		return _log.failure(
+			GdhFileWalk.new().with_nearest_files(said, scene_path.get_basename() + ".tscn")
+		)
 
 	var old_main_scene: String = str(ProjectSettings.get_setting("application/run/main_scene", ""))
 
@@ -536,4 +560,4 @@ func set_main_scene(params: Dictionary) -> Dictionary:
 	if err != OK:
 		return _log.failure("Failed to save project settings: " + str(err))
 
-	return {"old_main_scene": old_main_scene, "new_main_scene": scene_path, "saved": true}
+	return { "old_main_scene": old_main_scene, "new_main_scene": scene_path, "saved": true }

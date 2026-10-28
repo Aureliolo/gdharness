@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## gdUnit4's command-line runner over the suites a file lists, in the file's order. One `-a` a suite
 ## outgrows the command line once a game has a few hundred suites (Windows stops at 32767
 ## characters), so the suites come from the file named after `--` with [constant LISTED], and the
@@ -26,7 +25,8 @@ const ROWS: String = "--rows-in"
 ## row an engine found to tell one that no engine ran.
 const LEFT_OUT: String = "gdharness left out"
 ## Printed before each row an entry of [constant SKIPPING] leaves out, as
-## `res://suite.gd > test_case:row`, so the caller can tell an entry naming a row that does not exist.
+## `res://suite.gd > test_case:row`, so the caller can tell an entry naming a row that does not
+## exist.
 const IGNORED_ROW: String = "gdharness ignored"
 ## Printed after a case or a suite's hooks that gdUnit4 says left orphan nodes, as
 ## `res://suite.gd > test_case left 2: Node "Sandbox" of res://sandbox.gd, Timer "Timer"`, with
@@ -76,366 +76,6 @@ const WALK_HOLD: StringName = &"gdharness_scripts_held_past_the_shutdown_walk"
 var _runner: GdhRunner = null
 
 
-## gdUnit4's runner reading its options after this script's path rather than after its own tool's,
-## which it looks for by name and otherwise finds none of them, printing its help.
-class GdhRunner:
-	extends GdUnitTestCIRunner
-
-	var own_path: String = ""
-	## gdUnit4's options when they were given after [constant GDUNIT] rather than read from the
-	## engine's command line, as the suites scene gives them: a played scene has no script path to
-	## find them after.
-	var given: PackedStringArray = []
-	## The suites compiled by [method compiled_together], held for as long as the run goes on.
-	var together: GDScript = null
-	## The cases dealt by their rows, by `res://suite.gd:test_case`.
-	var row_shares: Dictionary[String, GdhRowShare] = {}
-	## The cases to leave out, by `res://suite.gd:test_case` of the suite running them. gdUnit4's own
-	## list is matched against the script declaring a case, which for a case a suite inherits is its
-	## base, so an inherited case left out under its suite ran in every engine the suite was dealt to,
-	## and a case of `res://tests/a_test.gd` was also left out of `res://more/tests/a_test.gd`.
-	var left_out: Dictionary[String, bool] = {}
-	## The rows of parameterised cases to leave out, by `res://suite.gd:test_case:row`.
-	var left_out_rows: Dictionary[String, bool] = {}
-	## The cases gdUnit4 said it finished, which [GdhSessionCheck] holds the session's lookups against.
-	var cases_ended: int = 0
-	## The marker of the shutdown walk's oldest end, made as the run starts.
-	var walk_scripts: Array[GDScript] = []
-	## The orphan nodes as the running case and the running suite began, and those already named in
-	## the suite, so each line names only what its own case or hooks left.
-	var orphans_at_case: Dictionary[int, bool] = {}
-	var orphans_at_suite: Dictionary[int, bool] = {}
-	var orphans_named: Dictionary[int, bool] = {}
-	## The orphans new as the suite's first case began, which its before() made, and whether a case
-	## has begun: gdUnit4 counts both hooks' orphans at the suite's end.
-	var orphans_from_before: Dictionary[int, bool] = {}
-	var case_began: bool = false
-	## The suite running, which a case's own event does not carry.
-	var suite_running: String = ""
-
-	## As the run ends, the marker of the walk's newest end, and every script held past the walk, on
-	## an engine whose walk can stop part way ([GdhShutdownWalk]).
-	func _notification(what: int) -> void:
-		if what != NOTIFICATION_EXIT_TREE or not GdhShutdownWalk.guarded():
-			return
-		var also: Array[GDScript] = walk_scripts.duplicate()
-		also.append_array(GdhShutdownWalk.marker(WALK_BEGAN))
-		if together != null:
-			also.append(together)
-		var own: GDScript = ResourceLoader.get_cached_ref(own_path) as GDScript
-		if own != null:
-			also.append(own)
-		GdhShutdownWalk.hold(also)
-
-	func get_cmdline_args() -> PackedStringArray:
-		if not given.is_empty():
-			var options: PackedStringArray = [TOOL]
-			options.append_array(given)
-			return options
-		return options_of(OS.get_cmdline_args(), own_path)
-
-	## gdUnit4's own discovery, with each case filed under the suite it was found in before it is
-	## asked whether to leave the case out. gdUnit4 files a case under the script declaring it, which
-	## for a case a suite inherits is its base: its reports added such a case to no suite, so
-	## project_test counted none of them, and a parameterised one ran as a suite of the base's own,
-	## outside the suite inheriting it and its hooks, and was judged a case that suite never ran.
-	func discover_tests() -> Array[GdUnitTestCase]:
-		var added: Signal = GdUnitSignals.instance().gdunit_test_discover_added
-		_test_cases = _runner_config.test_cases()
-		var scanner: GdUnitTestSuiteScanner = GdUnitTestSuiteScanner.new()
-		for path: String in _included_tests:
-			for script: Script in scanner.scan(path):
-				var suite: String = script.resource_path
-				var found: Callable = func(test: GdUnitTestCase) -> void:
-					filed_under(test, suite)
-					if not is_skipped(test):
-						_test_cases.append(test)
-						added.emit(test)
-				GdUnitTestDiscoverer.discover_tests(script, found)
-		return _test_cases
-
-	## [param test] as a case of the suite at [param suite], under which gdUnit4 groups, reports and
-	## leaves out its cases.
-	static func filed_under(test: GdUnitTestCase, suite: String) -> void:
-		if test.suite_resource_path == suite and test.source_file == suite:
-			return
-		test.suite_resource_path = suite
-		test.source_file = suite
-		test.suite_name = suite.get_file().get_basename()
-		test._build_fully_qualified_name(suite)
-
-	## gdUnit4 asks this of every case it finds, a parameterised case once a row, each row carrying
-	## its index.
-	func is_skipped(test: GdUnitTestCase) -> bool:
-		if left_out.has("%s:%s" % [test.suite_resource_path, test.test_name]) or super(test):
-			return true
-		var row: String = "%s:%s:%d" % [test.suite_resource_path, test.test_name, test.attribute_index]
-		if test.attribute_index >= 0 and left_out_rows.has(row):
-			print(
-				(
-					"%s %s > %s:%d"
-					% [IGNORED_ROW, test.suite_resource_path, test.test_name, test.attribute_index]
-				)
-			)
-			return true
-		var share: GdhRowShare = row_shares.get("%s:%s" % [test.suite_resource_path, test.test_name], null)
-		if share == null or not share.leaves_out(test.attribute_index):
-			return false
-		print("%s %s > %s:%d" % [LEFT_OUT, test.suite_resource_path, test.test_name, test.attribute_index])
-		return true
-
-	## The session gdUnit4 has just made, swapped for a [GdhIndexedSession] of the same cases as it
-	## is announced: everything that reads the session, the hooks, the cases and the console printing
-	## every case, is handed it after this.
-	func _on_gdunit_event(event: GdUnitEvent) -> void:
-		match event.type():
-			GdUnitEvent.SESSION_START:
-				_test_session = GdhIndexedSession.of(_test_session)
-			GdUnitEvent.TESTSUITE_BEFORE:
-				suite_running = event.resource_path()
-				orphans_at_suite = orphan_ids()
-				orphans_named.clear()
-				orphans_from_before.clear()
-				case_began = false
-			GdUnitEvent.TESTCASE_BEFORE:
-				orphans_at_case = orphan_ids()
-				if not case_began:
-					case_began = true
-					for id: int in new_orphans(orphans_at_suite):
-						orphans_from_before[id] = true
-			GdUnitEvent.TESTCASE_AFTER:
-				cases_ended += 1
-		super(event)
-		# After gdUnit4's own report of the case, so the line falls under it.
-		if event.orphan_nodes() == 0:
-			return
-		if event.type() == GdUnitEvent.TESTCASE_AFTER:
-			say_left(event.test_name(), new_orphans(orphans_at_case))
-		elif event.type() == GdUnitEvent.TESTSUITE_AFTER:
-			var left: Array[int] = new_orphans(orphans_at_suite)
-			if not case_began:
-				say_left("before or after", left)
-				return
-			say_left("before", left.filter(func(id: int) -> bool: return orphans_from_before.has(id)))
-			say_left("after", left.filter(func(id: int) -> bool: return not orphans_from_before.has(id)))
-
-	## The orphans now that were not there in [param before] and no line has named yet.
-	func new_orphans(before: Dictionary[int, bool]) -> Array[int]:
-		var found: Array[int] = []
-		for id: int in orphan_ids():
-			if not before.has(id) and not orphans_named.has(id):
-				found.append(id)
-		return found
-
-	## Prints the orphans [param ids] as left by [param during], under [constant ORPHANS_LEFT], once
-	## each in a suite.
-	func say_left(during: String, ids: Array[int]) -> void:
-		if ids.is_empty():
-			return
-		var named: PackedStringArray = []
-		for id: int in ids:
-			orphans_named[id] = true
-			if named.size() < ORPHANS_NAMED:
-				var _named: bool = named.append(described(instance_from_id(id) as Node))
-		var more: String = "" if ids.size() <= named.size() else ", and %d more" % (ids.size() - named.size())
-		print(
-			(
-				"%s %s > %s left %d: %s%s"
-				% [ORPHANS_LEFT, suite_running, during, ids.size(), ", ".join(named), more]
-			)
-		)
-
-	## The nodes outside every tree that are not on their way out, by instance id, as gdUnit4 counts
-	## them: one queued for deletion is freed at the end of the frame.
-	static func orphan_ids() -> Dictionary[int, bool]:
-		var ids: Dictionary[int, bool] = {}
-		for id: int in Node.get_orphan_node_ids():
-			var node: Node = instance_from_id(id) as Node
-			if node != null and not node.is_queued_for_deletion():
-				ids[id] = true
-		return ids
-
-	## [param node] as an orphan line names it: its class, its name when it was given one, and its
-	## script when it has one.
-	static func described(node: Node) -> String:
-		var said: String = node.get_class()
-		if not node.name.is_empty():
-			said += ' "%s"' % node.name
-		var attached: Variant = node.get_script()
-		if attached is Script:
-			var script: Script = attached
-			if not script.resource_path.is_empty():
-				said += " of " + script.resource_path
-		return said
-
-	## [param args] with everything up to the script at [param own] given as gdUnit4's tool name. The
-	## path is compared with its separators and, on Windows, its case folded, since the engine
-	## reports the script as `X:/a/listed.gd` when it was started as `X:\a\listed.gd`.
-	static func options_of(args: PackedStringArray, own: String) -> PackedStringArray:
-		var wanted: String = spelt(own)
-		var at: int = -1
-		for index: int in args.size():
-			if spelt(args[index]) == wanted:
-				at = index
-				break
-		if at < 0:
-			return args
-		var options: PackedStringArray = [TOOL]
-		options.append_array(args.slice(at + 1))
-		return options
-
-	static func spelt(path: String) -> String:
-		var forward: String = path.replace("\\", "/")
-		return forward.to_lower() if OS.get_name() == "Windows" else forward
-
-
-## The rows of one parameterised case an engine runs: those named, or every row but those.
-class GdhRowShare:
-	extends RefCounted
-
-	var only: bool = true
-	var rows: PackedInt32Array = []
-
-	## Whether the engine leaves out [param row], which is -1 for a case that is not parameterised
-	## and so runs only in the engine taking the rows besides.
-	func leaves_out(row: int) -> bool:
-		return rows.has(row) != only
-
-
-## gdUnit4's session finding a case by its id in a dictionary, where its own walks every case of the
-## session, `GdUnitTestSession.find_test_by_id`: the console asks it twice a case and each report
-## twice more, so a run's time in it grew with the square of its cases (17.9 s of processor time
-## in an engine of 2300 cases).
-class GdhIndexedSession:
-	extends GdUnitTestSession
-
-	## The cases found by id, which [GdhSessionCheck] reads to tell that the console used this session.
-	var lookups: int = 0
-	var _by_id: Dictionary[String, GdUnitTestCase] = {}
-
-	func _init(cases: Array[GdUnitTestCase], reports_in: String) -> void:
-		super(cases, reports_in)
-		for test: GdUnitTestCase in _test_cases:
-			_by_id[str(test.guid)] = test
-
-	func find_test_by_id(id: GdUnitGUID) -> GdUnitTestCase:
-		lookups += 1
-		var found: GdUnitTestCase = _by_id.get(str(id), null)
-		return found
-
-	## [param made] as an indexed session of its cases, reporting where it does; one already indexed
-	## as it is.
-	static func of(made: GdUnitTestSession) -> GdUnitTestSession:
-		if made is GdhIndexedSession:
-			return made
-		return GdhIndexedSession.new(made._test_cases, made.report_path)
-
-
-## A session hook of the runner's own, failing the run when the [GdhIndexedSession] is not the
-## session gdUnit4 works from. The swap holds only while gdUnit4 announces a session before it hands
-## it to the hooks and the console, and a gdUnit4 that changed that order would otherwise run every
-## suite as before, only slower, with nothing said. Checked in the gdUnit4 the game installed, on
-## every run, rather than in the one gdharness tests against.
-class GdhSessionCheck:
-	extends GdUnitTestSessionHook
-
-	var _runner: GdhRunner = null
-
-	func _init(runner: GdhRunner) -> void:
-		super("gdharness session check", "Fails the run when gdUnit4 works from another session.")
-		_runner = runner
-
-	func startup(session: GdUnitTestSession) -> GdUnitResult:
-		if session is GdhIndexedSession:
-			return GdUnitResult.success()
-		return GdUnitResult.error(
-			(
-				(
-					"gdharness test: gdUnit4 %s handed its session hooks the session before announcing it, so"
-					+ " the runner's indexed session is not the one they read. This gdUnit4 starts a session"
-					+ " differently from the ones gdharness knows; report it to gdharness with the version."
-				)
-				% GdUnit4Version.current()
-			)
-		)
-
-	func shutdown(session: GdUnitTestSession) -> GdUnitResult:
-		var indexed: GdhIndexedSession = session as GdhIndexedSession
-		if indexed == null or _runner.cases_ended == 0 or indexed.lookups > 0:
-			return GdUnitResult.success()
-		return GdUnitResult.error(
-			(
-				(
-					"gdharness test: gdUnit4 %s ran %d cases without looking one up in the runner's indexed"
-					+ " session, so its console reads another session. This gdUnit4 starts a session"
-					+ " differently from the ones gdharness knows; report it to gdharness with the version."
-				)
-				% [GdUnit4Version.current(), _runner.cases_ended]
-			)
-		)
-
-
-## The engine's shutdown walk over its scripts, on an engine below 4.8. It clears them from the
-## newest, and a script whose release frees the next one, as the last reference to its base can,
-## leaves the walk on freed memory, where it ends (godot#117991, fixed in 4.8 by godot#120976).
-## Every script it never reached keeps what it holds, which the engine then reports as leaked at
-## exit, so a run of suites that leaked nothing failed on it.
-class GdhShutdownWalk:
-	extends RefCounted
-
-	## Whether the engine of [param version] is one whose walk can stop part way.
-	static func guarded(version: Dictionary = Engine.get_version_info()) -> bool:
-		var major: int = version.get("major", 0)
-		var minor: int = version.get("minor", 0)
-		return major == 4 and minor < 8
-
-	## A script the walk clears as it passes it, printing [param said] then, made now so it takes
-	## this place in the walk. It holds an instance of itself, which keeps it alive past the engine
-	## dropping its cache of scripts until the walk clears it, and the instance that prints, whose
-	## script is older and so is not cleared yet.
-	static func marker(said: String) -> Array[GDScript]:
-		var printing: GDScript = GDScript.new()
-		printing.source_code = (
-			'extends RefCounted\n\nvar said: String = ""\n\n\nfunc _notification(what: int) -> void:\n'
-			+ "\tif what == NOTIFICATION_PREDELETE:\n\t\tprint(said)\n"
-		)
-		var marking: GDScript = GDScript.new()
-		marking.source_code = (
-			"extends RefCounted\n\nstatic var kept: RefCounted = null\n"
-			+ "static var printing: RefCounted = null\n"
-		)
-		if printing.reload() != OK or marking.reload() != OK:
-			push_error("gdharness test could not make the marker of the engine's shutdown: " + said)
-			return []
-		var instance: Object = printing.new()
-		instance.set("said", said)
-		marking.set("kept", marking.new())
-		marking.set("printing", instance)
-		return [printing, marking]
-
-	## Every script loaded from a file under res://, and [param also], held until the theme database
-	## goes, which is after the walk and before the GDScript language does. Freed in the walk, a
-	## script can take the next one with it and end the walk; held, none is freed there, so the walk
-	## reaches every script and what the engine reports at exit is only what was leaked. A script a
-	## run leaks is held by what leaked it as well, and is still reported.
-	static func hold(also: Array[GDScript]) -> void:
-		var held: Array[GDScript] = also.duplicate()
-		var pending: PackedStringArray = ["res://"]
-		while not pending.is_empty():
-			var directory: String = pending[pending.size() - 1]
-			pending.remove_at(pending.size() - 1)
-			for file: String in DirAccess.get_files_at(directory):
-				var path: String = directory.path_join(file)
-				if file.ends_with(".gd") and ResourceLoader.has_cached(path):
-					var script: GDScript = ResourceLoader.get_cached_ref(path) as GDScript
-					if script != null:
-						held.append(script)
-			for inner: String in DirAccess.get_directories_at(directory):
-				if not inner.begins_with("."):
-					var _inner: bool = pending.append(directory.path_join(inner))
-		ThemeDB.set_meta(WALK_HOLD, held)
-
-
 func _initialize() -> void:
 	_runner = started(OS.get_cmdline_user_args())
 	_runner.own_path = get_script().resource_path
@@ -472,8 +112,8 @@ static func started(given: PackedStringArray) -> GdhRunner:
 			push_error(
 				(
 					(
-						"gdharness test: gdUnit4 %s registers no session hook %s, so the report it writes is not"
-						+ " turned off; report it to gdharness with the version."
+						"gdharness test: gdUnit4 %s registers no session hook %s, so the report it "
+						+ "writes is not turned off; report it to gdharness with the version."
 					)
 					% [GdUnit4Version.current(), path]
 				)
@@ -506,7 +146,9 @@ static func started(given: PackedStringArray) -> GdhRunner:
 ## Turns off the hooks among [param hooks] whose scripts [param unread] names, answering the scripts
 ## of those it turned off. Through the mark gdUnit4's own `is_enabled` reads, rather than its
 ## `enable_hook`, which writes the setting into `project.godot`: a run changes nothing in the tree.
-static func unread_off(hooks: GdUnitTestSessionHookService, unread: PackedStringArray) -> PackedStringArray:
+static func unread_off(
+	hooks: GdUnitTestSessionHookService, unread: PackedStringArray
+) -> PackedStringArray:
 	var off: PackedStringArray = []
 	for hook: GdUnitTestSessionHook in hooks.enigne_hooks:
 		var path: String = hook.get_script().resource_path
@@ -517,14 +159,14 @@ static func unread_off(hooks: GdUnitTestSessionHookService, unread: PackedString
 
 
 ## [param suites] compiled inside one script, answered for the caller to hold so gdUnit4's own loads
-## find them compiled. The engine keeps what it read of a class only while the compile that asked for
-## it runs (`GDScriptCache`), so a suite compiled on its own reads again every class it reaches a
-## member of, some seventy milliseconds a suite. As the preloads of one script naming every class of
-## the game's own first, held from that script's compile, they share one reading of each: two hundred
-## suites compiled in a third of the time they took one at a time. The names are public, since a
-## private one unread is a warning and every warning an error, and each a variable, since a class is
-## no constant expression. A suite that does not compile fails here and again when gdUnit4 loads it,
-## which reports it as it would have. A directory listed is left to gdUnit4 to walk.
+## find them compiled. The engine keeps what it read of a class only while the compile that asked
+## for it runs (`GDScriptCache`), so a suite compiled on its own reads again every class it reaches
+## a member of, some seventy milliseconds a suite. As the preloads of one script naming every class
+## of the game's own first, held from that script's compile, they share one reading of each: two
+## hundred suites compiled in a third of the time they took one at a time. The names are public,
+## since a private one unread is a warning and every warning an error, and each a variable, since a
+## class is no constant expression. A suite that does not compile fails here and again when gdUnit4
+## loads it, which reports it as it would have. A directory listed is left to gdUnit4 to walk.
 static func compiled_together(suites: PackedStringArray) -> GDScript:
 	var lines: PackedStringArray = ["extends RefCounted"]
 	var at: int = 0
@@ -580,7 +222,12 @@ static func listed(args: PackedStringArray, flag: String) -> PackedStringArray:
 static func is_one_row(entry: String) -> bool:
 	var at: int = entry.rfind(":")
 	var row: String = entry.substr(at + 1)
-	return at > 0 and row.is_valid_int() and not row.begins_with("-") and is_one_case(entry.substr(0, at))
+	return (
+		at > 0
+		and row.is_valid_int()
+		and not row.begins_with("-")
+		and is_one_case(entry.substr(0, at))
+	)
 
 
 static func is_one_case(entry: String) -> bool:
@@ -618,14 +265,18 @@ static func argument_after(args: PackedStringArray, flag: String) -> String:
 
 
 ## What each of [param suites] declares in [param constant], by suite path and then case name, read
-## off the compiled suite's constants so a declaration is whatever the engine made of it. A directory
-## listed is walked for its scripts, as gdUnit4 walks it for suites. Only a script whose source names
-## the constant is loaded: gdUnit4 stops on a suite that does not load only when its own load is the
-## one that fails, so a broken suite loaded here first let the rest of its directory run.
+## off the compiled suite's constants so a declaration is whatever the engine made of it. A
+## directory listed is walked for its scripts, as gdUnit4 walks it for suites. Only a script whose
+## source names the constant is loaded: gdUnit4 stops on a suite that does not load only when its
+## own load is the one that fails, so a broken suite loaded here first let the rest of its directory
+## run.
 static func expected_by_suite(suites: PackedStringArray, constant: String) -> Dictionary:
 	var expected: Dictionary = {}
 	for path: String in scripts_in(suites):
-		if not FileAccess.file_exists(path) or not FileAccess.get_file_as_string(path).contains(constant):
+		if (
+			not FileAccess.file_exists(path)
+			or not FileAccess.get_file_as_string(path).contains(constant)
+		):
 			continue
 		var suite: Script = load(path)
 		var declared: Variant = suite.get_script_constant_map().get(constant)
@@ -657,10 +308,398 @@ static func scripts_in(paths: PackedStringArray) -> PackedStringArray:
 static func write_expected(path: String, suites: PackedStringArray) -> void:
 	var file: FileAccess = FileAccess.open(path, FileAccess.WRITE)
 	if file == null:
-		push_error("Could not write the expected errors to %s: %s" % [path, FileAccess.get_open_error()])
+		push_error(
+			"Could not write the expected errors to %s: %s" % [path, FileAccess.get_open_error()]
+		)
 		return
 	var expected: Dictionary = {}
 	for kind: String in EXPECTED:
 		expected[kind] = expected_by_suite(suites, EXPECTED[kind])
 	var _stored: bool = file.store_string(JSON.stringify(expected))
 	file.close()
+
+
+## gdUnit4's runner reading its options after this script's path rather than after its own tool's,
+## which it looks for by name and otherwise finds none of them, printing its help.
+class GdhRunner:
+	extends GdUnitTestCIRunner
+
+	var own_path: String = ""
+	## gdUnit4's options when they were given after [constant GDUNIT] rather than read from the
+	## engine's command line, as the suites scene gives them: a played scene has no script path to
+	## find them after.
+	var given: PackedStringArray = []
+	## The suites compiled by [method compiled_together], held for as long as the run goes on.
+	var together: GDScript = null
+	## The cases dealt by their rows, by `res://suite.gd:test_case`.
+	var row_shares: Dictionary[String, GdhRowShare] = {}
+	## The cases to leave out, by `res://suite.gd:test_case` of the suite running them. gdUnit4's
+	## own list is matched against the script declaring a case, which for a case a suite inherits is
+	## its base, so an inherited case left out under its suite ran in every engine the suite was
+	## dealt to, and a case of `res://tests/a_test.gd` was also left out of
+	## `res://more/tests/a_test.gd`.
+	var left_out: Dictionary[String, bool] = {}
+	## The rows of parameterised cases to leave out, by `res://suite.gd:test_case:row`.
+	var left_out_rows: Dictionary[String, bool] = {}
+	## The cases gdUnit4 said it finished, which [GdhSessionCheck] holds the session's lookups
+	## against.
+	var cases_ended: int = 0
+	## The marker of the shutdown walk's oldest end, made as the run starts.
+	var walk_scripts: Array[GDScript] = []
+	## The orphan nodes as the running case and the running suite began, and those already named in
+	## the suite, so each line names only what its own case or hooks left.
+	var orphans_at_case: Dictionary[int, bool] = {}
+	var orphans_at_suite: Dictionary[int, bool] = {}
+	var orphans_named: Dictionary[int, bool] = {}
+	## The orphans new as the suite's first case began, which its before() made, and whether a case
+	## has begun: gdUnit4 counts both hooks' orphans at the suite's end.
+	var orphans_from_before: Dictionary[int, bool] = {}
+	var case_began: bool = false
+	## The suite running, which a case's own event does not carry.
+	var suite_running: String = ""
+
+	## As the run ends, the marker of the walk's newest end, and every script held past the walk, on
+	## an engine whose walk can stop part way ([GdhShutdownWalk]).
+	func _notification(what: int) -> void:
+		if what != NOTIFICATION_EXIT_TREE or not GdhShutdownWalk.guarded():
+			return
+		var also: Array[GDScript] = walk_scripts.duplicate()
+		also.append_array(GdhShutdownWalk.marker(WALK_BEGAN))
+		if together != null:
+			also.append(together)
+		var own: GDScript = ResourceLoader.get_cached_ref(own_path) as GDScript
+		if own != null:
+			also.append(own)
+		GdhShutdownWalk.hold(also)
+
+	func get_cmdline_args() -> PackedStringArray:
+		if not given.is_empty():
+			var options: PackedStringArray = [TOOL]
+			options.append_array(given)
+			return options
+		return options_of(OS.get_cmdline_args(), own_path)
+
+	## gdUnit4's own discovery, with each case filed under the suite it was found in before it is
+	## asked whether to leave the case out. gdUnit4 files a case under the script declaring it,
+	## which for a case a suite inherits is its base: its reports added such a case to no suite, so
+	## project_test counted none of them, and a parameterised one ran as a suite of the base's own,
+	## outside the suite inheriting it and its hooks, and was judged a case that suite never ran.
+	func discover_tests() -> Array[GdUnitTestCase]:
+		var added: Signal = GdUnitSignals.instance().gdunit_test_discover_added
+		_test_cases = _runner_config.test_cases()
+		var scanner: GdUnitTestSuiteScanner = GdUnitTestSuiteScanner.new()
+		for path: String in _included_tests:
+			for script: Script in scanner.scan(path):
+				var suite: String = script.resource_path
+				var found: Callable = func(test: GdUnitTestCase) -> void:
+					filed_under(test, suite)
+					if not is_skipped(test):
+						_test_cases.append(test)
+						added.emit(test)
+				GdUnitTestDiscoverer.discover_tests(script, found)
+		return _test_cases
+
+	## [param test] as a case of the suite at [param suite], under which gdUnit4 groups, reports and
+	## leaves out its cases.
+	static func filed_under(test: GdUnitTestCase, suite: String) -> void:
+		if test.suite_resource_path == suite and test.source_file == suite:
+			return
+		test.suite_resource_path = suite
+		test.source_file = suite
+		test.suite_name = suite.get_file().get_basename()
+		test._build_fully_qualified_name(suite)
+
+	## gdUnit4 asks this of every case it finds, a parameterised case once a row, each row carrying
+	## its index.
+	func is_skipped(test: GdUnitTestCase) -> bool:
+		if left_out.has("%s:%s" % [test.suite_resource_path, test.test_name]) or super(test):
+			return true
+		var row: String = (
+			"%s:%s:%d" % [test.suite_resource_path, test.test_name, test.attribute_index]
+		)
+		if test.attribute_index >= 0 and left_out_rows.has(row):
+			print(
+				(
+					"%s %s > %s:%d"
+					% [IGNORED_ROW, test.suite_resource_path, test.test_name, test.attribute_index]
+				)
+			)
+			return true
+		var share: GdhRowShare = row_shares.get(
+			"%s:%s" % [test.suite_resource_path, test.test_name], null
+		)
+		if share == null or not share.leaves_out(test.attribute_index):
+			return false
+		print(
+			(
+				"%s %s > %s:%d"
+				% [LEFT_OUT, test.suite_resource_path, test.test_name, test.attribute_index]
+			)
+		)
+		return true
+
+	## The session gdUnit4 has just made, swapped for a [GdhIndexedSession] of the same cases as it
+	## is announced: everything that reads the session, the hooks, the cases and the console
+	## printing every case, is handed it after this.
+	func _on_gdunit_event(event: GdUnitEvent) -> void:
+		match event.type():
+			GdUnitEvent.SESSION_START:
+				_test_session = GdhIndexedSession.of(_test_session)
+			GdUnitEvent.TESTSUITE_BEFORE:
+				suite_running = event.resource_path()
+				orphans_at_suite = orphan_ids()
+				orphans_named.clear()
+				orphans_from_before.clear()
+				case_began = false
+			GdUnitEvent.TESTCASE_BEFORE:
+				orphans_at_case = orphan_ids()
+				if not case_began:
+					case_began = true
+					for id: int in new_orphans(orphans_at_suite):
+						orphans_from_before[id] = true
+			GdUnitEvent.TESTCASE_AFTER:
+				cases_ended += 1
+		super(event)
+		# After gdUnit4's own report of the case, so the line falls under it.
+		if event.orphan_nodes() == 0:
+			return
+		if event.type() == GdUnitEvent.TESTCASE_AFTER:
+			say_left(event.test_name(), new_orphans(orphans_at_case))
+		elif event.type() == GdUnitEvent.TESTSUITE_AFTER:
+			var left: Array[int] = new_orphans(orphans_at_suite)
+			if not case_began:
+				say_left("before or after", left)
+				return
+			say_left(
+				"before", left.filter(func(id: int) -> bool: return orphans_from_before.has(id))
+			)
+			say_left(
+				"after", left.filter(func(id: int) -> bool: return not orphans_from_before.has(id))
+			)
+
+	## The orphans now that were not there in [param before] and no line has named yet.
+	func new_orphans(before: Dictionary[int, bool]) -> Array[int]:
+		var found: Array[int] = []
+		for id: int in orphan_ids():
+			if not before.has(id) and not orphans_named.has(id):
+				found.append(id)
+		return found
+
+	## Prints the orphans [param ids] as left by [param during], under [constant ORPHANS_LEFT], once
+	## each in a suite.
+	func say_left(during: String, ids: Array[int]) -> void:
+		if ids.is_empty():
+			return
+		var named: PackedStringArray = []
+		for id: int in ids:
+			orphans_named[id] = true
+			if named.size() < ORPHANS_NAMED:
+				var _named: bool = named.append(described(instance_from_id(id) as Node))
+		var more: String = (
+			"" if ids.size() <= named.size() else ", and %d more" % (ids.size() - named.size())
+		)
+		print(
+			(
+				"%s %s > %s left %d: %s%s"
+				% [ORPHANS_LEFT, suite_running, during, ids.size(), ", ".join(named), more]
+			)
+		)
+
+	## The nodes outside every tree that are not on their way out, by instance id, as gdUnit4 counts
+	## them: one queued for deletion is freed at the end of the frame.
+	static func orphan_ids() -> Dictionary[int, bool]:
+		var ids: Dictionary[int, bool] = {}
+		for id: int in Node.get_orphan_node_ids():
+			var node: Node = instance_from_id(id) as Node
+			if node != null and not node.is_queued_for_deletion():
+				ids[id] = true
+		return ids
+
+	## [param node] as an orphan line names it: its class, its name when it was given one, and its
+	## script when it has one.
+	static func described(node: Node) -> String:
+		var said: String = node.get_class()
+		if not node.name.is_empty():
+			said += ' "%s"' % node.name
+		var attached: Variant = node.get_script()
+		if attached is Script:
+			var script: Script = attached
+			if not script.resource_path.is_empty():
+				said += " of " + script.resource_path
+		return said
+
+	## [param args] with everything up to the script at [param own] given as gdUnit4's tool name.
+	## The path is compared with its separators and, on Windows, its case folded, since the engine
+	## reports the script as `X:/a/listed.gd` when it was started as `X:\a\listed.gd`.
+	static func options_of(args: PackedStringArray, own: String) -> PackedStringArray:
+		var wanted: String = spelt(own)
+		var at: int = -1
+		for index: int in args.size():
+			if spelt(args[index]) == wanted:
+				at = index
+				break
+		if at < 0:
+			return args
+		var options: PackedStringArray = [TOOL]
+		options.append_array(args.slice(at + 1))
+		return options
+
+	static func spelt(path: String) -> String:
+		var forward: String = path.replace("\\", "/")
+		return forward.to_lower() if OS.get_name() == "Windows" else forward
+
+
+## The rows of one parameterised case an engine runs: those named, or every row but those.
+class GdhRowShare:
+	extends RefCounted
+
+	var only: bool = true
+	var rows: PackedInt32Array = []
+
+	## Whether the engine leaves out [param row], which is -1 for a case that is not parameterised
+	## and so runs only in the engine taking the rows besides.
+	func leaves_out(row: int) -> bool:
+		return rows.has(row) != only
+
+
+## gdUnit4's session finding a case by its id in a dictionary, where its own walks every case of the
+## session, `GdUnitTestSession.find_test_by_id`: the console asks it twice a case and each report
+## twice more, so a run's time in it grew with the square of its cases (17.9 s of processor time
+## in an engine of 2300 cases).
+class GdhIndexedSession:
+	extends GdUnitTestSession
+
+	## The cases found by id, which [GdhSessionCheck] reads to tell that the console used this
+	## session.
+	var lookups: int = 0
+	var _by_id: Dictionary[String, GdUnitTestCase] = {}
+
+	func _init(cases: Array[GdUnitTestCase], reports_in: String) -> void:
+		super(cases, reports_in)
+		for test: GdUnitTestCase in _test_cases:
+			_by_id[str(test.guid)] = test
+
+	func find_test_by_id(id: GdUnitGUID) -> GdUnitTestCase:
+		lookups += 1
+		var found: GdUnitTestCase = _by_id.get(str(id), null)
+		return found
+
+	## [param made] as an indexed session of its cases, reporting where it does; one already indexed
+	## as it is.
+	static func of(made: GdUnitTestSession) -> GdUnitTestSession:
+		if made is GdhIndexedSession:
+			return made
+		return GdhIndexedSession.new(made._test_cases, made.report_path)
+
+
+## A session hook of the runner's own, failing the run when the [GdhIndexedSession] is not the
+## session gdUnit4 works from. The swap holds only while gdUnit4 announces a session before it hands
+## it to the hooks and the console, and a gdUnit4 that changed that order would otherwise run every
+## suite as before, only slower, with nothing said. Checked in the gdUnit4 the game installed, on
+## every run, rather than in the one gdharness tests against.
+class GdhSessionCheck:
+	extends GdUnitTestSessionHook
+
+	var _runner: GdhRunner = null
+
+	func _init(runner: GdhRunner) -> void:
+		super("gdharness session check", "Fails the run when gdUnit4 works from another session.")
+		_runner = runner
+
+	func startup(session: GdUnitTestSession) -> GdUnitResult:
+		if session is GdhIndexedSession:
+			return GdUnitResult.success()
+		return (
+			GdUnitResult
+			. error(
+				(
+					(
+						"gdharness test: gdUnit4 %s handed its session hooks the session before "
+						+ "announcing it, so the runner's indexed session is not the one they "
+						+ "read. This gdUnit4 starts a session differently from the ones gdharness "
+						+ "knows; report it to gdharness with the version."
+					)
+					% GdUnit4Version.current()
+				)
+			)
+		)
+
+	func shutdown(session: GdUnitTestSession) -> GdUnitResult:
+		var indexed: GdhIndexedSession = session as GdhIndexedSession
+		if indexed == null or _runner.cases_ended == 0 or indexed.lookups > 0:
+			return GdUnitResult.success()
+		return (
+			GdUnitResult
+			. error(
+				(
+					(
+						"gdharness test: gdUnit4 %s ran %d cases without looking one up in the "
+						+ "runner's indexed session, so its console reads another session. This "
+						+ "gdUnit4 starts a session differently from the ones gdharness knows; "
+						+ "report it to gdharness with the version."
+					)
+					% [GdUnit4Version.current(), _runner.cases_ended]
+				)
+			)
+		)
+
+
+## The engine's shutdown walk over its scripts, on an engine below 4.8. It clears them from the
+## newest, and a script whose release frees the next one, as the last reference to its base can,
+## leaves the walk on freed memory, where it ends (godot#117991, fixed in 4.8 by godot#120976).
+## Every script it never reached keeps what it holds, which the engine then reports as leaked at
+## exit, so a run of suites that leaked nothing failed on it.
+class GdhShutdownWalk:
+	extends RefCounted
+
+	## Whether the engine of [param version] is one whose walk can stop part way.
+	static func guarded(version: Dictionary = Engine.get_version_info()) -> bool:
+		var major: int = version.get("major", 0)
+		var minor: int = version.get("minor", 0)
+		return major == 4 and minor < 8
+
+	## A script the walk clears as it passes it, printing [param said] then, made now so it takes
+	## this place in the walk. It holds an instance of itself, which keeps it alive past the engine
+	## dropping its cache of scripts until the walk clears it, and the instance that prints, whose
+	## script is older and so is not cleared yet.
+	static func marker(said: String) -> Array[GDScript]:
+		var printing: GDScript = GDScript.new()
+		printing.source_code = (
+			'extends RefCounted\n\nvar said: String = ""\n\n\nfunc _notification(what: int) -> '
+			+ "void:\n\tif what == NOTIFICATION_PREDELETE:\n\t\tprint(said)\n"
+		)
+		var marking: GDScript = GDScript.new()
+		marking.source_code = (
+			"extends RefCounted\n\nstatic var kept: RefCounted = null\n"
+			+ "static var printing: RefCounted = null\n"
+		)
+		if printing.reload() != OK or marking.reload() != OK:
+			push_error("gdharness test could not make the marker of the engine's shutdown: " + said)
+			return []
+		var instance: Object = printing.new()
+		instance.set("said", said)
+		marking.set("kept", marking.new())
+		marking.set("printing", instance)
+		return [printing, marking]
+
+	## Every script loaded from a file under res://, and [param also], held until the theme database
+	## goes, which is after the walk and before the GDScript language does. Freed in the walk, a
+	## script can take the next one with it and end the walk; held, none is freed there, so the walk
+	## reaches every script and what the engine reports at exit is only what was leaked. A script a
+	## run leaks is held by what leaked it as well, and is still reported.
+	static func hold(also: Array[GDScript]) -> void:
+		var held: Array[GDScript] = also.duplicate()
+		var pending: PackedStringArray = ["res://"]
+		while not pending.is_empty():
+			var directory: String = pending[pending.size() - 1]
+			pending.remove_at(pending.size() - 1)
+			for file: String in DirAccess.get_files_at(directory):
+				var path: String = directory.path_join(file)
+				if file.ends_with(".gd") and ResourceLoader.has_cached(path):
+					var script: GDScript = ResourceLoader.get_cached_ref(path) as GDScript
+					if script != null:
+						held.append(script)
+			for inner: String in DirAccess.get_directories_at(directory):
+				if not inner.begins_with("."):
+					var _inner: bool = pending.append(directory.path_join(inner))
+		ThemeDB.set_meta(WALK_HOLD, held)

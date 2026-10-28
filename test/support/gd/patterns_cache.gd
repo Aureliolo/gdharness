@@ -1,5 +1,4 @@
 extends SceneTree
-
 ## Whether `GdhPatterns.compiled` hands back the same object for a pattern it has already built.
 ##
 ## The cache is argued for in the source at length and was held by nothing, which is the shape a

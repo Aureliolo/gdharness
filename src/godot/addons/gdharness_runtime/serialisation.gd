@@ -1,5 +1,4 @@
 extends RefCounted
-
 ## Godot values as JSON can carry them, and JSON back into the values the engine wants.
 ##
 ## This file is the one beside the operations, and `bun run sync:gd` copies it into each addon,
@@ -10,17 +9,14 @@ extends RefCounted
 
 const GdhRead = preload("reading.gd")
 const GdhShapes = preload("value_shapes.gd")
-
 # What the engine carries from one to another without complaint, which is what a value written to a
 # property or handed to a parameter may arrive as. Numbers include bool because the engine counts it
 # as one, and the three text types are one string wearing three hats.
 const NUMBERS: Array[int] = [TYPE_BOOL, TYPE_INT, TYPE_FLOAT]
 const TEXTS: Array[int] = [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH]
-
 # 2^53. A JSON number is a double, and every whole number below this one in size has a double of
 # its own; from here on two or more share each double, so one arriving tells nobody which was sent.
-const EXACT: int = 9007199254740992
-
+const EXACT: int = 9_007_199_254_740_992
 # The types that cross as a plain JSON list and have to be built back into themselves. A list is
 # what a caller can write by hand and what the serialiser answers with, and the parameter or
 # property being written is the only thing that knows which of these it wanted.
@@ -35,7 +31,6 @@ const LIST_TYPES: Array[int] = [
 	TYPE_PACKED_VECTOR4_ARRAY,
 	TYPE_PACKED_COLOR_ARRAY,
 ]
-
 # What each Godot type becomes on the wire, as one table you can read rather than an order you
 # have to trust. Keyed on typeof() rather than written as a chain of `is` tests, because the
 # order mattered: Resource had to be tested before Object or every resource came back as a bare
@@ -92,7 +87,6 @@ const SERIALISERS: Dictionary = {
 	TYPE_PACKED_VECTOR4_ARRAY: "_serialize_vector4s",
 	TYPE_PACKED_COLOR_ARRAY: "_serialize_colors",
 }
-
 # What each tag builds back into. The other half of the table above, and separate from it because
 # they are keyed differently: one by the type of a value in hand, the other by the name in a
 # dictionary that arrived from somewhere else.
@@ -144,7 +138,11 @@ func serialize_value(value: Variant) -> Variant:
 	# The fixed shapes carry their components as bare floats, so an infinite one in a Vector2 is
 	# tagged here, and a 32-bit one shortened; containers reach their members through this already.
 	var type: int = typeof(value)
-	return carried if type in [TYPE_ARRAY, TYPE_DICTIONARY] else _finite(carried, GdhRead.holds_singles(type))
+	return (
+		carried
+		if type in [TYPE_ARRAY, TYPE_DICTIONARY]
+		else _finite(carried, GdhRead.holds_singles(type))
+	)
 
 
 # [param carried] with every non-finite float in it tagged. JSON has no spelling for infinity or
@@ -172,7 +170,10 @@ func _finite(carried: Variant, single: bool = false) -> Variant:
 func _serialize_float(value: float) -> Variant:
 	if is_finite(value):
 		return value
-	return {"_type": "float", "value": "nan" if is_nan(value) else ("inf" if value > 0 else "-inf")}
+	return {
+		"_type": "float",
+		"value": "nan" if is_nan(value) else ("inf" if value > 0 else "-inf"),
+	}
 
 
 # A packed float array stays the JSON list it is unless something in it has no JSON spelling.
@@ -400,8 +401,9 @@ func fitted(value: Variant, type: int) -> Variant:
 	var simple: Array[int] = [TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING]
 	if not simple.has(type) or not simple.has(typeof(rebuilt)):
 		return rebuilt
-	# A number or a truth value stays as sent where text is wanted, for the refusal to name. Converted,
-	# 1 arrived as the double it is in JSON and was saved as "1.0", which is not the text anyone sends.
+	# A number or a truth value stays as sent where text is wanted, for the refusal to name.
+	# Converted, 1 arrived as the double it is in JSON and was saved as "1.0", which is not the text
+	# anyone sends.
 	if type == TYPE_STRING and not rebuilt is String:
 		return rebuilt
 
@@ -426,9 +428,10 @@ func fitted(value: Variant, type: int) -> Variant:
 
 
 ## Why [param given], meant for an int, may not be the number that was sent, or "" when it is. A
-## JSON number is a double wherever it is read, so a whole number from 2^53 on arrives as the nearest
-## double to the one written: 9007199254740993 sent as a number arrives as 9007199254740992, and a
-## seed written that way would be stored as its neighbour with the answer saying it was written.
+## JSON number is a double wherever it is read, so a whole number from 2^53 on arrives as the
+## nearest double to the one written: 9007199254740993 sent as a number arrives as 9007199254740992,
+## and a seed written that way would be stored as its neighbour with the answer saying it was
+## written.
 static func inexact(given: Variant, type: int) -> String:
 	if type != TYPE_INT or (typeof(given) != TYPE_FLOAT and typeof(given) != TYPE_INT):
 		return ""
@@ -437,9 +440,9 @@ static func inexact(given: Variant, type: int) -> String:
 		return ""
 	return (
 		(
-			"%s is 2^53 or more, where a JSON number holds a whole number only to the nearest double,"
-			+ ' so it may not be the number sent: send the digits as {"_type": "int", "value": "..."}'
-			+ ", the form a read answers with"
+			"%s is 2^53 or more, where a JSON number holds a whole number only to the nearest "
+			+ 'double, so it may not be the number sent: send the digits as {"_type": "int", '
+			+ '"value": "..."}, the form a read answers with'
 		)
 		% String.num(number, 0)
 	)
@@ -450,51 +453,59 @@ func _serialize_nil(_value: Variant) -> Variant:
 
 
 func _serialize_vector2(value: Vector2) -> Dictionary:
-	return {"x": value.x, "y": value.y, "_type": "Vector2"}
+	return { "x": value.x, "y": value.y, "_type": "Vector2" }
 
 
 func _serialize_vector2i(value: Vector2i) -> Dictionary:
-	return {"x": value.x, "y": value.y, "_type": "Vector2i"}
+	return { "x": value.x, "y": value.y, "_type": "Vector2i" }
 
 
 func _serialize_vector3(value: Vector3) -> Dictionary:
-	return {"x": value.x, "y": value.y, "z": value.z, "_type": "Vector3"}
+	return { "x": value.x, "y": value.y, "z": value.z, "_type": "Vector3" }
 
 
 func _serialize_vector3i(value: Vector3i) -> Dictionary:
-	return {"x": value.x, "y": value.y, "z": value.z, "_type": "Vector3i"}
+	return { "x": value.x, "y": value.y, "z": value.z, "_type": "Vector3i" }
 
 
 func _serialize_vector4(value: Vector4) -> Dictionary:
-	return {"x": value.x, "y": value.y, "z": value.z, "w": value.w, "_type": "Vector4"}
+	return { "x": value.x, "y": value.y, "z": value.z, "w": value.w, "_type": "Vector4" }
 
 
 func _serialize_vector4i(value: Vector4i) -> Dictionary:
-	return {"x": value.x, "y": value.y, "z": value.z, "w": value.w, "_type": "Vector4i"}
+	return { "x": value.x, "y": value.y, "z": value.z, "w": value.w, "_type": "Vector4i" }
 
 
 func _serialize_rect2(value: Rect2) -> Dictionary:
 	return {
-		"position": serialize_value(value.position), "size": serialize_value(value.size), "_type": "Rect2"
+		"position": serialize_value(value.position),
+		"size": serialize_value(value.size),
+		"_type": "Rect2",
 	}
 
 
 func _serialize_rect2i(value: Rect2i) -> Dictionary:
 	return {
-		"position": serialize_value(value.position), "size": serialize_value(value.size), "_type": "Rect2i"
+		"position": serialize_value(value.position),
+		"size": serialize_value(value.size),
+		"_type": "Rect2i",
 	}
 
 
 func _serialize_plane(value: Plane) -> Dictionary:
-	return {"normal": serialize_value(value.normal), "d": value.d, "_type": "Plane"}
+	return { "normal": serialize_value(value.normal), "d": value.d, "_type": "Plane" }
 
 
 func _serialize_quaternion(value: Quaternion) -> Dictionary:
-	return {"x": value.x, "y": value.y, "z": value.z, "w": value.w, "_type": "Quaternion"}
+	return { "x": value.x, "y": value.y, "z": value.z, "w": value.w, "_type": "Quaternion" }
 
 
 func _serialize_aabb(value: AABB) -> Dictionary:
-	return {"position": serialize_value(value.position), "size": serialize_value(value.size), "_type": "AABB"}
+	return {
+		"position": serialize_value(value.position),
+		"size": serialize_value(value.size),
+		"_type": "AABB",
+	}
 
 
 func _serialize_basis(value: Basis) -> Dictionary:
@@ -502,7 +513,7 @@ func _serialize_basis(value: Basis) -> Dictionary:
 		"x": serialize_value(value.x),
 		"y": serialize_value(value.y),
 		"z": serialize_value(value.z),
-		"_type": "Basis"
+		"_type": "Basis",
 	}
 
 
@@ -511,13 +522,15 @@ func _serialize_transform2d(value: Transform2D) -> Dictionary:
 		"origin": serialize_value(value.origin),
 		"x": serialize_value(value.x),
 		"y": serialize_value(value.y),
-		"_type": "Transform2D"
+		"_type": "Transform2D",
 	}
 
 
 func _serialize_transform3d(value: Transform3D) -> Dictionary:
 	return {
-		"origin": serialize_value(value.origin), "basis": serialize_value(value.basis), "_type": "Transform3D"
+		"origin": serialize_value(value.origin),
+		"basis": serialize_value(value.basis),
+		"_type": "Transform3D",
 	}
 
 
@@ -527,22 +540,22 @@ func _serialize_projection(value: Projection) -> Dictionary:
 		"y": serialize_value(value.y),
 		"z": serialize_value(value.z),
 		"w": serialize_value(value.w),
-		"_type": "Projection"
+		"_type": "Projection",
 	}
 
 
 func _serialize_color(value: Color) -> Dictionary:
-	return {"r": value.r, "g": value.g, "b": value.b, "a": value.a, "_type": "Color"}
+	return { "r": value.r, "g": value.g, "b": value.b, "a": value.a, "_type": "Color" }
 
 
 func _serialize_node_path(value: NodePath) -> Dictionary:
-	return {"path": str(value), "_type": "NodePath"}
+	return { "path": str(value), "_type": "NodePath" }
 
 
 # By its id, which is all an RID is from outside the server holding it, and which builds it back:
 # a viewport's RID read off one call is what RenderingServer's render timing takes in the next.
 func _serialize_rid(value: RID) -> Dictionary:
-	return {"id": _serialize_int(value.get_id()), "_type": "RID"}
+	return { "id": _serialize_int(value.get_id()), "_type": "RID" }
 
 
 # A whole number from 2^53 on as its digits, because JSON numbers are doubles on the server's side
@@ -552,7 +565,7 @@ func _serialize_rid(value: RID) -> Dictionary:
 func _serialize_int(value: int) -> Variant:
 	if value > -EXACT and value < EXACT:
 		return value
-	return {"_type": "int", "value": str(value)}
+	return { "_type": "int", "value": str(value) }
 
 
 # A packed list of 64-bit numbers stays the JSON list it is unless something in it is too large for
@@ -570,7 +583,7 @@ func _serialize_ints(value: PackedInt64Array) -> Variant:
 # A bound method, said in the terms a caller could act on: what it is on, and what it is called.
 # It cannot be rebuilt from here, and saying so is the answer rather than a silent null.
 func _serialize_callable(value: Callable) -> Dictionary:
-	var described: Dictionary = {"method": str(value.get_method()), "_type": "Callable"}
+	var described: Dictionary = { "method": str(value.get_method()), "_type": "Callable" }
 	var holder: Object = value.get_object()
 	if holder != null:
 		described["object"] = _describe_object(holder)
@@ -578,7 +591,7 @@ func _serialize_callable(value: Callable) -> Dictionary:
 
 
 func _serialize_signal(value: Signal) -> Dictionary:
-	var described: Dictionary = {"name": str(value.get_name()), "_type": "Signal"}
+	var described: Dictionary = { "name": str(value.get_name()), "_type": "Signal" }
 	var holder: Object = value.get_object()
 	if holder != null:
 		described["object"] = _describe_object(holder)
@@ -589,12 +602,14 @@ func _serialize_signal(value: Signal) -> Dictionary:
 ## int or Vector2 key was answered as its text, and a dictionary read and written back had its keys
 ## replaced by words: `{1: "a"}` came back as `{"1": "a"}`.
 func _serialize_dictionary(value: Dictionary) -> Dictionary:
-	var texts: bool = value.keys().all(func(key: Variant) -> bool: return key is String or key is StringName)
+	var texts: bool = value.keys().all(
+		func(key: Variant) -> bool: return key is String or key is StringName
+	)
 	if not texts:
 		var entries: Array = []
 		for key: Variant in value:
 			entries.append([serialize_value(key), serialize_value(value[key])])
-		return {"_type": "Dictionary", "entries": entries}
+		return { "_type": "Dictionary", "entries": entries }
 	var serialised: Dictionary = {}
 	for key: Variant in value:
 		serialised[str(key)] = serialize_value(value[key])
@@ -612,7 +627,7 @@ func _serialize_array(value: Array) -> Array:
 # TileMapLayer with nothing painted yet, so a read of one carried an engine error in its answer.
 func _serialize_bytes(value: PackedByteArray) -> Dictionary:
 	var text: String = "" if value.is_empty() else Marshalls.raw_to_base64(value)
-	return {"base64": text, "size": value.size(), "_type": "PackedByteArray"}
+	return { "base64": text, "size": value.size(), "_type": "PackedByteArray" }
 
 
 # The packed vector and colour arrays, each element serialised the way one of them on its own is.
@@ -660,7 +675,7 @@ func _serialize_object(value: Object) -> Variant:
 		if resource.resource_path.is_empty() or resource.resource_path.contains("::"):
 			return _describe_built_in(resource)
 		var filed: Dictionary = {
-			"path": resource.resource_path, "class": resource.get_class(), "_type": "Resource"
+			"path": resource.resource_path, "class": resource.get_class(), "_type": "Resource",
 		}
 		# The engine class of a resource with a script is the one its script extends, so a Stats
 		# file read as a Resource and nothing said it was a Stats.
@@ -673,7 +688,7 @@ func _serialize_object(value: Object) -> Variant:
 	if value is Node:
 		var node: Node = value
 		if node.is_inside_tree():
-			return {"path": str(node.get_path()), "class": node.get_class(), "_type": "Node"}
+			return { "path": str(node.get_path()), "class": node.get_class(), "_type": "Node" }
 	return _describe_object(value)
 
 
@@ -683,16 +698,16 @@ func _serialize_object(value: Object) -> Variant:
 ## written back.
 func _describe_built_in(resource: Resource) -> Dictionary:
 	if _describing.has(resource):
-		return {"class": resource.get_class(), "_type": "Resource"}
+		return { "class": resource.get_class(), "_type": "Resource" }
 	_describing.append(resource)
-	var described: Dictionary = {"_type": resource.get_class()}
+	var described: Dictionary = { "_type": resource.get_class() }
 	var attached: Variant = resource.get_script()
 	var script: Script = null
 	if attached is Script:
 		script = attached
 		# By the class its script declares, which a write takes as the _type and which says what it
-		# is: as Resource with the script beside it, one answer named a Shop's built-in item that way
-		# and the file item beside it as an Item.
+		# is: as Resource with the script beside it, one answer named a Shop's built-in item that
+		# way and the file item beside it as an Item.
 		if script.get_global_name().is_empty():
 			described["script"] = serialize_value(script)
 		else:
@@ -741,11 +756,17 @@ static func _fresh(script: Script) -> Object:
 ## away from its default. As a bare resource it was its class and nothing else, so an input action
 ## read back from project.godot could not say whether it was bound to Space or to a joypad button.
 func _describe_input_event(event: InputEvent) -> Dictionary:
-	var described: Dictionary = {"class": event.get_class(), "_type": "Resource", "text": event.as_text()}
+	var described: Dictionary = {
+		"class": event.get_class(), "_type": "Resource", "text": event.as_text(),
+	}
 	for property: Dictionary in event.get_property_list():
 		var usage: int = property.get("usage", 0)
 		var name: String = str(property.get("name", ""))
-		if not (usage & PROPERTY_USAGE_STORAGE) or name.begins_with("resource_") or name == "script":
+		if (
+			not (usage & PROPERTY_USAGE_STORAGE)
+			or name.begins_with("resource_")
+			or name == "script"
+		):
 			continue
 		var held: Variant = event.get(name)
 		if held == ClassDB.class_get_property_default_value(event.get_class(), name):
@@ -764,7 +785,7 @@ func _describe_input_event(event: InputEvent) -> Dictionary:
 ## different per object. None of it is invented: every field is left out when there is nothing to
 ## put in it, because a key holding "" is a worse answer than a key that is not there.
 func _describe_object(value: Object) -> Dictionary:
-	var described: Dictionary = {"class": value.get_class(), "_type": "Object"}
+	var described: Dictionary = { "class": value.get_class(), "_type": "Object" }
 	# Asked as a Variant and narrowed, because get_script answers one and an object without a
 	# script answers null: casting that to Script is the unsafe cast the engine refuses to compile.
 	var attached: Variant = value.get_script()
@@ -892,7 +913,10 @@ func _build_transform3d(fields: Dictionary) -> Transform3D:
 
 func _build_projection(fields: Dictionary) -> Projection:
 	return Projection(
-		_vector4_at(fields, "x"), _vector4_at(fields, "y"), _vector4_at(fields, "z"), _vector4_at(fields, "w")
+		_vector4_at(fields, "x"),
+		_vector4_at(fields, "y"),
+		_vector4_at(fields, "z"),
+		_vector4_at(fields, "w")
 	)
 
 

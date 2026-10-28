@@ -1,8 +1,7 @@
 @tool
 extends RefCounted
-
-## The two ways a scene keeps its own values for nodes another scene makes: by inheriting that scene,
-## or by instancing it with its children editable.
+## The two ways a scene keeps its own values for nodes another scene makes: by inheriting that
+## scene, or by instancing it with its children editable.
 
 const GdhFileReads = preload("../file_reads.gd")
 const GdhPaths = preload("scene_paths.gd")
@@ -18,11 +17,11 @@ static func taken(scene_path: String) -> Dictionary:
 		"error":
 		(
 			(
-				"%s already exists, and scene_create op=create would replace everything in it. Edit it "
-				+ "with scene_node, or create the scene under another path."
+				"%s already exists, and scene_create op=create would replace everything in it. "
+				+ "Edit it with scene_node, or create the scene under another path."
 			)
 			% scene_path
-		)
+		),
 	}
 
 
@@ -32,12 +31,15 @@ static func inherited(
 	args: Dictionary, scene_path: String, base_path: String, script_path: String
 ) -> Dictionary:
 	if scene_path.is_empty():
-		return {"ok": false, "error": "Missing scenePath"}
+		return { "ok": false, "error": "Missing scenePath" }
 	if args.has("rootNodeType"):
 		return {
 			"ok": false,
 			"error":
-			"inherits takes the root's class from %s, so rootNodeType is not given with it." % base_path
+			(
+				"inherits takes the root's class from %s, so rootNodeType is not given with it."
+				% base_path
+			),
 		}
 	if FileAccess.file_exists(scene_path):
 		return taken(scene_path)
@@ -45,10 +47,10 @@ static func inherited(
 	if not script_path.is_empty():
 		script = load(script_path) as Script
 		if script == null:
-			return {"ok": false, "error": "No script loads from " + script_path}
+			return { "ok": false, "error": "No script loads from " + script_path }
 		var uncompiled: String = GdhSceneFile.uncompiled(script, script_path)
 		if not uncompiled.is_empty():
-			return {"ok": false, "error": uncompiled}
+			return { "ok": false, "error": uncompiled }
 	return inherit(scene_path, base_path, str(args.get("rootNodeName", "")), script)
 
 
@@ -57,17 +59,22 @@ static func inherited(
 ## given. Answers what scene_create answers, or a refusal.
 ##
 ## Written as the text the editor's New Inherited Scene saves rather than packed from an instance of
-## the base: a headless engine making that instance runs every script in the base, and the pack would
-## keep what they set as this scene's own values.
-static func inherit(scene_path: String, base_path: String, root_name: String, script: Script) -> Dictionary:
+## the base: a headless engine making that instance runs every script in the base, and the pack
+## would keep what they set as this scene's own values.
+static func inherit(
+	scene_path: String, base_path: String, root_name: String, script: Script
+) -> Dictionary:
 	var base: Dictionary = GdhFileReads.scene_node(base_path, ".")
 	if not base.get("ok", false):
-		return {"ok": false, "error": "inherits: " + str(base.get("error", "%s holds no nodes" % base_path))}
+		return {
+			"ok": false,
+			"error": "inherits: " + str(base.get("error", "%s holds no nodes" % base_path)),
+		}
 	var root_type: String = str(base["type"])
 	var name: String = str(base["name"]) if root_name.is_empty() else root_name
 	var unfit: String = GdhSceneFile.unfit_name(name)
 	if not unfit.is_empty():
-		return {"ok": false, "error": unfit}
+		return { "ok": false, "error": unfit }
 	if script != null:
 		var extended: String = str(script.get_instance_base_type())
 		if not ClassDB.is_parent_class(root_type, extended):
@@ -77,11 +84,11 @@ static func inherit(scene_path: String, base_path: String, root_name: String, sc
 				(
 					"%s extends %s, so it cannot be on the %s root %s inherits."
 					% [script.resource_path, extended, root_type, base_path]
-				)
+				),
 			}
 	var folder: String = GdhSceneFile.make_folder_for(scene_path)
 	if not folder.is_empty():
-		return {"ok": false, "error": folder}
+		return { "ok": false, "error": folder }
 
 	var lines: PackedStringArray = [
 		'[gd_scene format=3 uid="%s"]' % ResourceUID.id_to_text(ResourceUID.create_id()),
@@ -105,18 +112,24 @@ static func inherit(scene_path: String, base_path: String, root_name: String, sc
 	if file == null or not file.store_string("\n".join(lines) + "\n"):
 		return {
 			"ok": false,
-			"error": "Could not write %s: %s" % [scene_path, error_string(FileAccess.get_open_error())]
+			"error":
+			"Could not write %s: %s" % [scene_path, error_string(FileAccess.get_open_error())],
 		}
 	file.close()
 
-	var loaded: PackedScene = ResourceLoader.load(scene_path, "PackedScene", ResourceLoader.CACHE_MODE_IGNORE)
+	var loaded: PackedScene = ResourceLoader.load(
+		scene_path, "PackedScene", ResourceLoader.CACHE_MODE_IGNORE
+	)
 	var instanced: PackedScene = loaded.get_state().get_node_instance(0) if loaded != null else null
 	if instanced == null or instanced.resource_path != base_path:
 		var _removed: Error = DirAccess.remove_absolute(scene_path)
 		return {
 			"ok": false,
 			"error":
-			"%s did not load back as a scene inheriting %s, so it was removed." % [scene_path, base_path]
+			(
+				"%s did not load back as a scene inheriting %s, so it was removed."
+				% [scene_path, base_path]
+			),
 		}
 	GdhSceneFile.refresh(scene_path)
 	var answer: Dictionary = {
@@ -124,7 +137,7 @@ static func inherit(scene_path: String, base_path: String, root_name: String, sc
 		"scenePath": scene_path,
 		"inherits": base_path,
 		"rootNodeType": root_type,
-		"rootNodeName": name
+		"rootNodeName": name,
 	}
 	var properties: Dictionary = base["properties"]
 	var carried: Variant = script if script != null else properties.get("script")
@@ -139,7 +152,8 @@ static func inherit(scene_path: String, base_path: String, root_name: String, sc
 ## Makes the children of [param node], an instance in [param scene], editable or not, answering why
 ## it cannot or "". With them editable the scene keeps its own values for them, as the editor's
 ## Editable Children does; made not editable again, the values it kept for them are dropped. The
-## caller has had [method GdhSceneFile.foreign] refuse a node inside an instance that is not editable.
+## caller has had [method GdhSceneFile.foreign] refuse a node inside an instance that is not
+## editable.
 static func set_editable(scene: GdhSceneFile, node: Node, editable: bool) -> String:
 	if node.owner == null or node.scene_file_path.is_empty():
 		return (
@@ -161,7 +175,9 @@ static func set_editable(scene: GdhSceneFile, node: Node, editable: bool) -> Str
 ## for a node deleted, they are only named. Answers followed, the scenes rewritten, and
 ## notFollowed, each one left as it was with why, each only when it names any, with what
 ## [param carried] gives.
-static func follow(changed: String, old_path: String, new_path: String, carried: GdhPaths) -> Dictionary:
+static func follow(
+	changed: String, old_path: String, new_path: String, carried: GdhPaths
+) -> Dictionary:
 	var texts: Dictionary = {}
 	_read_scenes("res://", texts)
 	var kin: Array[String] = [changed]
@@ -187,7 +203,7 @@ static func follow(changed: String, old_path: String, new_path: String, carried:
 			moves[old_path] = new_path
 		var read: Dictionary = GdhFileReads.scene_tree(scene_path, -1, false, false)
 		if not read.get("ok", false):
-			not_followed.append({"scenePath": scene_path, "reason": str(read.get("error", ""))})
+			not_followed.append({ "scenePath": scene_path, "reason": str(read.get("error", "")) })
 			continue
 		var tree: Dictionary = read["tree"]
 		_instances_of(tree, changed, old_path, new_path, moves)
@@ -198,28 +214,29 @@ static func follow(changed: String, old_path: String, new_path: String, carried:
 			rewritten = _rewritten(text, moves, old_path.get_base_dir() != new_path.get_base_dir())
 		if rewritten != text:
 			if not unsaved.is_empty():
-				not_followed.append({"scenePath": scene_path, "reason": unsaved})
+				not_followed.append({ "scenePath": scene_path, "reason": unsaved })
 				continue
 			var file: FileAccess = FileAccess.open(scene_path, FileAccess.WRITE)
 			if file == null or not file.store_string(rewritten):
 				not_followed.append(
-					{"scenePath": scene_path, "reason": error_string(FileAccess.get_open_error())}
+					{ "scenePath": scene_path, "reason": error_string(FileAccess.get_open_error()) }
 				)
 				continue
 			file.close()
 			GdhSceneFile.refresh(scene_path)
 			followed.append(scene_path)
 		var holds_paths: bool = text.contains("NodePath(")
-		# A script is only read, for the lines naming the node, so it does not need the file written.
+		# A script is only read, for the lines naming the node, so it does not need the file
+		# written.
 		if moves.is_empty() or not (holds_paths or text.contains('Script"')):
 			continue
 		if holds_paths and not unsaved.is_empty() and not new_path.is_empty():
-			not_followed.append({"scenePath": scene_path, "reason": unsaved})
+			not_followed.append({ "scenePath": scene_path, "reason": unsaved })
 			continue
 		var before: int = carried.retargeted.size()
 		var unwritten: String = carried.carry_into(scene_path, moves)
 		if not unwritten.is_empty() and not followed.has(scene_path):
-			not_followed.append({"scenePath": scene_path, "reason": unwritten})
+			not_followed.append({ "scenePath": scene_path, "reason": unwritten })
 		elif carried.retargeted.size() > before and not followed.has(scene_path):
 			followed.append(scene_path)
 	var answer: Dictionary = carried.answer()
@@ -238,7 +255,9 @@ static func _read_scenes(directory: String, texts: Dictionary) -> void:
 			_read_scenes(directory.path_join(name), texts)
 	for name: String in DirAccess.get_files_at(directory):
 		if name.ends_with(".tscn"):
-			texts[directory.path_join(name)] = FileAccess.get_file_as_string(directory.path_join(name))
+			texts[directory.path_join(name)] = FileAccess.get_file_as_string(
+				directory.path_join(name)
+			)
 
 
 ## Whether the scene at [param scene_path] inherits [param changed], through any number of scenes.
@@ -253,19 +272,22 @@ static func _inherits(scene_path: String, changed: String, texts: Dictionary) ->
 	return false
 
 
-## The scene the root of [param text] inherits, or "": a root entry naming an instance and no parent.
+## The scene the root of [param text] inherits, or "": a root entry naming an instance and no
+## parent.
 static func _base_of(text: String) -> String:
 	for line: String in text.split("\n"):
 		if not line.begins_with("[node "):
 			continue
-		var instanced: RegExMatch = RegEx.create_from_string('instance=ExtResource\\("([^"]+)"\\)').search(
-			line
+		var instanced: RegExMatch = (
+			RegEx.create_from_string('instance=ExtResource\\("([^"]+)"\\)').search(line)
 		)
 		if instanced == null or line.contains(" parent="):
 			return ""
 		var named: RegExMatch = (
 			RegEx
-			. create_from_string('\\[ext_resource [^\\n]*path="([^"]+)" id="%s"\\]' % instanced.get_string(1))
+			. create_from_string(
+				'\\[ext_resource [^\\n]*path="([^"]+)" id="%s"\\]' % instanced.get_string(1)
+			)
 			. search(text)
 		)
 		return named.get_string(1) if named != null else ""
@@ -289,10 +311,11 @@ static func _instances_of(
 
 ## [param text] with every path [param moves] names, and every path below one, moved.
 ##
-## Beside a path the saver writes the unique_ids of the nodes along it, which the loader follows when
-## the path has vanished. A rename leaves those ids as they were; with [param reparented] they run
-## through the old parent, which still exists, so a recovery would find the wrong node. They are left
-## out of each path moved, as a hand-written scene leaves them, and the next save writes them anew.
+## Beside a path the saver writes the unique_ids of the nodes along it, which the loader follows
+## when the path has vanished. A rename leaves those ids as they were; with [param reparented] they
+## run through the old parent, which still exists, so a recovery would find the wrong node. They are
+## left out of each path moved, as a hand-written scene leaves them, and the next save writes them
+## anew.
 static func _rewritten(text: String, moves: Dictionary, reparented: bool) -> String:
 	if moves.is_empty():
 		return text
@@ -314,7 +337,11 @@ static func _rewritten(text: String, moves: Dictionary, reparented: bool) -> Str
 				var placed: String = _attribute_set(
 					line, "parent", "." if moved_parent.is_empty() else moved_parent
 				)
-				line = _without_ids(placed, "parent_id_path") if placed != line and reparented else placed
+				line = (
+					_without_ids(placed, "parent_id_path")
+					if placed != line and reparented
+					else placed
+				)
 			else:
 				line = _attribute_moved(line, "parent", "parent_id_path", moves, reparented)
 		lines[at] = line
@@ -338,8 +365,8 @@ static func _attribute_set(line: String, attribute: String, value: String) -> St
 	return line.substr(0, found.get_start(1)) + value + line.substr(found.get_end(1))
 
 
-## [param line] with the path under [param attribute] moved by [param moves], and, when that moved it
-## and the move was a reparent, without the ids under [param ids] that went along the old path.
+## [param line] with the path under [param attribute] moved by [param moves], and, when that moved
+## it and the move was a reparent, without the ids under [param ids] that went along the old path.
 static func _attribute_moved(
 	line: String, attribute: String, ids: String, moves: Dictionary, reparented: bool
 ) -> String:

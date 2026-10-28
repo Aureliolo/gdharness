@@ -41,7 +41,9 @@ static func compiled(expression: String) -> RegEx:
 # `class_name X extends Y` is one line, so a reader that takes the rest of the line as the name gets
 # `Blade extends Node2D` for the class and never sees the base at all.
 static func declared_class(line: String) -> RegExMatch:
-	return compiled("^class_name\\s+([A-Za-z_][A-Za-z0-9_]*)(?:\\s+extends\\s+(\\S+))?").search(line)
+	return compiled("^class_name\\s+([A-Za-z_][A-Za-z0-9_]*)(?:\\s+extends\\s+(\\S+))?").search(
+		line
+	)
 
 
 # The annotations at the front of a line, in order, written as they are without the leading `@`.
