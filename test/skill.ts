@@ -99,6 +99,7 @@ function testTheReferenceIsTheServersOwnToolList(): void {
       'editor_run',
       'editor_output',
       'editor_status',
+      'editor_rescan',
       'runtime_inspect',
       'runtime_input',
       'runtime_wait',

@@ -2349,6 +2349,13 @@ const PLAYING_STATUS_MS = 1_000;
 const SCAN_SETTLED_MS = 500;
 
 /**
+ * How long an idle editor may take to say so before the time counts as the editor being held up
+ * rather than as a question asked. An idle editor answers in milliseconds, and one past a second
+ * was working through an earlier request on the thread that answers.
+ */
+const SLOW_ANSWER_MS = 1000;
+
+/**
  * How long project_import waits for a reimport by default. Downstream, the editor took 58 s over
  * 211 changed glTF scenes, so the wait is set well past a project of that size.
  */
@@ -3787,7 +3794,7 @@ function engineChecked(why: string): OperationParams {
   return {
     checkedBy: 'engine',
     languageServer: why,
-    note: "No editor of this project is open to ask, so a headless engine compiled the scripts the way loading them does. It reports every error that stops a script compiling, at its line and without a column, but stops reading a script at its first syntax error, so an error after one shows once it is fixed. A second engine reports the warnings, at the levels the project sets, by raising each warning set to warn as an error for that run only, since the engine tells a warning as one only to an editor; each comes at its line without a column, and warnings is null when that engine could not answer. editor_launch with hidden: true opens this project's editor without a window, and its language server reports both with their columns.",
+    note: "No editor of this project is open to ask, so a headless engine compiled the scripts the way loading them does. It reports every error that stops a script compiling, at its line and without a column, but stops reading a script at its first syntax error, so an error after one shows once it is fixed, and so do its warnings, since a script that does not parse is not checked for any. A second engine reports the warnings, at the levels the project sets, by raising each warning set to warn as an error for that run only, since the engine tells a warning as one only to an editor; each comes at its line without a column, and warnings is null when that engine could not answer. editor_launch with hidden: true opens this project's editor without a window, and its language server reports both with their columns.",
   };
 }
 
@@ -5580,6 +5587,21 @@ class GodotServer {
             kept.keeper,
             keptGameRequest(tool, op, args),
             kept.projectPath ?? '',
+          );
+        }
+        // A kept game's console lived in its keeper, which ends with it. The adapter's buffer holds
+        // nothing of that run, so reading it answered no lines, or an earlier played run's.
+        const last = this.activeProcess;
+        if (
+          tool === 'debug_state' &&
+          op === 'output' &&
+          last !== null &&
+          !last.throughEditor &&
+          last.keeper !== undefined
+        ) {
+          return this.createErrorResponse(
+            'The game this server started has ended, and its debugger, which held its console output, ended with it.',
+            ['editor_output reads what the game printed, with the errors and warnings it reported'],
           );
         }
         // The console the adapter buffered outlives the game it came from, so reading it needs
@@ -13938,6 +13960,12 @@ class GodotServer {
     // the editor's previous scan is still to be joined, which makes `scan()` return having done
     // nothing for a frame or more after that scan stops reporting itself.
     let waitedForEditorMs = 0;
+    // The time an idle editor took to say so, busy on its main thread with an earlier request, which
+    // is not time any scan took. Counted against the wait, a scan_status that came back idle after
+    // thirty seconds, behind a request the server had already given up on, spent the whole budget:
+    // the scan this call then started was never looked at, and the answer said it was still going.
+    let answerStalledMs = 0;
+    const deadline = (): number => started + timeoutMs + answerStalledMs;
     // Whether the editor took the request that starts the scan in and did not answer it in time. A
     // hidden editor imports what a scan finds on the thread that answers requests, so a large import
     // holds the answer until it is over; the editor is at work rather than gone, and is waited for.
@@ -13952,7 +13980,15 @@ class GodotServer {
     for (;;) {
       const busySince = Date.now();
       let wasBusy = false;
-      while (Date.now() - started < timeoutMs && (await this.editorIsScanningOrImporting())) {
+      while (Date.now() < deadline()) {
+        const asked = Date.now();
+        if (!(await this.editorIsScanningOrImporting())) {
+          const took = Date.now() - asked;
+          if (took >= SLOW_ANSWER_MS) {
+            answerStalledMs += took;
+          }
+          break;
+        }
         wasBusy = true;
         await new Promise((settle) => setTimeout(settle, 100));
       }
@@ -13977,7 +14013,7 @@ class GodotServer {
       if (duplicated !== undefined) {
         uidsDuplicatedOnDisk = duplicated.map((group) => (Array.isArray(group) ? group.map(String) : []));
       }
-      if (firstAnswer['started'] !== false || Date.now() - started >= timeoutMs) {
+      if (firstAnswer['started'] !== false || Date.now() >= deadline()) {
         break;
       }
       await new Promise((settle) => setTimeout(settle, 100));
@@ -13994,9 +14030,12 @@ class GodotServer {
     // reporting itself, and an editor that has just been told of files starts its own scan a moment
     // later. Answered on the first idle look, a rescan after a large write said it had finished
     // with a changed file still on its old import, and the editor's scan of it began straight after.
+    // Looked at once however late it is, since a scan never looked at is not known to be running.
     let busy = true;
     let idleSince: number | null = null;
-    while (Date.now() - started < timeoutMs) {
+    let looked = false;
+    while (!looked || Date.now() < deadline()) {
+      looked = true;
       await new Promise((settle) => setTimeout(settle, 100));
       let status: OperationParams;
       try {
@@ -14091,6 +14130,7 @@ class GodotServer {
     } = {};
     const reloadedFirst: ReloadedFirst[] = [];
     let builtOn: string | undefined;
+    let builtOnUnchecked = false;
     // A @tool script is refused for the reason reloadDependents gives: it runs inside the editor, and
     // reloading one from inside a call the editor is serving can take the editor down.
     const reloadingSource =
@@ -14117,6 +14157,7 @@ class GodotServer {
             answer = await reloadAsked();
           }
           builtOn = first.said;
+          builtOnUnchecked = first.unchecked === true;
         }
         const methods = readArray(answer, 'methods');
         const listed = (field: string): Record<string, string[]> => {
@@ -14148,6 +14189,7 @@ class GodotServer {
               restored: answer['restored'] === true,
               restoredAs: readString(answer, 'restoredAs') ?? '',
               ...(builtOn === undefined ? {} : { builtOn }),
+              ...(builtOnUnchecked ? { builtOnUnchecked } : {}),
             }),
           };
         } else {
@@ -14189,6 +14231,11 @@ class GodotServer {
         : await this.reloadDependents(projectPath, broughtIn);
     const stillGone = lost.filter((name) => !restored.includes(name));
     const notes: string[] = [];
+    if (answerStalledMs > 0) {
+      notes.push(
+        `The editor took ${(answerStalledMs / 1000).toFixed(1)} seconds to say it was idle, busy on the thread that answers with an earlier request, and that time was added to the wait rather than taken from it.`,
+      );
+    }
     if (busy) {
       notes.push(
         startUnanswered
@@ -14245,6 +14292,7 @@ class GodotServer {
       // How much of that was the editor's own scan or import, finished before this one was asked
       // for, so an answer after a large write says the editor was already at work on it.
       waitedForEditorScanMs: waitedForEditorMs > 0 ? waitedForEditorMs : undefined,
+      waitedForEditorAnswerMs: answerStalledMs > 0 ? answerStalledMs : undefined,
       reloadedAs: reloaded.as,
       ...reloadDifference(reloaded),
       // The whole lists on request. Answered always, a reload of a script holding six hundred
@@ -14417,11 +14465,13 @@ class GodotServer {
 
   /**
    * Which of [param scriptPaths] the editor holds compiled from a text that is not the file's, and
-   * which of those are open with unsaved edits, or null when the editor would not say.
+   * which of those are open with unsaved edits, or why the editor did not say. The why is passed
+   * on rather than logged: answered as nothing held behind, a check that timed out read the same as
+   * a project with nothing wrong.
    */
   private async scriptsHeldBehind(
     scriptPaths: readonly string[],
-  ): Promise<{ behind: string[]; unsaved: string[] } | null> {
+  ): Promise<{ behind: string[]; unsaved: string[] } | { unchecked: string }> {
     if (scriptPaths.length === 0) {
       return { behind: [], unsaved: [] };
     }
@@ -14429,13 +14479,10 @@ class GodotServer {
       const answer = asParams(await this.godotBridge.invokeTool('scripts_behind', { scriptPaths }));
       const behind = readArray(answer, 'behind');
       return behind === undefined
-        ? null
+        ? { unchecked: 'the editor answered without a list of them' }
         : { behind: behind.map(String), unsaved: (readArray(answer, 'unsavedInEditor') ?? []).map(String) };
     } catch (error) {
-      this.logDebug(
-        `The editor would not say which scripts it holds behind their files: ${errorMessage(error)}`,
-      );
-      return null;
+      return { unchecked: `the editor would not say: ${errorMessage(error)}` };
     }
   }
 
@@ -14453,11 +14500,15 @@ class GodotServer {
   private async reloadWhatItIsBuiltOn(
     projectPath: string,
     scriptPath: string,
-  ): Promise<{ reloaded: ReloadedFirst[]; said?: string }> {
+  ): Promise<{ reloaded: ReloadedFirst[]; said?: string; unchecked?: true }> {
     const against = this.scriptsCompiledAgainst(projectPath, scriptPath);
     const held = await this.scriptsHeldBehind(against);
-    if (held === null) {
-      return { reloaded: [] };
+    if ('unchecked' in held) {
+      return {
+        reloaded: [],
+        said: `Whether the editor holds the scripts it is compiled against behind their files could not be checked: ${held.unchecked}.`,
+        unchecked: true,
+      };
     }
     const reloadedFor = scriptPath.startsWith('res://')
       ? scriptPath
@@ -15435,10 +15486,13 @@ class GodotServer {
     const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : '';
     // A class whose file changed is no change to the list, so the rebuild answers it nowhere, and
     // the editor goes on compiling everything naming it against the copy it held before.
-    const listed = projectPath === '' ? null : cachedClasses(projectPath);
+    // Asked only of an editor that answered for its classes: one that did not is said under
+    // classesUnchecked, and would refuse this the same way.
+    const listed = projectPath === '' || checked.unchecked !== undefined ? null : cachedClasses(projectPath);
     const held = listed === null ? null : await this.scriptsHeldBehind([...new Set(listed.values())]);
+    const behindUnchecked = held !== null && 'unchecked' in held ? held.unchecked : undefined;
     const behind =
-      listed === null || held === null
+      listed === null || held === null || 'unchecked' in held
         ? []
         : [...listed]
             .filter(([, path]) => held.behind.includes(path))
@@ -15447,6 +15501,7 @@ class GodotServer {
       checked.unseen.length === 0 &&
       stillHeld.length === 0 &&
       checked.unchecked === undefined &&
+      behindUnchecked === undefined &&
       behind.length === 0
     ) {
       return answered;
@@ -15483,6 +15538,7 @@ class GodotServer {
       stillHeldByEditor: stillHeld.length > 0 ? stillHeld : undefined,
       heldBehindInEditor: behind.length > 0 ? behind : undefined,
       classesUnchecked: checked.unchecked,
+      heldBehindUnchecked: behindUnchecked,
       note: notes.length > 0 ? notes.join(' ') : undefined,
     });
   }

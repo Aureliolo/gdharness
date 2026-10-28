@@ -51,7 +51,7 @@ func reload_script(args: Dictionary) -> Dictionary:
 	var asked: String = str(args.get("scriptPath", ""))
 	if asked.is_empty():
 		return { "ok": false, "error": "scriptPath is required" }
-	var path: String = _spelled_as_on_disk(asked)
+	var path: String = _spelled_as_on_disk(asked, {})
 	if not ResourceLoader.exists(path):
 		return { "ok": false, "error": "No script at " + path }
 
@@ -151,8 +151,9 @@ func scripts_behind(args: Dictionary) -> Dictionary:
 		unsaved = EditorInterface.get_script_editor().get_unsaved_files()
 	var behind: Array[String] = []
 	var edited: Array[String] = []
+	var listings: Dictionary = {}
 	for entry: Variant in asked:
-		var path: String = _spelled_as_on_disk(str(entry))
+		var path: String = _spelled_as_on_disk(str(entry), listings)
 		var script: GDScript = ResourceLoader.get_cached_ref(path) as GDScript
 		if script == null:
 			continue
@@ -196,26 +197,44 @@ func _reread_open_tabs(path: String, answer: Dictionary) -> void:
 ## `res://core/rules.gd`, but the editor holds its copy under the spelling on disk, and a load by
 ## another spelling misses that copy and compiles a new one: reloading that answers with a fresh
 ## compile's members and leaves the copy the editor holds as it was.
-static func _spelled_as_on_disk(path: String) -> String:
+##
+## [param listings] keeps each directory's entries for the length of one call that spells many
+## paths. Listed again for every path, a check of the 416 classes of one project listed a folder of
+## eight hundred files twice per class, and held an editor's main thread for close to a minute on a
+## CI runner, with every request behind it waiting.
+static func _spelled_as_on_disk(path: String, listings: Dictionary) -> String:
 	var local: String = ProjectSettings.localize_path(path)
 	if not local.begins_with("res://"):
 		return local
 	var spelled: String = "res://"
 	for step: String in local.trim_prefix("res://").split("/", false):
-		var listing: DirAccess = DirAccess.open(spelled)
-		if listing == null:
+		if not listings.has(spelled):
+			listings[spelled] = _entries_by_spelling(spelled)
+		var entries: Variant = listings[spelled]
+		if entries == null:
 			return local
-		var found: String = ""
-		for entry: String in listing.get_directories() + listing.get_files():
-			if entry == step:
-				found = entry
-				break
-			if found.is_empty() and entry.nocasecmp_to(step) == 0:
-				found = entry
+		var exact: Dictionary = entries[0]
+		var folded: Dictionary = entries[1]
+		var found: String = step if exact.has(step) else str(folded.get(step.to_lower(), ""))
 		if found.is_empty():
 			return local
 		spelled = spelled.path_join(found)
 	return spelled
+
+
+## The entries of [param directory] by their own spelling and by their spelling in lower case, the
+## first of those that fold together winning, or null for a directory that cannot be opened.
+static func _entries_by_spelling(directory: String) -> Variant:
+	var listing: DirAccess = DirAccess.open(directory)
+	if listing == null:
+		return null
+	var exact: Dictionary = {}
+	var folded: Dictionary = {}
+	for entry: String in listing.get_directories() + listing.get_files():
+		exact[entry] = true
+		if not folded.has(entry.to_lower()):
+			folded[entry.to_lower()] = entry
+	return [exact, folded]
 
 
 func _method_names(script: GDScript) -> Array[String]:

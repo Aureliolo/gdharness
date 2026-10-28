@@ -36,6 +36,8 @@ var _files: GdhFileWalk = GdhFileWalk.new()
 ## script again made the whole-project answer quadratic in the number of scripts.
 var _classes_declared: Dictionary = {}
 var _classes_read: bool = false
+var _uids_declared: Dictionary = {}
+var _uids_read: bool = false
 
 
 func _init(p_log: GdhLog) -> void:
@@ -709,7 +711,7 @@ func _depend(
 
 ## Every autoload the project registers as a global name, with its script. One that is not global
 ## is no name code can use.
-static func autoloads_declared() -> Dictionary:
+func autoloads_declared() -> Dictionary:
 	var autoloads: Dictionary = {}
 	for property: Dictionary in ProjectSettings.get_property_list():
 		var setting: String = str(property.get("name", ""))
@@ -762,19 +764,55 @@ static func classes_used_in(content: String, classes: Dictionary) -> Array[Strin
 	return used
 
 
-# [param written] as the res:// path the engine would load from [param from]: a uid:// by what the
-# project's uid cache says it names, and a relative path against the referring file's directory.
-# Both were passed over as not being res:// paths, so a script's `preload("sibling.gd")` was no
-# dependency at all.
-static func _resolved(written: String, from: String) -> String:
+# [param written] as the res:// path the engine would load from [param from]: a uid:// by the file
+# it names, and a relative path against the referring file's directory. Both were passed over as not
+# being res:// paths, so a script's `preload("sibling.gd")` was no dependency at all.
+func _resolved(written: String, from: String) -> String:
 	if written.begins_with("res://"):
 		return written
 	if written.begins_with("uid://"):
-		var id: int = ResourceUID.text_to_id(written)
-		return ResourceUID.get_id_path(id) if ResourceUID.has_id(id) else written
+		var found: String = _uid_path(written)
+		return written if found.is_empty() else found
 	if written.contains("://"):
 		return written
 	return from.get_base_dir().path_join(written).simplify_path()
+
+
+# The file the uid:// [param text] names, or empty when nothing does: the engine's uid cache first,
+# then the uids the project's files declare. Only an import writes the cache, so on a fresh clone
+# every uid was answered as naming no file, and a scene moved outside the editor was missing under
+# its old path, although the first import loads it by its uid. A cached path with no file there
+# gives way to a file declaring the uid, and is the answer when none does.
+func _uid_path(text: String) -> String:
+	var id: int = ResourceUID.text_to_id(text)
+	if id == ResourceUID.INVALID_ID:
+		return ""
+	var cached: String = ResourceUID.get_id_path(id) if ResourceUID.has_id(id) else ""
+	if FileAccess.file_exists(cached):
+		return cached
+	return str(_files_by_uid().get(id, cached))
+
+
+# Every file of the project that declares a uid, by its uid's id: in a .uid sidecar, an import
+# sidecar or the header of a text resource, as GdhResourceFiles reads them. Read once for the call,
+# the first time the cache does not know a uid.
+func _files_by_uid() -> Dictionary:
+	if _uids_read:
+		return _uids_declared
+	_uids_read = true
+	var declaring: Dictionary = {}
+	for file: String in _files.find_files_with_extensions(
+		"res://", ["uid", "import"] + GdhResourceFiles.TEXT_RESOURCE_KINDS
+	):
+		var sidecar: bool = file.get_extension() in ["uid", "import"]
+		declaring[file.get_basename() if sidecar else file] = true
+	for file: String in declaring:
+		if not FileAccess.file_exists(file):
+			continue
+		var id: int = ResourceUID.text_to_id(str(GdhResourceFiles.uid_of(file).get("uid", "")))
+		if id != ResourceUID.INVALID_ID:
+			_uids_declared[id] = file
+	return _uids_declared
 
 
 # The ext_resource paths in [param content] whose uid leads elsewhere, each with the file the uid
@@ -782,7 +820,7 @@ static func _resolved(written: String, from: String) -> String:
 # says, so a file moved outside the editor still loads, and the walk called it missing; every
 # pattern reads the old path, the bare res:// one included, so the paths are mapped before any of
 # them runs.
-static func _moved_by_uid(content: String) -> Dictionary:
+func _moved_by_uid(content: String) -> Dictionary:
 	var moved: Dictionary = {}
 	for line: RegExMatch in GdhPatterns.compiled("\\[ext_resource[^\\]]*\\]").search_all(content):
 		var found: String = _loaded_by_uid(line.get_string())
@@ -795,7 +833,7 @@ static func _moved_by_uid(content: String) -> Dictionary:
 # The ext_resource paths in [param content], read from [param from], whose uid names no file the
 # project has, each with that uid. The engine warns that the uid is invalid and loads the path, and
 # the walk followed the path saying nothing, so an export was the first to mention it.
-static func _unknown_uids(content: String, from: String) -> Dictionary:
+func _unknown_uids(content: String, from: String) -> Dictionary:
 	var unknown: Dictionary = {}
 	for line: RegExMatch in GdhPatterns.compiled("\\[ext_resource[^\\]]*\\]").search_all(content):
 		var uid: String = _unknown_uid_of(line.get_string())
@@ -806,21 +844,18 @@ static func _unknown_uids(content: String, from: String) -> Dictionary:
 
 
 # The uid an ext_resource [param entry] carries when it names no file the project has, or empty.
-static func _unknown_uid_of(entry: String) -> String:
+func _unknown_uid_of(entry: String) -> String:
 	var uid: RegExMatch = GdhPatterns.compiled('uid="(uid://[^"]+)"').search(entry)
 	return "" if uid == null or not _loaded_by_uid(entry).is_empty() else uid.get_string(1)
 
 
 # The file an ext_resource [param entry] is loaded from by its uid, or empty when it carries none
 # the project knows, and the engine falls back to the path.
-static func _loaded_by_uid(entry: String) -> String:
+func _loaded_by_uid(entry: String) -> String:
 	var uid: RegExMatch = GdhPatterns.compiled('uid="(uid://[^"]+)"').search(entry)
 	if uid == null:
 		return ""
-	var id: int = ResourceUID.text_to_id(uid.get_string(1))
-	if id == ResourceUID.INVALID_ID or not ResourceUID.has_id(id):
-		return ""
-	var found: String = ResourceUID.get_id_path(id)
+	var found: String = _uid_path(uid.get_string(1))
 	return found if FileAccess.file_exists(found) else ""
 
 

@@ -885,6 +885,8 @@ export interface FailedReload {
    * once that was asked, in place of the advice to find such a class by reading the errors.
    */
   readonly builtOn?: string;
+  /** Set when the editor would not say, which leaves the advice as the one way to find such a class. */
+  readonly builtOnUnchecked?: boolean;
 }
 
 /** A script reloaded ahead of one that failed to compile against the copy of it the editor held. */
@@ -970,12 +972,14 @@ export function failedReloadNote(failed: FailedReload): string {
   } else {
     copy = `The copy the editor holds was compiled again from the text it was built from and changed even so${lost.length === 0 ? '' : `, and has lost ${lost.join(', ')}`}: anything diagnosed against it now is answered from what is left, and reloading it once it compiles rebuilds it.`;
   }
+  const advice =
+    failed.names.length === 0
+      ? ''
+      : ` If they deny a member of ${failed.names.join(' or ')} that its file declares, the editor's copy of that class is behind: reload that class first with reloadScript and then this script, the order that cleared it in the one project that has met this.`;
   const order =
-    failed.builtOn !== undefined
-      ? ` ${failed.builtOn}`
-      : failed.names.length === 0
-        ? ''
-        : ` If they deny a member of ${failed.names.join(' or ')} that its file declares, the editor's copy of that class is behind: reload that class first with reloadScript and then this script, the order that cleared it in the one project that has met this.`;
+    failed.builtOn === undefined
+      ? advice
+      : ` ${failed.builtOn}${failed.builtOnUnchecked === true ? advice : ''}`;
   return (
     `${failed.script} did not compile: Godot answered ${answered}. ${copy} ` +
     `script_diagnostics on it gives the errors.${order}`

@@ -491,6 +491,8 @@ the list a running editor already loaded, so a class it cannot resolve stays unr
 rebuild still answers `added: []`. Any such class comes back under `unseenByEditor`, and
 `classesUnchecked` says so when the editor would not answer, because a check that goes quiet on
 failure reads exactly like a clean project. `editor_rescan` reports the same two after its scan.
+A class the editor holds compiled from an older text of its file comes back under
+`heldBehindInEditor`, and `heldBehindUnchecked` says why when the editor would not say.
 
 The scan also writes `.godot/global_script_class_cache.cfg` from the list the editor is holding,
 so that file follows the editor rather than the project: a class the editor cannot resolve is one

@@ -312,16 +312,25 @@ static func _bare(word: String) -> String:
 	return word.to_lower().replace("_", "").replace(" ", "")
 
 
-## The signals [param object] has that a caller can connect, its own class's first: the engine
-## lists them from Object down, which puts a Button's pressed after thirty a Control has, and names
-## starting with an underscore are the engine's own.
+## The signals [param object] has that a caller can connect, its own class's first: its script's,
+## as declared, then the engine's from the class down to Object. The engine lists its own from
+## Object down, which puts a Button's pressed after thirty a Control has, and its script's ahead of
+## those, so reversing the whole list put a game's own two signals after twenty-four of the
+## engine's. Names starting with an underscore are the engine's own.
 static func signals_of(object: Object) -> Array:
+	var declared: Array = []
+	var script: Script = object.get_script()
+	if script != null:
+		for entry: Dictionary in script.get_script_signal_list():
+			var name: String = str(entry["name"])
+			if not name.begins_with("_") and not name in declared:
+				declared.append(name)
 	var names: Array = []
 	for entry: Dictionary in object.get_signal_list():
 		var name: String = str(entry["name"])
-		if not name.begins_with("_"):
+		if not name.begins_with("_") and not name in declared:
 			names.push_front(name)
-	return names
+	return declared + names
 
 
 ## [param word] after the article it takes, "an AnimationTree" or "a Node2D".

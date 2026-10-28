@@ -3196,6 +3196,119 @@ function testAReferenceIsMissingOnlyWhereTheEngineMissesIt(godotPath: string, _p
 }
 
 /**
+ * A uid is followed to the file declaring it before the project has been imported, as on a fresh
+ * clone or a CI checkout, where the engine has no uid cache until its first import.
+ *
+ * The walk asked only the cache, so every uid named no file: a scene moved outside the editor was
+ * missing under its old path with its uid called unknown, which is wrong for every project that
+ * has not been opened yet. Each place a file declares its uid is used once: a scene's header, a
+ * script's .uid sidecar and an image's import sidecar.
+ */
+function testAUidIsFollowedBeforeAnyImport(godotPath: string, _projectDir: string): void {
+  const dir = createProject(godotPath);
+  const operation = (name: string, params: unknown): unknown => runOperation(godotPath, dir, name, params);
+  try {
+    mkdirSync(join(dir, 'items'));
+    writeFileSync(
+      join(dir, 'items', 'chest.tscn'),
+      '[gd_scene format=3 uid="uid://bm0v3dch3st"]\n\n[node name="Chest" type="Node"]\n',
+    );
+    writeFileSync(
+      join(dir, 'hall.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" uid="uid://bm0v3dch3st" path="res://old/chest.tscn" id="1_chest"]\n\n[node name="Hall" type="Node"]\n\n[node name="Chest" parent="." instance=ExtResource("1_chest")]\n',
+    );
+    writeFileSync(join(dir, 'coin.gd'), 'extends Node\n');
+    writeFileSync(join(dir, 'coin.gd.uid'), 'uid://c01ns1d3c4r\n');
+    writeFileSync(join(dir, 'badge.png'), 'not read as an image here\n');
+    writeFileSync(
+      join(dir, 'badge.png.import'),
+      '[remap]\n\nimporter="texture"\ntype="CompressedTexture2D"\nuid="uid://b4dg3s1d3c4r"\n',
+    );
+    writeFileSync(
+      join(dir, 'bank.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tprint(load("uid://c01ns1d3c4r"), load("uid://b4dg3s1d3c4r"))\n',
+    );
+
+    const hall = operation('get_dependencies', { resource_path: 'res://hall.tscn' });
+    assert.deepEqual(
+      [
+        asArray(get(hall, 'dependencies', 'res://hall.tscn')).map((dep) => [
+          get(dep, 'path'),
+          get(dep, 'exists'),
+          get(dep, 'stale_path'),
+          get(dep, 'unknown_uid'),
+        ]),
+        get(hall, 'summary', 'missing'),
+      ],
+      [[['res://items/chest.tscn', true, 'res://old/chest.tscn', undefined]], []],
+      `the scene's uid leads to the file whose header declares it: ${JSON.stringify(hall)}`,
+    );
+    const old = operation('find_resource_usages', { resource_path: 'res://old/chest.tscn' });
+    assert.deepEqual(
+      asArray(get(old, 'usages')).map((usage) =>
+        asArray(get(usage, 'references')).map((reference) => [
+          get(usage, 'file'),
+          get(reference, 'kind'),
+          get(reference, 'loads'),
+        ]),
+      ),
+      [[['res://hall.tscn', 'stale_path', 'res://items/chest.tscn']]],
+      `asked what uses the old path, the line loads the moved scene: ${JSON.stringify(old)}`,
+    );
+    const bank = operation('get_dependencies', { resource_path: 'res://bank.gd' });
+    assert.deepEqual(
+      [
+        asArray(get(bank, 'dependencies', 'res://bank.gd')).map((dep) => [
+          get(dep, 'path'),
+          get(dep, 'exists'),
+        ]),
+        get(bank, 'summary', 'missing'),
+      ],
+      [
+        [
+          ['res://coin.gd', true],
+          ['res://badge.png', true],
+        ],
+        [],
+      ],
+      `a load by uid reaches the files their sidecars declare it for: ${JSON.stringify(bank)}`,
+    );
+    assert.ok(
+      !existsSync(join(dir, '.godot', 'uid_cache.bin')),
+      'the operations ran on a project the engine has never imported',
+    );
+
+    // Imported, then moved with its sidecar: the cache names a path with no file, and the file
+    // declaring the uid is where the next import puts it.
+    const run = spawnSyncHidden(godotPath, ['--headless', '--path', dir, '--import'], {
+      encoding: 'utf8',
+      timeout: 180_000,
+    });
+    assert.equal(run.status, 0, `the project should import: ${run.stdout}\n${run.stderr}`);
+    assert.ok(existsSync(join(dir, '.godot', 'uid_cache.bin')), 'the import writes the uid cache');
+    mkdirSync(join(dir, 'moved'));
+    for (const name of ['coin.gd', 'coin.gd.uid']) {
+      writeFileSync(join(dir, 'moved', name), readFileSync(join(dir, name)));
+      rmSync(join(dir, name));
+    }
+    const movedBank = operation('get_dependencies', { resource_path: 'res://bank.gd' });
+    assert.deepEqual(
+      asArray(get(movedBank, 'dependencies', 'res://bank.gd')).map((dep) => [
+        get(dep, 'path'),
+        get(dep, 'exists'),
+      ]),
+      [
+        ['res://moved/coin.gd', true],
+        ['res://badge.png', true],
+      ],
+      `a cached path with no file gives way to the file declaring the uid: ${JSON.stringify(movedBank)}`,
+    );
+  } finally {
+    sweep(dir);
+  }
+}
+
+/**
  * An import is judged by content: what it built is there, its source is the one it recorded, and a
  * scene depends on every image it names.
  *
@@ -5426,6 +5539,7 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   gdignore: testAGdignoreStopsTheWalk,
   importJudged: testAnImportIsJudgedByWhatItWasBuiltFrom,
   referencesMissing: testAReferenceIsMissingOnlyWhereTheEngineMissesIt,
+  uidBeforeImport: testAUidIsFollowedBeforeAnyImport,
   autoloadUses: (godotPath) => {
     testAnAutoloadIsUsedByItsName(godotPath);
   },

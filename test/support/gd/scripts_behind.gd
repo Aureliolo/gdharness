@@ -11,6 +11,8 @@ const GdhClassTools = preload("res://addons/gdharness_editor/tools/class_tools.g
 const HELD: String = "res://behind_held.gd"
 const SAME: String = "res://behind_same.gd"
 const NEVER: String = "res://behind_never.gd"
+const CROWD: String = "res://behind_crowd"
+const CROWD_SIZE: int = 40
 const GOOD: String = "extends RefCounted\n\nconst REFUSED: int = 1\n"
 
 var failures: Array[String] = []
@@ -41,12 +43,40 @@ func _initialize() -> void:
 	tools.free()
 	for path: String in [HELD, SAME, NEVER]:
 		var _removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	_spelled_listing_each_directory_once()
 	if failures.is_empty():
 		print(JSON.stringify({ "ok": true }))
 		quit(0)
 		return
 	printerr("\n".join(failures))
 	quit(1)
+
+
+## Every path of a check is spelled from one listing of each directory it passes through. Listed per
+## path, a check of a project's 416 classes held an editor's main thread for close to a minute.
+func _spelled_listing_each_directory_once() -> void:
+	Checked.done(
+		DirAccess.make_dir_absolute(ProjectSettings.globalize_path(CROWD)),
+		"making " + CROWD,
+	)
+	var paths: Array[String] = []
+	for index: int in CROWD_SIZE:
+		paths.append(CROWD.path_join("filler_%d.gd" % index))
+		_write(paths[index], GOOD)
+	var listings: Dictionary = {}
+	for path: String in paths:
+		var spelled: String = GdhClassTools._spelled_as_on_disk(path, listings)
+		if spelled != path:
+			_fail("a path spelled as on disk is answered as given: %s for %s" % [spelled, path])
+	var other_case: String = "res://Behind_Crowd/FILLER_7.gd"
+	var mixed: String = GdhClassTools._spelled_as_on_disk(other_case, listings)
+	if mixed != CROWD.path_join("filler_7.gd"):
+		_fail("a path in another case is answered as the files spell it: %s" % mixed)
+	if listings.keys() != ["res://", CROWD]:
+		_fail("each directory is listed once for the whole check: %s" % [listings.keys()])
+	for path: String in paths:
+		var _removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	var _gone: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(CROWD))
 
 
 func _write(path: String, source: String) -> void:

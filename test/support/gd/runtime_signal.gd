@@ -91,6 +91,27 @@ func _check_signal() -> void:
 	if unknown.get("type") != "error":
 		_fail("a signal the node does not have is refused: %s" % str(unknown))
 
+	# Offered every signal when none is near, a script's own come first, as declared: the reversed
+	# engine list put them after everything the engine gives the node.
+	var declaring: GDScript = GDScript.new()
+	declaring.source_code = (
+		"extends Timer\n\n@warning_ignore('unused_signal')\nsignal hit(damage: int)\n"
+		+ "@warning_ignore('unused_signal')\nsignal died\n"
+	)
+	Checked.done(declaring.reload(), "compiling the declaring script")
+	var scripted: Timer = Timer.new()
+	scripted.name = "Scripted"
+	scripted.set_script(declaring)
+	root.add_child(scripted)
+	var offered: Dictionary = await node._execute_command(
+		"wait_signal", { "path": "/root/Scripted", "signal": "qwxz" }
+	)
+	if not str(offered.get("message", "")).begins_with(
+		"/root/Scripted has no signal qwxz; it has hit, died, timeout, "
+	):
+		_fail("a script's own signals are offered first, then its class's: %s" % str(offered))
+	scripted.queue_free()
+
 	# A game's own signal can carry more than any engine one. The handler took five, a sixth was
 	# never delivered, and the wait ran out saying the signal had not fired.
 	timer.add_user_signal(
