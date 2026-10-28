@@ -4462,22 +4462,57 @@ function testAFamilySaysWhatTheProjectSets(godotPath: string): void {
 }
 
 /**
- * Validation reads at most a hundred scripts, and says so with the count it read and the count there
- * are. It counted the one past the limit before stopping and answered 101.
+ * Validation reads every script for TODO and FIXME comments, as health does, and a load written in
+ * a string that runs across lines is text, not a missing file.
+ *
+ * Cut at a hundred, the count sat beside a compile check of every script and read as how many
+ * compiled. A test suite template's example `load("res://folder/my_class.gd")` made a game's
+ * validation fail.
  */
-function testValidationSaysHowMuchItRead(godotPath: string): void {
+function testValidationReadsEveryScript(godotPath: string): void {
   const dir = createProject(godotPath);
+  const noted = (validated: unknown): unknown =>
+    get(
+      asArray(get(validated, 'warnings')).find((warning) => get(warning, 'check') === 'scripts'),
+      'message',
+    );
   try {
+    const before = /^\d+/.exec(asString(noted(runOperation(godotPath, dir, 'validate_project', {}))))?.[0];
     mkdirSync(join(dir, 'many'));
-    // Past the limit by these alone: validation passes over installed addons, so the fixture's own
-    // scripts count for nothing.
     for (let index = 0; index < 110; index++) {
-      writeFileSync(join(dir, 'many', `s${index}.gd`), 'extends Node\n');
+      writeFileSync(join(dir, 'many', `s${index}.gd`), 'extends Node\n\n# TODO: one each\n');
     }
+    writeFileSync(
+      join(dir, 'many', 'template.gd'),
+      [
+        'extends Node',
+        '',
+        'const SHOWN := """',
+        '\tvar my_script := load("res://folder/shown_only.gd")',
+        '"""',
+        "const ALSO := '''",
+        '\tload("res://folder/also_shown.gd")',
+        "'''",
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tprint(SHOWN, ALSO, load("res://folder/really_missing.gd"))',
+        '',
+      ].join('\n'),
+    );
     const validated = runOperation(godotPath, dir, 'validate_project', {});
     const total = asNumber(get(validated, 'scripts_total'));
-    assert.ok(total > 100, `the project should hold more than the limit: ${total}`);
-    assert.equal(get(validated, 'scripts_checked'), 100, JSON.stringify(validated));
+    assert.ok(total > 111, `the fixture's scripts and these: ${total}`);
+    assert.equal(get(validated, 'scripts_checked'), total, JSON.stringify(validated));
+    assert.equal(noted(validated), `${Number(before) + 110} script issues found`, JSON.stringify(validated));
+    const missing = asArray(get(validated, 'issues'))
+      .filter((issue) => get(issue, 'check') === 'references')
+      .map((issue) => asString(get(issue, 'message')));
+    assert.deepEqual(
+      missing.map((message) => /res:\/\/folder\/\w+\.gd/.exec(message)?.[0]),
+      ['res://folder/really_missing.gd'],
+      `only the load in code: ${JSON.stringify(missing)}`,
+    );
   } finally {
     sweep(dir);
   }
@@ -5592,7 +5627,7 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
     testTheImporterIsAskedFirst(godotPath);
   },
   validationCounts: (godotPath) => {
-    testValidationSaysHowMuchItRead(godotPath);
+    testValidationReadsEveryScript(godotPath);
   },
   connectionsReached: (godotPath) => {
     testAConnectionNamesWhatItReaches(godotPath);

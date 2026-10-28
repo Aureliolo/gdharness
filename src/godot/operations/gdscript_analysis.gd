@@ -131,7 +131,7 @@ func _members(
 		# Inside a string the raw line is counted, because a `#` in it is text and taking it for a
 		# comment would cut off the quotes that close the string.
 		if in_multiline_string:
-			if _triple_quotes(raw) % 2 == 1:
+			if GdhPatterns.triple_quotes(raw) % 2 == 1:
 				in_multiline_string = false
 			continue
 		# A `##` block documents what it sits directly above: the class when that is its class_name
@@ -165,7 +165,7 @@ func _members(
 		# it opened on. Toggling on any count lost `const HELP := """Usage"""`, and everything after
 		# it up to the next triple quote, with the state inverted from there to the end of the file.
 		# The line that opens one is still read: it can be the declaration the string belongs to.
-		if _triple_quotes(stripped) % 2 == 1:
+		if GdhPatterns.triple_quotes(stripped) % 2 == 1:
 			in_multiline_string = true
 
 		# Only a line at this body's own margin declares one of its members. Deeper, it is a
@@ -207,7 +207,7 @@ func _members(
 			while i + 1 < lines.size():
 				i += 1
 				stripped += "\n" + lines[i]
-				if _triple_quotes(lines[i]) % 2 == 1:
+				if GdhPatterns.triple_quotes(lines[i]) % 2 == 1:
 					break
 			in_multiline_string = false
 			header = GdhPatterns.without_annotations(stripped)
@@ -821,13 +821,8 @@ func _collect_dependencies(line: String, into: Array[String]) -> void:
 			into.append(dep)
 
 
-# How many triple quotes of either kind [param line] holds.
 static func _declares_variable(header: String) -> bool:
 	return header.begins_with("var ") or header.begins_with("static var ")
-
-
-static func _triple_quotes(line: String) -> int:
-	return line.count('"""') + line.count("'''")
 
 
 func _extract_dependencies(line: String) -> Array[String]:

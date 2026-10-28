@@ -160,8 +160,22 @@ func missing_references() -> Array[Dictionary]:
 func _loaded_and_missing(script: String) -> Array[String]:
 	var loaded: Array[String] = []
 	var named: Dictionary = {}
+	# A string running across lines is text, and read as code its lines were calls: a test suite
+	# template showing `load("res://folder/my_class.gd")` as an example made the project invalid.
+	var in_string: bool = false
 	for line: String in FileAccess.get_file_as_string(script).split("\n"):
+		if in_string:
+			if GdhPatterns.triple_quotes(line) % 2 == 1:
+				in_string = false
+			continue
 		var code: String = GdhPatterns.without_comment(line)
+		if GdhPatterns.triple_quotes(code) % 2 == 1:
+			in_string = true
+			var opened: int = code.find('"""')
+			var apostrophes: int = code.find("'''")
+			if opened < 0 or (apostrophes >= 0 and apostrophes < opened):
+				opened = apostrophes
+			code = code.substr(0, opened)
 		if not code.contains("load("):
 			for literal: String in _string_literals(code):
 				named[_resolved(literal, script)] = true
