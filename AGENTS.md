@@ -19,7 +19,8 @@
 | `bun run test:engine`, `bun run test:editor`              | The engine and editor legs; need a real Godot.                                                                                                                  |
 
 Set up with `bun install`, `bun scripts/install-gdstyle.ts` and `uv sync --locked`. The second puts
-the pinned gdstyle in the temp directory, where the GDScript gates look for it, and the third puts
+the pinned gdstyle in `tools` under gdharness's cache folder (the one the engine slots sit beside),
+where the GDScript gates look for it, and the third puts
 the pinned yamllint in `.venv`, which `uv run` uses in preference to any copy on `PATH`.
 `gdstyle.toml` is the lane's, copied byte for byte: a change to it is made in the lane first.
 
@@ -27,8 +28,9 @@ Build before running a suite, because the suites start servers from the bundle. 
 need `GODOT_PATH`, and the gdUnit fixture needs `GDUNIT4_PATH`; without them those cases skip and say
 so, and `GDHARNESS_REQUIRE_GODOT=1` turns those skips into failures, as the engine legs set it.
 Windowed regressions skip unless `GDHARNESS_ALLOW_WINDOWS` is set. `bun scripts/install-godot.ts`
-and `bun scripts/install-gdunit4.ts` fetch the pinned versions into the temp directory and print
-where they landed.
+and `bun scripts/install-gdunit4.ts` fetch the pinned versions there too and print where they
+landed. CI keeps them in the runner's temporary folder; anywhere else a temporary folder is swept,
+and a pinned engine kept in one vanished from under every session pointing `GODOT_PATH` at it.
 
 The server speaks the 2026-07-28 protocol only, as Claude Code does: `ServerProcess` opens with
 `server/discover` and puts the envelope on every request. A 2025 `initialize` is answered with the
