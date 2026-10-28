@@ -52323,6 +52323,12 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
     join(project, 'shop.gd'),
     'class_name Shop\nextends Resource\n\n@export var items: Array[Item] = []\n',
   );
+  writeFileSync(
+    join(project, 'stats.gd'),
+    'class_name Stats\nextends Resource\n\n@export var health: int = 10:\n\tset(value):\n\t\thealth = value\n' +
+      '\t\tlabel = "hp %d" % value\n\n@export var label: String = ""\n@export var tags: Array[String] = []\n\n\n' +
+      'func _init() -> void:\n\ttags = ["base"]\n',
+  );
   const server = new ServerProcess({
     env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
   });
@@ -52401,6 +52407,44 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
       [get(plain, 'resourceType'), get(plain, 'script'), get(plain, 'scriptClass')],
       ['Resource', 'res://item.gd', 'Item'],
       `given by its script, the class is named too: ${JSON.stringify(plain)}`,
+    );
+    // What stats.gd's setter and _init set is put back before the save, so neither a write's answer
+    // nor a read gives it as something the file holds.
+    const setNote =
+      "res://grunt.tres's script is not a tool, so it ran in the headless engine that wrote the file, and set label as it did. The file does not hold it, as a save from the editor, where the script does not run, would not; the script sets it again when it runs in the game.";
+    for (const args of [
+      { op: 'create', resourcePath: 'res://grunt.tres', resourceType: 'Stats', properties: { health: 5 } },
+      { op: 'modify', resourcePath: 'res://grunt.tres', properties: { health: 9 } },
+    ]) {
+      const wrote = await answered(args);
+      assert.deepEqual(
+        [
+          get(wrote, 'alsoChanged'),
+          Object.keys(asObject(get(wrote, 'setByScript') ?? {})),
+          get(wrote, 'setByScriptNote'),
+        ],
+        [undefined, ['label'], setNote],
+        `${args.op}: ${JSON.stringify(wrote)}`,
+      );
+    }
+    assert.doesNotMatch(readFileSync(join(project, 'grunt.tres'), 'utf8'), /label|tags/);
+    const grunt = await answered({ op: 'read', resourcePath: 'res://grunt.tres' });
+    assert.deepEqual(
+      get(grunt, 'properties'),
+      { health: 9 },
+      `a read gives what the file sets: ${JSON.stringify(grunt)}`,
+    );
+    writeFileSync(
+      join(project, 'camp.tres'),
+      '[gd_resource type="Resource" format=3]\n\n[ext_resource type="Script" path="res://stats.gd" id="1_stats"]\n\n' +
+        '[sub_resource type="Resource" id="Stats_guard"]\nscript = ExtResource("1_stats")\nhealth = 3\n\n' +
+        '[resource]\nmetadata/guard = SubResource("Stats_guard")\n',
+    );
+    const guard = await answered({ op: 'read', resourcePath: 'res://camp.tres::Stats_guard' });
+    assert.deepEqual(
+      get(guard, 'properties'),
+      { health: 3 },
+      `and so does a read of one kept inside a file: ${JSON.stringify(guard)}`,
     );
     const physics = await answered({
       op: 'create',

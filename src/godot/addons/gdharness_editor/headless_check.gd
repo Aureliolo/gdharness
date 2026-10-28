@@ -505,6 +505,35 @@ static func setter_ran(object: Object, property: String, refused: String) -> Str
 	)
 
 
+## Moves out of alsoChanged in [param answer] each of [param names], what a headless write put back
+## as the doing of the script of [param owner], which is not a tool, to setByScript, with a note
+## saying why the file does not hold it.
+static func move_script_set(answer: Dictionary, names: Array, owner: String) -> void:
+	if not answer.has("alsoChanged"):
+		return
+	var changed: Dictionary = answer["alsoChanged"]
+	var by_script: Dictionary = {}
+	for key: Variant in names:
+		if changed.has(key):
+			by_script[key] = changed[key]
+			var _erased: bool = changed.erase(key)
+	if by_script.is_empty():
+		return
+	if changed.is_empty():
+		var _dropped: bool = answer.erase("alsoChanged")
+	answer["setByScript"] = by_script
+	var listed: Array = by_script.keys()
+	var pronoun: String = "it" if listed.size() == 1 else "them"
+	answer["setByScriptNote"] = (
+		(
+			"%s's script is not a tool, so it ran in the headless engine that wrote the file, and set %s "
+			+ "as it did. The file does not hold %s, as a save from the editor, where the script does not "
+			+ "run, would not; the script sets %s again when it runs in the game."
+		)
+		% [owner, ", ".join(listed), pronoun, pronoun]
+	)
+
+
 ## Why [param name] on [param what] cannot be saved as the file held it.
 static func unasked(what: String, name: String, why: String = "") -> String:
 	return (

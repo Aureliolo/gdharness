@@ -750,31 +750,10 @@ static func _paths_to(value: Variant, path: String, wanted: Dictionary, seen: Di
 
 
 ## Moves out of alsoChanged in [param answer] what the last write of [param scene] put back on the
-## node with instance id [param id], to setByScript, with a note saying why the file does not hold it.
+## node with instance id [param id], at [param at], to setByScript.
 static func _note_put_back(answer: Dictionary, scene: GdhSceneFile, id: int, at: String) -> void:
 	var restored: Dictionary = scene.restored_by_write.get(id, {})
-	if restored.is_empty() or not answer.has("alsoChanged"):
-		return
-	var changed: Dictionary = answer["alsoChanged"]
-	var by_script: Dictionary = {}
-	for key: Variant in restored:
-		if changed.has(key):
-			by_script[key] = changed[key]
-			var _erased: bool = changed.erase(key)
-	if by_script.is_empty():
-		return
-	if changed.is_empty():
-		var _dropped: bool = answer.erase("alsoChanged")
-	answer["setByScript"] = by_script
-	var names: Array = by_script.keys()
-	answer["setByScriptNote"] = (
-		(
-			"%s's script is not a tool, so it ran in the headless engine that wrote the file, and set %s "
-			+ "as it did. The file does not hold %s, as a save from the editor, where the script does not "
-			+ "run, would not; the script sets %s again when it runs in the game."
-		)
-		% [at, ", ".join(names), "it" if names.size() == 1 else "them", "it" if names.size() == 1 else "them"]
-	)
+	GdhHeadlessCheck.move_script_set(answer, restored.keys(), at)
 
 
 ## Notes under notStored each of [param named] the file saved from [param pack] does not set on the
