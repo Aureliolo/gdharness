@@ -1187,7 +1187,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['read', 'create', 'add_track', 'remove_track', 'set', 'rename', 'remove', 'add_state'],
         description:
-          'The animation in the player. A name before a slash is the library it is in, as moves/walk. read: the one to answer with whole, its tracks a list; without it, read lists them, each with the number of its tracks under tracks. create: a library the player does not have is made in the scene and named under libraryMade. add_state: the one that state plays. One the player does not have yet is written all the same, answering animationFound false and why under animationMissing.',
+          'The animation in the player. A name before a slash is the library it is in, as moves/walk. read: the one to answer with whole, its tracks a list; without it, read lists them, each with the number of its tracks under tracks. create: a library the player does not have is made in the scene and named under libraryMade, where an empty name is the default library of the player, the one a name without a slash is in. add_state: the one that state plays. One the player does not have yet is written all the same, answering animationFound false and why under animationMissing.',
       },
       newName: {
         type: 'string',
