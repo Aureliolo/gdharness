@@ -59820,7 +59820,8 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
  * right after the original, as the editor's Duplicate puts it. A move keeps the node where it is
  * drawn, worked out through a scaled parent, a Control keeping only its position, a parent that is
  * no CanvasItem and so places nothing, top-level nodes left alone, and in 3D, and the file keeps the
- * move on a node whose script is not a tool, without what that script did as it loaded;
+ * move on a node whose script is not a tool, without what that script did as it loaded, which a
+ * set and an add answer under setByScript rather than alsoChanged;
  * keepGlobalTransform false leaves the transform as it was. A set through a resource built into the
  * scene names the other places holding it. A delete names the nodes of this scene that went with it,
  * and not those inside its instances.
@@ -59882,14 +59883,19 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
     'spun.gd': 'extends Node3D\n\n\nfunc _init() -> void:\n\tvisible = false\n',
     'scripted.tscn':
       '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://drawn.gd" id="1_drawn"]\n' +
-      '[ext_resource type="Script" path="res://spun.gd" id="2_spun"]\n\n[node name="Scripted" type="Node"]\n\n' +
+      '[ext_resource type="Script" path="res://spun.gd" id="2_spun"]\n' +
+      '[ext_resource type="Script" path="res://paced.gd" id="3_paced"]\n\n[node name="Scripted" type="Node"]\n\n' +
       '[node name="Flat" type="Node2D" parent="."]\nposition = Vector2(100, 50)\nscale = Vector2(2, 2)\n\n' +
       '[node name="Walker" type="Node2D" parent="Flat"]\nposition = Vector2(5, 5)\nscript = ExtResource("1_drawn")\n\n' +
       '[node name="Card" type="Control" parent="Flat"]\nlayout_mode = 3\noffset_left = 4.0\noffset_top = 4.0\n' +
       'offset_right = 44.0\noffset_bottom = 44.0\nscript = ExtResource("1_drawn")\n\n' +
       '[node name="Deep" type="Node3D" parent="."]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 2, 3)\n\n' +
       '[node name="Grip" type="Node3D" parent="Deep"]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)\n' +
-      'script = ExtResource("2_spun")\n',
+      'script = ExtResource("2_spun")\n\n' +
+      '[node name="Pacer" type="Node2D" parent="."]\nscript = ExtResource("3_paced")\n',
+    'paced.gd':
+      'extends Node2D\n\n@export var speed: float = 100.0:\n\tset(value):\n\t\tspeed = value\n' +
+      '\t\tmodulate = Color(1, 0, 1)\n',
     'shared.tscn':
       '[gd_scene format=3]\n\n[sub_resource type="CircleShape2D" id="Round"]\nradius = 10.0\n\n' +
       '[sub_resource type="CircleShape2D" id="Own"]\nradius = 5.0\n\n' +
@@ -60205,6 +60211,37 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
       assert.match(fileOf('scripted.tscn'), saved, `${path}: ${fileOf('scripted.tscn')}`);
     }
     assert.doesNotMatch(fileOf('scripted.tscn'), /modulate|visible/, fileOf('scripted.tscn'));
+    // What such a script changes as a write runs is put back before the file is saved, so the
+    // answer says so rather than giving it as a change the file holds.
+    const paced = await node({
+      scenePath: 'scripted.tscn',
+      op: 'set',
+      nodePath: 'Pacer',
+      properties: { speed: 400 },
+    });
+    assert.deepEqual(
+      [get(paced, 'alsoChanged'), Object.keys(asObject(get(paced, 'setByScript') ?? {}))],
+      [undefined, ['modulate']],
+      JSON.stringify(paced),
+    );
+    assert.equal(
+      get(paced, 'setByScriptNote'),
+      "Pacer's script is not a tool, so it ran in the headless engine that wrote the file, and set modulate as it did. The file does not hold it, as a save from the editor, where the script does not run, would not; the script sets it again when it runs in the game.",
+    );
+    const spawned = await node({
+      scenePath: 'scripted.tscn',
+      op: 'add',
+      nodeType: 'Node2D',
+      nodeName: 'Spawned',
+      properties: { script: 'res://drawn.gd' },
+    });
+    assert.deepEqual(
+      [get(spawned, 'alsoChanged'), Object.keys(asObject(get(spawned, 'setByScript') ?? {}))],
+      [undefined, ['modulate']],
+      `what _init set on an added node: ${JSON.stringify(spawned)}`,
+    );
+    assert.match(fileOf('scripted.tscn'), /\nspeed = 400\.0\n/, fileOf('scripted.tscn'));
+    assert.doesNotMatch(fileOf('scripted.tscn'), /modulate/, fileOf('scripted.tscn'));
 
     const shared = { scenePath: 'shared.tscn' };
     await node({ ...shared, op: 'duplicate', nodePath: 'Body', newName: 'Body2' });

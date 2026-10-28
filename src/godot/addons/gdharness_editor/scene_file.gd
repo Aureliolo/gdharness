@@ -45,6 +45,10 @@ var root: Node = null
 var path: String = ""
 ## What the last write saved, for its answer to read what the file now stores.
 var written_pack: PackedScene = null
+## The properties a headless write put back on each node the tool changed, by instance id, as a
+## set: what the node's script, which is not a tool, changed as the tool wrote, and the file was
+## not given.
+var restored_by_write: Dictionary = {}
 ## The path of each node a scene this one inherits gives, with the file that makes it.
 var _base_paths: Dictionary = {}
 var _state: SceneState = null
@@ -777,8 +781,10 @@ func _settled(packed: PackedScene) -> Array:
 		for found: Array in moved:
 			var node: Node = found[0]
 			var before: Dictionary = _before[node.get_instance_id()]
+			var restored: Dictionary = restored_by_write.get_or_add(node.get_instance_id(), {})
 			for name: String in found[1]:
 				node.set(name, before.get(name, GdhHeadlessCheck.default_of(node, name)))
+				restored[name] = true
 		current = PackedScene.new()
 		var packing: Error = current.pack(root)
 		if packing != OK:

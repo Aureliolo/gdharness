@@ -318,6 +318,7 @@ func add_node(args: Dictionary) -> Dictionary:
 	_properties.note_write(answer, new_node)
 	if not adding.is_empty():
 		answer.merge(GdhGroups.read_added(new_node, adding))
+	var id: int = new_node.get_instance_id()
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
 			var unkept: String = _kept(
@@ -330,6 +331,7 @@ func add_node(args: Dictionary) -> Dictionary:
 	if not written.is_empty():
 		return written
 
+	_note_put_back(answer, scene, id, new_path)
 	if packed != null:
 		answer["instanceOf"] = instance_path
 	return answer
@@ -668,6 +670,7 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var source: String = scene.values_from(node, old_path)
 	var carried: GdhPaths = GdhPaths.new()
 	var _rewritten: int = carried.carry(scene, {old_path: new_path} if new_path != old_path else {})
+	var id: int = node.get_instance_id()
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
 			var unkept: String = _kept(scene, saved, node, properties.keys())
@@ -689,6 +692,7 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	if not dropped.is_empty():
 		answer["droppedValues"] = dropped["values"]
 		answer["droppedNodes"] = dropped["nodes"]
+	_note_put_back(answer, scene, id, new_path)
 	_note_left_out(answer, scene.written_pack, new_path, named, source)
 	if new_path != old_path:
 		answer.merge(GdhKin.follow(scene_path, old_path, new_path, carried))
@@ -743,6 +747,34 @@ static func _paths_to(value: Variant, path: String, wanted: Dictionary, seen: Di
 		if not property.is_empty() and GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
 			paths.append_array(_paths_to(held.get(property), path + "/" + property, wanted, seen))
 	return paths
+
+
+## Moves out of alsoChanged in [param answer] what the last write of [param scene] put back on the
+## node with instance id [param id], to setByScript, with a note saying why the file does not hold it.
+static func _note_put_back(answer: Dictionary, scene: GdhSceneFile, id: int, at: String) -> void:
+	var restored: Dictionary = scene.restored_by_write.get(id, {})
+	if restored.is_empty() or not answer.has("alsoChanged"):
+		return
+	var changed: Dictionary = answer["alsoChanged"]
+	var by_script: Dictionary = {}
+	for key: Variant in restored:
+		if changed.has(key):
+			by_script[key] = changed[key]
+			var _erased: bool = changed.erase(key)
+	if by_script.is_empty():
+		return
+	if changed.is_empty():
+		var _dropped: bool = answer.erase("alsoChanged")
+	answer["setByScript"] = by_script
+	var names: Array = by_script.keys()
+	answer["setByScriptNote"] = (
+		(
+			"%s's script is not a tool, so it ran in the headless engine that wrote the file, and set %s "
+			+ "as it did. The file does not hold %s, as a save from the editor, where the script does not "
+			+ "run, would not; the script sets %s again when it runs in the game."
+		)
+		% [at, ", ".join(names), "it" if names.size() == 1 else "them", "it" if names.size() == 1 else "them"]
+	)
 
 
 ## Notes under notStored each of [param named] the file saved from [param pack] does not set on the
