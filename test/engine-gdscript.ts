@@ -4738,6 +4738,45 @@ async function testAScriptNamingAnAutoloadCompiles(godotPath: string): Promise<v
       /\nfunc greet\(\) -> void:\n\tprint\(Thing\.hello\(\)\)\n\n\nfunc twice\(\) -> void:\n\tvar n: int = Thing\.hello\(\)\n\n\tprint\(n, n\)\n$/,
       readFileSync(join(dir, 'made.gd'), 'utf8'),
     );
+    // Each level of a body takes the file's own unit, whichever the caller nested it with: the
+    // engine refuses a script indented with spaces in one place and tabs in another.
+    const nested = await runThroughTheServersOwnPath(
+      engine,
+      'modify_script',
+      {
+        scriptPath: 'made.gd',
+        modifications: [{ type: 'add_function', name: 'guarded', body: 'if Thing:\n  print(Thing)' }],
+      },
+      dir,
+    );
+    writeFileSync(
+      join(dir, 'spaced.gd'),
+      'extends Node\n\n\nfunc hurt() -> void:\n    if Thing:\n        pass\n',
+    );
+    const spaced = await runThroughTheServersOwnPath(
+      engine,
+      'modify_script',
+      {
+        scriptPath: 'spaced.gd',
+        modifications: [{ type: 'add_function', name: 'heal', body: 'if Thing:\n\tprint(Thing)\n' }],
+      },
+      dir,
+    );
+    assert.deepEqual(
+      [nested, spaced].map((made) => (made.ok ? get(made.payload, 'parses') : made.message)),
+      [true, true],
+      JSON.stringify([nested, spaced]),
+    );
+    assert.match(
+      readFileSync(join(dir, 'made.gd'), 'utf8'),
+      /\nfunc guarded\(\) -> void:\n\tif Thing:\n\t\tprint\(Thing\)\n$/,
+      readFileSync(join(dir, 'made.gd'), 'utf8'),
+    );
+    assert.match(
+      readFileSync(join(dir, 'spaced.gd'), 'utf8'),
+      /\nfunc heal\(\) -> void:\n {4}if Thing:\n {8}print\(Thing\)\n$/,
+      readFileSync(join(dir, 'spaced.gd'), 'utf8'),
+    );
     const structure = await runThroughTheServersOwnPath(
       engine,
       'get_script_info',

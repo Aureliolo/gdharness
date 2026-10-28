@@ -640,9 +640,24 @@ func _add_function(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 
 	# The body's statements relative to the function, whether or not the caller indented them for
 	# it: a body written with its tab already on came out two levels in. A blank line stays empty,
-	# since an indent alone on it is trailing whitespace to every formatter.
-	for bl: String in body.dedent().split("\n"):
-		func_lines.append("" if bl.strip_edges().is_empty() else "\t" + bl)
+	# since an indent alone on it is trailing whitespace to every formatter. Each level is the
+	# file's own unit, because the engine refuses a file indented with spaces in one place and tabs
+	# in another, so a tab put into a script indented with spaces stopped it parsing.
+	var unit: String = _indent_unit(lines)
+	var body_lines: Array[String] = []
+	body_lines.assign(body.dedent().strip_edges(false, true).split("\n"))
+	var given_unit: String = _indent_unit(body_lines)
+	for bl: String in body_lines:
+		if bl.strip_edges().is_empty():
+			func_lines.append("")
+			continue
+		var stripped: String = bl.lstrip(" \t")
+		var leading: String = bl.substr(0, bl.length() - stripped.length())
+		var levels: int = floori(float(leading.length()) / given_unit.length())
+		if leading != given_unit.repeat(levels):
+			func_lines.append(unit + bl)
+			continue
+		func_lines.append(unit.repeat(levels + 1) + stripped)
 
 	var below: int = _blank_run(lines, insert_line, 1)
 	if insert_line + below < lines.size():
@@ -652,6 +667,21 @@ func _add_function(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 		func_lines.append("")
 
 	return declared_at if _insert(lines, insert_line, func_lines, placed) else -1
+
+
+## One level of indentation in [param lines]: what the first line indented below an unindented
+## line ending a block opens with, or a tab, the engine's default, when no line is.
+static func _indent_unit(lines: Array[String]) -> String:
+	var opener: bool = false
+	for line: String in lines:
+		var stripped: String = line.strip_edges()
+		if stripped.is_empty() or stripped.begins_with("#"):
+			continue
+		var leading: String = line.substr(0, line.length() - line.lstrip(" \t").length())
+		if opener and not leading.is_empty():
+			return leading
+		opener = leading.is_empty() and stripped.ends_with(":")
+	return "\t"
 
 
 # How many blank lines run from [param from] on in the direction of [param step], 1 or -1.

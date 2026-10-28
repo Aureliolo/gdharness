@@ -310,7 +310,7 @@ const SCRIPT_MODIFICATIONS: JsonSchema = {
       body: {
         type: 'string',
         description:
-          'Functions: the body, its lines separated by \\n. Indent shared by every line is taken off and one tab put on, so it can be written indented or not.',
+          "Functions: the body, its lines separated by \\n. Indent shared by every line is taken off, so it can be written indented or not, and each level is written in the script's own indentation, tabs or spaces.",
       },
       varType: {
         type: 'string',
