@@ -108,3 +108,9 @@ static func without_comment(line: String) -> String:
 		if ch == '"' or ch == "'":
 			quote = ch
 	return line.strip_edges()
+
+
+## How many triple quotes of either kind [param line] holds. An odd count opens or closes a string
+## that runs across lines.
+static func triple_quotes(line: String) -> int:
+	return line.count('"""') + line.count("'''")
