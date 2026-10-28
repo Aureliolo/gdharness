@@ -12,10 +12,10 @@ const GdhKin = preload("scene_kin.gd")
 const GdhNavigationBake = preload("navigation_bake.gd")
 const GdhPaths = preload("scene_paths.gd")
 const GdhPlacing = preload("scene_placing.gd")
-const GdhPropertyPaths = preload("../property_paths.gd")
 const GdhPropertyValues = preload("../property_values.gd")
 const GdhSame = preload("../same_values.gd")
 const GdhSceneFile = preload("../scene_file.gd")
+const GdhSceneSharing = preload("scene_sharing.gd")
 const GdhSerialisation = preload("../serialisation.gd")
 const GdhTilesetTools = preload("tileset_tools.gd")
 
@@ -44,7 +44,16 @@ func _kept(scene: GdhSceneFile, saved: Node, node: Node, names: Array) -> String
 	for key: Variant in names:
 		var property: String = str(key)
 		var loaded: Variant = _properties.read_at(copy, property)
-		if not scene.kept(saved, loaded, _properties.read_at(node, property)):
+		var given: Variant = _properties.read_at(node, property)
+		if not scene.kept(saved, loaded, given):
+			# The file holds it, and the copy's own script set it again as the copy loaded, as it will
+			# wherever the scene loads; an editor saves the same.
+			if scene.stores(at, property, given):
+				var on: Dictionary = scene.loads_as.get_or_add(at, {})
+				if GdhHeadlessCheck.untooled(copy.get_script()):
+					scene.loads_untooled[at] = true
+				on[property] = _values.serialize_value(loaded)
+				continue
 			return (
 				(
 					"%s.%s would load from the file as %s: the scene does not keep it, because the property "
@@ -332,6 +341,7 @@ func add_node(args: Dictionary) -> Dictionary:
 		return written
 
 	_note_put_back(answer, scene, id, new_path)
+	_note_loads_as(answer, scene, new_path)
 	if packed != null:
 		answer["instanceOf"] = instance_path
 	return answer
@@ -655,7 +665,7 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	_properties.note_write(answer, node)
 	var shared: Dictionary = {}
 	for key: Variant in properties:
-		var holders: Array[Dictionary] = _sharing(scene, node, str(key))
+		var holders: Array[Dictionary] = GdhSceneSharing.holders(scene, node, str(key))
 		if not holders.is_empty():
 			shared[str(key)] = holders
 	if not shared.is_empty():
@@ -693,60 +703,38 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		answer["droppedValues"] = dropped["values"]
 		answer["droppedNodes"] = dropped["nodes"]
 	_note_put_back(answer, scene, id, new_path)
+	_note_loads_as(answer, scene, new_path)
 	_note_left_out(answer, scene.written_pack, new_path, named, source)
 	if new_path != old_path:
 		answer.merge(GdhKin.follow(scene_path, old_path, new_path, carried))
 	return answer
 
 
-## Every other place in [param scene] holding a resource that [param key] was written through on
-## [param node], as {node, property}. A resource built into a scene is one object wherever the scene
-## uses it, as a copy made by duplicate shares its original's, so the write changed each of them too.
-func _sharing(scene: GdhSceneFile, node: Node, key: String) -> Array[Dictionary]:
-	var holders: Array[Dictionary] = []
-	var through: Array = GdhPropertyPaths.holder_of(node, key, GdhPropertyPaths.home_of(node))[2]
-	if through.is_empty():
-		return holders
-	var wanted: Dictionary = {}
-	for reached: Resource in through:
-		wanted[reached.get_instance_id()] = true
-	var nodes: Array[Node] = [scene.root]
-	nodes.append_array(scene.root.find_children("*", "", true, false))
-	for at: Node in nodes:
-		for declared: Dictionary in at.get_property_list():
-			var property: String = str(declared.get("name", ""))
-			if property.is_empty() or not (GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE):
-				continue
-			for found: String in _paths_to(at.get(property), property, wanted, {}):
-				if at != node or not key.begins_with(found + "/"):
-					holders.append({"node": scene.path_of(at), "property": found})
-	return holders
-
-
-## The paths below [param path] at which [param value] holds a resource of [param wanted], by
-## instance id, stepping into lists and into resources built into a scene.
-static func _paths_to(value: Variant, path: String, wanted: Dictionary, seen: Dictionary) -> Array[String]:
-	var paths: Array[String] = []
-	if value is Array:
-		var items: Array = value
-		for index: int in items.size():
-			paths.append_array(_paths_to(items[index], "%s/%d" % [path, index], wanted, seen))
-		return paths
-	if not value is Resource:
-		return paths
-	var held: Resource = value
-	var id: int = held.get_instance_id()
-	if wanted.has(id):
-		paths.append(path)
-	var built_in: bool = held.resource_path.is_empty() or held.resource_path.contains("::")
-	if seen.has(id) or not built_in:
-		return paths
-	seen[id] = true
-	for declared: Dictionary in held.get_property_list():
-		var property: String = str(declared.get("name", ""))
-		if not property.is_empty() and GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
-			paths.append_array(_paths_to(held.get(property), path + "/" + property, wanted, seen))
-	return paths
+## Puts under loadsAs in [param answer] each value given that the file holds and the script of the
+## node at [param at] changes as the scene loads, as it loads.
+static func _note_loads_as(answer: Dictionary, scene: GdhSceneFile, at: String) -> void:
+	var on: Dictionary = scene.loads_as.get(at, {})
+	if on.is_empty():
+		return
+	answer["loadsAs"] = on
+	var names: Array = on.keys()
+	var pronoun: String = "it" if names.size() == 1 else "them"
+	if scene.loads_untooled.has(at):
+		answer["loadsAsNote"] = (
+			(
+				"The file holds %s as given, which the editor shows. %s's script is not a tool, so in the "
+				+ "game it runs as the scene loads and changes %s to what loadsAs gives."
+			)
+			% [", ".join(names), at, pronoun]
+		)
+	else:
+		answer["loadsAsNote"] = (
+			(
+				"The file holds %s as given. %s's script runs as the scene loads, in the editor and in "
+				+ "the game, and changes %s to what loadsAs gives."
+			)
+			% [", ".join(names), at, pronoun]
+		)
 
 
 ## Moves out of alsoChanged in [param answer] what the last write of [param scene] put back on the

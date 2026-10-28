@@ -59928,7 +59928,9 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
     'scripted.tscn':
       '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://drawn.gd" id="1_drawn"]\n' +
       '[ext_resource type="Script" path="res://spun.gd" id="2_spun"]\n' +
-      '[ext_resource type="Script" path="res://paced.gd" id="3_paced"]\n\n[node name="Scripted" type="Node"]\n\n' +
+      '[ext_resource type="Script" path="res://paced.gd" id="3_paced"]\n' +
+      '[ext_resource type="Script" path="res://counted.gd" id="4_counted"]\n' +
+      '[ext_resource type="Script" path="res://dialled.gd" id="5_dialled"]\n\n[node name="Scripted" type="Node"]\n\n' +
       '[node name="Flat" type="Node2D" parent="."]\nposition = Vector2(100, 50)\nscale = Vector2(2, 2)\n\n' +
       '[node name="Walker" type="Node2D" parent="Flat"]\nposition = Vector2(5, 5)\nscript = ExtResource("1_drawn")\n\n' +
       '[node name="Card" type="Control" parent="Flat"]\nlayout_mode = 3\noffset_left = 4.0\noffset_top = 4.0\n' +
@@ -59936,7 +59938,13 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
       '[node name="Deep" type="Node3D" parent="."]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 2, 3)\n\n' +
       '[node name="Grip" type="Node3D" parent="Deep"]\ntransform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0)\n' +
       'script = ExtResource("2_spun")\n\n' +
-      '[node name="Pacer" type="Node2D" parent="."]\nscript = ExtResource("3_paced")\n',
+      '[node name="Pacer" type="Node2D" parent="."]\nscript = ExtResource("3_paced")\n\n' +
+      '[node name="Tally" type="Label" parent="."]\ntext = "old"\nscript = ExtResource("4_counted")\ncount = 3\n\n' +
+      '[node name="Dial" type="Label" parent="."]\ntext = "old"\nscript = ExtResource("5_dialled")\ncount = 4\n',
+    'counted.gd':
+      'extends Label\n\nvar kept: int = 0\n\n@export var count: int = 0:\n\tset(value):\n\t\tcount = value\n\t\ttext = "x%d" % value\n',
+    'dialled.gd':
+      '@tool\nextends Label\n\n@export var count: int = 0:\n\tset(value):\n\t\tcount = value\n\t\ttext = "x%d" % value\n',
     'paced.gd':
       'extends Node2D\n\n@export var speed: float = 100.0:\n\tset(value):\n\t\tspeed = value\n' +
       '\t\tmodulate = Color(1, 0, 1)\n',
@@ -60286,6 +60294,58 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
     );
     assert.match(fileOf('scripted.tscn'), /\nspeed = 400\.0\n/, fileOf('scripted.tscn'));
     assert.doesNotMatch(fileOf('scripted.tscn'), /modulate/, fileOf('scripted.tscn'));
+    // The text is saved before the script and count, so count's setter replaces it as the scene
+    // loads: the copy the write checks loads with x3, which the editor, running no such script, saves
+    // over just as this does.
+    const retitled = await node({
+      scenePath: 'scripted.tscn',
+      op: 'set',
+      nodePath: 'Tally',
+      properties: { text: 'new' },
+    });
+    assert.deepEqual(
+      [get(retitled, 'properties'), get(retitled, 'loadsAs'), get(retitled, 'loadsAsNote')],
+      [
+        { text: 'new' },
+        { text: 'x3' },
+        "The file holds text as given, which the editor shows. Tally's script is not a tool, so in the game it runs as the scene loads and changes it to what loadsAs gives.",
+      ],
+      JSON.stringify(retitled),
+    );
+    assert.match(
+      fileOf('scripted.tscn'),
+      /\[node name="Tally"[^\]]*\]\ntext = "new"\n/,
+      fileOf('scripted.tscn'),
+    );
+    // What the script declares and the scene does not store is still refused: the file cannot hold it.
+    const unkept = fileOf('scripted.tscn');
+    assert.match(
+      await refusal({ scenePath: 'scripted.tscn', op: 'set', nodePath: 'Tally', properties: { kept: 5 } }),
+      /Nothing was written: Tally\.kept would load from the file as 0: the scene does not keep it/,
+    );
+    assert.equal(fileOf('scripted.tscn'), unkept, 'and the file was left as it was');
+    // A tool script runs as the scene loads in the editor too, so the file holds what was given there
+    // as well, and both load what the setter makes of it.
+    const dialled = await node({
+      scenePath: 'scripted.tscn',
+      op: 'set',
+      nodePath: 'Dial',
+      properties: { text: 'new' },
+    });
+    assert.deepEqual(
+      [get(dialled, 'properties'), get(dialled, 'loadsAs'), get(dialled, 'loadsAsNote')],
+      [
+        { text: 'new' },
+        { text: 'x4' },
+        "The file holds text as given. Dial's script runs as the scene loads, in the editor and in the game, and changes it to what loadsAs gives.",
+      ],
+      JSON.stringify(dialled),
+    );
+    assert.match(
+      fileOf('scripted.tscn'),
+      /\[node name="Dial"[^\]]*\]\ntext = "new"\n/,
+      fileOf('scripted.tscn'),
+    );
 
     const shared = { scenePath: 'shared.tscn' };
     await node({ ...shared, op: 'duplicate', nodePath: 'Body', newName: 'Body2' });

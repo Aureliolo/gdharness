@@ -49,6 +49,13 @@ var written_pack: PackedScene = null
 ## set: what the node's script, which is not a tool, changed as the tool wrote, and the file was
 ## not given.
 var restored_by_write: Dictionary = {}
+## What the scene loads with where it stores what the tool gave, by node path and then property:
+## the node's script changed the value as the copy the write checks loaded.
+var loads_as: Dictionary = {}
+## The node paths in [member loads_as] whose script is not a tool, so an editor does not run it.
+var loads_untooled: Dictionary = {}
+## The pack a write's check reads, for [method stores] to answer from.
+var _checked_pack: PackedScene = null
 ## The path of each node a scene this one inherits gives, with the file that makes it.
 var _base_paths: Dictionary = {}
 var _state: SceneState = null
@@ -568,6 +575,19 @@ func kept(saved: Node, loaded: Variant, given: Variant) -> bool:
 	return GdhSame.same(loaded, given)
 
 
+## Whether the pack a write is checking stores [param given] for [param property] on the node at
+## [param at], a path from the root.
+func stores(at: String, property: String, given: Variant) -> bool:
+	if _checked_pack == null:
+		return false
+	var state: SceneState = _checked_pack.get_state()
+	for index: int in state.get_node_count():
+		if _relative(str(state.get_node_path(index))) == at:
+			var stored: Dictionary = _stored_at(state, index)
+			return stored.has(property) and GdhSame.same(stored[property], given)
+	return false
+
+
 ## Packs [member root], has [param check] read the result as the file will hold it, and writes the
 ## file only if the check answers "". Frees [member root] either way.
 ##
@@ -596,6 +616,7 @@ func write(check: Callable = Callable()) -> Dictionary:
 		var saved: Node = packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
 		if saved == null:
 			return refuse("The packed copy of %s did not instantiate, so nothing was written." % path)
+		_checked_pack = packed
 		var missing: String = str(check.call(saved))
 		saved.free()
 		if not missing.is_empty():
