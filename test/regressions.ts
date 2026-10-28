@@ -62520,7 +62520,7 @@ async function testAnInheritedSceneIsMadeWithNoEditor(): Promise<void> {
     );
     assert.equal(
       get(further, 'namedByPath'),
-      "What this saved names res://parts/big_crate.tscn by path rather than by uid, which loads the same. A uid in a file's own header is resolved through the project's uid cache, which holds none for it yet, as with a file made since the project was last scanned, so a uid written now would warn on every load. project_import refresh_uids scans the project, and writes after it name it by uid.",
+      "What this saved names res://parts/big_crate.tscn by path rather than by uid, which loads the same. A reference by uid is resolved through the project's uid cache, which holds none for it yet, as with a file made since the project was last scanned, so naming it by uid now would warn on every load. project_import refresh_uids scans the project, and writes after it name it by uid.",
       'and the answer says why, with the call that changes it',
     );
     assert.equal(get(made, 'namedByPath'), undefined, `crate.tscn was imported: ${JSON.stringify(made)}`);
@@ -63414,7 +63414,7 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
     });
     assert.equal(
       get(both, 'namedByPath'),
-      "What this saved names res://lamp.tscn, res://desk.tscn by path rather than by uid, which loads the same. A uid in a file's own header is resolved through the project's uid cache, which holds none for them yet, as with a file made since the project was last scanned, so a uid written now would warn on every load. project_import refresh_uids scans the project, and writes after it name them by uid.",
+      "What this saved names res://lamp.tscn, res://desk.tscn by path rather than by uid, which loads the same. A reference by uid is resolved through the project's uid cache, which holds none for them yet, as with a file made since the project was last scanned, so naming them by uid now would warn on every load. project_import refresh_uids scans the project, and writes after it name them by uid.",
       JSON.stringify(both),
     );
     assert.equal(await energy('unrelated.tscn', 'Top/DeskLamp/Bulb'), 3, fileOf('unrelated.tscn'));
