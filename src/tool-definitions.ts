@@ -2286,17 +2286,17 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'runtime_input',
     title: 'Send input to the game',
     description:
-      "Input to the running game: a whole click on a Control or a 3D node named by path or on a control named by the words on it, an item chosen out of a menu, typing into whatever has the focus, or a raw action, key, mouse button, mouse motion or drag. All of it works headless, where the viewport is the project's window size and the GUI only takes what is inside it. On gdharness's own desktop, where a windowed run goes, Windows refuses to say where the pointer is: every pointer answer there carries pointer_on_hidden_desktop, and the first of the run pointer_note saying why it matters: get_mouse_position() on the root window, and the mouse positions derived from it, read a meaningless position, while what reads the event itself (the control under it, hover, tooltips, input handlers) gets the injected position. A native window no real pointer has entered gets no hover from Godot, so the runtime supplies it there and the answers say hover_supplied.",
+      "Input to the running game: a whole click on a Control or a 3D node named by path or by the words on it, an item chosen out of a menu, typing into the focus, or a raw action, key, mouse button, mouse motion or drag, touch or finger drag. All of it works headless, where the viewport is the project's window size and the GUI only takes what is inside it. On gdharness's own desktop, where a windowed run goes, Windows refuses to say where the pointer is: every pointer answer there carries pointer_on_hidden_desktop, and the run's first pointer_note says why it matters: get_mouse_position() on the root window, and what derives from it, reads nonsense, while what reads the event itself (the control under it, hover, tooltips, input handlers) gets the injected position. A native window no real pointer has entered gets no hover from Godot, so the runtime supplies it there and the answers say hover_supplied.",
     answer:
-      "click: what was under the pointer, and what became of the control: in_tree, removed or freed. A button answers pressed_signal, whether its pressed signal fired during the click. Named by says, found says which match it was, its index being the index argument that presses the same match again, found.item names the tab, list entry, tree row or menu bar title pressed (kind; index, the item's own number in its control, which is not found.index; says; and for a row the column of the cell saying the words), and found.pressedOn says \"the words\" for words in a RichTextLabel pressed where they are drawn, or \"the middle of the label\" with a note saying why they could not be placed; on a rich label link_pressed says whether the press reached a link, with link_meta giving the meta the label reports clicked, an empty one included. A control scrolled into view first is scrolled each container out from it a frame after the one inside, and scrolled_into_view says whether a scroll value changed. A button in toggle mode, a CheckBox or CheckButton included, answers pressed with before and after, its button_pressed either side of the click: the same value twice is a click the game undid, and after is null when the click freed it. A refusal for a pointer turned off names where mouse_behavior_recursive was set. On a 3D node landed says the interface did not swallow the press: no control under the pointer stopped it, a control letting the pointer pass included, and every viewport on the way out from the room had the pointer over what shows the room. choose: what was chosen, read before the press, which is heard rather than assumed; what became of the control named (in_tree, removed or freed, since a game can rebuild its screen on the pick); and what the button in front of the menu shows now when it is still there. A menu is opened rather than clicked because its items are drawn rather than built, and the item is looked for as the menu stands once open, since a game can fill a menu as it opens. action, key, mouse_click and joypad_button: the event as it was sent, with whole saying whether the press was let go of again and pressed whether it is left held down (true only after pressed true), for a key the keycode, physical_keycode and unicode it carried, and for a controller button its number, its name and the device. mouse_motion: the position and the relative movement sent. mouse_drag: from, to, motions sent and relative_total. joypad_motion: the axis by number and name, the value and the device. key, mouse_click, click, joypad_button and joypad_motion answer actions, the InputMap actions the event also presses; for a motion, those its direction reaches past their deadzone, and none for one inside it. mouse_click, mouse_motion and mouse_drag answer hovered, the control under the pointer once the events are handled, or null over none; the other events are aimed at nothing. mouse_click with a press, and mouse_drag, answer press_went_to, the path of what the press went to (a control, or a window embedded over the point), read before it, or null when nothing there takes the pointer; given nodePath naming a Control, landed says whether that is the control or inside it. A click that did not land on a control whose mouse_filter is ignore, as a Label's is, says so under why_not_landed, and one on a control with something drawn over it names that, a window stacked above the one the control is in among them. An action, a key, a joypad_button or a joypad_motion answers focused with the path of the Control holding the keyboard focus when it went in, since that Control gets it before the game's _unhandled_input: Space or Enter on a focused button presses the button, and a stick or dpad pressing ui_down moves a focused list's selection, or the focus, and never reaches the game's handler. Where the press moved the focus, focused_after names the Control holding it once the event was handled, or null when nothing does. A key that a focused LineEdit or TextEdit took as typing names that field under typed_into, with what it holds under holds, since a field being edited keeps the key from the game's _unhandled_input. editing_ended true, on a key or on text, is a LineEdit that stopped being edited, as Enter does by submitting it: it keeps the focus, and nothing typed into it lands until it is clicked again. text with the focus on a control that is no LineEdit or TextEdit answers holds null and a note saying so, since a focused button takes a space or Enter as a press. A mouse_click, mouse_motion or mouse_drag given nodePath answers it under path, its points in the pixels of the window they went to, and that window under window when it is not the game's own. One with a point outside the viewport it went to says so under outside_viewport, with the viewport's rectangle, since no control there receives it.",
+      "click: what was under the pointer, and what became of the control: in_tree, removed or freed. A button answers pressed_signal, whether its pressed signal fired during the click. Named by says, found says which match it was, its index being the index argument that presses the same match again, found.item names the tab, list entry, tree row or menu bar title pressed (kind; index, the item's own number in its control, which is not found.index; says; and for a row the column of the cell saying the words), and found.pressedOn says \"the words\" for words in a RichTextLabel pressed where they are drawn, or \"the middle of the label\" with a note saying why they could not be placed; on a rich label link_pressed says whether the press reached a link, with link_meta giving the meta the label reports clicked, an empty one included. A control scrolled into view first is scrolled each container out from it a frame after the one inside, and scrolled_into_view says whether a scroll value changed. A button in toggle mode, a CheckBox or CheckButton included, answers pressed with before and after, its button_pressed either side of the click: the same value twice is a click the game undid, and after is null when the click freed it. A refusal for a pointer turned off names where mouse_behavior_recursive was set. On a 3D node landed says the interface did not swallow the press: no control under the pointer stopped it, a control letting the pointer pass included, and every viewport on the way out from the room had the pointer over what shows the room. choose: what was chosen, read before the press, which is heard rather than assumed; what became of the control named (in_tree, removed or freed, since a game can rebuild its screen on the pick); and what the button in front of the menu shows now when it is still there. A menu is opened rather than clicked because its items are drawn rather than built, and the item is looked for as the menu stands once open, since a game can fill a menu as it opens. action, key, mouse_click and joypad_button: the event as it was sent, with whole saying whether the press was let go of again and pressed whether it is left held down (true only after pressed true), for a key the keycode, physical_keycode and unicode it carried, and for a controller button its number, its name and the device. mouse_motion: the position and the relative movement sent. mouse_drag: from, to, motions sent and relative_total. touch: the finger's index, the position, whole and pressed as a mouse_click has them, and emulates_mouse; touch_drag: what mouse_drag answers, with index and emulates_mouse. joypad_motion: the axis by number and name, the value and the device. key, mouse_click, click, joypad_button and joypad_motion answer actions, the InputMap actions the event also presses; for a motion, those its direction reaches past their deadzone, and none for one inside it. mouse_click, mouse_motion and mouse_drag answer hovered, the control under the pointer once the events are handled, or null over none; the other events are aimed at nothing. mouse_click with a press, and mouse_drag, answer press_went_to, the path of what the press went to (a control, or a window embedded over the point), read before it, or null when nothing there takes the pointer; given nodePath naming a Control, landed says whether that is the control or inside it. A click that did not land on a control whose mouse_filter is ignore, as a Label's is, says so under why_not_landed, and one on a control with something drawn over it names that, a window stacked above the one the control is in among them. An action, a key, a joypad_button or a joypad_motion answers focused with the path of the Control holding the keyboard focus when it went in, since that Control gets it before the game's _unhandled_input: Space or Enter on a focused button presses the button, and a stick or dpad pressing ui_down moves a focused list's selection, or the focus, and never reaches the game's handler. Where the press moved the focus, focused_after names the Control holding it once the event was handled, or null when nothing does. A key that a focused LineEdit or TextEdit took as typing names that field under typed_into, with what it holds under holds, since a field being edited keeps the key from the game's _unhandled_input. editing_ended true, on a key or on text, is a LineEdit that stopped being edited, as Enter does by submitting it: it keeps the focus, and nothing typed into it lands until it is clicked again. text with the focus on a control that is no LineEdit or TextEdit answers holds null and a note saying so, since a focused button takes a space or Enter as a press. A mouse_click, mouse_motion or mouse_drag given nodePath answers it under path, its points in the pixels of the window they went to, and that window under window when it is not the game's own. One with a point outside the viewport it went to says so under outside_viewport, with the viewport's rectangle, since no control there receives it.",
     parameters: {
       projectPath: RUNNING_PROJECT_PATH,
       pid: RUNNING_PID,
       nodePath: {
         type: 'string',
-        ops: ['click', 'choose', 'mouse_click', 'mouse_motion', 'mouse_drag'],
+        ops: ['click', 'choose', 'mouse_click', 'mouse_motion', 'mouse_drag', 'touch', 'touch_drag'],
         description:
-          "click: the Control to click, at its centre, at x and y in its own space when those are given, or at the middle of the part on screen when no scroll brings its centre into view (said under pressed_on), or the 3D node to click, where it is drawn; with says, where to look for the control instead, default the whole tree. choose: the PopupMenu, or the OptionButton or MenuButton in front of one. mouse_click, mouse_motion, mouse_drag: the Control, Node2D or Window whose own space the points are in, a Window's being its own pixels; the events go to the window that shows it, a native one included, which the game's window pixels cannot reach, and the answer names it under window when it is not the game's own. Default the game's window.",
+          "click: the Control to click, at its centre, at x and y in its own space when those are given, or at the middle of the part on screen when no scroll brings its centre into view (said under pressed_on), or the 3D node to click, where it is drawn; with says, where to look for the control instead, default the whole tree. choose: the PopupMenu, or the OptionButton or MenuButton in front of one. mouse_click, mouse_motion, mouse_drag, touch, touch_drag: the Control, Node2D or Window whose own space the points are in, a Window's being its own pixels; the events go to the window that shows it, a native one included, which the game's window pixels cannot reach, and the answer names it under window when it is not the game's own. Default the game's window.",
       },
       says: {
         type: 'string',
@@ -2312,17 +2312,17 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       pressed: {
         type: 'boolean',
-        ops: ['action', 'key', 'mouse_click', 'joypad_button'],
+        ops: ['action', 'key', 'mouse_click', 'joypad_button', 'touch'],
         description:
-          'action, key, mouse_click, joypad_button: leave it out and the press is a whole one, down and up a frame apart. true holds it down, false lets go of one being held. A wheel button held down is still a whole step, since a wheel is never held.',
+          'action, key, mouse_click, joypad_button, touch: leave it out and the press is a whole one, down and up a frame apart. true holds it down, false lets go of one being held, a finger lifted at x and y. A wheel button held down is still a whole step, since a wheel is never held.',
       },
       holdFrames: {
         type: 'integer',
         minimum: 1,
         maximum: 600,
-        ops: ['action', 'key', 'mouse_click', 'joypad_button'],
+        ops: ['action', 'key', 'mouse_click', 'joypad_button', 'touch'],
         description:
-          'action, key, mouse_click, joypad_button: hold a whole press down for this many process frames and then let go, both inside the game, so a pour, a charge or a long press runs to a set length. A press, a frames wait and a release sent as three calls hold it for the time between the calls as well. The answer says held_frames, and under held_for the seconds the hold lasted and the physics_frames that ran in it: a process frame is no set time, and a headless game, drawing nothing, runs them far faster than the sixty physics ticks a second that _physics_process sees. Not with pressed, and not on a wheel step. Default 1.',
+          'action, key, mouse_click, joypad_button, touch: hold a whole press down for this many process frames and then let go, both inside the game, so a pour, a charge or a long press runs to a set length. A press, a frames wait and a release sent as three calls hold it for the time between the calls as well. The answer says held_frames, and under held_for the seconds the hold lasted and the physics_frames that ran in it: a process frame is no set time, and a headless game, drawing nothing, runs them far faster than the sixty physics ticks a second that _physics_process sees. Not with pressed, and not on a wheel step. Default 1.',
       },
       strength: {
         type: 'number',
@@ -2351,44 +2351,49 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       index: {
         type: 'number',
-        ops: ['click', 'choose'],
+        ops: ['click', 'choose', 'touch', 'touch_drag'],
         description:
-          'click: which of several controls saying the words, counting from 0 in the order a refusal lists them, best matches first. choose: the item to take, by where it is in the list, when text will not do.',
+          'click: which of several controls saying the words, counting from 0 in the order a refusal lists them, best matches first. choose: the item to take, by where it is in the list, when text will not do. touch, touch_drag: the finger, from 0, as InputEventScreenTouch.index; a second finger down at once is another index. Default 0.',
       },
       shift: { type: 'boolean', ops: ['key'], description: 'key: hold Shift with it. Default false.' },
       ctrl: { type: 'boolean', ops: ['key'], description: 'key: hold Ctrl with it. Default false.' },
       alt: { type: 'boolean', ops: ['key'], description: 'key: hold Alt with it. Default false.' },
       x: {
         type: 'number',
-        ops: ['click', 'mouse_click', 'mouse_motion', 'mouse_drag'],
+        ops: ['click', 'mouse_click', 'mouse_motion', 'mouse_drag', 'touch', 'touch_drag'],
         description:
-          "click: with y, the point to press in the control's own space instead of its centre, for a control that draws its parts itself; not with a 3D node, nor with says finding an item the control draws. mouse_click, mouse_motion: window pixels, or nodePath's own space when that is given. mouse_drag: where the press is, in the same space.",
+          "click: with y, the point to press in the control's own space instead of its centre, for a control that draws its parts itself; not with a 3D node, nor with says finding an item the control draws. mouse_click, mouse_motion, touch: window pixels, or nodePath's own space when that is given. mouse_drag, touch_drag: where the press is, in the same space.",
       },
       y: {
         type: 'number',
-        ops: ['click', 'mouse_click', 'mouse_motion', 'mouse_drag'],
-        description: 'click, mouse_click, mouse_motion, mouse_drag: as x.',
+        ops: ['click', 'mouse_click', 'mouse_motion', 'mouse_drag', 'touch', 'touch_drag'],
+        description: 'click, mouse_click, mouse_motion, mouse_drag, touch, touch_drag: as x.',
       },
       toX: {
         type: 'number',
-        ops: ['mouse_drag'],
-        description: "mouse_drag: where the release is, in window pixels or nodePath's own space.",
+        ops: ['mouse_drag', 'touch_drag'],
+        description:
+          "mouse_drag, touch_drag: where the release is, in window pixels or nodePath's own space.",
       },
-      toY: { type: 'number', ops: ['mouse_drag'], description: 'mouse_drag: as toX.' },
+      toY: {
+        type: 'number',
+        ops: ['mouse_drag', 'touch_drag'],
+        description: 'mouse_drag, touch_drag: as toX.',
+      },
       via: {
         type: 'array',
         items: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2 },
-        ops: ['mouse_drag'],
+        ops: ['mouse_drag', 'touch_drag'],
         description:
-          'mouse_drag: points the stroke passes through on the way, in order, each [x, y] in the space x and y are in. The motions are spread along the whole stroke by distance. Default none: a straight line.',
+          'mouse_drag, touch_drag: points the stroke passes through on the way, in order, each [x, y] in the space x and y are in. The motions are spread along the whole stroke by distance. Default none: a straight line.',
       },
       frames: {
         type: 'integer',
         minimum: 1,
         maximum: 600,
-        ops: ['mouse_drag'],
+        ops: ['mouse_drag', 'touch_drag'],
         description:
-          'mouse_drag: how many process frames the stroke takes, one motion each, as a real mouse sends one a frame; a hand takes about 20 to 60 for a stroke across a screen.',
+          'mouse_drag, touch_drag: how many process frames the stroke takes, one motion each, as a real mouse or finger sends one a frame; a hand takes about 20 to 60 for a stroke across a screen.',
       },
       button: {
         type: ['string', 'number'],
@@ -2439,32 +2444,32 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       click: {
         effect: 'additive',
         summary:
-          'press and release on a Control, a frame apart, named by nodePath or by says with the words on it (found under nodePath when both are given), or on a 3D node where it is drawn. A control out of sight inside a ScrollContainer is scrolled to first, and a link in a RichTextLabel is pressed where its words are drawn. A disabled button, a control that does not process and one whose pointer mouse_behavior_recursive turned off are refused, since the press would do nothing; by says, one the pointer can reach is picked over it',
+          'press and release on a Control, a frame apart, named by nodePath or by says (found under nodePath when both are given), or on a 3D node where it is drawn. A control hidden in a ScrollContainer is scrolled to first; a RichTextLabel link is pressed where its words are drawn. A disabled button, a control that does not process and one mouse_behavior_recursive turned off are refused, since the press would do nothing; by says, a reachable one is picked over it',
         requires: [],
       },
       choose: {
         effect: 'additive',
         summary:
-          "take an item out of a menu, by what it says or by where it is in the list: the menu is opened, the item found in it as it stands then, and pressed through the engine's own path, which needs no window and does not depend on what ui_accept is bound to. A disabled or hidden button in front of the menu is refused, and so is a press the menu did not take",
+          "take an item out of a menu, by its words or its place in the list: the menu is opened, the item found as it stands then and pressed through the engine's own path, which needs no window and not ui_accept's binding. A disabled or hidden button in front of the menu is refused, and so is a press the menu did not take",
         requires: ['nodePath'],
       },
       action: { effect: 'additive', summary: 'press an action, or hold it', requires: ['action'] },
       key: {
         effect: 'additive',
         summary:
-          "press a key, or hold it. Not for a menu a click has opened: an OptionButton or PopupMenu pops up as a window of its own that a key sent to the game never reaches, so an arrow moves nothing in it and Enter closes it with nothing chosen. choose is what selects there. The limit is that menu's own navigation, not windows in general: an embedded dialog whose owner reads keys in _input gets them, and a binding catcher up in one takes the key first time",
+          'press a key, or hold it. Not for a menu a click has opened: an OptionButton or PopupMenu pops up as a window of its own that a key never reaches, so arrows move nothing and Enter closes it unchosen; choose selects there. Other windows are not like it: an embedded dialog whose owner reads keys in _input gets them',
         requires: ['keycode'],
       },
       text: {
         effect: 'additive',
         summary:
-          'type a string into the field being edited, a character at a time, and say what it landed in and what it holds afterwards, a secret field as its mask. The field is the focus of the dialog that has the focus when one does, which is where the keys go',
+          "type a string into the field being edited, a character at a time, saying what it landed in and what it then holds (a secret field as its mask). With a dialog focused, the field is that dialog's focus, where the keys go",
         requires: ['text'],
       },
       mouse_click: {
         effect: 'additive',
         summary:
-          'click a mouse button at a position, pressed and released a frame apart, each event carrying the buttons held once it has happened; the answer says whole. A drag is mouse_drag. A wheel button is always a whole step, press and release together as a mouse sends one: a lone wheel press holds the viewport on the control that took it, so every click after it lands there',
+          'click a mouse button at a position, pressed and released a frame apart, each event carrying the buttons held after it; the answer says whole. A drag is mouse_drag. A wheel button is always a whole step, as a mouse sends one: a lone wheel press holds the viewport on the control that took it, so every later click lands there',
         requires: ['x', 'y'],
       },
       mouse_motion: {
@@ -2476,19 +2481,30 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       mouse_drag: {
         effect: 'additive',
         summary:
-          'a whole drag in one call, as a hand makes one: press at x, y, a motion each frame for frames frames, and release at toX, toY; for a stir, a paint stroke or a slow slider',
+          'a whole drag in one call: press at x, y, a motion each frame, release at toX, toY; for a stir, a paint stroke or a slow slider',
+        requires: ['x', 'y', 'toX', 'toY', 'frames'],
+      },
+      touch: {
+        effect: 'additive',
+        summary:
+          "press a finger at x, y and lift it a frame later, or hold it, as an InputEventScreenTouch; in the game's window the engine makes mouse events carrying DEVICE_ID_EMULATION from the first finger down, where emulate_mouse_from_touch is on (emulates_mouse)",
+        requires: ['x', 'y'],
+      },
+      touch_drag: {
+        effect: 'additive',
+        summary: 'mouse_drag for one finger: the touch, an InputEventScreenDrag each frame, and the lift',
         requires: ['x', 'y', 'toX', 'toY', 'frames'],
       },
       joypad_button: {
         effect: 'additive',
         summary:
-          'press a controller button, or hold it, as an InputEventJoypadButton, so a game reading the pad in _input or _unhandled_input gets what a controller sends; an action bound to the button fires with it, as it would for a real one. Pressed and released a frame apart unless pressed says otherwise',
+          'press a controller button, or hold it, as an InputEventJoypadButton, as a controller sends it to _input and _unhandled_input; an action bound to the button fires with it. Pressed and released a frame apart unless pressed says otherwise',
         requires: ['button'],
       },
       joypad_motion: {
         effect: 'additive',
         summary:
-          'move a stick or trigger axis to a value, as an InputEventJoypadMotion, which is what a game reading the sticks gets; the axis stays there until another motion moves it',
+          'move a stick or trigger axis to a value, as an InputEventJoypadMotion; the axis stays there until another motion moves it',
         requires: ['axis', 'value'],
       },
     },

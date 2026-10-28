@@ -5422,7 +5422,7 @@ class GodotServer {
           // A held press answers once it has let go, and a drag once its stroke is over, so each is
           // given as long as a frames wait of the same length.
           const holding =
-            op === 'mouse_drag'
+            op === 'mouse_drag' || op === 'touch_drag'
               ? (readPositiveNumber(args, 'frames') ?? 1) + 2
               : readPositiveNumber(args, 'holdFrames');
           return await this.handleRuntimeCommand(`inject_${op}`, args, {

@@ -96,11 +96,12 @@ static func where(aim: Dictionary, viewport: Viewport, points: Array[Vector2]) -
 
 
 ## The points of a drag: x, y, then each of via, then toX, toY. Answers the String saying what is
-## wrong instead, since a point left out would otherwise read as the window's corner.
-static func stroke_of(params: Dictionary) -> Variant:
+## wrong instead, since a point left out would otherwise read as the window's corner. [param op] is
+## the drag the refusal names.
+static func stroke_of(params: Dictionary, op: String = "mouse_drag") -> Variant:
 	for key: String in ["x", "y", "toX", "toY"]:
 		if not params.has(key):
-			return "mouse_drag needs x, y, toX and toY: %s is missing." % key
+			return "%s needs x, y, toX and toY: %s is missing." % [op, key]
 	var points: Array[Vector2] = [Vector2(GdhRead.as_float(params["x"]), GdhRead.as_float(params["y"]))]
 	var via: Variant = params.get("via", [])
 	if not via is Array:
