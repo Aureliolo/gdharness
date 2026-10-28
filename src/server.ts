@@ -345,6 +345,7 @@ import {
 import { runHidden as run, spawnHidden } from './spawn.js';
 import {
   declaringAdvice,
+  funcOf,
   named,
   readExpected,
   readRun,
@@ -8008,6 +8009,13 @@ class GodotServer {
                 .filter((one) => !ignoreRead.leftOut.includes(one));
             })
         : [];
+    // The constant's shape is given only in the documentation, which a caller of the tool does not
+    // see, so the note was advice to fill in a constant nothing described.
+    const firstUndeclared = undeclaredErrors[0];
+    const declaredAs =
+      firstUndeclared?.case === undefined
+        ? ''
+        : ` A suite declaring none yet does it as const ${firstUndeclared.warning === true ? 'GDHARNESS_EXPECTED_WARNINGS' : 'GDHARNESS_EXPECTED_ERRORS'}: Dictionary = ${JSON.stringify({ [funcOf(firstUndeclared.case)]: [firstUndeclared.text] })}, keyed by case function, or by before and after for the suite's own hooks.`;
     // gdUnit4 prints such a row passed, then skips it, and the run was answered passed.
     const rowsMismatched = casePrinted.mismatched.map((row) => ({
       test: `${row.suite} > ${row.name}`,
@@ -8139,7 +8147,7 @@ class GodotServer {
             : undefined,
           uncaughtNote(uncaught),
           undeclaredErrors.length > 0
-            ? `An engine error or warning a suite does not declare fails the run, as gdharness test judges it; ${declaringAdvice(undeclaredErrors[0]?.case ?? 'test_name', undeclaredErrors[0]?.warning === true)}, once for each time it prints it${undeclaredErrors.some((error) => error.warning !== undeclaredErrors[0]?.warning) ? (undeclaredErrors[0]?.warning === true ? ', and an error in its GDHARNESS_EXPECTED_ERRORS' : ', and a warning in its GDHARNESS_EXPECTED_WARNINGS') : ''}.`
+            ? `An engine error or warning a suite does not declare fails the run, as gdharness test judges it; ${declaringAdvice(undeclaredErrors[0]?.case ?? 'test_name', undeclaredErrors[0]?.warning === true)}, once for each time it prints it${undeclaredErrors.some((error) => error.warning !== undeclaredErrors[0]?.warning) ? (undeclaredErrors[0]?.warning === true ? ', and an error in its GDHARNESS_EXPECTED_ERRORS' : ', and a warning in its GDHARNESS_EXPECTED_WARNINGS') : ''}.${declaredAs}`
             : undefined,
           declaredNotPrinted.length > 0
             ? 'A declared error or warning the case did not print fails the run too, since the case no longer reaches what it was written to test.'

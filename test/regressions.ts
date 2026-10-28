@@ -42451,6 +42451,18 @@ function testTheShippedRunnerRunsAFileOfSuites(): void {
       elsewhere.said,
     );
 
+    // A gdUnit4 whose session finds its cases by id itself, as one with test_count() does, keeps its
+    // own session, and the checks pass it rather than failing every run on it.
+    const selfIndexed = changed(
+      'runners/GdUnitTestSession.gd',
+      '## Finds a test case by its unique identifier.',
+      'func test_count() -> int:\n\treturn _test_cases.size()\n\n\n## Finds a test case by its unique identifier.',
+    );
+    const indexing = run('indexing', ['--html-report-off', '--junit-report-off']);
+    selfIndexed();
+    assert.match(indexing.said, /Executed test cases\s*:\s*\(2\//, `the suites ran: ${indexing.said}`);
+    assert.doesNotMatch(indexing.said, /gdharness test: gdUnit4/, indexing.said);
+
     const noJunitHook = changed(
       'hooks/GdUnitTestSessionHookService.gd',
       'service.register(GdUnitXMLReporterTestSessionHook.new())',
@@ -47450,6 +47462,13 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
           /list its text under "test_unmeant" in the suite's GDHARNESS_EXPECTED_ERRORS, once for each time it prints it, and a warning in its GDHARNESS_EXPECTED_WARNINGS\./,
           said,
         );
+        // The declaration itself, since a caller of the tool never sees the documentation giving it.
+        assert.ok(
+          text(get(answer, 'note')).includes(
+            ' A suite declaring none yet does it as const GDHARNESS_EXPECTED_ERRORS: Dictionary = {"test_unmeant":["nobody declared this"]}, keyed by case function, or by before and after for the suite\'s own hooks.',
+          ),
+          said,
+        );
         assert.deepEqual(
           asArray(get(answer, 'suites')).map((suite) => [
             get(suite, 'path'),
@@ -47678,6 +47697,12 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
               text(get(jsonOf(alone, path), 'note')),
               /list its text under "test_warned" in the suite's GDHARNESS_EXPECTED_WARNINGS, once for each time it prints it\./,
               `a warning alone is told where warnings are declared: ${alone}`,
+            );
+            assert.ok(
+              text(get(jsonOf(alone, path), 'note')).includes(
+                'does it as const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_warned":["a warning nobody declared"]},',
+              ),
+              `and how: ${alone}`,
             );
           }
         }
