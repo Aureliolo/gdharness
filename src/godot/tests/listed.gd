@@ -447,6 +447,7 @@ class GdhRunner:
 				if not GdhIndexedSession.indexes_itself(_test_session):
 					_test_session = GdhIndexedSession.of(_test_session)
 			GdUnitEvent.TESTSUITE_BEFORE:
+				drawn_window()
 				suite_running = event.resource_path()
 				orphans_at_suite = orphan_ids()
 				orphans_named.clear()
@@ -477,6 +478,15 @@ class GdhRunner:
 			say_left(
 				"after", left.filter(func(id: int) -> bool: return not orphans_from_before.has(id))
 			)
+
+	## The window back from minimised, which gdUnit4 makes it as its runner starts and after every
+	## suite, and where Godot draws nothing: a suite given a window to render in waited for a
+	## frame_post_draw that never came. Called as a suite begins, ahead of its before().
+	static func drawn_window() -> void:
+		if DisplayServer.get_name() == "headless" or Engine.is_embedded_in_editor():
+			return
+		if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_MINIMIZED:
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
 
 	## The orphans now that were not there in [param before] and no line has named yet.
 	func new_orphans(before: Dictionary[int, bool]) -> Array[int]:

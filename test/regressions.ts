@@ -47062,18 +47062,38 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
 
     const windowed = windowedRunRefused();
     if (windowed === null) {
-      writeTree(project, {
-        'tests/window_test.gd': [
+      // gdUnit4 minimises the window as its runner starts and after every suite, and a minimised
+      // window draws nothing, so a suite rendering in it waited for a frame that never came. The
+      // second suite meets the window as the first one's end left it.
+      const drawing = (name: string): string =>
+        [
           'extends GdUnitTestSuite',
           '',
           'const GDHARNESS_NEEDS_WINDOW: bool = true',
           '',
-          'func test_window() -> void:',
+          'var drawn: int = 0',
+          '',
+          '',
+          `func test_${name}() -> void:`,
           '\tassert_str(DisplayServer.get_name()).is_not_equal("headless")',
           '\tassert_str(AudioServer.get_driver_name()).is_equal("Dummy")',
+          '\tassert_int(DisplayServer.window_get_mode()).is_not_equal(DisplayServer.WINDOW_MODE_MINIMIZED)',
+          '\tvar counted: Callable = func() -> void: drawn += 1',
+          '\tRenderingServer.frame_post_draw.connect(counted)',
+          '\tfor frame: int in 30:',
+          '\t\tawait get_tree().process_frame',
+          '\tRenderingServer.frame_post_draw.disconnect(counted)',
+          '\tassert_int(drawn).is_greater(0)',
           '',
-        ].join('\n'),
+        ].join('\n');
+      writeTree(project, {
+        'tests/window_test.gd': drawing('window'),
+        'tests/window_again_test.gd': drawing('window_again'),
       });
+      const both = test('--engines', '1', 'tests/window_test.gd', 'tests/window_again_test.gd');
+      assert.equal(both.status, 0, both.said);
+      assert.match(both.said, /^Passed: \d+ cases in 2 suites/m, both.said);
+      rmSync(join(project, 'tests', 'window_again_test.gd'));
       // The windowed engine runs only the suite needing it, and a headless engine follows it in its
       // slot with the rest, one declaring nothing or one saying it runs headless alike, and with one
       // slot as with four. stood_test.gd fails in a window, which shows the follower ran headless.

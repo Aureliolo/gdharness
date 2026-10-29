@@ -276,7 +276,8 @@ on the desktop in use or takes its focus. That desktop has no compositor, so a l
 fails there once it has been shown again; [the install guide](install.md) says how a game tells.
 The headless engines run there too, since an engine that fails to start shows a modal alert even
 with `--headless`. Elsewhere it uses the display there is; on a CI runner with none, run it under
-`xvfb-run`.
+`xvfb-run`. gdUnit4 minimises its window as the runner starts and after every suite, and a
+minimised window draws nothing, so the runner puts the window back before each suite begins.
 
 The `project_test` tool reads the suites the same way. Its run is one engine, so when a suite in it
 needs a window the whole run has one, started as above, and the answer's `windowNote` names the
