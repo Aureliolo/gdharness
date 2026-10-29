@@ -24,6 +24,7 @@ import {
   helperStep,
   throughHelper,
 } from './desktop.js';
+import { giveBackSlot, handSlot, ownStart } from './engine-slots.js';
 import { crashesReported, letWindowsReportCrashes } from './error-mode.js';
 import { GameDebugger } from './game-debugger.js';
 import { type KeeperListening, listenForTheServer } from './keeper-channel.js';
@@ -361,6 +362,8 @@ async function keep(): Promise<void> {
     run !== undefined && throughTheHelper(spec) ? mkdtempSync(join(tmpdir(), 'gdharness-stop-')) : null;
   const stopFile = own === null ? '' : join(own, 'stop');
   let started: Awaited<ReturnType<typeof startDetached>>;
+  // Read beside the start rather than before it: on Windows it is a query of its own.
+  const keeperStarted = run?.slot === undefined ? undefined : ownStart();
   // Before the game exists, so anything listed as started after it can be the game's own.
   const spawnedAt = Date.now();
   try {
@@ -377,6 +380,10 @@ async function keep(): Promise<void> {
     process.exit(1);
   }
   const { child, pid } = started;
+  const slot = run?.slot;
+  if (slot !== undefined && keeperStarted !== undefined) {
+    handSlot(slot.lock, slot.from, { pid: process.pid, started: await keeperStarted, by: slot.by });
+  }
   const record =
     run === undefined
       ? null
@@ -503,6 +510,9 @@ async function keep(): Promise<void> {
       exitSignal: code === null ? signal : null,
       notTold,
     });
+  }
+  if (slot !== undefined) {
+    giveBackSlot(slot.lock, process.pid);
   }
   debuggerPeer?.close();
   listening?.close();
