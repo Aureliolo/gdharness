@@ -2690,7 +2690,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       step_out: {
         effect: 'additive',
         summary:
-          "run to the end of the current function and stop at the next line run at its caller's depth: in its caller, or, when the call was the last thing its caller did, wherever script runs next, such as the caller's next call; a game this server started only",
+          "run to the end of the current function and stop at the next line run at its caller's depth: in its caller, or, when the call was the last thing its caller did, wherever script runs next, such as the caller's next call; only for a game this server started",
         requires: [],
       },
     },
