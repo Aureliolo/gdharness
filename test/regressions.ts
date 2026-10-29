@@ -64303,7 +64303,9 @@ async function testAPropertyHoldingANodeFollowsIt(): Promise<void> {
       'script = ExtResource("1_shelf")\naim = NodePath("Box/Title")\n' +
       'marks = [NodePath("Box/Title"), NodePath("Box")]\nnamed = {\n"title": NodePath("Box/Title")\n}\n\n' +
       '[node name="Box" type="Node2D" parent="."]\n\n[node name="Title" type="Node2D" parent="Box"]\n\n' +
-      '[node name="Side" type="Node2D" parent="."]\n',
+      '[node name="Side" type="Node2D" parent="."]\n\n' +
+      // A NodePath, which a delete leaves naming the node rather than clears.
+      '[node name="Pointer" type="RemoteTransform2D" parent="."]\nremote_path = NodePath("../Box/Title")\n',
   };
   for (const [path, content] of Object.entries(files)) {
     writeFileSync(join(project, path), content);
@@ -64333,9 +64335,10 @@ async function testAPropertyHoldingANodeFollowsIt(): Promise<void> {
     assert.ok(Array.isArray(listed), `${field} in ${JSON.stringify(answer)}`);
     return listed
       .map((entry) => {
-        const e = entry as Record<string, string>;
-        const to = e['to'] === undefined ? '' : ` -> ${e['to']}`;
-        return `${e['nodePath']} ${e['property']} ${e['from']}${to}`;
+        const e = entry as Record<string, string | boolean | undefined>;
+        const to = e['to'] === undefined ? '' : ` -> ${String(e['to'])}`;
+        const cleared = e['cleared'] === undefined ? '' : ` cleared ${String(e['cleared'])}`;
+        return `${String(e['nodePath'])} ${String(e['property'])} ${String(e['from'])}${to}${cleared}`;
       })
       .sort();
   };
@@ -64351,6 +64354,7 @@ async function testAPropertyHoldingANodeFollowsIt(): Promise<void> {
         '. aim Box/Title -> Box/Heading',
         '. marks Box/Title -> Box/Heading',
         '. named Box/Title -> Box/Heading',
+        'Pointer remote_path ../Box/Title -> ../Box/Heading',
       ],
       JSON.stringify(renamed),
     );
@@ -64364,6 +64368,7 @@ async function testAPropertyHoldingANodeFollowsIt(): Promise<void> {
         '. aim Box/Heading -> Side/Heading',
         '. marks Box/Heading -> Side/Heading',
         '. named Box/Heading -> Side/Heading',
+        'Pointer remote_path ../Box/Heading -> ../Side/Heading',
       ],
       JSON.stringify(moved),
     );
@@ -64373,14 +64378,20 @@ async function testAPropertyHoldingANodeFollowsIt(): Promise<void> {
     const deleted = await call({ op: 'delete', nodePath: 'Side/Heading' });
     assert.deepEqual(
       lines(deleted, 'stillNaming'),
-      ['. aim Side/Heading', '. marks Side/Heading', '. named Side/Heading'],
+      [
+        '. aim Side/Heading cleared true',
+        '. marks Side/Heading cleared true',
+        '. named Side/Heading cleared true',
+        'Pointer remote_path ../Side/Heading',
+      ],
       JSON.stringify(deleted),
     );
     assert.equal(get(deleted, 'engine_messages'), undefined, JSON.stringify(deleted));
     assert.ok(!fileOf().includes('aim ='), `the node is gone, so nothing names it: ${fileOf()}`);
     assert.ok(fileOf().includes('marks = [null, NodePath("Box")]'), fileOf());
     assert.ok(fileOf().includes('"title": null'), fileOf());
-    assert.ok(!fileOf().includes('Heading'), fileOf());
+    assert.ok(fileOf().includes('remote_path = NodePath("../Side/Heading")'), fileOf());
+    assert.equal(fileOf().split('Heading').length, 2, `only the NodePath still names the node: ${fileOf()}`);
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });

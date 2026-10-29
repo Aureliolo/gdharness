@@ -274,6 +274,8 @@ func _carry_nodes(
 	var naming: int = still_naming.size()
 	var carried: Array = _carried(held, was, now, entry, "")
 	if still_naming.size() > naming:
+		for index: int in range(naming, still_naming.size()):
+			still_naming[index]["cleared"] = true
 		_scene.asked(node, [name])
 		node.set(name, _unfreed(node.get(name)))
 	elif carried[0]:
