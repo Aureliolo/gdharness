@@ -3988,8 +3988,10 @@ async function testAVariablesReadSaysWhatItCouldNotRead(): Promise<void> {
  * Godot's adapter answers an evaluate the way it answers an object's variables: the request that
  * sends it to the game is never answered, and one after the game's reply answers with it. The game
  * evaluates on the frame's instance and, in a frame with none, leaves its debug loop instead of
- * answering, which lets it run on. The stand-in answers the second evaluate, gives frame 1 no self,
- * and puts a for loop's compiler local beside frame 0's own.
+ * answering, which lets it run on. The stand-in answers the third evaluate, gives frame 1 no self,
+ * and puts a for loop's compiler local beside frame 0's own. The third comes after the scopes'
+ * patience has run out, as a game's first evaluate does in a large project, since it loads every
+ * global class first, so the answer is waited for on the evaluate's own budget.
  */
 async function testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer(): Promise<void> {
   const evaluated: number[] = [];
@@ -4033,7 +4035,7 @@ async function testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer(): Promise<void> {
       });
     } else if (command === 'evaluate') {
       evaluated.push(Number(get(args, 'frameId')));
-      if (evaluated.length > 1) {
+      if (evaluated.length > 2) {
         answer({ result: '15', type: 'int', variablesReference: 0 });
       }
     } else {
@@ -4041,7 +4043,7 @@ async function testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer(): Promise<void> {
     }
   };
   await withFramedPeer(adapter, async (port) => {
-    const client = new GodotDAPClient(port, '127.0.0.1', { scopesMs: 6000 });
+    const client = new GodotDAPClient(port, '127.0.0.1', { scopesMs: 1500 });
     try {
       const read = await handleDAPTool(client, 'dap_get_variables', {});
       const scopes = get(JSON.parse(textOf({ jsonrpc: '2.0', result: read }) ?? '{}') as unknown, 'scopes');
@@ -4059,7 +4061,7 @@ async function testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer(): Promise<void> {
         { frame: 0, expression: 'amount * 3', value: '15', type: 'int' },
         'asked again once the game had answered',
       );
-      assert.deepEqual(evaluated, [0, 0], 'on the frame asked for');
+      assert.deepEqual(evaluated, [0, 0, 0], 'on the frame asked for');
 
       const static_ = await handleDAPTool(client, 'dap_evaluate', { expression: 'value', frameId: 1 });
       const said = textOf({ jsonrpc: '2.0', result: static_ }) ?? '';
@@ -4069,7 +4071,7 @@ async function testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer(): Promise<void> {
         /: Frame 1 has no instance of its script to evaluate on, as a static function called on its class has none/,
         said,
       );
-      assert.deepEqual(evaluated, [0, 0], `and the game is not asked there: ${said}`);
+      assert.deepEqual(evaluated, [0, 0, 0], `and the game is not asked there: ${said}`);
     } finally {
       await client.abandon();
     }
@@ -33581,6 +33583,14 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
       'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
   );
+  // Nothing uses this class, so the game first loads it when it evaluates: the engine puts every
+  // global class in scope by loading its script, and this one's static variable takes longer than
+  // any other read of a held game is waited for.
+  writeFileSync(
+    join(project, 'slow_to_load.gd'),
+    'class_name SlowToLoad\nextends RefCounted\n\nstatic var ready_at: int = _wait()\n\n\n' +
+      'static func _wait() -> int:\n\tOS.delay_msec(6000)\n\treturn 1\n',
+  );
   // Line 7 is the only script line a frame runs, line 11 the breakpoint inside add, line 17 the
   // script error that ends explode, line 27 the line after noted's push_error, and line 38 the loop
   // inside tripled, a static function.
@@ -33687,15 +33697,19 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       `held inside the call: ${held.said}`,
     );
     // Worked out by the held game on the frame's instance, with its locals: amount is the 5 given.
+    // The first evaluate also waits out the slow class's load.
+    const evaluating = Date.now();
     const evaluated = await call('debug_state', {
       op: 'evaluate',
       expression: 'amount * 3 + get_child_count()',
     });
+    const evaluateTook = Date.now() - evaluating;
     assert.deepEqual(
       [get(evaluated.answer, 'value'), get(evaluated.answer, 'type'), get(evaluated.answer, 'frame')],
       ['15', 'int', 0],
       evaluated.said,
     );
+    assert.ok(evaluateTook >= 6000, `the evaluate is the one that loaded the slow class: ${evaluateTook}ms`);
     const unparsed = await call('debug_state', { op: 'evaluate', expression: 'amount +' });
     assert.deepEqual(
       [get(unparsed.answer, 'value'), get(unparsed.answer, 'note')],

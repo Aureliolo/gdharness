@@ -125,7 +125,7 @@ import { type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-ru
 import { slotForCall } from './engine-slots.js';
 import { errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
-import { type DebugRequest, PAUSE_MS, READ_MS, STEP_MS } from './game-debugger.js';
+import { type DebugRequest, EVALUATE_MS, PAUSE_MS, READ_MS, STEP_MS } from './game-debugger.js';
 import {
   answersTo,
   type FoldedEntry,
@@ -9069,7 +9069,12 @@ class GodotServer {
     request: DebugRequest,
     projectPath: string,
   ): Promise<ToolResponse> {
-    const answered = await askTheKeepersDebugger(keeper, request, KEEPER_DEBUG_MS);
+    // An evaluate reads the frame before it asks, and then waits out the engine's first load.
+    const answered = await askTheKeepersDebugger(
+      keeper,
+      request,
+      request.op === 'evaluate' ? EVALUATE_MS + 2 * READ_MS : KEEPER_DEBUG_MS,
+    );
     if ('unreached' in answered) {
       return this.createErrorResponse(
         `The debugger of the running game did not answer: ${String(answered.unreached)}.`,
