@@ -270,13 +270,28 @@ const ANIMATION_TRACK: JsonSchema = {
       ],
       description: 'add_track makes property and method tracks; remove_track takes any type read answers.',
     },
-    nodePath: { type: 'string', description: 'Target node, relative to the AnimationPlayer root.' },
+    nodePath: {
+      type: 'string',
+      description:
+        "Target node, relative to the AnimationPlayer's root_node, which is the player's parent unless the scene sets it.",
+    },
     property: { type: 'string', description: 'For property tracks: the property to animate.' },
     update: {
       type: 'string',
       enum: ['continuous', 'discrete', 'capture'],
       description:
         "For property tracks: how the value moves between keys. continuous blends toward the next key, so a bool or an int changes halfway to it; discrete holds each key's value until the next; capture blends from the value the property holds when playing starts. Without it a new track is made as the editor makes one: as the RESET animation's track for the same property, otherwise continuous for a float, vector, colour or transform and discrete for anything else. The answer gives the track's update.",
+    },
+    interpolation: {
+      type: 'string',
+      enum: ['nearest', 'linear', 'cubic', 'linear_angle', 'cubic_angle'],
+      description:
+        'For property tracks: how a continuous track blends between keys. Without it a new track is made linear, or as the RESET track for the same property is, and an existing track keeps its own.',
+    },
+    loopWrap: {
+      type: 'boolean',
+      description:
+        'For property tracks: whether a looping animation blends its last key into its first. Without it a new track wraps, or as the RESET track for the same property does, and an existing track keeps its own.',
     },
     method: {
       type: 'string',

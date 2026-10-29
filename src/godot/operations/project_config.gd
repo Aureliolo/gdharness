@@ -413,6 +413,9 @@ func add_autoload(params: Dictionary) -> Dictionary:
 		return _log.failure(
 			GdhFileWalk.new().with_nearest_files("Autoload file does not exist: " + path, path)
 		)
+	var unloadable: String = _not_an_autoload(path)
+	if not unloadable.is_empty():
+		return _log.failure(unloadable)
 
 	# Through ProjectSettings so the file is saved the way the editor saves it, which includes
 	# putting Godot's header back and dropping any comment somebody wrote into the file by hand.
@@ -451,6 +454,38 @@ func add_autoload(params: Dictionary) -> Dictionary:
 	if was_updated:
 		answer["old_path"] = held.trim_prefix("*")
 	return answer
+
+
+## Why the file at [param path] cannot be an autoload, or empty when it can, as the editor's
+## Autoload
+## tab judges it: a scene, or a script whose instances are nodes. Written anyway, a script extending
+## RefCounted saved fine and every start of the game then failed to instantiate it. A script that
+## does not compile is let through, since it may be one being written, and its errors are its own.
+static func _not_an_autoload(path: String) -> String:
+	var refused: String = "%s is %s, and an autoload is a scene or a script extending Node"
+	if not ResourceLoader.exists(path):
+		return (refused + "; nothing was written.") % [path, "a file Godot does not load"]
+	var loaded: Resource = load(path)
+	if loaded is PackedScene:
+		return ""
+	if not loaded is Script:
+		var kind: String = "nothing Godot could load"
+		if loaded != null:
+			kind = "a " + loaded.get_class()
+		return (refused + "; nothing was written.") % [path, kind]
+	var script: Script = loaded
+	if not script.can_instantiate():
+		return ""
+	var base: StringName = script.get_instance_base_type()
+	if ClassDB.is_parent_class(base, "Node"):
+		return ""
+	return (
+		(
+			"%s extends %s, which is not a Node, and Godot instantiates an autoload under the root "
+			+ "as a node, so every start of the game would fail to load it; nothing was written."
+		)
+		% [path, base]
+	)
 
 
 ## Why [param name] cannot name an autoload, or empty when it can. The editor's Autoload tab refuses
