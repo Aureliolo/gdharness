@@ -125,7 +125,7 @@ import { type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-ru
 import { slotForCall } from './engine-slots.js';
 import { errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
-import { type DebugRequest, PAUSE_MS, READ_MS, STEP_MS } from './game-debugger.js';
+import { type DebugRequest, EVALUATE_MS, PAUSE_MS, READ_MS, STEP_MS } from './game-debugger.js';
 import {
   answersTo,
   type FoldedEntry,
@@ -216,8 +216,10 @@ import { acceptsConnections, notListeningNote } from './port-probe.js';
 import { freePort, portFromEnvOrNull } from './ports.js';
 import {
   ancestorsIn,
+  CONSOLE_WRAPPER,
   type CommandLineRead,
   descendantsIn,
+  editorsOfProjectIn,
   oneShotOptionOf,
   type ProcessTree,
   processTree,
@@ -1408,40 +1410,6 @@ interface ChildrenEnded {
   readonly ended: readonly GameUnderTheRun[];
   readonly left: readonly number[];
   readonly unknown: false | 'platform' | 'no process';
-}
-
-/**
- * Godot's Windows console build, by name: `X_console.exe` is a wrapper that starts `X.exe` beside
- * it as its child and forwards the console to it, so the wrapper is never the game.
- */
-const CONSOLE_WRAPPER = /_console(\.exe)?$/i;
-
-/**
- * The editors of [param projectPath] in [param tree], read off their command lines: a Godot
- * executable given `--path` on the project and the editor flag, without an option that makes it
- * one job that quits, and not the console wrapper, which forwards to an editor listed beside it.
- *
- * Read from the process table because an editor that has not reached the bridge yet is known to
- * nothing else. A restart interrupted by a reconnect launched one and its server was ended before
- * it connected; the next server, seeing nothing connected and no restart owed, opened a second on
- * the same project and the same language server port.
- */
-export function editorsOfProjectIn(tree: ProcessTree, projectPath: string): number[] {
-  const found: number[] = [];
-  for (const [pid, listed] of tree) {
-    const read = readCommandLine(listed.command);
-    if (
-      read.editor &&
-      read.oneShot === null &&
-      read.projectPath !== null &&
-      /godot/i.test(read.executable) &&
-      !CONSOLE_WRAPPER.test(read.executable) &&
-      isSameDirectory(read.projectPath, projectPath)
-    ) {
-      found.push(pid);
-    }
-  }
-  return found.sort((a, b) => a - b);
 }
 
 /** [param executable] and, when it is the console wrapper, the engine it starts. */
@@ -9101,7 +9069,12 @@ class GodotServer {
     request: DebugRequest,
     projectPath: string,
   ): Promise<ToolResponse> {
-    const answered = await askTheKeepersDebugger(keeper, request, KEEPER_DEBUG_MS);
+    // An evaluate reads the frame before it asks, and then waits out the engine's first load.
+    const answered = await askTheKeepersDebugger(
+      keeper,
+      request,
+      request.op === 'evaluate' ? EVALUATE_MS + 2 * READ_MS : KEEPER_DEBUG_MS,
+    );
     if ('unreached' in answered) {
       return this.createErrorResponse(
         `The debugger of the running game did not answer: ${String(answered.unreached)}.`,

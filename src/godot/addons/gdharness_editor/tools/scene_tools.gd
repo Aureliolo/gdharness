@@ -560,11 +560,12 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	GdhPlacing.own(node, root)
 	if GdhRead.as_bool(args.get("keepGlobalTransform", true)):
 		GdhPlacing.keep_in_place(node, old_parent)
-		# Unasked, a headless write takes the move on a node whose script is not a tool for the
-		# script's doing and puts the node back as the file held it.
-		var placed: Array[String] = GdhHeadlessCheck.differing(node, stored_before, {})
-		if not placed.is_empty():
-			scene.asked(node, placed)
+	# Unasked, a headless write takes the move on a node whose script is not a tool for the script's
+	# doing and puts the node back as the file held it. A new parent changes more than where the
+	# node is drawn: a container gives a Control its own layout mode.
+	var placed: Array[String] = GdhHeadlessCheck.differing(node, stored_before, {})
+	if not placed.is_empty():
+		scene.asked(node, placed)
 	var also_changed: Dictionary = {}
 	for property: String in drawn_at:
 		var now: Variant = _properties.read_at(node, property)
@@ -572,6 +573,18 @@ func reparent_node(args: Dictionary) -> Dictionary:
 			also_changed[property] = {
 				"was": _readable(node, drawn_at[property]), "now": _readable(node, now),
 			}
+	var drawn_in: Array[String] = GdhPlacing.placed_in(node)
+	for property: String in placed:
+		if property in drawn_in or also_changed.has(property):
+			continue
+		var was: Variant = (
+			stored_before[property]
+			if stored_before.has(property)
+			else GdhHeadlessCheck.default_of(node, property)
+		)
+		also_changed[property] = {
+			"was": _readable(node, was), "now": _readable(node, node.get(property)),
+		}
 	var sheared: String = ""
 	if node is Node3D and GdhPlacing.sheared((node as Node3D).basis):
 		var spatial: Node3D = node

@@ -86,11 +86,18 @@ func carry(scene: GdhSceneFile, moves: Dictionary) -> int:
 		# A value another file gives is in that file's terms, which its own pass carried already.
 		var from: String = scene.values_from(node, was)
 		var set_here: Dictionary = scene.set_at(was) if not from.is_empty() else {}
+		var read_here: bool = not from.is_empty()
 		for property: Dictionary in node.get_property_list():
 			var name: String = str(property["name"])
 			if not _may_hold_paths(property):
 				continue
 			var entry: Dictionary = { "scenePath": scene.path, "nodePath": now, "property": name }
+			if _names_nodes(property):
+				if not read_here:
+					set_here = scene.set_at(was)
+					read_here = true
+				_carry_nodes(node, name, set_here.get(name), was, now, entry)
+				continue
 			var elsewhere: String = "" if set_here.has(name) else from
 			var carried: Array = _carried(node.get(name), was, now, entry, elsewhere)
 			if carried[0]:
@@ -238,6 +245,60 @@ static func _may_hold_paths(property: Dictionary) -> bool:
 	return [TYPE_OBJECT, TYPE_NODE_PATH, TYPE_ARRAY, TYPE_DICTIONARY].has(
 		GdhRead.as_int(property.get("type"))
 	)
+
+
+## Whether [param property] is typed as a node, or as an array or dictionary of nodes. It holds the
+## nodes themselves, and the pack writes the path to each as it saves.
+static func _names_nodes(property: Dictionary) -> bool:
+	var hint: int = GdhRead.as_int(property.get("hint"))
+	match GdhRead.as_int(property.get("type")):
+		TYPE_OBJECT:
+			return hint == PROPERTY_HINT_NODE_TYPE
+		TYPE_ARRAY, TYPE_DICTIONARY:
+			return (
+				hint == PROPERTY_HINT_TYPE_STRING
+				and str(property.get("hint_string", "")).contains(
+					"%d/%d:" % [TYPE_OBJECT, PROPERTY_HINT_NODE_TYPE]
+				)
+			)
+	return false
+
+
+## Carries the property [param name] of [param node], typed as nodes, from [param held], the paths
+## the file gives it. The nodes it holds moved with the move, so only what the file held is named;
+## marking it asked lets the write save the new paths the pack gives. A node the move deleted is
+## cleared, as the editor's save clears it, since no path reaches it.
+func _carry_nodes(
+	node: Node, name: String, held: Variant, was: String, now: String, entry: Dictionary
+) -> void:
+	var naming: int = still_naming.size()
+	var carried: Array = _carried(held, was, now, entry, "")
+	if still_naming.size() > naming:
+		for index: int in range(naming, still_naming.size()):
+			still_naming[index]["cleared"] = true
+		_scene.asked(node, [name])
+		node.set(name, _unfreed(node.get(name)))
+	elif carried[0]:
+		_scene.asked(node, [name])
+
+
+## [param value] with each freed node in it as null.
+static func _unfreed(value: Variant) -> Variant:
+	if typeof(value) == TYPE_OBJECT:
+		return value if is_instance_valid(value) else null
+	if typeof(value) == TYPE_ARRAY:
+		var items: Array = value
+		items = items.duplicate()
+		for index: int in items.size():
+			items[index] = _unfreed(items[index])
+		return items
+	if typeof(value) == TYPE_DICTIONARY:
+		var pairs: Dictionary = value
+		pairs = pairs.duplicate()
+		for key: Variant in pairs.keys():
+			pairs[key] = _unfreed(pairs[key])
+		return pairs
+	return value
 
 
 ## [param value], held by the node that was at [param was] and is at [param now], with each path in

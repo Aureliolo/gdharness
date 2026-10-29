@@ -3,6 +3,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { answerJson } from './answer-json.js';
 import { Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
+import { EVALUATE_MS } from './game-debugger.js';
 import { portFromEnv } from './ports.js';
 import type { ToolResponse } from './server-types.js';
 
@@ -178,16 +179,19 @@ export class GodotDAPClient {
   readonly scopesPatienceMs: number;
   /** How long a step is given to stop the game again; see [STEP_LANDS_WITHIN_MS]. */
   readonly stepPatienceMs: number;
+  /** How long an evaluate's answer is waited for; see [EVALUATE_MS]. */
+  readonly evaluatePatienceMs: number;
 
   constructor(
     port = portFromEnv('GDHARNESS_DAP_PORT', DEFAULT_DAP_PORT),
     host = '127.0.0.1',
-    patience: { scopesMs?: number; stepMs?: number } = {},
+    patience: { scopesMs?: number; stepMs?: number; evaluateMs?: number } = {},
   ) {
     this.port = port;
     this.host = host;
     this.scopesPatienceMs = patience.scopesMs ?? SCOPES_TIMEOUT_MS;
     this.stepPatienceMs = patience.stepMs ?? STEP_LANDS_WITHIN_MS;
+    this.evaluatePatienceMs = patience.evaluateMs ?? EVALUATE_MS;
     this.pendingRequests = new Map();
   }
 
@@ -985,7 +989,7 @@ export class GodotDAPClient {
         `Frame ${frame} has no instance of its script to evaluate on, as a static function called on its class has none, and the engine lets the game go on rather than answer one there, so it was not asked. Evaluate in a frame below it, or read this one's locals with debug_state variables`,
       );
     }
-    const deadline = Date.now() + this.scopesPatienceMs;
+    const deadline = Date.now() + this.evaluatePatienceMs;
     while (Date.now() < deadline) {
       try {
         const answered = await this.sendRequest(
@@ -1004,7 +1008,7 @@ export class GodotDAPClient {
       await delay(200);
     }
     throw new ReadRefusal(
-      `What ${expression} comes to did not arrive from the game within ${this.scopesPatienceMs / 1000}s. It comes from the game through the editor: ask again`,
+      `What ${expression} comes to did not arrive from the game within ${this.evaluatePatienceMs / 1000}s. It comes from the game through the editor, and the first expression a game evaluates loads the script of every global class in the project first, static initialisers included, so one of those may still be running: ask again`,
     );
   }
 

@@ -176,12 +176,16 @@ func execute_tool(tool_name: String, args: Dictionary) -> Dictionary:
 		return { "ok": false, "error": "Tool method not found: %s.%s" % [node.name, method] }
 
 	GdhSceneFile.also_saved.clear()
+	GdhSceneFile.unmade_note = ""
 	var result: Variant = node.call(method, args)
 	if result is Dictionary:
 		var answered: Dictionary = result
 		if not GdhSceneFile.also_saved.is_empty():
 			answered["alsoSaved"] = GdhSceneFile.also_saved.duplicate(true)
 			GdhSceneFile.also_saved.clear()
+		if not GdhSceneFile.unmade_note.is_empty():
+			answered["unmadeConnections"] = GdhSceneFile.unmade_note
+			GdhSceneFile.unmade_note = ""
 		return answered
 
 	return { "ok": false, "error": "Invalid tool result from: " + tool_name }

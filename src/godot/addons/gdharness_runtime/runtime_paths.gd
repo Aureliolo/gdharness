@@ -503,7 +503,7 @@ static func can_read(holder: Variant, named: String) -> bool:
 		var object: Object = holder
 		if not method.is_empty():
 			return call_refused(object, method, "", args.size()).is_empty()
-		return _has_property(object, named)
+		return _has_property(object, named) or not constant_of(object, named).is_empty()
 	return false
 
 
@@ -876,7 +876,7 @@ static func read_under(holder: Variant, named: String) -> Variant:
 	if not method.is_empty():
 		var args: Array = arguments_of(named)["args"]
 		return object.callv(method, args)
-	return object.get(named)
+	return constant_of(object, named)[0] if is_constant(object, named) else object.get(named)
 
 
 ## Where [param named] lands in a list of [param size], or -1 for a step that is not in it.
@@ -1030,3 +1030,30 @@ static func _has_property(holder: Object, named: String) -> bool:
 		if str(entry["name"]) == named:
 			return true
 	return false
+
+
+## The constant [param named] that [param holder]'s script or a script it extends declares, in a
+## list of one, or an empty list. A constant is no property, so the property list never names it,
+## and `get` answers null for one.
+static func constant_of(holder: Variant, named: String) -> Array:
+	if not holder is Object:
+		return []
+	var object: Object = holder
+	var attached: Variant = object.get_script()
+	if not attached is Script:
+		return []
+	var script: Script = attached
+	while script != null:
+		var constants: Dictionary = script.get_script_constant_map()
+		if constants.has(named):
+			return [constants[named]]
+		script = script.get_base_script()
+	return []
+
+
+## Whether [param named] reaches a constant on [param holder] rather than a property.
+static func is_constant(holder: Variant, named: String) -> bool:
+	if not holder is Object:
+		return false
+	var object: Object = holder
+	return not _has_property(object, named) and not constant_of(object, named).is_empty()

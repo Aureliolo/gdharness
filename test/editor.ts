@@ -3350,6 +3350,7 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
         type: 'property',
         nodePath: 'Sprite',
         property: 'position',
+        update: 'continuous',
         keyframes: [
           { time: 0, value: { _type: 'Vector2', x: 1, y: 2 } },
           { time: 0.5, value: { _type: 'Vector2', x: 3, y: 4 } },

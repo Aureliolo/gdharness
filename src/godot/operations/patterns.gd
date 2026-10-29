@@ -96,6 +96,11 @@ static func without_annotations(line: String) -> String:
 # brace opens before the `#` and closes on a later line. Held by a case, since the argument for the
 # difference is not visible from the code and reads like an oversight beside its neighbours.
 static func without_comment(line: String) -> String:
+	var start: int = _comment_start(line)
+	return (line if start == -1 else line.substr(0, start)).strip_edges()
+
+
+static func _comment_start(line: String) -> int:
 	var quote: String = ""
 	for i: int in range(line.length()):
 		var ch: String = line[i]
@@ -104,10 +109,30 @@ static func without_comment(line: String) -> String:
 				quote = ""
 			continue
 		if ch == "#":
-			return line.substr(0, i).strip_edges()
+			return i
 		if ch == '"' or ch == "'":
 			quote = ch
-	return line.strip_edges()
+	return -1
+
+
+## The code in front of each TODO or FIXME comment in [param content], one entry a comment.
+##
+## Read from the comments alone, as the editor highlights them, so `#TODO` counts and the same
+## words inside a string or a multi-line string do not.
+static func noted_work(content: String) -> Array[String]:
+	var noted: Array[String] = []
+	var in_string: bool = false
+	for line: String in content.split("\n"):
+		if in_string:
+			in_string = triple_quotes(line) % 2 == 0
+			continue
+		var start: int = _comment_start(line)
+		var code: String = line if start == -1 else line.substr(0, start)
+		if triple_quotes(code) % 2 == 1:
+			in_string = true
+		elif start != -1 and compiled("^#+\\s*(?:TODO|FIXME)\\b").search(line.substr(start)):
+			noted.append(code.strip_edges())
+	return noted
 
 
 ## How many triple quotes of either kind [param line] holds. An odd count opens or closes a string

@@ -81,6 +81,8 @@ static func run(params: Dictionary) -> Dictionary:
 		var answered: Dictionary = answer
 		if not GdhSceneFile.also_saved.is_empty():
 			answered["alsoSaved"] = GdhSceneFile.also_saved.duplicate(true)
+		if not GdhSceneFile.unmade_note.is_empty():
+			answered["unmadeConnections"] = GdhSceneFile.unmade_note
 		if not GdhSceneUids.by_path.is_empty():
 			answered["namedByPath"] = (
 				(

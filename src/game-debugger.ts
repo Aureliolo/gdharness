@@ -109,6 +109,12 @@ function frameEndLine(): number {
 }
 /** How long a read of a held game waits for its answer, which comes from the same thread at once. */
 export const READ_MS = 5000;
+/**
+ * How long an evaluate waits. The engine puts every global class in scope by loading its script,
+ * so the first expression a game works out loads them all, static initialisers included: 9.5s for
+ * a game of 681 classes, where every later one took a tenth of a second.
+ */
+export const EVALUATE_MS = 60_000;
 /** The messages that answer a command, which wait in the inbox when no request is reading yet. */
 const REPLIES: ReadonlySet<string> = new Set([
   'debug_enter',
@@ -846,10 +852,10 @@ export class GameDebugger {
     }
     this.forget('evaluation_return');
     this.send('evaluate', [expression, frame], held.thread);
-    const answered = await this.next(GameDebugger.named('evaluation_return'), READ_MS);
+    const answered = await this.next(GameDebugger.named('evaluation_return'), EVALUATE_MS);
     if (answered === null || !('data' in answered)) {
       return {
-        refused: `The game worked out nothing for ${expression} within ${READ_MS / 1000}s. Ask again.`,
+        refused: `The game worked out nothing for ${expression} within ${EVALUATE_MS / 1000}s. The first expression a game evaluates loads the script of every global class in the project first, static initialisers included, so one of those may still be running. Ask again.`,
       };
     }
     const [, , type, value, hint] = answered.data;
