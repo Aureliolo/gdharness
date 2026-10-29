@@ -303,6 +303,13 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 		wanted.append([at, source_id, atlas_coords, alternative])
 		if source_id == -1:
 			erased += 1
+	# An erased cell leaves the layer's data at its next update, which a layer outside the tree
+	# never has, so the pack wrote it as a cell naming no tile, where the editor's save leaves it
+	# out.
+	if layered != null:
+		layered.update_internals()
+	else:
+		single.update_internals()
 
 	var at_path: String = scene.path_of(node)
 	var written: Dictionary = scene.write(

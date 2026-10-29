@@ -65824,6 +65824,13 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
     assert.deepEqual([get(painted, 'placed'), get(painted, 'erased')], [2, 0], JSON.stringify(painted));
     const erased = parseTextContent(await paint([{ coords: { x: 0, y: 0 }, sourceId: -1 }]));
     assert.deepEqual([get(erased, 'placed'), get(erased, 'erased')], [0, 1], JSON.stringify(erased));
+    // The format version, then the one cell left: (1, 0) from source 0 at (1, 1), alternative 0.
+    assert.ok(
+      fileOf('map.tscn').includes(
+        'tile_map_data = PackedByteArray(0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0)\n',
+      ),
+      `the erased cell is gone from the file, as the editor saves it: ${fileOf('map.tscn')}`,
+    );
     const ground = parseTextContent(await call('scene_node', { ...map, op: 'get' }));
     assert.deepEqual(
       get(ground, 'cells'),
@@ -65850,6 +65857,29 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
         ['Bare', 1, 'scene_node get with nodePath Bare, which lists them as set_tilemap_cells takes them'],
       ],
       JSON.stringify(tree),
+    );
+    // A TileMap keeps its cells in layers of its own, and drops an erased one only as they update too.
+    writeFileSync(
+      join(project, 'old.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="TileSet" path="res://set.tres" id="1_set"]\n\n' +
+        '[node name="Old" type="TileMap"]\ntile_set = ExtResource("1_set")\n',
+    );
+    const old = { scenePath: 'res://old.tscn', nodePath: '.', op: 'set_tilemap_cells' };
+    await call('scene_node', {
+      ...old,
+      cells: [
+        { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
+        { coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 1, y: 1 } },
+      ],
+    });
+    const oldErased = parseTextContent(
+      await call('scene_node', { ...old, cells: [{ coords: { x: 0, y: 0 }, sourceId: -1 }] }),
+    );
+    assert.deepEqual([get(oldErased, 'placed'), get(oldErased, 'erased')], [0, 1], JSON.stringify(oldErased));
+    // (1, 0), then source 0 with the atlas column above it, then the atlas row with alternative 0.
+    assert.ok(
+      fileOf('old.tscn').includes('layer_0/tile_data = PackedInt32Array(1, 65536, 1)\n'),
+      `the erased cell is gone from the TileMap's file: ${fileOf('old.tscn')}`,
     );
     assert.equal(
       textOf(await call('scene_node', { ...map, op: 'set', properties: { tile_set: 'res://missing.tres' } })),
