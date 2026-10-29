@@ -59804,6 +59804,13 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       '[node name="Taker" type="Node2D" parent="."]\nscript = ExtResource("1_wired")\n\n' +
       '[connection signal="visibility_changed" from="Emitter" to="Taker" method="take" binds= [5]]\n' +
       '[connection signal="child_entered_tree" from="Emitter" to="Taker" method="queue_free" unbinds=1]\n',
+    // Connections binding and unbinding arguments to a method the root lacks, which the engine
+    // refuses to make as the scene loads, beside one it makes.
+    'quits.tscn':
+      '[gd_scene format=3]\n\n[node name="Menu" type="Control"]\n\n[node name="Quit" type="Button" parent="."]\n\n' +
+      '[connection signal="pressed" from="Quit" to="." method="_on_quit" binds= [3]]\n' +
+      '[connection signal="toggled" from="Quit" to="." method="_on_toggle" unbinds=1]\n' +
+      '[connection signal="pressed" from="Quit" to="." method="queue_free"]\n',
     // Does not compile, so the engine instances the scene without it, where the editor keeps it.
     'broken.gd': 'extends Node\n\n\nfunc _init() -> void:\n\tnot_declared_anywhere()\n',
     'broken.tscn':
@@ -60201,6 +60208,89 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     assert.equal(
       lineOf('visibility_changed', 'scale_by'),
       '[connection signal="visibility_changed" from="Emitter" to="Taker" method="scale_by" binds= [2.0]]',
+    );
+    // The engine makes a connection that binds or unbinds arguments only to a method its target
+    // has, so a connect aimed elsewhere is refused. One a file holds already is loaded without and
+    // dropped by a save, so a write puts it back, at its nodes' paths after a rename, until a
+    // disconnect takes it out or a connect replaces it.
+    assert.equal(
+      textOf(
+        await call('scene_signal', {
+          op: 'connect',
+          scenePath: 'wires.tscn',
+          sourceNodePath: 'Emitter',
+          signalName: 'died',
+          targetNodePath: 'Taker',
+          methodName: 'not_there',
+          binds: [1],
+        }),
+      ),
+      "Taker has no method not_there, and the engine connects a signal that binds or unbinds arguments only to a method its target has, so the scene would load without the connection. Add the method to the target's script first, or connect without binds and unbinds.",
+    );
+    const connectionsOf = (file: string): string[] =>
+      fileOf(file)
+        .split('\n')
+        .filter((line) => line.startsWith('[connection'))
+        .sort();
+    const unmadeBefore = connectionsOf('quits.tscn');
+    const relabelled = await written('scene_node', {
+      op: 'set',
+      scenePath: 'quits.tscn',
+      nodePath: 'Quit',
+      properties: { text: 'Quit' },
+    });
+    assert.equal(
+      get(relabelled, 'unmadeConnections'),
+      "res://quits.tscn holds connections the engine cannot make as it loads the scene, Quit.pressed to Menu._on_quit with binds [3]; Quit.toggled to Menu._on_toggle with unbinds 1, since Menu has no method _on_quit, Menu has no method _on_toggle. This write kept them as the file held them, and they do nothing until the method exists. The engine connects a signal that binds or unbinds arguments only to a method its target has: add the method to the target's script, or scene_signal disconnect takes the connection out.",
+      JSON.stringify(relabelled),
+    );
+    assert.deepEqual(connectionsOf('quits.tscn'), unmadeBefore, fileOf('quits.tscn'));
+    assert.match(fileOf('quits.tscn'), /text = "Quit"/, 'and the set was written');
+    await written('scene_node', {
+      op: 'set',
+      scenePath: 'quits.tscn',
+      nodePath: 'Quit',
+      properties: { name: 'Exit' },
+    });
+    assert.deepEqual(
+      connectionsOf('quits.tscn'),
+      [
+        '[connection signal="pressed" from="Exit" to="." method="_on_quit" binds= [3]]',
+        '[connection signal="pressed" from="Exit" to="." method="queue_free"]',
+        '[connection signal="toggled" from="Exit" to="." method="_on_toggle" unbinds=1]',
+      ],
+      fileOf('quits.tscn'),
+    );
+    const taken = await written('scene_signal', {
+      op: 'disconnect',
+      scenePath: 'quits.tscn',
+      sourceNodePath: 'Exit',
+      signalName: 'pressed',
+      targetNodePath: '.',
+      methodName: '_on_quit',
+    });
+    assert.deepEqual([get(taken, 'removed'), get(taken, 'binds')], [true, [3]], JSON.stringify(taken));
+    const replaced = await written('scene_signal', {
+      op: 'connect',
+      scenePath: 'quits.tscn',
+      sourceNodePath: 'Exit',
+      signalName: 'toggled',
+      targetNodePath: '.',
+      methodName: '_on_toggle',
+      unbinds: 0,
+    });
+    assert.deepEqual(
+      [get(replaced, 'methodFound'), get(replaced, 'unmadeConnections')],
+      [false, undefined],
+      JSON.stringify(replaced),
+    );
+    assert.deepEqual(
+      connectionsOf('quits.tscn'),
+      [
+        '[connection signal="pressed" from="Exit" to="." method="queue_free"]',
+        '[connection signal="toggled" from="Exit" to="." method="_on_toggle"]',
+      ],
+      fileOf('quits.tscn'),
     );
     // Where a bind lands moves with what the signal passes: unbinds drops the node child_entered_tree
     // passes, so the bind reaches factor, and the source an append adds pushes it past the end.
@@ -60934,11 +61024,15 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
       '[node name="Lone" type="CollisionShape2D" parent="."]\nshape = SubResource("Own")\n\n' +
       '[node name="Wide" type="Sprite2D" parent="."]\ntexture = SubResource("WideRamp")\n\n' +
       '[node name="Thin" type="Sprite2D" parent="."]\ntexture = SubResource("ThinRamp")\n',
+    'panel.gd': 'extends Control\n\n\nfunc _on_quit(_code: int) -> void:\n\tpass\n',
     'panel.tscn':
-      '[gd_scene format=3]\n\n[node name="Panel" type="Control"]\nlayout_mode = 3\nanchors_preset = 0\n\n' +
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://panel.gd" id="1_panel"]\n\n' +
+      '[node name="Panel" type="Control"]\nlayout_mode = 3\nanchors_preset = 0\nscript = ExtResource("1_panel")\n\n' +
       '[node name="Rows" type="VBoxContainer" parent="."]\nlayout_mode = 0\n\n' +
       '[node name="Close" type="Button" parent="."]\nlayout_mode = 0\n\n' +
-      '[node name="Open" type="Button" parent="."]\nlayout_mode = 0\n',
+      '[node name="Open" type="Button" parent="."]\nlayout_mode = 0\n\n' +
+      '[connection signal="pressed" from="Close" to="." method="_on_quit" flags=6 binds= [3]]\n' +
+      '[connection signal="toggled" from="Open" to="Rows" method="queue_sort" unbinds=1]\n',
   };
   for (const [path, content] of Object.entries(files)) {
     writeFileSync(join(project, path), content);
@@ -61263,6 +61357,22 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
         fileOf('panel.tscn'),
       );
     }
+    // A copy's connections keep the arguments the original's bind and unbind, and one aimed inside
+    // the copied nodes is aimed at the copy.
+    await node({ scenePath: 'panel.tscn', op: 'duplicate', nodePath: 'Rows', newName: 'Shelf' });
+    const connections = fileOf('panel.tscn')
+      .split('\n')
+      .filter((line) => line.startsWith('[connection'));
+    assert.deepEqual(
+      connections,
+      [
+        '[connection signal="pressed" from="Rows/Close" to="." method="_on_quit" flags=6 binds= [3]]',
+        '[connection signal="toggled" from="Rows/Open" to="Rows" method="queue_sort" unbinds=1]',
+        '[connection signal="pressed" from="Shelf/Close" to="." method="_on_quit" flags=6 binds= [3]]',
+        '[connection signal="toggled" from="Shelf/Open" to="Shelf" method="queue_sort" unbinds=1]',
+      ],
+      fileOf('panel.tscn'),
+    );
     // What such a script changes as a write runs is put back before the file is saved, so the
     // answer says so rather than giving it as a change the file holds.
     const paced = await node({

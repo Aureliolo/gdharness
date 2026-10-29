@@ -1045,7 +1045,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'set: groups to take the node out of. One it is not in is refused, and so is one another scene puts it in (the scene that makes it, instances it or is inherited here), which only that scene can take it out of.',
       },
-      newName: { type: 'string', ops: ['duplicate'], description: "duplicate: the copy's name." },
+      newName: {
+        type: 'string',
+        ops: ['duplicate'],
+        description:
+          "duplicate: the copy's name. The copy has the nodes under the original and their connections, as the editor's Duplicate makes it: each connection keeps its flags, binds and unbinds, and one between two copied nodes joins the copies.",
+      },
       newParentPath: {
         type: 'string',
         ops: ['reparent'],
@@ -1125,7 +1130,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
   {
     name: 'scene_signal',
     title: 'Scene signals',
-    description: `Signal connections in a scene file. Each connection answers with its flags as the number and as flagNames; persist is on every connection, since a scene saves no other kind. A connection carries binds, the values passed after the signal's own, and unbinds, how many of the signal's own are dropped first, as the editor's connect dialog offers them; each is answered only when there is one. A connect of a pair already connected says alreadyConnected, with flagsBefore, bindsBefore and unbindsBefore when it changed them, and keeps the binds and unbinds it had unless the call gives new ones. A connect to a method the target does not have is still written, as the editor's own dialog allows, since the method may be written next; methodFound false says so, and until the method exists the signal fails each time it is emitted. One whose method cannot take what the signal passes, with its binds and unbinds (too few or too many arguments, an object where the method takes a value or the reverse, or an engine class unrelated to the one it takes), is written too, and answers argumentsFit false with misfit saying why; list gives each connection its methodFound, and misfit when it has one. list marks editable false on a connection a scene this one instances or inherits makes, on its own root as well as inside it, and names that scene under madeIn; only that scene can change it, so a disconnect of one is refused. ${WITHOUT_AN_EDITOR} ${ALSO_SAVED}`,
+    description: `Signal connections in a scene file. Each connection answers with its flags as the number and as flagNames; persist is on every connection, since a scene saves no other kind. A connection carries binds, the values passed after the signal's own, and unbinds, how many of the signal's own are dropped first, as the editor's connect dialog offers them; each is answered only when there is one. A connect of a pair already connected says alreadyConnected, with flagsBefore, bindsBefore and unbindsBefore when it changed them, and keeps the binds and unbinds it had unless the call gives new ones. A connect to a method the target does not have is still written, as the editor's own dialog allows, since the method may be written next; methodFound false says so, and until the method exists the signal fails each time it is emitted. That holds only without binds and unbinds: the engine makes a connection that binds or unbinds arguments only to a method its target has, and a scene loads without one aimed elsewhere, so such a connect is refused. A file can hold one already, written by hand or before its method was renamed: the engine loads the scene without it and a save drops it, so every tool that writes a .tscn puts it back as the file held it and says so under unmadeConnections, a write to a binary .scn holding one is refused, and a disconnect takes it out. One whose method cannot take what the signal passes, with its binds and unbinds (too few or too many arguments, an object where the method takes a value or the reverse, or an engine class unrelated to the one it takes), is written too, and answers argumentsFit false with misfit saying why; list gives each connection its methodFound, and misfit when it has one. list marks editable false on a connection a scene this one instances or inherits makes, on its own root as well as inside it, and names that scene under madeIn; only that scene can change it, so a disconnect of one is refused. ${WITHOUT_AN_EDITOR} ${ALSO_SAVED}`,
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
