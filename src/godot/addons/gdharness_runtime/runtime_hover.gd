@@ -179,7 +179,7 @@ func _drop(viewport: Viewport, until: int) -> void:
 	var over: Control = instance_from_id(top) as Control
 	var container: SubViewportContainer = over as SubViewportContainer
 	if container != null:
-		for child: Node in container.get_children(true):
+		for child: Node in container.get_children():
 			var shown: SubViewport = child as SubViewport
 			if shown != null:
 				_drop(shown, 0)
