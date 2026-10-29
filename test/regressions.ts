@@ -152,7 +152,13 @@ import {
 import { GodotLocator } from '../src/godot-path.js';
 import { DebuggerStream, decodeVariant, framedCommand, type SentValue } from '../src/godot-variant.js';
 import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/harnesses.js';
-import { type ImportOutcome, librariesNotCopied, notImportedNote, runImport } from '../src/headless.js';
+import {
+  type ImportOutcome,
+  librariesNotCopied,
+  notImportedNote,
+  runImport,
+  runOperation,
+} from '../src/headless.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
 import { IMPORTABLE_EXTENSIONS, staleImports } from '../src/import-freshness.js';
 import { RENDERED_AWAY_NOTE, type ScriptError } from '../src/junit.js';
@@ -28932,6 +28938,55 @@ function testTheScanNoteNamesWhatStarted(): void {
     { waitedForEditorScanMs: 1_200, scanNote: undefined },
     'a scan that finished in time is a wait and no note',
   );
+}
+
+/**
+ * A headless operation that never answers is ended at its ceiling, and its answer says so.
+ *
+ * No operation had one, so an engine whose dependency walk never answered spun a core for nearly
+ * four hours, and the call waited on it the whole time. The stand-in script logs that it began and
+ * then never writes an answer; it quits by itself after twenty seconds, so with the ceiling gone
+ * the run still ends, as one that produced no result rather than one that was ended.
+ */
+async function testAnOperationThatNeverAnswersIsEnded(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('operation ceiling regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-ceiling-'));
+  const scripts = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-ceiling-script-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Ceiling"\n',
+  );
+  const script = join(scripts, 'never_answers.gd');
+  writeFileSync(
+    script,
+    'extends SceneTree\n\nvar _left: float = 20.0\n\n\nfunc _init() -> void:\n\tprint("[INFO] walking")\n\n\n' +
+      'func _process(delta: float) -> bool:\n\t_left -= delta\n\treturn _left <= 0.0\n',
+  );
+  try {
+    const began = Date.now();
+    const outcome = await runOperation(
+      { godotPath, script, debug: false, ceiling: { ms: 3_000, said: 'three seconds' } },
+      'get_dependencies',
+      { resource_path: 'res://project.godot' },
+      project,
+    );
+    const took = Date.now() - began;
+    assert.match(
+      'message' in outcome ? outcome.message : `answered ${JSON.stringify(outcome)}`,
+      /^get_dependencies failed \(.*because it ran past its three seconds\)/,
+      JSON.stringify(outcome),
+    );
+    assert.ok(took < 15_000, `ended at its ceiling, not when it quit by itself: ${String(took)} ms`);
+  } finally {
+    sweep(project, scripts);
+  }
 }
 
 /**
@@ -66792,6 +66847,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStoppedSpawnedRunGivesWayToAPlay,
   testAKilledRunHasNoExitCode,
   testAnEngineRunSaysHowItEnded,
+  testAnOperationThatNeverAnswersIsEnded,
   testTheScanNoteNamesWhatStarted,
   testAnExportIsJudgedByTheFileItWrote,
   testAnExportThatCouldNotCopyALibrarySaysSo,
