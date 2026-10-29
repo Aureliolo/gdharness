@@ -91,9 +91,14 @@ export interface RunPrinted {
   readonly orphansLeft: readonly OrphansLeft[];
   /** The rows gdUnit4 skipped for data that does not fit their case's parameters. */
   readonly mismatched: readonly MismatchedRow[];
+  /** The cases gdUnit4 skipped because it cannot run them as they are declared. */
+  readonly unrunnable: readonly MismatchedRow[];
 }
 
-/** A row of a parameterised case that gdUnit4 skipped because its data does not fit the case. */
+/**
+ * A case, or a row of a parameterised one, that gdUnit4 skipped for how it is declared, or for data
+ * that does not fit it.
+ */
 interface MismatchedRow {
   readonly suite: string;
   /** The row as gdUnit4 printed it, `test_fit:0 (…)`. */
@@ -114,6 +119,11 @@ const EXECUTED = /^Executed test cases\s*:\s*\((\d+)\//;
 // gdUnit4's reason for skipping a row whose data does not fit its case, printed under the row, which
 // it prints as PASSED first. The run's summary counts it skipped, and nothing else says it never ran.
 const MISMATCHED_ROW = /^\s*The test data set at index \(\d+\) does not match the expected test parameters/;
+// gdUnit4's reason for skipping a case it cannot run as declared, printed under the case the same
+// way: a parameter it has no data for, or a fuzzer declared after a setting. Not a skip the case
+// asked for with do_skip, whose reason is the case's own.
+const UNRUNNABLE_CASE =
+  /^\s*Reason: '((?:Unknown test case argument's \[.*\] found|Fuzzer argument '.+' must be declared before the test config argument\(s\) \[.*\])\.)'\s*$/;
 // The engine's first line, `Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org`.
 const BANNER = /^\s*Godot Engine v(\S+?)(?:\s+-\s+\S+)?\s*$/;
 // Printed by the runner in src/godot/tests/listed.gd as it leaves a row out, -1 for a case whole.
@@ -174,16 +184,22 @@ function rowRuns(share: RowShare, row: number | null): boolean {
 }
 
 /**
- * Every row [param printed] says gdUnit4 skipped for data that does not fit its case, under the suite
- * and the row printed last before the reason.
+ * Every row [param printed] says gdUnit4 skipped for data that does not fit its case, and every case
+ * it skipped as unrunnable as declared, under the suite and the row or case printed last before the
+ * reason.
  *
- * A row skipped this way is a case that never ran, and gdUnit4 calls the run passed: a case taking
- * its rows from a function returning a constant had all three skipped, and a mix of fitting and
- * misfitting rows passes with only the misfits left out.
+ * A row or case skipped this way never ran, and gdUnit4 calls the run passed: a case taking its rows
+ * from a function returning a constant had all three skipped, a mix of fitting and misfitting rows
+ * passes with only the misfits left out, and a case run alone whose parameter had a typo in its name
+ * was answered passed.
  */
-function mismatchedRowsIn(printed: readonly string[]): MismatchedRow[] {
+function skippedAsDeclaredIn(printed: readonly string[]): {
+  mismatched: MismatchedRow[];
+  unrunnable: MismatchedRow[];
+} {
   const lines = printed.flatMap((text) => stripVTControlCharacters(text).split(/\r?\n/));
   const found: MismatchedRow[] = [];
+  const unrunnable: MismatchedRow[] = [];
   let suite: string | null = null;
   let lastCase: string | null = null;
   for (let at = 0; at < lines.length; at += 1) {
@@ -199,7 +215,15 @@ function mismatchedRowsIn(printed: readonly string[]): MismatchedRow[] {
       lastCase = caseLine[3] === 'STARTED' ? lastCase : (caseLine[2] ?? null);
       continue;
     }
-    if (suite === null || lastCase === null || !MISMATCHED_ROW.test(line)) {
+    if (suite === null || lastCase === null) {
+      continue;
+    }
+    const declared = UNRUNNABLE_CASE.exec(line)?.[1];
+    if (declared !== undefined) {
+      unrunnable.push({ suite, name: lastCase, reason: declared });
+      continue;
+    }
+    if (!MISMATCHED_ROW.test(line)) {
       continue;
     }
     const parts = [line.trim()];
@@ -209,7 +233,7 @@ function mismatchedRowsIn(printed: readonly string[]): MismatchedRow[] {
     }
     found.push({ suite, name: lastCase, reason: parts.join(' ').replaceAll(/\[\/?color[^\]]*\]/g, '') });
   }
-  return found;
+  return { mismatched: found, unrunnable };
 }
 
 /** [param printed], both streams in the order they came, read into suites, cases and errors. */
@@ -358,7 +382,7 @@ export function readRun(printed: string): RunPrinted {
     leftOut,
     engineVersion,
     orphansLeft,
-    mismatched: mismatchedRowsIn(lines),
+    ...skippedAsDeclaredIn(lines),
   };
 }
 
@@ -659,7 +683,7 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
         : 'the run executed no test case at all, whatever it exited with',
     );
   }
-  for (const row of printed.mismatched) {
+  for (const row of [...printed.mismatched, ...printed.unrunnable]) {
     faults.push(`${row.suite} > ${row.name} never ran: gdUnit4 skipped it, saying "${row.reason}"`);
     failing.add(row.suite);
   }
