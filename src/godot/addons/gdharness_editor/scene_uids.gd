@@ -25,29 +25,41 @@ static func save_keeping_uid(resource: Resource, file_path: String) -> Error:
 	var marked: Error = ResourceSaver.set_uid(file_path, uid)
 	if marked != OK:
 		return marked
-	return _with_external_uids(file_path)
+	return _as_the_editor_writes(file_path)
 
 
-## Puts back the uid on each external resource the text file at [param file_path] names. Only the
-## editor's file system tells the saver a path's uid, so a headless save writes every reference by
-## path alone, and each breaks when the file it names is moved.
-static func _with_external_uids(file_path: String) -> Error:
+## Writes the text file at [param file_path] as the editor's save would have.
+##
+## Only the editor's file system tells the saver a path's uid, so a headless save writes every
+## reference by path alone, and each breaks when the file it names is moved: the uid is put back on
+## each external resource.
+##
+## The saver leaves out a shader parameter holding the default the renderer gives it, and a headless
+## engine's renderer gives none, so every parameter a ShaderMaterial never set was written as null.
+## Loading null clears the parameter, so the line changes nothing, and the editor drops it again.
+static func _as_the_editor_writes(file_path: String) -> Error:
 	if not (file_path.ends_with(".tscn") or file_path.ends_with(".tres")):
 		return OK
 	var lines: PackedStringArray = FileAccess.get_file_as_string(file_path).split("\n")
 	var pattern: RegEx = RegEx.create_from_string(' path="([^"]+)"')
+	var unset: RegEx = RegEx.create_from_string("^shader_parameter/\\S+ = null$")
+	var kept: PackedStringArray = []
 	var changed: bool = false
-	for at: int in lines.size():
-		var line: String = lines[at]
-		if not line.begins_with("[ext_resource ") or line.contains(' uid="'):
-			continue
-		var named: RegExMatch = pattern.search(line)
-		if named == null:
-			continue
-		var uid: String = reference_uid(named.get_string(1))
-		if not uid.is_empty():
-			lines[at] = line.replace(' path="', uid + ' path="')
+	for line: String in lines:
+		if unset.search(line) != null:
 			changed = true
+			continue
+		var named: RegExMatch = (
+			pattern.search(line)
+			if line.begins_with("[ext_resource ") and not line.contains(' uid="')
+			else null
+		)
+		var uid: String = "" if named == null else reference_uid(named.get_string(1))
+		if not uid.is_empty():
+			line = line.replace(' path="', uid + ' path="')
+			changed = true
+		var _added: bool = kept.append(line)
+	lines = kept
 	if not changed:
 		return OK
 	var file: FileAccess = FileAccess.open(file_path, FileAccess.WRITE)
