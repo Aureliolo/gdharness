@@ -29110,7 +29110,8 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
           '\t\tvar go: Button = Button.new()\n\t\tgo.text = "Go %d" % row\n\t\tline.add_child(go)\n' +
           '\t\tline.add_child(ColorRect.new())\n' +
           '\tdate.text = "Spring 16"\n\tsmall.add_child(date)\n\n\n' +
-          'func turn_the_day() -> void:\n\tdate.text = "Spring 17"\n',
+          'func turn_the_day() -> void:\n\tdate.text = "Spring 17"\n\n\n' +
+          'func turn_the_season() -> void:\n\tdate.text = "Summer 1"\n',
       );
       writeFileSync(
         join(project, 'main.tscn'),
@@ -29220,6 +29221,23 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
         timeoutMs: 5_000,
       });
       assert.equal(get(turned, 'met'), true, JSON.stringify(turned));
+
+      // A look over the whole hall costs tens of milliseconds, and the paced looks read it a slice
+      // to a frame, so none of them holds a frame the way the last look of the wait above did, which
+      // is read whole. Read whole, every paced look held a frame that long, and a game logging its
+      // own frame times saw a long frame every few dozen that came and went with the wait.
+      const [season] = await Promise.all([
+        call('runtime_wait', { op: 'until', nodePath: '/root/Main', says: 'Summer 1', timeoutMs: 10_000 }),
+        delay(500).then(() =>
+          call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'turn_the_season' }),
+        ),
+      ]);
+      const whole = asNumber(get(outlasted, 'longest_hold_ms'), JSON.stringify(outlasted));
+      const sliced = asNumber(get(season, 'longest_hold_ms'), JSON.stringify(season));
+      assert.ok(
+        get(season, 'met') === true && sliced > 0 && sliced < whole / 3,
+        `the paced looks held a frame for at most ${sliced}ms, against ${whole}ms for a look read whole: ${JSON.stringify({ season, outlasted })}`,
+      );
       await call('editor_run', { op: 'stop' });
     },
     { realAddon: true, engine },

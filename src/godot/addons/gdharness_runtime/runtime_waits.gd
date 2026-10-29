@@ -17,6 +17,11 @@ const MOST_FRAMES: int = 600
 ## How long a wait for words leaves between looks, as a multiple of what the last look took: nine
 ## gives looking about a tenth of the time.
 const LOOKS_APART: int = 9
+## The longest a wait for words holds one of the game's frames while it looks, in microseconds: a
+## look over a screen too large to read in that time carries on in the next frame from where it
+## stopped. Read whole, a look over an interface of about 1,000 labels held a frame for 28ms every
+## few dozen, which a game logging its own frame times took for a hitch of its own.
+const LOOK_SLICE_USEC: int = 2000
 ## How a property wait compares what it reads with the value: equality by default, and order for a
 ## number that steps rather than lands, as a day counter on a fast clock goes from 31 to 34 between
 ## two looks and a wait for 32 never sees it.
@@ -785,9 +790,12 @@ static func _declared_slot(holder: Variant, named: String) -> Dictionary:
 ## looking takes about a tenth of the time. Every frame on a hall of 3,500 nodes held the game at a
 ## sixth of its frame rate, and its clock, which advances by the frame's delta, lost three quarters
 ## of its time, so a wait for a date timed out on a clock that turned a day every thirty seconds.
-## The answer says how many frames the wait spanned, how many looks it took and how long they took
-## between them, which is how a caller sees what it cost and whether the game lost its speed to the
-## looks or to something else.
+## Each look is read a slice at a time, [constant LOOK_SLICE_USEC] to a frame, so the frames it runs
+## in keep their length; the last is read whole, since the wait answers on it.
+##
+## The answer says how many frames the wait spanned, how many looks it took, how long they took
+## between them and the longest they held one frame, which is how a caller sees what it cost and
+## whether the game lost its speed, or a frame its length, to the looks or to something else.
 func _wait_until_said(
 	node_path: String, said: String, timeout_ms: int, include_hidden: bool
 ) -> Dictionary:
@@ -795,18 +803,24 @@ func _wait_until_said(
 	var frames: int = 0
 	var looks: int = 0
 	var looked_usec: int = 0
+	var held_usec: int = 0
 	var next_look: int = 0
 	var looked_at_frame: int = 0
 	var found: bool = false
+	var look: GdhLook = null
 	while true:
-		if Time.get_ticks_usec() >= next_look:
-			var looking: int = Time.get_ticks_usec()
-			found = _anything_says(node_path, said, include_hidden)
-			looks += 1
-			var took: int = Time.get_ticks_usec() - looking
-			looked_usec += took
-			next_look = Time.get_ticks_usec() + took * LOOKS_APART
+		if look == null and Time.get_ticks_usec() >= next_look:
+			look = GdhLook.new(_under(node_path), said, include_hidden)
+		if look != null:
+			var held: int = look.go_on(LOOK_SLICE_USEC)
+			looked_usec += held
+			held_usec = maxi(held_usec, held)
 			looked_at_frame = frames
+			if look.done:
+				looks += 1
+				found = look.found
+				next_look = Time.get_ticks_usec() + look.took_usec * LOOKS_APART
+				look = null
 		if found or Time.get_ticks_msec() - started >= timeout_ms:
 			break
 		await _host.get_tree().process_frame
@@ -815,14 +829,18 @@ func _wait_until_said(
 	# never having come. Taken once a whole frame has run since the last look, which is two frame
 	# starts: a first look that outlasted the timeout otherwise left none, so the wait answered with
 	# the game not having run at all, and a command sent during that look not yet read.
+	var heard: bool = found
 	if not found:
 		while frames - looked_at_frame < 2:
 			await _host.get_tree().process_frame
 			frames += 1
-		var last: int = Time.get_ticks_usec()
-		found = _anything_says(node_path, said, include_hidden)
+		var last: GdhLook = GdhLook.new(_under(node_path), said, include_hidden)
+		var held: int = last.go_on(-1)
 		looks += 1
-		looked_usec += Time.get_ticks_usec() - last
+		looked_usec += held
+		held_usec = maxi(held_usec, held)
+		found = last.found
+		heard = last.heard
 
 	var answer: Dictionary = {
 		"type": "condition",
@@ -834,10 +852,11 @@ func _wait_until_said(
 		"frames": frames,
 		"looks": looks,
 		"looking_ms": looked_usec / 1000.0,
+		"longest_hold_ms": held_usec / 1000.0,
 	}
 	# Words that are there and cannot be read look, from a wait that ran out, like words that never
 	# came.
-	if not found and not include_hidden and _anything_says(node_path, said, true):
+	if not found and heard:
 		answer["unseen_note"] = (
 			(
 				"Something under %s says it, but is hidden or drawn outside the viewport or a "
@@ -849,22 +868,8 @@ func _wait_until_said(
 	return answer
 
 
-## Whether anything under [param node_path] says [param said], the node itself included, and where
-## the player can read it unless hidden ones are wanted too. Matched as a find and a click match
-## `says`, a glob over the whole text when it has `*` or `?`: read as literal words, a glob a click
-## had just pressed by was waited on for the whole timeout with its label on screen, and answered as
-## words never arriving.
-func _anything_says(node_path: String, said: String, include_hidden: bool) -> bool:
-	var root: Node = _host.get_tree().root.get_node_or_null(node_path)
-	if root == null:
-		return false
-	var pending: Array[Node] = [root]
-	while not pending.is_empty():
-		var node: Node = pending.pop_back()
-		if GdhSays.says(node, said) and (include_hidden or GdhQueries.readable(node)):
-			return true
-		pending.append_array(node.get_children(true))
-	return false
+func _under(node_path: String) -> Node:
+	return _host.get_tree().root.get_node_or_null(node_path)
 
 
 ## Remembers that a signal fired and what it carried, for a wait that polls rather than
@@ -940,6 +945,56 @@ class GdhTrace:
 		else:
 			changes[changes.size() - 1] = change
 			dropped += 1
+
+
+## One look for whether anything under a node says some words, the node itself included, and where
+## the player can read it unless hidden ones are wanted too. Matched as a find and a click match
+## `says`, a glob over the whole text when it has `*` or `?`: read as literal words, a glob a click
+## had just pressed by was waited on for the whole timeout with its label on screen, and answered as
+## words never arriving.
+class GdhLook:
+	extends RefCounted
+	## Whether a node that counts says the words.
+	var found: bool = false
+	## Whether any node says them, hidden or not: words that are there and cannot be read look,
+	## from a wait that ran out, like words that never came.
+	var heard: bool = false
+	var done: bool = false
+	## How long the look has taken over every frame it has run in.
+	var took_usec: int = 0
+	var _said: String
+	var _include_hidden: bool
+	## Untyped, since a node waiting here can be freed between two frames of the look.
+	var _pending: Array = []
+
+	func _init(root: Node, said: String, include_hidden: bool) -> void:
+		_said = said
+		_include_hidden = include_hidden
+		if root != null:
+			_pending.append(root)
+
+	## Reads on until the look is done or [param budget_usec] has passed, -1 for no limit, and
+	## answers how long it read.
+	func go_on(budget_usec: int) -> int:
+		var from: int = Time.get_ticks_usec()
+		while not _pending.is_empty():
+			if budget_usec >= 0 and Time.get_ticks_usec() - from >= budget_usec:
+				break
+			var next: Variant = _pending.pop_back()
+			if not is_instance_valid(next):
+				continue
+			var node: Node = next
+			if GdhSays.says(node, _said):
+				heard = true
+				if _include_hidden or GdhQueries.readable(node):
+					found = true
+					_pending.clear()
+					break
+			_pending.append_array(node.get_children(true))
+		done = _pending.is_empty()
+		var read: int = Time.get_ticks_usec() - from
+		took_usec += read
+		return read
 
 
 ## A signal recorded from when it was armed until it is collected.
