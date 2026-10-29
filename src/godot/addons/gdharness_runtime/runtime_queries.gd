@@ -61,9 +61,16 @@ func get_tree(params: Dictionary) -> Dictionary:
 		return reached
 	var root: Node = reached["node"]
 
+	# A game whose first scene hands over to another shows a tree that names neither, so which
+	# scene is showing was guessed from the project's documentation.
+	var scene: Node = _host.get_tree().current_scene
+	var showing: Variant = null
+	if scene != null:
+		showing = { "path": str(scene.get_path()), "file": scene.scene_file_path }
 	return {
 		"type": "tree",
 		"root": _serialize_node_tree(root, 0, max_depth, include_properties, named),
+		"current_scene": showing,
 	}
 
 

@@ -212,7 +212,7 @@ func set_import_options(params: Dictionary) -> Dictionary:
 	var refused: Array[String] = []
 	for key: Variant in options:
 		var name: String = str(key)
-		var held: Variant = config.get_value("params", name, null)
+		var held: Variant = _held(config, name)
 		var given: Variant = _values.deserialize_value(options[key])
 		var value: Variant = _as_option(_values.fitted(options[key], typeof(held)), held)
 		if value is Dictionary:
@@ -248,7 +248,7 @@ func set_import_options(params: Dictionary) -> Dictionary:
 	var unchanged_keys: Array[String] = []
 	var changes: Dictionary = {}
 	for name: String in fitted_values:
-		var held: Variant = config.get_value("params", name, null)
+		var held: Variant = _held(config, name)
 		var value: Variant = fitted_values[name]
 		if held != null and typeof(held) == typeof(value) and held == value:
 			unchanged_keys.append(name)
@@ -273,6 +273,14 @@ func set_import_options(params: Dictionary) -> Dictionary:
 	if not unchanged_keys.is_empty():
 		answer["unchanged_options"] = unchanged_keys
 	return answer
+
+
+## What the option [param name] holds in [param config]'s params, or null when it holds none. Asked
+## with a default of null, the engine prints an error for a key the file does not have.
+static func _held(config: ConfigFile, name: String) -> Variant:
+	if not config.has_section_key("params", name):
+		return null
+	return config.get_value("params", name)
 
 
 ## [param given] as the option holds it. Every JSON number arrives as a float, and an enum option

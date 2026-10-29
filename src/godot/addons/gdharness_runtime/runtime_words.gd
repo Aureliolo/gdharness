@@ -163,7 +163,7 @@ static func pressable_words(from: Node, open: Callable, most: int) -> String:
 			if offered.size() == most:
 				return ", ".join(offered) + ", and more"
 			offered.append(quoted)
-		var children: Array[Node] = node.get_children()
+		var children: Array[Node] = node.get_children(true)
 		for index: int in range(children.size() - 1, -1, -1):
 			pending.push_front(children[index])
 	return ", ".join(offered)
