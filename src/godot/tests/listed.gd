@@ -449,11 +449,7 @@ class GdhRunner:
 			GdUnitEvent.SESSION_START:
 				if not GdhIndexedSession.indexes_itself(_test_session):
 					_test_session = GdhIndexedSession.of(_test_session)
-				var tree: SceneTree = get_tree()
-				if not tree.process_frame.is_connected(drawn_window):
-					var _watched: int = tree.process_frame.connect(drawn_window)
 			GdUnitEvent.TESTSUITE_BEFORE:
-				drawn_window()
 				suite_running = event.resource_path()
 				orphans_at_suite = orphan_ids()
 				orphans_named.clear()
