@@ -207,6 +207,16 @@ static func placing(node: Node) -> Array[String]:
 	return []
 
 
+## The stored properties [param node] keeps what [method placing] names in: a Control's position
+## is its offsets, and a Node3D's position, rotation and scale its transform.
+static func placed_in(node: Node) -> Array[String]:
+	if node is Node3D:
+		return ["transform"]
+	if node is Control:
+		return ["offset_left", "offset_top", "offset_right", "offset_bottom"]
+	return placing(node)
+
+
 ## Gives [param node], just moved from under [param was], the transform that keeps it where it was
 ## drawn, as the editor's reparent and Node.reparent do. Worked out from the local transforms
 ## rather than read off the global ones, which the engine answers only for a node in the tree, and

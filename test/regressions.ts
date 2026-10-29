@@ -19578,7 +19578,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 47, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 48, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -50457,7 +50457,14 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
       1,
       `and only it: ${upgraded.output}`,
     );
-    assert.match(upgraded.output, /Restart it with the\s+editor_launch restart/, upgraded.output);
+    // Without the digest the editor code may have changed, and no editor of the project is open to
+    // restart.
+    assert.match(
+      upgraded.output,
+      /1\. Nothing for the editor: none of this project is running, and the next one opened loads\n\s+these addons\./,
+      upgraded.output,
+    );
+    assert.doesNotMatch(upgraded.output, /Restart/, upgraded.output);
     assert.ok(existsSync(digestMarker), 'and the upgrade writes the digest back');
     // And the value it read is still the value it writes, which is what made the refusal absurd.
     assert.equal(
@@ -60926,6 +60933,11 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
       '[node name="Lone" type="CollisionShape2D" parent="."]\nshape = SubResource("Own")\n\n' +
       '[node name="Wide" type="Sprite2D" parent="."]\ntexture = SubResource("WideRamp")\n\n' +
       '[node name="Thin" type="Sprite2D" parent="."]\ntexture = SubResource("ThinRamp")\n',
+    'panel.tscn':
+      '[gd_scene format=3]\n\n[node name="Panel" type="Control"]\nlayout_mode = 3\nanchors_preset = 0\n\n' +
+      '[node name="Rows" type="VBoxContainer" parent="."]\nlayout_mode = 0\n\n' +
+      '[node name="Close" type="Button" parent="."]\nlayout_mode = 0\n\n' +
+      '[node name="Open" type="Button" parent="."]\nlayout_mode = 0\n',
   };
   for (const [path, content] of Object.entries(files)) {
     writeFileSync(join(project, path), content);
@@ -61226,6 +61238,30 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
       assert.match(fileOf('scripted.tscn'), saved, `${path}: ${fileOf('scripted.tscn')}`);
     }
     assert.doesNotMatch(fileOf('scripted.tscn'), /modulate|visible/, fileOf('scripted.tscn'));
+    // A container lays out its children itself, so the engine gives a Control moved under one the
+    // container's layout mode, and the file saves it.
+    for (const [name, kept] of [
+      ['Close', true],
+      ['Open', false],
+    ] as const) {
+      const contained = await node({
+        scenePath: 'panel.tscn',
+        op: 'reparent',
+        nodePath: name,
+        newParentPath: 'Rows',
+        keepGlobalTransform: kept,
+      });
+      assert.deepEqual(
+        [get(contained, 'alsoChanged'), get(contained, 'alsoSaved')],
+        [{ layout_mode: { was: 0, now: 2 } }, undefined],
+        JSON.stringify(contained),
+      );
+      assert.match(
+        fileOf('panel.tscn'),
+        new RegExp(`\\[node name="${name}" type="Button" parent="Rows"[^\\]]*\\]\\nlayout_mode = 2\\n`),
+        fileOf('panel.tscn'),
+      );
+    }
     // What such a script changes as a write runs is put back before the file is saved, so the
     // answer says so rather than giving it as a change the file holds.
     const paced = await node({
