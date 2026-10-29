@@ -64276,6 +64276,119 @@ async function testAMovedNodeKeepsThePathsNamingIt(): Promise<void> {
 }
 
 /**
+ * A script's export typed as a node holds the node itself, and the pack writes the path to it as it
+ * saves, so a rename hands the file a path the tool never set. A model-driven probe renamed a node
+ * a menu script exported as a Control, and the write was refused as a change made by the script.
+ * Deleting the node it held logged errors from a freed instance.
+ */
+async function testAPropertyHoldingANodeFollowsIt(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('node property regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-node-prop-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-node-prop-rt-'));
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Held"\n',
+    'shelf.gd':
+      'extends Node2D\n\n@export var aim: Node2D\n@export var marks: Array[Node] = []\n' +
+      '@export var named: Dictionary[String, Node] = {}\n',
+    'shelf.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://shelf.gd" id="1_shelf"]\n\n' +
+      '[node name="Shelf" type="Node2D" node_paths=PackedStringArray("aim", "marks", "named")]\n' +
+      'script = ExtResource("1_shelf")\naim = NodePath("Box/Title")\n' +
+      'marks = [NodePath("Box/Title"), NodePath("Box")]\nnamed = {\n"title": NodePath("Box/Title")\n}\n\n' +
+      '[node name="Box" type="Node2D" parent="."]\n\n[node name="Title" type="Node2D" parent="Box"]\n\n' +
+      '[node name="Side" type="Node2D" parent="."]\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (args: Record<string, unknown>): Promise<unknown> => {
+    const result = await server.request(
+      'tools/call',
+      { name: 'scene_node', arguments: { projectPath: project, scenePath: 'shelf.tscn', ...args } },
+      240_000,
+    );
+    const parsed = parseTextContent(result);
+    assert.ok(parsed !== null, `scene_node ${String(args['op'])} answered: ${JSON.stringify(result)}`);
+    return parsed;
+  };
+  const fileOf = (): string => readFileSync(join(project, 'shelf.tscn'), 'utf8');
+  const lines = (answer: unknown, field: string): string[] => {
+    const listed = get(answer, field);
+    assert.ok(Array.isArray(listed), `${field} in ${JSON.stringify(answer)}`);
+    return listed
+      .map((entry) => {
+        const e = entry as Record<string, string>;
+        const to = e['to'] === undefined ? '' : ` -> ${e['to']}`;
+        return `${e['nodePath']} ${e['property']} ${e['from']}${to}`;
+      })
+      .sort();
+  };
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('node-prop-engine');
+
+    const renamed = await call({ op: 'set', nodePath: 'Box/Title', properties: { name: 'Heading' } });
+    assert.deepEqual(
+      lines(renamed, 'retargeted'),
+      [
+        '. aim Box/Title -> Box/Heading',
+        '. marks Box/Title -> Box/Heading',
+        '. named Box/Title -> Box/Heading',
+      ],
+      JSON.stringify(renamed),
+    );
+    assert.ok(fileOf().includes('aim = NodePath("Box/Heading")'), fileOf());
+    assert.ok(fileOf().includes('NodePath("Box/Heading"), NodePath("Box")]'), fileOf());
+
+    const moved = await call({ op: 'reparent', nodePath: 'Box/Heading', newParentPath: 'Side' });
+    assert.deepEqual(
+      lines(moved, 'retargeted'),
+      [
+        '. aim Box/Heading -> Side/Heading',
+        '. marks Box/Heading -> Side/Heading',
+        '. named Box/Heading -> Side/Heading',
+      ],
+      JSON.stringify(moved),
+    );
+    assert.ok(fileOf().includes('aim = NodePath("Side/Heading")'), fileOf());
+    assert.ok(fileOf().includes('"title": NodePath("Side/Heading")'), fileOf());
+
+    const deleted = await call({ op: 'delete', nodePath: 'Side/Heading' });
+    assert.deepEqual(
+      lines(deleted, 'stillNaming'),
+      ['. aim Side/Heading', '. marks Side/Heading', '. named Side/Heading'],
+      JSON.stringify(deleted),
+    );
+    assert.equal(get(deleted, 'engine_messages'), undefined, JSON.stringify(deleted));
+    assert.ok(!fileOf().includes('aim ='), `the node is gone, so nothing names it: ${fileOf()}`);
+    assert.ok(fileOf().includes('marks = [null, NodePath("Box")]'), fileOf());
+    assert.ok(fileOf().includes('"title": null'), fileOf());
+    assert.ok(!fileOf().includes('Heading'), fileOf());
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * A script that reads a node by its path breaks when the node is renamed, moved or deleted, and code
  * is left as it was, as the editor's own rename leaves it, so each such line is named with the path
  * that reaches the node now. A model-driven probe renamed a label `main.gd` read as `$Status`, got
@@ -66131,6 +66244,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnInheritedSceneFindsItsBaseAsTheEngineDoes,
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,
   testAMovedNodeKeepsThePathsNamingIt,
+  testAPropertyHoldingANodeFollowsIt,
   testAMovedNodeNamesTheScriptLinesReadingIt,
   testAHandWrittenValueIsNoChangeOfAScripts,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,
