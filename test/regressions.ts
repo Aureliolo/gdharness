@@ -26543,6 +26543,24 @@ async function testAReimportReimportsThroughTheEngine(): Promise<void> {
       const after = readFileSync(join(project, 'good.png.import'), 'utf8');
       assert.match(after, /^compress\/mode=0$/m, `the real option was applied:\n${after}`);
       assert.doesNotMatch(after, /^filter=/m, `and the import file holds no filter:\n${after}`);
+      // With no reimport there is nothing to judge it by, and a probe's misspelt option was
+      // answered as written like the real one beside it.
+      const unjudged = await call({
+        op: 'set_options',
+        resourcePath: 'good.png',
+        options: { filter: 0, 'compress/mode': 1 },
+        reimport: false,
+      });
+      assert.equal(
+        get(unjudged, 'note'),
+        'Not reimported: the editor imports it with these options on its next scan, or project_import reimport does now. filter was not in the import file before, so only that reimport can tell whether the importer has it: one it lacks is dropped from the file then, and the reimport through set_options says which.',
+        JSON.stringify(unjudged),
+      );
+      assert.deepEqual(
+        get(unjudged, 'changed', 'compress/mode'),
+        { was: 0, now: 1 },
+        JSON.stringify(unjudged),
+      );
 
       // A scene is loaded as it is and never imported. Asked for by name, it ran a pass and came
       // back as not reimported, which reads as its import failing.

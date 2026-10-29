@@ -734,7 +734,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'object',
         ops: ['set_options'],
         description:
-          'set_options: import options keyed as the .import file spells them, {"compress/mode": 1}. A dictionary option whose keys are numbers, a font\'s opentype_features or any option already holding number keys, takes them written as strings of digits, and opentype_features also takes an OpenType tag by its four-letter name: {"opentype_features": {"liga": 0}} turns ligatures off. Both are written as the numbers the engine reads. One already holding the value given is answered under unchanged_options rather than updated_options, and when none changed nothing is written or reimported. changed gives each option written as {was, now}. An option the sidecar does not list is refused with the nearest it does: the import writes every option its importer has, so a name it lacks reaches no importer.',
+          'set_options: import options keyed as the .import file spells them, {"compress/mode": 1}. A dictionary option whose keys are numbers, a font\'s opentype_features or any option already holding number keys, takes them written as strings of digits, and opentype_features also takes an OpenType tag by its four-letter name: {"opentype_features": {"liga": 0}} turns ligatures off. Both are written as the numbers the engine reads. One already holding the value given is answered under unchanged_options rather than updated_options, and when none changed nothing is written or reimported. changed gives each option written as {was, now}.',
         additionalProperties: true,
       },
       reimport: {

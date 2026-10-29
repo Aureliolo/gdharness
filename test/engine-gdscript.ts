@@ -1827,19 +1827,15 @@ function testOperations(godotPath: string, projectDir: string): void {
     wrong.stderr,
   );
   assert.equal(readFileSync(sidecarFile, 'utf8'), kept, 'and the sidecar is left as it was');
-  // The sidecar lists every option the import has, so a name it does not list is a misspelling.
-  const unlisted = runRefusedOperation(godotPath, projectDir, 'set_import_options', {
+  // Only the importer knows its options, so one the sidecar does not hold is written for the
+  // reimport to judge. Read with a default, the missing key put an engine error in the output.
+  const unlisted = runOperationScript(godotPath, projectDir, 'set_import_options', {
     resource_path: 'art.png',
     options: { 'compress/mod': 1 },
   });
-  assert.equal(unlisted.answer, null, 'an option the sidecar does not list is refused');
-  assert.match(
-    unlisted.stderr,
-    /Nothing was written: compress\/mod is not an option this texture import has; the nearest it has is compress\/mode/,
-    unlisted.stderr,
-  );
+  assert.deepEqual(get(unlisted.answer, 'changed', 'compress/mod'), { was: null, now: 1 }, unlisted.stderr);
   assert.doesNotMatch(unlisted.stderr, /Couldn't find the given section/, 'read without an engine error');
-  assert.equal(readFileSync(sidecarFile, 'utf8'), kept, 'and nothing is written');
+  writeFileSync(sidecarFile, kept);
   // A sidecar whose source has gone takes options nothing will ever apply.
   writeFileSync(
     join(projectDir, 'gone.png.import'),

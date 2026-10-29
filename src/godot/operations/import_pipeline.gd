@@ -210,21 +210,8 @@ func set_import_options(params: Dictionary) -> Dictionary:
 	var importer: String = str(config.get_value("remap", "importer", ""))
 	var fitted_values: Dictionary = {}
 	var refused: Array[String] = []
-	# The import writes every option its importer has, so on a sidecar it has written a name it
-	# does not list is a misspelling: written, it reached no importer and only left the resource
-	# needing a reimport.
-	var listed: PackedStringArray = (
-		config.get_section_keys("params") if config.has_section("params") else PackedStringArray()
-	)
 	for key: Variant in options:
 		var name: String = str(key)
-		if not listed.is_empty() and not listed.has(name):
-			refused.append(
-				GdhRead.offered(
-					"%s is not an option this %s import has" % [name, importer], name, Array(listed)
-				)
-			)
-			continue
 		var held: Variant = _held(config, name)
 		var given: Variant = _values.deserialize_value(options[key])
 		var value: Variant = _as_option(_values.fitted(options[key], typeof(held)), held)

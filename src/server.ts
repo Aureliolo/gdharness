@@ -3881,6 +3881,25 @@ function needsItsOwnProcess(asked: RunEnvironment): boolean {
   return asked.savesIn !== undefined || asked.env !== undefined;
 }
 
+/**
+ * The sentence for options set_options wrote that the sidecar held no value for, or an empty one.
+ * Only the importer knows which options it has, and without a reimport a misspelt name was answered
+ * as written like any other, so a caller learned nothing until the import ignored it.
+ */
+function unheldNote(changed: unknown): string {
+  if (!isPlainObject(changed)) {
+    return '';
+  }
+  const unheld = Object.entries(changed)
+    .filter(([, change]) => isPlainObject(change) && change['was'] === null)
+    .map(([name]) => name);
+  if (unheld.length === 0) {
+    return '';
+  }
+  const one = unheld.length === 1;
+  return ` ${unheld.join(', ')} ${one ? 'was' : 'were'} not in the import file before, so only that reimport can tell whether the importer has ${one ? 'it' : 'them'}: one it lacks is dropped from the file then, and the reimport through set_options says which.`;
+}
+
 const STATIC_LIST_HINT = { ttlMs: 5 * 60_000, cacheScope: 'private' } as const;
 
 class GodotServer {
@@ -6417,7 +6436,7 @@ class GodotServer {
               ...written,
               payload: {
                 ...written.payload,
-                note: 'Not reimported: the editor imports it with these options on its next scan, or project_import reimport does now.',
+                note: `Not reimported: the editor imports it with these options on its next scan, or project_import reimport does now.${unheldNote(written.payload['changed'])}`,
               },
             }
           : written,
