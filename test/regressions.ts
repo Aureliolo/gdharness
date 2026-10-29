@@ -46006,10 +46006,15 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
         existsSync(ours) ? holderOf(readFileSync(ours, 'utf8')) : null;
       await cameTrue(() => lockHolder()?.pid !== server.child.pid, 10_000);
       const keeper = lockHolder();
-      assert.equal(keeper?.by, `a game of ${project} editor_run started`, JSON.stringify(keeper));
+      assert.ok(keeper !== null, 'the keeper holds the lock');
       assert.ok(
         keeper.pid !== server.child.pid && keeper.pid !== game && alive(keeper.pid),
         `the lock names the game's keeper, not the server or the game: ${JSON.stringify(keeper)}`,
+      );
+      // A wait behind it named the keeper's pid as the game's, which editor_status never listed.
+      assert.equal(
+        slotWaitSaid(0, 1, 'slots', [keeper]),
+        `Waiting for an engine: the one engine slot on this machine (slots) is in use, by a game of ${project} editor_run started, through the keeper process that runs it (pid ${String(keeper.pid)}), and the engine starts when it is given back.`,
       );
       assert.deepEqual(leftInSlots(slots), ['0.lock'], "one slot, the game's");
       const stopped = await server.request(

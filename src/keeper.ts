@@ -436,9 +436,15 @@ async function keep(): Promise<void> {
   });
   // After the pid has gone back, since on Windows reading this process's start is a query of its
   // own, and a start held up by it answered after a game that announces at once had done so.
+  // The pid in the lock is this process's, since a game that restarts itself comes back under
+  // another, so the label says whose it is: a wait would otherwise name it as the game's.
   const slot = run?.slot;
   if (slot !== undefined && keeperStarted !== undefined) {
-    handSlot(slot.lock, slot.from, { pid: process.pid, started: await keeperStarted, by: slot.by });
+    handSlot(slot.lock, slot.from, {
+      pid: process.pid,
+      started: await keeperStarted,
+      by: `${slot.by}, through the keeper process that runs it`,
+    });
   }
   let { code, signal } = await exited;
   let exitedAt = Date.now();
