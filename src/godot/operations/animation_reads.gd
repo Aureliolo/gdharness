@@ -16,6 +16,22 @@ const UPDATE_MODE_NAMES: Dictionary[int, String] = {
 	Animation.UPDATE_DISCRETE: "discrete",
 	Animation.UPDATE_CAPTURE: "capture",
 }
+const INTERPOLATION_NAMES: Dictionary[int, String] = {
+	Animation.INTERPOLATION_NEAREST: "nearest",
+	Animation.INTERPOLATION_LINEAR: "linear",
+	Animation.INTERPOLATION_CUBIC: "cubic",
+	Animation.INTERPOLATION_LINEAR_ANGLE: "linear_angle",
+	Animation.INTERPOLATION_CUBIC_ANGLE: "cubic_angle",
+}
+## The track types whose keys are blended between, so how they are and whether a looping animation
+## blends its last key into its first say how the track moves.
+const INTERPOLATED_TYPES: Array[int] = [
+	Animation.TYPE_VALUE,
+	Animation.TYPE_POSITION_3D,
+	Animation.TYPE_ROTATION_3D,
+	Animation.TYPE_SCALE_3D,
+	Animation.TYPE_BLEND_SHAPE,
+]
 const TRACK_TYPE_NAMES: Dictionary[int, String] = {
 	Animation.TYPE_VALUE: "property",
 	Animation.TYPE_POSITION_3D: "position_3d",
@@ -174,6 +190,10 @@ static func _track(anim: Animation, track: int, values: GdhSerialisation) -> Dic
 	if kind == Animation.TYPE_VALUE:
 		var mode: int = anim.value_track_get_update_mode(track)
 		shaped["update"] = UPDATE_MODE_NAMES.get(mode, str(mode))
+	if kind in INTERPOLATED_TYPES:
+		var interpolation: int = anim.track_get_interpolation_type(track)
+		shaped["interpolation"] = INTERPOLATION_NAMES.get(interpolation, str(interpolation))
+		shaped["loopWrap"] = anim.track_get_interpolation_loop_wrap(track)
 	var keyframes: Array[Dictionary] = []
 	var methods: Dictionary = {}
 	for key: int in anim.track_get_key_count(track):

@@ -109,6 +109,9 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 	if anim.track_get_type(track_idx) == Animation.TYPE_VALUE:
 		var mode: int = anim.value_track_get_update_mode(track_idx)
 		answer["update"] = GdhAnimationReads.UPDATE_MODE_NAMES.get(mode, str(mode))
+		var blended: int = anim.track_get_interpolation_type(track_idx)
+		answer["interpolation"] = GdhAnimationReads.INTERPOLATION_NAMES.get(blended, str(blended))
+		answer["loopWrap"] = anim.track_get_interpolation_loop_wrap(track_idx)
 	if built[3]:
 		answer["existingTrack"] = true
 	var replaced: Array = built[5]
@@ -165,6 +168,7 @@ func _add_track(
 	var kind: Animation.TrackType = Animation.TYPE_VALUE
 	var path: NodePath = NodePath(target_path)
 	var update: int = -1
+	var interpolation: int = -1
 	if track_type == "property":
 		var prop_name: String = str(track.get("property", ""))
 		if prop_name.is_empty():
@@ -175,6 +179,11 @@ func _add_track(
 		)
 		if named != null:
 			update = GdhRead.as_int(named)
+		var blended: Variant = GdhAnimationReads.INTERPOLATION_NAMES.find_key(
+			str(track.get("interpolation", ""))
+		)
+		if blended != null:
+			interpolation = GdhRead.as_int(blended)
 		var values: Array = _key_values(target, prop_name, keyframes)
 		if not values[0]:
 			return _not_added(str(values[1]))
@@ -196,6 +205,12 @@ func _add_track(
 				misfit = _key_misfit(target, method_name, arguments, index)
 		method_found = target.has_method(method_name)
 		kind = Animation.TYPE_METHOD
+		# A method key is called at its time and never blended, so neither has anything to set.
+		for blending: String in ["interpolation", "loopWrap"]:
+			if track.has(blending):
+				return _not_added(
+					"track.%s is for property tracks; a method key is not blended." % blending
+				)
 	else:
 		return _not_added(
 			(
@@ -250,6 +265,10 @@ func _add_track(
 			_as_the_editor_makes(anim, track_idx, player, target)
 	if update >= 0:
 		anim.value_track_set_update_mode(track_idx, update as Animation.UpdateMode)
+	if interpolation >= 0:
+		anim.track_set_interpolation_type(track_idx, interpolation as Animation.InterpolationType)
+	if track.has("loopWrap"):
+		anim.track_set_interpolation_loop_wrap(track_idx, GdhRead.as_bool(track["loopWrap"]))
 	for index: int in keyframes.size():
 		var keyframe: Dictionary = keyframes[index]
 		if anim.track_insert_key(track_idx, GdhRead.as_float(keyframe["time"]), keys[index]) < 0:
