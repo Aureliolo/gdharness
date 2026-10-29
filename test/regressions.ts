@@ -4042,7 +4042,9 @@ async function testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer(): Promise<void> {
       });
     } else if (command === 'evaluate') {
       evaluated.push(Number(get(args, 'frameId')));
-      if (evaluated.length > 2) {
+      if (get(args, 'expression') === 'missing') {
+        answer({ result: '<null>', type: 'Nil', variablesReference: 0 });
+      } else if (evaluated.length > 2) {
         answer({ result: '15', type: 'int', variablesReference: 0 });
       }
     } else {
@@ -4069,6 +4071,13 @@ async function testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer(): Promise<void> {
         'asked again once the game had answered',
       );
       assert.deepEqual(evaluated, [0, 0, 0], 'on the frame asked for');
+      const nil = await handleDAPTool(client, 'dap_evaluate', { expression: 'missing' });
+      assert.match(
+        String(get(JSON.parse(textOf({ jsonrpc: '2.0', result: nil }) ?? '{}') as unknown, 'note')),
+        /^null is also what an expression comes to when it does not parse or fails as it runs\. For a game the editor plays, why reaches only the editor's Debugger panel/,
+        'a null through the adapter is not passed off as the value',
+      );
+      evaluated.pop();
 
       const static_ = await handleDAPTool(client, 'dap_evaluate', { expression: 'value', frameId: 1 });
       const said = textOf({ jsonrpc: '2.0', result: static_ }) ?? '';
@@ -34156,18 +34165,22 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       evaluated.said,
     );
     assert.ok(evaluateTook >= 6000, `the evaluate is the one that loaded the slow class: ${evaluateTook}ms`);
+    // A failed expression and a null value both come back as null, and only the error the engine
+    // sends after it tells them apart, so a probe read a missing name as a variable holding null.
     const unparsed = await call('debug_state', { op: 'evaluate', expression: 'amount +' });
     assert.deepEqual(
-      [get(unparsed.answer, 'value'), get(unparsed.answer, 'note')],
-      [
-        'null',
-        'null is also what an expression comes to when it does not parse or fails as it runs. The game prints why as an error, which editor_output reads, since its debugger hands errors over apart from the console debug_state output keeps.',
-      ],
+      [get(unparsed.answer, 'value'), get(unparsed.answer, 'failed'), get(unparsed.answer, 'note')],
+      ['null', 'There was previously a parse error: Expected expression..', undefined],
       unparsed.said,
     );
-    // Where the note sends a caller: the error is not in the console debug_state output keeps.
-    const why = await call('editor_output', { op: 'run', severity: 'error', contains: 'parse error' });
-    assert.match(why.said, /There was previously a parse error: Expected expression/, why.said);
+    const unnamed = await call('debug_state', { op: 'evaluate', expression: 'self.no_such_member' });
+    assert.match(text(get(unnamed.answer, 'failed')), /no_such_member/, unnamed.said);
+    const nothing = await call('debug_state', { op: 'evaluate', expression: 'null' });
+    assert.deepEqual(
+      [get(nothing.answer, 'value'), get(nothing.answer, 'failed'), get(nothing.answer, 'note')],
+      ['null', undefined, undefined],
+      `a null that is the value is not said to have failed, after the failures before it: ${nothing.said}`,
+    );
     const beside = await call('runtime_inspect', {
       op: 'property',
       nodePath: '/root/Main',

@@ -2731,7 +2731,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['evaluate'],
         description:
-          "evaluate: a GDScript expression, as Godot's Expression class parses it: members of self by name, locals, autoloads and global classes, operators, indexing and calls, such as wave.spawned[0] or Ledger.entries.size(). An expression that does not parse, or fails as it runs, comes to null, and the game prints why as an error, which editor_output reads for a game this server started. The game reports what an expression raises while it is held inside a runtime_invoke call as raised by that call, and the call's answer says so under errorsNote.",
+          "evaluate: a GDScript expression, as Godot's Expression class parses it: members of self by name, locals, autoloads and global classes, operators, indexing and calls, such as wave.spawned[0] or Ledger.entries.size(). An expression that does not parse, or fails as it runs, comes to null with failed saying why, as the engine words it, and a null with no failed is the value; for a game the editor plays, the reason reaches only the editor's Debugger panel, so a null there carries a note saying it may be either. The game reports what an expression raises while it is held inside a runtime_invoke call as raised by that call, and the call's answer says so under errorsNote.",
       },
     },
     requires: [],
