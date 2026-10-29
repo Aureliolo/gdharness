@@ -272,6 +272,12 @@ const ANIMATION_TRACK: JsonSchema = {
     },
     nodePath: { type: 'string', description: 'Target node, relative to the AnimationPlayer root.' },
     property: { type: 'string', description: 'For property tracks: the property to animate.' },
+    update: {
+      type: 'string',
+      enum: ['continuous', 'discrete', 'capture'],
+      description:
+        "For property tracks: how the value moves between keys. continuous blends toward the next key, so a bool or an int changes halfway to it; discrete holds each key's value until the next; capture blends from the value the property holds when playing starts. Without it a new track is made as the editor makes one: as the RESET animation's track for the same property, otherwise continuous for a float, vector, colour or transform and discrete for anything else. The answer gives the track's update.",
+    },
     method: {
       type: 'string',
       description:

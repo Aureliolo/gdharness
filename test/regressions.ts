@@ -59576,6 +59576,7 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
           type: 'property',
           nodePath: 'Sprite',
           property: 'position',
+          update: 'continuous',
           keyframes: [
             { time: 0, value: { x: 0, y: 0, _type: 'Vector2' } },
             { time: 0.5, value: { x: 0, y: -40, _type: 'Vector2' } },
@@ -61743,6 +61744,72 @@ async function testAnAnimationsKeysAndLengthAreWrittenWithNoEditor(): Promise<vo
       JSON.stringify(listed),
     );
     await written({ op: 'remove', playerNodePath: 'Player', animationName: 'beat' });
+
+    // A new track is made as the editor makes one: discrete unless the editor blends the declared
+    // type of the property's last name, so a bool changes at its key rather than halfway to it, and
+    // as the RESET animation's track for the same property when there is one.
+    await written({ op: 'create', playerNodePath: 'Player', animationName: 'show', length: 1.5 });
+    const keyed = async (
+      property: string,
+      value: unknown,
+      extra: Record<string, unknown> = {},
+      animationName = 'show',
+    ): Promise<unknown> =>
+      await written({
+        op: 'add_track',
+        playerNodePath: 'Player',
+        animationName,
+        track: { type: 'property', nodePath: 'Body', property, keyframes: [{ time: 0, value }], ...extra },
+      });
+    await written({ op: 'create', playerNodePath: 'Player', animationName: 'RESET' });
+    assert.equal(
+      get(await keyed('flip_h', false, { update: 'continuous' }, 'RESET'), 'update'),
+      'continuous',
+    );
+    const made = [
+      await keyed('visible', false),
+      await keyed('modulate', { _type: 'Color', r: 1, g: 1, b: 1, a: 0 }),
+      await keyed('position:x', 0),
+      await keyed('frame', 0),
+      await keyed('z_index', 0, { update: 'continuous' }),
+      await keyed('flip_h', false),
+    ];
+    assert.deepEqual(
+      made.map((answer) => get(answer, 'update')),
+      ['discrete', 'continuous', 'discrete', 'discrete', 'continuous', 'continuous'],
+      JSON.stringify(made),
+    );
+    const show = parseTextContent(
+      await call({ op: 'read', playerNodePath: 'Player', animationName: 'show' }),
+    );
+    assert.deepEqual(
+      asArray(get(show, 'tracks')).map((each) => [get(each, 'property'), get(each, 'update')]),
+      [
+        ['visible', 'discrete'],
+        ['modulate', 'continuous'],
+        ['position:x', 'discrete'],
+        ['frame', 'discrete'],
+        ['z_index', 'continuous'],
+        ['flip_h', 'continuous'],
+      ],
+      JSON.stringify(show),
+    );
+    assert.match(
+      fileOf('moves.tscn'),
+      /tracks\/0\/path = NodePath\("Body:visible"\)[\s\S]*?"update": 1,/,
+      fileOf('moves.tscn'),
+    );
+    assert.equal(
+      textOf(
+        await call({
+          op: 'add_track',
+          playerNodePath: 'Player',
+          animationName: 'show',
+          track: { type: 'property', nodePath: 'Body', property: 'scale', update: 'smooth', keyframes: [] },
+        }),
+      ),
+      'scene_animation takes track.update as one of continuous, discrete, capture, not "smooth".',
+    );
   });
 }
 
