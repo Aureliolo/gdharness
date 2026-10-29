@@ -160,7 +160,7 @@ func _hover(viewport: Viewport, point: Vector2) -> void:
 	var inside: Vector2 = container.get_global_transform_with_canvas().affine_inverse() * point
 	if container.stretch:
 		inside /= container.stretch_shrink
-	for child: Node in container.get_children(true):
+	for child: Node in container.get_children():
 		var shown: SubViewport = child as SubViewport
 		if shown != null and not shown.gui_disable_input:
 			_hover(shown, shown.get_final_transform().affine_inverse() * inside)
