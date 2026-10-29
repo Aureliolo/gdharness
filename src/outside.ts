@@ -43,6 +43,12 @@ export interface OutsideSpec {
      * refuses `--remote-debug` and quits ("compiled without debug. Aborting.").
      */
     readonly debugged?: boolean;
+    /**
+     * The engine slot the server took for the run, which the keeper takes over once the game has
+     * started and gives back when the run ends, since the run outlives the server. [member from] is
+     * the pid the lock names until then, and [member by] what the keeper's names it held for.
+     */
+    readonly slot?: { readonly lock: string; readonly from: number; readonly by: string };
   };
   /** A Windows desktop to start it on, where its windows neither show nor take the focus. */
   readonly desktop?: string;

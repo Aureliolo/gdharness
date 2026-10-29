@@ -326,8 +326,12 @@ The slots are files in one directory, shared by every tool on the machine that s
 for every project, so that the gates of several games, a benchmark and a build running at once
 start no more engines between them than there are slots. The MCP server's own engines take them
 too: each headless operation, script check, export, `project_test` run and `editor_run check`
-waits for a slot before its engine starts. A game started with `editor_run start`, and one the
-editor plays, does not: someone is driving it for as long as it runs.
+waits for a slot before its engine starts. So does a game started with `editor_run start`, whether
+the server starts it or the editor plays it, and it keeps the slot for as long as it runs. A game
+outlives the server that started it, so its lock is handed on: to the keeper holding the game, or
+to the game the editor plays once it announces, and it is free once that process has gone. A
+played game that has not announced by the end of the start's wait gives its slot back, since
+nothing would see it end. An editor, and a game played from it by hand, take none.
 
 A wait for a slot is said. A tool call that asked for progress hears it at once, and every 20
 seconds after, and a call that waited a second or more in all is answered with an

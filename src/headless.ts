@@ -30,6 +30,8 @@ export interface HeadlessEngine {
   readonly debug: boolean;
   /** Start the engine as an editor, which is the only engine that can make an exporter. */
   readonly editor?: boolean;
+  /** How long an operation's engine may run before it is ended; ten minutes when not given. */
+  readonly ceiling?: { readonly ms: number; readonly said: string };
 }
 
 /** The problems a run reported, as many as an answer carries, and how many older ones it left out. */
@@ -212,6 +214,8 @@ function withoutAsides(entries: readonly LogEntry[]): LogEntry[] {
 
 /** At most this many of the newest problems ride on an answer; the rest are counted. */
 const MESSAGES_KEPT = 200;
+/** How long one operation's engine may run, twice what an export is given. */
+const OPERATION_CEILING = { ms: 600_000, said: 'ten minutes' } as const;
 
 /** Of the engine's errors, how many a reason names before counting the rest. */
 const ERRORS_NAMED = 3;
@@ -510,7 +514,10 @@ async function operationOutcome(
   let ran: EngineRun;
   let answer: ReturnType<typeof answerIn>;
   try {
-    ran = await runEngine(engine.godotPath, args);
+    // Every operation answers one question about the project, and one that never finishes holds
+    // an engine slot and a core for as long as the server lives: a dependency walk that never
+    // answered spun for nearly four hours with nothing to end it.
+    ran = await runEngine(engine.godotPath, args, { timeout: engine.ceiling ?? OPERATION_CEILING });
     answer = answerIn(answerFile);
   } finally {
     discard(paramsDir);

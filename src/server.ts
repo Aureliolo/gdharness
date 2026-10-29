@@ -125,7 +125,7 @@ import {
   walkStoppedPartWay,
 } from './engine-leaks.js';
 import { type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-run.js';
-import { slotForCall } from './engine-slots.js';
+import { type CallSlot, slotForCall } from './engine-slots.js';
 import { errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
 import { type DebugRequest, EVALUATE_MS, PAUSE_MS, READ_MS, STEP_MS } from './game-debugger.js';
@@ -837,6 +837,18 @@ function restartsOf(run: GodotProcess): RestartNamed[] | undefined {
  * this, the run was reported over with the first process's clean exit, and nothing could stop the
  * successor, which once sat on a hidden desktop for hours holding a file a later export needed.
  */
+/**
+ * Hands [param slot] to the played game [param pid], so its lock is freed by the game ending; given
+ * back when the game's start cannot be read or the lock is no longer this server's to hand.
+ */
+async function handToTheGame(slot: CallSlot, pid: number, projectPath: string | null): Promise<void> {
+  const started = (await startTimesOf([pid])).get(pid);
+  const by = `a game${projectPath === null ? '' : ` of ${projectPath}`} the editor played for editor_run`;
+  if (started === undefined || !slot.handTo({ pid, started, by })) {
+    slot.release();
+  }
+}
+
 function followTheRestart(run: GodotProcess): boolean {
   if (run.throughEditor || run.pid === null || run.projectPath === null) {
     return false;
@@ -2143,6 +2155,15 @@ function presetPlatform(projectPath: string, preset: string): string | null {
  * export_presets.cfg file at its root" and never named the preset, and starting it cost an import
  * of the whole project to learn that.
  */
+/** How [param ending] ended, for after "as", where it did not end cleanly. */
+function engineEndSaid(ending: EngineRun): string {
+  if (ending.failure === null && ending.exitSignal === null) {
+    return `the engine ended with ${exitCodeText(ending.exitCode)}`;
+  }
+  const how = howItEnded(ending);
+  return how.startsWith('ended by') ? `the engine was ${how}` : how;
+}
+
 export function exportPresetRefusal(projectPath: string, preset: string): string | null {
   const presets = presetsIn(projectPath);
   if (presets === null) {
@@ -2205,10 +2226,31 @@ export function exportAnswer(
   if (verdict.exported) {
     return { content: [{ type: 'text', text: answerJson(verdict) }] };
   }
+  if (written) {
+    const errors = log.count('error');
+    const because = [
+      ...(ending.exitCode === 0 && ending.failure === null && ending.exitSignal === null
+        ? []
+        : [engineEndSaid(ending)]),
+      ...(errors === 0
+        ? []
+        : [`it printed ${String(errors)} ${errors === 1 ? 'error' : 'errors'}, under entries`]),
+    ];
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Export with preset '${asked.preset}' wrote ${asked.outputPath}, but it is not counted as exported, as ${because.join(' and ')}.`,
+        },
+        { type: 'text', text: answerJson(verdict) },
+      ],
+      isError: true,
+    };
+  }
   const stale =
-    !written && after !== null
-      ? ` The ${asked.outputPath} there is from before this export, which did not write it.`
-      : '';
+    after === null
+      ? ''
+      : ` The ${asked.outputPath} there is from before this export, which did not write it.`;
   const why =
     ending.exitSignal === null
       ? stale
@@ -11092,6 +11134,9 @@ class GodotServer {
     const breakpoints = await this.dapHoldingBreakpointsOf(projectPath).reapplyBreakpoints();
     this.logDebug(`Breakpoints were sent again after ${Date.now() - sendingFrom}ms`);
 
+    // In one of the machine's engine slots, like every engine started for a call, taken before the
+    // play so a full machine holds the play rather than the game.
+    const slot = await slotForCall();
     // Armed before the play rather than switched on after it, so the profiler goes on as the game's
     // debugger session starts, which is before any of its scripts have run.
     if (profiled) {
@@ -11100,6 +11145,7 @@ class GodotServer {
         frameFunctions: profileFrameFunctions(projectPath),
       });
       if (armed.isError === true) {
+        slot.release();
         return armed;
       }
     }
@@ -11108,6 +11154,7 @@ class GodotServer {
       scene === null ? {} : { scenePath: `res://${scene}` },
     );
     if (answer.isError === true) {
+      slot.release();
       return answer;
     }
 
@@ -11147,6 +11194,7 @@ class GodotServer {
       seenPlaying: readBoolean(playAnswer, 'playing') === true,
       ...(which === null ? {} : { play: which }),
       bootScene: runtimeWaitMs.scene,
+      slot,
     };
     this.activeProcess = played;
     this.noteTheLatestRun({ projectPath, pid: null, startedAt });
@@ -11163,6 +11211,16 @@ class GodotServer {
     step('sweep');
     this.logDebug(`After the play: ${steps.join(', ')}`);
 
+    // No arguments, by construction: a run carrying any is started by this server rather than played
+    // by the editor, so the editor path cannot be the one that bought itself a long boot.
+    const runtime = await this.runtimeUp(projectPath, alreadyPlaying, runtimeWaitMs, false);
+    // A game that did not announce inside the wait is tied later or never, and nothing ends a lock
+    // naming this server until it goes, so the slot is given back rather than held for a run it
+    // cannot see end.
+    if (played.slot !== undefined) {
+      played.slot.release();
+      delete played.slot;
+    }
     return this.jsonTextResponse({
       started: true,
       through: 'editor',
@@ -11190,9 +11248,7 @@ class GodotServer {
               scriptPath: projectSpelling(projectPath, one.scriptPath),
               reason: one.reason,
             })),
-      // No arguments, by construction: a run carrying any is started by this server rather than
-      // played by the editor, so the editor path cannot be the one that bought itself a long boot.
-      runtime: await this.runtimeUp(projectPath, alreadyPlaying, runtimeWaitMs, false),
+      runtime,
       message:
         'The editor is playing it, so its debugger holds it: the debug_* tools can reach it, ' +
         "editor_output reads its console through the debug adapter and the runtime's report of it, and editor_run stop ends it." +
@@ -11857,20 +11913,37 @@ class GodotServer {
     // A profiled game is told so, and holds its start until the keeper's switch reaches it.
     const gameEnv = profiled ? { ...(env ?? process.env), [PROFILE_FROM_START]: '1' } : env;
     const profile = profiled ? profilePath(startedAt) : undefined;
-    const launched = await launchOutsideTheTree({
-      command: godotPath,
-      args: cmdArgs,
-      ...(gameEnv === undefined ? {} : { env: gameEnv }),
-      run: {
-        transcript: transcript.path,
-        startedAt,
-        projectPath,
-        ...this.servedBy(),
-        ...(profile === undefined ? {} : { profile }),
-        ...(debugged ? { breakpoints: this.breakpointsForAGame(projectPath) } : { debugged: false }),
-      },
-      ...(desktop === undefined ? {} : { desktop }),
-    });
+    // In one of the machine's engine slots, like every engine started for a call. The keeper takes
+    // the lock over once it has handed the game's pid back, and gives it back when the run ends,
+    // since the run outlives this server; so a started run leaves the lock to it, and one the keeper
+    // never took over names this server, which frees it by going.
+    const slot = await slotForCall();
+    let launched: Awaited<ReturnType<typeof launchOutsideTheTree>>;
+    try {
+      launched = await launchOutsideTheTree({
+        command: godotPath,
+        args: cmdArgs,
+        ...(gameEnv === undefined ? {} : { env: gameEnv }),
+        run: {
+          transcript: transcript.path,
+          startedAt,
+          projectPath,
+          ...this.servedBy(),
+          ...(profile === undefined ? {} : { profile }),
+          ...(debugged ? { breakpoints: this.breakpointsForAGame(projectPath) } : { debugged: false }),
+          slot: { lock: slot.lock, from: slot.from, by: `a game of ${projectPath} editor_run started` },
+        },
+        ...(desktop === undefined ? {} : { desktop }),
+      });
+    } catch (error) {
+      slot.release();
+      throw error;
+    }
+    if ('error' in launched) {
+      slot.release();
+    } else {
+      slot.leave();
+    }
     if ('error' in launched) {
       return launched;
     }
@@ -12290,6 +12363,11 @@ class GodotServer {
   private tie(run: GodotProcess, endpoint: RuntimeEndpoint): void {
     run.announcedPid = endpoint.pid;
     this.noteBootOf(run, endpoint);
+    const slot = run.slot;
+    if (slot !== undefined) {
+      delete run.slot;
+      void handToTheGame(slot, endpoint.pid, run.projectPath);
+    }
   }
 
   /**

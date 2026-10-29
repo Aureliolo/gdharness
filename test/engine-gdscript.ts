@@ -533,6 +533,34 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
     [{ path: 'res://chain/boros.gd', exists: true, beyond_depth: 1 }],
     'boros names one file the depth kept out',
   );
+  // A cycle is met from a second of its files only when it is walked again, which the depth cutting
+  // the far walk short through the tail does: b is reached nearer, walks a again, and closes the
+  // cycle at b. Still one cycle, listed as the walk first closed it.
+  mkdirSync(join(projectDir, 'twice'), { recursive: true });
+  for (const [name, loads] of [
+    ['both', ['far', 'b']],
+    ['far', ['far2']],
+    ['far2', ['a']],
+    ['a', ['b']],
+    ['b', ['a', 'tail1']],
+    ['tail1', ['tail2']],
+    ['tail2', ['tail3']],
+    ['tail3', []],
+  ] as const) {
+    const lines = loads.map((other, at) => `const L${at} = preload("res://twice/${other}.gd")\n`);
+    writeFileSync(join(projectDir, 'twice', `${name}.gd`), `extends Node\n\n${lines.join('')}`);
+  }
+  assert.deepEqual(
+    get(
+      runOperation(godotPath, projectDir, 'get_dependencies', {
+        resource_path: 'res://twice/both.gd',
+        depth: 6,
+      }),
+      'circular_references',
+    ),
+    [['res://twice/a.gd', 'res://twice/b.gd', 'res://twice/a.gd']],
+    'the cycle through a and b is listed once',
+  );
 
   // addons/ is project content and often shipping content, so it is walked like anything
   // else; what the walk leaves out by default is the engine's own res://. space.
