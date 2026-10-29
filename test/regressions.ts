@@ -64434,6 +64434,100 @@ async function testAPropertyHoldingANodeFollowsIt(): Promise<void> {
 }
 
 /**
+ * A headless write saves what the editor would. A model-driven probe renamed a node in a scene whose
+ * ShaderMaterial set none of its parameters, and the save wrote each as null, since the saver leaves
+ * out a parameter at the default the renderer gives and a headless renderer gives none. The same
+ * probe moved an instanced Control and was told its position was not stored, when its offsets were.
+ */
+async function testAHeadlessWriteSavesWhatTheEditorWould(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('headless write regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-as-editor-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-as-editor-rt-'));
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="AsEditor"\n',
+    'finish.gdshader':
+      'shader_type canvas_item;\n\nuniform float corners = 0.26;\nuniform float grain = 0.025;\nuniform sampler2D tex;\n',
+    'panel.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Shader" path="res://finish.gdshader" id="1_finish"]\n\n' +
+      '[sub_resource type="ShaderMaterial" id="ShaderMaterial_card"]\nshader = ExtResource("1_finish")\n' +
+      'shader_parameter/grain = 0.5\n\n' +
+      '[node name="Panel" type="Control"]\n\n' +
+      '[node name="Card" type="ColorRect" parent="."]\nmaterial = SubResource("ShaderMaterial_card")\n',
+    'room.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://panel.tscn" id="1_panel"]\n\n' +
+      '[node name="Room" type="Node2D"]\n\n[node name="PanelA" parent="." instance=ExtResource("1_panel")]\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const set = async (
+    scenePath: string,
+    nodePath: string,
+    properties: Record<string, unknown>,
+  ): Promise<unknown> => {
+    const result = await server.request(
+      'tools/call',
+      { name: 'scene_node', arguments: { projectPath: project, op: 'set', scenePath, nodePath, properties } },
+      240_000,
+    );
+    const parsed = parseTextContent(result);
+    assert.ok(parsed !== null, `scene_node set answered: ${JSON.stringify(result)}`);
+    return parsed;
+  };
+  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('as-editor-engine');
+
+    const coloured = await set('panel.tscn', 'Card', { color: { _type: 'Color', r: 1, g: 0, b: 0, a: 1 } });
+    assert.deepEqual(get(coloured, 'properties', 'color', 'r'), 1, JSON.stringify(coloured));
+    assert.match(fileOf('panel.tscn'), /^color = Color\(1, 0, 0, 1\)$/m, fileOf('panel.tscn'));
+    assert.match(
+      fileOf('panel.tscn'),
+      /^shader_parameter\/grain = 0\.5$/m,
+      `the parameter the material sets is kept: ${fileOf('panel.tscn')}`,
+    );
+    assert.doesNotMatch(
+      fileOf('panel.tscn'),
+      /shader_parameter\/(corners|tex)/,
+      `and those it never set are not written: ${fileOf('panel.tscn')}`,
+    );
+
+    const moved = await set('room.tscn', 'PanelA', { position: { _type: 'Vector2', x: 100, y: 50 } });
+    assert.match(fileOf('room.tscn'), /^offset_left = 100\.0$/m, fileOf('room.tscn'));
+    assert.equal(get(moved, 'notStored'), undefined, `the offsets hold it: ${JSON.stringify(moved)}`);
+    const back = await set('room.tscn', 'PanelA', { position: { _type: 'Vector2', x: 0, y: 0 } });
+    assert.doesNotMatch(fileOf('room.tscn'), /offset_/, fileOf('room.tscn'));
+    assert.deepEqual(
+      get(back, 'notStored'),
+      ['position'],
+      `and at the default nothing does: ${JSON.stringify(back)}`,
+    );
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * project_info's classes, with an addon's counted unless asked for. A model-driven probe on a game
  * carrying two large addons asked for them, got 686 classes in 88 thousand characters, which the
  * harness moved out of the conversation, and went back to searching the files; 19 were the game's.
@@ -66403,6 +66497,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMovedNodeKeepsThePathsNamingIt,
   testAPropertyHoldingANodeFollowsIt,
   testTheProjectsOwnClassesAreListedAndAnAddonsCounted,
+  testAHeadlessWriteSavesWhatTheEditorWould,
   testAMovedNodeNamesTheScriptLinesReadingIt,
   testAHandWrittenValueIsNoChangeOfAScripts,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,

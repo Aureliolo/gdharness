@@ -718,6 +718,15 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		if property != "name" and property in node and not named.has(property):
 			named.append(property)
 	var source: String = scene.values_from(node, old_path)
+	# Read before the write, which frees the node.
+	var unsaved: Array[String] = []
+	for declared: Dictionary in node.get_property_list():
+		var declared_name: String = str(declared.get("name", ""))
+		if (
+			named.has(declared_name)
+			and not GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE
+		):
+			unsaved.append(declared_name)
 	var carried: GdhPaths = GdhPaths.new()
 	var _rewritten: int = carried.carry(
 		scene,
@@ -751,7 +760,7 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		answer["droppedNodes"] = dropped["nodes"]
 	_note_put_back(answer, scene, id, new_path)
 	_note_loads_as(answer, scene, new_path)
-	_note_left_out(answer, scene.written_pack, new_path, named, source)
+	_note_left_out(answer, scene.written_pack, new_path, named, unsaved, source)
 	if new_path != old_path:
 		answer.merge(GdhKin.follow(scene_path, old_path, new_path, carried))
 	return answer
@@ -793,9 +802,15 @@ static func _note_put_back(answer: Dictionary, scene: GdhSceneFile, id: int, at:
 
 ## Notes under notStored each of [param named] the file saved from [param pack] does not set on the
 ## node at [param at]: a set gave it the value the node has without it, so the packer leaves it out,
-## as the editor does, and it follows [param source], or its default, from then on.
+## as the editor does, and it follows [param source], or its default, from then on. [param unsaved]
+## are those of them the node never stores by name.
 static func _note_left_out(
-	answer: Dictionary, pack: PackedScene, at: String, named: Array[String], source: String
+	answer: Dictionary,
+	pack: PackedScene,
+	at: String,
+	named: Array[String],
+	unsaved: Array[String],
+	source: String
 ) -> void:
 	var stored: Dictionary = {}
 	var state: SceneState = pack.get_state()
@@ -803,9 +818,13 @@ static func _note_left_out(
 		if str(state.get_node_path(index)).trim_prefix("./") == at:
 			for property: int in state.get_node_property_count(index):
 				stored[str(state.get_node_property_name(index, property))] = true
+	# A property the file never holds by name, as a Control's position, which its offsets hold, is
+	# stored when what changed with it is.
+	var also: Dictionary = answer.get("alsoChanged", {})
+	var held_with_it: bool = also.keys().any(func(other: Variant) -> bool: return stored.has(other))
 	var left: Array[String] = []
 	for asked: String in named:
-		if not stored.has(asked):
+		if not stored.has(asked) and not (held_with_it and unsaved.has(asked)):
 			left.append(asked)
 	if left.is_empty():
 		return
