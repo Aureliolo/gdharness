@@ -27862,6 +27862,39 @@ function testAnExportIsJudgedByTheFileItWrote(): void {
     [true, "Export with preset 'Linux' did not produce builds/game.x86_64."],
     'and with no file at all there is nothing from before to mention',
   );
+  // A file this run did write is named as written, with what kept it from counting.
+  const errored = (): EngineRun => {
+    const log = new GameLog();
+    log.append('stderr', 'ERROR: Sentry requires the minimum macOS version to be 12.0 or higher.\n');
+    log.finish();
+    return { log, exitCode: 0, exitSignal: null, failure: null };
+  };
+  assert.deepEqual(said(exportAnswer(errored(), asked, 1000, 2000)), [
+    true,
+    "Export with preset 'Linux' wrote builds/game.x86_64, but it is not counted as exported, as it printed 1 error, under entries.",
+  ]);
+  assert.deepEqual(said(exportAnswer({ ...errored(), exitCode: 3 }, asked, null, 5)), [
+    true,
+    "Export with preset 'Linux' wrote builds/game.x86_64, but it is not counted as exported, as the engine ended with exit code 3 and it printed 1 error, under entries.",
+  ]);
+  assert.deepEqual(
+    said(
+      exportAnswer(
+        { ...clean(), exitCode: null, exitSignal: 'SIGTERM', failure: 'it ran past its five minutes' },
+        asked,
+        null,
+        5,
+      ),
+    ),
+    [
+      true,
+      "Export with preset 'Linux' wrote builds/game.x86_64, but it is not counted as exported, as the engine was ended by SIGTERM, because it ran past its five minutes.",
+    ],
+  );
+  assert.deepEqual(said(exportAnswer({ ...clean(), exitCode: 1 }, asked, null, 5)), [
+    true,
+    "Export with preset 'Linux' wrote builds/game.x86_64, but it is not counted as exported, as the engine ended with exit code 1.",
+  ]);
 
   // What else the export wrote beside the build: a pack new or rewritten, and not a file it left
   // alone or the build itself.

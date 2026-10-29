@@ -2155,6 +2155,15 @@ function presetPlatform(projectPath: string, preset: string): string | null {
  * export_presets.cfg file at its root" and never named the preset, and starting it cost an import
  * of the whole project to learn that.
  */
+/** How [param ending] ended, for after "as", where it did not end cleanly. */
+function engineEndSaid(ending: EngineRun): string {
+  if (ending.failure === null && ending.exitSignal === null) {
+    return `the engine ended with ${exitCodeText(ending.exitCode)}`;
+  }
+  const how = howItEnded(ending);
+  return how.startsWith('ended by') ? `the engine was ${how}` : how;
+}
+
 export function exportPresetRefusal(projectPath: string, preset: string): string | null {
   const presets = presetsIn(projectPath);
   if (presets === null) {
@@ -2217,10 +2226,31 @@ export function exportAnswer(
   if (verdict.exported) {
     return { content: [{ type: 'text', text: answerJson(verdict) }] };
   }
+  if (written) {
+    const errors = log.count('error');
+    const because = [
+      ...(ending.exitCode === 0 && ending.failure === null && ending.exitSignal === null
+        ? []
+        : [engineEndSaid(ending)]),
+      ...(errors === 0
+        ? []
+        : [`it printed ${String(errors)} ${errors === 1 ? 'error' : 'errors'}, under entries`]),
+    ];
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `Export with preset '${asked.preset}' wrote ${asked.outputPath}, but it is not counted as exported, as ${because.join(' and ')}.`,
+        },
+        { type: 'text', text: answerJson(verdict) },
+      ],
+      isError: true,
+    };
+  }
   const stale =
-    !written && after !== null
-      ? ` The ${asked.outputPath} there is from before this export, which did not write it.`
-      : '';
+    after === null
+      ? ''
+      : ` The ${asked.outputPath} there is from before this export, which did not write it.`;
   const why =
     ending.exitSignal === null
       ? stale
