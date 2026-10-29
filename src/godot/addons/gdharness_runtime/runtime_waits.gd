@@ -808,9 +808,11 @@ func _wait_until_said(
 	var looked_at_frame: int = 0
 	var found: bool = false
 	var look: GdhLook = null
+	var look_began: int = 0
 	while true:
 		if look == null and Time.get_ticks_usec() >= next_look:
 			look = GdhLook.new(_under(node_path), said, include_hidden)
+			look_began = Time.get_ticks_usec()
 		if look != null:
 			var held: int = look.go_on(LOOK_SLICE_USEC)
 			looked_usec += held
@@ -819,7 +821,10 @@ func _wait_until_said(
 			if look.done:
 				looks += 1
 				found = look.found
-				next_look = Time.get_ticks_usec() + look.took_usec * LOOKS_APART
+				# From where the look began, since the frames it was read across are the game's:
+				# counted from its end, a look spread over a third of a second waited out its nine
+				# lengths after that, and a wait on 3,500 nodes looked four times in two seconds.
+				next_look = look_began + look.took_usec * (LOOKS_APART + 1)
 				look = null
 		if found or Time.get_ticks_msec() - started >= timeout_ms:
 			break

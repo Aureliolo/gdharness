@@ -121,6 +121,26 @@ static func _runnable(config: ConfigFile, section: String) -> bool:
 	return GdhRead.as_bool(config.get_value(section, "runnable", false))
 
 
+## The name of the preset [param platform] runs, or "" when it has none: the one its section names,
+## or in a file saved before that section, the last preset of the platform keeping the key, which is
+## the one the editor ends up running. Read from the section alone, a file of that age had no
+## runnable preset, so a preset added for its platform took the place of the one it had.
+static func _runnable_name(config: ConfigFile, platform: String) -> String:
+	if config.has_section_key(RUNNABLE_SECTION, platform):
+		return str(config.get_value(RUNNABLE_SECTION, platform))
+	var named: String = ""
+	var at: int = 0
+	while config.has_section("preset." + str(at)):
+		var section: String = "preset." + str(at)
+		if (
+			str(config.get_value(section, "platform", "")) == platform
+			and GdhRead.as_bool(config.get_value(section, "runnable", false))
+		):
+			named = str(config.get_value(section, "name", ""))
+		at += 1
+	return named
+
+
 ## Adds an export preset to export_presets.cfg, written with the keys the editor's Project > Export
 ## writes for a new one, and every option in [code]known_options[/code] (what
 ## [method export_options] answers for the platform) at its default. The editor also writes the
@@ -160,7 +180,7 @@ func add_export_preset(params: Dictionary) -> Dictionary:
 			)
 		index += 1
 	# A platform with no preset to run takes the new one, as the editor's dialog does.
-	var runnable: bool = not config.has_section_key(RUNNABLE_SECTION, platform)
+	var runnable: bool = _runnable_name(config, platform).is_empty()
 	if runnable:
 		config.set_value(RUNNABLE_SECTION, platform, preset_name)
 
@@ -609,6 +629,7 @@ func remove_export_preset(params: Dictionary) -> Dictionary:
 	var index: int = found["index"]
 	var section: String = found["section"]
 	var platform: String = str(config.get_value(section, "platform", ""))
+	var was_runnable: bool = _runnable_name(config, platform) == preset_name
 	var last: int = index
 	while config.has_section("preset." + str(last + 1)):
 		last += 1
@@ -622,11 +643,17 @@ func remove_export_preset(params: Dictionary) -> Dictionary:
 		if keeping != OK:
 			return _log.failure("Failed to save %s: %s" % [CREDENTIALS_FILE, error_string(keeping)])
 		answer["credentials"] = CREDENTIALS_FILE
-	if str(config.get_value(RUNNABLE_SECTION, platform, "")) == preset_name:
-		config.set_value(RUNNABLE_SECTION, platform, null)
-		answer["runnableNow"] = null
+	if was_runnable:
+		if config.has_section_key(RUNNABLE_SECTION, platform):
+			config.set_value(RUNNABLE_SECTION, platform, null)
+		# A file saved before the section can mark another preset of the platform too, which the
+		# editor then runs.
+		var kept: String = _runnable_name(config, platform)
+		answer["runnableNow"] = kept
+		if kept.is_empty():
+			answer["runnableNow"] = null
 		var at: int = 0
-		while config.has_section("preset." + str(at)):
+		while kept.is_empty() and config.has_section("preset." + str(at)):
 			if str(config.get_value("preset." + str(at), "platform", "")) == platform:
 				var next: String = str(config.get_value("preset." + str(at), "name", ""))
 				config.set_value(RUNNABLE_SECTION, platform, next)
