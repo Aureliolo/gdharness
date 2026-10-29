@@ -59721,7 +59721,7 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
       '[sub_resource type="Animation" id="Animation_idle"]\n\n' +
       '[sub_resource type="Animation" id="Animation_jump"]\nlength = 0.5\n' +
       'tracks/0/type = "value"\ntracks/0/imported = false\ntracks/0/enabled = true\n' +
-      'tracks/0/path = NodePath("Sprite:position")\ntracks/0/interp = 1\ntracks/0/loop_wrap = true\n' +
+      'tracks/0/path = NodePath("Sprite:position")\ntracks/0/interp = 2\ntracks/0/loop_wrap = false\n' +
       'tracks/0/keys = {\n"times": PackedFloat32Array(0, 0.5),\n"transitions": PackedFloat32Array(1, 1),\n' +
       '"update": 0,\n"values": [Vector2(0, 0), Vector2(0, -40)]\n}\n\n' +
       '[sub_resource type="AnimationLibrary" id="AnimationLibrary_moves"]\n' +
@@ -59974,6 +59974,8 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
           nodePath: 'Sprite',
           property: 'position',
           update: 'continuous',
+          interpolation: 'cubic',
+          loopWrap: false,
           keyframes: [
             { time: 0, value: { x: 0, y: 0, _type: 'Vector2' } },
             { time: 0.5, value: { x: 0, y: -40, _type: 'Vector2' } },
@@ -62890,6 +62892,67 @@ async function testATrackAndItsKeysComeOutWithNoEditor(): Promise<void> {
         }),
       ),
       'add_track makes property and method tracks, and track.type is bezier; remove_track takes any.',
+    );
+    // How a track blends is written as asked and read back as written, and a track read with it is
+    // still taken out as it stands.
+    const stepped = await written({
+      op: 'add_track',
+      playerNodePath: 'Player',
+      animationName: 'sway',
+      track: {
+        type: 'property',
+        nodePath: 'Body',
+        property: 'skew',
+        update: 'continuous',
+        interpolation: 'nearest',
+        loopWrap: false,
+        keyframes: [{ time: 0, value: 0.5 }],
+      },
+    });
+    assert.deepEqual(
+      [get(stepped, 'interpolation'), get(stepped, 'loopWrap')],
+      ['nearest', false],
+      JSON.stringify(stepped),
+    );
+    assert.match(
+      fileOf('moves.tscn'),
+      /NodePath\("Body:skew"\)\ntracks\/\d+\/interp = 0\ntracks\/\d+\/loop_wrap = false\n/,
+      fileOf('moves.tscn'),
+    );
+    const skewed = asArray(
+      get(
+        parseTextContent(await call({ op: 'read', playerNodePath: 'Player', animationName: 'sway' })),
+        'tracks',
+      ),
+    ).find((track) => get(track, 'property') === 'skew');
+    assert.deepEqual(
+      [get(skewed, 'interpolation'), get(skewed, 'loopWrap')],
+      ['nearest', false],
+      JSON.stringify(skewed),
+    );
+    assert.equal(
+      get(
+        await written({ op: 'remove_track', playerNodePath: 'Player', animationName: 'sway', track: skewed }),
+        'tracksRemoved',
+      ),
+      1,
+    );
+    assert.equal(
+      textOf(
+        await call({
+          op: 'add_track',
+          playerNodePath: 'Player',
+          animationName: 'sway',
+          track: {
+            type: 'method',
+            nodePath: 'Body',
+            method: 'hide',
+            loopWrap: false,
+            keyframes: [{ time: 0 }],
+          },
+        }),
+      ),
+      'track.loopWrap is for property tracks; a method key is not blended.',
     );
     const sway = parseTextContent(
       await call({ op: 'read', playerNodePath: 'Player', animationName: 'sway' }),

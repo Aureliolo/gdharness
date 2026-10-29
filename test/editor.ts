@@ -3351,6 +3351,8 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
         nodePath: 'Sprite',
         property: 'position',
         update: 'continuous',
+        interpolation: 'linear',
+        loopWrap: true,
         keyframes: [
           { time: 0, value: { _type: 'Vector2', x: 1, y: 2 } },
           { time: 0.5, value: { _type: 'Vector2', x: 3, y: 4 } },
