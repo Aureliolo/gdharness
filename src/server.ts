@@ -8049,6 +8049,11 @@ class GodotServer {
       test: `${row.suite} > ${row.name}`,
       reason: row.reason,
     }));
+    // The same for a case gdUnit4 cannot run as declared, which it counts skipped beside a pass.
+    const casesUnrunnable = casePrinted.unrunnable.map((one) => ({
+      test: `${one.suite} > ${one.name}`,
+      reason: one.reason,
+    }));
     return this.jsonTextResponse({
       // A report with no cases in it is a run where nothing ran, which exits 0 and was answered
       // passed beside a verdict saying no test cases were found.
@@ -8068,6 +8073,7 @@ class GodotServer {
         testsNotRun.length === 0 &&
         casesNotRun.length === 0 &&
         rowsMismatched.length === 0 &&
+        casesUnrunnable.length === 0 &&
         notSuites.length === 0,
       verdict: [
         // gdUnit4's word for the exit, which is not the run's when something below fails it.
@@ -8078,6 +8084,7 @@ class GodotServer {
           testsNotRun.length +
           casesNotRun.length +
           rowsMismatched.length +
+          casesUnrunnable.length +
           notSuites.length >
           0
           ? undefined
@@ -8103,6 +8110,9 @@ class GodotServer {
         rowsMismatched.length > 0
           ? `${rowsMismatched.length === 1 ? 'one row' : `${String(rowsMismatched.length)} rows`} skipped for data that does not fit the case`
           : undefined,
+        casesUnrunnable.length > 0
+          ? `${casesUnrunnable.length === 1 ? 'one case' : `${String(casesUnrunnable.length)} cases`} skipped as gdUnit4 cannot run ${casesUnrunnable.length === 1 ? 'it' : 'them'} as declared`
+          : undefined,
         notSuites.length > 0
           ? `${notSuites.length === 1 ? 'one script declares' : `${String(notSuites.length)} scripts declare`} cases gdUnit4 never runs`
           : undefined,
@@ -8115,6 +8125,7 @@ class GodotServer {
         ? { testsNotRun: [...testsNotRun, ...casesNotRun] }
         : {}),
       ...(rowsMismatched.length > 0 ? { rowsMismatched } : {}),
+      ...(casesUnrunnable.length > 0 ? { casesUnrunnable } : {}),
       ...(timedOut ? { timedOut, hung, silentForMs } : {}),
       exitCode,
       exitSignal: run.exitSignal ?? undefined,
@@ -8160,6 +8171,9 @@ class GodotServer {
             : undefined,
           rowsMismatched.length > 0
             ? `gdUnit4 skipped what rowsMismatched names because the row's data does not fit the case's parameters, though it printed ${rowsMismatched.length === 1 ? 'the row' : 'each row'} passed first; each entry carries gdUnit4's reason. The run is not called passed, as gdharness test judges it.`
+            : undefined,
+          casesUnrunnable.length > 0
+            ? `gdUnit4 skipped what casesUnrunnable names because it cannot run ${casesUnrunnable.length === 1 ? 'that case' : 'those cases'} as declared, though it printed ${casesUnrunnable.length === 1 ? 'it' : 'each'} passed first; each entry carries gdUnit4's reason. A parameter is filled only by _test_parameters, a fuzzer or a setting gdUnit4 names (timeout, do_skip, skip_reason, fuzzer_iterations, fuzzer_seed), and fuzzers come before the settings. The run is not called passed, as gdharness test judges it.`
             : undefined,
           notSuites.length > 0
             ? 'What notSuites names declares cases gdUnit4 never runs, so the run is not called passed, as gdharness test judges it.'

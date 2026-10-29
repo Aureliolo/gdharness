@@ -43560,6 +43560,29 @@ function testARowSkippedForItsDataIsNoPass(): void {
     'rows skipped beside a case that passed',
   );
   assert.deepEqual(skipped.passedSuites, [], 'and the suite did not pass');
+
+  // A case gdUnit4 cannot run as declared is printed the same way with its reason on one line, and
+  // a case skipped on purpose prints its own reason there, which fails nothing.
+  const declaredRun = (reason: string): string =>
+    cannedRun([
+      caseLine(S_TEST, 'test_a', 'STARTED'),
+      caseLine(S_TEST, 'test_a', 'PASSED', '0ms'),
+      '  \u001b[38;2;0;206;209m\u001b[1m\u001b[4mReport:\u001b[0m',
+      '  \u001b[38;2;128;128;128m\u001b[38;2;255;69;0mThis test is skipped!\u001b[0m',
+      `  Reason: '\u001b[38;2;30;144;255m${reason}\u001b[0m'`,
+      '\u001b[0m\u001b[38;2;128;128;128m\u001b[0m',
+      caseLine(S_TEST, 'test_p', 'STARTED'),
+      caseLine(S_TEST, 'test_p', 'PASSED', '5ms'),
+    ]);
+  const typo = `Unknown test case argument's ["value"] found.`;
+  const unrunnable = judgeEngine(readRun(declaredRun(typo)), handed, clean);
+  assert.deepEqual(
+    [unrunnable.faults, unrunnable.passedSuites],
+    [[`${S_TEST} > test_a never ran: gdUnit4 skipped it, saying "${typo}"`], []],
+    'a case gdUnit4 cannot run as declared',
+  );
+  const onPurpose = judgeEngine(readRun(declaredRun('not yet')), handed, clean);
+  assert.deepEqual([onPurpose.faults, onPurpose.passedSuites], [[], [S_TEST]], 'a case skipped on purpose');
 }
 
 /**
@@ -54215,7 +54238,9 @@ async function testATestRunTakesTheCasesNamed(): Promise<void> {
 /**
  * A suite gdUnit4 runs and passes can leave out a case it declares, or skip every row of one, and say
  * nothing that fails the run. Both were answered passed. The two shapes are those gdUnit4 was seen to
- * do it with: a parameterised case whose signature spans lines, and rows a function returns.
+ * do it with: a parameterised case whose signature spans lines, and rows a function returns. A case
+ * it cannot run as declared is skipped the same way, and run alone it was the whole run, exit 0 and
+ * answered passed.
  */
 async function testACaseGdUnitLeavesUnrunIsNoPass(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -54250,6 +54275,14 @@ async function testACaseGdUnitLeavesUnrunIsNoPass(): Promise<void> {
       join(project, 'test', 'returned_test.gd'),
       'extends GdUnitTestSuite\n\nconst PAIRS: Array = [[1, 2], [3, 4]]\n\n\nfunc pairs() -> Array:\n\treturn PAIRS\n\n\n' +
         `func test_pair(a: int, b: int, _test_parameters: Array = pairs()) -> void:\n\tassert_int(a + 1).is_equal(b)\n${plain}`,
+    );
+    // A parameter nothing fills and a fuzzer after a setting, which gdUnit4 cannot run, beside a case
+    // skipped on purpose, which is the case's own choice and fails nothing.
+    writeFileSync(
+      join(project, 'test', 'declared_test.gd'),
+      'extends GdUnitTestSuite\n\n\nfunc test_typo(value: String) -> void:\n\tassert_str(value).is_equal("x")\n\n\n' +
+        'func test_late(timeout := 2000, fuzzer := Fuzzers.rangei(0, 9)) -> void:\n\tassert_int(fuzzer.next_value()).is_less(10)\n\n\n' +
+        `func test_later(do_skip := true, skip_reason := "not yet") -> void:\n\tassert_bool(false).is_true()\n${plain}`,
     );
     await withStdioServer(async (_call, request) => {
       const run = async (args: Record<string, unknown>): Promise<{ text: string; answer: unknown }> => {
@@ -54307,6 +54340,51 @@ async function testACaseGdUnitLeavesUnrunIsNoPass(): Promise<void> {
         get(returned.answer, 'verdict'),
         '2 rows skipped for data that does not fit the case',
         returned.text,
+      );
+
+      const declared = await run({ path: 'res://test/declared_test.gd' });
+      assert.deepEqual(
+        [
+          get(declared.answer, 'passed'),
+          get(declared.answer, 'verdict'),
+          get(declared.answer, 'casesUnrunnable'),
+        ],
+        [
+          false,
+          '2 cases skipped as gdUnit4 cannot run them as declared',
+          [
+            {
+              test: 'res://test/declared_test.gd > test_typo',
+              reason: `Unknown test case argument's ["value"] found.`,
+            },
+            {
+              test: 'res://test/declared_test.gd > test_late',
+              reason: `Fuzzer argument 'fuzzer' must be declared before the test config argument(s) ["timeout"].`,
+            },
+          ],
+        ],
+        declared.text,
+      );
+      assert.match(
+        text(get(declared.answer, 'note')),
+        /gdUnit4 skipped what casesUnrunnable names because it cannot run those cases as declared/,
+        declared.text,
+      );
+      // Run alone, the case was the whole run, and gdUnit4 exits 0 on it.
+      const alone = await run({ path: 'res://test/declared_test.gd:test_typo' });
+      assert.deepEqual(
+        [get(alone.answer, 'passed'), get(alone.answer, 'exitCode'), get(alone.answer, 'casesUnrunnable')],
+        [
+          false,
+          0,
+          [
+            {
+              test: 'res://test/declared_test.gd > test_typo',
+              reason: `Unknown test case argument's ["value"] found.`,
+            },
+          ],
+        ],
+        alone.text,
       );
     });
   } finally {
