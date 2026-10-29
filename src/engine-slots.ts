@@ -417,6 +417,14 @@ export class EngineSlots {
     giveBackSlot(lock, this.holder.pid);
   }
 
+  /**
+   * Stops counting the slot at [param lock] as this process's without giving it back, for a lock
+   * another process takes over in its own time: see {@link handSlot}.
+   */
+  forget(lock: string): void {
+    this.held.delete(lock);
+  }
+
   /** Hands the slot at [param lock] to [param to], answering whether it did: see {@link handSlot}. */
   hand(lock: string, to: SlotHolder): boolean {
     const handed = handSlot(lock, this.holder.pid, to);
@@ -670,6 +678,9 @@ export async function slotForCall(): Promise<CallSlot> {
       slots.release(lock);
     },
     handTo: (holder) => slots.hand(lock, holder),
+    leave: () => {
+      slots.forget(lock);
+    },
   };
 }
 
@@ -680,6 +691,8 @@ export interface CallSlot {
   readonly from: number;
   readonly release: () => void;
   readonly handTo: (holder: SlotHolder) => boolean;
+  /** Leaves the lock for another process to take over, naming this one until it does. */
+  readonly leave: () => void;
 }
 
 /** Runs [param body] holding one of the machine's slots for the call, and gives it back after. */

@@ -11914,8 +11914,9 @@ class GodotServer {
     const gameEnv = profiled ? { ...(env ?? process.env), [PROFILE_FROM_START]: '1' } : env;
     const profile = profiled ? profilePath(startedAt) : undefined;
     // In one of the machine's engine slots, like every engine started for a call. The keeper takes
-    // the lock over once the game has started and gives it back when the run ends, since the run
-    // outlives this server, so the release here gives back only a slot the keeper never took.
+    // the lock over once it has handed the game's pid back, and gives it back when the run ends,
+    // since the run outlives this server; so a started run leaves the lock to it, and one the keeper
+    // never took over names this server, which frees it by going.
     const slot = await slotForCall();
     let launched: Awaited<ReturnType<typeof launchOutsideTheTree>>;
     try {
@@ -11934,8 +11935,14 @@ class GodotServer {
         },
         ...(desktop === undefined ? {} : { desktop }),
       });
-    } finally {
+    } catch (error) {
       slot.release();
+      throw error;
+    }
+    if ('error' in launched) {
+      slot.release();
+    } else {
+      slot.leave();
     }
     if ('error' in launched) {
       return launched;

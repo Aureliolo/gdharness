@@ -362,7 +362,7 @@ async function keep(): Promise<void> {
     run !== undefined && throughTheHelper(spec) ? mkdtempSync(join(tmpdir(), 'gdharness-stop-')) : null;
   const stopFile = own === null ? '' : join(own, 'stop');
   let started: Awaited<ReturnType<typeof startDetached>>;
-  // Read beside the start rather than before it: on Windows it is a query of its own.
+  // Read beside the start rather than after it: on Windows it is a query of its own.
   const keeperStarted = run?.slot === undefined ? undefined : ownStart();
   // Before the game exists, so anything listed as started after it can be the game's own.
   const spawnedAt = Date.now();
@@ -380,10 +380,6 @@ async function keep(): Promise<void> {
     process.exit(1);
   }
   const { child, pid } = started;
-  const slot = run?.slot;
-  if (slot !== undefined && keeperStarted !== undefined) {
-    handSlot(slot.lock, slot.from, { pid: process.pid, started: await keeperStarted, by: slot.by });
-  }
   const record =
     run === undefined
       ? null
@@ -438,6 +434,12 @@ async function keep(): Promise<void> {
     });
     process.stdout.end(`pid ${pid}\n`, resolve);
   });
+  // After the pid has gone back, since on Windows reading this process's start is a query of its
+  // own, and a start held up by it answered after a game that announces at once had done so.
+  const slot = run?.slot;
+  if (slot !== undefined && keeperStarted !== undefined) {
+    handSlot(slot.lock, slot.from, { pid: process.pid, started: await keeperStarted, by: slot.by });
+  }
   let { code, signal } = await exited;
   let exitedAt = Date.now();
   let note: RunRecord | null =

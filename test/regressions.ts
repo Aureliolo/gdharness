@@ -45841,7 +45841,11 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
         ENGINE_CALL_TIMEOUT_MS,
       );
       const game = asNumber(get(JSON.parse(textOf(started) ?? '{}'), 'pid'));
-      const keeper = existsSync(ours) ? holderOf(readFileSync(ours, 'utf8')) : null;
+      // Taken over once the keeper has handed the pid back, which can come a moment after the start.
+      const lockHolder = (): SlotHolder | null =>
+        existsSync(ours) ? holderOf(readFileSync(ours, 'utf8')) : null;
+      await cameTrue(() => lockHolder()?.pid !== server.child.pid, 10_000);
+      const keeper = lockHolder();
       assert.equal(keeper?.by, `a game of ${project} editor_run started`, JSON.stringify(keeper));
       assert.ok(
         keeper.pid !== server.child.pid && keeper.pid !== game && alive(keeper.pid),
