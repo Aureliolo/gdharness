@@ -1173,6 +1173,9 @@ export async function handleDAPTool(
         const frameId = typeof safeArgs.frameId === 'number' ? safeArgs.frameId : undefined;
         const expression = typeof safeArgs.expression === 'string' ? safeArgs.expression : '';
         const evaluated = await client.evaluate(expression, frameId);
+        // The engine says why an expression failed in an error the editor's debugger shows and the
+        // adapter never passes on, so a failure and a null value answer alike here.
+        const nil = evaluated.type === 'Nil' || evaluated.value === 'null' || evaluated.value === '<null>';
         return {
           content: [
             {
@@ -1182,6 +1185,11 @@ export async function handleDAPTool(
                 expression,
                 value: evaluated.value,
                 ...(evaluated.type === undefined ? {} : { type: evaluated.type }),
+                ...(nil
+                  ? {
+                      note: "null is also what an expression comes to when it does not parse or fails as it runs. For a game the editor plays, why reaches only the editor's Debugger panel, so this cannot say which it was.",
+                    }
+                  : {}),
               }),
             },
           ],

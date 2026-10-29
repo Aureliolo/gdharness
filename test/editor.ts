@@ -6198,6 +6198,13 @@ async function testDebugging({ call, refusal, attempt, play, project }: Editor):
   const total = named.find((variable) => text(get(variable, 'name')) === 'total');
   assert.ok(total, `total should be in scope at the breakpoint; saw ${JSON.stringify(named)}`);
   assert.match(text(get(total, 'value')), /\b4\b/, 'and should read as the 4 the line above worked out');
+  // However the adapter words a null, a failed expression is not passed off as one.
+  const unnamed = await call('debug_state', { op: 'evaluate', expression: 'no_such_name' });
+  assert.match(
+    text(get(unnamed, 'note')),
+    /^null is also what an expression comes to when it does not parse or fails as it runs/,
+    JSON.stringify(unnamed),
+  );
 
   // One line, run. The game is held either way, so what says the step happened is where it is
   // held now: a step that did nothing leaves it on the line it was already on. Read from the

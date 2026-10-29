@@ -5,6 +5,7 @@
 
 import assert from 'node:assert/strict';
 import { forAnswer, GameLog } from '../src/game-log.js';
+import { suitesPrinted } from '../src/junit.js';
 
 function testHeadlinesKeepTheirDetail(): void {
   const log = new GameLog();
@@ -303,6 +304,60 @@ function testAnEntrySaysTheScriptItPointsAt(): void {
   assert.equal(engine.detail?.[0], 'at: get_global_transform (scene/2d/node_2d.cpp:415)');
 }
 
+/**
+ * A windowed engine on Windows prints a case's script error on stdout, where gdUnit4 prints its
+ * indented case lines: the error's backtrace is its detail, and the case lines after it are not.
+ */
+function testAScriptErrorDoesNotTakeTheCasesAfterIt(): void {
+  const log = new GameLog();
+  log.append(
+    'stdout',
+    [
+      'Run Test Suite: res://tests/a_test.gd',
+      '  res://tests/a_test.gd > test_null STARTED',
+      "SCRIPT ERROR: Cannot call method 'get_class' on a null value.",
+      '   at: test_null (res://tests/a_test.gd:14)',
+      '   GDScript backtrace (most recent call first):',
+      '       [0] test_null (res://tests/a_test.gd:14)',
+      '  res://tests/a_test.gd > test_null FAILED 10ms',
+      '  Report:',
+      '  res://tests/a_test.gd > test_row:2 (3, 10) STARTED',
+      '  res://tests/a_test.gd > test_row:2 (3, 10) FAILED 16ms',
+      'Statistics: 2 test cases | 1 errors | 1 failures | 0 flaky | 0 skipped | 0 orphans | FAILED 115ms',
+      '',
+    ].join('\n'),
+  );
+  assert.deepEqual(
+    log.all.map((entry) => [entry.severity, entry.text, ...entry.detail]),
+    [
+      ['info', 'Run Test Suite: res://tests/a_test.gd'],
+      ['info', '  res://tests/a_test.gd > test_null STARTED'],
+      [
+        'error',
+        "Cannot call method 'get_class' on a null value.",
+        'at: test_null (res://tests/a_test.gd:14)',
+        'GDScript backtrace (most recent call first):',
+        '[0] test_null (res://tests/a_test.gd:14)',
+      ],
+      ['info', '  res://tests/a_test.gd > test_null FAILED 10ms'],
+      ['info', '  Report:'],
+      ['info', '  res://tests/a_test.gd > test_row:2 (3, 10) STARTED'],
+      ['info', '  res://tests/a_test.gd > test_row:2 (3, 10) FAILED 16ms'],
+      [
+        'info',
+        'Statistics: 2 test cases | 1 errors | 1 failures | 0 flaky | 0 skipped | 0 orphans | FAILED 115ms',
+      ],
+    ],
+  );
+  const printed = log.select({ severity: 'info', sinceLastCall: false, limit: Number.POSITIVE_INFINITY });
+  assert.deepEqual(
+    suitesPrinted(printed.entries.map((entry) => entry.text)).finished.map((suite) => suite.failed),
+    [['test_null', 'test_row:2 (3, 10)']],
+    'every failing case is read off what the run printed',
+  );
+}
+
+testAScriptErrorDoesNotTakeTheCasesAfterIt();
 testAnEntrySaysTheScriptItPointsAt();
 testACrashIsAnErrorWithItsReport();
 testAFilteredReadDoesNotConsumeWhatItDidNotReport();

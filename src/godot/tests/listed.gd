@@ -357,6 +357,9 @@ class GdhRunner:
 	var case_began: bool = false
 	## The suite running, which a case's own event does not carry.
 	var suite_running: String = ""
+	## Whether gdUnit4 has minimised the window, or is about to, and it is not back yet: it does as
+	## its runner starts, and after every suite.
+	var minimise_pending: bool = true
 
 	## As the run ends, the marker of the walk's newest end, and every script held past the walk, on
 	## an engine whose walk can stop part way ([GdhShutdownWalk]).
@@ -446,7 +449,11 @@ class GdhRunner:
 			GdUnitEvent.SESSION_START:
 				if not GdhIndexedSession.indexes_itself(_test_session):
 					_test_session = GdhIndexedSession.of(_test_session)
+				var tree: SceneTree = get_tree()
+				if not tree.process_frame.is_connected(drawn_window):
+					var _watched: int = tree.process_frame.connect(drawn_window)
 			GdUnitEvent.TESTSUITE_BEFORE:
+				drawn_window()
 				suite_running = event.resource_path()
 				orphans_at_suite = orphan_ids()
 				orphans_named.clear()
@@ -461,6 +468,9 @@ class GdhRunner:
 			GdUnitEvent.TESTCASE_AFTER:
 				cases_ended += 1
 		super(event)
+		# gdUnit4 minimises the window once the suite's end is reported.
+		if event.type() == GdUnitEvent.TESTSUITE_AFTER:
+			minimise_pending = true
 		# After gdUnit4's own report of the case, so the line falls under it.
 		if event.orphan_nodes() == 0:
 			return
@@ -477,6 +487,21 @@ class GdhRunner:
 			say_left(
 				"after", left.filter(func(id: int) -> bool: return not orphans_from_before.has(id))
 			)
+
+	## The window back from minimised, which gdUnit4 makes it as its runner starts and after every
+	## suite, and where Godot draws nothing: a suite given a window to render in waited for a
+	## frame_post_draw that never came. Called as a suite begins, ahead of its before(), and every
+	## frame after, since on macOS the minimise is an animation that reads as windowed until it
+	## ends, and a window not yet minimised cannot be put back. Only once for each minimise of
+	## gdUnit4's, so a suite minimising the window itself keeps it minimised.
+	func drawn_window() -> void:
+		if not minimise_pending or DisplayServer.get_name() == "headless":
+			return
+		if Engine.is_embedded_in_editor():
+			return
+		if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_MINIMIZED:
+			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+			minimise_pending = false
 
 	## The orphans now that were not there in [param before] and no line has named yet.
 	func new_orphans(before: Dictionary[int, bool]) -> Array[int]:

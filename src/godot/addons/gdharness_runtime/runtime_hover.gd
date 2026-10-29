@@ -160,7 +160,7 @@ func _hover(viewport: Viewport, point: Vector2) -> void:
 	var inside: Vector2 = container.get_global_transform_with_canvas().affine_inverse() * point
 	if container.stretch:
 		inside /= container.stretch_shrink
-	for child: Node in container.get_children():
+	for child: Node in container.get_children(true):
 		var shown: SubViewport = child as SubViewport
 		if shown != null and not shown.gui_disable_input:
 			_hover(shown, shown.get_final_transform().affine_inverse() * inside)
@@ -179,7 +179,7 @@ func _drop(viewport: Viewport, until: int) -> void:
 	var over: Control = instance_from_id(top) as Control
 	var container: SubViewportContainer = over as SubViewportContainer
 	if container != null:
-		for child: Node in container.get_children():
+		for child: Node in container.get_children(true):
 			var shown: SubViewport = child as SubViewport
 			if shown != null:
 				_drop(shown, 0)
@@ -264,7 +264,7 @@ func _pressed_at(viewport: Viewport, point: Vector2) -> Node:
 	var inside: Vector2 = container.get_global_transform_with_canvas().affine_inverse() * point
 	if container.stretch:
 		inside /= container.stretch_shrink
-	for child: Node in container.get_children():
+	for child: Node in container.get_children(true):
 		var shown: SubViewport = child as SubViewport
 		if shown != null and not shown.gui_disable_input:
 			var within: Node = _pressed_at(
@@ -277,9 +277,11 @@ func _pressed_at(viewport: Viewport, point: Vector2) -> Node:
 
 ## The controls [param node] holds that the engine keeps as roots of [param node]'s viewport: drawn
 ## on their own, or with no control above them. Not into another viewport, a window or a
-## SubViewport, whose controls are that one's.
+## SubViewport, whose controls are that one's. Internal children count, as they do for the engine,
+## though get_children leaves them out unless asked: a layer added with INTERNAL_MODE_BACK was
+## passed over, and the press predicted for the control under it.
 static func _gather_roots(node: Node, roots: Array[Control]) -> void:
-	for child: Node in node.get_children():
+	for child: Node in node.get_children(true):
 		if child is Viewport:
 			continue
 		var control: Control = child as Control
@@ -331,8 +333,8 @@ func _at(item: CanvasItem, point: Vector2, holder: Transform2D) -> Control:
 	var control: Control = item as Control
 	var local: Vector2 = matrix.affine_inverse() * point
 	if control == null or not control.is_clipping_contents() or _has_point(control, local):
-		for index: int in range(item.get_child_count() - 1, -1, -1):
-			var child: CanvasItem = item.get_child(index) as CanvasItem
+		for index: int in range(item.get_child_count(true) - 1, -1, -1):
+			var child: CanvasItem = item.get_child(index, true) as CanvasItem
 			if child == null or child.top_level:
 				continue
 			var found: Control = _at(child, point, matrix)

@@ -259,6 +259,8 @@ export class GameDebugger {
   private readonly onClosed: (() => void)[] = [];
   private readonly output: string[] = [];
   private outputDropped = 0;
+  /** Why the expressions evaluated since the last evaluate began failed, as the engine said it. */
+  private readonly expressionErrors: string[] = [];
   /** Requests answered one at a time: each reads the replies to the commands it sent. */
   private queue: Promise<unknown> = Promise.resolve();
   private readonly server: Server;
@@ -412,6 +414,16 @@ export class GameDebugger {
         if (over > 0) {
           this.output.splice(0, over);
           this.outputDropped += over;
+        }
+      }
+    } else if (received.message === 'error') {
+      // An expression that does not parse or fails as it runs comes back as null, and the engine
+      // says why in an error raised from its Expression class, sent after the null.
+      const [, , , , file, , , error, described] = received.data;
+      if (file === 'core/math/expression.cpp' && this.expressionErrors.length < 10) {
+        const why = typeof described === 'string' && described !== '' ? described : error;
+        if (typeof why === 'string') {
+          this.expressionErrors.push(why);
         }
       }
     }
@@ -851,6 +863,7 @@ export class GameDebugger {
       };
     }
     this.forget('evaluation_return');
+    this.expressionErrors.length = 0;
     this.send('evaluate', [expression, frame], held.thread);
     const answered = await this.next(GameDebugger.named('evaluation_return'), EVALUATE_MS);
     if (answered === null || !('data' in answered)) {
@@ -859,18 +872,26 @@ export class GameDebugger {
       };
     }
     const [, , type, value, hint] = answered.data;
-    return {
+    const answer = {
       held: this.heldState(),
       frame,
       expression,
       value: shownValue(value ?? null, typeof hint === 'string' ? hint : ''),
       type: typeNamed(type, hint),
-      ...(value === null || value === undefined
-        ? {
-            note: 'null is also what an expression comes to when it does not parse or fails as it runs. The game prints why as an error, which editor_output reads, since its debugger hands errors over apart from the console debug_state output keeps.',
-          }
-        : {}),
     };
+    if (value !== null && value !== undefined) {
+      return answer;
+    }
+    // The held game sends the errors it raised on its next pass, before it answers anything asked
+    // after them, so one answered question means every error the expression raised is in.
+    if (!(await this.taken())) {
+      return {
+        ...answer,
+        note: 'null is also what an expression comes to when it does not parse or fails as it runs, and the game did not answer the question asked after it to say whether this one failed. editor_output has any error it printed.',
+      };
+    }
+    const why = this.expressionErrors.join(' ');
+    return why === '' ? answer : { ...answer, failed: why };
   }
 
   /**

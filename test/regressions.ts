@@ -4042,7 +4042,9 @@ async function testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer(): Promise<void> {
       });
     } else if (command === 'evaluate') {
       evaluated.push(Number(get(args, 'frameId')));
-      if (evaluated.length > 2) {
+      if (get(args, 'expression') === 'missing') {
+        answer({ result: '<null>', type: 'Nil', variablesReference: 0 });
+      } else if (evaluated.length > 2) {
         answer({ result: '15', type: 'int', variablesReference: 0 });
       }
     } else {
@@ -4069,6 +4071,13 @@ async function testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer(): Promise<void> {
         'asked again once the game had answered',
       );
       assert.deepEqual(evaluated, [0, 0, 0], 'on the frame asked for');
+      const nil = await handleDAPTool(client, 'dap_evaluate', { expression: 'missing' });
+      assert.match(
+        String(get(JSON.parse(textOf({ jsonrpc: '2.0', result: nil }) ?? '{}') as unknown, 'note')),
+        /^null is also what an expression comes to when it does not parse or fails as it runs\. For a game the editor plays, why reaches only the editor's Debugger panel/,
+        'a null through the adapter is not passed off as the value',
+      );
+      evaluated.pop();
 
       const static_ = await handleDAPTool(client, 'dap_evaluate', { expression: 'value', frameId: 1 });
       const said = textOf({ jsonrpc: '2.0', result: static_ }) ?? '';
@@ -16719,6 +16728,9 @@ async function testAWatchRecordsAPropertyEveryFrame(): Promise<void> {
  * takes, and one in the second. Headless as well, wherever this runs: the engine fakes the root's
  * mouse-enter there, since the headless platform puts its pointer at the origin, inside the window,
  * so the engine hovers by itself and nothing may be supplied or entered twice over it.
+ *
+ * The second window also holds a container showing a SubViewport that is its internal child, which
+ * the supplied hover is carried into and taken out of.
  */
 async function testAClickInAWindowNothingEnteredPresses(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -16765,7 +16777,7 @@ async function testAClickInAWindowNothingEnteredPresses(): Promise<void> {
         '\t\tsecond.name = "Second"',
         '\t\tsecond.borderless = true',
         '\t\tsecond.unfocusable = true',
-        '\t\tsecond.size = Vector2i(64, 64)',
+        '\t\tsecond.size = Vector2i(64, 128)',
         '\t\tsecond.position = Vector2i(screen.end.x - 160, screen.position.y + 16)',
         '\t\tvar other: Button = Button.new()',
         '\t\tother.name = "Other"',
@@ -16773,8 +16785,23 @@ async function testAClickInAWindowNothingEnteredPresses(): Promise<void> {
         '\t\tother.position = Vector2(4, 4)',
         '\t\tother.size = Vector2(56, 40)',
         '\t\tsecond.add_child(other)',
+        '\t\t# What a container shows from a SubViewport that is its internal child, as a game adds one.',
+        '\t\tvar box: SubViewportContainer = SubViewportContainer.new()',
+        '\t\tbox.name = "Box"',
+        '\t\tbox.stretch = true',
+        '\t\tbox.position = Vector2(4, 68)',
+        '\t\tbox.size = Vector2(56, 40)',
+        '\t\tvar view: SubViewport = SubViewport.new()',
+        '\t\tview.name = "View"',
+        '\t\tvar shown: Button = Button.new()',
+        '\t\tshown.name = "Shown"',
+        '\t\tshown.text = "S"',
+        '\t\tshown.size = Vector2(56, 40)',
+        '\t\tview.add_child(shown)',
+        '\t\tbox.add_child(view, false, Node.INTERNAL_MODE_FRONT)',
+        '\t\tsecond.add_child(box)',
         '\t\tadd_child(second)',
-        '\t\tbuttons.append(other)',
+        '\t\tbuttons.append_array([other, shown])',
         '\tfor button: Button in buttons:',
         '\t\tvar named: String = button.name',
         '\t\tvar _p: int = button.pressed.connect(func() -> void: pressed.append(named))',
@@ -16856,6 +16883,29 @@ async function testAClickInAWindowNothingEnteredPresses(): Promise<void> {
           await read('pressed'),
           ['Yes', 'No', 'Other'],
           `the button in the second window: ${otherShown}`,
+        );
+        const inBox = await call('runtime_input', {
+          op: 'click',
+          nodePath: '/root/Main/Second/Box/View/Shown',
+        });
+        const inBoxShown = JSON.stringify(inBox);
+        assert.equal(get(inBox, 'landed'), true, inBoxShown);
+        assert.equal(get(inBox, 'hovered'), '/root/Main/Second/Box/View/Shown', inBoxShown);
+        assert.deepEqual(
+          await read('pressed'),
+          ['Yes', 'No', 'Other', 'Shown'],
+          `the button a container shows: ${inBoxShown}`,
+        );
+        await call('runtime_input', {
+          op: 'mouse_motion',
+          nodePath: '/root/Main/Second/Other',
+          x: 10,
+          y: 10,
+        });
+        assert.deepEqual(
+          ((await read('left')) as string[]).slice(-1),
+          ['Shown'],
+          'and left when the pointer moved out of the container',
         );
       }
       await stopItsRun(server);
@@ -17011,6 +17061,11 @@ async function testAClickThatFreesWhatItMissedAnswers(): Promise<void> {
  * drawn button could be pressed or hovered. Each control here records the press and motion positions
  * it reads. The holder is moved and scaled, so the node's space and the window's pixels differ, and
  * one window is embedded, reached through the game's window, and named by its own pixels.
+ *
+ * Reported from a game whose reader is a CanvasLayer added as an internal child of a Node2D under a
+ * scaled Control: mouse_click pressed the reader's button and answered press_went_to with the
+ * layer-0 control under it, since the prediction walked children without the internal ones. The
+ * layer's button here is its holder's internal child too, and so is the SubViewport the Box shows.
  */
 async function testAPointerAimsInsideANamedNode(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -17066,6 +17121,39 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
         '',
         '',
         'func _ready() -> void:',
+        "\t# A layer that is a node's internal child, as a game adds one, under a Node2D in a scaled",
+        "\t# Control, which the layer's own transform leaves out; its button is over Lower.",
+        '\tvar layer: CanvasLayer = CanvasLayer.new()',
+        '\tlayer.name = "Layer"',
+        '\tlayer.layer = 64',
+        '\tvar reader: Control = Control.new()',
+        '\treader.name = "Reader"',
+        '\treader.position = Vector2(40, 270)',
+        '\treader.size = Vector2(160, 60)',
+        '\treader.mouse_filter = Control.MOUSE_FILTER_IGNORE',
+        '\tvar upper: Button = Button.new()',
+        '\tupper.name = "Upper"',
+        '\tupper.text = "Upper"',
+        '\tupper.set_script(load("res://drawn.gd"))',
+        '\tupper.size = Vector2(160, 60)',
+        '\treader.add_child(upper, false, Node.INTERNAL_MODE_FRONT)',
+        '\tlayer.add_child(reader)',
+        '\t$Scaled/Plane.add_child(layer, false, Node.INTERNAL_MODE_BACK)',
+        "\t# A container showing a SubViewport that is the container's internal child.",
+        '\tvar box: SubViewportContainer = SubViewportContainer.new()',
+        '\tbox.name = "Box"',
+        '\tbox.stretch = true',
+        '\tbox.position = Vector2(220, 260)',
+        '\tbox.size = Vector2(100, 80)',
+        '\tvar shown: SubViewport = SubViewport.new()',
+        '\tshown.name = "Shown"',
+        '\tvar boxed: Control = Control.new()',
+        '\tboxed.name = "Boxed"',
+        '\tboxed.set_script(load("res://drawn.gd"))',
+        '\tboxed.size = Vector2(100, 80)',
+        '\tshown.add_child(boxed)',
+        '\tbox.add_child(shown, false, Node.INTERNAL_MODE_FRONT)',
+        '\tadd_child(box)',
         '\tif DisplayServer.get_name() == "headless":',
         '\t\treturn',
         "\t# A native window beside the game's, which the game's window pixels cannot reach.",
@@ -17099,6 +17187,10 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
         '[node name="Drawn" type="Control" parent="Holder"]\noffset_right = 600.0\noffset_bottom = 230.0\nscript = ExtResource("2")\n\n' +
         // Over the top right of Drawn: its x 460 to 600 and y 0 to 100.
         '[node name="Cover" type="Control" parent="."]\noffset_left = 250.0\noffset_top = 10.0\noffset_right = 320.0\noffset_bottom = 60.0\n\n' +
+        '[node name="Away" type="Button" parent="."]\noffset_left = -400.0\noffset_top = 20.0\noffset_right = -300.0\noffset_bottom = 60.0\ntext = "Away"\n\n' +
+        '[node name="Lower" type="Button" parent="."]\noffset_left = 40.0\noffset_top = 270.0\noffset_right = 200.0\noffset_bottom = 330.0\ntext = "Lower"\nscript = ExtResource("2")\n\n' +
+        '[node name="Scaled" type="Control" parent="."]\noffset_left = 10.0\noffset_top = 250.0\noffset_right = 10.0\noffset_bottom = 250.0\nscale = Vector2(2, 2)\nmouse_filter = 2\n\n' +
+        '[node name="Plane" type="Node2D" parent="Scaled"]\n\n' +
         '[node name="Popup" type="Window" parent="."]\nposition = Vector2i(330, 150)\nsize = Vector2i(300, 200)\nunfocusable = true\ncontent_scale_factor = 2.0\n\n' +
         '[node name="Inside" type="Control" parent="Popup"]\noffset_right = 300.0\noffset_bottom = 200.0\nscript = ExtResource("2")\n',
     );
@@ -17207,6 +17299,35 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
         afterDrag.presses.length,
         `${how}: neither press reached Drawn`,
       );
+
+      const upper = '/root/Main/Scaled/Plane/Layer/Reader/Upper';
+      const layered = await call('runtime_input', { op: 'mouse_click', nodePath: upper, x: 80, y: 30 });
+      const layeredShown = `${how}: ${JSON.stringify(layered)}`;
+      assert.deepEqual(get(layered, 'position'), [120, 300], layeredShown);
+      assert.equal(get(layered, 'press_went_to'), upper, layeredShown);
+      assert.equal(get(layered, 'hovered'), upper, layeredShown);
+      assert.equal(get(layered, 'landed'), true, layeredShown);
+      assert.deepEqual(
+        (await record(upper)).presses,
+        [[80, 30]],
+        `${how}: the layer's button took the press`,
+      );
+      assert.deepEqual((await record('/root/Main/Lower')).presses, [], `${how}: the button under it did not`);
+      const boxed = '/root/Main/Box/Shown/Boxed';
+      const inBox = await call('runtime_input', { op: 'mouse_click', nodePath: boxed, x: 30, y: 20 });
+      const inBoxShown = `${how}: ${JSON.stringify(inBox)}`;
+      assert.deepEqual(get(inBox, 'position'), [250, 280], inBoxShown);
+      assert.equal(get(inBox, 'press_went_to'), boxed, inBoxShown);
+      assert.equal(get(inBox, 'hovered'), boxed, inBoxShown);
+      assert.deepEqual((await record(boxed)).presses, [[30, 20]], `${how}: the shown control took the press`);
+      const offered = textOf(
+        await server.request(
+          'tools/call',
+          { name: 'runtime_input', arguments: { op: 'click', says: 'Away' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+      assert.match(offered ?? '', /the buttons on screen say [^;]*"Upper"/, `${how}: ${offered}`);
 
       if (headless) {
         // A Window's own space is its pixels, which a content scale of 2 makes twice its canvas; this
@@ -17644,6 +17765,15 @@ async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
       [get(held, 'lives'), get(held, 'speed'), get(held, '_hidden')],
       [3, 1.5, undefined],
       JSON.stringify(held),
+    );
+    // Named whatever part of the tree is read, since a read of a screen inside it is the usual one.
+    const inside: unknown = JSON.parse(
+      await call('runtime_inspect', { op: 'tree', nodePath: '/root/Main/Near', depth: 0 }),
+    );
+    assert.deepEqual(
+      get(inside, 'current_scene'),
+      { path: '/root/Main', file: 'res://main.tscn' },
+      JSON.stringify(inside),
     );
 
     const size = await call('runtime_inspect', { op: 'property', nodePath: '/root', property: 'size' });
@@ -26431,6 +26561,24 @@ async function testAReimportReimportsThroughTheEngine(): Promise<void> {
       const after = readFileSync(join(project, 'good.png.import'), 'utf8');
       assert.match(after, /^compress\/mode=0$/m, `the real option was applied:\n${after}`);
       assert.doesNotMatch(after, /^filter=/m, `and the import file holds no filter:\n${after}`);
+      // With no reimport there is nothing to judge it by, and a probe's misspelt option was
+      // answered as written like the real one beside it.
+      const unjudged = await call({
+        op: 'set_options',
+        resourcePath: 'good.png',
+        options: { filter: 0, 'compress/mode': 1 },
+        reimport: false,
+      });
+      assert.equal(
+        get(unjudged, 'note'),
+        'Not reimported: the editor imports it with these options on its next scan, or project_import reimport does now. filter was not in the import file before, so only that reimport can tell whether the importer has it: one it lacks is dropped from the file then, and the reimport through set_options says which.',
+        JSON.stringify(unjudged),
+      );
+      assert.deepEqual(
+        get(unjudged, 'changed', 'compress/mode'),
+        { was: 0, now: 1 },
+        JSON.stringify(unjudged),
+      );
 
       // A scene is loaded as it is and never imported. Asked for by name, it ran a pass and came
       // back as not reimported, which reads as its import failing.
@@ -34017,18 +34165,22 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       evaluated.said,
     );
     assert.ok(evaluateTook >= 6000, `the evaluate is the one that loaded the slow class: ${evaluateTook}ms`);
+    // A failed expression and a null value both come back as null, and only the error the engine
+    // sends after it tells them apart, so a probe read a missing name as a variable holding null.
     const unparsed = await call('debug_state', { op: 'evaluate', expression: 'amount +' });
     assert.deepEqual(
-      [get(unparsed.answer, 'value'), get(unparsed.answer, 'note')],
-      [
-        'null',
-        'null is also what an expression comes to when it does not parse or fails as it runs. The game prints why as an error, which editor_output reads, since its debugger hands errors over apart from the console debug_state output keeps.',
-      ],
+      [get(unparsed.answer, 'value'), get(unparsed.answer, 'failed'), get(unparsed.answer, 'note')],
+      ['null', 'There was previously a parse error: Expected expression..', undefined],
       unparsed.said,
     );
-    // Where the note sends a caller: the error is not in the console debug_state output keeps.
-    const why = await call('editor_output', { op: 'run', severity: 'error', contains: 'parse error' });
-    assert.match(why.said, /There was previously a parse error: Expected expression/, why.said);
+    const unnamed = await call('debug_state', { op: 'evaluate', expression: 'self.no_such_member' });
+    assert.match(text(get(unnamed.answer, 'failed')), /no_such_member/, unnamed.said);
+    const nothing = await call('debug_state', { op: 'evaluate', expression: 'null' });
+    assert.deepEqual(
+      [get(nothing.answer, 'value'), get(nothing.answer, 'failed'), get(nothing.answer, 'note')],
+      ['null', undefined, undefined],
+      `a null that is the value is not said to have failed, after the failures before it: ${nothing.said}`,
+    );
     const beside = await call('runtime_inspect', {
       op: 'property',
       nodePath: '/root/Main',
@@ -45876,10 +46028,15 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
         existsSync(ours) ? holderOf(readFileSync(ours, 'utf8')) : null;
       await cameTrue(() => lockHolder()?.pid !== server.child.pid, 10_000);
       const keeper = lockHolder();
-      assert.equal(keeper?.by, `a game of ${project} editor_run started`, JSON.stringify(keeper));
+      assert.ok(keeper !== null, 'the keeper holds the lock');
       assert.ok(
         keeper.pid !== server.child.pid && keeper.pid !== game && alive(keeper.pid),
         `the lock names the game's keeper, not the server or the game: ${JSON.stringify(keeper)}`,
+      );
+      // A wait behind it named the keeper's pid as the game's, which editor_status never listed.
+      assert.equal(
+        slotWaitSaid(0, 1, 'slots', [keeper]),
+        `Waiting for an engine: the one engine slot on this machine (slots) is in use, by a game of ${project} editor_run started, through the keeper process that runs it (pid ${String(keeper.pid)}), and the engine starts when it is given back.`,
       );
       assert.deepEqual(leftInSlots(slots), ['0.lock'], "one slot, the game's");
       const stopped = await server.request(
@@ -46950,18 +47107,39 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
 
     const windowed = windowedRunRefused();
     if (windowed === null) {
-      writeTree(project, {
-        'tests/window_test.gd': [
+      // gdUnit4 minimises the window as its runner starts and after every suite, and a minimised
+      // window draws nothing, so a suite rendering in it waited for a frame that never came. The
+      // second suite meets the window as the first one's end left it.
+      const drawing = (name: string): string =>
+        [
           'extends GdUnitTestSuite',
           '',
           'const GDHARNESS_NEEDS_WINDOW: bool = true',
           '',
-          'func test_window() -> void:',
+          'var drawn: int = 0',
+          '',
+          '',
+          `func test_${name}() -> void:`,
           '\tassert_str(DisplayServer.get_name()).is_not_equal("headless")',
           '\tassert_str(AudioServer.get_driver_name()).is_equal("Dummy")',
+          // In seconds rather than frames: on macOS the minimise and the way back are animations.
+          '\tawait get_tree().create_timer(1.5).timeout',
+          '\tassert_int(DisplayServer.window_get_mode()).is_not_equal(DisplayServer.WINDOW_MODE_MINIMIZED)',
+          '\tvar counted: Callable = func() -> void: drawn += 1',
+          '\tRenderingServer.frame_post_draw.connect(counted)',
+          '\tawait get_tree().create_timer(0.5).timeout',
+          '\tRenderingServer.frame_post_draw.disconnect(counted)',
+          '\tassert_int(drawn).is_greater(0)',
           '',
-        ].join('\n'),
+        ].join('\n');
+      writeTree(project, {
+        'tests/window_test.gd': drawing('window'),
+        'tests/window_again_test.gd': drawing('window_again'),
       });
+      const both = test('--engines', '1', 'tests/window_test.gd', 'tests/window_again_test.gd');
+      assert.equal(both.status, 0, both.said);
+      assert.match(both.said, /^Passed: \d+ cases in 2 suites/m, both.said);
+      rmSync(join(project, 'tests', 'window_again_test.gd'));
       // The windowed engine runs only the suite needing it, and a headless engine follows it in its
       // slot with the rest, one declaring nothing or one saying it runs headless alike, and with one
       // slot as with four. stood_test.gd fails in a window, which shows the follower ran headless.
@@ -59720,7 +59898,7 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
       '[node name="Body" parent="." index="0"]\nvisible = false\n\n' +
       '[node name="Extra" type="Label" parent="Body"]\ntext = "hi"\n',
     'loud.gd':
-      'extends Node2D\n\n@export var speed: int = 3\n\n\nfunc _init() -> void:\n' +
+      'class_name LoudThing\nextends Node2D\n\n@export var speed: int = 3\n\n\nfunc _init() -> void:\n' +
       '\tFileAccess.open("res://init_ran.txt", FileAccess.WRITE).store_string("ran")\n',
     'loud.tscn':
       '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://loud.gd" id="1_loud"]\n\n' +
@@ -59794,7 +59972,7 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
   const flat = (entry: unknown): string[] => [
     `${text(get(entry, 'path'))} ${text(get(entry, 'type'))} ${text(get(entry, 'name'))}${
       get(entry, 'instanceOf') === undefined ? '' : ` <${text(get(entry, 'instanceOf'))}`
-    }`,
+    }${get(entry, 'scriptClass') === undefined ? '' : ` (${text(get(entry, 'scriptClass'))})`}`,
     ...asArray(get(entry, 'children')).flatMap(flat),
   ];
   const at = (entry: unknown, path: string): unknown =>
@@ -59820,7 +59998,8 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
         'Pet/Body/Added Node2D Added',
         'Pet/Body/Tail Node2D Tail',
         'Pet/Body/Extra Label Extra',
-        'Loud Node2D Loud <res://loud.tscn',
+        // The class its script declares, carried from the file the instance comes from.
+        'Loud Node2D Loud <res://loud.tscn (LoudThing)',
       ],
       JSON.stringify(tree),
     );

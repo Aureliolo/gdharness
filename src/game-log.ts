@@ -47,6 +47,14 @@ const HEADLINE = /^(USER )?(SCRIPT ERROR|SHADER ERROR|ERROR|WARNING):\s?(.*)$/;
 const CRASH = /^(?:CrashHandlerException|handle_crash): Program crashed with signal \d+/;
 
 /**
+ * The line gdUnit4 prints as a case starts and ends, indented like an error's detail. A windowed
+ * engine on Windows prints its errors on stdout beside these, so a case's script error took every
+ * line of the suite after it as its detail: a run cut off by its timeout named one failing case of
+ * a suite counting four.
+ */
+const GDUNIT_CASE = /^\s+res:\/\/.+?\.(?:gd|cs) > .+? (?:STARTED|PASSED|FAILED|ERROR|SKIPPED|FLAKY)(?:\s|$)/;
+
+/**
  * Lines of a crash report that say nothing: the rules around its parts, the markers ending them,
  * and a native frame the build has no symbol for, which is an address and nothing else.
  */
@@ -365,7 +373,7 @@ export class GameLog {
       return;
     }
     const owner = this.lastHeadline[source];
-    if (owner !== null && /^\s/.test(line)) {
+    if (owner !== null && /^\s/.test(line) && !GDUNIT_CASE.test(line)) {
       owner.detail.push(line.trim());
       owner.continues = false;
       return;
