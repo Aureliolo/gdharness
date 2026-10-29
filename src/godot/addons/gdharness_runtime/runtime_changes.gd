@@ -62,6 +62,15 @@ func set_property(params: Dictionary) -> Dictionary:
 			"type": "error",
 			"message": GdhPaths.nothing_there(holder, named, str(reached["called"])),
 		}
+	if GdhPaths.is_constant(holder, named):
+		return {
+			"type": "error",
+			"message":
+			(
+				"%s:%s is a constant its script declares, and a constant cannot be set"
+				% [reached["called"], named]
+			),
+		}
 	var old_value: Variant = GdhPaths.read_under(holder, named)
 	var slot: Dictionary = GdhValues.slot_declared(holder, named)
 	var declared: int = slot["type"]

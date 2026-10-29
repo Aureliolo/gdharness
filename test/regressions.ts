@@ -36061,7 +36061,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
     async ({ server, project, runtimeDir, start }) => {
       writeFileSync(
         join(project, 'gear.gd'),
-        'class_name Gear\nextends RefCounted\n\nvar label: String = ""\n',
+        'class_name Gear\nextends RefCounted\n\nconst KIND := "gear"\n\nvar label: String = ""\n',
       );
       writeFileSync(join(project, 'helm.gd'), 'class_name Helm\nextends Gear\n');
       // A class no node carries, whose static functions answer what the game's own rules would.
@@ -36073,7 +36073,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       writeFileSync(join(project, 'main_rules.gd'), 'class_name Main\nextends RefCounted\n');
       writeFileSync(
         join(project, 'main.gd'),
-        'extends Node\n\nvar wares: Array[Gear] = []\nvar worn: Gear = null\n' +
+        'extends Node\n\nconst STOCK_NOTE := "held"\n\nvar wares: Array[Gear] = []\nvar worn: Gear = null\n' +
           'var by_name: Dictionary[String, Gear] = {"head": null}\n' +
           'var spare: RefCounted = RefCounted.new()\nvar count: int = 3\nvar later_took: int = 0\n' +
           'var done_at: Array[int] = []\nvar tally: Dictionary[String, int] = {}\nvar board: Array[int] = []\n' +
@@ -36271,6 +36271,20 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         /Node not found: Shelf\. \/root has no Shelf; its children are GdharnessRuntime, Main\./,
         'a path the scene has not either is told what the root has',
       );
+      // A constant is read as its script declares it, through a path and from a script the object's
+      // extends too: the helm is a Helm, and Gear declares the constant.
+      const readOff = async (property: string): Promise<unknown> =>
+        get(
+          parseTextContent(
+            await server.request(
+              'tools/call',
+              { name: 'runtime_inspect', arguments: { op: 'property', nodePath: '/root/Main', property } },
+              ENGINE_CALL_TIMEOUT_MS,
+            ),
+          ),
+          'value',
+        );
+      assert.deepEqual([await readOff('STOCK_NOTE'), await readOff('wares:4:KIND')], ['held', 'gear']);
 
       // The same naming on a write. Each slot starts empty or holding another piece, so the write
       // is what puts the instance there: an empty `Gear` property reads as no type at all, and is
@@ -36305,6 +36319,11 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           'worn',
           'count',
           /^\/root\/Main\.worn holds an object: \/root\/Main:count holds int, not an object$/,
+        ],
+        [
+          'STOCK_NOTE',
+          'sold',
+          /^\/root\/Main:STOCK_NOTE is a constant its script declares, and a constant cannot be set$/,
         ],
       ];
       for (const [property, value, expected] of refusedWrites) {
