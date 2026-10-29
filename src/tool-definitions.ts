@@ -2597,7 +2597,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['until'],
         description:
-          'until, with says: count words on a hidden node too, and on one drawn outside the viewport or scrolled out of a ScrollContainer. Default false, since a wait for words is a wait for them to be shown, and a wait that runs out while such a node holds them says so under unseen_note: a button that exists hidden through a whole animation carries its words the whole time and satisfied the wait at once, and every wait on that screen fell back to counting frames.',
+          'until, with says: count words on a hidden node too, and on one drawn outside the viewport or scrolled out of a ScrollContainer. Default false, since a wait for words is a wait for them to be shown, and a wait that runs out while such a node holds them says so under unseen_note: a button that exists hidden through a whole animation carries its words the whole time and satisfied the wait at once, and every wait on that screen fell back to counting frames. What is drawn over a node is not looked at, so words under a dialog or a panel count either way.',
       },
       timeoutMs: {
         type: 'integer',
