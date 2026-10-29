@@ -8036,6 +8036,16 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       /Not a Godot project/,
       'while with validation included they reach the project check',
     );
+    assert.match(
+      await call('project_info', { projectPath: '/p', include: ['autoloads'], addonClasses: ['kit'] }),
+      /^addonClasses is read only by the classes section, which this call does not include: add "classes" to include, or leave it out\./,
+      'addonClasses is refused without the section that reads it',
+    );
+    assert.match(
+      await call('project_info', { projectPath: '/p', include: ['classes'], addonClasses: ['kit'] }),
+      /Not a Godot project/,
+      'while with classes included it reaches the project check',
+    );
 
     // The editor's console is read off disk on every call, so there is no mark to be since and no
     // process to ask for processor time. Both would have been accepted and ignored.
@@ -59142,6 +59152,12 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
       'the moved script, its subclass and its user, each by name',
     );
     assert.equal(get(renamed, 'uidTable'), 'rebuilt by an import pass');
+    // Measured from before the call: the import pass writes the cache ahead of the rebuild.
+    assert.deepEqual(
+      ['added', 'removed', 'changed'].map((key) => get(renamed, 'classCache', key)),
+      [['Wording'], ['Told'], ['Loud']],
+      `the subclass changes with the base it names: ${JSON.stringify(get(renamed, 'classCache'))}`,
+    );
     assert.ok(!existsSync(join(project, 'told.gd')) && !existsSync(join(project, 'told.gd.uid')));
     assert.equal(
       readFileSync(join(project, 'words', 'wording.gd.uid'), 'utf8'),
@@ -64400,6 +64416,88 @@ async function testAPropertyHoldingANodeFollowsIt(): Promise<void> {
 }
 
 /**
+ * project_info's classes, with an addon's counted unless asked for. A model-driven probe on a game
+ * carrying two large addons asked for them, got 686 classes in 88 thousand characters, which the
+ * harness moved out of the conversation, and went back to searching the files; 19 were the game's.
+ */
+async function testTheProjectsOwnClassesAreListedAndAnAddonsCounted(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('project classes regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-classes-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-classes-rt-'));
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Classes"\n',
+    'hero.gd': 'class_name Hero\nextends Node\n',
+    'addons/kit/part.gd': 'class_name KitPart\nextends RefCounted\n',
+    'addons/kit/deep/whole.gd': 'class_name KitWhole\nextends RefCounted\n',
+    'addons/tool/tool.gd': 'class_name ToolMain\nextends RefCounted\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(dirname(join(project, path)), { recursive: true });
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const info = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      { name: 'project_info', arguments: { projectPath: project, include: ['classes'], ...args } },
+      240_000,
+    );
+  const section = async (args: Record<string, unknown>): Promise<unknown[]> => {
+    const answered = parseTextContent(await info(args));
+    const classes = get(answered, 'classes');
+    return [
+      asArray(get(classes, 'classes')).map(
+        (entry) => `${text(get(entry, 'name'))} ${text(get(entry, 'path'))}`,
+      ),
+      get(classes, 'inAddons'),
+      get(classes, 'count'),
+    ];
+  };
+  try {
+    await server.initialize('classes-engine');
+    assert.deepEqual(await section({}), [['Hero res://hero.gd'], { kit: 2, tool: 1 }, 4]);
+    assert.deepEqual(await section({ addonClasses: ['kit'] }), [
+      ['Hero res://hero.gd', 'KitPart res://addons/kit/part.gd', 'KitWhole res://addons/kit/deep/whole.gd'],
+      { tool: 1 },
+      4,
+    ]);
+    assert.deepEqual(await section({ addonClasses: ['tool', 'kit'] }), [
+      [
+        'Hero res://hero.gd',
+        'KitPart res://addons/kit/part.gd',
+        'KitWhole res://addons/kit/deep/whole.gd',
+        'ToolMain res://addons/tool/tool.gd',
+      ],
+      undefined,
+      4,
+    ]);
+    assert.equal(
+      textOf(await info({ addonClasses: ['kits'] })),
+      'addonClasses names kits, and no folder of that name under res://addons declares a class. The addons declaring classes are kit, tool.',
+    );
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * A script that reads a node by its path breaks when the node is renamed, moved or deleted, and code
  * is left as it was, as the editor's own rename leaves it, so each such line is named with the path
  * that reaches the node now. A model-driven probe renamed a label `main.gd` read as `$Status`, got
@@ -66286,6 +66384,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,
   testAMovedNodeKeepsThePathsNamingIt,
   testAPropertyHoldingANodeFollowsIt,
+  testTheProjectsOwnClassesAreListedAndAnAddonsCounted,
   testAMovedNodeNamesTheScriptLinesReadingIt,
   testAHandWrittenValueIsNoChangeOfAScripts,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,

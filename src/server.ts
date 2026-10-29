@@ -47,11 +47,14 @@ import {
   withCallSignal,
 } from './call-signal.js';
 import {
+  cacheChangesBetween,
   cachedAtMissingPaths,
   cachedClasses,
+  cachedEntries,
   cacheWrittenAt,
   classesNamedIn,
   classesStartedWithout,
+  classesWithAddonsCounted,
   contradictedDiagnostics,
   declaredClasses,
   declaredClassLines,
@@ -6771,6 +6774,11 @@ class GodotServer {
         `${forValidation.join(' and ')} ${forValidation.length === 1 ? 'is' : 'are'} read only by the validation section, which this call does not include: add "validation" to include, or leave ${forValidation.length === 1 ? 'it' : 'them'} out.`,
       );
     }
+    if (args['addonClasses'] !== undefined && !include.includes('classes')) {
+      return this.createErrorResponse(
+        'addonClasses is read only by the classes section, which this call does not include: add "classes" to include, or leave it out.',
+      );
+    }
     const project = this.project(args);
     if (!project.ok) {
       return project.response;
@@ -6810,6 +6818,25 @@ class GodotServer {
           : {}),
       };
       const outcome = await this.operation(spec.operation, params, project.value.path);
+      if (section === 'classes' && outcome.ok && Array.isArray(outcome.payload['classes'])) {
+        const declared: unknown[] = outcome.payload['classes'];
+        const asked = readStringArray(args, 'addonClasses') ?? [];
+        const addons = Object.keys(classesWithAddonsCounted(declared, new Set()).inAddons).sort();
+        const unknownAddons = asked.filter((addon) => !addons.includes(addon));
+        if (unknownAddons.length > 0) {
+          return this.createErrorResponse(
+            `addonClasses names ${unknownAddons.join(', ')}, and no folder of that name under res://addons declares a class. ${addons.length === 0 ? 'No addon declares one.' : `The addons declaring classes are ${addons.join(', ')}.`}`,
+          );
+        }
+        const counted = classesWithAddonsCounted(declared, new Set(asked));
+        info[section] = {
+          ...outcome.payload,
+          classes: counted.classes,
+          ...(Object.keys(counted.inAddons).length > 0 ? { inAddons: counted.inAddons } : {}),
+          ...engineExtras(outcome),
+        };
+        continue;
+      }
       info[section] = outcome.ok
         ? { ...outcome.payload, ...engineExtras(outcome) }
         : { error: outcome.message, ...engineExtras(outcome) };
@@ -15411,6 +15438,9 @@ class GodotServer {
   ): Promise<{ ok: boolean; report: Record<string, unknown> }> {
     const report: Record<string, unknown> = {};
     let ok = true;
+    // The import pass below writes the cache too, so the rebuild after it compares against a cache
+    // already holding the rename and answers that nothing changed.
+    const cacheBefore = asked.rebuildCache ? cachedEntries(projectPath) : null;
     if (asked.moved) {
       const engine = await this.engine();
       // The pass gives a uid file to every script that had none, anywhere in the project, and
@@ -15436,7 +15466,9 @@ class GodotServer {
     }
     if (asked.rebuildCache) {
       const rebuilt = await this.rebuildClassCache(projectPath);
-      report['classCache'] = rebuilt.ok ? rebuilt.payload : { rebuilt: false, problem: rebuilt.message };
+      report['classCache'] = rebuilt.ok
+        ? { ...rebuilt.payload, ...cacheChangesBetween(cacheBefore, cachedEntries(projectPath)) }
+        : { rebuilt: false, problem: rebuilt.message };
       ok &&= rebuilt.ok;
     }
     if (changed.length > 0) {
