@@ -36,10 +36,9 @@ func get_uid(params: Dictionary) -> Dictionary:
 	var answer: Dictionary = { "file": file_path, "absolute_path": absolute_path }
 	var found: Dictionary = uid_of(file_path)
 	if found.is_empty():
-		answer["exists"] = false
+		answer["uid"] = null
 		answer["message"] = _why_none(file_path)
 		return answer
-	answer["exists"] = true
 	answer.merge(found)
 	return answer
 

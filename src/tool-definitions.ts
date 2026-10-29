@@ -734,7 +734,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'object',
         ops: ['set_options'],
         description:
-          'set_options: import options keyed as the .import file spells them, {"compress/mode": 1}. A dictionary option whose keys are numbers, a font\'s opentype_features or any option already holding number keys, takes them written as strings of digits, and opentype_features also takes an OpenType tag by its four-letter name: {"opentype_features": {"liga": 0}} turns ligatures off. Both are written as the numbers the engine reads. One already holding the value given is answered under unchanged_options rather than updated_options, and when none changed nothing is written or reimported. changed gives each option written as {was, now}, was null for one the import file did not hold.',
+          'set_options: import options keyed as the .import file spells them, {"compress/mode": 1}. A dictionary option whose keys are numbers, a font\'s opentype_features or any option already holding number keys, takes them written as strings of digits, and opentype_features also takes an OpenType tag by its four-letter name: {"opentype_features": {"liga": 0}} turns ligatures off. Both are written as the numbers the engine reads. One already holding the value given is answered under unchanged_options rather than updated_options, and when none changed nothing is written or reimported. changed gives each option written as {was, now}. An option the sidecar does not list is refused with the nearest it does: the import writes every option its importer has, so a name it lacks reaches no importer.',
         additionalProperties: true,
       },
       reimport: {
@@ -779,7 +779,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       uid: {
         effect: 'read',
         summary:
-          "the UID of one file and where it was read: a script's or shader's .uid file, an imported file's .import, or a scene's or resource's own header",
+          "the UID of one file and where it was read: a script's or shader's .uid file, an imported file's .import, or a scene's or resource's own header. A file with none is answered with uid null and what would give it one",
         requires: ['resourcePath'],
       },
       refresh_uids: {

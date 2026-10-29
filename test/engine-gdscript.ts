@@ -1827,6 +1827,19 @@ function testOperations(godotPath: string, projectDir: string): void {
     wrong.stderr,
   );
   assert.equal(readFileSync(sidecarFile, 'utf8'), kept, 'and the sidecar is left as it was');
+  // The sidecar lists every option the import has, so a name it does not list is a misspelling.
+  const unlisted = runRefusedOperation(godotPath, projectDir, 'set_import_options', {
+    resource_path: 'art.png',
+    options: { 'compress/mod': 1 },
+  });
+  assert.equal(unlisted.answer, null, 'an option the sidecar does not list is refused');
+  assert.match(
+    unlisted.stderr,
+    /Nothing was written: compress\/mod is not an option this texture import has; the nearest it has is compress\/mode/,
+    unlisted.stderr,
+  );
+  assert.doesNotMatch(unlisted.stderr, /Couldn't find the given section/, 'read without an engine error');
+  assert.equal(readFileSync(sidecarFile, 'utf8'), kept, 'and nothing is written');
   // A sidecar whose source has gone takes options nothing will ever apply.
   writeFileSync(
     join(projectDir, 'gone.png.import'),
@@ -2235,7 +2248,8 @@ function testOperations(godotPath: string, projectDir: string): void {
   writeFileSync(join(projectDir, 'made', 'unimported.gd'), 'extends Node\n');
   const absent = operation('get_uid', { resource_path: 'made/unimported.gd' });
   rmSync(join(projectDir, 'made', 'unimported.gd'));
-  assert.equal(get(absent, 'exists'), false);
+  // The file is there and only its uid is not; exists: false was read as the file being gone.
+  assert.deepEqual([get(absent, 'uid'), Object.hasOwn(absent as object, 'exists')], [null, false]);
   assert.equal(get(absent, 'file'), 'res://made/unimported.gd');
   assert.match(
     String(get(absent, 'message')),
@@ -2244,8 +2258,8 @@ function testOperations(godotPath: string, projectDir: string): void {
   );
   const minted = operation('get_uid', { resource_path: 'made/hero.gd' });
   assert.deepEqual(
-    [get(minted, 'exists'), get(minted, 'uid')],
-    [true, heroUid],
+    [Object.hasOwn(minted as object, 'exists'), get(minted, 'uid')],
+    [false, heroUid],
     'the sidecar create_script wrote is the uid the engine reads',
   );
   // Every other kind keeps its UID somewhere else, and refresh_uids makes none of them: a scene in its
@@ -2266,13 +2280,13 @@ function testOperations(godotPath: string, projectDir: string): void {
     const uidOf = (path: string): unknown[] => {
       const answer = operation('get_uid', { resource_path: path });
       return [
-        get(answer, 'exists'),
-        get(answer, 'uid') ?? null,
+        Object.hasOwn(answer as object, 'exists'),
+        get(answer, 'uid'),
         get(answer, 'from') ?? get(answer, 'message'),
       ];
     };
-    assert.deepEqual(uidOf('uid_scene.tscn'), [true, 'uid://c4c550daekhi1', "the file's header"]);
-    assert.deepEqual(uidOf('uid_art.png'), [true, 'uid://bsrmp7ti1112c', 'res://uid_art.png.import']);
+    assert.deepEqual(uidOf('uid_scene.tscn'), [false, 'uid://c4c550daekhi1', "the file's header"]);
+    assert.deepEqual(uidOf('uid_art.png'), [false, 'uid://bsrmp7ti1112c', 'res://uid_art.png.import']);
     assert.deepEqual(uidOf('bare_scene.tscn'), [
       false,
       null,
