@@ -203,6 +203,7 @@ import {
   ancestorsIn,
   childrenOf,
   descendantsIn,
+  editorsOfProjectIn,
   linuxStartEarliest,
   listingFailure,
   type ProcessTree,
@@ -307,7 +308,6 @@ import {
   beganBy,
   captureDestinationRefusal,
   captureDetail,
-  editorsOfProjectIn,
   endedPreviousRun,
   endedToStartThis,
   endedWithoutACode,
@@ -359,6 +359,7 @@ import {
 import {
   ADDONS,
   autoloadIsOurs,
+  editorUpgradeNote,
   installAddons,
   installedEditorDigest,
   installedRuntimeDigest,
@@ -50948,8 +50949,12 @@ function testCommandLineSetup(): void {
     const pointedAt = readFileSync(windsurf, 'utf8');
     // Setup and upgrade from one build install the same editor code, so there is nothing to
     // restart the editor for, and saying there was sent a project to a restart that changed nothing.
-    assert.match(upgraded.stdout, /Nothing for the editor/, upgraded.stdout);
-    assert.doesNotMatch(upgraded.stdout, /Restart it with the/, upgraded.stdout);
+    assert.match(
+      upgraded.stdout,
+      /Nothing for the editor: this upgrade left the editor addons the same code/,
+      upgraded.stdout,
+    );
+    assert.doesNotMatch(upgraded.stdout, /Restart/, upgraded.stdout);
     assert.match(
       readFileSync(project, 'utf8'),
       /GdharnessRuntime="\*res:\/\/boot\/gdharness_loader\.gd"/,
@@ -65804,8 +65809,38 @@ function testRegressionPartsCoverEveryTestOnceAndBalance(): void {
   assert.deepEqual(regressionPart(['a', 'b', 'c', 'd'], 2, 2, weights), ['c', 'd']);
 }
 
+/**
+ * An upgrade tells the user to restart an editor only when one of the project is running, and
+ * names it. Told to restart "the open editor" with none open, the reader looks for one that is not
+ * there.
+ */
+function testAnUpgradeRestartsOnlyAnEditorThatIsOpen(): void {
+  assert.match(
+    editorUpgradeNote(true, [41]),
+    /^ {2}1\. Nothing for the editor: this upgrade left the editor addons the same code/,
+  );
+  assert.equal(
+    editorUpgradeNote(false, []),
+    '  1. Nothing for the editor: none of this project is running, and the next one opened loads\n     these addons.',
+  );
+  assert.equal(
+    editorUpgradeNote(false, [41]),
+    '  1. The open editor (pid 41) is still running the addons loaded at startup. Restart with the\n     editor_launch restart tool, which closes and reopens the window.',
+  );
+  assert.match(
+    editorUpgradeNote(false, [41, 57]),
+    /^ {2}1\. The open editors \(pids 41, 57\) are still running/,
+  );
+  // The process table unread is not taken as no editor.
+  assert.match(
+    editorUpgradeNote(false, null),
+    /^ {2}1\. An editor of this project that is open is still running/,
+  );
+}
+
 const TESTS: (() => void | Promise<void>)[] = [
   testRegressionPartsCoverEveryTestOnceAndBalance,
+  testAnUpgradeRestartsOnlyAnEditorThatIsOpen,
   testARescanAsTheEditorOpensFindsNothingMissing,
   testAScriptIsReadTheWayItsTokenizerReadsIt,
   testARenamedClassChangesItsUsesAndLeavesItsWords,

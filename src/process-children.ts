@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
+import { isSameDirectory } from './paths.js';
 import { runHidden as run } from './spawn.js';
 import { askWindows, WindowsAskFailure } from './windows-ask.js';
 
@@ -421,6 +422,40 @@ const ONE_SHOT_OPTIONS: readonly string[] = [
   '--convert-3to4',
   '--validate-conversion-3to4',
 ];
+
+/**
+ * Godot's Windows console build, by name: `X_console.exe` is a wrapper that starts `X.exe` beside
+ * it as its child and forwards the console to it, so the wrapper is never the game.
+ */
+export const CONSOLE_WRAPPER = /_console(\.exe)?$/i;
+
+/**
+ * The editors of [param projectPath] in [param tree], read off their command lines: a Godot
+ * executable given `--path` on the project and the editor flag, without an option that makes it
+ * one job that quits, and not the console wrapper, which forwards to an editor listed beside it.
+ *
+ * Read from the process table because an editor that has not reached the bridge yet is known to
+ * nothing else. A restart interrupted by a reconnect launched one and its server was ended before
+ * it connected; the next server, seeing nothing connected and no restart owed, opened a second on
+ * the same project and the same language server port.
+ */
+export function editorsOfProjectIn(tree: ProcessTree, projectPath: string): number[] {
+  const found: number[] = [];
+  for (const [pid, listed] of tree) {
+    const read = readCommandLine(listed.command);
+    if (
+      read.editor &&
+      read.oneShot === null &&
+      read.projectPath !== null &&
+      /godot/i.test(read.executable) &&
+      !CONSOLE_WRAPPER.test(read.executable) &&
+      isSameDirectory(read.projectPath, projectPath)
+    ) {
+      found.push(pid);
+    }
+  }
+  return found.sort((a, b) => a - b);
+}
 
 /**
  * [param command] read the way the engine reads its own: the executable first, then `--path` and
