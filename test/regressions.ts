@@ -122,6 +122,7 @@ import {
   lockIsFree,
   machineSlots,
   ownStart,
+  type SlotHolder,
   START_TOLERANCE_MS,
   slotWaitedSaid,
   slotWaitSaid,
@@ -152,7 +153,13 @@ import {
 import { GodotLocator } from '../src/godot-path.js';
 import { DebuggerStream, decodeVariant, framedCommand, type SentValue } from '../src/godot-variant.js';
 import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/harnesses.js';
-import { type ImportOutcome, librariesNotCopied, notImportedNote, runImport } from '../src/headless.js';
+import {
+  type ImportOutcome,
+  librariesNotCopied,
+  notImportedNote,
+  runImport,
+  runOperation,
+} from '../src/headless.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
 import { IMPORTABLE_EXTENSIONS, staleImports } from '../src/import-freshness.js';
 import { RENDERED_AWAY_NOTE, type ScriptError } from '../src/junit.js';
@@ -27855,6 +27862,39 @@ function testAnExportIsJudgedByTheFileItWrote(): void {
     [true, "Export with preset 'Linux' did not produce builds/game.x86_64."],
     'and with no file at all there is nothing from before to mention',
   );
+  // A file this run did write is named as written, with what kept it from counting.
+  const errored = (): EngineRun => {
+    const log = new GameLog();
+    log.append('stderr', 'ERROR: Sentry requires the minimum macOS version to be 12.0 or higher.\n');
+    log.finish();
+    return { log, exitCode: 0, exitSignal: null, failure: null };
+  };
+  assert.deepEqual(said(exportAnswer(errored(), asked, 1000, 2000)), [
+    true,
+    "Export with preset 'Linux' wrote builds/game.x86_64, but it is not counted as exported, as it printed 1 error, under entries.",
+  ]);
+  assert.deepEqual(said(exportAnswer({ ...errored(), exitCode: 3 }, asked, null, 5)), [
+    true,
+    "Export with preset 'Linux' wrote builds/game.x86_64, but it is not counted as exported, as the engine ended with exit code 3 and it printed 1 error, under entries.",
+  ]);
+  assert.deepEqual(
+    said(
+      exportAnswer(
+        { ...clean(), exitCode: null, exitSignal: 'SIGTERM', failure: 'it ran past its five minutes' },
+        asked,
+        null,
+        5,
+      ),
+    ),
+    [
+      true,
+      "Export with preset 'Linux' wrote builds/game.x86_64, but it is not counted as exported, as the engine was ended by SIGTERM, because it ran past its five minutes.",
+    ],
+  );
+  assert.deepEqual(said(exportAnswer({ ...clean(), exitCode: 1 }, asked, null, 5)), [
+    true,
+    "Export with preset 'Linux' wrote builds/game.x86_64, but it is not counted as exported, as the engine ended with exit code 1.",
+  ]);
 
   // What else the export wrote beside the build: a pack new or rewritten, and not a file it left
   // alone or the build itself.
@@ -28932,6 +28972,55 @@ function testTheScanNoteNamesWhatStarted(): void {
     { waitedForEditorScanMs: 1_200, scanNote: undefined },
     'a scan that finished in time is a wait and no note',
   );
+}
+
+/**
+ * A headless operation that never answers is ended at its ceiling, and its answer says so.
+ *
+ * No operation had one, so an engine whose dependency walk never answered spun a core for nearly
+ * four hours, and the call waited on it the whole time. The stand-in script logs that it began and
+ * then never writes an answer; it quits by itself after twenty seconds, so with the ceiling gone
+ * the run still ends, as one that produced no result rather than one that was ended.
+ */
+async function testAnOperationThatNeverAnswersIsEnded(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('operation ceiling regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-ceiling-'));
+  const scripts = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-ceiling-script-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Ceiling"\n',
+  );
+  const script = join(scripts, 'never_answers.gd');
+  writeFileSync(
+    script,
+    'extends SceneTree\n\nvar _left: float = 20.0\n\n\nfunc _init() -> void:\n\tprint("[INFO] walking")\n\n\n' +
+      'func _process(delta: float) -> bool:\n\t_left -= delta\n\treturn _left <= 0.0\n',
+  );
+  try {
+    const began = Date.now();
+    const outcome = await runOperation(
+      { godotPath, script, debug: false, ceiling: { ms: 3_000, said: 'three seconds' } },
+      'get_dependencies',
+      { resource_path: 'res://project.godot' },
+      project,
+    );
+    const took = Date.now() - began;
+    assert.match(
+      'message' in outcome ? outcome.message : `answered ${JSON.stringify(outcome)}`,
+      /^get_dependencies failed \(.*because it ran past its three seconds\)/,
+      JSON.stringify(outcome),
+    );
+    assert.ok(took < 15_000, `ended at its ceiling, not when it quit by itself: ${String(took)} ms`);
+  } finally {
+    sweep(project, scripts);
+  }
 }
 
 /**
@@ -30898,6 +30987,84 @@ async function testAPlayedRunWithNoReportGivesNoVerdict(): Promise<void> {
  * the worker. Two rounds, one announcing inside the start's wait and one after it, since the tie is
  * made in each.
  */
+async function testAPlayedGameHoldsAnEngineSlot(): Promise<void> {
+  for (const announces of [true, false]) {
+    const round = announces ? 'a game that announces' : 'a game that never announces';
+    const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-played-slot-'));
+    const lock = join(slots, '0.lock');
+    const held: { game: ChildProcess | null } = { game: null };
+    let atThePlay: SlotHolder | null = null;
+    try {
+      await withAPlayingEditor(
+        ({ adapter, project, runtimeDir }) =>
+          (tool) => {
+            if (tool === 'play_scene') {
+              atThePlay = existsSync(lock) ? holderOf(readFileSync(lock, 'utf8')) : null;
+              const game = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+                stdio: 'ignore',
+              });
+              held.game = game;
+              if (announces) {
+                writeFileSync(
+                  join(runtimeDir, `runtime-${String(game.pid)}.json`),
+                  JSON.stringify({
+                    protocol: RUNTIME_PROTOCOL,
+                    pid: game.pid,
+                    port: 51_996,
+                    address: '127.0.0.1',
+                    project: { name: 'Played', path: project },
+                    addon_version: SERVER_VERSION,
+                    addon_digest: shippedRuntimeDigest(),
+                    editor_pid: FAKE_EDITOR_PID,
+                  }),
+                  'utf8',
+                );
+              }
+              return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
+            }
+            if (tool === 'playing_status') {
+              return { ok: true, playing: true, scenePath: '', debugPort: adapter };
+            }
+            return { ok: true };
+          },
+        async ({ server, project, start }) => {
+          await start(announces ? 5_000 : 300);
+          assert.equal(
+            atThePlay?.pid,
+            server.child.pid,
+            `${round}: the server holds the slot as it asks for the play`,
+          );
+          if (!announces) {
+            assert.deepEqual(leftInSlots(slots), [], `${round}: the slot is given back once the wait ends`);
+            return;
+          }
+          const game = held.game?.pid;
+          assert.ok(
+            await cameTrue(
+              () => existsSync(lock) && holderOf(readFileSync(lock, 'utf8'))?.pid === game,
+              10_000,
+            ),
+            `${round}: the slot is handed to the game`,
+          );
+          assert.equal(
+            holderOf(readFileSync(lock, 'utf8'))?.by,
+            `a game of ${project} the editor played for editor_run`,
+          );
+          await endGame(held.game);
+          const taker = new EngineSlots(slots, 1, { pid: process.pid, started: await ownStart() });
+          const taken = await taker.takeFree();
+          assert.equal(taken, lock, `${round}: and it is free once the game has gone`);
+          taker.release(lock);
+        },
+        { held, env: { GODOT_ENGINE_SLOTS: slots, GODOT_ENGINE_SLOT_COUNT: '1' } },
+      );
+    } finally {
+      await endGame(held.game);
+      sweep(slots);
+    }
+  }
+}
+
 async function testAPlayedGameIsToldFromItsWorkers(): Promise<void> {
   const rounds = [
     { round: 'inside the wait', inside: true, read: 'editor_output' },
@@ -45622,9 +45789,13 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
       await delay(1000);
       assert.equal(holderOf(readFileSync(ours, 'utf8'))?.pid, process.pid, 'the boot check waits too');
       // A client that asked for progress is told why nothing has started, rather than left silent.
+      // Told at the first look that finds the slot held, which on a loaded machine reads the holder's
+      // start for a second or more first, and then says so.
       const told = server.notifications
         .filter((message) => message.method === 'notifications/progress')
-        .map((message) => text(get(message, 'params', 'message')));
+        .map((message) =>
+          text(get(message, 'params', 'message')).replace(/^Waiting \d s so far /, 'Waiting '),
+        );
       assert.deepEqual(
         told,
         [
@@ -45661,6 +45832,38 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
           .filter((block) => block !== null),
         [],
         `a call that found a slot free says nothing of slots: ${JSON.stringify(free)}`,
+      );
+
+      // A started game outlives the server, so its keeper holds the slot for as long as the run lasts.
+      const started = await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'start', projectPath: project, headless: true } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      const game = asNumber(get(JSON.parse(textOf(started) ?? '{}'), 'pid'));
+      // Taken over once the keeper has handed the pid back, which can come a moment after the start.
+      const lockHolder = (): SlotHolder | null =>
+        existsSync(ours) ? holderOf(readFileSync(ours, 'utf8')) : null;
+      await cameTrue(() => lockHolder()?.pid !== server.child.pid, 10_000);
+      const keeper = lockHolder();
+      assert.equal(keeper?.by, `a game of ${project} editor_run started`, JSON.stringify(keeper));
+      assert.ok(
+        keeper.pid !== server.child.pid && keeper.pid !== game && alive(keeper.pid),
+        `the lock names the game's keeper, not the server or the game: ${JSON.stringify(keeper)}`,
+      );
+      assert.deepEqual(leftInSlots(slots), ['0.lock'], "one slot, the game's");
+      const stopped = await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      for (let looked = 0; looked < 300 && leftInSlots(slots).length > 0; looked += 1) {
+        await delay(100);
+      }
+      assert.deepEqual(
+        leftInSlots(slots),
+        [],
+        `and the keeper gives it back once the run has ended: ${JSON.stringify(stopped)}`,
       );
     } finally {
       await server.stop();
@@ -66746,6 +66949,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEngineFlagsReachTheEngine,
   testACrashedRunIsNeverClean,
   testAPlayedRunWithNoReportGivesNoVerdict,
+  testAPlayedGameHoldsAnEngineSlot,
   testAPlayedGameIsToldFromItsWorkers,
   testHeadlessFollowsTheDisplay,
   testStaleClassesAreReadFromDisk,
@@ -66792,6 +66996,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStoppedSpawnedRunGivesWayToAPlay,
   testAKilledRunHasNoExitCode,
   testAnEngineRunSaysHowItEnded,
+  testAnOperationThatNeverAnswersIsEnded,
   testTheScanNoteNamesWhatStarted,
   testAnExportIsJudgedByTheFileItWrote,
   testAnExportThatCouldNotCopyALibrarySaysSo,

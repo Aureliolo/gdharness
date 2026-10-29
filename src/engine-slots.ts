@@ -51,7 +51,7 @@ import { cacheHome } from './cache-home.js';
 import { callProgress, callSignal, callSlotWaits } from './call-signal.js';
 import { EngineUsageError } from './engine-launch.js';
 import { startTimesOf } from './process-children.js';
-import { removeWhole } from './whole-file.js';
+import { readWhole, removeWhole, writeWhole } from './whole-file.js';
 
 /** The variable naming the slot directory in place of the machine's. */
 export const SLOTS_VARIABLE = 'GODOT_ENGINE_SLOTS';
@@ -276,7 +276,7 @@ export class EngineSlots {
 
   readonly directory: string;
   readonly count: number;
-  private readonly holder: SlotHolder;
+  readonly holder: SlotHolder;
   private readonly say: ((line: string) => void) | undefined;
 
   constructor(directory: string, count: number, holder: SlotHolder, say?: (line: string) => void) {
@@ -332,7 +332,16 @@ export class EngineSlots {
           changes = new FolderChanges(this.directory);
           continue;
         }
-        await changes.next(SLOT_LOOK_MS, SLOT_SETTLE_MS, signal);
+        // Woken for the next line as well as for the next look, so it comes when it is due: said only
+        // at a look, the line due two seconds in came near three, as the first look read a holder's
+        // start for 1.9 s on a loaded machine and the next came a second after that.
+        const sayAt =
+          waiting !== undefined
+            ? said + WAIT_SAID_MS
+            : this.say !== undefined && this.held.size === 0
+              ? Math.max(began + COMMAND_WAIT_SAID_MS, this.saidAt + WAIT_SAID_MS)
+              : Number.POSITIVE_INFINITY;
+        await changes.next(Math.max(0, Math.min(SLOT_LOOK_MS, sayAt - Date.now())), SLOT_SETTLE_MS, signal);
       }
     } finally {
       changes?.close();
@@ -405,13 +414,24 @@ export class EngineSlots {
   /** Gives back the slot at [param lock]. */
   release(lock: string): void {
     this.held.delete(lock);
-    try {
-      if (holderOf(readFileSync(lock, 'utf8'))?.pid === this.holder.pid) {
-        removeWhole(lock);
-      }
-    } catch {
-      // Already gone.
+    giveBackSlot(lock, this.holder.pid);
+  }
+
+  /**
+   * Stops counting the slot at [param lock] as this process's without giving it back, for a lock
+   * another process takes over in its own time: see {@link handSlot}.
+   */
+  forget(lock: string): void {
+    this.held.delete(lock);
+  }
+
+  /** Hands the slot at [param lock] to [param to], answering whether it did: see {@link handSlot}. */
+  hand(lock: string, to: SlotHolder): boolean {
+    const handed = handSlot(lock, this.holder.pid, to);
+    if (handed) {
+      this.held.delete(lock);
     }
+    return handed;
   }
 
   /** Makes [param path] holding this process, answering false when it is there already. */
@@ -488,6 +508,33 @@ export class EngineSlots {
     }
     const started = (await startTimesOf([pid])).get(pid);
     this.starts.set(pid, { started, readAt: Date.now() });
+  }
+}
+
+/**
+ * Hands the slot at [param lock] to [param to] when it still names [param from], answering whether
+ * it did. For an engine that outlives the process that waited for its slot, a game a keeper holds or
+ * one an editor plays: the lock then names that engine's holder and is free once it has gone, by the
+ * rule every lock is judged by. Renamed over the lock, so a taker reading it never finds it empty.
+ */
+export function handSlot(lock: string, from: number, to: SlotHolder): boolean {
+  let content: string | null;
+  try {
+    content = readWhole(lock);
+  } catch {
+    return false;
+  }
+  return content !== null && holderOf(content)?.pid === from && writeWhole(lock, JSON.stringify(to));
+}
+
+/** Gives back the slot at [param lock] when [param pid] holds it. */
+export function giveBackSlot(lock: string, pid: number): void {
+  try {
+    if (holderOf(readFileSync(lock, 'utf8'))?.pid === pid) {
+      removeWhole(lock);
+    }
+  } catch {
+    // Already gone.
   }
 }
 
@@ -600,9 +647,9 @@ function listed(named: readonly string[]): string {
 /**
  * Takes one of the machine's slots for the call being answered, waiting for one: a cancelled call
  * stops waiting, and one whose client asked for progress is told that it is waiting and why.
- * Answers how to give it back.
+ * Answers its lock, how to give it back, and how to hand it to an engine that outlives this process.
  */
-export async function slotForCall(): Promise<{ readonly release: () => void }> {
+export async function slotForCall(): Promise<CallSlot> {
   const slots = await processSlots();
   const progress = callProgress();
   const waits = callSlotWaits();
@@ -625,10 +672,27 @@ export async function slotForCall(): Promise<{ readonly release: () => void }> {
     waits.said ??= (waitedMs) => slotWaitedSaid(waitedMs, slots.count, slots.directory, heldBy);
   }
   return {
+    lock,
+    from: slots.holder.pid,
     release: () => {
       slots.release(lock);
     },
+    handTo: (holder) => slots.hand(lock, holder),
+    leave: () => {
+      slots.forget(lock);
+    },
   };
+}
+
+/** A slot taken for a call: see {@link slotForCall}. */
+export interface CallSlot {
+  readonly lock: string;
+  /** The pid the lock names until it is handed on. */
+  readonly from: number;
+  readonly release: () => void;
+  readonly handTo: (holder: SlotHolder) => boolean;
+  /** Leaves the lock for another process to take over, naming this one until it does. */
+  readonly leave: () => void;
 }
 
 /** Runs [param body] holding one of the machine's slots for the call, and gives it back after. */

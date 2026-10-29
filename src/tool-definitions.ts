@@ -817,7 +817,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['set_preset'],
         enum: ['all_resources', 'scenes', 'resources', 'exclude'],
         description:
-          'set_preset: what the preset exports: every resource, the scenes listed in files and what they use, the resources listed, or every resource but those listed.',
+          'set_preset: what the preset exports: every resource, the scenes listed in files and what they use, the resources listed, or every resource but those listed. What a scene or a resource uses is what the engine counts as its dependencies, so a file named only in a string, such as a scene path held in an exported property, or a script reached only by its class_name, is left out of the export, though project_dependencies lists both.',
       },
       files: {
         type: 'array',
@@ -2597,7 +2597,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['until'],
         description:
-          'until, with says: count words on a hidden node too, and on one drawn outside the viewport or scrolled out of a ScrollContainer. Default false, since a wait for words is a wait for them to be shown, and a wait that runs out while such a node holds them says so under unseen_note: a button that exists hidden through a whole animation carries its words the whole time and satisfied the wait at once, and every wait on that screen fell back to counting frames.',
+          'until, with says: count words on a hidden node too, and on one drawn outside the viewport or scrolled out of a ScrollContainer. Default false, since a wait for words is a wait for them to be shown, and a wait that runs out while such a node holds them says so under unseen_note: a button that exists hidden through a whole animation carries its words the whole time and satisfied the wait at once, and every wait on that screen fell back to counting frames. What is drawn over a node is not looked at, so words under a dialog or a panel count either way.',
       },
       timeoutMs: {
         type: 'integer',
@@ -2690,7 +2690,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       step_out: {
         effect: 'additive',
         summary:
-          "run to the end of the current function and stop at the next line run at its caller's depth: in its caller, or, when the call was the last thing its caller did, wherever script runs next, such as the caller's next call; a game this server started only",
+          "run to the end of the current function and stop at the next line run at its caller's depth: in its caller, or, when the call was the last thing its caller did, wherever script runs next, such as the caller's next call; only for a game this server started",
         requires: [],
       },
     },

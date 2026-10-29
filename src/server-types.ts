@@ -1,4 +1,5 @@
 import type { McpServer, Tool } from '@modelcontextprotocol/server';
+import type { CallSlot } from './engine-slots.js';
 import type { GameLog } from './game-log.js';
 import type { EditorPlay, RestartedFrom } from './run-record.js';
 import type { ChildProcess } from './spawn.js';
@@ -164,6 +165,12 @@ export interface GodotProcess {
    */
   announcedPid?: number;
   announcedBefore?: ReadonlySet<number>;
+  /**
+   * For a run the editor plays, the engine slot taken before the play, until the tie hands it to the
+   * game that announced: the editor's game is its child and not this server's, so its lock names the
+   * game, which frees it by ending. Given back unhanded when the start's wait ends with no tie.
+   */
+  slot?: CallSlot;
   /**
    * For a run the editor plays, whether the editor has yet reported it as playing: in its answer
    * to the play, or to a later question. Until it has, the editor saying "not playing" is a play
