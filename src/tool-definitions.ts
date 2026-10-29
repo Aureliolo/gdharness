@@ -442,7 +442,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'array',
         items: { type: 'string', enum: [...PROJECT_INFO_SECTIONS] },
         description:
-          "Extra sections: registered autoloads, the classes the project's scripts declare with class_name, each with its script, read from the files, the input actions project.godot holds with their events (an engine ui_ action only when the project rebinds it, as engineAction), addons and whether each is enabled, export presets (runnable marks the one preset of its platform the editor's one-click deploy uses), the audio bus layout, a health report, or export validation. health and validation compile every script of the project in headless engines and name each that fails with its first error, each file a scene, resource or script refers to that does not exist, each input action a script reads by a name written in the call that neither the project nor the engine defines, with every line reading it, and each signal connection in a scene whose method or signal the node at its end does not have, judged from the node's type and scripts as their files are written.",
+          "Extra sections: registered autoloads, the classes the project's scripts declare with class_name, each with its script, read from the files (those an addon declares counted per addon under inAddons, unless addonClasses names the addon), the input actions project.godot holds with their events (an engine ui_ action only when the project rebinds it, as engineAction), addons and whether each is enabled, export presets (runnable marks the one preset of its platform the editor's one-click deploy uses), the audio bus layout, a health report, or export validation. health and validation compile every script of the project in headless engines and name each that fails with its first error, each file a scene, resource or script refers to that does not exist, each input action a script reads by a name written in the call that neither the project nor the engine defines, with every line reading it, and each signal connection in a scene whose method or signal the node at its end does not have, judged from the node's type and scripts as their files are written.",
+      },
+      addonClasses: {
+        type: 'array',
+        items: { type: 'string' },
+        description:
+          "For classes: the addons, by their folder under res://addons, whose classes are listed by name and script like the project's own, rather than counted under inAddons. Default none: a game with two large addons answered 686 classes, 19 of them its own.",
       },
       preset: { type: 'string', description: 'For validation: the export preset to validate against.' },
       detail: {

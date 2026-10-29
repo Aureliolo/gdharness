@@ -222,6 +222,44 @@ export function cachedClasses(projectPath: string): Map<string, string> | null {
   return listed;
 }
 
+/**
+ * Each class the cache lists, to the whole of its entry (base, path, icon and the rest) as the file
+ * writes it, or null when there is no cache.
+ */
+export function cachedEntries(projectPath: string): Map<string, string> | null {
+  const text = readWhole(join(projectPath, '.godot', 'global_script_class_cache.cfg'));
+  if (text === null) {
+    return null;
+  }
+  const listed = new Map<string, string>();
+  for (const entry of text.matchAll(/\{[^{}]*\}/g)) {
+    const named = /"class":\s*&"([^"]+)"/.exec(entry[0])?.[1];
+    if (named !== undefined) {
+      listed.set(named, entry[0]);
+    }
+  }
+  return listed;
+}
+
+/**
+ * The classes added to, removed from and changed in the cache between [param before] and
+ * [param after], each sorted, or nothing when either is unknown.
+ */
+export function cacheChangesBetween(
+  before: ReadonlyMap<string, string> | null,
+  after: ReadonlyMap<string, string> | null,
+): { added: string[]; removed: string[]; changed: string[] } | Record<string, never> {
+  if (before === null || after === null) {
+    return {};
+  }
+  const added = [...after.keys()].filter((name) => !before.has(name)).sort();
+  const removed = [...before.keys()].filter((name) => !after.has(name)).sort();
+  const changed = [...after.keys()]
+    .filter((name) => before.has(name) && before.get(name) !== after.get(name))
+    .sort();
+  return { added, removed, changed };
+}
+
 /** The folder under res://addons that [param path] is inside, or undefined for the project's own. */
 function addonOf(path: string): string | undefined {
   return /^res:\/\/addons\/([^/]+)\//.exec(path)?.[1];
@@ -247,6 +285,31 @@ export function withAddonPathsCounted(paths: readonly string[]): {
     }
   }
   return { own, inAddons };
+}
+
+/**
+ * project_info's [param classes], each {name, path}, with those an addon declares counted per addon
+ * under `inAddons` unless the addon is in [param listed]. A game carrying two large addons answered
+ * 686 classes in 88 thousand characters, which a harness moves out of the conversation, and 19 of
+ * them were the game's own.
+ */
+export function classesWithAddonsCounted(
+  classes: readonly unknown[],
+  listed: ReadonlySet<string>,
+): { classes: unknown[]; inAddons: Record<string, number> } {
+  const kept: unknown[] = [];
+  const inAddons: Record<string, number> = {};
+  for (const entry of classes) {
+    const path =
+      entry !== null && typeof entry === 'object' ? (entry as Record<string, unknown>)['path'] : '';
+    const addon = addonOf(typeof path === 'string' ? path : '');
+    if (addon === undefined || listed.has(addon)) {
+      kept.push(entry);
+    } else {
+      inAddons[addon] = (inAddons[addon] ?? 0) + 1;
+    }
+  }
+  return { classes: kept, inAddons };
 }
 
 /**
