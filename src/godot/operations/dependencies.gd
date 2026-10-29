@@ -633,8 +633,14 @@ func _depend(dep_info: Dictionary, current_depth: int, walk: GdhDependencyWalk) 
 	# tree answered that file as a dependency of itself.
 	if dep_path in walk.path_stack:
 		var cycle: Array[String] = walk.path_stack.slice(walk.path_stack.find(dep_path))
-		cycle.append(dep_path)
-		if not cycle in walk.circular_references:
+		# Kept by a key that is the same wherever the walk entered the cycle: compared as written,
+		# one cycle met from two of its files was listed twice, and comparing each against every
+		# cycle found so far grew with the square of their number, sixteen thousand on three
+		# hundred scripts typed by each other's class names.
+		var key: String = _cycle_key(cycle)
+		if not walk.cycles_seen.has(key):
+			walk.cycles_seen[key] = true
+			cycle.append(dep_path)
 			walk.circular_references.append(cycle)
 		dep_info["circular"] = true
 		return false
@@ -658,6 +664,16 @@ func _depend(dep_info: Dictionary, current_depth: int, walk: GdhDependencyWalk) 
 	dep_info["dependencies"] = _analyze_resource(dep_path, current_depth + 1, walk)
 	var walked: Dictionary = walk.shown[dep_path]
 	return walked["cut"]
+
+
+## [param cycle], the files of one cycle in the order the walk met them, turned to start at the
+## first of them in sorting order, so the cycle met from any of its files keys the same.
+static func _cycle_key(cycle: Array[String]) -> String:
+	var first: int = 0
+	for at: int in cycle.size():
+		if cycle[at] < cycle[first]:
+			first = at
+	return "\n".join(PackedStringArray(cycle.slice(first) + cycle.slice(0, first)))
 
 
 ## What [param path] names, each file once, as the entries the tree lists it by; read once a walk.
@@ -961,6 +977,9 @@ class GdhDependencyWalk:
 	var path_stack: Array[String] = []
 
 	var circular_references: Array
+
+	## Each cycle in circular_references, by [method _cycle_key].
+	var cycles_seen: Dictionary[String, bool] = {}
 
 	func _init(p_max_depth: int, p_include_built_in: bool, p_circular_references: Array) -> void:
 		max_depth = p_max_depth
