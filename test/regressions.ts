@@ -28113,6 +28113,88 @@ async function testAnAddedPresetExports(): Promise<void> {
 }
 
 /**
+ * A presets file saved before the editor named each platform's runnable preset in a section of its
+ * own marks it with a key in the preset, which the editor still reads. Read from the section alone,
+ * such a platform had nothing to run: a preset added for it took the place of the one it ran, and
+ * removing that one passed the mark to nobody. Found by a probe on a game whose file is of that age.
+ */
+async function testAnOldPresetFileKeepsThePresetItRuns(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('old preset file regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-old-presets-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-old-presets-rt-'));
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\n\nconfig/name="Old"\n');
+  const preset = (index: number, name: string, runnable: boolean): string =>
+    `[preset.${String(index)}]\n\nname="${name}"\nplatform="Linux"\nrunnable=${String(runnable)}\n` +
+    `dedicated_server=false\ncustom_features=""\nexport_filter="all_resources"\ninclude_filter=""\n` +
+    `exclude_filter=""\nexport_path=""\n\n[preset.${String(index)}.options]\n\n`;
+  writeFileSync(join(project, 'export_presets.cfg'), preset(0, 'Old', true) + preset(1, 'Spare', false));
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (args: Record<string, unknown>): Promise<unknown> =>
+    parseTextContent(
+      await server.request(
+        'tools/call',
+        { name: 'project_export', arguments: { projectPath: project, ...args } },
+        300_000,
+      ),
+    );
+  const file = (): string => readFileSync(join(project, 'export_presets.cfg'), 'utf8');
+  const runs = async (): Promise<unknown[]> =>
+    asArray(get(await call({ op: 'list' }), 'presets')).map((one) => [
+      get(one, 'name'),
+      get(one, 'runnable'),
+    ]);
+  try {
+    await server.initialize('old-presets');
+    const added = await call({ op: 'add_preset', preset: 'New', platform: 'Linux' });
+    assert.equal(get(added, 'runnable'), false, `Linux already runs Old: ${JSON.stringify(added)}`);
+    assert.doesNotMatch(file(), /Linux="New"/, file());
+    assert.deepEqual(
+      await runs(),
+      [
+        ['Old', true],
+        ['Spare', false],
+        ['New', false],
+      ],
+      file(),
+    );
+
+    const removed = await call({ op: 'remove_preset', preset: 'Old' });
+    assert.deepEqual(
+      [get(removed, 'runnableNow'), get(removed, 'presets')],
+      ['Spare', ['Spare', 'New']],
+      `the next preset of the platform becomes the one it runs: ${JSON.stringify(removed)}`,
+    );
+    assert.match(file(), /\[runnable_presets\]\s*\n\s*Linux="Spare"/, file());
+    assert.deepEqual(
+      await runs(),
+      [
+        ['Spare', true],
+        ['New', false],
+      ],
+      file(),
+    );
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
  * project_export set_preset, remove_preset and run with pack.
  *
  * Found by probe 150: nothing could set a preset's export path, its filters or its platform's
@@ -66716,6 +66798,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnExportOfAMissingPresetIsRefusedFirst,
   testAnAddedPresetExports,
   testAPresetIsSetRemovedAndPacked,
+  testAnOldPresetFileKeepsThePresetItRuns,
   testASelfContainedEngineKeepsItsTemplates,
   testAnExportedBuildIsFoundInsideTheProject,
   testAnExportedBuildIsStartedAndStopped,
