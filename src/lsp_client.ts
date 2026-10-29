@@ -1,7 +1,7 @@
 import { existsSync, realpathSync } from 'node:fs';
 import { readFile, realpath } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, extname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { answerJson } from './answer-json.js';
@@ -1185,6 +1185,18 @@ async function resolveLSPPaths(
     scriptPath = await realpath(contained.absolutePath);
   } catch {
     throw new ArgumentRefusal(`Script file does not exist: res://${contained.relativePath}`);
+  }
+  // Anything else would come back as a script with nothing wrong in it.
+  if (!scriptPath.toLowerCase().endsWith('.gd')) {
+    const said = `res://${contained.relativePath} is not a GDScript file, and the language server reads .gd files only`;
+    const kind = extname(scriptPath).toLowerCase();
+    throw new ArgumentRefusal(
+      kind === '.tscn' || kind === '.scn'
+        ? `${said}: scene_tree reads a scene's nodes, and with properties the script each carries.`
+        : kind === '.tres' || kind === '.res'
+          ? `${said}: resource_edit read reads a resource.`
+          : `${said}.`,
+    );
   }
 
   if (!isWithinRoot(projectPath, scriptPath)) {

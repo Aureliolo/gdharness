@@ -22759,6 +22759,36 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       textOf(await diagnose('checked/brokn.gd')),
       'Script file does not exist: res://checked/brokn.gd. The nearest .gd file is res://checked/broken.gd.',
     );
+    // A file that is not a script is refused as that, alone or in a list, rather than read as one
+    // with nothing wrong in it.
+    writeFileSync(
+      join(project, 'checked', 'stage.tscn'),
+      '[gd_scene format=3]\n\n[node name="Stage" type="Node"]\n',
+    );
+    writeFileSync(join(project, 'checked', 'notes.txt'), 'not code\n');
+    assert.equal(
+      textOf(await diagnose('checked/stage.tscn')),
+      "res://checked/stage.tscn is not a GDScript file, and the language server reads .gd files only: scene_tree reads a scene's nodes, and with properties the script each carries.",
+    );
+    const notScripts = parseTextContent(await diagnose(['checked/stage.tscn', 'checked/notes.txt']));
+    assert.deepEqual(
+      {
+        clean: get(notScripts, 'clean'),
+        scriptsNotRead: get(notScripts, 'scriptsNotRead'),
+        refused: asArray(get(notScripts, 'scripts')).map((entry) => get(entry, 'error')),
+        nothingReported: get(notScripts, 'nothingReported'),
+      },
+      {
+        clean: false,
+        scriptsNotRead: 2,
+        refused: [
+          "res://checked/stage.tscn is not a GDScript file, and the language server reads .gd files only: scene_tree reads a scene's nodes, and with properties the script each carries.",
+          'res://checked/notes.txt is not a GDScript file, and the language server reads .gd files only.',
+        ],
+        nothingReported: [],
+      },
+      JSON.stringify(notScripts),
+    );
     const outside = textOf(await diagnose(join(tmpdir(), 'elsewhere.gd'))) ?? '';
     assert.match(
       outside,
