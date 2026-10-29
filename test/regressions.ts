@@ -25892,6 +25892,36 @@ async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
         ['updated', 'res://other_thing.gd', 'res://thing.gd'],
         JSON.stringify(replaced),
       );
+      // Only a scene or a script whose instances are nodes, as the editor's Autoload tab takes them:
+      // a RefCounted one saved, and every start of the game failed to instantiate it.
+      const refusal = async (path: string): Promise<string> =>
+        textOf(
+          await server.request(
+            'tools/call',
+            {
+              name: 'project_settings',
+              arguments: { projectPath: project, op: 'add_autoload', name: 'Model', path },
+            },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        ) ?? '';
+      writeFileSync(join(project, 'model.gd'), 'extends RefCounted\n');
+      writeFileSync(join(project, 'notes.txt'), 'notes\n');
+      const holding = readFileSync(join(project, 'project.godot'), 'utf8');
+      assert.match(
+        await refusal('res://model.gd'),
+        /res:\/\/model\.gd extends RefCounted, which is not a Node, .*; nothing was written\./,
+      );
+      assert.match(
+        await refusal('res://notes.txt'),
+        /res:\/\/notes\.txt is a file Godot does not load, and an autoload is a scene or a script extending Node; nothing was written\./,
+      );
+      assert.equal(readFileSync(join(project, 'project.godot'), 'utf8'), holding, 'neither was written');
+      // A node through another script is a node.
+      writeFileSync(join(project, 'mover.gd'), 'extends "res://thing.gd"\n');
+      const inherited = await call({ op: 'add_autoload', name: 'Mover', path: 'res://mover.gd' });
+      assert.equal(get(inherited, 'action'), 'added', JSON.stringify(inherited));
+      await call({ op: 'remove_autoload', name: 'Mover' });
       sent.splice(0);
       const removed = await call({ op: 'remove_autoload', name: 'Thing' });
       assert.deepEqual(
