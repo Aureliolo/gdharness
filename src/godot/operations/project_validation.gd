@@ -8,6 +8,7 @@ const GdhFileWalk = preload("file_walk.gd")
 const GdhImportPipeline = preload("import_pipeline.gd")
 const GdhInputActions = preload("input_actions.gd")
 const GdhLog = preload("logger.gd")
+const GdhPatterns = preload("patterns.gd")
 const GdhRead = preload("reading.gd")
 const GdhSceneConnections = preload("scene_connections.gd")
 const GdhScriptCheck = preload("script_check.gd")
@@ -205,11 +206,12 @@ func validate_project(params: Dictionary) -> Dictionary:
 			var content: String = file.get_as_text()
 			file.close()
 
-			if "# TODO" in content or "# FIXME" in content:
+			var noted: Array[String] = GdhPatterns.noted_work(content)
+			if not noted.is_empty():
 				script_issues.append(
 					{ "path": script_path, "issue": "Contains TODO/FIXME comments" }
 				)
-			if "pass # TODO" in content:
+			if "pass" in noted:
 				script_issues.append(
 					{ "path": script_path, "issue": "Contains unimplemented functions" }
 				)

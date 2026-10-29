@@ -37,12 +37,14 @@ import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headl
 import { defectReport } from './issues.js';
 import { lspOptionsOf, runLspBridge } from './lsp-bridge.js';
 import { isSameDirectory } from './paths.js';
+import { editorsOfProjectIn, processTree } from './process-children.js';
 import { Ask, interactive } from './prompt.js';
 import { DEBUG_MODE } from './server-version.js';
 import {
   autoloadIsOurs,
   disablePlugins,
   EDITOR_PLUGINS,
+  editorUpgradeNote,
   enablePlugins,
   inspectProject,
   installAddons,
@@ -591,13 +593,12 @@ async function upgrade(): Promise<void> {
   }
 
   console.log(`\nOn ${version}. What is left for you:`);
+  const tree = await processTree();
   console.log(
-    digestBefore !== null && digestBefore === installedEditorDigest(projectPath)
-      ? '  1. Nothing for the editor: this upgrade left the editor addons the same code as before,\n' +
-          '     so it gives an open editor nothing to restart for. editor_status says addonIsStale\n' +
-          '     if the editor is running other code.'
-      : '  1. The open editor is still running the addons it loaded at startup. Restart it with the\n' +
-          '     editor_launch restart tool, which closes and reopens the window.',
+    editorUpgradeNote(
+      digestBefore !== null && digestBefore === installedEditorDigest(projectPath),
+      tree === undefined ? null : editorsOfProjectIn(tree, projectPath),
+    ),
   );
   const serving = await serverServing(projectPath);
   console.log(

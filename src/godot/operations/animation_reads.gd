@@ -11,6 +11,11 @@ const LOOP_MODE_NAMES: Dictionary[int, String] = {
 	Animation.LOOP_LINEAR: "linear",
 	Animation.LOOP_PINGPONG: "pingpong",
 }
+const UPDATE_MODE_NAMES: Dictionary[int, String] = {
+	Animation.UPDATE_CONTINUOUS: "continuous",
+	Animation.UPDATE_DISCRETE: "discrete",
+	Animation.UPDATE_CAPTURE: "capture",
+}
 const TRACK_TYPE_NAMES: Dictionary[int, String] = {
 	Animation.TYPE_VALUE: "property",
 	Animation.TYPE_POSITION_3D: "position_3d",
@@ -166,6 +171,9 @@ static func _track(anim: Animation, track: int, values: GdhSerialisation) -> Dic
 	var property: String = str(path.get_concatenated_subnames())
 	if not property.is_empty():
 		shaped["property"] = property
+	if kind == Animation.TYPE_VALUE:
+		var mode: int = anim.value_track_get_update_mode(track)
+		shaped["update"] = UPDATE_MODE_NAMES.get(mode, str(mode))
 	var keyframes: Array[Dictionary] = []
 	var methods: Dictionary = {}
 	for key: int in anim.track_get_key_count(track):

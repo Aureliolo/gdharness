@@ -167,6 +167,39 @@ export function installedEditorDigest(projectPath: string): string | null {
   return digestMarker(projectPath, ADDONS[0]);
 }
 
+/**
+ * What an upgrade tells the user to do about the editor: [param sameCode] when the editor addons
+ * came out as the code they were, and [param editors] the pids of the project's running editors,
+ * or null when the process table could not be read.
+ */
+export function editorUpgradeNote(sameCode: boolean, editors: readonly number[] | null): string {
+  if (sameCode) {
+    return (
+      '  1. Nothing for the editor: this upgrade left the editor addons the same code as before,\n' +
+      '     so it gives an open editor nothing to restart for. editor_status says addonIsStale\n' +
+      '     if the editor is running other code.'
+    );
+  }
+  if (editors === null) {
+    return (
+      '  1. An editor of this project that is open is still running the addons it loaded at\n' +
+      '     startup. Restart it with the editor_launch restart tool, which closes and reopens\n' +
+      '     the window.'
+    );
+  }
+  if (editors.length === 0) {
+    return '  1. Nothing for the editor: none of this project is running, and the next one opened loads\n     these addons.';
+  }
+  const which =
+    editors.length === 1
+      ? `The open editor (pid ${editors[0]}) is`
+      : `The open editors (pids ${editors.join(', ')}) are`;
+  return (
+    `  1. ${which} still running the addons loaded at startup. Restart with the\n` +
+    '     editor_launch restart tool, which closes and reopens the window.'
+  );
+}
+
 /** The digest the installed runtime addon was written with, or null for a copy without one. */
 export function installedRuntimeDigest(projectPath: string): string | null {
   return digestMarker(projectPath, RUNTIME_ADDON);

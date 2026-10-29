@@ -3,6 +3,29 @@ extends "animation_tools.gd"
 ## The tracks and keys of an animation, beside the players and libraries the script it extends
 ## edits, whose helpers it shares.
 
+## The types whose values the editor blends between keys, so it makes a track on one continuous.
+const BLENDED_TYPES: Array[int] = [
+	TYPE_FLOAT,
+	TYPE_VECTOR2,
+	TYPE_RECT2,
+	TYPE_VECTOR3,
+	TYPE_TRANSFORM2D,
+	TYPE_VECTOR4,
+	TYPE_PLANE,
+	TYPE_QUATERNION,
+	TYPE_AABB,
+	TYPE_BASIS,
+	TYPE_TRANSFORM3D,
+	TYPE_PROJECTION,
+	TYPE_COLOR,
+	TYPE_PACKED_FLOAT32_ARRAY,
+	TYPE_PACKED_FLOAT64_ARRAY,
+	TYPE_PACKED_VECTOR2_ARRAY,
+	TYPE_PACKED_VECTOR3_ARRAY,
+	TYPE_PACKED_COLOR_ARRAY,
+	TYPE_PACKED_VECTOR4_ARRAY,
+]
+
 
 # =============================================================================
 # add_animation_track, remove_animation_track
@@ -61,7 +84,7 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 		)
 	var keyframes: Array = keyed[1]
 	var replacing: bool = GdhRead.as_bool(args.get("replaceKeys", false))
-	var built: Array = _add_track(anim, track, target, target_path, keyframes, replacing)
+	var built: Array = _add_track(player, anim, track, target_path, keyframes, replacing)
 	if not str(built[1]).is_empty():
 		return scene.refuse(str(built[1]))
 	var track_idx: int = built[0]
@@ -83,6 +106,9 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 		"keys": keys,
 		"keysAdded": keyframes.size(),
 	}
+	if anim.track_get_type(track_idx) == Animation.TYPE_VALUE:
+		var mode: int = anim.value_track_get_update_mode(track_idx)
+		answer["update"] = GdhAnimationReads.UPDATE_MODE_NAMES.get(mode, str(mode))
 	if built[3]:
 		answer["existingTrack"] = true
 	var replaced: Array = built[5]
@@ -112,7 +138,9 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 	return _finish(scene, check, files, answer)
 
 
-## Adds [param track] to [param anim] with [param keyframes], as [index, why not, methodFound,
+## Adds [param track] to [param anim] of [param player], on the node at [param target_path] from the
+## player's root, which the caller has found, with [param keyframes], as [index, why not,
+## methodFound,
 ## existing, misfit, replaced]: methodFound is null for a property track, existing is whether the
 ## keys went into a track the animation already had for that path, misfit why a method key's
 ## arguments cannot reach the method, or "", and replaced each key [param replacing] let a keyframe
@@ -122,23 +150,31 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 ## animates: two tracks for one path both play, the later overriding the earlier, and a key meant
 ## to extend the motion was split off where reading the animation showed two halves.
 func _add_track(
+	player: AnimationPlayer,
 	anim: Animation,
 	track: Dictionary,
-	target: Node,
 	target_path: String,
 	keyframes: Array,
 	replacing: bool
 ) -> Array:
+	var target: Node = _animated(player, target_path)
 	var track_type: String = str(track.get("type", ""))
 	var keys: Array = []
 	var method_found: Variant = null
 	var misfit: String = ""
 	var kind: Animation.TrackType = Animation.TYPE_VALUE
 	var path: NodePath = NodePath(target_path)
+	var update: int = -1
 	if track_type == "property":
 		var prop_name: String = str(track.get("property", ""))
 		if prop_name.is_empty():
 			return _not_added("track.property is required for property track")
+		# The server has refused any name but these.
+		var named: Variant = GdhAnimationReads.UPDATE_MODE_NAMES.find_key(
+			str(track.get("update", ""))
+		)
+		if named != null:
+			update = GdhRead.as_int(named)
 		var values: Array = _key_values(target, prop_name, keyframes)
 		if not values[0]:
 			return _not_added(str(values[1]))
@@ -210,11 +246,61 @@ func _add_track(
 	else:
 		track_idx = anim.add_track(kind)
 		anim.track_set_path(track_idx, path)
+		if kind == Animation.TYPE_VALUE:
+			_as_the_editor_makes(anim, track_idx, player, target)
+	if update >= 0:
+		anim.value_track_set_update_mode(track_idx, update as Animation.UpdateMode)
 	for index: int in keyframes.size():
 		var keyframe: Dictionary = keyframes[index]
 		if anim.track_insert_key(track_idx, GdhRead.as_float(keyframe["time"]), keys[index]) < 0:
 			return _not_added("Keyframe %d could not be inserted." % index)
 	return [track_idx, "", method_found, existing, misfit, replaced]
+
+
+## Sets the new property track [param index] up as the editor sets up a track it makes: as the
+## RESET animation's track for the same path when there is one, and otherwise discrete unless the
+## property's declared type is one the editor blends, so a bool or an int changes at its key rather
+## than halfway to it.
+static func _as_the_editor_makes(
+	anim: Animation, index: int, player: AnimationPlayer, target: Node
+) -> void:
+	var path: NodePath = anim.track_get_path(index)
+	var mode: Animation.UpdateMode = Animation.UPDATE_DISCRETE
+	if player.has_animation(&"RESET") and player.get_animation(&"RESET") != anim:
+		var reset: Animation = player.get_animation(&"RESET")
+		for kind: Animation.TrackType in [Animation.TYPE_VALUE, Animation.TYPE_BEZIER]:
+			var at: int = reset.find_track(path, kind)
+			if at < 0:
+				continue
+			if kind == Animation.TYPE_VALUE:
+				mode = reset.value_track_get_update_mode(at)
+			anim.value_track_set_update_mode(index, mode)
+			anim.track_set_interpolation_type(index, reset.track_get_interpolation_type(at))
+			anim.track_set_interpolation_loop_wrap(
+				index, reset.track_get_interpolation_loop_wrap(at)
+			)
+			return
+	if BLENDED_TYPES.has(_declared_type(target, path)):
+		mode = Animation.UPDATE_CONTINUOUS
+	anim.value_track_set_update_mode(index, mode)
+
+
+## The type the node or resource holding the last name of [param path] declares for it, read from
+## [param target] as the editor reads it: a property of a property, as position:x, is no name the
+## node declares, so it has none.
+static func _declared_type(target: Node, path: NodePath) -> int:
+	var reached: Array = target.get_node_and_resource(
+		NodePath(".:" + str(path.get_concatenated_subnames()))
+	)
+	var leftover: NodePath = reached[2]
+	var holder: Object = reached[1] if reached[1] != null else reached[0]
+	if holder == null or leftover.get_subname_count() == 0:
+		return TYPE_NIL
+	var leaf: String = str(leftover.get_subname(leftover.get_subname_count() - 1))
+	for declared: Dictionary in holder.get_property_list():
+		if str(declared.get("name", "")) == leaf:
+			return GdhRead.as_int(declared.get("type", TYPE_NIL))
+	return TYPE_NIL
 
 
 ## What [method _add_track] answers when it added nothing, because of [param why].

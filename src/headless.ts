@@ -595,10 +595,15 @@ async function operationOutcome(
   }
   // The answer is written before the engine shuts down and the project's autoloads run, so a
   // failure after it did not undo it: a setting it answered as saved is saved.
+  const onTheWayOut = answered === -1 ? problems : after;
   const afterAnswer =
     ran.exitCode === 0 && ran.failure === null
       ? undefined
-      : `The operation finished and wrote this answer, and then the engine did not exit cleanly (${howItEnded(ran)}). Anything it reported on the way out is under ${answered === -1 ? 'engine_messages' : 'engine_messages_after_answer'}.`;
+      : `The operation finished and wrote this answer, and then the engine did not exit cleanly (${howItEnded(ran)}). ${
+          onTheWayOut.length === 0
+            ? 'It printed no error or warning on the way out.'
+            : `What it reported on the way out is under ${answered === -1 ? 'engine_messages' : 'engine_messages_after_answer'}.`
+        }`;
   return {
     ok: true,
     payload: answer.payload,

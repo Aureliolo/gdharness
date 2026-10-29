@@ -38,6 +38,9 @@ static var scan_due: bool = false
 ## What the saves of a call wrote on nodes it did not ask to change, differently from their file,
 ## gathered for that call's answer as [method _also_saved] finds them.
 static var also_saved: Array[Dictionary] = []
+## What a write said of the connections it kept in the file though the engine cannot make them,
+## gathered for that call's answer as [member also_saved] is.
+static var unmade_note: String = ""
 
 var root: Node = null
 var path: String = ""
@@ -75,6 +78,11 @@ var _text: String = ""
 ## from where the node is, as it keeps layout_mode at Container under a container, and stores the
 ## same from an editor.
 var _engine_kept: Dictionary = {}
+## Each connection the file holds that the engine refused to make as it loaded the scene, as
+## {source, target, from, signal, to, method, flags, binds, unbinds}: one passing binds or unbinds
+## to a method its target lacks. A pack saves only the connections made, so [method write] puts
+## these back.
+var _unmade: Array[Dictionary] = []
 
 
 ## Opens [param scene_path], answering a refusal, or {} with [member root] set.
@@ -100,6 +108,8 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 		return { "ok": false, "error": "Failed to instantiate " + path }
 	_state = packed.get_state()
 	_base_paths = makers(_state)
+	if for_writing:
+		_unmade = _unmade_connections(_state)
 	# On a read as well, which would otherwise answer what the scripts set as what the file holds.
 	if for_writing or not Engine.is_editor_hint():
 		for index: int in _state.get_node_count():
@@ -113,6 +123,163 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 		if not unsettled.is_empty():
 			return refuse(("Nothing was written: " if for_writing else "Not read: ") + unsettled)
 	return {}
+
+
+## The connections in [param state] the engine did not make on [member root]: Object.connect
+## refuses a callable that binds or unbinds arguments unless its target has the method, so the scene
+## loads without them, in the editor as well, and every save drops them.
+func _unmade_connections(state: SceneState) -> Array[Dictionary]:
+	var unmade: Array[Dictionary] = []
+	for index: int in state.get_connection_count():
+		var from: NodePath = state.get_connection_source(index)
+		var to: NodePath = state.get_connection_target(index)
+		var signal_name: StringName = state.get_connection_signal(index)
+		var method: StringName = state.get_connection_method(index)
+		var source: Node = root.get_node_or_null(from)
+		var target: Node = root.get_node_or_null(to)
+		if source == null or target == null or not source.has_signal(signal_name):
+			continue
+		var made: bool = false
+		for conn: Dictionary in source.get_signal_connection_list(signal_name):
+			var callable: Callable = conn.get("callable", Callable())
+			if callable.get_object() == target and callable.get_method() == method:
+				made = true
+				break
+		if not made:
+			unmade.append(
+				{
+					"source": source,
+					"target": target,
+					"from": str(from),
+					"signal": str(signal_name),
+					"to": str(to),
+					"method": str(method),
+					"flags": state.get_connection_flags(index),
+					"binds": state.get_connection_binds(index),
+					"unbinds": state.get_connection_unbinds(index),
+				}
+			)
+	return unmade
+
+
+## The connection the file holds that the engine could not make, from [param from].[param signal]
+## to [param to].[param method], taken out of those a write refuses to drop, since the tool removes
+## it; {} when there is none.
+func drop_unmade(from: String, signal_name: String, to: String, method: String) -> Dictionary:
+	for index: int in _unmade.size():
+		var held: Dictionary = _unmade[index]
+		var ends: Array = [held["from"], held["signal"], held["to"], held["method"]]
+		if ends == [from, signal_name, to, method]:
+			_unmade.remove_at(index)
+			return held
+	return {}
+
+
+## The [code][connection][/code] lines that put back each connection the engine could not make, at
+## its nodes' paths now. One whose source or target the call took out of the scene goes with it.
+## Read before the write frees [member root].
+func _unmade_lines() -> PackedStringArray:
+	var lines: PackedStringArray = []
+	var still: Array[Dictionary] = []
+	for held: Dictionary in _unmade:
+		var ends: Array[Node] = []
+		for end: String in ["source", "target"]:
+			var held_end: Variant = held[end]
+			if not is_instance_valid(held_end) or not held_end is Node:
+				continue
+			var node: Node = held_end
+			if node == root or root.is_ancestor_of(node):
+				ends.append(node)
+		if ends.size() < 2:
+			continue
+		var from: String = path_of(ends[0])
+		var to: String = path_of(ends[1])
+		var line: String = (
+			'[connection signal="%s" from="%s" to="%s" method="%s"'
+			% [held["signal"], from, to, held["method"]]
+		)
+		var flags: int = held["flags"]
+		if flags != Object.CONNECT_PERSIST:
+			line += " flags=%d" % flags
+		var bound: PackedStringArray = []
+		var unbinds: int = held["unbinds"]
+		if unbinds > 0:
+			line += " unbinds=%d" % unbinds
+			var _unbinding: bool = bound.append("unbinds %d" % unbinds)
+		var binds: Array = held["binds"]
+		if not binds.is_empty():
+			line += " binds= " + var_to_str(binds)
+			var _binding: bool = bound.append("binds " + var_to_str(binds))
+		var _added: bool = lines.append(line + "]")
+		var named_to: String = str(ends[1].name) if ends[1] == root else to
+		held["said"] = (
+			"%s.%s to %s.%s with %s"
+			% [
+				str(ends[0].name) if ends[0] == root else from,
+				held["signal"],
+				named_to,
+				held["method"],
+				" and ".join(bound),
+			]
+		)
+		held["lacks"] = "%s has no method %s" % [named_to, held["method"]]
+		still.append(held)
+	_unmade = still
+	return lines
+
+
+## The connections [method _unmade_lines] kept, named for a sentence.
+func _unmade_named() -> String:
+	var said: PackedStringArray = []
+	var lacking: PackedStringArray = []
+	for held: Dictionary in _unmade:
+		var _said: bool = said.append(str(held["said"]))
+		var _lacks: bool = lacking.append(str(held["lacks"]))
+	return (
+		"%s the engine cannot make as it loads the scene, %s, since %s"
+		% [
+			"a connection" if _unmade.size() == 1 else "connections",
+			"; ".join(said),
+			", ".join(lacking),
+		]
+	)
+
+
+func _unmade_remedy() -> String:
+	return (
+		"The engine connects a signal that binds or unbinds arguments only to a method its target "
+		+ "has: add the method to the target's script, or scene_signal disconnect takes the "
+		+ "connection out."
+	)
+
+
+## Adds [param lines] to the file just saved, answering "" or why they could not be added.
+func _keep_unmade(lines: PackedStringArray) -> String:
+	var saved: String = FileAccess.get_file_as_string(path)
+	var file: FileAccess = FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		return (
+			"%s was saved without %s, and could not be opened again to put it back: %s"
+			% [path, _unmade_named(), error_string(FileAccess.get_open_error())]
+		)
+	var joined: String = "\n".join(lines) + "\n"
+	var _stored: bool = file.store_string(
+		saved + joined if saved.contains("\n[connection ") else saved + "\n" + joined
+	)
+	file.close()
+	refresh(path)
+	unmade_note = (
+		"%s holds %s. This write kept %s as the file held %s, and %s nothing until the method "
+		+ "exists. %s"
+	) % [
+		path,
+		_unmade_named(),
+		"it" if _unmade.size() == 1 else "them",
+		"it" if _unmade.size() == 1 else "them",
+		"it does" if _unmade.size() == 1 else "they do",
+		_unmade_remedy(),
+	]
+	return ""
 
 
 ## Puts back what the scene's scripts changed on every node a tool has not asked to change, as
@@ -629,7 +796,30 @@ func stores(at: String, property: String, given: Variant) -> bool:
 ## The check reads a scene instantiated from the pack, which is what loading the file gives, so
 ## anything the pack leaves out (a property with no storage, a node the scene does not own) is seen
 ## as missing before the file is touched.
+##
+## A connection the file holds that the engine could not make is written back after the save as the
+## file held it, at its nodes' paths now, and goes only with a node of it the call deleted, since a
+## pack saves only the connections made. A binary scene cannot be added to, so there the write is
+## refused.
 func write(check: Callable = Callable()) -> Dictionary:
+	var unmade_lines: PackedStringArray = _unmade_lines()
+	if not unmade_lines.is_empty() and not path.ends_with(".tscn"):
+		return refuse(
+			(
+				"Nothing was written: %s holds %s, and a binary scene saves only the connections "
+				+ "the engine made. %s"
+			)
+			% [path, _unmade_named(), _unmade_remedy()]
+		)
+	var written: Dictionary = _write(check)
+	if written.is_empty() and not unmade_lines.is_empty():
+		var unkept: String = _keep_unmade(unmade_lines)
+		if not unkept.is_empty():
+			return refuse(unkept)
+	return written
+
+
+func _write(check: Callable) -> Dictionary:
 	var packed: PackedScene = PackedScene.new()
 	var packing: Error = packed.pack(root)
 	if packing != OK:

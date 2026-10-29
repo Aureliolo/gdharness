@@ -92,6 +92,19 @@ func connect_signal(args: Dictionary) -> Dictionary:
 	if unbinds > 0:
 		callable = callable.unbind(unbinds)
 	var method_found: bool = target.has_method(method_name)
+	if not method_found and (not binds.is_empty() or unbinds > 0):
+		var named_to: String = str(target.name) if target == scene.root else target_node_path
+		return scene.refuse(
+			(
+				(
+					"%s has no method %s, and the engine connects a signal that binds or unbinds "
+					+ "arguments only to a method its target has, so the scene would load without "
+					+ "the connection. Add the method to the target's script first, or connect "
+					+ "without binds and unbinds."
+				)
+				% [named_to, method_name]
+			)
+		)
 	var misfit: String = _misfit(source, signal_name, callable, flags)
 	if not before.is_empty():
 		var held: Callable = before["callable"]
@@ -102,6 +115,7 @@ func connect_signal(args: Dictionary) -> Dictionary:
 
 	var from: String = scene.path_of(source)
 	var to: String = scene.path_of(target)
+	var _replaced: Dictionary = scene.drop_unmade(from, signal_name, to, method_name)
 	var saved: Dictionary = {}
 	var written: Dictionary = scene.write(
 		func(loaded: Node) -> String:
@@ -464,7 +478,11 @@ func disconnect_signal(args: Dictionary) -> Dictionary:
 	# A connection that was never there saved the scene unchanged and answered as removed, so a
 	# typo in either name read as success.
 	var held: Dictionary = _saved(scene.root, from, signal_name, to, method_name)
-	if held.is_empty():
+	# One the engine could not make is in the file alone, and the write drops it.
+	var unmade: Dictionary = scene.drop_unmade(from, signal_name, to, method_name)
+	if held.is_empty() and not unmade.is_empty():
+		held = { "flags": unmade["flags"], "binds": unmade["binds"], "unbinds": unmade["unbinds"] }
+	elif held.is_empty():
 		# The root's path is ".", which before ".method" read as "..method".
 		var said_from: String = str(source.name) if source == scene.root else from
 		var said_to: String = str(target.name) if target == scene.root else to
@@ -492,8 +510,9 @@ func disconnect_signal(args: Dictionary) -> Dictionary:
 				)
 			)
 		)
-	var callable: Callable = held["callable"]
-	source.disconnect(signal_name, callable)
+	if held.has("callable"):
+		var callable: Callable = held["callable"]
+		source.disconnect(signal_name, callable)
 
 	var written: Dictionary = scene.write(
 		func(loaded: Node) -> String:

@@ -5,6 +5,7 @@ const GdhFileWalk = preload("file_walk.gd")
 const GdhImportPipeline = preload("import_pipeline.gd")
 const GdhInputActions = preload("input_actions.gd")
 const GdhLog = preload("logger.gd")
+const GdhPatterns = preload("patterns.gd")
 const GdhRead = preload("reading.gd")
 const GdhSceneConnections = preload("scene_connections.gd")
 const GdhScriptCheck = preload("script_check.gd")
@@ -87,7 +88,7 @@ func get_project_health(params: Dictionary) -> Dictionary:
 				var content: String = file.get_as_text()
 				file.close()
 
-				if "# TODO" in content or "# FIXME" in content:
+				if not GdhPatterns.noted_work(content).is_empty():
 					todo_count += 1
 
 		# Work noted for later, which no script fails on, so said rather than failed. A count of

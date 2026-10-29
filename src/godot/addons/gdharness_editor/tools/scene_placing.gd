@@ -112,8 +112,9 @@ static func copied(source: Node, root: Node, copies: Dictionary) -> Node:
 	return copy
 
 
-## Gives each copy in [param copies] the persistent connections its source has, to the copy of the
-## target when the target was copied too. A connection an instance makes inside itself is skipped:
+## Gives each copy in [param copies] the persistent connections its source has, with their flags,
+## bound arguments and unbinds, to the copy of the target when the target was copied too. A
+## connection an instance makes inside itself is skipped:
 ## the instance made again from its file already has it.
 static func reconnect(copies: Dictionary, top: Node) -> void:
 	for key: Variant in copies:
@@ -134,7 +135,15 @@ static func reconnect(copies: Dictionary, top: Node) -> void:
 					and (target == top or top.is_ancestor_of(target as Node))
 				):
 					continue
+				# Unbound and then bound again as Node.duplicate does: a callable made
+				# from the method alone would save the copy without the arguments the
+				# original passes.
 				var aimed: Callable = Callable(to, callable.get_method())
+				var unbound: int = callable.get_unbound_arguments_count()
+				if unbound > 0:
+					aimed = aimed.unbind(unbound)
+				if callable.get_bound_arguments_count() > 0:
+					aimed = aimed.bindv(callable.get_bound_arguments())
 				if (
 					not copy.is_connected(signal_name, aimed)
 					and copy.connect(signal_name, aimed, flags) != OK
@@ -205,6 +214,16 @@ static func placing(node: Node) -> Array[String]:
 	if node is Node2D:
 		return ["position", "rotation", "scale", "skew"]
 	return []
+
+
+## The stored properties [param node] keeps what [method placing] names in: a Control's position
+## is its offsets, and a Node3D's position, rotation and scale its transform.
+static func placed_in(node: Node) -> Array[String]:
+	if node is Node3D:
+		return ["transform"]
+	if node is Control:
+		return ["offset_left", "offset_top", "offset_right", "offset_bottom"]
+	return placing(node)
 
 
 ## Gives [param node], just moved from under [param was], the transform that keeps it where it was

@@ -2011,8 +2011,16 @@ function testOperations(godotPath: string, projectDir: string): void {
     ),
     `and the missing presets are still recommended: ${JSON.stringify(get(health, 'recommendations'))}`,
   );
+  const notedCount = (checked: unknown): number =>
+    Number(
+      asArray(get(checked, 'recommendations'))
+        .map((said) => /^(\d+) scripts have TODO or FIXME comments/.exec(String(said))?.[1])
+        .find(Boolean) ?? 0,
+    );
+  const unnoted = notedCount(operation('get_project_health', { categories: ['scripts'] }));
   const noted = join(projectDir, 'noted_for_later.gd');
-  writeFileSync(noted, 'extends Node\n\n\n# TODO: something later\nfunc later() -> void:\n\tpass\n');
+  // No space after the mark, as the editor still highlights it.
+  writeFileSync(noted, 'extends Node\n\n\n#TODO: something later\nfunc later() -> void:\n\tpass\n');
   try {
     const withNotes = operation('get_project_health', { categories: ['scripts'] });
     assert.equal(
@@ -2020,10 +2028,9 @@ function testOperations(godotPath: string, projectDir: string): void {
       true,
       `a TODO fails nothing: ${JSON.stringify(withNotes)}`,
     );
-    assert.ok(
-      asArray(get(withNotes, 'recommendations')).some((said) =>
-        String(said).includes('scripts have TODO or FIXME comments'),
-      ),
+    assert.equal(
+      notedCount(withNotes),
+      unnoted + 1,
       `and is said as something to look at: ${JSON.stringify(withNotes)}`,
     );
   } finally {
@@ -4539,17 +4546,24 @@ function testValidationReadsEveryScript(godotPath: string): void {
       'message',
     );
   try {
-    const before = /^\d+/.exec(asString(noted(runOperation(godotPath, dir, 'validate_project', {}))))?.[0];
+    // No warning at all is none found.
+    const unnoted = noted(runOperation(godotPath, dir, 'validate_project', {}));
+    const before = unnoted === undefined ? 0 : Number(/^\d+/.exec(asString(unnoted))?.[0]);
     mkdirSync(join(dir, 'many'));
-    for (let index = 0; index < 110; index++) {
-      writeFileSync(join(dir, 'many', `s${index}.gd`), 'extends Node\n\n# TODO: one each\n');
+    // Written as the editor still highlights them, with no space after the mark, and one left as a
+    // stub, which counts twice: once noted, once unimplemented.
+    writeFileSync(join(dir, 'many', 's0.gd'), 'extends Node\n\n\nfunc later() -> void:\n\tpass #TODO\n');
+    for (let index = 1; index < 110; index++) {
+      writeFileSync(join(dir, 'many', `s${index}.gd`), 'extends Node\n\n#TODO: one each\n');
     }
     writeFileSync(
       join(dir, 'many', 'template.gd'),
       [
         'extends Node',
         '',
+        'const SAID := "# TODO in a string is text"',
         'const SHOWN := """',
+        '# FIXME inside a string that runs across lines',
         '\tvar my_script := load("res://folder/shown_only.gd")',
         '"""',
         "const ALSO := '''",
@@ -4566,7 +4580,7 @@ function testValidationReadsEveryScript(godotPath: string): void {
     const total = asNumber(get(validated, 'scripts_total'));
     assert.ok(total > 111, `the fixture's scripts and these: ${total}`);
     assert.equal(get(validated, 'scripts_checked'), total, JSON.stringify(validated));
-    assert.equal(noted(validated), `${Number(before) + 110} script issues found`, JSON.stringify(validated));
+    assert.equal(noted(validated), `${before + 111} script issues found`, JSON.stringify(validated));
     const missing = asArray(get(validated, 'issues'))
       .filter((issue) => get(issue, 'check') === 'references')
       .map((issue) => asString(get(issue, 'message')));
@@ -4822,6 +4836,9 @@ async function testTheAnswerIsTheOperations(godotPath: string): Promise<void> {
         '',
         '',
         'func _ready() -> void:',
+        '\tif FileAccess.file_exists("res://quiet_quit"):',
+        '\t\tget_tree().quit(3)',
+        '\t\treturn',
         '\tprint({"setting_path": "not the operation", "value": "loud _ready"})',
         '\tpush_error("raised by the loud autoload")',
         '\tif FileAccess.file_exists("res://quit_after"):',
@@ -4877,7 +4894,7 @@ async function testTheAnswerIsTheOperations(godotPath: string): Promise<void> {
     assert.ok(written.ok, `a write that happened is answered as one: ${written.ok ? '' : written.message}`);
     assert.match(
       written.afterAnswer ?? '',
-      /wrote this answer, and then the engine did not exit cleanly \(exit code 3\)/,
+      /wrote this answer, and then the engine did not exit cleanly \(exit code 3\)\. What it reported on the way out is under engine_messages_after_answer\.$/,
       String(written.afterAnswer),
     );
     assert.match(
@@ -4886,6 +4903,26 @@ async function testTheAnswerIsTheOperations(godotPath: string): Promise<void> {
       'and the write it answered for is on disk',
     );
     rmSync(join(dir, 'quit_after'));
+    // An engine that ends badly having printed nothing is not sent to read messages that are not
+    // there, as one crashing on its way out after reading a scene of editor-only scripts was.
+    writeFileSync(join(dir, 'quiet_quit'), '');
+    const quiet = await runThroughTheServersOwnPath(
+      engine,
+      'get_project_setting',
+      { setting: 'application/config/name' },
+      dir,
+    );
+    assert.ok(quiet.ok, `the quiet read still answers: ${quiet.ok ? '' : quiet.message}`);
+    assert.deepEqual(
+      [get(quiet.payload, 'value'), quiet.afterAnswer, quiet.afterAnswerMessages],
+      [
+        'Answered',
+        'The operation finished and wrote this answer, and then the engine did not exit cleanly (exit code 3). It printed no error or warning on the way out.',
+        undefined,
+      ],
+      JSON.stringify(quiet),
+    );
+    rmSync(join(dir, 'quiet_quit'));
 
     // One helper made to raise part-way through building the answer, in a copy of the scripts.
     cpSync(resolve('src/godot/operations'), operations, { recursive: true });
