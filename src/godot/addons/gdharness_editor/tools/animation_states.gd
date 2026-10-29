@@ -139,12 +139,16 @@ func connect_animation_states(args: Dictionary) -> Dictionary:
 		return scene.refuse("The state machine did not take the transition.")
 	_tell_the_tree(sm)
 	var files: Dictionary = found[2]
-	return _finish(
-		scene,
-		Callable(),
-		files,
-		{ "ok": true, "from": from_state, "to": to_state, "advanceMode": advance_mode }
-	)
+	var made: Dictionary = {
+		"ok": true,
+		"from": from_state,
+		"to": to_state,
+		"transitionType": transition_type,
+		"advanceMode": advance_mode,
+	}
+	if not advance_condition.is_empty():
+		made["advanceCondition"] = advance_condition
+	return _finish(scene, Callable(), files, made)
 
 
 ## Has the AnimationTree playing [param sm] list its parameters again. Adding or removing a

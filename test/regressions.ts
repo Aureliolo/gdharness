@@ -62788,7 +62788,11 @@ async function testAStateMachineWrittenWithNoEditorRunsAsWritten(): Promise<void
       toState: 'Hop',
       advanceCondition: 'jumped',
     });
-    assert.equal(get(conditioned, 'advanceMode'), 'auto', JSON.stringify(conditioned));
+    assert.deepEqual(
+      ['transitionType', 'advanceMode', 'advanceCondition'].map((key) => get(conditioned, key)),
+      ['immediate', 'auto', 'jumped'],
+      `the answer says what was written: ${JSON.stringify(conditioned)}`,
+    );
     // The tree lists a parameter for each condition, and the write that made the condition holds it.
     assert.match(
       fileOf('machine.tscn'),
