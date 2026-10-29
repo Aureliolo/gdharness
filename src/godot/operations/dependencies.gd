@@ -530,6 +530,20 @@ static func _comment_of(line: String) -> String:
 
 # How a line that names the resource by path uses it.
 func _path_reference_kind(line: String, file_path: String) -> String:
+	var placed: String = _placed_kind(line, file_path)
+	if not placed.is_empty():
+		return placed
+	var trimmed: String = GdhPatterns.without_annotations(line)
+	if "preload(" in trimmed:
+		return "preload"
+	if "load(" in trimmed:
+		return "load"
+	return "path"
+
+
+# The kind a reference on [param line] has by the file it is in or by how the line starts, or ""
+# when neither says.
+static func _placed_kind(line: String, file_path: String) -> String:
 	match file_path.get_file():
 		"project.godot":
 			return "setting"
@@ -546,11 +560,31 @@ func _path_reference_kind(line: String, file_path: String) -> String:
 		return "ext_resource"
 	if trimmed.begins_with("#include"):
 		return "include"
-	if "preload(" in trimmed:
+	return ""
+
+
+# The kind of the reference [param found] is in [param content], read from [param path], by the
+# call its path is handed to rather than by the line, which can name a second file another way: a
+# path only written in a string, which nothing in the file may load, read as a load.
+static func _forward_kind(content: String, found: RegExMatch, path: String) -> String:
+	var matched: String = found.get_string()
+	if matched.begins_with("preload("):
 		return "preload"
-	if "load(" in trimmed:
+	if matched.begins_with("load("):
 		return "load"
-	return "path"
+	var start: int = found.get_start()
+	var line_start: int = content.rfind("\n", start) + 1
+	var line_end: int = content.find("\n", start)
+	var line: String = content.substr(
+		line_start, (content.length() if line_end == -1 else line_end) - line_start
+	)
+	var before: String = content.substr(line_start, start - line_start).rstrip("\"'")
+	if before.ends_with("preload("):
+		return "preload"
+	if before.ends_with("load("):
+		return "load"
+	var placed: String = _placed_kind(line, path)
+	return "path" if placed.is_empty() else placed
 
 
 func _regex_escaped(text: String) -> String:
@@ -704,12 +738,13 @@ func _references(path: String, walk: GdhDependencyWalk) -> Array[Dictionary]:
 			for m: RegExMatch in regex.search_all(content):
 				var written: String = _resolved(_referenced_path(m.get_string()), path)
 				var dep_path: String = str(moved.get(written, written))
+				var kind: String = _forward_kind(content, m, path)
 
 				# A uid the project does not know names no file, and loading it fails: passed over
 				# as no res:// path, a script's load of one went unsaid while the game printed
 				# "Unrecognized UID" at that line.
 				if dep_path.begins_with("uid://"):
-					_name(deps, path, dep_path, {})
+					_name(deps, path, dep_path, { "kind": kind })
 					continue
 				if not dep_path.begins_with("res://"):
 					continue
@@ -725,7 +760,9 @@ func _references(path: String, walk: GdhDependencyWalk) -> Array[Dictionary]:
 				if not walk.include_built_in and dep_path.begins_with("res://."):
 					continue
 
-				var named_by: Dictionary = { "stale_path": written } if dep_path != written else {}
+				var named_by: Dictionary = { "kind": kind }
+				if dep_path != written:
+					named_by["stale_path"] = written
 				if unknown.has(dep_path):
 					named_by["unknown_uid"] = unknown[dep_path]
 				_name(deps, path, dep_path, named_by)
@@ -746,8 +783,8 @@ func _references(path: String, walk: GdhDependencyWalk) -> Array[Dictionary]:
 
 # Adds [param dep_path] to [param deps], what [param path] depends on, once however many times it
 # is named. [param named_by] is the class or autoload name it was named by, as by_class or
-# by_autoload, and the path written when the engine loads another, as stale_path; empty for a path
-# that is the file.
+# by_autoload, or for a path its kind, with the path written when the engine loads another as
+# stale_path.
 func _name(deps: Array[Dictionary], path: String, dep_path: String, named_by: Dictionary) -> void:
 	if dep_path == path:
 		return

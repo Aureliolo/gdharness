@@ -514,7 +514,8 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
       {
         path: 'res://chain/boros.gd',
         exists: true,
-        dependencies: [{ path: 'res://chain/ouro.gd', exists: true, circular: true }],
+        kind: 'preload',
+        dependencies: [{ path: 'res://chain/ouro.gd', exists: true, kind: 'preload', circular: true }],
       },
     ],
     'ouro is not a dependency of itself',
@@ -530,7 +531,7 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
       'dependencies',
       'res://chain/ouro.gd',
     ),
-    [{ path: 'res://chain/boros.gd', exists: true, beyond_depth: 1 }],
+    [{ path: 'res://chain/boros.gd', exists: true, kind: 'preload', beyond_depth: 1 }],
     'boros names one file the depth kept out',
   );
   // A cycle is met from a second of its files only when it is walked again, which the depth cutting
@@ -560,6 +561,44 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
     ),
     [['res://twice/a.gd', 'res://twice/b.gd', 'res://twice/a.gd']],
     'the cycle through a and b is listed once',
+  );
+
+  // Each way a script names a file, one line naming two of them two ways: read by its line, the
+  // path written beside a preload was answered as preloaded too.
+  writeFileSync(join(projectDir, 'chain', 'loaded.gd'), 'extends Node\n');
+  writeFileSync(
+    join(projectDir, 'chain', 'kinds.gd'),
+    'extends "res://chain/leaf.gd"\n\nconst Middle = preload("res://chain/middle.gd")\n' +
+      'const NAMED: String = "res://chain/top.gd"\n\n' +
+      'var both: Array = [preload("res://chain/boros.gd"), "res://chain/ouro.gd"]\n\n\n' +
+      'func _later() -> Resource:\n\treturn load("res://chain/loaded.gd")\n',
+  );
+  let kinds: unknown;
+  try {
+    kinds = runOperation(godotPath, projectDir, 'get_dependencies', {
+      resource_path: 'res://chain/kinds.gd',
+      depth: 1,
+    });
+  } finally {
+    rmSync(join(projectDir, 'chain', 'kinds.gd'));
+    rmSync(join(projectDir, 'chain', 'loaded.gd'));
+  }
+  assert.deepEqual(
+    Object.fromEntries(
+      asArray(get(kinds, 'dependencies', 'res://chain/kinds.gd')).map((dep) => [
+        get(dep, 'path'),
+        get(dep, 'kind'),
+      ]),
+    ),
+    {
+      'res://chain/leaf.gd': 'extends',
+      'res://chain/middle.gd': 'preload',
+      'res://chain/top.gd': 'path',
+      'res://chain/boros.gd': 'preload',
+      'res://chain/ouro.gd': 'path',
+      'res://chain/loaded.gd': 'load',
+    },
+    `each file by how it is named: ${JSON.stringify(kinds)}`,
   );
 
   // addons/ is project content and often shipping content, so it is walked like anything
@@ -4217,21 +4256,24 @@ function testEveryUseIsFound(godotPath: string): void {
         {
           path: 'res://sub/chain_b.gd',
           exists: true,
+          kind: 'preload',
           dependencies: [
             {
               path: 'res://sub/chain_c.gd',
               exists: true,
+              kind: 'preload',
               dependencies: [
                 {
                   path: 'res://sub/chain_d.gd',
                   exists: true,
-                  dependencies: [{ path: 'res://sub/chain_e.gd', exists: true }],
+                  kind: 'preload',
+                  dependencies: [{ path: 'res://sub/chain_e.gd', exists: true, kind: 'preload' }],
                 },
               ],
             },
           ],
         },
-        { path: 'res://sub/chain_c.gd', exists: true, dependencies_listed_above: true },
+        { path: 'res://sub/chain_c.gd', exists: true, kind: 'preload', dependencies_listed_above: true },
       ],
       'c is listed once',
     );
@@ -4264,12 +4306,12 @@ function testEveryUseIsFound(godotPath: string): void {
     );
     assert.deepEqual(
       asArray(get(throughB[0], 'dependencies')),
-      [{ path: 'res://sub/chain_d.gd', exists: true, beyond_depth: 1 }],
+      [{ path: 'res://sub/chain_d.gd', exists: true, kind: 'preload', beyond_depth: 1 }],
       `the depth stopped the walk at d, which names e: ${JSON.stringify(walked)}`,
     );
     assert.deepEqual(
       asArray(get(asArray(get(shortcut, 'dependencies'))[0], 'dependencies')),
-      [{ path: 'res://sub/chain_e.gd', exists: true }],
+      [{ path: 'res://sub/chain_e.gd', exists: true, kind: 'preload' }],
       'and e names nothing',
     );
 
@@ -4297,7 +4339,8 @@ function testEveryUseIsFound(godotPath: string): void {
         {
           path: 'res://sub/parts/tint.gdshaderinc',
           exists: true,
-          dependencies: [{ path: 'res://sub/more.gdshaderinc', exists: true }],
+          kind: 'include',
+          dependencies: [{ path: 'res://sub/more.gdshaderinc', exists: true, kind: 'include' }],
         },
       ],
       'the relative include is followed, the include in it too, and no comment is',
@@ -4330,7 +4373,7 @@ function testEveryUseIsFound(godotPath: string): void {
         'dependencies',
         'res://sub/loader.tscn',
       ),
-      [{ path: 'res://sub/art/loading.png', exists: false }],
+      [{ path: 'res://sub/art/loading.png', exists: false, kind: 'ext_resource' }],
       'the path is read from path=, not the first quoted value on the line',
     );
   } finally {
@@ -4624,7 +4667,7 @@ function testValidationReadsEveryScript(godotPath: string): void {
         'dependencies',
         'res://many/template.gd',
       ),
-      [{ path: 'res://folder/really_missing.gd', exists: false }],
+      [{ path: 'res://folder/really_missing.gd', exists: false, kind: 'load' }],
       'nor does the walk depend on the text',
     );
   } finally {
