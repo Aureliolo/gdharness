@@ -59832,7 +59832,7 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
       '[node name="Body" parent="." index="0"]\nvisible = false\n\n' +
       '[node name="Extra" type="Label" parent="Body"]\ntext = "hi"\n',
     'loud.gd':
-      'extends Node2D\n\n@export var speed: int = 3\n\n\nfunc _init() -> void:\n' +
+      'class_name LoudThing\nextends Node2D\n\n@export var speed: int = 3\n\n\nfunc _init() -> void:\n' +
       '\tFileAccess.open("res://init_ran.txt", FileAccess.WRITE).store_string("ran")\n',
     'loud.tscn':
       '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://loud.gd" id="1_loud"]\n\n' +
@@ -59906,7 +59906,7 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
   const flat = (entry: unknown): string[] => [
     `${text(get(entry, 'path'))} ${text(get(entry, 'type'))} ${text(get(entry, 'name'))}${
       get(entry, 'instanceOf') === undefined ? '' : ` <${text(get(entry, 'instanceOf'))}`
-    }`,
+    }${get(entry, 'scriptClass') === undefined ? '' : ` (${text(get(entry, 'scriptClass'))})`}`,
     ...asArray(get(entry, 'children')).flatMap(flat),
   ];
   const at = (entry: unknown, path: string): unknown =>
@@ -59932,7 +59932,8 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
         'Pet/Body/Added Node2D Added',
         'Pet/Body/Tail Node2D Tail',
         'Pet/Body/Extra Label Extra',
-        'Loud Node2D Loud <res://loud.tscn',
+        // The class its script declares, carried from the file the instance comes from.
+        'Loud Node2D Loud <res://loud.tscn (LoudThing)',
       ],
       JSON.stringify(tree),
     );

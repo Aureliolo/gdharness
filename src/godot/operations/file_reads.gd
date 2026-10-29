@@ -356,6 +356,12 @@ static func _entry(
 	var data: Dictionary = {
 		"name": node["name"], "type": node["type"], "path": path, "children": children,
 	}
+	var given_values: Dictionary = node["properties"]
+	var attached: Variant = given_values.get("script")
+	if attached is Script:
+		var script: Script = attached
+		if not str(script.get_global_name()).is_empty():
+			data["scriptClass"] = str(script.get_global_name())
 	# The root's file is the scene being read, so only another node's names a second scene.
 	if path != "." and node.has("instanceOf"):
 		data["instanceOf"] = node["instanceOf"]
