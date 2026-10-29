@@ -62772,7 +62772,7 @@ async function testAStateMachineWrittenWithNoEditorRunsAsWritten(): Promise<void
     console.log('state machine run without an editor regression skipped (Godot not found)');
     return;
   }
-  await withAnAnimationProject(godotPath, {}, async ({ server, project, call, written }) => {
+  await withAnAnimationProject(godotPath, {}, async ({ server, project, call, written, fileOf }) => {
     // A machine written here is run, since the mode the engine reads is what decides whether it
     // moves: written as the default enabled, it sat in Start with its condition true.
     const machine = { scenePath: 'machine.tscn', animTreePath: 'Tree' };
@@ -62789,6 +62789,12 @@ async function testAStateMachineWrittenWithNoEditorRunsAsWritten(): Promise<void
       advanceCondition: 'jumped',
     });
     assert.equal(get(conditioned, 'advanceMode'), 'auto', JSON.stringify(conditioned));
+    // The tree lists a parameter for each condition, and the write that made the condition holds it.
+    assert.match(
+      fileOf('machine.tscn'),
+      /^parameters\/conditions\/jumped = false$/m,
+      `the condition's parameter is written with the transition: ${fileOf('machine.tscn')}`,
+    );
     const kept = await written({
       ...machine,
       op: 'connect_states',
@@ -62842,6 +62848,14 @@ async function testAStateMachineWrittenWithNoEditorRunsAsWritten(): Promise<void
     );
     const said = JSON.stringify(get(ran, 'entries'));
     assert.match(said, /in Idle.*then in Hop/, JSON.stringify(ran));
+
+    const cut = await written({ ...machine, op: 'disconnect_states', fromState: 'Idle', toState: 'Hop' });
+    assert.deepEqual(get(cut, 'removed'), { from: 'Idle', to: 'Hop' }, JSON.stringify(cut));
+    assert.doesNotMatch(
+      fileOf('machine.tscn'),
+      /parameters\/conditions\/jumped/,
+      `and goes with the last transition reading it: ${fileOf('machine.tscn')}`,
+    );
   });
 }
 

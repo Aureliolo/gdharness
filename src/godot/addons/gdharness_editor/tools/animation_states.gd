@@ -137,6 +137,7 @@ func connect_animation_states(args: Dictionary) -> Dictionary:
 	sm.add_transition(StringName(from_state), StringName(to_state), transition)
 	if not sm.has_transition(StringName(from_state), StringName(to_state)):
 		return scene.refuse("The state machine did not take the transition.")
+	_tell_the_tree(sm)
 	var files: Dictionary = found[2]
 	return _finish(
 		scene,
@@ -144,6 +145,14 @@ func connect_animation_states(args: Dictionary) -> Dictionary:
 		files,
 		{ "ok": true, "from": from_state, "to": to_state, "advanceMode": advance_mode }
 	)
+
+
+## Has the AnimationTree playing [param sm] list its parameters again. Adding or removing a
+## transition does not say the tree changed, so the save kept the parameters from before it: a
+## condition's parameter was written by the next call to change the machine, and a removed one's
+## stayed until then.
+static func _tell_the_tree(sm: AnimationNodeStateMachine) -> void:
+	var _told: Error = sm.emit_signal(&"tree_changed")
 
 
 ## Why [param sm] cannot take a transition from [param from_state] to [param to_state], or "".
@@ -270,6 +279,7 @@ func disconnect_animation_states(args: Dictionary) -> Dictionary:
 	sm.remove_transition(StringName(from_state), StringName(to_state))
 	if sm.has_transition(StringName(from_state), StringName(to_state)):
 		return scene.refuse("The state machine did not let go of the transition.")
+	_tell_the_tree(sm)
 	var files: Dictionary = found[2]
 	return _finish(
 		scene, Callable(), files, { "ok": true, "removed": { "from": from_state, "to": to_state } }
