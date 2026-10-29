@@ -817,7 +817,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['set_preset'],
         enum: ['all_resources', 'scenes', 'resources', 'exclude'],
         description:
-          'set_preset: what the preset exports: every resource, the scenes listed in files and what they use, the resources listed, or every resource but those listed.',
+          'set_preset: what the preset exports: every resource, the scenes listed in files and what they use, the resources listed, or every resource but those listed. What a scene or a resource uses is what the engine counts as its dependencies, so a file named only in a string, such as a scene path held in an exported property, or a script reached only by its class_name, is left out of the export, though project_dependencies lists both.',
       },
       files: {
         type: 'array',
