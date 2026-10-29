@@ -17757,6 +17757,15 @@ async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
       [3, 1.5, undefined],
       JSON.stringify(held),
     );
+    // Named whatever part of the tree is read, since a read of a screen inside it is the usual one.
+    const inside: unknown = JSON.parse(
+      await call('runtime_inspect', { op: 'tree', nodePath: '/root/Main/Near', depth: 0 }),
+    );
+    assert.deepEqual(
+      get(inside, 'current_scene'),
+      { path: '/root/Main', file: 'res://main.tscn' },
+      JSON.stringify(inside),
+    );
 
     const size = await call('runtime_inspect', { op: 'property', nodePath: '/root', property: 'size' });
     assert.match(size, /"x": 800,\s*"y": 600/, `the root has the project's window size: ${size}`);

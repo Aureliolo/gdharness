@@ -2143,7 +2143,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     },
     requires: [],
     operations: {
-      tree: { effect: 'read', summary: 'the live scene tree', requires: [] },
+      tree: {
+        effect: 'read',
+        summary:
+          'the live scene tree, with current_scene giving the path of the scene the game is showing and the file it was loaded from, or null when it shows none',
+        requires: [],
+      },
       text: {
         effect: 'read',
         summary:
