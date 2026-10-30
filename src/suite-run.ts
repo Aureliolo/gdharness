@@ -46,6 +46,7 @@ import { staleImports } from './import-freshness.js';
 import { hiddenWindowFlags } from './launch.js';
 import { freeLibraryCopies, seedExtensionList } from './library-copies.js';
 import { prependTo, readLog } from './log-read.js';
+import { forceNextImport } from './reimport.js';
 import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
 import { EVERY_FILE, type PassedSuite, reachedBySuite, SuiteInputs } from './suite-inputs.js';
 import {
@@ -1013,11 +1014,12 @@ async function importProject(launch: Launch): Promise<string | null> {
     console.log(`Wrote .godot/extension_list.cfg naming ${named(seeded)}, so the import loads them.`);
   }
   const cached = cachedClasses(launch.projectPath);
+  const stale = staleImports(launch.projectPath);
   if (
     (seeded === null || seeded.length === 0) &&
     cached !== null &&
     staleAgainst(cached, launch.projectPath).length === 0 &&
-    staleImports(launch.projectPath).length === 0
+    stale.length === 0
   ) {
     console.log('The import was skipped: every imported file and the class cache are current.');
     return null;
@@ -1030,6 +1032,11 @@ async function importProject(launch: Launch): Promise<string | null> {
     // An editor open on the project holds the copies of its extension libraries, and an import
     // that cannot copy one runs without the extension.
     freeLibraryCopies(launch.projectPath);
+    // The engine's scan without the editor's cache passes over a sidecar that names no output, so
+    // every file found behind is marked for the import rather than left to the scan's judgement.
+    for (const one of stale) {
+      forceNextImport(launch.projectPath, one.path);
+    }
     const ended = await watchedEngine(
       launch,
       lock,
