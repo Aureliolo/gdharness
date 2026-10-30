@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { isSameDirectory } from './paths.js';
+import { askProcessTable, ProcessTableUnbuilt } from './process-table.js';
 import { runHidden as run } from './spawn.js';
-import { askWindows, WindowsAskFailure } from './windows-ask.js';
+import { WindowsAskFailure } from './windows-ask.js';
 
 /**
  * When each of [param pids] started, as milliseconds, for the ones the platform will say.
@@ -18,11 +19,7 @@ export async function startTimesOf(pids: readonly number[]): Promise<Map<number,
   }
   try {
     if (process.platform === 'win32') {
-      const filter = pids.map((pid) => `ProcessId=${pid}`).join(' OR ');
-      const said = await askWindows(
-        `Get-CimInstance Win32_Process -Filter "${filter}" | ForEach-Object { "$($_.ProcessId) $(([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds())" }`,
-        ASK_TIMEOUT_MS,
-      );
+      const said = await askProcessTable(`Starts('${pids.join(',')}')`, ASK_TIMEOUT_MS);
       for (const line of said.split('\n')) {
         const found = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
         if (found?.[1] !== undefined && found[2] !== undefined) {
@@ -186,7 +183,7 @@ let lastListingFailure: string | undefined;
  * to either.
  */
 export function listingFailure(error: unknown): string {
-  if (error instanceof WindowsAskFailure) {
+  if (error instanceof WindowsAskFailure || error instanceof ProcessTableUnbuilt) {
     return error.message;
   }
   if (!(error instanceof Error)) {
@@ -535,13 +532,9 @@ function commandWords(command: string): string[] {
 }
 
 function listWindows(): Promise<string> {
-  return askWindows(
-    // The start beside the parent link, because the link alone is not to be believed on Windows:
-    // see `linked`. Zero for the few processes the system will not date. Only the four properties
-    // read below: the whole object takes the query about twice as long.
-    'Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate,CommandLine | ForEach-Object { $began = 0; if ($_.CreationDate) { $began = ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }; "$($_.ProcessId) $($_.ParentProcessId) $began $($_.CommandLine)" }',
-    ASK_TIMEOUT_MS,
-  );
+  // The start beside the parent link, because the link alone is not to be believed on Windows: see
+  // `linked`.
+  return askProcessTable('Table()', ASK_TIMEOUT_MS);
 }
 
 async function askPosix(): Promise<string> {
