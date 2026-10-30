@@ -314,11 +314,13 @@ runs the rest. A gate can pass it: a suite is left out only when the files it ra
 to the byte, and every script is still compiled together in an engine of its own, so a script that
 no longer compiles fails the run even when every suite is left out.
 
-A suite's inputs are what its engine loaded, recorded as the run goes: every path a loader was
-asked for, from before the autoloads load until the suite's own end, and every project script the
-engine compiled without asking a loader. Since the engine answers a load it already holds from its
-cache, a suite's inputs include everything loaded before it in the same engine. From those files
-the inputs are followed further: the scripts each one preloads or names, the paths a scene or
+A suite's inputs are what its engine recorded for it as the run went: its own script, what the
+autoloads loaded, every path a loader was asked for while the suite ran, every project script the
+engine compiled then without asking a loader, and every project file the engine's cache held as the
+suite began. The engine answers a load of a resource it holds from its cache without asking any
+loader, and holds one only while something refers to it, so what an earlier suite loaded and let go
+is not among a later suite's inputs: loading it again asks a loader. From those files the inputs
+are followed further: the scripts each one preloads or names, the paths a scene or
 resource names, each resource's `.import` and `.uid` files, and the whole of any addon reached.
 A file read or listed by a literal or constant path is an input; one read by a path computed at run
 time, or a `uid://` preload, makes every file in the project an input. Added to every suite are

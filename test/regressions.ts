@@ -43373,16 +43373,20 @@ function testTheShippedRunnerRunsAFileOfSuites(): void {
         '[autoload]\n\nEarly="*res://early.gd"\n',
       'early.gd': 'extends Node\n\nvar held: Resource = load("res://data/" + "early.tres")\n',
       'data/early.tres': '[gd_resource type="Resource" format=3]\n\n[resource]\n',
+      'data/word.tres': '[gd_resource type="Resource" format=3]\n\n[resource]\n',
     });
     cpSync(gdunit, join(projectDir, 'addons', 'gdUnit4'), { recursive: true });
     mkdirSync(join(projectDir, 'tests'));
-    writeFileSync(join(projectDir, 'tests', 'a_test.gd'), suite(['test_one', 'test_two']));
+    // Each suite loads the same resource and lets it go, so the cache holds it for neither.
+    const looksUp =
+      'func before() -> void:\n\tvar word: Resource = load("res://data/" + "word.tres")\n\tif word == null:\n\t\tpush_error("no word")\n';
+    writeFileSync(join(projectDir, 'tests', 'a_test.gd'), suite(['test_one', 'test_two'], looksUp));
     writeFileSync(
       join(projectDir, 'tests', 'b_test.gd'),
       suite(
         ['test_three'],
         'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {"test_three": ["the store is closed"]}\n' +
-          'const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_three": ["the till is open"]}\n',
+          `const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_three": ["the till is open"]}\n\n${looksUp}`,
       ),
     );
     writeFileSync(join(projectDir, 'tests', 'c_test.gd'), suite(['test_never']));
@@ -43514,28 +43518,48 @@ function testTheShippedRunnerRunsAFileOfSuites(): void {
     const lines = readFileSync(reached, 'utf8')
       .trim()
       .split('\n')
-      .map((line) => JSON.parse(line) as { suite: string; reached: string[] });
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            autoloads?: boolean;
+            began?: string;
+            suite?: string;
+            resident?: string[];
+            reached: string[];
+          },
+      );
     assert.deepEqual(
-      lines.map((line) => line.suite),
-      ['res://tests/b_test.gd', 'res://tests/a_test.gd'],
-      'a line as each suite ends, in the order they ran',
+      lines.map((line) => (line.autoloads === true ? 'autoloads' : (line.began ?? line.suite))),
+      [
+        'autoloads',
+        'res://tests/b_test.gd',
+        'res://tests/b_test.gd',
+        'res://tests/a_test.gd',
+        'res://tests/a_test.gd',
+      ],
+      `a line once the autoloads are loaded, then one as each suite begins and ends: ${JSON.stringify(lines)}`,
     );
-    const firstLine = lines[0]?.reached ?? [];
-    for (const path of [
-      'res://early.gd',
-      'res://data/early.tres',
-      'res://tests/b_test.gd',
-      'res://tests/a_test.gd',
-    ]) {
+    const autoloads = lines[0]?.reached ?? [];
+    for (const path of ['res://early.gd', 'res://data/early.tres']) {
+      assert.ok(autoloads.includes(path), `${path} is on the autoloads' line: ${autoloads.join(', ')}`);
+    }
+    for (const at of [1, 3]) {
+      const resident = lines[at]?.resident ?? [];
       assert.ok(
-        firstLine.includes(path),
-        `${path} is recorded by the first suite's end: ${firstLine.join(', ')}`,
+        resident.includes('res://data/early.tres'),
+        `what the autoload holds is resident as ${lines[at]?.began ?? ''} begins: ${resident.join(', ')}`,
+      );
+      assert.ok(
+        !resident.includes('res://data/word.tres'),
+        `what an earlier suite let go is not: ${resident.join(', ')}`,
       );
     }
-    assert.ok(
-      (lines[1]?.reached ?? []).every((path) => !firstLine.includes(path)),
-      'each path once, on the line it was first asked for',
-    );
+    for (const at of [2, 4]) {
+      assert.ok(
+        (lines[at]?.reached ?? []).includes('res://data/word.tres'),
+        `${lines[at]?.suite ?? ''} loading what the suite before it let go is recorded on its own line: ${JSON.stringify(lines[at])}`,
+      );
+    }
     assert.ok(
       lines.every((line) => !line.reached.includes('res://wreck.gd')),
       `nothing loaded the unreached class: ${JSON.stringify(lines)}`,
@@ -46099,17 +46123,50 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
     utimesSync(join(project, 'data', 'icon.png'), new Date(began + 5000), new Date(began + 5000));
     assert.equal(new SuiteInputs(scripts, ['1']).modifiedAfter(kept, began), true, 'one input since');
 
-    // Each suite's line adds to every earlier line's, since a suite can use what an earlier one loaded.
+    // A suite has the autoloads' line, its own, and what the cache held as it began; not what an
+    // earlier suite loaded and let go, nor the loads between suites.
     const record = join(project, 'reached.jsonl');
     writeFileSync(
       record,
-      `${JSON.stringify({ suite: 'res://tests/a_test.gd', reached: ['res://game.gd', 'res://tests/a_test.gd'] })}\n` +
-        `${JSON.stringify({ suite: 'res://tests/b_test.gd', reached: ['res://helper.gd'] })}\n`,
+      [
+        { autoloads: true, reached: ['res://game.gd'] },
+        { began: 'res://tests/a_test.gd', resident: ['res://game.gd'], reached: ['res://tests/a_test.gd'] },
+        { suite: 'res://tests/a_test.gd', reached: ['res://levels/one.txt'] },
+        {
+          began: 'res://tests/b_test.gd',
+          resident: ['res://game.gd', 'res://helper.gd'],
+          reached: ['res://between.gd'],
+        },
+        { suite: 'res://tests/b_test.gd', reached: ['res://data/levels.json'] },
+        { suite: 'res://tests/never_began_test.gd', reached: [] },
+      ]
+        .map((line) => `${JSON.stringify(line)}\n`)
+        .join(''),
     );
-    assert.deepEqual(Object.fromEntries(reachedBySuite(record)), {
-      'res://tests/a_test.gd': ['res://game.gd', 'res://tests/a_test.gd'],
-      'res://tests/b_test.gd': ['res://game.gd', 'res://tests/a_test.gd', 'res://helper.gd'],
+    const recorded = reachedBySuite(record);
+    assert.deepEqual(Object.fromEntries(recorded), {
+      'res://tests/a_test.gd': {
+        autoloads: ['res://game.gd'],
+        during: ['res://levels/one.txt'],
+        resident: ['res://game.gd'],
+      },
+      'res://tests/b_test.gd': {
+        autoloads: ['res://game.gd'],
+        during: ['res://data/levels.json'],
+        resident: ['res://game.gd', 'res://helper.gd'],
+      },
     });
+    const ofB = new SuiteInputs(scripts, ['1']).inputsOfSuite(
+      'res://tests/b_test.gd',
+      recorded.get('res://tests/b_test.gd') ?? { autoloads: [], during: [], resident: [] },
+    );
+    assert.ok(ofB.includes('res://helper.gd'), `what the cache held as it began: ${ofB.join(', ')}`);
+    assert.ok(ofB.includes('res://data/levels.json'), `what it loaded: ${ofB.join(', ')}`);
+    assert.ok(
+      !ofB.includes('res://levels/one.txt'),
+      `not what the suite before it loaded: ${ofB.join(', ')}`,
+    );
+    assert.ok(!ofB.includes('res://between.gd'), `nor what was loaded between them: ${ofB.join(', ')}`);
     assert.deepEqual(
       reachedBySuite(join(project, 'never-written.jsonl')).size,
       0,
@@ -49065,11 +49122,19 @@ async function testAnOrphanIsNamedWithTheCaseThatLeftIt(): Promise<void> {
       said,
     );
     assert.doesNotMatch(said, /exited 101/, `the code says nothing the lines do not: ${said}`);
-    // The suite that left them is not one that passed, and the clean one beside it is.
+    // The suite that left them is not one that passed, and the clean one beside it is when it had an
+    // engine of its own. A machine with room for one engine runs both together, and the nodes the
+    // leaking suite keeps are then leaked at that engine's exit, which names no suite, so neither
+    // is kept.
     const passed = JSON.parse(
       readFileSync(join(project, '.godot', 'gdharness', 'suite-passed.json'), 'utf8'),
     ) as Record<string, unknown>;
-    assert.deepEqual(Object.keys(passed).sort(), ['res://tests/clean_test.gd'], JSON.stringify(passed));
+    const together = /^Failed: .* across 1 engine, /m.test(said);
+    assert.deepEqual(
+      Object.keys(passed).sort(),
+      together ? [] : ['res://tests/clean_test.gd'],
+      `${together ? 'both in one engine' : 'an engine each'}: ${JSON.stringify(passed)}\n${said}`,
+    );
 
     await server.initialize('regression-test');
     const response = await server.request(

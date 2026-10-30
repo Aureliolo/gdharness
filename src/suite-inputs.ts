@@ -6,8 +6,9 @@
  * Reading the scripts alone cannot say it: every game names `res://tests/` in `project.godot` and
  * `res://` somewhere in a test, so following every path a file names reaches the whole project from
  * every suite. The runner records instead ([GdhReached] in `listed.gd`), and a suite's inputs are
- * what its engine loaded up to the suite's end, followed only along what compiles with a script (its
- * preloads, its base, the classes it names) and what a scene or resource names. A file a script reads
+ * its own script, the autoloads, what it loaded and what the cache held as it began, followed only
+ * along what compiles with a script (its preloads, its base, the classes it names) and what a scene
+ * or resource names. A file a script reads
  * or a folder it lists by a literal or constant path is an input too; one read or listed by a path
  * worked out at run time makes every file in the project one, since nothing records those.
  */
@@ -55,27 +56,51 @@ interface Read {
   readonly modified: number;
 }
 
+/** What an engine recorded for one suite. */
+export interface SuiteReached {
+  /** Loaded before the engine's first suite was handed to the runner: the autoloads and theirs. */
+  readonly autoloads: readonly string[];
+  /** Asked for while the suite ran, and compiled then without a loader being asked. */
+  readonly during: readonly string[];
+  /** The project's files the cache held as the suite began, which a load could have had unasked. */
+  readonly resident: readonly string[];
+}
+
 /**
- * Every suite the engine's record at [param file] names, with the paths its engine had recorded by
- * the suite's end, its own and every earlier line's. No file, from an engine that never started,
- * names none.
+ * Every suite the engine's record at [param file] names that ended, with what was recorded for it.
+ * No file, from an engine that never started, names none.
  */
-export function reachedBySuite(file: string): Map<string, string[]> {
-  const bySuite = new Map<string, string[]>();
+export function reachedBySuite(file: string): Map<string, SuiteReached> {
+  const bySuite = new Map<string, SuiteReached>();
   if (!existsSync(file)) {
     return bySuite;
   }
-  const sofar: string[] = [];
+  const paths = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((path): path is string => typeof path === 'string') : [];
+  let autoloads: string[] = [];
+  const resident = new Map<string, string[]>();
   for (const line of readFileSync(file, 'utf8').split('\n')) {
     if (line.trim() === '') {
       continue;
     }
-    const parsed = JSON.parse(line) as { suite?: unknown; reached?: unknown };
-    if (typeof parsed.suite !== 'string' || !Array.isArray(parsed.reached)) {
-      continue;
+    const parsed = JSON.parse(line) as {
+      autoloads?: unknown;
+      began?: unknown;
+      suite?: unknown;
+      reached?: unknown;
+      resident?: unknown;
+    };
+    if (parsed.autoloads === true) {
+      autoloads = paths(parsed.reached);
+    } else if (typeof parsed.began === 'string') {
+      resident.set(parsed.began, paths(parsed.resident));
+    } else if (typeof parsed.suite === 'string') {
+      // A suite whose beginning went unrecorded has no resident set to judge it by, so it has none.
+      const held = resident.get(parsed.suite);
+      if (held !== undefined) {
+        bySuite.set(parsed.suite, { autoloads, during: paths(parsed.reached), resident: held });
+      }
     }
-    sofar.push(...parsed.reached.filter((path): path is string => typeof path === 'string'));
-    bySuite.set(parsed.suite, [...sofar]);
   }
   return bySuite;
 }
@@ -98,7 +123,17 @@ export class SuiteInputs {
     this.everywhere = ['res://project.godot', ...extensionsOf(scripts.projectPath)];
   }
 
-  /** The inputs of a suite whose engine recorded [param reached], in order, every path once. */
+  /**
+   * The inputs of the suite at [param suite], from what its engine recorded for it: its own script,
+   * the autoloads, what it loaded as it ran, and what the cache held as it began, which a load could
+   * have had without asking, all followed. What an earlier suite loaded and let go is not among them:
+   * the cache had let it go too, so loading it again asked a loader.
+   */
+  inputsOfSuite(suite: string, reached: SuiteReached): string[] {
+    return this.inputsOf([suite, ...reached.autoloads, ...reached.during, ...reached.resident]);
+  }
+
+  /** The inputs followed from [param reached], in order, every path once. */
   inputsOf(reached: readonly string[]): string[] {
     const inputs = new Set<string>();
     const pending = [...reached, ...this.everywhere]

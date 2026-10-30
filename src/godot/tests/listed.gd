@@ -99,6 +99,8 @@ func _initialize() -> void:
 	if given.has(COMPILE_ONLY):
 		compile_only(given)
 		return
+	if GdhReached.current != null:
+		GdhReached.current.autoloaded()
 	_runner = started(given)
 	_runner.own_path = get_script().resource_path
 	root.add_child(_runner)
@@ -499,6 +501,8 @@ class GdhRunner:
 					var _watched: int = tree.process_frame.connect(drawn_window)
 			GdUnitEvent.TESTSUITE_BEFORE:
 				drawn_window()
+				if GdhReached.current != null:
+					GdhReached.current.began(event.resource_path())
 				suite_running = event.resource_path()
 				orphans_at_suite = orphan_ids()
 				orphans_named.clear()
@@ -791,14 +795,15 @@ class GdhShutdownWalk:
 		ThemeDB.set_meta(WALK_HOLD, held)
 
 
-## What the run loads, written to the file named after [constant REACHED_OUT] as each suite ends: a
-## line of JSON with the suite's path and every path asked for since the line before. A suite's
-## inputs are everything up to its own line, not only what it loaded itself: the engine answers a
-## load of a resource it holds from its cache without asking any loader, so a suite can use what the
-## autoloads or an earlier suite loaded and nothing records it. Placed first among the loaders, it
-## is asked about every load and every [method ResourceLoader.exists] and declines each. A script
-## compiled for a preload, a base or a class name is read without a loader, so each line also has
-## the project's files the cache holds that no loader was asked for.
+## What the run loads, written to the file named after [constant REACHED_OUT] a line of JSON at a
+## time, each with every path asked for since the line before: one once the autoloads are loaded,
+## one as each suite begins, which also names the project's files the cache holds then, and one as
+## it ends. The engine answers a load of a resource it holds from its cache without asking any
+## loader, and it holds one only while something refers to it, so what a suite can load unasked is
+## what the cache held as it began. Placed first among the loaders, it is asked about every load and
+## every [method ResourceLoader.exists] and declines each. A script compiled for a preload, a base
+## or a class name is read without a loader, so a suite's last line also has the project's files
+## the cache came to hold that no loader was asked for.
 class GdhReached:
 	extends ResourceFormatLoader
 
@@ -807,9 +812,11 @@ class GdhReached:
 	var _file: FileAccess = null
 	## Loads on other threads ask too, as a threaded load runs its own.
 	var _mutex: Mutex = Mutex.new()
+	## What the current line holds, since a path freed and loaded again is asked for again.
 	var _seen: Dictionary[String, bool] = {}
 	var _fresh: PackedStringArray = []
 	var _files: PackedStringArray = []
+	var _resident: Dictionary[String, bool] = {}
 
 	static func start(into: String) -> void:
 		var file: FileAccess = FileAccess.open(into, FileAccess.WRITE)
@@ -865,13 +872,29 @@ class GdhReached:
 	func _handles_type(_type: StringName) -> bool:
 		return false
 
-	## Writes the line of the suite at [param suite], which has just ended. The cache is asked
-	## outside the lock, since a load on another thread holds the cache's own while it asks this.
+	## Writes the line for the autoloads, which have all been loaded by now.
+	func autoloaded() -> void:
+		written({ "autoloads": true })
+
+	## Writes the line of the suite at [param suite], which is about to begin, with what the cache
+	## holds. The cache is asked outside the lock, since a load on another thread holds the cache's
+	## own lock while it asks this.
+	func began(suite: String) -> void:
+		var resident: PackedStringArray = []
+		_resident.clear()
+		for path: String in _files:
+			if ResourceLoader.has_cached(path):
+				var _held: bool = resident.append(path)
+				_resident[path] = true
+		written({ "began": suite, "resident": resident })
+
+	## Writes the line of the suite at [param suite], which has just ended, with the project's files
+	## the cache came to hold while it ran that no loader was asked for.
 	func ended(suite: String) -> void:
 		_mutex.lock()
 		var unseen: PackedStringArray = []
 		for path: String in _files:
-			if not _seen.has(path):
+			if not _seen.has(path) and not _resident.has(path):
 				var _unseen: bool = unseen.append(path)
 		_mutex.unlock()
 		var cached: PackedStringArray = []
@@ -883,8 +906,15 @@ class GdhReached:
 			if not _seen.has(path):
 				_seen[path] = true
 				var _held: bool = _fresh.append(path)
-		var line: String = JSON.stringify({ "suite": suite, "reached": _fresh })
-		_fresh = []
 		_mutex.unlock()
-		var _stored: bool = _file.store_line(line)
+		written({ "suite": suite })
+
+	## Writes [param fields] as a line with every path asked for since the line before.
+	func written(fields: Dictionary) -> void:
+		_mutex.lock()
+		fields["reached"] = _fresh
+		_fresh = []
+		_seen.clear()
+		_mutex.unlock()
+		var _stored: bool = _file.store_line(JSON.stringify(fields))
 		_file.flush()

@@ -46,7 +46,7 @@ import { staleImports } from './import-freshness.js';
 import { hiddenWindowFlags } from './launch.js';
 import { freeLibraryCopies, seedExtensionList } from './library-copies.js';
 import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
-import { type PassedSuite, reachedBySuite, SuiteInputs } from './suite-inputs.js';
+import { EVERY_FILE, type PassedSuite, reachedBySuite, SuiteInputs } from './suite-inputs.js';
 import {
   type EngineAssignment,
   type EngineEnd,
@@ -845,8 +845,8 @@ function recordPassed(
         failedSomewhere.add(path);
         continue;
       }
-      const into = reached.get(path) ?? new Set<string>([path]);
-      for (const one of recorded) {
+      const into = reached.get(path) ?? new Set<string>();
+      for (const one of inputs.inputsOfSuite(path, recorded)) {
         into.add(one);
       }
       reached.set(path, into);
@@ -854,7 +854,12 @@ function recordPassed(
   }
   for (const path of new Set([...reached.keys(), ...failedSomewhere])) {
     const loaded = reached.get(path);
-    const kept = failedSomewhere.has(path) || loaded === undefined ? [] : inputs.inputsOf([...loaded]);
+    const kept =
+      failedSomewhere.has(path) || loaded === undefined
+        ? []
+        : loaded.has(EVERY_FILE)
+          ? [EVERY_FILE]
+          : [...loaded].sort();
     if (kept.length > 0 && !inputs.modifiedAfter(kept, began)) {
       passed[path] = { print: inputs.printOf(kept), inputs: kept };
     } else {
