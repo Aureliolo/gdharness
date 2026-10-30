@@ -305,9 +305,13 @@ included, so whether it exists says nothing about whether gdharness can reach th
 needs to know asks `get_node("/root/GdharnessRuntime").serving()`, which is true only while the
 runtime under it is listening.
 
-The loader lives in its own top-level folder, `gdharness/`, and the export carries it, since the
-autoload names it. A check that refuses unexpected top-level folders in an exported pack has to
-allow that one.
+A release export leaves gdharness out while the editor addon is enabled: the autoload entry is
+taken out of the exported settings, and the `gdharness/` folder, the runtime and the editor addons
+are not exported, so no player's build carries them and `/root/GdharnessRuntime` is not there. Game
+code that ships reaches it only by path, as with `get_node_or_null`. A debug export keeps all of it,
+and `project.godot` is left as it was. The loader lives in its own top-level folder, `gdharness/`,
+which a debug export carries, so a check that refuses unexpected top-level folders in a debug pack
+has to allow that one.
 
 A scene that is not the game, such as a bench, is handed to the engine the way a screen is, so it
 is served like the game unless you list its folder. Set `gdharness/runtime/quiet_scenes_under` to

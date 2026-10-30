@@ -6,6 +6,7 @@ extends EditorPlugin
 
 const GdhBridgeClient = preload("bridge_client.gd")
 const GdhToolExecutor = preload("tool_executor.gd")
+const GdhReleaseExport = preload("release_export.gd")
 ## The tools answered while the editor scans or imports, because none of them saves a file: the
 ## ones a caller waits on a scan with, and the ones that only read or stop a played game.
 const ANSWERED_WHILE_SCANNING: Array[String] = [
@@ -20,9 +21,13 @@ const ANSWERED_WHILE_SCANNING: Array[String] = [
 var _client: GdhBridgeClient
 var _tool_executor: GdhToolExecutor
 var _status_label: Label
+var _release_export: GdhReleaseExport
 
 
 func _enter_tree() -> void:
+	_release_export = GdhReleaseExport.new()
+	add_export_plugin(_release_export)
+
 	_client = GdhBridgeClient.new()
 	_client.name = "GdharnessBridgeClient"
 	add_child(_client)
@@ -41,6 +46,10 @@ func _enter_tree() -> void:
 
 
 func _exit_tree() -> void:
+	if _release_export:
+		remove_export_plugin(_release_export)
+		_release_export = null
+
 	if _client:
 		if _client.connected.is_connected(_on_connected):
 			_client.connected.disconnect(_on_connected)
