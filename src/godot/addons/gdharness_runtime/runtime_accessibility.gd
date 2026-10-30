@@ -40,6 +40,7 @@ const WALK: String = r"""
 $ErrorActionPreference = 'Stop'
 function Answer($value) {
   [System.IO.File]::WriteAllText($Out, (ConvertTo-Json -InputObject $value -Depth 100 -Compress))
+  Mark 'answered'
 }
 function Mark($stage) {
   [System.IO.File]::AppendAllText($Progress, "$stage $([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())`n")
@@ -280,14 +281,24 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 	var looked_at: int = began_at
 	while OS.is_process_running(pid):
 		var now: int = Time.get_ticks_msec()
-		if not walking and now - looked_at >= LOOK_MS:
+		if now - looked_at >= LOOK_MS:
 			looked_at = now
-			if FileAccess.get_file_as_string(progress).contains("loaded "):
+			var marked: String = FileAccess.get_file_as_string(progress)
+			if not walking and marked.contains("loaded "):
 				walking = true
 				deadline = _deadline(began_at, now, handles.size())
+			# The answer is whole once it is marked, so the read is done whatever the client does
+			# after it, and a client slow to exit costs the read nothing.
+			if marked.contains("answered "):
+				var _ended: Error = OS.kill(pid)
+				break
 		if now > deadline:
 			var _killed: Error = OS.kill(pid)
-			var reached: String = _reached(FileAccess.get_file_as_string(progress), started_ms)
+			var reached: String = _reached(
+				FileAccess.get_file_as_string(progress),
+				started_ms,
+				int(Time.get_unix_time_from_system() * 1000.0)
+			)
 			var _gone: Error = DirAccess.remove_absolute(progress)
 			return _refused(
 				(
@@ -743,19 +754,22 @@ static func _marks(progress: String) -> Array:
 	return marks
 
 
-## How far a client started at [param started_ms] got by the marks in [param progress], said for a
-## caller whose read it stopped: the time went to starting PowerShell, loading UI Automation, or the
-## walks, and which tells a loaded machine from a window that never answers.
-static func _reached(progress: String, started_ms: int) -> String:
+## How far a client started at [param started_ms] and stopped at [param stopped_ms] got by the marks
+## in [param progress], said for a caller whose read it stopped: the time went to starting
+## PowerShell, loading UI Automation, the walks, or after the last walk, and which tells a loaded
+## machine from a window that never answers.
+static func _reached(progress: String, started_ms: int, stopped_ms: int) -> String:
 	var marks: Array = _marks(progress)
 	var at: Dictionary = {}
 	var walks: int = 0
 	var last: String = ""
+	var last_at: int = 0
 	for mark: Array in marks:
 		var stage: String = mark[0]
 		if stage.begins_with("walked "):
 			walks += 1
 			last = stage.trim_prefix("walked ")
+			last_at = mark[1]
 		elif not at.has(stage):
 			at[stage] = mark[1]
 	if not at.has("began"):
@@ -775,9 +789,18 @@ static func _reached(progress: String, started_ms: int) -> String:
 	return (
 		(
 			"PowerShell began the client after %d ms and loaded UI Automation in %d ms, and the "
-			+ "windows were walked %d time%s, the last finding %s element%s"
+			+ "windows were walked %d time%s, the last finding %s element%s and ending %d ms "
+			+ "before the client was stopped"
 		)
-		% [began, loaded, walks, "" if walks == 1 else "s", last, "" if last == "1" else "s"]
+		% [
+			began,
+			loaded,
+			walks,
+			"" if walks == 1 else "s",
+			last,
+			"" if last == "1" else "s",
+			stopped_ms - last_at,
+		]
 	)
 
 

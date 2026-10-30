@@ -602,6 +602,19 @@ export function uncachedFor(
 }
 
 /**
+ * The script of [param projectPath] declaring the class [param name] when the class cache does not
+ * list it, or null. An engine knows a class_name only from that cache, so until it is rebuilt a
+ * create naming the class is refused as naming no class at all. The scripts are read only when the
+ * cache lacks the name, since an engine class or a cached one is the usual answer.
+ */
+export function declaredButUncached(projectPath: string, name: string): string | null {
+  if (name === '' || cachedClasses(projectPath)?.has(name) === true) {
+    return null;
+  }
+  return declaredClasses(projectPath).get(name) ?? null;
+}
+
+/**
  * The global classes a script names, which are the types its own analysed copy is built from.
  *
  * What this is for: the editor's held copy of a type is refreshed when one of the things it depends
