@@ -46148,21 +46148,21 @@ function testTheCompileCheckAndUnattributedFaultsAreJudged(): void {
   assert.deepEqual(compiled([COMPILED_SAID], 1), ['the engine exited 1'], 'and a failing exit');
 
   const handed = {
-    suites: [{ path: 'res://tests/a_test.gd', cases: ['test_a'] }],
+    suites: [{ path: S_TEST, cases: ['test_a', 'test_p'] }],
     expected: { errors: {}, warnings: {} },
   };
-  const ran = (extra: readonly string[]): string =>
-    [
-      'Godot Engine v4.7.2.stable.official',
-      ...extra,
-      'Run Test Suite: res://tests/a_test.gd',
-      '  Run Test: res://tests/a_test.gd > test_a :PASSED 1ms',
-      'Run Test Suite: res://tests/a_test.gd PASSED 1 tests | 0 error | 0 failed | 0 flaky | 0 skipped | 0 orphans 5ms',
-      'Overall Summary: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans |',
-      'Executed test suites: (1/1)',
-      'Executed test cases : (1/1)',
-      '',
-    ].join('\n');
+  const ran = (extra: readonly string[]): string => {
+    const lines = cannedRun([
+      caseLine(S_TEST, 'test_a', 'STARTED'),
+      caseLine(S_TEST, 'test_a', 'PASSED', '5ms'),
+      ...[0, 1, 2].flatMap((row) => [
+        caseLine(S_TEST, `test_p:${String(row)} (${String(row + 1)})`, 'STARTED'),
+        caseLine(S_TEST, `test_p:${String(row)} (${String(row + 1)})`, 'PASSED', '3ms'),
+      ]),
+    ]).split('\r\n');
+    lines.splice(1, 0, ...extra);
+    return lines.join('\r\n');
+  };
   const clean = judgeEngine(readRun(ran([])), handed, { code: 0, signal: null, ended: null });
   assert.equal(clean.passed, true, clean.faults.join(' | '));
   assert.equal(clean.unattributed, false, 'a clean engine');
@@ -46175,7 +46175,7 @@ function testTheCompileCheckAndUnattributedFaultsAreJudged(): void {
       ended: null,
     },
   );
-  assert.deepEqual(outside.passedSuites, ['res://tests/a_test.gd'], 'the suite itself passed');
+  assert.deepEqual(outside.passedSuites, [S_TEST], 'the suite itself passed');
   assert.equal(outside.unattributed, true, `but the error names no suite: ${outside.faults.join(' | ')}`);
 }
 
@@ -47677,6 +47677,28 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       /^Nothing has changed since every suite last passed\.$/m,
       `a resource no engine loaded: ${unusedChanged.said}`,
     );
+    // A class no suite loads that no longer compiles fails the run with every suite left out, since
+    // the scripts are still compiled together; the import puts it in the class cache.
+    writeTree(project, {
+      'broken_thing.gd':
+        'class_name BrokenThing\nextends Node\n\n\nfunc said() -> void:\n\tnowhere_at_all()\n',
+    });
+    const brokenAside = test('tests/ok_test.gd', 'tests/loads_test.gd', '--changed-only', '--import');
+    rmSync(join(project, 'broken_thing.gd'));
+    rmSync(join(project, 'broken_thing.gd.uid'), { force: true });
+    const recached = spawnSyncHidden(process.execPath, ['build/cli.js', 'classes', project], {
+      encoding: 'utf8',
+      env,
+    });
+    assert.equal(recached.status, 0, `${recached.stdout}${recached.stderr}`);
+    assert.equal(brokenAside.status, 1, brokenAside.said);
+    assert.match(
+      brokenAside.said,
+      /^Nothing has changed since every suite last passed\.$/m,
+      brokenAside.said,
+    );
+    assert.match(brokenAside.said, /^--- compiling every script together:$/m, brokenAside.said);
+    assert.match(brokenAside.said, /^ {2}an engine error: .*nowhere_at_all/m, brokenAside.said);
     writeTree(project, { 'data/word.tres': resource('two') });
     const wordChanged = loads();
     assert.equal(wordChanged.status, 0, wordChanged.said);

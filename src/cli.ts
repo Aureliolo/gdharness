@@ -793,8 +793,8 @@ Usage:
                                      engine error no case declared, a case that never finished
                                      or a leak at exit. A suite is a script, a directory, or
                                      script.gd:test_case for one case. --changed-only leaves out
-                                     suites that passed with everything they reach unchanged; it
-                                     is for iterating, and no gate passes it. --print-output
+                                     suites that passed on exactly the files their engine loaded,
+                                     all unchanged, and still compiles every script. --print-output
                                      prints what every engine printed, for a
                                      benchmark run by hand. --verbose starts every engine verbose,
                                      so a leak at exit is named. --result writes the outcome, each

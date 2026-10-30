@@ -142,7 +142,7 @@ gdharness
 |   `-- suite-run.ts      test: a game's suites over engines, judged line by line
 |       |-- suite-plan.ts        which suites, their cost, which engine runs what
 |       |-- suite-judge.ts       an engine's output read case by case
-|       |-- suite-fingerprint.ts what a suite reaches, for --changed-only
+|       |-- suite-inputs.ts      what a suite's engine loaded, for --changed-only
 |       `-- engine-slots.ts      the slots every tool starting an engine shares
 |
 `-- server.ts             the MCP server: one call in, one answer out

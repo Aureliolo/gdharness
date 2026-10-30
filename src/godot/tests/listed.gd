@@ -86,7 +86,8 @@ var _runner: GdhRunner = null
 
 
 ## Here rather than in [method _initialize]: Godot loads the script given with `-s` and makes its
-## instance before it loads the autoloads, so a load an autoload makes as it is made is recorded too.
+## instance before it loads the autoloads, so a load an autoload makes as it is made is recorded
+## too.
 func _init() -> void:
 	var into: String = argument_after(OS.get_cmdline_user_args(), REACHED_OUT)
 	if not into.is_empty():
@@ -126,7 +127,10 @@ func compile_only(given: PackedStringArray) -> void:
 		var also: Array[GDScript] = oldest.duplicate()
 		also.append_array(GdhShutdownWalk.marker(WALK_BEGAN))
 		also.append(together)
-		also.append(get_script() as GDScript)
+		var own_path: String = get_script().resource_path
+		var own: GDScript = ResourceLoader.get_cached_ref(own_path) as GDScript
+		if own != null:
+			also.append(own)
 		GdhShutdownWalk.hold(also)
 	quit()
 
@@ -788,13 +792,13 @@ class GdhShutdownWalk:
 
 
 ## What the run loads, written to the file named after [constant REACHED_OUT] as each suite ends: a
-## line of JSON with the suite's path and every path asked for since the line before. A suite's inputs
-## are everything up to its own line, not only what it loaded itself: the engine answers a load of a
-## resource it holds from its cache without asking any loader, so a suite can use what the autoloads
-## or an earlier suite loaded and nothing records it. Placed first among the loaders, it is asked
-## about every load and every [method ResourceLoader.exists] and declines each. A script compiled
-## for a preload, a base or a class name is read without a loader, so each line also has the
-## project's files the cache holds that no loader was asked for.
+## line of JSON with the suite's path and every path asked for since the line before. A suite's
+## inputs are everything up to its own line, not only what it loaded itself: the engine answers a
+## load of a resource it holds from its cache without asking any loader, so a suite can use what the
+## autoloads or an earlier suite loaded and nothing records it. Placed first among the loaders, it
+## is asked about every load and every [method ResourceLoader.exists] and declines each. A script
+## compiled for a preload, a base or a class name is read without a loader, so each line also has
+## the project's files the cache holds that no loader was asked for.
 class GdhReached:
 	extends ResourceFormatLoader
 
@@ -879,7 +883,7 @@ class GdhReached:
 			if not _seen.has(path):
 				_seen[path] = true
 				var _held: bool = _fresh.append(path)
-		var line: String = JSON.stringify({"suite": suite, "reached": _fresh})
+		var line: String = JSON.stringify({ "suite": suite, "reached": _fresh })
 		_fresh = []
 		_mutex.unlock()
 		var _stored: bool = _file.store_line(line)

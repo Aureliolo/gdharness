@@ -539,6 +539,8 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         return 1;
       }
     }
+    // After the import, which writes the .import and .uid files beside what a suite loads.
+    const suitesBegan = Date.now();
     const always = [
       getLocalVersion(),
       readFileSync(shippedListedRunner(), 'utf8'),
@@ -549,7 +551,6 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     ];
     const everySuite = suites;
     if (options.changedOnly) {
-      // After the import, which writes the .import files beside every asset a suite can reach.
       const inputs = new SuiteInputs(scripts, always);
       const passedBefore = readPassed(passedFile);
       const unchanged = suites.filter((suite) => {
@@ -694,12 +695,13 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       say(sharesSaid(taken.length, lanes.length));
     }
     // Once the lanes hold what slots were free, so it takes one only beside them.
-    const compiling = compileCheck(launch, everySuite);
+    const handed = new HandedSlot();
+    const compiling = compileCheck(launch, everySuite, handed);
     // Awaited after the suites; a run failing before then reports its own error, not this one too.
     compiling.catch(() => undefined);
     let ran = shared
-      ? await runShares(launch, units, declared, lanes.length, taken, times)
-      : (await Promise.all(lanes.map((lane, at) => runLane(launch, lane, times, taken[at] ?? null))))
+      ? await runShares(launch, units, declared, lanes.length, taken, times, handed)
+      : (await Promise.all(lanes.map((lane, at) => runLane(launch, lane, times, taken[at] ?? null, handed))))
           .flat()
           .sort((a, b) => a.index - b.index);
     if (ran.some((engine) => engine.verdict.starved) && ran.some((engine) => !engine.verdict.passed)) {
@@ -735,7 +737,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       ran,
       new Set(across.map((fault) => fault.suite)),
       new SuiteInputs(scripts, always),
-      startedAt,
+      suitesBegan,
     );
     return report(
       ran,
@@ -814,8 +816,8 @@ function readPassed(file: string): Record<string, PassedSuite> {
  * Keeps each suite that passed with its inputs and their print, and drops each that did not. A suite
  * dealt out over several engines passed only if it passed in each, and its inputs are what each of
  * them loaded. One is not kept when its engine failed on something naming no suite, which any of
- * them may have caused, or when [param inputs] reads one of its inputs as changed after the run
- * began at [param startedAt], since the suite may have run on what was there before. A suite whose
+ * them may have caused, or when [param inputs] reads one of its inputs as changed after the suites
+ * began at [param began], since the suite may have run on what was there before. A suite whose
  * script is gone from [param projectPath] is dropped too.
  */
 function recordPassed(
@@ -824,7 +826,7 @@ function recordPassed(
   ran: readonly EngineRan[],
   failedAcross: ReadonlySet<string>,
   inputs: SuiteInputs,
-  startedAt: number,
+  began: number,
 ): void {
   const passed = readPassed(file);
   for (const path of Object.keys(passed)) {
@@ -853,7 +855,7 @@ function recordPassed(
   for (const path of new Set([...reached.keys(), ...failedSomewhere])) {
     const loaded = reached.get(path);
     const kept = failedSomewhere.has(path) || loaded === undefined ? [] : inputs.inputsOf([...loaded]);
-    if (kept.length > 0 && !inputs.modifiedAfter(kept, startedAt)) {
+    if (kept.length > 0 && !inputs.modifiedAfter(kept, began)) {
       passed[path] = { print: inputs.printOf(kept), inputs: kept };
     } else {
       delete passed[path];
@@ -878,11 +880,46 @@ interface Compiled {
 const COMPILE_CHECK = 'compiling every script together';
 
 /**
+ * The slot the compile check runs in, beside a run's suites: one free as it asks, or else the first
+ * a lane of the same run is done with, handed over rather than given back, since another run waiting
+ * would take it and leave this one waiting on slots held elsewhere after its suites had finished.
+ */
+class HandedSlot {
+  private wanted = true;
+  private handOver: (lock: string) => void = () => undefined;
+  readonly lock = new Promise<string>((resolve) => {
+    this.handOver = resolve;
+  });
+
+  /** Hands [param lock] over when the check still wants a slot, and says whether it did. */
+  give(lock: string): boolean {
+    if (!this.wanted) {
+      return false;
+    }
+    this.wanted = false;
+    this.handOver(lock);
+    return true;
+  }
+}
+
+/** Gives [param lock] to the compile check waiting on [param handed], or back to the machine. */
+function doneWith(launch: Launch, lock: string, handed: HandedSlot | undefined): void {
+  if (handed?.give(lock) !== true) {
+    launch.slots.release(lock);
+  }
+}
+
+/**
  * Compiles [param suites] together beside every class of the game in an engine of its own, which
  * names every script that does not compile. Apart from the suites' engines, so those load only what
- * their suites do and what each records is what its suites could have used.
+ * their suites do and what each records is what its suites could have used. Beside a run's suites
+ * it runs in the slot [param handed] settles on; alone, in the next slot free.
  */
-async function compileCheck(launch: Launch, suites: readonly DeclaredSuite[]): Promise<Compiled> {
+async function compileCheck(
+  launch: Launch,
+  suites: readonly DeclaredSuite[],
+  handed?: HandedSlot,
+): Promise<Compiled> {
   const directory = join(launch.runDirectory, 'compile');
   mkdirSync(join(directory, 'user'), { recursive: true });
   const suitesFile = join(directory, 'suites.txt');
@@ -901,7 +938,16 @@ async function compileCheck(launch: Launch, suites: readonly DeclaredSuite[]): P
     '--compile-only',
   ];
   const log = join(directory, 'engine.log');
-  const lock = await launch.slots.take();
+  let lock: string;
+  if (handed === undefined) {
+    lock = await launch.slots.take();
+  } else {
+    const free = await launch.slots.takeFree();
+    if (free !== null && !handed.give(free)) {
+      launch.slots.release(free);
+    }
+    lock = await handed.lock;
+  }
   let end: EngineEnd;
   try {
     end = await watchedEngine(launch, args, directory, log, launch.silenceFloorSeconds);
@@ -1005,6 +1051,7 @@ async function runLane(
   lane: ReadonlyArray<{ readonly plan: EnginePlan; readonly index: number }>,
   times: SuiteTimes,
   taken: string | null,
+  handed?: HandedSlot,
 ): Promise<EngineRan[]> {
   const lock = taken ?? (await launch.slots.take());
   try {
@@ -1014,7 +1061,7 @@ async function runLane(
     }
     return ran;
   } finally {
-    launch.slots.release(lock);
+    doneWith(launch, lock, handed);
   }
 }
 
@@ -1031,6 +1078,7 @@ async function runShares(
   lanes: number,
   taken: readonly string[],
   times: SuiteTimes,
+  handed?: HandedSlot,
 ): Promise<EngineRan[]> {
   const shares = new Shares(units, declared, lanes);
   const handedOut = new AbortController();
@@ -1059,7 +1107,7 @@ async function runShares(
       }
       return ran;
     } finally {
-      launch.slots.release(lock);
+      doneWith(launch, lock, handed);
     }
   };
   return (await Promise.all(Array.from({ length: lanes }, (_, at) => lane(at))))

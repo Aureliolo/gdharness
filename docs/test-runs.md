@@ -40,8 +40,8 @@ command line itself is wrong.
   never been imported, with no class cache, is imported first without it.
 - `--order reversed` or `--order SEED`: every suite in one engine, in reverse order of path or
   shuffled by a number, to find suites that depend on the order they run in.
-- `--changed-only`: leave out the suites that passed with everything they reach unchanged. For
-  iterating only.
+- `--changed-only`: leave out the suites that passed on exactly the files their engine loaded, all
+  of them unchanged. Every script is still compiled together.
 - `--reach-also PATH`: a file every suite depends on, for `--changed-only`. May be given more than
   once.
 - `--print-output`: print everything each engine printed, before the verdict, as for a benchmark
@@ -309,18 +309,26 @@ a time, and those runs are the ones judged. One that fails again is headed as ru
 
 ## Leaving out what passed
 
-`--changed-only` leaves out every suite that passed last time with everything it reaches unchanged.
-It is for iterating while working on something. A gate, `make ci`, a pre-push hook or a release
-build never passes it: they run every suite, every time.
+`--changed-only` leaves out every suite that passed last time on inputs that are all unchanged, and
+runs the rest. A gate can pass it: a suite is left out only when the files it ran on are the same
+to the byte, and every script is still compiled together in an engine of its own, so a script that
+no longer compiles fails the run even when every suite is left out.
 
-A suite's fingerprint covers its own script and, followed from file to file, every class its code
-names, every `res://` path in it, every script it preloads by relative path, every resource those
-name with each one's `.import` file, every addon it reaches (read whole), the project's autoloads
-and extensions, `project.godot`, the gdharness version and runner, and each file named with
-`--reach-also`. A suite that reaches anything named only at run time has no fingerprint and always
-runs: a `DirAccess`, a `list_directory`, a `load` of a computed path, a path with a placeholder in
-it, a `uid://` path, or a binary `.scn` or `.res`. The fingerprints of the suites that passed are
-kept in `.godot/gdharness/suite-passed.json`, beside the times.
+A suite's inputs are what its engine loaded, recorded as the run goes: every path a loader was
+asked for, from before the autoloads load until the suite's own end, and every project script the
+engine compiled without asking a loader. Since the engine answers a load it already holds from its
+cache, a suite's inputs include everything loaded before it in the same engine. From those files
+the inputs are followed further: the scripts each one preloads or names, the paths a scene or
+resource names, each resource's `.import` and `.uid` files, and the whole of any addon reached.
+A file read or listed by a literal or constant path is an input; one read by a path computed at run
+time, or a `uid://` preload, makes every file in the project an input. Added to every suite are
+`project.godot`, the gdharness version and runner, the engine executable's path, size and
+modification time, and each file named with `--reach-also`. gdUnit4 is an addon the runner loads,
+so all of it is an input.
+
+A suite is recorded as passed only when its engine raised nothing outside any suite and none of
+its inputs changed while it ran. The suites that passed are kept with their inputs in
+`.godot/gdharness/suite-passed.json`, beside the times.
 
 ## Engine slots
 
