@@ -69,6 +69,7 @@ import {
   type DeclaredSuite,
   dealt,
   type EnginePlan,
+  gdUnitFailsOnPushErrors,
   headlessInAWindow,
   inOneEngine,
   lanesOf,
@@ -449,6 +450,7 @@ interface Launch extends EngineLaunch {
   readonly selfTyped: readonly SelfTypedExport[];
   readonly godotVersion: string | null;
   readonly verbose: boolean;
+  readonly failsOnPushErrors: boolean;
 }
 
 /** Runs the suites [param options] asks for with the engine at [param godotPath], answering the exit code. */
@@ -511,6 +513,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     godotVersion: options.godotVersion,
     cores: options.cores,
     verbose: options.verbose,
+    failsOnPushErrors: gdUnitFailsOnPushErrors(options.projectPath),
   };
   try {
     // A project with no class cache has never been imported, and no suite can run in it: gdUnit4's
@@ -1035,6 +1038,7 @@ async function runEngine(
     expected: readExpected(expectedFile),
     selfTyped: launch.selfTyped,
     godotVersion: launch.godotVersion,
+    failsOnPushErrors: launch.failsOnPushErrors,
   };
   const judged = judgeEngine(printed, assignment, end);
   const written = reportsFault(join(directory, 'reports'));

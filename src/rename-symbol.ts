@@ -400,7 +400,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
       ? null
       : { from: declaringPath, to: moveTo, absoluteTo: request.newScriptPath },
   );
-  const left = leftAloneReport(asWritten(plan.mentions, rewrites));
+  const left = leftAloneReport(asWritten(plan.mentions, rewrites), [symbol]);
   const graph = new ClassGraph(scripts, declared);
   const rank = (path: string): number =>
     (declaringFiles.includes(path) ? 0 : 1000) + graph.ancestors(`${path}#`).length;
@@ -543,6 +543,8 @@ export function changedReport(
   return rewrites.map((rewrite) => {
     const lines = rewrite.after.split('\n');
     const byLine = new Map<number, Set<EditKind>>();
+    // Where on its line the first edit falls, which a long line is quoted around.
+    const firstAt = new Map<number, number>();
     const starts: number[] = [0];
     for (let at = rewrite.before.indexOf('\n'); at !== -1; at = rewrite.before.indexOf('\n', at + 1)) {
       starts.push(at + 1);
@@ -558,6 +560,8 @@ export function changedReport(
         line += 1;
       }
       byLine.set(line, (byLine.get(line) ?? new Set()).add(edit.kind));
+      const column = edit.offset - (starts[line] ?? 0);
+      firstAt.set(line, Math.min(firstAt.get(line) ?? column, column));
     }
     return {
       file: rewrite.path,
@@ -567,7 +571,11 @@ export function changedReport(
         .map(([line, kinds]) => ({
           line: line + 1,
           kinds: [...kinds],
-          text: (lines[line] ?? '').replace(/\r$/, '').trim(),
+          text: (() => {
+            const whole = (lines[line] ?? '').replace(/\r$/, '');
+            const indent = whole.length - whole.trimStart().length;
+            return quoted(whole.trim(), (firstAt.get(line) ?? 0) - indent);
+          })(),
         })),
     };
   });
@@ -598,7 +606,7 @@ export function asWritten(mentions: readonly Mention[], rewrites: readonly Rewri
  * uses, 309 kilobytes a caller had to dig the edits out of. What stays quoted is code that might
  * still be the member, a value whose type the analyser could not tell.
  */
-export function leftAloneReport(mentions: readonly Mention[]): LeftAlone {
+export function leftAloneReport(mentions: readonly Mention[], terms: readonly string[]): LeftAlone {
   const full: Mention[] = [];
   const prose = new Map<string, { file: string; kind: string; lines: number[] }>();
   // By reason first, so a reason is said once however many files it covers: said per file, the
@@ -632,7 +640,7 @@ export function leftAloneReport(mentions: readonly Mention[]): LeftAlone {
       others.set(mention.why, files);
       counts.otherSymbols += 1;
     } else {
-      full.push(mention);
+      full.push({ ...mention, text: quotedAround(mention.text, terms) });
       counts.quoted += 1;
     }
   }
@@ -740,6 +748,29 @@ export function writeLeftAloneDetail(projectPath: string, symbol: string, detail
  * a hundred and fifty more entries a caller had to read past to reach the few that matter.
  */
 const PROSE_KINDS: ReadonlySet<string> = new Set(['comment', 'doc', 'string', 'text']);
+
+/** How much of a line an answer quotes; a longer one is cut to the part around what it is about. */
+const QUOTED_CHARS = 240;
+
+/**
+ * [param line] as an answer quotes it: whole, or the [constant QUOTED_CHARS] around [param at],
+ * marked with ... where it was cut. A file holding one record a line, a JSON list of cards, put
+ * lines of eight thousand characters under leftAlone for a word in one card, most of the answer.
+ */
+function quoted(line: string, at: number): string {
+  if (line.length <= QUOTED_CHARS) {
+    return line;
+  }
+  const start = Math.max(0, Math.min(at - Math.floor(QUOTED_CHARS / 3), line.length - QUOTED_CHARS));
+  const end = start + QUOTED_CHARS;
+  return `${start > 0 ? '...' : ''}${line.slice(start, end)}${end < line.length ? '...' : ''}`;
+}
+
+/** [param text] quoted around the first of [param terms] it holds, or from its start. */
+function quotedAround(text: string, terms: readonly string[]): string {
+  const at = terms.map((term) => text.indexOf(term)).filter((found) => found >= 0);
+  return quoted(text, at.length > 0 ? Math.min(...at) : 0);
+}
 
 /** The left-alone lists for the answer, and how many occurrences each holds. */
 export interface LeftAlone {

@@ -274,7 +274,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
     file: afterwards(mention.file),
   }));
 
-  const left = leftAloneReport(mentions);
+  const left = leftAloneReport(mentions, [...moves.keys()]);
   const absoluteOf = (path: string): string => join(projectPath, path.slice('res://'.length));
   const rewritten = new Map(rewrites.map((rewrite) => [rewrite.path, rewrite]));
   const moved: MovedFile[] = [...moves].map(([source, target]) => {
