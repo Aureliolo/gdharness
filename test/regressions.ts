@@ -33582,6 +33582,8 @@ async function testAGameOnTheHiddenDesktopIsNotHeldToARefresh(): Promise<void> {
   }
   const project = mkdtempSync(join(tmpdir(), 'gdharness-paced-'));
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-paced-rt-'));
+  // The game's user data, which would otherwise go in the user's own application data.
+  const saves = mkdtempSync(join(tmpdir(), 'gdharness-paced-saves-'));
   cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
     recursive: true,
   });
@@ -33613,6 +33615,7 @@ async function testAGameOnTheHiddenDesktopIsNotHeldToARefresh(): Promise<void> {
           projectPath: project,
           op: 'start',
           headless: false,
+          savesIn: saves,
           runtimeWaitMs: WINDOWED_BOOT_MS,
           ...extra,
         },
@@ -33670,6 +33673,7 @@ async function testAGameOnTheHiddenDesktopIsNotHeldToARefresh(): Promise<void> {
     }
     rmSync(project, { recursive: true, force: true });
     rmSync(runtimeDir, { recursive: true, force: true });
+    rmSync(saves, { recursive: true, force: true });
   }
 }
 
@@ -33703,6 +33707,8 @@ async function testTheRendererIsChosenAndItsMemoryRead(): Promise<void> {
   }
   const project = mkdtempSync(join(tmpdir(), 'gdharness-renderer-'));
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-renderer-rt-'));
+  // The game's user data, which would otherwise go in the user's own application data.
+  const saves = mkdtempSync(join(tmpdir(), 'gdharness-renderer-saves-'));
   cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
     recursive: true,
   });
@@ -33739,6 +33745,7 @@ async function testTheRendererIsChosenAndItsMemoryRead(): Promise<void> {
           projectPath: project,
           op: 'start',
           headless: false,
+          savesIn: saves,
           runtimeWaitMs: WINDOWED_BOOT_MS,
           engineArgs,
         },
@@ -33818,7 +33825,7 @@ async function testTheRendererIsChosenAndItsMemoryRead(): Promise<void> {
       );
     }
     await server.stop();
-    sweep(project, runtimeDir);
+    sweep(project, runtimeDir, saves);
   }
 }
 
