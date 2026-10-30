@@ -607,7 +607,7 @@ func get_rect(params: Dictionary) -> Dictionary:
 	if node is Control:
 		var control: Control = node
 		var canvas_rect: Rect2 = control.get_global_rect()
-		return {
+		var answer: Dictionary = {
 			"type": "rect",
 			"path": node_path,
 			"visible": control.is_visible_in_tree(),
@@ -621,6 +621,19 @@ func get_rect(params: Dictionary) -> Dictionary:
 				)
 			),
 		}
+		# Visible and in view read as clickable for a button under a dialog covering the screen,
+		# which a click by its words refused. Loaded here, since runtime_targets preloads this
+		# script.
+		if answer["visible"] and answer["in_view"]:
+			var own: Script = get_script()
+			var targets: GDScript = load(
+				own.resource_path.get_base_dir().path_join("runtime_targets.gd")
+			)
+			var over: Variant = targets.call("drawn_over", control)
+			if over is Node:
+				var cover: Node = over
+				answer["drawn_over"] = str(cover.get_path())
+		return answer
 	if node is Node2D:
 		var item: Node2D = node
 		var canvas_position: Vector2 = item.get_global_transform_with_canvas().origin
