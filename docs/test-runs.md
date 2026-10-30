@@ -385,8 +385,11 @@ the slots. A tool of a game's own that starts engines takes them the same way:
    count ever reads them, so nothing else frees them.
 
 gdharness starts every engine it holds a slot for with `GODOT_ENGINE_HELD` set to that slot's lock
-path. A tool the engine starts that takes slots this way should run on that slot rather than take a
-second one, for as long as the lock names a live holder other than itself.
+path. A taker started under it runs one engine on that slot rather than take a second one, but only
+while the lock's live holder is the nearest process above the taker running another executable,
+passing over launchers of the taker's own (a `bun` under `bun run`). A game an editor plays inherits
+the editor's environment and runs the editor's executable, so it takes a slot of its own. The lent
+slot is never given back by the taker: it stays its holder's.
 
 Gates come first. Each gate in the machine's queue, waiting for its seat or holding it, keeps a mark
 from its arrival to its release: `<directory>/queued/<its ticket>.json`, holding what a lock does,
@@ -398,15 +401,16 @@ is removed with its `.seated` file.
   holds. A process runs inside a gate when `GODOT_ENGINE_SHARE` and `GODOT_ENGINE_SHARE_COUNT` are
   both set.
 - A timing's engine, one with `GODOT_ENGINE_TIMED` set, takes any slot.
-- An engine run in a turn the queue gave, with `GODOT_ENGINE_TURN` naming a ticket file that is
-  still there, takes the last two slots.
-- Any other engine takes no slot while a live mark has no `.seated` file, the last two included,
-  and waits; only the last two, numbers `count - 2` and up, while every live mark is seated; and
-  any slot while no mark is live.
+- Any other engine takes any slot while no mark is live.
+- While a mark is live, a gate's own step outside its seat, one with `GODOT_ENGINE_TIER` set
+  (`fast` or `full`), takes the last two slots, `count - 2` first.
+- Any other engine then takes no slot while a live mark has no `.seated` file, and waits; and only
+  the last slot, `count - 1`, while every live mark is seated, `count - 2` being the gates' own
+  steps'.
 
-An engine outside a gate tries the highest-numbered slot first, queue or none, so the gates' slots
-stay free longest. Which slots a take may try is asked again at every look, and a slot already held
-is kept to its end, whatever arrives in the queue.
+An engine outside a gate tries the highest-numbered slot first, a gate's own step excepted, so the
+gates' slots stay free longest. Which slots a take may try is asked again at every look, and a slot
+already held is kept to its end, whatever arrives in the queue.
 
 On Windows, Python opens a file without delete sharing, and a lock or mark open in another process
 cannot be removed until it is closed. gdharness retries a removal refused so for a second; a tool

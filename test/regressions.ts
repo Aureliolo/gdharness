@@ -119,6 +119,7 @@ import {
   EngineSlots,
   FolderChanges,
   holderOf,
+  inheritsSlot,
   lockIsFree,
   machineSlots,
   ownStart,
@@ -45081,16 +45082,97 @@ async function testATakeSweepsGoneLocksPastTheCount(): Promise<void> {
 /**
  * Gates come before work beside them, as the games' own tools take the slots. While a gate waits
  * for its seat, an engine outside a gate takes no slot at all, the kept ones included; once every
- * queued gate is seated it takes only the last two, and a gate's engine only the others. Work outside
- * the queue once held 12 of 16 slots while gates waited hours. A timing takes any slot and a turn the
- * queue gave takes the kept two, while its ticket is there. A gate's mark is live by the rule a lock
- * is: one whose holder has gone is removed with its seat and holds nothing back, and one not yet
- * written names nobody.
+ * queued gate is seated it takes only the last, and a gate's engine only those below the kept two.
+ * Work outside the queue once held 12 of 16 slots while gates waited hours. A timing takes any slot,
+ * and a gate's own step, which names its tier, the kept two while a gate is queued. A gate's mark is
+ * live by the rule a lock is: one whose holder has gone is removed with its seat and holds nothing
+ * back, and one not yet written names nobody.
  */
+/**
+ * A process started by an engine on a slot runs one engine on that slot, named in GODOT_ENGINE_HELD,
+ * only while the slot's holder is the nearest process above it running another executable. A game
+ * an editor plays inherits the editor's environment and runs the editor's executable, so it takes a
+ * slot of its own.
+ */
+async function testAnEngineOnASlotLendsItToWhatItStarts(): Promise<void> {
+  const tree: ProcessTree = new Map([
+    [10, { parent: 9, command: '"C:\\tools\\Bun.exe" x gdharness test' }],
+    [9, { parent: 8, command: 'bun run test' }],
+    [8, { parent: 5, command: 'C:\\Godot\\Godot.exe --path C:\\game' }],
+    [7, { parent: 8, command: 'C:\\Godot\\Godot.exe --path C:\\game res://main.tscn' }],
+    [5, { parent: 1, command: 'claude' }],
+  ]);
+  assert.equal(inheritsSlot(tree, 10, 8, 'bun.exe'), true, "past its own launcher, the engine's slot");
+  assert.equal(inheritsSlot(tree, 9, 8, 'bun'), true, 'and its launcher too');
+  assert.equal(inheritsSlot(tree, 7, 8, 'Godot.exe'), false, 'not a game the editor plays');
+  assert.equal(inheritsSlot(tree, 10, 5, 'bun.exe'), false, 'nor a holder further up');
+  assert.equal(inheritsSlot(tree, 5, 8, 'claude'), false, 'nor one not above it');
+
+  // The wiring, judged by the rule above: a lock naming the nearest process above this one on
+  // another executable, read from the variable, lent to one engine and never given back.
+  const listed = await processTree();
+  assert.ok(listed !== undefined, whyTheProcessTreeFailed() ?? 'the process table');
+  const above = ancestorsIn(listed, process.pid, 1).find((pid) =>
+    inheritsSlot(listed, process.pid, pid, basename(process.execPath)),
+  );
+  assert.ok(above !== undefined, 'a process above this one on another executable');
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-slots-'));
+  const before = process.env['GODOT_ENGINE_HELD'];
+  try {
+    const lent = join(directory, '0.lock');
+    const aboveStarted = (await startTimesOf([above])).get(above);
+    writeFileSync(lent, JSON.stringify({ pid: above, started: aboveStarted, by: 'an engine' }));
+    process.env['GODOT_ENGINE_HELD'] = lent;
+    const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
+    const slots = new EngineSlots(directory, 2, holder, undefined, () => 'other');
+    assert.equal(await slots.takeFree(), lent, 'the slot it was started on');
+    assert.equal(
+      await slots.takeFree(),
+      join(directory, '1.lock'),
+      'for one engine, the next taking a slot of its own',
+    );
+    slots.release(lent);
+    assert.equal(
+      holderOf(readFileSync(lent, 'utf8'))?.pid,
+      above,
+      'and given back to nobody, being not its own',
+    );
+    assert.equal(await slots.takeFree(), lent, 'and lent again once that engine is done');
+    slots.releaseAll();
+    assert.equal(existsSync(join(directory, '1.lock')), false, 'its own given back as it ends');
+    assert.equal(holderOf(readFileSync(lent, 'utf8'))?.pid, above, 'the lent one left with its holder');
+
+    // The closest lock that is not the slot it runs on: a live holder that is not above it.
+    const stranger = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], {
+      stdio: 'ignore',
+    });
+    try {
+      const strangerPid = stranger.pid ?? 0;
+      const strangers = join(directory, '1.lock');
+      writeFileSync(
+        strangers,
+        JSON.stringify({ pid: strangerPid, started: (await startTimesOf([strangerPid])).get(strangerPid) }),
+      );
+      process.env['GODOT_ENGINE_HELD'] = strangers;
+      const other = new EngineSlots(directory, 2, holder, undefined, () => 'other');
+      assert.equal(await other.takeFree(), null, "a live stranger's slot is not lent, and the other is held");
+    } finally {
+      stranger.kill();
+    }
+  } finally {
+    if (before === undefined) {
+      delete process.env['GODOT_ENGINE_HELD'];
+    } else {
+      process.env['GODOT_ENGINE_HELD'] = before;
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
   const every16 = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
   assert.deepEqual(slotsDrawnOn(16, 'other', 'none'), { numbers: every16 });
-  assert.deepEqual(slotsDrawnOn(16, 'other', 'seated'), { numbers: [15, 14], limit: 'kept' });
+  assert.deepEqual(slotsDrawnOn(16, 'other', 'seated'), { numbers: [15], limit: 'kept' });
   assert.deepEqual(slotsDrawnOn(16, 'other', 'waiting'), { numbers: [], limit: 'held' });
   assert.deepEqual(slotsDrawnOn(16, 'gate', 'waiting'), {
     numbers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
@@ -45098,30 +45180,28 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
   });
   assert.deepEqual(slotsDrawnOn(16, 'timing', 'waiting'), { numbers: every16 }, 'a timing takes any slot');
   assert.deepEqual(
-    slotsDrawnOn(16, 'turn', 'waiting'),
-    { numbers: [15, 14], limit: 'kept' },
-    'a turn the kept',
+    [
+      slotsDrawnOn(16, 'tier', 'waiting'),
+      slotsDrawnOn(16, 'tier', 'seated'),
+      slotsDrawnOn(16, 'tier', 'none'),
+    ],
+    [{ numbers: [14, 15], limit: 'tier' }, { numbers: [14, 15], limit: 'tier' }, { numbers: every16 }],
+    "a gate's own step the kept two while a gate is queued, the first of them first, and any slot when none is",
   );
   assert.deepEqual(slotsDrawnOn(2, 'gate', 'none'), { numbers: [0], limit: 'gate' });
   assert.deepEqual(slotsDrawnOn(2, 'other', 'seated'), { numbers: [1], limit: 'kept' });
   assert.deepEqual(slotsDrawnOn(1, 'other', 'seated'), { numbers: [0] }, "one slot is everybody's");
-  const turnTicket = join(realpathSync(tmpdir()), `gdharness-turn-${String(process.pid)}.json`);
-  writeFileSync(turnTicket, '');
-  try {
-    assert.deepEqual(
-      [
-        slotTaker({ [SHARE_VARIABLE]: 'share', [SHARE_COUNT_VARIABLE]: '3', GODOT_ENGINE_TIMED: 'x' }),
-        slotTaker({ GODOT_ENGINE_TIMED: '/slots/3.lock' }),
-        slotTaker({ GODOT_ENGINE_TURN: turnTicket }),
-        slotTaker({ GODOT_ENGINE_TURN: `${turnTicket}.gone` }),
-        slotTaker({}),
-      ],
-      ['gate', 'timing', 'turn', 'other', 'other'],
-      'a gate, a timing, a turn while its ticket is there, and anything else',
-    );
-  } finally {
-    rmSync(turnTicket, { force: true });
-  }
+  assert.deepEqual(
+    [
+      slotTaker({ [SHARE_VARIABLE]: 'share', [SHARE_COUNT_VARIABLE]: '3', GODOT_ENGINE_TIMED: 'x' }),
+      slotTaker({ GODOT_ENGINE_TIMED: '/slots/3.lock', GODOT_ENGINE_TIER: 'fast' }),
+      slotTaker({ GODOT_ENGINE_TIER: 'full' }),
+      slotTaker({ GODOT_ENGINE_TIER: '' }),
+      slotTaker({}),
+    ],
+    ['gate', 'timing', 'tier', 'other', 'other'],
+    "a gate, a timing, a gate's own step, and anything else",
+  );
   assert.deepEqual(
     [
       runsInAGate({ [SHARE_VARIABLE]: 'share', [SHARE_COUNT_VARIABLE]: '3' }),
@@ -45150,6 +45230,7 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
   try {
     const outside = new EngineSlots(directory, 4, holder, undefined, () => 'other');
     const gate = new EngineSlots(directory, 4, holder, undefined, () => 'gate');
+    const tier = new EngineSlots(directory, 4, holder, undefined, () => 'tier');
     assert.deepEqual(await takeAll(outside), ['3.lock', '2.lock', '1.lock', '0.lock'], 'no gate queued');
 
     // A gate whose process has gone: its mark is removed and holds nothing back.
@@ -45178,14 +45259,24 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
       "Waiting 3 s so far for an engine: a gate in this machine's queue is waiting for its seat (slots), and the engine starts once every queued gate has its seat.",
     );
     assert.deepEqual(await takeAll(gate), ['0.lock', '1.lock'], "while the gates' engines take theirs");
+    assert.deepEqual(await takeAll(tier), ['2.lock', '3.lock'], "and the gates' own steps the kept two");
 
     writeFileSync(join(queued, 'ticket.json.seated'), '');
-    assert.deepEqual(await takeAll(outside), ['3.lock', '2.lock'], 'a seated gate keeps the first two');
+    assert.deepEqual(await takeAll(outside), ['3.lock'], 'a seated gate leaves work beside it the last slot');
     assert.equal(outside.drawn.limit, 'kept', JSON.stringify(outside.drawn));
     assert.deepEqual(await takeAll(gate), ['0.lock', '1.lock'], 'and its engines take only those');
+    assert.deepEqual(
+      await takeAll(tier),
+      ['2.lock', '3.lock'],
+      "and the gates' own steps still the kept two",
+    );
     assert.equal(
       slotWaitSaid(3000, 4, 'slots', outside.holders(), outside.drawn),
-      'Waiting 3 s so far for an engine: the 2 engine slots of the 4 on this machine (slots) kept for engines outside a gate while a gate is queued are in use, by a gate or another tool, and the engine starts when one is given back or no gate is queued.',
+      'Waiting 3 s so far for an engine: the one engine slot of the 4 on this machine (slots) kept for engines outside a gate while a gate is queued is in use, by a gate or another tool, and the engine starts when it is given back or no gate is queued.',
+    );
+    assert.equal(
+      slotWaitSaid(3000, 4, 'slots', tier.holders(), tier.drawn),
+      "Waiting 3 s so far for an engine: the 2 engine slots of the 4 on this machine (slots) a gate's own steps take while a gate is queued are in use, by a gate or another tool, and the engine starts when one is given back or no gate is queued.",
     );
     assert.equal(
       slotWaitSaid(1000, 2, 'slots', [holder], slotsDrawnOn(2, 'other', 'seated')),
@@ -45210,7 +45301,8 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
       true,
       'a gate arriving takes nothing already held',
     );
-    assert.deepEqual(await takeAll(outside), ['2.lock'], 'and the one kept slot left is all there is');
+    assert.deepEqual(await takeAll(outside), [], 'and the last slot is the one it holds');
+    assert.deepEqual(await takeAll(tier), ['2.lock'], "while a gate's own step takes the other kept one");
     if (held !== null) {
       outside.release(held);
     }
@@ -68927,6 +69019,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASlotWaitLooksWhenTheSlotsChange,
   testAWaitForASlotKeepsAMarkUntilItEnds,
   testGatesInTheQueueKeepTheirSlots,
+  testAnEngineOnASlotLendsItToWhatItStarts,
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testAFingerprintFollowsWhatASuiteReaches,
   testTheTestCommandReadsItsOwnOptions,
