@@ -574,10 +574,21 @@ static func _import_staleness(resource_path: String, sidecar: ConfigFile) -> Dic
 	if not sidecar.has_section_key("remap", "uid"):
 		return _stale("its import file has no uid, which the import writes")
 
+	# A tool that writes a sidecar for the engine to import from leaves out what the import writes,
+	# and every load of the resource then fails. The engine's scan without its cache takes such a
+	# sidecar as imported while the record of the last import still matches the source.
+	var outputs: Array[String] = _outputs_of(sidecar)
+	if outputs.is_empty() and not _names_a_path(sidecar):
+		return _stale(
+			(
+				"its import file names no imported output, as one written before the engine "
+				+ "imports from it does"
+			)
+		)
+
 	# The sidecar alone does not say the import is there: deleting the outputs under
 	# .godot/imported is the ordinary way to force one, and a resource whose output is gone was
 	# answered as current, which is what a reimport is then skipped on.
-	var outputs: Array[String] = _outputs_of(sidecar)
 	var missing: Array[String] = []
 	for output: String in outputs:
 		if not FileAccess.file_exists(output):
@@ -784,6 +795,17 @@ static func _outputs_of(sidecar: ConfigFile) -> Array[String]:
 		for one: Variant in listed:
 			outputs.append(str(one))
 	return outputs
+
+
+## Whether [param sidecar]'s remap names where a load finds the import, as [code]path[/code] or a
+## [code]path.<feature>[/code] key.
+static func _names_a_path(sidecar: ConfigFile) -> bool:
+	if not sidecar.has_section("remap"):
+		return false
+	for key: String in sidecar.get_section_keys("remap"):
+		if key.begins_with("path"):
+			return true
+	return false
 
 
 ## The image files a glTF scene refers to by path, resolved against the scene's own directory.
