@@ -231,6 +231,7 @@ import {
   startTimesOf,
   whyTheProcessTreeFailed,
 } from './process-children.js';
+import { ensureProcessTable } from './process-table.js';
 import { cpuSecondsOf } from './process-time.js';
 import {
   folderFiles,
@@ -4120,11 +4121,13 @@ class GodotServer {
     });
     console.error('gdharness running on stdio');
     sweepAbandonedScratch();
-    // The helper a windowed run starts through, compiled now rather than inside the first windowed
-    // start, which on a slow machine took longer than the start is given. Once per machine and
-    // version; a server finding another already compiling goes on without waiting.
+    // The helper a windowed run starts through and the process table, compiled now rather than
+    // inside the first windowed start or listing, which on a slow machine took longer than either
+    // is given. Once per machine and version; a server finding another already compiling goes on
+    // without waiting.
     if (process.platform === 'win32') {
       void ensureHelperCompiled(undefined, undefined, false);
+      void ensureProcessTable(undefined, false);
     }
 
     // A bridge that cannot bind must not take the stdio server down with it: the tools that
@@ -4406,8 +4409,8 @@ class GodotServer {
   /**
    * The lifecycle log's started line, and the replaced line when a live server of the same project
    * holds its announcement. The parent's command line follows on a line of its own a few seconds
-   * in: reading it costs a query of the process table, a PowerShell on Windows, and a server
-   * started and ended within seconds, as a test suite starts hundreds, then costs none.
+   * in: reading it costs a question to the platform, and a server started and ended within
+   * seconds, as a test suite starts hundreds, then costs none.
    */
   private noteTheStart(): void {
     const cwd = process.cwd();
@@ -4425,11 +4428,12 @@ class GodotServer {
       writeLifecycle('replaced', { project: this.ownProject, predecessor });
     }
     const ask = setTimeout(() => {
-      void processTree().then((tree) => {
-        this.parentCommand = tree?.get(process.ppid)?.command ?? null;
+      void runningAs(process.ppid).then((parent) => {
+        this.parentCommand = parent?.kind === 'commandLine' ? parent.text : null;
         writeLifecycle('parent', {
           command: this.parentCommand,
-          ...(tree === undefined ? { why: whyTheProcessTreeFailed() } : {}),
+          ...(parent === null ? { why: 'the platform would not say' } : {}),
+          ...(parent?.unread === undefined ? {} : { why: parent.unread }),
         });
       });
     }, PARENT_ASKED_AFTER_MS);

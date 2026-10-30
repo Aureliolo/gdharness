@@ -32,9 +32,9 @@ import {
 } from './desktop.js';
 import { Refusal } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
+import { askProcessTable } from './process-table.js';
 import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
 import { type EngineEnd, type RunPrinted, readRun } from './suite-judge.js';
-import { askWindows } from './windows-ask.js';
 
 /** A command line `test` or `spread` cannot act on, which the CLI answers with exit code 2. */
 export class EngineUsageError extends Refusal {}
@@ -244,14 +244,9 @@ export async function windowsCommitLeft(): Promise<number | string | null> {
     return null;
   }
   try {
-    const said = await askWindows(
-      '(Get-CimInstance Win32_OperatingSystem -Property FreeVirtualMemory).FreeVirtualMemory',
-      COMMIT_ASK_MS,
-    );
-    const kilobytes = Number(said.trim());
-    return Number.isFinite(kilobytes) && kilobytes > 0
-      ? kilobytes * 1024
-      : `it answered ${JSON.stringify(said.trim())}`;
+    const said = await askProcessTable('CommitLeft()', COMMIT_ASK_MS);
+    const bytes = Number(said.trim());
+    return Number.isFinite(bytes) && bytes > 0 ? bytes : `it answered ${JSON.stringify(said.trim())}`;
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }

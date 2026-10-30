@@ -1,5 +1,5 @@
+import { askProcessTable } from './process-table.js';
 import { runHidden as run } from './spawn.js';
-import { askWindows } from './windows-ask.js';
 
 /**
  * Long enough for the operating system to answer about one process on a machine that is busy,
@@ -30,9 +30,9 @@ export async function cpuSecondsOf(pid: number): Promise<number | undefined> {
 }
 
 async function secondsOnWindows(pid: number): Promise<number | undefined> {
-  const said = await askWindows(`(Get-Process -Id ${pid}).CPU`, ASK_TIMEOUT_MS);
-  const seconds = Number(said.trim().replace(',', '.'));
-  return Number.isFinite(seconds) ? seconds : undefined;
+  const said = (await askProcessTable(`ProcessorSeconds(${pid})`, ASK_TIMEOUT_MS)).trim();
+  const seconds = Number(said);
+  return said !== '' && Number.isFinite(seconds) ? seconds : undefined;
 }
 
 async function askPosix(pid: number): Promise<number | undefined> {

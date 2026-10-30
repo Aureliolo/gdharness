@@ -3,6 +3,7 @@ import { basename } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
 import { linuxStartEarliest, linuxStartTimes, readCommandLine } from './process-children.js';
+import { loadingTheTable } from './process-table.js';
 import { runHidden, spawnHidden } from './spawn.js';
 
 /**
@@ -111,22 +112,19 @@ async function followOnWindows(
   notBefore: number,
   exitedAt: number,
 ): Promise<Followed | null> {
+  let loading: string;
+  try {
+    loading = await loadingTheTable();
+  } catch {
+    return null;
+  }
   const script = [
     '[Console]::OutputEncoding = [Text.Encoding]::UTF8',
-    '$held = @{}',
-    `foreach ($c in @(Get-CimInstance Win32_Process -Filter "ParentProcessId=${exitedPid}" -Property ProcessId,CreationDate,CommandLine)) {`,
-    '  if (-not $c.CreationDate) { continue }',
-    '  $began = ([DateTimeOffset]$c.CreationDate).ToUnixTimeMilliseconds()',
-    '  $p = Get-Process -Id $c.ProcessId -ErrorAction SilentlyContinue',
-    '  if ($null -eq $p -or [Math]::Abs(([DateTimeOffset]$p.StartTime).ToUnixTimeMilliseconds() - $began) -gt 1000) { continue }',
-    // Asked for now, or the handle the exit code is read through is not kept.
-    '  $null = $p.Handle',
-    '  $held[[int]$c.ProcessId] = $p',
-    '  "$($c.ProcessId) $began $($c.CommandLine)"',
-    '}',
+    loading,
+    `[Console]::Out.Write([GdhProcessTable]::HoldChildren(${exitedPid}))`,
     "'listed'",
     '$chosen = [Console]::In.ReadLine()',
-    "if ($chosen -and $held.ContainsKey([int]$chosen)) { $p = $held[[int]$chosen]; $p.WaitForExit(); 'exit ' + $p.ExitCode }",
+    'if ($chosen) { [GdhProcessTable]::WaitFor([int]$chosen) }',
   ].join('\n');
   const holder = spawnHidden(
     'powershell.exe',
