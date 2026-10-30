@@ -170,6 +170,8 @@ import {
   engineFlagsAmongGameArgs,
   environmentFor,
   envValue,
+  HIDDEN_WINDOW_FPS,
+  hiddenWindowFlags,
   OPENED_BY_A_SERVER,
   resolveHeadless,
   resolveSilent,
@@ -20498,6 +20500,51 @@ async function testUpdateCheckHasAnOffSwitch(): Promise<void> {
 }
 
 /**
+ * A window on the hidden desktop starts with vsync off and a cap standing in for a refresh, the
+ * cap left out when the caller or the project sets one, and a headless run is given neither.
+ */
+function testAHiddenWindowStartsWithVsyncOff(): void {
+  const cap = String(HIDDEN_WINDOW_FPS);
+  assert.deepEqual(hiddenWindowFlags([], false), ['--disable-vsync', '--max-fps', cap]);
+  assert.deepEqual(hiddenWindowFlags(['--max-fps', '30'], false), ['--disable-vsync']);
+  assert.deepEqual(hiddenWindowFlags([], true), ['--disable-vsync']);
+  assert.deepEqual(
+    runArguments({
+      projectPath: '/p',
+      headless: false,
+      scene: 'a.tscn',
+      engineArgs: ['--verbose'],
+      hiddenWindow: { projectCapsFrames: false },
+    }),
+    ['--path', '/p', '--disable-vsync', '--max-fps', cap, '--verbose', 'res://a.tscn'],
+  );
+  assert.deepEqual(
+    runArguments({
+      projectPath: '/p',
+      headless: false,
+      scene: null,
+      engineArgs: ['--max-fps', '30'],
+      hiddenWindow: { projectCapsFrames: false },
+    }),
+    ['--path', '/p', '--disable-vsync', '--max-fps', '30'],
+  );
+  assert.deepEqual(
+    runArguments({
+      projectPath: '/p',
+      headless: true,
+      scene: null,
+      hiddenWindow: { projectCapsFrames: false },
+    }),
+    ['--headless', '--path', '/p'],
+  );
+  // A game a hidden editor plays is given its flags by the editor addon, which caps it the same.
+  assert.match(
+    readFileSync(join('src', 'godot', 'addons', 'gdharness_editor', 'tools', 'play_tools.gd'), 'utf8'),
+    new RegExp(`^const HIDDEN_WINDOW_FPS: int = ${cap}$`, 'm'),
+  );
+}
+
+/**
  * The engine's argument list is not visible from any response, so it is asserted directly.
  * No -d in either branch: the local debugger it turns on breaks into a `debug>` prompt on the
  * first script error and, with no stdin to read a command from, loops on that prompt forever.
@@ -33498,6 +33545,120 @@ async function testAScreenshotHoldsTheGamesOwnWindows(): Promise<void> {
     }
     await server.stop();
     sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * A windowed game on the hidden desktop reads its vsync as off and its frames as capped. That
+ * desktop has no display, and a Vulkan game waiting on a refresh there drew two frames a second,
+ * which only the command line can prevent, since the boot splash presents before any script runs.
+ * Read inside the game, since its own reading is the effect the flags are for. Off Windows the
+ * window has a display and is given neither.
+ */
+async function testAGameOnTheHiddenDesktopIsNotHeldToARefresh(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('hidden desktop pacing regression skipped (Godot not found)');
+    return;
+  }
+  const refused = process.platform === 'win32' ? null : windowedRunRefused();
+  if (refused !== null) {
+    console.log(`hidden desktop pacing regression skipped (${refused})`);
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-paced-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-paced-rt-'));
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  const settings = (application: string): string =>
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Paced"\n' +
+    `run/main_scene="res://main.tscn"\n${application}\n` +
+    '[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n';
+  writeFileSync(join(project, 'project.godot'), settings(''));
+  writeFileSync(
+    join(project, 'main.gd'),
+    'extends Node\n\n\nfunc _ready() -> void:\n' +
+      '\tprint("paced vsync=%d max_fps=%d" % [DisplayServer.window_get_vsync_mode(), Engine.max_fps])\n',
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  // What the start put on the command line, and what the game read of its pacing.
+  const runWith = async (extra: Record<string, unknown>): Promise<{ arguments: unknown; paced: string }> => {
+    const started = await server.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: {
+          projectPath: project,
+          op: 'start',
+          headless: false,
+          runtimeWaitMs: WINDOWED_BOOT_MS,
+          ...extra,
+        },
+      },
+      WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
+    );
+    const answer = parseTextContent(started);
+    assert.equal(
+      get(answer, 'runtime', 'listening'),
+      true,
+      `${JSON.stringify(extra)} starts a game: ${textOf(started) ?? JSON.stringify(started)}`,
+    );
+    const printed =
+      textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '';
+    await stopItsRun(server);
+    return {
+      arguments: get(answer, 'arguments'),
+      paced: /paced (vsync=\d+ max_fps=\d+)/.exec(printed)?.[1] ?? `nothing said: ${printed}`,
+    };
+  };
+  let stopped = true;
+  try {
+    await server.initialize('regression-test');
+    stopped = false;
+    const hidden = process.platform === 'win32';
+    const own = await runWith({});
+    assert.equal(
+      own.paced,
+      hidden ? `vsync=0 max_fps=${String(HIDDEN_WINDOW_FPS)}` : 'vsync=1 max_fps=0',
+      `the game reads its pacing as the desktop it is on sets it: ${JSON.stringify(own.arguments)}`,
+    );
+    const asked = await runWith({ engineArgs: ['--max-fps', '30'] });
+    assert.equal(asked.paced, hidden ? 'vsync=0 max_fps=30' : 'vsync=1 max_fps=30', "the caller's cap holds");
+    writeFileSync(join(project, 'project.godot'), settings('run/max_fps=24\n'));
+    const capped = await runWith({});
+    assert.equal(
+      capped.paced,
+      hidden ? 'vsync=0 max_fps=24' : 'vsync=1 max_fps=24',
+      "the project's cap holds",
+    );
+    if (hidden && windowedRunRefused() === null) {
+      // On the desktop in use the display has a refresh to wait on, so nothing is turned off.
+      const shown = await runWith({ visible: true });
+      assert.equal(
+        shown.paced,
+        'vsync=1 max_fps=24',
+        `a visible window keeps its vsync: ${JSON.stringify(shown.arguments)}`,
+      );
+    }
+    await server.stop();
+    stopped = true;
+  } finally {
+    if (!stopped) {
+      await server.stop();
+    }
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
   }
 }
 
@@ -47264,6 +47425,10 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
           `func test_${name}() -> void:`,
           '\tassert_str(DisplayServer.get_name()).is_not_equal("headless")',
           '\tassert_str(AudioServer.get_driver_name()).is_equal("Dummy")',
+          // On Windows the engine is on the hidden desktop, which has no refresh for vsync to wait on.
+          '\tif OS.get_name() == "Windows":',
+          '\t\tassert_int(DisplayServer.window_get_vsync_mode()).is_equal(DisplayServer.VSYNC_DISABLED)',
+          `\t\tassert_int(Engine.max_fps).is_equal(${String(HIDDEN_WINDOW_FPS)})`,
           // In seconds rather than frames: on macOS the minimise and the way back are animations.
           '\tawait get_tree().create_timer(1.5).timeout',
           '\tassert_int(DisplayServer.window_get_mode()).is_not_equal(DisplayServer.WINDOW_MODE_MINIMIZED)',
@@ -67375,6 +67540,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheProfilerReadsWhatTheEngineSends,
   testSceneToolsVectorRegression,
   testRunArgumentsLeaveTheLocalDebuggerOff,
+  testAHiddenWindowStartsWithVsyncOff,
   testEngineFlagsAreAListNotAPassage,
   testWhatThisServerStartsIsSilentUnlessAsked,
   testASilentRunIsStartedHereAndSaysWhy,
@@ -67472,6 +67638,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartSaysItsGameIsOnAnotherBuild,
   testAScreenshotHoldsTheGamesOwnWindows,
   testTheRendererIsChosenAndItsMemoryRead,
+  testAGameOnTheHiddenDesktopIsNotHeldToARefresh,
   testWhatTheGameTellsAScreenReaderIsRead,
   testARefusalIsSaidOnce,
   testAStartHeldBeforeItsRuntimeSaysWhere,

@@ -11,7 +11,7 @@
 
 import type { JSONValue, ToolAnnotations } from '@modelcontextprotocol/server';
 import { dictionary } from './dictionary.js';
-import { ENGINE_FLAGS } from './launch.js';
+import { ENGINE_FLAGS, HIDDEN_WINDOW_FPS } from './launch.js';
 import type { MCPToolDefinition } from './server-types.js';
 
 type JsonSchema = Readonly<Record<string, JSONValue>>;
@@ -1734,8 +1734,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       visible: {
         type: 'boolean',
         ops: ['start'],
-        description:
-          'start: on Windows, show the window on the desktop in use. By default a windowed run this server starts goes on a desktop of its own, where it renders and runtime_capture works but the window never shows and never takes the keyboard or the pointer. A game a visible editor plays opens on the desktop in use, and one a hidden editor (editor_launch hidden: true) plays goes on its desktop. Elsewhere than Windows the window shows either way. Default false.',
+        description: `start: on Windows, show the window on the desktop in use. By default a windowed run this server starts goes on a desktop of its own, where it renders and runtime_capture works but the window never shows and never takes the keyboard or the pointer. That desktop has no display, so there is no refresh for vsync to wait on: a Vulkan game waiting on one drew two frames a second, and kept to that after turning vsync off as it ran. A game there, whether this server starts it or a hidden editor plays it, is given --disable-vsync, and --max-fps ${String(HIDDEN_WINDOW_FPS)} unless engineArgs, the project's editor/run/main_run_args or its application/run/max_fps cap its frames, so it reads its vsync mode as disabled; a game that turns vsync on as it runs slows to two frames a second again. A game a visible editor plays opens on the desktop in use, and one a hidden editor (editor_launch hidden: true) plays goes on its desktop. Elsewhere than Windows the window shows either way. Default false.`,
       },
       silent: {
         type: 'boolean',

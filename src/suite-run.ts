@@ -43,6 +43,7 @@ import {
 import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
 import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
 import { staleImports } from './import-freshness.js';
+import { hiddenWindowFlags } from './launch.js';
 import { freeLibraryCopies, seedExtensionList } from './library-copies.js';
 import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
 import { SuiteFingerprints } from './suite-fingerprint.js';
@@ -64,6 +65,7 @@ import {
 } from './suite-judge.js';
 import {
   type CasesBySuite,
+  capsFrames,
   type DeclaredSuite,
   dealt,
   type EnginePlan,
@@ -969,10 +971,14 @@ async function runEngine(
       .join('\n')}\n`,
   );
   const viewport = viewportOf(launch.projectPath);
+  // On Windows every engine runs on the hidden desktop, so a windowed one starts with its flags.
   const display = plan.windowed
-    ? viewport === null
-      ? []
-      : ['--resolution', `${String(viewport.width)}x${String(viewport.height)}`]
+    ? [
+        ...(viewport === null
+          ? []
+          : ['--resolution', `${String(viewport.width)}x${String(viewport.height)}`]),
+        ...(process.platform === 'win32' ? hiddenWindowFlags([], capsFrames(launch.projectPath)) : []),
+      ]
     : ['--headless'];
   const args = [
     ...display,
