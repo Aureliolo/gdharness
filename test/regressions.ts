@@ -6399,6 +6399,104 @@ async function testACallWaitsForAnArrivingEditor(): Promise<void> {
 }
 
 /**
+ * An editor refusing a class_name that a script declares and the class cache lacks is answered with
+ * why. The editor knows a class_name from its last scan, which is what it wrote to the cache, so it
+ * calls a class in a script written since then no class at all. The stand-in refuses both creates in
+ * those words; only the declared class gets the note naming the rescan.
+ */
+async function testAnEditorRefusingAnUncachedClassSaysWhy(): Promise<void> {
+  const port = await reservePort();
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-uncached-create-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Uncached"\n',
+  );
+  mkdirSync(join(project, '.godot'));
+  writeFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'list=[]\n');
+  writeFileSync(join(project, 'lamp_note.gd'), 'class_name LampNote\nextends Resource\n');
+  const server = new ServerProcess({
+    env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: join(tmpdir(), 'gdharness-no-such-engine') },
+  });
+  let editor: WebSocket | null = null;
+  try {
+    await server.initialize('regression-test');
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    editor = socket;
+    await new Promise<void>((resolve, reject) => {
+      socket.once('open', () => {
+        resolve();
+      });
+      socket.once('error', reject);
+    });
+    const asked: string[] = [];
+    socket.on('message', (data: Buffer) => {
+      const message = JSON.parse(data.toString('utf8')) as {
+        type?: string;
+        tool?: string;
+        id?: string;
+        args?: Record<string, unknown>;
+      };
+      if (message.type === 'tool_invoke' && message.tool === 'create_resource') {
+        const type = String(message.args?.['resourceType']);
+        asked.push(type);
+        socket.send(
+          JSON.stringify({
+            type: 'tool_result',
+            id: message.id,
+            success: false,
+            error: `${type} is neither an engine class nor a class_name in the project's class list.`,
+          }),
+        );
+      }
+    });
+    socket.send(JSON.stringify(greeting(project)));
+    for (let waited = 0; waited < 10_000; waited += 100) {
+      const now = get(
+        parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+        'editor',
+      );
+      if (get(now, 'connected') === true) {
+        break;
+      }
+      await delay(100);
+    }
+    const create = async (resourceType: string): Promise<string> =>
+      textOf(
+        await server.request(
+          'tools/call',
+          {
+            name: 'resource_edit',
+            arguments: { projectPath: project, op: 'create', resourcePath: 'made.tres', resourceType },
+          },
+          30_000,
+        ),
+      ) ?? '';
+    const declared = await create('LampNote');
+    assert.match(
+      declared,
+      /: LampNote is neither an engine class nor a class_name in the project's class list\./,
+      declared,
+    );
+    assert.match(
+      declared,
+      /LampNote is declared in this project and missing from \.godot\/global_script_class_cache\.cfg, so a game launched now would not resolve it either\. Try editor_rescan first/,
+      declared,
+    );
+    const undeclared = await create('Statz');
+    assert.match(
+      undeclared,
+      /: Statz is neither an engine class nor a class_name in the project's class list\.$/,
+      undeclared,
+    );
+    assert.deepEqual(asked, ['LampNote', 'Statz'], 'both creates reached the editor');
+  } finally {
+    editor?.terminate();
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * editor_status counts the requests calls are waiting on the editor for, not its own questions. It
  * asks what the editor is playing and scanning with a one-second wait, and an editor busy importing
  * answers later than that, so the questions are still out when it answers and when the next status
@@ -62008,8 +62106,62 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       ) ?? '';
     assert.match(
       notAClass,
-      /^Statz is neither an engine class nor a class_name a script in this project declares\./,
+      /^Statz is neither an engine class nor a class_name in the project's class list\./,
       notAClass,
+    );
+    // Declared in scripts written after the import, so the class cache the engine starts from has
+    // neither class, and each create has to put it there first.
+    const uncachedReason = (type: string, script: string): RegExp =>
+      new RegExp(
+        `^${type} is declared in res://${script} and \\.godot/global_script_class_cache\\.cfg did not list it, which is where an engine resolves a class name from, so the cache was rebuilt from the declarations on disk before the write\\.$`,
+      );
+    writeFileSync(
+      join(project, 'lamp_note.gd'),
+      'class_name LampNote\nextends Resource\n\n@export var lit: bool = false\n',
+    );
+    const uncachedResource = await written('resource_edit', {
+      op: 'create',
+      resourcePath: 'lamp.tres',
+      resourceType: 'LampNote',
+      properties: { lit: true },
+    });
+    assert.deepEqual(
+      [get(uncachedResource, 'scriptClass'), get(uncachedResource, 'properties')],
+      ['LampNote', { lit: true }],
+      JSON.stringify(uncachedResource),
+    );
+    assert.match(
+      text(get(uncachedResource, 'classCacheRebuilt')),
+      uncachedReason('LampNote', 'lamp_note.gd'),
+      JSON.stringify(uncachedResource),
+    );
+    assert.match(fileOf('lamp.tres'), /path="res:\/\/lamp_note\.gd"/, fileOf('lamp.tres'));
+    writeFileSync(join(project, 'lamp.gd'), 'class_name Lamp\nextends Node2D\n');
+    const uncachedNode = await written('scene_node', {
+      op: 'add',
+      scenePath: 'made.tscn',
+      nodeName: 'Lamp',
+      nodeType: 'Lamp',
+    });
+    assert.match(
+      text(get(uncachedNode, 'classCacheRebuilt')),
+      uncachedReason('Lamp', 'lamp.gd'),
+      JSON.stringify(uncachedNode),
+    );
+    assert.match(
+      fileOf('made.tscn'),
+      /path="res:\/\/lamp\.gd" id="([^"]+)"\][\s\S]*\[node name="Lamp" type="Node2D" parent="\."[^\]]*\]\nscript = ExtResource\("\1"\)/,
+      fileOf('made.tscn'),
+    );
+    const cachedNow = await written('resource_edit', {
+      op: 'create',
+      resourcePath: 'lamp_again.tres',
+      resourceType: 'LampNote',
+    });
+    assert.equal(
+      get(cachedNow, 'classCacheRebuilt'),
+      undefined,
+      `a class the cache lists is made without a rebuild: ${JSON.stringify(cachedNow)}`,
     );
     const notANode =
       textOf(
@@ -68311,6 +68463,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStatusDuringArrivalIsOfOneMoment,
   testAnEditorIsReadOnceItHasSaidWhoItIs,
   testACallWaitsForAnArrivingEditor,
+  testAnEditorRefusingAnUncachedClassSaysWhy,
   testEditorStatusCountsOnlyOtherCallsInFlight,
   testARestartWaitsForTheOldEditorToGo,
   testAnEditorCloseWaitsForItToGo,
