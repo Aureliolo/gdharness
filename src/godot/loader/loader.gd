@@ -31,8 +31,9 @@ func _ready() -> void:
 	_runtime = runtime
 
 
-## Whether gdharness's runtime is listening in this engine: false in a release build, a script run
-## and an engine without the addon, though this node is in every one of them.
+## Whether gdharness's runtime is listening in this engine: false in a script run, an engine without
+## the addon and a release build that still carries this node, though it is in every one of them. A
+## release export made with the editor addon enabled leaves this node out.
 func serving() -> bool:
 	if not is_instance_valid(_runtime) or not _runtime.has_method("serving"):
 		return false

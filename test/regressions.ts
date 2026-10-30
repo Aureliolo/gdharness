@@ -2401,6 +2401,137 @@ async function turnedAwayAtTheBridge(
   marked.close();
 }
 
+/**
+ * A release export leaves gdharness out: the runtime's autoload entry, its loader and the addons,
+ * none of which does anything in a release build, while a debug export keeps them all and
+ * `project.godot` is left as it was. A pack only, which needs no template; the debug one checks that
+ * a template is there without using it, so the fixture's data folder holds empty ones.
+ */
+function testAReleaseExportLeavesGdharnessOut(): void {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('release export regression skipped (Godot not found)');
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-release-export-'));
+  try {
+    const project = join(root, 'game');
+    const data = join(root, 'data');
+    const version = spawnSyncHidden(godotPath, ['--version'], { encoding: 'utf8' }).stdout.trim();
+    const templates = join(
+      data,
+      process.platform === 'win32'
+        ? join('Godot', 'export_templates')
+        : process.platform === 'darwin'
+          ? join('Library', 'Application Support', 'Godot', 'export_templates')
+          : join('godot', 'export_templates'),
+      version.split('.').slice(0, 4).join('.'),
+    );
+    mkdirSync(templates, { recursive: true });
+    for (const name of [
+      'linux_debug.x86_64',
+      'linux_release.x86_64',
+      'linux_debug.arm64',
+      'linux_release.arm64',
+    ]) {
+      writeFileSync(join(templates, name), '');
+    }
+    const env = {
+      ...process.env,
+      APPDATA: data,
+      XDG_DATA_HOME: data,
+      ...(process.platform === 'darwin' ? { HOME: data } : {}),
+    };
+    writeTree(project, {
+      'project.godot':
+        'config_version=5\n\n[application]\nconfig/name="ReleaseExport"\nrun/main_scene="res://tests/main.tscn"\n\n' +
+        '[autoload]\n\nFirst="*res://first.gd"\nGdharnessRuntime="*res://gdharness/loader.gd"\nLast="*res://last.gd"\n\n' +
+        '[editor_plugins]\n\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n\n' +
+        '[gdharness]\n\nruntime/quiet_scenes_under=PackedStringArray("res://tests/")\n',
+      'first.gd': 'extends Node\n',
+      'last.gd': 'extends Node\n',
+      'tests/main.gd': [
+        'extends Node',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar found: Dictionary = {',
+        '\t\t"node": get_node_or_null("/root/GdharnessRuntime") != null,',
+        '\t\t"loader": ResourceLoader.exists("res://gdharness/loader.gd"),',
+        '\t\t"runtime": ResourceLoader.exists("res://addons/gdharness_runtime/runtime_autoload.gd"),',
+        '\t\t"editor": ResourceLoader.exists("res://addons/gdharness_editor/plugin.gd"),',
+        '\t\t"own": ResourceLoader.exists("res://first.gd"),',
+        '\t\t"autoloads": [',
+        '\t\t\tProjectSettings.has_setting("autoload/First"),',
+        '\t\t\tProjectSettings.has_setting("autoload/GdharnessRuntime"),',
+        '\t\t\tProjectSettings.has_setting("autoload/Last"),',
+        '\t\t],',
+        '\t}',
+        '\tprint("found ", JSON.stringify(found))',
+        '\tget_tree().quit()',
+        '',
+      ].join('\n'),
+      'tests/main.tscn':
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://tests/main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+      'export_presets.cfg':
+        '[preset.0]\n\nname="Pack"\nplatform="Linux"\nrunnable=true\nexport_filter="all_resources"\n' +
+        'include_filter=""\nexclude_filter=""\nexport_path=""\n\n[preset.0.options]\n\nbinary_format/architecture="x86_64"\n',
+    });
+    for (const addon of ['gdharness_editor', 'gdharness_runtime']) {
+      cpSync(join('src', 'godot', 'addons', addon), join(project, 'addons', addon), { recursive: true });
+    }
+    mkdirSync(join(project, 'gdharness'));
+    cpSync(join('src', 'godot', 'loader', 'loader.gd'), join(project, 'gdharness', 'loader.gd'));
+    const settings = readFileSync(join(project, 'project.godot'), 'utf8');
+    const engine = (args: string[]): string => {
+      const ran = spawnSyncHidden(godotPath, ['--headless', ...args], {
+        encoding: 'utf8',
+        env,
+        timeout: 180_000,
+      });
+      return `${ran.stdout}${ran.stderr}`;
+    };
+    engine(['--path', project, '--import']);
+    const found = (kind: string, flag: string): unknown => {
+      const pack = join(root, `${kind}.pck`);
+      const said = engine(['--path', project, flag, 'Pack', pack]);
+      assert.ok(existsSync(pack), `the ${kind} pack, exported: ${said}`);
+      const ran = engine(['--main-pack', pack]);
+      const line = /^found (\{.*\})$/m.exec(ran)?.[1];
+      assert.ok(line !== undefined, `what the ${kind} pack holds, said: ${ran}`);
+      return JSON.parse(line);
+    };
+    assert.deepEqual(
+      found('release', '--export-pack'),
+      {
+        node: false,
+        loader: false,
+        runtime: false,
+        editor: false,
+        own: true,
+        autoloads: [true, false, true],
+      },
+      "a release pack without gdharness's entry, loader or addons, and with the game's own",
+    );
+    assert.deepEqual(
+      found('debug', '--export-debug'),
+      { node: true, loader: true, runtime: true, editor: true, own: true, autoloads: [true, true, true] },
+      'a debug pack with all of them',
+    );
+    assert.equal(
+      readFileSync(join(project, 'project.godot'), 'utf8'),
+      settings,
+      'and project.godot as it was',
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
 function testSceneToolsVectorRegression(): void {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -68458,6 +68589,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEngineEntriesFoldAndScriptErrorsAreKnown,
   testTheProfilerReadsWhatTheEngineSends,
   testSceneToolsVectorRegression,
+  testAReleaseExportLeavesGdharnessOut,
   testRunArgumentsLeaveTheLocalDebuggerOff,
   testAHiddenWindowStartsWithVsyncOff,
   testEngineFlagsAreAListNotAPassage,
