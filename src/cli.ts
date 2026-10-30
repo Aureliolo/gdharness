@@ -787,20 +787,22 @@ Usage:
   gdharness test [project] [suite ...] [--engines N] [--slots DIR] [--slot-count N]
                  [--silence S] [--deadline S] [--tests DIR] [--changed-only] [--reach-also PATH]
                  [--import] [--godot PATH] [--godot-version V] [--cores N]
-                 [--order reversed|SEED] [--print-output] [--verbose] [--result FILE] [--runner]
+                 [--order reversed|SEED] [--print-output] [--verbose] [--result FILE]
+                 [--times FILE] [--runner]
                                      Run the project's gdUnit4 suites over several engines and
                                      judge every line they print: exit 1 on a failing case, an
                                      engine error no case declared, a case that never finished
                                      or a leak at exit. A suite is a script, a directory, or
                                      script.gd:test_case for one case. --changed-only leaves out
-                                     suites that passed with everything they reach unchanged; it
-                                     is for iterating, and no gate passes it. --print-output
+                                     suites that passed on exactly the files their engine loaded,
+                                     all unchanged, and still compiles every script. --print-output
                                      prints what every engine printed, for a
                                      benchmark run by hand. --verbose starts every engine verbose,
                                      so a leak at exit is named. --result writes the outcome, each
-                                     suite's time and every problem as JSON for a gate. --runner
-                                     prints the shipped runner's path. docs/test-runs.md has the
-                                     rest.
+                                     suite's time and every problem as JSON for a gate. --times
+                                     deals by and records into FILE instead of the project's own
+                                     times. --runner prints the shipped runner's path.
+                                     docs/test-runs.md has the rest.
   gdharness spread [project] SCENE [--workers N] [--slots DIR] [--slot-count N] [--silence S]
                    [--deadline S] [--godot PATH] [--godot-version V] [--cores N] [-- ARGS]
                                      Play a bench scene's runs over several headless engines,

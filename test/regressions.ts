@@ -402,12 +402,14 @@ import {
 } from '../src/spawn.js';
 import { type ArmPlayed, armsPlayed, shareFaults, shareOf } from '../src/spread-run.js';
 import { followSuccessor, RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
-import { SuiteFingerprints } from '../src/suite-fingerprint.js';
+import { EVERY_FILE, reachedBySuite, SuiteInputs } from '../src/suite-inputs.js';
 import {
+  COMPILED_SAID,
   exitNamed,
   failedOnPushErrors,
   funcOf,
   type HandedSuite,
+  judgeCompile,
   judgeEngine,
   type RowShare,
   readRun,
@@ -43608,19 +43610,28 @@ function testTheShippedRunnerRunsAFileOfSuites(): void {
       ...cases.flatMap((name) => ['', `func ${name}() -> void:`, '\tassert_bool(true).is_true()', '']),
     ].join('\n');
   try {
-    writeFileSync(
-      join(projectDir, 'project.godot'),
-      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Listed"\n',
-    );
+    // An autoload loading a computed path as it is made, which the record sees only if it starts
+    // before the autoloads load.
+    writeTree(projectDir, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Listed"\n\n' +
+        '[autoload]\n\nEarly="*res://early.gd"\n',
+      'early.gd': 'extends Node\n\nvar held: Resource = load("res://data/" + "early.tres")\n',
+      'data/early.tres': '[gd_resource type="Resource" format=3]\n\n[resource]\n',
+      'data/word.tres': '[gd_resource type="Resource" format=3]\n\n[resource]\n',
+    });
     cpSync(gdunit, join(projectDir, 'addons', 'gdUnit4'), { recursive: true });
     mkdirSync(join(projectDir, 'tests'));
-    writeFileSync(join(projectDir, 'tests', 'a_test.gd'), suite(['test_one', 'test_two']));
+    // Each suite loads the same resource and lets it go, so the cache holds it for neither.
+    const looksUp =
+      'func before() -> void:\n\tvar word: Resource = load("res://data/" + "word.tres")\n\tif word == null:\n\t\tpush_error("no word")\n';
+    writeFileSync(join(projectDir, 'tests', 'a_test.gd'), suite(['test_one', 'test_two'], looksUp));
     writeFileSync(
       join(projectDir, 'tests', 'b_test.gd'),
       suite(
         ['test_three'],
         'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {"test_three": ["the store is closed"]}\n' +
-          'const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_three": ["the till is open"]}\n',
+          `const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_three": ["the till is open"]}\n\n${looksUp}`,
       ),
     );
     writeFileSync(join(projectDir, 'tests', 'c_test.gd'), suite(['test_never']));
@@ -43732,15 +43743,79 @@ function testTheShippedRunnerRunsAFileOfSuites(): void {
       `both reports when left on: ${third.said}`,
     );
 
-    // As a gate runs it: every class of the game compiled with the suites, so the broken one is
-    // named although no suite reaches it, and the suites still run.
-    const together = run('together', ['--html-report-off', '--junit-report-off', '--compile-together']);
-    assert.match(together.said, /res:\/\/wreck\.gd/, `the broken class is named: ${together.said}`);
-    assert.match(
+    // As gdharness test runs a suite engine: its own suites compiled together, recording what it
+    // loads, and no class of the game that no suite reaches, so the broken one is not compiled here.
+    const reached = join(scratch, 'reached.jsonl');
+    const together = run('together', [
+      '--html-report-off',
+      '--junit-report-off',
+      '--compile-together',
+      '--reached-out',
+      reached,
+    ]);
+    assert.equal(together.status, 0, together.said);
+    assert.doesNotMatch(
       together.said,
-      /Executed test cases\s*:\s*\(2\//,
-      `and the listed suites run beside it: ${together.said}`,
+      /res:\/\/wreck\.gd/,
+      `no unreached class is compiled: ${together.said}`,
     );
+    assert.match(together.said, /Executed test cases\s*:\s*\(2\//, `the listed suites run: ${together.said}`);
+    const lines = readFileSync(reached, 'utf8')
+      .trim()
+      .split('\n')
+      .map(
+        (line) =>
+          JSON.parse(line) as {
+            autoloads?: boolean;
+            began?: string;
+            suite?: string;
+            resident?: string[];
+            reached: string[];
+          },
+      );
+    assert.deepEqual(
+      lines.map((line) => (line.autoloads === true ? 'autoloads' : (line.began ?? line.suite))),
+      [
+        'autoloads',
+        'res://tests/b_test.gd',
+        'res://tests/b_test.gd',
+        'res://tests/a_test.gd',
+        'res://tests/a_test.gd',
+      ],
+      `a line once the autoloads are loaded, then one as each suite begins and ends: ${JSON.stringify(lines)}`,
+    );
+    const autoloads = lines[0]?.reached ?? [];
+    for (const path of ['res://early.gd', 'res://data/early.tres']) {
+      assert.ok(autoloads.includes(path), `${path} is on the autoloads' line: ${autoloads.join(', ')}`);
+    }
+    for (const at of [1, 3]) {
+      const resident = lines[at]?.resident ?? [];
+      assert.ok(
+        resident.includes('res://data/early.tres'),
+        `what the autoload holds is resident as ${lines[at]?.began ?? ''} begins: ${resident.join(', ')}`,
+      );
+      assert.ok(
+        !resident.includes('res://data/word.tres'),
+        `what an earlier suite let go is not: ${resident.join(', ')}`,
+      );
+    }
+    for (const at of [2, 4]) {
+      assert.ok(
+        (lines[at]?.reached ?? []).includes('res://data/word.tres'),
+        `${lines[at]?.suite ?? ''} loading what the suite before it let go is recorded on its own line: ${JSON.stringify(lines[at])}`,
+      );
+    }
+    assert.ok(
+      lines.every((line) => !line.reached.includes('res://wreck.gd')),
+      `nothing loaded the unreached class: ${JSON.stringify(lines)}`,
+    );
+
+    // As gdharness test checks every script: every class of the game compiled with the suites, so
+    // the broken one is named although no suite reaches it, and no suite runs.
+    const compiled = run('compiled', ['--compile-only']);
+    assert.match(compiled.said, /res:\/\/wreck\.gd/, `the broken class is named: ${compiled.said}`);
+    assert.match(compiled.said, new RegExp(`^${COMPILED_SAID}$`, 'm'), compiled.said);
+    assert.doesNotMatch(compiled.said, /Run Test Suite/, `and no suite runs: ${compiled.said}`);
     for (const healthy of [first, second, third, together]) {
       assert.doesNotMatch(healthy.said, /gdharness test: gdUnit4/, 'the checks say nothing on this gdUnit4');
     }
@@ -46189,11 +46264,13 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
 }
 
 /**
- * A suite's fingerprint moves with what it reaches and nothing else, and a suite reaching what no
- * file names has none, so it always runs.
+ * A suite's inputs are what its engine recorded, followed along what compiles with a script and what
+ * a resource names, and its print moves with those and nothing else. A file read or a folder listed
+ * by a literal or constant path is an input; one read by a path worked out at run time makes every
+ * file in the project one.
  */
-function testAFingerprintFollowsWhatASuiteReaches(): void {
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-prints-'));
+function testASuitesInputsAreWhatItsEngineLoaded(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-inputs-'));
   try {
     writeTree(project, {
       'project.godot': 'config_version=5\n\n[autoload]\n\nGame="*res://game.gd"\n',
@@ -46204,36 +46281,143 @@ function testAFingerprintFollowsWhatASuiteReaches(): void {
       'data/table.tres':
         '[gd_resource type="Resource" format=3]\n[ext_resource path="res://data/icon.png" type="Texture2D" id="1"]\n',
       'data/icon.png': 'png',
+      'data/levels.json': '[1]\n',
+      'levels/one.txt': 'one\n',
       'other.gd': 'class_name Other\nextends Node\n',
       'tests/a_test.gd': 'extends GdUnitTestSuite\n\nfunc test_a() -> void:\n\tHelper.new()\n',
-      'tests/walk_test.gd':
-        'extends GdUnitTestSuite\n\nfunc test_w() -> void:\n\tDirAccess.get_files_at("res://data")\n',
-      'tests/load_test.gd': 'extends GdUnitTestSuite\n\nfunc test_l(id: String) -> void:\n\tload(id)\n',
-      'tests/placeholder_test.gd':
-        'extends GdUnitTestSuite\n\nfunc test_p(id: String) -> void:\n\tResourceLoader.exists("res://data/%s.tres" % id)\n',
+      'reader.gd':
+        'extends Node\n\nconst LEVELS: String = "res://data/levels.json"\n\n\nfunc read() -> String:\n' +
+        '\t# FileAccess.open(somewhere) in a comment reads nothing.\n' +
+        '\tFileAccess.open("user://saved.cfg", FileAccess.READ)\n' +
+        '\tFileAccess.open(str(self), FileAccess.WRITE)\n\treturn FileAccess.get_file_as_string(LEVELS)\n',
+      'lister.gd':
+        'extends Node\n\n\nfunc names() -> PackedStringArray:\n\treturn DirAccess.get_files_at("res://levels")\n',
+      'computed.gd':
+        'extends Node\n\n\nfunc read(name: String) -> String:\n\treturn FileAccess.get_file_as_string(name)\n',
+      'paths.gd': 'class_name Paths\nextends Node\n\nconst DATA: String = "res://da" + "ta"\n',
+      'joined.gd':
+        'extends Paths\n\nconst LEVELS: String = DATA + "/"\n\n\nfunc read(name: String) -> String:\n' +
+        '\treturn FileAccess.get_file_as_string(LEVELS.path_join(name))\n',
+      'formatted.gd':
+        'extends Node\n\n\nfunc read(name: String) -> String:\n' +
+        '\treturn FileAccess.get_file_as_string("res://levels/%s.txt" % name)\n',
+      'store.gd': 'class_name Store\nextends Node\n\nconst SAVE_ROOT: String = "user://"\n',
+      'saves.gd':
+        'extends Node\n\nconst SAVES: String = Store.SAVE_ROOT + "saves"\n\n\nfunc read(name: String) -> String:\n' +
+        '\treturn FileAccess.get_file_as_string(SAVES.path_join(name))\n',
+      'maybe.gd':
+        'extends Node\n\n\nfunc there() -> bool:\n\treturn ResourceLoader.exists("res://data/maybe.tres")\n',
+      'by_uid.gd': 'extends Node\n\nconst SCENE = preload("uid://b1234")\n',
+      'tests/b_test.gd': 'extends GdUnitTestSuite\n\nfunc test_b(name: String) -> void:\n\tload(name)\n',
+      'sounds.gd': 'class_name Sounds\nextends Node\n\nconst ROOT: String = "res://sound/"\n',
+      'sound/a.ogg': 'ogg',
+      'sound/player.gd': 'extends Node\n\n\nfunc play(path: String) -> void:\n\tload(path)\n',
+      'tests/c_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_c(take: String) -> void:\n\tload(Sounds.ROOT + take + ".ogg")\n',
+      'tests/d_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_d() -> void:\n\tload("res://data/table.tres")\n',
       '.godot/extension_list.cfg': 'res://ext/native.gdextension\n',
       'ext/native.gdextension': '[configuration]\nentry_symbol = "init"\n',
-      'tests/literal_test.gd':
-        'extends GdUnitTestSuite\n\nfunc test_l() -> void:\n\tload("res://data/table.tres")\n',
     });
-    const printOf = (path: string, always: readonly string[] = ['1']): string | null => {
-      const scripts = new ProjectScripts(project);
-      const suite = scripts.suite(path);
-      assert.ok(suite !== null, path);
-      return new SuiteFingerprints(scripts, always).of(suite);
+    const inputsOf = (reached: readonly string[]): string[] =>
+      new SuiteInputs(new ProjectScripts(project), ['1']).inputsOf(reached);
+    const printOf = (reached: readonly string[], always: readonly string[] = ['1']): string => {
+      const inputs = new SuiteInputs(new ProjectScripts(project), always);
+      return inputs.printOf(inputs.inputsOf(reached));
     };
-    const first = printOf('res://tests/a_test.gd');
-    assert.equal(typeof first, 'string', 'a suite reaching only files has one');
-    assert.equal(printOf('res://tests/a_test.gd'), first, 'the same files, the same print');
-    assert.equal(printOf('res://tests/walk_test.gd'), null, 'a directory walked has none');
-    assert.equal(printOf('res://tests/load_test.gd'), null, 'a computed load has none');
-    assert.equal(printOf('res://tests/placeholder_test.gd'), null, 'nor a path filled in at run time');
-    assert.equal(typeof printOf('res://tests/literal_test.gd'), 'string', 'a literal load does');
-    const changes = (path: string, text: string): boolean => {
-      const before = printOf('res://tests/a_test.gd');
+    // As an engine records it: the autoload, the suite, gdUnit4, and what the project has no file of.
+    const suite = [
+      'res://game.gd',
+      'res://tests/a_test.gd',
+      'user://saved.cfg',
+      'res://.godot/imported/x.ctex',
+      'res://addons/gdUnit4/src/GdUnitTestSuite.gd',
+    ];
+    assert.deepEqual(
+      inputsOf(suite),
+      [
+        'res://addons/gdUnit4/',
+        'res://data/icon.png',
+        'res://data/table.tres',
+        'res://ext/native.gdextension',
+        'res://game.gd',
+        'res://helper.gd',
+        'res://project.godot',
+        'res://tests/a_test.gd',
+      ],
+      'the class it names, what that preloads and what that names, its addon whole, the project and its extension, and nothing outside the project files',
+    );
+    assert.deepEqual(
+      inputsOf(['res://reader.gd']).filter((path) => path.startsWith('res://data') || path === EVERY_FILE),
+      ['res://data/levels.json'],
+      'a file read by a constant path, and no user:// file, written file or comment',
+    );
+    assert.ok(inputsOf(['res://lister.gd']).includes('res://levels'), 'a folder listed by a literal path');
+    assert.deepEqual(inputsOf(['res://computed.gd']), [EVERY_FILE], 'a file read by a computed path');
+    assert.deepEqual(inputsOf(['res://by_uid.gd']), [EVERY_FILE], 'and a preload by uid');
+    assert.deepEqual(
+      inputsOf(['res://joined.gd']).filter(
+        (path) => !path.startsWith('res://project') && !path.startsWith('res://ext'),
+      ),
+      ['res://joined.gd', 'res://paths.gd', 'tree:res://data/'],
+      'a path joined onto an inherited constant built from literals, read as that folder whole',
+    );
+    assert.ok(
+      inputsOf(['res://formatted.gd']).includes('tree:res://levels/'),
+      'and a path formatted into a literal, as the folder it begins in',
+    );
+    assert.deepEqual(
+      inputsOf(['res://saves.gd']).filter(
+        (path) => !path.startsWith('res://project') && !path.startsWith('res://ext'),
+      ),
+      ['res://saves.gd', 'res://store.gd'],
+      "no file for a path joined onto another class's user:// constant",
+    );
+    assert.ok(
+      inputsOf(['res://maybe.gd']).includes('res://data/maybe.tres'),
+      'a resource asked about by path',
+    );
+
+    const first = printOf(suite);
+    assert.equal(printOf(suite), first, 'the same files, the same print');
+    const moves = (reached: readonly string[], path: string, text: string): boolean => {
+      const before = printOf(reached);
       writeFileSync(join(project, path), text);
-      return printOf('res://tests/a_test.gd') !== before;
+      return printOf(reached) !== before;
     };
+    assert.equal(moves(['res://reader.gd'], 'data/levels.json', '[2]\n'), true, 'the file it reads');
+    assert.equal(
+      moves(['res://lister.gd'], 'levels/one.txt', 'uno\n'),
+      false,
+      'a listed file it does not read',
+    );
+    assert.equal(
+      moves(['res://lister.gd'], 'levels/two.txt', 'two\n'),
+      true,
+      'a file added to a folder it lists',
+    );
+    assert.equal(
+      moves(['res://computed.gd'], 'other.gd', 'class_name Other\nextends Node3D\n'),
+      true,
+      'any file, for a computed read',
+    );
+    assert.equal(
+      moves(['res://joined.gd'], 'data/levels.json', '[3]\n'),
+      true,
+      'a file in the folder joined onto',
+    );
+    assert.equal(moves(['res://joined.gd'], 'levels/one.txt', 'eins\n'), false, 'and not one outside it');
+    assert.equal(
+      moves(['res://formatted.gd'], 'levels/one.txt', 'une\n'),
+      true,
+      'a file in the folder formatted into',
+    );
+    assert.equal(
+      moves(['res://maybe.gd'], 'data/maybe.tres', '[gd_resource type="Resource" format=3]\n'),
+      true,
+      'the resource it asked about appearing',
+    );
+    const changes = (path: string, text: string): boolean => moves(suite, path, text);
     assert.equal(
       changes('other.gd', 'class_name Other\nextends Node2D\n'),
       false,
@@ -46248,7 +46432,7 @@ function testAFingerprintFollowsWhatASuiteReaches(): void {
       'a class it names',
     );
     assert.equal(changes('data/icon.png', 'png2'), true, 'what a resource it preloads names');
-    assert.equal(changes('game.gd', 'extends Node2D\n'), true, 'an autoload, which runs beside every suite');
+    assert.equal(changes('game.gd', 'extends Node2D\n'), true, 'an autoload its engine loaded');
     assert.equal(
       changes('ext/native.gdextension', '[configuration]\nentry_symbol = "begin"\n'),
       true,
@@ -46264,14 +46448,153 @@ function testAFingerprintFollowsWhatASuiteReaches(): void {
       true,
       'the project',
     );
-    assert.notEqual(
-      printOf('res://tests/a_test.gd', ['2']),
-      printOf('res://tests/a_test.gd', ['1']),
-      'what every suite depends on',
+    assert.notEqual(printOf(suite, ['2']), printOf(suite, ['1']), 'what every suite depends on');
+
+    // An input changed after the run began may not be what the suite ran on.
+    const scripts = new ProjectScripts(project);
+    const inputs = new SuiteInputs(scripts, ['1']);
+    const kept = inputs.inputsOf(suite);
+    const began = Date.now();
+    utimesSync(join(project, 'data', 'icon.png'), new Date(began - 60_000), new Date(began - 60_000));
+    utimesSync(join(project, 'helper.gd'), new Date(began - 60_000), new Date(began - 60_000));
+    assert.equal(new SuiteInputs(scripts, ['1']).modifiedAfter(kept, began), false, 'nothing since');
+    utimesSync(join(project, 'data', 'icon.png'), new Date(began + 5000), new Date(began + 5000));
+    assert.equal(new SuiteInputs(scripts, ['1']).modifiedAfter(kept, began), true, 'one input since');
+
+    // A suite has the autoloads' line, its own, and what the cache held as it began but the other
+    // suites; not what an earlier suite loaded and let go, nor the loads between suites.
+    const record = join(project, 'reached.jsonl');
+    writeFileSync(
+      record,
+      [
+        { autoloads: true, reached: ['res://game.gd'] },
+        { began: 'res://tests/a_test.gd', resident: ['res://game.gd'], reached: ['res://tests/a_test.gd'] },
+        { suite: 'res://tests/a_test.gd', reached: ['res://levels/one.txt'] },
+        {
+          began: 'res://tests/b_test.gd',
+          resident: ['res://game.gd', 'res://helper.gd', 'res://tests/a_test.gd'],
+          reached: ['res://between.gd'],
+        },
+        { suite: 'res://tests/b_test.gd', reached: ['res://data/levels.json'] },
+        { suite: 'res://tests/never_began_test.gd', reached: [] },
+      ]
+        .map((line) => `${JSON.stringify(line)}\n`)
+        .join(''),
+    );
+    const recorded = reachedBySuite(record);
+    assert.deepEqual(Object.fromEntries(recorded), {
+      'res://tests/a_test.gd': {
+        autoloads: ['res://game.gd'],
+        during: ['res://levels/one.txt'],
+        resident: ['res://game.gd'],
+      },
+      'res://tests/b_test.gd': {
+        autoloads: ['res://game.gd'],
+        during: ['res://data/levels.json'],
+        resident: ['res://game.gd', 'res://helper.gd'],
+      },
+    });
+    const ofB = new SuiteInputs(scripts, ['1']).inputsOfSuite(
+      'res://tests/b_test.gd',
+      recorded.get('res://tests/b_test.gd') ?? { autoloads: [], during: [], resident: [] },
+    );
+    assert.ok(ofB.includes('res://helper.gd'), `what the cache held as it began: ${ofB.join(', ')}`);
+    assert.ok(ofB.includes('res://data/levels.json'), `what it loaded: ${ofB.join(', ')}`);
+    assert.ok(
+      !ofB.includes('res://levels/one.txt'),
+      `not what the suite before it loaded: ${ofB.join(', ')}`,
+    );
+    assert.ok(!ofB.includes('res://between.gd'), `nor what was loaded between them: ${ofB.join(', ')}`);
+
+    // Of what the cache held, a load by a path that names nothing takes it all, one by a path begun
+    // with a constant what lies under it, and one by a path it names none.
+    const held = (suite: string, resident: readonly string[]): string[] =>
+      new SuiteInputs(scripts, ['1']).inputsOfSuite(suite, { autoloads: [], during: [], resident });
+    const ofC = held('res://tests/c_test.gd', ['res://sound/a.ogg', 'res://helper.gd']);
+    assert.ok(ofC.includes('res://sound/a.ogg'), `what the cache held under the start: ${ofC.join(', ')}`);
+    assert.ok(!ofC.includes('res://helper.gd'), `and nothing else it held: ${ofC.join(', ')}`);
+    const ofPlayer = held('res://tests/c_test.gd', [
+      'res://sound/a.ogg',
+      'res://sound/player.gd',
+      'res://helper.gd',
+    ]);
+    assert.ok(
+      ofPlayer.includes('res://helper.gd'),
+      `everything held, once a held script loads by a path naming nothing: ${ofPlayer.join(', ')}`,
+    );
+    const ofD = held('res://tests/d_test.gd', ['res://helper.gd']);
+    assert.ok(
+      ofD.includes('res://data/table.tres') && ofD.includes('res://data/icon.png'),
+      `what a load by a path it names gives, followed: ${ofD.join(', ')}`,
+    );
+    assert.ok(!ofD.includes('res://helper.gd'), `and nothing the cache held: ${ofD.join(', ')}`);
+    assert.deepEqual(
+      reachedBySuite(join(project, 'never-written.jsonl')).size,
+      0,
+      'an engine that never started',
     );
   } finally {
     sweep(project);
   }
+}
+
+/**
+ * The engine compiling every script together fails on any error it printed and on not saying it had
+ * compiled them, and an engine fault naming no suite keeps every suite of that engine from passing.
+ */
+function testTheCompileCheckAndUnattributedFaultsAreJudged(): void {
+  const compiled = (lines: readonly string[], code = 0): string[] =>
+    judgeCompile(readRun(`${lines.join('\n')}\n`), { code, signal: null, ended: null });
+  assert.deepEqual(
+    compiled(['Godot Engine v4.7.2.stable.official', COMPILED_SAID]),
+    [],
+    'every script compiled',
+  );
+  assert.deepEqual(
+    compiled(['Godot Engine v4.7.2.stable.official']),
+    ['it never said it had compiled them'],
+    'an engine that stopped before the end',
+  );
+  const broken = compiled([
+    'Godot Engine v4.7.2.stable.official',
+    'SCRIPT ERROR: Parse Error: Function "nowhere_at_all()" not found in base self.',
+    '   at: GDScript::reload (res://wreck.gd:6)',
+    COMPILED_SAID,
+  ]);
+  assert.equal(broken.length, 1, broken.join(' | '));
+  assert.match(broken[0] ?? '', /^an engine error: .*nowhere_at_all/, broken.join(' | '));
+  assert.deepEqual(compiled([COMPILED_SAID], 1), ['the engine exited 1'], 'and a failing exit');
+
+  const handed = {
+    suites: [{ path: S_TEST, cases: ['test_a', 'test_p'] }],
+    expected: { errors: {}, warnings: {} },
+  };
+  const ran = (extra: readonly string[]): string => {
+    const lines = cannedRun([
+      caseLine(S_TEST, 'test_a', 'STARTED'),
+      caseLine(S_TEST, 'test_a', 'PASSED', '5ms'),
+      ...[0, 1, 2].flatMap((row) => [
+        caseLine(S_TEST, `test_p:${String(row)} (${String(row + 1)})`, 'STARTED'),
+        caseLine(S_TEST, `test_p:${String(row)} (${String(row + 1)})`, 'PASSED', '3ms'),
+      ]),
+    ]).split('\r\n');
+    lines.splice(1, 0, ...extra);
+    return lines.join('\r\n');
+  };
+  const clean = judgeEngine(readRun(ran([])), handed, { code: 0, signal: null, ended: null });
+  assert.equal(clean.passed, true, clean.faults.join(' | '));
+  assert.equal(clean.unattributed, false, 'a clean engine');
+  const outside = judgeEngine(
+    readRun(ran(['ERROR: said before any suite', '   at: f (res://x.gd:1)'])),
+    handed,
+    {
+      code: 0,
+      signal: null,
+      ended: null,
+    },
+  );
+  assert.deepEqual(outside.passedSuites, [S_TEST], 'the suite itself passed');
+  assert.equal(outside.unattributed, true, `but the error names no suite: ${outside.faults.join(' | ')}`);
 }
 
 /** `gdharness test` reads its own options, and refuses what it does not know before anything runs. */
@@ -46295,9 +46618,17 @@ function testTheTestCommandReadsItsOwnOptions(): void {
         '--verbose',
         '--result',
         'out/result.json',
+        '--times',
+        'gate/suite-times.json',
       ],
       tmpdir(),
     );
+    assert.equal(
+      read.timesFile,
+      join(tmpdir(), 'gate', 'suite-times.json'),
+      'a times file read from where it ran',
+    );
+    assert.equal(testOptionsOf([], project).timesFile, null, "and the project's own unless named");
     assert.equal(read.printOutput, true);
     assert.equal(testOptionsOf([], project).printOutput, false, 'off unless asked for');
     assert.equal(read.verbose, true);
@@ -47548,6 +47879,83 @@ async function testASpreadBenchGathersTheTableItPlaysAlone(): Promise<void> {
   }
 }
 
+/**
+ * A run given `--times` deals by that file and records into it, leaving the project's own alone, so a
+ * gate keeping times of its own runs never deals by a hand run's.
+ */
+function testATestRunDealsByAndRecordsIntoTheTimesItIsGiven(): void {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('times file regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-times-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-slots-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\nconfig/name="TimesNamed"\n',
+      'tests/ok_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_one() -> void:\n\tassert_int(1).is_equal(1)\n\n\nfunc test_two() -> void:\n\tawait get_tree().process_frame\n\tassert_int(2).is_equal(2)\n',
+      'tests/other_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_other() -> void:\n\tassert_int(3).is_equal(3)\n',
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const test = (...args: string[]): { said: string; status: number | null } => {
+      const ran = spawnSyncHidden(
+        process.execPath,
+        ['build/cli.js', 'test', project, '--slots', slots, ...args],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, GODOT_PATH: godotPath },
+          timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+        },
+      );
+      return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
+    };
+    const own = join(project, '.godot', 'gdharness', 'suite-times.json');
+    const gateTimes = join(project, 'gate', 'suite-times.json');
+    const first = test('--times', gateTimes);
+    assert.equal(first.status, 0, first.said);
+    const recorded = (existsSync(gateTimes) ? JSON.parse(readFileSync(gateTimes, 'utf8')) : {}) as Record<
+      string,
+      { cases?: object }
+    >;
+    assert.deepEqual(
+      Object.keys(recorded['res://tests/ok_test.gd']?.cases ?? {}).sort(),
+      ['test_one', 'test_two'],
+      `what the run took, recorded into the file named: ${JSON.stringify(recorded)}`,
+    );
+    assert.equal(existsSync(own), false, "and nothing into the project's own");
+
+    writeFileSync(own, '{}\n');
+    writeFileSync(
+      gateTimes,
+      JSON.stringify({
+        ...recorded,
+        'res://tests/ok_test.gd': { seconds: 30, cases: { test_one: 15, test_two: 15 } },
+      }),
+    );
+    const dealt = test('--engines', '2', '--times', gateTimes);
+    assert.equal(dealt.status, 0, dealt.said);
+    // Two engines need about seven gigabytes free, which the macOS runner does not have.
+    assert.match(
+      dealt.said,
+      dealt.said.includes('over 1 engine, of the 2 asked for, since')
+        ? /^3 test functions in 2 suites over 1 engine, of the 2 asked for, since the machine has /m
+        : /^Dealt out case by case, since it took more than an engine's share of this run \(\d+ s\) last time: res:\/\/tests\/ok_test\.gd\.$/m,
+      `dealt by the times in the file named, the project's own being empty: ${dealt.said}`,
+    );
+    assert.equal(readFileSync(own, 'utf8'), '{}\n', "the project's own left as it was");
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(slots, { recursive: true, force: true });
+  }
+}
+
 async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
   const godotPath = resolveGodotPath();
   const gdunit = process.env['GDUNIT4_PATH'];
@@ -47712,7 +48120,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     );
     assert.match(
       noisy.said,
-      /^2 suites passed with everything they reach as it stands now, and are not run: res:\/\/tests\/ok_test\.gd, res:\/\/tests\/declared_test\.gd\.$/m,
+      /^2 suites passed on everything their engines loaded as it stands now, and are not run: res:\/\/tests\/ok_test\.gd, res:\/\/tests\/declared_test\.gd\.$/m,
       noisy.said,
     );
     assert.match(
@@ -47741,6 +48149,69 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       /^Every engine's output is kept under .*test-runs[\\/]\d+-\d+ until 5 later runs have failed\.$/m,
       noisy.said,
     );
+
+    // A suite loading a path worked out at run time is left out until what its engine loaded changes,
+    // and a change to a resource nothing loaded leaves it out still.
+    const resource = (word: string): string =>
+      `[gd_resource type="Resource" format=3]\n\n[resource]\nmetadata/word = "${word}"\n`;
+    writeTree(project, {
+      'data/word.tres': resource('one'),
+      'data/unused.tres': resource('one'),
+      'tests/loads_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_loads() -> void:\n\tvar loaded: Resource = load("res://data/" + "word.tres")\n\tassert_str(str(loaded.get_meta("word"))).is_not_empty()\n',
+    });
+    const loads = (): { said: string; status: number | null } =>
+      test('tests/ok_test.gd', 'tests/loads_test.gd', '--changed-only');
+    const loadsFirst = loads();
+    assert.equal(loadsFirst.status, 0, loadsFirst.said);
+    assert.match(
+      loadsFirst.said,
+      /^1 suite passed on everything its engine loaded as it stands now, and is not run: res:\/\/tests\/ok_test\.gd\.$/m,
+      loadsFirst.said,
+    );
+    assert.match(loadsFirst.said, /^Passed: 1 case in 1 suite across 1 engine, /m, loadsFirst.said);
+    const loadsAgain = loads();
+    assert.equal(loadsAgain.status, 0, loadsAgain.said);
+    assert.match(loadsAgain.said, /^Nothing has changed since every suite last passed\.$/m, loadsAgain.said);
+    writeTree(project, { 'data/unused.tres': resource('two') });
+    const unusedChanged = loads();
+    assert.match(
+      unusedChanged.said,
+      /^Nothing has changed since every suite last passed\.$/m,
+      `a resource no engine loaded: ${unusedChanged.said}`,
+    );
+    // A class no suite loads that no longer compiles fails the run with every suite left out, since
+    // the scripts are still compiled together; the import puts it in the class cache.
+    writeTree(project, {
+      'broken_thing.gd':
+        'class_name BrokenThing\nextends Node\n\n\nfunc said() -> void:\n\tnowhere_at_all()\n',
+    });
+    const brokenAside = test('tests/ok_test.gd', 'tests/loads_test.gd', '--changed-only', '--import');
+    rmSync(join(project, 'broken_thing.gd'));
+    rmSync(join(project, 'broken_thing.gd.uid'), { force: true });
+    const recached = spawnSyncHidden(process.execPath, ['build/cli.js', 'classes', project], {
+      encoding: 'utf8',
+      env,
+    });
+    assert.equal(recached.status, 0, `${recached.stdout}${recached.stderr}`);
+    assert.equal(brokenAside.status, 1, brokenAside.said);
+    assert.match(
+      brokenAside.said,
+      /^Nothing has changed since every suite last passed\.$/m,
+      brokenAside.said,
+    );
+    assert.match(brokenAside.said, /^--- compiling every script together:$/m, brokenAside.said);
+    assert.match(brokenAside.said, /^ {2}an engine error: .*nowhere_at_all/m, brokenAside.said);
+    writeTree(project, { 'data/word.tres': resource('two') });
+    const wordChanged = loads();
+    assert.equal(wordChanged.status, 0, wordChanged.said);
+    assert.match(
+      wordChanged.said,
+      /^1 suite passed on everything its engine loaded as it stands now, and is not run: res:\/\/tests\/ok_test\.gd\.$/m,
+      `the suite that loaded it runs again: ${wordChanged.said}`,
+    );
+    assert.match(wordChanged.said, /^Passed: 1 case in 1 suite across 1 engine, /m, wordChanged.said);
+    rmSync(join(project, 'tests', 'loads_test.gd'));
 
     const embedRefused = test('tests/window_test.gd');
     assert.equal(embedRefused.status, 1, embedRefused.said);
@@ -48103,9 +48574,14 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
           '\tassert_int(DisplayServer.window_get_mode()).is_not_equal(DisplayServer.WINDOW_MODE_MINIMIZED)',
           '\tvar counted: Callable = func() -> void: drawn += 1',
           '\tRenderingServer.frame_post_draw.connect(counted)',
-          '\tawait get_tree().create_timer(0.5).timeout',
+          // Godot skips drawing while the desktop reports none of its windows can be seen, as macOS
+          // does for a window every other one covers, so a failure names the window's state.
+          '\tvar until: int = Time.get_ticks_msec() + 500',
+          '\twhile Time.get_ticks_msec() < until:',
+          '\t\tawait get_tree().process_frame',
           '\tRenderingServer.frame_post_draw.disconnect(counted)',
-          '\tassert_int(drawn).is_greater(0)',
+          '\tvar state: String = "window mode %d, focused %s" % [DisplayServer.window_get_mode(), DisplayServer.window_is_focused()]',
+          '\tassert_int(drawn).override_failure_message("no frame was drawn in 0.5 s, %s" % state).is_greater(0)',
           '',
         ].join('\n');
       writeTree(project, {
@@ -49192,11 +49668,19 @@ async function testAnOrphanIsNamedWithTheCaseThatLeftIt(): Promise<void> {
       said,
     );
     assert.doesNotMatch(said, /exited 101/, `the code says nothing the lines do not: ${said}`);
-    // The suite that left them is not one that passed, and the clean one beside it is.
+    // The suite that left them is not one that passed, and the clean one beside it is when it had an
+    // engine of its own. A machine with room for one engine runs both together, and the nodes the
+    // leaking suite keeps are then leaked at that engine's exit, which names no suite, so neither
+    // is kept.
     const passed = JSON.parse(
       readFileSync(join(project, '.godot', 'gdharness', 'suite-passed.json'), 'utf8'),
     ) as Record<string, unknown>;
-    assert.deepEqual(Object.keys(passed).sort(), ['res://tests/clean_test.gd'], JSON.stringify(passed));
+    const together = /^Failed: .* across 1 engine, /m.test(said);
+    assert.deepEqual(
+      Object.keys(passed).sort(),
+      together ? [] : ['res://tests/clean_test.gd'],
+      `${together ? 'both in one engine' : 'an engine each'}: ${JSON.stringify(passed)}\n${said}`,
+    );
 
     await server.initialize('regression-test');
     const response = await server.request(
@@ -68885,7 +69369,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWaitForASlotKeepsAMarkUntilItEnds,
   testGatesInTheQueueKeepTheirSlots,
   testSuitesAreFoundAndDealtByWhatTheyCost,
-  testAFingerprintFollowsWhatASuiteReaches,
+  testASuitesInputsAreWhatItsEngineLoaded,
+  testTheCompileCheckAndUnattributedFaultsAreJudged,
   testTheTestCommandReadsItsOwnOptions,
   testTheLspCommandFindsTheEditorsPort,
   testEveryLongCallIsHeardFrom,
@@ -68894,6 +69379,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheTestHelpersWaitStepAndPress,
   testASpreadBenchGathersTheTableItPlaysAlone,
   testTheTestCommandRunsAndJudgesAProject,
+  testATestRunDealsByAndRecordsIntoTheTimesItIsGiven,
   testTheShutdownWalkIsHeldAndARealLeakStillFails,
   testAParameterisedCaseIsDealtByItsRows,
   testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly,

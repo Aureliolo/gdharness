@@ -495,6 +495,11 @@ export interface EngineVerdict {
   readonly passedSuites: readonly string[];
   /** Whether the machine running out of memory may be why it failed. */
   readonly starved: boolean;
+  /**
+   * Whether a fault names no suite: the engine crashed, leaked at exit or printed an error outside
+   * every suite. Any of its suites may be the cause, so none of them is kept as passed.
+   */
+  readonly unattributed: boolean;
   /** The printed lines worth showing for a failure, in order, with gaps marked. */
   readonly shown: readonly string[];
 }
@@ -744,6 +749,7 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
         : 'the run executed no test case at all, whatever it exited with',
     );
   }
+  let unattributed = faults.length;
   for (const row of [...printed.mismatched, ...printed.unrunnable]) {
     faults.push(`${row.suite} > ${row.name} never ran: gdUnit4 skipped it, saying "${row.reason}"`);
     failing.add(row.suite);
@@ -828,7 +834,9 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
         ? `an engine ${error.warning ? 'warning' : 'error'} outside every suite: ${error.text}`
         : `an engine ${error.warning ? 'warning' : 'error'} in ${error.suite} > ${error.during ?? ''}: ${error.text}; ${declaringAdvice(error.during ?? '', error.warning)}`,
     );
-    if (error.suite !== null) {
+    if (error.suite === null) {
+      unattributed += 1;
+    } else {
       failing.add(error.suite);
     }
     shownAt.add(error.at);
@@ -842,6 +850,7 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
   }
   const selfTyped = selfTypedSentence(handed.selfTyped ?? []);
   const notes: string[] = [];
+  const beforeExit = faults.length;
   const pushErrorsFailed =
     handed.failsOnPushErrors === true ? pushErrorsFailedSentence(failedOnPushErrors(printed)) : undefined;
   if (pushErrorsFailed !== undefined) {
@@ -865,6 +874,7 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
   if (printed.starved.length > 0) {
     faults.push('the engine ran out of memory');
   }
+  unattributed += faults.length - beforeExit;
   printed.lines.forEach((line, at) => {
     if (/^(?:Overall Summary|Executed test|Total execution time| ?Exit code)/.test(line.trim())) {
       shownAt.add(at);
@@ -883,8 +893,45 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
     notes,
     passedSuites,
     starved,
+    unattributed: unattributed > 0,
     shown: passed ? [] : linesShown(printed.lines, shownAt, cutShort),
   };
+}
+
+/** What the runner prints once it has compiled every script together; kept in step with `listed.gd`. */
+export const COMPILED_SAID = 'gdharness compiled every script together';
+
+/**
+ * What is wrong with the engine that compiled every script of the run together, by what it printed
+ * and how it ended: none when it compiled them all and printed no error or warning.
+ */
+export function judgeCompile(printed: RunPrinted, end: EngineEnd): string[] {
+  const faults: string[] = [];
+  const crashed = crashIn(printed.lines);
+  if (end.ended !== null) {
+    faults.push(end.ended);
+  } else if (end.code !== 0) {
+    faults.push(
+      crashed !== null && crashed.signal !== ''
+        ? `the engine crashed, its crash handler reporting signal ${crashed.signal}`
+        : end.code === null
+          ? `the engine was ended by ${end.signal ?? 'a signal'}`
+          : `the engine exited ${exitNamed(end.code)}`,
+    );
+  }
+  if (!printed.lines.some((line) => line.trim() === COMPILED_SAID)) {
+    faults.push('it never said it had compiled them');
+  }
+  for (const error of unexpectedErrors(printed, { errors: {}, warnings: {} }, []).printed) {
+    faults.push(`an engine ${error.warning ? 'warning' : 'error'}: ${error.text}`);
+  }
+  // A walk the engine stopped part way reports as leaked what it never reached, as judgeEngine notes.
+  if (!walkStoppedPartWay(printed.lines)) {
+    for (const leak of printed.leaks) {
+      faults.push(`the engine exited holding what it should have freed: ${leak}`);
+    }
+  }
+  return faults;
 }
 
 /**
