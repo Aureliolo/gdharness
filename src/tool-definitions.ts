@@ -2164,7 +2164,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       rect: {
         effect: 'read',
         summary:
-          "one node's rectangle or position, in canvas and in window pixels, and for a Control whether it is in view. Canvas is the node's own viewport; window is where it is drawn in the game's window, through any embedded dialog or SubViewport it sits in, which is what runtime_input mouse_click and mouse_motion take. A 2D node answers where it stands, and a sprite, collision shape, polygon or line also the rectangle it covers under covers. A 3D node answers with the point to aim at, which is the middle of what it draws rather than the origin it stands on, the rectangle it covers under covers, the camera that drew it, and behind_camera when it is not in front of one",
+          "one node's rectangle or position, in canvas and in window pixels, and for a Control whether it is in view, with drawn_over naming what a pointer at its centre would reach instead, such as a dialog over the screen. Canvas is the node's own viewport; window is where it is drawn in the game's window, through any embedded dialog or SubViewport it sits in, which is what runtime_input mouse_click and mouse_motion take. A 2D node answers where it stands, and a sprite, collision shape, polygon or line also the rectangle it covers under covers. A 3D node answers with the point to aim at, which is the middle of what it draws rather than the origin it stands on, the rectangle it covers under covers, the camera that drew it, and behind_camera when it is not in front of one",
         requires: ['nodePath'],
       },
       property: {

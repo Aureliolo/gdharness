@@ -17019,6 +17019,20 @@ async function testAClickThatFreesWhatItMissedAnswers(): Promise<void> {
     });
     assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
 
+    // Visible and in view read as clickable for a button under a dialog covering the screen.
+    const under = await call('runtime_inspect', { op: 'rect', nodePath: '/root/Main/Covered' });
+    assert.deepEqual(
+      [get(under, 'visible'), get(under, 'in_view'), get(under, 'drawn_over')],
+      [true, true, '/root/Main/Cover'],
+      JSON.stringify(under),
+    );
+    const top = await call('runtime_inspect', { op: 'rect', nodePath: '/root/Main/Cover' });
+    assert.deepEqual(
+      [get(top, 'visible'), get(top, 'drawn_over')],
+      [true, undefined],
+      `what is on top is drawn over by nothing: ${JSON.stringify(top)}`,
+    );
+
     const spot = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Spot' });
     const spotShown = JSON.stringify(spot);
     assert.equal(get(spot, 'type'), 'clicked', `a whole answer: ${spotShown}`);
