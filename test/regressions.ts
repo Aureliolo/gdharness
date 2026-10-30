@@ -122,8 +122,13 @@ import {
   lockIsFree,
   machineSlots,
   ownStart,
+  QUEUED_FOLDER,
+  inAGate as runsInAGate,
+  SHARE_COUNT_VARIABLE,
+  SHARE_VARIABLE,
   type SlotHolder,
   START_TOLERANCE_MS,
+  slotsDrawnOn,
   slotWaitedSaid,
   slotWaitSaid,
   UNWRITTEN_MS,
@@ -44794,6 +44799,105 @@ async function testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone(): Promise<void
 }
 
 /**
+ * While a gate is in the machine's queue, an engine outside a gate takes only the last two slots, and
+ * a gate's engine takes only the others, as the games' own tools take them. Work outside the queue
+ * once held 12 of 16 slots while gates waited hours. A gate's mark is live by the rule a lock is: one
+ * whose holder has gone is removed and holds nothing back, and one not yet written names nobody.
+ */
+async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
+  assert.deepEqual(slotsDrawnOn(16, false, false), {
+    numbers: [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
+  });
+  assert.deepEqual(slotsDrawnOn(16, false, true), { numbers: [15, 14], limit: 'kept' });
+  assert.deepEqual(slotsDrawnOn(16, true, true), {
+    numbers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+    limit: 'gate',
+  });
+  assert.deepEqual(slotsDrawnOn(2, true, false), { numbers: [0], limit: 'gate' });
+  assert.deepEqual(slotsDrawnOn(2, false, true), { numbers: [1], limit: 'kept' });
+  assert.deepEqual(slotsDrawnOn(1, false, true), { numbers: [0] }, "one slot is everybody's");
+  assert.deepEqual(
+    [
+      runsInAGate({ [SHARE_VARIABLE]: 'share', [SHARE_COUNT_VARIABLE]: '3' }),
+      runsInAGate({ [SHARE_VARIABLE]: 'share' }),
+      runsInAGate({ [SHARE_VARIABLE]: '', [SHARE_COUNT_VARIABLE]: '3' }),
+    ],
+    [true, false, false],
+    'a gate names its share in both variables',
+  );
+
+  const started = await ownStart();
+  const holder = { pid: process.pid, started, by: 'gdharness test of /p' };
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gate-slots-'));
+  const queued = join(directory, QUEUED_FOLDER);
+  mkdirSync(queued);
+  const takeAll = async (slots: EngineSlots): Promise<string[]> => {
+    const taken: string[] = [];
+    for (let lock = await slots.takeFree(); lock !== null; lock = await slots.takeFree()) {
+      taken.push(basename(lock));
+    }
+    for (const lock of taken) {
+      slots.release(join(directory, lock));
+    }
+    return taken;
+  };
+  try {
+    const outside = new EngineSlots(directory, 4, holder, undefined, false);
+    const gate = new EngineSlots(directory, 4, holder, undefined, true);
+    assert.deepEqual(await takeAll(outside), ['3.lock', '2.lock', '1.lock', '0.lock'], 'no gate queued');
+
+    // A gate whose process has gone: its mark is removed and holds nothing back.
+    const gone = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
+    assert.equal(typeof gone.pid, 'number', 'a process to have gone');
+    writeFileSync(join(queued, 'gone.json'), JSON.stringify({ pid: gone.pid, started }));
+    // And one still being written, which names nobody yet.
+    writeFileSync(join(queued, 'writing.json'), '');
+    assert.deepEqual(
+      await takeAll(outside),
+      ['3.lock', '2.lock', '1.lock', '0.lock'],
+      'a gone gate and an unwritten mark keep no slots',
+    );
+    assert.deepEqual(readdirSync(queued).sort(), ['writing.json'], "and the gone gate's mark is removed");
+
+    writeFileSync(join(queued, 'ticket.json'), JSON.stringify({ pid: process.pid, started }));
+    assert.deepEqual(await takeAll(outside), ['3.lock', '2.lock'], 'a live gate keeps the first two');
+    assert.equal(outside.drawn.limit, 'kept', JSON.stringify(outside.drawn));
+    assert.deepEqual(await takeAll(gate), ['0.lock', '1.lock'], 'and its engines take only those');
+    assert.equal(
+      slotWaitSaid(3000, 4, 'slots', outside.holders(), outside.drawn),
+      'Waiting 3 s so far for an engine: the 2 engine slots of the 4 on this machine (slots) kept for engines outside a gate while a gate is queued are in use, by a gate or another tool, and the engine starts when one is given back or no gate is queued.',
+    );
+    assert.equal(
+      slotWaitSaid(1000, 2, 'slots', [holder], slotsDrawnOn(2, false, true)),
+      `Waiting 1 s so far for an engine: the one engine slot of the 2 on this machine (slots) kept for engines outside a gate while a gate is queued is in use, by this process (pid ${String(process.pid)}), and the engine starts when it is given back or no gate is queued.`,
+    );
+    assert.equal(
+      slotWaitedSaid(3000, 4, 'slots', [holder, holder], gate.drawn),
+      "This call waited 3 s for an engine slot in all. When it first waited, the 2 engine slots of the 4 on this machine (slots) a gate's engines draw on were in use: 2 by this process (pid " +
+        String(process.pid) +
+        ').',
+    );
+
+    // A slot already held is kept to its end whatever arrives in the queue.
+    rmSync(join(queued, 'ticket.json'));
+    const held = await outside.takeFree();
+    assert.equal(held === null ? null : basename(held), '3.lock', 'the queue empty again');
+    writeFileSync(join(queued, 'ticket.json'), JSON.stringify({ pid: process.pid, started }));
+    assert.equal(
+      held === null ? false : existsSync(held) && holderOf(readFileSync(held, 'utf8'))?.pid === process.pid,
+      true,
+      'a gate arriving takes nothing already held',
+    );
+    assert.deepEqual(await takeAll(outside), ['2.lock'], 'and the one kept slot left is all there is');
+    if (held !== null) {
+      outside.release(held);
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
  * A take that finds every slot held keeps a mark of its wait for as long as it waits, and only then.
  *
  * The games' gates read the marks to leave the time `gdharness test` stood waiting for slots others
@@ -68397,6 +68501,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
   testASlotWaitLooksWhenTheSlotsChange,
   testAWaitForASlotKeepsAMarkUntilItEnds,
+  testGatesInTheQueueKeepTheirSlots,
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testAFingerprintFollowsWhatASuiteReaches,
   testTheTestCommandReadsItsOwnOptions,
