@@ -345,6 +345,7 @@ import {
   scriptErrorsNote,
   scriptsToDiagnose,
   settingsNamedBy,
+  staleCopyNote,
   stopVerdict,
   testPathsIn,
   timedOutVerdict,
@@ -8989,6 +8990,8 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
     writeFileSync(join(sandbox, 'export', 'shipped.gd'), needle);
     mkdirSync(join(sandbox, 'lib', 'vendor'), { recursive: true });
     writeFileSync(join(sandbox, 'lib', 'vendor', '.gdignore'), '');
+    // A file spelled with a dot, which the engine steps over as it does such a directory.
+    writeFileSync(join(sandbox, 'scripts', '.draft.gd'), needle);
 
     // An addon gdharness installed, which nobody on the project wrote, beside the project's own
     // addon under a name the package also uses: only the marker setup writes tells them apart.
@@ -28027,6 +28030,21 @@ function testNotRunIsPutDownToFailFastOnlyWhenSet(): void {
  * An export is exported when this run wrote its file. The file an earlier export left read as this
  * one's, so an export that exited cleanly having written nothing was answered as exported.
  */
+/**
+ * The note for an editor that kept the script it compiled before, whose reasons are written with
+ * and without a full stop of their own: one with its own read as "...answered error 43.." in an
+ * answer.
+ */
+function testAStaleCopyNoteEndsOnce(): void {
+  assert.deepEqual(
+    [staleCopyNote('it did not compile: Godot answered error 43.'), staleCopyNote('it did not compile')],
+    [
+      'The editor serving the project still holds the copy of the script it compiled before, since reloading it failed: it did not compile: Godot answered error 43.',
+      'The editor serving the project still holds the copy of the script it compiled before, since reloading it failed: it did not compile.',
+    ],
+  );
+}
+
 function testAnExportIsJudgedByTheFileItWrote(): void {
   const clean = (): EngineRun => {
     const log = new GameLog();
@@ -28049,6 +28067,14 @@ function testAnExportIsJudgedByTheFileItWrote(): void {
   );
   assert.equal(get(parseTextContent({ result: exportAnswer(clean(), asked, 1000, 2000) }), 'exported'), true);
   assert.equal(get(parseTextContent({ result: exportAnswer(clean(), asked, null, 5) }), 'exported'), true);
+  // Exported says the file was written, and only its size says whether a filter left it near empty.
+  assert.deepEqual(
+    [
+      get(parseTextContent({ result: exportAnswer(clean(), asked, 1000, 2000, [], null, 4096) }), 'bytes'),
+      get(parseTextContent({ result: exportAnswer(clean(), asked, 1000, 2000) }), 'bytes'),
+    ],
+    [4096, undefined],
+  );
   assert.deepEqual(
     said(exportAnswer(clean(), asked, null, null)),
     [true, "Export with preset 'Linux' did not produce builds/game.x86_64."],
@@ -28744,6 +28770,11 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
         .toString('latin1'),
       'GDPC',
       'and the file written is a pack',
+    );
+    assert.equal(
+      get(pack, 'bytes'),
+      statSync(join(project, 'build', 'tux.pck')).size,
+      `its size is the file's: ${JSON.stringify(pack)}`,
     );
     assert.match(
       await refused({ op: 'run', preset: 'Tux', outputPath: 'build/tux.pck', pack: true, debug: true }),
@@ -67306,6 +67337,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnOperationThatNeverAnswersIsEnded,
   testTheScanNoteNamesWhatStarted,
   testAnExportIsJudgedByTheFileItWrote,
+  testAStaleCopyNoteEndsOnce,
   testAnExportThatCouldNotCopyALibrarySaysSo,
   testAnExportOfAMissingPresetIsRefusedFirst,
   testAnAddedPresetExports,
