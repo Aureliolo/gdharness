@@ -7,10 +7,10 @@ extends SceneTree
 ##
 ## Started from outside the project, `-s` with this file's absolute path, so it declares no class of
 ## its own and reaches gdUnit4 through the project's global classes. Besides the file of suites it
-## finds each case by its id in a dictionary ([GdhIndexedSession]), can compile the suites together
-## before gdUnit4 loads them ([constant TOGETHER]), can turn off the reports the caller does
-## not read ([constant REPORTS_OFF]), and writes the errors and warnings each suite declares it
-## prints ([constant EXPECTED_OUT]).
+## finds each case by its id in a dictionary ([GdhIndexedSession]), can turn off the reports the
+## caller does not read ([constant REPORTS_OFF]), writes the errors and warnings each suite declares
+## it prints ([constant EXPECTED_OUT]) and what the run loads ([constant REACHED_OUT]), and in an
+## engine of its own compiles every script together ([constant COMPILE_ONLY]).
 
 const LISTED: String = "--suites-in"
 const SKIPPING: String = "--skipping-in"
@@ -42,11 +42,6 @@ const REPORTS_OFF: Dictionary[String, String] = {
 	"--html-report-off": "res://addons/gdUnit4/src/core/hooks/GdUnitHtmlReporterTestSessionHook.gd",
 	"--junit-report-off": "res://addons/gdUnit4/src/core/hooks/GdUnitXMLReporterTestSessionHook.gd",
 }
-## Compiles the suites together beside every class of the game ([method compiled_together]) before
-## gdUnit4 loads them. A gate asks for it, since it runs every suite and wants every script that
-## does not compile named. project_test does not: its answer is about the scripts its run reached,
-## and the compile names every broken script of the game, then once more as the one script it made.
-const TOGETHER: String = "--compile-together"
 ## The file to write what every suite declares it prints into, as JSON: each key of
 ## [constant EXPECTED] holding the declarations keyed by suite path and then case name.
 const EXPECTED_OUT: String = "--expected-out"
@@ -56,6 +51,20 @@ const EXPECTED: Dictionary[String, String] = {
 	"errors": "GDHARNESS_EXPECTED_ERRORS",
 	"warnings": "GDHARNESS_EXPECTED_WARNINGS",
 }
+## Compiles the engine's own suites together ([method compiled_together]) before gdUnit4 loads them,
+## so they share one reading of what they reach, and no class of the game they do not: what the
+## engine holds is then what its suites reach, which is what [constant REACHED_OUT] records.
+const TOGETHER: String = "--compile-together"
+## The file to write what the run loads into, a line as each suite ends ([GdhReached]).
+const REACHED_OUT: String = "--reached-out"
+## Compiles the suites together beside every class of the game ([method compiled_together]), prints
+## [constant COMPILED] and quits, running no suite: a run's check of every script, made in an engine
+## of its own so the engines running its suites load only what their suites do. `gdharness test`
+## asks for it, since it wants every script that does not compile named. project_test does not: its
+## answer is about the scripts its run reached, and the compile names every broken script of the
+## game, then once more as the one script it made.
+const COMPILE_ONLY: String = "--compile-only"
+const COMPILED: String = "gdharness compiled every script together"
 ## The tool name gdUnit4 reads its options after.
 const TOOL: String = "GdUnitCmdTool.gd"
 ## Ends the runner's own arguments: everything after it is gdUnit4's options, for a run with no
@@ -76,18 +85,50 @@ const WALK_HOLD: StringName = &"gdharness_scripts_held_past_the_shutdown_walk"
 var _runner: GdhRunner = null
 
 
+## Here rather than in [method _initialize]: Godot loads the script given with `-s` and makes its
+## instance before it loads the autoloads, so a load an autoload makes as it is made is recorded too.
+func _init() -> void:
+	var into: String = argument_after(OS.get_cmdline_user_args(), REACHED_OUT)
+	if not into.is_empty():
+		GdhReached.start(into)
+
+
 func _initialize() -> void:
-	_runner = started(OS.get_cmdline_user_args())
+	var given: PackedStringArray = OS.get_cmdline_user_args()
+	if given.has(COMPILE_ONLY):
+		compile_only(given)
+		return
+	_runner = started(given)
 	_runner.own_path = get_script().resource_path
 	root.add_child(_runner)
 
 
 ## As gdUnit4's own `GdUnitCmdTool.gd` ends, which names in a verbose run the nodes left orphaned.
 func _finalize() -> void:
+	GdhReached.stop()
+	if _runner == null:
+		return
 	queue_delete(_runner)
 	if OS.is_stdout_verbose():
 		print("Orphan nodes left as the run ends:")
 		Window.print_orphan_nodes()
+
+
+## Compiles the suites [param given] lists together and quits, holding the scripts past the
+## engine's shutdown walk as a run of suites does ([GdhShutdownWalk]).
+func compile_only(given: PackedStringArray) -> void:
+	var oldest: Array[GDScript] = []
+	if GdhShutdownWalk.guarded():
+		oldest = GdhShutdownWalk.marker(WALK_ENDED)
+	var together: GDScript = compiled_together(listed(given, LISTED), held_classes())
+	print(COMPILED)
+	if GdhShutdownWalk.guarded():
+		var also: Array[GDScript] = oldest.duplicate()
+		also.append_array(GdhShutdownWalk.marker(WALK_BEGAN))
+		also.append(together)
+		also.append(get_script() as GDScript)
+		GdhShutdownWalk.hold(also)
+	quit()
 
 
 ## The runner over the suites [param given] lists, to be added to the tree, which starts it. Shared
@@ -124,7 +165,7 @@ static func started(given: PackedStringArray) -> GdhRunner:
 	if at >= 0:
 		runner.given = given.slice(at + 1)
 	if asked.has(TOGETHER):
-		runner.together = compiled_together(suites)
+		runner.together = compiled_together(suites, [])
 	var expected_out: String = argument_after(asked, EXPECTED_OUT)
 	if not expected_out.is_empty():
 		write_expected(expected_out, suites)
@@ -161,16 +202,16 @@ static func unread_off(
 ## [param suites] compiled inside one script, answered for the caller to hold so gdUnit4's own loads
 ## find them compiled. The engine keeps what it read of a class only while the compile that asked
 ## for it runs (`GDScriptCache`), so a suite compiled on its own reads again every class it reaches
-## a member of, some seventy milliseconds a suite. As the preloads of one script naming every class
-## of the game's own first, held from that script's compile, they share one reading of each: two
-## hundred suites compiled in a third of the time they took one at a time. The names are public,
+## a member of, some seventy milliseconds a suite. As the preloads of one script, after the
+## [param classes] it names first, held from that script's compile, they share one reading of each:
+## two hundred suites compiled in a third of the time they took one at a time. The names are public,
 ## since a private one unread is a warning and every warning an error, and each a variable, since a
 ## class is no constant expression. A suite that does not compile fails here and again when gdUnit4
 ## loads it, which reports it as it would have. A directory listed is left to gdUnit4 to walk.
-static func compiled_together(suites: PackedStringArray) -> GDScript:
+static func compiled_together(suites: PackedStringArray, classes: PackedStringArray) -> GDScript:
 	var lines: PackedStringArray = ["extends RefCounted"]
 	var at: int = 0
-	for named: String in held_classes():
+	for named: String in classes:
 		var _held: bool = lines.append("var held_%d: Variant = %s" % [at, named])
 		at += 1
 	at = 0
@@ -185,7 +226,7 @@ static func compiled_together(suites: PackedStringArray) -> GDScript:
 	return together
 
 
-## The classes [method compiled_together] names before the suites: the game's own GDScript classes,
+## The classes [constant COMPILE_ONLY] compiles before the suites: the game's own GDScript classes,
 ## none of an addon's or a suite's, then gdUnit4's suite. Only GDScript shares the engine's reading,
 ## and a sandboxed mod's SafeGDScript class would load the sandbox's compiler, some 290 MB and up to
 ## 2.5 s, for nothing.
@@ -471,6 +512,8 @@ class GdhRunner:
 		# gdUnit4 minimises the window once the suite's end is reported.
 		if event.type() == GdUnitEvent.TESTSUITE_AFTER:
 			minimise_pending = true
+			if GdhReached.current != null:
+				GdhReached.current.ended(event.resource_path())
 		# After gdUnit4's own report of the case, so the line falls under it.
 		if event.orphan_nodes() == 0:
 			return
@@ -742,3 +785,102 @@ class GdhShutdownWalk:
 				if not inner.begins_with("."):
 					var _inner: bool = pending.append(directory.path_join(inner))
 		ThemeDB.set_meta(WALK_HOLD, held)
+
+
+## What the run loads, written to the file named after [constant REACHED_OUT] as each suite ends: a
+## line of JSON with the suite's path and every path asked for since the line before. A suite's inputs
+## are everything up to its own line, not only what it loaded itself: the engine answers a load of a
+## resource it holds from its cache without asking any loader, so a suite can use what the autoloads
+## or an earlier suite loaded and nothing records it. Placed first among the loaders, it is asked
+## about every load and every [method ResourceLoader.exists] and declines each. A script compiled
+## for a preload, a base or a class name is read without a loader, so each line also has the
+## project's files the cache holds that no loader was asked for.
+class GdhReached:
+	extends ResourceFormatLoader
+
+	static var current: GdhReached = null
+
+	var _file: FileAccess = null
+	## Loads on other threads ask too, as a threaded load runs its own.
+	var _mutex: Mutex = Mutex.new()
+	var _seen: Dictionary[String, bool] = {}
+	var _fresh: PackedStringArray = []
+	var _files: PackedStringArray = []
+
+	static func start(into: String) -> void:
+		var file: FileAccess = FileAccess.open(into, FileAccess.WRITE)
+		if file == null:
+			push_error(
+				(
+					"gdharness test could not write what the run loads to %s: %s"
+					% [into, error_string(FileAccess.get_open_error())]
+				)
+			)
+			return
+		current = GdhReached.new()
+		current._file = file
+		current._files = project_files()
+		ResourceLoader.add_resource_format_loader(current, true)
+
+	static func stop() -> void:
+		if current == null:
+			return
+		ResourceLoader.remove_resource_format_loader(current)
+		current._file.close()
+		current = null
+
+	## Every file under res:// the engine sees, as its file system does: no hidden folder, and no
+	## folder holding a `.gdignore`.
+	static func project_files() -> PackedStringArray:
+		var found: PackedStringArray = []
+		var pending: PackedStringArray = ["res://"]
+		while not pending.is_empty():
+			var directory: String = pending[pending.size() - 1]
+			pending.remove_at(pending.size() - 1)
+			if FileAccess.file_exists(directory.path_join(".gdignore")):
+				continue
+			for file: String in DirAccess.get_files_at(directory):
+				if not file.ends_with(".import") and not file.ends_with(".uid"):
+					var _file_found: bool = found.append(directory.path_join(file))
+			for inner: String in DirAccess.get_directories_at(directory):
+				if not inner.begins_with("."):
+					var _inner: bool = pending.append(directory.path_join(inner))
+		return found
+
+	func _recognize_path(path: String, _type: StringName) -> bool:
+		_mutex.lock()
+		if not _seen.has(path):
+			_seen[path] = true
+			var _asked: bool = _fresh.append(path)
+		_mutex.unlock()
+		return false
+
+	func _get_recognized_extensions() -> PackedStringArray:
+		return []
+
+	func _handles_type(_type: StringName) -> bool:
+		return false
+
+	## Writes the line of the suite at [param suite], which has just ended. The cache is asked
+	## outside the lock, since a load on another thread holds the cache's own while it asks this.
+	func ended(suite: String) -> void:
+		_mutex.lock()
+		var unseen: PackedStringArray = []
+		for path: String in _files:
+			if not _seen.has(path):
+				var _unseen: bool = unseen.append(path)
+		_mutex.unlock()
+		var cached: PackedStringArray = []
+		for path: String in unseen:
+			if ResourceLoader.has_cached(path):
+				var _cached: bool = cached.append(path)
+		_mutex.lock()
+		for path: String in cached:
+			if not _seen.has(path):
+				_seen[path] = true
+				var _held: bool = _fresh.append(path)
+		var line: String = JSON.stringify({"suite": suite, "reached": _fresh})
+		_fresh = []
+		_mutex.unlock()
+		var _stored: bool = _file.store_line(line)
+		_file.flush()

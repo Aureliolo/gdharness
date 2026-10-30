@@ -46,13 +46,14 @@ import { staleImports } from './import-freshness.js';
 import { hiddenWindowFlags } from './launch.js';
 import { freeLibraryCopies, seedExtensionList } from './library-copies.js';
 import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
-import { SuiteFingerprints } from './suite-fingerprint.js';
+import { type PassedSuite, reachedBySuite, SuiteInputs } from './suite-inputs.js';
 import {
   type EngineAssignment,
   type EngineEnd,
   type EngineVerdict,
   exitNamed,
   funcOf,
+  judgeCompile,
   judgeEngine,
   named,
   type RunPrinted,
@@ -396,6 +397,8 @@ interface EngineRan {
   readonly seconds: number;
   /** Whether this is the engine run again alone after one ran out of memory. */
   readonly again: boolean;
+  /** The file the runner wrote what it loaded into, a line as each suite ended. */
+  readonly reached: string;
 }
 
 /**
@@ -536,42 +539,51 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         return 1;
       }
     }
-    // After the import, which writes the .import files beside every asset a suite can reach.
-    const fingerprints = new SuiteFingerprints(scripts, [
+    const always = [
       getLocalVersion(),
       readFileSync(shippedListedRunner(), 'utf8'),
+      engineSaid(godotPath),
       ...options.reachAlso.map(
         (path) => `${path}\n${existsSync(path) ? readFileSync(path, 'latin1') : 'missing'}`,
       ),
-    ]);
-    const printsOf = new Map(suites.map((suite) => [suite.path, fingerprints.of(suite)]));
+    ];
+    const everySuite = suites;
     if (options.changedOnly) {
-      const passedBefore = readRecord(passedFile);
+      // After the import, which writes the .import files beside every asset a suite can reach.
+      const inputs = new SuiteInputs(scripts, always);
+      const passedBefore = readPassed(passedFile);
       const unchanged = suites.filter((suite) => {
-        const print = printsOf.get(suite.path);
-        return print !== null && print !== undefined && passedBefore[suite.path] === print;
+        const passed = passedBefore[suite.path];
+        return passed !== undefined && inputs.printOf(passed.inputs) === passed.print;
       });
       suites = suites.filter((suite) => !unchanged.includes(suite));
       if (unchanged.length > 0) {
         console.log(
-          `${plural(unchanged.length, 'suite')} passed with everything ${unchanged.length === 1 ? 'it reaches' : 'they reach'} as it stands now, and ${unchanged.length === 1 ? 'is' : 'are'} not run: ${named(unchanged.map((suite) => suite.path))}.`,
+          `${plural(unchanged.length, 'suite')} passed on everything ${unchanged.length === 1 ? 'its engine' : 'their engines'} loaded as it stands now, and ${unchanged.length === 1 ? 'is' : 'are'} not run: ${named(unchanged.map((suite) => suite.path))}.`,
         );
       }
       if (suites.length === 0) {
         console.log('Nothing has changed since every suite last passed.');
-        rmSync(runDirectory, { recursive: true, force: true });
+        const compiled = await compileCheck(launch, everySuite);
+        const problems = [...compiled.faults.map((fault) => `${COMPILE_CHECK}: ${fault}`), ...uncollected];
+        if (problems.length === 0) {
+          rmSync(runDirectory, { recursive: true, force: true });
+        } else {
+          logs.keep();
+        }
         writeEarlyResult(
           { resultFile: options.resultFile, lastRunFile, engines: options.engines },
           startedAt,
-          uncollected,
-          null,
+          problems,
+          problems.length === 0 ? null : logs.shown,
         );
-        if (uncollected.length === 0) {
+        if (problems.length === 0) {
           return 0;
         }
+        printCompiled(compiled, logs);
         printUncollected(uncollected);
         console.log('');
-        console.log(`Failed: ${plural(uncollected.length, 'problem')}, listed above.`);
+        console.log(`Failed: ${plural(problems.length, 'problem')}, listed above.`);
         return 1;
       }
     }
@@ -681,6 +693,10 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     if (shared) {
       say(sharesSaid(taken.length, lanes.length));
     }
+    // Once the lanes hold what slots were free, so it takes one only beside them.
+    const compiling = compileCheck(launch, everySuite);
+    // Awaited after the suites; a run failing before then reports its own error, not this one too.
+    compiling.catch(() => undefined);
     let ran = shared
       ? await runShares(launch, units, declared, lanes.length, taken, times)
       : (await Promise.all(lanes.map((lane, at) => runLane(launch, lane, times, taken[at] ?? null))))
@@ -713,9 +729,17 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       ),
     );
     const across = rowsAcross(ran.map((engine) => ({ handed: engine.plan.suites, printed: engine.printed })));
-    recordPassed(passedFile, ran, printsOf, new Set(across.map((fault) => fault.suite)));
+    recordPassed(
+      passedFile,
+      options.projectPath,
+      ran,
+      new Set(across.map((fault) => fault.suite)),
+      new SuiteInputs(scripts, always),
+      startedAt,
+    );
     return report(
       ran,
+      await compiling,
       across.map((fault) => fault.fault),
       uncollected,
       startedAt,
@@ -764,43 +788,140 @@ export function roomSaid(
     : `, of the ${String(asked)} asked for, since ${held}`;
 }
 
-function readRecord(file: string): Record<string, string> {
+/** The suites [param file] keeps as passed, each with its inputs and their print. */
+function readPassed(file: string): Record<string, PassedSuite> {
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
-    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, string>) : {};
+    parsed = JSON.parse(readFileSync(file, 'utf8'));
   } catch {
     return {};
   }
+  const passed: Record<string, PassedSuite> = {};
+  for (const [path, entry] of Object.entries(typeof parsed === 'object' && parsed !== null ? parsed : {})) {
+    const { print, inputs } = (entry ?? {}) as { print?: unknown; inputs?: unknown };
+    if (
+      typeof print === 'string' &&
+      Array.isArray(inputs) &&
+      inputs.every((input) => typeof input === 'string')
+    ) {
+      passed[path] = { print, inputs: inputs };
+    }
+  }
+  return passed;
 }
 
 /**
- * Keeps each suite that passed whole with the fingerprint it passed at, and drops each that did not.
- * A suite dealt out over several engines passed only if it passed in each of them.
+ * Keeps each suite that passed with its inputs and their print, and drops each that did not. A suite
+ * dealt out over several engines passed only if it passed in each, and its inputs are what each of
+ * them loaded. One is not kept when its engine failed on something naming no suite, which any of
+ * them may have caused, or when [param inputs] reads one of its inputs as changed after the run
+ * began at [param startedAt], since the suite may have run on what was there before. A suite whose
+ * script is gone from [param projectPath] is dropped too.
  */
 function recordPassed(
   file: string,
+  projectPath: string,
   ran: readonly EngineRan[],
-  printsOf: ReadonlyMap<string, string | null>,
   failedAcross: ReadonlySet<string>,
+  inputs: SuiteInputs,
+  startedAt: number,
 ): void {
-  const passed = readRecord(file);
-  const failedSomewhere = new Set<string>(failedAcross);
-  const passedSomewhere = new Set<string>();
-  for (const engine of ran) {
-    const passing = new Set(engine.verdict.passedSuites);
-    for (const { path } of engine.plan.suites) {
-      (passing.has(path) ? passedSomewhere : failedSomewhere).add(path);
+  const passed = readPassed(file);
+  for (const path of Object.keys(passed)) {
+    if (!existsSync(join(projectPath, path.slice('res://'.length)))) {
+      delete passed[path];
     }
   }
-  for (const path of new Set([...passedSomewhere, ...failedSomewhere])) {
-    const print = printsOf.get(path);
-    if (!failedSomewhere.has(path) && print !== null && print !== undefined) {
-      passed[path] = print;
+  const failedSomewhere = new Set<string>(failedAcross);
+  const reached = new Map<string, Set<string>>();
+  for (const engine of ran) {
+    const passing = new Set(engine.verdict.unattributed ? [] : engine.verdict.passedSuites);
+    const loaded = reachedBySuite(engine.reached);
+    for (const { path } of engine.plan.suites) {
+      const recorded = loaded.get(path);
+      if (!passing.has(path) || recorded === undefined) {
+        failedSomewhere.add(path);
+        continue;
+      }
+      const into = reached.get(path) ?? new Set<string>([path]);
+      for (const one of recorded) {
+        into.add(one);
+      }
+      reached.set(path, into);
+    }
+  }
+  for (const path of new Set([...reached.keys(), ...failedSomewhere])) {
+    const loaded = reached.get(path);
+    const kept = failedSomewhere.has(path) || loaded === undefined ? [] : inputs.inputsOf([...loaded]);
+    if (kept.length > 0 && !inputs.modifiedAfter(kept, startedAt)) {
+      passed[path] = { print: inputs.printOf(kept), inputs: kept };
     } else {
       delete passed[path];
     }
   }
   writeJson(file, passed);
+}
+
+/** The engine at [param godotPath] as the build it is, for a suite to have passed on. */
+function engineSaid(godotPath: string): string {
+  const stat = statSync(godotPath);
+  return `${resolve(godotPath)}\n${String(stat.size)}\n${String(stat.mtimeMs)}`;
+}
+
+/** What compiling every script together found wrong, and where its engine's log is. */
+interface Compiled {
+  readonly faults: readonly string[];
+  readonly log: string;
+}
+
+/** How a problem of the compile check is headed, in the output and the result. */
+const COMPILE_CHECK = 'compiling every script together';
+
+/**
+ * Compiles [param suites] together beside every class of the game in an engine of its own, which
+ * names every script that does not compile. Apart from the suites' engines, so those load only what
+ * their suites do and what each records is what its suites could have used.
+ */
+async function compileCheck(launch: Launch, suites: readonly DeclaredSuite[]): Promise<Compiled> {
+  const directory = join(launch.runDirectory, 'compile');
+  mkdirSync(join(directory, 'user'), { recursive: true });
+  const suitesFile = join(directory, 'suites.txt');
+  writeFileSync(suitesFile, `${suites.map((suite) => suite.path).join('\n')}\n`);
+  const args = [
+    '--headless',
+    '--audio-driver',
+    'Dummy',
+    '--path',
+    launch.projectPath,
+    '-s',
+    shippedListedRunner(),
+    '--',
+    '--suites-in',
+    suitesFile,
+    '--compile-only',
+  ];
+  const log = join(directory, 'engine.log');
+  const lock = await launch.slots.take();
+  let end: EngineEnd;
+  try {
+    end = await watchedEngine(launch, args, directory, log, launch.silenceFloorSeconds);
+  } finally {
+    launch.slots.release(lock);
+  }
+  return { faults: judgeCompile(readRun(readFileSync(log, 'utf8')), end), log };
+}
+
+/** Prints what [param compiled] found wrong under a heading of its own, with where its log is kept. */
+function printCompiled(compiled: Compiled, logs: RunLogs): void {
+  if (compiled.faults.length === 0) {
+    return;
+  }
+  console.log('');
+  console.log(`--- ${COMPILE_CHECK}:`);
+  for (const fault of compiled.faults) {
+    console.log(`  ${fault}`);
+  }
+  console.log(`everything it printed: ${logs.named(compiled.log)}`);
 }
 
 /**
@@ -964,6 +1085,7 @@ async function runEngine(
   const skippingFile = join(directory, 'skipping.txt');
   const rowsFile = join(directory, 'rows.txt');
   const expectedFile = join(directory, 'expected.json');
+  const reached = join(directory, 'reached.jsonl');
   writeFileSync(suitesFile, `${plan.suites.map((suite) => suite.path).join('\n')}\n`);
   writeFileSync(skippingFile, `${plan.skipping.join('\n')}\n`);
   writeFileSync(
@@ -1018,6 +1140,8 @@ async function runEngine(
     '--compile-together',
     '--expected-out',
     expectedFile,
+    '--reached-out',
+    reached,
   ];
   const log = join(directory, 'engine.log');
   const lock = slot ?? (await launch.slots.take());
@@ -1051,6 +1175,7 @@ async function runEngine(
     began,
     seconds: (Date.now() - began) / 1000,
     again: again !== '',
+    reached,
   };
 }
 
@@ -1080,6 +1205,7 @@ export function reportsFault(reports: string): string | null {
 /** Prints how the run went and answers the exit code: what failed, in full, then one line of totals. */
 function report(
   ran: readonly EngineRan[],
+  compiled: Compiled,
   across: readonly string[],
   uncollected: readonly string[],
   startedAt: number,
@@ -1139,6 +1265,7 @@ function report(
       console.log(`  ${fault}`);
     }
   }
+  printCompiled(compiled, logs);
   printUncollected(uncollected);
   const cases = ran.reduce(
     (sum, engine) => sum + [...engine.printed.suites.values()].reduce((n, s) => n + s.cases.length, 0),
@@ -1178,7 +1305,8 @@ function report(
   }
   const totals = `${plural(cases, 'case')} in ${plural(suites, 'suite')} across ${plural(ran.length, 'engine')}, ${took.toFixed(1)} s; the longest engine took ${longest.toFixed(1)} s.`;
   console.log('');
-  const passed = failed.length === 0 && across.length === 0 && uncollected.length === 0;
+  const passed =
+    failed.length === 0 && compiled.faults.length === 0 && across.length === 0 && uncollected.length === 0;
   if (passed) {
     rmSync(logs.directory, { recursive: true, force: true });
   } else {
@@ -1191,6 +1319,7 @@ function report(
       ...failed.flatMap((engine) =>
         engine.verdict.faults.map((fault) => `engine ${String(engine.index)}: ${fault}`),
       ),
+      ...compiled.faults.map((fault) => `${COMPILE_CHECK}: ${fault}`),
       ...across,
       ...uncollected,
     ],
@@ -1217,7 +1346,7 @@ function report(
   }
   const problems = failed.reduce(
     (sum, engine) => sum + engine.verdict.faults.length,
-    across.length + uncollected.length,
+    compiled.faults.length + across.length + uncollected.length,
   );
   console.log(`Failed: ${plural(problems, 'problem')}, listed above. Ran ${totals}`);
   console.log(
