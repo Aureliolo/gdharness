@@ -8989,6 +8989,8 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
     writeFileSync(join(sandbox, 'export', 'shipped.gd'), needle);
     mkdirSync(join(sandbox, 'lib', 'vendor'), { recursive: true });
     writeFileSync(join(sandbox, 'lib', 'vendor', '.gdignore'), '');
+    // A file spelled with a dot, which the engine steps over as it does such a directory.
+    writeFileSync(join(sandbox, 'scripts', '.draft.gd'), needle);
 
     // An addon gdharness installed, which nobody on the project wrote, beside the project's own
     // addon under a name the package also uses: only the marker setup writes tells them apart.
