@@ -513,7 +513,13 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     verbose: options.verbose,
   };
   try {
-    if (options.importFirst) {
+    // A project with no class cache has never been imported, and no suite can run in it: gdUnit4's
+    // own runner extends classes only the cache names. Nothing else has it open to race the import.
+    const neverImported = cachedClasses(options.projectPath) === null;
+    if (neverImported && !options.importFirst) {
+      console.log('The project has never been imported, so it is imported first.');
+    }
+    if (options.importFirst || neverImported) {
       const imported = await importProject(launch);
       if (imported !== null) {
         logs.keep();

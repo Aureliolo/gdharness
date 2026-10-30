@@ -36,7 +36,8 @@ command line itself is wrong.
   holds only the number of engines.
 - `--tests DIR`: where to look for suites, `tests` and `test` by default. May be given more than
   once.
-- `--import`: import the project in an engine of its own before the suites.
+- `--import`: import the project in an engine of its own before the suites. A project that has
+  never been imported, with no class cache, is imported first without it.
 - `--order reversed` or `--order SEED`: every suite in one engine, in reverse order of path or
   shuffled by a number, to find suites that depend on the order they run in.
 - `--changed-only`: leave out the suites that passed with everything they reach unchanged. For

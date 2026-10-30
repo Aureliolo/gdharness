@@ -28969,18 +28969,29 @@ async function testAnExportedBuildIsStartedAndStopped(): Promise<void> {
         args: [script, saves, `${said}.silent`],
       }),
     );
+    // On Windows a window goes on the hidden desktop, which has no refresh for vsync to wait on.
     assert.deepEqual(
       get(silentStart, 'arguments'),
-      ['--audio-driver', 'Dummy', '--', script, saves, `${said}.silent`],
+      [
+        '--audio-driver',
+        'Dummy',
+        ...(process.platform === 'win32' ? ['--disable-vsync', '--max-fps', String(HIDDEN_WINDOW_FPS)] : []),
+        '--',
+        script,
+        saves,
+        `${said}.silent`,
+      ],
       `an exported build is silent by default: ${JSON.stringify(silentStart)}`,
     );
     await call({ op: 'stop' });
 
+    // Visible as well, so nothing goes before the build's own arguments on Windows either.
     const answered = await call({
       op: 'start',
       executable: build,
       headless: false,
       silent: false,
+      visible: true,
       savesIn: saves,
       args: [script, saves, said],
     });
@@ -44239,6 +44250,82 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
 }
 
 /**
+ * A crash is read from the report Godot's crash handler printed rather than from the exit code: a
+ * windowed engine on Windows that crashed this way exited 5, and the run was said to have called
+ * quit(5). A crash inside the engine's report on its call queue overflowing is named as the
+ * overflow, from the frames of the build that has them or from the line only that report prints.
+ */
+function testACrashIsReadFromTheCrashHandlersReport(): void {
+  const handed = {
+    suites: [{ path: S_TEST, cases: ['test_a', 'test_b'] }],
+    expected: { errors: {}, warnings: {} },
+  };
+  const report = (build: string, frames: readonly string[]): string[] => [
+    '================================================================',
+    'CrashHandlerException: Program crashed with signal 11',
+    `Engine version: Godot Engine v4.7.2.stable.official (${build})`,
+    'Dumping the backtrace. Please include this when reporting the bug on: https://github.com/godotengine/godot/issues',
+    'Load address: 7ff557fc0000',
+    '[1] 7ff69c094d61 (main+40d4d61) - no debug info in PE/COFF executable',
+    ...frames.map(
+      (frame, at) => `[${String(at + 2)}] 7ff69baeb734 (${frame}) - no debug info in PE/COFF executable`,
+    ),
+    '-- END OF C++ BACKTRACE --',
+    '================================================================',
+  ];
+  // Cut off in its second case, as a crash leaves it: no suite statistics and no summary.
+  const ran = (...after: string[]): string =>
+    [
+      'Godot Engine v4.7.2.stable.official - https://godotengine.org',
+      `\u001b[38;2;0;206;209mRun Test Suite: \u001b[0m\u001b[38;2;250;235;215m${S_TEST}\u001b[0m`,
+      caseLine(S_TEST, 'test_a', 'STARTED'),
+      caseLine(S_TEST, 'test_a', 'PASSED', '5ms'),
+      caseLine(S_TEST, 'test_b', 'STARTED'),
+      ...after,
+    ].join('\r\n');
+  const exited5 = { code: 5, signal: null, ended: null, freeBytes: 2.5 * 1024 ** 3 };
+  const during = `while ${S_TEST} > test_b ran`;
+  const overflow = `the engine's call queue overflowed ${during}: something queued deferred calls without end within one frame, most often a layout that changes the size it is laid out from in a deferred handler, so the frame never ends`;
+
+  const official = 'ed1daf0bf001b61586d9930840f2f1394092c079';
+  const queueFrames = ['main+3b2b734', 'main+3e0f4aa', 'main+3e1082a', 'main+3e0e831'];
+  const inTheReport = judgeEngine(readRun(ran(...report(official, queueFrames))), handed, exited5).faults;
+  assert.ok(
+    inTheReport.includes(
+      `the engine crashed ${during}, its crash handler reporting signal 11, with 2.5 GB of memory free as it ended`,
+    ),
+    inTheReport.join('\n'),
+  );
+  assert.ok(
+    inTheReport.includes(`${overflow}, and the engine crashed reporting the overflow`),
+    inTheReport.join('\n'),
+  );
+  assert.ok(!inTheReport.some((fault) => fault.includes('quit(5)')), inTheReport.join('\n'));
+
+  // The same frames under another build are other code, so only the crash is said.
+  const elsewhere = judgeEngine(readRun(ran(...report('0'.repeat(40), queueFrames))), handed, exited5).faults;
+  assert.ok(
+    elsewhere.some((fault) => fault.startsWith(`the engine crashed ${during}`)),
+    elsewhere.join('\n'),
+  );
+  assert.ok(!elsewhere.some((fault) => fault.includes('call queue')), elsewhere.join('\n'));
+  // And one of the two frames alone is a crash somewhere else in the build.
+  const oneFrame = judgeEngine(readRun(ran(...report(official, ['main+3e0f4aa']))), handed, exited5).faults;
+  assert.ok(!oneFrame.some((fault) => fault.includes('call queue')), oneFrame.join('\n'));
+
+  // A queue of callables the report does not crash on overflows for ever, printing the line only
+  // that report prints, until the engine is ended for it.
+  const silence = 'the engine printed nothing for 60 s';
+  const endless = judgeEngine(readRun(ran('Object was deleted while awaiting a callback.')), handed, {
+    code: null,
+    signal: null,
+    ended: silence,
+  }).faults;
+  assert.ok(endless.includes(silence), endless.join('\n'));
+  assert.ok(endless.includes(overflow), endless.join('\n'));
+}
+
+/**
  * A row gdUnit4 skips because its data does not fit the case fails the run. gdUnit4 prints the row
  * passed and then a report saying it was skipped, and a run with other cases passing beside it was
  * called passed. The lines are gdUnit4's own, captured from a real run of rows a function returned.
@@ -46958,8 +47045,11 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       );
       return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
     };
-    const first = test('--import', 'tests/ok_test.gd', 'tests/declared_test.gd');
+    // Without --import: a project with no class cache is imported whatever the switches say, since
+    // gdUnit4's runner extends classes only the cache names.
+    const first = test('tests/ok_test.gd', 'tests/declared_test.gd');
     assert.equal(first.status, 0, first.said);
+    assert.match(first.said, /^The project has never been imported, so it is imported first\.$/m, first.said);
     // Nothing is timed yet, so each suite has an engine of its own unless the machine's room holds
     // the run back, which the first line then says.
     assert.match(
@@ -67819,6 +67909,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineRunIsReadCaseByCase,
   testAnEngineMayBeSilentAsLongAsWhatItRuns,
   testAnEngineRunIsJudgedOnEverythingItPrinted,
+  testACrashIsReadFromTheCrashHandlersReport,
   testARowSkippedForItsDataIsNoPass,
   testTheScriptsGodotNeverFreesAreFound,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
