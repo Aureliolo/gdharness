@@ -6,9 +6,10 @@
  * Reading the scripts alone cannot say it: every game names `res://tests/` in `project.godot` and
  * `res://` somewhere in a test, so following every path a file names reaches the whole project from
  * every suite. The runner records instead ([GdhReached] in `listed.gd`), and a suite's inputs are
- * its own script, the autoloads, what it loaded and what the cache held as it began, followed only
- * along what compiles with a script (its preloads, its base, the classes it names) and what a scene
- * or resource names. A file a script reads
+ * its own script, the autoloads and what it loaded, followed only along what compiles with a script
+ * (its preloads, its base, the classes it names), what it loads by a path it names, and what a scene
+ * or resource names; and what the cache held as it began, for a suite reaching a load by a computed
+ * path, held to where that path is known to begin. A file a script reads
  * or a folder it lists by a literal or constant path is an input too; one read or listed by a path
  * worked out at run time makes every file in the project one, since nothing records those.
  */
@@ -23,6 +24,20 @@ import type { ProjectScripts } from './suite-plan.js';
 /** The input standing for every file in the project, for a suite reaching a computed file read. */
 export const EVERY_FILE = 'res://';
 
+/**
+ * The mark of a load by a path worked out at run time, which the cache can answer without a loader
+ * being asked, so nothing records it: a suite reaching one depends on what the cache held as it
+ * began. Followed by the start the path is known to have (`"res://sound/" + take`), or by nothing
+ * when it could be anywhere. Never a path, so it is never read and never an input itself.
+ */
+const CACHE_HELD = 'cache:';
+
+/**
+ * The mark before a folder read whole, every file under it: what a script reading a path joined onto
+ * that folder at run time may have read.
+ */
+const TREE = 'tree:';
+
 /** A suite that passed, with what its verdict depended on and their print as they stood then. */
 export interface PassedSuite {
   readonly print: string;
@@ -33,12 +48,26 @@ const RES_LITERAL = /res:\/\/[^"'\s)\]<>]*/g;
 const PRELOAD = /\bpreload\(\s*(?:"([^"]*)"|'([^']*)'|([A-Za-z_]\w*))\s*\)/g;
 /**
  * A call reading a file or listing a folder by the path it is given, up to the start of that path.
- * `ResourceLoader.load` is left out: a load goes through the loaders, which record it.
+ * `ResourceLoader.load` is left out: see [constant RESOURCE_LOAD].
  */
 const FILE_READ =
-  /(?:\b(?:FileAccess\.(?:open\w*|get_file_as_string|get_file_as_bytes|file_exists|get_md5|get_sha256|get_modified_time|get_size)|DirAccess\.(?:open|get_files_at|get_directories_at|dir_exists_absolute)|ResourceLoader\.list_directory|Image\.load_from_file)|(?<!\bResourceLoader)\.(?:load|load_from_file|change_dir))\(/g;
+  /(?:\b(?:FileAccess\.(?:open\w*|get_file_as_string|get_file_as_bytes|file_exists|get_md5|get_sha256|get_modified_time|get_size)|DirAccess\.(?:open|get_files_at|get_directories_at|dir_exists_absolute)|ResourceLoader\.(?:list_directory|exists)|Image\.load_from_file)|(?<!\bResourceLoader)\.(?:load|load_from_file|change_dir))\(/g;
+/**
+ * A load through the resource loaders, up to the start of its path. One the cache answers asks no
+ * loader, so the recorder misses it whenever another suite of the engine already holds the resource:
+ * gdUnit4 loads every suite of an engine before the first runs, with all they preload. One by a path
+ * the script names is followed like a preload; one by a computed path is [constant CACHE_HELD].
+ */
+const RESOURCE_LOAD = /(?:\bResourceLoader\.load(?:_threaded_request)?|(?<![\w.])(?<!\bfunc\s+)load)\(/g;
 const STRING_ARGUMENT = /^(?:"([^"]*)"|'([^']*)')$/;
 const CONSTANT_ARGUMENT = /^[A-Za-z_]\w*$/;
+const CLASS_CONSTANT = /^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/;
+/**
+ * A path joined at run time, up to what joins its first part on: `+`, `%`, or a `path_join` call,
+ * which puts a slash between.
+ */
+const JOINED_ARGUMENT =
+  /^(?:"([^"]*)"|'([^']*)'|([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?))\s*(?:([+%])|\.path_join\()/;
 /** A file opened to be written only, which the script does not read through that call. */
 const WRITE_ONLY = /^FileAccess\.WRITE$/;
 /** The directory of the addon a path is in. */
@@ -62,7 +91,10 @@ export interface SuiteReached {
   readonly autoloads: readonly string[];
   /** Asked for while the suite ran, and compiled then without a loader being asked. */
   readonly during: readonly string[];
-  /** The project's files the cache held as the suite began, which a load could have had unasked. */
+  /**
+   * The project's files the cache held as the suite began, which a load could have had unasked, but
+   * for the engine's other suites: gdUnit4 loads them all first, and no game loads a suite.
+   */
   readonly resident: readonly string[];
 }
 
@@ -102,12 +134,16 @@ export function reachedBySuite(file: string): Map<string, SuiteReached> {
       }
     }
   }
+  for (const [suite, reached] of bySuite) {
+    bySuite.set(suite, { ...reached, resident: reached.resident.filter((path) => !resident.has(path)) });
+  }
   return bySuite;
 }
 
 /** The inputs of a project's suites and their prints, read once per run. */
 export class SuiteInputs {
   private readonly reads = new Map<string, Read>();
+  private readonly constants = new Map<string, Map<string, string>>();
   private readonly scripts: ProjectScripts;
   private readonly alwaysDigest: string;
   private readonly everywhere: string[];
@@ -125,16 +161,38 @@ export class SuiteInputs {
 
   /**
    * The inputs of the suite at [param suite], from what its engine recorded for it: its own script,
-   * the autoloads, what it loaded as it ran, and what the cache held as it began, which a load could
-   * have had without asking, all followed. What an earlier suite loaded and let go is not among them:
-   * the cache had let it go too, so loading it again asked a loader.
+   * the autoloads and what it loaded as it ran, all followed, and what the cache held as it began
+   * only when those reach a load by a computed path, the one load the cache can answer that nothing
+   * names, and of that only what lies where the path is known to begin. Held to that, since the
+   * cache holds every other suite of the engine and all they preload, and a suite given it all
+   * depended on nearly every file. What an earlier suite loaded and let go is not among them: the
+   * cache had let it go too, so loading it again asked a loader.
    */
   inputsOfSuite(suite: string, reached: SuiteReached): string[] {
-    return this.inputsOf([suite, ...reached.autoloads, ...reached.during, ...reached.resident]);
+    const inputs = this.reach([suite, ...reached.autoloads, ...reached.during]);
+    // What the cache held can itself reach a computed load, so add it until nothing more is held.
+    for (let under: string[] = []; ; ) {
+      const held = [...inputs]
+        .filter((path) => path.startsWith(CACHE_HELD))
+        .map((path) => path.slice(CACHE_HELD.length));
+      const next = reached.resident.filter((path) => held.some((start) => path.startsWith(start)));
+      if (next.length === under.length) {
+        break;
+      }
+      under = next;
+      for (const path of this.reach(under)) {
+        inputs.add(path);
+      }
+    }
+    return listed(inputs);
   }
 
   /** The inputs followed from [param reached], in order, every path once. */
   inputsOf(reached: readonly string[]): string[] {
+    return listed(this.reach(reached));
+  }
+
+  private reach(reached: readonly string[]): Set<string> {
     const inputs = new Set<string>();
     const pending = [...reached, ...this.everywhere]
       .map(inputPath)
@@ -144,13 +202,13 @@ export class SuiteInputs {
         continue;
       }
       inputs.add(path);
-      if (path === EVERY_FILE) {
+      if (path === EVERY_FILE || path.startsWith(CACHE_HELD)) {
         continue;
       }
       const read = this.read(path);
       pending.push(...read.follows, ...read.also);
     }
-    return inputs.has(EVERY_FILE) ? [EVERY_FILE] : [...inputs].sort();
+    return inputs;
   }
 
   /** The print of [param inputs] as they stand now. */
@@ -173,7 +231,13 @@ export class SuiteInputs {
       return known;
     }
     const read =
-      path === EVERY_FILE ? this.everyFile() : ADDON.test(path) ? this.addon(path) : this.readAnew(path);
+      path === EVERY_FILE
+        ? this.everyFile()
+        : path.startsWith(TREE)
+          ? this.tree(path.slice(TREE.length))
+          : ADDON.test(path)
+            ? this.tree(path)
+            : this.readAnew(path);
     this.reads.set(path, read);
     return read;
   }
@@ -190,11 +254,11 @@ export class SuiteInputs {
   }
 
   /**
-   * An addon read whole, every file under it, rather than followed from script to script: gdUnit4
-   * walks directories and loads computed paths, while an addon changes only when it is installed
-   * again.
+   * The folder at [param root] read whole, every file under it. An addon is read so rather than
+   * followed from script to script: gdUnit4 walks directories and loads computed paths, while an
+   * addon changes only when it is installed again.
    */
-  private addon(root: string): Read {
+  private tree(root: string): Read {
     const hash = createHash('sha256');
     let modified = 0;
     const directory = join(this.scripts.projectPath, root.slice('res://'.length));
@@ -255,7 +319,7 @@ export class SuiteInputs {
   private scriptReaches(path: string): { follows: string[]; also: string[] } | null {
     const source = this.scripts.sources.get(path) ?? '';
     const text = uncommented(source);
-    const constants = stringConstants(text);
+    const constants = this.constantsOf(path);
     const follows: string[] = [];
     const also: string[] = [];
     for (const found of text.matchAll(PRELOAD)) {
@@ -273,19 +337,35 @@ export class SuiteInputs {
         continue;
       }
       const literal = STRING_ARGUMENT.exec(first);
-      const named =
-        literal !== null
-          ? (literal[1] ?? literal[2])
-          : CONSTANT_ARGUMENT.test(first)
-            ? constants.get(first)
-            : undefined;
-      if (named?.startsWith('user://') === true) {
+      const named = literal !== null ? (literal[1] ?? literal[2]) : this.constantNamed(first, path);
+      const start = named ?? this.knownStart(first, path);
+      if (start.startsWith('user://')) {
         continue;
       }
-      if (named === undefined || !named.startsWith('res://')) {
+      if (named?.startsWith('res://') === true) {
+        also.push(named);
+        continue;
+      }
+      // A path joined onto a folder the script names reads somewhere under that folder.
+      const folder = start.slice(0, start.lastIndexOf('/') + 1);
+      if (named !== undefined || !folder.startsWith('res://') || folder === 'res://') {
         return null;
       }
-      also.push(named);
+      also.push(`${TREE}${folder}`);
+    }
+    for (const found of text.matchAll(RESOURCE_LOAD)) {
+      const [first = ''] = argumentsAt(text, found.index + found[0].length);
+      const literal = STRING_ARGUMENT.exec(first);
+      const named = literal !== null ? (literal[1] ?? literal[2]) : this.constantNamed(first, path);
+      // A load the cache can answer, by a path that names nothing here, is recorded only when asked.
+      if (named === undefined || named.startsWith('uid://')) {
+        const start = this.knownStart(first, path);
+        also.push(`${CACHE_HELD}${start.startsWith('res://') ? start : ''}`);
+      } else {
+        follows.push(
+          named.startsWith('res://') ? named : `res://${posix.join(posix.dirname(path.slice(6)), named)}`,
+        );
+      }
     }
     const base = this.scripts.base(path);
     if (base !== null && 'path' in base) {
@@ -296,11 +376,75 @@ export class SuiteInputs {
     }
     return { follows, also };
   }
+
+  /**
+   * The string the constant [param name] holds in the script at [param path]: its own, one it
+   * inherits, or a global class's when qualified with the class.
+   */
+  private constantNamed(name: string, path: string): string | undefined {
+    const qualified = CLASS_CONSTANT.exec(name);
+    if (qualified !== null) {
+      const declaring = this.scripts.classes.get(qualified[1] ?? '');
+      return declaring === undefined ? undefined : this.constantsOf(declaring).get(qualified[2] ?? '');
+    }
+    return CONSTANT_ARGUMENT.test(name) ? this.constantsOf(path).get(name) : undefined;
+  }
+
+  /** The string constants the script at [param path] declares or inherits, the nearest winning. */
+  private constantsOf(path: string): ReadonlyMap<string, string> {
+    const known = this.constants.get(path);
+    if (known !== undefined) {
+      return known;
+    }
+    const constants = new Map<string, string>();
+    // Set before the base is read, so a chain that loops ends here.
+    this.constants.set(path, constants);
+    const base = this.scripts.base(path);
+    if (base !== null && 'path' in base) {
+      for (const [name, value] of this.constantsOf(base.path)) {
+        constants.set(name, value);
+      }
+    }
+    for (const [name, expression] of constantsDeclared(uncommented(this.scripts.sources.get(path) ?? ''))) {
+      const value = joinedString(expression, (part) =>
+        part.includes('.') ? this.constantNamed(part, path) : constants.get(part),
+      );
+      if (value === undefined) {
+        constants.delete(name);
+      } else {
+        constants.set(name, value);
+      }
+    }
+    return constants;
+  }
+
+  /**
+   * How the path [param argument] the script at [param path] joins at run time is known to begin, or
+   * nothing.
+   */
+  private knownStart(argument: string, path: string): string {
+    const joined = JOINED_ARGUMENT.exec(argument);
+    if (joined === null) {
+      return '';
+    }
+    const first = joined[1] ?? joined[2] ?? this.constantNamed(joined[3] ?? '', path) ?? '';
+    if (joined[4] === '%') {
+      return first.split('%')[0] ?? '';
+    }
+    return joined[4] === undefined && !first.endsWith('/') && first !== '' ? `${first}/` : first;
+  }
+}
+
+/** [param inputs] in order, or every file alone when they reach it, without the cache's mark. */
+function listed(inputs: ReadonlySet<string>): string[] {
+  return inputs.has(EVERY_FILE)
+    ? [EVERY_FILE]
+    : [...inputs].filter((path) => !path.startsWith(CACHE_HELD)).sort();
 }
 
 /** A recorded path as an input: the addon it is in, or null for one outside the project's files. */
 function inputPath(path: string): string | null {
-  if (path === EVERY_FILE) {
+  if (path === EVERY_FILE || path.startsWith(CACHE_HELD) || path.startsWith(TREE)) {
     return path;
   }
   if (!path.startsWith('res://') || path.startsWith('res://.godot/') || path === '') {
@@ -353,15 +497,32 @@ function uncommented(source: string): string {
   return text;
 }
 
-/** The constants [param text] declares with a string literal, by name. */
-function stringConstants(text: string): Map<string, string> {
-  const constants = new Map<string, string>();
-  for (const found of text.matchAll(
-    /^\s*const\s+([A-Za-z_]\w*)\s*(?::\s*\w+\s*)?:?=\s*(?:"([^"]*)"|'([^']*)')\s*$/gm,
-  )) {
-    constants.set(found[1] ?? '', found[2] ?? found[3] ?? '');
+/** The constants [param text] declares on one line, by name, each with what it is set to. */
+function constantsDeclared(text: string): [string, string][] {
+  return [...text.matchAll(/^\s*const\s+([A-Za-z_]\w*)\s*(?::\s*\w+\s*)?:?=\s*(.+?)\s*$/gm)].map((found) => [
+    found[1] ?? '',
+    found[2] ?? '',
+  ]);
+}
+
+/**
+ * The string [param expression] makes of string literals and constants joined with `+`, each constant
+ * given by [param named], or undefined for any other expression.
+ */
+function joinedString(expression: string, named: (name: string) => string | undefined): string | undefined {
+  const part = /\s*(?:"([^"]*)"|'([^']*)'|([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?))\s*(\+|$)/y;
+  let value = '';
+  for (let found = part.exec(expression); found !== null; found = part.exec(expression)) {
+    const piece = found[1] ?? found[2] ?? named(found[3] ?? '');
+    if (piece === undefined) {
+      return undefined;
+    }
+    value += piece;
+    if (found[4] === '') {
+      return value;
+    }
   }
-  return constants;
+  return undefined;
 }
 
 /**

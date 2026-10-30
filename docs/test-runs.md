@@ -315,15 +315,27 @@ to the byte, and every script is still compiled together in an engine of its own
 no longer compiles fails the run even when every suite is left out.
 
 A suite's inputs are what its engine recorded for it as the run went: its own script, what the
-autoloads loaded, every path a loader was asked for while the suite ran, every project script the
-engine compiled then without asking a loader, and every project file the engine's cache held as the
-suite began. The engine answers a load of a resource it holds from its cache without asking any
-loader, and holds one only while something refers to it, so what an earlier suite loaded and let go
-is not among a later suite's inputs: loading it again asks a loader. From those files the inputs
-are followed further: the scripts each one preloads or names, the paths a scene or
-resource names, each resource's `.import` and `.uid` files, and the whole of any addon reached.
-A file read or listed by a literal or constant path is an input; one read by a path computed at run
-time, or a `uid://` preload, makes every file in the project an input. Added to every suite are
+autoloads loaded, every path a loader was asked for while the suite ran, and every project script
+the engine compiled then without asking a loader. From those files the inputs are followed further:
+the scripts each one preloads or names, what each one loads by a literal or constant path, the
+paths a scene or resource names, each resource's `.import` and `.uid` files, and the whole of any
+addon reached. A constant may be inherited, belong to another class (`Main.MUSIC`), or be built
+from literals and constants joined with `+`.
+
+The engine answers a load of a resource it holds from its cache without asking any loader, and
+gdUnit4 loads every suite of an engine, with all they preload, before the first one runs, so a
+load the cache answers is never recorded. A suite reaching a load by a path worked out at run time
+therefore also has the project files the cache held as it began, other than the engine's suites:
+all of them, or for a path begun with a literal or constant (`SOUNDS + take + ".ogg"`), only those
+under that start. The cache holds a resource only while something refers to it, so what an earlier
+suite loaded and let go is not among a later suite's inputs: loading it again asks a loader.
+
+A file read, listed or asked about (`ResourceLoader.exists`) by a literal or constant path is an
+input, and one missing then counts as changed when it appears. A path joined at run time onto a
+folder the script names (`FOLDER.path_join(name)`, `FOLDER + name`, `"res://data/%s.json" % name`)
+makes every file under that folder an input. One read by any other path computed at run time, or a
+`uid://` preload, makes every file in the project an input. A `user://` path is never one. Added to
+every suite are
 `project.godot`, the gdharness version and runner, the engine executable's path, size and
 modification time, and each file named with `--reach-also`. gdUnit4 is an addon the runner loads,
 so all of it is an input.

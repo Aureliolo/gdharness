@@ -46014,8 +46014,29 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
       'lister.gd':
         'extends Node\n\n\nfunc names() -> PackedStringArray:\n\treturn DirAccess.get_files_at("res://levels")\n',
       'computed.gd':
-        'extends Node\n\n\nfunc read(name: String) -> String:\n\treturn FileAccess.get_file_as_string("res://data/" + name)\n',
+        'extends Node\n\n\nfunc read(name: String) -> String:\n\treturn FileAccess.get_file_as_string(name)\n',
+      'paths.gd': 'class_name Paths\nextends Node\n\nconst DATA: String = "res://da" + "ta"\n',
+      'joined.gd':
+        'extends Paths\n\nconst LEVELS: String = DATA + "/"\n\n\nfunc read(name: String) -> String:\n' +
+        '\treturn FileAccess.get_file_as_string(LEVELS.path_join(name))\n',
+      'formatted.gd':
+        'extends Node\n\n\nfunc read(name: String) -> String:\n' +
+        '\treturn FileAccess.get_file_as_string("res://levels/%s.txt" % name)\n',
+      'store.gd': 'class_name Store\nextends Node\n\nconst SAVE_ROOT: String = "user://"\n',
+      'saves.gd':
+        'extends Node\n\nconst SAVES: String = Store.SAVE_ROOT + "saves"\n\n\nfunc read(name: String) -> String:\n' +
+        '\treturn FileAccess.get_file_as_string(SAVES.path_join(name))\n',
+      'maybe.gd':
+        'extends Node\n\n\nfunc there() -> bool:\n\treturn ResourceLoader.exists("res://data/maybe.tres")\n',
       'by_uid.gd': 'extends Node\n\nconst SCENE = preload("uid://b1234")\n',
+      'tests/b_test.gd': 'extends GdUnitTestSuite\n\nfunc test_b(name: String) -> void:\n\tload(name)\n',
+      'sounds.gd': 'class_name Sounds\nextends Node\n\nconst ROOT: String = "res://sound/"\n',
+      'sound/a.ogg': 'ogg',
+      'sound/player.gd': 'extends Node\n\n\nfunc play(path: String) -> void:\n\tload(path)\n',
+      'tests/c_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_c(take: String) -> void:\n\tload(Sounds.ROOT + take + ".ogg")\n',
+      'tests/d_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_d() -> void:\n\tload("res://data/table.tres")\n',
       '.godot/extension_list.cfg': 'res://ext/native.gdextension\n',
       'ext/native.gdextension': '[configuration]\nentry_symbol = "init"\n',
     });
@@ -46055,6 +46076,28 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
     assert.ok(inputsOf(['res://lister.gd']).includes('res://levels'), 'a folder listed by a literal path');
     assert.deepEqual(inputsOf(['res://computed.gd']), [EVERY_FILE], 'a file read by a computed path');
     assert.deepEqual(inputsOf(['res://by_uid.gd']), [EVERY_FILE], 'and a preload by uid');
+    assert.deepEqual(
+      inputsOf(['res://joined.gd']).filter(
+        (path) => !path.startsWith('res://project') && !path.startsWith('res://ext'),
+      ),
+      ['res://joined.gd', 'res://paths.gd', 'tree:res://data/'],
+      'a path joined onto an inherited constant built from literals, read as that folder whole',
+    );
+    assert.ok(
+      inputsOf(['res://formatted.gd']).includes('tree:res://levels/'),
+      'and a path formatted into a literal, as the folder it begins in',
+    );
+    assert.deepEqual(
+      inputsOf(['res://saves.gd']).filter(
+        (path) => !path.startsWith('res://project') && !path.startsWith('res://ext'),
+      ),
+      ['res://saves.gd', 'res://store.gd'],
+      "no file for a path joined onto another class's user:// constant",
+    );
+    assert.ok(
+      inputsOf(['res://maybe.gd']).includes('res://data/maybe.tres'),
+      'a resource asked about by path',
+    );
 
     const first = printOf(suite);
     assert.equal(printOf(suite), first, 'the same files, the same print');
@@ -46078,6 +46121,22 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
       moves(['res://computed.gd'], 'other.gd', 'class_name Other\nextends Node3D\n'),
       true,
       'any file, for a computed read',
+    );
+    assert.equal(
+      moves(['res://joined.gd'], 'data/levels.json', '[3]\n'),
+      true,
+      'a file in the folder joined onto',
+    );
+    assert.equal(moves(['res://joined.gd'], 'levels/one.txt', 'eins\n'), false, 'and not one outside it');
+    assert.equal(
+      moves(['res://formatted.gd'], 'levels/one.txt', 'une\n'),
+      true,
+      'a file in the folder formatted into',
+    );
+    assert.equal(
+      moves(['res://maybe.gd'], 'data/maybe.tres', '[gd_resource type="Resource" format=3]\n'),
+      true,
+      'the resource it asked about appearing',
     );
     const changes = (path: string, text: string): boolean => moves(suite, path, text);
     assert.equal(
@@ -46123,8 +46182,8 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
     utimesSync(join(project, 'data', 'icon.png'), new Date(began + 5000), new Date(began + 5000));
     assert.equal(new SuiteInputs(scripts, ['1']).modifiedAfter(kept, began), true, 'one input since');
 
-    // A suite has the autoloads' line, its own, and what the cache held as it began; not what an
-    // earlier suite loaded and let go, nor the loads between suites.
+    // A suite has the autoloads' line, its own, and what the cache held as it began but the other
+    // suites; not what an earlier suite loaded and let go, nor the loads between suites.
     const record = join(project, 'reached.jsonl');
     writeFileSync(
       record,
@@ -46134,7 +46193,7 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
         { suite: 'res://tests/a_test.gd', reached: ['res://levels/one.txt'] },
         {
           began: 'res://tests/b_test.gd',
-          resident: ['res://game.gd', 'res://helper.gd'],
+          resident: ['res://game.gd', 'res://helper.gd', 'res://tests/a_test.gd'],
           reached: ['res://between.gd'],
         },
         { suite: 'res://tests/b_test.gd', reached: ['res://data/levels.json'] },
@@ -46167,6 +46226,29 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
       `not what the suite before it loaded: ${ofB.join(', ')}`,
     );
     assert.ok(!ofB.includes('res://between.gd'), `nor what was loaded between them: ${ofB.join(', ')}`);
+
+    // Of what the cache held, a load by a path that names nothing takes it all, one by a path begun
+    // with a constant what lies under it, and one by a path it names none.
+    const held = (suite: string, resident: readonly string[]): string[] =>
+      new SuiteInputs(scripts, ['1']).inputsOfSuite(suite, { autoloads: [], during: [], resident });
+    const ofC = held('res://tests/c_test.gd', ['res://sound/a.ogg', 'res://helper.gd']);
+    assert.ok(ofC.includes('res://sound/a.ogg'), `what the cache held under the start: ${ofC.join(', ')}`);
+    assert.ok(!ofC.includes('res://helper.gd'), `and nothing else it held: ${ofC.join(', ')}`);
+    const ofPlayer = held('res://tests/c_test.gd', [
+      'res://sound/a.ogg',
+      'res://sound/player.gd',
+      'res://helper.gd',
+    ]);
+    assert.ok(
+      ofPlayer.includes('res://helper.gd'),
+      `everything held, once a held script loads by a path naming nothing: ${ofPlayer.join(', ')}`,
+    );
+    const ofD = held('res://tests/d_test.gd', ['res://helper.gd']);
+    assert.ok(
+      ofD.includes('res://data/table.tres') && ofD.includes('res://data/icon.png'),
+      `what a load by a path it names gives, followed: ${ofD.join(', ')}`,
+    );
+    assert.ok(!ofD.includes('res://helper.gd'), `and nothing the cache held: ${ofD.join(', ')}`);
     assert.deepEqual(
       reachedBySuite(join(project, 'never-written.jsonl')).size,
       0,
