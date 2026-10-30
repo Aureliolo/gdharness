@@ -381,6 +381,21 @@ the slots. A tool of a game's own that starts engines takes them the same way:
    will.
 7. When done, remove the lock, but only if it still names your pid.
 
+Gates come first. Each gate in the machine's queue, waiting for its seat or holding it, keeps a mark
+from its arrival to its release: `<directory>/queued/<its ticket>.json`, holding what a lock does.
+A mark is live by the rule a lock is held by; one not yet written names nobody and is passed over,
+and one whose holder has gone is removed. While any mark is live:
+
+- An engine outside a gate takes only the last two slots, numbers `count - 2` and up, and waits
+  for those.
+- A gate's engine takes only the slots below `count - 2`, and slot 0 at least. A process runs
+  inside a gate when `GODOT_ENGINE_SHARE` and `GODOT_ENGINE_SHARE_COUNT` are both set, and a gate's
+  engines keep to their slots whether or not a mark is live.
+
+An engine outside a gate tries the highest-numbered slot first, queue or none, so the gates' slots
+stay free longest. Which slots a take may try is asked again at every look, and a slot already held
+is kept to its end, whatever arrives in the queue.
+
 On Windows, Python opens a file without delete sharing, and a lock or mark open in another process
 cannot be removed until it is closed. gdharness retries a removal refused so for a second; a tool
 of a game's own that removes them should do the same.
