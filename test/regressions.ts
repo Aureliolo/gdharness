@@ -26787,6 +26787,60 @@ async function testARunImportsWhatChangedFirst(): Promise<void> {
       assert.equal(get(tested, 'uidsMissing'), undefined, JSON.stringify(tested));
       assert.deepEqual(await behindByStatus(), [], 'and status reads it current after the test run');
 
+      // Issue #1361: the sidecar changed and the source did not, first as setting an option does,
+      // then as a tool writes one for the engine to import from, with no output named, in a
+      // checkout without the editor's cache, where the record of the last import still matches.
+      const sidecar = join(project, 'picture.png.import');
+      const sidecarShapes = [
+        {
+          reason: 'its import file changed after it was imported, as setting an option does',
+          rewrite: (): void => {
+            writeFileSync(
+              sidecar,
+              readFileSync(sidecar, 'utf8').replace('mipmaps/generate=false', 'mipmaps/generate=true'),
+            );
+          },
+        },
+        {
+          reason:
+            'its import file names no imported output, as one written before the engine imports from it does',
+          rewrite: (): void => {
+            writeFileSync(
+              sidecar,
+              readFileSync(sidecar, 'utf8')
+                .replace(/^path=.*\r?\n/m, '')
+                .replace(/\[deps\][\s\S]*?(?=\r?\n\[|$)/, ''),
+            );
+            for (const name of readdirSync(join(project, '.godot', 'editor'))) {
+              if (name.startsWith('filesystem_cache')) {
+                rmSync(join(project, '.godot', 'editor', name));
+              }
+            }
+          },
+        },
+      ];
+      for (const { reason, rewrite } of sidecarShapes) {
+        const before = readFileSync(sidecar, 'utf8');
+        rewrite();
+        assert.notEqual(readFileSync(sidecar, 'utf8'), before, `the rewrite changed the sidecar: ${reason}`);
+        const behindNow = staleImports(project);
+        assert.deepEqual(behindNow, [{ path: 'res://picture.png', reason }], JSON.stringify(behindNow));
+        assert.deepEqual(await behindByStatus(), behindNow, 'status names it for the same reason');
+        const ran = await answer('project_test', { path: 'res://test' });
+        assert.equal(get(ran, 'passed'), true, `the suite loads the picture: ${JSON.stringify(ran)}`);
+        assert.deepEqual(
+          asArray(get(ran, 'importedFirst')).map(String),
+          ['res://picture.png'],
+          `the test run imported it first: ${JSON.stringify(ran)}`,
+        );
+        assert.match(
+          readFileSync(sidecar, 'utf8'),
+          /^path="res:\/\/\.godot\/imported\//m,
+          'its sidecar names its output',
+        );
+        assert.deepEqual(staleImports(project), [], `and it reads current after: ${reason}`);
+      }
+
       // Asked for directly, the reimport writes the same sidecars, and names them as the run does.
       writeFileSync(join(project, 'picture.png'), solidPng(40, 160, 160));
       writeFileSync(join(project, 'helper.gd'), 'extends Node\n');
@@ -48355,6 +48409,28 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     assert.doesNotMatch(changed.said, /The import was skipped/, changed.said);
     assert.equal(changed.status, 0, changed.said);
     assert.ok(existsSync(join(project, 'dot.svg.import')), `the new file was imported: ${changed.said}`);
+    // A sidecar naming no output, as a tool writes one, in a checkout without the editor's cache:
+    // the engine's own scan passes over it, so the run has to mark it for the import.
+    const dotSidecar = join(project, 'dot.svg.import');
+    writeFileSync(
+      dotSidecar,
+      readFileSync(dotSidecar, 'utf8')
+        .replace(/^path=.*\r?\n/m, '')
+        .replace(/\[deps\][\s\S]*?(?=\r?\n\[|$)/, ''),
+    );
+    assert.doesNotMatch(readFileSync(dotSidecar, 'utf8'), /^path=/m, 'the sidecar names no output');
+    for (const name of readdirSync(join(project, '.godot', 'editor'))) {
+      if (name.startsWith('filesystem_cache')) {
+        rmSync(join(project, '.godot', 'editor', name));
+      }
+    }
+    const unnamed = test('--import', 'tests/ok_test.gd');
+    assert.equal(unnamed.status, 0, unnamed.said);
+    assert.match(
+      readFileSync(dotSidecar, 'utf8'),
+      /^path="res:\/\/\.godot\/imported\/dot\.svg-/m,
+      `the import named its output again: ${unnamed.said}`,
+    );
     writeTree(project, { 'broken.svg': 'not an image\n' });
     const failing = test('--import', 'tests/ok_test.gd');
     rmSync(join(project, 'broken.svg'));

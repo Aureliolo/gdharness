@@ -147,22 +147,99 @@ function onDisk(projectPath: string, resPath: string): string {
 }
 
 /**
+ * The md5 of each sidecar as the editor last imported it, keyed by `res://` path, from the newest
+ * filesystem cache under `.godot/editor`, read as `import_pipeline.gd` reads it; empty without one.
+ */
+function importedSidecarMd5s(projectPath: string): Map<string, string> {
+  const found = new Map<string, string>();
+  const editor = join(projectPath, '.godot', 'editor');
+  let newest = -1;
+  try {
+    for (const name of readdirSync(editor)) {
+      const version = /^filesystem_cache(\d+)$/.exec(name)?.[1];
+      if (version !== undefined) {
+        newest = Math.max(newest, Number(version));
+      }
+    }
+  } catch {
+    return found;
+  }
+  if (newest < 0) {
+    return found;
+  }
+  let text: string;
+  try {
+    text = readFileSync(join(editor, `filesystem_cache${newest}`), 'utf8');
+  } catch {
+    return found;
+  }
+  // The first line is the import settings version; then a "::<dir>::<time>" line opens each
+  // directory, and each file line has nine "::" fields, the eighth "<>"-separated with the
+  // sidecar's md5 sixth.
+  let directory = 'res://';
+  for (const line of text
+    .split(/\r?\n/)
+    .slice(1)
+    .map((one) => one.trim())) {
+    if (line === '') {
+      continue;
+    }
+    const fields = line.split('::');
+    if (line.startsWith('::')) {
+      if (fields.length === 3) {
+        directory = fields[1] ?? directory;
+      }
+      continue;
+    }
+    const slices = fields.length < 9 ? [] : (fields[7] ?? '').split('<>');
+    const md5 = slices[5];
+    if (slices.length >= 7 && md5 !== undefined && md5 !== '') {
+      found.set(`${directory}${directory.endsWith('/') ? '' : '/'}${fields[0]}`, md5);
+    }
+  }
+  return found;
+}
+
+/**
  * Why the import of [param resPath] is behind it, or null when it is current or kept or skipped.
  *
- * The checks are the ones `project_import status` makes that need no importer, in its order and
- * in its words, so a file flagged here is one that status calls `needs_reimport`. A failed import
- * records the hash of the source it failed on and writes no output, so it is behind only once
- * its source changes, which is when importing it again can succeed.
+ * The checks are the ones `project_import status` makes that need no importer and read no import,
+ * in its order and in its words, so a file flagged here is one that status calls `needs_reimport`.
+ * A failed import records the hash of the source it failed on and writes no output, so it is
+ * behind only once its source changes, which is when importing it again can succeed.
  */
-function behind(projectPath: string, resPath: string, sidecar: string): string | null {
+function behind(
+  projectPath: string,
+  resPath: string,
+  sidecarFile: string,
+  sidecar: string,
+  importedFrom: ReadonlyMap<string, string>,
+): string | null {
+  const imported = importedFrom.get(resPath);
+  if (imported !== undefined && md5Of(sidecarFile) !== imported) {
+    return 'its import file changed after it was imported, as setting an option does';
+  }
   const remap = sectionOf(sidecar, 'remap');
   const importer = unquoted(remap.get('importer'));
   if (importer === 'keep' || importer === 'skip') {
     return null;
   }
-  const outputs = listed(sectionOf(sidecar, 'deps').get('dest_files'));
+  const deps = sectionOf(sidecar, 'deps');
+  const outputs = listed(deps.get('dest_files'));
+  if (remap.get('valid') !== 'false') {
+    if (!remap.has('uid')) {
+      return 'its import file has no uid, which the import writes';
+    }
+    if (outputs.length === 0 && ![...remap.keys()].some((key) => key.startsWith('path'))) {
+      return 'its import file names no imported output, as one written before the engine imports from it does';
+    }
+  }
   if (outputs.some((output) => !existsSync(onDisk(projectPath, output)))) {
     return 'its imported output is not on disk';
+  }
+  const source = unquoted(deps.get('source_file'));
+  if (source !== '' && source !== resPath) {
+    return `its import file was written for ${source}`;
   }
   const name = resPath.slice(resPath.lastIndexOf('/') + 1);
   const record = join(
@@ -193,6 +270,7 @@ function behind(projectPath: string, resPath: string, sidecar: string): string |
  */
 export function staleImports(projectPath: string): StaleImport[] {
   const stale: StaleImport[] = [];
+  const importedFrom = importedSidecarMd5s(projectPath);
   const visit = (directory: string, resDirectory: string): void => {
     if (existsSync(join(directory, '.gdignore')) || existsSync(join(directory, VERSION_MARKER))) {
       return;
@@ -221,13 +299,14 @@ export function staleImports(projectPath: string): StaleImport[] {
         if (!names.has(entry.name.slice(0, -'.import'.length))) {
           continue;
         }
+        const sidecarFile = join(directory, entry.name);
         let sidecar: string;
         try {
-          sidecar = readFileSync(join(directory, entry.name), 'utf8');
+          sidecar = readFileSync(sidecarFile, 'utf8');
         } catch {
           continue;
         }
-        const reason = behind(projectPath, source, sidecar);
+        const reason = behind(projectPath, source, sidecarFile, sidecar, importedFrom);
         if (reason !== null) {
           stale.push({ path: source, reason });
         }
