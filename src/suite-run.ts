@@ -119,6 +119,11 @@ export interface TestOptions {
   readonly verbose: boolean;
   /** Where the run writes its result as JSON ([type RunResult]), or null for nowhere. */
   readonly resultFile: string | null;
+  /**
+   * The times the run deals by and records into, or null for the project's own: a gate keeping a
+   * record of its runs alone names its file, so hand runs never skew how it deals.
+   */
+  readonly timesFile: string | null;
 }
 
 /**
@@ -226,6 +231,7 @@ const VALUED = new Set([
   '--reach-also',
   '--order',
   '--result',
+  '--times',
 ]);
 const SWITCHES = new Set(['--changed-only', '--import', '--print-output', '--verbose']);
 
@@ -279,6 +285,7 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     printOutput: switches.has('--print-output'),
     verbose: switches.has('--verbose'),
     resultFile: last('--result') === undefined ? null : resolve(cwd, last('--result') ?? ''),
+    timesFile: last('--times') === undefined ? null : resolve(cwd, last('--times') ?? ''),
   };
 }
 
@@ -466,7 +473,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
   const scripts = new ProjectScripts(options.projectPath);
   const home = homeOf(options.projectPath);
   const state = join(home, '.godot', 'gdharness');
-  const timesFile = join(state, 'suite-times.json');
+  const timesFile = options.timesFile ?? join(state, 'suite-times.json');
   const passedFile = join(state, 'suite-passed.json');
   const lastRunFile = join(state, LAST_RUN_FILE);
   let suites = selectedSuites(scripts, options);

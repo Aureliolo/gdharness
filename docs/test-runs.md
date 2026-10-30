@@ -61,8 +61,10 @@ command line itself is wrong.
   the suites a share at a time) and `dealing`, the lines the run printed about its deal. `log` and
   `logs` are null once a passing run has removed them. A run that failed its import, or had
   nothing left to run under `--changed-only`, writes empty `suites` and `engines`. Every run writes
-  the same result to `.godot/gdharness/last-run.json` beside the suite times, with or without
+  the same result to `.godot/gdharness/last-run.json` beside the project's suite times, with or without
   `--result`, so a run inside a gate that keeps none of a passing step's output can still be read.
+- `--times FILE`: deal the suites by the times in `FILE` and record what they took into it, in
+  place of `.godot/gdharness/suite-times.json`. A missing file deals as no times would.
 - `--runner`: print the path of the shipped runner and exit.
 
 ## Which suites run
@@ -86,7 +88,9 @@ tests/not_searched=PackedStringArray("res://test/bench")
 ## How they are dealt to engines
 
 What each case took is kept in `.godot/gdharness/suite-times.json`, in the main checkout when the
-project is a git worktree of one:
+project is a git worktree of one, or in the file `--times` names, which the run then deals by too.
+A gate that keeps a record of its own runs names it, so hand runs and benches never change how the
+gate deals:
 
 ```json
 {

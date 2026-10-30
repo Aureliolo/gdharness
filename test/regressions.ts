@@ -46489,9 +46489,17 @@ function testTheTestCommandReadsItsOwnOptions(): void {
         '--verbose',
         '--result',
         'out/result.json',
+        '--times',
+        'gate/suite-times.json',
       ],
       tmpdir(),
     );
+    assert.equal(
+      read.timesFile,
+      join(tmpdir(), 'gate', 'suite-times.json'),
+      'a times file read from where it ran',
+    );
+    assert.equal(testOptionsOf([], project).timesFile, null, "and the project's own unless named");
     assert.equal(read.printOutput, true);
     assert.equal(testOptionsOf([], project).printOutput, false, 'off unless asked for');
     assert.equal(read.verbose, true);
@@ -47739,6 +47747,83 @@ async function testASpreadBenchGathersTheTableItPlaysAlone(): Promise<void> {
     rmSync(project, { recursive: true, force: true });
     rmSync(slots, { recursive: true, force: true });
     rmSync(runtimeDirectory, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A run given `--times` deals by that file and records into it, leaving the project's own alone, so a
+ * gate keeping times of its own runs never deals by a hand run's.
+ */
+function testATestRunDealsByAndRecordsIntoTheTimesItIsGiven(): void {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('times file regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-times-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-slots-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\nconfig/name="TimesNamed"\n',
+      'tests/ok_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_one() -> void:\n\tassert_int(1).is_equal(1)\n\n\nfunc test_two() -> void:\n\tawait get_tree().process_frame\n\tassert_int(2).is_equal(2)\n',
+      'tests/other_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_other() -> void:\n\tassert_int(3).is_equal(3)\n',
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const test = (...args: string[]): { said: string; status: number | null } => {
+      const ran = spawnSyncHidden(
+        process.execPath,
+        ['build/cli.js', 'test', project, '--slots', slots, ...args],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, GODOT_PATH: godotPath },
+          timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+        },
+      );
+      return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
+    };
+    const own = join(project, '.godot', 'gdharness', 'suite-times.json');
+    const gateTimes = join(project, 'gate', 'suite-times.json');
+    const first = test('--times', gateTimes);
+    assert.equal(first.status, 0, first.said);
+    const recorded = (existsSync(gateTimes) ? JSON.parse(readFileSync(gateTimes, 'utf8')) : {}) as Record<
+      string,
+      { cases?: object }
+    >;
+    assert.deepEqual(
+      Object.keys(recorded['res://tests/ok_test.gd']?.cases ?? {}).sort(),
+      ['test_one', 'test_two'],
+      `what the run took, recorded into the file named: ${JSON.stringify(recorded)}`,
+    );
+    assert.equal(existsSync(own), false, "and nothing into the project's own");
+
+    writeFileSync(own, '{}\n');
+    writeFileSync(
+      gateTimes,
+      JSON.stringify({
+        ...recorded,
+        'res://tests/ok_test.gd': { seconds: 30, cases: { test_one: 15, test_two: 15 } },
+      }),
+    );
+    const dealt = test('--engines', '2', '--times', gateTimes);
+    assert.equal(dealt.status, 0, dealt.said);
+    // Two engines need about seven gigabytes free, which the macOS runner does not have.
+    assert.match(
+      dealt.said,
+      dealt.said.includes('over 1 engine, of the 2 asked for, since')
+        ? /^3 test functions in 2 suites over 1 engine, of the 2 asked for, since the machine has /m
+        : /^Dealt out case by case, since it took more than an engine's share of this run \(\d+ s\) last time: res:\/\/tests\/ok_test\.gd\.$/m,
+      `dealt by the times in the file named, the project's own being empty: ${dealt.said}`,
+    );
+    assert.equal(readFileSync(own, 'utf8'), '{}\n', "the project's own left as it was");
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(slots, { recursive: true, force: true });
   }
 }
 
@@ -69063,6 +69148,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheTestHelpersWaitStepAndPress,
   testASpreadBenchGathersTheTableItPlaysAlone,
   testTheTestCommandRunsAndJudgesAProject,
+  testATestRunDealsByAndRecordsIntoTheTimesItIsGiven,
   testTheShutdownWalkIsHeldAndARealLeakStillFails,
   testAParameterisedCaseIsDealtByItsRows,
   testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly,
