@@ -795,6 +795,15 @@ export function capsFrames(projectPath: string): boolean {
   return typeof cap === 'number' && cap > 0;
 }
 
+/** Whether a project turns on gdUnit4's `report/godot/push_error`, which is off unless set. */
+export function gdUnitFailsOnPushErrors(projectPath: string): boolean {
+  const file = `${projectPath}/project.godot`;
+  if (!existsSync(file)) {
+    return false;
+  }
+  return parseProjectGodot(readFileSync(file, 'utf8'))['gdunit4']?.['report/godot/push_error'] === true;
+}
+
 /** The window size a project asks for, from its viewport settings, or null for Godot's own default. */
 export function viewportOf(projectPath: string): { width: number; height: number } | null {
   const file = `${projectPath}/project.godot`;

@@ -846,7 +846,7 @@ function instanceRemedy(
     `rebuilds that copy when the file changes; ${
       declaring.length === 1
         ? `editor_rescan with reloadScript set to ${declaring[0]} recompiles that copy`
-        : `reloadScript takes one script, so a call each for ${declaring.join(' and ')} recompiles those copies`
+        : `editor_rescan with reloadScript set to ${JSON.stringify(declaring)} recompiles those copies`
     } from the file into the same ` +
     'object and answers with what that added under methodsAdded and constantsAdded. Read that and the ' +
     'next diagnostics as two readings, because they are of two things: measured in one window on ' +
@@ -877,16 +877,9 @@ function classRemedy(entries: readonly Contradicted[]): string {
   const reload =
     declaring.length === 1
       ? `editor_rescan with reloadScript set to ${declaring[0]}`
-      : `editor_rescan with reloadScript, a call each for ${declaring.join(' and ')} since it takes one script,`;
-  // One at a time because a reload can cover the next: a rescan that brings in a class reloads
-  // every script naming it, and game-b's reload of rules.gd brought in Usurp and reloaded gear.gd,
-  // the other script this note had sent it to.
-  const oneAtATime =
-    declaring.length === 1
-      ? ''
-      : ' Take them one at a time: a rescan that brings in a class also reloads every script naming it and lists them under dependentsReloaded, so a script listed there needs no call of its own.';
+      : `editor_rescan with reloadScript set to ${JSON.stringify(declaring)}`;
   return (
-    `For ${entries.map(written).join(', ')}, run ${reload} first.${oneAtATime} In the one project ` +
+    `For ${entries.map(written).join(', ')}, run ${reload} first. In the one project ` +
     'that has reproduced a stale enum member, three times, the reload cleared it at once each time, ' +
     'and the one plain editor_rescan tried left the diagnostic standing.'
   );
