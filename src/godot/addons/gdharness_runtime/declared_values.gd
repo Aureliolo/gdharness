@@ -113,6 +113,41 @@ static func engine_constants(target: Object, property: String) -> Dictionary:
 	return values
 
 
+## The number [param word] names as a constant of the global enum the property [param declared] of
+## [param target] holds, such as VERTICAL_ALIGNMENT_BOTTOM, or null when it names none. ClassDB
+## lists no global enum and Expression reads no global constant, so a word spelt from the enum's
+## name and a value the hint gives is compiled, and taken only when the engine reads it as that
+## value: ORIENTATION_VERTICAL is spelt so and is not a constant, which is HORIZONTAL or VERTICAL.
+static func _global_constant(target: Object, declared: Dictionary, word: String) -> Variant:
+	var engine_class: String = target.get_class()
+	var setter: String = str(
+		ClassDB.class_get_property_setter(engine_class, str(declared.get("name", "")))
+	)
+	var named: String = ""
+	for method: Dictionary in ClassDB.class_get_method_list(engine_class):
+		var arguments: Array = method.get("args", [])
+		if str(method.get("name", "")) == setter and not arguments.is_empty():
+			var value_argument: Dictionary = arguments[-1]
+			named = str(value_argument.get("class_name", ""))
+			break
+	if named.is_empty() or "." in named:
+		return null
+	var wanted: String = word.strip_edges().to_upper()
+	var hinted: Dictionary = enum_values(str(declared.get("hint_string", "")))
+	for value_word: String in hinted:
+		var constant: String = (
+			named.to_snake_case().to_upper() + "_" + value_word.to_upper().replace(" ", "_")
+		)
+		if constant != wanted:
+			continue
+		var reader: GDScript = GDScript.new()
+		reader.source_code = "extends RefCounted\nconst READ = %s\n" % constant
+		if (reader.reload() == OK
+				and reader.get_script_constant_map().get("READ") == hinted[value_word]):
+			return hinted[value_word]
+	return null
+
+
 ## [param word] as the number of the value the enum property [param declared] of [param target]
 ## names by it, as [true, number], or [false, why] naming the values, with [param holder] naming the
 ## target in the refusal. [false, ""] for a word that is a number, which converts as one.
@@ -132,6 +167,8 @@ static func enum_by_name(
 	if chosen == null:
 		constants = engine_constants(target, property)
 		chosen = enum_named(constants, word)
+	if chosen == null and constants.is_empty():
+		chosen = _global_constant(target, declared, word)
 	if chosen != null:
 		return [true, chosen]
 	if word.strip_edges().is_valid_int():

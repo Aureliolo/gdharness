@@ -54359,6 +54359,27 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     });
     assert.ok(parseTextContent(glowing) !== null, textOf(glowing) ?? JSON.stringify(glowing));
     assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^blend_mode = 1$/m);
+    // A global enum's constants belong to no class, and VERTICAL_ALIGNMENT_BOTTOM was refused.
+    const bottom = await request('scene_node', {
+      scenePath: 'res://hero.tscn',
+      op: 'add',
+      nodeType: 'Label',
+      nodeName: 'Words',
+      properties: { vertical_alignment: 'VERTICAL_ALIGNMENT_BOTTOM' },
+    });
+    assert.ok(parseTextContent(bottom) !== null, textOf(bottom) ?? JSON.stringify(bottom));
+    assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^vertical_alignment = 2$/m);
+    assert.equal(
+      textOf(
+        await request('scene_node', {
+          ...hero,
+          nodePath: 'Words',
+          properties: { vertical_alignment: 'VERTICAL_ALIGNMENT_BOTOM' },
+        }),
+      ),
+      'Label.vertical_alignment is an enum, and VERTICAL_ALIGNMENT_BOTOM is none of its values: send Top (0), Center (1), Bottom (2), Fill (3) by name or by number.',
+    );
+    await request('scene_node', { ...hero, op: 'delete', nodePath: 'Words' });
     assert.equal(
       textOf(await request('scene_node', { ...hero, properties: { motion_mode: 'MOTION_MODE_FLYING' } })),
       "Player.motion_mode is an enum, and MOTION_MODE_FLYING is none of its values: send Grounded (0), Floating (1) by name, by number or by the engine's constant, such as MOTION_MODE_GROUNDED. The nearest are MOTION_MODE_FLOATING, MOTION_MODE_GROUNDED.",
