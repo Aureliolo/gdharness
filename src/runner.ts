@@ -7,8 +7,8 @@
  * either of them with `npx` hands over a command that does not exist on their machine.
  */
 
-import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
+import { delimiter, dirname, extname, join, resolve } from 'node:path';
 import process from 'node:process';
 
 export type Runner = 'npx' | 'bunx';
@@ -57,7 +57,7 @@ export interface Spawn {
  * the runtime the server runs under depend on machine state. The flag says run it under the Bun
  * the entry names. Nothing is lost where there is no Node: that is what Bun would have done.
  */
-export function spawnFor(runner: Runner, version: string, execPath = process.execPath): Spawn {
+export function spawnFor(runner: Runner, version: string, execPath = givenExecPath()): Spawn {
   const spec = `gdharness@${version}`;
   if (runner !== currentRunner()) {
     return { command: runner, args: runner === 'npx' ? ['-y', spec] : ['--bun', spec] };
@@ -66,6 +66,53 @@ export function spawnFor(runner: Runner, version: string, execPath = process.exe
     return { command: execPath, args: ['x', '--bun', spec] };
   }
   return { command: alongside(execPath, 'npx') ?? 'npx', args: ['-y', spec] };
+}
+
+/**
+ * The executable running us as it was started, through any link, or `process.execPath` when that
+ * cannot be told.
+ *
+ * `process.execPath` has every link resolved. A project pinning its toolchain links `.tools/bun` to
+ * an entry in a machine-wide store, and a config written from the resolved path named the entry the
+ * link pointed at that day: raising the pin moved the link and left the config on the old entry,
+ * which the store deletes once no link names it. [param argv0] keeps the path as given, the one a
+ * PATH search found included, and is taken only when it is the same file, so a name meaning
+ * another executable here is never written.
+ */
+export function givenExecPath(
+  argv0 = process.argv0,
+  execPath = process.execPath,
+  cwd = process.cwd(),
+  searched = process.env['PATH'] ?? '',
+): string {
+  const named = /[\\/]/.test(argv0)
+    ? [resolve(cwd, argv0)]
+    : searched
+        .split(delimiter)
+        .filter((directory) => directory !== '')
+        .map((directory) => join(directory, argv0));
+  const running = realPath(execPath);
+  for (const path of named.flatMap(withExtensions)) {
+    if (running !== null && realPath(path) === running) {
+      return path;
+    }
+  }
+  return execPath;
+}
+
+/** [param path], and on Windows the executables a name without an extension also starts. */
+function withExtensions(path: string): string[] {
+  return process.platform === 'win32' && extname(path) === '' ? [path, `${path}.exe`, `${path}.cmd`] : [path];
+}
+
+/** Where [param path] leads once every link is followed, compared case-blind on Windows, or null. */
+function realPath(path: string): string | null {
+  try {
+    const real = realpathSync.native(path);
+    return process.platform === 'win32' ? real.toLowerCase() : real;
+  } catch {
+    return null;
+  }
 }
 
 /**
