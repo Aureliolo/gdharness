@@ -15,6 +15,10 @@
  * and removes the steal file. A steal file older than {@link UNWRITTEN_MS} is a taker that died
  * holding it.
  *
+ * Gates come first. A gate in the machine's queue keeps a mark, `<directory>/queued/<ticket>.json`
+ * holding what a lock does, and while one is live an engine outside a gate takes only the last
+ * {@link KEPT_SLOTS} slots; a gate's engines take only the others ({@link slotsDrawnOn}).
+ *
  * A taker that finds every slot held keeps a mark, `<directory>/waiting/<pid>-<n>.json` holding
  * what its lock will, until its take ends, so that a gate counting its own time can tell a wait for
  * slots others hold from its own work. A mark whose holder has gone is free by the same rule as a
@@ -36,6 +40,7 @@ import {
   type FSWatcher,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
@@ -147,6 +152,54 @@ const COMMAND_WAIT_SAID_MS = 2000;
 const START_READ_MS = 10_000;
 /** The folder, inside the slots', of the marks takers keep while they wait. */
 export const WAITING_FOLDER = 'waiting';
+/**
+ * The folder, inside the slots', of the marks the gates in the machine's queue keep, one a gate's
+ * ticket, from its arrival to its release, holding what a lock does.
+ */
+export const QUEUED_FOLDER = 'queued';
+/**
+ * The variables naming the share of the gate a process runs in, set in every process a gate runs,
+ * so both set says the engine is a gate's.
+ */
+export const SHARE_VARIABLE = 'GODOT_ENGINE_SHARE';
+export const SHARE_COUNT_VARIABLE = 'GODOT_ENGINE_SHARE_COUNT';
+/**
+ * The slots kept for engines outside a gate while a gate is queued: the last two. The gates draw on
+ * the rest alone, and an engine outside a gate takes one of those only while no gate is queued, so
+ * work started beside the gates never leaves them waiting: one morning engines outside the queue
+ * held 12 of 16 slots while gates stood in line for hours.
+ */
+const KEPT_SLOTS = 2;
+
+/** Which of a machine's slots a take is held to, when it is held to some. */
+type SlotLimit = 'gate' | 'kept';
+
+/** The slot numbers a take may try, in order, and what holds it to them when something does. */
+export interface SlotsDrawn {
+  readonly numbers: readonly number[];
+  readonly limit?: SlotLimit;
+}
+
+/**
+ * The slot numbers of [param count] a take may try now, in the order it tries them, and what holds it
+ * to them. A gate's engine ([param inAGate]) takes the first count less {@link KEPT_SLOTS}, at least
+ * one. Any other takes every slot while no gate is queued, and only the kept ones while one is
+ * ([param gateQueued]), trying the kept ones first either way so the gates' stay free longest.
+ */
+export function slotsDrawnOn(count: number, inAGate: boolean, gateQueued: boolean): SlotsDrawn {
+  const gated = Math.max(1, count - KEPT_SLOTS);
+  if (inAGate) {
+    return { numbers: Array.from({ length: gated }, (_, slot) => slot), limit: 'gate' };
+  }
+  const every = Array.from({ length: count }, (_, slot) => count - 1 - slot);
+  const kept = every.slice(0, count - gated);
+  return gateQueued && kept.length > 0 ? { numbers: kept, limit: 'kept' } : { numbers: every };
+}
+
+/** Whether [param env] says this process runs inside a gate, which names its share in both. */
+export function inAGate(env: NodeJS.ProcessEnv = process.env): boolean {
+  return nonEmpty(env[SHARE_VARIABLE]) !== undefined && nonEmpty(env[SHARE_COUNT_VARIABLE]) !== undefined;
+}
 /** The waits this process has marked, which makes each mark's name its own. */
 let waitsMarked = 0;
 
@@ -272,18 +325,30 @@ export class EngineSlots {
   private readonly starts = new Map<number, { started: number | undefined; readAt: number }>();
   private readonly held = new Set<string>();
   private readonly marks = new Set<string>();
+  /** The slots the last look could take, in the order it tried them, and what held it to them. */
+  drawn: SlotsDrawn = { numbers: [] };
   private saidAt = Number.NEGATIVE_INFINITY;
 
   readonly directory: string;
   readonly count: number;
   readonly holder: SlotHolder;
+  /** Whether this process runs inside a gate, which holds its takes to the gates' slots. */
+  readonly inAGate: boolean;
   private readonly say: ((line: string) => void) | undefined;
 
-  constructor(directory: string, count: number, holder: SlotHolder, say?: (line: string) => void) {
+  constructor(
+    directory: string,
+    count: number,
+    holder: SlotHolder,
+    say?: (line: string) => void,
+    gated: boolean = inAGate(),
+  ) {
     this.directory = directory;
     this.count = count;
     this.holder = holder;
     this.say = say;
+    this.inAGate = gated;
+    this.drawn = slotsDrawnOn(count, gated, false);
   }
 
   /**
@@ -325,7 +390,7 @@ export class EngineSlots {
           now - this.saidAt >= WAIT_SAID_MS
         ) {
           this.saidAt = now;
-          this.say(slotWaitSaid(now - began, this.count, this.directory, this.holders()));
+          this.say(slotWaitSaid(now - began, this.count, this.directory, this.holders(), this.drawn));
         }
         if (changes === undefined) {
           // Looked at again once watched, since a slot given back before the watch began says nothing.
@@ -351,10 +416,15 @@ export class EngineSlots {
     }
   }
 
-  /** Takes a slot that is free now and answers its lock's path, or null when every slot is held. */
+  /**
+   * Takes a slot that is free now and answers its lock's path, or null when every slot it may take is
+   * held. Which it may take is asked again at every look, since a gate arriving in the queue or the
+   * last one leaving changes them; a slot already held is kept to its end whatever arrives.
+   */
   async takeFree(): Promise<string | null> {
     mkdirSync(this.directory, { recursive: true });
-    for (let slot = 0; slot < this.count; slot += 1) {
+    this.drawn = slotsDrawnOn(this.count, this.inAGate, !this.inAGate && (await this.aGateIsQueued()));
+    for (const slot of this.drawn.numbers) {
       const lock = join(this.directory, `${String(slot)}.lock`);
       if (this.made(lock) || (await this.takenOver(lock))) {
         this.held.add(lock);
@@ -384,10 +454,41 @@ export class EngineSlots {
     return mark;
   }
 
-  /** Who holds the slots now, in slot order, leaving out a lock that cannot be read. */
+  /**
+   * Whether a live gate has a mark in the machine's queue. A mark whose gate has gone is removed, by
+   * the rule a lock is freed by, and one not yet written names nobody and is passed over.
+   */
+  private async aGateIsQueued(): Promise<boolean> {
+    const marks = join(this.directory, QUEUED_FOLDER);
+    let names: string[];
+    try {
+      names = readdirSync(marks).filter((name) => name.endsWith('.json'));
+    } catch {
+      return false;
+    }
+    let live = false;
+    for (const name of names) {
+      const mark = join(marks, name);
+      const content = readWhole(mark);
+      if (content === null || holderOf(content) === null) {
+        continue;
+      }
+      if (await this.free(mark)) {
+        removeWhole(mark);
+      } else {
+        live = true;
+      }
+    }
+    return live;
+  }
+
+  /**
+   * Who holds the slots the last look could take, in the order it tried them, leaving out a lock
+   * that cannot be read.
+   */
   holders(): SlotHolder[] {
     const found: SlotHolder[] = [];
-    for (let slot = 0; slot < this.count; slot += 1) {
+    for (const slot of this.drawn.numbers) {
       try {
         const holder = holderOf(readFileSync(join(this.directory, `${String(slot)}.lock`), 'utf8'));
         if (holder !== null) {
@@ -582,20 +683,36 @@ export function slotWaitSaid(
   count: number,
   directory: string,
   holders: readonly SlotHolder[] = [],
+  drawn: SlotsDrawn = { numbers: [] },
 ): string {
-  const slots =
-    count === 1
-      ? `the one engine slot on this machine (${directory}) is in use`
-      : `all ${String(count)} engine slots on this machine (${directory}) are in use`;
-  const named = holdersNamed(count, holders);
+  const taking = drawn.limit === undefined ? count : drawn.numbers.length;
+  const slots = `${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'is' : 'are'} in use`;
+  const named = holdersNamed(taking, holders);
   const waiting = `Waiting${waitedMs >= 1000 ? ` ${String(Math.round(waitedMs / 1000))} s so far` : ''} for an engine: ${slots}`;
+  const back = `the engine starts when ${taking === 1 ? 'it' : 'one'} is given back`;
+  const starts = drawn.limit === 'kept' ? `${back} or no gate is queued` : back;
   if (named.length === 0) {
-    return `${waiting}, by a gate or another tool, and the engine starts when one is given back.`;
+    return `${waiting}, by a gate or another tool, and ${starts}.`;
   }
-  if (count === 1) {
-    return `${waiting}, by ${named.join(', ')}, and the engine starts when it is given back.`;
+  if (taking === 1) {
+    return `${waiting}, by ${named.join(', ')}, and ${starts}.`;
   }
-  return `${waiting}: ${listed(named)}. The engine starts when one is given back.`;
+  return `${waiting}: ${listed(named)}. ${starts.charAt(0).toUpperCase()}${starts.slice(1)}.`;
+}
+
+/**
+ * The slots a take may use, [param taking] of the machine's [param count] in [param directory], named
+ * for what holds it to them.
+ */
+function slotsSaid(taking: number, count: number, directory: string, limit: SlotLimit | undefined): string {
+  const where = `on this machine (${directory})`;
+  if (limit === 'kept') {
+    return `${taking === 1 ? 'the one engine slot' : `the ${String(taking)} engine slots`} of the ${String(count)} ${where} kept for engines outside a gate while a gate is queued`;
+  }
+  if (limit === 'gate') {
+    return `${taking === 1 ? 'the one engine slot' : `the ${String(taking)} engine slots`} of the ${String(count)} ${where} a gate's engines draw on`;
+  }
+  return count === 1 ? `the one engine slot ${where}` : `all ${String(count)} engine slots ${where}`;
 }
 
 /**
@@ -607,17 +724,16 @@ export function slotWaitedSaid(
   count: number,
   directory: string,
   holders: readonly SlotHolder[],
+  drawn: SlotsDrawn = { numbers: [] },
 ): string {
   const waited = `This call waited ${String(Math.round(waitedMs / 1000))} s for an engine slot in all.`;
-  const slots =
-    count === 1
-      ? `the one engine slot on this machine (${directory}) was in use`
-      : `all ${String(count)} engine slots on this machine (${directory}) were in use`;
-  const named = holdersNamed(count, holders);
+  const taking = drawn.limit === undefined ? count : drawn.numbers.length;
+  const slots = `${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'was' : 'were'} in use`;
+  const named = holdersNamed(taking, holders);
   if (named.length === 0) {
     return `${waited} When it first waited, ${slots}, by a gate or another tool.`;
   }
-  return count === 1
+  return taking === 1
     ? `${waited} When it first waited, ${slots}, by ${named.join(', ')}.`
     : `${waited} When it first waited, ${slots}: ${listed(named)}.`;
 }
@@ -655,21 +771,27 @@ export async function slotForCall(): Promise<CallSlot> {
   const waits = callSlotWaits();
   const began = Date.now();
   let blockedBy: readonly SlotHolder[] | undefined;
+  let blockedOn: SlotsDrawn | undefined;
   const lock = await slots.take(
     callSignal(),
     progress === undefined
       ? undefined
       : (waitedMs) => {
-          progress(waitedMs / 1000, slotWaitSaid(waitedMs, slots.count, slots.directory, slots.holders()));
+          progress(
+            waitedMs / 1000,
+            slotWaitSaid(waitedMs, slots.count, slots.directory, slots.holders(), slots.drawn),
+          );
         },
     () => {
       blockedBy = slots.holders();
+      blockedOn = slots.drawn;
     },
   );
   if (waits !== undefined && blockedBy !== undefined) {
     waits.ms += Date.now() - began;
     const heldBy = blockedBy;
-    waits.said ??= (waitedMs) => slotWaitedSaid(waitedMs, slots.count, slots.directory, heldBy);
+    const heldOn = blockedOn;
+    waits.said ??= (waitedMs) => slotWaitedSaid(waitedMs, slots.count, slots.directory, heldBy, heldOn);
   }
   return {
     lock,
