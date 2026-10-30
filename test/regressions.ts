@@ -61988,7 +61988,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     assert.equal(asArray(get(orc, 'result', 'content')).length, 1, JSON.stringify(orc));
     assert.equal(
       textOf(await call('scene_create', { op: 'create', scenePath: 'typo.tscn', rootNodeType: 'Node2DD' })),
-      'rootNodeType must be a node class, and Node2DD is not one; the nearest are Node2D, Node, Node3D.',
+      "rootNodeType must be a node class or a class_name in the project's class list, and Node2DD is neither; the nearest are Node2D, Node, Node3D.",
     );
     // A folder the path names is made, and said to be.
     const mapped = await written('scene_create', {
