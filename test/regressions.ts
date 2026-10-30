@@ -48071,16 +48071,14 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
           '\tassert_int(DisplayServer.window_get_mode()).is_not_equal(DisplayServer.WINDOW_MODE_MINIMIZED)',
           '\tvar counted: Callable = func() -> void: drawn += 1',
           '\tRenderingServer.frame_post_draw.connect(counted)',
-          // Godot draws no frame while the desktop says no window of it can be seen: on macOS a
-          // window every other one covers. This case needs a window the desktop shows, and says so.
-          '\tvar shown_by_desktop: bool = false',
+          // Godot skips drawing while the desktop reports none of its windows can be seen, as macOS
+          // does for a window every other one covers, so a failure names the window's state.
           '\tvar until: int = Time.get_ticks_msec() + 500',
           '\twhile Time.get_ticks_msec() < until:',
-          '\t\tshown_by_desktop = shown_by_desktop or DisplayServer.can_any_window_draw()',
           '\t\tawait get_tree().process_frame',
           '\tRenderingServer.frame_post_draw.disconnect(counted)',
-          '\tassert_bool(shown_by_desktop).override_failure_message("the desktop showed no window of this engine for 0.5 s, so Godot drew nothing; the case needs a window the desktop shows").is_true()',
-          '\tassert_int(drawn).is_greater(0)',
+          '\tvar state: String = "window mode %d, focused %s" % [DisplayServer.window_get_mode(), DisplayServer.window_is_focused()]',
+          '\tassert_int(drawn).override_failure_message("no frame was drawn in 0.5 s, %s" % state).is_greater(0)',
           '',
         ].join('\n');
       writeTree(project, {
