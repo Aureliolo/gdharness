@@ -228,7 +228,7 @@ import {
   startTimesOf,
   whyTheProcessTreeFailed,
 } from '../src/process-children.js';
-import { secondsFromClock } from '../src/process-time.js';
+import { cpuSecondsOf, secondsFromClock } from '../src/process-time.js';
 import {
   ignoredTexts,
   projectStructure,
@@ -401,7 +401,7 @@ import {
   spawnSyncHidden,
 } from '../src/spawn.js';
 import { type ArmPlayed, armsPlayed, shareFaults, shareOf } from '../src/spread-run.js';
-import { RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
+import { followSuccessor, RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
 import { SuiteFingerprints } from '../src/suite-fingerprint.js';
 import {
   exitNamed,
@@ -38739,6 +38739,100 @@ async function testACommandLineOutsideAsciiIsListedWhole(): Promise<void> {
 }
 
 /**
+ * The process table read from the kernel says what WMI says about the same processes.
+ *
+ * Every check that judges a parent link, a start or a command line on Windows was written against
+ * WMI's answers, and now reads the kernel's table: a start a millisecond off is a recorded run
+ * refused as another process, and a parent read from the wrong field is a stop that ends nothing. So
+ * this process and a child it starts are read both ways and compared field by field, the processor
+ * time against Node's own, and the child's exit code through the handle the table holds, the way a
+ * game's successor is followed.
+ */
+async function testTheProcessTableAgreesWithWmi(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('process table regression skipped (only Windows reads it)');
+    return;
+  }
+  const probe = spawnHidden(
+    process.execPath,
+    // Ended when told rather than on a timer: the first listing compiles the table, and a probe given
+    // four seconds had gone by the time its start was asked for.
+    ['-e', "process.stdin.once('data', () => process.exit(7))", '--', 'table-probe'],
+    { stdio: ['pipe', 'ignore', 'ignore'] },
+  );
+  try {
+    assert.ok(typeof probe.pid === 'number', 'the fixture needs a live process to list');
+    const pids = [process.pid, probe.pid];
+    const wmi = await askWindows(
+      `Get-CimInstance Win32_Process -Filter "ProcessId=${process.pid} OR ProcessId=${probe.pid}" | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId) $(([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds()) $($_.CommandLine)" }`,
+      60_000,
+    );
+    const tree = await processTree();
+    assert.ok(tree !== undefined, `the table is read: ${whyTheProcessTreeFailed() ?? 'no reason recorded'}`);
+    const starts = await startTimesOf(pids);
+    const compared: number[] = [];
+    for (const line of wmi.split(/\r?\n/)) {
+      const fields = /^(\d+) (\d+) (\d+) (.*)$/.exec(line.trim());
+      if (fields?.[1] === undefined || fields[2] === undefined || fields[3] === undefined) {
+        continue;
+      }
+      const pid = Number(fields[1]);
+      const said = {
+        parent: Number(fields[2]),
+        command: (fields[4] ?? '').trim(),
+        startedAt: Number(fields[3]),
+      };
+      assert.deepEqual(tree.get(pid), said, `pid ${pid} is listed as WMI lists it`);
+      assert.equal(starts.get(pid), said.startedAt, `and its start is read alone as WMI reads it`);
+      const one = await runningAs(pid);
+      assert.deepEqual(
+        one,
+        { kind: 'commandLine', text: said.command, startedAt: said.startedAt },
+        'and read on its own',
+      );
+      compared.push(pid);
+    }
+    const order = (a: number, b: number): number => a - b;
+    assert.deepEqual(compared.sort(order), [...pids].sort(order), `both processes were compared: ${wmi}`);
+    assert.equal(tree.get(probe.pid)?.parent, process.pid, 'the child names this process as its parent');
+
+    const before = process.cpuUsage();
+    const seconds = await cpuSecondsOf(process.pid);
+    const after = process.cpuUsage();
+    const of = (usage: NodeJS.CpuUsage): number => (usage.user + usage.system) / 1e6;
+    assert.ok(
+      seconds !== undefined && seconds >= of(before) - 0.05 && seconds <= of(after) + 0.05,
+      `the processor time is the one Node reads: ${String(seconds)} between ${of(before)} and ${of(after)}`,
+    );
+    assert.equal(
+      await cpuSecondsOf(probe.pid + 999_999),
+      undefined,
+      'and none is given for a process not running',
+    );
+
+    const followed = await followSuccessor(
+      process.pid,
+      process.execPath,
+      0,
+      starts.get(probe.pid) ?? 0,
+      undefined,
+    );
+    assert.equal(
+      followed?.successor.pid,
+      probe.pid,
+      `the child is held and followed: ${JSON.stringify(followed)}`,
+    );
+    // Told to end once the holder has had time to start waiting: a probe told at once ended before
+    // the holder read which child to wait on, and a holder that never waited read its code anyway.
+    await delay(2000);
+    probe.stdin.write('end\n');
+    assert.deepEqual(await followed.ended, { code: 7 }, 'and its exit code is read through the held handle');
+  } finally {
+    probe.kill();
+  }
+}
+
+/**
  * A process's children are listed while it lives, and on POSIX not after: the reason a stop asked
  * to end them lists them before ending the run.
  *
@@ -39941,7 +40035,7 @@ async function testAPidIsNotAnIdentity(): Promise<void> {
  * case rather than a machine to be on.
  */
 async function testACommandLineNotGivenInTimeIsAskedAgain(): Promise<void> {
-  const answer = '2026-09-29T13:50:00.0000000Z\nGodot.exe --path C:/game res://main.tscn';
+  const answer = '1790690400000\nGodot.exe --path C:/game res://main.tscn';
   const budgets: number[] = [];
   const slowThenAnswering = (_script: string, withinMs: number): Promise<string> => {
     budgets.push(withinMs);
@@ -68618,6 +68712,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARuntimeCallReachesThisServersOwnGame,
   testACommandLineIsReadTheWayTheEngineReadsIt,
   testACommandLineOutsideAsciiIsListedWhole,
+  testTheProcessTableAgreesWithWmi,
   testChildrenAreListedWhileTheParentLives,
   testAStopCanEndWhatTheGameStarted,
   testAStopTakesTheEndedGamesAnnouncementDown,
