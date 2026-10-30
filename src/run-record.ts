@@ -28,10 +28,10 @@ import { basename, join, resolve } from 'node:path';
 import { errorMessage } from './errors.js';
 import { isSameDirectory, realAsFarAsItExists } from './paths.js';
 import { type CommandLineRead, linuxStartTimes, readCommandLine } from './process-children.js';
+import { askProcessTable } from './process-table.js';
 import { runtimeDirectories, runtimeDirectory, STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
 import { runHidden } from './spawn.js';
 import { writeWhole } from './whole-file.js';
-import { askWindows } from './windows-ask.js';
 
 /** What a run leaves behind so another server can find it. */
 export interface RunRecord {
@@ -593,8 +593,8 @@ export function listeningPidInNetstat(printed: string, port: number): number | n
 /**
  * The start and whole command line of a Windows process, or why Windows did not give them.
  *
- * Windows keeps a command line out of reach of anything but a query, on a path that runs once when
- * a run is picked up and once before one is ended.
+ * The start in milliseconds is the first line and the command line the rest, read together from the
+ * process table on a path that runs once when a run is picked up and once before one is ended.
  *
  * Asked again, with longer, when PowerShell does not answer. The helper that answers is started by
  * the first question and ended by a timeout, so on a loaded machine one question can spend its whole
@@ -604,13 +604,12 @@ export function listeningPidInNetstat(printed: string, port: number): number | n
  */
 export async function readWindowsCommandLine(
   pid: number,
-  ask: (script: string, withinMs: number) => Promise<string> = askWindows,
+  ask: (call: string, withinMs: number) => Promise<string> = askProcessTable,
 ): Promise<{ answer: string } | { unread: string }> {
-  const query = `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; if ($p) { $p.CreationDate.ToUniversalTime().ToString("o"); $p.CommandLine }`;
   let unread = '';
   for (const withinMs of [15_000, 45_000]) {
     try {
-      const answer = (await ask(query, withinMs)).trim();
+      const answer = (await ask(`One(${pid})`, withinMs)).trim();
       return answer === '' ? { unread: 'Windows gave no command line for it' } : { answer };
     } catch (error) {
       unread = errorMessage(error);
@@ -632,8 +631,9 @@ async function startedAt(pid: number, windowsAnswer: string | null): Promise<num
   if (process.platform === 'win32') {
     // The first line of the answer above, asked in the same question, on a path that runs before
     // every signal.
-    const when = Date.parse(windowsAnswer?.split('\n')[0]?.trim() ?? '');
-    return Number.isNaN(when) ? null : when;
+    const first = windowsAnswer?.split('\n')[0]?.trim() ?? '';
+    const when = first === '' ? Number.NaN : Number(first);
+    return Number.isInteger(when) && when > 0 ? when : null;
   }
   if (process.platform === 'linux') {
     return (await linuxStartTimes([pid])).get(pid) ?? null;
