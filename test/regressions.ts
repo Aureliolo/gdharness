@@ -33640,13 +33640,20 @@ async function testAGameOnTheHiddenDesktopIsNotHeldToARefresh(): Promise<void> {
       true,
       `${JSON.stringify(extra)} starts a game: ${textOf(started) ?? JSON.stringify(started)}`,
     );
-    const printed =
-      textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '';
+    // Read until the scene has said it. The runtime is an autoload and announces before the main
+    // scene's _ready prints, so on a slow runner a single read straight after found only the banner.
+    const deadline = Date.now() + 30_000;
+    let printed = '';
+    let paced: string | undefined;
+    while (paced === undefined && Date.now() < deadline) {
+      printed = textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '';
+      paced = /paced (vsync=\d+ max_fps=\d+)/.exec(printed)?.[1];
+      if (paced === undefined) {
+        await delay(250);
+      }
+    }
     await stopItsRun(server);
-    return {
-      arguments: get(answer, 'arguments'),
-      paced: /paced (vsync=\d+ max_fps=\d+)/.exec(printed)?.[1] ?? `nothing said: ${printed}`,
-    };
+    return { arguments: get(answer, 'arguments'), paced: paced ?? `nothing said: ${printed}` };
   };
   let stopped = true;
   try {
@@ -59048,6 +59055,87 @@ const NO_LANGUAGE_SERVER: Pick<RenameServices, 'references' | 'definitions'> = {
 };
 
 /**
+ * A long line is quoted around the name, under changed and under leftAlone. Reported from a member
+ * rename in a game whose cockpit keeps one JSON record a line: three cards naming the word in their
+ * notes came back whole under leftAlone, the longest eight thousand characters.
+ */
+async function testALongLineIsQuotedAroundTheName(): Promise<void> {
+  const project = renameProject();
+  try {
+    mkdirSync(join(project, 'cards'));
+    writeFileSync(join(project, 'cards', '.gdignore'), '');
+    writeFileSync(
+      join(project, 'cards', 'board.json'),
+      `{"note": "${'x'.repeat(990)} Told ${'y'.repeat(1000)}"}\n`,
+    );
+    const padding = 'p'.repeat(400);
+    writeFileSync(
+      join(project, 'long.gd'),
+      `extends Node\n\nvar held: Told = null; var pad := "${padding}"\n`,
+    );
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'told.gd'),
+        symbol: 'Told',
+        newName: 'Wording',
+        newScriptPath: null,
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(outcome.ok, `the rename was refused: ${JSON.stringify(outcome)}`);
+    const card = asArray(get(outcome.report, 'leftAlone')).find(
+      (one) => get(one, 'file') === 'res://cards/board.json',
+    );
+    // The word is at 1001 of the trimmed line, so the quote starts 80 before it.
+    assert.equal(
+      get(card, 'text'),
+      `...${'x'.repeat(79)} Told ${'y'.repeat(155)}...`,
+      JSON.stringify(get(outcome.report, 'leftAlone')),
+    );
+    const changed = asArray(get(outcome.report, 'changed')).find(
+      (one) => get(one, 'file') === 'res://long.gd',
+    );
+    assert.deepEqual(
+      asArray(get(changed, 'lines')).map((one) => get(one, 'text')),
+      [`${`var held: Wording = null; var pad := "${padding}`.slice(0, 240)}...`],
+      JSON.stringify(changed),
+    );
+    // A short line is quoted whole, as it always was.
+    assert.ok(
+      asArray(get(outcome.report, 'changed')).some((one) =>
+        asArray(get(one, 'lines')).some((line) => get(line, 'text') === 'class_name Wording'),
+      ),
+      JSON.stringify(get(outcome.report, 'changed')),
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+  // A move quotes what it left alone around the path it moved.
+  const moving = moveProject();
+  try {
+    mkdirSync(join(moving, 'cards'));
+    writeFileSync(join(moving, 'cards', '.gdignore'), '');
+    writeFileSync(
+      join(moving, 'cards', 'board.json'),
+      `{"note": "${'x'.repeat(990)} res://scenes/hero.tscn ${'y'.repeat(1000)}"}\n`,
+    );
+    const outcome = planFileMove(moving, join(moving, 'scenes/hero.tscn'), join(moving, 'actors/hero.tscn'));
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    const card = asArray(get(outcome.report, 'leftAlone')).find(
+      (one) => get(one, 'file') === 'res://cards/board.json',
+    );
+    assert.equal(
+      get(card, 'text'),
+      `...${'x'.repeat(79)} res://scenes/hero.tscn ${'y'.repeat(137)}...`,
+      JSON.stringify(get(outcome.report, 'leftAlone')),
+    );
+  } finally {
+    rmSync(moving, { recursive: true, force: true });
+  }
+}
+
+/**
  * A class rename changes every use the engine makes of the name and nothing else, and names each
  * place it left alone. Every way the word occurs without being a use is in the fixture: prose in a
  * doc comment and a comment, a string, a node path, a member after a dot, a script declaring a
@@ -67714,6 +67802,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARescanAsTheEditorOpensFindsNothingMissing,
   testAScriptIsReadTheWayItsTokenizerReadsIt,
   testARenamedClassChangesItsUsesAndLeavesItsWords,
+  testALongLineIsQuotedAroundTheName,
   testARenameRefusesANameAlreadyTaken,
   testAMemberRenameFollowsWhatTheLanguageServerResolves,
   testAUseUnderACommentEndingInAFullStopIsRenamed,
