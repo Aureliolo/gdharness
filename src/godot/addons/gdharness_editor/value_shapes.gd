@@ -234,6 +234,15 @@ static func packed_from(items: Array, type: int, fit: Callable) -> Variant:
 	return type_convert(built, type)
 
 
+## What [param value] is, as a refusal names it. A number arrives from JSON as a float whether or
+## not it has a fraction, so [1, 2] given for a list of words was called a list of floats, and 5
+## given for a Vector2 was called a float.
+static func kind(value: Variant) -> String:
+	if value is int or value is float:
+		return "a number"
+	return type_string(typeof(value))
+
+
 ## The sentences a refusal of [param value] where a [param type] goes ends with: which of its keys
 ## kept it from being read as one, and how one is written. Empty for a type not built from fields.
 ##

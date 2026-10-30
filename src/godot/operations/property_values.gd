@@ -118,7 +118,7 @@ func cannot_hold(
 	if not GdhSerialisation.acceptable(value, expected_type):
 		var shape: String = "%s.%s is %s and the value given is %s, which cannot become one."
 		var remedy: String = GdhShapes.remedy(value, expected_type)
-		return shape % [holder, property, held, _kind(value)] + remedy + cost
+		return shape % [holder, property, held, GdhShapes.kind(value)] + remedy + cost
 
 	# And the same question of each element, because a list is accepted for a packed or typed array
 	# whatever is in it: a polygon written as [{"x": 1}] passes the check above and lands as one
@@ -132,7 +132,12 @@ func cannot_hold(
 			if not GdhSerialisation.acceptable(items[index], element):
 				var shape: String = "%s.%s is %s and item %d of the list given is %s, not %s."
 				var named: Array = [
-					holder, property, held, index, _kind(items[index]), type_string(element),
+					holder,
+					property,
+					held,
+					index,
+					GdhShapes.kind(items[index]),
+					type_string(element),
 				]
 				return shape % named + GdhShapes.remedy(items[index], element) + cost
 			# A list of polygons is a list of lists of points, and each point is read as one too.
@@ -151,7 +156,7 @@ func cannot_hold(
 						type_string(inner),
 						at,
 						index,
-						_kind(points[at]),
+						GdhShapes.kind(points[at]),
 						type_string(inner),
 					]
 					return nested % said + GdhShapes.remedy(points[at], inner) + cost
@@ -171,14 +176,6 @@ func cannot_hold(
 				]
 				return shape % named + GdhShapes.remedy(entry, value_type) + cost
 	return ""
-
-
-## What [param value] is, as a refusal names it. A number arrives from JSON as a float whether or
-## not it has a fraction, so [1, 2] given for a list of words was called a list of floats.
-static func _kind(value: Variant) -> String:
-	if value is int or value is float:
-		return "a number"
-	return type_string(typeof(value))
 
 
 ## Writes each of [param properties] onto [param target], stopping at the first it cannot write and

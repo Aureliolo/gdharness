@@ -36598,6 +36598,8 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           'var ledger: Dictionary = {"zeta": 1, "alpha": 2, "mid": 3}\n' +
           'var names: PackedStringArray = PackedStringArray(["Ada", "Bram"])\n' +
           'var sign: String = "in\\u00a02"\n' +
+          'var art: Texture2D = null\nvar kept: Texture2D = preload("res://shine.tres")\n' +
+          'var aim: Vector2 = Vector2.ZERO\n' +
           'var locked: int = 5:\n\tset(value):\n\t\tpass\n\n\n' +
           'func _ready() -> void:\n' +
           '\tfor index: int in 4:\n\t\tvar piece: Gear = Gear.new()\n' +
@@ -36613,6 +36615,9 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           '\treturn sum\n\n\n' +
           'func armour(pieces: Array[Gear]) -> String:\n\tvar labels: Array[String] = []\n' +
           '\tfor piece: Gear in pieces:\n\t\tlabels.append(piece.label)\n\treturn ", ".join(labels)\n\n\n' +
+          'func art_is_kept() -> bool:\n\treturn is_same(art, kept)\n\n\n' +
+          'func width_of(texture: Texture2D) -> int:\n\treturn texture.get_width()\n\n\n' +
+          'func aim_at(at: Vector2) -> float:\n\treturn at.x\n\n\n' +
           'func slow(ms: int) -> String:\n\tOS.delay_msec(ms)\n\tcount += 1\n\treturn "done after %d" % ms\n\n\n' +
           'func later(ms: int) -> String:\n\tvar began: int = Time.get_ticks_usec()\n' +
           '\tawait get_tree().create_timer(ms / 1000.0).timeout\n' +
@@ -36622,6 +36627,10 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         join(project, 'main.tscn'),
         '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
           '[node name="Main" type="Node"]\nscript = ExtResource("1")\n\n[node name="Rack" type="Node" parent="."]\n',
+      );
+      writeFileSync(
+        join(project, 'shine.tres'),
+        '[gd_resource type="GradientTexture1D" format=3]\n\n[resource]\nwidth = 16\n',
       );
       // A game run straight off the files knows a script class only once the project has been
       // imported, which is what writes the list of global classes an editor would have. Run without
@@ -36648,6 +36657,11 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         imported.status,
         0,
         `the project imports, which took ${Date.now() - importing}ms: ${imported.output}`,
+      );
+      // An image written after the import, which the game has no resource for.
+      writeFileSync(
+        join(project, 'late.svg'),
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4"/></svg>\n',
       );
       const started = await start(20_000);
       assert.equal(get(started.answer, 'runtime', 'listening'), true, JSON.stringify(started.answer));
@@ -36855,6 +36869,89 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       }
       assert.equal(await wearing(1), true, 'the refused writes left the property as it was');
       assert.equal((await invoke('same', [0, 3])).result, true, 'and the list slot');
+
+      // A resource is named by its file and loaded as the game loads one, so the slot holds the
+      // texture the script preloaded rather than a copy of it.
+      const filed = await set('art', 'res://shine.tres');
+      assert.ok(filed.written, `a texture slot takes a res:// path: ${filed.said}`);
+      assert.equal((await invoke('art_is_kept', [])).result, true, 'and holds the instance the game loaded');
+      await set('art', 'null');
+      const byRecord = await set('art', {
+        _type: 'Resource',
+        path: 'res://shine.tres',
+        class: 'GradientTexture1D',
+      });
+      assert.ok(
+        byRecord.written,
+        `the record a read answers a filed resource with names it: ${byRecord.said}`,
+      );
+      assert.equal((await invoke('art_is_kept', [])).result, true, 'the same instance through the record');
+      assert.equal(
+        (await invoke('width_of', ['res://shine.tres'])).result,
+        16,
+        'an argument takes one by its path',
+      );
+      assert.equal(
+        (await invoke('named', [{ _type: 'Node', path: '/root/Main/Rack', class: 'Node' }])).result,
+        'Rack',
+        'and a node by the record a read answers it with',
+      );
+      const unfiled: [unknown, RegExp][] = [
+        [
+          'res://gear.gd',
+          /^\/root\/Main\.art holds an object: res:\/\/gear\.gd is GDScript, not a Texture2D$/,
+        ],
+        ['res://nowhere.tres', /^\/root\/Main\.art holds an object: No resource at res:\/\/nowhere\.tres$/],
+        [
+          'res://late.svg',
+          /^\/root\/Main\.art holds an object: res:\/\/late\.svg is there, but it has never been imported, so the game has no resource to load from it\. project_import reimport with resourcePath res:\/\/late\.svg imports it$/,
+        ],
+        [
+          { _type: 'GradientTexture1D', width: 8 },
+          /^\/root\/Main\.art holds an object: a resource is named by the res:\/\/ path of its file, and the GradientTexture1D given has none: a resource built into a scene has no path, and the game builds none from its properties$/,
+        ],
+      ];
+      for (const [value, expected] of unfiled) {
+        const refused = await set('art', value);
+        assert.equal(refused.written, false, `${JSON.stringify(value)} is refused: ${refused.said}`);
+        assert.match(refused.said, expected, `and says why: ${refused.said}`);
+      }
+      assert.equal(
+        (await invoke('art_is_kept', [])).result,
+        true,
+        'the refused resources left the texture as it was',
+      );
+
+      // A JSON number arrives as a float whether or not it has a fraction, so a refusal calling it
+      // one names a type the caller never sent.
+      const numberFor = await invoke('aim_at', [5]);
+      assert.match(
+        numberFor.said,
+        /^\/root\/Main\.aim_at takes Vector2 as argument 1 and was given a number, which cannot be converted\./,
+        numberFor.said,
+      );
+      const numberInto = await set('aim', 5);
+      assert.match(
+        numberInto.said,
+        /^\/root\/Main\.aim holds Vector2 and the value given is a number, which cannot become one\./,
+        numberInto.said,
+      );
+      const numberWait =
+        textOf(
+          await server.request(
+            'tools/call',
+            {
+              name: 'runtime_wait',
+              arguments: { op: 'until', nodePath: '/root/Main', property: 'aim', value: 5, timeoutMs: 500 },
+            },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        ) ?? '';
+      assert.match(
+        numberWait,
+        /\/root\/Main\.aim holds Vector2 and the value to wait for is a number, which cannot become one/,
+        numberWait,
+      );
 
       // A typed container written with the plain one JSON carries. The engine keeps what it held and
       // says nothing, so this answered as a set whose old and new values were both [].
