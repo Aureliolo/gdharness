@@ -360,6 +360,7 @@ import {
   withNestedErrors,
 } from './suite-judge.js';
 import {
+  capsFrames,
   NOT_SEARCHED_SETTING,
   ProjectScripts,
   TEST_DIRECTORIES,
@@ -10776,6 +10777,7 @@ class GodotServer {
       );
     }
 
+    const onTheHiddenDesktop = !headless && args['visible'] !== true;
     const cmdArgs = runArguments({
       projectPath: exported === null ? project.value.path : null,
       headless,
@@ -10783,6 +10785,9 @@ class GodotServer {
       userArgs: given,
       engineArgs: flags.value,
       silent,
+      ...(onTheHiddenDesktop && process.platform === 'win32'
+        ? { hiddenWindow: { projectCapsFrames: exported === null && capsFrames(project.value.path) } }
+        : {}),
     });
     this.logDebug(`Running Godot project: ${engine.value} ${cmdArgs.join(' ')}`);
     const started = await this.launchKeptGame(
@@ -10794,7 +10799,7 @@ class GodotServer {
         : undefined,
       // A window on a desktop of its own, where it renders and neither shows nor takes the keyboard,
       // unless the caller asked to see it. A headless run has no window to put anywhere.
-      headless || args['visible'] === true ? undefined : HIDDEN_DESKTOP,
+      onTheHiddenDesktop ? HIDDEN_DESKTOP : undefined,
       profiled,
       exported === null,
     );

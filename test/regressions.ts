@@ -170,6 +170,8 @@ import {
   engineFlagsAmongGameArgs,
   environmentFor,
   envValue,
+  HIDDEN_WINDOW_FPS,
+  hiddenWindowFlags,
   OPENED_BY_A_SERVER,
   resolveHeadless,
   resolveSilent,
@@ -14178,6 +14180,20 @@ async function testAnEditorWritesItsConsoleWhereTheServerLooks(): Promise<void> 
     // way this could answer with output that is not the connected editor's.
     const asAnother = editorConsole(project, pid + 1, true);
     assert.ok('kind' in asAnother && asAnother.kind === 'another editor', JSON.stringify(asAnother));
+
+    // The editor kept its project's data in the suite's own Godot home, which is what keeps every
+    // editor a suite opens off the editor settings the machine's own editors share.
+    if (process.platform === 'win32') {
+      const home = process.env['APPDATA'] ?? '';
+      assert.ok(
+        resolve(home).startsWith(resolve(tmpdir())),
+        `the suite's Godot home is a temporary one: ${home}`,
+      );
+      assert.ok(
+        existsSync(join(home, 'Godot', 'app_userdata', 'ConsoleProbe')),
+        `the editor wrote its project's folder there: ${home}`,
+      );
+    }
   } finally {
     sweep(project);
   }
@@ -20495,6 +20511,51 @@ async function testUpdateCheckHasAnOffSwitch(): Promise<void> {
   } finally {
     sweep(home);
   }
+}
+
+/**
+ * A window on the hidden desktop starts with vsync off and a cap standing in for a refresh, the
+ * cap left out when the caller or the project sets one, and a headless run is given neither.
+ */
+function testAHiddenWindowStartsWithVsyncOff(): void {
+  const cap = String(HIDDEN_WINDOW_FPS);
+  assert.deepEqual(hiddenWindowFlags([], false), ['--disable-vsync', '--max-fps', cap]);
+  assert.deepEqual(hiddenWindowFlags(['--max-fps', '30'], false), ['--disable-vsync']);
+  assert.deepEqual(hiddenWindowFlags([], true), ['--disable-vsync']);
+  assert.deepEqual(
+    runArguments({
+      projectPath: '/p',
+      headless: false,
+      scene: 'a.tscn',
+      engineArgs: ['--verbose'],
+      hiddenWindow: { projectCapsFrames: false },
+    }),
+    ['--path', '/p', '--disable-vsync', '--max-fps', cap, '--verbose', 'res://a.tscn'],
+  );
+  assert.deepEqual(
+    runArguments({
+      projectPath: '/p',
+      headless: false,
+      scene: null,
+      engineArgs: ['--max-fps', '30'],
+      hiddenWindow: { projectCapsFrames: false },
+    }),
+    ['--path', '/p', '--disable-vsync', '--max-fps', '30'],
+  );
+  assert.deepEqual(
+    runArguments({
+      projectPath: '/p',
+      headless: true,
+      scene: null,
+      hiddenWindow: { projectCapsFrames: false },
+    }),
+    ['--headless', '--path', '/p'],
+  );
+  // A game a hidden editor plays is given its flags by the editor addon, which caps it the same.
+  assert.match(
+    readFileSync(join('src', 'godot', 'addons', 'gdharness_editor', 'tools', 'play_tools.gd'), 'utf8'),
+    new RegExp(`^const HIDDEN_WINDOW_FPS: int = ${cap}$`, 'm'),
+  );
 }
 
 /**
@@ -28922,18 +28983,29 @@ async function testAnExportedBuildIsStartedAndStopped(): Promise<void> {
         args: [script, saves, `${said}.silent`],
       }),
     );
+    // On Windows a window goes on the hidden desktop, which has no refresh for vsync to wait on.
     assert.deepEqual(
       get(silentStart, 'arguments'),
-      ['--audio-driver', 'Dummy', '--', script, saves, `${said}.silent`],
+      [
+        '--audio-driver',
+        'Dummy',
+        ...(process.platform === 'win32' ? ['--disable-vsync', '--max-fps', String(HIDDEN_WINDOW_FPS)] : []),
+        '--',
+        script,
+        saves,
+        `${said}.silent`,
+      ],
       `an exported build is silent by default: ${JSON.stringify(silentStart)}`,
     );
     await call({ op: 'stop' });
 
+    // Visible as well, so nothing goes before the build's own arguments on Windows either.
     const answered = await call({
       op: 'start',
       executable: build,
       headless: false,
       silent: false,
+      visible: true,
       savesIn: saves,
       args: [script, saves, said],
     });
@@ -33502,6 +33574,124 @@ async function testAScreenshotHoldsTheGamesOwnWindows(): Promise<void> {
 }
 
 /**
+ * A windowed game on the hidden desktop reads its vsync as off and its frames as capped. That
+ * desktop has no display, and a Vulkan game waiting on a refresh there drew two frames a second,
+ * which only the command line can prevent, since the boot splash presents before any script runs.
+ * Read inside the game, since its own reading is the effect the flags are for. Off Windows the
+ * window has a display and is given neither.
+ */
+async function testAGameOnTheHiddenDesktopIsNotHeldToARefresh(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('hidden desktop pacing regression skipped (Godot not found)');
+    return;
+  }
+  const refused = process.platform === 'win32' ? null : windowedRunRefused();
+  if (refused !== null) {
+    console.log(`hidden desktop pacing regression skipped (${refused})`);
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-paced-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-paced-rt-'));
+  // The game's user data, which would otherwise go in the user's own application data.
+  const saves = mkdtempSync(join(tmpdir(), 'gdharness-paced-saves-'));
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  const settings = (application: string): string =>
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Paced"\n' +
+    `run/main_scene="res://main.tscn"\n${application}\n` +
+    '[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n';
+  writeFileSync(join(project, 'project.godot'), settings(''));
+  writeFileSync(
+    join(project, 'main.gd'),
+    'extends Node\n\n\nfunc _ready() -> void:\n' +
+      '\tprint("paced vsync=%d max_fps=%d" % [DisplayServer.window_get_vsync_mode(), Engine.max_fps])\n',
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  // What the start put on the command line, and what the game read of its pacing.
+  const runWith = async (extra: Record<string, unknown>): Promise<{ arguments: unknown; paced: string }> => {
+    const started = await server.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: {
+          projectPath: project,
+          op: 'start',
+          headless: false,
+          savesIn: saves,
+          runtimeWaitMs: WINDOWED_BOOT_MS,
+          ...extra,
+        },
+      },
+      WINDOWED_BOOT_MS + ENGINE_CALL_TIMEOUT_MS,
+    );
+    const answer = parseTextContent(started);
+    assert.equal(
+      get(answer, 'runtime', 'listening'),
+      true,
+      `${JSON.stringify(extra)} starts a game: ${textOf(started) ?? JSON.stringify(started)}`,
+    );
+    const printed =
+      textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '';
+    await stopItsRun(server);
+    return {
+      arguments: get(answer, 'arguments'),
+      paced: /paced (vsync=\d+ max_fps=\d+)/.exec(printed)?.[1] ?? `nothing said: ${printed}`,
+    };
+  };
+  let stopped = true;
+  try {
+    await server.initialize('regression-test');
+    stopped = false;
+    const hidden = process.platform === 'win32';
+    const own = await runWith({});
+    assert.equal(
+      own.paced,
+      hidden ? `vsync=0 max_fps=${String(HIDDEN_WINDOW_FPS)}` : 'vsync=1 max_fps=0',
+      `the game reads its pacing as the desktop it is on sets it: ${JSON.stringify(own.arguments)}`,
+    );
+    const asked = await runWith({ engineArgs: ['--max-fps', '30'] });
+    assert.equal(asked.paced, hidden ? 'vsync=0 max_fps=30' : 'vsync=1 max_fps=30', "the caller's cap holds");
+    writeFileSync(join(project, 'project.godot'), settings('run/max_fps=24\n'));
+    const capped = await runWith({});
+    assert.equal(
+      capped.paced,
+      hidden ? 'vsync=0 max_fps=24' : 'vsync=1 max_fps=24',
+      "the project's cap holds",
+    );
+    if (hidden && windowedRunRefused() === null) {
+      // On the desktop in use the display has a refresh to wait on, so nothing is turned off.
+      const shown = await runWith({ visible: true });
+      assert.equal(
+        shown.paced,
+        'vsync=1 max_fps=24',
+        `a visible window keeps its vsync: ${JSON.stringify(shown.arguments)}`,
+      );
+    }
+    await server.stop();
+    stopped = true;
+  } finally {
+    if (!stopped) {
+      await server.stop();
+    }
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+    rmSync(saves, { recursive: true, force: true });
+  }
+}
+
+/**
  * The renderer a run draws with is chosen through engineArgs, and the memory it holds on the GPU is
  * read through metrics.
  *
@@ -33531,6 +33721,8 @@ async function testTheRendererIsChosenAndItsMemoryRead(): Promise<void> {
   }
   const project = mkdtempSync(join(tmpdir(), 'gdharness-renderer-'));
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-renderer-rt-'));
+  // The game's user data, which would otherwise go in the user's own application data.
+  const saves = mkdtempSync(join(tmpdir(), 'gdharness-renderer-saves-'));
   cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
     recursive: true,
   });
@@ -33567,6 +33759,7 @@ async function testTheRendererIsChosenAndItsMemoryRead(): Promise<void> {
           projectPath: project,
           op: 'start',
           headless: false,
+          savesIn: saves,
           runtimeWaitMs: WINDOWED_BOOT_MS,
           engineArgs,
         },
@@ -33646,7 +33839,7 @@ async function testTheRendererIsChosenAndItsMemoryRead(): Promise<void> {
       );
     }
     await server.stop();
-    sweep(project, runtimeDir);
+    sweep(project, runtimeDir, saves);
   }
 }
 
@@ -36598,6 +36791,8 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           'var ledger: Dictionary = {"zeta": 1, "alpha": 2, "mid": 3}\n' +
           'var names: PackedStringArray = PackedStringArray(["Ada", "Bram"])\n' +
           'var sign: String = "in\\u00a02"\n' +
+          'var art: Texture2D = null\nvar kept: Texture2D = preload("res://shine.tres")\n' +
+          'var aim: Vector2 = Vector2.ZERO\n' +
           'var locked: int = 5:\n\tset(value):\n\t\tpass\n\n\n' +
           'func _ready() -> void:\n' +
           '\tfor index: int in 4:\n\t\tvar piece: Gear = Gear.new()\n' +
@@ -36613,6 +36808,9 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           '\treturn sum\n\n\n' +
           'func armour(pieces: Array[Gear]) -> String:\n\tvar labels: Array[String] = []\n' +
           '\tfor piece: Gear in pieces:\n\t\tlabels.append(piece.label)\n\treturn ", ".join(labels)\n\n\n' +
+          'func art_is_kept() -> bool:\n\treturn is_same(art, kept)\n\n\n' +
+          'func width_of(texture: Texture2D) -> int:\n\treturn texture.get_width()\n\n\n' +
+          'func aim_at(at: Vector2) -> float:\n\treturn at.x\n\n\n' +
           'func slow(ms: int) -> String:\n\tOS.delay_msec(ms)\n\tcount += 1\n\treturn "done after %d" % ms\n\n\n' +
           'func later(ms: int) -> String:\n\tvar began: int = Time.get_ticks_usec()\n' +
           '\tawait get_tree().create_timer(ms / 1000.0).timeout\n' +
@@ -36622,6 +36820,10 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         join(project, 'main.tscn'),
         '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
           '[node name="Main" type="Node"]\nscript = ExtResource("1")\n\n[node name="Rack" type="Node" parent="."]\n',
+      );
+      writeFileSync(
+        join(project, 'shine.tres'),
+        '[gd_resource type="GradientTexture1D" format=3]\n\n[resource]\nwidth = 16\n',
       );
       // A game run straight off the files knows a script class only once the project has been
       // imported, which is what writes the list of global classes an editor would have. Run without
@@ -36648,6 +36850,11 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         imported.status,
         0,
         `the project imports, which took ${Date.now() - importing}ms: ${imported.output}`,
+      );
+      // An image written after the import, which the game has no resource for.
+      writeFileSync(
+        join(project, 'late.svg'),
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4"/></svg>\n',
       );
       const started = await start(20_000);
       assert.equal(get(started.answer, 'runtime', 'listening'), true, JSON.stringify(started.answer));
@@ -36855,6 +37062,89 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       }
       assert.equal(await wearing(1), true, 'the refused writes left the property as it was');
       assert.equal((await invoke('same', [0, 3])).result, true, 'and the list slot');
+
+      // A resource is named by its file and loaded as the game loads one, so the slot holds the
+      // texture the script preloaded rather than a copy of it.
+      const filed = await set('art', 'res://shine.tres');
+      assert.ok(filed.written, `a texture slot takes a res:// path: ${filed.said}`);
+      assert.equal((await invoke('art_is_kept', [])).result, true, 'and holds the instance the game loaded');
+      await set('art', 'null');
+      const byRecord = await set('art', {
+        _type: 'Resource',
+        path: 'res://shine.tres',
+        class: 'GradientTexture1D',
+      });
+      assert.ok(
+        byRecord.written,
+        `the record a read answers a filed resource with names it: ${byRecord.said}`,
+      );
+      assert.equal((await invoke('art_is_kept', [])).result, true, 'the same instance through the record');
+      assert.equal(
+        (await invoke('width_of', ['res://shine.tres'])).result,
+        16,
+        'an argument takes one by its path',
+      );
+      assert.equal(
+        (await invoke('named', [{ _type: 'Node', path: '/root/Main/Rack', class: 'Node' }])).result,
+        'Rack',
+        'and a node by the record a read answers it with',
+      );
+      const unfiled: [unknown, RegExp][] = [
+        [
+          'res://gear.gd',
+          /^\/root\/Main\.art holds an object: res:\/\/gear\.gd is GDScript, not a Texture2D$/,
+        ],
+        ['res://nowhere.tres', /^\/root\/Main\.art holds an object: No resource at res:\/\/nowhere\.tres$/],
+        [
+          'res://late.svg',
+          /^\/root\/Main\.art holds an object: res:\/\/late\.svg is there, but it has never been imported, so the game has no resource to load from it\. project_import reimport with resourcePath res:\/\/late\.svg imports it$/,
+        ],
+        [
+          { _type: 'GradientTexture1D', width: 8 },
+          /^\/root\/Main\.art holds an object: a resource is named by the res:\/\/ path of its file, and the GradientTexture1D given has none: a resource built into a scene has no path, and the game builds none from its properties$/,
+        ],
+      ];
+      for (const [value, expected] of unfiled) {
+        const refused = await set('art', value);
+        assert.equal(refused.written, false, `${JSON.stringify(value)} is refused: ${refused.said}`);
+        assert.match(refused.said, expected, `and says why: ${refused.said}`);
+      }
+      assert.equal(
+        (await invoke('art_is_kept', [])).result,
+        true,
+        'the refused resources left the texture as it was',
+      );
+
+      // A JSON number arrives as a float whether or not it has a fraction, so a refusal calling it
+      // one names a type the caller never sent.
+      const numberFor = await invoke('aim_at', [5]);
+      assert.match(
+        numberFor.said,
+        /^\/root\/Main\.aim_at takes Vector2 as argument 1 and was given a number, which cannot be converted\./,
+        numberFor.said,
+      );
+      const numberInto = await set('aim', 5);
+      assert.match(
+        numberInto.said,
+        /^\/root\/Main\.aim holds Vector2 and the value given is a number, which cannot become one\./,
+        numberInto.said,
+      );
+      const numberWait =
+        textOf(
+          await server.request(
+            'tools/call',
+            {
+              name: 'runtime_wait',
+              arguments: { op: 'until', nodePath: '/root/Main', property: 'aim', value: 5, timeoutMs: 500 },
+            },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        ) ?? '';
+      assert.match(
+        numberWait,
+        /\/root\/Main\.aim holds Vector2 and the value to wait for is a number, which cannot become one/,
+        numberWait,
+      );
 
       // A typed container written with the plain one JSON carries. The engine keeps what it held and
       // says nothing, so this answered as a set whose old and new values were both [].
@@ -43981,6 +44271,82 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
 }
 
 /**
+ * A crash is read from the report Godot's crash handler printed rather than from the exit code: a
+ * windowed engine on Windows that crashed this way exited 5, and the run was said to have called
+ * quit(5). A crash inside the engine's report on its call queue overflowing is named as the
+ * overflow, from the frames of the build that has them or from the line only that report prints.
+ */
+function testACrashIsReadFromTheCrashHandlersReport(): void {
+  const handed = {
+    suites: [{ path: S_TEST, cases: ['test_a', 'test_b'] }],
+    expected: { errors: {}, warnings: {} },
+  };
+  const report = (build: string, frames: readonly string[]): string[] => [
+    '================================================================',
+    'CrashHandlerException: Program crashed with signal 11',
+    `Engine version: Godot Engine v4.7.2.stable.official (${build})`,
+    'Dumping the backtrace. Please include this when reporting the bug on: https://github.com/godotengine/godot/issues',
+    'Load address: 7ff557fc0000',
+    '[1] 7ff69c094d61 (main+40d4d61) - no debug info in PE/COFF executable',
+    ...frames.map(
+      (frame, at) => `[${String(at + 2)}] 7ff69baeb734 (${frame}) - no debug info in PE/COFF executable`,
+    ),
+    '-- END OF C++ BACKTRACE --',
+    '================================================================',
+  ];
+  // Cut off in its second case, as a crash leaves it: no suite statistics and no summary.
+  const ran = (...after: string[]): string =>
+    [
+      'Godot Engine v4.7.2.stable.official - https://godotengine.org',
+      `\u001b[38;2;0;206;209mRun Test Suite: \u001b[0m\u001b[38;2;250;235;215m${S_TEST}\u001b[0m`,
+      caseLine(S_TEST, 'test_a', 'STARTED'),
+      caseLine(S_TEST, 'test_a', 'PASSED', '5ms'),
+      caseLine(S_TEST, 'test_b', 'STARTED'),
+      ...after,
+    ].join('\r\n');
+  const exited5 = { code: 5, signal: null, ended: null, freeBytes: 2.5 * 1024 ** 3 };
+  const during = `while ${S_TEST} > test_b ran`;
+  const overflow = `the engine's call queue overflowed ${during}: something queued deferred calls without end within one frame, most often a layout that changes the size it is laid out from in a deferred handler, so the frame never ends`;
+
+  const official = 'ed1daf0bf001b61586d9930840f2f1394092c079';
+  const queueFrames = ['main+3b2b734', 'main+3e0f4aa', 'main+3e1082a', 'main+3e0e831'];
+  const inTheReport = judgeEngine(readRun(ran(...report(official, queueFrames))), handed, exited5).faults;
+  assert.ok(
+    inTheReport.includes(
+      `the engine crashed ${during}, its crash handler reporting signal 11, with 2.5 GB of memory free as it ended`,
+    ),
+    inTheReport.join('\n'),
+  );
+  assert.ok(
+    inTheReport.includes(`${overflow}, and the engine crashed reporting the overflow`),
+    inTheReport.join('\n'),
+  );
+  assert.ok(!inTheReport.some((fault) => fault.includes('quit(5)')), inTheReport.join('\n'));
+
+  // The same frames under another build are other code, so only the crash is said.
+  const elsewhere = judgeEngine(readRun(ran(...report('0'.repeat(40), queueFrames))), handed, exited5).faults;
+  assert.ok(
+    elsewhere.some((fault) => fault.startsWith(`the engine crashed ${during}`)),
+    elsewhere.join('\n'),
+  );
+  assert.ok(!elsewhere.some((fault) => fault.includes('call queue')), elsewhere.join('\n'));
+  // And one of the two frames alone is a crash somewhere else in the build.
+  const oneFrame = judgeEngine(readRun(ran(...report(official, ['main+3e0f4aa']))), handed, exited5).faults;
+  assert.ok(!oneFrame.some((fault) => fault.includes('call queue')), oneFrame.join('\n'));
+
+  // A queue of callables the report does not crash on overflows for ever, printing the line only
+  // that report prints, until the engine is ended for it.
+  const silence = 'the engine printed nothing for 60 s';
+  const endless = judgeEngine(readRun(ran('Object was deleted while awaiting a callback.')), handed, {
+    code: null,
+    signal: null,
+    ended: silence,
+  }).faults;
+  assert.ok(endless.includes(silence), endless.join('\n'));
+  assert.ok(endless.includes(overflow), endless.join('\n'));
+}
+
+/**
  * A row gdUnit4 skips because its data does not fit the case fails the run. gdUnit4 prints the row
  * passed and then a report saying it was skipped, and a run with other cases passing beside it was
  * called passed. The lines are gdUnit4's own, captured from a real run of rows a function returned.
@@ -46700,8 +47066,11 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       );
       return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
     };
-    const first = test('--import', 'tests/ok_test.gd', 'tests/declared_test.gd');
+    // Without --import: a project with no class cache is imported whatever the switches say, since
+    // gdUnit4's runner extends classes only the cache names.
+    const first = test('tests/ok_test.gd', 'tests/declared_test.gd');
     assert.equal(first.status, 0, first.said);
+    assert.match(first.said, /^The project has never been imported, so it is imported first\.$/m, first.said);
     // Nothing is timed yet, so each suite has an engine of its own unless the machine's room holds
     // the run back, which the first line then says.
     assert.match(
@@ -47167,6 +47536,10 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
           `func test_${name}() -> void:`,
           '\tassert_str(DisplayServer.get_name()).is_not_equal("headless")',
           '\tassert_str(AudioServer.get_driver_name()).is_equal("Dummy")',
+          // On Windows the engine is on the hidden desktop, which has no refresh for vsync to wait on.
+          '\tif OS.get_name() == "Windows":',
+          '\t\tassert_int(DisplayServer.window_get_vsync_mode()).is_equal(DisplayServer.VSYNC_DISABLED)',
+          `\t\tassert_int(Engine.max_fps).is_equal(${String(HIDDEN_WINDOW_FPS)})`,
           // In seconds rather than frames: on macOS the minimise and the way back are animations.
           '\tawait get_tree().create_timer(1.5).timeout',
           '\tassert_int(DisplayServer.window_get_mode()).is_not_equal(DisplayServer.WINDOW_MODE_MINIMIZED)',
@@ -67278,6 +67651,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheProfilerReadsWhatTheEngineSends,
   testSceneToolsVectorRegression,
   testRunArgumentsLeaveTheLocalDebuggerOff,
+  testAHiddenWindowStartsWithVsyncOff,
   testEngineFlagsAreAListNotAPassage,
   testWhatThisServerStartsIsSilentUnlessAsked,
   testASilentRunIsStartedHereAndSaysWhy,
@@ -67375,6 +67749,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartSaysItsGameIsOnAnotherBuild,
   testAScreenshotHoldsTheGamesOwnWindows,
   testTheRendererIsChosenAndItsMemoryRead,
+  testAGameOnTheHiddenDesktopIsNotHeldToARefresh,
   testWhatTheGameTellsAScreenReaderIsRead,
   testARefusalIsSaidOnce,
   testAStartHeldBeforeItsRuntimeSaysWhere,
@@ -67555,6 +67930,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineRunIsReadCaseByCase,
   testAnEngineMayBeSilentAsLongAsWhatItRuns,
   testAnEngineRunIsJudgedOnEverythingItPrinted,
+  testACrashIsReadFromTheCrashHandlersReport,
   testARowSkippedForItsDataIsNoPass,
   testTheScriptsGodotNeverFreesAreFound,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,

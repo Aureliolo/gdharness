@@ -61,7 +61,28 @@ export interface RunOptions {
   readonly engineArgs?: readonly string[];
   /** Whether the run makes no sound; a headless one makes none whatever this says. */
   readonly silent?: boolean;
+  /** Set for a window on the hidden desktop: whether the project caps its own frames. */
+  readonly hiddenWindow?: { readonly projectCapsFrames: boolean };
 }
+
+/**
+ * The engine flags a window on the hidden desktop starts with, given the [param engineArgs] the
+ * caller passed and whether the project caps its own frames.
+ *
+ * The hidden desktop belongs to a window station with no display, so a present that waits for the
+ * refresh has none to wait for. Measured with NVIDIA's driver on 4.7.2: a Vulkan game with vsync on
+ * presented every 500 ms, two frames a second, and a window that had presented one such frame kept
+ * that pace after vsync was turned off as it ran. The boot splash presents before any script runs,
+ * so only the command line can turn it off in time. The cap stands in for the refresh a display
+ * would hold the game to; a cap does not wait on one.
+ */
+export function hiddenWindowFlags(engineArgs: readonly string[], projectCapsFrames: boolean): string[] {
+  const capped = projectCapsFrames || engineArgs.includes('--max-fps');
+  return ['--disable-vsync', ...(capped ? [] : ['--max-fps', String(HIDDEN_WINDOW_FPS)])];
+}
+
+/** The frames a second a window on the hidden desktop is held to when nothing else caps it. */
+export const HIDDEN_WINDOW_FPS = 60;
 
 /**
  * Whether what this server starts is to make no sound: yes unless [param requested] is `false`.
@@ -211,6 +232,9 @@ export function runArguments(options: RunOptions): string[] {
   }
   if (options.quitAfter !== undefined && options.quitAfter !== null) {
     args.push('--quit-after', String(options.quitAfter));
+  }
+  if (options.hiddenWindow !== undefined && !options.headless) {
+    args.push(...hiddenWindowFlags(options.engineArgs ?? [], options.hiddenWindow.projectCapsFrames));
   }
   if (options.engineArgs !== undefined) {
     args.push(...options.engineArgs);

@@ -14,6 +14,12 @@ const HEADLESS_DISPLAY: String = "headless"
 ## for every editor on the machine, and bound only while a game runs.
 const DEBUGGER_SETTING: String = "network/debug/remote_port"
 const LOOPBACK: String = "127.0.0.1"
+## Set in the environment of an editor the server started on its hidden desktop, and so in every
+## game it plays. Kept in step with `DESKTOP_VARIABLE` in the server's desktop module.
+const DESKTOP_VARIABLE: String = "GDHARNESS_DESKTOP"
+const RUN_ARGS_SETTING: String = "editor/run/main_run_args"
+## Kept in step with `HIDDEN_WINDOW_FPS` in the server's launch module.
+const HIDDEN_WINDOW_FPS: int = 60
 
 var _editor_plugin: EditorPlugin = null
 ## Which play this is, counted up for every one the editor starts, whoever starts it. What a server
@@ -80,10 +86,26 @@ func play_scene(args: Dictionary) -> Dictionary:
 
 	var debugger: int = _a_port_for_the_debugger()
 
+	var held: String = str(ProjectSettings.get_setting(RUN_ARGS_SETTING, ""))
+	var given: String = with_hidden_window_flags(
+		held,
+		OS.get_name() == "Windows" and not OS.get_environment(DESKTOP_VARIABLE).is_empty(),
+		GdhRead.as_int(ProjectSettings.get_setting("application/run/max_fps", 0)) > 0,
+	)
+	# The editor builds the game's command line from the text its run instances dialog holds, which
+	# it fetches from the setting on settings_changed. The project emits that a frame later, so it
+	# is emitted here on both sides of the play, and no frame passes in which anything could save
+	# the project with the flags in it.
+	if given != held:
+		ProjectSettings.set_setting(RUN_ARGS_SETTING, given)
+		ProjectSettings.settings_changed.emit()
 	if full_path.is_empty():
 		EditorInterface.play_main_scene()
 	else:
 		EditorInterface.play_custom_scene(full_path)
+	if given != held:
+		ProjectSettings.set_setting(RUN_ARGS_SETTING, held)
+		ProjectSettings.settings_changed.emit()
 
 	_play += 1
 	_was_playing = EditorInterface.is_playing_scene()
@@ -97,6 +119,26 @@ func play_scene(args: Dictionary) -> Dictionary:
 		"play": _play,
 		"editorPid": OS.get_process_id(),
 	}
+
+
+## [param held], the project's run arguments, with the flags a window on the hidden desktop starts
+## with put in front when [param hidden] says the editor is there: the server's `hiddenWindowFlags`
+## gives the reason. Nothing is added for a game the arguments already play headless, and no cap
+## where [param capped] says the project sets one or the arguments do. In front because a `--` in
+## them makes everything after it the game's own; after `%command%` when they hold one, since what
+## goes before it is the command that runs the engine.
+static func with_hidden_window_flags(held: String, hidden: bool, capped: bool) -> String:
+	var words: PackedStringArray = held.split(" ", false)
+	if not hidden or words.has("--headless"):
+		return held
+	var flags: String = "--disable-vsync"
+	if not capped and not words.has("--max-fps"):
+		flags += " --max-fps %d" % HIDDEN_WINDOW_FPS
+	var placeholder: int = held.find("%command%")
+	if placeholder == -1:
+		return (flags + " " + held).strip_edges()
+	var after: int = placeholder + "%command%".length()
+	return held.substr(0, after) + " " + flags + held.substr(after)
 
 
 ## Gives this editor's debugger a port of its own, and answers the one the game will be sent to.

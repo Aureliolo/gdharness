@@ -8,6 +8,7 @@ const GdhPaths = preload("runtime_paths.gd")
 const GdhQueries = preload("runtime_queries.gd")
 const GdhRead = preload("reading.gd")
 const GdhSays = preload("runtime_says.gd")
+const GdhShapes = preload("value_shapes.gd")
 const GdhValues = preload("runtime_values.gd")
 ## The longest one wait may last, whatever the request says: past this the server has long
 ## since given up on the reply.
@@ -490,7 +491,7 @@ func wait_until(params: Dictionary) -> Dictionary:
 				"%s.%s is declared to hold an object and the value to wait for is %s, which it can"
 				+ " never hold: wait for null, or for the object's own value on a property of it."
 			)
-			% [node_path, property, type_string(typeof(wanted))]
+			% [node_path, property, GdhShapes.kind(wanted)]
 		)
 	if not refused.is_empty():
 		return { "type": "error", "message": refused }
@@ -679,7 +680,7 @@ static func _not_comparable(
 	current: Variant, wanted: Variant, node_path: String, property: String
 ) -> String:
 	var types: Array[String] = [
-		node_path, property, type_string(typeof(current)), type_string(typeof(wanted)),
+		node_path, property, type_string(typeof(current)), GdhShapes.kind(wanted),
 	]
 	# A value that cannot become what the property holds is said as that, which names the remedy,
 	# before the comparison it would also fail; an object on either side is said as the comparison.

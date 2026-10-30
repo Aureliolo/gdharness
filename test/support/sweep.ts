@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { discard, type Surviving, untilDiscarded } from '../../src/scratch.js';
 import { type EndedEngine, endEnginesUnder } from './engines.js';
+import './godot-home.js';
 import './slots.js';
 
 /**

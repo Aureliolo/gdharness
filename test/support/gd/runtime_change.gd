@@ -573,17 +573,29 @@ func _check_an_element_declared_as_an_object() -> void:
 	)
 	if emptied.get("met") != true or emptied.get("frames") != 0:
 		_fail("and the text null meets the empty element at once: %s" % JSON.stringify(emptied))
+	# The record a read answers a node with carries its path, so it names the node.
 	var recorded: Dictionary = await _write("nodes", [{ "_type": "Node", "path": "/root/Plain" }])
+	var written: Variant = recorded.get("new_value")
 	if (
-		recorded.get("type") != "error"
-		or not str(recorded.get("message", "")).contains("named by its path")
+		recorded.get("type") != "property_set"
+		or not written is Array
+		or JSON.stringify(written).find('"path":"/root/Plain"') == -1
+	):
+		_fail("a node's record names the node for an element: %s" % JSON.stringify(recorded))
+	var identified: Dictionary = await _write(
+		"nodes", [{ "_type": "Object", "class": "Node3D", "id": 1 }]
+	)
+	if (
+		identified.get("type") != "error"
+		or not str(identified.get("message", "")).contains("named by its path")
 	):
 		_fail(
 			(
-				"a record for an object element is told how objects are named: %s"
-				% JSON.stringify(recorded)
+				"a record naming an object by its id is told how objects are named: %s"
+				% JSON.stringify(identified)
 			)
 		)
+	var _emptied_again: Dictionary = await _write("nodes", ["null"])
 
 
 ## A map typed by its key, stepped into by that key written as text, logs nothing in the game.

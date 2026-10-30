@@ -609,6 +609,51 @@ export function rowsAcross(
   return faults;
 }
 
+/** The line Godot's crash handler starts its report with, and the signal it names. */
+const CRASH_HEADER = /^(?:CrashHandlerException|handle_crash): Program crashed with signal (\d+)/;
+
+/** The build a crash report names, as `Engine version: Godot Engine v... (<commit>)`. */
+const CRASH_BUILD = /^Engine version: .*\(([0-9a-f]{40})\)$/;
+
+/**
+ * Printed by the engine only as it reports its call queue overflowing (`CallQueue::statistics`),
+ * so a log holding it is one whose queue overflowed. The overflow's own line goes to stderr just
+ * before the report and is lost when the report crashes.
+ */
+const QUEUE_OVERFLOW_LINE = 'Object was deleted while awaiting a callback.';
+
+/**
+ * The frames an official build's crash handler prints when it crashes in that report, by the
+ * build's commit: `CallQueue::push_callablep` calling `statistics`, which reads messages the
+ * running flush has already destroyed. Measured on 4.7.2's Windows build; another build moves them.
+ */
+const QUEUE_OVERFLOW_FRAMES: ReadonlyMap<string, readonly string[]> = new Map([
+  ['ed1daf0bf001b61586d9930840f2f1394092c079', ['main+3e1082a', 'main+3e0f4aa']],
+]);
+
+/** What Godot's crash handler reported in [param lines]: the signal and whether the call queue overflowed. */
+function crashIn(lines: readonly string[]): { readonly signal: string; readonly overflowed: boolean } | null {
+  const trimmed = lines.map((line) => line.trim());
+  const at = trimmed.findIndex((line) => CRASH_HEADER.test(line));
+  const said = trimmed.some((line) => line.includes(QUEUE_OVERFLOW_LINE));
+  if (at === -1) {
+    return said ? { signal: '', overflowed: true } : null;
+  }
+  const report = trimmed.slice(at);
+  const build = report.map((line) => CRASH_BUILD.exec(line)?.[1]).find((commit) => commit !== undefined);
+  const frames = build === undefined ? undefined : QUEUE_OVERFLOW_FRAMES.get(build);
+  const framed = frames?.every((frame) => report.some((line) => line.includes(`(${frame})`))) === true;
+  return { signal: CRASH_HEADER.exec(trimmed[at] ?? '')?.[1] ?? '', overflowed: said || framed };
+}
+
+/** Where [param running] had got to, as a clause: ` while <suite> > <case> ran`, or empty. */
+function whileRunning(running: RunPrinted['running']): string {
+  if (running === null) {
+    return '';
+  }
+  return running.during === null ? ` in ${running.suite}` : ` while ${running.suite} > ${running.during} ran`;
+}
+
 /** How many lines of a run's end are shown when nothing in it says what went wrong. */
 const TAIL = 60;
 /** How many cases are named in one sentence before the rest are counted. */
@@ -650,6 +695,10 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
     (end.code === GDUNIT_FAILED &&
       [...printed.suites.values()].some((suite) => suite.cases.some((ran) => ran.verdict === 'FAILED'))) ||
     (end.code === GDUNIT_ORPHANS && printed.orphansLeft.length > 0);
+  // A crash is read from the report the engine's crash handler printed, since the code a crashed
+  // engine exits with says nothing reliable: a windowed one on Windows exited 5, which read as a
+  // quit(5) in the game's code.
+  const crashed = crashIn(printed.lines);
   if (end.ended !== null) {
     faults.push(end.ended);
   } else if (end.code !== 0 && !explained) {
@@ -658,9 +707,16 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
         ? ''
         : `, with ${(end.freeBytes / 1024 ** 3).toFixed(1)} GB of memory free as it ended`;
     faults.push(
-      end.code === null
-        ? `the engine was ended by ${end.signal ?? 'a signal'}${free}`
-        : `the engine exited ${exitNamed(end.code)}${free}`,
+      crashed !== null && crashed.signal !== ''
+        ? `the engine crashed${whileRunning(printed.running)}, its crash handler reporting signal ${crashed.signal}${free}`
+        : end.code === null
+          ? `the engine was ended by ${end.signal ?? 'a signal'}${free}`
+          : `the engine exited ${exitNamed(end.code)}${free}`,
+    );
+  }
+  if (crashed?.overflowed === true) {
+    faults.push(
+      `the engine's call queue overflowed${whileRunning(printed.running)}: something queued deferred calls without end within one frame, most often a layout that changes the size it is laid out from in a deferred handler, so the frame never ends${crashed.signal === '' ? '' : ', and the engine crashed reporting the overflow'}`,
     );
   }
   if (printed.lines.every((line) => line.trim() === '')) {
