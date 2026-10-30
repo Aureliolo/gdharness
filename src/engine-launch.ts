@@ -30,8 +30,10 @@ import {
   helperStep,
   throughHelper,
 } from './desktop.js';
+import { onTheSlot } from './engine-slots.js';
 import { Refusal } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
+import { LOG_LIMIT_BYTES, readLog } from './log-read.js';
 import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
 import { type EngineEnd, type RunPrinted, readRun } from './suite-judge.js';
 import { askWindows } from './windows-ask.js';
@@ -59,6 +61,9 @@ const LOOK_MS = 500;
 const COMMIT_ASK_MS = 15_000;
 /** What the engine prints when an autoload did not start, after which nothing it does can mean anything. */
 const AUTOLOAD_FAILED = 'Failed to instantiate an autoload';
+
+/** How much of a growing log is read at a time while it is scanned. */
+const SCAN_BYTES = 1024 * 1024;
 
 export function plural(count: number, noun: string): string {
   return `${String(count)} ${noun}${count === 1 ? '' : 's'}`;
@@ -320,16 +325,18 @@ export function heldToCores(
 /**
  * Starts the engine with [param args], both its streams into [param log] through one handle so
  * their lines stay in the order printed (on Windows one pipe, copied into the log), and waits for it, ending it once it has printed nothing for
- * [param silenceSeconds], has run past the run's deadline, or an autoload has failed to start. Its
+ * [param silenceSeconds], has run past the run's deadline, has printed more than
+ * {@link LOG_LIMIT_BYTES}, or an autoload has failed to start. Its
  * user data is a `user` folder in [param directory], so two engines never write one save or
  * settings file.
  *
  * [param silenceIn] lengthens the silence for what was running as the engine fell silent, read from
- * what it had printed; it is asked only once a silence passes [param silenceSeconds], since a long
- * log is read whole each time.
+ * what it had printed; it is asked only once a silence passes [param silenceSeconds], since the log
+ * is read again each time.
  */
 export async function watchedEngine(
   launch: EngineLaunch,
+  lock: string,
   args: readonly string[],
   directory: string,
   log: string,
@@ -337,7 +344,7 @@ export async function watchedEngine(
   silenceIn?: (printed: RunPrinted) => number,
 ): Promise<EngineEnd> {
   const user = join(directory, 'user');
-  const env = { ...process.env, APPDATA: user, XDG_DATA_HOME: user };
+  const env = onTheSlot({ ...process.env, APPDATA: user, XDG_DATA_HOME: user }, lock);
   const output = openSync(log, 'w');
   let child: ChildProcess;
   let stop: () => void;
@@ -424,7 +431,8 @@ export async function watchedEngine(
     let size = 0;
     const started = Date.now();
     let lastGrowth = started;
-    let text = '';
+    // The end of what was scanned, so a marker split between two reads is still found.
+    let carried = '';
     // The silence allowed for what the log shows running, read once for each size it reaches.
     let allowed = { size: -1, seconds: silenceSeconds };
     while (!finished.now) {
@@ -432,19 +440,30 @@ export async function watchedEngine(
       // Silence alone never ends an engine that keeps printing, such as a case warning every frame.
       const deadline = launch.deadlineSeconds;
       if (ended === null && deadline !== null && Date.now() - started > deadline * 1000) {
-        const stoppedIn = readRun(text).stoppedIn;
+        const stoppedIn = readRun(readLog(log)).stoppedIn;
         ended = `the engine ran past the ${String(deadline)} s deadline${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended`;
         stop();
       }
       const now = fstatSync(reading).size;
       if (now > size) {
-        const chunk = Buffer.alloc(now - size);
-        readSync(reading, chunk, 0, chunk.length, size);
-        text += chunk.toString('utf8');
+        const chunk = Buffer.alloc(SCAN_BYTES);
+        for (let at = size; at < now; ) {
+          const got = readSync(reading, chunk, 0, Math.min(SCAN_BYTES, now - at), at);
+          if (got === 0) {
+            break;
+          }
+          const scanned = carried + chunk.toString('utf8', 0, got);
+          if (ended === null && scanned.includes(AUTOLOAD_FAILED)) {
+            ended = 'an autoload did not start, so the engine was ended rather than run without it';
+            stop();
+          }
+          carried = scanned.slice(-AUTOLOAD_FAILED.length);
+          at += got;
+        }
         size = now;
         lastGrowth = Date.now();
-        if (ended === null && text.includes(AUTOLOAD_FAILED)) {
-          ended = 'an autoload did not start, so the engine was ended rather than run without it';
+        if (ended === null && size > LOG_LIMIT_BYTES) {
+          ended = `the engine printed more than the ${String(LOG_LIMIT_BYTES / 1024 / 1024)} MiB a log may hold, so it was ended`;
           stop();
         }
       } else if (ended === null && Date.now() - lastGrowth > silenceSeconds * 1000) {
@@ -452,13 +471,15 @@ export async function watchedEngine(
           allowed = {
             size,
             seconds:
-              silenceIn === undefined ? silenceSeconds : Math.max(silenceSeconds, silenceIn(readRun(text))),
+              silenceIn === undefined
+                ? silenceSeconds
+                : Math.max(silenceSeconds, silenceIn(readRun(readLog(log)))),
           };
         }
         if (Date.now() - lastGrowth <= allowed.seconds * 1000) {
           continue;
         }
-        const { stoppedIn } = readRun(text);
+        const { stoppedIn } = readRun(readLog(log));
         // A helper that never wrote the pid never started the engine, which is a start that hung.
         const unstarted =
           helper !== null && !existsSync(helper.pid)
@@ -468,6 +489,10 @@ export async function watchedEngine(
         stop();
       }
     }
+  } catch (error) {
+    // Ended before the failure goes on, since nothing else holds a way to end it once this returns.
+    stop();
+    throw error;
   } finally {
     closeSync(reading);
     launch.running.delete(stop);

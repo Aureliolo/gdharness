@@ -45,6 +45,7 @@ import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
 import { staleImports } from './import-freshness.js';
 import { hiddenWindowFlags } from './launch.js';
 import { freeLibraryCopies, seedExtensionList } from './library-copies.js';
+import { prependTo, readLog } from './log-read.js';
 import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
 import { SuiteFingerprints } from './suite-fingerprint.js';
 import {
@@ -852,6 +853,7 @@ async function importProject(launch: Launch): Promise<string | null> {
     freeLibraryCopies(launch.projectPath);
     const ended = await watchedEngine(
       launch,
+      lock,
       ['--headless', '--audio-driver', 'Dummy', '--path', launch.projectPath, '--import'],
       directory,
       log,
@@ -862,7 +864,7 @@ async function importProject(launch: Launch): Promise<string | null> {
     }
     // Godot's import exits 0 whatever it printed, and a suite run on a failed import reads what
     // the import left behind.
-    const printed = readRun(readFileSync(log, 'utf8'));
+    const printed = readRun(readLog(log));
     const wrongEngine =
       launch.godotVersion === null ? null : versionFault(printed.engineVersion, launch.godotVersion);
     if (wrongEngine !== null) {
@@ -1024,7 +1026,7 @@ async function runEngine(
   const began = Date.now();
   let end: EngineEnd;
   try {
-    end = await watchedEngine(launch, args, directory, log, launch.silenceFloorSeconds, (printed) =>
+    end = await watchedEngine(launch, lock, args, directory, log, launch.silenceFloorSeconds, (printed) =>
       silenceWhile(printed.running, times, launch.silenceFloorSeconds),
     );
   } finally {
@@ -1032,7 +1034,7 @@ async function runEngine(
       launch.slots.release(lock);
     }
   }
-  const printed = readRun(readFileSync(log, 'utf8'));
+  const printed = readRun(readLog(log));
   const assignment: EngineAssignment = {
     suites: plan.suites,
     expected: readExpected(expectedFile),
@@ -1096,7 +1098,7 @@ function report(
       );
       console.log(
         existsSync(engine.log)
-          ? readFileSync(engine.log, 'utf8').replace(CONTROL_SEQUENCE, '').trimEnd()
+          ? readLog(engine.log).replace(CONTROL_SEQUENCE, '').trimEnd()
           : '(no log was written)',
       );
     }
@@ -1115,7 +1117,7 @@ function report(
         `gdharness: ${heading.slice(4)}`,
         ...engine.verdict.faults.map((fault) => `  ${fault}`),
       ];
-      writeFileSync(engine.log, `${verdict.join('\n')}\n---\n${readFileSync(engine.log, 'utf8')}`);
+      prependTo(engine.log, `${verdict.join('\n')}\n---\n`);
     }
     if (engine.verdict.shown.length > 0) {
       console.log('');

@@ -126,7 +126,7 @@ import {
   walkStoppedPartWay,
 } from './engine-leaks.js';
 import { type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-run.js';
-import { type CallSlot, slotForCall } from './engine-slots.js';
+import { type CallSlot, onTheSlot, slotForCall } from './engine-slots.js';
 import { errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
 import { type DebugRequest, EVALUATE_MS, PAUSE_MS, READ_MS, STEP_MS } from './game-debugger.js';
@@ -11831,7 +11831,7 @@ class GodotServer {
     // log is whole, so the caller's own limit counts the engine's time and not the wait.
     const held = await slotForCall();
     try {
-      const run = this.spawnHeld(godotPath, cmdArgs, env, onDesktop);
+      const run = this.spawnHeld(godotPath, cmdArgs, onTheSlot(env ?? process.env, held.lock), onDesktop);
       void run.settled.finally(held.release);
       return run;
     } catch (error) {
@@ -11985,20 +11985,23 @@ class GodotServer {
     // by killing its process tree at every reconnect, and a run spawned here went with it however
     // detached it was. The keeper is the game's parent, writes its record and its exit, and is
     // nobody's child here once the launcher has gone.
-    // A profiled game is told so, and holds its start until the keeper's switch reaches it.
-    const gameEnv = profiled ? { ...(env ?? process.env), [PROFILE_FROM_START]: '1' } : env;
     const profile = profiled ? profilePath(startedAt) : undefined;
     // In one of the machine's engine slots, like every engine started for a call. The keeper takes
     // the lock over once it has handed the game's pid back, and gives it back when the run ends,
     // since the run outlives this server; so a started run leaves the lock to it, and one the keeper
     // never took over names this server, which frees it by going.
     const slot = await slotForCall();
+    // A profiled game is told so, and holds its start until the keeper's switch reaches it.
+    const gameEnv = onTheSlot(
+      profiled ? { ...(env ?? process.env), [PROFILE_FROM_START]: '1' } : (env ?? process.env),
+      slot.lock,
+    );
     let launched: Awaited<ReturnType<typeof launchOutsideTheTree>>;
     try {
       launched = await launchOutsideTheTree({
         command: godotPath,
         args: cmdArgs,
-        ...(gameEnv === undefined ? {} : { env: gameEnv }),
+        env: gameEnv,
         run: {
           transcript: transcript.path,
           startedAt,

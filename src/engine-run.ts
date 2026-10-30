@@ -7,7 +7,7 @@
  */
 
 import { callSignal } from './call-signal.js';
-import { inASlot } from './engine-slots.js';
+import { inASlot, onTheSlot } from './engine-slots.js';
 import { GameLog } from './game-log.js';
 import { spawnHidden } from './spawn.js';
 
@@ -32,7 +32,7 @@ export async function runEngine(
 ): Promise<EngineRun> {
   const signal = callSignal();
   try {
-    return await inASlot(() => runStarted(executable, args, options, signal));
+    return await inASlot((lock) => runStarted(executable, args, lock, options, signal));
   } catch (error) {
     const said = error instanceof Error ? error.message : String(error);
     return {
@@ -53,6 +53,7 @@ export async function runEngine(
 function runStarted(
   executable: string,
   args: readonly string[],
+  lock: string,
   options: { readonly timeout?: { readonly ms: number; readonly said: string } },
   signal: AbortSignal | undefined,
 ): Promise<EngineRun> {
@@ -61,6 +62,7 @@ function runStarted(
     let failure: string | null = null;
     const child = spawnHidden(executable, args, {
       stdio: ['ignore', 'pipe', 'pipe'],
+      env: onTheSlot(process.env, lock),
       ...(signal === undefined ? {} : { signal }),
     });
     child.stdout.on('data', (chunk: Buffer) => {

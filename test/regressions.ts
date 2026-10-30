@@ -187,6 +187,7 @@ import {
 } from '../src/launch.js';
 import { freeLibraryCopies, seedExtensionList } from '../src/library-copies.js';
 import { callsInFlight, LIFECYCLE_LOG_LIMIT, writeLifecycle } from '../src/lifecycle-log.js';
+import { LOG_LIMIT_BYTES, prependTo, readLog } from '../src/log-read.js';
 import {
   DEFAULT_LSP_PORT,
   GodotLSPClient,
@@ -44949,6 +44950,40 @@ async function testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone(): Promise<void
 }
 
 /**
+ * A lock numbered at or past the count is removed by any take once its holder has gone. No taker of
+ * the count reads those, so no take over ever freed them: a taker given more slots left two in the
+ * machine's folder for seven hours. One a live holder names is a taker's of more slots and stays, and
+ * one another taker is taking over, under its steal file, is left to it.
+ */
+async function testATakeSweepsGoneLocksPastTheCount(): Promise<void> {
+  const started = await ownStart();
+  const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  await exitOf(gone);
+  const deadHolder = JSON.stringify({ pid: gone.pid ?? 0, started });
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
+  try {
+    for (const name of ['2.lock', '17.lock', '18.lock']) {
+      writeFileSync(join(directory, name), deadHolder);
+    }
+    for (const name of ['1.lock', '19.lock']) {
+      writeFileSync(join(directory, name), JSON.stringify({ pid: process.pid, started }));
+    }
+    writeFileSync(join(directory, '18.lock.steal'), '');
+    writeFileSync(join(directory, 'notes.lock'), deadHolder);
+    const slots = new EngineSlots(directory, 2, { pid: process.pid, started });
+    const taken = await slots.takeFree();
+    assert.equal(taken, join(directory, '0.lock'), 'the take itself goes on as it would');
+    assert.deepEqual(
+      readdirSync(directory).sort(),
+      ['0.lock', '1.lock', '18.lock', '18.lock.steal', '19.lock', 'notes.lock'],
+      'the gone holders past the count are removed, and a live one and one being taken over stay',
+    );
+  } finally {
+    sweep(directory);
+  }
+}
+
+/**
  * While a gate is in the machine's queue, an engine outside a gate takes only the last two slots, and
  * a gate's engine takes only the others, as the games' own tools take them. Work outside the queue
  * once held 12 of 16 slots while gates waited hours. A gate's mark is live by the rule a lock is: one
@@ -48355,6 +48390,98 @@ async function testAnEngineIsHeldToTheProcessorsAsked(): Promise<void> {
 }
 
 /**
+ * An engine's log is read only up to a limit, and an engine printing past it is ended.
+ *
+ * A layout loop in a change under test made an engine print 2 GB. The server held the whole log in
+ * one string as it watched, ran out of memory, and left the engine running, since the failure went
+ * past the only code that could end it. So the reader is held to its head and tail on a small
+ * limit, a stand-in printing without end is run to the real one, and a failure while the log is
+ * read is made on purpose: each time the engine has to be gone afterwards.
+ */
+async function testARunawayEngineLogIsCutAndEnded(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-runaway-'));
+  try {
+    const small = join(scratch, 'small.log');
+    const lines = Array.from({ length: 100 }, (_, index) => `line ${String(index).padStart(3, '0')}`);
+    writeFileSync(small, `${lines.join('\n')}\n`);
+    assert.equal(readLog(small), `${lines.join('\n')}\n`, 'a log within the limit is read whole');
+    const cut = readLog(small, 400);
+    const kept = cut.split('\n').filter((line) => line.startsWith('line '));
+    assert.deepEqual(
+      kept,
+      [...lines.slice(0, 11), ...lines.slice(-33)],
+      `its first quarter and its last three quarters, cut at whole lines: ${cut}`,
+    );
+    assert.match(cut, /\[gdharness: 504 bytes of this 900-byte log were not read; at most 400 are\]/);
+    prependTo(small, 'the verdict\n---\n');
+    assert.equal(
+      readFileSync(small, 'utf8'),
+      `the verdict\n---\n${lines.join('\n')}\n`,
+      'a verdict goes on top',
+    );
+
+    const launch = {
+      godotPath: process.execPath,
+      projectPath: scratch,
+      deadlineSeconds: 120,
+      running: new Set<() => void>(),
+      cores: null,
+    };
+    const endless = join(scratch, 'endless');
+    mkdirSync(endless);
+    const runaway = await watchedEngine(
+      launch,
+      join(scratch, '0.lock'),
+      [
+        '-e',
+        "console.log('pid ' + process.pid); const mib = ('x'.repeat(1023) + '\\n').repeat(1024); setInterval(() => process.stdout.write(mib), 1)",
+      ],
+      endless,
+      join(endless, 'engine.log'),
+      60,
+    );
+    assert.equal(
+      runaway.ended,
+      `the engine printed more than the ${String(LOG_LIMIT_BYTES / 1024 / 1024)} MiB a log may hold, so it was ended`,
+    );
+    // Ended by a stop file on Windows, which the helper acts on in its own time.
+    const gone = async (pid: number): Promise<boolean> => {
+      const until = Date.now() + 15_000;
+      while (alive(pid) && Date.now() < until) {
+        await delay(100);
+      }
+      return Number.isInteger(pid) && pid > 0 && !alive(pid);
+    };
+    const runawayPid = Number(/^pid (\d+)/.exec(readLog(join(endless, 'engine.log')))?.[1]);
+    assert.ok(await gone(runawayPid), `and it is gone: pid ${String(runawayPid)}`);
+
+    const silent = join(scratch, 'silent');
+    mkdirSync(silent);
+    await assert.rejects(
+      watchedEngine(
+        launch,
+        join(scratch, '0.lock'),
+        ['-e', "console.log('pid ' + process.pid); setInterval(() => {}, 1000)"],
+        silent,
+        join(silent, 'engine.log'),
+        1,
+        () => {
+          throw new Error('the log could not be read');
+        },
+      ),
+      /the log could not be read/,
+    );
+    const silentPid = Number(/^pid (\d+)/.exec(readLog(join(silent, 'engine.log')))?.[1]);
+    assert.ok(
+      await gone(silentPid),
+      `a failure reading the log still ends the engine: pid ${String(silentPid)}`,
+    );
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
  * An engine started for a run writes to a pipe on Windows, copied into its log, and to the log file
  * itself elsewhere. The stream is the property the cost depends on: an engine on Windows spent 1.5
  * to 4 ms on each line written to a file and 0.04 ms on one written to a pipe. Either way the log
@@ -48381,6 +48508,7 @@ async function testAnEngineWritesItsLogThroughAPipeOnWindows(): Promise<void> {
         'func _init() -> void:',
         '\tvar names := {OS.STD_HANDLE_PIPE: "a pipe", OS.STD_HANDLE_FILE: "a file"}',
         '\tprint("stdout is %s" % names.get(OS.get_stdout_type(), "neither"))',
+        '\tprint("held %s" % OS.get_environment("GODOT_ENGINE_HELD"))',
         '\tfor i in 3:',
         '\t\tprint("out %d" % i)',
         '\t\tprinterr("err %d" % i)',
@@ -48399,8 +48527,11 @@ async function testAnEngineWritesItsLogThroughAPipeOnWindows(): Promise<void> {
       running: new Set<() => void>(),
       cores: null,
     };
+    // The slot the engine runs on, named to it so the programs it starts run on it too.
+    const lock = join(project, '3.lock');
     const end = await watchedEngine(
       launch,
+      lock,
       ['--headless', '--path', project, '-s', 'res://speak.gd'],
       directory,
       log,
@@ -48409,11 +48540,14 @@ async function testAnEngineWritesItsLogThroughAPipeOnWindows(): Promise<void> {
     const text = readFileSync(log, 'utf8');
     assert.equal(end.ended, null, text);
     assert.equal(end.code, 0, text);
-    const said = text.split(/\r?\n/).filter((line) => /^(stdout is|out \d|err \d|the last line)/.test(line));
+    const said = text
+      .split(/\r?\n/)
+      .filter((line) => /^(stdout is|held |out \d|err \d|the last line)/.test(line));
     assert.deepEqual(
       said,
       [
         `stdout is ${process.platform === 'win32' ? 'a pipe' : 'a file'}`,
+        `held ${lock}`,
         'out 0',
         'err 0',
         'out 1',
@@ -48442,6 +48576,7 @@ async function testAnEngineWritesItsLogThroughAPipeOnWindows(): Promise<void> {
     const began = Date.now();
     const heldEnd = await watchedEngine(
       { ...launch, godotPath: process.execPath },
+      lock,
       ['-e', linger],
       held,
       join(held, 'engine.log'),
@@ -68650,6 +68785,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARowSkippedForItsDataIsNoPass,
   testTheScriptsGodotNeverFreesAreFound,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
+  testATakeSweepsGoneLocksPastTheCount,
   testASlotWaitLooksWhenTheSlotsChange,
   testAWaitForASlotKeepsAMarkUntilItEnds,
   testGatesInTheQueueKeepTheirSlots,
@@ -68670,6 +68806,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFreshCloneHasItsExtensionsListed,
   testAnEngineIsHeldToTheProcessorsAsked,
   testAnEngineWritesItsLogThroughAPipeOnWindows,
+  testARunawayEngineLogIsCutAndEnded,
   testProjectTestJudgesItsRunAsTheGateDoes,
   testAnEngineGdharnessStartsCanHaveItsCrashReported,
   testATestRunSaysHowFarItHasGot,

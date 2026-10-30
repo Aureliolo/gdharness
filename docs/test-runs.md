@@ -380,6 +380,13 @@ the slots. A tool of a game's own that starts engines takes them the same way:
    exclusively as a lock is (create the folder first if it is missing) and holding what your lock
    will.
 7. When done, remove the lock, but only if it still names your pid.
+8. At each take, remove every `<n>.lock` numbered at or past the slot count whose holder has gone,
+   under its steal file as in step 4. Only a taker given more slots makes those, and no take of the
+   count ever reads them, so nothing else frees them.
+
+gdharness starts every engine it holds a slot for with `GODOT_ENGINE_HELD` set to that slot's lock
+path. A tool the engine starts that takes slots this way should run on that slot rather than take a
+second one, for as long as the lock names a live holder other than itself.
 
 Gates come first. Each gate in the machine's queue, waiting for its seat or holding it, keeps a mark
 from its arrival to its release: `<directory>/queued/<its ticket>.json`, holding what a lock does.

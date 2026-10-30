@@ -13,7 +13,11 @@
  * judged one free cannot both remove it: the second would be removing the first one's fresh lock.
  * Whoever holds the steal file reads the lock again, removes it if it is still free, makes its own,
  * and removes the steal file. A steal file older than {@link UNWRITTEN_MS} is a taker that died
- * holding it.
+ * holding it. A lock numbered at or past the count, which only a taker given more slots makes, is
+ * removed the same way by every take once its holder has gone.
+ *
+ * An engine started on a slot has the slot's lock in {@link HELD_VARIABLE}, so the programs it
+ * starts run on its slot.
  *
  * Gates come first. A gate in the machine's queue keeps a mark, `<directory>/queued/<ticket>.json`
  * holding what a lock does, and while one is live an engine outside a gate takes only the last
@@ -57,6 +61,19 @@ import { callProgress, callSignal, callSlotWaits } from './call-signal.js';
 import { EngineUsageError } from './engine-launch.js';
 import { startTimesOf } from './process-children.js';
 import { readWhole, removeWhole, writeWhole } from './whole-file.js';
+
+/**
+ * The variable an engine started on a slot is given, naming that slot's lock, so a program the
+ * engine starts that takes slots the same way runs on the engine's slot rather than taking a second:
+ * a game's trailer and screenshot helpers held a slot of their own beside the game's, and one game
+ * held both slots kept for the sessions.
+ */
+const HELD_VARIABLE = 'GODOT_ENGINE_HELD';
+
+/** [param env] for an engine started on the slot at [param lock]. */
+export function onTheSlot(env: NodeJS.ProcessEnv, lock: string): NodeJS.ProcessEnv {
+  return { ...env, [HELD_VARIABLE]: lock };
+}
 
 /** The variable naming the slot directory in place of the machine's. */
 export const SLOTS_VARIABLE = 'GODOT_ENGINE_SLOTS';
@@ -423,6 +440,7 @@ export class EngineSlots {
    */
   async takeFree(): Promise<string | null> {
     mkdirSync(this.directory, { recursive: true });
+    await this.sweep();
     this.drawn = slotsDrawnOn(this.count, this.inAGate, !this.inAGate && (await this.aGateIsQueued()));
     for (const slot of this.drawn.numbers) {
       const lock = join(this.directory, `${String(slot)}.lock`);
@@ -551,8 +569,37 @@ export class EngineSlots {
     return true;
   }
 
+  /**
+   * Removes every lock numbered at or past the count whose holder has gone. No taker of this count
+   * reads them, so no take ever frees them: a taker given more slots left two there for seven hours.
+   * One a live holder names is a taker's of more slots, and stays.
+   */
+  private async sweep(): Promise<void> {
+    let names: string[];
+    try {
+      names = readdirSync(this.directory);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const numbered = /^(\d+)\.lock$/.exec(name)?.[1];
+      if (numbered !== undefined && Number(numbered) >= this.count) {
+        await this.cleared(join(this.directory, name), false);
+      }
+    }
+  }
+
   /** Takes over [param lock] when its holder has gone, under the steal file. */
-  private async takenOver(lock: string): Promise<boolean> {
+  private takenOver(lock: string): Promise<boolean> {
+    return this.cleared(lock, true);
+  }
+
+  /**
+   * Removes [param lock] when its holder has gone, under its steal file, so that a lock another
+   * taker has just made in its place is never removed; with [param retake] makes it again for this
+   * process, answering whether that was done.
+   */
+  private async cleared(lock: string, retake: boolean): Promise<boolean> {
     if (!(await this.free(lock))) {
       return false;
     }
@@ -578,7 +625,7 @@ export class EngineSlots {
         // Windows will not remove it, and that tool still holds the slot.
         return false;
       }
-      return this.made(lock);
+      return retake ? this.made(lock) : true;
     } finally {
       rmSync(steal, { force: true });
     }
@@ -817,11 +864,14 @@ export interface CallSlot {
   readonly leave: () => void;
 }
 
-/** Runs [param body] holding one of the machine's slots for the call, and gives it back after. */
-export async function inASlot<T>(body: () => Promise<T>): Promise<T> {
+/**
+ * Runs [param body] holding one of the machine's slots for the call, handing it the slot's lock,
+ * and gives it back after.
+ */
+export async function inASlot<T>(body: (lock: string) => Promise<T>): Promise<T> {
   const held = await slotForCall();
   try {
-    return await body();
+    return await body(held.lock);
   } finally {
     held.release();
   }
