@@ -345,6 +345,7 @@ import {
   scriptErrorsNote,
   scriptsToDiagnose,
   settingsNamedBy,
+  staleCopyNote,
   stopVerdict,
   testPathsIn,
   timedOutVerdict,
@@ -28029,6 +28030,21 @@ function testNotRunIsPutDownToFailFastOnlyWhenSet(): void {
  * An export is exported when this run wrote its file. The file an earlier export left read as this
  * one's, so an export that exited cleanly having written nothing was answered as exported.
  */
+/**
+ * The note for an editor that kept the script it compiled before, whose reasons are written with
+ * and without a full stop of their own: one with its own read as "...answered error 43.." in an
+ * answer.
+ */
+function testAStaleCopyNoteEndsOnce(): void {
+  assert.deepEqual(
+    [staleCopyNote('it did not compile: Godot answered error 43.'), staleCopyNote('it did not compile')],
+    [
+      'The editor serving the project still holds the copy of the script it compiled before, since reloading it failed: it did not compile: Godot answered error 43.',
+      'The editor serving the project still holds the copy of the script it compiled before, since reloading it failed: it did not compile.',
+    ],
+  );
+}
+
 function testAnExportIsJudgedByTheFileItWrote(): void {
   const clean = (): EngineRun => {
     const log = new GameLog();
@@ -67321,6 +67337,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnOperationThatNeverAnswersIsEnded,
   testTheScanNoteNamesWhatStarted,
   testAnExportIsJudgedByTheFileItWrote,
+  testAStaleCopyNoteEndsOnce,
   testAnExportThatCouldNotCopyALibrarySaysSo,
   testAnExportOfAMissingPresetIsRefusedFirst,
   testAnAddedPresetExports,

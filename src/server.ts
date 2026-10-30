@@ -3887,6 +3887,14 @@ function needsItsOwnProcess(asked: RunEnvironment): boolean {
 }
 
 /**
+ * Why the editor still answers from the script it compiled before a write, for [param problem], the
+ * reason its reload failed. The reasons are written with and without a full stop of their own.
+ */
+export function staleCopyNote(problem: string): string {
+  return `The editor serving the project still holds the copy of the script it compiled before, since reloading it failed: ${problem.replace(/\.$/, '')}.`;
+}
+
+/**
  * The sentence for options set_options wrote that the sidecar held no value for, or an empty one.
  * Only the importer knows which options it has, and without a reimport a misspelt name was answered
  * as written like any other, so a caller learned nothing until the import ignored it.
@@ -14991,11 +14999,7 @@ class GodotServer {
     );
     const problem = done.notReloaded[0]?.problem;
     const notes = [
-      ...(problem === undefined
-        ? []
-        : [
-            `The editor serving the project was not given the script as written, so it answers from the copy it compiled before: ${problem}.`,
-          ]),
+      ...(problem === undefined ? [] : [staleCopyNote(problem)]),
       ...(done.unsavedInEditor.length > 0 ? [unsavedInEditorNote(done.unsavedInEditor)] : []),
     ];
     return this.jsonTextResponse({
