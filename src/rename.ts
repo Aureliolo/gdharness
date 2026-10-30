@@ -978,21 +978,42 @@ export function planMove(args: MoveArguments, plan: Plan): Plan {
     for (const path of named) {
       // Not a longer name that only begins with it: res://levels is not res://levels_old or
       // res://levels.old, and a full stop ending a sentence after it is not part of it.
-      const spelled = new RegExp(`${path.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}(?![\\w-]|\\.\\w)`, 'g');
-      for (const match of file.text.matchAll(spelled)) {
-        const offset = match.index;
-        const covered = edits.some(
-          (one) => one.file === file.path && one.offset <= offset && offset < one.offset + one.length,
-        );
-        if (!covered) {
-          const region = script?.regions.find((one) => one.start <= offset && offset < one.end);
-          mentions.push({
-            file: file.path,
-            line: lines.positionOf(offset).line + 1,
-            kind: region !== undefined ? region.kind : /\.(tscn|tres)$/.test(file.path) ? 'scene' : 'text',
-            text: lines.lineAt(offset).trim(),
-            why: `names ${path} outside a string the engine reads as a path`,
-          });
+      const after = String.raw`(?![\w-]|\.\w)`;
+      const escaped = (text: string): string => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+      // And as a path from the project's root, the way a build script or a note names a file: a
+      // move left a game's Python gate naming the folder it had moved, with nothing under leftAlone.
+      // Not the end of a longer path, which is another file or the res:// spelling above.
+      const fromRoot = path.startsWith('res://') ? path.slice('res://'.length) : '';
+      const spellings = [
+        {
+          pattern: new RegExp(`${escaped(path)}${after}`, 'g'),
+          why: `names ${path} outside a string the engine reads as a path`,
+        },
+        ...(fromRoot === ''
+          ? []
+          : [
+              {
+                pattern: new RegExp(`(?<![\\w./-])${escaped(fromRoot)}${after}`, 'g'),
+                why: `names ${path} as ${fromRoot}, a path from the project's root without res://, which the engine does not read as one`,
+              },
+            ]),
+      ];
+      for (const { pattern, why } of spellings) {
+        for (const match of file.text.matchAll(pattern)) {
+          const offset = match.index;
+          const covered = edits.some(
+            (one) => one.file === file.path && one.offset <= offset && offset < one.offset + one.length,
+          );
+          if (!covered) {
+            const region = script?.regions.find((one) => one.start <= offset && offset < one.end);
+            mentions.push({
+              file: file.path,
+              line: lines.positionOf(offset).line + 1,
+              kind: region !== undefined ? region.kind : /\.(tscn|tres)$/.test(file.path) ? 'scene' : 'text',
+              text: lines.lineAt(offset).trim(),
+              why,
+            });
+          }
         }
       }
     }
