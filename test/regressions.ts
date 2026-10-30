@@ -14180,6 +14180,20 @@ async function testAnEditorWritesItsConsoleWhereTheServerLooks(): Promise<void> 
     // way this could answer with output that is not the connected editor's.
     const asAnother = editorConsole(project, pid + 1, true);
     assert.ok('kind' in asAnother && asAnother.kind === 'another editor', JSON.stringify(asAnother));
+
+    // The editor kept its project's data in the suite's own Godot home, which is what keeps every
+    // editor a suite opens off the editor settings the machine's own editors share.
+    if (process.platform === 'win32') {
+      const home = process.env['APPDATA'] ?? '';
+      assert.ok(
+        resolve(home).startsWith(resolve(tmpdir())),
+        `the suite's Godot home is a temporary one: ${home}`,
+      );
+      assert.ok(
+        existsSync(join(home, 'Godot', 'app_userdata', 'ConsoleProbe')),
+        `the editor wrote its project's folder there: ${home}`,
+      );
+    }
   } finally {
     sweep(project);
   }
