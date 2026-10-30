@@ -1481,7 +1481,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       symbols: {
         effect: 'read',
         summary:
-          'document symbols from the language server, each with its kind, the line and column of its name, and the lastLine of its declaration',
+          'document symbols from the language server, each with its kind, the line and column of its name, and the lastLine of its declaration. detail is the language server\'s own text, which writes a default through the engine (Callable() as "null::null", a Color as a quoted tuple) and leaves out a signal\'s argument types; structure gives each declaration as the file writes it',
         requires: [],
       },
       completion: {
