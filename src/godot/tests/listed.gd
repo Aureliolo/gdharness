@@ -107,11 +107,10 @@ func _initialize() -> void:
 
 
 ## As gdUnit4's own `GdUnitCmdTool.gd` ends, which names in a verbose run the nodes left orphaned.
+## The runner is not queued for deletion here, as gdUnit4's does: the tree has freed root and the
+## runner with it before this is called, and queueing a freed node writes into freed memory.
 func _finalize() -> void:
 	GdhReached.stop()
-	if _runner == null:
-		return
-	queue_delete(_runner)
 	if OS.is_stdout_verbose():
 		print("Orphan nodes left as the run ends:")
 		Window.print_orphan_nodes()

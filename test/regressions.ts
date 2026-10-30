@@ -155,7 +155,7 @@ import {
   theEditorHasComeBack,
   withoutTrailingSeparator,
 } from '../src/godot-bridge.js';
-import { GodotLocator } from '../src/godot-path.js';
+import { GodotLocator, type Located, VERSION_STARTS, versionStartOf } from '../src/godot-path.js';
 import { DebuggerStream, decodeVariant, framedCommand, type SentValue } from '../src/godot-variant.js';
 import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/harnesses.js';
 import {
@@ -9751,6 +9751,156 @@ async function testAnEngineThatDoesNotAnswerIsNamed(): Promise<void> {
     }
   }
   sweep(project);
+}
+
+/**
+ * An engine that crashes as it starts is asked again, and refused only once it answers as something
+ * else.
+ *
+ * Godot on Windows crashes now and then at start under load with 0xC06D007F and prints nothing, and
+ * one such `--version` start refused a GODOT_PATH naming a working engine, which failed a gate's
+ * setup outright, with only "Command failed" to go on. A crash says nothing about what the path is,
+ * so only an answer decides: output with a failing exit, or a program that cannot be started. The
+ * crash code and what was printed go into the reason, and a path that only crashed is asked afresh
+ * by the next find rather than refused from memory.
+ *
+ * The real runs at the end hold what the injected errors stand for: a child that exits is reported
+ * with its code and its output, which every case above takes as given.
+ */
+async function testAnEngineThatCrashesAtStartIsAskedAgain(): Promise<void> {
+  const before = process.env['GODOT_PATH'];
+  const path = join(process.cwd(), 'package.json');
+  const failure = (fields: Record<string, unknown>): Error =>
+    Object.assign(new Error('Command failed'), fields);
+  const startCrash = failure({ code: 0xc06d007f, signal: null, stdout: '', stderr: '' });
+  const located = async (
+    answers: readonly (Error | null)[],
+  ): Promise<{ found: Located; starts: number; waits: number[] }> => {
+    let starts = 0;
+    const waits: number[] = [];
+    const locator = new GodotLocator(
+      async () => {
+        const answer = answers[Math.min(starts, answers.length - 1)] ?? null;
+        starts += 1;
+        if (answer !== null) {
+          throw answer;
+        }
+        return Promise.resolve();
+      },
+      async (ms) => {
+        waits.push(ms);
+        return Promise.resolve();
+      },
+    );
+    return { found: await locator.find(), starts, waits };
+  };
+  try {
+    process.env['GODOT_PATH'] = path;
+
+    const recovered = await located([startCrash, null]);
+    assert.deepEqual(
+      recovered.found,
+      { ok: true, path },
+      'an engine that crashed once and then answered is found',
+    );
+    assert.equal(recovered.starts, 2, 'after a second start');
+    assert.deepEqual(recovered.waits, [500], 'with a wait between them');
+
+    const silent = await located([failure({ code: 1, signal: null, stdout: '', stderr: '' }), null]);
+    assert.deepEqual(silent.found, { ok: true, path }, 'a failing exit that printed nothing is a crash too');
+
+    const signalled = await located([
+      failure({ code: null, signal: 'SIGSEGV', stdout: '', stderr: '' }),
+      null,
+    ]);
+    assert.deepEqual(signalled.found, { ok: true, path }, 'and so is a signal');
+
+    const refused = await located([
+      failure({ code: 2, signal: null, stdout: '', stderr: 'unknown option --version\n' }),
+    ]);
+    assert.equal(refused.starts, 1, 'a program that answers is asked once');
+    assert.deepEqual(
+      refused.found,
+      {
+        ok: false,
+        named: path,
+        reason: 'does not answer --version: it exited 2 and printed "unknown option --version"',
+      },
+      'and refused with its exit code and what it printed',
+    );
+
+    const unstartable = await located([failure({ code: 'EACCES', errno: -13 })]);
+    assert.equal(unstartable.starts, 1, 'a file that cannot be started is asked once');
+    assert.deepEqual(
+      unstartable.found,
+      {
+        ok: false,
+        named: path,
+        reason: 'does not answer --version: it could not be started: Command failed',
+      },
+      'and refused as that',
+    );
+
+    let starts = 0;
+    const waits: number[] = [];
+    const crashing = new GodotLocator(
+      async () => {
+        starts += 1;
+        return Promise.reject(startCrash);
+      },
+      async (ms) => {
+        waits.push(ms);
+        return Promise.resolve();
+      },
+    );
+    const crashed = await crashing.find();
+    assert.equal(starts, VERSION_STARTS, 'an engine that crashes every time is started as often as allowed');
+    assert.deepEqual(waits, [500, 1000, 2000, 4000], 'with longer waits between');
+    assert.deepEqual(
+      crashed,
+      {
+        ok: false,
+        named: path,
+        reason:
+          'crashed on each of 5 starts with --version; the last time it exited 0xC06D007F and printed nothing',
+      },
+      'and refused naming the crash code',
+    );
+    await crashing.find();
+    assert.equal(starts, 2 * VERSION_STARTS, 'a path that only crashed is asked again by the next find');
+
+    const signed = versionStartOf(failure({ code: 0xc06d007f | 0, signal: null, stdout: '', stderr: '' }));
+    assert.deepEqual(
+      signed,
+      { kind: 'crashed', said: 'it exited 0xC06D007F and printed nothing' },
+      'an exception code read as a signed number is the same crash',
+    );
+
+    const exiting = async (script: string): Promise<unknown> => {
+      try {
+        await runHidden(process.execPath, ['-e', script]);
+        return null;
+      } catch (error) {
+        return error;
+      }
+    };
+    assert.deepEqual(
+      versionStartOf(await exiting('process.stderr.write("not an engine"); process.exit(3)')),
+      { kind: 'refused', said: 'it exited 3 and printed "not an engine"' },
+      'a real child that prints and fails is read with its code and output',
+    );
+    assert.deepEqual(
+      versionStartOf(await exiting('process.exit(3)')),
+      { kind: 'crashed', said: 'it exited 3 and printed nothing' },
+      'and one that fails silently is a crash',
+    );
+  } finally {
+    if (before === undefined) {
+      delete process.env['GODOT_PATH'];
+    } else {
+      process.env['GODOT_PATH'] = before;
+    }
+  }
 }
 
 /**
@@ -68780,6 +68930,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testWhatALaunchedEditorDroppedIsReadAsItArrives,
   testProjectDefaultsToTheWorkingDirectory,
   testAnEngineThatDoesNotAnswerIsNamed,
+  testAnEngineThatCrashesAtStartIsAskedAgain,
   testAnAutoloadGitWillNotCarry,
   testAnAutoloadNamingAFileThatIsNotThere,
   testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome,
