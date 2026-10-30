@@ -963,7 +963,7 @@ async function compileCheck(
   }
   let end: EngineEnd;
   try {
-    end = await watchedEngine(launch, args, directory, log, launch.silenceFloorSeconds);
+    end = await watchedEngine(launch, lock, args, directory, log, launch.silenceFloorSeconds);
   } finally {
     launch.slots.release(lock);
   }
