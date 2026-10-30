@@ -351,8 +351,10 @@ import {
 import { runHidden as run, spawnHidden } from './spawn.js';
 import {
   declaringAdvice,
+  failedOnPushErrors,
   funcOf,
   named,
+  pushErrorsFailedSentence,
   readExpected,
   readRun,
   uncollectedSaid,
@@ -361,6 +363,7 @@ import {
 } from './suite-judge.js';
 import {
   capsFrames,
+  gdUnitFailsOnPushErrors,
   NOT_SEARCHED_SETTING,
   ProjectScripts,
   TEST_DIRECTORIES,
@@ -3551,6 +3554,17 @@ function foldedEntriesAnswer(
     entries: problems.entries,
     ...(problems.omitted === 0 ? {} : { entriesOmitted: problems.omitted }),
   };
+}
+
+/** What reloading one script named in reloadScript came to. */
+interface ScriptReload {
+  methods?: string[];
+  heldBefore?: string[];
+  constants?: string[];
+  heldConstantsBefore?: string[];
+  problem?: string;
+  as?: string;
+  unsaved?: string;
 }
 
 /**
@@ -8269,6 +8283,9 @@ class GodotServer {
             : undefined,
           declaredNotPrinted.length > 0
             ? 'A declared error or warning the case did not print fails the run too, since the case no longer reaches what it was written to test.'
+            : undefined,
+          gdUnitFailsOnPushErrors(project.value.path)
+            ? pushErrorsFailedSentence(failedOnPushErrors(casePrinted))
             : undefined,
           walkStopped ? WALK_STOPPED_SENTENCE : undefined,
           countedLeaks.length > 0
@@ -14259,96 +14276,20 @@ class GodotServer {
     // After the scan rather than before it. The scan settles what the editor knows about the files;
     // this settles what it has already built from one of them, and building from a file the scan
     // has not read yet would be recompiling the old source.
-    const reloading = readNonEmptyString(args, 'reloadScript');
-    let reloaded: {
-      methods?: string[];
-      heldBefore?: string[];
-      constants?: string[];
-      heldConstantsBefore?: string[];
-      problem?: string;
-      as?: string;
-      unsaved?: string;
-    } = {};
+    const asked = args['reloadScript'];
+    const reloads: { scriptPath: string; reloaded: ScriptReload }[] = [];
     const reloadedFirst: ReloadedFirst[] = [];
-    let builtOn: string | undefined;
-    let builtOnUnchecked = false;
-    // A @tool script is refused for the reason reloadDependents gives: it runs inside the editor, and
-    // reloading one from inside a call the editor is serving can take the editor down.
-    const reloadingSource =
-      reloading === undefined || projectPath === '' ? null : this.sourceOfClass(projectPath, reloading);
-    if (reloading !== undefined && reloadingSource !== null && isToolScript(reloadingSource)) {
-      reloaded = {
-        problem: `${reloading} is a @tool script, which runs inside the editor, so it is not reloaded from inside a call: editor_launch restart recompiles it.`,
-      };
-    } else if (reloading !== undefined) {
-      try {
-        const reloadAsked = async (): Promise<OperationParams> =>
-          asParams(await this.godotBridge.invokeTool('reload_script', { ...args, scriptPath: reloading }));
-        let answer = await reloadAsked();
-        // A script compiled against a class the editor holds behind its file fails on what the file
-        // has gained, and keeps failing however often it alone is reloaded, so that class goes first.
-        const failedFirst = answer['failed'];
-        if (typeof failedFirst === 'number' && failedFirst !== 0 && projectPath !== '') {
-          const first = await this.reloadWhatItIsBuiltOn(
-            projectPath,
-            readString(answer, 'script') ?? reloading,
-          );
-          reloadedFirst.push(...first.reloaded);
-          if (first.reloaded.length > 0) {
-            answer = await reloadAsked();
-          }
-          builtOn = first.said;
-          builtOnUnchecked = first.unchecked === true;
-        }
-        const methods = readArray(answer, 'methods');
-        const listed = (field: string): Record<string, string[]> => {
-          const found = readArray(answer, field);
-          return found ? { [field]: found.map(String) } : {};
-        };
-        // The script as the files on disk spell it, which the addon reloads by: the editor holds its
-        // copy under that spelling, and on a filesystem ignoring case another one opens the same file
-        // and reaches a fresh copy instead. Said when it differs from what was asked.
-        const asResource = (path: string): string =>
-          path.startsWith('res://') ? path : `res://${path.replace(/^\/+/, '')}`;
-        const script = asResource(readString(answer, 'script') ?? reloading);
-        const spelling = script === asResource(reloading) ? {} : { as: script };
-        const failed = answer['failed'];
-        if (typeof failed === 'number' && failed !== 0) {
-          reloaded = {
-            ...spelling,
-            ...listed('heldBefore'),
-            ...listed('heldConstantsBefore'),
-            problem: failedReloadNote({
-              script,
-              code: failed,
-              codeName: readString(answer, 'failedAs') ?? '',
-              heldBefore: listed('heldBefore')['heldBefore'] ?? [],
-              heldAfter: methods?.map(String) ?? [],
-              constantsBefore: listed('heldConstantsBefore')['heldConstantsBefore'] ?? [],
-              constantsAfter: listed('constants')['constants'] ?? [],
-              names: projectPath === '' ? [] : this.classesAScriptNames(projectPath, script),
-              restored: answer['restored'] === true,
-              restoredAs: readString(answer, 'restoredAs') ?? '',
-              ...(builtOn === undefined ? {} : { builtOn }),
-              ...(builtOnUnchecked ? { builtOnUnchecked } : {}),
-            }),
-          };
-        } else {
-          reloaded = methods
-            ? {
-                ...spelling,
-                methods: methods.map(String),
-                ...listed('heldBefore'),
-                ...listed('constants'),
-                ...listed('heldConstantsBefore'),
-                ...(answer['unsavedInEditor'] === true ? { unsaved: unsavedInEditorNote([script]) } : {}),
-              }
-            : { problem: `the editor would not say what ${script} has after reloading it` };
-        }
-      } catch (error) {
-        reloaded = { problem: `${reloading} could not be reloaded: ${errorMessage(error)}` };
-      }
+    for (const scriptPath of Array.isArray(asked)
+      ? asked.map(String)
+      : typeof asked === 'string'
+        ? [asked]
+        : []) {
+      const one = await this.reloadAsked(projectPath, args, scriptPath);
+      reloads.push({ scriptPath, reloaded: one.reloaded });
+      reloadedFirst.push(...one.reloadedFirst);
     }
+    // A list is answered under reloads, each in the shape one script is answered in.
+    const reloaded: ScriptReload = Array.isArray(asked) ? {} : (reloads[0]?.reloaded ?? {});
 
     const checked = busy ? { unseen: [] } : await this.classesTheEditorCannotSee(args);
     const unseen = checked.unseen;
@@ -14426,7 +14367,7 @@ class GodotServer {
         stillAtMissingPaths.length === 0 &&
         (dependents === null || dependents.notReloaded.length === 0) &&
         // The script asked for by name is the stronger case of a dependent that would not reload.
-        reloaded.problem === undefined &&
+        reloads.every((one) => one.reloaded.problem === undefined) &&
         checked.unchecked === undefined,
       stillWorking: busy,
       waitedMs: Date.now() - started,
@@ -14452,6 +14393,24 @@ class GodotServer {
         return all.length > 0 ? all : undefined;
       })(),
       unsavedInEditorNote: reloaded.unsaved,
+      reloads: Array.isArray(asked)
+        ? reloads.map(({ scriptPath, reloaded: one }) => ({
+            scriptPath,
+            ok: one.problem === undefined,
+            reloadedAs: one.as,
+            ...reloadDifference(one),
+            ...(args['listMembers'] === true
+              ? {
+                  heldBeforeReload: one.heldBefore,
+                  reloadedMethods: one.methods,
+                  heldConstantsBeforeReload: one.heldConstantsBefore,
+                  reloadedConstants: one.constants,
+                }
+              : {}),
+            reloadProblem: one.problem,
+            unsavedInEditorNote: one.unsaved,
+          }))
+        : undefined,
       unseenByEditor: unseen.length > 0 ? unseen : undefined,
       broughtIn: broughtIn.length > 0 ? broughtIn : undefined,
       dependentsReloaded:
@@ -14467,6 +14426,98 @@ class GodotServer {
       uidsDuplicatedOnDisk: uidsDuplicatedOnDisk.length > 0 ? uidsDuplicatedOnDisk : undefined,
       note: notes.length > 0 ? notes.join(' ') : undefined,
     });
+  }
+
+  /**
+   * Reloads [param reloading] in the editor from its file, as reloadScript asks, first reloading
+   * what it is built on when it fails against a class the editor holds behind its file.
+   */
+  private async reloadAsked(
+    projectPath: string,
+    args: OperationParams,
+    reloading: string,
+  ): Promise<{ reloaded: ScriptReload; reloadedFirst: ReloadedFirst[] }> {
+    let reloaded: ScriptReload = {};
+    const reloadedFirst: ReloadedFirst[] = [];
+    let builtOn: string | undefined;
+    let builtOnUnchecked = false;
+    // A @tool script is refused for the reason reloadDependents gives: it runs inside the editor, and
+    // reloading one from inside a call the editor is serving can take the editor down.
+    const reloadingSource = projectPath === '' ? null : this.sourceOfClass(projectPath, reloading);
+    if (reloadingSource !== null && isToolScript(reloadingSource)) {
+      reloaded = {
+        problem: `${reloading} is a @tool script, which runs inside the editor, so it is not reloaded from inside a call: editor_launch restart recompiles it.`,
+      };
+    } else {
+      try {
+        const reloadAsked = async (): Promise<OperationParams> =>
+          asParams(await this.godotBridge.invokeTool('reload_script', { ...args, scriptPath: reloading }));
+        let answer = await reloadAsked();
+        // A script compiled against a class the editor holds behind its file fails on what the file
+        // has gained, and keeps failing however often it alone is reloaded, so that class goes first.
+        const failedFirst = answer['failed'];
+        if (typeof failedFirst === 'number' && failedFirst !== 0 && projectPath !== '') {
+          const first = await this.reloadWhatItIsBuiltOn(
+            projectPath,
+            readString(answer, 'script') ?? reloading,
+          );
+          reloadedFirst.push(...first.reloaded);
+          if (first.reloaded.length > 0) {
+            answer = await reloadAsked();
+          }
+          builtOn = first.said;
+          builtOnUnchecked = first.unchecked === true;
+        }
+        const methods = readArray(answer, 'methods');
+        const listed = (field: string): Record<string, string[]> => {
+          const found = readArray(answer, field);
+          return found ? { [field]: found.map(String) } : {};
+        };
+        // The script as the files on disk spell it, which the addon reloads by: the editor holds its
+        // copy under that spelling, and on a filesystem ignoring case another one opens the same file
+        // and reaches a fresh copy instead. Said when it differs from what was asked.
+        const asResource = (path: string): string =>
+          path.startsWith('res://') ? path : `res://${path.replace(/^\/+/, '')}`;
+        const script = asResource(readString(answer, 'script') ?? reloading);
+        const spelling = script === asResource(reloading) ? {} : { as: script };
+        const failed = answer['failed'];
+        if (typeof failed === 'number' && failed !== 0) {
+          reloaded = {
+            ...spelling,
+            ...listed('heldBefore'),
+            ...listed('heldConstantsBefore'),
+            problem: failedReloadNote({
+              script,
+              code: failed,
+              codeName: readString(answer, 'failedAs') ?? '',
+              heldBefore: listed('heldBefore')['heldBefore'] ?? [],
+              heldAfter: methods?.map(String) ?? [],
+              constantsBefore: listed('heldConstantsBefore')['heldConstantsBefore'] ?? [],
+              constantsAfter: listed('constants')['constants'] ?? [],
+              names: projectPath === '' ? [] : this.classesAScriptNames(projectPath, script),
+              restored: answer['restored'] === true,
+              restoredAs: readString(answer, 'restoredAs') ?? '',
+              ...(builtOn === undefined ? {} : { builtOn }),
+              ...(builtOnUnchecked ? { builtOnUnchecked } : {}),
+            }),
+          };
+        } else {
+          reloaded = methods
+            ? {
+                ...spelling,
+                methods: methods.map(String),
+                ...listed('heldBefore'),
+                ...listed('constants'),
+                ...listed('heldConstantsBefore'),
+                ...(answer['unsavedInEditor'] === true ? { unsaved: unsavedInEditorNote([script]) } : {}),
+              }
+            : { problem: `the editor would not say what ${script} has after reloading it` };
+        }
+      } catch (error) {
+        reloaded = { problem: `${reloading} could not be reloaded: ${errorMessage(error)}` };
+      }
+    }
+    return { reloaded, reloadedFirst };
   }
 
   /**
@@ -15671,7 +15722,7 @@ class GodotServer {
       const one = behind.length === 1;
       const scripts = behind.map((entry) => entry.scriptPath);
       notes.push(
-        `The editor holds ${behind.map((entry) => entry.className).join(', ')} compiled from ${one ? 'a text its file no longer has' : 'texts their files no longer have'}, so a script it compiles against ${one ? 'that class' : 'them'} fails on whatever the file has gained, as a member not found or an identifier not declared, while the files are right and a new engine compiles them. editor_rescan with reloadScript on ${scripts.join(', ')} reloads ${one ? 'it' : 'each'}, and a rescan reloads such a class before a dependent compiled against it.`,
+        `The editor holds ${behind.map((entry) => entry.className).join(', ')} compiled from ${one ? 'a text its file no longer has' : 'texts their files no longer have'}, so a script it compiles against ${one ? 'that class' : 'them'} fails on whatever the file has gained, as a member not found or an identifier not declared, while the files are right and a new engine compiles them. editor_rescan with reloadScript set to ${one ? scripts[0] : JSON.stringify(scripts)} reloads ${one ? 'it' : 'each'}, and a rescan reloads such a class before a dependent compiled against it.`,
       );
     }
     return this.jsonTextResponse({

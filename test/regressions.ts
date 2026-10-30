@@ -399,6 +399,7 @@ import { RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
 import { SuiteFingerprints } from '../src/suite-fingerprint.js';
 import {
   exitNamed,
+  failedOnPushErrors,
   funcOf,
   type HandedSuite,
   judgeEngine,
@@ -414,6 +415,7 @@ import {
   dealt,
   type EnginePlan,
   GUESS_WINDOW_SETTING,
+  gdUnitFailsOnPushErrors,
   headlessInAWindow,
   inOneEngine,
   lanesOf,
@@ -19924,17 +19926,20 @@ function testTheStaleNoteNamesTheCallThatRebuildsTheCopy(): void {
   );
   assert.match(pair, /some types/, 'more than one type reads as more than one');
   assert.match(pair, /those copies/, 'and the plural carries through the sentence');
-  // reloadScript takes one script. A list of them behind it is a call that gets refused, which is
-  // worse than saying nothing: the note is read at the moment a caller has already been misled once.
+  // Given as the list reloadScript takes: named in a sentence, a refresh note's five scripts were
+  // sent as one string and looked up as one path.
   assert.match(
     pair,
-    /reloadScript takes one script, so a call each for res:\/\/bell\.gd and res:\/\/rope\.gd/,
-    'two declaring scripts are two calls, said as two calls',
+    /editor_rescan with reloadScript set to \["res:\/\/bell\.gd","res:\/\/rope\.gd"\] recompiles those copies/,
+    'two declaring scripts are one call, given as a list',
   );
-  assert.equal(
-    toolSpec('editor_rescan')?.parameters['reloadScript']?.['type'],
-    'string',
-    'and that is what the argument is, so the sentence above is checkable rather than a habit',
+  assert.deepEqual(
+    [
+      toolSpec('editor_rescan')?.parameters['reloadScript']?.['type'],
+      toolSpec('editor_rescan')?.parameters['reloadScript']?.['items'],
+    ],
+    [['string', 'array'], { type: 'string' }],
+    'and that is what the argument takes, so the sentence above is checkable rather than a habit',
   );
 
   // Two members missing from one class: two entries, one stale type, one script. This is the shape
@@ -22143,15 +22148,8 @@ function testAStaleEnumMemberIsNamed(): void {
   );
   assert.match(
     twoScripts,
-    /a call each for res:\/\/core\/charm\.gd and res:\/\/core\/ledger\.gd since it takes one script/,
-    `reloadScript takes one script, so two are two calls: ${twoScripts}`,
-  );
-  // One at a time, because a reload can cover the next: game-b's reload of rules.gd brought in a
-  // class and reloaded gear.gd with it, and the separate call the note asked for was wasted.
-  assert.match(
-    twoScripts,
-    /Take them one at a time: .* a script listed there needs no call of its own\./,
-    `and says a script already reloaded under dependentsReloaded needs no call: ${twoScripts}`,
+    /run editor_rescan with reloadScript set to \["res:\/\/core\/charm\.gd","res:\/\/core\/ledger\.gd"\] first\./,
+    `two declaring scripts are one call, given as a list: ${twoScripts}`,
   );
   assert.doesNotMatch(
     staleAnalysisNote([probe], []),
@@ -33642,13 +33640,20 @@ async function testAGameOnTheHiddenDesktopIsNotHeldToARefresh(): Promise<void> {
       true,
       `${JSON.stringify(extra)} starts a game: ${textOf(started) ?? JSON.stringify(started)}`,
     );
-    const printed =
-      textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '';
+    // Read until the scene has said it. The runtime is an autoload and announces before the main
+    // scene's _ready prints, so on a slow runner a single read straight after found only the banner.
+    const deadline = Date.now() + 30_000;
+    let printed = '';
+    let paced: string | undefined;
+    while (paced === undefined && Date.now() < deadline) {
+      printed = textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '';
+      paced = /paced (vsync=\d+ max_fps=\d+)/.exec(printed)?.[1];
+      if (paced === undefined) {
+        await delay(250);
+      }
+    }
     await stopItsRun(server);
-    return {
-      arguments: get(answer, 'arguments'),
-      paced: /paced (vsync=\d+ max_fps=\d+)/.exec(printed)?.[1] ?? `nothing said: ${printed}`,
-    };
+    return { arguments: get(answer, 'arguments'), paced: paced ?? `nothing said: ${printed}` };
   };
   let stopped = true;
   try {
@@ -43700,6 +43705,67 @@ function testTheScriptsGodotNeverFreesAreFound(): void {
   );
 }
 
+function testGdUnitFailingOnPushErrorsIsSaid(): void {
+  const clean = { code: 0, signal: null, ended: null };
+  const printed = readRun(
+    cannedRun([
+      caseLine(S_TEST, 'test_pushed', 'STARTED'),
+      'ERROR: pushed on purpose',
+      caseLine(S_TEST, 'test_pushed', 'FAILED', '3ms'),
+      caseLine(S_TEST, 'test_faulted', 'STARTED'),
+      'SCRIPT ERROR: a script fault',
+      caseLine(S_TEST, 'test_faulted', 'FAILED', '3ms'),
+      caseLine(S_TEST, 'test_taken', 'STARTED'),
+      'ERROR: taken by an assert',
+      caseLine(S_TEST, 'test_taken', 'PASSED', '3ms'),
+      caseLine(S_TEST, 'test_warned', 'STARTED'),
+      'WARNING: warned on purpose',
+      caseLine(S_TEST, 'test_warned', 'FAILED', '3ms'),
+    ]),
+  );
+  assert.deepEqual(
+    failedOnPushErrors(printed),
+    [`${S_TEST} > test_pushed`, `${S_TEST} > test_warned`],
+    'the failed cases that printed an error or a warning, a script fault and a passing case aside',
+  );
+  const handed = {
+    suites: [{ path: S_TEST, cases: ['test_pushed', 'test_faulted', 'test_taken', 'test_warned'] }],
+    expected: {
+      errors: {
+        [S_TEST]: {
+          test_pushed: ['pushed on purpose'],
+          test_faulted: ['a script fault'],
+          test_taken: ['taken by an assert'],
+        },
+      },
+      warnings: { [S_TEST]: { test_warned: ['warned on purpose'] } },
+    },
+  };
+  const said = `The project turns on gdUnit4's report/godot/push_error, so gdUnit4 fails a case on every error and warning the engine prints while it runs, declared or not, which failed these cases: ${S_TEST} > test_pushed, ${S_TEST} > test_warned. A case that prints one on purpose does it inside assert_error(...).is_push_error(...) or is_push_warning(...), which gdUnit4 passes, and declares it for gdharness all the same.`;
+  assert.deepEqual(judgeEngine(printed, { ...handed, failsOnPushErrors: true }, clean).notes, [said]);
+  assert.deepEqual(judgeEngine(printed, handed, clean).notes, [], 'said only where the setting is on');
+
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-push-errors-'));
+  try {
+    const reads = (section: string): boolean => {
+      writeFileSync(join(project, 'project.godot'), `config_version=5\n\n${section}`);
+      return gdUnitFailsOnPushErrors(project);
+    };
+    assert.deepEqual(
+      [
+        reads('[gdunit4]\n\nreport/godot/push_error=true\n'),
+        reads('[gdunit4]\n\nreport/godot/push_error=false\n'),
+        reads('[gdunit4]\n\nreport/godot/script_error=true\n'),
+        reads(''),
+      ],
+      [true, false, false, false],
+      'on only when the project sets it, as gdUnit4 leaves it off',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
 function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   const clean = { code: 0, signal: null, ended: null };
   const handed = (
@@ -47494,6 +47560,17 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     );
     assert.equal(noAutoload.status, 1, noAutoload.said);
 
+    // gdUnit4 failing the noisy case on its push_error, which it does only under its own setting.
+    writeFileSync(godotFile, `${projectText}\n[gdunit4]\n\nreport/godot/push_error=true\n`);
+    const pushed = test('tests/noisy_test.gd');
+    writeFileSync(godotFile, projectText);
+    assert.match(
+      pushed.said,
+      /^ {2}The project turns on gdUnit4's report\/godot\/push_error, so gdUnit4 fails a case on every error and warning the engine prints while it runs, declared or not, which failed this case: res:\/\/tests\/noisy_test\.gd > test_noisy\. /m,
+      pushed.said,
+    );
+    assert.match(pushed.said, /^ {2}res:\/\/tests\/noisy_test\.gd > test_noisy failed$/m, pushed.said);
+
     // A suite standing a scene up through the scene runner and saying it runs headless is run
     // headless, where the root viewport takes the size the suite gives it in the next frame.
     writeTree(project, {
@@ -48734,6 +48811,60 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
           JSON.stringify(many),
         );
         rmSync(join(project, 'many'), { recursive: true, force: true });
+
+        // gdUnit4's own setting fails a case on what it prints, declared or not, unless an
+        // assert_error took it.
+        const settings = readFileSync(join(project, 'project.godot'), 'utf8');
+        writeTree(project, {
+          'project.godot': `${settings}\n[gdunit4]\n\nreport/godot/push_error=true\n`,
+          'pushed/pushed_test.gd': [
+            'extends GdUnitTestSuite',
+            '',
+            'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {',
+            '\t"test_bare": ["pushed bare"],',
+            '\t"test_taken": ["pushed and taken"],',
+            '}',
+            'const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_warned": ["warned and taken"]}',
+            '',
+            '',
+            'func test_bare() -> void:',
+            '\tpush_error("pushed bare")',
+            '',
+            '',
+            'func test_taken() -> void:',
+            '\tassert_error(func() -> void: push_error("pushed and taken")).is_push_error("pushed and taken")',
+            '',
+            '',
+            'func test_warned() -> void:',
+            '\tassert_error(func() -> void: push_warning("warned and taken")).is_push_warning(',
+            '\t\t"warned and taken"',
+            '\t)',
+            '',
+          ].join('\n'),
+        });
+        const pushedSaid = await call(
+          'project_test',
+          { projectPath: project, path: 'pushed' },
+          ENGINE_CALL_TIMEOUT_MS * 3,
+        );
+        const pushed = jsonOf(pushedSaid, 'pushed');
+        assert.deepEqual(
+          [
+            get(pushed, 'tests'),
+            get(pushed, 'errors'),
+            asArray(get(pushed, 'failed')).map((one) => get(one, 'name')),
+            get(pushed, 'undeclaredErrors'),
+          ],
+          [3, 1, ['test_bare'], undefined],
+          `gdUnit4 fails the bare one and passes the two an assert_error took: ${pushedSaid}`,
+        );
+        assert.match(
+          text(get(pushed, 'note')),
+          /The project turns on gdUnit4's report\/godot\/push_error, so gdUnit4 fails a case on every error and warning the engine prints while it runs, declared or not, which failed this case: res:\/\/pushed\/pushed_test\.gd > test_bare\. A case that prints one on purpose does it inside assert_error\(\.\.\.\)\.is_push_error\(\.\.\.\) or is_push_warning\(\.\.\.\), which gdUnit4 passes, and declares it for gdharness all the same\./,
+          pushedSaid,
+        );
+        writeFileSync(join(project, 'project.godot'), settings);
+        rmSync(join(project, 'pushed'), { recursive: true, force: true });
 
         // A declared text matches the whole error, so the start of one is never printed. Only the
         // case that declared it can have printed it instead: test_silent declares the same text
@@ -57261,6 +57392,37 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
       [['run_once'], ['Effect.SPENDS', 'Effect.RESALE_GROWS', 'MAX'], ['Effect.RESALE_GROWS']],
       `and the whole lists when asked for, beside what changed: ${JSON.stringify(listed)}`,
     );
+    // #1343: several at once, as a refresh note names them, each answered as one script is.
+    const several = parseTextContent(
+      await server.request('tools/call', {
+        name: 'editor_rescan',
+        arguments: { projectPath: project, reloadScript: ['res://grown.gd', 'base.gd'] },
+      }),
+    );
+    const reloads = asArray(get(several, 'reloads'));
+    assert.deepEqual(
+      reloads.map((one) => [
+        get(one, 'scriptPath'),
+        get(one, 'ok'),
+        get(one, 'methodsAdded'),
+        get(one, 'constantsAdded'),
+      ]),
+      [
+        ['res://grown.gd', true, ['sell'], ['Effect.RESALE_GROWS']],
+        ['base.gd', false, undefined, undefined],
+      ],
+      JSON.stringify(several),
+    );
+    assert.match(
+      String(get(reloads[1], 'reloadProblem')),
+      /^res:\/\/base\.gd did not compile/,
+      JSON.stringify(several),
+    );
+    assert.deepEqual(
+      [get(several, 'ok'), get(several, 'methodsAdded'), get(several, 'reloadProblem')],
+      [false, undefined, undefined],
+      `one that failed fails the call, and nothing is answered beside the scan for a list: ${JSON.stringify(several)}`,
+    );
     // The declaring script asked for without res://. Its file names only its own class, which is not
     // one to reload first: spelled this way it passed for one, and the script was told to reload itself.
     const ownClass = parseTextContent(
@@ -57630,6 +57792,7 @@ async function testARebuildSaysWhatItsOwnEngineCouldNotKnow(): Promise<void> {
       socket.once('error', reject);
     });
     let behindRefused = false;
+    let menuBehind = false;
     socket.on('message', (raw: Buffer) => {
       const message: unknown = JSON.parse(String(raw));
       if (!isRecord(message) || message['type'] !== 'tool_invoke') {
@@ -57654,7 +57817,9 @@ async function testARebuildSaysWhatItsOwnEngineCouldNotKnow(): Promise<void> {
               ok: true,
               behind: asArray(args['scriptPaths'])
                 .map(String)
-                .filter((path) => path === 'res://kit/manifest.gd'),
+                .filter(
+                  (path) => path === 'res://kit/manifest.gd' || (menuBehind && path === 'res://kit/menu.gd'),
+                ),
               unsavedInEditor: [],
             }
           : tool === 'global_classes'
@@ -57678,7 +57843,7 @@ async function testARebuildSaysWhatItsOwnEngineCouldNotKnow(): Promise<void> {
     );
     assert.match(
       text(get(withEditor.answer, 'note')),
-      /The editor holds KitManifest compiled from a text its file no longer has.*editor_rescan with reloadScript on res:\/\/kit\/manifest\.gd reloads it/,
+      /The editor holds KitManifest compiled from a text its file no longer has.*editor_rescan with reloadScript set to res:\/\/kit\/manifest\.gd reloads it/,
       withEditor.said,
     );
     // The list the second rebuild started with held KitMenu, so nothing is its engine's own.
@@ -57692,6 +57857,16 @@ async function testARebuildSaysWhatItsOwnEngineCouldNotKnow(): Promise<void> {
       [get(unasked.answer, 'heldBehindInEditor'), get(unasked.answer, 'heldBehindUnchecked')],
       [undefined, 'the editor would not say: a stand-in refusal'],
       unasked.said,
+    );
+
+    // #1343: two behind are one call, given as the list reloadScript takes.
+    behindRefused = false;
+    menuBehind = true;
+    const twoBehind = await refresh();
+    assert.match(
+      text(get(twoBehind.answer, 'note')),
+      /The editor holds KitManifest, KitMenu compiled from texts their files no longer have.*editor_rescan with reloadScript set to \["res:\/\/kit\/manifest\.gd","res:\/\/kit\/menu\.gd"\] reloads each,/,
+      twoBehind.said,
     );
   } finally {
     editor?.terminate();
@@ -58878,6 +59053,87 @@ const NO_LANGUAGE_SERVER: Pick<RenameServices, 'references' | 'definitions'> = {
   references: async () => Promise.reject(new Error('a class rename asked the language server')),
   definitions: async () => Promise.reject(new Error('a class rename asked the language server')),
 };
+
+/**
+ * A long line is quoted around the name, under changed and under leftAlone. Reported from a member
+ * rename in a game whose cockpit keeps one JSON record a line: three cards naming the word in their
+ * notes came back whole under leftAlone, the longest eight thousand characters.
+ */
+async function testALongLineIsQuotedAroundTheName(): Promise<void> {
+  const project = renameProject();
+  try {
+    mkdirSync(join(project, 'cards'));
+    writeFileSync(join(project, 'cards', '.gdignore'), '');
+    writeFileSync(
+      join(project, 'cards', 'board.json'),
+      `{"note": "${'x'.repeat(990)} Told ${'y'.repeat(1000)}"}\n`,
+    );
+    const padding = 'p'.repeat(400);
+    writeFileSync(
+      join(project, 'long.gd'),
+      `extends Node\n\nvar held: Told = null; var pad := "${padding}"\n`,
+    );
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'told.gd'),
+        symbol: 'Told',
+        newName: 'Wording',
+        newScriptPath: null,
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(outcome.ok, `the rename was refused: ${JSON.stringify(outcome)}`);
+    const card = asArray(get(outcome.report, 'leftAlone')).find(
+      (one) => get(one, 'file') === 'res://cards/board.json',
+    );
+    // The word is at 1001 of the trimmed line, so the quote starts 80 before it.
+    assert.equal(
+      get(card, 'text'),
+      `...${'x'.repeat(79)} Told ${'y'.repeat(155)}...`,
+      JSON.stringify(get(outcome.report, 'leftAlone')),
+    );
+    const changed = asArray(get(outcome.report, 'changed')).find(
+      (one) => get(one, 'file') === 'res://long.gd',
+    );
+    assert.deepEqual(
+      asArray(get(changed, 'lines')).map((one) => get(one, 'text')),
+      [`${`var held: Wording = null; var pad := "${padding}`.slice(0, 240)}...`],
+      JSON.stringify(changed),
+    );
+    // A short line is quoted whole, as it always was.
+    assert.ok(
+      asArray(get(outcome.report, 'changed')).some((one) =>
+        asArray(get(one, 'lines')).some((line) => get(line, 'text') === 'class_name Wording'),
+      ),
+      JSON.stringify(get(outcome.report, 'changed')),
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+  // A move quotes what it left alone around the path it moved.
+  const moving = moveProject();
+  try {
+    mkdirSync(join(moving, 'cards'));
+    writeFileSync(join(moving, 'cards', '.gdignore'), '');
+    writeFileSync(
+      join(moving, 'cards', 'board.json'),
+      `{"note": "${'x'.repeat(990)} res://scenes/hero.tscn ${'y'.repeat(1000)}"}\n`,
+    );
+    const outcome = planFileMove(moving, join(moving, 'scenes/hero.tscn'), join(moving, 'actors/hero.tscn'));
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    const card = asArray(get(outcome.report, 'leftAlone')).find(
+      (one) => get(one, 'file') === 'res://cards/board.json',
+    );
+    assert.equal(
+      get(card, 'text'),
+      `...${'x'.repeat(79)} res://scenes/hero.tscn ${'y'.repeat(137)}...`,
+      JSON.stringify(get(outcome.report, 'leftAlone')),
+    );
+  } finally {
+    rmSync(moving, { recursive: true, force: true });
+  }
+}
 
 /**
  * A class rename changes every use the engine makes of the name and nothing else, and names each
@@ -67546,6 +67802,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARescanAsTheEditorOpensFindsNothingMissing,
   testAScriptIsReadTheWayItsTokenizerReadsIt,
   testARenamedClassChangesItsUsesAndLeavesItsWords,
+  testALongLineIsQuotedAroundTheName,
   testARenameRefusesANameAlreadyTaken,
   testAMemberRenameFollowsWhatTheLanguageServerResolves,
   testAUseUnderACommentEndingInAFullStopIsRenamed,
@@ -67930,6 +68187,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineRunIsReadCaseByCase,
   testAnEngineMayBeSilentAsLongAsWhatItRuns,
   testAnEngineRunIsJudgedOnEverythingItPrinted,
+  testGdUnitFailingOnPushErrorsIsSaid,
   testACrashIsReadFromTheCrashHandlersReport,
   testARowSkippedForItsDataIsNoPass,
   testTheScriptsGodotNeverFreesAreFound,

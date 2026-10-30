@@ -49,6 +49,8 @@ interface PrintedError {
   readonly text: string;
   /** Whether it is a warning, which a suite declares apart from its errors. */
   readonly warning: boolean;
+  /** Whether the engine headed it `SCRIPT ERROR` or `SCRIPT WARNING`, a fault in running a script. */
+  readonly script?: boolean;
   readonly at: number;
   /** The suite that was open, or null for one printed outside every suite. */
   readonly suite: string | null;
@@ -246,7 +248,7 @@ export function readRun(printed: string): RunPrinted {
   let open: SuitePrinted | null = null;
   let during: string | null = null;
   // Errors printed after a verdict, held until it is known whether another case follows.
-  let afterCase: { text: string; at: number; warning: boolean }[] = [];
+  let afterCase: { text: string; at: number; warning: boolean; script: boolean }[] = [];
   let lastCase: string | null = null;
   const settleAfterCase = (owner: string): void => {
     for (const held of afterCase) {
@@ -346,12 +348,13 @@ export function readRun(printed: string): RunPrinted {
     }
     const text = found[1] ?? '';
     const warning = error === null;
+    const script = /^\s*SCRIPT /.test(line);
     if (open === null) {
-      errors.push({ text, at, suite: null, during: null, warning });
+      errors.push({ text, at, suite: null, during: null, warning, script });
     } else if (during === null) {
-      afterCase.push({ text, at, warning });
+      afterCase.push({ text, at, warning, script });
     } else {
-      errors.push({ text, at, suite: open.path, during, warning });
+      errors.push({ text, at, suite: open.path, during, warning, script });
     }
   }
   const last: SuitePrinted | null = open;
@@ -439,6 +442,8 @@ export interface EngineAssignment {
   readonly selfTyped?: readonly SelfTypedExport[];
   /** The version the engine must say it is as it starts, as `--godot-version` gives it. */
   readonly godotVersion?: string | null;
+  /** Whether the project turns on gdUnit4's `report/godot/push_error`. */
+  readonly failsOnPushErrors?: boolean;
 }
 
 /**
@@ -837,6 +842,11 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
   }
   const selfTyped = selfTypedSentence(handed.selfTyped ?? []);
   const notes: string[] = [];
+  const pushErrorsFailed =
+    handed.failsOnPushErrors === true ? pushErrorsFailedSentence(failedOnPushErrors(printed)) : undefined;
+  if (pushErrorsFailed !== undefined) {
+    notes.push(pushErrorsFailed);
+  }
   if (printed.leaks.length > 0 && walkStoppedPartWay(printed.lines)) {
     notes.push(`${WALK_STOPPED_SENTENCE} It said: ${printed.leaks.join(' ')}`);
   } else {
@@ -909,6 +919,45 @@ function linesShown(lines: readonly string[], picked: ReadonlySet<number>, cutSh
 /** What to do about an error, or a [param warning], printed during [param during] that its suite did not declare. */
 export function declaringAdvice(during: string, warning = false): string {
   return `if the suite prints it on purpose, list its text under "${funcOf(during)}" in the suite's ${warning ? 'GDHARNESS_EXPECTED_WARNINGS' : 'GDHARNESS_EXPECTED_ERRORS'}`;
+}
+
+/**
+ * The cases gdUnit4 failed during which the engine printed an error or a warning that was not a
+ * script's, as `suite > case`. A project turning on gdUnit4's `report/godot/push_error` has each of
+ * those fail its case, declared or not, so a case that declares it for gdharness, as the advice
+ * above asks, still fails, and gdUnit4's report gives only the text.
+ */
+export function failedOnPushErrors(printed: RunPrinted): string[] {
+  const failed = new Set<string>();
+  for (const suite of printed.suites.values()) {
+    for (const ran of suite.cases) {
+      if (ran.verdict === 'FAILED') {
+        failed.add(`${suite.path} > ${ran.name}`);
+      }
+    }
+  }
+  return [
+    ...new Set(
+      printed.errors
+        .filter((error) => error.script !== true && error.suite !== null && error.during !== null)
+        .map((error) => `${error.suite ?? ''} > ${error.during ?? ''}`)
+        .filter((ran) => failed.has(ran)),
+    ),
+  ];
+}
+
+/** What to say of [param cases], from {@link failedOnPushErrors}, or nothing when there are none. */
+export function pushErrorsFailedSentence(cases: readonly string[]): string | undefined {
+  if (cases.length === 0) {
+    return undefined;
+  }
+  return (
+    "The project turns on gdUnit4's report/godot/push_error, so gdUnit4 fails a case on every error " +
+    `and warning the engine prints while it runs, declared or not, which failed ` +
+    `${cases.length === 1 ? 'this case' : 'these cases'}: ${named(cases)}. A case that prints one on purpose ` +
+    'does it inside assert_error(...).is_push_error(...) or is_push_warning(...), which gdUnit4 passes, ' +
+    'and declares it for gdharness all the same.'
+  );
 }
 
 interface MissingError {
