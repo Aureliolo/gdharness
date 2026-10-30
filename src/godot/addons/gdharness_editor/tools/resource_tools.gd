@@ -212,7 +212,7 @@ func create_resource(args: Dictionary) -> Dictionary:
 			"ok": false,
 			"error":
 			(
-				"%s is neither an engine class nor a class_name a script in this project declares."
+				"%s is neither an engine class nor a class_name in the project's class list."
 				% resource_type
 			),
 		}

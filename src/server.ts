@@ -56,6 +56,7 @@ import {
   classesStartedWithout,
   classesWithAddonsCounted,
   contradictedDiagnostics,
+  declaredButUncached,
   declaredClasses,
   declaredClassLines,
   declaredSince,
@@ -396,6 +397,16 @@ import {
 } from './tool-definitions.js';
 import { argumentShape } from './tool-reference.js';
 import { isNewer, UpdateCheck } from './update-check.js';
+
+/**
+ * The argument naming the class each editor tool makes, which may be a class_name a project script
+ * declares.
+ */
+const TYPE_ARGUMENTS: Readonly<Record<string, string>> = {
+  add_node: 'nodeType',
+  create_resource: 'resourceType',
+  create_scene: 'rootNodeType',
+};
 
 /**
  * How many answers pass between one update notice and the next.
@@ -15316,9 +15327,17 @@ class GodotServer {
       return project.response;
     }
     const projectPath = project.value.path;
+    const typeArgument = TYPE_ARGUMENTS[command];
+    const named = typeArgument === undefined ? '' : (readString(contained.value, typeArgument) ?? '');
     const waited = await this.waitForTheEditorOpenedHere(contained.value, []);
     if (this.editorHasOpen(projectPath)) {
-      return await this.handleViaBridge(command, contained.value, askedAs);
+      const answered = await this.handleViaBridge(command, contained.value, askedAs);
+      // The editor's class list is the one its last scan wrote to the cache, so the cache lacking a
+      // class a script declares is why the editor called it no class at all.
+      if (answered.isError === true && declaredButUncached(projectPath, named) !== null) {
+        answered.content.push({ type: 'text', text: uncachedClassNote([named]) });
+      }
+      return answered;
     }
     if (effect === 'writes') {
       if (waited !== null) {
@@ -15336,6 +15355,15 @@ class GodotServer {
         );
       }
     }
+    // A headless engine reads the class cache as it starts, so a class a script declares and the
+    // cache lacks is put in it first, the way editor_run start does before a game.
+    const declaring = declaredButUncached(projectPath, named);
+    if (declaring !== null) {
+      const rebuilt = await this.rebuildClassCache(projectPath);
+      if (!rebuilt.ok) {
+        return this.answer(rebuilt);
+      }
+    }
     const outcome = await this.operation(
       'run_editor_tool',
       { command, arguments: contained.value },
@@ -15346,6 +15374,11 @@ class GodotServer {
     }
     return this.jsonTextResponse({
       ...outcome.payload,
+      ...(declaring === null
+        ? {}
+        : {
+            classCacheRebuilt: `${named} is declared in ${declaring} and .godot/global_script_class_cache.cfg did not list it, which is where an engine resolves a class name from, so the cache was rebuilt from the declarations on disk before the write.`,
+          }),
       ...(effect === 'reads'
         ? {
             readBy:

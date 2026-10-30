@@ -51,16 +51,18 @@ func _run() -> void:
 		"began 1100\nloaded 1600\nwalked 1 1700\n":
 		(
 			"PowerShell began the client after 100 ms and loaded UI Automation in 500 ms, and the"
-			+ " windows were walked 1 time, the last finding 1 element"
+			+ " windows were walked 1 time, the last finding 1 element and ending 300 ms before the"
+			+ " client was stopped"
 		),
 		"began 1100\nloaded 1600\nwalked 1 1700\nwalked 12 1900\n":
 		(
 			"PowerShell began the client after 100 ms and loaded UI Automation in 500 ms, and the"
-			+ " windows were walked 2 times, the last finding 12 elements"
+			+ " windows were walked 2 times, the last finding 12 elements and ending 100 ms before"
+			+ " the client was stopped"
 		),
 	}
 	for progress: String in reached:
-		var said: String = Accessibility._reached(progress, 1000)
+		var said: String = Accessibility._reached(progress, 1000, 2000)
 		if said != reached[progress]:
 			failures.append("marks %s are said as: %s" % [JSON.stringify(progress), said])
 	var took: Dictionary = Accessibility._took(

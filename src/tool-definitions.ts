@@ -955,7 +955,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['create'],
         description:
-          'create: the root node class, an engine class or a class_name a project script declares, which the root is made as with that script attached. Default Node. The answer names the root as scene_node get does: rootNodeType its engine class, with scriptClass for a class_name.',
+          'create: the root node class, an engine class or a class_name a project script declares, which the root is made as with that script attached. Default Node. The answer names the root as scene_node get does: rootNodeType its engine class, with scriptClass for a class_name. With no editor open, a class_name the class cache does not list yet is put in it first, and classCacheRebuilt says so.',
       },
       rootNodeName: {
         type: 'string',
@@ -1036,7 +1036,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['add'],
         description:
-          'add: the node class, such as "CharacterBody2D", or a class_name a project script declares, which the node is made as with that script attached. Give this or instancePath. The answer names the node made as get does: nodeType its engine class, for an instance the class of its scene\'s root, with scriptClass when its script declares a class_name.',
+          'add: the node class, such as "CharacterBody2D", or a class_name a project script declares, which the node is made as with that script attached. Give this or instancePath. The answer names the node made as get does: nodeType its engine class, for an instance the class of its scene\'s root, with scriptClass when its script declares a class_name. With no editor open, a class_name the class cache does not list yet is put in it first, and classCacheRebuilt says so.',
       },
       instancePath: {
         type: 'string',
@@ -1529,7 +1529,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['create'],
         description:
-          'create: the resource class, such as "PhysicsMaterial" or "StandardMaterial3D", or a class_name a project script declares, which the resource is made as with that script attached.',
+          'create: the resource class, such as "PhysicsMaterial" or "StandardMaterial3D", or a class_name a project script declares, which the resource is made as with that script attached. With no editor open, a class_name the class cache does not list yet is put in it first, and classCacheRebuilt says so.',
       },
       properties: { ...PROPERTIES, ops: ['create', 'modify'] },
       script: {

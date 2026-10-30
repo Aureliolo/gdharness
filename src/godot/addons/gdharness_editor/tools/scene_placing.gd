@@ -50,9 +50,16 @@ static func what_to_add(node_type: String, instance_path: String, scene_path: St
 
 
 ## The refusal for [param given], sent as [param argument], which names no node class, with the
-## node classes nearest it, so "Node2DD" is offered Node2D.
+## node classes nearest it, so "Node2DD" is offered Node2D. A name that is no engine class at all
+## may
+## have been meant as a class_name, which is taken too.
 static func not_a_node_class(argument: String, given: String) -> String:
 	var said: String = "%s must be a node class, and %s is not one" % [argument, given]
+	if not ClassDB.class_exists(given):
+		said = (
+			"%s must be a node class or a class_name in the project's class list, and %s is neither"
+			% [argument, given]
+		)
 	var classes: PackedStringArray = ClassDB.get_inheriters_from_class("Node")
 	var _added: bool = classes.append("Node")
 	var close: PackedStringArray = GdhRead.nearest(given, classes)
