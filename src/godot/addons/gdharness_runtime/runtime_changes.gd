@@ -7,6 +7,7 @@ const GdhCallErrors = preload("call_errors.gd")
 const GdhDeclared = preload("declared_values.gd")
 const GdhPaths = preload("runtime_paths.gd")
 const GdhRead = preload("reading.gd")
+const GdhShapes = preload("value_shapes.gd")
 const GdhValues = preload("runtime_values.gd")
 ## The most errors a call's answer carries, which is enough to see what the method ran into and
 ## short of a method reporting one per element of a list of thousands.
@@ -254,7 +255,7 @@ func _argument_for(
 					named,
 					type_string(wants),
 					index + 1,
-					type_string(typeof(given)),
+					GdhShapes.kind(sent),
 					GdhValues.remedy(sent, wants),
 				]
 			),
@@ -379,7 +380,7 @@ func _value_for(
 						called,
 						named,
 						type_string(wanted),
-						type_string(typeof(given)),
+						GdhShapes.kind(value),
 						GdhValues.remedy(value, wanted),
 					]
 				),

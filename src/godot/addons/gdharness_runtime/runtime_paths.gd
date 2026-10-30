@@ -338,19 +338,23 @@ static func walk_to(node: Object, node_path: String, reaching: String) -> Dictio
 ##
 ## A colon path read from [param node], the node the call was made on, the way the method's own
 ## path is: "_ladder:shop:_wares:-15". One beginning with a slash starts at the node it names
-## instead, "/root/Main/Hud" or "/root/Main:_game:run". The record runtime_inspect answers an object
-## with is not accepted, because its id is a 64-bit number and does not survive being sent as JSON:
-## a rounded id names another object or none, and the path names the one meant.
+## instead, "/root/Main/Hud" or "/root/Main:_game:run". A res:// or uid:// path names a resource
+## file, which is loaded the way the game loads one, so a resource the game already holds is handed
+## over as that instance. The records a read answers a node and a filed resource with carry such a
+## path and are taken as it. The record runtime_inspect answers any other object with is not
+## accepted, because its id is a 64-bit number and does not survive being sent as JSON: a rounded id
+## names another object or none, and the path names the one meant.
 static func object_at(root: Node, node: Node, node_path: String, given: Variant) -> Dictionary:
+	var named: Variant = given
 	if given is Dictionary:
-		return {
-			"message":
-			(
-				"an object is named by its path, not by the record runtime_inspect answered with:"
-				+ " its id does not survive the trip as a number"
-			),
-		}
-	var path: String = given
+		var record: Dictionary = given
+		var tag: String = str(record.get("_type", ""))
+		if not (tag in ["Node", "Resource"] and record.get("path") is String):
+			return { "message": _no_path_in(record) }
+		named = record["path"]
+	var path: String = named
+	if path.begins_with("res://") or path.begins_with("uid://"):
+		return _resource_at(path)
 	var start: Node = node
 	var start_path: String = node_path
 	var reaching: String = path
@@ -380,6 +384,63 @@ static func object_at(root: Node, node: Node, node_path: String, given: Variant)
 			"%s:%s holds %s, not an object" % [reached["called"], name, type_string(typeof(value))],
 		}
 	return { "object": value }
+
+
+## Why [param record], a dictionary given where an object goes, names none. A resource built into a
+## scene is read as its class beside its properties and has no path; the runtime builds no resource
+## from those, so the remedy is the file, not the path the other records are told to use.
+static func _no_path_in(record: Dictionary) -> String:
+	if record.has("id"):
+		return (
+			"an object is named by its path, not by the record runtime_inspect answered with:"
+			+ " its id does not survive the trip as a number"
+		)
+	var sort: String = str(record.get("_type", record.get("class", "")))
+	if sort.is_empty():
+		return (
+			"an object is named by its path, or a resource by the res:// path of its file, and a"
+			+ " dictionary names neither"
+		)
+	return (
+		(
+			"a resource is named by the res:// path of its file, and the %s given has none: a"
+			+ " resource built into a scene has no path, and the game builds none from its"
+			+ " properties"
+		)
+		% sort
+	)
+
+
+## The resource at [param path], a res:// or uid:// path, as `{"object": ...}`, or
+## `{"message": ...}` saying why there is none to hand over.
+static func _resource_at(path: String) -> Dictionary:
+	if path.contains("::"):
+		return {
+			"message":
+			(
+				"%s is a resource built into %s, and only that file can refer to it"
+				% [path, path.get_slice("::", 0)]
+			),
+		}
+	if not ResourceLoader.exists(path):
+		# An image or a sound nobody has imported is a file the engine has no loader for, and "No
+		# resource at" sent a caller looking for a file that was there.
+		if path.begins_with("res://") and FileAccess.file_exists(path):
+			return {
+				"message":
+				(
+					(
+						"%s is there, but it has never been imported, so the game has no resource "
+						+ "to load from it. project_import reimport with resourcePath %s imports it"
+					)
+					% [path, path]
+				),
+			}
+		return { "message": "No resource at %s" % path }
+	var loaded: Resource = load(path)
+	if loaded == null:
+		return { "message": "%s did not load; the game's output says why" % path }
+	return { "object": loaded }
 
 
 ## Whether a step can be taken into [param value] at all: an object, a list, a map or a value with

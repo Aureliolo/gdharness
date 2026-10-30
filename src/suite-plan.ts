@@ -785,6 +785,16 @@ export function windowNeedsOf(
   };
 }
 
+/** Whether a project caps its frames with `application/run/max_fps`. */
+export function capsFrames(projectPath: string): boolean {
+  const file = `${projectPath}/project.godot`;
+  if (!existsSync(file)) {
+    return false;
+  }
+  const cap = parseProjectGodot(readFileSync(file, 'utf8'))['application']?.['run/max_fps'];
+  return typeof cap === 'number' && cap > 0;
+}
+
 /** The window size a project asks for, from its viewport settings, or null for Godot's own default. */
 export function viewportOf(projectPath: string): { width: number; height: number } | null {
   const file = `${projectPath}/project.godot`;
