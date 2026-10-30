@@ -8,9 +8,9 @@
  */
 
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join } from 'node:path';
 import process from 'node:process';
 import { type BridgeAnnouncement, serverBehind } from '../src/bridge-announce.js';
 import {
@@ -29,7 +29,7 @@ import {
   launchFor,
   SERVER_KEY,
 } from '../src/harnesses.js';
-import { currentRunner, type Runner, spawnFor } from '../src/runner.js';
+import { currentRunner, givenExecPath, type Runner, spawnFor } from '../src/runner.js';
 import { sweep } from './support/sweep.js';
 
 const LAUNCH = launchFor('9.9.9', '/opt/godot/godot', '/home/you/game', 'npx');
@@ -80,6 +80,47 @@ function testTheLaunchIsTheSameEverywhere(): void {
   // path for and can only name.
   const bun = spawnFor('bunx', '9.9.9', '/somewhere/bin/bun');
   assert.deepEqual(bun.args.slice(-1), ['gdharness@9.9.9'], 'the version is pinned either way');
+}
+
+/**
+ * The runner is named by the link it was started through, not by the store entry behind it. A
+ * project links `.tools/bun` to a machine-wide store, and a pin raise moves the link: a config naming
+ * the resolved entry stayed on the old one, which the store then deleted.
+ */
+function testTheRunnerIsNamedByThePathItWasStartedThrough(): void {
+  const root = project();
+  try {
+    const running = process.execPath;
+    const name = basename(running);
+    const link = join(root, '.tools', 'bun');
+    mkdirSync(dirname(link), { recursive: true });
+    symlinkSync(dirname(running), link, process.platform === 'win32' ? 'junction' : 'dir');
+    const throughLink = join(link, name);
+    assert.equal(givenExecPath(throughLink, running, root, ''), throughLink, 'the link, as it was given');
+    assert.equal(
+      givenExecPath(join('.tools', 'bun', name), running, root, ''),
+      throughLink,
+      'a relative path, read from where it ran',
+    );
+    // The closest thing that is not the target: a file of the same name that is another program.
+    const impostor = join(root, 'other');
+    mkdirSync(impostor);
+    writeFileSync(join(impostor, name), 'not bun');
+    const bare = name.replace(/\.exe$/i, '');
+    assert.equal(
+      givenExecPath(bare, running, root, [impostor, link].join(delimiter)),
+      throughLink,
+      'found along PATH past a file of the same name that is another program',
+    );
+    assert.equal(
+      givenExecPath(join(impostor, name), running, root, ''),
+      running,
+      'and another program given by path is never named for it',
+    );
+    assert.equal(givenExecPath('nothing-here', running, root, ''), running, 'nor a name nothing answers');
+  } finally {
+    sweep(root);
+  }
 }
 
 function testTheRunnerRunningUsIsNamedByItsPathRatherThanItsName(): void {
@@ -859,6 +900,7 @@ const TESTS = [
   testEachShapeIsWrittenAsItsHarnessReadsIt,
   testAConfigIsWrittenWhereTheHarnessLooks,
   testTheRunnerRunningUsIsNamedByItsPathRatherThanItsName,
+  testTheRunnerIsNamedByThePathItWasStartedThrough,
   testABunEntryRunsUnderBun,
   testHarnessesSharingAFileAreWrittenOnce,
   testEveryHarnessHasAReadablePathOnEveryPlatform,

@@ -34,6 +34,7 @@ import {
   wholeFlag,
 } from './engine-launch.js';
 import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
+import { readLog } from './log-read.js';
 import { SHARE_SCRIPT } from './setup.js';
 import { type EngineEnd, exitNamed, readRun, versionFault } from './suite-judge.js';
 
@@ -319,7 +320,7 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
       return failed(faults, left, runDirectory, 'so nothing was gathered');
     }
     const gather = await engine('gather', `${GATHER}${String(workers)}`);
-    console.log(readFileSync(gather.log, 'utf8').replace(CONTROL_SEQUENCE, '').trimEnd());
+    console.log(readLog(gather.log).replace(CONTROL_SEQUENCE, '').trimEnd());
     const gatherFaults = engineFaults(gather, options.godotVersion);
     const gatheredFile = join(shareDirectory, 'gathered.arms');
     const gathered = new Set(
@@ -375,7 +376,7 @@ async function played(
   const lock = await slots.take();
   const began = Date.now();
   try {
-    const end = await watchedEngine(launch, args, directory, log, options.silenceSeconds);
+    const end = await watchedEngine(launch, lock, args, directory, log, options.silenceSeconds);
     return { name, log, end, seconds: (Date.now() - began) / 1000 };
   } finally {
     slots.release(lock);
@@ -400,7 +401,7 @@ function engineFaults(engine: EngineLeft, godotVersion: string | null): string[]
   if (!existsSync(engine.log)) {
     return faults;
   }
-  const printed = readRun(readFileSync(engine.log, 'utf8'));
+  const printed = readRun(readLog(engine.log));
   const wrongEngine = godotVersion === null ? null : versionFault(printed.engineVersion, godotVersion);
   if (wrongEngine !== null) {
     faults.push(`${engine.name}: ${wrongEngine}`);
@@ -417,7 +418,7 @@ function engineFaults(engine: EngineLeft, godotVersion: string | null): string[]
 /** How far each worker whose log is at [param logs] has got, by the last progress line it printed. */
 function progressOf(logs: readonly string[]): string {
   const each = logs.map((log, index) => {
-    const text = existsSync(log) ? readFileSync(log, 'utf8') : '';
+    const text = existsSync(log) ? readLog(log) : '';
     const last = [...text.matchAll(PROGRESS)].at(-1);
     return last === undefined
       ? `worker ${String(index)} has played no arm yet`
