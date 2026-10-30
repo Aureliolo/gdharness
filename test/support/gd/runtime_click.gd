@@ -42,6 +42,7 @@ func _everything() -> void:
 	await _check_a_control_past_the_engine_viewport()
 	await _check_the_world_behind_the_interface()
 	await _check_words_nobody_can_click()
+	await _check_words_drawn_apart_from_a_clipping_container()
 	await _check_words_in_a_rich_label()
 	await _check_a_word_inside_a_sentence()
 	await _check_a_word_said_inside_other_words()
@@ -604,6 +605,49 @@ func _check_words_nobody_can_click() -> void:
 	await process_frame
 
 
+## Words on a button drawn on a CanvasLayer under a clipping container, on a top_level one in it,
+## and on one under a plain Node in it are on screen above where the container ends, since none is
+## drawn inside it. #1344: a reader drawn on a layer under a clipping desk had every choice above
+## the
+## desk's top edge refused as off the screen. A button drawn inside the container is still clipped.
+func _check_words_drawn_apart_from_a_clipping_container() -> void:
+	var desk: Control = Control.new()
+	desk.name = "Desk"
+	desk.clip_contents = true
+	desk.position = Vector2(2, 40)
+	desk.size = Vector2(20, 10)
+	root.add_child(desk)
+	var layer: CanvasLayer = CanvasLayer.new()
+	layer.name = "Reader"
+	desk.add_child(layer)
+	_put("OnLayer", Vector2(2, 2), layer, "Layered")
+	var lifted: Button = _button("Lifted", Vector2.ZERO, desk, "Lifted")
+	lifted.top_level = true
+	lifted.global_position = Vector2(14, 2)
+	var plain: Node = Node.new()
+	plain.name = "Plain"
+	desk.add_child(plain)
+	_put("Apart", Vector2(26, 2), plain, "Apart")
+	_put("Inside", Vector2(38, -30), desk, "Inside")
+	await process_frame
+	for words: String in ["Layered", "Lifted", "Apart"]:
+		var clicked: Dictionary = await input.click({ "says": words })
+		if clicked.get("type") == "error":
+			_fail(
+				(
+					"a button drawn apart from a clipping container is on screen: %s"
+					% JSON.stringify(clicked)
+				)
+			)
+	if _presses("OnLayer") != 1 or _presses("Lifted") != 1 or _presses("Apart") != 1:
+		_fail("and each is pressed: %s" % JSON.stringify(pressed))
+	var clipped: Dictionary = await input.click({ "says": "Inside" })
+	if not _says(clipped, "outside what the screen shows") or _presses("Inside") != 0:
+		_fail("a button drawn inside it is still clipped: %s" % JSON.stringify(clipped))
+	desk.queue_free()
+	await process_frame
+
+
 ## Words that are part of a rich label's line are pressed where they are drawn, so a link among them
 ## is the one pressed. #885: a line naming two people, each a link, was pressed in its middle, which
 ## was on the second name, and the game opened the wrong page. Here the line's middle is on plain
@@ -680,7 +724,7 @@ func _check_a_word_inside_a_sentence() -> void:
 		not _says(refused, 'no control on screen says exactly "Out"')
 		or not said.contains("/root/Line")
 		or not said.contains("/root/Tab, hidden")
-		or not said.contains("pass index 0")
+		or not said.contains("pass index 0 to press /root/Line anyway")
 		or _presses("Line") != 0
 	):
 		_fail(
@@ -785,7 +829,10 @@ func _check_a_word_said_inside_other_words() -> void:
 	there.queue_free()
 	await process_frame
 	var buried: Dictionary = await input.click({ "says": "Out" })
-	if not _says(buried, 'says "Out" as a word of its own') or not _says(buried, '"Scout, 90"'):
+	if (
+		not _says(buried, 'says "Out" as a word of its own')
+		or not _says(buried, '"Scout, 90"; pass index 0 to press /root/Look anyway')
+	):
 		_fail("words found only inside a longer word are refused: %s" % JSON.stringify(buried))
 	var anyway: Dictionary = await input.click({ "says": "Out", "index": 0 })
 	if _presses("Look") != 1:

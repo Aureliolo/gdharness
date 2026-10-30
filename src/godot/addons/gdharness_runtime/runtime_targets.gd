@@ -250,7 +250,7 @@ static func control_saying(
 			(
 				(
 					'no %s on screen%s says exactly "%s", so nothing was clicked: %s %s says it as '
-					+ 'part of "%s", while %s; pass index %d to press that one anyway'
+					+ 'part of "%s", while %s; pass index %d to press %s anyway'
 				)
 				% [
 					"button" if exact_elsewhere.size() > exact_out_of_reach.size() else "control",
@@ -261,6 +261,7 @@ static func control_saying(
 					_shortened(lines[index]),
 					_out_of_reach_exactly(exact_elsewhere, elsewhere_as),
 					index,
+					targets[index].get_path(),
 				]
 			),
 		}
@@ -272,7 +273,7 @@ static func control_saying(
 				(
 					'no control on screen%s says "%s" as a word of its own, so nothing was '
 					+ 'clicked: %s %s has it only inside a longer word, "%s"; pass index %d to '
-					+ "press that one anyway"
+					+ "press %s anyway"
 				)
 				% [
 					under,
@@ -281,6 +282,7 @@ static func control_saying(
 					targets[index].get_path(),
 					_shortened(lines[index]),
 					index,
+					targets[index].get_path(),
 				]
 			),
 		}
@@ -871,8 +873,8 @@ static func _where_it_lands(
 	var half: Vector2 = (drawn * Rect2(Vector2.ZERO, target.size)).size * 0.5
 	var moves: Dictionary[ScrollContainer, Vector2] = {}
 	var landed: Vector2 = point
-	var walk: Node = target.get_parent()
-	while walk != null and not (walk is Viewport):
+	var walk: CanvasItem = _drawn_inside(target)
+	while walk != null:
 		var holder: ScrollContainer = walk as ScrollContainer
 		if holder != null:
 			var shown: Rect2 = (
@@ -887,7 +889,7 @@ static func _where_it_lands(
 			if next != landed:
 				moves[holder] = next - landed
 			landed = next
-		walk = walk.get_parent()
+		walk = _drawn_inside(walk)
 	return moves
 
 
@@ -919,8 +921,8 @@ static func _off_screen(target: Control, aim: Vector2) -> bool:
 static func _clipped_away(
 	control: Control, point: Vector2, moves: Dictionary[ScrollContainer, Vector2]
 ) -> bool:
-	var walk: Node = control.get_parent()
-	while walk != null and not (walk is Viewport):
+	var walk: CanvasItem = _drawn_inside(control)
+	while walk != null:
 		var holder: Control = walk as Control
 		if (
 			holder != null
@@ -928,8 +930,19 @@ static func _clipped_away(
 			and not _holds(holder, point - _moved_by(holder, moves))
 		):
 			return true
-		walk = walk.get_parent()
+		walk = _drawn_inside(walk)
 	return false
+
+
+## The canvas item [param item] is drawn inside, which is what can clip it and what moves it, or
+## null where its drawing starts afresh: under a CanvasLayer, a viewport or a node that is not a
+## canvas item, or when it is top_level. A clipping Control above a CanvasLayer clips nothing on the
+## layer, and judged against one, every button of a reader drawn on a layer under a clipping desk
+## was refused as off the screen where it sat above the desk's top edge.
+static func _drawn_inside(item: CanvasItem) -> CanvasItem:
+	if item.top_level:
+		return null
+	return item.get_parent() as CanvasItem
 
 
 ## The canvas layer [param control] is drawn on, 0 for the viewport's own canvas.

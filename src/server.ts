@@ -11590,6 +11590,15 @@ class GodotServer {
         if (spawned) {
           clearTheRecord();
         }
+        // The editor holds its play as going until it notices the game has gone, and a play begun
+        // before then replaced one it still held as playing: its count of plays did not move, and the
+        // new play was given this one's console. Told here, the editor holds the play over at once.
+        if (running.throughEditor) {
+          const told = await this.handleViaBridge('stop_playing', {});
+          if (told.isError === true) {
+            this.logDebug(`The editor was not told its closed game is over: ${told.content[0]?.text ?? ''}`);
+          }
+        }
         running.endedAt ??= Date.now();
         running.log.record(
           'info',

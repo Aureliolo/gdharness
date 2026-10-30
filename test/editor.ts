@@ -408,6 +408,9 @@ const HOOKS_GD = [
   '\t\t"play":',
   '\t\t\tEditorInterface.play_main_scene()',
   '\t\t\treturn {"playing": EditorInterface.is_playing_scene()}',
+  // Whether the editor holds a play as going, read past the server and its addon.
+  '\t\t"playing":',
+  '\t\t\treturn {"playing": EditorInterface.is_playing_scene()}',
   // The addon stopping the play and somebody else starting one in the same frame, which no frame of
   // the addon looks between: a stop through the server and a play the moment after it.
   '\t\t"stop_then_play":',
@@ -6759,6 +6762,14 @@ async function testAPlayIsItsOwn({ call, attempt, refusal, play, project }: Edit
   const transcript = get(first, 'transcript');
   assert.equal(typeof transcript, 'string', `a played run writes a transcript: ${JSON.stringify(first)}`);
   await call('editor_run', { op: 'stop' });
+  // The game is closed as a player closes it, and the editor is told the play is over rather than
+  // left to notice: a play begun before it noticed was taken for the closed one still going.
+  const after = await hook(project, { op: 'playing' });
+  assert.equal(
+    get(after, 'playing'),
+    false,
+    `the editor holds the play over once the stop has answered: ${JSON.stringify(after)}`,
+  );
 
   // A play started in the editor by somebody else, which the server picks up.
   const started = await hook(project, { op: 'play' });
