@@ -129,6 +129,7 @@ import {
   type SlotHolder,
   START_TOLERANCE_MS,
   slotsDrawnOn,
+  slotTaker,
   slotWaitedSaid,
   slotWaitSaid,
   UNWRITTEN_MS,
@@ -44984,23 +44985,49 @@ async function testATakeSweepsGoneLocksPastTheCount(): Promise<void> {
 }
 
 /**
- * While a gate is in the machine's queue, an engine outside a gate takes only the last two slots, and
- * a gate's engine takes only the others, as the games' own tools take them. Work outside the queue
- * once held 12 of 16 slots while gates waited hours. A gate's mark is live by the rule a lock is: one
- * whose holder has gone is removed and holds nothing back, and one not yet written names nobody.
+ * Gates come before work beside them, as the games' own tools take the slots. While a gate waits
+ * for its seat, an engine outside a gate takes no slot at all, the kept ones included; once every
+ * queued gate is seated it takes only the last two, and a gate's engine only the others. Work outside
+ * the queue once held 12 of 16 slots while gates waited hours. A timing takes any slot and a turn the
+ * queue gave takes the kept two, while its ticket is there. A gate's mark is live by the rule a lock
+ * is: one whose holder has gone is removed with its seat and holds nothing back, and one not yet
+ * written names nobody.
  */
 async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
-  assert.deepEqual(slotsDrawnOn(16, false, false), {
-    numbers: [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0],
-  });
-  assert.deepEqual(slotsDrawnOn(16, false, true), { numbers: [15, 14], limit: 'kept' });
-  assert.deepEqual(slotsDrawnOn(16, true, true), {
+  const every16 = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
+  assert.deepEqual(slotsDrawnOn(16, 'other', 'none'), { numbers: every16 });
+  assert.deepEqual(slotsDrawnOn(16, 'other', 'seated'), { numbers: [15, 14], limit: 'kept' });
+  assert.deepEqual(slotsDrawnOn(16, 'other', 'waiting'), { numbers: [], limit: 'held' });
+  assert.deepEqual(slotsDrawnOn(16, 'gate', 'waiting'), {
     numbers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
     limit: 'gate',
   });
-  assert.deepEqual(slotsDrawnOn(2, true, false), { numbers: [0], limit: 'gate' });
-  assert.deepEqual(slotsDrawnOn(2, false, true), { numbers: [1], limit: 'kept' });
-  assert.deepEqual(slotsDrawnOn(1, false, true), { numbers: [0] }, "one slot is everybody's");
+  assert.deepEqual(slotsDrawnOn(16, 'timing', 'waiting'), { numbers: every16 }, 'a timing takes any slot');
+  assert.deepEqual(
+    slotsDrawnOn(16, 'turn', 'waiting'),
+    { numbers: [15, 14], limit: 'kept' },
+    'a turn the kept',
+  );
+  assert.deepEqual(slotsDrawnOn(2, 'gate', 'none'), { numbers: [0], limit: 'gate' });
+  assert.deepEqual(slotsDrawnOn(2, 'other', 'seated'), { numbers: [1], limit: 'kept' });
+  assert.deepEqual(slotsDrawnOn(1, 'other', 'seated'), { numbers: [0] }, "one slot is everybody's");
+  const turnTicket = join(realpathSync(tmpdir()), `gdharness-turn-${String(process.pid)}.json`);
+  writeFileSync(turnTicket, '');
+  try {
+    assert.deepEqual(
+      [
+        slotTaker({ [SHARE_VARIABLE]: 'share', [SHARE_COUNT_VARIABLE]: '3', GODOT_ENGINE_TIMED: 'x' }),
+        slotTaker({ GODOT_ENGINE_TIMED: '/slots/3.lock' }),
+        slotTaker({ GODOT_ENGINE_TURN: turnTicket }),
+        slotTaker({ GODOT_ENGINE_TURN: `${turnTicket}.gone` }),
+        slotTaker({}),
+      ],
+      ['gate', 'timing', 'turn', 'other', 'other'],
+      'a gate, a timing, a turn while its ticket is there, and anything else',
+    );
+  } finally {
+    rmSync(turnTicket, { force: true });
+  }
   assert.deepEqual(
     [
       runsInAGate({ [SHARE_VARIABLE]: 'share', [SHARE_COUNT_VARIABLE]: '3' }),
@@ -45027,14 +45054,15 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
     return taken;
   };
   try {
-    const outside = new EngineSlots(directory, 4, holder, undefined, false);
-    const gate = new EngineSlots(directory, 4, holder, undefined, true);
+    const outside = new EngineSlots(directory, 4, holder, undefined, () => 'other');
+    const gate = new EngineSlots(directory, 4, holder, undefined, () => 'gate');
     assert.deepEqual(await takeAll(outside), ['3.lock', '2.lock', '1.lock', '0.lock'], 'no gate queued');
 
     // A gate whose process has gone: its mark is removed and holds nothing back.
     const gone = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
     assert.equal(typeof gone.pid, 'number', 'a process to have gone');
     writeFileSync(join(queued, 'gone.json'), JSON.stringify({ pid: gone.pid, started }));
+    writeFileSync(join(queued, 'gone.json.seated'), '');
     // And one still being written, which names nobody yet.
     writeFileSync(join(queued, 'writing.json'), '');
     assert.deepEqual(
@@ -45042,10 +45070,23 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
       ['3.lock', '2.lock', '1.lock', '0.lock'],
       'a gone gate and an unwritten mark keep no slots',
     );
-    assert.deepEqual(readdirSync(queued).sort(), ['writing.json'], "and the gone gate's mark is removed");
+    assert.deepEqual(
+      readdirSync(queued).sort(),
+      ['writing.json'],
+      "and the gone gate's mark is removed with its seat",
+    );
 
     writeFileSync(join(queued, 'ticket.json'), JSON.stringify({ pid: process.pid, started }));
-    assert.deepEqual(await takeAll(outside), ['3.lock', '2.lock'], 'a live gate keeps the first two');
+    assert.deepEqual(await takeAll(outside), [], 'a live gate waiting for its seat holds back every slot');
+    assert.equal(outside.drawn.limit, 'held', JSON.stringify(outside.drawn));
+    assert.equal(
+      slotWaitSaid(3000, 4, 'slots', outside.holders(), outside.drawn),
+      "Waiting 3 s so far for an engine: a gate in this machine's queue is waiting for its seat (slots), and the engine starts once every queued gate has its seat.",
+    );
+    assert.deepEqual(await takeAll(gate), ['0.lock', '1.lock'], "while the gates' engines take theirs");
+
+    writeFileSync(join(queued, 'ticket.json.seated'), '');
+    assert.deepEqual(await takeAll(outside), ['3.lock', '2.lock'], 'a seated gate keeps the first two');
     assert.equal(outside.drawn.limit, 'kept', JSON.stringify(outside.drawn));
     assert.deepEqual(await takeAll(gate), ['0.lock', '1.lock'], 'and its engines take only those');
     assert.equal(
@@ -45053,7 +45094,7 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
       'Waiting 3 s so far for an engine: the 2 engine slots of the 4 on this machine (slots) kept for engines outside a gate while a gate is queued are in use, by a gate or another tool, and the engine starts when one is given back or no gate is queued.',
     );
     assert.equal(
-      slotWaitSaid(1000, 2, 'slots', [holder], slotsDrawnOn(2, false, true)),
+      slotWaitSaid(1000, 2, 'slots', [holder], slotsDrawnOn(2, 'other', 'seated')),
       `Waiting 1 s so far for an engine: the one engine slot of the 2 on this machine (slots) kept for engines outside a gate while a gate is queued is in use, by this process (pid ${String(process.pid)}), and the engine starts when it is given back or no gate is queued.`,
     );
     assert.equal(
@@ -45065,9 +45106,11 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
 
     // A slot already held is kept to its end whatever arrives in the queue.
     rmSync(join(queued, 'ticket.json'));
+    rmSync(join(queued, 'ticket.json.seated'));
     const held = await outside.takeFree();
     assert.equal(held === null ? null : basename(held), '3.lock', 'the queue empty again');
     writeFileSync(join(queued, 'ticket.json'), JSON.stringify({ pid: process.pid, started }));
+    writeFileSync(join(queued, 'ticket.json.seated'), '');
     assert.equal(
       held === null ? false : existsSync(held) && holderOf(readFileSync(held, 'utf8'))?.pid === process.pid,
       true,

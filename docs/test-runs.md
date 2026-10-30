@@ -389,15 +389,20 @@ path. A tool the engine starts that takes slots this way should run on that slot
 second one, for as long as the lock names a live holder other than itself.
 
 Gates come first. Each gate in the machine's queue, waiting for its seat or holding it, keeps a mark
-from its arrival to its release: `<directory>/queued/<its ticket>.json`, holding what a lock does.
-A mark is live by the rule a lock is held by; one not yet written names nobody and is passed over,
-and one whose holder has gone is removed. While any mark is live:
+from its arrival to its release: `<directory>/queued/<its ticket>.json`, holding what a lock does,
+and an empty `<its ticket>.json.seated` beside it once it has its seat. A mark is live by the rule a
+lock is held by; one not yet written names nobody and is passed over, and one whose holder has gone
+is removed with its `.seated` file.
 
-- An engine outside a gate takes only the last two slots, numbers `count - 2` and up, and waits
-  for those.
-- A gate's engine takes only the slots below `count - 2`, and slot 0 at least. A process runs
-  inside a gate when `GODOT_ENGINE_SHARE` and `GODOT_ENGINE_SHARE_COUNT` are both set, and a gate's
-  engines keep to their slots whether or not a mark is live.
+- A gate's engine takes only the slots below `count - 2`, and slot 0 at least, whatever the queue
+  holds. A process runs inside a gate when `GODOT_ENGINE_SHARE` and `GODOT_ENGINE_SHARE_COUNT` are
+  both set.
+- A timing's engine, one with `GODOT_ENGINE_TIMED` set, takes any slot.
+- An engine run in a turn the queue gave, with `GODOT_ENGINE_TURN` naming a ticket file that is
+  still there, takes the last two slots.
+- Any other engine takes no slot while a live mark has no `.seated` file, the last two included,
+  and waits; only the last two, numbers `count - 2` and up, while every live mark is seated; and
+  any slot while no mark is live.
 
 An engine outside a gate tries the highest-numbered slot first, queue or none, so the gates' slots
 stay free longest. Which slots a take may try is asked again at every look, and a slot already held
