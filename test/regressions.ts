@@ -60085,6 +60085,56 @@ function movedIn(
 }
 
 /**
+ * A path from the project's root without res://, the way a build script or a note names a file, is
+ * answered under leftAlone. Reported from a folder move in a game whose Python gate listed the
+ * moved scripts as `"game/store/icons.gd"`: nothing was changed or named, and the gate broke.
+ */
+function testAMoveNamesAPathFromTheRootItLeftAlone(): void {
+  const project = moveProject();
+  try {
+    // In a folder of its own, where it does not resolve as a path relative to the file holding it.
+    mkdirSync(join(project, 'tools'));
+    writeFileSync(
+      join(project, 'tools', 'gate.py'),
+      'CHECKED = [\n    "scenes/hero.tscn",\n    "old/scenes/hero.tscn",\n    "scenes/hero.tscn.bak",\n]\n',
+    );
+    writeFileSync(join(project, 'PLAN.md'), 'The scenes/ folder holds the hero.\n');
+    const scene = planFileMove(project, join(project, 'scenes/hero.tscn'), join(project, 'actors/hero.tscn'));
+    assert.ok(scene.ok, JSON.stringify(scene));
+    const named = asArray(get(scene.report, 'leftAlone')).filter(
+      (one) => get(one, 'file') === 'res://tools/gate.py',
+    );
+    assert.deepEqual(
+      named.map((one) => [get(one, 'line'), get(one, 'text'), get(one, 'why')]),
+      [
+        [
+          2,
+          '"scenes/hero.tscn",',
+          "names res://scenes/hero.tscn as scenes/hero.tscn, a path from the project's root without res://, which the engine does not read as one",
+        ],
+      ],
+      `the root path alone, not a longer path ending in it or a longer name: ${JSON.stringify(get(scene.report, 'leftAlone'))}`,
+    );
+    assert.equal(
+      readFileSync(join(project, 'tools', 'gate.py'), 'utf8').includes('"scenes/hero.tscn"'),
+      true,
+      'left as it was',
+    );
+    // A folder is named the same way, in prose too.
+    const folder = planFileMove(project, join(project, 'scenes'), join(project, 'stage'));
+    assert.ok(folder.ok, JSON.stringify(folder));
+    assert.ok(
+      asArray(get(folder.report, 'leftAlone')).some(
+        (one) => get(one, 'file') === 'res://PLAN.md' && get(one, 'line') === 1,
+      ),
+      JSON.stringify(get(folder.report, 'leftAlone')),
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * A file moved is named by its new path everywhere a path the engine reads names it, in the style
  * it was written in; a relative path is worked out again from the file holding it. A note in prose
  * and a scene saved in binary keep the old path and say so.
@@ -67816,6 +67866,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMovedScriptIsNamedByItsNewPathEverywhere,
   testARenameWritesEveryFileOrNone,
   testAMovedFileIsNamedByItsNewPathEverywhere,
+  testAMoveNamesAPathFromTheRootItLeftAlone,
   testAMovedFileTakesItsSidecars,
   testAMovedDirectoryTakesEverythingInIt,
   testAMoveThatCannotBeMadeIsRefused,
