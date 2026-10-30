@@ -2188,6 +2188,7 @@ export function exportPresetRefusal(projectPath: string, preset: string): string
  * [param beside] is what else the run wrote into the output's directory. A Windows or Linux export
  * writes the game's pack beside the executable unless the preset embeds it, and the build does not
  * start without it, so an answer naming only the executable sent the caller to ship half a game.
+ * [param bytes] is the output's size after the run.
  */
 export function exportAnswer(
   ending: EngineRun,
@@ -2201,6 +2202,7 @@ export function exportAnswer(
   after: number | null,
   beside: readonly string[] = [],
   docCacheNote: string | null = null,
+  bytes: number | null = null,
 ): ToolResponse {
   const { log } = ending;
   const written = after !== null && after !== before;
@@ -2213,6 +2215,9 @@ export function exportAnswer(
     failure: ending.failure ?? undefined,
     errors: log.count('error'),
     warnings: log.count('warning'),
+    // Exported says the file was written, not what it holds: a filter that leaves nearly
+    // everything out still writes a pack, and only its size shows it.
+    ...(written && bytes !== null ? { bytes } : {}),
     ...(beside.length === 0 ? {} : { alsoWritten: beside }),
     ...(notCopied.length === 0
       ? {}
@@ -7289,6 +7294,7 @@ class GodotServer {
       writtenAt(),
       beside,
       docCacheNote,
+      existsSync(output.absolutePath) ? statSync(output.absolutePath).size : null,
     );
   }
 

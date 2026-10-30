@@ -28051,6 +28051,14 @@ function testAnExportIsJudgedByTheFileItWrote(): void {
   );
   assert.equal(get(parseTextContent({ result: exportAnswer(clean(), asked, 1000, 2000) }), 'exported'), true);
   assert.equal(get(parseTextContent({ result: exportAnswer(clean(), asked, null, 5) }), 'exported'), true);
+  // Exported says the file was written, and only its size says whether a filter left it near empty.
+  assert.deepEqual(
+    [
+      get(parseTextContent({ result: exportAnswer(clean(), asked, 1000, 2000, [], null, 4096) }), 'bytes'),
+      get(parseTextContent({ result: exportAnswer(clean(), asked, 1000, 2000) }), 'bytes'),
+    ],
+    [4096, undefined],
+  );
   assert.deepEqual(
     said(exportAnswer(clean(), asked, null, null)),
     [true, "Export with preset 'Linux' did not produce builds/game.x86_64."],
@@ -28746,6 +28754,11 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
         .toString('latin1'),
       'GDPC',
       'and the file written is a pack',
+    );
+    assert.equal(
+      get(pack, 'bytes'),
+      statSync(join(project, 'build', 'tux.pck')).size,
+      `its size is the file's: ${JSON.stringify(pack)}`,
     );
     assert.match(
       await refused({ op: 'run', preset: 'Tux', outputPath: 'build/tux.pck', pack: true, debug: true }),
