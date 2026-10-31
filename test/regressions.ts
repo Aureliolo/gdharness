@@ -25410,6 +25410,30 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         [true, ['Kept']],
         JSON.stringify(naming),
       );
+      // A script naming its own class compiles only against a list holding it, which the engine
+      // writing it started without.
+      const selfish = (body: string): Promise<unknown> =>
+        call('script_edit', {
+          projectPath: project,
+          op: 'create',
+          scriptPath: `res://made/selfish_${String(body.length)}.gd`,
+          content: `class_name Selfish${String(body.length)}\nextends RefCounted\n\n${body.replaceAll('Selfish', `Selfish${String(body.length)}`)}`,
+        });
+      const own = await selfish('static func made() -> Selfish:\n\treturn Selfish.new()\n');
+      assert.deepEqual(
+        [get(own, 'parses'), get(own, 'registered')],
+        [true, true],
+        `a script naming its own class parses: ${JSON.stringify(own)}`,
+      );
+      assert.match(String(get(own, 'parsesNote')), /did not hold Selfish\d+, so the errors it printed/);
+      const broken = await selfish(
+        'static func made() -> Selfish:\n\treturn Selfish.new()\n\nfunc gone() -> void:\n\tnowhere()\n',
+      );
+      assert.deepEqual(
+        [get(broken, 'parses'), get(broken, 'parsesNote')],
+        [false, undefined],
+        `and one that is wrong besides still does not: ${JSON.stringify(broken)}`,
+      );
 
       // An export hint can only mean an export, so given alone it still writes one.
       const hinted = await call('script_edit', {
