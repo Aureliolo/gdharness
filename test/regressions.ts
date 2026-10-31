@@ -133,12 +133,16 @@ import {
   inAGate as runsInAGate,
   SHARE_COUNT_VARIABLE,
   SHARE_VARIABLE,
+  SLOT_YIELD_MS,
   type SlotHolder,
+  SlotLine,
   START_TOLERANCE_MS,
   slotEngineNamed,
+  slotsClaimed,
   slotsDrawnOn,
   slotTaker,
   slotWaitedSaid,
+  slotWaiters,
   slotWaitSaid,
   UNWRITTEN_MS,
   WAITING_FOLDER,
@@ -25406,6 +25410,30 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         [true, ['Kept']],
         JSON.stringify(naming),
       );
+      // A script naming its own class compiles only against a list holding it, which the engine
+      // writing it started without.
+      const selfish = (body: string): Promise<unknown> =>
+        call('script_edit', {
+          projectPath: project,
+          op: 'create',
+          scriptPath: `res://made/selfish_${String(body.length)}.gd`,
+          content: `class_name Selfish${String(body.length)}\nextends RefCounted\n\n${body.replaceAll('Selfish', `Selfish${String(body.length)}`)}`,
+        });
+      const own = await selfish('static func made() -> Selfish:\n\treturn Selfish.new()\n');
+      assert.deepEqual(
+        [get(own, 'parses'), get(own, 'registered')],
+        [true, true],
+        `a script naming its own class parses: ${JSON.stringify(own)}`,
+      );
+      assert.match(String(get(own, 'parsesNote')), /did not hold Selfish\d+, so the errors it printed/);
+      const broken = await selfish(
+        'static func made() -> Selfish:\n\treturn Selfish.new()\n\nfunc gone() -> void:\n\tnowhere()\n',
+      );
+      assert.deepEqual(
+        [get(broken, 'parses'), get(broken, 'parsesNote')],
+        [false, undefined],
+        `and one that is wrong besides still does not: ${JSON.stringify(broken)}`,
+      );
 
       // An export hint can only mean an export, so given alone it still writes one.
       const hinted = await call('script_edit', {
@@ -45277,10 +45305,10 @@ async function testASlotWaitLooksWhenTheSlotsChange(): Promise<void> {
     class Counted extends EngineSlots {
       looks = 0;
       waited: number[] = [];
-      override async takeFree(game = false, waitedMs = 0): Promise<string | null> {
+      override async takeFree(game = false, waitedMs = 0, line?: SlotLine): Promise<string | null> {
         this.looks += 1;
         this.waited.push(waitedMs);
-        return super.takeFree(game, waitedMs);
+        return super.takeFree(game, waitedMs, line);
       }
     }
     const slots = new Counted(directory, 1, me);
@@ -45836,8 +45864,8 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
     writeFileSync(join(waits, 'live.json'), JSON.stringify({ pid: process.pid, started }));
     assert.deepEqual(
       await takeAll(outside),
-      ['3.lock', '2.lock', '1.lock', '0.lock'],
-      'a gone gate and an unwritten mark keep no slots',
+      ['2.lock', '1.lock', '0.lock'],
+      'a gone gate and an unwritten mark keep no slots, and the live wait is left the first it takes',
     );
     assert.deepEqual(
       readdirSync(queued).sort(),
@@ -45988,6 +46016,124 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
 }
 
 /**
+ * Takers are served in the order they began to wait. A one-off waited 38 to 80 minutes for one slot
+ * while runs of seconds took turns on it, each the first to look as a lock went. A take leaves a free
+ * slot to a taker waiting longer that may take it, for {@link SLOT_YIELD_MS} at most, and reads the
+ * marks the games' tools write, which name `since` in seconds, or nothing beside the file's time.
+ */
+async function testTakersWaitTheirTurn(): Promise<void> {
+  assert.deepEqual(
+    [...slotsClaimed([[3, 2], [3]], [2, 3])],
+    [[3, 0]],
+    'the second wants only what the first took',
+  );
+  assert.deepEqual(
+    [...slotsClaimed([[3], [3, 2]], [2, 3])].sort(([a], [b]) => a - b),
+    [
+      [2, 1],
+      [3, 0],
+    ],
+    'each takes the first left to it',
+  );
+  assert.deepEqual([...slotsClaimed([[1]], [0])], [], 'one finding none of its own free takes none');
+
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-line-'));
+  const marks = join(directory, WAITING_FOLDER);
+  mkdirSync(marks, { recursive: true });
+  try {
+    const me = { pid: process.pid, started: await ownStart() };
+    // Live, since it names this process, and another taker's by its name.
+    const ahead = join(marks, '1-1.json');
+    writeFileSync(ahead, JSON.stringify({ ...me, taker: 'other', since: (Date.now() - 60_000) / 1000 }));
+    assert.deepEqual(
+      slotWaiters(directory).map((one) => [one.mark, one.taker, Math.round((Date.now() - one.since) / 1000)]),
+      [['1-1.json', 'other', 60]],
+      'a mark names its kind and since when, in seconds',
+    );
+    const began = Date.now() - 60_000;
+    writeFileSync(ahead, JSON.stringify({ ...me, taker: 'other', since: (began + 0.4) / 1000 }));
+    assert.deepEqual(
+      slotWaiters(directory).map((one) => one.since),
+      [began],
+      'read in whole milliseconds, as a take reads its own clock',
+    );
+    const tied = new SlotLine('other', false, () => began);
+    const waiter = { mark: '1-1.json', taker: 'other', since: began, game: false } as const;
+    assert.deepEqual(
+      tied.ahead([waiter]).map((one) => one.mark),
+      ['1-1.json'],
+      'a mark begun in the millisecond a take began was there at its first look',
+    );
+    tied.mark = '1-0.json';
+    assert.deepEqual(tied.ahead([waiter]), [], 'and once the take has a mark, a tie goes by name');
+    writeFileSync(ahead, JSON.stringify({ ...me, taker: 'other', since: (Date.now() - 60_000) / 1000 }));
+
+    const late = new EngineSlots(directory, 2, me, undefined, () => 'other');
+    const first = await late.takeFree();
+    // Read after the take, which notes when it first left the slot before it answers.
+    const firstLeft = Date.now();
+    assert.equal(first, join(directory, '0.lock'), 'a newcomer leaves slot 1, the one ahead takes first');
+    assert.equal(await late.takeFree(), null, 'and waits rather than take it');
+    assert.deepEqual(late.drawn.left, [1], 'saying which it leaves');
+    assert.match(
+      slotWaitSaid(3000, 2, directory, late.holders(), late.drawn),
+      /It leaves free slot 1 to takers that began waiting before it, which go first\.$/,
+    );
+
+    let now = Date.now();
+    const line = new SlotLine('other', false, () => now);
+    assert.equal(await late.takeFree(false, 0, line), null, 'a take with its place in line leaves it too');
+    now += SLOT_YIELD_MS - 1;
+    assert.equal(await late.takeFree(false, 0, line), null, 'until it has left it for the yield');
+    now += 1;
+    assert.equal(await late.takeFree(false, 0, line), join(directory, '1.lock'), 'then takes it itself');
+    // A mark that let a slot left to it stand, as a wait for memory under an older release does.
+    late.release(join(directory, '1.lock'));
+    await delay(Math.max(0, firstLeft + SLOT_YIELD_MS - Date.now()));
+    assert.equal(
+      await late.takeFree(),
+      join(directory, '1.lock'),
+      'and the process leaves a waiter that let a slot stand no other',
+    );
+    late.releaseAll();
+
+    const timing = new EngineSlots(directory, 2, me, undefined, () => 'timing');
+    assert.equal(await timing.takeFree(), join(directory, '1.lock'), 'a timing leaves nothing');
+    timing.releaseAll();
+
+    writeFileSync(ahead, JSON.stringify({ ...me, taker: 'other', since: (Date.now() + 60_000) / 1000 }));
+    const earlier = new EngineSlots(directory, 2, me, undefined, () => 'other');
+    assert.equal(
+      await earlier.takeFree(),
+      join(directory, '1.lock'),
+      'one that came later is not let go first',
+    );
+    earlier.releaseAll();
+
+    writeFileSync(ahead, JSON.stringify(me));
+    const anHourAgo = new Date(Date.now() - 3_600_000);
+    utimesSync(ahead, anHourAgo, anHourAgo);
+    assert.deepEqual(
+      slotWaiters(directory).map((one) => [one.taker, Math.round((Date.now() - one.since) / 60_000)]),
+      [['other', 60]],
+      'a mark naming neither is a one-off waiting since its file was made',
+    );
+    rmSync(ahead);
+
+    const memory = new EngineSlots(directory, 2, me);
+    const unmark = memory.markWaiting();
+    assert.equal(readdirSync(marks).length, 1, 'a wait for memory keeps a mark');
+    assert.deepEqual(slotWaiters(directory), [], 'which waits for no slot, so no take lets it go first');
+    const beside = new EngineSlots(directory, 2, me, undefined, () => 'other');
+    assert.equal(await beside.takeFree(), join(directory, '1.lock'), 'and a take beside it takes the slot');
+    beside.releaseAll();
+    unmark();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
  * A take that finds every slot held keeps a mark of its wait for as long as it waits, and only then.
  *
  * The games' gates read the marks to leave the time `gdharness test` stood waiting for slots others
@@ -46025,10 +46171,16 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
     const one = await markedSoon(1);
     assert.equal(one.length, 1, 'a take finding every slot held marks its wait');
     assert.match(one[0] ?? '', new RegExp(`^${String(process.pid)}-\\d+\\.json$`), 'named by pid and wait');
+    const said = JSON.parse(readFileSync(join(marks, one[0] ?? ''), 'utf8')) as Record<string, unknown>;
     assert.deepEqual(
-      JSON.parse(readFileSync(join(marks, one[0] ?? ''), 'utf8')),
-      holder,
-      'holding what its lock will',
+      { ...said, since: 0 },
+      { ...holder, taker: slotTaker(), since: 0 },
+      'holding what its lock will and its kind',
+    );
+    const since = said['since'];
+    assert.ok(
+      typeof since === 'number' && Math.abs(since * 1000 - Date.now()) < 10_000,
+      `and when it began to wait, in seconds: ${String(since)}`,
     );
     const besideIt = new AbortController();
     const another = waitFor(besideIt.signal);
@@ -56213,6 +56365,23 @@ async function testAWriteSaysWhatElseItChanged(): Promise<void> {
       Object.keys(asObject(get(filled, 'alsoChanged'), 'alsoChanged')).sort(),
       ['anchor_bottom', 'anchor_right', 'grow_horizontal', 'grow_vertical', 'offset_bottom', 'offset_right'],
       `a preset sets the anchors, offsets and growth: ${JSON.stringify(filled)}`,
+    );
+    // A scene's root out of a tree keeps the Position mode it was made with, which ignores a preset.
+    writeFileSync(
+      join(project, 'card.tscn'),
+      '[gd_scene format=3]\n\n[node name="Card" type="PanelContainer"]\n',
+    );
+    const rooted = await call('scene_node', {
+      scenePath: 'res://card.tscn',
+      op: 'set',
+      nodePath: '.',
+      properties: { anchors_preset: 15 },
+    });
+    assert.equal(get(rooted, 'properties', 'anchors_preset'), 15, JSON.stringify(rooted));
+    assert.match(
+      readFileSync(join(project, 'card.tscn'), 'utf8'),
+      /\nanchors_preset = 15\nanchor_right = 1\.0\nanchor_bottom = 1\.0\ngrow_horizontal = 2\ngrow_vertical = 2\n/,
+      `a root takes the full rect preset: ${readFileSync(join(project, 'card.tscn'), 'utf8')}`,
     );
     const moved = await node({
       op: 'add',
@@ -70632,6 +70801,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
   testATakeSweepsGoneLocksPastTheCount,
   testASlotWaitLooksWhenTheSlotsChange,
+  testTakersWaitTheirTurn,
   testAWaitForASlotKeepsAMarkUntilItEnds,
   testGatesInTheQueueKeepTheirSlots,
   testAnEngineOnASlotLendsItToWhatItStarts,

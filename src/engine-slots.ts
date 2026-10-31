@@ -24,9 +24,10 @@
  * {@link KEPT_SLOTS} slots; a gate's engines take only the others ({@link slotsDrawnOn}).
  *
  * A taker that finds every slot held keeps a mark, `<directory>/waiting/<pid>-<n>.json` holding
- * what its lock will, until its take ends, so that a gate counting its own time can tell a wait for
- * slots others hold from its own work. A mark whose holder has gone is free by the same rule as a
- * lock.
+ * what its lock will, its kind (`taker`) and when it began to wait (`since`), until its take ends, so
+ * that a gate counting its own time can tell a wait for slots others hold from its own work, and
+ * each take leaves a free slot to the takers waiting longer that may take it ({@link SlotLine}). A
+ * mark whose holder has gone is free by the same rule as a lock.
  *
  * One directory and one count serve the whole machine, whichever project an engine is for: every
  * game's gate, bench and tool, and this server's own engines, draw on the same budget. The directory
@@ -41,6 +42,7 @@
 
 import {
   closeSync,
+  existsSync,
   type FSWatcher,
   mkdirSync,
   openSync,
@@ -219,6 +221,149 @@ export function reservedSlotOf(count: number): number | null {
 export const ONE_OFF_AGED_MS = 120_000;
 
 /**
+ * How long a take leaves a free slot to a taker waiting longer that may take it, past which it takes
+ * the slot itself. One waiting ahead takes a slot within a moment of its coming free, woken as the
+ * lock goes, so one left that long is one it cannot take after all, a mark misread or a taker the
+ * queue has paused, and a slot never stands idle longer while someone waits who may take it.
+ */
+export const SLOT_YIELD_MS = 5000;
+
+/** The kind a waiting mark names for a wait for memory, which takes no slot. */
+const MEMORY_TAKER = 'memory';
+
+/** A taker waiting for one of the machine's slots, as its mark names it. */
+export interface SlotWaiter {
+  readonly mark: string;
+  readonly taker: SlotTaker;
+  /** When it began to wait, in milliseconds since the epoch. */
+  readonly since: number;
+  readonly game: boolean;
+}
+
+/**
+ * Each live taker waiting for a slot in [param directory], as its mark names it. A mark's `taker` of
+ * another kind is a one-off's, and one naming no `since` (seconds since the epoch, as the games'
+ * tools write it) waits since its file was made, which nobody writes again while it waits.
+ */
+export function slotWaiters(directory: string): SlotWaiter[] {
+  const marks = join(directory, WAITING_FOLDER);
+  let names: string[];
+  try {
+    names = readdirSync(marks).filter((name) => name.endsWith('.json'));
+  } catch {
+    return [];
+  }
+  const found: SlotWaiter[] = [];
+  for (const mark of names.sort()) {
+    let content: string | null;
+    let madeAt: number;
+    try {
+      content = readWhole(join(marks, mark));
+      madeAt = statSync(join(marks, mark)).mtimeMs;
+    } catch {
+      continue;
+    }
+    const holder = content === null ? null : holderOf(content);
+    if (content === null || holder === null || !alive(holder.pid)) {
+      continue;
+    }
+    const { taker, since } = JSON.parse(content) as { taker?: unknown; since?: unknown };
+    if (taker === MEMORY_TAKER) {
+      continue;
+    }
+    found.push({
+      mark,
+      taker: taker === 'gate' || taker === 'timing' || taker === 'tier' ? taker : 'other',
+      // In whole milliseconds, as a take's own clock reads: a file's time has a fraction, so a mark
+      // made in the millisecond a take began read as made after it, and the take went first.
+      since: Math.floor(typeof since === 'number' && Number.isFinite(since) ? since * 1000 : madeAt),
+      game: holder.game === true,
+    });
+  }
+  return found;
+}
+
+/**
+ * The slots of [param open] the takers ahead take, in their order, given the slots each may take,
+ * each with the place in [param ahead] of the one taking it: each takes the first open one of its
+ * own not taken by one before it, and one finding none takes none.
+ */
+export function slotsClaimed(
+  ahead: readonly (readonly number[])[],
+  open: readonly number[],
+): Map<number, number> {
+  const left = new Set(open);
+  const taken = new Map<number, number>();
+  for (const [at, numbers] of ahead.entries()) {
+    const first = numbers.find((slot) => left.has(slot));
+    if (first !== undefined) {
+      left.delete(first);
+      taken.set(first, at);
+    }
+  }
+  return taken;
+}
+
+/**
+ * A take's place among those waiting for the machine's slots: it leaves each free slot to the takers
+ * waiting longer that may take it, in the order they began to wait, so a one-off waiting its hour is
+ * never overtaken by the next taker to look, whichever wakes first as a lock goes. A gate's engine
+ * is no exception, since a one-off past {@link ONE_OFF_AGED_MS} may take a gate's slot; a timing,
+ * whose turn the queue already gave it, leaves nothing. Agent runs of one game waited 38 to 80
+ * minutes for one slot while runs of seconds took turns on it with no order among them.
+ */
+export class SlotLine {
+  readonly since: number;
+  /** The name of its own waiting mark once it has one. */
+  mark: string | undefined;
+  /** The slots it leaves to those ahead, each with when it first left it. */
+  private left = new Map<number, number>();
+
+  readonly taker: SlotTaker;
+  readonly game: boolean;
+  private readonly clock: () => number;
+
+  constructor(taker: SlotTaker, game = false, clock: () => number = Date.now) {
+    this.taker = taker;
+    this.game = game;
+    this.clock = clock;
+    this.since = clock();
+  }
+
+  /** What its waiting mark holds beside [param holder]: its kind and when it began, in seconds. */
+  marked(holder: SlotHolder): object {
+    return { ...holder, ...(this.game ? { game: true } : {}), taker: this.taker, since: this.since / 1000 };
+  }
+
+  /** The takers of [param waiters] waiting longer than this one, the longest first. */
+  ahead(waiters: readonly SlotWaiter[]): SlotWaiter[] {
+    // Before it has a mark of its own, a mark begun in the same millisecond was there at its look.
+    const own = this.mark ?? '￿';
+    return waiters
+      .filter(
+        (one) =>
+          one.mark !== this.mark && (one.since < this.since || (one.since === this.since && one.mark < own)),
+      )
+      .sort((a, b) => a.since - b.since || (a.mark < b.mark ? -1 : 1));
+  }
+
+  /**
+   * Those of [param numbers] it may take now, the order kept: it leaves out each of [param theirs],
+   * the free slots those ahead take first, until it has left it {@link SLOT_YIELD_MS}.
+   */
+  admitted(numbers: readonly number[], theirs: ReadonlySet<number>): number[] {
+    const now = this.clock();
+    this.left = new Map([...theirs].map((slot) => [slot, this.left.get(slot) ?? now]));
+    return numbers.filter((slot) => !theirs.has(slot) || now - (this.left.get(slot) ?? now) >= SLOT_YIELD_MS);
+  }
+
+  /** The free slots it leaves to those waiting longer, lowest first. */
+  leaves(): number[] {
+    return [...this.left.keys()].sort((a, b) => a - b);
+  }
+}
+
+/**
  * How many kept slots of [param kept] the games editor_run started may hold between them while a
  * gate is queued: half, leaving at least one beside the gate's own steps' for a short headless call
  * no running game can take.
@@ -247,6 +392,8 @@ type SlotLimit = 'gate' | 'kept' | 'tier' | 'games';
 export interface SlotsDrawn {
   readonly numbers: readonly number[];
   readonly limit?: SlotLimit;
+  /** Free ones of them the take leaves to takers waiting longer: see {@link SlotLine}. */
+  readonly left?: readonly number[];
 }
 
 /** What takes a slot, as its environment says: see {@link slotsDrawnOn}. */
@@ -488,6 +635,13 @@ export class EngineSlots {
   private readonly starts = new Map<number, { started: number | undefined; readAt: number }>();
   private readonly held = new Set<string>();
   private readonly marks = new Set<string>();
+  /**
+   * The waiting marks this process has left a free slot to, each with when it first did. One that
+   * lets a slot left to it stand {@link SLOT_YIELD_MS} is waiting for something else, a share or
+   * memory under a release whose marks named no kind, so no take of this process leaves it another:
+   * one such wait kept every short call of a server waiting 5 s for a slot that stood free.
+   */
+  private readonly passedOver = new Map<string, number>();
   /** The slot of the engine that started this process while one of its engines runs on it. */
   private inherited: string | null = null;
   /** The slots the last look could take, in the order it tried them, and what held it to them. */
@@ -528,19 +682,20 @@ export class EngineSlots {
     game = false,
   ): Promise<string> {
     mkdirSync(this.directory, { recursive: true });
-    const began = Date.now();
+    const line = new SlotLine(this.taker(), game);
+    const began = line.since;
     let said = Number.NEGATIVE_INFINITY;
     let mark: string | undefined;
     let changes: FolderChanges | undefined;
     try {
       for (;;) {
         signal?.throwIfAborted();
-        const lock = await this.takeFree(game, Date.now() - began);
+        const lock = await this.takeFree(game, Date.now() - began, line);
         if (lock !== null) {
           return lock;
         }
         if (mark === undefined) {
-          mark = this.waitMarked();
+          mark = this.waitMarked(line);
           blocked?.();
         }
         const now = Date.now();
@@ -589,9 +744,10 @@ export class EngineSlots {
    * for a [param game] editor_run started marks its lock as a game's, and while a gate is queued finds
    * none free once the games hold as many of the kept slots as {@link gamesKeptOf} gives them, nor
    * {@link reservedSlotOf}. A one-off take that has waited [param waitedMs] of
-   * {@link ONE_OFF_AGED_MS} takes any slot.
+   * {@link ONE_OFF_AGED_MS} takes any slot. A take but a timing's leaves the free slots the takers
+   * waiting longer than [param line] take first ({@link SlotLine}); one given no line came last.
    */
-  async takeFree(game = false, waitedMs = 0): Promise<string | null> {
+  async takeFree(game = false, waitedMs = 0, line?: SlotLine): Promise<string | null> {
     mkdirSync(this.directory, { recursive: true });
     await this.sweep();
     const inherited = this.inherited === null ? await this.inheritedLock() : null;
@@ -601,10 +757,12 @@ export class EngineSlots {
     }
     const taker = this.taker();
     const aged = taker === 'other' && !game && waitedMs >= ONE_OFF_AGED_MS;
+    let queue: GateQueue | undefined;
+    const queued = async (): Promise<GateQueue> => (queue ??= await this.gateQueue());
     this.drawn = slotsDrawnOn(
       this.count,
       taker,
-      taker === 'gate' || taker === 'timing' || aged ? 'none' : await this.gateQueue(),
+      taker === 'gate' || taker === 'timing' || aged ? 'none' : await queued(),
     );
     if (game && this.drawn.limit === 'kept') {
       const reserve = reservedSlotOf(this.count);
@@ -616,8 +774,35 @@ export class EngineSlots {
         return null;
       }
     }
+    let tried = this.drawn.numbers;
+    if (taker !== 'timing') {
+      const placed = line ?? new SlotLine(taker, game);
+      const now = Date.now();
+      const waiting = slotWaiters(this.directory);
+      for (const mark of this.passedOver.keys()) {
+        if (!waiting.some((one) => one.mark === mark)) {
+          this.passedOver.delete(mark);
+        }
+      }
+      const ahead = placed
+        .ahead(waiting)
+        .filter((one) => now - (this.passedOver.get(one.mark) ?? now) < SLOT_YIELD_MS);
+      const claims = await this.claimedAhead(ahead, queued);
+      for (const mark of claims.values()) {
+        if (!this.passedOver.has(mark)) {
+          this.passedOver.set(mark, now);
+        }
+      }
+      tried = placed.admitted(tried, new Set(claims.keys()));
+      const left = placed
+        .leaves()
+        .filter((slot) => this.drawn.numbers.includes(slot) && !tried.includes(slot));
+      if (left.length > 0) {
+        this.drawn = { ...this.drawn, left };
+      }
+    }
     const holder: SlotHolder = game ? { ...this.holder, game: true } : this.holder;
-    for (const slot of this.drawn.numbers) {
+    for (const slot of tried) {
       const lock = join(this.directory, `${String(slot)}.lock`);
       if (this.made(lock, holder) || (await this.takenOver(lock, holder))) {
         this.held.add(lock);
@@ -625,6 +810,48 @@ export class EngineSlots {
       }
     }
     return null;
+  }
+
+  /**
+   * The free slots the takers [param ahead] take first, in their order, each with the mark of the one
+   * taking it: see {@link slotsClaimed}.
+   */
+  private async claimedAhead(
+    ahead: readonly SlotWaiter[],
+    queued: () => Promise<GateQueue>,
+  ): Promise<Map<number, string>> {
+    if (ahead.length === 0) {
+      return new Map();
+    }
+    const open: number[] = [];
+    for (let slot = 0; slot < this.count; slot += 1) {
+      const lock = join(this.directory, `${String(slot)}.lock`);
+      if (!existsSync(lock) || (await this.free(lock))) {
+        open.push(slot);
+      }
+    }
+    if (open.length === 0) {
+      return new Map();
+    }
+    const now = Date.now();
+    const reserve = reservedSlotOf(this.count);
+    const drawn: (readonly number[])[] = [];
+    for (const one of ahead) {
+      const aged = one.taker === 'other' && !one.game && now - one.since >= ONE_OFF_AGED_MS;
+      const theirs = slotsDrawnOn(
+        this.count,
+        one.taker,
+        one.taker === 'gate' || one.taker === 'timing' || aged ? 'none' : await queued(),
+      );
+      drawn.push(
+        one.game && theirs.limit === 'kept'
+          ? theirs.numbers.filter((slot) => slot !== reserve)
+          : theirs.numbers,
+      );
+    }
+    return new Map(
+      [...slotsClaimed(drawn, open)].map(([slot, at]): [number, string] => [slot, ahead[at]?.mark ?? '']),
+    );
   }
 
   /**
@@ -654,10 +881,11 @@ export class EngineSlots {
 
   /**
    * Puts down the mark of a wait for something other than a slot, memory for one, and answers what
-   * takes it up again, so a gate counting its own time reads that wait as held up by others too.
+   * takes it up again, so a gate counting its own time reads that wait as held up by others too. It
+   * names its kind as `memory`, which no take lets go first, since it takes no slot.
    */
   markWaiting(): () => void {
-    const mark = this.waitMarked();
+    const mark = this.waitMarked({ ...this.holder, taker: MEMORY_TAKER });
     return () => {
       if (mark !== undefined && this.marks.delete(mark)) {
         removeWhole(mark);
@@ -666,10 +894,10 @@ export class EngineSlots {
   }
 
   /**
-   * Puts down the mark of a wait and answers its path, or undefined when it could not be made, which
-   * the next look tries again.
+   * Puts down the mark of a wait, holding [param line]'s place or [param line] itself, and answers
+   * its path, or undefined when it could not be made, which the next look tries again.
    */
-  private waitMarked(): string | undefined {
+  private waitMarked(line: SlotLine | object): string | undefined {
     const marks = join(this.directory, WAITING_FOLDER);
     waitsMarked += 1;
     const mark = join(marks, `${String(this.holder.pid)}-${String(waitsMarked)}.json`);
@@ -678,8 +906,11 @@ export class EngineSlots {
     } catch {
       return undefined;
     }
-    if (!this.made(mark)) {
+    if (!this.made(mark, line instanceof SlotLine ? line.marked(this.holder) : line)) {
       return undefined;
+    }
+    if (line instanceof SlotLine) {
+      line.mark = basename(mark);
     }
     this.marks.add(mark);
     return mark;
@@ -786,7 +1017,7 @@ export class EngineSlots {
   }
 
   /** Makes [param path] holding [param holder], answering false when it is there already. */
-  private made(path: string, holder: SlotHolder = this.holder): boolean {
+  private made(path: string, holder: object = this.holder): boolean {
     let made: number;
     try {
       made = openSync(path, 'wx');
@@ -1067,13 +1298,25 @@ export function slotWaitSaid(
     drawn.limit === 'kept' || drawn.limit === 'tier' || drawn.limit === 'games'
       ? `${back} or no gate is queued`
       : back;
-  if (named.length === 0) {
-    return `${waiting}, by a gate or another tool, and ${starts}.`;
+  const said =
+    named.length === 0
+      ? `${waiting}, by a gate or another tool, and ${starts}.`
+      : taking === 1
+        ? `${waiting}, by ${named.join(', ')}, and ${starts}.`
+        : `${waiting}: ${listed(named)}. ${starts.charAt(0).toUpperCase()}${starts.slice(1)}.`;
+  return `${said}${leftSaid(drawn)}`;
+}
+
+/** What a take says of the free slots of [param drawn] it leaves, or [param past] left, to takers waiting longer. */
+function leftSaid(drawn: SlotsDrawn, past = false): string {
+  const left = drawn.left ?? [];
+  if (left.length === 0) {
+    return '';
   }
-  if (taking === 1) {
-    return `${waiting}, by ${named.join(', ')}, and ${starts}.`;
-  }
-  return `${waiting}: ${listed(named)}. ${starts.charAt(0).toUpperCase()}${starts.slice(1)}.`;
+  const slots = left.length === 1 ? `slot ${String(left[0])}` : `slots ${listed(left.map(String))}`;
+  return past
+    ? ` It left free ${slots} to takers that had begun waiting before it, which go first.`
+    : ` It leaves free ${slots} to takers that began waiting before it, which go first.`;
 }
 
 /**
@@ -1112,12 +1355,13 @@ export function slotWaitedSaid(
   const taking = drawn.limit === undefined ? count : drawn.numbers.length;
   const slots = `${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'was' : 'were'} in use`;
   const named = holdersNamed(taking, holders);
-  if (named.length === 0) {
-    return `${waited} When it first waited, ${slots}, by a gate or another tool.`;
-  }
-  return taking === 1
-    ? `${waited} When it first waited, ${slots}, by ${named.join(', ')}.`
-    : `${waited} When it first waited, ${slots}: ${listed(named)}.`;
+  const said =
+    named.length === 0
+      ? `${waited} When it first waited, ${slots}, by a gate or another tool.`
+      : taking === 1
+        ? `${waited} When it first waited, ${slots}, by ${named.join(', ')}.`
+        : `${waited} When it first waited, ${slots}: ${listed(named)}.`;
+  return `${said}${leftSaid(drawn, true)}`;
 }
 
 /** [param holders] named one entry a process, with how many slots each holds when there are several. */
