@@ -405,7 +405,9 @@ func _add_inherited(answer: Dictionary, seen: Array[String]) -> void:
 		if above.is_empty():
 			break
 		inherits_from.append(base_path)
-		for list_name: String in ["signals", "variables", "functions", "constants", "enums"]:
+		for list_name: String in [
+			"signals", "variables", "functions", "constants", "enums", "inner_classes",
+		]:
 			var mine: Array[Dictionary] = answer[list_name]
 			var theirs: Array[Dictionary] = above[list_name]
 			for member: Dictionary in theirs:
