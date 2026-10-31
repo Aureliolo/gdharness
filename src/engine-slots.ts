@@ -416,6 +416,8 @@ export class EngineSlots {
   private inherited: string | null = null;
   /** The slots the last look could take, in the order it tried them, and what held it to them. */
   drawn: SlotsDrawn = { numbers: [] };
+  /** The gates the last look at the queue found waiting for their seats. */
+  private waitingGates: SlotHolder[] = [];
   private saidAt = Number.NEGATIVE_INFINITY;
 
   readonly directory: string;
@@ -588,10 +590,12 @@ export class EngineSlots {
       return 'none';
     }
     let live: GateQueue = 'none';
+    const waiting: SlotHolder[] = [];
     for (const name of names) {
       const mark = join(marks, name);
       const content = readWhole(mark);
-      if (content === null || holderOf(content) === null) {
+      const gate = content === null ? null : holderOf(content);
+      if (gate === null) {
         continue;
       }
       if (await this.free(mark)) {
@@ -599,18 +603,23 @@ export class EngineSlots {
         removeWhole(`${mark}${SEATED_SUFFIX}`);
       } else if (!existsSync(`${mark}${SEATED_SUFFIX}`)) {
         live = 'waiting';
+        waiting.push(gate);
       } else if (live === 'none') {
         live = 'seated';
       }
     }
+    this.waitingGates = waiting;
     return live;
   }
 
   /**
    * Who holds the slots the last look could take, in the order it tried them, leaving out a lock
-   * that cannot be read.
+   * that cannot be read; or, for a take held back by the queue, the gates waiting for their seats.
    */
   holders(): SlotHolder[] {
+    if (this.drawn.limit === 'held') {
+      return [...this.waitingGates];
+    }
     const found: SlotHolder[] = [];
     for (const slot of this.drawn.numbers) {
       try {
@@ -844,7 +853,7 @@ export function slotWaitSaid(
 ): string {
   const so = `Waiting${waitedMs >= 1000 ? ` ${String(Math.round(waitedMs / 1000))} s so far` : ''} for an engine`;
   if (drawn.limit === 'held') {
-    return `${so}: ${GATE_UNSEATED} (${directory}), and the engine starts once every queued gate has its seat.`;
+    return `${so}: ${gatesWaiting(directory, holders)}, and the engine starts once every queued gate has its seat.`;
   }
   const taking = drawn.limit === undefined ? count : drawn.numbers.length;
   const slots = `${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'is' : 'are'} in use`;
@@ -892,7 +901,7 @@ export function slotWaitedSaid(
 ): string {
   const waited = `This call waited ${String(Math.round(waitedMs / 1000))} s for an engine slot in all.`;
   if (drawn.limit === 'held') {
-    return `${waited} When it first waited, ${GATE_UNSEATED} (${directory}), and engines outside a gate wait until every queued gate has its seat.`;
+    return `${waited} When it first waited, ${gatesWaiting(directory, holders)}, and engines outside a gate wait until every queued gate has its seat.`;
   }
   const taking = drawn.limit === undefined ? count : drawn.numbers.length;
   const slots = `${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'was' : 'were'} in use`;
@@ -906,6 +915,17 @@ export function slotWaitedSaid(
 }
 
 /** [param holders] named one entry a process, with how many slots each holds when there are several. */
+/** The gates in the queue of [param directory] waiting for their seats, named by [param gates] where known. */
+function gatesWaiting(directory: string, gates: readonly SlotHolder[]): string {
+  const named = holdersNamed(1, gates);
+  if (named.length === 0) {
+    return `${GATE_UNSEATED} (${directory})`;
+  }
+  return named.length === 1
+    ? `a gate in this machine's queue, ${named.join('')}, is waiting for its seat (${directory})`
+    : `${String(named.length)} gates in this machine's queue are waiting for their seats (${directory}): ${listed(named)}`;
+}
+
 function holdersNamed(count: number, holders: readonly SlotHolder[]): string[] {
   const held = new Map<number, { by: string | undefined; slots: number }>();
   for (const holder of holders) {

@@ -45641,7 +45641,25 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
     assert.equal(outside.drawn.limit, 'held', JSON.stringify(outside.drawn));
     assert.equal(
       slotWaitSaid(3000, 4, 'slots', outside.holders(), outside.drawn),
-      "Waiting 3 s so far for an engine: a gate in this machine's queue is waiting for its seat (slots), and the engine starts once every queued gate has its seat.",
+      `Waiting 3 s so far for an engine: a gate in this machine's queue, this process (pid ${String(process.pid)}), is waiting for its seat (slots), and the engine starts once every queued gate has its seat.`,
+    );
+    // Several gates waiting are counted and each named, in the progress line and in the answer.
+    const twoGates = [
+      { pid: 60780, started },
+      { pid: 37656, started, by: 'make ci for X' },
+    ];
+    assert.equal(
+      slotWaitSaid(3000, 4, 'slots', twoGates, outside.drawn),
+      "Waiting 3 s so far for an engine: 2 gates in this machine's queue are waiting for their seats (slots): pid 60780 and make ci for X (pid 37656), and the engine starts once every queued gate has its seat.",
+    );
+    assert.equal(
+      slotWaitedSaid(983_000, 4, 'slots', twoGates, outside.drawn),
+      "This call waited 983 s for an engine slot in all. When it first waited, 2 gates in this machine's queue are waiting for their seats (slots): pid 60780 and make ci for X (pid 37656), and engines outside a gate wait until every queued gate has its seat.",
+    );
+    assert.equal(
+      slotWaitedSaid(983_000, 4, 'slots', [], outside.drawn),
+      "This call waited 983 s for an engine slot in all. When it first waited, a gate in this machine's queue is waiting for its seat (slots), and engines outside a gate wait until every queued gate has its seat.",
+      'and with no gate to name, as before',
     );
     assert.deepEqual(await takeAll(gate), ['0.lock', '1.lock'], "while the gates' engines take theirs");
     assert.deepEqual(await takeAll(tier), ['2.lock', '3.lock'], "and the gates' own steps the kept two");
