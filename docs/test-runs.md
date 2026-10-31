@@ -436,16 +436,21 @@ and an empty `<its ticket>.json.seated` beside it once it has its seat. A mark i
 lock is held by; one not yet written names nobody and is passed over, and one whose holder has gone
 is removed with its `.seated` file.
 
-- A gate's engine takes only the slots below `count - 2`, and slot 0 at least, whatever the queue
+The last `kept = max(2, floor(count / 4))` slots are kept for engines outside a gate: 4 of 16. The
+first of them, `count - kept`, is a gate's own steps' (`GATE_KEPT`, one slot).
+
+- A gate's engine takes only the slots below `count - kept`, and slot 0 at least, whatever the queue
   holds. A process runs inside a gate when `GODOT_ENGINE_SHARE` and `GODOT_ENGINE_SHARE_COUNT` are
-  both set.
+  both set. A gate's seat counts only these slots, so work in the kept ones never holds a seat back.
 - A timing's engine, one with `GODOT_ENGINE_TIMED` set, takes any slot.
 - Any other engine takes any slot while no mark is live.
 - While a mark is live, a gate's own step outside its seat, one with `GODOT_ENGINE_TIER` set
-  (`fast` or `full`), takes the last two slots, `count - 2` first.
-- Any other engine then takes no slot while a live mark has no `.seated` file, and waits; and only
-  the last slot, `count - 1`, while every live mark is seated, `count - 2` being the gates' own
-  steps'.
+  (`fast` or `full`), takes the kept slots, `count - kept` first.
+- Any other engine then takes the kept slots but the gate's own steps' one, the highest first.
+- A game editor_run started is one of those, and its lock carries `"game": true`, kept when its
+  keeper takes it over. While a mark is live, games hold at most
+  `min(floor(kept / 2), kept - GATE_KEPT - 1)` of the kept slots between them: 2 of 16. Past that a
+  game's start waits, so a short headless call always has a slot no running game can take.
 
 An engine outside a gate tries the highest-numbered slot first, a gate's own step excepted, so the
 gates' slots stay free longest. Which slots a take may try is asked again at every look, and a slot
