@@ -2996,6 +2996,7 @@ function importStatuses(payload: OperationParams): { path: string; status: strin
  */
 const WAIT_FOR_RUN_MS = 600_000;
 const RUN_POLL_MS = 250;
+const HOLD_ASKED_EVERY_MS = 1000;
 
 /** What to tell a caller whose file, scene, script or resource path landed outside the project. */
 const PATH_SOLUTIONS = [
@@ -13201,18 +13202,48 @@ class GodotServer {
       return elsewhere;
     }
     const budgetMs = readPositiveNumber(args, 'timeoutMs') ?? WAIT_FOR_RUN_MS;
-    const until = Date.now() + budgetMs;
+    const began = Date.now();
+    const until = began + budgetMs;
     // Drained as it goes rather than once at the end: the pipes are what the output is read from,
     // and a run that fills them while nobody reads blocks on its own print. Stopped when the caller
     // cancels, since nobody is left to answer and a played run is asked of the editor on every
     // pass; the run itself is not this call's to end, so it goes on.
     const cancelled = callSignal();
+    let held = false;
+    let holdAsked = 0;
     while (cancelled?.aborted !== true && (await this.runStillGoing(run)) && Date.now() < until) {
       this.drainEditorOutput(run);
       this.drainTranscript(run);
+      // A game held by its debugger cannot end until something lets it go, and a wait sat out its
+      // whole budget on one stopped at a breakpoint. Asked once a second, since a run started here
+      // is asked through its keeper's debugger.
+      if (Date.now() - holdAsked >= HOLD_ASKED_EVERY_MS) {
+        holdAsked = Date.now();
+        if (await this.heldByItsDebugger(run)) {
+          held = true;
+          break;
+        }
+      }
       await delay(RUN_POLL_MS);
     }
-    return await this.handleGetDebugOutput(args, (await this.runStillGoing(run)) ? budgetMs : undefined);
+    if (!(await this.runStillGoing(run))) {
+      return await this.handleGetDebugOutput(args);
+    }
+    return await this.handleGetDebugOutput(
+      args,
+      held ? { heldAfterMs: Date.now() - began } : { ranOutMs: budgetMs },
+    );
+  }
+
+  /**
+   * Whether [param run] is stopped where its debugger says, as a breakpoint, a pause or a step
+   * leaves it. Not a game that leaves a ping unanswered, which one in a long frame does as well.
+   */
+  private async heldByItsDebugger(run: GodotProcess): Promise<boolean> {
+    if (!run.throughEditor) {
+      return run.keeper !== undefined && (await this.keptHold(run.keeper)) !== null;
+    }
+    return this.dapClient?.holdIsKnown() === true && this.dapClient.whereItStopped() !== null;
   }
 
   /**
@@ -13497,7 +13528,10 @@ class GodotServer {
   }
 
   /** editor_output: the log as entries, filtered the way the caller asked. */
-  private async handleGetDebugOutput(args: OperationParams, waitedMs?: number): Promise<ToolResponse> {
+  private async handleGetDebugOutput(
+    args: OperationParams,
+    waited?: { readonly ranOutMs: number } | { readonly heldAfterMs: number },
+  ): Promise<ToolResponse> {
     if (readString(args, 'op') === 'editor') {
       return this.handleEditorConsole(args);
     }
@@ -13575,9 +13609,14 @@ class GodotServer {
           : 'cpu was asked for and this platform would not say what the run has used.',
       );
     }
-    if (waitedMs !== undefined) {
+    if (waited !== undefined && 'ranOutMs' in waited) {
       notes.push(
-        `The wait of ${waitedMs}ms ran out and the run is still going, so this is what it had printed by then rather than everything it will print. editor_run wait again to keep waiting.`,
+        `The wait of ${waited.ranOutMs}ms ran out and the run is still going, so this is what it had printed by then rather than everything it will print. editor_run wait again to keep waiting.`,
+      );
+    }
+    if (waited !== undefined && 'heldAfterMs' in waited) {
+      notes.push(
+        `The wait answered after ${waited.heldAfterMs}ms because the game is held by its debugger, where heldAt says, and a held game does not end: debug_control continue lets it go, and editor_run wait then waits on.`,
       );
     }
     // Which of the two silences this is. A run gdharness ended and a run that stopped being there
