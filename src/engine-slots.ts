@@ -270,18 +270,34 @@ export function inAGate(env: NodeJS.ProcessEnv = process.env): boolean {
 
 /**
  * Whether the process [param pid] in [param tree] runs on the slot [param holder] holds: whether the
- * nearest process above it whose executable is not [param executable] is [param holder]. Those
- * running [param executable] are passed over as launchers of its own, a `bun` under `bun run`; a
- * game an editor plays runs the editor's executable, so the editor is passed over too and the game
- * takes a slot of its own.
+ * nearest process above it whose executable is not [param executable] is the holder, or the engine
+ * the lock names with a start within {@link START_TOLERANCE_MS} of the one written. Those running
+ * [param executable] are passed over as launchers of its own, a `bun` under `bun run`; a game an
+ * editor plays runs the editor's executable, so the editor is passed over too and the game takes a
+ * slot of its own. [param engineStarted] is when the named engine's pid started, for a tree that
+ * does not list it; an engine whose start cannot be read lends nothing.
  */
-export function inheritsSlot(tree: ProcessTree, pid: number, holder: number, executable: string): boolean {
+export function inheritsSlot(
+  tree: ProcessTree,
+  pid: number,
+  holder: Pick<SlotHolder, 'pid' | 'engine'>,
+  executable: string,
+  engineStarted?: number,
+): boolean {
   // A command line names a program with or without its extension, in either case, on Windows.
   const program = (name: string): string => name.toLowerCase().replace(/\.(?:exe|cmd|bat|com)$/, '');
   const own = program(executable);
-  for (const above of ancestorsIn(tree, pid, holder)) {
+  for (const above of ancestorsIn(tree, pid, holder.pid)) {
     if (program(readCommandLine(tree.get(above)?.command ?? '').executable) !== own) {
-      return above === holder;
+      if (above === holder.pid) {
+        return true;
+      }
+      const started = tree.get(above)?.startedAt ?? engineStarted;
+      return (
+        above === holder.engine?.pid &&
+        started !== undefined &&
+        Math.abs(started - holder.engine.started) <= START_TOLERANCE_MS
+      );
     }
   }
   return false;
@@ -364,6 +380,18 @@ export interface SlotHolder {
   readonly by?: string;
   /** Set for a game editor_run started, which may hold only some of the kept slots: {@link gamesKeptOf}. */
   readonly game?: true;
+  /**
+   * The engine whose programs run on the slot, for a holder that is not it: a keeper holding the
+   * slot for its game, which comes back under another pid when it restarts itself, or a process
+   * waiting on an engine it started. Named as the holder is, and judged the same way.
+   */
+  readonly engine?: SlotEngine;
+}
+
+/** An engine a lock names beside its holder. */
+export interface SlotEngine {
+  readonly pid: number;
+  readonly started: number;
 }
 
 /** The holder [param content] names, or null for content that names none. */
@@ -373,24 +401,32 @@ export function holderOf(content: string): SlotHolder | null {
     if (typeof parsed !== 'object' || parsed === null) {
       return null;
     }
-    const { pid, started, by, game } = parsed as {
-      pid?: unknown;
-      started?: unknown;
-      by?: unknown;
-      game?: unknown;
-    };
-    if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0 || typeof started !== 'number') {
+    const { by, game, engine } = parsed as { by?: unknown; game?: unknown; engine?: unknown };
+    const named = namedProcess(parsed);
+    if (named === null) {
       return null;
     }
+    const runs = namedProcess(engine);
     return {
-      pid,
-      started,
+      ...named,
       ...(typeof by === 'string' && by !== '' ? { by } : {}),
       ...(game === true ? { game } : {}),
+      ...(runs === null ? {} : { engine: runs }),
     };
   } catch {
     return null;
   }
+}
+
+/** The `{"pid", "started"}` [param value] holds, or null. */
+function namedProcess(value: unknown): SlotEngine | null {
+  if (typeof value !== 'object' || value === null) {
+    return null;
+  }
+  const { pid, started } = value as { pid?: unknown; started?: unknown };
+  return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 && typeof started === 'number'
+    ? { pid, started }
+    : null;
 }
 
 /**
@@ -582,7 +618,13 @@ export class EngineSlots {
       return null;
     }
     const tree = await processTree();
-    return tree !== undefined && inheritsSlot(tree, process.pid, holder.pid, basename(process.execPath))
+    const engine = holder.engine?.pid;
+    const engineStarted =
+      engine === undefined || tree?.get(engine)?.startedAt !== undefined
+        ? undefined
+        : (await startTimesOf([engine])).get(engine);
+    return tree !== undefined &&
+      inheritsSlot(tree, process.pid, holder, basename(process.execPath), engineStarted)
       ? lock
       : null;
   }
@@ -846,6 +888,72 @@ export function handSlot(lock: string, from: number, to: SlotHolder): boolean {
     writeWhole(lock, JSON.stringify(holder.game === true ? { ...to, game: true } : to))
   );
 }
+
+/**
+ * Names [param engine] in the slot at [param lock] as the engine running on it, when the lock still
+ * names [param holder], answering whether it did. Renamed over the lock, as {@link handSlot} is.
+ */
+export function nameSlotEngine(lock: string, holder: number, engine: SlotEngine): boolean {
+  let content: string | null;
+  try {
+    content = readWhole(lock);
+  } catch {
+    return false;
+  }
+  const named = content === null ? null : holderOf(content);
+  return named?.pid === holder && writeWhole(lock, JSON.stringify({ ...named, engine }));
+}
+
+/**
+ * Names the engine [param pid] started in the slot at [param lock], which [param holder] holds, once
+ * its start has been read; a start the platform will not give names nothing, since an engine named
+ * without one would lend its slot to nobody.
+ */
+export async function nameSlotEngineOf(lock: string, holder: number, pid: number): Promise<void> {
+  const started = (await startTimesOf([pid])).get(pid);
+  if (started !== undefined) {
+    nameSlotEngine(lock, holder, { pid, started });
+  }
+}
+
+/**
+ * Names in the slot at [param lock], which this process holds, the engine [param run] started: its
+ * own pid, or the one a desktop helper writes to [param pidFile] once it has started the engine,
+ * looked for until the run settles.
+ */
+export async function slotEngineNamed(
+  lock: string,
+  run: { readonly pid: number | null; readonly settled: Promise<void> },
+  pidFile?: string,
+): Promise<void> {
+  if (pidFile === undefined) {
+    if (run.pid !== null) {
+      await nameSlotEngineOf(lock, process.pid, run.pid);
+    }
+    return;
+  }
+  // Held in an object, since it is set by the run settling, which no flow analysis follows.
+  const state = { settled: false };
+  void run.settled.finally(() => {
+    state.settled = true;
+  });
+  while (!state.settled) {
+    let written = Number.NaN;
+    try {
+      written = Number(readFileSync(pidFile, 'utf8').trim());
+    } catch {
+      // Not written yet.
+    }
+    if (Number.isInteger(written) && written > 0) {
+      await nameSlotEngineOf(lock, process.pid, written);
+      return;
+    }
+    await delay(ENGINE_PID_LOOK_MS);
+  }
+}
+
+/** How often the pid a desktop helper writes for its engine is looked for. */
+const ENGINE_PID_LOOK_MS = 100;
 
 /** Gives back the slot at [param lock] when [param pid] holds it. */
 export function giveBackSlot(lock: string, pid: number): void {

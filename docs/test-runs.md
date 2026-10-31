@@ -432,10 +432,13 @@ the slots. A tool of a game's own that starts engines takes them the same way:
 
 gdharness starts every engine it holds a slot for with `GODOT_ENGINE_HELD` set to that slot's lock
 path. A taker started under it runs one engine on that slot rather than take a second one, but only
-while the lock's live holder is the nearest process above the taker running another executable,
-passing over launchers of the taker's own (a `bun` under `bun run`). A game an editor plays inherits
-the editor's environment and runs the editor's executable, so it takes a slot of its own. The lent
-slot is never given back by the taker: it stays its holder's.
+while the slot is the engine's: its live holder is the nearest process above the taker running
+another executable, passing over launchers of the taker's own (a `bun` under `bun run`), or the lock
+names that process under `engine`, `{"pid", "started"}` as a holder is written, with a start within
+2000 ms. A holder that is not the engine (the keeper of a game, a server waiting on an engine it
+started) writes `engine` once it has the engine's pid, and again when a game restarts itself into
+another. A game an editor plays inherits the editor's environment, and the lock names the editor, so
+it takes a slot of its own. The lent slot is never given back by the taker: it stays its holder's.
 
 Gates come first. Each gate in the machine's queue, waiting for its seat or holding it, keeps a mark
 from its arrival to its release: `<directory>/queued/<its ticket>.json`, holding what a lock does,

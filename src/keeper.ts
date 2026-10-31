@@ -24,7 +24,7 @@ import {
   helperStep,
   throughHelper,
 } from './desktop.js';
-import { giveBackSlot, handSlot, ownStart } from './engine-slots.js';
+import { giveBackSlot, handSlot, nameSlotEngine, ownStart } from './engine-slots.js';
 import { crashesReported, letWindowsReportCrashes } from './error-mode.js';
 import { GameDebugger } from './game-debugger.js';
 import { type KeeperListening, listenForTheServer } from './keeper-channel.js';
@@ -36,6 +36,7 @@ import {
   sendSpec,
   withChanges,
 } from './outside.js';
+import { startTimesOf } from './process-children.js';
 import { type RestartedFrom, type RunRecord, recordRunEnded, writeRunRecord } from './run-record.js';
 import { discard, scratchDirectory } from './scratch.js';
 import {
@@ -437,13 +438,16 @@ async function keep(): Promise<void> {
   // After the pid has gone back, since on Windows reading this process's start is a query of its
   // own, and a start held up by it answered after a game that announces at once had done so.
   // The pid in the lock is this process's, since a game that restarts itself comes back under
-  // another, so the label says whose it is: a wait would otherwise name it as the game's.
+  // another, so the label says whose it is: a wait would otherwise name it as the game's. The game
+  // is named beside it, so what the game starts runs on its slot rather than taking a second.
   const slot = run?.slot;
   if (slot !== undefined && keeperStarted !== undefined) {
+    const gameStarted = (await startTimesOf([pid])).get(pid);
     handSlot(slot.lock, slot.from, {
       pid: process.pid,
       started: await keeperStarted,
       by: `${slot.by}, through the keeper process that runs it`,
+      ...(gameStarted === undefined ? {} : { engine: { pid, started: gameStarted } }),
     });
   }
   let { code, signal } = await exited;
@@ -487,6 +491,9 @@ async function keep(): Promise<void> {
       restartedFrom: [...(note.restartedFrom ?? []), before],
     };
     writeNoteIfItCan(note);
+    if (slot !== undefined) {
+      nameSlotEngine(slot.lock, process.pid, { pid: next.pid, started: next.startedAt });
+    }
     end = () => {
       try {
         process.kill(next.pid);

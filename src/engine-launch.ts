@@ -31,7 +31,7 @@ import {
   helperStep,
   throughHelper,
 } from './desktop.js';
-import { onTheSlot } from './engine-slots.js';
+import { nameSlotEngineOf, onTheSlot } from './engine-slots.js';
 import { nowSeconds, type Past, type Sample, Spent, STARVED, sampled, watching } from './engine-spent.js';
 import { Refusal } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
@@ -463,9 +463,15 @@ export async function watchedEngine(
       return undefined;
     }
   };
+  // Named in the lock as well, since the lock names this process, and what the engine starts runs on
+  // its slot only when the lock names the engine.
+  const found = (engine: number): void => {
+    watching(engine, true);
+    void nameSlotEngineOf(lock, process.pid, engine);
+  };
   let pid = engineAt();
   if (pid !== undefined) {
-    watching(pid, true);
+    found(pid);
   }
   try {
     let size = 0;
@@ -482,7 +488,7 @@ export async function watchedEngine(
       if (pid === undefined) {
         pid = engineAt();
         if (pid !== undefined) {
-          watching(pid, true);
+          found(pid);
         }
       }
       const taken = await sample();
