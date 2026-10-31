@@ -34629,6 +34629,21 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
       [8, 'res://main.gd', 'Breakpoint'],
       `the breakpoint set before the start stops the game on its line: ${stopped.said}`,
     );
+    // A held game cannot end, so a wait answers where it is held rather than sitting out its time.
+    const waitAsked = Date.now();
+    const heldWait = await call('editor_run', { op: 'wait', timeoutMs: 60_000 });
+    const heldWaitMs = Date.now() - waitAsked;
+    assert.deepEqual(
+      [get(heldWait.answer, 'running'), get(heldWait.answer, 'heldAt', 'reason')],
+      [true, 'breakpoint'],
+      heldWait.said,
+    );
+    assert.ok(heldWaitMs < 15_000, `the wait answered in ${heldWaitMs}ms: ${heldWait.said}`);
+    assert.match(
+      text(get(heldWait.answer, 'note')),
+      /The wait answered after \d+ms because the game is held by its debugger/,
+      heldWait.said,
+    );
     // And the run's output says where it is held, as it does for a game the editor plays: it said
     // heldAt null while the stack above was read.
     const heldOutput = await call('editor_output', { projectPath: project, op: 'run' });

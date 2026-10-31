@@ -1852,7 +1852,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       wait: {
         effect: 'read',
-        summary: 'wait for the run to end, then answer as editor_output does',
+        summary:
+          'wait for the run to end, or to be held by its debugger at a breakpoint, a pause or a step, then answer as editor_output does',
         requires: [],
       },
       profile: {
