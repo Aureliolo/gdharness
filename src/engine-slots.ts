@@ -202,6 +202,22 @@ export function keptSlotsOf(count: number): number {
 const GATE_KEPT = 1;
 
 /**
+ * The slot of [param count] that neither a gate's own steps nor a game editor_run started take, the
+ * last, or null when fewer than two are kept. A gate's steps could take every kept slot, and with
+ * two games on the rest, one-off runs waited over an hour while gates kept arriving.
+ */
+export function reservedSlotOf(count: number): number | null {
+  return count - Math.max(1, count - keptSlotsOf(count)) >= 2 ? count - 1 : null;
+}
+
+/**
+ * How long a one-off take, neither a gate's nor a game's, waits before it may take any free slot
+ * the way it does when no gate is queued, gates' slots included, so a steady arrival of gates never
+ * holds it back for good.
+ */
+export const ONE_OFF_AGED_MS = 120_000;
+
+/**
  * How many kept slots of [param kept] the games editor_run started may hold between them while a
  * gate is queued: half, leaving at least one beside the gate's own steps' for a short headless call
  * no running game can take.
@@ -243,8 +259,8 @@ export type GateQueue = 'none' | 'queued';
  * them, and what holds it to them, given [param queue]. A gate's engine takes the first count less
  * the kept ones ({@link keptSlotsOf}), at least one, and a timing takes any. With no gate queued every
  * other takes any, the kept ones first so the gates' stay free longest. While one is queued a gate's
- * own step takes the kept ones, the first of them first, and any other the kept ones but the
- * {@link GATE_KEPT} first. A gate's seat counts only the gates' slots, so work in the kept ones never
+ * own step takes the kept ones but {@link reservedSlotOf}, the first of them first, and any other the
+ * kept ones but the {@link GATE_KEPT} first. A gate's seat counts only the gates' slots, so work in the kept ones never
  * holds a seat back.
  */
 export function slotsDrawnOn(count: number, taker: SlotTaker, queue: GateQueue): SlotsDrawn {
@@ -258,7 +274,8 @@ export function slotsDrawnOn(count: number, taker: SlotTaker, queue: GateQueue):
     return { numbers: every };
   }
   if (taker === 'tier') {
-    return { numbers: [...kept].reverse(), limit: 'tier' };
+    const reserve = reservedSlotOf(count);
+    return { numbers: [...kept].reverse().filter((slot) => slot !== reserve), limit: 'tier' };
   }
   return { numbers: kept.slice(0, Math.max(1, kept.length - GATE_KEPT)), limit: 'kept' };
 }
@@ -517,7 +534,7 @@ export class EngineSlots {
     try {
       for (;;) {
         signal?.throwIfAborted();
-        const lock = await this.takeFree(game);
+        const lock = await this.takeFree(game, Date.now() - began);
         if (lock !== null) {
           return lock;
         }
@@ -569,9 +586,11 @@ export class EngineSlots {
    * held. Which it may take is asked again at every look, since a gate arriving in the queue or the
    * last one leaving changes them; a slot already held is kept to its end whatever arrives. A take
    * for a [param game] editor_run started marks its lock as a game's, and while a gate is queued finds
-   * none free once the games hold as many of the kept slots as {@link gamesKeptOf} gives them.
+   * none free once the games hold as many of the kept slots as {@link gamesKeptOf} gives them. A game
+   * never takes {@link reservedSlotOf}, and a one-off take that has waited [param waitedMs] of
+   * {@link ONE_OFF_AGED_MS} takes any slot.
    */
-  async takeFree(game = false): Promise<string | null> {
+  async takeFree(game = false, waitedMs = 0): Promise<string | null> {
     mkdirSync(this.directory, { recursive: true });
     await this.sweep();
     const inherited = this.inherited === null ? await this.inheritedLock() : null;
@@ -580,15 +599,20 @@ export class EngineSlots {
       return inherited;
     }
     const taker = this.taker();
+    const aged = taker === 'other' && !game && waitedMs >= ONE_OFF_AGED_MS;
     this.drawn = slotsDrawnOn(
       this.count,
       taker,
-      taker === 'gate' || taker === 'timing' ? 'none' : await this.gateQueue(),
+      taker === 'gate' || taker === 'timing' || aged ? 'none' : await this.gateQueue(),
     );
+    if (game) {
+      const reserve = reservedSlotOf(this.count);
+      this.drawn = { ...this.drawn, numbers: this.drawn.numbers.filter((slot) => slot !== reserve) };
+    }
     if (game && this.drawn.limit === 'kept') {
-      const share = slotsDrawnOn(this.count, 'tier', 'queued').numbers;
-      const games = await this.heldByGames(share);
-      if (games.length >= gamesKeptOf(share.length)) {
+      const kept = this.count - Math.max(1, this.count - keptSlotsOf(this.count));
+      const games = await this.heldByGames(Array.from({ length: kept }, (_, at) => this.count - kept + at));
+      if (games.length >= gamesKeptOf(kept)) {
         this.drawn = { numbers: games, limit: 'games' };
         return null;
       }
@@ -794,6 +818,28 @@ export class EngineSlots {
       const numbered = /^(\d+)\.lock$/.exec(name)?.[1];
       if (numbered !== undefined && Number(numbered) >= this.count) {
         await this.cleared(join(this.directory, name), false);
+      }
+    }
+    // By the pid alone, which costs no query: a taker killed while it waited leaves its mark, and a
+    // gate reading it counts a wait that is not happening.
+    const marks = join(this.directory, WAITING_FOLDER);
+    let waits: string[];
+    try {
+      waits = readdirSync(marks);
+    } catch {
+      return;
+    }
+    for (const name of waits) {
+      let content: string | null;
+      try {
+        content = readWhole(join(marks, name));
+      } catch {
+        // Held by a reader past the retries, which the next look tries again.
+        continue;
+      }
+      const pid = content === null ? undefined : holderOf(content)?.pid;
+      if (pid !== undefined && !alive(pid)) {
+        removeWhole(join(marks, name));
       }
     }
   }

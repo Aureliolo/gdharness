@@ -447,7 +447,8 @@ lock is held by; one not yet written names nobody and is passed over, and one wh
 is removed with its `.seated` file.
 
 The last `kept = max(2, floor(count / 4))` slots are kept for engines outside a gate: 4 of 16. The
-first of them, `count - kept`, is a gate's own steps' (`GATE_KEPT`, one slot).
+first of them, `count - kept`, is a gate's own steps' (`GATE_KEPT`, one slot). Where two or more are
+kept, the last, `count - 1`, is a one-off's: neither a gate's own step nor a game takes it.
 
 - A gate's engine takes only the slots below `count - kept`, and slot 0 at least, whatever the queue
   holds. A process runs inside a gate when `GODOT_ENGINE_SHARE` and `GODOT_ENGINE_SHARE_COUNT` are
@@ -455,12 +456,14 @@ first of them, `count - kept`, is a gate's own steps' (`GATE_KEPT`, one slot).
 - A timing's engine, one with `GODOT_ENGINE_TIMED` set, takes any slot.
 - Any other engine takes any slot while no mark is live.
 - While a mark is live, a gate's own step outside its seat, one with `GODOT_ENGINE_TIER` set
-  (`fast` or `full`), takes the kept slots, `count - kept` first.
-- Any other engine then takes the kept slots but the gate's own steps' one, the highest first.
-- A game editor_run started is one of those, and its lock carries `"game": true`, kept when its
-  keeper takes it over. While a mark is live, games hold at most
+  (`fast` or `full`), takes the kept slots but the one-off's, `count - kept` first.
+- Any other engine then takes the kept slots but the gate's own steps' one, the highest first. One
+  that is not a game and has waited two minutes takes any slot, as it would with no mark live, so
+  gates arriving all day never hold a one-off run back for good.
+- A game editor_run started is one of those, never takes the one-off's slot, and its lock carries
+  `"game": true`, kept when its keeper takes it over. While a mark is live, games hold at most
   `min(floor(kept / 2), kept - GATE_KEPT - 1)` of the kept slots between them: 2 of 16. Past that a
-  game's start waits, so a short headless call always has a slot no running game can take.
+  game's start waits.
 
 An engine outside a gate tries the highest-numbered slot first, a gate's own step excepted, so the
 gates' slots stay free longest. Which slots a take may try is asked again at every look, and a slot
