@@ -8950,7 +8950,7 @@ class GodotServer {
   }
 
   private async handleLSP(toolName: string, args: unknown): Promise<ToolResponse> {
-    return handleLSPTool(await this.lsp(), toolName, args);
+    return await handleLSPTool(await this.lsp(), toolName, args);
   }
 
   /**
@@ -9069,7 +9069,7 @@ class GodotServer {
   }
 
   private async handleDAP(toolName: string, args: unknown): Promise<ToolResponse> {
-    return handleDAPTool(this.dap(), toolName, args);
+    return await handleDAPTool(this.dap(), toolName, args);
   }
 
   /**
@@ -13537,7 +13537,7 @@ class GodotServer {
     waited?: { readonly ranOutMs: number } | { readonly heldAfterMs: number },
   ): Promise<ToolResponse> {
     if (readString(args, 'op') === 'editor') {
-      return this.handleEditorConsole(args);
+      return await this.handleEditorConsole(args);
     }
     await this.pickUpWhatTheEditorIsPlaying();
     const run = await this.currentRun();

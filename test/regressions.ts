@@ -3215,7 +3215,7 @@ async function testLanguageServerAnswersCountFromOne(): Promise<void> {
         try {
           await server.initialize('regression-test');
           const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
-            server.request('tools/call', {
+            await server.request('tools/call', {
               name,
               arguments: { projectPath: project, scriptPath: 'probe.gd', ...args },
             });
@@ -3657,7 +3657,7 @@ async function testTheLanguageServerOfAnotherProjectIsRefused(): Promise<void> {
           },
         });
         const diagnose = async (projectPath: string): Promise<JsonRpcMessage> =>
-          server.request('tools/call', {
+          await server.request('tools/call', {
             name: 'script_diagnostics',
             arguments: { projectPath, scriptPath: 'res://hero.gd' },
           });
@@ -9934,11 +9934,11 @@ async function testAnEngineThatCrashesAtStartIsAskedAgain(): Promise<void> {
         if (answer !== null) {
           throw answer;
         }
-        return Promise.resolve();
+        return await Promise.resolve();
       },
       async (ms) => {
         waits.push(ms);
-        return Promise.resolve();
+        return await Promise.resolve();
       },
     );
     return { found: await locator.find(), starts, waits };
@@ -9995,11 +9995,11 @@ async function testAnEngineThatCrashesAtStartIsAskedAgain(): Promise<void> {
     const crashing = new GodotLocator(
       async () => {
         starts += 1;
-        return Promise.reject(startCrash);
+        return await Promise.reject(startCrash);
       },
       async (ms) => {
         waits.push(ms);
-        return Promise.resolve();
+        return await Promise.resolve();
       },
     );
     const crashed = await crashing.find();
@@ -16102,7 +16102,7 @@ async function testAMetNumberIsTheProcessUnderItNow(): Promise<void> {
     return new MetProcesses(async (pids) => {
       const start = answers[Math.min(asked, answers.length - 1)];
       asked += 1;
-      return Promise.resolve(
+      return await Promise.resolve(
         new Map(start === undefined ? [] : pids.map((one): [number, number] => [one, start])),
       );
     });
@@ -16982,7 +16982,7 @@ async function testAWatchRecordsAPropertyEveryFrame(): Promise<void> {
       return asNumber(get(armed.parsed, 'watch'));
     };
     const recorded = async (id: number): Promise<{ parsed: unknown; said: string }> =>
-      call('runtime_wait', { op: 'recorded', watch: id });
+      await call('runtime_wait', { op: 'recorded', watch: id });
     const changesOf = (answer: unknown): { frame: number; game_time: number; value: unknown }[] =>
       asArray(get(answer, 'changes')).map((one) => ({
         frame: asNumber(get(one, 'frame')),
@@ -17978,7 +17978,7 @@ async function testATouchReachesTheGameAsAFinger(): Promise<void> {
         'result',
       ) as Seen;
     const touch = async (args: Record<string, unknown>): Promise<unknown> =>
-      call('runtime_input', { op: 'touch', ...args });
+      await call('runtime_input', { op: 'touch', ...args });
     const started = await call('editor_run', {
       projectPath: project,
       op: 'start',
@@ -23220,7 +23220,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     },
   });
   const diagnose = async (scriptPath: unknown): Promise<JsonRpcMessage> =>
-    server.request(
+    await server.request(
       'tools/call',
       { name: 'script_diagnostics', arguments: { projectPath: project, scriptPath } },
       ENGINE_CALL_TIMEOUT_MS,
@@ -33568,7 +33568,7 @@ async function testAKeyDoesNotChooseFromAnOpenedMenu(): Promise<void> {
         );
       const property = async (nodePath: string, name: string): Promise<unknown> =>
         get(await call('runtime_inspect', { op: 'property', nodePath, property: name }), 'value');
-      const settle = async (): Promise<unknown> => call('runtime_wait', { op: 'frames', frames: 3 });
+      const settle = async (): Promise<unknown> => await call('runtime_wait', { op: 'frames', frames: 3 });
       const account = async (): Promise<string> => {
         const counted = await Promise.all(
           ['presses', 'openings', 'closings'].map(
@@ -37966,7 +37966,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         return { parsed: parseTextContent(response), said: textOf(response) ?? '' };
       };
       const read = async (property: string): Promise<{ parsed: unknown; said: string }> =>
-        tool('runtime_inspect', { op: 'property', nodePath: '/root/Main', property });
+        await tool('runtime_inspect', { op: 'property', nodePath: '/root/Main', property });
       assert.equal(get((await read('wares:size()')).parsed, 'value'), 5, (await read('wares:size()')).said);
       assert.equal(get((await read('board:size()')).parsed, 'value'), 0, 'an empty list has a size too');
       assert.deepEqual(
@@ -38077,7 +38077,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       // Depth 0 is the node alone, the one depth that reads exactly one node's properties. It read
       // as "not given" and walked the default three levels, which over a router was 4 MB.
       const tree = async (depth: unknown): Promise<{ parsed: unknown; said: string }> =>
-        tool('runtime_inspect', { op: 'tree', nodePath: '/root', depth, properties: ['name'] });
+        await tool('runtime_inspect', { op: 'tree', nodePath: '/root', depth, properties: ['name'] });
       const alone = await tree(0);
       assert.equal(get(alone.parsed, 'root', 'path'), '/root', alone.said);
       assert.equal(
@@ -45308,7 +45308,7 @@ async function testASlotWaitLooksWhenTheSlotsChange(): Promise<void> {
       override async takeFree(game = false, waitedMs = 0, line?: SlotLine): Promise<string | null> {
         this.looks += 1;
         this.waited.push(waitedMs);
-        return super.takeFree(game, waitedMs, line);
+        return await super.takeFree(game, waitedMs, line);
       }
     }
     const slots = new Counted(directory, 1, me);
@@ -61461,7 +61461,7 @@ function engineSaying(
   taken: Record<string, { as?: string[]; declaredBy?: string }> = {},
 ): RenameServices['namesTaken'] {
   return async (names) =>
-    Promise.resolve(
+    await Promise.resolve(
       Object.fromEntries(
         names.map((name) => [
           name,
@@ -61495,8 +61495,8 @@ function renameReadings(report: Record<string, unknown>): { changed: string[]; l
 }
 
 const NO_LANGUAGE_SERVER: Pick<RenameServices, 'references' | 'definitions'> = {
-  references: async () => Promise.reject(new Error('a class rename asked the language server')),
-  definitions: async () => Promise.reject(new Error('a class rename asked the language server')),
+  references: async () => await Promise.reject(new Error('a class rename asked the language server')),
+  definitions: async () => await Promise.reject(new Error('a class rename asked the language server')),
 };
 
 /**
@@ -61704,8 +61704,8 @@ async function testARenameRefusesANameAlreadyTaken(): Promise<void> {
       { projectPath: project, scriptPath: join(project, script), symbol, newName, newScriptPath: null },
       {
         namesTaken: engineSaying(taken),
-        references: async () => Promise.resolve([]),
-        definitions: async () => Promise.resolve([]),
+        references: async () => await Promise.resolve([]),
+        definitions: async () => await Promise.resolve([]),
       },
     );
     assert.ok(!outcome.ok, `${symbol} to ${newName} was not refused`);
@@ -61826,9 +61826,9 @@ function fakeLanguageServer(project: string): Pick<RenameServices, 'references' 
   ]);
   return {
     references: async (absolute, _text, position) =>
-      Promise.resolve(references.get(key({ file: absolute, ...position })) ?? []),
+      await Promise.resolve(references.get(key({ file: absolute, ...position })) ?? []),
     definitions: async (absolute, _text, position) =>
-      Promise.resolve(definitions.get(key({ file: absolute, ...position })) ?? []),
+      await Promise.resolve(definitions.get(key({ file: absolute, ...position })) ?? []),
   };
 }
 
@@ -62069,14 +62069,14 @@ async function testAMemberNamedLikeALocalIsNotAskedAboutWhereItCannotBe(): Promi
         definitions: async (absolute, source, position) => {
           asked.push(`${basename(absolute)}:${String(position.line + 1)}`);
           return basename(absolute) === 'caller.gd'
-            ? Promise.resolve([
+            ? await Promise.resolve([
                 {
                   file: join(project, 'other.gd'),
                   line: otherSay,
                   character: (RENAME_FIXTURE['other.gd'] ?? '').split('\n')[otherSay]?.indexOf('say') ?? 0,
                 },
               ])
-            : fake.definitions(absolute, source, position);
+            : await fake.definitions(absolute, source, position);
         },
       },
     );
@@ -62128,8 +62128,8 @@ async function testARenameThatOutrunsTheLanguageServerSaysWhichRequest(): Promis
       },
       {
         namesTaken: engineSaying(),
-        references: async () => Promise.reject(new LSPTimeout('textDocument/references', 180_000)),
-        definitions: async () => Promise.resolve([]),
+        references: async () => await Promise.reject(new LSPTimeout('textDocument/references', 180_000)),
+        definitions: async () => await Promise.resolve([]),
       },
     );
     assert.ok(!outcome.ok, 'nothing to rename from');

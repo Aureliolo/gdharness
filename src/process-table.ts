@@ -393,5 +393,5 @@ export async function loadingTheTable(): Promise<string> {
  * shared PowerShell within [param withinMs].
  */
 export async function askProcessTable(call: string, withinMs: number): Promise<string> {
-  return askWindows(`${await loadingTheTable()}; [GdhProcessTable]::${call}`, withinMs);
+  return await askWindows(`${await loadingTheTable()}; [GdhProcessTable]::${call}`, withinMs);
 }

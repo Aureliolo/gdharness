@@ -224,7 +224,7 @@ export class GodotLSPClient {
     }
 
     if (this.connectPromise) {
-      return this.connectPromise;
+      return await this.connectPromise;
     }
 
     this.connectPromise = new Promise<void>((resolveConnect, rejectConnect) => {
@@ -355,7 +355,7 @@ export class GodotLSPClient {
 
     const framed = frame(payload);
 
-    return new Promise<unknown>((resolveRequest, rejectRequest) => {
+    return await new Promise<unknown>((resolveRequest, rejectRequest) => {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(id);
         rejectRequest(new LSPTimeout(method, timeoutMs));
@@ -682,7 +682,7 @@ export class GodotLSPClient {
     await this.ensureConnected();
     await this.ensureInitializedForFile(filePath);
 
-    return this.withDocument(filePath, async () => {
+    return await this.withDocument(filePath, async () => {
       const key = diagnosticsKey(this.toFileUri(filePath));
 
       const diagnosticsPromise = new Promise<unknown[]>((resolveDiagnostics, rejectDiagnostics) => {
@@ -764,7 +764,7 @@ export class GodotLSPClient {
     await this.ensureConnected();
     await this.ensureInitializedForFile(filePath);
 
-    return this.withDocument(filePath, async () => {
+    return await this.withDocument(filePath, async () => {
       const uri = this.syncDocument(filePath, content);
       try {
         return await this.sendRequest('textDocument/hover', {

@@ -1112,7 +1112,7 @@ async function compileUnlessUnchanged(
   handed?: HandedSlot,
 ): Promise<Compiled> {
   if (kept === null) {
-    return compileCheck(launch, suites, handed);
+    return await compileCheck(launch, suites, handed);
   }
   const before = compiledPrint(kept, launch.projectPath, suites).print;
   if (readKeptPrint(kept.file) === before) {

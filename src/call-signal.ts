@@ -70,8 +70,8 @@ export async function withCallSignal<T>(
 ): Promise<T> {
   if (progress === undefined) {
     return signal === undefined && slotWaits === undefined
-      ? answer()
-      : current.run({ signal, progress: undefined, slotWaits }, answer);
+      ? await answer()
+      : await current.run({ signal, progress: undefined, slotWaits }, answer);
   }
   const began = Date.now();
   const rising = risingOnly(progress);
