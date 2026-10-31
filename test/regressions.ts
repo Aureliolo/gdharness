@@ -30237,13 +30237,15 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
       const waitOn = (nodePath: string, args: Record<string, unknown>): Promise<unknown> =>
         call('runtime_wait', { op: 'until', nodePath, timeoutMs: 2_000, ...args });
 
-      // How often it looked, over the part of the hall the size of the report's. A look that asks
+      // What a look costs, over the part of the hall the size of the report's. A look that asks
       // every node for its property list costs over a second here, and pacing then leaves one look
-      // in the wait besides the last; read cheaply, a look costs milliseconds and there are dozens.
+      // in the wait besides the last. Read cheaply it costs milliseconds, or 46 to 61 on the macOS
+      // runner, where the looks a wait fits in two seconds came to four, so the count says how
+      // fast the runner is as much as how the look reads.
       const small = await waitOn('/root/Main/Small', { says: 'words nobody says' });
       assert.ok(
-        asNumber(get(small, 'looks')) >= 5,
-        `a words wait looks many times in two seconds on 3,500 nodes: ${JSON.stringify(small)}`,
+        asNumber(get(small, 'looking_ms')) / asNumber(get(small, 'looks')) < 200,
+        `a look at 3,500 nodes for words costs a fraction of a second: ${JSON.stringify(small)}`,
       );
 
       // Three waits of each kind taken in turn and added up. On the macOS runner the game's rate
