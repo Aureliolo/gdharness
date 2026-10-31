@@ -281,6 +281,8 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 	var by_kind: Dictionary = {}
 	var total: int = 0
 	var in_code: int = 0
+	var shares_uid: Array[String] = []
+	var target_uid: String = target["uid"]
 
 	for file_path: String in all_files:
 		# Its own sidecar names it as the file it was imported from, which is not a use of it.
@@ -305,6 +307,11 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 		var references: Array[Dictionary] = []
 		for i: int in range(lines.size()):
 			var line: String = lines[i]
+			# A file declaring the target's uid as its own is not using it: a resource copied with
+			# its header claims the same uid, and its header line was answered as a use by path.
+			if not target_uid.is_empty() and _own_uid(line, i, file_path) == target_uid:
+				shares_uid.append(file_path)
+				continue
 			var by_its_path: bool = _names_target(line, file_path, target)
 			var by_its_name: bool = false
 			var name_in_comment: bool = false
@@ -408,7 +415,28 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 	}
 	if not autoload_named.is_empty():
 		answer["autoload"] = autoload_named
+	if not shares_uid.is_empty():
+		answer["shares_uid"] = shares_uid
 	return answer
+
+
+# The uid [param line], line [param index] of [param file_path], declares as the file's own: a
+# scene's or a resource's header, or an import sidecar's uid of the file it imports; empty for any
+# other line.
+static func _own_uid(line: String, index: int, file_path: String) -> String:
+	var trimmed: String = line.strip_edges()
+	var declares: bool = (
+		(
+			index == 0
+			and file_path.get_extension() in ["tscn", "tres"]
+			and (trimmed.begins_with("[gd_scene") or trimmed.begins_with("[gd_resource"))
+		)
+		or (file_path.get_extension() == "import" and trimmed.begins_with('uid="'))
+	)
+	if not declares:
+		return ""
+	var found: RegExMatch = GdhPatterns.compiled('uid="(uid://[^"]+)"').search(trimmed)
+	return "" if found == null else found.get_string(1)
 
 
 # The class_name a script declares, or empty for a scene, a resource or a script without one.
