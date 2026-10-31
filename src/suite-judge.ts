@@ -57,7 +57,7 @@ interface PrintedError {
   readonly suite: string | null;
   /**
    * The case that printed it, as {@link CaseRan.name}, or `before` or `after` for the suite's own
-   * hooks; null outside every suite. A line printed after a case's verdict counts as that case's
+   * hooks. Null outside every suite. A line printed after a case's verdict counts as that case's
    * when another case follows, since what a case leaves for a later frame prints there, and as
    * `after`'s once the last case is done, since `after` runs there.
    */
@@ -84,7 +84,7 @@ export interface RunPrinted {
    */
   readonly running: { readonly suite: string; readonly during: string | null } | null;
   /**
-   * The rows the engine found and left to the others, by `path > func`; null for a case that is no
+   * The rows the engine found and left to the others, by `path > func`, or null for a case that is no
    * row. gdUnit4 prints nothing for them, so without these a row no engine was dealt goes unseen.
    */
   readonly leftOut: ReadonlyMap<string, readonly (number | null)[]>;
@@ -140,7 +140,7 @@ const DRIVER_FALLBACK = /^\s*WARNING: Your video card drivers .*, switching to /
 // or a rendering driver: `at: DisplayServerMacOS (platform/macos/display_server_macos.mm:3837)`.
 const MACHINE_WARNED = /^\s*at: .*\((?:\.\/)?(?:platform|drivers)\//;
 // gdUnit4's own report of the orphans a case or suite left, printed with a WARNING prefix. The
-// orphans are reported from the suite's statistics; read as a warning no suite declared, the line
+// orphans are reported from the suite's statistics. Read as a warning no suite declared, the line
 // came back as one more fault, with advice to declare it rather than free the nodes.
 const ORPHANS_REPORTED = /^\s*WARNING: Detected \d+ (?:possible )?orphan nodes\.\s*$/;
 // The allocator's null, in its error line and the location under it, and an image decode the same
@@ -569,10 +569,10 @@ export function exitNamed(code: number): string {
 
 /**
  * What is wrong with the cases dealt by their rows, read over every engine that held one: each row
- * printed by exactly one engine, from row 0 up to the last any engine found, with none missing. Judged over all of them rather than
- * in each, since an engine dealt rows a case no longer has rightly runs none of them; and only once
- * every engine holding the case closed its suite, since one that did not is a fault already and says
- * why.
+ * printed by exactly one engine, from row 0 up to the last any engine found, with none missing.
+ * Judged over all of them rather than in each, since an engine dealt rows a case no longer has
+ * rightly runs none of them. It is judged only once every engine holding the case closed its suite,
+ * since one that did not is a fault already and says why.
  */
 export function rowsAcross(
   engines: ReadonlyArray<{ readonly handed: readonly HandedSuite[]; readonly printed: RunPrinted }>,
@@ -644,7 +644,7 @@ const QUEUE_OVERFLOW_LINE = 'Object was deleted while awaiting a callback.';
 /**
  * The frames an official build's crash handler prints when it crashes in that report, by the
  * build's commit: `CallQueue::push_callablep` calling `statistics`, which reads messages the
- * running flush has already destroyed. Measured on 4.7.2's Windows build; another build moves them.
+ * running flush has already destroyed. Measured on 4.7.2's Windows build. Another build moves them.
  */
 const QUEUE_OVERFLOW_FRAMES: ReadonlyMap<string, readonly string[]> = new Map([
   ['ed1daf0bf001b61586d9930840f2f1394092c079', ['main+3e1082a', 'main+3e0f4aa']],
@@ -781,8 +781,8 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
       failing.add(path);
     }
     const finished = new Set(suite.cases.map((ran) => ran.func));
-    // A case dealt by its rows can rightly run none here, when it has fewer rows than last time;
-    // whether every row ran once is judged over all the engines, by rowsAcross.
+    // A case dealt by its rows can rightly run none here, when it has fewer rows than last time.
+    // Whether every row ran once is judged over all the engines, by rowsAcross.
     const missing = cases.filter((func) => !finished.has(func) && rows[func] === undefined);
     if (missing.length > 0 && suite.closed !== null) {
       faults.push(`${path} closed without running ${named(missing)}`);
@@ -907,7 +907,7 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
   };
 }
 
-/** What the runner prints once it has compiled every script together; kept in step with `listed.gd`. */
+/** What the runner prints once it has compiled every script together. Kept in step with `listed.gd`. */
 export const COMPILED_SAID = 'gdharness compiled every script together';
 
 /**
@@ -1026,7 +1026,7 @@ interface MissingError {
 /**
  * The errors and warnings printed that no suite declared, and the declared ones that were not
  * printed, for the suites at [param paths]. A case declares each text once for every time it prints
- * it, and a parameterised case each time per row; an error is declared among the errors and a
+ * it, and a parameterised case each time per row. An error is declared among the errors and a
  * warning among the warnings, so a text declared as one does not accept the other.
  */
 export function unexpectedErrors(

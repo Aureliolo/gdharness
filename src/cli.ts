@@ -79,7 +79,7 @@ class UsageError extends Refusal {}
  */
 function projectArgument(at: number): string {
   // The first thing that is not a flag. With the directory optional, `setup --cursor` is the
-  // natural thing to type and reads as a flag where the path used to be; taking the argument
+  // natural thing to type and reads as a flag where the path used to be. Taking the argument
   // positionally made it resolve `--cursor` as a directory and refuse the command the install
   // guide tells people to run.
   const named = args.slice(at).find((value) => !value.startsWith('--'));
@@ -146,7 +146,7 @@ function useTheShippedLoader(name: string, path: string): string {
  *
  * One function for setup, upgrade and `runtime on`, because the rule is one rule and three
  * phrasings of it would drift. An entry naming the shipped loader or the addon's own script is
- * ours to rewrite; one naming a script of the project's own is the project's, and is left with a
+ * ours to rewrite. One naming a script of the project's own is the project's, and is left with a
  * line saying how to use the shipped loader instead.
  *
  * A project's loader that is not on disk is still not rewritten, because a file can be absent for
@@ -491,7 +491,7 @@ async function uninstall(): Promise<void> {
 /**
  * The same project, on this version of gdharness.
  *
- * Setup asks which harnesses to write; an upgrade asks nothing, because the answer is already in
+ * Setup asks which harnesses to write. An upgrade asks nothing, because the answer is already in
  * the files: every config that has a gdharness entry gets it re-pinned, and one that has not is a
  * harness nobody asked us to write to. A machine-wide config is included when it holds our entry,
  * since a config we wrote pinning a version that is no longer installed is worse than a corrected
@@ -833,7 +833,7 @@ More info: https://github.com/Aureliolo/gdharness
  *
  * A mistyped flag used to be caught halfway through: `setup --curser` installed the addons,
  * enabled the plugins, registered the autoload and rebuilt the class list, and only then refused
- * the option, leaving a project half configured and the command exiting non-zero. A flag nobody
+ * the option. That left a project half configured and the command exiting non-zero. A flag nobody
  * recognises is a sentence nobody meant, so nothing happens until they all read.
  */
 function checkFlags(): void {

@@ -151,7 +151,7 @@ export interface RunResult {
   }[];
   readonly engines: readonly {
     readonly index: number;
-    /** The slot's lane it was dealt to; the engines of one lane run one after another. */
+    /** The slot's lane it was dealt to. The engines of one lane run one after another. */
     readonly lane: number;
     /** When it started, in seconds after the command did, once it had a slot. */
     readonly startedAfter: number;
@@ -169,7 +169,7 @@ export interface RunResult {
   readonly logs: string | null;
   /** The engines asked for, before the room on the machine and the slots held the run to fewer. */
   readonly enginesAsked: number;
-  /** How many of the slots its lanes take were free as it began; fewer than the lanes is a shared run. */
+  /** How many of the slots its lanes take were free as it began. Fewer than the lanes is a shared run. */
   readonly slotsFree: number;
   /** What the run printed of its deal: the engines, what it split, and what held it. */
   readonly dealing: readonly string[];
@@ -243,7 +243,7 @@ const VALUED = new Set([
 ]);
 const SWITCHES = new Set(['--changed-only', '--import', '--print-output', '--verbose']);
 
-/** [param args], everything after `test`, read into options; relative paths are read from [param cwd]. */
+/** [param args], everything after `test`, read into options. Relative paths are read from [param cwd]. */
 export function testOptionsOf(args: readonly string[], cwd: string): TestOptions {
   const valued = new Map<string, string[]>();
   const switches = new Set<string>();
@@ -471,7 +471,7 @@ interface Launch extends EngineLaunch {
   readonly failsOnPushErrors: boolean;
 }
 
-/** Runs the suites [param options] asks for with the engine at [param godotPath], answering the exit code. */
+/** Runs the suites [param options] asks for with the engine at [param godotPath]. Answers the exit code. */
 export async function runTestCommand(options: TestOptions, godotPath: string): Promise<number> {
   const unusable = gdUnit4Unusable(options.projectPath);
   if (unusable !== null) {
@@ -622,7 +622,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     const byMemory = roomWith(memory.bytes);
     // What the processors leave room for. Memory held a run to the engines it had room for at the
     // start for the whole of it, so one engine was dealt nearly everything while memory freed beside
-    // it; held by memory, the run is dealt for these and its engines start as memory has room.
+    // it. Held by memory, the run is dealt for these and its engines start as memory has room.
     const unheld = roomWith(Number.POSITIVE_INFINITY);
     const unheldUnits = unitsOf(suites, times, splitPastFor(suites, times, unheld.engines));
     const heldLanes = lanesOf(dealt(unheldUnits, declared, unheld.engines));
@@ -725,7 +725,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     // Once the lanes hold what slots were free, so it takes one only beside them.
     const handed = new HandedSlot();
     const compiling = compileUnlessUnchanged(launch, everySuite, compileKept, handed);
-    // Awaited after the suites; a run failing before then reports its own error, not this one too.
+    // Awaited after the suites. A run failing before then reports its own error, not this one too.
     compiling.catch(() => undefined);
     let ran = shared
       ? await runShares(
@@ -1030,7 +1030,7 @@ function doneWith(launch: Launch, lock: string, handed: HandedSlot | undefined):
  * Compiles [param suites] together beside every class of the game in an engine of its own, which
  * names every script that does not compile. Apart from the suites' engines, so those load only what
  * their suites do and what each records is what its suites could have used. Beside a run's suites
- * it runs in the slot [param handed] settles on; alone, in the next slot free.
+ * it runs in the slot [param handed] settles on. Alone, in the next slot free.
  */
 async function compileCheck(
   launch: Launch,

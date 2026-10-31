@@ -14,7 +14,7 @@ const HEADER_TERMINATOR = '\r\n\r\n';
  * Without one, a peer that announces an absurd Content-Length, or never finishes a header,
  * grows this process until it dies, and says nothing on the way. The largest real traffic on either
  * socket is a completion list over the whole global scope or the diagnostics for a very long
- * script, both of which Godot answers in hundreds of kilobytes; 32 MiB is two orders of
+ * script, both of which Godot answers in hundreds of kilobytes, and 32 MiB is two orders of
  * magnitude above that, so reaching it means the stream is broken rather than busy.
  */
 export const MAX_MESSAGE_BYTES = 32 * 1024 * 1024;
@@ -66,7 +66,7 @@ export class FrameReader {
 
   /**
    * Adds a chunk and returns the frames it completed, in order. Throws OversizedStreamError
-   * when the peer announces or accumulates more than the ceiling; the reader is unusable
+   * when the peer announces or accumulates more than the ceiling. The reader is unusable
    * after that and the caller drops the connection.
    */
   push(chunk: Buffer): Frame[] {

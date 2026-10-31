@@ -46,7 +46,7 @@ func _kept(scene: GdhSceneFile, saved: Node, node: Node, names: Array) -> String
 		var given: Variant = _properties.read_at(node, property)
 		if not scene.kept(saved, loaded, given):
 			# The file holds it, and the copy's own script set it again as the copy loaded, as it
-			# will wherever the scene loads; an editor saves the same.
+			# will wherever the scene loads. An editor saves the same.
 			if scene.stores(at, property, given):
 				var on: Dictionary = scene.loads_as.get_or_add(at, {})
 				if GdhHeadlessCheck.untooled(copy.get_script()):

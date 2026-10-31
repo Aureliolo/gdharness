@@ -44,7 +44,7 @@ export function writeLifecycle(event: string, fields: Record<string, unknown> = 
   try {
     mkdirSync(dirname(path), { recursive: true });
     if ((statSync(path, { throwIfNoEntry: false })?.size ?? 0) > LIFECYCLE_LOG_LIMIT) {
-      // Two servers can both find it full; the second rename finds nothing to move and the line
+      // Two servers can both find it full. The second rename finds nothing to move and the line
       // goes into the fresh file either way.
       try {
         renameSync(path, `${path}.1`);

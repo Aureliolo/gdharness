@@ -44,12 +44,12 @@ runtime_inspect { "op": "text", "nodePath": "/root/Hall/Ledger" }   // what the 
 editor_output   { "projectPath": "C:/games/hall" }           // errors and warnings, with backtraces
 ```
 
-The open editor plays the game, so its debugger holds it, which is what lets you set a breakpoint
-and read the variables in scope when it stops.
+The open editor plays the game, so its debugger holds it. You can set a breakpoint and read the
+variables in scope when it stops.
 
 Every answer is read back out of the engine after the fact, never echoed from the request. A tool
-that cannot answer says which state it is in and what would change it, rather than answering
-emptily, so a call that succeeded is a call that was understood.
+that cannot answer says which state it is in and what would change it. It never answers emptily,
+so a call that succeeded is a call that was understood.
 
 ## At a glance
 
@@ -76,9 +76,10 @@ parts connect, and every tool, op and argument.
 
 ## Project
 
-Fork of [GoPeak](https://github.com/HaD0Yun/Doyunha-Gopeak) v2.3.9, September 2026, MIT: the
-original MCP server [godot-mcp](https://github.com/Coding-Solo/godot-mcp) by
-[Solomon Elias](https://github.com/Coding-Solo), GoPeak by [HaD0Yun](https://github.com/HaD0Yun),
-and completely reworked since to be hardened, condensed and more streamlined.
+Fork of [GoPeak](https://github.com/HaD0Yun/Doyunha-Gopeak) v2.3.9, September 2026, MIT. The
+original MCP server is [godot-mcp](https://github.com/Coding-Solo/godot-mcp) by
+[Solomon Elias](https://github.com/Coding-Solo), and GoPeak is by
+[HaD0Yun](https://github.com/HaD0Yun). It has been reworked throughout since, to be hardened and
+condensed.
 
 Not affiliated with the Godot Foundation.

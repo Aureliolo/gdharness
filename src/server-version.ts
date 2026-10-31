@@ -50,7 +50,7 @@ export function sameCodeNote(addonVersion: string, serverVersion: string): strin
 
 /**
  * Why the editor is not asked anything, and what to do about it, when it and this server run
- * different addon code; undefined when they agree.
+ * different addon code. Undefined when they agree.
  *
  * Which half is behind decides the answer, and getting it wrong sends the reader the wrong way.
  * An upgrade writes the new addon under a running editor, so the editor is the old half and a
@@ -106,7 +106,7 @@ export function runtimeAddonUnknown(addon: { readonly version: string; readonly 
 
 /**
  * Why a game is not asked anything, and what to do about it, when it runs a runtime addon other
- * than this server's; undefined when it runs this server's or cannot say what it runs.
+ * than this server's. Undefined when it runs this server's or cannot say what it runs.
  *
  * The same question as `addonMismatch` asks of the editor, for the addon inside a game. A second
  * checkout of a project, a git worktree, carried a runtime addon three releases behind its server

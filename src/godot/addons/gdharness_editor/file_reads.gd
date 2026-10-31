@@ -200,7 +200,7 @@ static func _lay(
 			if prefix == "." and loaded == null:
 				nodes[path]["inheritedFrom"] = state.get_path()
 		# The name is the state's even for an entry laid already, since an inherited scene names its
-		# root itself; a root instanced inside another scene is renamed by that scene once laid.
+		# root itself. A root instanced inside another scene is renamed by that scene once laid.
 		if not recovered:
 			nodes[path]["name"] = str(state.get_node_name(index))
 		if fresh:

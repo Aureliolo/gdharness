@@ -50,7 +50,7 @@ export function contentOf(response: JsonRpcMessage | null | undefined): ToolCont
   });
 }
 
-/** Every complete JSON object on its own line; anything that is not one is dropped. */
+/** Every complete JSON object on its own line. Anything that is not one is dropped. */
 export function parseJsonLines(data: string): JsonRpcMessage[] {
   const messages: JsonRpcMessage[] = [];
   for (const raw of data.split('\n')) {
@@ -110,7 +110,7 @@ function soleKeyOf(chunk: ToolContentBlock, key: string): unknown {
  * end, and two JSON documents end to end are not one document. Joined, an answer that happened to
  * land on the two hundred and fiftieth call parsed as nothing and read here as a tool that
  * answered with no content, which is a green suite failing on the count it was run at rather than
- * on anything it measured. A server that answers JSON answers it in one block; the answers with
+ * on anything it measured. A server that answers JSON answers it in one block. The answers with
  * two lead with a sentence, and those were never JSON to begin with.
  */
 export function parseTextContent(response: JsonRpcMessage | null | undefined): unknown {

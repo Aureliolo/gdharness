@@ -86,7 +86,7 @@ interface MockRuntimeOptions {
   protocol?: number;
   /** Accept connections and never answer, which is what a game paused at a breakpoint does. */
   silent?: boolean;
-  /** The runtime addon it says it loaded; this server's by default. */
+  /** The runtime addon it says it loaded, by default this server's. */
   addon?: { version: string; digest: string };
 }
 

@@ -599,7 +599,7 @@ func fixed(node: Node, deleting: bool = false) -> String:
 	if node.owner == null:
 		return foreign(node)
 	if node.owner != root:
-		# Editable children keep values here and no more; the scene instanced may have the node from
+		# Editable children keep values here and no more. The scene instanced may have the node from
 		# a scene it inherits, which is the one to edit.
 		var instanced: String = node.owner.scene_file_path
 		var packed: PackedScene = load(instanced) as PackedScene

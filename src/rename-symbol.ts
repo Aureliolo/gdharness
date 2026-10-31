@@ -1,7 +1,7 @@
 /**
  * script_edit rename, up to the writes: which symbol is meant, whether the new name is free, the
  * plan, and the report a caller reads. The server does the writing and what the editor and the
- * class cache need afterwards; the engine and the language server are handed in, so every refusal
+ * class cache need afterwards. The engine and the language server are handed in, so every refusal
  * here can be reached without either.
  */
 
@@ -284,7 +284,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
       }
     }
     // A bare use of the new name inside a class that inherits the member is a local, a parameter,
-    // or a global the member would hide; each either shadows the renamed member or is shadowed by
+    // or a global the member would hide. Each either shadows the renamed member or is shadowed by
     // it, and a project treating SHADOWED_VARIABLE as an error stops compiling. In a class whose
     // chain declares the new name as a member, a bare use is that member's, which the declaration
     // above already names: `return weight * stack` was offered as a local beside `stack` declared.
@@ -436,7 +436,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
  * overrides and answers that method's references, while a bare call inside the overriding class,
  * or one on a value typed as that class, resolves to the override and is in neither answer. So the
  * second pass asks where every other occurrence of the name in code is declared. One answer naming
- * a declaration being renamed makes it a use; one answer naming anything else makes it not this
+ * a declaration being renamed makes it a use. One answer naming anything else makes it not this
  * member. More than one answer is the analyser offering every declaration of the name for a value
  * whose type it does not know, and that occurrence is left. Each occurrence is asked on its own
  * rather than settled with its symbol's references: a references request is a walk of every script
@@ -700,7 +700,7 @@ export function leftAloneReport(mentions: readonly Mention[], terms: readonly st
 /**
  * How many grouped left-alone lines an answer carries before they go to a file instead. A member
  * named `found` left 1886 such lines, which kept an answer past what a caller's client shows
- * inline even once each list was only file and line numbers; what a reader acts on, the quoted
+ * inline even once each list was only file and line numbers. What a reader acts on, the quoted
  * entries and the counts, stays in the answer either way.
  */
 export const LEFT_ALONE_ANSWER_LINES = 300;
@@ -749,7 +749,7 @@ export function writeLeftAloneDetail(projectPath: string, symbol: string, detail
  */
 const PROSE_KINDS: ReadonlySet<string> = new Set(['comment', 'doc', 'string', 'text']);
 
-/** How much of a line an answer quotes; a longer one is cut to the part around what it is about. */
+/** How much of a line an answer quotes. A longer one is cut to the part around what it is about. */
 const QUOTED_CHARS = 240;
 
 /**

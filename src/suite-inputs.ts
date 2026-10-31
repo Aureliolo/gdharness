@@ -8,10 +8,10 @@
  * every suite. The runner records instead ([GdhReached] in `listed.gd`), and a suite's inputs are
  * its own script, the autoloads and what it loaded, followed only along what compiles with a script
  * (its preloads, its base, the classes it names), what it loads by a path it names, and what a scene
- * or resource names; and what the cache held as it began, for a suite reaching a load by a computed
- * path, held to where that path is known to begin. A file a script reads
- * or a folder it lists by a literal or constant path is an input too; one read or listed by a path
- * worked out at run time makes every file in the project one, since nothing records those.
+ * or resource names. The inputs also include what the cache held as it began, for a suite reaching a
+ * load by a computed path, held to where that path is known to begin. A file a script reads or a
+ * folder it lists by a literal or constant path is an input too. One read or listed by a path worked
+ * out at run time makes every file in the project one, since nothing records those.
  */
 
 import { createHash } from 'node:crypto';
@@ -57,7 +57,7 @@ const FILE_READ =
  * A load through the resource loaders, up to the start of its path. One the cache answers asks no
  * loader, so the recorder misses it whenever another suite of the engine already holds the resource:
  * gdUnit4 loads every suite of an engine before the first runs, with all they preload. One by a path
- * the script names is followed like a preload; one by a computed path is [constant CACHE_HELD].
+ * the script names is followed like a preload. One by a computed path is [constant CACHE_HELD].
  */
 const RESOURCE_LOAD = /(?:\bResourceLoader\.load(?:_threaded_request)?|(?<![\w.])(?<!\bfunc\s+)load)\(/g;
 const STRING_ARGUMENT = /^(?:"([^"]*)"|'([^']*)')$/;

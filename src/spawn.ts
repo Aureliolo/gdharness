@@ -26,7 +26,7 @@ import type { Readable, Writable } from 'node:stream';
  * gives every console program it starts a console window of its own on the desktop in use: a gate
  * run detached after a push opened about twenty Godot console windows on the screen of the person
  * at the machine. `windowsHide` is what keeps them off it, and it is set here rather than left to
- * each call to remember; a regression refuses `child_process` and `Bun.spawn` anywhere else.
+ * each call to remember. A regression refuses `child_process` and `Bun.spawn` anywhere else.
  */
 
 export type { ChildProcess, ChildProcessWithoutNullStreams, SpawnSyncReturns } from 'node:child_process';
@@ -90,7 +90,7 @@ export function runHidden(
   });
 }
 
-/** What a hidden child printed, waited for; it throws as `execFileSync` does when the child fails. */
+/** What a hidden child printed, waited for. It throws as `execFileSync` does when the child fails. */
 export function runSyncHidden(
   command: string,
   args: readonly string[],

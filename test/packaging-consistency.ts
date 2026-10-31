@@ -284,7 +284,7 @@ try {
     );
   }
 
-  // Some archive tools on Windows do not restore executable mode; Bun can still run the prebuilt bin.
+  // Some archive tools on Windows do not restore executable mode. Bun can still run the prebuilt bin.
   await chmod(cliPath, 0o755);
   const cli = spawnSyncHidden(process.execPath, [cliPath, 'version'], { cwd: packedRoot });
   assert.equal(cli.status, 0, cli.stderr.toString());

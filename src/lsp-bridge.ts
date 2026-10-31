@@ -130,7 +130,7 @@ export interface LspPortChoice {
 
 /**
  * The ports to try, in order: one named by [param named] or the GDHARNESS_LSP_PORT in
- * [param variable] alone, since a port somebody named is the only one meant; otherwise each live
+ * [param variable] alone, since a port somebody named is the only one meant. Otherwise each live
  * editor's, newest first, then Godot's default.
  */
 export function lspPortChoices(

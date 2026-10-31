@@ -269,7 +269,7 @@ export function helperAssembly(directory = tmpdir()): string {
   return HELPER.assembly(directory);
 }
 
-/** Compiles the desktop helper unless it is there; see [method CompiledHelper.ensure]. */
+/** Compiles the desktop helper unless it is there. See [method CompiledHelper.ensure]. */
 export function ensureHelperCompiled(
   directory = tmpdir(),
   budgetMs = HELPER_COMPILE_MS,
@@ -347,10 +347,10 @@ export function helperStep(stepFile: string): string {
 
 /**
  * The Windows PowerShell invocation that starts [param command] on [param how]'s desktop, or on the
- * one in use when it names none, shown without activation when it says so; writes its pid to the
- * pid file, waits for it and exits with its code, ending it first if the stop file appears. What
- * stops it before the pid is written goes to the error file, since its own streams are the ones the
- * process inherits. The process starts in [param how]'s directory, which the helper is not run in.
+ * one in use when it names none, shown without activation when it says so. It writes its pid to
+ * the pid file, waits for it and exits with its code, and ends it first if the stop file appears.
+ * What stops it before the pid is written goes to the error file, since its own streams are the
+ * ones the process inherits. The process starts in [param how]'s directory, which the helper is not run in.
  *
  * The spec goes in a file rather than on the command line. A long command line in base64 of the JSON
  * inside base64 of the script passed Windows' limit of 32767 characters on a command line: a keeper

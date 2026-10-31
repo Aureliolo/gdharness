@@ -48,7 +48,7 @@ export function readWhole(path: string): string | null {
 }
 
 /**
- * Writes [param text] to [param path] whole, and answers whether it did; a write that did not leaves
+ * Writes [param text] to [param path] whole, and answers whether it did. A write that did not leaves
  * the file as it was.
  *
  * Windows refuses to rename over a file another process has open, and every note here is opened by

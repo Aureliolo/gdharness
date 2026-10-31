@@ -86,7 +86,7 @@ export class Spent {
     this.last = { at: sample.at, machine: sample.machine, processor };
   }
 
-  /** Starts counting again from [param at], keeping the last reading as the start of the next stretch. */
+  /** Starts counting again from [param at]. The last reading becomes the start of the next stretch. */
   restart(at: number): void {
     this.since = at;
     this.byClock = 0;
@@ -164,7 +164,7 @@ async function take(): Promise<Sample> {
   return { at, machine, processors: await processorSecondsOf([...watched]) };
 }
 
-/** The processor seconds each of [param pids] has used, leaving out any the platform does not answer for. */
+/** The processor seconds each of [param pids] has used, without any the platform does not answer for. */
 export async function processorSecondsOf(pids: readonly number[]): Promise<Map<number, number>> {
   const found = new Map<number, number>();
   try {
@@ -197,7 +197,7 @@ export async function processorSecondsOf(pids: readonly number[]): Promise<Map<n
         }
       }
     } else {
-      // ps exits 1 when any pid it was given has gone, and still prints the rest; one it cannot
+      // ps exits 1 when any pid it was given has gone, and still prints the rest. One it cannot
       // take at all leaves it printing nothing, so each is then asked alone.
       const asked = (some: readonly number[]): Promise<string> =>
         run('ps', ['-o', 'pid=,time=', '-p', some.join(',')], { timeout: ASK_TIMEOUT_MS }).then(

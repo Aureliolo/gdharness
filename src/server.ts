@@ -2,9 +2,9 @@
  * The MCP server: one tool call in, one answer out.
  *
  * Every tool is answered by one of four things. A headless operation runs the engine on the
- * project with the operations script and answers with its JSON; the editor addon answers over
- * the bridge; a running game answers over the runtime socket; and a few are answered here, by
- * reading the project directory or driving a game process. Which is which is decided in
+ * project with the operations script and answers with its JSON. The editor addon answers over
+ * the bridge, and a running game over the runtime socket. A few are answered here, by reading the
+ * project directory or driving a game process. Which is which is decided in
  * `dispatch`, and the arguments have been checked against the tool's spec before it is reached.
  */
 
@@ -429,13 +429,13 @@ const FEEDBACK_NOTICE_EVERY = 250;
 
 /**
  * About how many characters of JSON `project_test` gives the failing cases before it names the
- * rest without their detail. Every case is still named; past this, nobody reads the reports in an
+ * rest without their detail. Every case is still named. Past this, nobody reads the reports in an
  * answer anyway, and the run that grows one this large is a single broken class failing everything.
  */
 const FAILED_BUDGET = 1_000_000;
 
 /**
- * The most bytes one answer is sent with; a larger one is written to a file and answered with where.
+ * The most bytes one answer is sent with. A larger one is written to a file and answered with where.
  *
  * Claude Code closes the connection on a message past 16 MB, and the call and every later tool go
  * with it until the server is reconnected by hand. The answer's text is escaped again inside the
@@ -474,7 +474,7 @@ function waitFromEnv(variable: string, fallback: number): number {
 
 /**
  * How long a restart waits for a connected editor's greeting. It follows the socket by a frame, so
- * seconds cover an editor that is busy; one still silent after that is stuck, and the caller is
+ * seconds cover an editor that is busy. One still silent after that is stuck, and the caller is
  * told rather than held. GDHARNESS_GREETING_WAIT_MS sets another.
  */
 function greetingWaitMs(): number {
@@ -619,7 +619,7 @@ function writtenFileRefusal(
  * Movie Maker reads every frame back from the renderer, and a headless run has none: Godot 4.7.2 asked
  * for one headless crashed on its first frame, in the dummy renderer's texture lookup. A `.png` path
  * is a sequence, written as the path's name with eight digits for each frame and a `.wav` beside it,
- * so those are what must not already be there; an `.avi` is the one file.
+ * so those are what must not already be there. An `.avi` is the one file.
  */
 export function movieRefusal(
   engineArgs: readonly string[],
@@ -853,8 +853,9 @@ function restartsOf(run: GodotProcess): RestartNamed[] | undefined {
  * successor, which once sat on a hidden desktop for hours holding a file a later export needed.
  */
 /**
- * Hands [param slot] to the played game [param pid], so its lock is freed by the game ending; given
- * back when the game's start cannot be read or the lock is no longer this server's to hand.
+ * Hands [param slot] to the played game [param pid], so its lock is freed by the game ending. The
+ * slot is given back when the game's start cannot be read or the lock is no longer this server's
+ * to hand.
  */
 async function handToTheGame(slot: CallSlot, pid: number, projectPath: string | null): Promise<void> {
   const started = (await startTimesOf([pid])).get(pid);
@@ -985,7 +986,7 @@ function playedSince(run: GodotProcess, playing: EditorPlay | null): boolean {
 }
 
 /**
- * Whether a run is still up, taking the editor's word for the runs it is playing.
+ * Whether a run is still up. For the runs the editor is playing, the editor's word is taken.
  *
  * A run this server spawned has a process to ask the operating system about. A run the editor
  * plays has none: there is no handle here, `exitCode` stays null for as long as the record lasts,
@@ -1053,7 +1054,7 @@ export function transcriptNote(transcript: string, going: boolean): string {
 /**
  * How long a stop waits for what it signalled to be gone before it answers.
  *
- * Ten seconds covers a windowed engine closing its renderer on a loaded machine; the kill is
+ * Ten seconds covers a windowed engine closing its renderer on a loaded machine. The kill is
  * immediate on Windows and a SIGTERM elsewhere, which Godot answers by quitting.
  * GDHARNESS_STOP_WAIT_MS sets another.
  */
@@ -1076,7 +1077,7 @@ const KEEPER_DEBUG_MS = PAUSE_MS + STEP_MS + 2 * READ_MS;
 
 /**
  * How long a run's keeper is given to write the exit of a game already seen to have gone.
- * Milliseconds in practice; bounded because every answer about the run waits on it.
+ * Milliseconds in practice. It is bounded because every answer about the run waits on it.
  */
 const EXIT_REPORTED_WITHIN_MS = 2_000;
 
@@ -1122,7 +1123,7 @@ const CLOSE_ASK_MS = 3000;
 
 /**
  * Asks the game announced as [param announced] to close the way a player's close does, and waits
- * for it and every process in [param alsoGoing] to exit. Null when they did; otherwise why the game
+ * for it and every process in [param alsoGoing] to exit. Null when they did, otherwise why the game
  * has to be ended another way, which nothing has done to it yet.
  *
  * Ended by its process, a game runs none of its own close. A game keeping a crash mark takes the
@@ -1162,7 +1163,7 @@ async function closeLikeAPlayer(
  * Why a run that is over has no exit code here, said for the cause that applies.
  *
  * Two kinds of run end with nobody here collecting a code. A game the editor plays is the editor's
- * child, so its code stays with the editor however long this server has been up; and a run read
+ * child, so its code stays with the editor however long this server has been up. A run read
  * back from the note another server left was being waited on by that server, not this one. One
  * sentence served both and named the second cause for the first: a played game that died while
  * starting on a loaded machine was reported as having outlived the server that started it, by the
@@ -1205,7 +1206,7 @@ export function endedWithoutACode(run: {
  * What a runtime call is told when no game is running and the run this server started has ended.
  *
  * The plain refusal says to start a game or play one from the editor, which reads as though nothing
- * had ever run; a caller that had just stopped its run with editor_run stop, or whose game quit on
+ * had ever run. A caller that had just stopped its run with editor_run stop, or whose game quit on
  * its own, was given the same sentence as one that never started any.
  */
 export function ourRunEnded(
@@ -1240,9 +1241,9 @@ export function ourRunEnded(
 }
 
 /**
- * How a stop went: the run is gone; it was signalled and was still there when the wait ran out; or
- * nothing was signalled, because its pid no longer answers as the process the run was started as.
- * `unreached` is a played run whose editor could not be asked to stop it.
+ * How a stop went. `gone` is a run that is gone. `lingering` was signalled and was still there when
+ * the wait ran out. `refused` was not signalled, because its pid no longer answers as the process
+ * the run was started as. `unreached` is a played run whose editor could not be asked to stop it.
  */
 type Ending = 'gone' | 'lingering' | 'refused' | 'unreached';
 
@@ -1466,7 +1467,7 @@ function gameBetween(tree: ProcessTree, pid: number, root: number, games: Readon
 }
 
 /**
- * The games among what the run started, ended; the rest named.
+ * Ends the games among what the run started, and names the rest.
  *
  * Signalled after the run is, and a game that was gone before the signal reached it is ended all
  * the same: one that exits as its slice ends, or one the platform takes down with its parent. It
@@ -1973,7 +1974,7 @@ const CONSOLE_WATCH_MS = 250;
 /**
  * How long the report's boundary line waits for the adapter to deliver its copy before the report
  * becomes the console anyway. The editor relays a game's prints once a frame, so the copy arrives
- * within a frame or two; what this absorbs is an editor under load. A print the adapter delivers
+ * within a frame or two. What this absorbs is an editor under load. A print the adapter delivers
  * later than this from before the line is dropped, and nothing after the line is lost either way.
  */
 const BOUNDARY_WAIT_MS = 2000;
@@ -2005,7 +2006,7 @@ const CACHE_WRITE_MS = 2_000;
  * How long a start waits for the editor to finish a scan before starting anyway and saying so.
  *
  * The rescan tool's own default, since it is the same wait. A scan of a few hundred scripts takes
- * a second or two; what runs longer is an import of large assets, and a caller who asked for a game
+ * a second or two. What runs longer is an import of large assets, and a caller who asked for a game
  * is better served by one started with a note than by a refusal to start.
  * GDHARNESS_SCAN_WAIT_MS sets another.
  */
@@ -2374,7 +2375,7 @@ const PLAYING_STATUS_MS = 1_000;
  * How long the editor has to stay idle after a rescan before the rescan answers.
  *
  * What a scan finds is imported after the scan stops reporting itself, and an editor just told of
- * files can begin its own scan a moment later; a rescan answered on the first idle look said it had
+ * files can begin its own scan a moment later. A rescan answered on the first idle look said it had
  * finished while a changed file was still on its old import. Half a second is many frames and a
  * small part of any scan worth waiting for.
  */
@@ -2736,7 +2737,7 @@ export function finishedBeforeTheEnd(finished: number, failing: number, running:
 
 /**
  * The sentence for a run gdUnit4 stopped at discovery, naming each script it could not load with
- * its first error; every error is under `scriptErrors` beside it. The suites that did load are
+ * its first error. Every error is under `scriptErrors` beside it. The suites that did load are
  * said not to have run, because a caller reading "script errors" took the rest of the tier as
  * having passed.
  *
@@ -3062,7 +3063,7 @@ export const PROJECT_FILE_ARGUMENTS = [
  * At any depth because a Resource tag inside a dictionary, a list or a keyframe reaches the
  * engine's loader as much as a bare path does. Only a res:// or uid:// path is judged: a node path
  * climbs with `..` as a matter of course ("../Player" is a sibling), and was refused as leaving the
- * project; anything else given to a property holding a Resource is refused by the addon, which
+ * project. Anything else given to a property holding a Resource is refused by the addon, which
  * knows which properties those are.
  */
 function escapingPropertyValue(value: unknown): string | undefined {
@@ -3200,7 +3201,7 @@ export interface ProfileReading {
   readonly callersOf?: { readonly name: string; readonly scripts: () => Iterable<readonly [string, string]> };
 }
 
-/** The most functions a frame of [param projectPath]'s game may carry; see `frameFunctionsFor`. */
+/** The most functions a frame of [param projectPath]'s game may carry. See `frameFunctionsFor`. */
 function profileFrameFunctions(projectPath: string | null): number {
   let projectGodot: string | null = null;
   if (projectPath !== null) {
@@ -3691,8 +3692,8 @@ export function testPathsIn(
   argument: 'path' | 'suites' = 'path',
 ): { ok: true; value: string[] } | { ok: false; reason: string } {
   // The directories gdharness test looks in, so the tool and the gate run the same suites. Only
-  // those there, since a default directory a project does not have is not a path it asked for;
-  // both when neither is, so the refusal names each.
+  // those there, since a default directory a project does not have is not a path it asked for.
+  // Both when neither is, so the refusal names each.
   const defaults = TEST_DIRECTORIES.filter((directory) => existsSync(join(projectPath, directory)));
   const entries =
     given === undefined || given === null || given === ''
@@ -3815,7 +3816,7 @@ function scriptsUnderGdignore(projectPath: string, scripts: readonly string[]): 
       };
 }
 
-/** Why a folder named gave no script, naming each folder below it that the walk stepped over. */
+/** Why a folder named gave no script, with each folder below it that the walk stepped over. */
 function noScriptUnder(entry: string, absolute: string, fromRoot: string): string {
   const said = (stepped: SteppedOver): string => {
     const folder = [fromRoot, stepped.folder].filter((step) => step !== '').join('/') || entry;
@@ -3978,7 +3979,7 @@ class GodotServer {
   private lastGodotVersion: string | null = null;
   private lspClient: GodotLSPClient | null = null;
   private dapClient: GodotDAPClient | null = null;
-  /** The adapter connection and editor the owner check last passed for; see [adapterBelongsElsewhere]. */
+  /** The adapter connection and editor the owner check last passed for. See [adapterBelongsElsewhere]. */
   private adapterPassed: { connection: object; editorPid: number } | null = null;
   /** Which client has taken on the project's breakpoint note. See [dapHoldingBreakpointsOf]. */
   private breakpointsSeededOn: GodotDAPClient | null = null;
@@ -4127,7 +4128,7 @@ class GodotServer {
     sweepAbandonedScratch();
     // The helper a windowed run starts through and the process table, compiled now rather than
     // inside the first windowed start or listing, which on a slow machine took longer than either
-    // is given. Once per machine and version; a server finding another already compiling goes on
+    // is given. Once per machine and version. A server finding another already compiling goes on
     // without waiting.
     if (process.platform === 'win32') {
       void ensureHelperCompiled(undefined, undefined, false);
@@ -4528,7 +4529,7 @@ class GodotServer {
     }
     this.shutdownInitiated = true;
     // Nothing left to do here. 'exit' runs synchronously and the process is gone the moment this
-    // returns, so killing the game was the only thing that could still happen; it no longer
+    // returns, so killing the game was the only thing that could still happen. It no longer
     // should, for the reason cleanup() gives. The bridge's close is a promise that would never
     // settle, and the sockets go with the process anyway.
     this.activeProcess = null;
@@ -4572,7 +4573,8 @@ class GodotServer {
     this.setupToolHandlers(protocol);
     setupPromptHandlers(protocol);
     // The project this server serves first, so a call naming another project's game does not move
-    // what the resources read; the last project named only for a server that can name none.
+    // what the resources read. The last project named stands in only for a server that can name
+    // none.
     setupResourceHandlers(protocol, () => this.ourProject() ?? this.lastProjectPath);
     protocol.onerror = (error) => {
       console.error('[MCP Error]', error);
@@ -4670,7 +4672,7 @@ class GodotServer {
   /**
    * [param answer] as it is when it fits in {@link ANSWER_BUDGET}, and otherwise written whole to
    * files and answered with where they are, beside whatever of its top level is small enough to
-   * read. A tool bounds its own answer where it knows how; this is for the shape nobody bounded,
+   * read. A tool bounds its own answer where it knows how. This is for the shape nobody bounded,
    * which otherwise loses the call and the connection together.
    */
   private withinTheClientsLimit(tool: string, answer: ToolResponse): ToolResponse {
@@ -5071,7 +5073,7 @@ class GodotServer {
   private async dispatch(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
     // Every call but the one that reports the state as it is waits out an editor still arriving,
     // so nothing is decided on a reading that is about to change: connected before the greeting,
-    // then not while the command line is read. editor_status answers in the middle of it, saying so.
+    // then not while the command line is read. editor_status answers in the middle of it and says so.
     if (tool !== 'editor_status' && this.godotBridge.isArriving()) {
       await this.waitForBridge(() => !this.godotBridge.isArriving(), Date.now() + greetingWaitMs());
     }
@@ -5898,7 +5900,7 @@ class GodotServer {
     }
     // A session, because the stack and the scopes are answered to one and a stop is not. The stop
     // reaches any connection open when it happens, attached or not, so a server that played the
-    // scene already knows; what it cannot do without attaching is read where.
+    // scene already knows. What it cannot do without attaching is read where.
     try {
       await this.dap().attach();
     } catch (error) {
@@ -5974,7 +5976,7 @@ class GodotServer {
    * An editor takes in a changed file only when its window regains focus, which an editor an
    * agent drives never does, and an engine started without one never imports at all, so a game
    * or a test run read the old import and drew a picture the project no longer held. The check
-   * reads the files and starts no engine; only when it finds something behind does the run pay
+   * reads the files and starts no engine. Only when it finds something behind does the run pay
    * for project_import reimport, which judges the project with project_import status and imports
    * through the editor when one has the project open. A run is not refused for an import that
    * failed: it is what the caller asked for, and the answer says which files it shows as before.
@@ -6042,7 +6044,7 @@ class GodotServer {
    * The editor rewrites `.godot/global_script_class_cache.cfg` a frame after it stops reporting a
    * scan, measured on 4.7.2, and a game reads the file as it boots. A start a few seconds after a
    * formatter rewrote scripts booted a game that resolved no global class at all, 95 "Could not
-   * find type" errors, while the file read whole straight afterwards; the same start again booted
+   * find type" errors, while the file read whole straight afterwards. The same start again booted
    * clean. So a scan that is running is waited for, and then the write: until the file is newer
    * than the scan's end, or until the write would have landed.
    *
@@ -6274,7 +6276,7 @@ class GodotServer {
    * and answers from a second status read what the reimport left current.
    *
    * Through the editor when one serves the project, so the editor imports on its own thread and
-   * reloads what it holds; an import pass beside it would leave it holding the old resources and
+   * reloads what it holds. An import pass beside it would leave it holding the old resources and
    * importing them all again on its next scan. Otherwise through the engine's own import pass,
    * which only reimports what it judges stale, so each resource is first made stale in its eyes.
    */
@@ -6328,7 +6330,7 @@ class GodotServer {
    * Written to the file alone, the editor went on holding the old values, answered them when asked,
    * and would write them back over the new ones the next time it saved the project settings. So the
    * settings the write changed, read off the file before and after, are handed to the editor to take
-   * from the file; and a bus layout, which the editor holds in its audio server, is reloaded there.
+   * from the file. A bus layout, which the editor holds in its audio server, is reloaded there.
    */
   private async handleProjectSettingsWrite(
     op: string,
@@ -6808,7 +6810,7 @@ class GodotServer {
           return { ok: true, finished: true };
         }
       } catch {
-        // Unanswered while the editor imports; the next question is asked all the same.
+        // Unanswered while the editor imports. The next question is asked all the same.
       }
     }
     return { ok: true, finished: false };
@@ -6823,7 +6825,7 @@ class GodotServer {
     if (!engine.ok) {
       // The refusal as built, with its reason and advice, rather than a sentence of its own: this
       // and the uid refresh both used to answer "No Godot executable found" over a GODOT_PATH that
-      // was set, throwing away the one answer that named the path.
+      // was set, and threw away the one answer that named the path.
       return {
         ok: false,
         message: engine.response.content.map((block) => block.text).join(' '),
@@ -6832,7 +6834,7 @@ class GodotServer {
     }
     // Every operation boots an engine on the project, and an engine resolves the project's classes
     // from the cache as it starts, so one started while the editor rewrites it fails on correct
-    // scripts; a class cache rebuilt here would also be written over by the editor's list.
+    // scripts. A class cache rebuilt here would also be written over by the editor's list.
     const scanned = await this.untilTheEditorsScanIsWritten(projectPath);
     this.logDebug(`Running ${operation} in ${projectPath}: ${JSON.stringify(params)}`);
     const outcome = await runOperation(
@@ -7060,7 +7062,7 @@ class GodotServer {
       return this.createErrorResponse(output.reason, OUTPUT_PATH_SOLUTIONS);
     }
     const platform = readString(args, 'platform') ?? '';
-    // A platform the exporters do not know is refused by the operation, naming the ones they do.
+    // The operation refuses a platform the exporters do not know and names the ones they do.
     let knownOptions: unknown[] = [];
     if (EXPORT_PLATFORMS.includes(platform)) {
       const known = await this.exportOptions(platform);
@@ -7349,7 +7351,7 @@ class GodotServer {
    * finishes, and one at least every twenty seconds while none does, so a client with an idle
    * limit sees a live call through a long suite. Claude Code ends a call that says nothing for
    * thirty minutes, and the SDK's own default is a minute. The number sent is the seconds the run
-   * has taken, which only goes up as the protocol asks; the counts are in the message.
+   * has taken, which only goes up as the protocol asks. The counts are in the message.
    */
   private reportTestProgress(log: GameLog): NodeJS.Timeout | undefined {
     const progress = callProgress();
@@ -8384,7 +8386,7 @@ class GodotServer {
    * script_diagnostics: what the language server reports, and the verdict that follows, for one
    * script or for several. Of several, a script with nothing to report is named under
    * `nothingReported` and every other is answered under `scripts`, in the shape one script is
-   * answered in, with the counts summed beside them; a script the server would not read is named
+   * answered in, with the counts summed beside them. A script the server would not read is named
    * there with why, and the rest are still asked about. The editor's language server being out of
    * reach is the same answer for every script, so it ends the call on the first.
    *
@@ -8702,7 +8704,7 @@ class GodotServer {
     // Compiled by an engine only when no editor of this project is on the bridge. A server still
     // reading the project is the right one and answers a call made again, and this project's own
     // editor is the authority on its scripts, so a language server of it that does not answer is
-    // that editor's fault to name; an engine started beside it also waits on its next scan.
+    // that editor's fault to name. An engine started beside it also waits on its next scan.
     const project = this.project(args);
     const ownEditor = project.ok && this.editorHasOpen(project.value.path);
     if (refused !== null && !refused.perScript && payload['stillReading'] !== true && !ownEditor) {
@@ -8866,9 +8868,9 @@ class GodotServer {
    * Whether the editor connected now is the one whose last scan or save of [param projectPath]
    * wrote a class cache shorter than the file. Such an editor holds a class list behind the files
    * and writes it over the cache every time, so a rescan cannot load the class the diagnostics
-   * cannot resolve; only a restart does, and the advice has to say so rather than send the caller
+   * cannot resolve. Only a restart does, and the advice has to say so rather than send the caller
    * back to the scan that just refused. Read from the project's note, so a server that replaced
-   * the one that saw the loss knows too; by pid, so a restarted editor starts clean.
+   * the one that saw the loss knows too. Kept by pid, so a restarted editor starts clean.
    */
   private editorWritesAShortList(projectPath: string): boolean {
     const recorded = readClassNote(projectPath)?.shortListEditorPid;
@@ -9172,7 +9174,7 @@ class GodotServer {
   }
 
   /**
-   * The adapter client, holding the breakpoints noted in [projectPath] as well as its own.
+   * The adapter client, with the breakpoints noted in [projectPath] as well as its own.
    *
    * Seeded once per client. What an earlier server set is taken on before this one's first
    * breakpoint call and before its first play, and a client replaced because its editor moved is
@@ -9451,7 +9453,7 @@ class GodotServer {
       awaitingLaunchedEditor:
         status.connected || !launchedIsUp ? undefined : (this.launchedEditor?.pid ?? undefined),
       // What the editor this server opened saved away on its way in, said once. The restart says
-      // this in its own answer; an open cannot, because it returns before the save happens.
+      // this in its own answer. An open cannot, because it returns before the save happens.
       ...(status.connected ? this.whatTheLaunchedEditorDropped() : {}),
       startupError: this.bridgeStartupError,
       // Why `port` is not the one configured, when it is not. Beside a pinned port it read as the pin
@@ -9491,8 +9493,8 @@ class GodotServer {
       // reporting because it is the difference between an editor that cannot find this server
       // and one that has not been restarted: both look like an editor that is not there.
       announcedAt: this.announcedAt ?? undefined,
-      // The third version in play. `addonIsStale` catches an editor that has not been restarted;
-      // this catches the other way round, a project upgraded while this server kept running, and
+      // The third version in play. `addonIsStale` catches an editor that has not been restarted.
+      // This catches the other way round, a project upgraded while this server kept running, and
       // nothing reported that at all: the answer was that everything was fine.
       projectIs: this.projectHasMovedOn() ?? undefined,
       // And the fourth, which is the one nobody was looking at: the version the config names is
@@ -9554,7 +9556,7 @@ class GodotServer {
       };
     } catch {
       // The editor is there but did not answer this one, which the connection fields already
-      // describe; a status call is not the place to fail over its own extra question.
+      // describe. A status call is not the place to fail over its own extra question.
       return null;
     }
   }
@@ -9664,7 +9666,7 @@ class GodotServer {
             ? {}
             : { ofThisProject: isSameDirectory(endpoint.project.path, this.ownProject) }),
           // Which editor played it, as the game announced: a game the editor played, and
-          // whatever that game started for itself, carries the editor's process id; a game
+          // whatever that game started for itself, carries the editor's process id. A game
           // another server started carries none. Absent when the game announced none.
           editorPid: endpoint.editorPid,
           userDir: endpoint.userDir,
@@ -9753,8 +9755,8 @@ class GodotServer {
         processActive: active,
         // Which run processActive is about. Without it the flag could not be tied to any entry in
         // runtimes below, which on a machine running a bench fan-out lists dozens of games, and a run
-        // adopted after a reconnect read the same as one this server started (reported from
-        // game-b, checking a kept run across a reconnect).
+        // adopted after a reconnect read the same as one this server started (game-b reported it
+        // while it checked a kept run across a reconnect).
         run,
         playingInEditor: playing,
         // The same three answers editor_output gives, for the same run: absent when there is no
@@ -9832,7 +9834,7 @@ class GodotServer {
    * with what the editor said about it, rather than left for a second restart.
    *
    * Godot tries the port once, as the editor starts and seconds before the language server, and
-   * says why it failed only in its log panel; a restart in four of a hundred and thirty downstream
+   * says why it failed only in its log panel. A restart in four of a hundred and thirty downstream
    * came back without it and was cured every time by restarting again, so the port was free soon
    * after. The language server binds later, once the editor is ready, and only once, so it is
    * reported and left. What Godot said trying each port goes with the answer, since its reason for
@@ -10199,7 +10201,7 @@ class GodotServer {
    * The settings an editor saved away, as the fields that report them.
    *
    * One home for the comparison and the sentence, because the same thing happens on an `open` and
-   * the answer there said nothing at all about it. Godot does the stripping either way; the two
+   * the answer there said nothing at all about it. Godot does the stripping either way. The two
    * calls differ only in when they can notice, so they should not differ in what they say.
    *
    * With the value each one held, because naming the key alone leaves the caller to go and find
@@ -10736,7 +10738,7 @@ class GodotServer {
     // the same silence as a run dying on its own, and the caller reads the second as the first:
     // a bench that stops mid-measurement with nothing said sends them looking at their engine.
     // Whether there is one to end is asked the way every other answer asks it, so a played run
-    // the editor says is over is not "ended" here and then reported as ended; and a played run
+    // the editor says is over is not "ended" here and then reported as ended. A played run
     // that is going is named by the number its game announced, when it announced one. The editor
     // is asked what it is playing first, as every answer about a run asks it: a replacement
     // server had no record of the game the editor was playing, so its start had the editor stop
@@ -11003,7 +11005,7 @@ class GodotServer {
       budgetMs: Math.max(runBegan + budgetMs - waitBegan, 0),
       // Not a game of this project that somebody else started: for a run the editor plays, one
       // naming another editor as the one that played it, or none where the project's games name
-      // theirs; for a run started here, one naming the editor at all, since a game this server
+      // theirs. For a run started here, it is one naming the editor at all, since a game this server
       // spawned inherited no editor to name. A start that took a stranger's game for its own
       // answered listening about a process it did not start while its own was still booting,
       // and a spawned start judged by the played rule waited its whole budget on its own game.
@@ -11396,7 +11398,7 @@ class GodotServer {
    * while nobody is reading.
    *
    * From the runtime's boundary line on the report carries the prints as well, and becomes the
-   * run's one source; see `consoleFromReport`. The switch waits for the adapter to deliver that
+   * run's one source. See `consoleFromReport`. The switch waits for the adapter to deliver that
    * line, [param heard] when it has just done so, because the prints before it arrive only over
    * the adapter and must be written first. A run with no adapter to wait for switches when the
    * line is in the report: one picked up after a reconnect, whose boundary went by before this
@@ -11837,7 +11839,7 @@ class GodotServer {
    *
    * For the runs a caller is waiting on: a test tier, a boot check. These are held rather than
    * detached on purpose. The answer is the point of them, and an answer belongs to the call that
-   * asked, so a server that goes away mid-run takes the only reader with it; outliving it would
+   * asked, so a server that goes away mid-run takes the only reader with it. Outliving it would
    * leave an engine nobody is reading and nobody will ever end.
    */
   private async spawnGame(
@@ -11999,14 +12001,14 @@ class GodotServer {
   ): Promise<GodotProcess | { error: string }> {
     // In one of the machine's engine slots, like every engine started for a call. The keeper takes
     // the lock over once it has handed the game's pid back, and gives it back when the run ends,
-    // since the run outlives this server; so a started run leaves the lock to it, and one the keeper
+    // since the run outlives this server. So a started run leaves the lock to it, and one the keeper
     // never took over names this server, which frees it by going.
     const slot = await slotForCall(true);
     // From the slot rather than the call, since the wait to announce is counted from here: counted
     // from the call, a 24-minute wait for a slot spent the whole of it before the engine began.
     const startedAt = Date.now();
     const transcript = openTranscript(startedAt);
-    // The keeper opens it again for the game; this server only ever reads it.
+    // The keeper opens it again for the game. This server only ever reads it.
     closeSync(transcript.fd);
     // Through a launcher and a keeper rather than as this server's child. The harness ends a server
     // by killing its process tree at every reconnect, and a run spawned here went with it however
@@ -12138,7 +12140,7 @@ class GodotServer {
     // run: the editor was told to stop, so its "playing" is a new play. So does a played run the
     // editor numbers a later play than, whoever ended it. Otherwise a run that ended somewhere else
     // stays: the editor goes on reporting a game whose process was ended from outside, so for a
-    // played run with no number "playing" can be the same play, still being reported; and a spawned
+    // played run with no number "playing" can be the same play, still being reported. A spawned
     // run that finished on its own is output somebody is waiting to read, which a scene played in
     // the editor meanwhile is not.
     const asked =
@@ -12443,7 +12445,7 @@ class GodotServer {
       this.tie(run, own);
       return own.pid;
     }
-    // The run's own process can have ended by now; the editor's has not, while it plays the run.
+    // The run's own process can have ended by now. The editor's has not, while it plays the run.
     const under = new Set(descendantsIn(tree, root, root === run.pid ? beganBy(run) : undefined));
     const directlyUnder = announced.filter(
       (one) => under.has(one.pid) && !gameBetween(tree, one.pid, root, games),
@@ -12590,7 +12592,7 @@ class GodotServer {
     return mine === null ? {} : { servedBy: mine };
   }
 
-  /** Writes down [param latest] as the run this project's servers started last; see `LatestRun`. */
+  /** Writes down [param latest] as the run this project's servers started last. See `LatestRun`. */
   private noteTheLatestRun(latest: LatestRun): void {
     const mine = this.ourProject();
     if (mine !== null) {
@@ -12733,7 +12735,7 @@ class GodotServer {
 
   /**
    * The announced games of [param run]'s project. A run started here names its project, which a
-   * server started without one and with no editor connected has no other way of knowing; a run
+   * server started without one and with no editor connected has no other way of knowing. A run
    * that names none is judged by this server's, as everything else is.
    */
   private announcedOfTheRunsProject<T extends { project: { path: string } }>(
@@ -12882,7 +12884,7 @@ class GodotServer {
     // check's run is read nowhere but here, so an answer keeping only the problems would drop
     // everything the flag was passed for.
     const floor: Severity = engineArgs.includes('--verbose') ? 'info' : 'warning';
-    // Apart from the problems, so a chatty boot never pushes an error out of entries; a check's run
+    // Apart from the problems, so a chatty boot never pushes an error out of entries. A check's run
     // is kept nowhere for editor_output, so lines left out here cannot be read at all.
     const ordinary = boot.log.all.filter((entry) => entry.severity === 'info');
     const printed = floor === 'warning' ? foldedRepeats(ordinary).slice(-MOST_PRINTED_LINES) : [];
@@ -13217,11 +13219,12 @@ class GodotServer {
     // Drained as it goes rather than once at the end: the pipes are what the output is read from,
     // and a run that fills them while nobody reads blocks on its own print. Stopped when the caller
     // cancels, since nobody is left to answer and a played run is asked of the editor on every
-    // pass; the run itself is not this call's to end, so it goes on.
+    // pass. The run itself is not this call's to end, so it goes on.
     const cancelled = callSignal();
     let held = false;
     let holdAsked = 0;
-    // oxlint-disable-next-line eslint/no-unmodified-loop-condition -- the caller's cancellation aborts the signal while the loop awaits
+    // The caller's cancellation aborts the signal while the loop awaits.
+    // oxlint-disable-next-line eslint/no-unmodified-loop-condition
     while (cancelled?.aborted !== true && (await this.runStillGoing(run)) && Date.now() < until) {
       this.drainEditorOutput(run);
       this.drainTranscript(run);
@@ -13343,7 +13346,7 @@ class GodotServer {
       if (record !== null && record.pid === run.pid && record.endingAt !== undefined) {
         until = Math.max(until, record.endingAt + SUCCESSOR_SOUGHT_WITHIN_MS);
       }
-      // A keeper still alive is on its way to writing the exit, however late it heard of it; one that
+      // A keeper still alive is on its way to writing the exit, however late it heard of it. One that
       // has gone will write nothing, and the run is settled as the two seconds say.
       if (
         record !== null &&
@@ -13378,8 +13381,9 @@ class GodotServer {
     // Before the editor dials in, what is known about it is what this server launched. Its console
     // is already being written by then, and startup is what the console is for, so an editor still
     // connecting was answered "not opened by gdharness" at exactly the moment its wall of parse
-    // errors was going past. Once it has greeted, its own report of who opened it decides; before
-    // the greeting counts as before connecting, since the pid and the opener arrive with it.
+    // errors was going past. Once it has greeted, its own report of who opened it decides. The
+    // time before the greeting counts as before connecting, since the pid and the opener arrive
+    // with it.
     const greeted = status.connected;
     const launched = greeted ? null : (this.launchedEditor?.pid ?? null);
     if (launched === null && status.identifying === true) {
@@ -13442,7 +13446,7 @@ class GodotServer {
     // context, and a console with a hundred different repeated messages would otherwise carry a
     // hundred groups on top of the two hundred entries. Sorted by count, so the cap takes the
     // small ones, and what it took is said rather than left to be inferred from a short list.
-    // Zero is a group with nothing above it, which is an answer; read as positive it carried three.
+    // Zero is a group with nothing above it, which is an answer. Read as positive, it carried three.
     // Only the shapes the read asked about, when it asked about something in particular.
     const filtered = severity !== 'info' || contains !== undefined;
     const grouped = bursts(
@@ -13514,7 +13518,7 @@ class GodotServer {
   /**
    * editor_output's refusal for a projectPath that is not the project of what it would read, or
    * null. The output read is the one run or editor this server holds, so the argument picks
-   * nothing; it is taken because every runtime tool beside this one takes it, and callers sent it
+   * nothing. It is taken because every runtime tool beside this one takes it, and callers sent it
    * here too, and a caller naming one project while the run is another's is reading output it
    * would attribute to the wrong game.
    */
@@ -13708,7 +13712,7 @@ class GodotServer {
     // an upgrade, left it holding 239 bytes of somebody else's output while this file was intact.
     // And what that file cannot answer, since handing somebody a path is also an invitation to
     // watch it. A run is alive or not by the operating system, which is what `running` above is
-    // asked of; a file that has stopped growing is a run between prints, and an arm of a bench
+    // asked of. A file that has stopped growing is a run between prints, and an arm of a bench
     // that prints one row at its end is legitimately silent for minutes. A watcher built on the
     // file declared a bench dead while its process sat there doing what it was asked, which is
     // the shape of every liveness proxy: it fails in the direction of the proxy rather than the
@@ -13733,8 +13737,8 @@ class GodotServer {
       // check: absent means the console was arriving throughout.
       consoleLost: run.consoleLost === true ? true : undefined,
       errorsUnread: errorsUnread(run) ? true : undefined,
-      // Three answers and not two. Null is a game this session knows is running; an object is one
-      // it knows is held, whether the adapter said so or the runtime did; and absent with
+      // Three answers and not two. Null is a game this session knows is running. An object is one
+      // it knows is held, whether the adapter said so or the runtime did. Absent with
       // heldUnknown beside it is a session that connected after a stop, asked, and could not find
       // out, which is the state a replacement server is in until the game answers something.
       ...hold,
@@ -13886,7 +13890,7 @@ class GodotServer {
       // that prints ended and thirty left grinding, which went on writing their slice files until
       // the next run of the same bench read their lines as its own and reported 107.9% of runs
       // won. A stop that says which process it ended is one a caller can compare against what they
-      // know their game started; one that says "stopped" is not. For a run the editor plays the
+      // know their game started. One that says "stopped" is not. For a run the editor plays the
       // number is the one its game announced, when it announced one: the process is the same
       // whichever side ended it.
       endedPid: verdict.endedPid,
@@ -13895,7 +13899,7 @@ class GodotServer {
       ...childrenFields(ended),
       // Whether there was anything left to stop. A run whose exit nobody collected, which is a
       // played run picked up after a reconnect and gone since, has no exit code and is over all
-      // the same; answering false there said a game had been ended that had ended itself. Read
+      // the same. Answering false there said a game had been ended that had ended itself. Read
       // before the stop and not off the exit code after it: the kill's exit lands while this answer
       // is being built, so the code was there for a run this very stop had ended, and on Linux the
       // answer said it had exited before the stop.
@@ -14212,7 +14216,7 @@ class GodotServer {
     const deadline = (): number => started + timeoutMs + answerStalledMs;
     // Whether the editor took the request that starts the scan in and did not answer it in time. A
     // hidden editor imports what a scan finds on the thread that answers requests, so a large import
-    // holds the answer until it is over; the editor is at work rather than gone, and is waited for.
+    // holds the answer until it is over. The editor is at work rather than gone, and is waited for.
     let startUnanswered = false;
     // How many scans the editor had completed before the one asked for: the scan asked for is over
     // once the count has moved past it.
@@ -14359,8 +14363,8 @@ class GodotServer {
         : atMissingPaths.filter((name) => !cachedAtMissingPaths(rebuilt, projectPath).includes(name));
     const stillAtMissingPaths = atMissingPaths.filter((name) => !dropped.includes(name));
 
-    // After the scan rather than before it. The scan settles what the editor knows about the files;
-    // this settles what it has already built from one of them, and building from a file the scan
+    // After the scan rather than before it. The scan settles what the editor knows about the files.
+    // This settles what it has already built from one of them, and building from a file the scan
     // has not read yet would be recompiling the old source.
     const asked = args['reloadScript'];
     const reloads: { scriptPath: string; reloaded: ScriptReload }[] = [];
@@ -14614,7 +14618,7 @@ class GodotServer {
    * A script extending a new base class, compiled while the editor could not see the class, went on
    * reporting "Could not find base class" to the language server after the rescan had answered
    * clean, until it was reloaded by hand. Each is reloaded as `reloadScript` reloads one: from the
-   * file, keeping the state of what uses it.
+   * file, with the state of what uses it kept.
    *
    * The scripts declaring the classes go first, since the others are compiled against them. One
    * that does not compile is named by the scripts that fail on it, which try it again.
@@ -14650,7 +14654,8 @@ class GodotServer {
     const reloadedFirst: ReloadedFirst[] = [];
     for (const { script: scriptPath, tool } of scripts) {
       // A @tool script is running in the editor, and reloading one from inside a call the editor is
-      // serving can take the editor down: it did on Linux, reloading the addon's own tool executor.
+      // serving can take the editor down. It did on Linux, when it reloaded the addon's own tool
+      // executor.
       if (tool) {
         notReloaded.push({
           scriptPath,
@@ -14774,7 +14779,7 @@ class GodotServer {
    * A script that names a class the editor holds in an older shape fails to compile on what the file
    * has added, and a reload of the script alone fails the same way. Downstream, a rescan reloading a
    * loader that took a constant and a method from such a class answered that the loader named the
-   * new classes the scan brought in, which were fine; reloading the class and then the loader
+   * new classes the scan brought in, which were fine. Reloading the class and then the loader
    * cleared it, four calls later.
    */
   private async reloadWhatItIsBuiltOn(
@@ -14972,7 +14977,7 @@ class GodotServer {
    * The rebuild's engine loaded the old list when it started and compiles the autoloads against it
    * after answering, so [param names], which the rebuild added, are unknown to them there. Taking
    * those errors for the scripts' told a caller a correct autoload would be left out of every run
-   * until it was fixed; whether it compiles is a question for an engine that starts on the new list.
+   * until it was fixed. Whether it compiles is a question for an engine that starts on the new list.
    */
   private async autoloadsOnTheRebuiltList(
     projectPath: string,
@@ -15223,7 +15228,7 @@ class GodotServer {
         }
         return await question(client);
       } catch (error) {
-        // A server that took the request in is there; the rename says what ran out instead.
+        // A server that took the request in is there. The rename says what ran out instead.
         if (!(error instanceof LSPTimeout)) {
           languageServer.problem = normalizeLSPError(error, client.port);
         }
@@ -15362,7 +15367,7 @@ class GodotServer {
    * a headless engine running the editor's own read on the file.
    *
    * An editor this server opened is waited for first, since one importing the project as it starts
-   * is no engine to boot a second beside; one that never connects leaves the file to read all the
+   * is no engine to boot a second beside. One that never connects leaves the file to read all the
    * same.
    */
   private async readFromFile(
@@ -15737,8 +15742,8 @@ class GodotServer {
   /**
    * After a rename with no editor: the class cache rebuilt when a class was renamed or moved, the
    * engine's UID table rebuilt when a script moved, since it names the old path and a scene
-   * loading the script by its UID would look there; then every changed script compiled in a fresh
-   * engine.
+   * loading the script by its UID would look there, and then every changed script compiled in a
+   * fresh engine.
    */
   private async settleRenameOnDisk(
     projectPath: string,
@@ -15874,7 +15879,7 @@ class GodotServer {
    * A member's uses are found through the language server, which types a value only by the classes
    * the editor holds, so a use through a value of a class the editor has not loaded is not one it
    * reports. Measured on 4.7.2: a script created moments before, then a second script with
-   * `var counter: Counter` and `print(counter.value)`; renaming `value` left that line as it was,
+   * `var counter: Counter` and `print(counter.value)`. Renaming `value` left that line as it was,
    * the rename answered ok and the file no longer compiled. After editor_rescan brought Counter
    * in, the same rename edited it. A class rename reads the files, so it is not held up.
    */
@@ -16062,7 +16067,7 @@ class GodotServer {
     // path the call names: it has no other project to look in. So a call naming a different one
     // was answered about the editor's, under the caller's own project name, and nothing in the
     // answer said which project it described. The bridge already turns away an editor from
-    // elsewhere; this is the same rule read from the other end.
+    // elsewhere. This is the same rule read from the other end.
     const open = this.godotBridge.getStatus().projectPath;
     const meant = readNonEmptyString(args, 'projectPath');
     if (open !== undefined && open !== '' && meant !== undefined && !isSameDirectory(open, meant)) {
@@ -16134,7 +16139,7 @@ class GodotServer {
 
   /**
    * Where the game this server started is held by its keeper's debugger, when [param endpoint] is
-   * that game and it is held; null otherwise, and for a debugger that does not answer. The editor's
+   * that game and it is held. Null otherwise, and for a debugger that does not answer. The editor's
    * session says this of its game before a call goes, and a kept game said nothing: a call that met
    * a breakpoint waited out the whole runtime timeout, then said only that the game might be held.
    */
@@ -16148,7 +16153,7 @@ class GodotServer {
 
   /**
    * Where the game that [param keeper] keeps is held by its debugger, in the shape the editor's
-   * session reports a stop in; null when it is running, or its debugger does not answer.
+   * session reports a stop in. Null when it is running, or its debugger does not answer.
    */
   private async keptHold(keeper: string): Promise<StoppedAt | null> {
     const answered = await askTheKeepersDebugger(keeper, { op: 'stack' }, KEEPER_DEBUG_MS);
@@ -16278,7 +16283,7 @@ class GodotServer {
     // before it is still listed while its process is dying (on Linux, until it is reaped), and it
     // is a game of the same project naming no editor, so it passed for this run's own: the call
     // went to it and met a closed port.
-    // The run's own record of what was up before it comes first, as it does in announcedPidOf; the
+    // The run's own record of what was up before it comes first, as it does in announcedPidOf. The
     // file's time is for a run started without one.
     const announcedSinceTheStart = (one: RuntimeEndpoint): boolean => {
       if (run.announcedBefore !== undefined) {

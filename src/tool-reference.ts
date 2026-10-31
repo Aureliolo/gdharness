@@ -150,7 +150,7 @@ export function renderToolsMarkdown(): string {
         const isDefault = tool.defaultOperation === op ? ' (default)' : '';
         const wants = needs.length > 0 ? ` Needs: ${needs.map((name) => `\`${name}\``).join(', ')}.` : '';
         // What else the op will take, because an argument meant for another op is refused. The
-        // list below says which ops each argument belongs to; this says it the way round somebody
+        // list below says which ops each argument belongs to. This says it the way round somebody
         // writing one call wants it.
         const spare = argumentsOf(tool, op).filter((name) => !needs.includes(name) && name !== 'projectPath');
         const takes = spare.length > 0 ? ` Takes: ${spare.map((name) => `\`${name}\``).join(', ')}.` : '';

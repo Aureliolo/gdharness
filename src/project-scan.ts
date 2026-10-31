@@ -24,7 +24,7 @@ export const VERSION_MARKER = '.gdharness-version';
  * A vendored engine, an export directory, somebody else's project kept for reference: what is
  * under one is not imported, so it is not this project's content and counting or searching it
  * answers about files the engine will never load. A hundred megabytes of exported binary is the
- * cheap half of getting this wrong; the expensive half is a search that finds a match in a copy
+ * cheap half of getting this wrong. The expensive half is a search that finds a match in a copy
  * of the code nobody is running.
  *
  * An addon gdharness installed is stepped over too. The engine loads it, but nobody on the project
@@ -127,7 +127,7 @@ export function projectStructure(projectPath: string): ProjectStructure {
 
 /**
  * The project's files whose extension is one of [param extensions] (with the dot, lower case),
- * project-relative with forward slashes and sorted, stepping over what the engine steps over.
+ * project-relative with forward slashes and sorted. The walk steps over what the engine steps over.
  */
 export function projectFiles(projectPath: string, extensions: readonly string[]): string[] {
   return filesBelow(projectPath, extensions);
@@ -135,7 +135,7 @@ export function projectFiles(projectPath: string, extensions: readonly string[])
 
 /**
  * [method projectFiles] for one folder of a project that a caller named, relative to that folder.
- * The folder is walked even when gdharness installed it, since naming it asks for it; below it,
+ * The folder is walked even when gdharness installed it, since naming it asks for it. Below it,
  * as everywhere, what the engine steps over and what gdharness installed are stepped over. A walk
  * of its own here took in gdharness's addons, so a project's diagnostics checked fifty-five of
  * them beside its three scripts while every other answer called the three the project's.
@@ -160,7 +160,7 @@ export function underGdignore(projectPath: string, relativePath: string): boolea
 
 /** A folder [method folderFiles] steps over, and why. */
 export interface SteppedOver {
-  /** Relative to the folder walked, with forward slashes; empty for that folder itself. */
+  /** Relative to the folder walked, with forward slashes. Empty for that folder itself. */
   readonly folder: string;
   readonly why: 'gdignore' | 'gdharness';
 }
@@ -260,7 +260,7 @@ export function scriptsWithoutUid(projectPath: string): string[] {
  * The res:// paths the project's uid cache holds a uid for, or null when it has no cache it can read.
  *
  * The engine writes `.godot/uid_cache.bin` as a count and then, for each entry, the id, the length
- * of the path and the path, little-endian; files gaining a uid later are appended and the count
+ * of the path and the path, little-endian. Files gaining a uid later are appended and the count
  * rewritten, so a later entry for an id replaces an earlier one, as the engine's own load takes it.
  * A headless write looks a path's uid up here, which nothing in the project's own files shows.
  */

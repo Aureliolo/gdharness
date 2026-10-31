@@ -2,7 +2,11 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
-import { isRecord } from '../src/records.js';
+
+// Its own copy rather than src/records.ts: the release workflow and its test run this script alone.
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
 
 const ROOT = process.cwd();
 const PACKAGE_JSON_PATH = path.join(ROOT, 'package.json');

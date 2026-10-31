@@ -65,7 +65,7 @@ function runtime(): string {
  * A short, stable id for the same defect seen twice.
  *
  * Two machines hitting one bug should arrive with one id, so what differs between machines comes
- * out first: paths, numbers, casing. A dedupe aid in a title and nothing else, which is why eight
+ * out first: paths, numbers and casing. A dedupe aid in a title and nothing else, which is why eight
  * characters is enough and why nothing depends on it being unique.
  */
 export function defectSignature(where: string, message: string): string {
@@ -137,7 +137,7 @@ function filledTemplate(where: string, message: string, godotVersion?: string): 
 export class DefectsSeen {
   private readonly counts = new Map<string, number>();
 
-  /** How many times this failure has already been reported, counting this one in for next time. */
+  /** How many times this failure has already been reported, with this one counted in for next time. */
   before(where: string, message: string): number {
     const signature = defectSignature(where, message);
     const seen = this.counts.get(signature) ?? 0;
@@ -171,7 +171,7 @@ export interface DefectContext {
  * cleared.
  *
  * So the advice is taken off something known rather than assumed. The same failure twice in one
- * process is a state and says so; the first time is an event until it is not, and one retry settles
+ * process is a state and says so. The first time is an event until it is not, and one retry settles
  * which. The paragraph after it hands over the decision, which is not the agent's to take.
  */
 export function defectReport(where: string, error: unknown, context: DefectContext = {}): string {

@@ -22,7 +22,7 @@ import process from 'node:process';
 import type { DebugAnswer, DebugRequest } from './game-debugger.js';
 import { isRecord } from './records.js';
 
-/** How a question for the game's debugger starts its line; the JSON of the request follows. */
+/** How a question for the game's debugger starts its line. The JSON of the request follows. */
 const DEBUG_PREFIX = 'debug ';
 
 /** What the keeper did when asked: ended the game, or found it already gone. */

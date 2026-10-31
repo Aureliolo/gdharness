@@ -286,7 +286,7 @@ export class UpdateCheck {
    *
    * One definition, because two methods read it and they must not be able to disagree. Deciding
    * an answer is too old to use is what starts a fetch, and it is also what stops that answer
-   * being quoted meanwhile; written out twice and inverted, one of them drifts and the notice
+   * being quoted meanwhile. Written out twice and inverted, one of them drifts and the notice
    * goes back to naming a version the fetch beside it was started to replace.
    */
   private stale(now: number): boolean {
@@ -308,7 +308,7 @@ export class UpdateCheck {
     // call and starts a fetch precisely because the window has passed, so naming the version here
     // hands out something known stale together with an upgrade command for it. A server that had
     // just restarted read a note left hours earlier by a previous process and told its first
-    // caller to install a version and a half behind; the call after that named the right one.
+    // caller to install a version and a half behind. The call after that named the right one.
     //
     // Only while a fetch is actually in flight. A failed one backs off and leaves `checking`
     // false, and then this reports what it has again, because offline and behind is still worth

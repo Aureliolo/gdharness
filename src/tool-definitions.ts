@@ -20,7 +20,7 @@ type JsonSchema = Readonly<Record<string, JSONValue>>;
  * A parameter's schema, and which ops read it.
  *
  * `ops` is what makes an argument belong to some of a tool's ops rather than all of them. A tool
- * refuses an argument nothing names; without this it took one named for a different op and threw
+ * refuses an argument nothing names. Without this it took one named for a different op and threw
  * it away, which is the same fault wearing the tool's own vocabulary: `runtime_inspect text` was
  * given a limit for a year and answered with every line on the screen.
  *
@@ -63,13 +63,13 @@ interface ToolSpecBase {
    * What the fields of the answer mean, for a tool whose answer needs more than its description has
    * room for. Rendered in the skill's tool reference and on the site, and not in the description a
    * client is sent: Claude Code cuts that at 4096 characters, and the cut fell inside three tools'
-   * text, taking editor_run's list of ops with it.
+   * text and took editor_run's list of ops with it.
    */
   readonly answer?: string;
   readonly parameters: Readonly<Record<string, Parameter>>;
   /** Arguments every call needs, whatever the op. */
   readonly requires: readonly string[];
-  /** The op assumed when none is given; absent means op is required. */
+  /** The op assumed when none is given. Absent means op is required. */
   readonly defaultOperation?: string;
 }
 
@@ -2774,7 +2774,7 @@ function describeOperations(spec: ToolSpec): string {
   return ` Operations: ${lines.join('; ')}.${fallback}`;
 }
 
-/** The longest description a client is sent; Claude Code cuts a tool's description beyond it. */
+/** The longest description a client is sent. Claude Code cuts a tool's description beyond it. */
 export const MOST_DESCRIPTION_CHARACTERS = 4096;
 
 /** A tool's description as a client is sent it: the prose, its ops, and where its answer is described. */

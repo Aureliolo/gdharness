@@ -8,7 +8,7 @@
  * scene, resource, script or project.godot is rewritten, where the dock asks each dependent's loader
  * to rename its dependencies. A relative path inside a moved file is rewritten too, which the dock
  * does not do. A scene or resource saved as .scn or .res names its dependencies in bytes this cannot
- * rewrite, so it is answered instead; it still finds a file that has a UID.
+ * rewrite, so it is answered instead. It still finds a file that has a UID.
  */
 
 import {
@@ -334,7 +334,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
 /**
  * Makes every write of a planned move or none. Each file is checked against what the plan was made
  * from before anything is written, so an edit made in between is not overwritten with a plan that
- * never saw it; and a write that fails part of the way puts back everything already done.
+ * never saw it. A write that fails part of the way puts back everything already done.
  */
 export function applyFileMove(outcome: Extract<MoveOutcome, { ok: true }>): void {
   for (const rewrite of outcome.inPlace) {
@@ -397,7 +397,7 @@ export function applyFileMove(outcome: Extract<MoveOutcome, { ok: true }>): void
         step();
       } catch {
         // Putting back is best done for every file, so one that will not go back does not stop the
-        // rest; the error below says the move failed, which is the thing to act on.
+        // rest. The error below says the move failed, which is the thing to act on.
       }
     }
     throw error;

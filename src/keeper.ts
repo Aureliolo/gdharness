@@ -3,7 +3,7 @@
 /**
  * The launcher and the keeper `outside.ts` starts, so nothing the server starts is its child.
  *
- * `launch` starts the target detached and exits once it has the pid; for a run it starts a keeper
+ * `launch` starts the target detached and exits once it has the pid. For a run it starts a keeper
  * instead, which is what becomes the game's parent. `keep` starts the game on its transcript,
  * writes the run's record, hands the pid back, and waits: a server can wait only on its own
  * children and none is the game's, so this process is what sees the exit and writes it where the
@@ -51,10 +51,10 @@ import { type ChildProcess, spawnHidden, spawnShown } from './spawn.js';
 import { followSuccessor } from './successor.js';
 
 /**
- * The target started detached, so it is in no job object and no process group of this process;
- * its streams go to [param output], the transcript for a run and nowhere otherwise, since a pipe
+ * The target started detached, so it is in no job object and no process group of this process.
+ * Its streams go to [param output], the transcript for a run and nowhere otherwise, since a pipe
  * with no reader fills and then blocks the writer. [param hidden] for the editor, which is headless
- * and so opens no window, but whose console an engine built as a console program would show; never
+ * and so opens no window, but whose console an engine built as a console program would show. Never
  * for a game, whose window is what it is run for. [param detached] false and [param errors]
  * dropped only for the helper that starts a process through Win32: Windows PowerShell will not
  * run detached, and writes its own progress to its error stream.
@@ -98,7 +98,7 @@ async function startDirectly(
  * and outlives both. So only a keeper starts one, since it waits for as long as the target runs.
  * A launcher that exited after the pid took the helper with it, and a process it had started on a
  * desktop of its own could no longer start one of its own there, which is what an editor does when
- * it plays a game; and a start without activation needs its helper to hold the foreground.
+ * it plays a game. A start without activation also needs its helper to hold the foreground.
  */
 async function startThroughHelper(
   spec: SentSpec,
@@ -404,7 +404,7 @@ async function keep(): Promise<void> {
   const exited = exitOf(child);
   let listening: KeeperListening | null = null;
   // What a stop ends: the game, through what this process holds rather than through the pid (the
-  // game's own handle, or the helper's, which ends the game through the handle it holds; neither can
+  // game's own handle, or the helper's, which ends the game through the handle it holds. Neither can
   // reach a later process given the same number), and then whatever it restarted itself into.
   let end = (): 'signalled' | 'gone' => {
     if (stopFile !== '') {

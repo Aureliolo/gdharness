@@ -105,7 +105,7 @@ function testIgnoresDirectoriesMatchingPattern() {
  * A download in the home directory is tried, after every conventional path and never before.
  *
  * The scan reads the host's filesystem with the host's separators, so it is exercised for the
- * platform this runs on; the other platforms' lists are shape-checked without a scan.
+ * platform this runs on. The other platforms' lists are shape-checked without a scan.
  */
 function testDownloadsAreTriedAfterTheConventionalPaths() {
   const home = mkdtempSync(join(tmpdir(), 'gdharness-detect-home-'));

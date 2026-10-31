@@ -602,7 +602,7 @@ function testDependencyWalk(godotPath: string, projectDir: string): void {
   );
 
   // addons/ is project content and often shipping content, so it is walked like anything
-  // else; what the walk leaves out by default is the engine's own res://. space.
+  // else. What the walk leaves out by default is the engine's own res://. space.
   mkdirSync(join(projectDir, 'addons', 'fixture'), { recursive: true });
   writeFileSync(join(projectDir, 'addons', 'fixture', 'helper.gd'), 'extends Node\n');
   // The engine-internal path is loaded at run time rather than preloaded: the walk reads source
@@ -1283,7 +1283,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   }
 
   // Functions are spaced the way gdstyle and gdformat write them, two blank lines on each side counting those
-  // already there, and the file still ends with a newline; one placed after _ready goes above the
+  // already there, and the file still ends with a newline. One placed after _ready goes above the
   // doc comment and the annotation line of the function that follows, not between them and it. The
   // comment indented in _ready's body is the end of that body and stays there.
   const spacedPath = join(projectDir, 'made', 'spaced.gd');
@@ -1613,7 +1613,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   };
 
   // A setting nothing declares has no type to fit a number to, and JSON sends every number as a
-  // float, so a whole one was written as 800.0; one named like a declared setting is said to be.
+  // float, so a whole one was written as 800.0. One named like a declared setting is said to be.
   const beforeNew = readFileSync(projectFile, 'utf8');
   const widht = operation('set_project_setting', {
     setting: 'display/window/size/viewport_widht',
@@ -1632,7 +1632,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     `a section nothing declares has nothing to be near: ${JSON.stringify(own)}`,
   );
   assert.match(readFileSync(projectFile, 'utf8'), /^\[fixture_game\]\n\ntempo=3$/m);
-  // The way back from a misspelt set: unset takes the line out, leaving every other line as it was.
+  // The way back from a misspelt set: unset takes the line out, and every other line stays as it was.
   const unwritten = operation('unset_project_setting', { setting: 'display/window/size/viewport_widht' });
   assert.deepEqual(
     [get(unwritten, 'removed'), get(unwritten, 'old_value'), get(unwritten, 'default_value')],
@@ -2244,7 +2244,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   writeFileSync(join(projectDir, 'made', 'unimported.gd'), 'extends Node\n');
   const absent = operation('get_uid', { resource_path: 'made/unimported.gd' });
   rmSync(join(projectDir, 'made', 'unimported.gd'));
-  // The file is there and only its uid is not; exists: false was read as the file being gone.
+  // The file is there and only its uid is not. exists: false was read as the file being gone.
   assert.deepEqual([get(absent, 'uid'), Object.hasOwn(asObject(absent), 'exists')], [null, false]);
   assert.equal(get(absent, 'file'), 'res://made/unimported.gd');
   assert.match(
@@ -2511,8 +2511,8 @@ function testOperations(godotPath: string, projectDir: string): void {
     undefined,
     `an engine action left alone is not listed: ${JSON.stringify(actions)}`,
   );
-  // A rebind naming no deadzone keeps the action's own; a key can be bound by where it sits, and
-  // every event is bound to every device, as the editor binds it, so a second joypad reaches it.
+  // A rebind naming no deadzone keeps the action's own. A key can be bound by where it sits. Every
+  // event is bound to every device, as the editor binds it, so a second joypad reaches it.
   const physical = operation('add_input_action', {
     action_name: 'fixture_jump',
     events: [
@@ -2767,7 +2767,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   const untouchedBinding =
     "ui_accept is one of the engine's own actions, and project.godot does not rebind it, so there is nothing to remove: the engine's binding holds. Rebind it with add_input_action.";
   assert.ok(builtIn.stderr.includes(untouchedBinding), builtIn.stderr);
-  // Rebound, it can go back to the engine's binding, and the refusal says how; the way it names
+  // Rebound, it can go back to the engine's binding, and the refusal says how. The way it names
   // has to work, so it is taken.
   operation('add_input_action', { action_name: 'ui_accept', events: [{ type: 'key', keycode: 'E' }] });
   const reboundRefused = runRefusedOperation(godotPath, projectDir, 'remove_input_action', {
@@ -3518,12 +3518,11 @@ function testAUidIsFollowedBeforeAnyImport(godotPath: string, _projectDir: strin
  * An import is judged by content: what it built is there, its source is the one it recorded, and a
  * scene depends on every image it names.
  *
- * Status compared file times. That missed the case it was first written for, 64 glTF scenes
- * imported before their textures and so untextured, all read as up to date; and once it compared
- * more times it was wrong the other way: 31 images an installer rewrote byte for byte read as
- * changed, and 33 correct scenes read as built before their textures, because a texture a 3D scene
- * uses is reimported compressed after the scene. Everything here is imported by the engine itself
- * with --import, so the files are the ones the editor writes.
+ * File times cannot judge it. Compared by time, 64 glTF scenes imported before their textures, and
+ * so untextured, all read as up to date. Comparing more times was wrong the other way: 31 images an
+ * installer rewrote byte for byte read as changed. And 33 correct scenes read as built before their
+ * textures, because a texture a 3D scene uses is reimported compressed after the scene. Everything
+ * here is imported by the engine itself with --import, so the files are the ones the editor writes.
  */
 function testAnImportIsJudgedByWhatItWasBuiltFrom(godotPath: string, _projectDir: string): void {
   const dir = createProject(godotPath);
@@ -3694,7 +3693,7 @@ function testAnImportIsJudgedByWhatItWasBuiltFrom(godotPath: string, _projectDir
     assert.equal(get(held, 'status'), 'up_to_date', `a resource kept as it is: ${JSON.stringify(held)}`);
     expectStale('models/tex/broken.png', 'failed', /last import failed/, 'an image that would not import');
 
-    // An option set in the sidecar without a reimport, as set_options does; the editor holds the
+    // An option set in the sidecar without a reimport, as set_options does. The editor holds the
     // sidecar's hash from its last import in its filesystem cache.
     const tintSidecar = join(tex, 'tint.png.import');
     const tintText = readFileSync(tintSidecar, 'utf8');
@@ -3722,7 +3721,7 @@ function testAnImportIsJudgedByWhatItWasBuiltFrom(godotPath: string, _projectDir
       'an output changed after its import',
     );
 
-    // A sidecar copied beside a copy of its image, naming the image it was written for.
+    // A sidecar copied beside a copy of its image. It names the image it was written for.
     writeFileSync(join(tex, 'twin.png'), readFileSync(join(tex, 'plain.png')));
     writeFileSync(join(tex, 'twin.png.import'), readFileSync(join(tex, 'plain.png.import')));
     expectStale(
@@ -3873,7 +3872,7 @@ function testAGdignoreStopsTheWalk(godotPath: string, projectDir: string): void 
   );
 
   // An addon gdharness installed is not the project's, told by the marker setup writes and not by
-  // its name; an addon the project wrote is. And a WebP texture is something the engine imports,
+  // its name. An addon the project wrote is. And a WebP texture is something the engine imports,
   // which the health check counted as nothing beside five other formats.
   const installed = join(projectDir, 'addons', 'installed_tool');
   const theirs = join(projectDir, 'addons', 'their_tool');
@@ -4256,7 +4255,7 @@ function testEveryUseIsFound(godotPath: string): void {
       ['res://sub/b.gd'],
       'and the forward walk follows it',
     );
-    // A path a comment names is not a dependency, in any of the three places a comment sits; the
+    // A path a comment names is not a dependency, in any of the three places a comment sits. The
     // shipped serialisation module's example path was one of every project with the addon.
     writeFileSync(
       join(dir, 'sub', 'commented.gd'),
@@ -4315,7 +4314,7 @@ function testEveryUseIsFound(godotPath: string): void {
     assert.deepEqual(structure('herald.gd'), [[], []], 'and not one named only in words');
     assert.deepEqual(structure('enemy.gd'), [[], []], 'nor a script for its own name');
     // A base named by its path, a constant handed to load, and an inner class's base are loaded
-    // as surely as a path written in the call; a constant only printed, or one held in a variable,
+    // as surely as a path written in the call. A constant only printed, or one held in a variable,
     // is not loaded by name.
     writeFileSync(
       join(dir, 'based.gd'),
@@ -4906,7 +4905,7 @@ function testAConnectionNamesWhatItReaches(godotPath: string): void {
  * asks the importer only about a sidecar whose time has moved, so a rewrite landing in the second
  * the import wrote it is never looked at: on a fast Linux runner it landed there and the engine
  * rebuilt nothing, once in the importer case and once in the font case. A sidecar somebody changes
- * is changed after its import, so this is the state those cases are about; the server's own
+ * is changed after its import, so this is the state those cases are about. The server's own
  * reimport forces the resources it names and does not depend on it.
  */
 function pastTheImportsSecond(sidecar: string, importedAt: number): void {
@@ -5570,8 +5569,8 @@ function testTheClassListIsTheEnginesOwn(godotPath: string): void {
  *
  * Godot resolves a type as a global class, then an autoload, before the script's own constants and
  * inner classes, so in a project with `class_name Log` a module's `var logger: Log` named the
- * project's class and the module refused to compile, losing every headless call; an inner class of
- * that name is refused as hiding the global one. Found when a fixture here declared
+ * project's class and the module refused to compile, and every headless call failed. An inner
+ * class of that name is refused as hiding the global one. Found when a fixture here declared
  * `class_name Shapes`. So every name a shipped script declares in a class's casing carries the
  * prefix, and the same name without it is one class, and in a second project one autoload, here.
  * The names in capitals are constants, which no project names a class after.
@@ -6105,7 +6104,7 @@ async function main(): Promise<void> {
     // And an announcement that does not answer is set aside rather than waited on for good.
     runFixture(godotPath, projectDir, 'bridge_leftover');
     // The game announces itself under the engine's temporary directory and the server looks
-    // under Bun's; a platform where the two differ is one where no game is ever found. Both go
+    // under Bun's. A platform where the two differ is one where no game is ever found. Both go
     // through the filesystem's own spelling, because Windows hands one side the 8.3 short name
     // and the other the long one for the same directory.
     const clients = runFixture(godotPath, projectDir, 'runtime_clients');

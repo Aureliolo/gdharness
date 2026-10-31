@@ -38,8 +38,8 @@ export function readNonEmptyString(params: OperationParams, key: string): string
 
 /**
  * A number greater than zero, or a string that is wholly one. Zero is not a usable limit or
- * depth anywhere it is read here, so it means the same as not sending the argument at all; and
- * clients that build their arguments as text send `"3"` where the schema says 3, which is the
+ * depth anywhere it is read here, so it means the same as not sending the argument at all.
+ * Clients that build their arguments as text send `"3"` where the schema says 3, which is the
  * same mismatch the runtime bridge fits arguments to their types for.
  */
 export function readPositiveNumber(params: OperationParams, key: string): number | undefined {
@@ -81,7 +81,7 @@ export function readBoolean(params: OperationParams, key: string): boolean | und
   return undefined;
 }
 
-/** An array whose every element is a string; a mixed array reads as absent rather than partial. */
+/** An array whose every element is a string. A mixed array reads as absent rather than partial. */
 export function readStringArray(params: OperationParams, key: string): string[] | undefined {
   const value = params[key];
   if (!Array.isArray(value)) {

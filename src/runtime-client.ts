@@ -83,7 +83,7 @@ export function runtimeDirectory(variables: NodeJS.ProcessEnv = process.env): st
  * Windows directory's Temp while this server, started with them set, watches the user's. Measured
  * on Windows, where it cost a session: the game announced in C:\Windows\Temp\gdharness and the
  * server created and swept an empty C:\Users\<name>\AppData\Local\Temp\gdharness beside it,
- * answering that no game was running while one was.
+ * and answered that no game was running while one was.
  *
  * `editor_launch` now passes the first of these down, so an editor this server opened puts its
  * games where this server looks. The rest are for the editor it did not open, which is most of
@@ -421,7 +421,7 @@ interface Verdict {
 
 const verdicts = new Map<string, Verdict>();
 
-/** The judgement being made now, if one is; see [method strangersAmong]. */
+/** The judgement being made now, if one is. See [method strangersAmong]. */
 let judging: Promise<void> | null = null;
 
 /** Resolves once the judgement being made, if any, has landed. */
@@ -512,14 +512,14 @@ function announcedIn(directory: string): Announced[] {
       try {
         candidates.push({ file, pid, writtenAt: statSync(file).mtimeMs });
       } catch {
-        // Taken by another reader between the listing and this; the parse below says rubbish.
+        // Taken by another reader between the listing and this. The parse below says rubbish.
       }
     }
   }
   const strangers = strangersAmong(candidates, Date.now());
   for (const { file, pid, running } of entries) {
     // A number answering to a signal is not the game unless the process behind it is the one that
-    // wrote the file; one that is not is swept as a game that has gone, which is what it is.
+    // wrote the file. One that is not is swept as a game that has gone, which is what it is.
     const departed = !running || strangers.has(file);
     const announced: Announced = departed ? { kind: 'rubbish' } : parseAnnouncement(file, pid);
     if (announced.kind === 'rubbish') {
@@ -561,7 +561,7 @@ function announcedIn(directory: string): Announced[] {
 
 /**
  * The longest a stop waits for the game it ended to go before taking its announcement down. The
- * editor ends a game with a kill and the operating system reaps it inside a second; a process
+ * editor ends a game with a kill and the operating system reaps it inside a second. A process
  * still there after this is one the stop did not end, and its announcement stays with it.
  */
 const ENDED_WITHIN_MS = 3_000;
@@ -653,7 +653,7 @@ export interface WaitingForRuntime {
  * this waited, or none.
  *
  * Starting a game and being able to talk to it are two moments, and everything treated them as
- * one. The editor answers `play_scene` as soon as it has asked the engine to play; the engine
+ * one. The editor answers `play_scene` as soon as it has asked the engine to play. The engine
  * then boots, and the runtime binds a port and writes its announcement somewhere inside that. So
  * the call straight after a start was answered "No game with the runtime addon is running", about
  * a game that was starting, and the way through was to make the same call again a moment later.
@@ -787,8 +787,8 @@ function tooNew(unspoken: readonly UnspokenRuntime[]): string {
 }
 
 /**
- * The one game to talk to. With a process id, that game; with a project path, the game running
- * that project; without either, the only game running. Two games and nothing to tell them apart
+ * The one game to talk to. With a process id, that game. With a project path, the game running
+ * that project. Without either, the only game running. Two games and nothing to tell them apart
  * is a question this cannot answer, and the answer names both so the caller can.
  *
  * The process id is for a project running several games at once, which a bench fanning out to
@@ -902,8 +902,8 @@ export type RuntimeReply =
     };
 
 /**
- * What a request does once its wait runs out. `drop` stops listening; `keep` keeps the reply under
- * the request's id for `lateAnswer`; a function is called with the reply when it comes, or with the
+ * What a request does once its wait runs out. `drop` stops listening. `keep` keeps the reply under
+ * the request's id for `lateAnswer`. A function is called with the reply when it comes, or with the
  * failure once the late wait ends, for work that has to outlive the wait without being collected.
  */
 export type AfterTheWait = 'drop' | 'keep' | ((reply: RuntimeReply) => void);
@@ -974,7 +974,7 @@ const REDIAL_MS = 50;
  * refused dials, and with one still [param dialling], neither accepted nor refused, or with none
  * open because no place came free.
  *
- * Nothing listening and a full queue are refused alike on Windows, so the refusal names both;
+ * Nothing listening and a full queue are refused alike on Windows, so the refusal names both.
  * Linux and macOS hold a dial to a full queue instead, which is the dial still open.
  */
 export function notSent(

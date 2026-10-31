@@ -95,7 +95,7 @@ func get_import_status(params: Dictionary) -> Dictionary:
 		if not full_path.begins_with("res://"):
 			full_path = "res://" + full_path
 
-		# missing_source is a sidecar whose source has gone; with neither, the path names nothing
+		# missing_source is a sidecar whose source has gone. With neither, the path names nothing
 		# the engine ever imported, and answering it as a lost source sent a caller to restore a
 		# file.
 		if (

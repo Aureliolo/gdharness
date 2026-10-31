@@ -4,7 +4,7 @@
 
 | Command                                                   | What it does                                                                                                                                                    |
 | --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bun run build`                                           | Bundles into `build/` without typechecking. `ci`, `test:metadata`, `test:packaging` and `test:node-runtime` run it first; `test:ci` and the regressions do not. |
+| `bun run build`                                           | Bundles into `build/` without typechecking. `ci`, `test:metadata`, `test:packaging` and `test:node-runtime` run it first. `test:ci` and the regressions do not. |
 | `bun run typecheck`                                       | `tsc --noEmit`.                                                                                                                                                 |
 | `bun run ci`                                              | Build, typecheck, `format:check`, `lint` and `test:ci`, in that order.                                                                                          |
 | `bun run lint`                                            | Biome, types, dead code and markdownlint.                                                                                                                       |
@@ -12,356 +12,385 @@
 | `bun run lint:gd`, `bun run format:gd:check`              | The pinned gdstyle with the lane's `gdstyle.toml`, on every script under `src/godot` and `test/support/gd`.                                                     |
 | `uv run yamllint --strict .`                              | The `yaml` job.                                                                                                                                                 |
 | `bun run format`, `bun run lint:fix`, `bun run format:gd` | Write the fixes.                                                                                                                                                |
-| `bun run test:typed`                                      | Shipped scripts and fixtures, warnings as errors; Godot.                                                                                                        |
-| `bun test/regressions.ts [name ...]`                      | Every regression; names select tests, loosely matched.                                                                                                          |
-| `bun run test:ci`                                         | The eleven fast files, regressions included.                                                                                                                    |
-| `test:integration`, `test:metadata`, `test:packaging`     | The other four files the `build-and-test` job runs. `test:packaging` refuses on Windows.                                                                        |
-| `bun run test:engine`, `bun run test:editor`              | The engine and editor legs; need a real Godot.                                                                                                                  |
+
+## Test commands
+
+| Command                                               | What it does                                                                             |
+| ----------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `bun run test:typed`                                  | Shipped scripts and fixtures in Godot, warnings as errors.                               |
+| `bun test/regressions.ts [name ...]`                  | Every regression. Names select tests, loosely matched.                                   |
+| `bun run test:ci`                                     | The eleven fast files, regressions included.                                             |
+| `test:integration`, `test:metadata`, `test:packaging` | The other four files the `build-and-test` job runs. `test:packaging` refuses on Windows. |
+| `bun run test:engine`, `bun run test:editor`          | The engine and editor legs. They need a real Godot.                                      |
+
+## Setup
 
 Set up with `bun install`, `bun scripts/install-gdstyle.ts` and `uv sync --locked`. The second puts
-the pinned gdstyle in `tools` under gdharness's cache folder (the one the engine slots sit beside),
-where the GDScript gates look for it, and the third puts
-the pinned yamllint in `.venv`, which `uv run` uses in preference to any copy on `PATH`.
-`gdstyle.toml` is the lane's, copied byte for byte: a change to it is made in the lane first.
+the pinned gdstyle in `tools` under gdharness's cache folder, beside the engine slots, where the
+GDScript gates look for it. The third puts the pinned yamllint in `.venv`. `uv run` takes that copy
+before any on `PATH`. `gdstyle.toml` is copied byte for byte from the lane, where a change to it is
+made first.
+
+## Engines and fixtures
 
 Build before running a suite, because the suites start servers from the bundle. Engine-backed cases
-need `GODOT_PATH`, and the gdUnit fixture needs `GDUNIT4_PATH`; without them those cases skip and say
-so, and `GDHARNESS_REQUIRE_GODOT=1` turns those skips into failures, as the engine legs set it.
-Windowed regressions skip unless `GDHARNESS_ALLOW_WINDOWS` is set. `bun scripts/install-godot.ts`
-and `bun scripts/install-gdunit4.ts` fetch the pinned versions there too and print where they
-landed. CI keeps them in the runner's temporary folder; anywhere else a temporary folder is swept,
-and a pinned engine kept in one vanished from under every session pointing `GODOT_PATH` at it.
+need `GODOT_PATH` and the gdUnit fixture `GDUNIT4_PATH`. Without them those cases skip and say so.
+The engine legs set `GDHARNESS_REQUIRE_GODOT=1`, which turns those skips into failures. Windowed
+regressions skip unless `GDHARNESS_ALLOW_WINDOWS` is set.
 
-The server speaks the 2026-07-28 protocol only, as Claude Code does: `ServerProcess` opens with
-`server/discover` and puts the envelope on every request. A 2025 `initialize` is answered with the
-unsupported-protocol-version error naming 2026-07-28, which smoke checks.
+`bun scripts/install-godot.ts` and `bun scripts/install-gdunit4.ts` fetch the pinned versions into
+the same cache folder and print where they landed. CI keeps them in the runner's temporary folder.
+Anywhere else a temporary folder is swept, taking the engine from every session whose `GODOT_PATH`
+names it.
 
-Run `test:typed` after any GDScript change. gdstyle passes a script the engine refuses with
-warnings as errors, and the regressions load the addons under the default warnings, so a local run
-with the engine passed a runtime addon that failed to compile on the Linux engine leg. The fixtures
-in `test/support/gd` compile under those settings too: one tried in a scratch project with default
-warnings passed there and failed on the leg for discarding what `ItemList.add_item` returns.
+## Protocol
+
+The server speaks the 2026-07-28 protocol only, as Claude Code does. `ServerProcess` opens with
+`server/discover` and puts the envelope on every request. `test/smoke.ts` checks that a 2025
+`initialize` gets the unsupported-protocol-version error naming 2026-07-28.
+
+## GDScript
+
+Run `test:typed` after any GDScript change. gdstyle passes a script the engine refuses with warnings
+as errors. The regressions load the addons under the default warnings. A runtime addon can pass them
+locally and fail to compile on the Linux engine leg. The fixtures in `test/support/gd` must also
+compile under the strict settings, not only in a scratch project with default warnings.
 
 Every name a shipped script declares in a class's casing (a preloaded module, an inner class, an
 enum) starts with `Gdh`. Godot resolves a type as the project's global class or autoload before the
-script's own constant, so a game with `class_name Log` or an autoload called `Log` broke every module
+script's own constant. A game with `class_name Log` or an autoload called `Log` breaks every module
 that preloads its logger as `Log`. The engine leg's `ourNames` case refuses a name without the
-prefix and compiles the shipped scripts beside a class and an autoload for each name.
+prefix. It also compiles the shipped scripts beside a class and an autoload for each name.
+
+## Shared modules and packaging
 
 The modules listed in `scripts/sync-shared-gd.ts` (`reading.gd`, `serialisation.gd`,
 `value_shapes.gd`, `property_values.gd`, `property_paths.gd`, `declared_values.gd`,
 `same_values.gd`, `file_reads.gd`, `file_walk.gd`, `animation_reads.gd` and `setting_reads.gd`) are
-edited in
-`src/godot/operations/` only; `bun run sync:gd` writes the copies inside the addons, and a
-regression fails on a copy that has drifted. Commit the `.gd.uid` Godot writes beside every new
-addon script, and add a new operations module to the list in `test/packaging-consistency.ts`.
-`test:packaging` checks both and runs only on Linux and macOS, so from Windows the push is the
-first run that sees them.
+edited in `src/godot/operations/` only. `bun run sync:gd` writes the copies inside the addons. A
+regression fails on a copy that has drifted.
 
-`src/` is the TypeScript MCP server (entry point `cli.ts`, which serves stdio when given no
-command). Every tool is one entry in `src/tool-definitions.ts`: the server dispatches from it, and
-the site and the skill render their tool reference from it. `src/godot/addons/` holds the editor,
-runtime and auto-reload addons and `src/godot/operations/` the headless engine operations, both
-GDScript. `test/` holds the suites, with shared helpers in `test/support/`, and `scripts/` the
-build, release and installer scripts. `docs/architecture.md` describes how the parts fit together,
-and the repository map in `.github/CONTRIBUTING.md` names the main modules.
+Commit the `.gd.uid` Godot writes beside every new addon script. Add a new operations module to the
+list in `test/packaging-consistency.ts`. `test:packaging` checks both, on Linux and macOS only. From
+Windows, the push is the first run that sees them.
+
+## Layout
+
+`src/` is the TypeScript MCP server. Its entry point is `cli.ts`, which serves stdio when given no
+command. Every tool is one entry in `src/tool-definitions.ts`. The server dispatches from it. The
+site and the skill render their tool reference from it.
+
+`src/godot/addons/` holds the editor, runtime and auto-reload addons. `src/godot/operations/` holds
+the headless engine operations. Both are GDScript. `test/` holds the suites, with shared helpers in
+`test/support/`. `scripts/` holds the build, release and installer scripts.
+
+`docs/architecture.md` describes how the parts fit together. The repository map in
+`.github/CONTRIBUTING.md` names the main modules.
 
 ## Tests
 
 ### Disarming
 
-- Check a fixture by disarming what it guards: break the line on purpose, say which tests should
-  notice before running them, then run and compare. `bun test/regressions.ts` keeps going after a
-  failure and names every failure at the end, so one disarm shows every test that caught it.
+- Check a fixture by disarming what it guards. Break the line on purpose, say which tests should
+  notice before running them, then run and compare.
+- `bun test/regressions.ts` keeps going after a failure and names every failure at the end. One
+  disarm therefore shows every test that caught it.
 - A disarm counts only when it fails on the assertion you aimed at. Read the message, not the exit
-  code. `bun run build` does not typecheck, so a disarm that does not compile leaves the old bundle
-  in place and the suite runs the unbroken code. An edit calling `writeFileSync` without importing
-  it built clean, threw at run time and failed three assertions early. Run `bun run typecheck`
-  before trusting a disarm.
-- When a disarm passes, look at the setup before strengthening the assertion: the fixture reached
-  the assertion without walking the broken line. The causes seen here:
-  - The setup removes the state the fault needs. A decoy run record written to the wrong runtime
-    directory left the disarmed server nothing to pick up, so it said "No game is running" and the
-    pass proved only that the directory was empty.
-  - The setup supplies the state the broken line would have computed. Three earlier fixtures each
-    opened a debug adapter session as a side effect, and a session lasts as long as the server, so
-    fixture order decided what the console timing case measured.
-  - The input is the reproduction from the report, which is the shape that survived. The
-    `@abstract` report used a script with `class_name` behind an annotation and `extends` on the
-    next line; the second line set the insertion point by itself, so the fix was never exercised.
-    The shape that breaks is a script whose whole header is the annotated line. Ask which other
-    inputs reach the same line, and write the one where the line has nothing to fall back on.
-  - A second guard covers the one you broke. Stripping trailing comments and counting bracket depth
-    overlap exactly on `func noted(a: int) -> void:  # a comment with a bracket )`, so disarming the
-    depth count passed. It is still needed: `func noted(a: int) -> void: print(a, ")")` is legal and
-    only the depth count handles it. Disarm one line at a time, and when one passes, look for the
-    input only that line handles.
+  code.
+- A disarm that does not compile leaves the old bundle in place, since `bun run build` does not
+  typecheck. Run `bun run typecheck` before trusting a disarm.
+- Do not say which case catches a line without a disarm to show it. Such a claim is usually a guess
+  that misses cases you had not credited.
 
-  Fix the setup and disarm again.
+### Disarms that cannot run or can escape
 
-- Sometimes the assertion is the problem because it reads the wrong property. A doubled-word check
-  searched for the same word twice in a row; the fault was
-  `the addon from before versions were reported addon`, nineteen words apart, and the disarm passed
-  on it. Before changing the setup, ask
-  which property the assertion reads and whether the broken and working versions differ in it.
-- Ask the same of any check: what would make it fail on the thing it is meant to catch? If nothing
-  could, it measures its own shape. The recorded-arguments check under "Disagreements" was one.
-- Do not say which case catches a line without a disarm to show it. Such claims are usually guesses,
-  and the line is often held by cases you had not credited.
-- Some disarms cannot run: deleting a line leaves an unused parameter, a dead branch or a dangling
-  import, and the gates refuse it. Use a smaller break the compiler accepts, and note that the gates
-  hold the line as well as the test.
+- When deleting a line leaves an unused parameter, a dead branch or a dangling import, use a
+  smaller break the compiler accepts. Note that the gates hold that line as well as the test.
 - A disarmed containment guard can escape. Give the disarmed run somewhere harmless to escape to
   before running it.
 
+### When a disarm passes
+
+A passing disarm usually means the fixture never walked the broken line. Fix the setup before the
+assertion, then disarm again. The causes seen here:
+
+- The setup removes the state the fault needs. A disarmed server whose decoy run record sat in the
+  wrong directory passed on an empty directory.
+- The setup supplies the state the broken line would have computed. Earlier fixtures that left a
+  debug adapter session open decided what the console timing case measured.
+- The input is the report's reproduction, the shape that survived. Write the input where the line
+  has nothing to fall back on, such as a script whose whole header is the `@abstract` line.
+- A second guard can cover the one you broke, so disarm one line at a time. For a pass, look for the
+  input only that line handles, such as `func noted(a: int) -> void: print(a, ")")` for the bracket
+  depth.
+
+### When the assertion is the problem
+
+- An assertion can read the wrong property. Before changing the setup, ask which property it reads
+  and whether the broken and working versions differ in it.
+- Ask of any check what would make it fail on the thing it is meant to catch. If nothing could, it
+  measures its own shape.
+
 ### Writing assertions
 
-- Never assert only what did not happen. A `doesNotMatch` against the complaint you expect is
-  satisfied by a crash, a timeout and every other refusal. Assert what the call returns when it
-  works.
-- When the finding is an absence (nothing written, killed or changed), pair it with a positive in the
-  same fixture showing the code ran. The guard keeping test servers out of the real runtime directory
-  was once checked by watching that directory not grow, which a suite that had stopped starting
-  servers also passes. Assert the record it wrote, then that it wrote it nowhere else.
-- Assert the invariant, not the reading. A case that encodes a measurement or a conclusion keeps it
-  in force after the evidence is gone. A report that a stale type was cured by editing the declaring
-  script went into three sentences and a case requiring all three. When the reporting project
-  retracted it, fixing the sentences failed the suite, so they stayed wrong for two releases. The
-  rewrite holds only what does not depend on the remedy: nothing tells a caller to edit source that
-  is already correct.
-- Check the output, not the inputs. A case comparing generated tool names against the schemas passed
-  on two renderings of one sentence, one of which escaped every backtick, because the markup sits
-  between the names. A case reading `src/server.ts` for remedy sentences could not see the one built
-  from parts at run time. Render it, call it, and assert what comes back.
-- Render the branches no reproduction reaches: a plural argument, an empty list, a second entry. The
-  note on which script to reload told callers to pass two paths comma-separated to an argument that
-  takes one string, and it was found only by rendering the two-type case.
-- Name the thing being checked in terms that survive it improving, and take everything else as an
-  argument. A check split a document on a marker that appeared only while a notice was printed; the
-  notice was removed and the case failed as if the feature had regressed.
-- When a count is stated twice, hold every statement of it. `docs/architecture.md` gives the number
-  of harnesses that read their own skills directory twice, one line apart, and only the first was
-  checked.
-- Changing a test to fit the code is allowed in one case: the test asserts a state that cannot occur.
-  A fixture wrote a record claiming its run began a minute before the process it had just spawned,
-  although one call does both. Correct the setup, keep the assertions, and say in the change why the
-  state was unreachable.
-- A case that needs something the machine has only one of, such as window focus, fails for reasons
-  outside it. The windowed menu case needs the game window to keep focus for thirty frames, and an
-  editor for another project opening mid-run failed it with `window focus_exited` in the log. Do not
-  loosen it. Say in the case what it needs, and have the assertion report lost focus as the
-  desktop's doing rather than an input fault.
+- Assert what a call returns when it works, never only what did not happen. A `doesNotMatch`
+  against the expected complaint also passes on a crash, a timeout or any other refusal.
+- Pair an absence (nothing written, killed or changed) with a positive in the same fixture showing
+  the code ran. A fixture that never ran shows the same absence.
+- Assert the record a guard wrote, then that it wrote it nowhere else.
+- Assert the invariant, not the reading. A case encoding a measurement or a conclusion keeps it in
+  force after the evidence is gone and fails the correction.
+
+### Checking output
+
+- To check the output, render it, call it and assert what comes back. A read of the source misses
+  the markup between names and the sentences built at run time.
+- Render the branches no reproduction reaches, such as a plural argument, an empty list or a second
+  entry. Only the two-type rendering showed a note asking for two paths in a one-string argument.
+- When a count is stated twice, hold every statement of it. A check on the first leaves the second
+  free to drift.
+
+### Changing a case
+
+- Name the thing being checked in terms that survive it improving. Take everything else as an
+  argument, since a check that splits a document on a notice's marker fails when the notice goes.
+- Change a test to fit the code only when it asserts an impossible state, such as a run recorded
+  as starting before its own process. Correct the setup, keep the assertions, and say in
+  the change why the state was unreachable.
+- Do not loosen a case needing something the machine has only one of, such as the windowed menu
+  case's thirty frames of focus. Say in the case what it needs and report lost focus
+  (`window focus_exited`) as the desktop's doing rather than an input fault.
 
 ### Sets, floors and counts
 
-- Walk the directory rather than listing files. The gate on tool names in prose listed three of five
-  documents, one of the skill's two files (not the generated reference, which a rename rewrites) and
-  no GDScript.
-- A derived set can still be wrong. The same gate derived its excused words from the `.gd`
-  filenames, and two modules are named after their tools, so `runtime_capture` and `runtime_input`
-  were excused everywhere. After deriving a set, ask what the derivation removes from what is being
-  checked.
-- Read every count that feeds a floor on every change, and ask which way the change should move it.
-  The fault above was found because the mention count fell from 427 to 422 after a change that only
-  added sources.
+- Walk the directory rather than listing files. A list misses every file nobody added to it.
+- Ask what deriving a set removes from what is checked. Excusing the `.gd` filenames also excuses
+  the tools `runtime_capture` and `runtime_input`, since two modules share their tools' names.
+- On every change, read each count that feeds a floor and ask which way the change should move it.
+  A count that falls after a change that only added sources shows a fault.
 - Set a floor to what the file holds today, not a comfortable minimum. A floor of 25 on a table of
-  31 misses six entries silently going. Removing an entry then means lowering the floor in the same
-  change. Disarm a floor by reading one entry fewer, not none.
+  31 misses six entries going.
+- Removing an entry means lowering the floor in the same change. Disarm a floor by reading one entry
+  fewer, not none.
 - A check that loops over the list it checks tests less when an entry is dropped, and still passes.
 
-### Disagreements, faults and the platform
+### Faults and disagreements
 
 - Code that runs only when something is wrong is not exercised by runs that go well. Put the system
-  into the mismatch, fault or timeout on purpose and read the output. The refusal for a game
-  announcing an unreadable protocol consulted a sweep that drops those announcements, so it gave
-  advice that would end the run it was refusing, while a function written for that state sat unused
-  twenty lines away. It was found by bumping a protocol constant for another reason.
+  into the mismatch, fault or timeout on purpose and read the output.
 - Hold that state by taking the disagreeing thing as an argument, the way `judgeRun` is given the
-  operating system's answer. A port reservation fixture asked the real kernel for forty ports, got
-  forty different ones, and still passed with the deduplication removed.
-- To check identity, test the closest thing that is not the target. The check before `process.kill`
-  compared the engine basename and the project path, and every case was something unrelated. The
-  project's editor matches both and is the process most likely to reuse the pid, so it was confirmed
-  and killed. Treat the answer as a set: game-b's thirty-one bench workers also share the
-  executable and `--path`, with no editor flag.
-- When every compared property is shared across a family, adding more of the same kind does not
-  help. The recorded arguments matched the workers too, because their command line is a superset.
-  Find a property no sibling can have: the process start time, because a pid cannot be reissued
-  until its holder has gone.
+  operating system's answer. A fixture asking the real kernel for forty ports gets forty different
+  ones even with the deduplication removed.
 - Size a tolerance to what it absorbs, then ask what falls inside it that should not. A
-  ninety-second start-time window, described as generous against clock skew, missed every run
-  shorter than ninety seconds, which is how the bench workers run.
-- Assert a platform-supplied property whose absence would be silent. Start time is read three ways
-  on three platforms and every judging case hands it in, so a platform that never produced one would
-  have passed everything. One case asks a real process and requires an answer.
-- A best-effort reading that says when it fails is different. Processor time is a PowerShell query
-  with a budget that a loaded Windows runner can exceed. Assert that the question went to
-  the right process (the number, or the note that the platform did not answer), and identify the
-  process by a field the platform does not supply.
-- A stand-in for a real process has behaviour of its own. Node children on Windows sit in the
-  parent's job object and die with it; Godot workers from `OS.create_process` do not, so a case meant
-  to measure orphans measured the job object. Start stand-ins detached, and ask which behaviours are
-  the stand-in's own.
+  ninety-second start-time window misses every run shorter than ninety seconds, which is how bench
+  workers run.
 
-### State, caches and events
+### Identity
 
-- A message describing its own work must be written after the work. A line announcing a kill was
-  printed before the signal, so for runs already over it reported a kill that never happened. Read
-  the output and check whether the work had happened yet.
-- Before interpreting a measurement, ask which result would have contradicted it. Two lists both
-  showing a new method cannot tell one cache from two; that needs one moment where one is stale and
-  the other is not. The note that a built copy was stale while diagnostics read clean compared a
-  read before a reload with a read after it, and taking both in the same window confirmed it.
-- A cached reading's timestamp decides whether to read again, so a wrong reading blocks its own
-  correction, and a shared cache makes this worse. The update check once kept a result for four
-  hours in one file per user, so a server starting at 19:00 used a 17:07 reading and missed two
-  releases. For anything timestamped, compare the window with how often the source changes, and
-  decide separately whether a newly started process should inherit it. A fixture with its own copy
-  of the window stops testing the boundary when the window changes.
-- For a two-step act where the process can be replaced between the steps, write the intent where the
-  next process reads it before the first step, and have whatever completes or cancels the act remove
-  it. The editor restart quits and then starts the editor; a reconnect in between left a successor
-  that saw nothing connected and said an editor might still dial in. The user's reconnect is the
-  usual replacement.
-- A test server claims its project as its process starts, initialised or not, and the server whose
-  announcement it replaced stops at its next successor check, ten seconds on. Spawn a second server
-  for a project where it is used, after the state it should meet. Two fixtures spawned every server
-  at the top: one lost its first server partway through on a slow Windows runner, and the other's
-  servers read the announcements they were meant to meet before the fixture had written them.
-- A replacement process misses events the old one saw. The debug adapter reports a stop only to
-  sessions connected at the time; a later session asking for the stack gets a thread and no frames
-  while the game sits at a breakpoint, and the code read that as running. When state comes from an
-  event, ask what a process that missed it is told. If nothing, treat it as a third state and find
-  another source; here the runtime, which `editor_status` already used.
-- Check that a measurement distinguished the property a fix depends on. The write-up said the
-  session was attached when the property that mattered was being connected. A server playing a scene
-  through the editor is connected but does not attach until its first stack read, so the fix sent
-  the ordinary case to the runtime.
-- Do not trust a comment saying a source never sends something, because nothing will handle it.
-  Godot sends `continued` to every connection when a game is released, and `breakpoint` events with
-  `reason: "removed"`. Log every event the other side sends during one fixture run and read the log.
-  When something is set and then consumed by a play, a run or a request, set it once and use it
+- To check identity, test the closest thing that is not the target. A check on the engine basename
+  and project path before a kill also matches the project's editor, the likeliest process to reuse
+  the pid.
+- Treat the answer as a set. A project's bench workers share the executable and `--path` too, with
+  no editor flag.
+- When every compared property is shared across a family, more of the same kind does not help. Find
+  a property no sibling can have, such as the process start time, since a pid cannot be reissued
+  until its holder has gone.
+
+### The platform
+
+- Assert a platform-supplied property whose absence would be silent. Since every judging case hands
+  in a start time read three ways on three platforms, one case asks a real process for it.
+- Processor time from a budgeted PowerShell query is a best-effort reading that passes with a number
+  or a note saying it failed. Assert that it asked the right process, named by a field the platform
+  does not supply.
+- Start a stand-in for a real process detached and ask which of its behaviours are its own. Node
+  children on Windows die with the parent's job object, while Godot workers started by
+  `create_process` do not.
+
+### Messages and measurements
+
+- A message describing its own work is written after the work. Read the output and check whether
+  the work had happened yet, since a message printed before can report a kill that never happened.
+- Before interpreting a measurement, ask which result would have contradicted it. Take both readings
+  in the same window, since telling one cache from two needs one moment where only one is stale.
+- Check that a measurement distinguished the property a fix depends on. A server playing a scene
+  through the editor is connected but attaches only at its first stack read.
+
+### Caches and replacement processes
+
+- A wrong cached reading blocks its own correction, because its timestamp decides whether to read
+  again. Compare the window with how often the source changes and decide separately whether a newly
+  started process inherits a shared one.
+- Read a cache window into a fixture rather than copying it. A copy stops testing the boundary when
+  the window changes.
+- Before the first step of a two-step act, write its intent where a replacement process reads it.
+  Whatever completes or cancels the act removes the intent, since a user's reconnect can land
+  between the editor restart's quit and its start.
+- A server stops at its next successor check, ten seconds on, once a new test server claims its
+  project at process start. Spawn a second server for a project where it is used, after
+  the state it should meet.
+
+### Events
+
+- A replacement process misses events the old one saw. When it is told nothing about one, treat
+  that as a third state with another source.
+- The debug adapter reports a stop only to the sessions connected then. A later one sees a thread
+  with no frames at a breakpoint, and the runtime, which `editor_status` already reads, answers it.
+- Do not trust a comment saying a source never sends something. Log every event the other side
+  sends during one fixture run and read the log.
+- Godot sends `continued` to every connection when a game is released. It also sends `breakpoint`
+  events with `reason: "removed"`.
+
+### Settings and consumed state
+
+- When something is set and then consumed by a play, a run or a request, set it once and use it
   twice.
-- Test the effect, not the stored value. Godot clears every editor breakpoint when a debug session
-  opens unless one setting is off. Writing that setting read back fine, but the adapter rereads it
-  only on a notification the settings dialog sends after Apply, so nothing changed. The fixture that
-  caught it opened a second session and read what the adapter sent.
+- Test the effect, not the stored value. The setting that stops Godot clearing editor breakpoints
+  reads back fine when written, while the adapter rereads it only after the settings dialog's Apply.
 
 ### After a change
 
 - Run the change and read what comes out, especially your own change with a good argument behind
-  it. `terminateDebuggee: false` was reasoned from the protocol and given to the reporting project as
-  the fix for an editor-played game ending on reconnect. Godot's adapter ignores the field; only
-  skipping the disconnect request saved the game.
-- After a fix, look for answers elsewhere that were right only because the fault existed. Once played
-  games survived a reconnect, the refusal that cannot see a played game (the addon takes about thirty
-  seconds to dial back in) went from rare to routine.
-- A fix that makes something survive creates states nothing has exercised. A replacement server
-  meeting a live editor-played run could not be tested until the shutdown stopped killing those
-  runs. Ask what now happens to the thing that survives.
+  it. Godot's adapter ignores `terminateDebuggee: false`, although the protocol suggests it.
+- After a fix, look for answers elsewhere that were right only because the fault existed. Once
+  played games survive a reconnect, the refusal that cannot see one during the addon's thirty
+  seconds to dial back in becomes routine.
+- A fix that makes something survive creates states nothing has exercised. Ask what now happens to
+  the thing that survives, such as a replacement server meeting a live editor-played run.
 
 ### Running suites
 
-- Do not edit or build while a suite runs. Each fixture starts a server from the bundle, so a build
-  mid-run hands later fixtures a half-written file, and their failures look like faults in the tools
-  they called. Rerun any suite that failed beside a build.
-- The repository is public, so CI runs the suites: push, and read every one CI runs before calling a
-  change done, `test:ci`, `test:integration`, `test:metadata` and `test:packaging`, fifteen files in
-  all, and the engine and editor legs. They call the same code in different ways: a sentence change
-  passed the regressions and failed `test/bridge.ts` on the push. Locally, run the regressions and
-  editor cases the change touches.
-- Locally, run engines headless and leave the windowed cases to CI; do not set
-  `GDHARNESS_ALLOW_WINDOWS` on a desktop someone is using. A headless editor still opens a window
-  for the game it plays, so do not call `editor_run start` through a local probe editor. Measure
-  played-game behaviour with the `withAPlayingEditor` fixture, which starts the game with
-  `--headless`.
-- Redirect a run's output to a file under `$TEMP` or the scratchpad, and read the file. `| tail`
+- Do not edit or build while a suite runs. A build mid-run hands later fixtures a half-written file,
+  because each fixture starts a server from the bundle.
+- Rerun any suite that failed beside a build.
+- Redirect a run's output to a file under `$TEMP` or the scratchpad and read the file. `| tail`
   loses the message, and a failure that never repeats leaves nothing else behind.
+
+### CI and local runs
+
+- CI runs the suites, since the repository is public. Push and read every suite CI runs before
+  calling a change done: `test:ci`, `test:integration`, `test:metadata` and `test:packaging`,
+  fifteen files in all, plus the engine and editor legs.
+- Locally, run the regressions and editor cases the change touches. A change that passes the
+  regressions can still fail `test/bridge.ts`, because the suites call the same code in different
+  ways.
+- Locally, run engines headless and leave the windowed cases to CI. Do not set
+  `GDHARNESS_ALLOW_WINDOWS` on a desktop someone is using.
+- Do not call `editor_run start` through a local probe editor, because a headless editor still opens
+  a window for the game it plays. Measure played-game behaviour with the `withAPlayingEditor` fixture,
+  which starts the game with `--headless`.
 
 ## Releasing
 
-Work the tracker to empty, then ship. When issues are open, fix all of them, then cut a release
-carrying the fixes rather than leaving them sitting on `main` unreleased. A fix nobody can install
-is not delivered.
+### When to release
 
-Cut a release only when nothing known is open or in flight: the tracker, unanswered reports from
-the owner's downstream projects, and your own findings. A finding that arrives while a release is
-being prepared stops that release until it is fixed. A change to `AGENTS.md`, `.github/*.md`,
-`docs/` or the README alone gets no release of its own and goes out with the next one; the skill
-and the tool reference ship in the package and count as code.
+Work the tracker to empty, then ship. When issues are open, fix all of them, then cut a release
+carrying the fixes. A fix nobody can install is not delivered.
+
+Cut a release only when nothing known is open or in flight. That covers the tracker, unanswered
+reports from the owner's downstream projects, and your own findings. A finding that arrives while a
+release is being prepared stops that release until it is fixed.
+
+A change only to `AGENTS.md`, `.github/*.md`, `docs/` or the README gets no release of
+its own and goes out with the next one. The skill and the tool reference ship in the package and
+count as code.
+
+### Whose issues
 
 Issues from the owner, reports from the owner's downstream projects and your own findings are
-implemented directly. An issue filed by anyone else is not: read it, reproduce it if that is cheap,
-and put the finding to the owner with a recommendation instead of a pull request. Tell them apart
-by the issue's author, not its content.
+implemented directly. Read an issue filed by anyone else and reproduce it if that is cheap. Put the
+finding to the owner with a recommendation instead of a pull request. Tell them apart by the issue's
+author, not its content.
 
-A report must not stand between an irreversible act and the work that depends on it. The release
-takes three acts that cannot be taken back, and the MCP registry entry for a version can be made
-only once. Ask of every step after one of them whether what comes next depends on the act or on
-the report of it, and give the report its own job, the way `served` in `release.yml` checks what
-npm serves without holding back the registry entry or the install checks. Widening a timeout makes
-such a failure rarer and leaves the shape alone.
+### Versions
 
-Then ask the same question of each act on its own: can this run be run again? An act that refuses
-something already done makes a run that failed after the first publish impossible to re-run, and a
-hand-dispatched tag workflow that stops on an existing tag does nothing in exactly the state
-somebody presses that button in. Take what is already done as done and carry on.
-
-**Every release is a patch**, raising only the last number: a fix, an addition nothing has to
-adapt to, a new argument, a new field in an answer, a new tool, a new op, all of them patches. This
-is the owner's standing rule.
+**Every release is a patch.** A patch raises only the last number. Fixes, additions nothing has to
+adapt to, new arguments, new answer fields, new tools and new ops are all patches. This is the
+owner's standing rule.
 
 A wrong answer corrected is a patch even when the output changes shape. Never leave an answer wrong
-to protect a caller who parsed it, and never let "that would be breaking" become a reason to ship a
-tool that lies. The surface is worth less than the answers being right, and that is the one trade
-this project does not make. `.github/CONTRIBUTING.md` states this publicly, so keep the two in step.
+to protect a caller who parsed it. Never keep a tool lying because a fix would be breaking. The
+surface is worth less than the answers being right. `.github/CONTRIBUTING.md` states this
+publicly, so keep the two in step.
 
-**Never cut a minor without the owner's approval, given for that release.** `minor` on the
-"Prepare release" workflow is run only when the owner has said so for the release in hand, in their
-own words, after being asked directly; a change that looks like it deserves one is still a patch
-until then. **Never cut a major, and never ask for one.** `major` and an exact `2.0.0` are not
-options here, however ready anything looks.
+### Minor and major
+
+**Never cut a minor without the owner's approval, given for that release.** Run `minor` on the
+"Prepare release" workflow only when the owner has said so for the release in hand. That approval
+comes in the owner's own words, after being asked directly. A change that looks like it deserves a
+minor is still a patch until then.
+
+**Never cut a major, and never ask for one.** Neither `major` nor an exact `2.0.0` is an option here,
+however ready anything looks.
+
+### Older releases
 
 Nothing is kept working for an older release while gdharness has no users outside the owner's own
-projects. The server and the addons of one release work with each other only: an editor or a game
-on another release's addon is refused with the command that brings it into step, and no fallback,
-alias or old reading is kept for it. A rename or a removal goes out in a minor the owner approved.
-`.github/CONTRIBUTING.md` says the same under Versions.
+projects. The server and the addons of one release work with each other only. An editor or a game
+on another release's addon is refused with the command that brings it into step. No fallback, alias
+or old reading is kept for it. A rename or a removal goes out in a minor the owner approved, as
+`.github/CONTRIBUTING.md` says under Versions.
 
-Cut releases through the button rather than by hand: run the "Prepare release" workflow with the
-bump, merge the pull request it opens, and `release-tag.yml` tags whatever version lands on
-`main`. `.github/release-process.md` covers how a release is cut, signed and verified.
+### Reports after an irreversible act
 
-Merge nothing else while a release pull request is open. The ruleset on `main` requires branches to
-be up to date, so every other merge puts the release branch behind and costs it all fourteen checks
-again. Cut the release last, let it through, then carry on. It is a convention rather than a
-setting, and it costs nothing: the work is already done by the time the release is cut.
+A report must not stand between an irreversible act and the work that depends on it. The release
+takes three acts that cannot be taken back, such as the MCP registry entry a version gets only once.
+For every step after one of them, ask whether it depends on the act or on the report of it. Give the
+report its own job rather than a wider timeout. `served` in `release.yml` checks what npm serves
+without holding back the registry entry or the install checks.
+
+### Runs that can be run again
+
+Ask of each act whether its run can be run again. An act that refuses something already done makes
+a run that failed after the first publish impossible to re-run. A hand-dispatched tag workflow that
+stops on an existing tag does nothing in exactly the state somebody presses that button in. Take
+what is already done as done and carry on.
+
+### Cutting a release
+
+Cut releases through the button rather than by hand. Run the "Prepare release" workflow with the
+bump and merge the pull request it opens. `release-tag.yml` tags whatever version lands on `main`.
+`.github/release-process.md` covers how a release is cut, signed and verified.
+
+Merge nothing else while a release pull request is open. Every other merge costs the release branch
+all fourteen checks again, since the ruleset on `main` requires up-to-date branches. Cut the release
+last, let it through, then carry on. This is a convention rather than a setting. It costs nothing
+because the work is done by the time the release is cut.
+
+### Rulesets
 
 Read that requirement from the rulesets rather than from branch protection.
 `gh api repos/Aureliolo/gdharness/branches/main/protection` answers 404, which reads as "nothing is
-enforced" and is wrong: the rules live in `gh api repos/Aureliolo/gdharness/rulesets`, and `strict`
-on the required checks is the line that makes this matter.
+enforced" and is wrong. The rules live in `gh api repos/Aureliolo/gdharness/rulesets`, where
+`strict` on the required checks is the line that matters.
 
-The same rule is why the fixes from one stretch of work go into one pull request: every merge sends
-each other open pull request through CI again, and GitHub offers merge queues only to repositories
-owned by an organisation.
+The same rule is why the fixes from one stretch of work go into one pull request. Every merge sends
+each other open pull request through CI again. GitHub offers merge queues only to repositories owned
+by an organisation.
+
+### Merging
 
 Merge your own pull request with `gh pr merge <n> --squash --delete-branch` as soon as every
-required check passes; the merge is part of the work. A release pull request is opened by the
-workflow's token, so its runs wait for approval. They report `status: completed` with
-`conclusion: action_required`: select on the conclusion, approve each with
+required check passes, because the merge is part of the work. A release pull request's runs wait for
+approval, because the workflow's token opened it. They report `status: completed` with
+`conclusion: action_required`. Select on the conclusion, approve each with
 `gh api -X POST repos/Aureliolo/gdharness/actions/runs/<id>/approve`, and merge once the checks
-pass. Before approval the pull request lists only the CodeQL contexts, so "nothing pending" is not
-"every check passed".
+pass.
 
-After a merge, follow `main`'s own `ci.yml` run to its end, because a green pull request does not
-make a green `main`. `ci.yml` cancels a run in progress on the same ref, so a release merge cancels
-the run for the fix merged before it, and the run on the release commit is the one to follow. Cut
-the release without waiting for `main`'s run, since the release pull request runs the same checks
-on the same code. A failure on `main` is root-caused before anything else merges.
+Before approval the pull request lists only the CodeQL contexts, so "nothing pending" is not "every
+check passed".
+
+### After a merge
+
+Follow `main`'s own `ci.yml` run to its end, because a green pull request does not make a green
+`main`. Because `ci.yml` cancels a run in progress on the same ref, a release merge cancels the run
+for the fix merged before it. Follow the run on the release commit. Cut the release without waiting
+for `main`'s run, since the release pull request runs the same checks on the same code. A failure on
+`main` is root-caused before anything else merges.
+
+### Commit subjects
 
 Read a commit's subject back after writing it, with `git log -1 --format=%s`. A PowerShell
-here-string, `-m @'...'@`, passed through a POSIX shell commits with the subject `@` (there `@'` is
-a literal `@` and a quote), and the commit still succeeds. Write `-m "Subject" -m "Body"`, or a
-heredoc. Pull requests squash with their title and body, so a branch subject never reaches `main`,
-but the branch commits are what a reviewer reads.
+here-string, `-m @'...'@`, passed through a POSIX shell commits with the subject `@` and still
+succeeds. Write `-m "Subject" -m "Body"`, or a heredoc. A branch subject never reaches `main`, since
+pull requests squash with their title and body. The branch commits are still what a reviewer reads.

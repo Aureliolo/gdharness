@@ -66,7 +66,7 @@ function findBlock(lines: readonly string[], entry: TomlEntry): { from: number; 
   return undefined;
 }
 
-/** The TOML file with our entry in it, replacing an older one of ours if there is one. */
+/** The TOML file with our entry in it, in place of an older one of ours if there is one. */
 export function writeToml(existing: string, entry: TomlEntry, launch: TomlLaunch): string {
   const lines = existing === '' ? [] : existing.replace(/\n+$/, '').split('\n');
   const found = findBlock(lines, entry);

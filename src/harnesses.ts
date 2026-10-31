@@ -874,7 +874,7 @@ export function recordedEnginePath(projectPath: string): string | null {
       continue;
     }
     const named = reach(entryEnvironment(harness, projectPath), 'GODOT_PATH');
-    // Relative to the project, where the harness starts the server that reads it; an absolute one
+    // Relative to the project, where the harness starts the server that reads it. An absolute one
     // as written, for the same reason as GODOT_PATH itself.
     const path =
       typeof named !== 'string' || named === ''
@@ -1007,7 +1007,7 @@ function reach(held: unknown, key: string): unknown {
 /**
  * gdharness taken back out of one harness's configuration.
  *
- * Only our own key is touched. A file that held other servers keeps them and stays; one that held
+ * Only our own key is touched. A file that held other servers keeps them and stays. One that held
  * nothing but gdharness is removed, because a file we created and then emptied is litter.
  */
 export function disconnect(harness: Harness, projectPath: string): Removed {
@@ -1065,7 +1065,7 @@ export function disconnect(harness: Harness, projectPath: string): Removed {
 export interface Written {
   readonly harness: Harness;
   readonly path: string;
-  /** `written` and `replaced` touched the file; the other two leave it to the reader. */
+  /** `written` and `replaced` touched the file. The other two leave it to the reader. */
   readonly action: 'written' | 'replaced' | 'command' | 'snippet';
   /** For `command`, what to run. For `snippet`, what to put in the file. */
   readonly command?: readonly string[];
@@ -1173,7 +1173,7 @@ function launchedBy(entry: unknown): string | undefined {
   if (!isRecord(entry)) {
     return undefined;
   }
-  // opencode carries the whole line in `command`; everything else splits it across two keys.
+  // opencode carries the whole line in `command`. Everything else splits it across two keys.
   const whole = entry['command'];
   const args: unknown[] = Array.isArray(entry['args']) ? (entry['args'] as unknown[]) : [];
   const parts: unknown[] = Array.isArray(whole) ? (whole as unknown[]) : [whole, ...args];

@@ -6,7 +6,7 @@
  * WMI provider host, which walks every process and formats every property it was asked for, and a
  * machine running several servers, benches and a gate kept a whole core busy in wmiprvse for
  * listings nobody was waiting on. The kernel hands the same table over in one call, with the parent
- * links, start times and processor times in it; only a command line takes a handle to its process.
+ * links, start times and processor times in it. Only a command line takes a handle to its process.
  */
 
 import { tmpdir } from 'node:os';
@@ -371,7 +371,7 @@ const TABLE = new CompiledHelper('process table', 'gdharness-processes', SOURCE)
 /** The process table could not be compiled, which is why Windows was not asked. */
 export class ProcessTableUnbuilt extends Error {}
 
-/** Compiles the table unless it is there; a server starting up passes [param wait] false. */
+/** Compiles the table unless it is there. A server starting up passes [param wait] false. */
 export function ensureProcessTable(directory = tmpdir(), wait = true): Promise<string | null> {
   return TABLE.ensure(directory, HELPER_COMPILE_MS, wait);
 }

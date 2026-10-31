@@ -180,7 +180,7 @@ func _members(
 			own.last = i - 1
 			return own
 
-		# An odd count opens a string that runs on; an even one is a string that closed on the line
+		# An odd count opens a string that runs on. An even one is a string that closed on the line
 		# it opened on. Toggling on any count lost `const HELP := """Usage"""`, and everything after
 		# it up to the next triple quote, with the state inverted from there to the end of the file.
 		# The line that opens one is still read: it can be the declaration the string belongs to.
@@ -677,7 +677,7 @@ func _parse_function(line: String, line_num: int, annotated: String = "") -> Dic
 		"name": name,
 		"params": params,
 		"return_type": return_type,
-		# Filled in after the whole file is read, once the base is known; see `_mark_virtuals`.
+		# Filled in after the whole file is read, once the base is known. See `_mark_virtuals`.
 		"is_virtual": false,
 		"is_static": is_static,
 		# Said rather than left to be inferred: an abstract method has no body, so a caller that

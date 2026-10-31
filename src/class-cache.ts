@@ -436,7 +436,7 @@ export function externalMemberIn(
 
 /**
  * The script [param source] extends, as a resource path, or undefined for a native base or none.
- * A class name is looked up in [param classes]; a quoted path is taken as written, and one without
+ * A class name is looked up in [param classes]. A quoted path is taken as written, and one without
  * `res://` is read against [param from], the script's own path, as Godot reads it.
  */
 function baseScriptOf(
@@ -486,7 +486,7 @@ export function declaresMember(source: string, missing: MissingMember): boolean 
   }
   // What the class itself answers by name: a static variable or function, a constant, an enum or
   // inner class by its own name, and the values of an enum with no name, which land on the class. A
-  // plain variable or a signal is not among them; Godot denies `Peal.speed` for `var speed`, and is
+  // plain variable or a signal is not among them. Godot denies `Peal.speed` for `var speed`, and is
   // right to. An instance answers all of those and its variables, signals and functions besides.
   const kinds =
     missing.kind === 'property'
@@ -624,7 +624,7 @@ export function declaredButUncached(projectPath: string, name: string): string |
  * Read by name against the class list rather than by parsing GDScript, because a name that is a
  * declared global class is the only kind worth reporting and everything else in the file is noise.
  * A word inside a string or a comment can match, which costs a caller one wasted touch on a file
- * that was already fine; missing one costs them a restart.
+ * that was already fine. Missing one costs them a restart.
  */
 export function classesNamedIn(source: string, known: ReadonlyMap<string, string>): string[] {
   const named = new Set<string>();
@@ -754,7 +754,7 @@ export function contradictedDiagnostics(
  * It leads with the scan because that is what has cleared this, in two projects. Neither of them is
  * this one: the diagnostic has never gone stale in this project's own bench, so every figure here is
  * somebody else's reading and is attributed rather than claimed. That is for methods and
- * properties; an enum member or a constant is answered the other way round, in {@link classRemedy}.
+ * properties. An enum member or a constant is answered the other way round, in {@link classRemedy}.
  *
  * The count that used to sit here, one clearing in five attempts, is gone because it measured a
  * different tool. Those five were taken against a version where the rescan answered before the scan
@@ -909,7 +909,7 @@ export interface NotReloaded {
 /**
  * What a caller is told about the scripts naming a class the scan brought in that were not
  * reloaded, each with the remedy that fits it. One that was tried and refused is tried again with
- * `reloadScript`; a `@tool` script is not, because `reloadScript` refuses one for the same reason
+ * `reloadScript`. A `@tool` script is not, because `reloadScript` refuses one for the same reason
  * the rescan left it alone, so sending the caller there would only earn the refusal.
  */
 export function notReloadedNote(broughtIn: readonly string[], notReloaded: readonly NotReloaded[]): string {
@@ -970,7 +970,7 @@ export interface ReloadedFirst {
 /**
  * What a reload changed in the copy the editor holds, from its member lists before and after, with
  * how many it holds afterwards. A reload is asked whether it brought the copy up to the file, which
- * is the difference; the count is there because a reload that compiled nothing and answered OK is
+ * is the difference. The count is there because a reload that compiled nothing and answered OK is
  * the failure worth catching, and it shows as a copy holding no methods. Enum values come as
  * `Kind.SHORT` among the constants, since a copy holds an enum member as a constant.
  */
@@ -1011,7 +1011,7 @@ export function reloadDifference(reloaded: {
  * The members are not the whole of it. A failed reload leaves the copy unusable while its member
  * lists read as before, measured on 4.7.2: the editor can make no instance of it, and one it already
  * made has lost its methods. The addon compiles the text the copy was built from again, which puts
- * it back, and says whether that worked; the note says the copy is as it was only when it did.
+ * it back, and says whether that worked. The note says the copy is as it was only when it did.
  *
  * The advice on order is game-b's: the script failed while a class it names was behind in the
  * editor, and reloading that class first and then the script cleared it. Named by the classes the
@@ -1068,7 +1068,7 @@ export function failedReloadNote(failed: FailedReload): string {
  *
  * The scan is offered first and with its own limit rather than as the better remedy. A file another
  * engine has already imported reads as settled, so the editor's walk does not look inside it and the
- * declaration stays out of the list however many times it scans; that is the case the reading above
+ * declaration stays out of the list however many times it scans. That is the case the reading above
  * did not hit, and the one `refresh_classes` is for.
  */
 export function uncachedClassNote(types: readonly string[]): string {

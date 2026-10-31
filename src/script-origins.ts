@@ -50,7 +50,7 @@ const MOST_CHECKED = 8;
  * The scripts declaring a class [param errors] could not resolve: under `origins` each error the
  * engine's check found in one, in the order they were reached, and under `unconfirmed` those it
  * found nothing in, or could not finish. A script already among [param errors] is
- * named there with its own error and is not checked again; one declaring a class that could not
+ * named there with its own error and is not checked again. One declaring a class that could not
  * itself be resolved is followed to the script declaring that one, which is the one to open.
  *
  * A class [param declared] does not hold is left unnamed rather than guessed: a script that declares

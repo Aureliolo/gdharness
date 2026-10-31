@@ -1,8 +1,11 @@
 extends SceneTree
-## Writes and calls on declarations the engine describes less than fully: a script class with no
-## `class_name`, which it names by the engine class the script extends; a slot declared as Variant,
-## which takes anything; a map keyed by numbers; a method given the wrong number of arguments. Each
-## refusal is checked beside the write or call that works, so a check that refused everything fails.
+## Writes and calls on declarations the engine describes less than fully:
+## - a script class with no `class_name`, which it names by the engine class the script extends
+## - a slot declared as Variant, which takes anything
+## - a map keyed by numbers
+## - a method given the wrong number of arguments.
+## Each refusal is checked beside the write or call that works, so a check that refused everything
+## fails.
 
 const Checked = preload("checked.gd")
 const GdhRead = preload("res://addons/gdharness_runtime/reading.gd")
@@ -475,7 +478,7 @@ func _check_a_value_given_by_its_fields() -> void:
 		)
 
 
-## A slot declared as Variant takes what it is given, as the engine does; one declared as a number
+## A slot declared as Variant takes what it is given, as the engine does. One declared as a number
 ## still refuses a word. The text null empties a Variant slot holding nothing, as a wait on it
 ## reads.
 func _check_a_slot_that_takes_anything() -> void:

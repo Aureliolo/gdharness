@@ -21,7 +21,7 @@
  *
  * Gates come first. A gate in the machine's queue keeps a mark, `<directory>/queued/<ticket>.json`
  * holding what a lock does, and while one is live an engine outside a gate takes at most the last
- * {@link KEPT_SLOTS} slots; a gate's engines take only the others ({@link slotsDrawnOn}).
+ * {@link KEPT_SLOTS} slots. A gate's engines take only the others ({@link slotsDrawnOn}).
  *
  * A taker that finds every slot held keeps a mark, `<directory>/waiting/<pid>-<n>.json` holding
  * what its lock will, its kind (`taker`) and when it began to wait (`since`), until its take ends, so
@@ -32,7 +32,7 @@
  * One directory and one count serve the whole machine, whichever project an engine is for: every
  * game's gate, bench and tool, and this server's own engines, draw on the same budget. The directory
  * is `$XDG_CACHE_HOME/gdharness/slots` where that variable is set, else
- * `%LOCALAPPDATA%\gdharness\slots` on Windows, else `~/.cache/gdharness/slots`; the count is half
+ * `%LOCALAPPDATA%\gdharness\slots` on Windows, else `~/.cache/gdharness/slots`. The count is half
  * the processors, at least one. `GODOT_ENGINE_SLOTS` and `GODOT_ENGINE_SLOT_COUNT`
  * replace either, and a command's `--slots` and `--slot-count` replace those ({@link machineSlots}).
  *
@@ -180,7 +180,7 @@ const START_READ_MS = 10_000;
 export const WAITING_FOLDER = 'waiting';
 /**
  * The folder, inside the slots', of the marks the gates in the machine's queue keep, one a gate's
- * ticket, from its arrival to its release, holding what a lock does.
+ * ticket from its arrival to its release. A mark holds what a lock does.
  */
 export const QUEUED_FOLDER = 'queued';
 /**
@@ -310,7 +310,7 @@ export function slotsClaimed(
  * A take's place among those waiting for the machine's slots: it leaves each free slot to the takers
  * waiting longer that may take it, in the order they began to wait, so a one-off waiting its hour is
  * never overtaken by the next taker to look, whichever wakes first as a lock goes. A gate's engine
- * is no exception, since a one-off past {@link ONE_OFF_AGED_MS} may take a gate's slot; a timing,
+ * is no exception, since a one-off past {@link ONE_OFF_AGED_MS} may take a gate's slot. A timing,
  * whose turn the queue already gave it, leaves nothing. Agent runs of one game waited 38 to 80
  * minutes for one slot while runs of seconds took turns on it with no order among them.
  */
@@ -374,7 +374,7 @@ export function gamesKeptOf(kept: number): number {
   return Math.max(0, Math.min(Math.floor(kept / 2), kept - GATE_KEPT - 1));
 }
 
-/** The variable a timing sets in what it runs, naming the slot it holds; a timing takes any slot. */
+/** The variable a timing sets in what it runs, with the slot it holds. A timing takes any slot. */
 const TIMED_VARIABLE = 'GODOT_ENGINE_TIMED';
 /**
  * The variable a gate sets, `fast` or `full`, in each of its own steps, which run outside its seat
@@ -439,10 +439,10 @@ export function inAGate(env: NodeJS.ProcessEnv = process.env): boolean {
  * Whether the process [param pid] in [param tree] runs on the slot [param holder] holds: whether the
  * nearest process above it whose executable is not [param executable] is the holder, or the engine
  * the lock names with a start within {@link START_TOLERANCE_MS} of the one written. Those running
- * [param executable] are passed over as launchers of its own, a `bun` under `bun run`; a game an
+ * [param executable] are passed over as launchers of its own, a `bun` under `bun run`. A game an
  * editor plays runs the editor's executable, so the editor is passed over too and the game takes a
  * slot of its own. [param engineStarted] is when the named engine's pid started, for a tree that
- * does not list it; an engine whose start cannot be read lends nothing.
+ * does not list it. An engine whose start cannot be read lends nothing.
  */
 export function inheritsSlot(
   tree: ProcessTree,
@@ -539,7 +539,7 @@ export class FolderChanges {
 
 /**
  * Who holds a lock, as its file says. [member by] is what took it, such as a test run and its
- * project, so a wait can say who it waits behind; a lock written without it is named by its pid.
+ * project, so a wait can say who it waits behind. A lock written without it is named by its pid.
  */
 export interface SlotHolder {
   readonly pid: number;
@@ -742,12 +742,12 @@ export class EngineSlots {
   /**
    * Takes a slot that is free now and answers its lock's path, or null when every slot it may take is
    * held. Which it may take is asked again at every look, since a gate arriving in the queue or the
-   * last one leaving changes them; a slot already held is kept to its end whatever arrives. A take
+   * last one leaving changes them. A slot already held is kept to its end whatever arrives. A take
    * for a [param game] editor_run started marks its lock as a game's, and while a gate is queued finds
    * none free once the games hold as many of the kept slots as {@link gamesKeptOf} gives them, nor
    * {@link reservedSlotOf}. A one-off take that has waited [param waitedMs] of
    * {@link ONE_OFF_AGED_MS} takes any slot. A take but a timing's leaves the free slots the takers
-   * waiting longer than [param line] take first ({@link SlotLine}); one given no line came last.
+   * waiting longer than [param line] take first ({@link SlotLine}). One given no line came last.
    */
   async takeFree(game = false, waitedMs = 0, line?: SlotLine): Promise<string | null> {
     mkdirSync(this.directory, { recursive: true });
@@ -963,7 +963,7 @@ export class EngineSlots {
 
   /**
    * Who holds the slots the last look could take, in the order it tried them, leaving out a lock
-   * that cannot be read; for a game held back by the cap, the games holding the kept slots.
+   * that cannot be read. For a game held back by the cap, the games holding the kept slots.
    */
   holders(): SlotHolder[] {
     const found: SlotHolder[] = [];
@@ -1018,7 +1018,7 @@ export class EngineSlots {
     return handed;
   }
 
-  /** Makes [param path] holding [param holder], answering false when it is there already. */
+  /** Makes [param path] holding [param holder]. Answers false when it is there already. */
   private made(path: string, holder: object = this.holder): boolean {
     let made: number;
     try {
@@ -1083,8 +1083,8 @@ export class EngineSlots {
 
   /**
    * Removes [param lock] when its holder has gone, under its steal file, so that a lock another
-   * taker has just made in its place is never removed; with [param retake] makes it again for this
-   * process, written as [param holder], answering whether that was done.
+   * taker has just made in its place is never removed. With [param retake] it makes it again for
+   * this process, written as [param holder]. Answers whether that was done.
    */
   private async cleared(lock: string, retake: boolean, holder: SlotHolder = this.holder): Promise<boolean> {
     if (!(await this.free(lock))) {
@@ -1169,7 +1169,7 @@ export function handSlot(lock: string, from: number, to: SlotHolder): boolean {
 
 /**
  * Names [param engine] in the slot at [param lock] as the engine running on it, when the lock still
- * names [param holder], answering whether it did. Renamed over the lock, as {@link handSlot} is.
+ * names [param holder]. Answers whether it did. Renamed over the lock, as {@link handSlot} is.
  */
 export function nameSlotEngine(lock: string, holder: number, engine: SlotEngine): boolean {
   let content: string | null;
@@ -1184,7 +1184,7 @@ export function nameSlotEngine(lock: string, holder: number, engine: SlotEngine)
 
 /**
  * Names the engine [param pid] started in the slot at [param lock], which [param holder] holds, once
- * its start has been read; a start the platform will not give names nothing, since an engine named
+ * its start has been read. A start the platform will not give names nothing, since an engine named
  * without one would lend its slot to nobody.
  */
 export async function nameSlotEngineOf(lock: string, holder: number, pid: number): Promise<void> {
@@ -1444,7 +1444,7 @@ export interface CallSlot {
   readonly from: number;
   readonly release: () => void;
   readonly handTo: (holder: SlotHolder) => boolean;
-  /** Leaves the lock for another process to take over, naming this one until it does. */
+  /** Leaves the lock for another process to take over. It names this one until it does. */
   readonly leave: () => void;
 }
 

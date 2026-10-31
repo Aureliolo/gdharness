@@ -569,7 +569,7 @@ export class GameDebugger {
     };
   }
 
-  /** The refusal of a read that needs a held game, naming [param what] the call asked for. */
+  /** Refuses a read that needs a held game and names [param what] the call asked for. */
   private notHeld(what: string): DebugAnswer {
     return {
       refused: `The game is running, not held, so it has no ${what}: debug_control pause stops it where it is, and a breakpoint stops it on its line.`,
@@ -752,7 +752,7 @@ export class GameDebugger {
     }
     this.forget('debug_enter');
     // Over and out count lines only at the depth they start from, which held where no script runs
-    // is none, so either would let the game run on for good; into stops at its next line.
+    // is none, so either would let the game run on for good. A step into stops at its next line.
     this.send(held.hasStack ? how : 'step', [], held.thread);
     const entered = await this.next(GameDebugger.named('debug_enter'), STEP_MS);
     if (entered === null) {
@@ -778,7 +778,7 @@ export class GameDebugger {
     const stack = past.frames ?? [];
     const top = stack[0];
     // The engine names every stop Breakpoint, so a step that ran into one cannot be told from a step
-    // that ended on its line; the line is what can be said.
+    // that ended on its line. The line is what can be said.
     const onBreakpoint = top !== undefined && this.breakpointLines.has(`${top.script}:${String(top.line)}`);
     return {
       stepped: true,

@@ -295,7 +295,7 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 		file.close()
 		var lines: PackedStringArray = text.split("\n")
 		# A class is used by name only in a script's code. In a scene or a resource the same word is
-		# a node's name or a caption, and each was counted as a use of the class; a shader has no
+		# a node's name or a caption, and each was counted as a use of the class. A shader has no
 		# use for one at all.
 		var code: bool = file_path.get_extension() == "gd"
 		# In a shader # opens a directive, so an #include was answered as a comment, and its

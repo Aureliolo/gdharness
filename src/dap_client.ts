@@ -26,7 +26,7 @@ const SCOPES_TIMEOUT_MS = 20_000;
 /**
  * How long a step is given to stop the game again before it is answered as running.
  *
- * A step over a line runs everything the line calls, so it is as long as the line is; this is the
+ * A step over a line runs everything the line calls, so it is as long as the line is. This is the
  * wait before saying so, not a limit on the step.
  */
 const STEP_LANDS_WITHIN_MS = 10_000;
@@ -202,11 +202,11 @@ export class GodotDAPClient {
   /** Told whenever the set this side holds changes without a call: see [setBreakpointsSink]. */
   private onBreakpointsChanged: ((held: HeldBreakpoint[]) => void) | null = null;
 
-  /** How long a frame's scopes and values are waited for; see [SCOPES_TIMEOUT_MS]. */
+  /** How long a frame's scopes and values are waited for. See [SCOPES_TIMEOUT_MS]. */
   readonly scopesPatienceMs: number;
-  /** How long a step is given to stop the game again; see [STEP_LANDS_WITHIN_MS]. */
+  /** How long a step is given to stop the game again. See [STEP_LANDS_WITHIN_MS]. */
   readonly stepPatienceMs: number;
-  /** How long an evaluate's answer is waited for; see [EVALUATE_MS]. */
+  /** How long an evaluate's answer is waited for. See [EVALUATE_MS]. */
   readonly evaluatePatienceMs: number;
 
   constructor(
@@ -746,7 +746,7 @@ export class GodotDAPClient {
     } else {
       this.breakpoints.set(key, new Set(mine));
     }
-    // What the editor now has in this file, as sent; the adapter echoes each toggle back as an
+    // What the editor now has in this file, as sent. The adapter echoes each toggle back as an
     // event as well, and a read between the answer and the echo should not say otherwise.
     if (lines.size === 0) {
       this.inEditor.delete(key);
@@ -1092,7 +1092,7 @@ export class GodotDAPClient {
   }
 
   /**
-   * Drop a connection whose framing has run away, naming the size that did it.
+   * Drop a connection whose framing has run away, and name the size that did it.
    *
    * Nothing downstream can recover from a stream this far out of step, and waiting quietly
    * for the rest of a body that is never coming is indistinguishable from an idle adapter.

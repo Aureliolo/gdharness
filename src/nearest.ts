@@ -69,7 +69,7 @@ export function withNearestFiles(
   return `${said}. None of the project's ${files.length} .${extension} files is named like it.`;
 }
 
-/** Up to three of [param names] closest to [param word], closest first, ignoring case. */
+/** Up to three of [param names] closest to [param word], closest first. Case is ignored. */
 export function nearest(word: string, names: readonly string[]): string[] {
   const wanted = word.toLowerCase();
   const score = (name: string): number => similarity(name.toLowerCase(), wanted);

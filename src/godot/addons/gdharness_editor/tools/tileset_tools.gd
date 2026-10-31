@@ -72,7 +72,7 @@ func create_tileset(args: Dictionary) -> Dictionary:
 			return { "ok": false, "error": built[1] }
 		var atlas: TileSetAtlasSource = built[1]
 		# The first source sets the tile set's own tile size, which is what a TileMapLayer draws
-		# cells at; left at its default of 16 it did not match the atlas.
+		# cells at. Left at its default of 16 it did not match the atlas.
 		if index == 0:
 			tileset.tile_size = atlas.texture_region_size
 		var added: int = tileset.add_source(atlas)

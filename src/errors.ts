@@ -40,7 +40,7 @@ export function errorMessage(error: unknown, fallback = 'Unknown error'): string
 
 /**
  * The caught value as an Error, so a rejection or a rethrow always carries a `.message` and
- * a `.stack`. Anything already an Error passes through untouched, keeping its own stack.
+ * a `.stack`. Anything already an Error passes through untouched, with its own stack.
  */
 export function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(errorMessage(error), { cause: error });

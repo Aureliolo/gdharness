@@ -98,7 +98,7 @@ export class ProjectScripts {
       settings =
         parseProjectGodot(readFileSync(join(projectPath, 'project.godot'), 'utf8'))['gdharness'] ?? {};
     } catch {
-      // A project with no readable project.godot has no settings to read; whatever runs it says so.
+      // A project with no readable project.godot has no settings to read. Whatever runs it says so.
     }
     const [section, key] = [NOT_SEARCHED_SETTING, GUESS_WINDOW_SETTING].map((setting) =>
       setting.slice('gdharness/'.length),

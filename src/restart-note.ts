@@ -82,8 +82,8 @@ export function restartOwed(projectPath: string): RestartNote | null {
 /**
  * Takes the note down: the launch happened, or an editor is connected, so nothing is owed.
  *
- * Whichever server does it. Unlike the bridge announcement this is not a live address that a
- * replacement might be holding; it is a debt, and an editor being there settles it whoever opened
+ * Whichever server does it. Unlike the bridge announcement, the note is a debt rather than a live
+ * address that a replacement might be holding. An editor being there settles it whoever opened
  * the editor.
  */
 export function restartSettled(projectPath: string): void {

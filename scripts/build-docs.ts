@@ -3,7 +3,7 @@
  * The public site: markdown in, HTML out, one template and one stylesheet, both ours.
  *
  * Hand-rolled rather than a site framework because the site is small, the repository is
- * TypeScript, and a bespoke look is the point: a generator we own is less to carry than a
+ * TypeScript, and a look of our own is the point: a generator we own is less to carry than a
  * theme we would spend the same effort overriding.
  *
  * The tool reference is rendered from the tool definitions themselves, so it cannot drift from

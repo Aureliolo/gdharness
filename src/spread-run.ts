@@ -2,8 +2,8 @@
  * `gdharness spread`: a bench's runs played by several engines at once, and gathered back whole.
  *
  * The bench is a scene whose arms ask GdhShare (addons/gdharness_tests/share.gd) for their
- * outcomes. Each worker engine plays every Nth run of every arm and leaves what each run answered;
- * once every worker has played its whole share, one more engine runs the scene to gather, and that
+ * outcomes. Each worker engine plays every Nth run of every arm and leaves what each run answered.
+ * Once every worker has played its whole share, one more engine runs the scene to gather, and that
  * engine's output, the bench's table, is printed. A worker that failed, played a share other than
  * its own, or went another way through the arms than the rest fails the run before anything is
  * gathered, since a table over some of the runs reads like a table over all of them. Every engine
@@ -85,7 +85,7 @@ export interface ArmPlayed {
   readonly played: number;
 }
 
-/** [param args], everything after `spread`, read into options; relative paths are read from [param cwd]. */
+/** [param args], everything after `spread`, read into options. Relative paths are read from [param cwd]. */
 export function spreadOptionsOf(args: readonly string[], cwd: string): SpreadOptions {
   const dashes = args.indexOf('--');
   const own = dashes === -1 ? args : args.slice(0, dashes);
@@ -147,7 +147,7 @@ export function spreadOptionsOf(args: readonly string[], cwd: string): SpreadOpt
   };
 }
 
-/** The arms a worker's [param text], one JSON line each, says it played; null for a line it cannot read. */
+/** The arms a worker's [param text], one JSON line each, says it played. Null for a line it cannot read. */
 export function armsPlayed(text: string): ArmPlayed[] | null {
   const arms: ArmPlayed[] = [];
   for (const line of text.split(/\r?\n/)) {
@@ -232,7 +232,7 @@ interface EngineLeft {
   readonly seconds: number;
 }
 
-/** Plays [param options]'s bench with the engine at [param godotPath], answering the exit code. */
+/** Plays [param options]'s bench with the engine at [param godotPath]. Answers the exit code. */
 export async function runSpreadCommand(options: SpreadOptions, godotPath: string): Promise<number> {
   if (!existsSync(join(options.projectPath, SHARE_SCRIPT))) {
     throw new EngineUsageError(

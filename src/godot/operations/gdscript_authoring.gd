@@ -767,7 +767,7 @@ func _variable_insertion_point(lines: Array[String]) -> int:
 		# Annotations off first. `@abstract class_name X` is one line in Godot 4.5 and later, and
 		# unstripped it matches nothing here, so the header is only found when some other line
 		# carries it. A script whose whole header is that one line leaves `after_header` at 0 and
-		# takes the new line above the `class_name`, where it does not parse; one that declares
+		# takes the new line above the `class_name`, where it does not parse. One that declares
 		# `extends` first takes it between the two, which does not parse either. Stripping also
 		# turns `@export var x` into `var x`, which is why the annotation names are gone below.
 		var line: String = GdhPatterns.without_annotations(lines[i])

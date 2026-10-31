@@ -23,7 +23,7 @@ import { type ChildProcess, spawnHidden } from './spawn.js';
 export interface OutsideSpec {
   readonly command: string;
   readonly args: readonly string[];
-  /** The environment it starts with; absent is the launcher's own, which is the server's. */
+  /** The environment it starts with. Absent is the launcher's own, which is the server's. */
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly run?: {
     readonly transcript: string;

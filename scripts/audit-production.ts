@@ -9,7 +9,7 @@
  * The one thing it must never do is pass because the service was unreachable. An audit that cannot
  * reach the advisories has not cleared anything, and reporting that as a clean run is the failure
  * mode worth avoiding above the inconvenience of a stopped build. So an outage is retried, and if
- * the answer never comes the run still fails, saying which of the two it was.
+ * the answer never comes the run still fails and says which of the two it was.
  */
 
 import { spawnSyncHidden } from '../src/spawn.js';
@@ -25,7 +25,7 @@ const ATTEMPTS = 4;
  * The status code is only read as one on a line that also says `error`, which is narrower than it
  * looks necessary and is not: a package at version 1.502.0 puts a bare `502` between two word
  * boundaries, so a status matched anywhere in the output reads a genuine advisory as an outage and
- * waits it out instead of failing the build. Getting that backwards is the cheap direction; getting
+ * waits it out instead of failing the build. Getting that backwards is the cheap direction. Getting
  * the other one backwards ships a release having cleared nothing.
  */
 export function serviceDidNotAnswer(output: string): boolean {

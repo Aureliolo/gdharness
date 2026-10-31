@@ -3,7 +3,7 @@
  * turns the runtime autoload on or off, and reads back whether all of that holds.
  *
  * Every write that lands in project.godot goes through the engine's own operations, so the
- * file is written the way the editor writes it; the addon copy is a plain copy, whole and
+ * file is written the way the editor writes it. The addon copy is a plain copy, whole and
  * fresh each time, so an upgrade never leaves a file of the old version behind.
  */
 
@@ -243,7 +243,7 @@ export function loaderState(projectPath: string): 'current' | 'differs' | 'missi
   return lines(copy) === lines(shippedLoader()) ? 'current' : 'differs';
 }
 
-/** The shipped loader written into [param projectPath], answering whether anything changed. */
+/** The shipped loader written into [param projectPath]. Answers whether anything changed. */
 export function writeLoader(projectPath: string): boolean {
   if (loaderState(projectPath) === 'current') {
     return false;

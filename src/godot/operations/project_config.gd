@@ -569,7 +569,7 @@ func list_autoloads(_params: Dictionary) -> Dictionary:
 		var value: String = str(ProjectSettings.get_setting(setting))
 		var path: String = value.trim_prefix("*")
 
-		# Enabled whatever the asterisk says, because every autoload listed is loaded; the asterisk
+		# Enabled whatever the asterisk says, because every autoload listed is loaded. The asterisk
 		# is whether its name is a global variable.
 		var autoload_info: Dictionary = {
 			"name": setting.trim_prefix("autoload/"),

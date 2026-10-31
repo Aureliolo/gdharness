@@ -728,12 +728,12 @@ async function testAnOpenConnectionDoesNotHoldItsProcess(): Promise<void> {
  * The addon falls back to the default port whenever its own project holds no announcement, which
  * is every project whose server has not run yet, so any server on that port took the connection
  * and served it. Tool calls reached an editor showing another project's scenes and both sides
- * called the bridge healthy. The addon has always said which project it has open; nothing read it.
+ * called the bridge healthy. The addon has always said which project it has open. Nothing read it.
  */
 function testOneServerOneProjectRegression(): void {
   // Short enough that a reason naming both fits a close frame. Under the temporary directory the
   // pair came to 168 bytes, a reason no close frame carries, which the stand-in accepted until it
-  // was made to refuse what ws refuses (#941); the long pair is checked below.
+  // was made to refuse what ws refuses (#941). The long pair is checked below.
   const mine = resolve('/gdharness-one-server-mine');
   const theirs = resolve('/gdharness-one-server-theirs');
 
@@ -753,7 +753,7 @@ function testOneServerOneProjectRegression(): void {
   );
 
   // #941: paths long enough that naming both overruns a close frame. ws threw, uncaught, and the
-  // server ended; the refusal is still made, with a reason that fits and ends with this project.
+  // server ended. The refusal is still made, with a reason that fits and ends with this project.
   const longMine = join(tmpdir(), `gdharness-one-server-${'mine'.repeat(30)}`);
   const long = createBridge(0, 1000, '127.0.0.1', longMine);
   const farAway = new FakeSocket('far away');
@@ -862,9 +862,9 @@ async function testAOneShotEngineRunIsTurnedAwayAtTheBridge(): Promise<void> {
 
 /**
  * A one-shot run of another project is turned away as a one-shot, quietly. A gate's `--import` of a
- * fresh worktree has no announcement and dials the shared default port; closed as another
- * project's editor, the addon warns and gates refuse a push on the warning, while closed as a
- * one-shot it stops dialling and says nothing. An editor of another project is still told whose
+ * fresh worktree has no announcement and dials the shared default port. Closed as another
+ * project's editor, the addon warns and gates refuse a push on the warning. Closed as a one-shot,
+ * it stops dialling and says nothing. An editor of another project is still told whose
  * server this is, after its command line is read, and one that sends no pid is told at once.
  */
 async function testAOneShotRunOfAnotherProjectIsTurnedAwayQuietly(): Promise<void> {
@@ -1321,7 +1321,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     'two functions a frame is under three',
   );
 
-  // A frame carrying as many as were asked for is counted, since the engine left out the rest; and a
+  // A frame carrying as many as were asked for is counted, since the engine left out the rest. A
   // function whose naming message never came is kept under its number.
   const tight = new ProfileAggregate(1000, 2);
   const into = (message: string, data: GodotValue[]): void => {
@@ -1513,14 +1513,14 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     /^2 messages from the game could not be read/,
   );
   // A run still inside the frame its work is in, which has sent nothing and is not a profiler that
-  // failed; and a run past it, whose frames are summed so far.
+  // failed. And a run past it, whose frames are summed so far.
   assert.match(
     say({ running: true, totals: { ...partial, frames: 0 } }),
     /^The profiler is on and the game has not finished its first frame yet: .*the engine's own totals arrive when the game quits\.$/,
   );
   assert.match(say({ running: true, totals: { ...partial, frames: 1 } }), /one frame summed so far/);
 
-  // What the cap leaves out, said for each way it can: some frames, every frame, the totals; and
+  // What the cap leaves out, said for each way it can: some frames, every frame, the totals. And
   // nothing for a profile that never reached it or one read off a keeper older than the cap.
   const atCap = { ...partial, frameFunctions: 1536, cappedFrames: 1, totalCapped: false };
   assert.match(
@@ -1536,8 +1536,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     say({ totals: { ...totals({}), frameFunctions: 1536, cappedFrames: 0, totalCapped: true } }),
     /^The engine's totals carried the most functions the profiler asks for, 1536, so the functions with the least time are not in them/,
   );
-  // At the cap with the last function kept timed, something with time can be past it; with it untimed,
-  // nothing past it took any. game-b's totals reached 1536 with 324 functions counted, the rest
+  // At the cap with the last function kept timed, something with time can be past it. With it
+  // untimed, nothing past it took any. game-b's totals reached 1536 with 324 functions counted, the rest
   // compiled and never run, and the note said functions with time were missing.
   const atTheCap = (lastSeconds: number): ProfileTotals => ({
     ...totals({
@@ -2498,7 +2498,7 @@ async function turnedAwayAtTheBridge(
 /**
  * A release export leaves gdharness out: the runtime's autoload entry, its loader and the addons,
  * none of which does anything in a release build, while a debug export keeps them all and
- * `project.godot` is left as it was. A pack only, which needs no template; the debug one checks that
+ * `project.godot` is left as it was. A pack only, which needs no template. The debug one checks that
  * a template is there without using it, so the fixture's data folder holds empty ones.
  */
 function testAReleaseExportLeavesGdharnessOut(): void {
@@ -2994,7 +2994,7 @@ async function testAReferencesRequestIsGivenItsOwnTime(): Promise<void> {
  *
  * The stand-in publishes nothing, so each script waits out the five seconds a publish is given, and
  * the call is cancelled during the first. Twelve seconds later an uncancelled loop would have opened
- * three; a stopped one opened only the one it was on.
+ * three. A stopped one opened only the one it was on.
  */
 async function testACancelledFolderStopsAsking(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-diagnose-cancelled-'));
@@ -3417,9 +3417,9 @@ async function testLanguageServerAnswersCountFromOne(): Promise<void> {
 /**
  * A symbol's lastLine is the last line its range covers. The end of a protocol range is exclusive,
  * so a range ending at the start of a line ends on the line before it. Godot ends a script's own
- * class that way, one or two lines past the file, which the clamp to the file's length also covers;
- * the ranges here end at the start of a line inside the file, which only the exclusive reading
- * handles.
+ * class that way, one or two lines past the file, and the clamp to the file's length also covers
+ * that. The ranges here end at the start of a line inside the file, and only the exclusive reading
+ * handles those.
  */
 async function testASymbolEndingAtALinesStartEndsOnTheLineBefore(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lsp-last-line-'));
@@ -3699,7 +3699,7 @@ async function testTwoAsksAboutOneFileAreBothAnswered(): Promise<void> {
  * the port this server asks.
  *
  * Godot answers an initialize naming a root that is not its project by telling the client to
- * change to its own project, ahead of the answer; measured on 4.7.2 against a headless editor.
+ * change to its own project, ahead of the answer. Measured on 4.7.2 against a headless editor.
  * The client went on and asked about this project's script, which that editor would read against
  * its own `res://` and classes. The stand-in names its project the way Godot does, so the answer
  * for the right project is also asserted, spelled differently enough that the stand-in sends the
@@ -3865,7 +3865,7 @@ async function cameTrue(condition: () => boolean, patienceMs = 2000): Promise<bo
   return condition();
 }
 
-/** Both protocols frame the same way; what the body is (JSON-RPC or DAP) is the handler's business. */
+/** Both protocols frame the same way. What the body is (JSON-RPC or DAP) is the handler's business. */
 type FramedPeerHandler = (message: Record<string, unknown>, socket: Socket) => void;
 
 /**
@@ -3930,7 +3930,7 @@ async function withFramedPeer<T>(
  * is desynchronised from then on and never recovers.
  *
  * Two messages arrive in one write for that reason. The first carries the multi-byte text
- * and is one the client ignores; the second is the one under assertion, and it can only be
+ * and is one the client ignores. The second is the one under assertion, and it can only be
  * found at all if the first was measured in bytes.
  */
 async function testLspFramesBodiesByBytes(): Promise<void> {
@@ -4356,8 +4356,8 @@ async function testAStepAnswersWhereItLanded(): Promise<void> {
         frameJsonRpc({ seq: 2, type: 'event', event: 'stopped', body: { reason: 'step', threadId: 1 } }),
       );
     };
-    // The first step stops after its answer; the second before it, which nothing in the protocol
-    // rules out.
+    // The first step stops after its answer. The second stops before it, which nothing in the
+    // protocol rules out.
     if (command === 'next' && line === 31) {
       line = 32;
       stop();
@@ -4555,7 +4555,7 @@ async function testLettingGoOfTheAdapterSendsItNothing(): Promise<void> {
  * frames, and frames learned by asking say "attached" and not why. A connection opened after the
  * stop has to ask, since the adapter repeats nothing, and what a connection knew ends with it.
  *
- * The editor tier holds the same three states against a real adapter; this holds each line of the
+ * The editor tier holds the same three states against a real adapter. This holds each line of the
  * client on its own, with the adapter's answers under the fixture's control.
  */
 async function testAStopIsKnownToTheConnectionItWasSentTo(): Promise<void> {
@@ -4587,7 +4587,7 @@ async function testAStopIsKnownToTheConnectionItWasSentTo(): Promise<void> {
     event: 'stopped',
     body: { reason: 'exception', description: 'Division by zero', text: '', threadId: 1 },
   });
-  // Only the first connection is there when the game stops; the ones after it arrive late.
+  // Only the first connection is there when the game stops. The ones after it arrive late.
   let connections = 0;
   const tellTheFirst = (socket: Socket): void => {
     if (connections++ === 0) {
@@ -4657,7 +4657,7 @@ async function testAStopIsKnownToTheConnectionItWasSentTo(): Promise<void> {
  * event that lands in the same window. Frames learned by asking say "attached" and not why, so
  * taking them over the event replaced `breakpoint` with `attached` on the session that had been
  * told. Measured on macOS in the editor tier, where the first stack read after a play and the stop
- * at a breakpoint in `_ready` land close enough together to cross; the adapter here crosses them on
+ * at a breakpoint in `_ready` land close enough together to cross. The adapter here crosses them on
  * purpose, with the event written just ahead of the frames.
  */
 async function testAStopThatLandsWhileAttachAsksIsTheAnswer(): Promise<void> {
@@ -4711,7 +4711,7 @@ async function testAStopThatLandsWhileAttachAsksIsTheAnswer(): Promise<void> {
  * sending `continue` put a `continued` event on the connection of the session that had been told
  * of the stop, and that session went on answering held about a game that was running, since the
  * editor's own debugger and any other client resume the game without asking it. This holds the
- * event's effect against a scripted adapter; the editor tier holds its arrival from a real one.
+ * event's effect against a scripted adapter. The editor tier holds its arrival from a real one.
  */
 async function testAContinueByAnotherClientIsKnownHere(): Promise<void> {
   const respond: FramedPeerHandler = (message, socket) => {
@@ -4770,7 +4770,7 @@ async function testAContinueByAnotherClientIsKnownHere(): Promise<void> {
  *
  * Measured on 4.7.2: a breakpoint set through the adapter stops the play after it and not the one
  * after that, and sending it again before the play is what makes the second play stop. Held by the
- * editor tier against a real adapter; this holds what the client sends, and the two things the
+ * editor tier against a real adapter. This holds what the client sends, and the two things the
  * real one cannot show on demand. Breakpoints taken on from a note are sent nowhere until a play
  * asks for them, since a server that has just started has no play to send them for, and a file
  * the adapter refuses is dropped from the set with its reason in the answer, because a script the
@@ -5174,7 +5174,7 @@ function testProjectGodotResistsPrototypeKeys(): void {
  * "there is no editor" are one answer to two questions. A downstream session read it as the second
  * straight after an upgrade respawned its server, and went through the machine's process list to
  * find the editor still up and its own answer wrong. `editor_run start` has said `mayYetAnnounce`
- * about the runtime for exactly this reason; the editor's own connection had nothing.
+ * about the runtime for exactly this reason. The editor's own connection had nothing.
  *
  * The decision is judged apart from a clock, because the half worth having is the one that takes
  * over half a minute to reach and no fixture should be waiting for it.
@@ -5409,7 +5409,7 @@ async function testAProjectUpgradedUnderTheServerIsSaid(): Promise<void> {
  * The editor's stale note names the remedy that works for the code a restart would load.
  *
  * An editor older than the server was always told to restart. When the project's own addons are as
- * old as the editor's, a restart loads them again and its own answer says to restart again; what
+ * old as the editor's, a restart loads them again and its own answer says to restart again. What
  * works is an upgrade of the project first.
  */
 function testAStaleNoteKnowsWhatARestartLoads(): void {
@@ -5556,7 +5556,7 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
 /**
  * #931: an editor of this project that is running and has not reached this server is coming,
  * whoever opened it. A reconnect in the middle of a restart ended the server after it had launched
- * the new editor and before that editor connected; the next server said no pid, and an open beside
+ * the new editor and before that editor connected. The next server said no pid, and an open beside
  * it put a second editor on the project and on language server port 6005.
  *
  * The stand-in is the runtime under a name with "godot" in it, given a script that waits and the
@@ -5705,7 +5705,7 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
     return at >= 0 && argv[at + 1] === 'Dummy';
   };
   // `was` is what the editor being restarted was started with, which a restart reads off its process
-  // for whatever the call leaves out; null is a process gone before it is read.
+  // for whatever the call leaves out. null is a process gone before it is read.
   const cases: readonly {
     how: string;
     act: 'open' | 'restart';
@@ -6154,9 +6154,9 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
  * Both halves matter. The predecessor goes, and the announcement it leaves behind is the live
  * server's rather than a file it took down on its way out.
  *
- * And the replacement ends on the port both were configured with. It used to take a free one
- * while the predecessor still held it, so every other reconnect left the configured port empty for
- * the session and a pinned port read as ignored; it waits for the predecessor to let go instead.
+ * And the replacement ends on the port both were configured with. It waits for the predecessor to
+ * let go. Taking a free one while the predecessor still held it left the configured port empty for
+ * the session on every other reconnect, and a pinned port read as ignored.
  * A port of the fixture's own, since the default is whatever server this machine has on it.
  */
 async function testASupersededServerStandsDown(): Promise<void> {
@@ -6267,7 +6267,7 @@ async function testATurnedAwayEditorLeavesTheServerUp(): Promise<void> {
 
 /**
  * #941: a test server whose fixture names no bridge port is kept off the default. Two such servers
- * took 6505 while a real editor of another project was dialling its own server there; the editor
+ * took 6505 while a real editor of another project was dialling its own server there. The editor
  * reached them instead, and the real server that came next found the port held.
  */
 async function testATestServerTakesNoRealEditorsPort(): Promise<void> {
@@ -6427,7 +6427,7 @@ function testBothEndsAgreeAboutTheAnnouncement(): void {
 }
 
 /**
- * An editor a server opened is restarted by starting it again; one opened by hand restarts itself.
+ * An editor a server opened is restarted by starting it again. One opened by hand restarts itself.
  *
  * Godot consumes the arguments an editor was started with and hands none of them back, so an editor
  * that restarts itself comes up without the ports it was moved to. That was answered by writing
@@ -6441,7 +6441,7 @@ function testBothEndsAgreeAboutTheAnnouncement(): void {
  * editor says whether a server opened it, and which way the server went is read off what it did
  * next. The engine is pointed at nothing on purpose. Starting an editor again needs one and looks
  * it up first, so an editor a server opened stops there and says so, which is the answer no editor
- * restarting itself could ever produce; and nothing here puts a real editor on anybody's desk.
+ * restarting itself could ever produce. And nothing here puts a real editor on anybody's desk.
  */
 async function testAnEditorAServerOpenedIsStartedAgain(): Promise<void> {
   for (const opened of [true, false]) {
@@ -6620,7 +6620,7 @@ async function testACallWaitsForAnArrivingEditor(): Promise<void> {
     const greetedAt = Date.now();
     socket.send(
       // This process's pid, whose command line names no one-shot option, so the lookup takes it as
-      // an editor; not a server's, so the lookup happens.
+      // an editor. It is not a server's, so the lookup happens.
       JSON.stringify(greeting(project)),
     );
     const answered = textOf(await asked) ?? '';
@@ -6641,7 +6641,7 @@ async function testACallWaitsForAnArrivingEditor(): Promise<void> {
  * An editor refusing a class_name that a script declares and the class cache lacks is answered with
  * why. The editor knows a class_name from its last scan, which is what it wrote to the cache, so it
  * calls a class in a script written since then no class at all. The stand-in refuses both creates in
- * those words; only the declared class gets the note naming the rescan.
+ * those words. Only the declared class gets the note naming the rescan.
  */
 async function testAnEditorRefusingAnUncachedClassSaysWhy(): Promise<void> {
   const port = await reservePort();
@@ -6936,7 +6936,7 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
         await delay(50);
       }
     }
-    // The state is a race between the greeting and the process table, so it is tried until met; a
+    // The state is a race between the greeting and the process table, so it is tried until met. A
     // platform that never meets it in twenty tries says so rather than passing on the attempts.
     assert.ok(met > 0, `the editor never connected during a status call in ${String(attempts)} tries`);
   } finally {
@@ -6950,11 +6950,14 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
  * An editor that has connected and not yet greeted is described as that, and nothing is read off it.
  *
  * The socket opens a frame before the greeting, longer on an editor that is importing, and every
- * field the greeting carries is undefined in between. Read in the gap, the version compared as
- * stale and a healthy editor was sent to a restart; the opener read as "by hand", so a restart
- * asked the editor to restart itself, which brings back an editor a server opened without its
- * ports; and the console was refused as not ours. The fake editor holds its greeting while each is
- * asked, then greets as an editor a server opened while the restart waits.
+ * field the greeting carries is undefined in between. Read in the gap:
+ * - the version compared as stale and a healthy editor was sent to a restart
+ * - the opener read as "by hand", so a restart asked the editor to restart itself, which brings
+ *   back an editor a server opened without its ports
+ * - the console was refused as not ours.
+ *
+ * The fake editor holds its greeting while each is asked, then greets as an editor a server opened
+ * while the restart waits.
  */
 async function testAnEditorIsReadOnceItHasSaidWhoItIs(): Promise<void> {
   const port = await reservePort();
@@ -7103,7 +7106,7 @@ async function testAnEditorIsReadOnceItHasSaidWhoItIs(): Promise<void> {
  * The result of the wait for the old editor to exit was ignored, so a save that ran long, or a tool
  * script holding up the exit, had the replacement launched onto ports the old one still held. It
  * bound neither, reported both, and the answer said restarted. The editor here answers the quit and
- * its pid is a live stand-in that never exits; the timeout is shortened so the case waits seconds.
+ * its pid is a live stand-in that never exits. The timeout is shortened so the case waits seconds.
  */
 async function testARestartWaitsForTheOldEditorToGo(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slow-exit-'));
@@ -7111,7 +7114,7 @@ async function testARestartWaitsForTheOldEditorToGo(): Promise<void> {
     join(project, 'project.godot'),
     '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="SlowExit"\n',
   );
-  // Detached so it is nobody's job object and outlives nothing by accident; ended in the finally.
+  // Detached so it is nobody's job object and outlives nothing by accident. Ended in the finally.
   const lingering = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
     detached: true,
     stdio: 'ignore',
@@ -7181,7 +7184,7 @@ async function testARestartWaitsForTheOldEditorToGo(): Promise<void> {
 /**
  * A greeting is this release's only when it holds every field this release sends, each typed.
  *
- * The integration case below drops one field; this renders the rest, since a field left off the
+ * The integration case below drops one field. This renders the rest, since a field left off the
  * list is one whose absence lets another release's editor through. The list is read off the
  * stand-in greeting rather than written here, so a field the addon starts sending reaches this case.
  */
@@ -7500,7 +7503,7 @@ function testCompletionsAreNarrowedToWhatWasTyped(): void {
  *
  * A hidden editor has no window, so close is the only way to end one short of killing it. The
  * editor that goes rewrites project.godot on its way out, dropping a key named at its default as a
- * real one does, and the answer has to say which; the one that stays is refused rather than called
+ * real one does, and the answer has to say which. The one that stays is refused rather than called
  * closed. Both stand-ins are processes of their own, detached, so whether one is alive is the
  * operating system's answer and not the test's.
  */
@@ -7812,7 +7815,7 @@ async function testAnEditorPortMovesOnlyWhenItIsHeld(): Promise<void> {
  *
  * Two projects open in two harness sessions are two games announced on the same machine, and a
  * server that took whichever one it found would answer about somebody else's project with nothing
- * in the answer saying so. A caller naming a project still wins; this is only the default.
+ * in the answer saying so. A caller naming a project still wins. This is only the default.
  */
 async function testAServerOnlyAnswersAboutItsOwnGame(): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), 'gdharness-own-'));
@@ -8075,7 +8078,7 @@ async function testToolAndOpLookupsCannotReachThePrototype(): Promise<void> {
         `${name} must not resolve to a section`,
       );
     }
-    // The read two downstream sessions reached for after a set, sent where reads live; and an op
+    // The read two downstream sessions reached for after a set, sent where reads live. And an op
     // nothing answers, refused with the valid ops alone.
     for (const asked of ['get', 'property']) {
       assert.match(
@@ -8094,7 +8097,7 @@ async function testToolAndOpLookupsCannotReachThePrototype(): Promise<void> {
  *
  * `includeProperties` given the list of properties to include was taken, ignored, and answered as
  * though it had been read, so a caller saw nodes with no properties on them and no reason why. An
- * argument the tool does not name has always been refused; one it names and cannot use is the same
+ * argument the tool does not name has always been refused. One it names and cannot use is the same
  * mistake wearing the right word.
  */
 async function testArgumentsOfTheWrongTypeAreRefused(): Promise<void> {
@@ -8323,7 +8326,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       'while modify with its additions reaches the project check',
     );
     // Inside a list of objects too: params sent as a list was written into the script as
-    // `signal changed([])`, and a misspelt field was dropped, leaving a variable untyped.
+    // `signal changed([])`, and a misspelt field was dropped and left a variable untyped.
     const nested = async (modification: Record<string, unknown>): Promise<string> =>
       await call('script_edit', {
         op: 'modify',
@@ -8355,7 +8358,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
       }),
       'scene_animation takes track.keyframes[0].time as number, not a string.',
     );
-    // An object that names its fields and leaves the rest open takes one it does not name; only a
+    // An object that names its fields and leaves the rest open takes one it does not name. Only a
     // closed one refuses it, and either checks the type of a field it names. No tool has an open
     // one today, so the schema is handed in.
     const open = { type: 'object', properties: { x: { type: 'number' } } };
@@ -8426,7 +8429,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     // hand. Getting that boundary wrong cost a downstream session two calls, one in each
     // direction, so the boundary itself is asserted rather than left to whoever edits next. A stop
     // and a wait take it and check it against the run, because a call copied from the start
-    // carries it; that they do is held where a run is going.
+    // carries it. That they do is held where a run is going.
     for (const [tool, op] of [['editor_launch', 'restart']]) {
       assert.match(
         await call(String(tool), { op, projectPath: '/p' }),
@@ -8462,7 +8465,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     );
 
     // The other half, or this passes against a server that refuses every op-specific argument.
-    // Accepted means reaching the runtime and finding nothing there, which is one sentence; the
+    // Accepted means reaching the runtime and finding nothing there, which is one sentence. The
     // absence of "does not take" is every sentence in the program except one.
     for (const call_ of [
       { op: 'text', limit: 3 },
@@ -9359,8 +9362,8 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
       'the search should read the project and nothing standing beside it',
     );
     assert.equal(found.summary.files_searched, 2, 'and should not have opened the other three');
-    // Named, because an answer missing a copy the caller can see on disk reads as a search fault;
-    // a hidden directory and our own addon are not the project's to have marked.
+    // Named, because an answer missing a copy the caller can see on disk reads as a search fault.
+    // A hidden directory and our own addon are not the project's to have marked.
     assert.deepEqual(
       [...(found.not_searched ?? [])].toSorted(),
       ['res://export/', 'res://lib/vendor/'],
@@ -9375,7 +9378,7 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
     assert.equal(plain.summary.files_with_matches, 1, 'a project with nothing kept out is still searched');
     assert.equal(plain.not_searched, undefined, 'and says nothing was kept out');
     // A folder the whole-project search steps over, named as the place to search, is searched as
-    // asked, and the note says why the whole search leaves it out; what it holds that the walk steps
+    // asked, and the note says why the whole search leaves it out. What it holds that the walk steps
     // over, the reference project's installed addon, stays out.
     const inside = (place: string[]): ReturnType<typeof searchProject> =>
       searchProject(sandbox, {
@@ -9723,7 +9726,7 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
     );
 
     // A flag where the path used to be. With the directory optional this is the natural thing to
-    // type, and it is what the install guide tells people to run; taken positionally, `--json`
+    // type, and it is what the install guide tells people to run. Taken positionally, `--json`
     // was resolved as a directory and the command refused itself.
     const flagged = spawnSyncHidden(
       process.execPath,
@@ -9745,9 +9748,9 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
       'and the report is about that project, not an empty answer',
     );
 
-    // A flag nobody recognises stops the command before it starts. `setup --curser` used to
-    // install the addons, enable the plugins, register the autoload and rebuild the class list,
-    // and refuse the option afterwards, leaving the project half configured.
+    // A flag nobody recognises stops the command before it starts. `setup --curser` once installed
+    // the addons, enabled the plugins, registered the autoload and rebuilt the class list. It
+    // refused the option only afterwards, and the project was left half configured.
     for (const typo of [
       ['setup', '--curser'],
       ['doctor', '--jsonn'],
@@ -9919,7 +9922,8 @@ function testTheReleaseButtonOffersWhatBothDocumentsDescribe(): void {
 }
 
 /**
- * A GODOT_PATH that names something broken is refused as that, naming the path and what is wrong.
+ * A GODOT_PATH that names something broken is refused as that. The refusal names the path and the
+ * fault.
  *
  * The locator answered null for two states: nothing set and nothing found, and a variable set to
  * something that does not answer. Both became "No Godot executable found. Set GODOT_PATH", which
@@ -10521,7 +10525,7 @@ function testARunsEnvironmentIsBuiltInOrder(): void {
 
   // The runtime directory is set last, so it is this server's whatever else was asked for. The
   // tool refuses a caller naming it, so nothing reaching this function through `editor_run` can
-  // carry one; the guarantee is the function's own, and a second caller asking for an
+  // carry one. The guarantee is the function's own, and a second caller asking for an
   // environment would otherwise inherit an ordering that has never been read.
   const named = environmentFor(
     { env: { GDHARNESS_RUNTIME_DIR: 'D:/elsewhere' }, runtimeDirectory: runtime },
@@ -10842,7 +10846,7 @@ async function testAnAnnouncementIsItsOwnProcess(): Promise<void> {
   const anHourAgo = now - 60 * 60 * 1000;
   const twoMinutesAgo = now - 2 * JUDGED_AFTER_MS;
   const candidates = [
-    // Ended an hour ago; the number now belongs to something that started ten minutes ago.
+    // Ended an hour ago. The number now belongs to something that started ten minutes ago.
     { file: file(101), pid: 101, writtenAt: anHourAgo },
     // Booted five seconds before it announced, the ordinary shape.
     { file: file(102), pid: 102, writtenAt: twoMinutesAgo },
@@ -10926,7 +10930,7 @@ async function testAnAnnouncementIsItsOwnProcess(): Promise<void> {
 /**
  * The platform says when a process started, and the sweep acts on it.
  *
- * The case above supplies the operating system's answer; this one requires that there is one, for
+ * The case above supplies the operating system's answer. This one requires that there is one, for
  * a real process, on this platform. Every judgement above passes on a platform that never answers,
  * because an announcement nobody can judge is believed, so the answer is a dependency to assert
  * rather than assume. And the sweep is run against the real answer once: a live process whose
@@ -10955,7 +10959,7 @@ async function testAStaleAnnouncementWhoseNumberCameRoundIsSwept(): Promise<void
     // And within what the platform's reading can be early by, and never late. ps dated a Linux start
     // from the boot time in whole seconds and then cut it to the second, up to two seconds early, and
     // a game's restart was refused as having begun before the run that made it. /proc's reading is
-    // cut to the second and the tick, and a runner dated one 1008 ms early; macOS's ps cuts to the
+    // cut to the second and the tick, and a runner dated one 1008 ms early. macOS's ps cuts to the
     // second.
     const after = Date.now();
     const early =
@@ -11200,7 +11204,7 @@ function testAWallOfOneMessageCollapsesToItsShape(): void {
   assert.match(wall.first.text, /"Run" from "res:\/\/core\/file0\.gd"/, JSON.stringify(wall));
 
   // The slot that says something and the slot that says nothing, told apart. Three names across
-  // five lines is the finding; five different paths across five lines is the count again.
+  // five lines is the finding. Five different paths across five lines is the count again.
   assert.deepEqual(wall.slots[0], { distinct: 3, some: ['"Run"', '"Encounter"', '"Component"'] });
   assert.deepEqual(wall.slots[1], { distinct: 5, allDifferent: true });
 
@@ -11560,9 +11564,9 @@ async function testAnEditorStartedByAnEditorSaysSo(): Promise<void> {
  * Asked for from game-b, where the client twice restarted a healthy server mid-call and nothing
  * could say why: a client closing its end, a signal, a crash and a reconnect all looked the same.
  * Each way out is taken here and its line read. A kill on Windows is TerminateProcess, which no
- * handler sees, so the signal is taken where there is one to take; there a missing ended line is
- * itself the answer. The ended line's calls in flight and the cap on the file are rendered directly,
- * since no fixture holds a call open across a server's end or writes a megabyte of lines.
+ * handler sees, so the signal is taken where there is one to take. There a missing ended line is
+ * itself the answer. The ended line's calls in flight and the cap on the file are rendered
+ * directly, since no fixture holds a call open across a server's end or writes a megabyte of lines.
  */
 async function testTheLifecycleLogSaysHowAServerEnded(): Promise<void> {
   const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-lifecycle-'));
@@ -11760,7 +11764,7 @@ async function testEditorOutputChecksTheProjectItIsGiven(): Promise<void> {
  * editor, beside the one already opening, and editor_launch close then said there was nothing to
  * close and left the hidden editor running. The editor here is a real headless one on a project
  * whose addon is enabled and empty, so it runs and never dials in. A fake editor connects while the
- * first call waits, which is the editor arriving; once it has gone, a second call meets an editor
+ * first call waits, which is the editor arriving. Once it has gone, a second call meets an editor
  * that does not arrive within the wait.
  */
 async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
@@ -11800,7 +11804,7 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
   const port = await reservePort();
   const waitMs = 8_000;
   // Named, PowerShell saves its cache at that path and never where it runs, which leaves nothing
-  // to look for; set empty, it saves none at all. So it is taken out of what the server inherits
+  // to look for. Set empty, it saves none at all. So it is taken out of what the server inherits
   // for the server's start and put back after.
   const cachePathVariable = 'PSModuleAnalysisCachePath';
   const inheritedCachePath = process.env[cachePathVariable];
@@ -11946,7 +11950,7 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
     if (windows) {
       // Saved some thirteen seconds after a PowerShell first loads a module, measured here, so it is
       // waited for while both are still running rather than assumed. Both save to the same place, so
-      // the first to save meets the positive; the wait runs on until the later of the two, the one
+      // the first to save meets the positive. The wait runs on until the later of the two, the one
       // that started the editor, has had its chance to save in the wrong place.
       const cache = join(temp, 'Microsoft', 'Windows', 'PowerShell', 'ModuleAnalysisCache');
       for (let waited = 0; waited < 40_000 && !existsSync(cache); waited += 250) {
@@ -12177,7 +12181,7 @@ function testWhatADeclaredClassExtendsIsReadFromItsScript(): void {
 }
 
 /**
- * The console of an editor that has gone is still read, saying what became of it.
+ * The console of an editor that has gone is still read, and says what became of it.
  *
  * Found by a probe: after editor_launch close the call was refused with "No editor is connected",
  * while the file the editor wrote sat beside the project, and the console of an editor that
@@ -12397,7 +12401,7 @@ function isAlive(pid: number): boolean {
  * `detached` it was still the server's child, and a tree walk by parent pid reached it. A stand-in
  * server launches a long-lived stand-in through the launcher the server uses, and the tree is then
  * killed the way the harness kills it. The stand-in server holding its launch as a child is what
- * the walk found; what is asserted is that the walk finds nothing, and that the launch outlives it.
+ * the walk found. What is asserted is that the walk finds nothing, and that the launch outlives it.
  */
 async function testALaunchIsOutsideTheServersTree(): Promise<void> {
   const scratch = mkdtempSync(join(tmpdir(), 'gdharness-outside-'));
@@ -12729,12 +12733,12 @@ async function testTheDesktopHelperIsCompiledOnce(): Promise<void> {
 
 /**
  * Every start `src/spawn.ts` offers as hidden is hidden, under Bun, which runs the suites and the
- * scripts, and under Node, which runs the server; so is each start in the prelude a test hands to
+ * scripts, and under Node, which runs the server. So is each start in the prelude a test hands to
  * Node. Read back by the process started, which reports the show state its start named and whether
  * it has a console window: the flag that keeps a console program's window off the screen names
  * SW_HIDE, and a start that names no show state at all leaves the window to the program. The
- * shown start is the control, naming a show state of its own. Detached, so that it gets no console
- * either way and opens nothing on the desktop of whoever runs the suite.
+ * shown start is the control, and it names a show state of its own. Detached, so that it gets no
+ * console either way and opens nothing on the desktop of whoever runs the suite.
  */
 async function testEveryHiddenStartIsStartedHidden(): Promise<void> {
   if (process.platform !== 'win32') {
@@ -12835,7 +12839,7 @@ async function testEveryHiddenStartIsStartedHidden(): Promise<void> {
  * A run started on a desktop of its own is on that desktop, under its own pid.
  *
  * Every windowed run downstream put the game on the developer's screen and took the keyboard, and a
- * window started hidden was measured still taking it; a desktop is the boundary Windows keeps focus
+ * window started hidden was measured still taking it. A desktop is the boundary Windows keeps focus
  * inside. The launch goes through the launcher and the keeper the server uses, and the process
  * launched asks Windows which desktop it is on, which is the one thing that can say where it
  * went without a window being put anywhere to look at. The same launch without a desktop is the
@@ -13108,7 +13112,7 @@ async function testAnExitAlreadyToldIsStillSeen(): Promise<void> {
  * included, readable by every process on the machine for as long as the keeper lived, which is as
  * long as the run. Reported by game-a as a security advisory against 1.0.30.
  *
- * A secret is put in the server's environment and a variable in the run's own; the game prints
+ * A secret is put in the server's environment and a variable in the run's own. The game prints
  * both, which is the half that shows the environment still arrives. While the game is up, no
  * command line on the machine that runs the keeper carries either value, raw or in base64.
  */
@@ -13527,7 +13531,7 @@ function testAnAnnouncedGameIsJudgedBeforeItIsEnded(): void {
  *
  * When every run on the machine wrote one note, a run started for another project overwrote ours.
  * The server that started ours then checked the pid against that note, found another project's
- * run, and signalled nothing; a server started after a reconnect found no run of ours at all.
+ * run, and signalled nothing. A server started after a reconnect found no run of ours at all.
  * Reported by game-a and by game-b, whose sessions run side by side.
  *
  * The other project's run is written into its own note. Then one run of ours is stopped by a
@@ -13664,9 +13668,9 @@ async function testAnotherProjectsRunLeavesOursStoppable(): Promise<void> {
  * held at a breakpoint would not have answered.
  *
  * The run is started and its server killed, and the note is taken away, so the next server finds
- * the game only by its announcement. A stop without the number is refused and names it; a number
+ * the game only by its announcement. A stop without the number is refused and names it. A number
  * that is not a game of this project is refused and signals nothing, and so is one announced for
- * this project whose process is not its engine; the game's number ends it.
+ * this project whose process is not its engine. The game's number ends it.
  */
 async function testAGameNoNoteNamesIsStoppedByItsNumber(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -13922,7 +13926,7 @@ async function testARunOutlivesItsServersTree(): Promise<void> {
  * The process a game restarts itself into is picked out by when it started and what it runs.
  *
  * `OS.set_restart_on_exit` has the engine start itself again at the end of its teardown, so the
- * successor starts moments before its parent exits; a worker the game started earlier is not it,
+ * successor starts moments before its parent exits. A worker the game started earlier is not it,
  * nor a process of another executable, nor an orphan of an earlier holder of the number, which
  * started before the game existed. Two candidates are one too many to choose between. On POSIX the
  * listing gives starts to the second, cut down, so a successor listed up to a second early is kept.
@@ -14107,7 +14111,7 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
 
     await first.initialize('regression-test');
     // The closest thing to the successor that is not it: the same engine, started in the same
-    // moments, writing its output somewhere else. Taken for it, it is one of two and neither is
+    // moments, with its output somewhere else. Taken for it, it is one of two and neither is
     // followed.
     writeFileSync(
       join(decoyProject, 'project.godot'),
@@ -14317,8 +14321,8 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
         ENGINE_CALL_TIMEOUT_MS,
       ),
     );
-    // The keeper can end the successor before its script has run, so its mark is not required;
-    // a successor that lived long enough to write one must be the process the stop ended.
+    // The keeper can end the successor before its script has run, so its mark is not required.
+    // A successor that lived long enough to write one must be the process the stop ended.
     const closedSuccessor = asNumber(get(closed, 'endedPid'));
     await meet(closedSuccessor);
     assert.notEqual(
@@ -14354,7 +14358,7 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
     );
 
     // Ended without the close: whatever the engine makes of the keeper's signal, nothing of the
-    // run is left. Where a signal ends the engine at once there is no restart; where the engine
+    // run is left. Where a signal ends the engine at once there is no restart. Where the engine
     // treats it as a quit, it restarts, and the stop ends that too.
     rmSync(mark, { force: true });
     const killing = parseTextContent(
@@ -14387,7 +14391,7 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
     );
 
     // A worker the game started in its last moments is the same engine, started in the same window,
-    // writing into the same transcript, and the only candidate there is; the game says as it exits
+    // writing into the same transcript, and the only candidate there is. The game says as it exits
     // that it set no restart, so the run ends with it and the worker is left to the game's own.
     rmSync(join(project, 'restart_on_close'), { force: true });
     writeFileSync(join(project, 'worker_on_start'), '');
@@ -14486,7 +14490,7 @@ async function testACancelledCallEndsTheEngineItStarted(): Promise<void> {
         130_000,
       )
       .catch(() => {
-        // A cancelled request is not answered; the fixture reads the process table instead.
+        // A cancelled request is not answered. The fixture reads the process table instead.
       });
     for (let waited = 0; waited < 30_000 && seen.length === 0; waited += 500) {
       await delay(500);
@@ -14521,9 +14525,9 @@ async function testACancelledCallEndsTheEngineItStarted(): Promise<void> {
 /**
  * A real editor writes its console where this server reads it, through the argv the server builds.
  *
- * The chain nothing else can check. The other console cases are told what the file holds; this asks an
- * engine to write one. `--log-file` on an editor is the whole mechanism, and it is a claim about
- * Godot rather than about this code: measured here so that an engine which stopped honouring it,
+ * The chain nothing else can check. The other console cases are told what the file holds. This
+ * asks an engine to write one. `--log-file` on an editor is the whole mechanism, and it is a claim
+ * about Godot rather than about this code: measured here so that an engine which stopped honouring it,
  * or an argv that stopped passing it, fails on the case built for it rather than as an empty
  * console somebody reads as a quiet editor.
  *
@@ -14700,7 +14704,7 @@ async function testAnEditorWritesItsConsoleWhereTheServerLooks(): Promise<void> 
 /**
  * A game too new to talk to is still a game, and its announcement survives being read.
  *
- * The upgrade path makes this state. `setup.py` writes the new addon the moment a pin moves; the
+ * The upgrade path makes this state. `setup.py` writes the new addon the moment a pin moves. The
  * server a session already spawned stays as it was until the harness reconnects, so every upgrade
  * has a window where the game speaks a protocol the server does not. Deleting that announcement on
  * the way past and answering that nobody is playing anything is the one answer that is certainly
@@ -14939,7 +14943,7 @@ function testAPidPicksOneOfSeveralGames(): void {
   // The sentence the reference and the schema both give for a call that names neither, held
   // against what the pick does rather than against itself. A session downstream saw a second
   // project's game listed beside its own, read "not needed with one game" and could not tell
-  // what it was being answered by; both documents now say the order, and the middle step, the
+  // what it was being answered by. Both documents say the order, and the middle step, the
   // server's own game, is the one this function never sees, so it is named as belonging to the
   // caller above rather than left to look like a branch in here.
   // The sentence names an argument for each shape, and three copies of one sentence agree with
@@ -14969,7 +14973,7 @@ function testAPidPicksOneOfSeveralGames(): void {
 
 /**
  * A runtime call after this server's run has ended says that run ended and how. The stop is
- * exercised with a real game in testAHeadlessGameSaysItHasNoWindow; the endings a stop never
+ * exercised with a real game in testAHeadlessGameSaysItHasNoWindow. The endings a stop never
  * produces are rendered here: a game that quit by itself, one a signal ended, a played run with no
  * pid, and one nobody saw end.
  */
@@ -15040,7 +15044,7 @@ function testARunEndedWithoutACodeSaysWhy(): void {
   assert.match(starting, /exit code stays with the editor/, starting);
   assert.match(starting, /editor_output with op "editor"/, starting);
   // A project without the runtime addon never announces, so its game not having done so says
-  // nothing about when it ended; and a game that did announce was past starting.
+  // nothing about when it ended. And a game that did announce was past starting.
   for (const [announced, couldAnnounce] of [
     [true, true],
     [false, false],
@@ -15355,8 +15359,8 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
  * the answer naming it, so the project had two games and the server could speak for one.
  *
  * The engine is this process, as the neighbouring bench fixture does it. What is under test is what
- * the answer says, and a start that reaches the answer has gone through every decision above it;
- * needing a real engine would put this in the tier that only CI runs.
+ * the answer says, and a start that reaches the answer has gone through every decision above it.
+ * Needing a real engine would put this in the tier that only CI runs.
  */
 async function testAStartSaysWhatItLeftRunning(): Promise<void> {
   // Both protocols, because the two refusals that made this claim are different branches and both
@@ -15397,7 +15401,7 @@ async function aStartLeaves(protocol: number): Promise<void> {
       '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
   );
   // This process's pid, so the announcement is of something genuinely alive: a dead one is swept by
-  // the reader and the start would then have nothing to report, passing for the wrong reason.
+  // the reader and the start would then have nothing to report, and pass for the wrong reason.
   writeFileSync(
     join(announcements, `runtime-${process.pid}.json`),
     JSON.stringify({
@@ -15836,7 +15840,7 @@ function testAKeptGamesStackAndValuesRead(): void {
  *
  * The runtime addon is an autoload whose _process runs first in every frame, and the engine takes a
  * pause every 2048 lines of script wherever they fall, so an idle game paused in gdharness's code.
- * A Windows runner caught one in the addon's note_frame; the case wanting _process passed otherwise
+ * A Windows runner caught one in the addon's note_frame. The case wanting _process passed otherwise
  * only because the addon's frame is called that too. And a game held where no script runs, as one
  * is when it takes a pause asked for long before, ran on for good after a step over or out, which
  * count lines only at the depth they start from.
@@ -15845,7 +15849,7 @@ async function testAPauseAnswersWithTheGamesOwnScript(): Promise<void> {
   const addon = 'res://addons/gdharness_runtime/runtime_autoload.gd';
   const moved: string[] = [];
   // The stacks the stand-in game stops at, one for each break or step, the last kept once they run
-  // out; and the stack it holds now, [0] where no script runs.
+  // out. And the stack it holds now, [0] where no script runs.
   let stops: SentValue[][] = [];
   let now: SentValue[] = [0];
   // The addon's last line in a frame, found by its text: a continue with a breakpoint there stops on
@@ -16040,7 +16044,7 @@ async function testAPauseAnswersWithTheGamesOwnScript(): Promise<void> {
 }
 
 /**
- * A keeper hands a question to its game's debugger and answers with what it said; one without a
+ * A keeper hands a question to its game's debugger and answers with what it said. One without a
  * debugger says so, and an answer that is not one is quoted rather than taken as one.
  */
 async function testTheKeeperAnswersItsDebuggersQuestions(): Promise<void> {
@@ -16441,7 +16445,7 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
  * mark until its close never took the mark down, and its next start told the player it had crashed
  * and turned their mods off. The game here notes the close request and leaving the tree as files, in
  * a directory of each run's own. One closes, which is the stop the issue asked for. One turns off
- * auto_accept_quit and stays, so the stop sits out the close wait and ends it, saying why. One is
+ * auto_accept_quit and stays, so the stop sits out the close wait, ends it and says why. One is
  * stopped with graceful: false and sees no close at all. And a start ending the run before it closes
  * that run too.
  */
@@ -16658,9 +16662,10 @@ async function testAStopAsksTheGameToCloseFirst(): Promise<void> {
  *
  * Reported from game-a as #995: "has its processing disabled" said neither, and the
  * game's menu was over the hall, which took a find, a full-screen read and a guess to learn. Three
- * buttons: one inheriting DISABLED from the hall it is in, under a panel drawn over it; one set
- * DISABLED itself with nothing over it; and one inheriting the root's pausable mode once the game is
- * paused.
+ * buttons:
+ * - one inheriting DISABLED from the hall it is in, under a panel drawn over it
+ * - one set DISABLED itself with nothing over it
+ * - one inheriting the root's pausable mode once the game is paused.
  */
 async function testAClickThatDoesNotProcessSaysWhy(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -17867,7 +17872,7 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
       assert.match(offered ?? '', /the buttons on screen say [^;]*"Upper"/, `${how}: ${offered}`);
 
       if (headless) {
-        // A Window's own space is its pixels, which a content scale of 2 makes twice its canvas; this
+        // A Window's own space is its pixels, which a content scale of 2 makes twice its canvas. This
         // one is embedded, so the events go through the game's.
         const inPopup = await call('runtime_input', {
           op: 'mouse_click',
@@ -18187,7 +18192,7 @@ async function testATouchReachesTheGameAsAFinger(): Promise<void> {
     const aimedShown = JSON.stringify(aimed);
     assert.equal(get(aimed, 'path'), pad, aimedShown);
     assert.deepEqual(get(aimed, 'position'), [50, 30], `in the window's pixels: ${aimedShown}`);
-    // The pad was also given the earlier touches that landed on it; these are the aimed one's.
+    // The pad was also given the earlier touches that landed on it. These are the aimed one's.
     const padTouches = asArray(
       get(await call('runtime_invoke', { op: 'call', nodePath: pad, method: 'record' }), 'result'),
       "the pad's touches",
@@ -18544,7 +18549,7 @@ async function testARelativeEnginePathIsMadeWhole(): Promise<void> {
         'an engine named relatively is found whole',
       );
       // Setup writes the path it found into the harness config, so an absolute one comes back as
-      // written: resolving it respelt X:/ as X:\ and rewrote a config nobody had asked to change.
+      // written: resolving it respelt D:/ as D:\ and rewrote a config nobody had asked to change.
       const forward = resolve(before).replaceAll('\\', '/');
       process.env['GODOT_PATH'] = forward;
       assert.deepEqual(
@@ -18755,8 +18760,8 @@ async function testAGameSaysWhichRuntimeAddonItLoaded(): Promise<void> {
  *
  * The welcome is how a game says which protocol it speaks, so a game that opens with anything else
  * is refused before its answer is read. The stand-in answers the request at once and well, so the
- * only thing wrong with it is the missing welcome; one that sends the welcome first is the positive,
- * answered with what it said.
+ * only thing wrong with it is the missing welcome. One that sends the welcome first is the
+ * positive, answered with what it said.
  */
 async function testAGameThatDoesNotWelcomeIsRefused(): Promise<void> {
   const answering = (welcomes: boolean) =>
@@ -18818,8 +18823,8 @@ async function testAGameThatDoesNotWelcomeIsRefused(): Promise<void> {
  * The announcement names the address the game bound, and a project may set that to every interface.
  * Dialled as written, `*` is no host and Windows refuses `0.0.0.0`, so a listening game was answered
  * "may still be starting", which waiting never changes. Each wildcard gets a fake game bound the way
- * it says, and the status has to reach it. `::` needs IPv6, which some runners lack; that variant
- * says so and is left out there, while the other two hold everywhere.
+ * it says, and the status has to reach it. `::` needs IPv6, which some runners lack. That variant
+ * says so and is left out there, and the other two hold everywhere.
  */
 async function testAGameOnEveryInterfaceIsReached(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-every-interface-'));
@@ -18905,7 +18910,7 @@ async function testAGameOnEveryInterfaceIsReached(): Promise<void> {
  * Reported from game-a as #1152: fourteen runtime_inspect reads sent at once lost four
  * to ECONNREFUSED, worded as a game starting or stopping. The engine queues eight connections a game
  * has not taken and refuses the rest, and the game took one a frame. The fake game takes every
- * connection at once, so it cannot refuse; what it records is the property the fix holds, how many
+ * connection at once, so it cannot refuse. What it records is the property the fix holds, how many
  * of this server's connections were waiting for their welcome at the same moment, which it sends a
  * frame late. Then four slow calls the game has taken, which must not hold up a fifth, and a game
  * that takes nothing, where a call that never got a place is answered as never sent.
@@ -19946,7 +19951,7 @@ async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
  *
  * Issue #609: a stop, a start straight after it, and the next runtime_wait was refused with "A game
  * with the runtime addon announced itself and its process is gone" about the run that had just
- * been stopped, telling the caller to start another. The new game answered a few seconds later.
+ * been stopped, and told the caller to start another. The new game answered a few seconds later.
  * With nothing announced the refusal only looked at games that had gone.
  *
  * A real engine and the real runtime addon, because the state is two runs of it a moment apart:
@@ -20053,7 +20058,7 @@ async function testARuntimeCallWaitsForTheGameThisServerStarted(): Promise<void>
     try {
       await call('editor_run', { op: 'stop' });
     } catch {
-      // Stopped already, or the server is gone; the sweep below is what must happen.
+      // Stopped already, or the server is gone. The sweep below is what must happen.
     }
     await server.stop();
     sweep(project);
@@ -20310,7 +20315,7 @@ function testTheCureIsWrittenWhole(): void {
  * file: the skill described the fault the tool fixes as the tool's behaviour, and a session reading
  * it would refuse a scan the reference says to make. And `script_diagnostics` ended by saying a
  * stale type *needs* `editor_launch restart` and a missing class *needs* `project_import
- * refresh_classes`, while the notes a caller receives lead with `editor_rescan` for both; the
+ * refresh_classes`, while the notes a caller receives lead with `editor_rescan` for both. The
  * description is what a session reads before any call, so it booted a headless engine beside a
  * running bench for the state the note was rewritten to keep it from.
  *
@@ -20354,7 +20359,7 @@ function testEveryRemedyLeadsWithTheScan(): void {
     );
   }
 
-  // What the scan does to the cache, as the skill tells it. The field is the positive; the absence
+  // What the scan does to the cache, as the skill tells it. The field is the positive. The absence
   // beside it is the retracted claim, matched as a claim about who inherits what rather than as the
   // sentence that carried it.
   assert.match(editing, /cacheRestored/, 'the Editing section names the field that says the cache came back');
@@ -20594,7 +20599,7 @@ function testTheStaleHalfIsNamedCorrectly(): void {
  *
  * The version moves on every release and the editor addon mostly does not. Compared by version,
  * 1.0.12, which changed no addon file, called every editor stale on every answer and told it to
- * restart into the same code; the upgrade command said the same, and a downstream project was
+ * restart into the same code. The upgrade command said the same, and a downstream project was
  * told by gdharness to take a restart that its own release notes said it did not need.
  *
  * The digest is taken over both editor plugins and nothing else, because the runtime addon is
@@ -20927,8 +20932,8 @@ function testTheRegistryIsHttpsOrNpm(): void {
  * worth saying, and offline and behind is the state where it is worth saying most.
  *
  * The dead port on its own proves nothing about whether the variable was read, since npm being slow
- * looks the same from here; that is why this failed on one platform of three and passed on the other
- * two. What the variable maps to is asserted in `testTheRegistryIsHttpsOrNpm`, and that the
+ * looks the same from here. That is why this failed on one platform of three and passed on the
+ * other two. What the variable maps to is asserted in `testTheRegistryIsHttpsOrNpm`, and that the
  * environment reaches a spawned server's checker at all is what the off-switch fixture below shows.
  */
 async function testUpdateNoticeRidesOnAnAnswer(): Promise<void> {
@@ -21104,7 +21109,7 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
   // per machine rather than per editor, and the second editor open otherwise binds neither. The
   // log file is the only way anything reads what an editor prints, since its console reaches no
   // plugin: an editor spawned without it is one whose startup nobody can see.
-  // A visible editor by default, which is the user's; headless only when asked to be hidden. Silent
+  // A visible editor by default, which is the user's. Headless only when asked to be hidden. Silent
   // by default, which a headless one is already.
   const opened = [
     '--path',
@@ -21260,7 +21265,7 @@ function testEngineFlagsAreAListNotAPassage(): void {
   assert.match(refused(['--resolution', '1280x720', '--resolution']), /nothing followed it/);
   // Movie Maker's file is a value of its own kind: present, and not another flag. Where it may be
   // written is the server's to judge, with the project in hand (movieRefusal).
-  assert.deepEqual(engineFlags(['--write-movie', 'X:/out/trailer.avi', '--fixed-fps', '60']), { ok: true });
+  assert.deepEqual(engineFlags(['--write-movie', 'D:/out/trailer.avi', '--fixed-fps', '60']), { ok: true });
   assert.match(
     refused(['--write-movie']),
     /--write-movie takes a file path as the next entry, and nothing followed it/,
@@ -22079,9 +22084,8 @@ async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
     await delay(1100);
     // The editor that comes back names its two servers, and its language server starts listening a
     // second after it greets. Godot binds the debug adapter as the editor is built, before the
-    // greeting, and the language server once the editor is ready, after it; the fixture had the two
-    // the other way round, which no editor does, and a restart now reads an adapter down beside a
-    // language server up as one that failed.
+    // greeting, and the language server once the editor is ready, after it. A restart reads an
+    // adapter down beside a language server up as one that failed.
     const [lspPort, dapPort] = [await reservePort(), await reservePort()];
     const listen = async (on: number): Promise<Server> => {
       const made = createServer((socket) => {
@@ -22685,7 +22689,7 @@ function testAStaleEnumMemberIsNamed(): void {
  * class.
  *
  * On the default warnings Godot says only `Static function "nope()" not found in base "Peal"`, which
- * nothing read; a project met exactly that about `Components.opening()`. Where the unsafe method
+ * nothing read. A project met exactly that about `Components.opening()`. Where the unsafe method
  * access warning is raised to an error, the same call is also denied as a method of the inferred
  * type, and the two are one member rather than two entries with two remedies. Both wordings are the
  * engine's, taken from a headless 4.7.2 editor, and both orders are asserted since nothing fixes it.
@@ -23206,8 +23210,8 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
 
 /**
  * With no language server of the project to ask, the scripts are compiled by a headless engine and
- * answered in the language server's shape, saying so. The tool used to refuse here, so a caller
- * with no editor open had no way to learn that a script did not compile short of running the game.
+ * answered in the language server's shape, and the answer says so. Without it, a caller with no
+ * editor open had no way to learn that a script did not compile short of running the game.
  */
 async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> {
   const engine = resolveGodotPath();
@@ -23346,12 +23350,12 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       /^No editor of this project is open to ask, so a headless engine compiled the scripts .* A second engine reports the warnings, at the levels the project sets, .* warnings is null when that engine could not answer\. editor_launch with hidden: true .* reports both with their columns\.$/,
       shown,
     );
-    // A warning the project sets to warn comes back as a warning at its line, in the editor's words;
-    // one the project raises to an error comes back once, as the error the compile reported; and one
+    // A warning the project sets to warn comes back as a warning at its line, in the editor's words.
+    // One the project raises to an error comes back once, as the error the compile reported. One
     // the script ignores does not come back.
     const warned = parseTextContent(await diagnose('warned/warned.gd'));
-    // What a script loads is read on the way, and its warnings are its own, not the loader's; nor is
-    // the compile failure raising them gives the loader a warning of its.
+    // What a script loads is read on the way, and its warnings are its own, not the loader's. Nor
+    // does the compile failure raising them give the loader a warning of its own.
     const user = parseTextContent(await diagnose('warned/user.gd'));
     // Taken out again, since the project's own checks below count its scripts.
     rmSync(join(project, 'warned'), { recursive: true });
@@ -23762,8 +23766,8 @@ async function testDiagnosticsNameAStaleEnumMember(): Promise<void> {
  * #945: a member the type inherits from a project base class is found in the base, and a diagnostic
  * naming only the member is read against its line. game-b's 270 stale scripts denied
  * `READ_BY_THE_RUN`, declared in GearReads, which GearKinds extends, with `Could not resolve external
- * class member` and no type; and `piece_sells`, declared in Tariff, which Shop extends. Four
- * scripts, whose members sat in the named type's own file, were the only ones given a remedy, and
+ * class member` and no type. They also denied `piece_sells`, declared in Tariff, which Shop
+ * extends. Four scripts, whose members sat in the named type's own file, were the only ones given a remedy, and
  * following it cleared all 274.
  *
  * GearKinds reaches its base by a relative path and Shop by name, the two ways a script extends
@@ -24006,7 +24010,7 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
  * machine each leave the other a stale cache, and an import or an export that meets one does its
  * work, writes a fresh cache and crashes as it exits. The headless write fixture's first import
  * failed that way three times in ten minutes while another session ran 4.7.1, reported under Bun as
- * exit code 5, the low byte of an access violation; and project_export answered that it had not
+ * exit code 5, the low byte of an access violation. And project_export answered that it had not
  * produced a pack it had written in full. The stale cache is made here by rewriting a real one's
  * key, in a cache directory the fixture owns.
  */
@@ -24456,7 +24460,7 @@ function testTheProjectPathSentenceNamesEveryCallThatTakesNone(): void {
     `and the ops of a tool that takes one elsewhere: ${without.join(', ')}`,
   );
   // A stop and a wait take it, checked against the run, since a call copied from the start carries
-  // it; so they are not in the sentence, which would otherwise tell a caller to leave it off.
+  // it. So they are not in the sentence, which would otherwise tell a caller to leave it off.
   assert.ok(
     !without.includes('editor_run stop') && !without.includes('editor_run wait'),
     `and not the stop or the wait, which take one: ${without.join(', ')}`,
@@ -24708,15 +24712,19 @@ function testTheSkillNamesTheSettingThatServesAScriptRun(): void {
 
 /**
  * A run of a scene under a folder the project lists as quiet neither serves nor announces, and nor
- * do the engines it starts; a run started to be profiled from its start does.
+ * do the engines it starts. A run started to be profiled from its start does.
  *
  * Reported from game-b as #1197: a bench is handed to the engine as a scene, the way a screen is,
  * so the runtime announced it as the game for the twenty minutes it ran, and each worker engine it
  * started as another, all under the project's own path. Each game refused it in its own loader. The
- * issue's four checks, on a real headless engine: the bench is quiet, given as a `res://` path or
- * as an absolute one; a profiled bench is served, and the worker it starts is not, since it inherits
- * the bench's environment; a screen is served; and with the setting absent the bench is served, as
- * before. Every quiet run is paired with its scene saying it ran.
+ * issue's four checks, on a real headless engine:
+ * - the bench is quiet, given as a `res://` path or as an absolute one
+ * - a profiled bench is served, and the worker it starts is not, since it inherits the bench's
+ *   environment
+ * - a screen is served
+ * - with the setting absent the bench is served.
+ *
+ * Every quiet run is paired with its scene saying it ran.
  */
 async function testAQuietSceneIsNotServed(): Promise<void> {
   const engine = resolveGodotPath();
@@ -24892,7 +24900,7 @@ function testTheSkillWritesNoEscapedBackticks(): void {
  * files worth touching, and nothing in the engine will say what they are.
  *
  * Read by name against the class list rather than by parsing GDScript. A name in a comment or a
- * string can match, which costs one wasted touch on a file that was already fine; missing one costs
+ * string can match, which costs one wasted touch on a file that was already fine. Missing one costs
  * a restart, so the loose direction is the cheap one and is chosen deliberately.
  */
 function testWhatAStaleTypeDependsOnIsNamed(): void {
@@ -25796,7 +25804,7 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         '\tprint(at, tint, name, by)',
         '',
         '',
-        // A body on the declaration's own line, carrying a bracket and a colon of its own. The
+        // A body on the declaration's own line, with a bracket and a colon of its own. The
         // trailing-comment version of this cannot separate the two fixes, because taking the
         // comment off first leaves the last bracket on the line where it belongs.
         'func noted(a: int) -> void: print(a, ")")',
@@ -25918,8 +25926,8 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         '\tprint(local_speed + LOCAL_K)',
         '\tvar doc: String = """',
         'var not_a_member: int = 3',
-        // A hash inside the string before the quotes that close it, which a comment reading of the
-        // line would cut off, leaving the string open to the end of the file.
+        // A hash inside the string before the quotes that close it. A comment reading of the line
+        // would cut it off and leave the string open to the end of the file.
         'text with a hash # before the close"""',
         '\tprint(doc)',
         '',
@@ -26572,7 +26580,7 @@ function testEachSettingsWriteNamesItsSetting(): void {
  * would save it back over the new one, and the answer said nothing. What the editor is told is read
  * off the file either side of the write, so it is asked here with a write that changes a setting, a
  * write that changes nothing, a removal, a bus layout, and an editor that refuses. The fake editor
- * records what it was sent; the editor leg holds what a real one then answers.
+ * records what it was sent. The editor leg holds what a real one then answers.
  */
 async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
   const engine = resolveGodotPath();
@@ -26719,7 +26727,7 @@ async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
       );
 
       // A rename rewrites the scenes naming the bus, and the editor reads them again, or saves the
-      // old bus back over them; one with unsaved edits is named instead.
+      // old bus back over them. One with unsaved edits is named instead.
       writeFileSync(
         join(project, 'choir.tscn'),
         '[gd_scene format=3]\n\n[node name="Choir" type="AudioStreamPlayer"]\nbus = &"Voices"\n',
@@ -27353,10 +27361,10 @@ function testACleanupThatCannotFinishStillFinishes(): void {
  * of left its user data directory behind, fourteen of them from one downstream project's ordinary runs
  * and thirty-nine from the fixture for a run cut short.
  *
- * Held for real, the way an engine holds one on each platform: on Windows a process with a file open
- * and shared with nobody, which is how Godot opens its log; elsewhere an open file does not stop a
- * removal, so the parent is made read-only instead. The first attempt has to be refused, or the case
- * has shown nothing about what comes after it.
+ * Held for real, the way an engine holds one on each platform. On Windows it is a process with a
+ * file open and shared with nobody, which is how Godot opens its log. Elsewhere an open file does
+ * not stop a removal, so the parent is made read-only instead. The first attempt has to be
+ * refused, or the case has shown nothing about what comes after it.
  */
 async function testAHeldScratchDirectoryGoesOnceLetGo(): Promise<void> {
   if (process.platform !== 'win32' && process.getuid?.() === 0) {
@@ -27606,7 +27614,7 @@ async function testWhoIsHoldingAPortIsAskable(): Promise<void> {
  * its default value is redundant to the editor and is stripped the next time it saves. A project
  * names one there to keep "off by decision" and "not set" apart, and losing it hands the choice
  * back to the engine. Downstream, one `editor_launch restart` took
- * `gdscript/warnings/return_value_discarded=0` out of project.godot and changed nothing else; their
+ * `gdscript/warnings/return_value_discarded=0` out of project.godot and changed nothing else. Their
  * own gate caught it, which is not something this tool can rely on.
  *
  * The comparison rather than the restart, because an editor with no window refuses to restart at
@@ -27766,7 +27774,7 @@ async function testAnEditorsServersAreAskedOfTheirPorts(): Promise<void> {
  * Godot's adapter answers `initialize` by clearing every breakpoint in the script editor unless
  * `network/debug_adapter/sync_breakpoints` is on, and it is off by default, so a harness session
  * took the user's breakpoints away on its first debug call. The addon turns the setting on as it
- * loads and says in its greeting whether it holds; an editor saying it does not had it turned off
+ * loads and says in its greeting whether it holds. An editor saying it does not had it turned off
  * again since.
  *
  * Two greetings on one server, each from a fresh socket the way a restarted editor greets.
@@ -28098,8 +28106,8 @@ const FAKE_EDITOR_PID = process.pid;
  * result is sent back, so a fixture decides what the editor says it is playing, and when.
  *
  * The addon on disk is a stub unless [param options.realAddon] asks for the one this repository
- * ships, which is what says whether games of the project announce the editor that played them;
- * with it the addon is registered as the project's autoload too, so a real engine given the
+ * ships, which is what says whether games of the project announce the editor that played them.
+ * With it the addon is registered as the project's autoload too, so a real engine given the
  * project by [param options.engine] runs it and announces. [param options.held] is the game the
  * fake editor started, ended before the project is removed: a real engine keeps files open inside
  * it, and a case that failed before its own stop left the directory behind on Windows.
@@ -28291,7 +28299,7 @@ async function endGame(game: ChildProcess | null | undefined): Promise<void> {
  * The editor's answer to stop_playing was thrown away, and a game that had announced no process was
  * judged gone by waiting on an empty list, which is true at once. So a stop the editor never
  * received answered `stopped: true` about a game still playing, and the run read as ended here for
- * the rest of its life; and one the editor took and went on playing through answered the same.
+ * the rest of its life. And one the editor took and went on playing through answered the same.
  */
 async function testAStopTheEditorDidNotTakeIsNotAStop(): Promise<void> {
   const editor = { playing: false, refuses: false, keepsPlaying: false };
@@ -28357,7 +28365,7 @@ async function testAStopTheEditorDidNotTakeIsNotAStop(): Promise<void> {
  * and those are shared by every project on the machine: a played run stopped before its game
  * announced was answered with another project's recorded run, refused as not this server's to
  * answer for, and what the stop had done was nowhere. Written with another project's note on disk,
- * which is the shape it was found in; without one the answer was "No game is running", no better.
+ * which is the shape it was found in. Without one the answer was "No game is running", no better.
  *
  * Then the states keeping the run creates. A second stop finds the run over and leaves it as the
  * first recorded it, rather than ending it again. A scene the editor plays afterwards is the
@@ -28482,7 +28490,7 @@ async function testAStoppedRunIsStillTheOneAnswered(): Promise<void> {
  * A spawned run this server stopped gives way to a scene the editor plays afterwards.
  *
  * The other half of the rule above. A spawned run that finished on its own stays the answer,
- * because its output is what somebody is waiting to read; one this server was asked to stop is
+ * because its output is what somebody is waiting to read. One this server was asked to stop is
  * finished with, and the editor's play is the current run, as it was while a stop dropped the run.
  * A real engine, because the run has to be going until the stop ends it.
  */
@@ -28522,7 +28530,7 @@ async function testAStoppedSpawnedRunGivesWayToAPlay(): Promise<void> {
         runtimeWaitMs: 20_000,
       });
       assert.equal(get(started, 'through'), 'gdharness', JSON.stringify(started));
-      // Ended by its process, since the signal is what this case reads back; a close would end it
+      // Ended by its process, since the signal is what this case reads back. A close would end it
       // with a code of its own.
       const stopped = await call('editor_run', { op: 'stop', graceful: false });
       assert.equal(
@@ -29150,7 +29158,7 @@ async function testAnOldPresetFileKeepsThePresetItRuns(): Promise<void> {
  * Probe 151 of those ops found a value already held answered as changed, a missing icon written
  * without a word (the Windows export then fails on an invalid icon path), and a new preset written
  * with two of its options. An exporter lists an option only while the others show it, so the list
- * is read with the preset's own options and the asked ones applied; a secret such as a signing
+ * is read with the preset's own options and the asked ones applied. A secret such as a signing
  * password goes where the editor keeps it, numbered with the preset, and never into an answer.
  */
 async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
@@ -29735,17 +29743,17 @@ function testAnExportThatCouldNotCopyALibrarySaysSo(): void {
     // An export that wrote nothing says so in prose first and gives its verdict after.
     return JSON.parse(String(answer.content.at(-1)?.text)) as unknown;
   };
-  const one = ran('X:/game/bin/game.dll');
-  assert.deepEqual(get(one, 'librariesNotLoaded'), ['X:/game/bin/game.dll'], JSON.stringify(one));
+  const one = ran('D:/game/bin/game.dll');
+  assert.deepEqual(get(one, 'librariesNotLoaded'), ['D:/game/bin/game.dll'], JSON.stringify(one));
   assert.match(
     String(get(one, 'extensionNote')),
-    /^The export could not load X:\/game\/bin\/game\.dll: on Windows .* ~ copy beside the library/,
+    /^The export could not load D:\/game\/bin\/game\.dll: on Windows .* ~ copy beside the library/,
     JSON.stringify(one),
   );
-  const two = ran('X:/game/bin/game.dll', 'X:/game/bin/sandbox.dll');
+  const two = ran('D:/game/bin/game.dll', 'D:/game/bin/sandbox.dll');
   assert.match(
     String(get(two, 'extensionNote')),
-    /could not load X:\/game\/bin\/game\.dll and X:\/game\/bin\/sandbox\.dll:/,
+    /could not load D:\/game\/bin\/game\.dll and D:\/game\/bin\/sandbox\.dll:/,
     JSON.stringify(two),
   );
   const none = ran();
@@ -29941,7 +29949,7 @@ function testTheScanNoteNamesWhatStarted(): void {
  *
  * No operation had one, so an engine whose dependency walk never answered spun a core for nearly
  * four hours, and the call waited on it the whole time. The stand-in script logs that it began and
- * then never writes an answer; it quits by itself after twenty seconds, so with the ceiling gone
+ * then never writes an answer. It quits by itself after twenty seconds, so with the ceiling gone
  * the run still ends, as one that produced no result rather than one that was ended.
  */
 async function testAnOperationThatNeverAnswersIsEnded(): Promise<void> {
@@ -30224,7 +30232,7 @@ async function testAnRidAndAWholeNumberPast2To53GoBothWays(): Promise<void> {
  *
  * Twenty thousand nodes rather than the reported 3,500, because two things keep the rate and each
  * needs a hall that shows it. Reading text cheaply makes a look on 3,500 nodes cost well under a
- * frame, so looking every frame kept the rate and pacing went untested; at this size a cheap look
+ * frame, so looking every frame kept the rate and pacing went untested. At this size a cheap look
  * still costs a real share of a frame, and only pacing keeps the rate. Pacing alone would keep the
  * rate over the expensive reading too, by looking once in the whole wait, which the count of looks
  * shows.
@@ -30287,7 +30295,7 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
 
       // How often it looked, over the part of the hall the size of the report's. A look that asks
       // every node for its property list costs over a second here, and pacing then leaves one look
-      // in the wait besides the last; read cheaply, a look costs milliseconds and there are dozens.
+      // in the wait besides the last. Read cheaply, a look costs milliseconds and there are dozens.
       const small = await waitOn('/root/Main/Small', { says: 'words nobody says' });
       assert.ok(
         asNumber(get(small, 'looks')) >= 5,
@@ -31119,9 +31127,9 @@ async function testAHeadlessAccessibilityReadNamesWhatItNeeds(): Promise<void> {
  *
  * Downstream a game drew sixty frames a second while its physics stepped a tenth as often, and fps,
  * frame_time and physics_time all read as a healthy game. Here the game is held to one step a frame
- * with frames of over 50ms, so it takes about a third of the sixty steps it asks for; then it is let
- * go at 30 frames a second, where it takes two steps a frame, so the reading is above the frame rate
- * and cannot be the frames counted under another name.
+ * with frames of over 50ms, so it takes about a third of the sixty steps it asks for. Then it is
+ * let go at 30 frames a second, where it takes two steps a frame, so the reading is above the
+ * frame rate and cannot be the frames counted under another name.
  */
 async function testThePhysicsRateIsTheStepsTaken(): Promise<void> {
   const engine = resolveGodotPath();
@@ -31252,7 +31260,7 @@ async function testAPlayThroughAnotherProcesssAdapterIsRefusedEachTime(): Promis
  * Silence is an engine flag, and the editor takes none for a game it plays, so a silent run is
  * spawned the way a run with arguments is, which the answer says rather than leave to be found. By
  * default, asked for, and sound asked for with silent: false, each against a connected editor that
- * would otherwise play it in a window; and an editor whose project plays its games headless, which
+ * would otherwise play it in a window. And an editor whose project plays its games headless, which
  * are silent already and so are played through it.
  */
 async function testASilentRunIsStartedHereAndSaysWhy(): Promise<void> {
@@ -31634,7 +31642,7 @@ async function testARunGivenEngineFlagsIsStartedHere(): Promise<void> {
  * `OS.crash` prints an `ERROR` line of its own before the handler runs, which a segfault does not,
  * so here that line alone keeps `errors` above zero and `clean` false: with the crash read as info
  * again, both still held. What only the crash handling makes true is the crash entry being an error
- * with its backtrace, which is what fails when it is broken; test/game-log.ts holds the count for a
+ * with its backtrace, which is what fails when it is broken. test/game-log.ts holds the count for a
  * report with no line before it.
  *
  * The prints before the crash are what explains it, and a check's run is kept nowhere editor_output
@@ -31885,7 +31893,7 @@ async function testEngineFlagsReachTheEngine(): Promise<void> {
  * `push_error` and the engine's own errors arrive only through the runtime addon's report. With no
  * report found (a project without the addon, or a game that never announced) the run was answered
  * `clean: true` and `errors: 0`, which a gate reads as a run that raised nothing. `consoleLost`
- * already left `clean` out for a source that stopped arriving; this is a source that never did.
+ * already left `clean` out for a source that stopped arriving. This is a source that never did.
  * The report-found side, where `clean` is said, is held by the played-report case above with a real
  * engine.
  */
@@ -31958,8 +31966,8 @@ async function testAPlayedRunWithNoReportGivesNoVerdict(): Promise<void> {
  * A played run's report is found by the game it is tied to, and the announcements tied it only
  * when one game of the project could be the run's. A worker the game starts that loads the runtime
  * inherits the editor's mark and announces it as well. Inside the start's wait the first
- * announcement in the directory's order was taken, which was the worker's as often as the game's;
- * after the wait there were two, nothing was tied, and the run answered with its errors unread.
+ * announcement in the directory's order was taken, which was the worker's as often as the game's.
+ * After the wait there were two, nothing was tied, and the run answered with its errors unread.
  * The process tree tells them apart: the worker has the game between it and the editor. The
  * stand-in editor is this process, so a game it spawns is under it in the tree, and the game spawns
  * the worker. Two rounds, one announcing inside the start's wait and one after it, since the tie is
@@ -32335,7 +32343,7 @@ async function testAPlayedStartStopsWaitingForAGameThatIsOver(): Promise<void> {
  * question is asked beside the looks, and the last answer is what each look reads.
  *
  * The editor here answers `playing_status` after 700 ms and the game announces 300 ms after the
- * play; the start has to find it well before the editor's first answer arrives. Run here, it is
+ * play. The start has to find it well before the editor's first answer arrives. Run here, it is
  * found 311 to 313 ms after the play.
  */
 async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
@@ -32418,7 +32426,7 @@ async function testTheAnnounceWaitIsNotHeldByASlowEditor(): Promise<void> {
  * The arithmetic of a sized wait, and what a start says when the wait it sized ran out.
  *
  * Half as long again as the last boot, never less than the usual budget and never more than a
- * minute; and a note that names the boot it was sized to, so a caller reading "wait longer" does
+ * minute. And a note that names the boot it was sized to, so a caller reading "wait longer" does
  * not pass a runtimeWaitMs shorter than the one they just had. The note on disk round-trips, and
  * a note that is missing or rubbish reads as no boot known.
  */
@@ -32534,14 +32542,14 @@ function testTheWaitSizedToABootIsSaid(): void {
  * The wait a start gives its game is sized to how long the project's last game took to announce.
  *
  * A project downstream announces at eight seconds on its machine, every time, and every start
- * with the usual budget answered `listening: false` about a game that was fine; the way through
+ * with the usual budget answered `listening: false` about a game that was fine. The way through
  * was to pass `runtimeWaitMs` on every call. So the announcement's time is noted against the
  * run's start, in the project's own `.godot`, and the next start without a `runtimeWaitMs` waits
  * half as long again as that, never less than the usual and never more than a minute.
  *
  * The game here announces 6.5 s after the first plays, from a live process. The first start is
- * given the usual 5 s and does not find it; the status call after the announcement ties the run
- * late and writes the note; the second start names no wait, is given 9.75 s, and finds it. Disarmed
+ * given the usual 5 s and does not find it. The status call after the announcement ties the run
+ * late and writes the note. The second start names no wait, is given 9.75 s, and finds it. Disarmed
  * to the usual budget, the second start runs out at 5 s on a game that announces at 6.5.
  *
  * The note is the scene's. game-a starts a harness scene that announces as it quits,
@@ -32683,8 +32691,8 @@ async function testTheWaitIsSizedToTheLastBoot(): Promise<void> {
         await stop();
 
         // Another scene's boot is its own. Its first start has nothing noted, so it waits the usual
-        // 5 s and misses a game announcing at 7, where the main scene's note would have waited 9.75;
-        // then its boot is noted under its name, with the main scene's left alone.
+        // 5 s and misses a game announcing at 7, where the main scene's note would have waited 9.75.
+        // Then its boot is noted under its name, with the main scene's left alone.
         announcesAfterMs = 7_000;
         const mainBefore = notedFor(MAIN_SCENE);
         const other = await startWith({ scene: 'other.tscn' });
@@ -32717,7 +32725,7 @@ async function testTheWaitIsSizedToTheLastBoot(): Promise<void> {
  * was final where the truth was one more call away. Until the editor has reported the run playing
  * once, its "not playing" is the play still on its way, and the start keeps waiting for the
  * announcement. The editor here says "not playing" to the play and for 600 ms after, then plays,
- * and the game announces from a live process; the start has to find it. The other side stays:
+ * and the game announces from a live process. The start has to find it. The other side stays:
  * the case beside this one, whose editor reported playing and then not, is still answered "gone"
  * at once.
  */
@@ -32780,7 +32788,7 @@ async function testAPlayTheEditorHasNotStartedIsNotAGameThatHasGone(): Promise<v
  * The same gap as a cancelled test tier, one step removed: the wait loops for up to ten minutes,
  * and for a run the editor plays each pass asks the editor whether it is still playing. A caller
  * that cancelled left that going for the rest of the budget. The editor's answers are counted, so
- * the wait is seen asking before the cancel and seen to stop after it; the run is not the wait's to
+ * the wait is seen asking before the cancel and seen to stop after it. The run is not the wait's to
  * end, and editor_output still answers about it.
  */
 async function testACancelledWaitStopsAskingTheEditor(): Promise<void> {
@@ -32945,8 +32953,8 @@ async function testALateAnnouncementIsTiedToThePlayedRun(): Promise<void> {
  *
  * A played run is tied to the process its game announced, and the tie went by freshness alone:
  * the one game of the project announced since the play. A game of the same project that some
- * other server started in that window is exactly as fresh, and the start took it for its own,
- * answering listening about a process it did not start while its game was still booting; the
+ * other server started in that window is exactly as fresh, and the start took it for its own. It
+ * answered listening about a process it did not start while its game was still booting, and the
  * tie after the wait did the same. Freshness is a property every game of the project shares, so
  * the mark is one they cannot: the editor addon puts its process id into its environment, every
  * game the editor plays inherits it, and the runtime announces it. A game announcing another
@@ -33136,7 +33144,7 @@ async function testASpawnedGameBesideAnEditorIsStillItsOwn(): Promise<void> {
  * A control that drags reads the event's `relative` rather than its position, and every motion
  * sent through the bridge said it had moved by nothing, so a grip under a bridge drag stood still
  * through the whole drag. The distance from where the bridge last put the pointer is what a real
- * move would carry, and the first motion has nowhere to have come from; a relative the caller
+ * move would carry, and the first motion has nowhere to have come from. A relative the caller
  * gives is kept. Read off a script in the game that records what the events said, since the
  * answer's own `relative` only says what was sent.
  *
@@ -33149,7 +33157,7 @@ async function testASpawnedGameBesideAnEditorIsStillItsOwn(): Promise<void> {
  *
  * The other thing a drag reads is which buttons are down as the pointer moves, and a motion
  * between a held click and its release carried none, so a drag written as "moved with the left
- * button down" never began. The mask is what Input holds, which the injected click sets; the
+ * button down" never began. The mask is what Input holds, which the injected click sets. The
  * click's own events carry it too, the pressed button in on the press and out on the release.
  */
 async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void> {
@@ -33325,8 +33333,8 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
  * because opening another save writes the one being left and a fresh one autosaves as it plays.
  *
  * The editor here is connected and the project's own run arguments say it plays headless, so this
- * start would be played by the editor, which in this fixture is a stub that never really plays;
- * asking for an environment is what makes the server start the game itself. So the answer saying
+ * start would be played by the editor, which in this fixture is a stub that never really plays.
+ * Asking for an environment is what makes the server start the game itself. So the answer saying
  * `through: gdharness` and a real runtime announcing are the same assertion twice over: nothing
  * announces on the editor's path here at all.
  *
@@ -33533,7 +33541,7 @@ async function testARunCanBeGivenItsOwnEnvironment(): Promise<void> {
 }
 
 /**
- * A key sent to the game does not choose from a menu a click has opened; choose does.
+ * A key sent to the game does not choose from a menu a click has opened. `choose` does.
  *
  * An OptionButton's menu opens as a window of its own, and an injected key is delivered to the
  * game's main window, so it never reaches the menu: the item under the pointer stays where it
@@ -33545,7 +33553,7 @@ async function testARunCanBeGivenItsOwnEnvironment(): Promise<void> {
  * needs and Forward+ on the macOS runner's paravirtual device spends the first twenty seconds
  * compiling pipelines. The scene counts what the button and its menu did and logs their focus
  * and visibility events by frame, which is what separated a menu the click never opened from
- * one that opened and shut on its own; every assertion about the menu carries that account.
+ * one that opened and shut on its own. Every assertion about the menu carries that account.
  *
  * It needs the foreground of whatever machine it runs on, which a CI runner gives and a
  * developer's does not: focus belongs to the desktop rather than to this game, so a window
@@ -34070,7 +34078,7 @@ async function testAStartSaysItsGameIsOnAnotherBuild(): Promise<void> {
  * here fills its screen blue and opens a borderless red window over the right half of it, so a
  * picture brought down to one pixel is half red only when the window is in it, where it sits.
  *
- * Windowed, since nothing is drawn without a window; on Windows on a desktop of its own.
+ * Windowed, since nothing is drawn without a window. On Windows it runs on a desktop of its own.
  */
 async function testAScreenshotHoldsTheGamesOwnWindows(): Promise<void> {
   const engine = resolveGodotPath();
@@ -34386,14 +34394,14 @@ async function testAGameOnTheHiddenDesktopIsNotHeldToARefresh(): Promise<void> {
  * read through metrics.
  *
  * A game's memory on the GPU is not in memory_static, so a game committing gigabytes answered a few
- * hundred megabytes and the rest could not be asked about; and telling which driver holds it takes
+ * hundred megabytes and the rest could not be asked about. And telling which driver holds it takes
  * the same scene on another one. The game prints the driver and method that draw it, so the second
  * run shows the flag reached the engine and was obeyed rather than only passing the check. The dummy
  * driver is the one every runner has besides the project's own, and it holds nothing on the GPU,
  * which is the contrast: the first run's memory is the renderer's, not a number every run reports.
  *
- * Windowed, since a headless run draws with the dummy driver whatever it is asked; on Windows on a
- * desktop of its own.
+ * Windowed, since a headless run draws with the dummy driver whatever it is asked. On Windows it
+ * runs on a desktop of its own.
  */
 async function testTheRendererIsChosenAndItsMemoryRead(): Promise<void> {
   const engine = resolveGodotPath();
@@ -34892,8 +34900,8 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
       `the member the loop counts in has counted: ${JSON.stringify(members)}`,
     );
 
-    // Set and removed while it runs, on a line the loop passes every millisecond: set, it stops the
-    // game there; removed, the game runs on and stops nowhere.
+    // Set and removed while it runs, on a line the loop passes every millisecond. Set, it stops the
+    // game there. Removed, the game runs on and stops nowhere.
     const live = await call('debug_breakpoint', {
       projectPath: project,
       op: 'set',
@@ -35155,7 +35163,7 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       'The game was held by its debugger while this call ran, and elapsed_usec runs from the start of the call to its end, so it counts the time held as well as the call.',
       JSON.stringify(collected),
     );
-    // add itself raises nothing; the unparsed expression's error is handed to the call it was held in.
+    // add itself raises nothing. The unparsed expression's error is handed to the call it was held in.
     assert.deepEqual(
       [
         asArray(get(collected, 'errors')).some((one) => String(one).includes('parse error')),
@@ -35597,9 +35605,11 @@ async function testARunningGamesEnumIsSetByName(): Promise<void> {
 /**
  * Input that names nothing, or reaches nothing, says what would have worked.
  *
- * A misspelt key was refused as "Invalid key_label: Spaec", naming a field nobody passes and no key;
- * a wait on a signal the node lacks named none of the ones it has; and a click outside the window
- * answered exactly as one that landed. Found by probe 117.
+ * Found by probe 117:
+ * - a misspelt key was refused as "Invalid key_label: Spaec", naming a field nobody passes and no
+ *   key
+ * - a wait on a signal the node lacks named none of the ones it has
+ * - a click outside the window answered exactly as one that landed.
  */
 async function testInputThatReachesNothingSaysWhatWould(): Promise<void> {
   const engine = resolveGodotPath();
@@ -35965,7 +35975,7 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
       );
       return;
     }
-    // The first read starts PowerShell cold; a Windows runner once took it past the client's whole
+    // The first read starts PowerShell cold. A Windows runner once took it past the client's whole
     // deadline, so the time it took is printed beside the stages a slow one says it reached.
     const coldAt = Date.now();
     const unbuilt = textOf(await readWith([])) ?? '';
@@ -36494,7 +36504,7 @@ function pngPixels(png: Buffer): PngPixels {
  * refused as "the editor on this bridge has <main> open" (#834). The engine hands an editor plugin
  * none of its options, so the server reads the process's command line. The closest thing to the
  * target is an editor opened by hand, headless and unmarked as the one the editor leg runs, so it
- * is the one that must be served; the same editor told `--quit-after` is the one that must not. An
+ * is the one that must be served. The same editor told `--quit-after` is the one that must not. An
  * import can finish before it greets, so it is checked as well rather than instead.
  */
 async function testAOneShotEngineRunIsNotTheEditor(): Promise<void> {
@@ -36672,7 +36682,7 @@ function onePixelOf(png: Buffer): Buffer {
  * IntakeRow extends DocketCard extends Card: the match read the script's own class_name alone,
  * while a native class reaches every subclass through `is_class`. A caller naming a class means
  * what extends it, the way a typed `is` reads it, whichever side of the line the class is declared
- * on. Under the engine, since the matching is the addon's; the scripts extend by path so the
+ * on. Under the engine, since the matching is the addon's. The scripts extend by path so the
  * fixture does not depend on the class cache an editor would have written.
  */
 async function testAFindByClassReachesWhatExtendsIt(): Promise<void> {
@@ -37435,7 +37445,7 @@ function testAPickedUpRunReadsItsReportOnFromTheTranscript(): void {
  * `is_same`.
  *
  * The parameter is a script class, `Gear`, because that is the reported shape and the one
- * `is_class` does not answer for; a `Helm` extending it stands at the end of the list, so a
+ * `is_class` does not answer for. A `Helm` extending it stands at the end of the list, so a
  * subclass has to be recognised through the script's inheritance. Each refusal is paired with the
  * game still holding what the last good call gave it, so a refusal is known not to have called
  * the method with something else.
@@ -38011,7 +38021,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
 
       // What waits longer, for calls that take no timeoutMs: the note offered it to every call and
       // runtime_wait frames refused it. The game is held past the standing wait so that a frames wait
-      // and an input both run out; each is told what sets its own wait instead.
+      // and an input both run out. Each is told what sets its own wait instead.
       const holding = await invokeWaiting({
         op: 'call',
         nodePath: '/root/Main',
@@ -38985,12 +38995,16 @@ async function testARuntimeCallReachesThisServersOwnGame(): Promise<void> {
 /**
  * A command line is read the way the engine reads its own, on both platforms' spellings.
  *
- * Windows quotes what has spaces in it and `ps` quotes nothing, so a project directory with a space
- * in its name arrives as one word on the one and two on the other; `--path` may be last or
- * followed by another flag or a scene; `-e` and `--editor` are both the editor; and the process
- * table is `pid ppid command` with whatever leading space the platform pads with, a header or a
- * blank line to be skipped, and a command that may be empty. Nothing under `andChildren` is right
- * unless this is, and the engine tier would only show it on the platform it happened to run on.
+ * The spellings held:
+ * - Windows quotes what has spaces in it and `ps` quotes nothing, so a project directory with a
+ *   space in its name arrives as one word on the one and two on the other
+ * - `--path` may be last or followed by another flag or a scene
+ * - `-e` and `--editor` are both the editor
+ * - the process table is `pid ppid command` with whatever leading space the platform pads with, a
+ *   header or a blank line to be skipped, and a command that may be empty.
+ *
+ * Nothing under `andChildren` is right unless this is, and the engine tier would only show it on
+ * the platform it happened to run on.
  */
 function testACommandLineIsReadTheWayTheEngineReadsIt(): void {
   const windows = readCommandLine(
@@ -39066,7 +39080,7 @@ function testACommandLineIsReadTheWayTheEngineReadsIt(): void {
   assert.deepEqual(descendantsIn(tree, 12), [13]);
   assert.deepEqual(descendantsIn(tree, 20), []);
   // The console host a hidden console program is given is listed as its child, written the way
-  // Windows lists it; a program of the same name anywhere else is a child like any other.
+  // Windows lists it. A program of the same name anywhere else is a child like any other.
   const systemRoot = process.env['SystemRoot'] ?? 'C:\\Windows';
   const hosted = parseProcessTable(
     [
@@ -39097,8 +39111,8 @@ function testACommandLineIsReadTheWayTheEngineReadsIt(): void {
   // A listing that says when each began, as the Windows one does, and a link that is to a number
   // rather than to a process: 30 was left behind by whatever held 10 before this wrapper did, and
   // began before the wrapper, which no child of it could have. The positive is the engine, which
-  // began after the wrapper and is still its child; and a process the system would not date is
-  // linked by its number alone, as before.
+  // began after the wrapper and is still its child. A process the system would not date is
+  // linked by its number alone.
   const dated = parseProcessTable(
     [
       '10 1 1000 wrapper',
@@ -39298,7 +39312,7 @@ async function testTheProcessTableAgreesWithWmi(): Promise<void> {
  * that quietly ends nothing, so an answer is required of every platform. The second half is the
  * claim the ordering in `handleStopProject` rests on, measured rather than reasoned: a parent
  * started here with a child of its own is ended, and the child is asked for again. POSIX hands an
- * orphan to init, so the listing under the dead parent is empty; Windows keeps the dead parent's
+ * orphan to init, so the listing under the dead parent is empty. Windows keeps the dead parent's
  * number on the child, so the listing still names it there, which is why the ordering is written
  * for the platform that forgets rather than the one that remembers.
  */
@@ -39399,7 +39413,7 @@ async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
  * only those.
  *
  * A bench fans out to workers with OS.create_process, and a stop ended the bench and left the
- * workers grinding, as its note said; the session that hit it ended them by pid from a process
+ * workers grinding, as its note said. The session that hit it ended them by pid from a process
  * listing on the scene name, by hand, every time. Being under the run's process is the property a
  * stranger's bench cannot have, and being a game of the project, announced as one or the
  * project's engine run on it, is what says a child is a game at all: both are required before a
@@ -39469,7 +39483,7 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
                 'utf8',
               );
             };
-            // The bench first, inside the wait, so the run is tied to it; the worker from the body
+            // The bench first, inside the wait, so the run is tied to it. The worker from the body
             // once the start has answered, so it cannot be announced before the wait begins.
             setTimeout(() => {
               announce(benchPid);
@@ -39571,7 +39585,7 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
  * nothing to misread.
  *
  * The fake editor's game is a process of this fixture's, announced inside the start's wait and
- * killed when the editor is asked to stop; the file is read the moment the stop answers, before
+ * killed when the editor is asked to stop. The file is read the moment the stop answers, before
  * anything else could sweep it. The positive is the announcement being there for the stop to
  * take, and the stop naming the process it ended.
  */
@@ -39649,7 +39663,7 @@ async function testAStopTakesTheEndedGamesAnnouncementDown(): Promise<void> {
  * the number can come round in. Measured before this was written: the engine was listed under the
  * wrapper, and gone two seconds after the wrapper was killed, so the file is the stop's to take.
  *
- * Only where that build is, beside the engine the tier was given; elsewhere the run's number and
+ * Only where that build is, beside the engine the tier was given. Elsewhere the run's number and
  * the announced one are the same process and the case above holds it.
  */
 async function testAStopTakesTheWrappedEnginesAnnouncementDown(): Promise<void> {
@@ -40010,7 +40024,7 @@ async function testAStatusCallIsNotHeldByAHeldGame(): Promise<void> {
  * runtime timeout on it and then said it may be paused at a breakpoint, when the session had been
  * told the moment the game stopped and had the engine's own words for why. Held here with the
  * adapter telling the server's connection of the stop as it opens, the way a real one tells the
- * server that played the scene; the editor tier holds the same refusal against a real engine.
+ * server that played the scene. The editor tier holds the same refusal against a real engine.
  *
  * Knowledge and not a default: the status fixture above is the same stage without the event, and
  * there a runtime call goes to the game, since a session that has not been told has no business
@@ -40697,7 +40711,7 @@ function testTheEditorHoldingAProjectIsNotARunOfIt(): void {
  * A successor adopts the run its project's servers started last, not the newest note it can find.
  *
  * Reported from game-b on 1.2.3. A server of the project had started a run of its git worktree in
- * the morning, which left a note under the worktree naming the project as its server; in the
+ * the morning, which left a note under the worktree naming the project as its server. In the
  * afternoon it started a run of its own and stopped it, and a stop takes the note away. The next
  * server found the worktree's note the newest left and named that run, hours over, as the run.
  */
@@ -41027,7 +41041,7 @@ async function testARestartBeingLookedForIsWaitedFor(): Promise<void> {
 }
 
 /**
- * A run whose keeper is alive and has not yet written the exit is waited for; one whose keeper has
+ * A run whose keeper is alive and has not yet written the exit is waited for. One whose keeper has
  * gone is settled after the two seconds an exit takes to be written.
  *
  * On Windows a keeper starting its game through the desktop helper hears of the exit only once the
@@ -41214,11 +41228,11 @@ async function testARunEndedUnwatchedIsStillReadable(): Promise<void> {
     );
 
     // A server that cannot name a project at all does not get to claim this one either, which is
-    // the half that was missing. "I have no project" used to read as "any record is mine", so a
-    // regression suite, whose servers are started exactly like this, adopted a bench belonging to
-    // another project on this machine and ended it to start its own: six times in fifty minutes,
-    // silently, while its owner bisected their own code. The note says whose the run is; a server
-    // that cannot answer that question answers the one it can.
+    // the half that was missing. Read as "any record is mine", "I have no project" let a regression
+    // suite, whose servers are started exactly like this, adopt a bench belonging to another
+    // project on this machine and end it to start its own: six times in fifty minutes, silently,
+    // while its owner bisected their own code. The note says whose the run is. A server that
+    // cannot answer that question answers the one it can.
     await withStdioServer(
       async (call) => {
         const said = await call('editor_output', { limit: 200 });
@@ -41878,7 +41892,7 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
   );
   assert.equal(timedOutVerdict(600_000, 30_000).hung, true);
   // Killed before the engine printed anything, under a limit an engine may not start in, it was
-  // perhaps still starting; given thirty seconds and still saying nothing, it had stopped.
+  // perhaps still starting. Given thirty seconds and still saying nothing, it had stopped.
   const unstarted = timedOutVerdict(1, 3, null, false);
   assert.deepEqual(
     unstarted,
@@ -42021,7 +42035,7 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
           },
           ENGINE_CALL_TIMEOUT_MS,
         );
-        // The answer is a sentence and then the JSON, or the JSON alone, depending on whether a report was written.
+        // The answer is a sentence and then the JSON when a report was written, or the JSON alone.
         const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
         const json = blocks.find((block) => block.trimStart().startsWith('{')) ?? '{}';
         return JSON.parse(json) as unknown;
@@ -42158,7 +42172,7 @@ async function testATestRunWhoseAutoloadDidNotCompileStops(): Promise<void> {
   );
 
   // A script autoload by its own path and a scene by the scripts it names, with or without the star
-  // that makes it a global, since the engine loads both; a scene that is not there names nothing.
+  // that makes it a global, since the engine loads both. A scene that is not there names nothing.
   const named = mkdtempSync(join(tmpdir(), 'gdharness-autoloads-named-'));
   try {
     writeFileSync(
@@ -42307,9 +42321,10 @@ async function testATestRunWhoseAutoloadDidNotCompileStops(): Promise<void> {
  * lines of script, so the main scene's _ready could run before it: a game played on a macOS runner
  * counted 25 calls of a function called 26 times, the first from _ready. Here the debugger is a
  * stand-in that sends the switch a second and a half after the game connects, which no _ready
- * waits for. Told it is to be profiled from its start, the game counts the one call its _ready
- * makes; not told, the same run misses it, which shows the switch arrived after _ready; and told,
- * with a debugger that never sends the switch, it carries on after its wait and says so.
+ * waits for. Three runs:
+ * - told it is to be profiled from its start, the game counts the one call its _ready makes
+ * - not told, the same run misses it, which shows the switch arrived after _ready
+ * - told, with a debugger that never sends the switch, it carries on after its wait and says so.
  */
 async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
   const engine = resolveGodotPath();
@@ -42504,7 +42519,7 @@ async function testAProfileFromTheStartWaitsForTheProfiler(): Promise<void> {
 
     // A debugger six seconds behind, past the three a quitting game gives one that may never answer.
     // Started for a profile by gdharness, the game's debugger is one that answers, so the game waits
-    // for it and its totals arrive; a fixed three seconds lost them on a loaded macOS runner.
+    // for it and its totals arrive. A fixed three seconds lost them on a loaded macOS runner.
     const behind = await run(true, 0, 6000, 'res://loud.tscn');
     assert.deepEqual(
       [behind.complete, behind.goneUnread],
@@ -42747,7 +42762,7 @@ async function testARunNoteIsNeverReadHalfWritten(): Promise<void> {
     assert.ok(Number(seen['parsed'] ?? 0) > 100, `the reader read the notes throughout: ${said}; ${timing}`);
     assert.equal(seen['notes'], 3, `the run note, the editor-played run's and the latest run's: ${said}`);
     // Ten versions across the three notes is the reader having met the notes mid-rewrite many times
-    // over; one version each is a reader that ran beside a writer that had stopped.
+    // over. One version each is a reader that ran beside a writer that had stopped.
     assert.ok(
       Number(seen['versions'] ?? 0) >= 10,
       `the reader met the notes as they were rewritten: ${said}; ${timing}`,
@@ -42936,12 +42951,14 @@ async function testSuitesPlayInASceneTheProfilerSees(): Promise<void> {
  * A run started with profile: true answers which GDScript functions took its time.
  *
  * The keeper is the game's debugger and sums the engine's own script profiler. Four runs, because
- * each holds a different amount of the truth: a scene that does its work in _ready and quits, with
- * the runtime addon, which switches the profiler off as the game leaves so the engine sends its
- * totals, and must come back complete with exact call counts; the same scene with no runtime addon,
- * whose one frame the engine drops at exit, which must say so rather than answer an empty table as
- * a run that ran nothing; a scene that runs thirty frames with no addon, which is the frames summed
- * and must say so; and a run started without profile, which is refused.
+ * each holds a different amount of the truth:
+ * - a scene that does its work in _ready and quits, with the runtime addon, which switches the
+ *   profiler off as the game leaves so the engine sends its totals. It must come back complete
+ *   with exact call counts.
+ * - the same scene with no runtime addon, whose one frame the engine drops at exit. It must say so
+ *   rather than answer an empty table as a run that ran nothing.
+ * - a scene that runs thirty frames with no addon, which is the frames summed and must say so
+ * - a run started without profile, which is refused.
  */
 async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
   const engine = resolveGodotPath();
@@ -43099,7 +43116,7 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       ].join('\n'),
     );
     scene('burst', 'burst.gd');
-    // A run that goes on until it is stopped, reading a property through its get block every frame.
+    // A run that goes on until it is stopped and reads a property through its get block every frame.
     writeFileSync(
       join(project, 'harness', 'kept.gd'),
       [
@@ -43272,7 +43289,7 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         undefined,
         `a named function needs no placing: ${wholeShown}`,
       );
-      // The override calling super is marked, as its self time holds the base's; the base is not.
+      // The override calling super is marked, as its self time holds the base's. The base is not.
       assert.deepEqual(
         [
           get(row('Work.duel'), 'line'),
@@ -43284,7 +43301,7 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         `Work.duel calls super, Ladder.duel does not: ${wholeShown}`,
       );
 
-      // Its two callers, from the source, each with its own numbers from the same profile; the
+      // Its two callers, from the source, each with its own numbers from the same profile. The
       // comment and the string naming it are not code.
       const sites = asArray(get(whole, 'callers', 'sites')).map((one) => [
         get(one, 'script'),
@@ -43488,7 +43505,7 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         ) >= 10,
         `the frames summed before the stop: ${after}`,
       );
-      // The get block, as the engine names it, with its property; asked about by that name, its
+      // The get block, as the engine names it, with its property. Asked about by that name, its
       // places are where the property is read.
       assert.deepEqual(
         [
@@ -44549,7 +44566,7 @@ function testAnEngineMayBeSilentAsLongAsWhatItRuns(): void {
  * own class, the annotation on its own line or the variable's. A headless write of such a resource
  * answered that the engine's report of a leak at exit came from the project's autoloads, and a test
  * run loading one fails with nothing naming why. The found shapes leak when tried against the
- * engine, and a group heading, an unexported variable and one typed with a base class do not; the
+ * engine, and a group heading, an unexported variable and one typed with a base class do not. The
  * rest are text that only looks like a declaration.
  */
 function testTheScriptsGodotNeverFreesAreFound(): void {
@@ -45057,8 +45074,8 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   );
 
   // Below 4.8 the runner's markers say whether the engine's shutdown cleared every script. One that
-  // stopped part way reports what it never reached, so its leaks are noted and not counted; a walk
-  // that went whole, or a run without the markers, as on 4.8, counts them as before.
+  // stopped part way reports what it never reached, so its leaks are noted and not counted. A walk
+  // that went whole, or a run without the markers, as on 4.8, counts them.
   const leakLines =
     'WARNING: 1331 ObjectDB instances were leaked at exit (run with `--verbose` for details).\nERROR: 391 resources still in use at exit (run with --verbose for details).';
   const stopped = judgeEngine(readRun(`${rows([1])}\n${WALK_BEGAN}\n${leakLines}`), declaredRows, clean);
@@ -45632,7 +45649,7 @@ async function testATakeSweepsGoneLocksPastTheCount(): Promise<void> {
 
 /**
  * Gates come before work beside them, as the games' own tools take the slots. While a gate waits
- * for its seat, an engine outside a gate takes no slot at all, the kept ones included; once every
+ * for its seat, an engine outside a gate takes no slot at all, the kept ones included. Once every
  * queued gate is seated it takes only the last, and a gate's engine only those below the kept two.
  * Work outside the queue once held 12 of 16 slots while gates waited hours. A timing takes any slot,
  * and a gate's own step, which names its tier, the kept two while a gate is queued. A gate's mark is
@@ -45711,7 +45728,7 @@ async function testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded(): Promis
   starved.restart(100);
   assert.deepEqual([starved.byClock, starved.byWork, starved.clock(110)], [0, 0, 10]);
 
-  // A process that is running, this one, answers how much processor it has used; one that has
+  // A process that is running, this one, answers how much processor it has used. One that has
   // exited is left out, and so is a pid no process can have.
   const busyUntil = Date.now() + 200;
   while (Date.now() < busyUntil) {
@@ -45895,7 +45912,7 @@ async function testAnEngineOnASlotLendsItToWhatItStarts(): Promise<void> {
 
 async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
   // A quarter of the slots, at least two, kept for engines outside a gate, and half of those at most
-  // for the games editor_run started, leaving one beside a gate's own steps' for short calls.
+  // for the games editor_run started. That leaves one beside a gate's own steps' for short calls.
   assert.deepEqual(
     [2, 4, 8, 12, 16, 32].map((count) => keptSlotsOf(count)),
     [2, 2, 2, 3, 4, 8],
@@ -46260,7 +46277,7 @@ async function testTakersWaitTheirTurn(): Promise<void> {
  * The games' gates read the marks to leave the time `gdharness test` stood waiting for slots others
  * held out of their own clocks, so a mark missing while it waits counts the wait against the gate,
  * and one left behind counts the rest of the run as waiting. Python, which those gates are written
- * in, opens a file without delete sharing, and Windows will not remove a file opened so; a lock
+ * in, opens a file without delete sharing, and Windows will not remove a file opened so. A lock
  * given back while one reads it has to be removed once the read ends, or the slot stays taken.
  */
 async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
@@ -46368,7 +46385,7 @@ function writeTree(root: string, files: Readonly<Record<string, string>>): void 
  * Suites are found from the scripts and dealt to engines by what their cases cost.
  *
  * A suite is a script whose chain of bases reaches gdUnit4's, by name, by path or relative path, and
- * which declares a case or inherits one; gdUnit4 itself finds cases through the script's method
+ * which declares a case or inherits one. gdUnit4 itself finds cases through the script's method
  * list, which holds the inherited ones. A suite costing more than the split goes out case by case,
  * except one needing a window, since those all share the one windowed engine.
  */
@@ -46575,7 +46592,7 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     );
     const declared = new Map([big, edge, shown, small].map((s) => [s.path, s.cases]));
     const plans = dealt(units, declared, 4);
-    // 32 s of units, the slowest 10 s, so four lanes; the windowed units alone in the first, then the
+    // 32 s of units, the slowest 10 s, so four lanes. The windowed units alone in the first, then the
     // rest slowest first to the lightest lane, a tie in cost going to the suite first by path. The
     // windowed lane starts at its 4 s and the 5 s a following engine takes to start, so the other
     // three stay lighter and nothing follows it.
@@ -46819,8 +46836,8 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     assert.equal(roomSaid(4, 4, 4, undefined, 4), '');
 
     // A run whose third slot is held by an export for its first 121 s. Dealt at the start, that lane
-    // runs its third from 121 s on and the run ends as late as running the suites after the export;
-    // handed out a share at a time, the lanes started at once carry what the late one cannot.
+    // runs its third from 121 s on and the run ends as late as running the suites after the export.
+    // Handed out a share at a time, the lanes started at once carry what the late one cannot.
     const quickDeclared = new Map(quick.map((u) => [u.suite, u.cases]));
     const starts = [0, 0, 121];
     const start = 5;
@@ -47365,7 +47382,7 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
 /**
  * A suite's inputs are what its engine recorded, followed along what compiles with a script and what
  * a resource names, and its print moves with those and nothing else. A file read or a folder listed
- * by a literal or constant path is an input; one read by a path worked out at run time makes every
+ * by a literal or constant path is an input. One read by a path worked out at run time makes every
  * file in the project one.
  */
 function testASuitesInputsAreWhatItsEngineLoaded(): void {
@@ -47561,7 +47578,7 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
     assert.equal(new SuiteInputs(scripts, ['1']).modifiedAfter(kept, began), true, 'one input since');
 
     // A suite has the autoloads' line, its own, and what the cache held as it began but the other
-    // suites; not what an earlier suite loaded and let go, nor the loads between suites.
+    // suites. Not what an earlier suite loaded and let go, nor the loads between suites.
     const record = join(project, 'reached.jsonl');
     writeFileSync(
       record,
@@ -47976,7 +47993,7 @@ const written = setInterval(() => {
 /**
  * Has a process of its own wait for the slot at [param lock] to be taken and given back, then take
  * it for [param ms], as another run waiting on the machine's slots would. It looks every 2 ms, so it
- * takes a slot given back before a take polling every 50 ms does; the platform's start for it is
+ * takes a slot given back before a take polling every 50 ms does. The platform's start for it is
  * written to [param lock]`.start` before it looks, since its lock must name that start.
  */
 async function slotTakenWhenFreed(lock: string, ms: number): Promise<ReturnType<typeof spawnHidden>> {
@@ -48513,7 +48530,7 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
  * An editor gdharness opened beside another project's serves on a port of its own, which Godot
  * records nowhere, so the bridge reads the file the addon writes for each editor process. A record
  * outlives a crash and a pid is handed out again, so a record counts only while the process under
- * its pid started before it was written; a gate's `--import` loads the addon too and is nobody's
+ * its pid started before it was written. A gate's `--import` loads the addon too and is nobody's
  * editor. A left record is deleted only when its pid is provably not its writer: one the platform
  * would not say about may be a live editor.
  */
@@ -48568,7 +48585,7 @@ function testTheLspCommandFindsTheEditorsPort(): void {
       'started within the second some platforms round a start to',
     );
 
-    // 101 started before its record and stays; 102's pid went to a later process. Of the two the
+    // 101 started before its record and stays. 102's pid went to a later process. Of the two the
     // platform did not answer for, only the one whose pid nothing holds is deleted.
     writeFileSync(join(directory, '108.json'), record(108, 6108, 3000));
     writeFileSync(join(directory, '109.json'), record(109, 6109, 3000));
@@ -49219,7 +49236,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       'a passing run keeps no logs',
     );
 
-    // Nothing changed since, so nothing to import; then a new file to import, then one that fails.
+    // Nothing changed since, so nothing to import. Then a new file to import, then one that fails.
     const unchanged = test('--import', 'tests/ok_test.gd');
     assert.match(
       unchanged.said,
@@ -49378,7 +49395,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       `a resource no engine loaded: ${unusedChanged.said}`,
     );
     // A class no suite loads that no longer compiles fails the run with every suite left out, since
-    // the scripts are still compiled together; the import puts it in the class cache. It first
+    // the scripts are still compiled together. The import puts it in the class cache. It first
     // compiles, so the break changes the class's file and nothing the cache lists.
     writeTree(project, {
       'broken_thing.gd': 'class_name BrokenThing\nextends Node\n\n\nfunc said() -> void:\n\tpass\n',
@@ -49625,7 +49642,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
         split.said,
       );
     }
-    // The same run held to one processor starts one engine and says so; a machine short of memory
+    // The same run held to one processor starts one engine and says so. A machine short of memory
     // for even one engine names that instead, since memory is what the room is checked against first.
     // The split run kept what the suite took, so it is made slow again to want two engines.
     writeFileSync(timesFile, slowTimes);
@@ -49978,7 +49995,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     );
 
     // A run of two lanes meeting one of its two slots held elsewhere is handed out a share at a time.
-    // It needs room for two engines; a machine short of memory deals one lane, which has nothing to
+    // It needs room for two engines. A machine short of memory deals one lane, which has nothing to
     // share, and the run line says why.
     const timedAs = (seconds: number, suites: Record<string, readonly string[]>): void => {
       writeFileSync(
@@ -50160,7 +50177,7 @@ function testTheShutdownWalkIsHeldAndARealLeakStillFails(): void {
     }
     // The cycle alone holds no resource, so the script's leak is the one that holds its script.
     assert.doesNotMatch(test('cycle').said, /resources? still in use at exit/);
-    // Verbose engines name what they held, and the verdict carries it; without, only the counts.
+    // Verbose engines name what they held, and the verdict carries it. Without, only the counts.
     const named = test('--verbose', 'script');
     assert.equal(named.status, 1, named.said);
     assert.match(
@@ -50354,8 +50371,8 @@ async function testARunawayEngineLogIsCutAndEnded(): Promise<void> {
       `a failure reading the log still ends the engine: pid ${String(silentPid)}`,
     );
 
-    // The deadline and the silence counted as the machine is: held free, each ends at its limit
-    // by the clock; held crowded by others while the engine does nothing, only the clock's bound
+    // The deadline and the silence counted as the machine is. Held free, each ends at its limit
+    // by the clock. Held crowded by others while the engine does nothing, only the clock's bound
     // ends it, at eight times the limit.
     const freeMachine = (): Promise<Sample> =>
       Promise.resolve({ at: nowSeconds(), machine: 0, processors: null });
@@ -50423,7 +50440,7 @@ async function testARunawayEngineLogIsCutAndEnded(): Promise<void> {
     assert.ok(crowdedChatty.seconds >= 2 * STARVED, JSON.stringify(crowdedChatty));
 
     // A sample that lands as the engine exits puts its last stretch far past the deadline by the
-    // clock, as an exited engine's unread processor does; one that finished is not ended for it.
+    // clock, as an exited engine's unread processor does. One that finished is not ended for it.
     const exiting = join(scratch, 'exiting');
     mkdirSync(exiting);
     let looks = 0;
@@ -50580,7 +50597,8 @@ async function testAnEngineWritesItsLogThroughAPipeOnWindows(): Promise<void> {
 
 /**
  * A project with no extension list, as a fresh clone has, is given one naming every manifest the
- * editor's scan would find, so the import that follows loads the extensions; one with a list keeps it.
+ * editor's scan would find, so the import that follows loads the extensions. One with a list keeps
+ * it.
  */
 function testAFreshCloneHasItsExtensionsListed(): void {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-extensions-'));
@@ -50684,7 +50702,7 @@ function testATestRunImportsWhatSetupLeftUnimported(): void {
  *
  * The games write their matrices as parameterised cases, single cases of 110 to 408 s, which no
  * number of engines brought down while each ran whole. Each row prints the engine it ran in. The
- * times are set by hand after a first run, since six rows of nothing are too quick to be dealt; and
+ * times are set by hand after a first run, since six rows of nothing are too quick to be dealt. And
  * a row the case gains after they were taken runs once all the same, in the engine holding the last.
  * A suite declaring GDHARNESS_TOGETHER is not dealt out at all: its cases share a setup kept in the
  * suite, which every engine holding part of it computed again, 394 s whole against 612 s dealt out.
@@ -50774,7 +50792,7 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
         Array.from({ length: rows }, (_, row) => [row, 1]),
         `${what}: every row once: ${run.said}`,
       );
-      // Two engines need about seven gigabytes free, which the macOS runner does not have; there the
+      // Two engines need about seven gigabytes free, which the macOS runner does not have. There the
       // run is handed out a share at a time, so how many engines the rows met is the shares' to say.
       if (/^Memory had room for /m.test(run.said)) {
         console.log(`row dealing: held by memory, so the rows ran in shares (${what})`);
@@ -51980,9 +51998,11 @@ async function testARunawayTestRunAnswersASizeTheClientTakes(): Promise<void> {
  * gdUnit4 fails a case on a script error through a logger written in GDScript, and a stack
  * overflow is raised at the deepest call the engine allows, where that logger cannot be called. So
  * a case whose assertion accepted what the overflowed call returned passed, gdUnit4 exited 0, and
- * the answer said passed beside two thousand engine errors. Three runs: the overflow; a suite whose
- * only errors are its own (an expected runtime error and a deliberate push_error), which must still
- * pass; and the overflow again with the project's gdUnit4 setting for script errors turned off.
+ * the answer said passed beside two thousand engine errors. Three runs:
+ * - the overflow
+ * - a suite whose only errors are its own (an expected runtime error and a deliberate push_error),
+ *   which must still pass
+ * - the overflow again with the project's gdUnit4 setting for script errors turned off.
  */
 async function testAStackOverflowIsNotAPass(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -52881,8 +52901,8 @@ async function testGdUnitRunner(): Promise<void> {
         );
 
         // Nothing ran, two ways: every suite ignored, and a suite with no cases in it. Measured with the
-        // pinned gdUnit4 on 4.7.2, an ignored run writes no report, so it reaches the no-report answer;
-        // one with a report of no cases is refused as passed by the same rule should a runner write it.
+        // pinned gdUnit4 on 4.7.2, an ignored run writes no report, so it reaches the no-report answer.
+        // One with a report of no cases is refused as passed by the same rule should a runner write it.
         // A suite with no cases named on its own is refused before an engine starts.
         writeFileSync(join(projectDir, 'test', 'hollow_test.gd'), 'extends GdUnitTestSuite\n');
         const ignored = await call(
@@ -52995,7 +53015,7 @@ async function testGdUnitRunner(): Promise<void> {
         );
         // The same failing suite, run again and again. Reported downstream on 1.1.22 as a hook count
         // that changed between runs of one suite, which would be an earlier run's report being read
-        // as well as #800's arithmetic; the answer has to be this run's alone, and the same each time.
+        // as well as #800's arithmetic. The answer has to be this run's alone, and the same each time.
         writeFileSync(
           join(projectDir, 'test', 'thrice_test.gd'),
           'extends GdUnitTestSuite\n\n\nfunc test_three_assertions_fail() -> void:\n\tassert_bool(false).is_true()\n\tassert_bool(false).is_true()\n\tassert_bool(false).is_true()\n',
@@ -53188,7 +53208,7 @@ async function testGdUnitRunner(): Promise<void> {
           /^Nothing at res:\/\/test\/gone_test\.gd and res:\/\/gone, so they were left out and only res:\/\/test\/quiet_test\.gd ran/,
           JSON.stringify(partly, null, 2),
         );
-        // Every entry not there: nothing to run, refused before anything runs, naming each.
+        // Every entry not there: nothing to run, refused before anything runs, and each named.
         const none = await call(
           'project_test',
           { projectPath: projectDir, path: ['test/gone_test.gd', 'gone'] },
@@ -53262,10 +53282,11 @@ async function testGdUnitRunner(): Promise<void> {
           ].join('\n'),
         );
 
-        // The other ways a string equality prints: ignoring case, which writes a word after the
-        // value; BBCode in the value, which gdUnit4 masks on both sides; BBCode only in the
-        // expected string, which it renders away; and a dictionary holding the mask, which is not
-        // a string and must be left alone.
+        // The other ways a string equality prints:
+        // - ignoring case, which writes a word after the value
+        // - BBCode in the value, which gdUnit4 masks on both sides
+        // - BBCode only in the expected string, which it renders away
+        // - a dictionary holding the mask, which is not a string and must be left alone.
         mkdirSync(join(projectDir, 'shapes'));
         writeFileSync(
           join(projectDir, 'shapes', 'shapes_test.gd'),
@@ -53810,7 +53831,7 @@ async function testATestRunSaysHowFarItHasGot(): Promise<void> {
       );
     };
     // b's two seconds are what give the progress ticker, once a second, a finished suite to report
-    // before the run ends; a's guard nothing, so it is over at once.
+    // before the run ends. a's guard nothing, so it is over at once.
     suite('a', 0.1, true);
     suite('b', 2, false);
     suite('c', 120, true);
@@ -53882,7 +53903,7 @@ async function testATestRunSaysHowFarItHasGot(): Promise<void> {
         ENGINE_CALL_TIMEOUT_MS * 4,
       )
       .catch(() => {
-        // A cancelled call is not answered; the next call is where its leftovers come back.
+        // A cancelled call is not answered. The next call is where its leftovers come back.
       });
     const inTheLongOne = (each: { message: string }): boolean =>
       each.message.startsWith('2 suites have finished, 1 with failures; running res://test/c_test.gd');
@@ -54072,7 +54093,7 @@ function testAnUpgradeReadsTheEngineOutOfTheConfigItRewrites(): void {
     assert.match(upgraded.output, /an unmarked copy -> /, upgraded.output);
     assert.match(upgraded.output, /replaced .*gdharness_editor/, upgraded.output);
     // A folder the upgrade adds is named as new, so a project filtering the addons by name extends
-    // its filters; the ones it replaced are not.
+    // its filters. The ones it replaced are not.
     assert.match(
       upgraded.output,
       /^installed .*gdharness_tests\n {2}addons\/gdharness_tests\/ is new to this project: a \.gitignore entry or export filter naming gdharness's addons one by one has to name it too$/m,
@@ -54187,8 +54208,8 @@ function gdscriptArguments(source: string, open: number): string[] {
  * whose every start passes `windowsHide`, or the prelude that does the same for a script a test
  * hands to Node. A process with no console gives every console program it starts a window of its
  * own on the desktop in use, and a gate run detached after a push put about twenty of them on the
- * screen of the person at the machine. Walked rather than listed, so a file added later is covered;
- * a stand-in started from a string counts, which is why the words are searched for and not the
+ * screen of the person at the machine. Walked rather than listed, so a file added later is covered.
+ * A stand-in started from a string counts, which is why the words are searched for and not the
  * imports. GDScript starts through Godot's own calls, which open no console unless asked to with
  * `open_console`, so the shipped scripts never ask.
  */
@@ -54358,7 +54379,7 @@ function testTheShippedLoaderBringsTheRuntimeUpFirst(): void {
     const served = play();
     assert.match(served, /^runtime before main: true$/m, served);
     assert.doesNotMatch(served, /ERROR/, served);
-    // Printed once it serves; the announcement itself is taken back as the game quits.
+    // Printed once it serves. The announcement itself is taken back as the game quits.
     assert.match(served, /\[gdharness\] runtime listening on [\d.]+:\d+, announced at /, served);
     assert.match(served, /^serving: true$/m, `and the loader says it serves: ${served}`);
 
@@ -54547,7 +54568,7 @@ function testCommandLineSetup(): void {
     // Repointing a project's own loader takes away whatever that file refuses, and does it to the
     // file written to keep it. Nothing fails: the loader is still on disk and correct, and no gate
     // asks what project.godot registers, so one project found it in git status after twelve green
-    // ones, having been told about five other replacements and not this.
+    // ones. It had been told about five other replacements and not this.
     const guard = join(projectDir, 'boot');
     mkdirSync(guard, { recursive: true });
     writeFileSync(
@@ -54656,9 +54677,9 @@ function testCommandLineSetup(): void {
       `and it says how to use the shipped loader instead: ${underAnotherName.stdout}`,
     );
 
-    // And the doctor says the runtime is brought up, naming the file that does it. It used to
-    // answer "not registered" about a runtime that was binding a port and serving queries, because
-    // the only question it asked was whether an entry under our own name existed.
+    // And the doctor says the runtime is brought up, and names the file that does it. Asking only
+    // whether an entry under our own name existed answered "not registered" about a runtime that
+    // was binding a port and serving queries.
     const seen = cli('doctor', projectDir);
     assert.match(
       seen.stdout,
@@ -54943,8 +54964,8 @@ function namesIn(path: string, pattern: RegExp, what: string, least: number, wit
   // [param least] is what the file holds today, not a loose minimum, because a floor well under
   // the real count catches an emptied reading and not a shortened one. The sets read here drive
   // the checks that find a command nothing sends, so a reader quietly returning six fewer entries
-  // stops looking for six of them and still passes. Adding an operation does not trip this;
-  // removing one deliberately means lowering the number here in the same change, which is the
+  // stops looking for six of them and still passes. Adding an operation does not trip this.
+  // Removing one deliberately means lowering the number here in the same change, which is the
   // point at which somebody confirms the removal was meant.
   assert.ok(
     found.size >= least,
@@ -55028,7 +55049,7 @@ function testEveryDispatchedNameExistsOnBothSides(): void {
     'editor commands',
     36,
   );
-  // Most are sent by name at the call; the ones a caller reaches with `from: "editor"` are sent
+  // Most are sent by name at the call. The ones a caller reaches with `from: "editor"` are sent
   // out of a table, so the table is where they are read from rather than the source around it.
   const bridged = new Set([
     ...namesSent(
@@ -55229,7 +55250,7 @@ function testEveryToolParameterIsRead(): void {
       }
       if (path.endsWith('tool-definitions.ts')) continue;
       const source = (): string => readFileSync(path, 'utf8');
-      // The addon is handed the arguments under the names the tool gave them; the headless
+      // The addon is handed the arguments under the names the tool gave them. The headless
       // operations are handed them snake_cased, and those are the only files where that
       // spelling counts as a read.
       if (path.endsWith('.gd')) {
@@ -55456,7 +55477,7 @@ function testAWaitOfNothingIsAWaitOfNothing(): void {
  *
  * Almost every line an engine prints has no indented detail, so `"detail":[]` rode on nearly every
  * entry of every answer, and a caller watching a run reads that answer over and over. The lines are
- * what they came for; the empty list is thirteen characters of envelope each time.
+ * what they came for. The empty list is thirteen characters of envelope each time.
  */
 function testAnEntryWithNoDetailDoesNotCarryAnEmptyOne(): void {
   const log = new GameLog();
@@ -55704,7 +55725,7 @@ function testACaptureIsSavedOnlyWhereItMayBe(): void {
  *
  * Issue #1067: a trailer rendered from the game itself, which the engine does at a fixed timestep
  * whatever the machine's speed. Windowed, because a headless engine has no renderer for Movie Maker
- * to read and crashed when asked; the compatibility renderer, as the other windowed cases use.
+ * to read and crashed when asked. The compatibility renderer, as the other windowed cases use.
  */
 async function testAWindowedRunWritesItsMovie(): Promise<void> {
   const engine = resolveGodotPath();
@@ -55786,7 +55807,7 @@ async function testAWindowedRunWritesItsMovie(): Promise<void> {
  *
  * Issue #1067: a trailer rendered with Movie Maker writes a file at the caller's word, so it is held
  * to the capture's rules, with two of its own. A PNG movie is a sequence named from the path with a
- * WAV beside it, so a first frame or a WAV already there is a file written over; and a headless run
+ * WAV beside it, so a first frame or a WAV already there is a file written over. And a headless run
  * has no renderer to read frames from, which crashed Godot 4.7.2 on the first frame when asked.
  */
 function testAMovieIsWrittenOnlyWhereACaptureCouldBe(): void {
@@ -55839,7 +55860,7 @@ const ARGUMENT_MENTIONS = 10;
  * Every argument the skill names for an op is one that op takes.
  *
  * Issue #616: the skill said to press a key with `runtime_input` `key`, which reads as an argument
- * called `key`; the tool refused it and named `keycode`. The tool-name check below reads the tool
+ * called `key`. The tool refused it and named `keycode`. The tool-name check below reads the tool
  * and the op and had nothing to say about the word after them. This reads the phrase the skill
  * uses for it, "`tool op` with `argument`", from the rendered skill and every document, and asks
  * the schema whether that op takes that argument. A phrase written some other way is not read, so
@@ -55950,7 +55971,7 @@ function proseFaults(content: string, prose: boolean): string[] {
  *
  * No em dashes was a rule written in CONTRIBUTING.md and nowhere else, so nothing stopped a tool
  * description, a refusal or a comment carrying one to every agent that reads it. Every tracked text
- * file is read for the dashes, tests and workflows included; the double hyphen and the phrases only
+ * file is read for the dashes, tests and workflows included. The double hyphen and the phrases only
  * in what ships, the sources and the documents and the skill and tool reference as rendered, since a
  * test has to be free to quote a phrase and a command line's separator is a double hyphen.
  */
@@ -56253,7 +56274,7 @@ function testEveryToolNamedInProseIsATool(): void {
  * The schema says which ops take the argument and `EDITOR_READS` says which ops the editor can
  * answer, and they are written in different files. Offered where there is no editor side, a caller
  * reads the schema, asks for the editor and is refused by something they had every reason to think
- * would work; missing where there is one, the editor's answer is unreachable and the entry is dead.
+ * would work. Missing where there is one, the editor's answer is unreachable and the entry is dead.
  */
 function testTheEditorIsOfferedWhereItCanAnswer(): void {
   const offered = new Set<string>();
@@ -56608,9 +56629,13 @@ async function testAWriteSaysWhatElseItChanged(): Promise<void> {
  * that held one.
  */
 /**
- * What stops a resource write with no editor is named for what it is (probe 158): a setter of a
- * script that is not a tool, which runs here and not in an editor; two properties the engine keeps
- * in step; a resource given its own file; a shader that does not compile. And a resource built into
+ * What stops a resource write with no editor is named for what it is (probe 158):
+ * - a setter of a script that is not a tool, which runs here and not in an editor
+ * - two properties the engine keeps in step
+ * - a resource given its own file
+ * - a shader that does not compile.
+ *
+ * And a resource built into
  * a file reads by its script's class, a create names the script it attached, and the engine's report
  * of a script it never frees is not put down to the autoloads.
  */
@@ -56858,7 +56883,7 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
 
     // A list of new built-in resources replacing the file's. Every headless engine hands out the ids
     // of one sequence, so the third new item is saved under the id the file had kept for the first
-    // old one; read as the same resource, it was taken for that one changed by its script and given
+    // old one. Read as the same resource, it was taken for that one changed by its script and given
     // the old title back.
     const titled = (...titles: string[]): Record<string, unknown> => ({
       items: titles.map((title) => ({ _type: 'Item', title })),
@@ -57100,8 +57125,8 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     );
 
     // A property the resource lacks is refused with the ones it has nearest it, alone, beside
-    // another, and as the start of a path; and with its script's own when none is near, since the
-    // engine's run to dozens.
+    // another, and as the start of a path. When none is near, it is refused with its script's own,
+    // since the engine's run to dozens.
     const rarity = 'ItemData has no property rarety; the nearest it has is rarity.';
     assert.equal(await refused({ rarety: 1 }), rarity);
     assert.equal(
@@ -57143,8 +57168,9 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     );
 
     // A list the engine numbers, such as an OptionButton's items, has no property by its name, only
-    // a count and each entry's fields under a prefix, so the refusal names those; read from a fresh
-    // one when the node has no entries yet, and from the node once it has. Following it writes them.
+    // a count and each entry's fields under a prefix, so the refusal names those. They are read from
+    // a fresh one when the node has no entries yet, and from the node once it has. Following it
+    // writes them.
     const choice = async (op: 'add' | 'set', properties: Record<string, unknown>): Promise<JsonRpcMessage> =>
       await request('scene_node', {
         op,
@@ -57230,7 +57256,7 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       'one property refused alone says nothing of others',
     );
 
-    // Past a range closed on that side is named; past one open on it, or inside it, is not.
+    // Past a range closed on that side is named. Past one open on it, or inside it, is not.
     const ranged = await written({ rarity: 12, level: 40 });
     assert.deepEqual(
       get(ranged, 'outsideDeclared'),
@@ -57410,7 +57436,7 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     assert.ok(ring, chain);
     assert.equal(chain.split(`next = SubResource("${ring}")`).length, 3, chain);
 
-    // Only a file resource with a script that declares a class names one; ItemData is below.
+    // Only a file resource with a script that declares a class names one. ItemData is below.
     assert.deepEqual(get(grown, 'properties', 'icon'), {
       path: 'res://icon.svg',
       class: 'CompressedTexture2D',
@@ -57553,7 +57579,7 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     );
 
     // A bus renamed takes its sends and the scenes naming it along, and a script naming it in a
-    // string is named; a player left on a bus the layout lacks says so instead of reading as Master.
+    // string is named. A player left on a bus the layout lacks says so instead of reading as Master.
     const settings = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
       await request('project_settings', args);
     writeFileSync(join(project, 'jukebox.gd'), 'extends Node\n\nconst BUS := "Music"\n');
@@ -57783,7 +57809,7 @@ async function testATestRunTakesTheCasesNamed(): Promise<void> {
         elsewhere.text,
       );
       // A script named on its own that declares no case is refused before an engine starts, rather
-      // than run to gdUnit4 finding nothing; a directory holding one runs the suites beside it, as
+      // than run to gdUnit4 finding nothing. A directory holding one runs the suites beside it, as
       // every run here shows.
       const plain = await run({ path: 'res://test/wallet.gd' });
       assert.match(
@@ -58014,7 +58040,7 @@ async function testACaseGdUnitLeavesUnrunIsNoPass(): Promise<void> {
  *
  * Settings were built from the value alone, so a vector written as its fields without a tag was a
  * dictionary to them and refused, while scene_node set took it, and a colour given as its html code
- * was refused by both. A value carrying a field its type has not is refused here too, naming it.
+ * was refused by both. A value carrying a field its type has not is refused here too, by name.
  */
 async function testASettingTakesWhatAPropertyTakes(): Promise<void> {
   const engine = resolveGodotPath();
@@ -58127,8 +58153,8 @@ async function testASettingsWriteKeepsEveryOtherLine(): Promise<void> {
   }
   const project = mkdtempSync(join(tmpdir(), 'gdharness-setting-lines-'));
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-setting-lines-rt-'));
-  // The last line is not a default, so the engine keeps the section and leaves out only the others;
-  // the [rendering] section holds only a default, so the engine leaves the whole of it out.
+  // The last line is not a default, so the engine keeps the section and leaves out only the others.
+  // The [rendering] section holds only a default, so the engine leaves the whole of it out.
   const warning =
     'gdscript/warnings/unsafe_call_argument=0\ngdscript/warnings/unused_variable=1\n' +
     'gdscript/warnings/untyped_declaration=1\n';
@@ -58138,7 +58164,7 @@ async function testASettingsWriteKeepsEveryOtherLine(): Promise<void> {
   const hooks =
     'hooks/session_hooks={\n"res://tests/headless_hook.gd": true,\n"res://addons/kit/warm_hook.gd": true\n}\n';
   // What an override file lays over the project is what the engine holds and saves. A game keeps a
-  // player's window there, in user://; one under res:// is laid over the same way and stays in the
+  // player's window there, in user://. One under res:// is laid over the same way and stays in the
   // fixture's directory.
   const override = 'config/project_settings_override="res://player.cfg"\n';
   writeFileSync(join(project, 'player.cfg'), '[display]\n\nwindow/size/mode=3\n');
@@ -58287,7 +58313,7 @@ async function testAReadAskedOfTheEditorIsNotAnsweredFromDisk(): Promise<void> {
  *
  * A save during a scan updates the file list the scan's thread is writing out, so the addon turns
  * away every call that could save until the scan is over. The fixture editor turns calls away as
- * told, which a real one does only for as long as a scan lasts; the move is the vehicle because it
+ * told, which a real one does only for as long as a scan lasts. The move is the vehicle because it
  * reports what the editor answered, and the busy answer is the same for every tool.
  */
 async function testAToolWaitsOutTheEditorsScan(): Promise<void> {
@@ -58406,7 +58432,7 @@ async function testAToolWaitsOutTheEditorsScan(): Promise<void> {
  * An answer too large for the client is written to a file and answered with where.
  *
  * Claude Code closes the connection on a message past 16 MB, which loses the call and every later
- * tool until the server is reconnected by hand. project_test answered 18 MB on one line; whatever a
+ * tool until the server is reconnected by hand. project_test answered 18 MB on one line. Whatever a
  * tool does not bound itself is bounded here. An editor answering five megabytes stands in for it.
  */
 async function testAnAnswerTooLargeToSendIsWrittenToAFile(): Promise<void> {
@@ -58497,7 +58523,7 @@ async function testAnAnswerTooLargeToSendIsWrittenToAFile(): Promise<void> {
  * it, which is every server configured by port alone, and from then on a call naming another
  * project was served from the open one: the caller read their own project's name back in an answer
  * describing somebody else's scenes. The bridge already turns away an editor from elsewhere on the
- * way in; this is the same rule read from the caller's end.
+ * way in. This is the same rule read from the caller's end.
  */
 async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
   const port = await reservePort();
@@ -58619,7 +58645,7 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
  * server answering, and the newest on npm. The fourth is the one the project's own `.mcp.json`
  * names, which is what the client fetches the next time it spawns a server, and nothing looked at
  * it. A downstream project moved a pin it kept elsewhere, ran its reconnect twice, and got the old
- * server both times; two sessions went into working out which side was lying, and neither was.
+ * server both times. Two sessions went into working out which side was lying, and neither was.
  *
  * Silent while the two agree, because a notice that is always there is a notice nobody reads.
  */
@@ -58750,7 +58776,7 @@ async function testAnUnlistedValueIsRefusedRatherThanDefaulted(): Promise<void> 
  * `EditorFileSystem.scan()` queues rather than runs, so for the first frames after asking, both
  * flags the engine offers are false and a poll reads the scan as over. Downstream: a rescan of a
  * 376-class project answered `ok: true` 296ms in, and the editor then wrote its own stale class
- * list over the cache that had just been corrected; the loss surfaced an hour later in a separate
+ * list over the cache that had just been corrected. The loss surfaced an hour later in a separate
  * engine as an unknown identifier in a file nobody had touched. Measured here for comparison, a
  * headless editor of 400 scripts takes 1619ms and says so honestly, which is why the fault needs
  * an editor slow enough to be answering something else and cannot be reproduced by waiting.
@@ -58937,8 +58963,8 @@ async function testARescanWaitsOutTheEditorsImport(): Promise<void> {
  * Downstream, after 698 files were rewritten, a rescan answered finished in 1.5s while the one
  * changed file was still on its old import, and the editor's own scan of it began straight after.
  * What a scan finds is imported after the scan stops reporting itself. The fixture editor scans,
- * goes quiet for a moment, then imports what it found; the rescan has to wait out the import. The
- * first ask is declined with every flag false, as the addon now says when the editor's previous
+ * goes quiet for a moment, then imports what it found. The rescan has to wait out the import. The
+ * first ask is declined with every flag false, as the addon says when the editor's previous
  * scan is still to be joined and `scan()` did nothing.
  */
 async function testARescanWaitsForTheEditorToSettle(): Promise<void> {
@@ -59106,8 +59132,8 @@ async function testARescanWaitsForItsScanToComplete(): Promise<void> {
  * was its whole budget, so the scan it then started, over in under a second, was never looked at,
  * and the answer said the editor was still scanning. The fixture editor first answers its first
  * scan_status, idle, after longer than the whole wait, and scans for a moment once asked, which
- * needs the slow answer kept off the budget; then answers the start of the scan after the wait has
- * run out, with the scan already over, which needs the scan looked at once however late it is.
+ * needs the slow answer kept off the budget. Then it answers the start of the scan after the wait
+ * has run out, with the scan already over, which needs the scan looked at once however late it is.
  */
 async function testARescanCountsNoSlowAnswerAsScanning(): Promise<void> {
   const port = await reservePort();
@@ -59449,7 +59475,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
     );
 
     // A class cache rebuilt during a scan, which the editor's own write would land over a moment
-    // later, putting back whatever list it holds. The rebuild waits for that write and goes after
+    // later with whatever list it holds. The rebuild waits for that write and goes after
     // it, so the file left behind is the rebuild's.
     cacheBeforeTheScan();
     scanFor(1_000);
@@ -59636,7 +59662,7 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
  *
  * The fixture editor cannot see the class until it scans. One script extends it and reloads, one
  * uses it as a type and refuses to reload, one declares it, one only carries a word like it, one
- * names it in a comment and in strings only, and a @tool script uses it; the reloads asked for are
+ * names it in a comment and in strings only, and a @tool script uses it. The reloads asked for are
  * exactly the two plain scripts using it in code, and the @tool one is named as left alone. A
  * comment naming a class once had the editor addon's own tool executor reloaded mid-call, and the
  * Linux editor died of it. A second scan brings nothing in and reloads nothing, so a server
@@ -60844,7 +60870,7 @@ async function testARepairThatCouldNotRunIsNotReported(): Promise<void> {
  *
  * On a healthy editor `editor_rescan` loads the class, measured in the editor tier. An editor whose
  * scan writes a class cache shorter than the file holds a list behind the files and writes it
- * again on every scan, so the same rescan loads nothing there; its own answer says not to rescan
+ * again on every scan, so the same rescan loads nothing there. Its own answer says not to rescan
  * again until a restart. Downstream, a new `class_name` went through both in order: the rescan
  * answered `cacheLost` and `cacheRestored` with that note, the diagnostics on a script using the
  * class still could not resolve it and their `staleAnalysis` sent the caller back to the rescan,
@@ -60855,7 +60881,7 @@ async function testARepairThatCouldNotRunIsNotReported(): Promise<void> {
  * into the project's class note: the same diagnostics say restart on that editor, from the server
  * that saw it and from the one that replaces that server at the next reconnect, and say rescan
  * again once a restarted editor, with a new pid, has dialled in. The cache is put back by hand
- * here where the rebuild would have put it, since this server has no engine; what is under test
+ * here where the rebuild would have put it, since this server has no engine. What is under test
  * is the sentence, which turns on the loss having been seen and not on how the cache came back.
  */
 async function testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList(): Promise<void> {
@@ -61852,7 +61878,7 @@ async function testARenameRefusesANameAlreadyTaken(): Promise<void> {
     const declared = await ask('level', 'shout');
     assert.match(declared, /shout is already declared in res:\/\/loud\.gd/);
     assert.doesNotMatch(declared, /used in code/, 'a declaration is named once, as a declaration');
-    // A parameter of the class's own method and of its subclass's override would shadow the member;
+    // A parameter of the class's own method and of its subclass's override would shadow the member.
     // other.gd's class has a parameter of the same name and does not inherit it.
     const shadowing = await ask('level', 'times');
     assert.match(
@@ -61887,10 +61913,10 @@ async function testARenameRefusesANameAlreadyTaken(): Promise<void> {
 
 /**
  * Language server answers for the rename fixture, shaped as Godot 4.7.2 gave them when measured:
- * the references of the method's own declaration include the override's declaration and its call
- * to super, and miss the override's own uses, which only an ask at one of them returns; a word in a
- * comment or a string is resolved by name; and a call on a value of unknown type is answered with
- * every declaration of the name.
+ * - the references of the method's own declaration include the override's declaration and its
+ *   call to super, and miss the override's own uses, which only an ask at one of them returns
+ * - a word in a comment or a string is resolved by name
+ * - a call on a value of unknown type is answered with every declaration of the name.
  */
 function fakeLanguageServer(project: string): Pick<RenameServices, 'references' | 'definitions'> {
   const at = (
@@ -62141,7 +62167,7 @@ async function testADocLinkWrappedAcrossLinesIsRenamedWhole(): Promise<void> {
 /**
  * A member named like a common local is not asked about where it cannot be the member, and what is
  * certainly another symbol is given by file and line rather than quoted. A bare name in a file where
- * nothing inherits the member is that class's own; a call the language server resolves to one other
+ * nothing inherits the member is that class's own. A call the language server resolves to one other
  * declaration is that declaration's. A call on a value of unknown type may still be the member, and
  * stays quoted. Downstream, a member named `found` was asked about 1176 times for three uses and
  * answered in 309 kilobytes.
@@ -62690,7 +62716,7 @@ function testAMoveNamesAPathFromTheRootItLeftAlone(): void {
 
 /**
  * A file moved is named by its new path everywhere a path the engine reads names it, in the style
- * it was written in; a relative path is worked out again from the file holding it. A note in prose
+ * it was written in. A relative path is worked out again from the file holding it. A note in prose
  * and a scene saved in binary keep the old path and say so.
  */
 function testAMovedFileIsNamedByItsNewPathEverywhere(): void {
@@ -62988,7 +63014,7 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
       GDHARNESS_BRIDGE_PORT: String(await reservePort()),
       GDHARNESS_LSP_PORT: String(lspPort),
       GDHARNESS_RUNTIME_DIR: runtimeDir,
-      // The silent server below never answers initialize, which is waited on this long; nothing
+      // The silent server below never answers initialize, which is waited on this long. Nothing
       // else in the case reaches a language server that answers.
       GDHARNESS_LSP_INITIALIZE_TIMEOUT_MS: '2000',
     },
@@ -63005,7 +63031,7 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
     const uid = readFileSync(join(project, 'told.gd.uid'), 'utf8');
     await server.initialize('rename-engine');
 
-    // Its own name and a new path is a move of the script alone, which the file move makes; the
+    // Its own name and a new path is a move of the script alone, which the file move makes. The
     // refusal said only that there was nothing to rename, and the caller had no way to move it.
     for (const [moving, said] of [
       [{}, 'Told is already called Told; nothing to rename.'],
@@ -63304,7 +63330,7 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
     );
     assert.match(text(get(tree, 'readBy')), /headless engine, since no editor serves this project/);
     assert.equal(get(tree, 'unsavedInEditor'), undefined, 'only an editor can say what it holds unsaved');
-    // The editor's answer is these with unsavedInEditor for readBy; engine messages come and go.
+    // The editor's answer is these with unsavedInEditor for readBy. Engine messages come and go.
     const answerKeys = (answer: unknown): string[] =>
       Object.keys(asObject(answer))
         .filter((key) => !key.startsWith('engine_'))
@@ -63632,7 +63658,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       'config_version=5\n\n[application]\n\nconfig/name="Write"\n\n[autoload]\n\nScore="*res://score.gd"\n',
     'score.gd': 'extends Node\n\nvar total: int = 0\n',
     // A class the tools make by its name. _init renames the node and sets speed, whose setter tints
-    // it, so putting speed back tints it again; and _ready names an autoload, which a script compiled
+    // it, so putting speed back tints it again. And _ready names an autoload, which a script compiled
     // before the autoloads start does not know.
     'hero.gd':
       'class_name Hero\nextends Node2D\n\n@export var speed: float = 100.0:\n\tset(value):\n\t\tspeed = value\n\t\tmodulate = Color(1, 1, value / 200.0)\n\n\n' +
@@ -64841,7 +64867,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     }
 
     // An editor of the project that has not reached this server holds its own copy of what it has
-    // open, so a write waits for it; once it has gone, the same write goes through.
+    // open, so a write waits for it. Once it has gone, the same write goes through.
     const runtime = join(project, `godot-standin${process.platform === 'win32' ? '.exe' : ''}`);
     try {
       linkSync(process.execPath, runtime);
@@ -64882,13 +64908,15 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
 /**
  * scene_node's groups, copies, moves and deletes with no editor, through the server and a real
  * engine. A group the instanced coin.tscn puts its root in is read on every instance and can be
- * taken out only there; one this scene adds is saved in its file and read back from it. A copy goes
- * right after the original, as the editor's Duplicate puts it. A move keeps the node where it is
- * drawn, worked out through a scaled parent, a Control keeping only its position, a parent that is
- * no CanvasItem and so places nothing, top-level nodes left alone, and in 3D, and the file keeps the
- * move on a node whose script is not a tool, without what that script did as it loaded, which a
- * set and an add answer under setByScript rather than alsoChanged;
- * keepGlobalTransform false leaves the transform as it was. A set through a resource built into the
+ * taken out only there. One this scene adds is saved in its file and read back from it. A copy goes
+ * right after the original, as the editor's Duplicate puts it.
+ *
+ * A move keeps the node where it is drawn, worked out through a scaled parent, a Control keeping
+ * only its position, a parent that is no CanvasItem and so places nothing, top-level nodes left
+ * alone, and in 3D. The file keeps the move on a node whose script is not a tool, without what that
+ * script did as it loaded. A set and an add answer that under setByScript rather than alsoChanged.
+ * keepGlobalTransform false leaves the transform as it was.
+ * A set through a resource built into the
  * scene names the other places holding it. A delete names the nodes of this scene that went with it,
  * and not those inside its instances.
  */
@@ -65735,7 +65763,7 @@ async function testAnAnimationsKeysAndLengthAreWrittenWithNoEditor(): Promise<vo
     assert.doesNotMatch(fileOf('moves.tscn'), /position = Vector2\(9, 9\)/, 'what _init set is not saved');
 
     // A second add_track on the path keys the track that animates it, as the editor keys a property
-    // it already animates, rather than laying a second track over the first; a key past the end is
+    // it already animates, rather than laying a second track over the first. A key past the end is
     // written and named, since it never plays.
     assert.equal(get(track, 'pastLength'), undefined, JSON.stringify(track));
     const rotation = (keyframes: unknown[]) => ({
@@ -66467,7 +66495,7 @@ async function testATrackAndItsKeysComeOutWithNoEditor(): Promise<void> {
   }
   await withAnAnimationProject(godotPath, {}, async ({ call, written, fileOf }) => {
     // A track comes out by its type, node and property as read gives them, so a track read back is
-    // passed as it stands; the others stay.
+    // passed as it stands. The others stay.
     await written({ op: 'create', playerNodePath: 'Player', animationName: 'sway' });
     for (const [property, keyframes] of [
       [
@@ -66715,7 +66743,7 @@ async function testAMethodKeyIsJudgedAgainstItsMethodWithNoEditor(): Promise<voi
   }
   await withAnAnimationProject(godotPath, {}, async ({ call, written, fileOf }) => {
     // A method key whose arguments the method cannot take is written, as one calling a missing
-    // method is, and says why; add_track puts every method called on a node in one track.
+    // method is, and says why. add_track puts every method called on a node in one track.
     await written({ op: 'create', playerNodePath: 'Player', animationName: 'calls', length: 2 });
     const calling = (keyframes: unknown[], method = 'cheer') => ({
       op: 'add_track',
@@ -66764,7 +66792,7 @@ async function testAMethodKeyIsJudgedAgainstItsMethodWithNoEditor(): Promise<voi
         JSON.stringify(misfitting),
       );
     }
-    // JSON gives every number as a float; a whole one is saved as the int the method takes.
+    // JSON gives every number as a float. A whole one is saved as the int the method takes.
     assert.match(fileOf('moves.tscn'), /"args": \["ok", 2\]/, fileOf('moves.tscn'));
     const missing = await written(calling([{ time: 0.6, args: [1] }], 'gone'));
     assert.deepEqual(
@@ -67264,7 +67292,7 @@ async function testAnInheritedSceneIsMadeWithNoEditor(): Promise<void> {
     );
 
     // A node inside an instance is sent to the file that makes it, which for an inherited scene can
-    // be a scene it inherits; editable children would let this scene keep values and no more.
+    // be a scene it inherits. Editable children would let this scene keep values and no more.
     writeFileSync(
       join(project, 'yard.tscn'),
       '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://parts/bigger_crate.tscn" id="1_bigger"]\n\n' +
@@ -68589,7 +68617,7 @@ async function testAHeadlessWriteSavesWhatTheEditorWould(): Promise<void> {
 /**
  * project_info's classes, with an addon's counted unless asked for. A model-driven probe on a game
  * carrying two large addons asked for them, got 686 classes in 88 thousand characters, which the
- * harness moved out of the conversation, and went back to searching the files; 19 were the game's.
+ * harness moved out of the conversation, and went back to searching the files. 19 were the game's.
  */
 async function testTheProjectsOwnClassesAreListedAndAnAddonsCounted(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -69055,7 +69083,7 @@ async function testAControlIsLaidOutAsTheEditorLaysItOut(): Promise<void> {
 
     // Added under a container with a script that is not a tool, as an instance and as a node. The
     // engine keeps a container's child in Container mode whatever it is set to, and the editor saves
-    // it so; putting back what the script was taken to have done never settled, and every such add
+    // it so. Putting back what the script was taken to have done never settled, and every such add
     // was refused.
     writeFileSync(
       join(project, 'cell.tscn'),
@@ -69282,10 +69310,12 @@ async function testAProjectsFilesAndLayersAreNamedWithNoEditor(): Promise<void> 
 }
 
 /**
- * A 3D level read back as it was written, with no editor. A light turned 45 degrees down read back
- * as its transform alone; a joint given a node that is not there was saved without a word; a
- * resource built into the scene, given to resource_edit modify, was offered remedies for a path
- * outside the project; and a bake read from meshes passed on the engine's warning unexplained.
+ * A 3D level read back as it was written, with no editor. The faults this holds:
+ * - a light turned 45 degrees down read back as its transform alone
+ * - a joint given a node that is not there was saved without a word
+ * - a resource built into the scene, given to resource_edit modify, was offered remedies for a
+ *   path outside the project
+ * - a bake read from meshes passed on the engine's warning unexplained.
  */
 async function testA3DLevelIsReadAsItIsWritten(): Promise<void> {
   const engine = resolveGodotPath();
@@ -69424,10 +69454,12 @@ async function testA3DLevelIsReadAsItIsWritten(): Promise<void> {
 
 /**
  * A navigation region baked with no editor, and the points it is given read as numbers, through
- * the server and a real engine. A point whose field held a word was written as 0, in a vector and in
- * a list of them; the outlines of a NavigationPolygon, a list holding lists, were refused whatever
- * they held; a property of a NavigationAgent2D set on the body it serves was answered with the
- * nearest physics layer; and a region could be baked only by the editor's Bake button.
+ * the server and a real engine. The faults this holds:
+ * - a point whose field held a word was written as 0, in a vector and in a list of them
+ * - the outlines of a NavigationPolygon, a list holding lists, were refused whatever they held
+ * - a property of a NavigationAgent2D set on the body it serves was answered with the nearest
+ *   physics layer
+ * - a region could be baked only by the editor's Bake button.
  */
 async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
   const engine = resolveGodotPath();
@@ -69604,7 +69636,7 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
     const saved = readFileSync(join(project, 'walled.tscn'), 'utf8');
     assert.equal(get(parseTextContent(walled), 'savedTo'), 'res://walled.tscn', textOf(walled) ?? '');
     const polygons = asNumber(get(parseTextContent(walled), 'polygons'));
-    // The square alone bakes to one polygon; the wall inside it splits that up.
+    // The square alone bakes to one polygon. The wall inside it splits that up.
     assert.ok(polygons > 1, `the wall is carved out of the square: ${textOf(walled) ?? ''}`);
     assert.equal(polygonsIn(saved, 'id="NavigationPolygon_a"'), polygons, 'the file holds what was answered');
     assert.equal(existsSync(join(project, 'ran.txt')), false, "and the scene's script did not run for it");
@@ -69634,7 +69666,7 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
       textOf(plain) ?? '',
     );
     // Nothing read leaves the whole square walkable, which the counts alone do not tell from a bake
-    // that read the crate; the walls under the other regions are theirs and go unnamed.
+    // that read the crate. The walls under the other regions are theirs and go unnamed.
     assert.equal(
       get(parseTextContent(plain), 'note'),
       "No obstacle was read from the region's children (source mode root_node_children), so all the outlines enclose is walkable, less the agent_radius 10.0 kept from their edges. Crate (a StaticBody2D) is outside what was read; the bake reads a node elsewhere once it is in the group navigation_polygon_source_geometry_group and source_geometry_mode is groups_with_children, or once it is moved under the region.",
@@ -69722,10 +69754,11 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
 }
 
 /**
- * A theme and a tile set with no editor, through the server and a real engine. A font size Godot
- * would read back as the theme's default is refused; a theme type that is no class is set as the
- * variation it is and said to be one; and an image written since the import is named as not yet
- * imported, with the call that imports it, which this then makes and follows.
+ * A theme and a tile set with no editor, through the server and a real engine:
+ * - a font size Godot would read back as the theme's default is refused
+ * - a theme type that is no class is set as the variation it is and said to be one
+ * - an image written since the import is named as not yet imported, with the call that imports
+ *   it, which this then makes and follows.
  */
 async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -69923,7 +69956,7 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
     );
 
     // A layer the TileSet has none of yet is made by writing to it, and so is a tile's polygon on
-    // it, reached in the atlas source the TileSet holds; one past the next is refused.
+    // it, reached in the atlas source the TileSet holds. One past the next is refused.
     const set = { op: 'modify', resourcePath: 'res://set.tres' };
     const square = [
       [-1, -1],
@@ -70289,13 +70322,13 @@ async function testAMoveWithNoEditorLeavesTheProjectLoading(): Promise<void> {
  * reading of what the editor holds was taken before the rescan waited out the editor's first scan,
  * and an editor still scanning has not read its files in yet. Reproduced here with fifteen hundred
  * chained classes and the editor's file system cache deleted, which keeps that first scan going
- * after the addon has connected; at three hundred classes with the cache in place the scan was
+ * after the addon has connected. At three hundred classes with the cache in place the scan was
  * over first and nothing showed.
  *
  * Whether the scan is still going when the rescan arrives is a race between the scan and the
  * addon connecting, and a fast Windows runner finished fifteen hundred first. A project that
- * loses the race has not reached the state this is about, so a bigger one is made and asked again;
- * a broken rescan still fails on whichever attempt reaches it.
+ * loses the race has not reached the state this is about, so a bigger one is made and asked again.
+ * A broken rescan still fails on whichever attempt reaches it.
  */
 async function testARescanAsTheEditorOpensFindsNothingMissing(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -71108,8 +71141,8 @@ async function main(): Promise<void> {
   };
   // A regression that hangs fails by name rather than taking the leg's whole budget with it: a job
   // its own limit ends uploads no log, so nothing says which test it was. The slowest took 142s on
-  // the Windows leg, so five minutes is room for a loaded runner rather than a limit anything meets;
-  // the variable shortens it to check the deadline.
+  // the Windows leg, so five minutes is room for a loaded runner rather than a limit anything meets.
+  // The variable shortens it to check the deadline.
   const deadlineMs = Number(process.env['GDHARNESS_REGRESSION_DEADLINE_MS'] ?? 5 * 60_000);
   // The time the whole run has, which CI sets below the job's limit. A deadline alone did not keep
   // inside it: a part takes about twelve minutes of a twenty-minute job, so a test hanging for its

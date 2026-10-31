@@ -99,7 +99,7 @@ export function isSameDirectory(onePath: string, otherPath: string): boolean {
 export function isWithinRoot(rootPath: string, candidatePath: string): boolean {
   const step = relative(resolve(rootPath), resolve(candidatePath));
 
-  // `..` on its own and `..` followed by a separator climb out; a name that merely begins with
+  // `..` on its own and `..` followed by a separator climb out. A name that merely begins with
   // two dots, such as `..config`, does not. An absolute answer means another drive or share.
   return step !== '..' && !step.startsWith(`..${sep}`) && !isAbsolute(step);
 }
@@ -191,7 +191,7 @@ export function resolveWithinProject(
   // separator on the platform where node:path does not read it as absolute.
   if (withoutScheme.startsWith('/') || withoutScheme.startsWith('\\') || isAbsolute(withoutScheme)) {
     // The example is the end of the path given, so a build output is offered a build path and a
-    // scene a scene path; a fixed scene path was offered for an export's .exe.
+    // scene a scene path. A fixed scene path was offered for an export's .exe.
     // A file beside the project or above it keeps only its name: its folder holds the project, so
     // offered as one inside it, it names a folder the project does not have. Compared with the links
     // in both resolved: a macOS temporary directory given under /var holds a project under /private/var.

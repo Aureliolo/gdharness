@@ -17,7 +17,7 @@
  * the version-bump pull request. That exclusion lives in `IS_THE_RELEASE_ITSELF` below. Two things
  * that file knew are worth keeping: the configuration used to be read from the release's target
  * commit rather than from the default branch, so regenerating an old tag's notes to check a change
- * tested the old file and produced a null result that reads like a verdict; and dependency updates
+ * tested the old file and produced a null result that reads like a verdict. Dependency updates
  * stay in, because this is distributed as a bundle and a raised dependency changes what somebody
  * installs.
  */

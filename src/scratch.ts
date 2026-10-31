@@ -95,7 +95,7 @@ export function sweepAbandonedScratch(directory = tmpdir()): void {
     try {
       remove(join(directory, entry));
     } catch {
-      // Still held, by something that outlived its server; the next sweep gets it.
+      // Still held, by something that outlived its server. The next sweep gets it.
     }
   }
 }

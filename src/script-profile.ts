@@ -170,7 +170,7 @@ const QUEUE_HEADROOM = 512;
 /**
  * How many functions each frame may carry, for a game whose debugger queue holds [param queued]
  * messages. The engine names a function once, as it first appears, in a message of its own sent
- * with the frame, and queues every one of them at once; past the queue's size it drops them and
+ * with the frame, and queues every one of them at once. Past the queue's size it drops them and
  * never names those functions again, so 3000 functions called in one frame came back with 956 of
  * them as bare numbers, and the frame or the totals queued after the names can go the same way. It
  * sends a frame's functions by total time, so the cap leaves out the ones that took least, which a
@@ -248,7 +248,7 @@ export class ProfileAggregate {
     this.frameFunctions = frameFunctions;
   }
 
-  /** Takes one message from the game; anything that is not the profiler's is left alone. */
+  /** Takes one message from the game. Anything that is not the profiler's is left alone. */
   take(received: DebuggerMessage, now: number): void {
     if ('unreadable' in received) {
       this.unreadable += 1;
@@ -381,7 +381,7 @@ export interface ProfiledFunction {
    * half of it, from what one call cost an empty function in the same run.
    */
   readonly overheadMs?: number;
-  /** The property whose get or set block this is; see `propertyOf`. */
+  /** The property whose get or set block this is. See `propertyOf`. */
   readonly property?: string;
 }
 
@@ -589,7 +589,7 @@ export function totalsSince(
 
 /**
  * What one call costs the profiler in this run, in microseconds, read off the empty function the
- * runtime addon calls when the profiler goes on; null without the addon, or before it has.
+ * runtime addon calls when the profiler goes on. Null without the addon, or before it has.
  */
 function perCallCostOf(totals: ProfileTotals): number | null {
   for (const [signature, sum] of Object.entries(totals.functions)) {
@@ -780,7 +780,7 @@ export class ProfileObserver implements DebugObserver {
   private readonly changed: (totals: ProfileTotals) => void;
   private readonly frameFunctions: number;
 
-  /** Asking for at most [param frameFunctions] functions a frame; see `frameFunctionsFor`. */
+  /** Asking for at most [param frameFunctions] functions a frame. See `frameFunctionsFor`. */
   constructor(changed: (totals: ProfileTotals) => void, frameFunctions: number) {
     this.changed = changed;
     this.frameFunctions = frameFunctions;

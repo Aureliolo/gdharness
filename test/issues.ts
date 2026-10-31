@@ -33,8 +33,8 @@ assert.match(report, new RegExp(`gdharness ${pkg.version.replaceAll('.', '\\.')}
 assert.match(report, new RegExp(process.platform), 'and the platform it happened on');
 
 // The two sentences that decide what the agent does with it. Without the first it either loops on
-// a call that cannot succeed or walks away from one that would have worked on the next attempt;
-// without the second it files on somebody's behalf without asking.
+// a call that cannot succeed or walks away from one that would have worked on the next attempt.
+// Without the second it files on somebody's behalf without asking.
 assert.match(report, /Send the call once more before anything else/, 'a first sighting is worth a retry');
 assert.match(report, /Do not open an issue on your own initiative/, 'and hand the decision over');
 assert.match(report, /ask whether you may report it/, 'by asking the user first');

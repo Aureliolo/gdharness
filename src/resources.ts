@@ -155,7 +155,7 @@ const COMPLETION_LIMIT = 100;
 
 /**
  * The project's files a template's `path` could be, for a client's picker: those whose path holds
- * what has been typed, ignoring case. Ones whose path starts with it come first, then ones whose
+ * what has been typed, whatever its case. Ones whose path starts with it come first, then ones whose
  * file name does, since `main` is usually a file somebody is naming rather than a directory, then
  * the rest.
  */
@@ -247,7 +247,7 @@ export function settingKeys(content: string): Map<string, IniValue> {
  *
  * One home for the comparison and the sentence, because the same thing happens on a restart and on
  * an open and only the restart's answer said anything about it. Godot does the stripping either
- * way; the two calls differ in when they can notice, which is not a reason to differ in what they
+ * way. The two calls differ in when they can notice, which is not a reason to differ in what they
  * say. Downstream this has fired on six openings of one project, five of which named the same key.
  *
  * With the value each key held, because naming the key alone leaves the caller to go and find what

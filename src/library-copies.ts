@@ -29,7 +29,7 @@ export interface FreedCopies {
  * open editor loaded nothing until it was run again. Windows does let a mapped file be renamed,
  * and the engine holding it runs on from the new name, so the copy is moved aside rather than
  * deleted. Leftovers named after the copy (copies set aside earlier, and the `~RF….TMP` files a
- * failed copy leaves) are deleted once nothing holds them; one still held is left for a later
+ * failed copy leaves) are deleted once nothing holds them. One still held is left for a later
  * run.
  *
  * Elsewhere a mapped file can be replaced, so nothing collides and nothing is done.

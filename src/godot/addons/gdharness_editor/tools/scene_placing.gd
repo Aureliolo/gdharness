@@ -19,7 +19,7 @@ static func what_to_add(node_type: String, instance_path: String, scene_path: St
 		]
 	if not instance_path.is_empty():
 		# Asked before the cycle walk, which reads the file's dependencies and so loaded a file that
-		# was not there, laying the engine's error and a backtrace beneath the refusal.
+		# was not there and laid the engine's error and a backtrace beneath the refusal.
 		if not ResourceLoader.exists(instance_path, "PackedScene"):
 			var said: String = "No scene at %s to instance" % instance_path
 			var offered: String = GdhFileWalk.new().with_nearest_files(said, instance_path)

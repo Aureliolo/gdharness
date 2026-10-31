@@ -606,7 +606,7 @@ class GdhRunner:
 
 	## [param args] with everything up to the script at [param own] given as gdUnit4's tool name.
 	## The path is compared with its separators and, on Windows, its case folded, since the engine
-	## reports the script as `X:/a/listed.gd` when it was started as `X:\a\listed.gd`.
+	## reports the script as `D:/a/listed.gd` when it was started as `D:\a\listed.gd`.
 	static func options_of(args: PackedStringArray, own: String) -> PackedStringArray:
 		var wanted: String = spelt(own)
 		var at: int = -1

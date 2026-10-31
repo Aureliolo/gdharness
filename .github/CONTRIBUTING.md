@@ -2,91 +2,107 @@
 
 ## The rules that decide whether a change lands
 
-- **No fixture, no ship.** A tool is driven against a pinned Godot in CI before it exists in
-  a release. A change that adds or alters a tool comes with the fixture that proves it.
-- **A fixture asserts the invariant, not the reading.** A case that writes down what somebody
-  measured keeps that conclusion in force after the evidence for it is gone, and correcting the
-  answer then fails the suite. Hold what stays true whichever reading wins.
-- **A tool fails rather than answers.** No success payload for an empty or partial result
-  that could be a silent failure. An unknown argument or enum value is an error naming the
-  valid set, never a silent default.
-- **Every mutation reads back.** A tool that writes returns the engine's actual state
-  afterwards, read from the engine, not an echo of the request.
-- **A failure nobody modelled says so.** A refusal names what would have worked; anything that
-  reaches the tool boundary as a throw is a defect, and answers as one. Never dress an
-  unmodelled failure as a refusal: the caller then spends its turns rephrasing a call that was
-  right, and the bug is never heard about.
-- **A refusal says what the thing is, not only that the call was wrong.** "`editor_run check` is
-  a boot probe" ends the attempt; "invalid op" makes the next attempt the same attempt. Name the
-  version that decided too, where one did: it is what separates a call that is wrong from a call
-  that is merely too new for the server answering it.
-- **Answers are sized.** Anything that can return a lot takes a detail level and defaults to
-  the smallest useful one. Anything unbounded paginates.
+- **No fixture, no ship.** A change that adds or alters a tool comes with a fixture driving it
+  against a pinned Godot in CI.
+- **A fixture asserts the invariant, not the reading.** A case that writes down a measurement keeps
+  it in force after the evidence is gone, and then fails the correction.
+- **A tool fails rather than answers.** An empty or partial result that could be a silent failure
+  gets no success payload.
+- **An unknown argument or enum value is an error** naming the valid set, never a silent default.
+- **Every mutation reads back.** A tool that writes returns the engine's actual state afterwards,
+  read from the engine, not an echo of the request.
+
+## Refusals and answers
+
+- **A failure nobody modelled says so.** Anything that reaches the tool boundary as a throw is a
+  defect, and answers as one.
+- **Never dress an unmodelled failure as a refusal.** The caller then spends its turns rephrasing a
+  call that was right, while nobody hears about the bug.
+- **A refusal says what the thing is and what would have worked.** "`editor_run check` is a boot
+  probe" ends the attempt, while "invalid op" makes the next attempt the same attempt.
+- **A refusal names the version that decided, where one did.** That separates a wrong call from one
+  that is only too new for the server answering it.
+- **Answers are sized.** Anything that can return a lot takes a detail level and defaults to the
+  smallest useful one, and anything unbounded paginates.
 
 ## Versions
 
-- **Patch**: every release. An answer that was wrong is now right, and the output may change
-  shape for it, because a wrong answer corrected is a fix rather than a feature and leaving one
-  wrong to protect whoever parsed it is how a tool stops being worth asking. An addition nothing
-  has to adapt to is a patch too: a new argument, a new field, an argument reaching further than it
-  did, and so are a new tool and a new op. Ignore all of it and your calls still work.
-- **Minor**: only when the owner marks a release as one, which is announced ahead. Nothing earns
-  one on its own.
-- **Major**: none is planned.
+- **Patch** is every release. A corrected answer is a patch even when its output changes shape,
+  because a tool kept wrong for whoever parsed it is not worth asking.
+- An addition nothing has to adapt to is a patch too, such as a new argument, field, tool or op, or
+  an argument reaching further. Ignore all of it and your calls still work.
+- **Minor** comes only when the owner marks a release as one, announced ahead. Nothing earns one on
+  its own.
+- No **major** is planned.
 
 Until gdharness has users outside its own projects, nothing is kept working for an older release.
-The server and the addons of one release work with each other only, and an editor or a game on
-another release's addon is refused with the command that brings it into step. A rename or a
-removal ships in a minor.
+The server and the addons of one release work with each other only. An editor or a game on another
+release's addon is refused with the command that brings it into step. A rename or a removal ships in
+a minor.
 
 ## What every language in here is held to
 
-Five things, for each language present. A language that arrives without all five arrives with
-them in the same change. There is no JavaScript here: the server, the scripts and the tests are
-all TypeScript, so one type checker covers everything Bun runs.
+Five things, for each language present. A language that arrives without all five arrives with them
+in the same change.
 
 |              | TypeScript                                                                                                                                                                    | GDScript                                                                                                                                                              | YAML                                                                       | Markdown                               |
 | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | -------------------------------------- |
 | Formatter    | Biome                                                                                                                                                                         | gdstyle, the fixtures included                                                                                                                                        | Prettier                                                                   | Prettier, prose wrap preserved         |
-| Linter       | Biome, oxlint type-aware                                                                                                                                                      | gdstyle, every finding failing, with the lane's `gdstyle.toml`                                                                                                        | yamllint `--strict`; actionlint and zizmor at `pedantic` for the workflows | markdownlint, every rule, lines at 100 |
+| Linter       | Biome, oxlint type-aware                                                                                                                                                      | gdstyle, every finding failing, with the lane's `gdstyle.toml`                                                                                                        | yamllint `--strict`, actionlint and zizmor at `pedantic` for the workflows | markdownlint, every rule, lines at 100 |
 | Type checker | `tsc`, `@tsconfig/strictest`, over `src`, `test` and `scripts` alike                                                                                                          | the engine: `test:engine` parses every shipped script and fixture with all 43 GDScript warnings as errors, addons included, and proves the gate bites by planting one | -                                                                          | -                                      |
 | Dead code    | knip: every file, export and dependency is reached from an entry point                                                                                                        | -                                                                                                                                                                     | -                                                                          | -                                      |
 | Fuzzing      | fast-check properties in `test/fuzz.ts` over every reader of bytes nobody here wrote: the Content-Length framing, `project.godot`, paths inside a project, the engine archive | -                                                                                                                                                                     | -                                                                          | -                                      |
 
-Rules are **written out rather than inherited from a preset**, so the file says what it enforces:
-see `.oxlintrc.json`, `gdstyle.toml`, `.yamllint.yaml` and `.markdownlint-cli2.jsonc`. Nothing is
-turned off quietly. A rule that fires on good code is an argument about the rule, and the
-argument goes next to the suppression along with what it would cost to adopt. `gdstyle.toml` is
-shared with the owner's game projects and copied byte for byte, so a change to it is made there
+## Lint rules
+
+Rules are written out rather than inherited from a preset, so each file says what it enforces. See
+`.oxlintrc.json`, `gdstyle.toml`, `.yamllint.yaml` and `.markdownlint-cli2.jsonc`. Nothing is
+turned off quietly. A rule that fires on good code is an argument about the rule. That argument goes
+next to the suppression, with what adopting the rule would cost.
+
+`gdstyle.toml` is copied byte for byte from the owner's game projects, where a change to it is made
 first.
 
+## Required checks
+
 **Every job CI runs is a required status check.** A job that can be red while something merges is
-not a gate, and we have been bitten by exactly that. The engine legs run in parts on separate
-machines, and each platform's `engine (...)` check passes only when every one of its parts did, or
-when the `scope` job found the pull request changes nothing but the version lines a release bumps,
-in which case the parts are skipped. A `scope` that fails fails those checks with it.
+not a gate.
 
-**Nothing from outside the repository runs unverified.** Every file CI downloads is refused
-unless it matches a digest written in this repository: the Bun that runs every job
-(`.github/actions/install-bun`), uv and the interpreter, and yamllint under it (`ci.yml`,
-`uv.lock`), gdstyle (`scripts/install-gdstyle.ts`), actionlint (`workflows.yml`), the engine
-(`scripts/install-godot.ts`) and the gdUnit4 the runner fixture drives
-(`scripts/install-gdunit4.ts`). npm packages carry theirs in `bun.lock`, actions are pinned by
-commit, and zizmor runs from a container image whose digest is fixed by the action's commit. A
-tool that arrives without a digest arrives with one in the same change.
+The engine legs run in parts on separate machines. Each platform's `engine (...)` check passes only
+when every one of its parts did. It also passes when the `scope` job finds the pull request changes
+nothing but the version lines a release bumps, and the parts are skipped. A `scope` that fails fails
+those checks with it.
 
-**Every pin is watched by Renovate, digest included.** `.github/renovate.json` is the whole of
-it: the `bun` and `github-actions` managers cover `package.json`, `bun.lock` and every `uses:`;
-the `uv` manager covers yamllint in `pyproject.toml` and `uv.lock`, hashes included; and the
-regex managers read the `renovate:` comment above any other pin, so a new one is watched the
-moment it is annotated.
+## Downloads and pins
+
+**Nothing from outside the repository runs unverified.** Every file CI downloads is refused unless
+it matches a digest written in this repository:
+
+- the Bun that runs every job (`.github/actions/install-bun`)
+- uv, the interpreter and yamllint under it (`ci.yml`, `uv.lock`)
+- gdstyle (`scripts/install-gdstyle.ts`)
+- actionlint (`workflows.yml`)
+- the engine (`scripts/install-godot.ts`)
+- the gdUnit4 the runner fixture drives (`scripts/install-gdunit4.ts`)
+
+npm packages carry theirs in `bun.lock`. Actions are pinned by commit. zizmor runs from a container
+image whose digest is fixed by the action's commit. A tool that arrives without a digest arrives
+with one in the same change.
+
+## Renovate
+
+**Every pin is watched by Renovate, digest included.** `.github/renovate.json` is the whole of it.
+The `bun` and `github-actions` managers cover `package.json`, `bun.lock` and every `uses:`. The `uv`
+manager covers yamllint in `pyproject.toml` and `uv.lock`, hashes included. The regex managers read
+the `renovate:` comment above any other pin, so a new pin is watched once it is annotated.
+
 Renovate opens two pull requests a week and no others. Monday's carries every raise, majors and
-vulnerability fixes included. Tuesday's regenerates `bun.lock` and `uv.lock`, which is where the
-transitive dependencies move, and it is its own pull request because it changes nothing this
-file names. A pin without an annotation is a pin nothing watches, and the review refuses it.
+vulnerability fixes included. Tuesday's regenerates `bun.lock` and `uv.lock`, where the transitive
+dependencies move. It is a pull request of its own because it changes nothing this file names. A pin
+without an annotation is a pin nothing watches, and the review refuses it.
 
-Pick the newest stable version of a tool rather than the familiar one, and read what the release
-actually changed before taking it.
+Pick the newest stable version of a tool rather than the familiar one. Read what the release
+changed before taking it.
 
 ## Development setup
 
@@ -114,20 +130,23 @@ bun run docs               # the public site, into site/; refuses a page nothing
 bun run watch              # TypeScript watch mode
 ```
 
-`bun test/regressions.ts` runs every regression whether or not an earlier one failed and names
-the failures at the end, which is what makes a disarm readable: break the line a fixture guards,
-and the run says which fixtures noticed rather than stopping at the first. Arguments select
-tests by name, loosely matched, for working on one: `bun test/regressions.ts debugtools`.
+`bun test/regressions.ts` runs every regression whether or not an earlier one failed and names the
+failures at the end. That makes a disarm readable. Break the line a fixture guards and the run says
+which fixtures noticed. Arguments select tests by name, loosely matched, for working on one:
+`bun test/regressions.ts debugtools`.
 
 Install the engine locally and the fixtures that need it stop skipping: `bun scripts/install-godot.ts`
 and `bun scripts/install-gdunit4.ts` each print a path to export as `GODOT_PATH` and `GDUNIT4_PATH`.
 Both verify a published digest and refuse anything else.
 
-`bun run test:packaging` and `bun run release:pack` only work on Linux or macOS. Windows
-cannot record a POSIX file mode, so the packer refuses there rather than shipping an archive
-whose executables are world-writable. Releases are cut by CI.
+`bun run test:packaging` and `bun run release:pack` only work on Linux or macOS. Windows cannot
+record a POSIX file mode, and the packer refuses there rather than ship an archive whose executables
+are world-writable. Releases are cut by CI.
 
 ## Repository map
+
+There is no JavaScript here. The server, the scripts and the tests are all TypeScript, so one type
+checker covers everything Bun runs.
 
 ```text
 .
@@ -163,18 +182,18 @@ whose executables are world-writable. Releases are cut by CI.
 └── scripts/               # Build, pack, release and site tooling
 ```
 
-[release-process.md](./release-process.md) is how a release is cut, signed and verified, which is a
-maintainer's job rather than a reader's, so it lives here rather than on the site.
+[release-process.md](./release-process.md) says how a release is cut, signed and verified. That is
+a maintainer's job rather than a reader's, so it lives here rather than on the site.
 
 The site at <https://aureliolo.github.io/gdharness> is built from `docs/` by
 `scripts/build-docs.ts` and published by `.github/workflows/docs.yml`. The tool reference is
-rendered from `src/tool-definitions.ts` at build time rather than written by hand, so it says what
-the server says; a page added to `docs/` has to be listed in the generator, which is what stops one
-publishing with nothing linking to it.
+rendered from `src/tool-definitions.ts` at build time, so it says what the server says. A page added
+to `docs/` has to be listed in the generator, which stops one publishing with nothing linking to it.
 
 ## Style
 
-- British English in prose. No em-dashes, and no en dash or double hyphen standing in for one; no
-  chatbot openers or closers and no marketing words in what ships. A regression reads every file for
-  these, so the list it holds (`HABIT_PHRASES` in `test/regressions.ts`) is the one to add to.
+- British English in prose.
+- No em-dashes, and no en dash or double hyphen standing in for one.
+- No chatbot openers or closers and no marketing words in what ships. A regression reads every file
+  for these, and its list (`HABIT_PHRASES` in `test/regressions.ts`) is the one to add to.
 - Comments explain why, never what.

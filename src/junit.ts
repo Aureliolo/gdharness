@@ -239,7 +239,7 @@ export interface IgnoreNotApplied {
  * gdUnit4 reads an entry with no colon as a suite name or a piece of a suite's path, and a case only
  * as `suite_name:test_name`, so a list of test function names left out nothing and said nothing: nine
  * of nine cases ran in a run asked to skip some of them. Which entries skipped something cannot be
- * read afterwards, since a skipped case is simply absent; a case that ran under a name an entry gave
+ * read afterwards, since a skipped case is simply absent. A case that ran under a name an entry gave
  * can be, and that is the mistake made.
  */
 export function ignoredYetRan(report: TestReport, ignored: readonly string[]): IgnoreNotApplied[] {
@@ -376,7 +376,7 @@ export function ignoredLeftOut(
  * and one that failed assertions and then hit a runtime error answered the error alone, with no
  * failure counted, because gdUnit4 writes a case's error ahead of its failures. Measured on 4.7.2.
  * An error ends the case, so in the order the case met them its failures come first and the error
- * last, which is the order kept here; a case with an error is in error whatever failed before it.
+ * last, which is the order kept here. A case with an error is in error whatever failed before it.
  */
 function caseOf(suite: XmlElement, element: XmlElement): TestCase {
   const of = (kind: CaseReport['kind']): CaseReport[] =>
@@ -455,7 +455,7 @@ export function parseJUnit(xml: string): TestReport {
   const where = (suite: TestSuite): string => suite.path ?? suite.name;
   const suites = suiteElements.map((suite): TestSuite => {
     // Counted from the cases rather than read off the attributes, for the same reason the totals
-    // below are. A suite's `tests` attribute is what it discovered; when gdUnit4 stops at a failing
+    // below are. A suite's `tests` attribute is what it discovered. When gdUnit4 stops at a failing
     // case the cases after it are never written, so the attribute says nine while the body holds
     // two. Reporting the attribute as the count made one answer contradict itself, with the totals
     // saying two ran and the suite beside them saying nine tests and one failure, which reads as
@@ -600,7 +600,7 @@ export function scriptErrorsPrinted(printed: readonly string[]): ScriptError[] {
 
 /**
  * Where in [param printed] gdUnit4 listed the scripts it could not load, from its heading to the
- * last line of the list, with the errors read off it; null when it listed none.
+ * last line of the list, with the errors read off it. Null when it listed none.
  */
 export function discoveryListing(
   printed: readonly string[],
@@ -656,7 +656,7 @@ const PRINTED_ACTUAL = new RegExp(
 
 /**
  * A failing equality between two quoted values as the report writes it, a string's being a merged
- * diff; the error-message form is `assert_failure`'s `has_message` and its siblings.
+ * diff. The error-message form is `assert_failure`'s `has_message` and its siblings.
  */
 const QUOTED_EQUALITY = new RegExp(
   `^Expecting(?: error message)?:\\n '([\\s\\S]*)'\\n but was\\n '([\\s\\S]*)'(?:${IGNORING_CASE})?\\n\\tat `,
@@ -689,7 +689,7 @@ function unspelled(text: string): string {
  * marks are gone, and `actual` is the value the assertion found.
  *
  * A character on a red background is one the value lacked and one on green is one it had in
- * addition, told apart by which channel is the larger; the rest were in both. A marked character
+ * addition, told apart by which channel is the larger. The rest were in both. A marked character
  * that does not print, such as a line feed, is spelled out as "<LF>".
  */
 function readDiff(printed: string): { merged: string; actual: string } {
@@ -824,12 +824,12 @@ export interface FailedCase {
  * A case calling into a class that no longer compiled raised the same runtime error on every pass
  * of its loop: one case carried 2,062 reports, the same four errors about five hundred times each,
  * and a run of 125 such cases answered 18 MB on one line, which Claude Code refuses past 16 MB by
- * closing the connection, taking the call and every later tool with it. Folding takes such a case
- * to four; this bounds one whose reports all differ.
+ * closing the connection, and the call and every later tool go with it. Folding takes such a case
+ * to four. This bounds one whose reports all differ.
  */
 export const MOST_REPORTS_SHOWN = 20;
 
-/** The most characters of one report's detail an answer carries; the rest are counted. */
+/** The most characters of one report's detail an answer carries. The rest are counted. */
 export const LONGEST_DETAIL = 20_000;
 
 function shortened(detail: string | null): string | null {

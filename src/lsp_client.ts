@@ -86,7 +86,7 @@ export class LSPTimeout extends Error {
 const LANGUAGE_SERVER_START_MS = 30_000;
 const LANGUAGE_SERVER_RETRY_MS = 250;
 
-/** A port the connected editor names as its language server's, refusing past the wait for it. */
+/** The refusal for a port the connected editor names as its language server's, past the wait for it. */
 class LanguageServerNotListening extends Error {
   constructor(port: number, waitedMs: number) {
     super(
@@ -169,7 +169,7 @@ export class GodotLSPClient {
   private servedWorkspace: string | null = null;
   private diagnosticsWaiters = new Map<string, DiagnosticsWaiter>();
   private documentVersions = new Map<string, number>();
-  /** The last ask queued on each file, which the next one waits behind; see [withDocument]. */
+  /** The last ask queued on each file, which the next one waits behind. See [withDocument]. */
   private documentTurns = new Map<string, Promise<void>>();
 
   private readonly timeouts: LSPTimeouts;
@@ -451,7 +451,7 @@ export class GodotLSPClient {
   }
 
   /**
-   * Drop a connection whose framing has run away, naming the size that did it.
+   * Drop a connection whose framing has run away, and name the size that did it.
    *
    * Nothing downstream can recover from a stream this far out of step, and waiting quietly
    * for the rest of a body that is never coming is indistinguishable from an idle server.
@@ -1034,7 +1034,7 @@ function linesIn(content: string): number {
 /**
  * The last line [param whole], a protocol range, covers, counted from one, and no later than
  * [param lastOfDocument]. The end of a range is exclusive, so one at the start of a line ends on the
- * line before it; and Godot ends a script's own class a line past the file, so on a script of five
+ * line before it. Godot ends a script's own class a line past the file, so on a script of five
  * lines it said the class ended on line 7.
  */
 function lastLineOf(whole: JsonRecord, lastOfDocument: number): number | null {
@@ -1073,7 +1073,7 @@ function shownSymbol(entry: unknown, lastOfDocument: number): JsonRecord {
   };
 }
 
-/** The most completions one answer carries; the rest are counted. */
+/** The most completions one answer carries. The rest are counted. */
 const MOST_COMPLETIONS = 100;
 
 /**

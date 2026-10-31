@@ -22,7 +22,7 @@ export function currentRunner(): Runner {
 
 /** What a runner is typed as, which is the same line a config holds. */
 export function runLine(runner: Runner, version: string, rest = ''): string {
-  // `-y` is npm's "do not stop and ask before fetching this"; bunx has no such prompt.
+  // `-y` is npm's "do not stop and ask before fetching this". bunx has no such prompt.
   const flag = runner === 'npx' ? '-y ' : '';
   return `${runner} ${flag}gdharness@${version}${rest === '' ? '' : ` ${rest}`}`;
 }
@@ -34,7 +34,7 @@ export interface Spawn {
 }
 
 /**
- * What actually spawns [param runner] on this machine, preferring a path to a bare name.
+ * What actually spawns [param runner] on this machine. A path is preferred to a bare name.
  *
  * A harness spawns whatever a config names, and it spawns it the way the operating system does:
  * by name, through PATH. The runner's name is not always there. A Bun installed under a project
@@ -51,7 +51,7 @@ export interface Spawn {
  * then there is no path to know: somebody on Node asking for the bunx line gets the bunx line.
  *
  * **`--bun` on every Bun entry.** Our published bundles carry a Node shebang, because npx is Node
- * and that line has to work; a runner honours a shebang, so a plain `bun x` hands the file to
+ * and that line has to work. A runner honours a shebang, so a plain `bun x` hands the file to
  * whatever Node the machine happens to have. An entry naming a pinned Bun and then starting a
  * server under an unpinned Node is a config that says one thing and does another, and it makes
  * the runtime the server runs under depend on machine state. The flag says run it under the Bun

@@ -74,7 +74,7 @@ export function notListeningNote(
     greetedAgoMs !== null && greetedAgoMs < STARTING_MS
       ? ` The editor greeted ${Math.round(greetedAgoMs / 1000)}s ago, so ${down.length === 1 ? 'it' : 'they'} may still be starting: ask again in a few seconds.`
       : '';
-  // The adapter can be started again inside the editor; the language server starts once, on the
+  // The adapter can be started again inside the editor. The language server starts once, on the
   // editor's first frame after it is ready, and only a restart runs that again.
   const cures = [
     ...(servers.dap.listening === false

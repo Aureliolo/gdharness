@@ -192,7 +192,7 @@ function testRewritingLeavesNothingStaleBehind(): void {
 
 /**
  * Uninstalling has to leave the project as it found it. The shared directory is one gdharness
- * creates, so its husk goes too; a harness's own directory is that harness's, and stays.
+ * creates, so its husk goes too. A harness's own directory is that harness's, and stays.
  */
 function testRemovingTakesOurDirectoriesAndNobodyElses(): void {
   const root = project();

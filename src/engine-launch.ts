@@ -267,7 +267,7 @@ export function memoryRoomOf(free: number, commit: number | string | null): Memo
 
 /**
  * How much more Windows will commit, in bytes, which is what GlobalMemoryStatusEx answers as
- * ullAvailPageFile; null off Windows, or why Windows did not say.
+ * ullAvailPageFile. Null off Windows, or why Windows did not say.
  */
 export async function windowsCommitLeft(): Promise<number | string | null> {
   if (process.platform !== 'win32') {
@@ -329,7 +329,7 @@ export interface EngineLaunch {
 
 /**
  * [param command] and [param args] held to the first [param cores] processors on Linux, through
- * taskset, which execs the command in its own place so the pid is the engine's; as they are
+ * taskset, which execs the command in its own place so the pid is the engine's. As they are
  * elsewhere, since Windows holds a process through the helper and macOS cannot.
  */
 export function heldToCores(
@@ -352,7 +352,7 @@ export function heldToCores(
  * settings file.
  *
  * [param silenceIn] lengthens the silence for what was running as the engine fell silent, read from
- * what it had printed; it is asked only once a silence passes [param silenceSeconds], since the log
+ * what it had printed. It is asked only once a silence passes [param silenceSeconds], since the log
  * is read again each time.
  */
 export async function watchedEngine(

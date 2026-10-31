@@ -5,7 +5,7 @@
  */
 
 /**
- * An environment variable's value, treating the empty string as unset.
+ * An environment variable's value, with the empty string read as unset.
  *
  * A variable exported with nothing in it is how a shell says "not configured", and reading it
  * as a configured empty value picks a tool profile of "" or a page size that will not parse.
@@ -59,7 +59,7 @@ export interface RunOptions {
   readonly userArgs?: readonly string[];
   /** Engine flags, checked by [method engineFlags], which go before the `--`. */
   readonly engineArgs?: readonly string[];
-  /** Whether the run makes no sound; a headless one makes none whatever this says. */
+  /** Whether the run makes no sound. A headless one makes none whatever this says. */
   readonly silent?: boolean;
   /** Set for a window on the hidden desktop: whether the project caps its own frames. */
   readonly hiddenWindow?: { readonly projectCapsFrames: boolean };
@@ -74,7 +74,7 @@ export interface RunOptions {
  * presented every 500 ms, two frames a second, and a window that had presented one such frame kept
  * that pace after vsync was turned off as it ran. The boot splash presents before any script runs,
  * so only the command line can turn it off in time. The cap stands in for the refresh a display
- * would hold the game to; a cap does not wait on one.
+ * would hold the game to. A cap does not wait on one.
  */
 export function hiddenWindowFlags(engineArgs: readonly string[], projectCapsFrames: boolean): string[] {
   const capped = projectCapsFrames || engineArgs.includes('--max-fps');
@@ -104,7 +104,7 @@ export function resolveSilent(requested: unknown): boolean {
  * `--write-movie`, whose file the server holds to the rules a written capture is held to before the
  * run starts (`movieRefusal`). The command line also takes flags that run a script, open another
  * project, export or write files anywhere, and a tool that passed anything through would hand a
- * caller all of those; the flags this server sets itself (--headless, --path, --audio-driver,
+ * caller all of those. The flags this server sets itself (--headless, --path, --audio-driver,
  * --quit-after) are taken as the arguments that set them.
  */
 export const ENGINE_FLAGS: Readonly<Record<string, 'none' | FlagValue>> = Object.freeze({
@@ -258,7 +258,7 @@ export interface EditorPorts {
  * The engine's argument list for opening the editor on a project.
  *
  * Visible unless [param hidden]: the editor is the user's, and the owner wants one ordinary editor
- * on the desktop in use. Hidden is headless, for somebody who wants it gone entirely; a headless
+ * on the desktop in use. Hidden is headless, for somebody who wants it gone entirely. A headless
  * editor serves the bridge, the language server, the debug adapter and the games it plays as a
  * windowed one does, which is the editor the editor tests have always run. Pure for the same reason
  * as the rest of this file, since the editor is spawned detached and its argv appears in no tool's
@@ -270,7 +270,7 @@ export interface EditorPorts {
  *
  * The log file is the only way anything here can read what the editor prints. An editor's console
  * reaches no plugin, so the addon cannot scrape it, and an editor in self-contained mode writes no
- * log of its own; asking for one at the start is what makes `editor_output op: "editor"` possible
+ * log of its own. Asking for one at the start is what makes `editor_output op: "editor"` possible
  * at all, and only for an editor this server opened. Away from the project's own
  * `user://logs/godot.log` for the reason every other engine start here is: that file is rotated by
  * whichever process starts next, and a game would rotate it out from under the editor.
@@ -318,7 +318,7 @@ export function startedAs(commandLine: string): { hidden: boolean; silent: boole
 
 /**
  * [param line] split into its words: on white space outside double quotes, with the quotes taken
- * out. Windows reports a command line as the one string it was started with; the other platforms'
+ * out. Windows reports a command line as the one string it was started with. The other platforms'
  * readings arrive as words joined by spaces and have no quotes to take out.
  */
 function commandLineWords(line: string): string[] {

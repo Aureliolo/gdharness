@@ -644,7 +644,7 @@ const logText = fc
 
 /**
  * The pipe may cut the bytes anywhere, inside a line or inside a character, and the entries
- * are the same as if the whole text had arrived at once; every non-blank line lands in exactly
+ * are the same as if the whole text had arrived at once. Every non-blank line lands in exactly
  * one entry, and the severity counts add up to the entries.
  */
 function logsReadTheSameInAnyPieces(): void {

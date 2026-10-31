@@ -63,7 +63,7 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 		uids = _reread_changed_uids(filesystem)
 		# Files the caller has just written, moved or deleted, read again one by one. The scan finds
 		# a script that appeared and leaves the global class of one that has gone in the editor's
-		# list, which it then writes back into the class cache at a path that is not there; reading
+		# list, which it then writes back into the class cache at a path that is not there. Reading
 		# the gone path again is what drops it.
 		var named: Variant = args.get("updateFiles", [])
 		if named is Array:

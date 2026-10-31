@@ -14,7 +14,9 @@
 
 /** An empty dictionary with no prototype. */
 export function emptyRecord<T>(): Record<string, T> {
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Object.create(null) is an object with no keys, which every Record<string, T> type describes; the compiler types it any.
+  // Object.create(null) is an object with no keys, which every Record<string, T> type describes.
+  // The compiler types it any.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion
   return Object.create(null) as Record<string, T>;
 }
 

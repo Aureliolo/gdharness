@@ -316,7 +316,7 @@ export function everySkillDirectory(projectPath: string, harnesses: readonly Har
   return [...directories];
 }
 
-/** The skill taken out of wherever it was put, naming only what was actually there. */
+/** The skill taken out of wherever it was put. Only what was actually there is named. */
 export function removeSkill(directories: readonly string[], projectPath: string): readonly string[] {
   const removed: string[] = [];
   for (const directory of directories) {
@@ -354,7 +354,7 @@ export interface SkillWritten {
   readonly replaced: boolean;
 }
 
-/** The skill written into each directory, replacing any copy already there. */
+/** The skill written into each directory, over any copy already there. */
 export function writeSkill(directories: readonly string[], version: string): readonly SkillWritten[] {
   const files = skillFiles(version);
   return directories.map((directory) => {

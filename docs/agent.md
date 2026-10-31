@@ -4,8 +4,8 @@ For an agent. Version `{{version}}`. MCP server plus four Godot addons.
 
 ## Refuse
 
-- Starting a second Godot editor on a project that already has one. One server serves one editor;
-  another project wants its own server, which is its own session.
+- Starting a second Godot editor on a project that already has one. Each project has one server
+  for its one editor, in its own session.
 - Spawning an engine for anything a tool already does.
 - Reporting provenance as verified when no check ran.
 
@@ -16,7 +16,7 @@ godot --version   # >= 4.7.0
 node --version    # >= 22, for npx; or bun --version >= 1.4, for bunx
 ```
 
-Either runtime, not both. `setup` finds Godot itself; set `GODOT_PATH` to the binary if it is
+Either runtime, not both. `setup` finds Godot itself. Set `GODOT_PATH` to the binary if it is
 somewhere unusual.
 
 ## 2. Install
@@ -26,55 +26,63 @@ cd /absolute/path/to/project
 npx -y gdharness@{{version}} setup
 ```
 
-It installs the addons, enables the editor plugins, registers the runtime autoload, rebuilds the
-class list, writes the skill, and registers the server with the harnesses already set up in this
-project. It prints what it wrote and where. Anything it hands back as a command or a block to
+It installs the addons, enables the editor plugins and registers the runtime autoload. It also
+rebuilds the class list, writes the skill and registers the server with the harnesses this project
+already uses. It prints what it wrote and where. Anything it hands back as a command or a block to
 paste is yours to apply.
 
-Some harnesses want something from the reader after the file is written: a folder to trust, a
-server to trust, a toggle, a restart. `setup` prints that line under the harness it applies to.
-Pass it on rather than reporting the install as finished, because until it is done the config is
-written and nothing answers.
+Some harnesses want something from the reader after the file is written. That can be a folder to
+trust, a server to trust, a toggle or a restart. `setup` prints that line under the harness it
+applies to. Pass it on rather than reporting the install as finished. Until it is done, the config
+is written and nothing answers.
+
+### Outside the project
 
 **It writes nothing outside the project directory without a flag or an answered prompt.** Run from
-a pipe, as you are, it asks nothing: it writes the harnesses this project already uses and names
-the rest. Do not pass a machine-wide harness's flag on the reader's behalf, because it changes
-every other project they open with that harness. Report what it named and let them choose.
+a pipe, as you are, it asks nothing. It writes the harnesses this project already uses and names
+the rest. Do not pass a machine-wide harness's flag on the reader's behalf, since it changes every
+other project they open with that harness. Report what it named and let them choose.
 
-It also writes `.agents/skills/gdharness/`, the operating contract for this server in the format
-your harness reads, plus a copy in `.claude/skills`, `.kiro/skills` or `.cline/skills` for the
-three that do not read the shared directory. Read `SKILL.md` before your first tool call.
+### The skill and the flags
 
-`gdharness harnesses` lists every flag. `--no-connect` installs the addons and writes no config at
-all; `--no-skill` leaves the skill out; `--no-runtime` leaves the autoload out.
+It also writes `.agents/skills/gdharness/`, the operating contract for this server, in the format
+your harness reads. The three harnesses that do not read the shared directory get a copy in
+`.claude/skills`, `.kiro/skills` or `.cline/skills`. Read `SKILL.md` before your first tool call.
+
+`gdharness harnesses` lists every flag:
+
+- `--no-connect` installs the addons and writes no config at all.
+- `--no-skill` leaves the skill out.
+- `--no-runtime` leaves the autoload out.
 
 If this project generates its MCP config from a template, pass `--no-connect` and edit the
 template instead.
 
-The config carries `GODOT_PATH` and `GDHARNESS_PROJECT`, and nothing else is read from the
-environment. Every tool call carries its own `projectPath`. Reconnect the harness, then confirm the
-tools are listed.
+### The config and the autoload
+
+The config carries `GODOT_PATH` and `GDHARNESS_PROJECT`. Nothing else is read from the environment.
+Every tool call carries its own `projectPath`. Reconnect the harness, then confirm the tools are
+listed.
 
 The runtime autoload names `res://gdharness/loader.gd`, which setup writes. It brings the runtime up
-only in a debug build that has the addon, and does nothing in a release export or in a clone
-without `addons/`, so commit it with `project.godot` and leave it on. Without it, `runtime_*` has
-nothing to talk to.
+only in a debug build that has the addon. It does nothing in a release export or in a clone without
+`addons/`. Commit it with `project.godot` and leave it on. Without it, `runtime_*` has nothing to
+talk to.
 
 ## 3. Verify
 
 1. `editor_status` with nothing open: reports no editor, does not fail.
-2. Open the project in the editor. `editor_status`: `connected` true, `addonIsStale` false. If
-   `addonIsStale`, run `editor_launch restart`.
+2. Open the project in the editor. `editor_status` shows `connected` true and `addonIsStale`
+   false (when it is true, run `editor_launch restart`).
 3. `project_info`: returns the project name and main scene.
 4. `editor_run`, `editor_output`, `editor_run stop`.
 
 ## Updating
 
-The server tells you when there is a newer release: a tool answer carries an `update_available`
-block naming the version, its notes and the command. Tell the reader, and run it only with their
-agreement, because it replaces the addons in their project: a yes when asked, or a standing
-instruction of theirs to upgrade on every release. Afterwards the MCP server is reconnected and the
-editor restarted with `editor_launch restart`.
+When there is a newer release, a tool answer carries an `update_available` block. It names the
+version, its notes and the command. Tell the reader. Run the command only with their agreement,
+because it replaces the addons in their project. Agreement is a yes when asked, or a standing
+instruction of theirs to upgrade on every release.
 
 ```bash
 npx -y gdharness@<new> upgrade
@@ -109,26 +117,34 @@ browser lookup. If no check ran, say so rather than calling it verified.
 
 ## Rules
 
-- Use `editor_run start` / `editor_output` / `editor_run stop`. The editor plays the game, so its
-  debugger holds it, which is what the `debug_*` tools answer for.
-- Set breakpoints before running. They are waiting when it starts, and for every start after it
-  until `debug_breakpoint remove`, including through a reconnect: the start answer lists them.
-- A start says under `runtime` whether the game is something the `runtime_*` tools can talk to yet.
-  When it is not, read `mayYetAnnounce` before giving up: false is a runtime that is not coming,
-  true is a game still on its way up, and `runtimeWaitMs` waits longer on a project that boots slowly.
-  Until it announces, a `runtime_*` call naming no `projectPath` is refused by a server set up for a
-  project, and reaches whichever game is announced on a server set up for none; the note says which.
-  The server notes how long each game took to announce, so from the second start on a slow
-  project is waited for without being asked.
+- Use `editor_run start` / `editor_output` / `editor_run stop`. The editor plays the game, so the
+  `debug_*` tools can answer through its debugger.
+- Breakpoints set before running hold for every start until `debug_breakpoint remove`, reconnects
+  included. Each start answer lists them.
 - Read `editor_output` after every run.
 - Measure the running game: `runtime_inspect` for what is on screen, `runtime_invoke` for a value,
   `runtime_wait` instead of sleeping.
-- Colons in a property or method name reach through the objects a node holds, `_game:clock:speed`
-  to read or write one and `_game:run:advance` to call one, which is where a game keeps its state
-  and most of what it does. A step written as a call, `get_viewport():gui_get_focus_owner`, walks
-  into what a reading method returned, for the questions only a method answers, and an engine
-  method takes literal arguments in its brackets, `get_theme_constant("separation")`.
 - A refusal names the state it is in and what changes it. Read it rather than retrying.
+
+## When the runtime is not up yet
+
+- A start says under `runtime` whether the `runtime_*` tools can talk to the game yet.
+- When they cannot, read `mayYetAnnounce` before giving up. False is a runtime that is not coming,
+  true a game still on its way up.
+- `runtimeWaitMs` waits longer on a project that boots slowly. From the second start on, the server
+  waits for a slow project unasked, because it notes how long each game took to announce.
+- Until the game announces, a server set up for a project refuses a `runtime_*` call that names no
+  `projectPath`. A server set up for none sends it to whichever game is announced, and the note
+  says which.
+
+## Paths through objects
+
+- Colons in a property or method name reach through the objects a node holds, where a game keeps
+  its state and logic. So `_game:clock:speed` reads or writes one and `_game:run:advance` calls one.
+- A step written as a call, `get_viewport():gui_get_focus_owner`, walks into what a reading method
+  returned. It is for the questions only a method answers.
+- An engine method takes literal arguments in its brackets, as in
+  `get_theme_constant("separation")`.
 
 ## Reference
 
