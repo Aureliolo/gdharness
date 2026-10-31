@@ -3281,6 +3281,58 @@ function testAReferenceIsMissingOnlyWhereTheEngineMissesIt(godotPath: string, _p
 }
 
 /**
+ * A file claiming the uid of the one asked about is no use of it. A resource copied with its header
+ * declares the same uid, and the reverse walk answered the copy's header line as a use by path, of
+ * the original asked about the copy and of the copy asked about the original, while nothing said two
+ * files claimed one uid. An import sidecar claims a uid the same way.
+ */
+function testAFileClaimingTheSameUidIsNoUse(godotPath: string, _projectDir: string): void {
+  const dir = createProject(godotPath);
+  const operation = (name: string, params: unknown): unknown => runOperation(godotPath, dir, name, params);
+  try {
+    const look = '[gd_resource type="StyleBoxFlat" format=3 uid="uid://bl00kc0py5h4r"]\n\n[resource]\n';
+    writeFileSync(join(dir, 'look.tres'), look);
+    writeFileSync(join(dir, 'look_copy.tres'), look);
+    writeFileSync(join(dir, 'badge.png'), 'not read as an image here\n');
+    writeFileSync(
+      join(dir, 'badge.png.import'),
+      '[remap]\n\nimporter="texture"\ntype="CompressedTexture2D"\nuid="uid://bl00kc0py5h4r"\n',
+    );
+    writeFileSync(
+      join(dir, 'panel.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="StyleBox" uid="uid://bl00kc0py5h4r" path="res://look.tres" id="1_look"]\n\n[node name="Panel" type="PanelContainer"]\ntheme_override_styles/panel = ExtResource("1_look")\n',
+    );
+    for (const [asked, sharing] of [
+      ['res://look.tres', ['res://look_copy.tres', 'res://badge.png.import']],
+      ['res://look_copy.tres', ['res://look.tres', 'res://badge.png.import']],
+    ] as const) {
+      const used = operation('find_resource_usages', { resource_path: asked });
+      assert.deepEqual(
+        [
+          asArray(get(used, 'usages')).map((usage) => [
+            get(usage, 'file'),
+            asArray(get(usage, 'references')).map((reference) => get(reference, 'line')),
+          ]),
+          asArray(get(used, 'shares_uid'))
+            .map(String)
+            .sort((a, b) => a.localeCompare(b)),
+        ],
+        [[['res://panel.tscn', [3]]], [...sharing].sort((a, b) => a.localeCompare(b))],
+        `${asked}: used by the scene alone, with the files claiming its uid named apart: ${JSON.stringify(used)}`,
+      );
+    }
+    // A file whose uid nothing else claims answers no such list.
+    writeFileSync(join(dir, 'look_copy.tres'), '[gd_resource type="StyleBoxFlat" format=3]\n\n[resource]\n');
+    rmSync(join(dir, 'badge.png.import'));
+    const alone = operation('find_resource_usages', { resource_path: 'res://look.tres' });
+    assert.equal(get(alone, 'shares_uid'), undefined, JSON.stringify(alone));
+    assert.equal(get(alone, 'summary', 'in_code'), 1, JSON.stringify(alone));
+  } finally {
+    sweep(dir);
+  }
+}
+
+/**
  * A uid is followed to the file declaring it before the project has been imported, as on a fresh
  * clone or a CI checkout, where the engine has no uid cache until its first import.
  *
@@ -5809,6 +5861,7 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   importJudged: testAnImportIsJudgedByWhatItWasBuiltFrom,
   referencesMissing: testAReferenceIsMissingOnlyWhereTheEngineMissesIt,
   uidBeforeImport: testAUidIsFollowedBeforeAnyImport,
+  sharedUid: testAFileClaimingTheSameUidIsNoUse,
   autoloadUses: (godotPath) => {
     testAnAutoloadIsUsedByItsName(godotPath);
   },

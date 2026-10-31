@@ -16,8 +16,9 @@ const SETTLE_MS: int = 8000
 ## How long a window with nothing in it is walked before the client stops: a game building its tree
 ## fills the window within a few frames of being asked, and one building none never does.
 const EMPTY_MS: int = 4000
-## How long starting PowerShell and loading UI Automation may take before the client is stopped. It
-## waits on the machine alone: a warm start takes under a second, and a cold one on a loaded Windows
+## How long starting PowerShell, loading UI Automation and the client's other cold loads may take
+## before the client is stopped. It waits on the machine alone: a warm start takes under a second,
+## and a cold one on a loaded Windows
 ## runner took the whole of a single 23 s budget meant for the walk as well.
 const START_MS: int = 45000
 ## How long the walks may take beyond [constant SETTLE_MS] a window once UI Automation is loaded,
@@ -39,6 +40,7 @@ const NODE_ID: String = "_node_instance"
 const WALK: String = r"""
 $ErrorActionPreference = 'Stop'
 function Answer($value) {
+  Mark 'answering'
   [System.IO.File]::WriteAllText($Out, (ConvertTo-Json -InputObject $value -Depth 100 -Compress))
   Mark 'answered'
 }
@@ -48,7 +50,6 @@ function Mark($stage) {
 try {
   Mark 'began'
   Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
-  Mark 'loaded'
   $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
   function Patterned($element, $name) {
     $pattern = ("System.Windows.Automation.$($name)Pattern" -as [type])::Pattern
@@ -70,6 +71,10 @@ try {
   } catch {
     $script:unread = "$_"
   }
+  # Serialised once here, since the first ConvertTo-Json loads its serialiser, and on a loaded
+  # machine that cold load belongs to the start's budget, not to the walks'.
+  $null = ConvertTo-Json -InputObject @{ warm = @(1) } -Depth 100 -Compress
+  Mark 'loaded'
   function FullDescription($element) {
     if ($null -ne $script:unread) { return '' }
     try {
@@ -281,7 +286,9 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 	var looked_at: int = began_at
 	while OS.is_process_running(pid):
 		var now: int = Time.get_ticks_msec()
-		if now - looked_at >= LOOK_MS:
+		# Read again at the deadline too, so an answer marked since the last look is taken rather
+		# than stopped.
+		if now - looked_at >= LOOK_MS or now > deadline:
 			looked_at = now
 			var marked: String = FileAccess.get_file_as_string(progress)
 			if not walking and marked.contains("loaded "):
@@ -756,8 +763,8 @@ static func _marks(progress: String) -> Array:
 
 ## How far a client started at [param started_ms] and stopped at [param stopped_ms] got by the marks
 ## in [param progress], said for a caller whose read it stopped: the time went to starting
-## PowerShell, loading UI Automation, the walks, or after the last walk, and which tells a loaded
-## machine from a window that never answers.
+## PowerShell, loading UI Automation, the walks, after the last walk, or writing the answer, and
+## which tells a loaded machine from a window that never answers.
 static func _reached(progress: String, started_ms: int, stopped_ms: int) -> String:
 	var marks: Array = _marks(progress)
 	var at: Dictionary = {}
@@ -786,7 +793,7 @@ static func _reached(progress: String, started_ms: int, stopped_ms: int) -> Stri
 			)
 			% [began, loaded]
 		)
-	return (
+	var walked: String = (
 		(
 			"PowerShell began the client after %d ms and loaded UI Automation in %d ms, and the "
 			+ "windows were walked %d time%s, the last finding %s element%s and ending %d ms "
@@ -802,6 +809,10 @@ static func _reached(progress: String, started_ms: int, stopped_ms: int) -> Stri
 			stopped_ms - last_at,
 		]
 	)
+	if not at.has("answering"):
+		return walked
+	var answering: int = stopped_ms - at["answering"]
+	return walked + ", which had been writing the answer for %d ms" % answering
 
 
 ## Where the time of a client started at [param started_ms] and done at [param done_ms] went, by
