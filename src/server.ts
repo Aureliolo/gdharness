@@ -15027,12 +15027,26 @@ class GodotServer {
       return this.answer(created);
     }
     const rebuilt = await this.rebuildClassCache(project.value.path);
-    const registered =
-      cachedClasses(project.value.path)?.get(declared) === readString(created.payload, 'full_path');
+    const fullPath = readString(created.payload, 'full_path');
+    const registered = cachedClasses(project.value.path)?.get(declared) === fullPath;
+    // The engine that wrote the script compiled it against the list from before, which did not hold
+    // its class, so a script naming its own class (a static constructor returning one) read as one
+    // that does not parse.
+    const recompiled =
+      registered && created.payload['parses'] === false && fullPath !== undefined
+        ? await this.compileScripts(project.value.path, [fullPath])
+        : null;
+    const parsesOnTheList = recompiled?.ok === true && recompiled.payload.failed.length === 0;
     const answered = this.answer({
       ...created,
       payload: {
         ...created.payload,
+        ...(parsesOnTheList
+          ? {
+              parses: true,
+              parsesNote: `The engine that wrote it compiled it against the class list from before, which did not hold ${declared}, so the errors it printed naming ${declared} are its own and not the script's. An engine started on the rebuilt list compiles it.`,
+            }
+          : {}),
         registered,
         ...(registered
           ? {}
