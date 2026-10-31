@@ -126,7 +126,7 @@ import {
   walkStoppedPartWay,
 } from './engine-leaks.js';
 import { type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-run.js';
-import { type CallSlot, onTheSlot, slotForCall } from './engine-slots.js';
+import { type CallSlot, onTheSlot, slotEngineNamed, slotForCall } from './engine-slots.js';
 import { errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
 import { type DebugRequest, EVALUATE_MS, PAUSE_MS, READ_MS, STEP_MS } from './game-debugger.js';
@@ -11845,6 +11845,7 @@ class GodotServer {
     try {
       const run = this.spawnHeld(godotPath, cmdArgs, onTheSlot(env ?? process.env, held.lock), onDesktop);
       void run.settled.finally(held.release);
+      void slotEngineNamed(held.lock, run, onDesktop?.files.pid);
       return run;
     } catch (error) {
       held.release();
