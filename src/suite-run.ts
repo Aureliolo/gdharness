@@ -20,6 +20,7 @@ import {
 import { availableParallelism } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import process from 'node:process';
+import { setTimeout as delay } from 'node:timers/promises';
 import { cachedClasses, staleAgainst } from './class-cache.js';
 import {
   CONTROL_SEQUENCE,
@@ -34,6 +35,7 @@ import {
   plural,
   resPathOf,
   roomFor,
+  roomForAnother,
   SILENCE_FLOOR_SECONDS,
   sweepRunDirectories,
   versionNamed,
@@ -604,23 +606,32 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         `Windows did not say how much memory it can still commit (${memory.unread}), so engines are sized by the physical memory free.`,
       );
     }
-    const room =
+    const roomWith = (bytes: number): ReturnType<typeof roomFor> =>
       options.cores === null
-        ? roomFor(options.engines, availableParallelism(), memory.bytes, memory.said)
+        ? roomFor(options.engines, availableParallelism(), bytes, memory.said)
         : roomFor(
             options.engines,
             options.cores,
-            memory.bytes,
+            bytes,
             memory.said,
             `--cores holds it to ${plural(options.cores, 'processor')}`,
           );
+    const byMemory = roomWith(memory.bytes);
+    // What the processors leave room for. Memory held a run to the engines it had room for at the
+    // start for the whole of it, so one engine was dealt nearly everything while memory freed beside
+    // it; held by memory, the run is dealt for these and its engines start as memory has room.
+    const unheld = roomWith(Number.POSITIVE_INFINITY);
+    const unheldUnits = unitsOf(suites, times, splitPastFor(suites, times, unheld.engines));
+    const heldLanes = lanesOf(dealt(unheldUnits, declared, unheld.engines));
+    const memoryHeld = options.order === null && byMemory.engines < heldLanes;
+    const room = memoryHeld ? unheld : byMemory;
     if (options.cores !== null && process.platform === 'darwin') {
       console.log(
         'macOS offers no way to hold a process to some processors, so --cores holds only the number of engines here.',
       );
     }
     const splitPast = splitPastFor(suites, times, room.engines);
-    const units = unitsOf(suites, times, splitPast);
+    const units = memoryHeld ? unheldUnits : unitsOf(suites, times, splitPast);
     const past =
       splitPast > SPLIT_PAST_SECONDS
         ? `an engine's share of this run (${String(Math.round(splitPast))} s)`
@@ -690,18 +701,23 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       plans.flatMap((plan, index) => (plan.lane === lane ? [{ plan, index }] : [])),
     );
     // A slot for each lane, taken only where one is free now: what the run was dealt holds only when
-    // every lane starts at once.
+    // every lane starts at once. Held by memory, only the lanes memory has room for take one now, so
+    // a lane waiting for memory keeps no slot from anybody else.
+    const startable = memoryHeld ? Math.min(byMemory.engines, lanes.length) : lanes.length;
     const taken: string[] = [];
-    while (taken.length < lanes.length) {
+    while (taken.length < startable) {
       const lock = await slots.takeFree();
       if (lock === null) {
         break;
       }
       taken.push(lock);
     }
-    const shared = options.order === null && lanes.length > 1 && taken.length < lanes.length;
-    if (shared) {
-      say(sharesSaid(taken.length, lanes.length));
+    if (memoryHeld) {
+      say(memorySaid(byMemory.engines, lanes.length, byMemory.held ?? ''));
+    }
+    const shared = options.order === null && lanes.length > 1 && (memoryHeld || taken.length < lanes.length);
+    if (shared && taken.length < startable) {
+      say(sharesSaid(taken.length, startable));
     }
     // Once the lanes hold what slots were free, so it takes one only beside them.
     const handed = new HandedSlot();
@@ -709,7 +725,16 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     // Awaited after the suites; a run failing before then reports its own error, not this one too.
     compiling.catch(() => undefined);
     let ran = shared
-      ? await runShares(launch, units, declared, lanes.length, taken, times, handed)
+      ? await runShares(
+          launch,
+          units,
+          declared,
+          lanes.length,
+          taken,
+          times,
+          handed,
+          memoryHeld ? new MemoryGate(slots, async () => (await memoryAvailable()).bytes) : undefined,
+        )
       : (await Promise.all(lanes.map((lane, at) => runLane(launch, lane, times, taken[at] ?? null, handed))))
           .flat()
           .sort((a, b) => a.index - b.index);
@@ -776,6 +801,80 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
  */
 export function sharesSaid(free: number, lanes: number): string {
   return `${free === 0 ? 'None' : String(free)} of the ${String(lanes)} slots this run uses ${free === 1 ? 'was' : 'were'} free as it began, so its engines are handed the suites a share at a time as each starts, and an engine starts as each slot comes free.`;
+}
+
+/**
+ * What a run says when memory had room for [param room] of its [param lanes] engines at once as it
+ * began, for the reason [param held].
+ */
+export function memorySaid(room: number, lanes: number, held: string): string {
+  return `Memory had room for ${room === 1 ? 'one' : String(room)} of these ${String(lanes)} engines at once as the run began, since ${held}, so its engines are handed the suites a share at a time, and another starts whenever memory has room for it.`;
+}
+
+/** How often a share held back for memory reads it again. */
+const MEMORY_LOOK_MS = 2000;
+
+/**
+ * How long an engine is counted at its whole allowance against the memory read: one just started
+ * has yet to take what it will, so a reading then finds room for the next in what it is about to use.
+ */
+const ENGINE_SETTLING_MS = 30_000;
+
+/**
+ * Lets the engines of a run that memory held start one at a time while the machine has room for
+ * another, read again before each, so engines join as other work frees memory rather than the run
+ * keeping all its life the count it had room for as it began. The first engine of the run always
+ * starts, as a run held to one engine did. A wait keeps a mark in the slots, as a wait for a slot does.
+ */
+export class MemoryGate {
+  private readonly slots: Pick<EngineSlots, 'markWaiting'>;
+  private readonly read: () => Promise<number>;
+  private readonly now: () => number;
+  private readonly lookMs: number;
+  private readonly going = new Set<{ readonly at: number }>();
+  private turn: Promise<unknown> = Promise.resolve();
+
+  constructor(
+    slots: Pick<EngineSlots, 'markWaiting'>,
+    read: () => Promise<number>,
+    now: () => number = Date.now,
+    lookMs = MEMORY_LOOK_MS,
+  ) {
+    this.slots = slots;
+    this.read = read;
+    this.now = now;
+    this.lookMs = lookMs;
+  }
+
+  /** Waits until another engine has room, one caller at a time, and answers what to call once it ends. */
+  admit(signal: AbortSignal): Promise<() => void> {
+    const admitted = this.turn.then(() => this.room(signal));
+    this.turn = admitted.catch(() => undefined);
+    return admitted;
+  }
+
+  private async room(signal: AbortSignal): Promise<() => void> {
+    let unmark: (() => void) | undefined;
+    try {
+      for (;;) {
+        signal.throwIfAborted();
+        const at = this.now();
+        const starting = [...this.going].filter((one) => at - one.at < ENGINE_SETTLING_MS).length;
+        if (this.going.size === 0 || roomForAnother(await this.read(), starting)) {
+          break;
+        }
+        unmark ??= this.slots.markWaiting();
+        await delay(this.lookMs, undefined, { signal });
+      }
+    } finally {
+      unmark?.();
+    }
+    const engine = { at: this.now() };
+    this.going.add(engine);
+    return () => {
+      this.going.delete(engine);
+    };
+  }
 }
 
 /**
@@ -1088,9 +1187,11 @@ async function runLane(
 
 /**
  * Runs [param units] over [param lanes] lanes handed a share at a time (see [class Shares]), the
- * lanes holding the slots in [param taken] at once and the rest as slots come free. A lane still
+ * lanes holding the slots in [param taken] at once and the rest as slots come free, and each engine
+ * starting only once [param memory] has room for it when the run is held by memory. A lane still
  * waiting once every share is handed out stops waiting: a slot somebody else holds is not to keep a
- * run open that has nothing left to give it.
+ * run open that has nothing left to give it. Memory is waited for before a slot, so a lane waiting
+ * for it holds no slot from anybody else.
  */
 async function runShares(
   launch: Launch,
@@ -1100,35 +1201,50 @@ async function runShares(
   taken: readonly string[],
   times: SuiteTimes,
   handed?: HandedSlot,
+  memory?: MemoryGate,
 ): Promise<EngineRan[]> {
   const shares = new Shares(units, declared, lanes);
   const handedOut = new AbortController();
   let engines = 0;
+  // Asked through a call, since another lane empties it while this one waits.
+  const empty = (): boolean => shares.empty;
   const lane = async (at: number): Promise<EngineRan[]> => {
     let lock = taken[at] ?? null;
-    if (lock === null) {
-      try {
-        lock = await launch.slots.take(handedOut.signal);
-      } catch (error) {
-        if (handedOut.signal.aborted) {
-          return [];
-        }
-        throw error;
-      }
-    }
+    const ran: EngineRan[] = [];
     try {
-      const ran: EngineRan[] = [];
-      for (let plan = shares.next(at); plan !== null; plan = shares.next(at)) {
-        if (shares.empty) {
+      while (!empty()) {
+        let ended: (() => void) | undefined;
+        try {
+          ended = await memory?.admit(handedOut.signal);
+          lock ??= await launch.slots.take(handedOut.signal);
+        } catch (error) {
+          ended?.();
+          if (handedOut.signal.aborted) {
+            break;
+          }
+          throw error;
+        }
+        const plan = shares.next(at);
+        if (plan === null) {
+          ended?.();
+          break;
+        }
+        if (empty()) {
           handedOut.abort();
         }
         const index = engines;
         engines += 1;
-        ran.push(await runEngine(launch, plan, index, times, '', lock));
+        try {
+          ran.push(await runEngine(launch, plan, index, times, '', lock));
+        } finally {
+          ended?.();
+        }
       }
       return ran;
     } finally {
-      doneWith(launch, lock, handed);
+      if (lock !== null) {
+        doneWith(launch, lock, handed);
+      }
     }
   };
   return (await Promise.all(Array.from({ length: lanes }, (_, at) => lane(at))))

@@ -556,6 +556,19 @@ export class EngineSlots {
   }
 
   /**
+   * Puts down the mark of a wait for something other than a slot, memory for one, and answers what
+   * takes it up again, so a gate counting its own time reads that wait as held up by others too.
+   */
+  markWaiting(): () => void {
+    const mark = this.waitMarked();
+    return () => {
+      if (mark !== undefined && this.marks.delete(mark)) {
+        removeWhole(mark);
+      }
+    };
+  }
+
+  /**
    * Puts down the mark of a wait and answers its path, or undefined when it could not be made, which
    * the next look tries again.
    */

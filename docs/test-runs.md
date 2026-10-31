@@ -146,6 +146,14 @@ much is left, since every share starts an engine. The shares shrink as the work 
 freed partway through takes on part of what is left, rather than a part fixed when the run began.
 Once everything is handed out, the run stops waiting for slots.
 
+Memory is handed out the same way. When the memory free as a run begins holds it below the engines
+the processors allow, it is dealt for those engines, says how many memory had room for, and hands
+the work out a share at a time. Before each engine starts, the memory free is read again, and it
+starts when there is room for one more, counting each engine of the run started in the last 30
+seconds at its whole 1.5 GB, since it has yet to take it. The run's first engine always starts. A
+share waiting for memory keeps a mark in the slots' `waiting` folder as a wait for a slot does, and
+takes its slot only once memory has room, so it holds no slot from anybody else while it waits.
+
 ## What fails a run
 
 - A case that failed, or that failed and then passed on a retry.
