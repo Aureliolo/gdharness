@@ -46000,12 +46000,15 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
 async function testTakersWaitTheirTurn(): Promise<void> {
   assert.deepEqual(
     [...slotsClaimed([[3, 2], [3]], [2, 3])],
-    [3],
+    [[3, 0]],
     'the second wants only what the first took',
   );
   assert.deepEqual(
-    [...slotsClaimed([[3], [3, 2]], [2, 3])].sort((a, b) => a - b),
-    [2, 3],
+    [...slotsClaimed([[3], [3, 2]], [2, 3])].sort(([a], [b]) => a - b),
+    [
+      [2, 1],
+      [3, 0],
+    ],
     'each takes the first left to it',
   );
   assert.deepEqual([...slotsClaimed([[1]], [0])], [], 'one finding none of its own free takes none');
@@ -46025,6 +46028,7 @@ async function testTakersWaitTheirTurn(): Promise<void> {
     );
 
     const late = new EngineSlots(directory, 2, me, undefined, () => 'other');
+    const firstLeft = Date.now();
     const first = await late.takeFree();
     assert.equal(first, join(directory, '0.lock'), 'a newcomer leaves slot 1, the one ahead takes first');
     assert.equal(await late.takeFree(), null, 'and waits rather than take it');
@@ -46041,6 +46045,14 @@ async function testTakersWaitTheirTurn(): Promise<void> {
     assert.equal(await late.takeFree(false, 0, line), null, 'until it has left it for the yield');
     now += 1;
     assert.equal(await late.takeFree(false, 0, line), join(directory, '1.lock'), 'then takes it itself');
+    // A mark that let a slot left to it stand, as a wait for memory under an older release does.
+    late.release(join(directory, '1.lock'));
+    await delay(Math.max(0, firstLeft + SLOT_YIELD_MS - Date.now()));
+    assert.equal(
+      await late.takeFree(),
+      join(directory, '1.lock'),
+      'and the process leaves a waiter that let a slot stand no other',
+    );
     late.releaseAll();
 
     const timing = new EngineSlots(directory, 2, me, undefined, () => 'timing');

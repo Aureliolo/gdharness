@@ -282,18 +282,21 @@ export function slotWaiters(directory: string): SlotWaiter[] {
 }
 
 /**
- * The slots of [param open] the takers ahead take, in their order, given the slots each may take:
- * each takes the first open one of its own not taken by one before it, and one finding none takes
- * none.
+ * The slots of [param open] the takers ahead take, in their order, given the slots each may take,
+ * each with the place in [param ahead] of the one taking it: each takes the first open one of its
+ * own not taken by one before it, and one finding none takes none.
  */
-export function slotsClaimed(ahead: readonly (readonly number[])[], open: readonly number[]): Set<number> {
+export function slotsClaimed(
+  ahead: readonly (readonly number[])[],
+  open: readonly number[],
+): Map<number, number> {
   const left = new Set(open);
-  const taken = new Set<number>();
-  for (const numbers of ahead) {
+  const taken = new Map<number, number>();
+  for (const [at, numbers] of ahead.entries()) {
     const first = numbers.find((slot) => left.has(slot));
     if (first !== undefined) {
       left.delete(first);
-      taken.add(first);
+      taken.set(first, at);
     }
   }
   return taken;
@@ -629,6 +632,13 @@ export class EngineSlots {
   private readonly starts = new Map<number, { started: number | undefined; readAt: number }>();
   private readonly held = new Set<string>();
   private readonly marks = new Set<string>();
+  /**
+   * The waiting marks this process has left a free slot to, each with when it first did. One that
+   * lets a slot left to it stand {@link SLOT_YIELD_MS} is waiting for something else, a share or
+   * memory under a release whose marks named no kind, so no take of this process leaves it another:
+   * one such wait kept every short call of a server waiting 5 s for a slot that stood free.
+   */
+  private readonly passedOver = new Map<string, number>();
   /** The slot of the engine that started this process while one of its engines runs on it. */
   private inherited: string | null = null;
   /** The slots the last look could take, in the order it tried them, and what held it to them. */
@@ -764,10 +774,23 @@ export class EngineSlots {
     let tried = this.drawn.numbers;
     if (taker !== 'timing') {
       const placed = line ?? new SlotLine(taker, game);
-      tried = placed.admitted(
-        tried,
-        await this.claimedAhead(placed.ahead(slotWaiters(this.directory)), queued),
-      );
+      const now = Date.now();
+      const waiting = slotWaiters(this.directory);
+      for (const mark of this.passedOver.keys()) {
+        if (!waiting.some((one) => one.mark === mark)) {
+          this.passedOver.delete(mark);
+        }
+      }
+      const ahead = placed
+        .ahead(waiting)
+        .filter((one) => now - (this.passedOver.get(one.mark) ?? now) < SLOT_YIELD_MS);
+      const claims = await this.claimedAhead(ahead, queued);
+      for (const mark of claims.values()) {
+        if (!this.passedOver.has(mark)) {
+          this.passedOver.set(mark, now);
+        }
+      }
+      tried = placed.admitted(tried, new Set(claims.keys()));
       const left = placed
         .leaves()
         .filter((slot) => this.drawn.numbers.includes(slot) && !tried.includes(slot));
@@ -786,13 +809,16 @@ export class EngineSlots {
     return null;
   }
 
-  /** The free slots the takers [param ahead] take first, in their order: see {@link slotsClaimed}. */
+  /**
+   * The free slots the takers [param ahead] take first, in their order, each with the mark of the one
+   * taking it: see {@link slotsClaimed}.
+   */
   private async claimedAhead(
     ahead: readonly SlotWaiter[],
     queued: () => Promise<GateQueue>,
-  ): Promise<Set<number>> {
+  ): Promise<Map<number, string>> {
     if (ahead.length === 0) {
-      return new Set();
+      return new Map();
     }
     const open: number[] = [];
     for (let slot = 0; slot < this.count; slot += 1) {
@@ -802,7 +828,7 @@ export class EngineSlots {
       }
     }
     if (open.length === 0) {
-      return new Set();
+      return new Map();
     }
     const now = Date.now();
     const reserve = reservedSlotOf(this.count);
@@ -820,7 +846,9 @@ export class EngineSlots {
           : theirs.numbers,
       );
     }
-    return slotsClaimed(drawn, open);
+    return new Map(
+      [...slotsClaimed(drawn, open)].map(([slot, at]): [number, string] => [slot, ahead[at]?.mark ?? '']),
+    );
   }
 
   /**

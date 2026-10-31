@@ -432,7 +432,9 @@ the slots. A tool of a game's own that starts engines takes them the same way:
    naming no `since` waits since its file was made, and one naming another `taker` is `other`. Give
    each, in turn, the first free slot of those it may take now (below, aged by its own `since`) not
    given to one before it, and leave those slots alone. A slot you have left for 5 seconds you may
-   take, since one ahead takes a slot within a moment of its coming free. A timing leaves nothing.
+   take, since one ahead takes a slot within a moment of its coming free, and from then on leave
+   that waiter nothing: a mark that lets a slot stand waits for something else, as a wait for
+   memory under a release whose marks named no kind does. A timing leaves nothing.
 8. When done, remove the lock, but only if it still names your pid.
 9. At each take, remove every `<n>.lock` numbered at or past the slot count whose holder has gone,
    under its steal file as in step 4. Only a taker given more slots makes those, and no take of the
