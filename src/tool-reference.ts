@@ -79,7 +79,7 @@ function headlessSection(): string[] {
     '',
     '`scene_create`, `scene_node`, `scene_signal` and `resource_edit` go through the editor when one',
     'serves the project and through a headless engine when none does, so they need nothing open',
-    'either; a gate can call them, and the reads among them are the ones to gate on. Everything else',
+    'either. A gate can call them, and the reads among them are the ones to gate on. Everything else',
     'needs the editor (`editor_*`, `debug_*`, `scene_animation` but its reads) or a running game',
     '(`runtime_*`).',
     '',

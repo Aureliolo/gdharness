@@ -11,7 +11,9 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import { HARNESSES, harnessById } from '../src/harnesses.js';
+import { isRecord } from '../src/records.js';
 import {
   removeSkill,
   SHARED_SKILLS,
@@ -27,19 +29,20 @@ function project(): string {
   return mkdtempSync(join(tmpdir(), 'gdharness-skill-'));
 }
 
-/** The frontmatter, as the specification defines it rather than as YAML in general. */
+/**
+ * The frontmatter's top-level text fields, parsed as the YAML the format says it is. A reader
+ * splitting each line at its first colon passed a description holding a colon, which a YAML parser
+ * refuses.
+ */
 function frontmatter(text: string): Record<string, string> {
   assert.ok(text.startsWith('---\n'), 'the file opens with frontmatter');
   const end = text.indexOf('\n---\n', 4);
   assert.ok(end > 0, 'and the frontmatter is closed');
-  const fields: Record<string, string> = {};
-  for (const line of text.slice(4, end).split('\n')) {
-    const colon = line.indexOf(':');
-    if (colon > 0 && !line.startsWith(' ')) {
-      fields[line.slice(0, colon)] = line.slice(colon + 1).trim();
-    }
-  }
-  return fields;
+  const parsed: unknown = parseYaml(text.slice(4, end));
+  assert.ok(isRecord(parsed), `the frontmatter is a mapping: ${JSON.stringify(parsed)}`);
+  return Object.fromEntries(
+    Object.entries(parsed).flatMap(([key, value]) => (typeof value === 'string' ? [[key, value]] : [])),
+  );
 }
 
 function testTheSkillMeetsTheFormat(): void {
