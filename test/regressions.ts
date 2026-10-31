@@ -125,6 +125,7 @@ import {
   keptSlotsOf,
   lockIsFree,
   machineSlots,
+  nameSlotEngine,
   ownStart,
   QUEUED_FOLDER,
   inAGate as runsInAGate,
@@ -132,6 +133,7 @@ import {
   SHARE_VARIABLE,
   type SlotHolder,
   START_TOLERANCE_MS,
+  slotEngineNamed,
   slotsDrawnOn,
   slotTaker,
   slotWaitedSaid,
@@ -13950,6 +13952,9 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
         'func _ready() -> void:',
         '\tif "--restarted" in OS.get_cmdline_user_args():',
         '\t\tprint("the successor is up")',
+        '\t\tvar lock := FileAccess.open("res://successor_lock", FileAccess.WRITE)',
+        '\t\tlock.store_string(OS.get_environment("GODOT_ENGINE_HELD"))',
+        '\t\tlock.close()',
         '\t\tvar mark := FileAccess.open("res://successor_pid", FileAccess.WRITE)',
         '\t\tmark.store_string(str(OS.get_process_id()))',
         '\t\tmark.close()',
@@ -14071,6 +14076,17 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
       `the run goes on in the successor: ${going.said}${get(going.answer, 'running') === true ? '' : searched()}`,
     );
     assert.equal(get(going.answer, 'pid'), one.successor, going.said);
+    // The slot its keeper holds names the successor as its engine, so what it starts rides it.
+    const successorLock = readFileSync(join(project, 'successor_lock'), 'utf8');
+    const lockEngine = (): number | undefined => {
+      try {
+        return holderOf(readFileSync(successorLock, 'utf8'))?.engine?.pid;
+      } catch {
+        return undefined;
+      }
+    };
+    await cameTrue(() => lockEngine() === one.successor, 10_000);
+    assert.equal(lockEngine(), one.successor, `the slot names the successor: ${successorLock}`);
     assert.deepEqual(
       asArray(get(going.answer, 'restartedFrom')).map((before) => [
         get(before, 'pid'),
@@ -29872,6 +29888,22 @@ async function testAnEngineRunSaysHowItEnded(): Promise<void> {
     'and stdout to its end',
   );
 
+  // The lock it runs on names this process as its holder and the engine beside it, so what the
+  // engine starts runs on its slot.
+  const naming = await node(
+    "const fs = require('fs'); const lock = process.env.GODOT_ENGINE_HELD; const from = Date.now(); const look = () => { const held = JSON.parse(fs.readFileSync(lock, 'utf8')); if (held.engine !== undefined || Date.now() - from > 20000) { console.log(JSON.stringify({ pid: process.pid, held })); } else { setTimeout(look, 50); } }; look();",
+  );
+  const named = JSON.parse(naming.log.all.at(-1)?.text ?? '{}') as unknown;
+  assert.deepEqual(
+    [
+      get(named, 'held', 'pid'),
+      get(named, 'held', 'engine', 'pid'),
+      typeof get(named, 'held', 'engine', 'started'),
+    ],
+    [process.pid, get(named, 'pid'), 'number'],
+    `the lock names the engine it runs: ${JSON.stringify(named)}`,
+  );
+
   const three = await node('process.exit(3)');
   assert.deepEqual(
     [three.exitCode, three.exitSignal, three.failure, howItEnded(three)],
@@ -45535,18 +45567,44 @@ async function testAnEngineOnASlotLendsItToWhatItStarts(): Promise<void> {
     [7, { parent: 8, command: 'C:\\Godot\\Godot.exe --path C:\\game res://main.tscn' }],
     [5, { parent: 1, command: 'claude' }],
   ]);
-  assert.equal(inheritsSlot(tree, 10, 8, 'bun.exe'), true, "past its own launcher, the engine's slot");
-  assert.equal(inheritsSlot(tree, 9, 8, 'bun'), true, 'and its launcher too');
-  assert.equal(inheritsSlot(tree, 7, 8, 'Godot.exe'), false, 'not a game the editor plays');
-  assert.equal(inheritsSlot(tree, 10, 5, 'bun.exe'), false, 'nor a holder further up');
-  assert.equal(inheritsSlot(tree, 5, 8, 'claude'), false, 'nor one not above it');
+  const held = (pid: number): { pid: number } => ({ pid });
+  assert.equal(inheritsSlot(tree, 10, held(8), 'bun.exe'), true, "past its own launcher, the engine's slot");
+  assert.equal(inheritsSlot(tree, 9, held(8), 'bun'), true, 'and its launcher too');
+  assert.equal(inheritsSlot(tree, 7, held(8), 'Godot.exe'), false, 'not a game the editor plays');
+  assert.equal(inheritsSlot(tree, 10, held(5), 'bun.exe'), false, 'nor a holder further up');
+  assert.equal(inheritsSlot(tree, 5, held(8), 'claude'), false, 'nor one not above it');
+
+  // A keeper holds the slot for its game, through a desktop helper, and names the game beside it.
+  const kept: ProcessTree = new Map([
+    [10, { parent: 9, command: '"C:\\tools\\Bun.exe" x gdharness test', startedAt: 9_000 }],
+    [9, { parent: 8, command: 'bun run test', startedAt: 8_000 }],
+    [8, { parent: 6, command: 'C:\\Godot\\Godot.exe --path C:\\game', startedAt: 5_000 }],
+    [7, { parent: 8, command: 'C:\\Godot\\Godot.exe --path C:\\game res://main.tscn', startedAt: 6_000 }],
+    [6, { parent: 4, command: 'powershell.exe -File helper.ps1', startedAt: 4_500 }],
+    [4, { parent: 1, command: 'node keeper.js keep', startedAt: 4_000 }],
+  ]);
+  const keeper = (started: number): SlotHolder => ({ pid: 4, started: 4_000, engine: { pid: 8, started } });
+  assert.equal(inheritsSlot(kept, 10, keeper(5_000), 'bun.exe'), true, 'the engine the lock names');
+  assert.equal(inheritsSlot(kept, 10, keeper(6_900), 'bun.exe'), true, 'with a start inside the tolerance');
+  assert.equal(inheritsSlot(kept, 10, keeper(65_000), 'bun.exe'), false, 'not a later process on its pid');
+  assert.equal(inheritsSlot(kept, 7, keeper(5_000), 'Godot.exe'), false, 'nor a game the engine plays');
+  assert.equal(inheritsSlot(kept, 10, held(4), 'bun.exe'), false, 'nor the keeper with no engine named');
+  const undated: ProcessTree = new Map(
+    [...kept].map(([pid, { parent, command }]) => [pid, { parent, command }]),
+  );
+  assert.equal(
+    inheritsSlot(undated, 10, keeper(5_000), 'bun.exe'),
+    false,
+    'an engine with no start lends nothing',
+  );
+  assert.equal(inheritsSlot(undated, 10, keeper(5_000), 'bun.exe', 5_000), true, 'and one read apart does');
 
   // The wiring, judged by the rule above: a lock naming the nearest process above this one on
   // another executable, read from the variable, lent to one engine and never given back.
   const listed = await processTree();
   assert.ok(listed !== undefined, whyTheProcessTreeFailed() ?? 'the process table');
   const above = ancestorsIn(listed, process.pid, 1).find((pid) =>
-    inheritsSlot(listed, process.pid, pid, basename(process.execPath)),
+    inheritsSlot(listed, process.pid, held(pid), basename(process.execPath)),
   );
   assert.ok(above !== undefined, 'a process above this one on another executable');
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-slots-'));
@@ -45589,6 +45647,64 @@ async function testAnEngineOnASlotLendsItToWhatItStarts(): Promise<void> {
       process.env['GODOT_ENGINE_HELD'] = strangers;
       const other = new EngineSlots(directory, 2, holder, undefined, () => 'other');
       assert.equal(await other.takeFree(), null, "a live stranger's slot is not lent, and the other is held");
+
+      // The same holder naming the process above this one as the engine it holds the slot for, as
+      // a keeper names its game: lent, and left as the holder wrote it.
+      assert.equal(
+        nameSlotEngine(strangers, strangerPid, { pid: above, started: aboveStarted ?? 0 }),
+        true,
+        'named by its holder',
+      );
+      assert.equal(
+        nameSlotEngine(strangers, process.pid, { pid: 1, started: 0 }),
+        false,
+        'and by nobody else',
+      );
+      const engineOf = new EngineSlots(directory, 2, holder, undefined, () => 'other');
+      assert.equal(await engineOf.takeFree(), strangers, 'the slot of the engine the lock names');
+      engineOf.releaseAll();
+      assert.deepEqual(
+        holderOf(readFileSync(strangers, 'utf8')),
+        {
+          pid: strangerPid,
+          started: (await startTimesOf([strangerPid])).get(strangerPid),
+          engine: { pid: above, started: aboveStarted },
+        },
+        'kept by its holder, naming its engine',
+      );
+
+      // An engine a desktop helper starts is named from the pid file the helper writes, once written.
+      const own = join(directory, 'own.lock');
+      writeFileSync(own, JSON.stringify(holder));
+      const pidFile = join(directory, 'pid');
+      let settle = (): void => undefined;
+      const settled = new Promise<void>((resolveSettled) => {
+        settle = resolveSettled;
+      });
+      const naming = slotEngineNamed(own, { pid: null, settled }, pidFile);
+      // Settled whatever is asserted, so a lookup that never names anything still ends.
+      try {
+        await delay(300);
+        assert.equal(holderOf(readFileSync(own, 'utf8'))?.engine, undefined, 'nothing named before the pid');
+        writeFileSync(pidFile, `${String(strangerPid)}\n`);
+        await Promise.race([naming, delay(10_000)]);
+        assert.deepEqual(
+          holderOf(readFileSync(own, 'utf8'))?.engine,
+          { pid: strangerPid, started: (await startTimesOf([strangerPid])).get(strangerPid) },
+          'the engine the helper started',
+        );
+      } finally {
+        settle();
+      }
+      rmSync(pidFile);
+      const unnamed = join(directory, 'unnamed.lock');
+      writeFileSync(unnamed, JSON.stringify(holder));
+      await slotEngineNamed(unnamed, { pid: null, settled: Promise.resolve() }, pidFile);
+      assert.equal(
+        holderOf(readFileSync(unnamed, 'utf8'))?.engine,
+        undefined,
+        'and none for a run that ended first',
+      );
     } finally {
       stranger.kill();
     }
@@ -48028,6 +48144,12 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
         true,
         `and says it is a game's, which games share a cap on: ${JSON.stringify(keeper)}`,
       );
+      // And names the game as the engine on it, so what the game starts runs on its slot.
+      assert.deepEqual(
+        keeper.engine,
+        { pid: game, started: (await startTimesOf([game])).get(game) },
+        `and names the game as its engine: ${JSON.stringify(keeper)}`,
+      );
       // A wait behind it named the keeper's pid as the game's, which editor_status never listed.
       assert.equal(
         slotWaitSaid(0, 1, 'slots', [keeper]),
@@ -49345,6 +49467,40 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     // One suite needs one engine, so even a runner short of memory has nothing to say of its room.
     assert.match(stood.said, /^1 test function in 1 suite over 1 engine\.$/m, stood.said);
     assert.doesNotMatch(stood.said, /windowed|with a window/, stood.said);
+
+    // The lock a suite's engine runs on names that engine beside the process holding it, so what
+    // the engine starts runs on its slot rather than taking a second.
+    writeTree(project, {
+      'tests/slot_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        'func test_slot() -> void:',
+        '\tvar lock: String = OS.get_environment("GODOT_ENGINE_HELD")',
+        '\tvar held: Variant = null',
+        '\tfor _look: int in 200:',
+        '\t\tvar parsed: Variant = JSON.parse_string(FileAccess.get_file_as_string(lock))',
+        '\t\tif parsed is Dictionary and (parsed as Dictionary).has("engine"):',
+        '\t\t\theld = parsed',
+        '\t\t\tbreak',
+        '\t\tawait get_tree().create_timer(0.1).timeout',
+        '\tvar seen: FileAccess = FileAccess.open("res://slot_seen.json", FileAccess.WRITE)',
+        '\tseen.store_string(JSON.stringify({"pid": OS.get_process_id(), "held": held}))',
+        '\tseen.close()',
+        '',
+      ].join('\n'),
+    });
+    const onSlot = test('tests/slot_test.gd');
+    for (const made of ['slot_test.gd', 'slot_test.gd.uid']) {
+      rmSync(join(project, 'tests', made), { force: true });
+    }
+    assert.equal(onSlot.status, 0, onSlot.said);
+    const seen = JSON.parse(readFileSync(join(project, 'slot_seen.json'), 'utf8')) as unknown;
+    rmSync(join(project, 'slot_seen.json'));
+    assert.deepEqual(
+      [get(seen, 'held', 'engine', 'pid'), get(seen, 'held', 'pid') === get(seen, 'pid')],
+      [get(seen, 'pid'), false],
+      `the lock names the suite's engine beside its holder: ${JSON.stringify(seen)}`,
+    );
 
     const windowed = windowedRunRefused();
     if (windowed === null) {

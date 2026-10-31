@@ -7,7 +7,7 @@
  */
 
 import { callSignal } from './call-signal.js';
-import { inASlot, onTheSlot } from './engine-slots.js';
+import { inASlot, nameSlotEngineOf, onTheSlot } from './engine-slots.js';
 import { GameLog } from './game-log.js';
 import { spawnHidden } from './spawn.js';
 
@@ -65,6 +65,11 @@ function runStarted(
       env: onTheSlot(process.env, lock),
       ...(signal === undefined ? {} : { signal }),
     });
+    // The lock names this process, and what the engine starts runs on its slot only when it names
+    // the engine too.
+    if (child.pid !== undefined) {
+      void nameSlotEngineOf(lock, process.pid, child.pid);
+    }
     child.stdout.on('data', (chunk: Buffer) => {
       log.append('stdout', chunk);
     });
