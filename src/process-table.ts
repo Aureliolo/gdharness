@@ -289,6 +289,30 @@ public static class GdhProcessTable
         return "";
     }
 
+    /// <summary>"pid seconds" on a line for each running one of the comma-separated pids, from one snapshot.</summary>
+    public static string ProcessorSecondsOf(string pids)
+    {
+        HashSet<int> wanted = new HashSet<int>();
+        foreach (string one in pids.Split(','))
+        {
+            int pid;
+            if (int.TryParse(one, NumberStyles.Integer, CultureInfo.InvariantCulture, out pid))
+            {
+                wanted.Add(pid);
+            }
+        }
+        StringBuilder said = new StringBuilder();
+        foreach (Entry entry in Snapshot())
+        {
+            if (wanted.Contains(entry.Pid))
+            {
+                said.Append(Number(entry.Pid)).Append(' ')
+                    .Append((entry.Processor / 1e7).ToString("R", CultureInfo.InvariantCulture)).Append('\n');
+            }
+        }
+        return said.ToString();
+    }
+
     /// <summary>How many more bytes Windows will commit.</summary>
     public static string CommitLeft()
     {
