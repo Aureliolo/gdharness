@@ -25535,6 +25535,13 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         'func shared() -> String:',
         '\treturn "base"',
         '',
+        '',
+        'enum BaseKind { ONE, TWO }',
+        '',
+        '',
+        'class BaseCorner:',
+        '\tvar radius: float = 0.0',
+        '',
       ].join('\n'),
     );
     // Two levels, so the walk has to keep going after the first base rather than stopping at it.
@@ -25870,6 +25877,18 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         named(all, 'constants'),
         [['BASE_MAX', 'res://base.gd']],
         `and the constants: ${JSON.stringify(all)}`,
+      );
+      // A subclass reaches its bases' enums and inner classes by their bare names, as it does
+      // their constants.
+      assert.deepEqual(
+        named(all, 'enums'),
+        [['BaseKind', 'res://base.gd']],
+        `and the enums: ${JSON.stringify(all)}`,
+      );
+      assert.deepEqual(
+        named(all, 'inner_classes'),
+        [['BaseCorner', 'res://base.gd']],
+        `and the inner classes: ${JSON.stringify(all)}`,
       );
 
       // Asked of the engine rather than guessed from the name. The whole table, because the claim
