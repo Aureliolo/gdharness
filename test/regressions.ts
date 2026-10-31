@@ -49343,6 +49343,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
           'const GDHARNESS_NEEDS_WINDOW: bool = true',
           '',
           'var drawn: int = 0',
+          'var drawn_waiting: int = 0',
           '',
           '',
           `func test_${name}() -> void:`,
@@ -49353,17 +49354,32 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
           '\t\tassert_int(DisplayServer.window_get_vsync_mode()).is_equal(DisplayServer.VSYNC_DISABLED)',
           `\t\tassert_int(Engine.max_fps).is_equal(${String(HIDDEN_WINDOW_FPS)})`,
           // In seconds rather than frames: on macOS the minimise and the way back are animations.
+          '\tvar waiting: Callable = func() -> void: drawn_waiting += 1',
+          '\tRenderingServer.frame_post_draw.connect(waiting)',
           '\tawait get_tree().create_timer(1.5).timeout',
+          '\tRenderingServer.frame_post_draw.disconnect(waiting)',
           '\tassert_int(DisplayServer.window_get_mode()).is_not_equal(DisplayServer.WINDOW_MODE_MINIMIZED)',
           '\tvar counted: Callable = func() -> void: drawn += 1',
           '\tRenderingServer.frame_post_draw.connect(counted)',
           // Godot skips drawing while the desktop reports none of its windows can be seen, as macOS
-          // does for a window every other one covers, so a failure names the window's state.
+          // does for a window every other one covers, so a failure names the window's state: on the
+          // macOS leg a maximised, unfocused window drew nothing, and whether it drew while it came
+          // back, with where it sat on the screen, tells a covered window from one never shown.
           '\tvar until: int = Time.get_ticks_msec() + 500',
           '\twhile Time.get_ticks_msec() < until:',
           '\t\tawait get_tree().process_frame',
           '\tRenderingServer.frame_post_draw.disconnect(counted)',
-          '\tvar state: String = "window mode %d, focused %s" % [DisplayServer.window_get_mode(), DisplayServer.window_is_focused()]',
+          '\tvar state: String = (',
+          '\t\t"window mode %d, focused %s, %d frames drawn in the 1.5 s before, at %s size %s on a usable screen of %s"',
+          '\t\t% [',
+          '\t\t\tDisplayServer.window_get_mode(),',
+          '\t\t\tDisplayServer.window_is_focused(),',
+          '\t\t\tdrawn_waiting,',
+          '\t\t\tDisplayServer.window_get_position(),',
+          '\t\t\tDisplayServer.window_get_size(),',
+          '\t\t\tDisplayServer.screen_get_usable_rect(),',
+          '\t\t]',
+          '\t)',
           '\tassert_int(drawn).override_failure_message("no frame was drawn in 0.5 s, %s" % state).is_greater(0)',
           '',
         ].join('\n');
