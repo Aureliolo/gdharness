@@ -36,12 +36,16 @@ command line itself is wrong.
   holds only the number of engines.
 - `--tests DIR`: where to look for suites, `tests` and `test` by default. May be given more than
   once.
-- `--import`: import the project in an engine of its own before the suites. A project that has
-  never been imported, with no class cache, is imported first without it.
+- `--import`: import the project in an engine of its own before the suites. Without it, a project
+  is still imported first when no suite could run in it as it stands: it has no class cache, it
+  holds a `.gdextension` and no `.godot/extension_list.cfg` (as `gdharness setup` leaves it, which
+  writes the class cache without importing), or the cache does not list a class a script declares
+  where the script declares it.
 - `--order reversed` or `--order SEED`: every suite in one engine, in reverse order of path or
   shuffled by a number, to find suites that depend on the order they run in.
 - `--changed-only`: leave out the suites that passed on exactly the files their engine loaded, all
-  of them unchanged. Every script is still compiled together.
+  of them unchanged. Every script is still compiled together, unless they compiled together
+  cleanly on the same files last time.
 - `--reach-also PATH`: a file every suite depends on, for `--changed-only`. May be given more than
   once.
 - `--print-output`: print everything each engine printed, before the verdict, as for a benchmark
@@ -146,6 +150,14 @@ much is left, since every share starts an engine. The shares shrink as the work 
 freed partway through takes on part of what is left, rather than a part fixed when the run began.
 Once everything is handed out, the run stops waiting for slots.
 
+Memory is handed out the same way. When the memory free as a run begins holds it below the engines
+the processors allow, it is dealt for those engines, says how many memory had room for, and hands
+the work out a share at a time. Before each engine starts, the memory free is read again, and it
+starts when there is room for one more, counting each engine of the run started in the last 30
+seconds at its whole 1.5 GB, since it has yet to take it. The run's first engine always starts. A
+share waiting for memory keeps a mark in the slots' `waiting` folder as a wait for a slot does, and
+takes its slot only once memory has room, so it holds no slot from anybody else while it waits.
+
 ## What fails a run
 
 - A case that failed, or that failed and then passed on a retry.
@@ -206,8 +218,8 @@ it, its last 60 lines. The engine's whole output stays in
 `.godot/gdharness/test-runs/<start>-<pid>/engine-<n>/engine.log`, which the output names and which
 opens with the engine's verdict, so the file says why even for an engine that printed nothing. A
 project that is a worktree of another checkout has the logs of a failed run copied to the same place
-under the main checkout, and the output names the copy, since a gate running in a worktree of the
-commit removes the worktree once the run ends. Before
+under the main checkout, and the output names the copy and then the worktree's own, since a gate
+running in a worktree of the commit removes the worktree once the run ends. Before
 the verdict, a run over several engines says what each took beside what it was dealt, so an uneven
 deal is told from a slow suite, and a run of several suites names its five slowest. The last lines
 count the problems and name the run's directory. A run that passes leaves no logs. A failed run
@@ -321,7 +333,10 @@ a time, and those runs are the ones judged. One that fails again is headed as ru
 `--changed-only` leaves out every suite that passed last time on inputs that are all unchanged, and
 runs the rest. A gate can pass it: a suite is left out only when the files it ran on are the same
 to the byte, and every script is still compiled together in an engine of its own, so a script that
-no longer compiles fails the run even when every suite is left out.
+no longer compiles fails the run even when every suite is left out. That engine is left out too when
+the suites and every class the cache lists, with all they reach, are the same to the byte as when
+they last compiled together cleanly, so a run with nothing to run takes no engine slot and waits for
+none.
 
 A suite's inputs are what its engine recorded for it as the run went: its own script, what the
 autoloads loaded, every path a loader was asked for while the suite ran, and every project script
@@ -428,16 +443,21 @@ and an empty `<its ticket>.json.seated` beside it once it has its seat. A mark i
 lock is held by; one not yet written names nobody and is passed over, and one whose holder has gone
 is removed with its `.seated` file.
 
-- A gate's engine takes only the slots below `count - 2`, and slot 0 at least, whatever the queue
+The last `kept = max(2, floor(count / 4))` slots are kept for engines outside a gate: 4 of 16. The
+first of them, `count - kept`, is a gate's own steps' (`GATE_KEPT`, one slot).
+
+- A gate's engine takes only the slots below `count - kept`, and slot 0 at least, whatever the queue
   holds. A process runs inside a gate when `GODOT_ENGINE_SHARE` and `GODOT_ENGINE_SHARE_COUNT` are
-  both set.
+  both set. A gate's seat counts only these slots, so work in the kept ones never holds a seat back.
 - A timing's engine, one with `GODOT_ENGINE_TIMED` set, takes any slot.
 - Any other engine takes any slot while no mark is live.
 - While a mark is live, a gate's own step outside its seat, one with `GODOT_ENGINE_TIER` set
-  (`fast` or `full`), takes the last two slots, `count - 2` first.
-- Any other engine then takes no slot while a live mark has no `.seated` file, and waits; and only
-  the last slot, `count - 1`, while every live mark is seated, `count - 2` being the gates' own
-  steps'.
+  (`fast` or `full`), takes the kept slots, `count - kept` first.
+- Any other engine then takes the kept slots but the gate's own steps' one, the highest first.
+- A game editor_run started is one of those, and its lock carries `"game": true`, kept when its
+  keeper takes it over. While a mark is live, games hold at most
+  `min(floor(kept / 2), kept - GATE_KEPT - 1)` of the kept slots between them: 2 of 16. Past that a
+  game's start waits, so a short headless call always has a slot no running game can take.
 
 An engine outside a gate tries the highest-numbered slot first, a gate's own step excepted, so the
 gates' slots stay free longest. Which slots a take may try is asked again at every look, and a slot

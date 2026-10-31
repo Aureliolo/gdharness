@@ -22,7 +22,7 @@ import {
 } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { availableParallelism, homedir, tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
@@ -119,8 +119,10 @@ import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
 import {
   EngineSlots,
   FolderChanges,
+  gamesKeptOf,
   holderOf,
   inheritsSlot,
+  keptSlotsOf,
   lockIsFree,
   machineSlots,
   ownStart,
@@ -444,6 +446,9 @@ import {
 } from '../src/suite-plan.js';
 import {
   importFault,
+  importNeeded,
+  MemoryGate,
+  memorySaid,
   type RunResult,
   reportsFault,
   roomSaid,
@@ -27247,7 +27252,9 @@ async function testAHeldScratchDirectoryGoesOnceLetGo(): Promise<void> {
  * for real, as the scratch directory case holds a file: on Windows a process with it open and
  * shared with nobody, elsewhere its permissions taken away and given back by another process,
  * since this read blocks the thread a timer of its own would need. A plain read during the hold has
- * to be refused, or the case has shown nothing about the wait.
+ * to be refused, or the case has shown nothing about the wait. The holder lets go once a file it
+ * looks for every 10 ms appears, written just before the read: a hold of 400 ms on its own timer
+ * ran past the read's whole second on a loaded Windows runner.
  */
 async function testAClassCacheHeldShutIsReadOnceLetGo(): Promise<void> {
   if (process.platform !== 'win32' && process.getuid?.() === 0) {
@@ -27261,6 +27268,7 @@ async function testAClassCacheHeldShutIsReadOnceLetGo(): Promise<void> {
     cache,
     'list=[{\n"base": &"Node",\n"class": &"Held",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"GDScript",\n"path": "res://held.gd"\n}]\n',
   );
+  const letGo = join(project, 'let-go');
   let holder: ChildProcess | null = null;
   try {
     holder =
@@ -27270,13 +27278,18 @@ async function testAClassCacheHeldShutIsReadOnceLetGo(): Promise<void> {
             [
               '-NoProfile',
               '-Command',
-              `$f = [System.IO.File]::Open('${cache}', 'Open', 'Read', 'None'); [Console]::Out.WriteLine('holding'); Start-Sleep -Milliseconds 400; $f.Close()`,
+              `$f = [System.IO.File]::Open('${cache}', 'Open', 'Read', 'None'); [Console]::Out.WriteLine('holding'); $until = (Get-Date).AddSeconds(30); while (-not (Test-Path '${letGo}') -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 10 }; $f.Close()`,
             ],
             { stdio: ['ignore', 'pipe', 'ignore'] },
           )
-        : spawnHidden('sh', ['-c', `chmod 000 '${cache}'; echo holding; sleep 0.4; chmod 644 '${cache}'`], {
-            stdio: ['ignore', 'pipe', 'ignore'],
-          });
+        : spawnHidden(
+            'sh',
+            [
+              '-c',
+              `chmod 000 '${cache}'; echo holding; i=0; while [ ! -e '${letGo}' ] && [ $i -lt 3000 ]; do sleep 0.01; i=$((i+1)); done; chmod 644 '${cache}'`,
+            ],
+            { stdio: ['ignore', 'pipe', 'ignore'] },
+          );
     const holding = holder;
     await new Promise<void>((resolve, reject) => {
       holding.stdout?.once('data', () => {
@@ -27287,6 +27300,7 @@ async function testAClassCacheHeldShutIsReadOnceLetGo(): Promise<void> {
       });
     });
     assert.throws(() => readFileSync(cache, 'utf8'), 'a plain read is refused while the cache is held');
+    writeFileSync(letGo, '');
     assert.deepEqual([...(cachedClasses(project) ?? [])], [['Held', 'res://held.gd']]);
   } finally {
     await endGame(holder);
@@ -45555,27 +45569,32 @@ async function testAnEngineOnASlotLendsItToWhatItStarts(): Promise<void> {
 }
 
 async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
+  // A quarter of the slots, at least two, kept for engines outside a gate, and half of those at most
+  // for the games editor_run started, leaving one beside a gate's own steps' for short calls.
+  assert.deepEqual(
+    [2, 4, 8, 12, 16, 32].map((count) => keptSlotsOf(count)),
+    [2, 2, 2, 3, 4, 8],
+  );
+  assert.deepEqual(
+    [1, 2, 3, 4, 8].map((kept) => gamesKeptOf(kept)),
+    [0, 0, 1, 2, 4],
+  );
   const every16 = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
   assert.deepEqual(slotsDrawnOn(16, 'other', 'none'), { numbers: every16 });
-  assert.deepEqual(slotsDrawnOn(16, 'other', 'seated'), { numbers: [15], limit: 'kept' });
-  assert.deepEqual(slotsDrawnOn(16, 'other', 'waiting'), { numbers: [], limit: 'held' });
-  assert.deepEqual(slotsDrawnOn(16, 'gate', 'waiting'), {
-    numbers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13],
+  assert.deepEqual(slotsDrawnOn(16, 'other', 'queued'), { numbers: [15, 14, 13], limit: 'kept' });
+  assert.deepEqual(slotsDrawnOn(16, 'gate', 'queued'), {
+    numbers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
     limit: 'gate',
   });
-  assert.deepEqual(slotsDrawnOn(16, 'timing', 'waiting'), { numbers: every16 }, 'a timing takes any slot');
+  assert.deepEqual(slotsDrawnOn(16, 'timing', 'queued'), { numbers: every16 }, 'a timing takes any slot');
   assert.deepEqual(
-    [
-      slotsDrawnOn(16, 'tier', 'waiting'),
-      slotsDrawnOn(16, 'tier', 'seated'),
-      slotsDrawnOn(16, 'tier', 'none'),
-    ],
-    [{ numbers: [14, 15], limit: 'tier' }, { numbers: [14, 15], limit: 'tier' }, { numbers: every16 }],
-    "a gate's own step the kept two while a gate is queued, the first of them first, and any slot when none is",
+    [slotsDrawnOn(16, 'tier', 'queued'), slotsDrawnOn(16, 'tier', 'none')],
+    [{ numbers: [12, 13, 14, 15], limit: 'tier' }, { numbers: every16 }],
+    "a gate's own step the kept four while a gate is queued, the first of them first, and any slot when none is",
   );
   assert.deepEqual(slotsDrawnOn(2, 'gate', 'none'), { numbers: [0], limit: 'gate' });
-  assert.deepEqual(slotsDrawnOn(2, 'other', 'seated'), { numbers: [1], limit: 'kept' });
-  assert.deepEqual(slotsDrawnOn(1, 'other', 'seated'), { numbers: [0] }, "one slot is everybody's");
+  assert.deepEqual(slotsDrawnOn(2, 'other', 'queued'), { numbers: [1], limit: 'kept' });
+  assert.deepEqual(slotsDrawnOn(1, 'other', 'queued'), { numbers: [0] }, "one slot is everybody's");
   assert.deepEqual(
     [
       slotTaker({ [SHARE_VARIABLE]: 'share', [SHARE_COUNT_VARIABLE]: '3', GODOT_ENGINE_TIMED: 'x' }),
@@ -45602,9 +45621,9 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gate-slots-'));
   const queued = join(directory, QUEUED_FOLDER);
   mkdirSync(queued);
-  const takeAll = async (slots: EngineSlots): Promise<string[]> => {
+  const takeAll = async (slots: EngineSlots, game = false): Promise<string[]> => {
     const taken: string[] = [];
-    for (let lock = await slots.takeFree(); lock !== null; lock = await slots.takeFree()) {
+    for (let lock = await slots.takeFree(game); lock !== null; lock = await slots.takeFree(game)) {
       taken.push(basename(lock));
     }
     for (const lock of taken) {
@@ -45636,43 +45655,22 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
       "and the gone gate's mark is removed with its seat",
     );
 
+    // A live gate, seated or not: a seat counts only the gates' slots, so work beside the gates keeps
+    // the kept ones but the gate's own steps'.
     writeFileSync(join(queued, 'ticket.json'), JSON.stringify({ pid: process.pid, started }));
-    assert.deepEqual(await takeAll(outside), [], 'a live gate waiting for its seat holds back every slot');
-    assert.equal(outside.drawn.limit, 'held', JSON.stringify(outside.drawn));
-    assert.equal(
-      slotWaitSaid(3000, 4, 'slots', outside.holders(), outside.drawn),
-      `Waiting 3 s so far for an engine: a gate in this machine's queue, this process (pid ${String(process.pid)}), is waiting for its seat (slots), and the engine starts once every queued gate has its seat.`,
-    );
-    // Several gates waiting are counted and each named, in the progress line and in the answer.
-    const twoGates = [
-      { pid: 60780, started },
-      { pid: 37656, started, by: 'make ci for X' },
-    ];
-    assert.equal(
-      slotWaitSaid(3000, 4, 'slots', twoGates, outside.drawn),
-      "Waiting 3 s so far for an engine: 2 gates in this machine's queue are waiting for their seats (slots): pid 60780 and make ci for X (pid 37656), and the engine starts once every queued gate has its seat.",
-    );
-    assert.equal(
-      slotWaitedSaid(983_000, 4, 'slots', twoGates, outside.drawn),
-      "This call waited 983 s for an engine slot in all. When it first waited, 2 gates in this machine's queue are waiting for their seats (slots): pid 60780 and make ci for X (pid 37656), and engines outside a gate wait until every queued gate has its seat.",
-    );
-    assert.equal(
-      slotWaitedSaid(983_000, 4, 'slots', [], outside.drawn),
-      "This call waited 983 s for an engine slot in all. When it first waited, a gate in this machine's queue is waiting for its seat (slots), and engines outside a gate wait until every queued gate has its seat.",
-      'and with no gate to name, as before',
-    );
-    assert.deepEqual(await takeAll(gate), ['0.lock', '1.lock'], "while the gates' engines take theirs");
-    assert.deepEqual(await takeAll(tier), ['2.lock', '3.lock'], "and the gates' own steps the kept two");
-
-    writeFileSync(join(queued, 'ticket.json.seated'), '');
-    assert.deepEqual(await takeAll(outside), ['3.lock'], 'a seated gate leaves work beside it the last slot');
-    assert.equal(outside.drawn.limit, 'kept', JSON.stringify(outside.drawn));
-    assert.deepEqual(await takeAll(gate), ['0.lock', '1.lock'], 'and its engines take only those');
-    assert.deepEqual(
-      await takeAll(tier),
-      ['2.lock', '3.lock'],
-      "and the gates' own steps still the kept two",
-    );
+    for (const seat of ['waiting for its seat', 'seated']) {
+      if (seat === 'seated') {
+        writeFileSync(join(queued, 'ticket.json.seated'), '');
+      }
+      assert.deepEqual(
+        await takeAll(outside),
+        ['3.lock'],
+        `a gate ${seat} leaves work beside it the last slot`,
+      );
+      assert.equal(outside.drawn.limit, 'kept', JSON.stringify(outside.drawn));
+      assert.deepEqual(await takeAll(gate), ['0.lock', '1.lock'], 'and its engines take only those');
+      assert.deepEqual(await takeAll(tier), ['2.lock', '3.lock'], "and the gates' own steps the kept two");
+    }
     assert.equal(
       slotWaitSaid(3000, 4, 'slots', outside.holders(), outside.drawn),
       'Waiting 3 s so far for an engine: the one engine slot of the 4 on this machine (slots) kept for engines outside a gate while a gate is queued is in use, by a gate or another tool, and the engine starts when it is given back or no gate is queued.',
@@ -45682,7 +45680,7 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
       "Waiting 3 s so far for an engine: the 2 engine slots of the 4 on this machine (slots) a gate's own steps take while a gate is queued are in use, by a gate or another tool, and the engine starts when one is given back or no gate is queued.",
     );
     assert.equal(
-      slotWaitSaid(1000, 2, 'slots', [holder], slotsDrawnOn(2, 'other', 'seated')),
+      slotWaitSaid(1000, 2, 'slots', [holder], slotsDrawnOn(2, 'other', 'queued')),
       `Waiting 1 s so far for an engine: the one engine slot of the 2 on this machine (slots) kept for engines outside a gate while a gate is queued is in use, by this process (pid ${String(process.pid)}), and the engine starts when it is given back or no gate is queued.`,
     );
     assert.equal(
@@ -45691,6 +45689,13 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
         String(process.pid) +
         ').',
     );
+    // Of four kept, no game takes one: two would leave none beside the gate's own steps'.
+    assert.deepEqual(
+      await takeAll(outside, true),
+      [],
+      'with two kept, a game takes none while a gate is queued',
+    );
+    assert.equal(outside.drawn.limit, 'games', JSON.stringify(outside.drawn));
 
     // A slot already held is kept to its end whatever arrives in the queue.
     rmSync(join(queued, 'ticket.json'));
@@ -45698,7 +45703,6 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
     const held = await outside.takeFree();
     assert.equal(held === null ? null : basename(held), '3.lock', 'the queue empty again');
     writeFileSync(join(queued, 'ticket.json'), JSON.stringify({ pid: process.pid, started }));
-    writeFileSync(join(queued, 'ticket.json.seated'), '');
     assert.equal(
       held === null ? false : existsSync(held) && holderOf(readFileSync(held, 'utf8'))?.pid === process.pid,
       true,
@@ -45708,6 +45712,62 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
     assert.deepEqual(await takeAll(tier), ['2.lock'], "while a gate's own step takes the other kept one");
     if (held !== null) {
       outside.release(held);
+    }
+
+    // Sixteen slots, four kept: games hold two between them, and a short call still has the third.
+    // A probe's headless scene edit waited an hour behind the one game a session had started.
+    const sixteen = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-game-slots-'));
+    try {
+      mkdirSync(join(sixteen, QUEUED_FOLDER));
+      writeFileSync(
+        join(sixteen, QUEUED_FOLDER, 'ticket.json'),
+        JSON.stringify({ pid: process.pid, started }),
+      );
+      const sessions = new EngineSlots(sixteen, 16, holder, undefined, () => 'other');
+      const games = [await sessions.takeFree(true), await sessions.takeFree(true)];
+      assert.deepEqual(
+        games.map((lock) => (lock === null ? null : basename(lock))),
+        ['15.lock', '14.lock'],
+        'two games take the highest kept slots',
+      );
+      assert.deepEqual(
+        games.map((lock) => (lock === null ? null : holderOf(readFileSync(lock, 'utf8'))?.game)),
+        [true, true],
+        "each lock says it is a game's",
+      );
+      assert.equal(await sessions.takeFree(true), null, 'a third game waits');
+      assert.deepEqual(
+        sessions.drawn,
+        { numbers: [14, 15], limit: 'games' },
+        'held by the games holding theirs',
+      );
+      assert.equal(
+        slotWaitSaid(3000, 16, 'slots', sessions.holders(), sessions.drawn),
+        `Waiting 3 s so far for an engine: the 2 engine slots of the 16 on this machine (slots) that games editor_run started may hold while a gate is queued, the rest kept for short calls, are in use: 2 by this process (pid ${String(process.pid)}). The engine starts when one is given back or no gate is queued.`,
+      );
+      const short = await sessions.takeFree();
+      assert.equal(
+        short === null ? null : basename(short),
+        '13.lock',
+        'while a short call takes the slot left',
+      );
+      if (short !== null) {
+        sessions.release(short);
+      }
+      // A game's slot handed to its keeper stays a game's.
+      const first = games[0] ?? '';
+      assert.ok(sessions.hand(first, { pid: process.ppid, started: 1, by: 'a keeper' }), 'handed over');
+      assert.deepEqual(
+        holderOf(readFileSync(first, 'utf8')),
+        { pid: process.ppid, started: 1, by: 'a keeper', game: true },
+        "the keeper's lock still says it is a game's",
+      );
+      rmSync(first, { force: true });
+      if (games[1] !== null && games[1] !== undefined) {
+        sessions.release(games[1]);
+      }
+    } finally {
+      rmSync(sixteen, { recursive: true, force: true });
     }
   } finally {
     rmSync(directory, { recursive: true, force: true });
@@ -46338,6 +46398,96 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     );
     assert.match(sharesSaid(1, 2), /^1 of the 2 slots this run uses was free as it began/);
     assert.match(sharesSaid(0, 4), /^None of the 4 slots this run uses were free as it began/);
+    assert.equal(
+      memorySaid(1, 4, memory),
+      `Memory had room for one of these 4 engines at once as the run began, since ${memory}, so its engines are handed the suites a share at a time, and another starts whenever memory has room for it.`,
+    );
+    assert.match(memorySaid(2, 3, memory), /^Memory had room for 2 of these 3 engines at once/);
+
+    // A run held by memory starts each engine once memory has room for another, read again before
+    // each: one held all its life to the room it began with dealt 465 of 470 suites to one engine,
+    // while exports beside it freed their memory. A gate held at 6.6 GB free runs one engine, and
+    // another once the exports end and 9 GB are free.
+    const gigabytes = 1024 ** 3;
+    let freeBytes = 6.6 * gigabytes;
+    let memoryClock = 0;
+    const memoryMarks: string[] = [];
+    const memoryGate = new MemoryGate(
+      {
+        markWaiting: () => {
+          memoryMarks.push('marked');
+          return () => {
+            memoryMarks.push('taken up');
+          };
+        },
+      },
+      () => Promise.resolve(freeBytes),
+      () => memoryClock,
+      5,
+    );
+    // Ended with the case, so an assertion failing beside a wait does not leave it reading forever.
+    const caseOver = new AbortController();
+    const unended = caseOver.signal;
+    try {
+      const firstEngine = await memoryGate.admit(unended);
+      assert.deepEqual(memoryMarks, [], 'the first engine starts at once, with no mark');
+      let secondEngine: (() => void) | undefined;
+      const secondEngineComing = memoryGate
+        .admit(unended)
+        .then((ended) => {
+          secondEngine = ended;
+        })
+        .catch(() => undefined);
+      await delay(50);
+      assert.deepEqual(
+        [secondEngine, memoryMarks],
+        [undefined, ['marked']],
+        'the next waits while the memory free holds only the one, and marks its wait',
+      );
+      freeBytes = 9 * gigabytes;
+      await secondEngineComing;
+      assert.deepEqual(memoryMarks, ['marked', 'taken up'], 'and starts once memory frees, its mark gone');
+      // 9 GB beside two engines started this moment leaves 2 GB past what is kept: room for a third,
+      // but not with three counted at their whole allowance.
+      const thirdEngine = await memoryGate.admit(unended);
+      let fourthEngine: (() => void) | undefined;
+      const fourthEngineComing = memoryGate
+        .admit(unended)
+        .then((ended) => {
+          fourthEngine = ended;
+          return ended;
+        })
+        .catch(() => undefined);
+      await delay(50);
+      assert.equal(fourthEngine, undefined, 'engines just started are counted at what they will take');
+      memoryClock += 30_000;
+      const fourthAdmitted = await fourthEngineComing;
+      assert.equal(
+        typeof fourthAdmitted,
+        'function',
+        'and at what the memory read shows once they have settled',
+      );
+      for (const ended of [firstEngine, secondEngine, thirdEngine, fourthAdmitted]) {
+        ended?.();
+      }
+      freeBytes = 0;
+      const aloneEngine = await memoryGate.admit(unended);
+      assert.equal(
+        typeof aloneEngine,
+        'function',
+        'with none of its engines going, the next starts whatever is free',
+      );
+      const giveUp = new AbortController();
+      const abandoned = memoryGate.admit(giveUp.signal);
+      await delay(50);
+      giveUp.abort();
+      await assert.rejects(abandoned, 'a wait ended once every share is handed out');
+      assert.deepEqual(memoryMarks.slice(-2), ['marked', 'taken up'], 'and its mark goes with it');
+      aloneEngine();
+    } finally {
+      caseOver.abort();
+    }
+
     let going = 0;
     let most = 0;
     const turned = await inTurns([30, 10, 20, 5], 2, async (wait, index) => {
@@ -47768,6 +47918,60 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
         `a call that found a slot free says nothing of slots: ${JSON.stringify(free)}`,
       );
 
+      // The wait for a game to announce is counted from its engine's start, after the slot: counted
+      // from the call, a start that waited 24 minutes for a slot was told nothing had announced in its
+      // four, about a game that had announced in seconds. The slot is held past the whole wait, so a
+      // wait counted from the call has none left by the time the engine starts.
+      const announcing = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slot-announce-'));
+      try {
+        writeTree(announcing, {
+          'project.godot':
+            '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="SlotAnnounce"\n' +
+            `run/main_scene="res://main.tscn"\n\n[autoload]\n\n${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_SCRIPT}"\n`,
+          'main.tscn': '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n',
+        });
+        cpSync(
+          join('src', 'godot', 'addons', 'gdharness_runtime'),
+          join(announcing, 'addons', 'gdharness_runtime'),
+          { recursive: true },
+        );
+        await hold();
+        const budgetMs = 8000;
+        const starting = server.request(
+          'tools/call',
+          {
+            name: 'editor_run',
+            arguments: { op: 'start', projectPath: announcing, headless: true, runtimeWaitMs: budgetMs },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        assert.ok(
+          await cameTrue(() => leftInSlots(slots).some((entry) => entry.startsWith(WAITING_FOLDER)), 30_000),
+          `the start waits for the slot held: ${leftInSlots(slots).join(', ')}`,
+        );
+        await delay(budgetMs + 1000);
+        rmSync(ours);
+        const answer = await starting;
+        const startedThere = JSON.parse(textOf(answer) ?? '{}') as unknown;
+        const waited = asArray(get(answer, 'result', 'content'))
+          .map((block) => slotWaitOf(block as { type: string; text?: string }))
+          .filter((block) => block !== null);
+        assert.ok(asNumber(get(waited[0], 'waitedMs')) > budgetMs, JSON.stringify(waited));
+        assert.equal(
+          get(startedThere, 'runtime', 'listening'),
+          true,
+          `a game that announced inside the wait after its slot is found: ${JSON.stringify(startedThere)}`,
+        );
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { op: 'stop' } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        await cameTrue(() => leftInSlots(slots).length === 0, 30_000);
+      } finally {
+        sweep(announcing);
+      }
+
       // A started game outlives the server, so its keeper holds the slot for as long as the run lasts.
       const started = await server.request(
         'tools/call',
@@ -47784,6 +47988,11 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
       assert.ok(
         keeper.pid !== server.child.pid && keeper.pid !== game && alive(keeper.pid),
         `the lock names the game's keeper, not the server or the game: ${JSON.stringify(keeper)}`,
+      );
+      assert.equal(
+        keeper.game,
+        true,
+        `and says it is a game's, which games share a cap on: ${JSON.stringify(keeper)}`,
       );
       // A wait behind it named the keeper's pid as the game's, which editor_status never listed.
       assert.equal(
@@ -48404,12 +48613,10 @@ function testATestRunDealsByAndRecordsIntoTheTimesItIsGiven(): void {
     );
     const dealt = test('--engines', '2', '--times', gateTimes);
     assert.equal(dealt.status, 0, dealt.said);
-    // Two engines need about seven gigabytes free, which the macOS runner does not have.
+    // Dealt for two engines whatever the memory, which then decides only how many run at once.
     assert.match(
       dealt.said,
-      dealt.said.includes('over 1 engine, of the 2 asked for, since')
-        ? /^3 test functions in 2 suites over 1 engine, of the 2 asked for, since the machine has /m
-        : /^Dealt out case by case, since it took more than an engine's share of this run \(\d+ s\) last time: res:\/\/tests\/ok_test\.gd\.$/m,
+      /^Dealt out case by case, since it took more than an engine's share of this run \(\d+ s\) last time: res:\/\/tests\/ok_test\.gd\.$/m,
       `dealt by the times in the file named, the project's own being empty: ${dealt.said}`,
     );
     assert.equal(readFileSync(own, 'utf8'), '{}\n', "the project's own left as it was");
@@ -48490,10 +48697,10 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     assert.equal(first.status, 0, first.said);
     assert.match(first.said, /^The project has never been imported, so it is imported first\.$/m, first.said);
     // Nothing is timed yet, so each suite has an engine of its own unless the machine's room holds
-    // the run back, which the first line then says.
+    // the run back, which the run then says: held by memory, the first share is all of it.
     assert.match(
       first.said,
-      /asked for, since|at a time, since/.test(first.said)
+      /asked for, since|at a time, since|^Memory had room for /m.test(first.said)
         ? /^Passed: 4 cases in 2 suites across 1 engine, /m
         : /^Passed: 4 cases in 2 suites across 2 engines, /m,
       first.said,
@@ -48585,6 +48792,24 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     );
     assert.equal(failing.status, 1, failing.said);
 
+    // A class the cache lacks has the run import first without --import, as setup's cache leaves it.
+    writeTree(project, { 'helper_thing.gd': 'class_name HelperThing\nextends Node\n' });
+    const uncached = test('tests/ok_test.gd');
+    rmSync(join(project, 'helper_thing.gd'));
+    rmSync(join(project, 'helper_thing.gd.uid'), { force: true });
+    const uncachedGone = spawnSyncHidden(process.execPath, ['build/cli.js', 'classes', project], {
+      encoding: 'utf8',
+      env,
+    });
+    assert.equal(uncachedGone.status, 0, `${uncachedGone.stdout}${uncachedGone.stderr}`);
+    assert.equal(uncached.status, 0, uncached.said);
+    assert.match(
+      uncached.said,
+      /^The class cache does not list HelperThing where the scripts declare it, so the project is imported first\.$/m,
+      uncached.said,
+    );
+    assert.doesNotMatch(uncached.said, /The import was skipped/, `it was imported: ${uncached.said}`);
+
     const resultFile = join(checkouts, 'result.json');
     const resultOf = (): RunResult => JSON.parse(readFileSync(resultFile, 'utf8')) as RunResult;
     const noisy = test(
@@ -48645,6 +48870,8 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       'tests/loads_test.gd':
         'extends GdUnitTestSuite\n\nfunc test_loads() -> void:\n\tvar loaded: Resource = load("res://data/" + "word.tres")\n\tassert_str(str(loaded.get_meta("word"))).is_not_empty()\n',
     });
+    const SKIPPED_COMPILE =
+      /^Every script compiled together on these same files when last checked, so it is not compiled again\.$/m;
     const loads = (): { said: string; status: number | null } =>
       test('tests/ok_test.gd', 'tests/loads_test.gd', '--changed-only');
     const loadsFirst = loads();
@@ -48655,9 +48882,18 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       loadsFirst.said,
     );
     assert.match(loadsFirst.said, /^Passed: 1 case in 1 suite across 1 engine, /m, loadsFirst.said);
-    const loadsAgain = loads();
+    assert.doesNotMatch(loadsFirst.said, SKIPPED_COMPILE, `a new suite is compiled: ${loadsFirst.said}`);
+    // With nothing to run and the scripts as they last compiled together, no engine starts, so the
+    // run takes no slot and does not wait for one.
+    const loadsHolder = await slotHeldElsewhere(join(slots, '0.lock'), 8000);
+    const loadsAgain = test('tests/ok_test.gd', 'tests/loads_test.gd', '--changed-only', '--slot-count', '1');
+    loadsHolder.kill();
+    // Killed before its own timer gives the slot back.
+    rmSync(join(slots, '0.lock'), { force: true });
     assert.equal(loadsAgain.status, 0, loadsAgain.said);
     assert.match(loadsAgain.said, /^Nothing has changed since every suite last passed\.$/m, loadsAgain.said);
+    assert.match(loadsAgain.said, SKIPPED_COMPILE, loadsAgain.said);
+    assert.doesNotMatch(loadsAgain.said, /for an engine/, `no slot waited for: ${loadsAgain.said}`);
     writeTree(project, { 'data/unused.tres': resource('two') });
     const unusedChanged = loads();
     assert.match(
@@ -48666,12 +48902,19 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       `a resource no engine loaded: ${unusedChanged.said}`,
     );
     // A class no suite loads that no longer compiles fails the run with every suite left out, since
-    // the scripts are still compiled together; the import puts it in the class cache.
+    // the scripts are still compiled together; the import puts it in the class cache. It first
+    // compiles, so the break changes the class's file and nothing the cache lists.
+    writeTree(project, {
+      'broken_thing.gd': 'class_name BrokenThing\nextends Node\n\n\nfunc said() -> void:\n\tpass\n',
+    });
+    const wholeAside = test('tests/ok_test.gd', 'tests/loads_test.gd', '--changed-only', '--import');
+    assert.equal(wholeAside.status, 0, wholeAside.said);
+    assert.doesNotMatch(wholeAside.said, SKIPPED_COMPILE, `a new class is compiled: ${wholeAside.said}`);
     writeTree(project, {
       'broken_thing.gd':
         'class_name BrokenThing\nextends Node\n\n\nfunc said() -> void:\n\tnowhere_at_all()\n',
     });
-    const brokenAside = test('tests/ok_test.gd', 'tests/loads_test.gd', '--changed-only', '--import');
+    const brokenAside = test('tests/ok_test.gd', 'tests/loads_test.gd', '--changed-only');
     rmSync(join(project, 'broken_thing.gd'));
     rmSync(join(project, 'broken_thing.gd.uid'), { force: true });
     const recached = spawnSyncHidden(process.execPath, ['build/cli.js', 'classes', project], {
@@ -48696,6 +48939,24 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       `the suite that loaded it runs again: ${wordChanged.said}`,
     );
     assert.match(wordChanged.said, /^Passed: 1 case in 1 suite across 1 engine, /m, wordChanged.said);
+    // A suite that runs while the compile check is left out gives its slot back to the machine, not
+    // to the check. Its pass is forgotten, so it runs on the files the check last compiled.
+    const passedFile = join(project, '.godot', 'gdharness', 'suite-passed.json');
+    writeFileSync(
+      passedFile,
+      JSON.stringify(
+        Object.fromEntries(
+          Object.entries(JSON.parse(readFileSync(passedFile, 'utf8')) as Record<string, unknown>).filter(
+            ([path]) => path !== 'res://tests/loads_test.gd',
+          ),
+        ),
+      ),
+    );
+    const besideSkipped = loads();
+    assert.equal(besideSkipped.status, 0, besideSkipped.said);
+    assert.match(besideSkipped.said, SKIPPED_COMPILE, besideSkipped.said);
+    assert.match(besideSkipped.said, /^Passed: 1 case in 1 suite across 1 engine, /m, besideSkipped.said);
+    assert.deepEqual(leftInSlots(slots), [], `its slot given back: ${besideSkipped.said}`);
     rmSync(join(project, 'tests', 'loads_test.gd'));
 
     const embedRefused = test('tests/window_test.gd');
@@ -48874,16 +49135,20 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     writeFileSync(timesFile, slowTimes);
     const split = test('tests/ok_test.gd', 'tests/declared_test.gd', '--engines', '2');
     assert.equal(split.status, 0, split.said);
-    // Two engines need about seven gigabytes free, which the macOS runner does not have, so there
-    // the run is held to one and has to say why. The Linux and Windows runners have the room and
-    // deal the suite out; roomFor's own case holds which answer a machine gets.
+    // Dealt over two engines whatever the memory. Two engines need about seven gigabytes free, which
+    // the macOS runner does not have, so there the run says memory had room for one at once.
     assert.match(
       split.said,
-      split.said.includes('over 1 engine, of the 2 asked for, since')
-        ? /^3 test functions in 2 suites over 1 engine, of the 2 asked for, since the machine has \d+\.\d GB of memory free, 4\.0 GB of it kept for everything else and 1\.5 GB taken for each engine\.$/m
-        : /^3 test functions in 2 suites over 2 engines\.\nDealt out case by case, since it took more than an engine's share of this run \(\d+ s\) last time: res:\/\/tests\/ok_test\.gd\.$/m,
+      /^3 test functions in 2 suites over 2 engines\.\nDealt out case by case, since it took more than an engine's share of this run \(\d+ s\) last time: res:\/\/tests\/ok_test\.gd\.$/m,
       split.said,
     );
+    if (/^Memory had room for /m.test(split.said)) {
+      assert.match(
+        split.said,
+        /^Memory had room for one of these 2 engines at once as the run began, since the machine has \d+\.\d GB of memory free, 4\.0 GB of it kept for everything else and 1\.5 GB taken for each engine, so its engines are handed the suites a share at a time, and another starts whenever memory has room for it\.$/m,
+        split.said,
+      );
+    }
     // The same run held to one processor starts one engine and says so; a machine short of memory
     // for even one engine names that instead, since memory is what the room is checked against first.
     // The split run kept what the suite took, so it is made slow again to want two engines.
@@ -49143,6 +49408,23 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     assert.equal(dirname(keptUnder ?? ''), mainRuns, `named beside the main checkout: ${gateSaid}`);
     const namedLog = /^everything it printed: (.+)$/m.exec(gateSaid)?.[1] ?? '';
     assert.ok(namedLog.startsWith(keptUnder ?? '\0'), `and so is the engine's log: ${gateSaid}`);
+    // The worktree's own logs are named too, so the copy is not taken for logs written to the
+    // wrong project.
+    const wroteUnder =
+      /^That is a copy beside the main checkout\. The run wrote them under (.+) in this worktree, and they go with it when the worktree is removed\.$/m.exec(
+        gateSaid,
+      )?.[1];
+    assert.equal(
+      wroteUnder,
+      join(gated, '.godot', 'gdharness', 'test-runs', basename(keptUnder ?? '')),
+      `the worktree's own named: ${gateSaid}`,
+    );
+    assert.match(
+      readFileSync(join(wroteUnder, relative(keptUnder ?? '', namedLog)), 'utf8'),
+      /nobody said this/,
+      'and the worktree holds them',
+    );
+    assert.doesNotMatch(noisy.said, /^That is a copy beside/m, 'a run in the main checkout names one place');
     rmSync(join(checkouts, 'gate'), { recursive: true, force: true });
     const keptLog = readFileSync(namedLog, 'utf8');
     assert.match(keptLog, /^gdharness: engine 0: 1 suite, /, 'the copy opens with the verdict');
@@ -49203,7 +49485,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       'tests/lane_b_test.gd':
         'extends GdUnitTestSuite\n\n\nfunc test_meets_a() -> void:\n\tassert_bool(FileAccess.file_exists("res://lane_marker.txt")).is_true()\n',
     });
-    const roomHeld = /asked for, since|at a time, since/;
+    const roomHeld = /asked for, since|at a time, since|^Memory had room for /m;
 
     // Everything in one share: the run ends without waiting on a slot it no longer needs, though the
     // one its engine gives back goes to another run waiting, as one would on a busy machine.
@@ -49814,6 +50096,66 @@ function testAFreshCloneHasItsExtensionsListed(): void {
 }
 
 /**
+ * A test run imports first what setup left unimported. Setup writes the class cache without an
+ * import, so a project it set up has a cache and still no extension list, and the engine loads none
+ * of its extensions: every suite using a class one adds failed to compile until it was imported by
+ * hand. A cache lacking a class a script declares, or listing it at another path, fails the suites
+ * reaching it the same way. Each is put to it alone, then the project with all three current.
+ */
+function testATestRunImportsWhatSetupLeftUnimported(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-import-needed-'));
+  const cacheOf = (classes: Record<string, string>): string =>
+    `list=[${Object.entries(classes)
+      .map(
+        ([name, path]) =>
+          `{\n"base": &"Node",\n"class": &"${name}",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"GDScript",\n"path": "${path}"\n}`,
+      )
+      .join(', ')}]\n`;
+  const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+  const list = join(project, '.godot', 'extension_list.cfg');
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'native/kit.gdextension': '[configuration]\n',
+      'kit/thing.gd': 'class_name KitThing\nextends Node\n',
+    });
+    assert.equal(
+      importNeeded(project),
+      'The project has never been imported, so it is imported first.',
+      'no cache at all',
+    );
+    mkdirSync(join(project, '.godot'));
+    writeFileSync(cache, cacheOf({ KitThing: 'res://kit/thing.gd' }));
+    assert.equal(
+      importNeeded(project),
+      "No import has listed the project's extensions, res://native/kit.gdextension, so the engine would load none of them, and the project is imported first.",
+      'a cache and no extension list, as setup leaves it',
+    );
+    writeFileSync(list, 'res://native/kit.gdextension\n');
+    assert.equal(importNeeded(project), null, 'everything current');
+    writeTree(project, { 'kit/other.gd': 'class_name KitOther\nextends Node\n' });
+    assert.equal(
+      importNeeded(project),
+      'The class cache does not list KitOther where the scripts declare it, so the project is imported first.',
+      'a class the cache lacks',
+    );
+    writeFileSync(cache, cacheOf({ KitThing: 'res://old/thing.gd', KitOther: 'res://kit/other.gd' }));
+    assert.equal(
+      importNeeded(project),
+      'The class cache does not list KitThing where the scripts declare it, so the project is imported first.',
+      'a class the cache has at another path',
+    );
+    writeFileSync(cache, cacheOf({ KitThing: 'res://kit/thing.gd', KitOther: 'res://kit/other.gd' }));
+    assert.equal(importNeeded(project), null, 'current again');
+    rmSync(list);
+    rmSync(join(project, 'native'), { recursive: true });
+    assert.equal(importNeeded(project), null, 'no extension list is needed with no extension');
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * A parameterised case too slow for one engine is dealt out by its rows, and each row runs once.
  *
  * The games write their matrices as parameterised cases, single cases of 110 to 408 s, which no
@@ -49892,9 +50234,9 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
           rows: { test_face: Array.from({ length: rows }, () => 5) },
         },
       });
-    // Read off the dealt runs: a run whose only suite is kept whole would use one engine anyway, so
-    // it never says it was held to one.
-    let heldToOne = false;
+    // Read off the dealt runs, since a run whose only suite is kept whole uses one engine anyway and
+    // never says what memory held it to.
+    let heldByMemory = false;
     for (const [rows, what] of [
       [6, 'the rows the times know'],
       [7, 'a row added since the times were taken'],
@@ -49909,11 +50251,11 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
         Array.from({ length: rows }, (_, row) => [row, 1]),
         `${what}: every row once: ${run.said}`,
       );
-      // Two engines need about seven gigabytes free, which the macOS runner does not have; held to
-      // one, the case runs whole there, and the run says why it was held.
-      if (run.said.includes('over 1 engine, of the 2 asked for, since')) {
-        console.log(`row dealing: held to one engine, so the rows ran in one (${what})`);
-        heldToOne = true;
+      // Two engines need about seven gigabytes free, which the macOS runner does not have; there the
+      // run is handed out a share at a time, so how many engines the rows met is the shares' to say.
+      if (/^Memory had room for /m.test(run.said)) {
+        console.log(`row dealing: held by memory, so the rows ran in shares (${what})`);
+        heldByMemory = true;
         continue;
       }
       assert.match(
@@ -49958,8 +50300,8 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
       `a suite kept together runs every row once, in one engine: ${kept.said}`,
     );
     assert.doesNotMatch(kept.said, /^Dealt out (row by row|case by case)/m, kept.said);
-    // Held to one engine, as on the macOS runner, there is no deal to keep it out of.
-    if (!heldToOne) {
+    // With memory for one engine, as on the macOS runner, there is no deal to keep it out of.
+    if (!heldByMemory) {
       assert.match(
         kept.said,
         /^Kept whole in one engine, since it declares GDHARNESS_TOGETHER: res:\/\/tests\/matrix_test\.gd\.$/m,
@@ -49995,10 +50337,8 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
       [Array.from({ length: 6 }, (_, row) => [row, 1]), 1],
       `a suite within an engine's share runs every row once, in one engine: ${shared.said}`,
     );
-    // Two engines, so the rows met in one by the deal, unless held to one as on the macOS runner.
-    if (!heldToOne) {
-      assert.match(shared.said, /^4 test functions in 3 suites over 2 engines\.$/m, shared.said);
-    }
+    // Two engines, so the rows met in one by the deal.
+    assert.match(shared.said, /^4 test functions in 3 suites over 2 engines\.$/m, shared.said);
     assert.doesNotMatch(shared.said, /^(Dealt out|Kept whole)/m, shared.said);
     assert.deepEqual(leftInSlots(slots), [], 'every slot given back');
   } finally {
@@ -50126,15 +50466,16 @@ async function testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly(): Promise<void> {
       expected,
       `two engines run every case once between them: ${split.said}`,
     );
-    // Two engines need about seven gigabytes free, which the macOS runner does not have.
-    if (split.said.includes('over 1 engine, of the 2 asked for, since')) {
-      console.log('inherited cases: held to one engine, so the shell suite ran whole');
+    assert.match(
+      split.said,
+      /^Dealt out case by case, since it took more than an engine's share of this run \(\d+ s\) last time: res:\/\/tests\/shell_test\.gd\.$/m,
+      split.said,
+    );
+    // Two engines need about seven gigabytes free, which the macOS runner does not have, and there
+    // the run is handed out a share at a time, so how many engines the cases met is the shares' to say.
+    if (/^Memory had room for /m.test(split.said)) {
+      console.log('inherited cases: held by memory, so the shell suite ran in shares');
     } else {
-      assert.match(
-        split.said,
-        /^Dealt out case by case, since it took more than an engine's share of this run \(\d+ s\) last time: res:\/\/tests\/shell_test\.gd\.$/m,
-        split.said,
-      );
       const pids = new Set(
         [...split.said.matchAll(/^CASE res:\/\/tests\/shell_test\.gd:\S+ IN (\d+)\s*$/gm)].map(
           (found) => found[1],
@@ -64105,7 +64446,8 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
       '[node name="Close" type="Button" parent="."]\nlayout_mode = 0\n\n' +
       '[node name="Open" type="Button" parent="."]\nlayout_mode = 0\n\n' +
       '[connection signal="pressed" from="Close" to="." method="_on_quit" flags=6 binds= [3]]\n' +
-      '[connection signal="toggled" from="Open" to="Rows" method="queue_sort" unbinds=1]\n',
+      '[connection signal="toggled" from="Open" to="Rows" method="queue_sort" unbinds=1]\n' +
+      '[connection signal="resized" from="." to="Rows" method="queue_sort"]\n',
   };
   for (const [path, content] of Object.entries(files)) {
     writeFileSync(join(project, path), content);
@@ -64439,11 +64781,36 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
     assert.deepEqual(
       connections,
       [
+        '[connection signal="resized" from="." to="Rows" method="queue_sort"]',
         '[connection signal="pressed" from="Rows/Close" to="." method="_on_quit" flags=6 binds= [3]]',
         '[connection signal="toggled" from="Rows/Open" to="Rows" method="queue_sort" unbinds=1]',
         '[connection signal="pressed" from="Shelf/Close" to="." method="_on_quit" flags=6 binds= [3]]',
         '[connection signal="toggled" from="Shelf/Open" to="Shelf" method="queue_sort" unbinds=1]',
       ],
+      fileOf('panel.tscn'),
+    );
+    // A delete names each connection the file loses with the node: from it, from a node under it,
+    // and to it from outside.
+    const shelved = await node({ scenePath: 'panel.tscn', op: 'delete', nodePath: 'Rows' });
+    assert.deepEqual(
+      get(shelved, 'connectionsRemoved'),
+      [
+        { sourceNodePath: '.', signalName: 'resized', targetNodePath: 'Rows', methodName: 'queue_sort' },
+        { sourceNodePath: 'Rows/Close', signalName: 'pressed', targetNodePath: '.', methodName: '_on_quit' },
+        {
+          sourceNodePath: 'Rows/Open',
+          signalName: 'toggled',
+          targetNodePath: 'Rows',
+          methodName: 'queue_sort',
+        },
+      ],
+      JSON.stringify(shelved),
+    );
+    assert.deepEqual(
+      fileOf('panel.tscn')
+        .split('\n')
+        .filter((line) => line.startsWith('[connection')),
+      connections.slice(3),
       fileOf('panel.tscn'),
     );
     // What such a script changes as a write runs is put back before the file is saved, so the
@@ -64579,7 +64946,10 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
       JSON.stringify(gone),
     );
     const lone = await node({ op: 'delete', nodePath: 'Spawn' });
-    assert.deepEqual([get(lone, 'deletedNodePath'), get(lone, 'deletedWithIt')], ['Spawn', undefined]);
+    assert.deepEqual(
+      [get(lone, 'deletedNodePath'), get(lone, 'deletedWithIt'), get(lone, 'connectionsRemoved')],
+      ['Spawn', undefined, undefined],
+    );
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });
@@ -69807,6 +70177,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACleanupThatCannotFinishStillFinishes,
   testAHeldScratchDirectoryGoesOnceLetGo,
   testAClassCacheHeldShutIsReadOnceLetGo,
+  testATestRunImportsWhatSetupLeftUnimported,
   testAnAbandonedScratchDirectoryIsSweptAndNothingElse,
   testADiagnosticTheFileContradictsIsNamed,
   testAnImportThatCouldNotCopyAnExtensionRunsAgain,

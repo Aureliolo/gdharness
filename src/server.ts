@@ -11213,7 +11213,7 @@ class GodotServer {
 
     // In one of the machine's engine slots, like every engine started for a call, taken before the
     // play so a full machine holds the play rather than the game.
-    const slot = await slotForCall();
+    const slot = await slotForCall(true);
     // Armed before the play rather than switched on after it, so the profiler goes on as the game's
     // debugger session starts, which is before any of its scripts have run.
     if (profiled) {
@@ -11988,6 +11988,13 @@ class GodotServer {
     profiled = false,
     debugged = true,
   ): Promise<GodotProcess | { error: string }> {
+    // In one of the machine's engine slots, like every engine started for a call. The keeper takes
+    // the lock over once it has handed the game's pid back, and gives it back when the run ends,
+    // since the run outlives this server; so a started run leaves the lock to it, and one the keeper
+    // never took over names this server, which frees it by going.
+    const slot = await slotForCall(true);
+    // From the slot rather than the call, since the wait to announce is counted from here: counted
+    // from the call, a 24-minute wait for a slot spent the whole of it before the engine began.
     const startedAt = Date.now();
     const transcript = openTranscript(startedAt);
     // The keeper opens it again for the game; this server only ever reads it.
@@ -11997,11 +12004,6 @@ class GodotServer {
     // detached it was. The keeper is the game's parent, writes its record and its exit, and is
     // nobody's child here once the launcher has gone.
     const profile = profiled ? profilePath(startedAt) : undefined;
-    // In one of the machine's engine slots, like every engine started for a call. The keeper takes
-    // the lock over once it has handed the game's pid back, and gives it back when the run ends,
-    // since the run outlives this server; so a started run leaves the lock to it, and one the keeper
-    // never took over names this server, which frees it by going.
-    const slot = await slotForCall();
     // A profiled game is told so, and holds its start until the keeper's switch reaches it.
     const gameEnv = onTheSlot(
       profiled ? { ...(env ?? process.env), [PROFILE_FROM_START]: '1' } : (env ?? process.env),

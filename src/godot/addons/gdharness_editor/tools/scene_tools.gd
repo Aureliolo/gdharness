@@ -392,6 +392,7 @@ func delete_node(args: Dictionary) -> Dictionary:
 	for under: Node in node.find_children("*", "", true, false):
 		if under.owner == scene.root:
 			went.append(scene.path_of(under))
+	var cut: Array[Dictionary] = _connections_with(scene, at)
 	node.get_parent().remove_child(node)
 	node.free()
 	var carried: GdhPaths = GdhPaths.new()
@@ -409,8 +410,23 @@ func delete_node(args: Dictionary) -> Dictionary:
 	var answer: Dictionary = { "ok": true, "deletedNodePath": at }
 	if not went.is_empty():
 		answer["deletedWithIt"] = went
+	if not cut.is_empty():
+		answer["connectionsRemoved"] = cut
 	answer.merge(GdhKin.follow(scene_path, at, "", carried))
 	return answer
+
+
+## The connections [param scene]'s file holds from or to [param at] or a node under it, which go
+## with the node; one an instanced scene makes inside itself is that scene's, and stays there.
+static func _connections_with(scene: GdhSceneFile, at: String) -> Array[Dictionary]:
+	var cut: Array[Dictionary] = []
+	for held: Dictionary in scene.held_connections():
+		var ends: Array[String] = [str(held["sourceNodePath"]), str(held["targetNodePath"])]
+		for end: String in ends:
+			if end == at or end.begins_with(at + "/"):
+				cut.append(held)
+				break
+	return cut
 
 
 func duplicate_node(args: Dictionary) -> Dictionary:
