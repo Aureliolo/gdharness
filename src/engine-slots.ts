@@ -274,7 +274,9 @@ export function slotWaiters(directory: string): SlotWaiter[] {
     found.push({
       mark,
       taker: taker === 'gate' || taker === 'timing' || taker === 'tier' ? taker : 'other',
-      since: typeof since === 'number' && Number.isFinite(since) ? since * 1000 : madeAt,
+      // In whole milliseconds, as a take's own clock reads: a file's time has a fraction, so a mark
+      // made in the millisecond a take began read as made after it, and the take went first.
+      since: Math.floor(typeof since === 'number' && Number.isFinite(since) ? since * 1000 : madeAt),
       game: holder.game === true,
     });
   }
@@ -335,7 +337,8 @@ export class SlotLine {
 
   /** The takers of [param waiters] waiting longer than this one, the longest first. */
   ahead(waiters: readonly SlotWaiter[]): SlotWaiter[] {
-    const own = this.mark ?? '';
+    // Before it has a mark of its own, a mark begun in the same millisecond was there at its look.
+    const own = this.mark ?? '￿';
     return waiters
       .filter(
         (one) =>

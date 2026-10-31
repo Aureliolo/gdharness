@@ -46050,10 +46050,28 @@ async function testTakersWaitTheirTurn(): Promise<void> {
       [['1-1.json', 'other', 60]],
       'a mark names its kind and since when, in seconds',
     );
+    const began = Date.now() - 60_000;
+    writeFileSync(ahead, JSON.stringify({ ...me, taker: 'other', since: (began + 0.4) / 1000 }));
+    assert.deepEqual(
+      slotWaiters(directory).map((one) => one.since),
+      [began],
+      'read in whole milliseconds, as a take reads its own clock',
+    );
+    const tied = new SlotLine('other', false, () => began);
+    const waiter = { mark: '1-1.json', taker: 'other', since: began, game: false } as const;
+    assert.deepEqual(
+      tied.ahead([waiter]).map((one) => one.mark),
+      ['1-1.json'],
+      'a mark begun in the millisecond a take began was there at its first look',
+    );
+    tied.mark = '1-0.json';
+    assert.deepEqual(tied.ahead([waiter]), [], 'and once the take has a mark, a tie goes by name');
+    writeFileSync(ahead, JSON.stringify({ ...me, taker: 'other', since: (Date.now() - 60_000) / 1000 }));
 
     const late = new EngineSlots(directory, 2, me, undefined, () => 'other');
-    const firstLeft = Date.now();
     const first = await late.takeFree();
+    // Read after the take, which notes when it first left the slot before it answers.
+    const firstLeft = Date.now();
     assert.equal(first, join(directory, '0.lock'), 'a newcomer leaves slot 1, the one ahead takes first');
     assert.equal(await late.takeFree(), null, 'and waits rather than take it');
     assert.deepEqual(late.drawn.left, [1], 'saying which it leaves');
