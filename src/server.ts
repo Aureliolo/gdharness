@@ -9760,7 +9760,10 @@ class GodotServer {
         // up for a project is that project's. Counting every game on the machine said true on a
         // server whose own project had none running, beside another project's game, and the next
         // runtime call was refused (reported from game-b, with game-a's game up).
-        runtimeConnected: games.some((game) => game.reachable && game.ofThisProject !== false),
+        // Nor a game on another release's addon, which this server asks nothing.
+        runtimeConnected: games.some(
+          (game) => game.reachable && game.ofThisProject !== false && game.addonIsStale !== true,
+        ),
         runtimes: games,
         // Games announcing a protocol this server was not built to read. Apart from the list above
         // rather than folded into it, because nothing here can reach them and calling them runtimes

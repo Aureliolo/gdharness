@@ -19395,7 +19395,7 @@ async function testRuntimeConnectedIsAboutThisProjectsGames(): Promise<void> {
   const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-two-projects-rt-'));
   const listening: Server[] = [];
   const children: ChildProcess[] = [];
-  const game = async (project: string): Promise<number> => {
+  const game = async (project: string, version = SERVER_VERSION): Promise<number> => {
     const answering = createServer((socket) => {
       socket.setEncoding('utf8');
       socket.write(`${JSON.stringify({ type: 'welcome', protocol: RUNTIME_PROTOCOL })}\n`);
@@ -19424,8 +19424,9 @@ async function testRuntimeConnectedIsAboutThisProjectsGames(): Promise<void> {
         port: portOf(answering),
         address: '127.0.0.1',
         project: { name: basename(project), path: project },
-        addon_version: SERVER_VERSION,
-        addon_digest: shippedRuntimeDigest(),
+        addon_version: version,
+        addon_digest:
+          version === SERVER_VERSION ? shippedRuntimeDigest() : '0'.repeat(shippedRuntimeDigest().length),
       }),
       'utf8',
     );
@@ -19453,6 +19454,22 @@ async function testRuntimeConnectedIsAboutThisProjectsGames(): Promise<void> {
       get(aside, 'game', 'runtimeConnected'),
       false,
       `not this project's: ${JSON.stringify(aside)}`,
+    );
+
+    // A probe's editor_status said runtimeConnected true about a game on the release before, which
+    // every runtime call refused.
+    const stale = await game(mine, '0.0.1');
+    const behind = await status();
+    const old = asArray(get(behind, 'game', 'runtimes')).find((one) => get(one, 'pid') === stale);
+    assert.deepEqual(
+      [get(old, 'ofThisProject'), get(old, 'reachable'), get(old, 'addonIsStale')],
+      [true, true, true],
+      JSON.stringify(behind),
+    );
+    assert.equal(
+      get(behind, 'game', 'runtimeConnected'),
+      false,
+      `nor a game on another release's addon: ${JSON.stringify(behind)}`,
     );
 
     const own = await game(mine);

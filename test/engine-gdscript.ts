@@ -3333,6 +3333,74 @@ function testAFileClaimingTheSameUidIsNoUse(godotPath: string, _projectDir: stri
 }
 
 /**
+ * A setting a run's override file sets is answered with the project's value, beside the file's. A
+ * run lays res://override.cfg and then the file application/config/project_settings_override names
+ * over project.godot, and the editor lays neither. A game keeping a player's window size in user://
+ * had that size answered headless as the project's own setting, and a set of the same value answered
+ * unchanged and wrote nothing to a project.godot that held no line for it.
+ */
+function testASettingARunLaysOverIsNotTheProjects(godotPath: string, _projectDir: string): void {
+  const dir = createProject(godotPath);
+  const operation = (name: string, params: unknown): unknown => runOperation(godotPath, dir, name, params);
+  try {
+    const settings = join(dir, 'project.godot');
+    writeFileSync(
+      settings,
+      readFileSync(settings, 'utf8').replace(
+        '[application]\n',
+        '[application]\nconfig/project_settings_override="res://laid.cfg"\n',
+      ) + '\n[display]\n\nwindow/size/viewport_width=800\n',
+    );
+    writeFileSync(
+      join(dir, 'override.cfg'),
+      '[display]\n\nwindow/size/viewport_width=1000\nwindow/size/viewport_height=500\n',
+    );
+    writeFileSync(join(dir, 'laid.cfg'), '[display]\n\nwindow/size/viewport_width=1280\n');
+
+    const width = operation('get_project_setting', { setting: 'display/window/size/viewport_width' });
+    assert.deepEqual(
+      [get(width, 'value'), get(width, 'at_default'), get(width, 'overridden_in')],
+      [800, false, { file: 'res://laid.cfg', value: 1280 }],
+      `the project's value, and the last file to set it: ${JSON.stringify(width)}`,
+    );
+    const height = operation('get_project_setting', { setting: 'display/window/size/viewport_height' });
+    assert.deepEqual(
+      [get(height, 'value'), get(height, 'at_default'), get(height, 'overridden_in')],
+      [648, true, { file: 'res://override.cfg', value: 500 }],
+      `the default, where project.godot has no line: ${JSON.stringify(height)}`,
+    );
+    const name = operation('get_project_setting', { setting: 'application/config/name' });
+    assert.equal(get(name, 'overridden_in'), undefined, `one no file sets: ${JSON.stringify(name)}`);
+    const family = operation('get_project_setting', { prefix: 'display/window/size/viewport_h' });
+    assert.deepEqual(
+      asArray(get(family, 'settings')).map((one) => [get(one, 'value'), get(one, 'overridden_in')]),
+      [[648, { file: 'res://override.cfg', value: 500 }]],
+      `a family read the same way: ${JSON.stringify(family)}`,
+    );
+
+    const set = operation('set_project_setting', {
+      setting: 'display/window/size/viewport_height',
+      value: 500,
+    });
+    assert.deepEqual(
+      [get(set, 'old_value'), get(set, 'saved'), get(set, 'overridden_in')],
+      [648, true, { file: 'res://override.cfg', value: 500 }],
+      `the value the file holds is still a change to the project: ${JSON.stringify(set)}`,
+    );
+    assert.match(String(get(set, 'overriddenNote')), /reads 500 for it from res:\/\/override\.cfg/);
+    assert.match(readFileSync(settings, 'utf8'), /^window\/size\/viewport_height=500$/m);
+    const unset = operation('unset_project_setting', { setting: 'display/window/size/viewport_width' });
+    assert.deepEqual(
+      [get(unset, 'removed'), get(unset, 'old_value')],
+      [true, 800],
+      `and an unset says what the project held: ${JSON.stringify(unset)}`,
+    );
+  } finally {
+    sweep(dir);
+  }
+}
+
+/**
  * A uid is followed to the file declaring it before the project has been imported, as on a fresh
  * clone or a CI checkout, where the engine has no uid cache until its first import.
  *
@@ -5862,6 +5930,7 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   referencesMissing: testAReferenceIsMissingOnlyWhereTheEngineMissesIt,
   uidBeforeImport: testAUidIsFollowedBeforeAnyImport,
   sharedUid: testAFileClaimingTheSameUidIsNoUse,
+  laidOver: testASettingARunLaysOverIsNotTheProjects,
   autoloadUses: (godotPath) => {
     testAnAutoloadIsUsedByItsName(godotPath);
   },
