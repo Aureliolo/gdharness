@@ -284,4 +284,17 @@ func _check_methods_offered(scripted: GdhInputCommands) -> void:
 	var bare: String = GdhPaths.with_methods_offered("N has no method nobody", plain, "nobody")
 	if bare != "N has no method nobody":
 		_fail("an object with no script and nothing near is refused as it was: %s" % bare)
+	# A property with a setter gives the script a method called @asked_setter, which nobody means.
+	var accessed: GDScript = GDScript.new()
+	accessed.source_code = (
+		"extends Node\nvar asked: int:\n\tset(value):\n\t\tasked = value\n\n\nfunc own() -> void:\n"
+		+ "\tpass\n"
+	)
+	var _reloaded: Error = accessed.reload()
+	var holder: Node = Node.new()
+	holder.set_script(accessed)
+	var setters: String = GdhPaths.with_methods_offered("S has no method nobody", holder, "nobody")
+	if setters != "S has no method nobody; its script declares own":
+		_fail("a setter the engine names is not offered: %s" % setters)
+	holder.free()
 	plain.free()

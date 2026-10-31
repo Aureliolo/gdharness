@@ -89,8 +89,13 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 
 	var old_value: Variant = null
 	var had_value: bool = ProjectSettings.has_setting(setting_path)
+	var laid: Dictionary = GdhSettingReads.laid_over(
+		setting_path, GdhSettingReads.override_files()
+	)
 	if had_value:
-		old_value = ProjectSettings.get_setting(setting_path)
+		old_value = (
+			ProjectSettings.get_setting(setting_path) if laid.is_empty() else laid["project"]
+		)
 	# A setting the engine registers is there with its default whether or not project.godot sets it,
 	# so has_setting alone called the description of a project that had never set one an old value.
 	# Whether it is new is the file's to say: one at its default has a line only where the project
@@ -131,6 +136,16 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 		"was_default": was_default,
 		"saved": true,
 	}
+	if not laid.is_empty():
+		var read: Variant = _values.serialize_value(laid["value"])
+		answer["overridden_in"] = { "file": laid["file"], "value": read }
+		answer["overriddenNote"] = (
+			(
+				"A run on this machine still reads %s for it from %s, which a run lays over "
+				+ "project.godot and the editor does not."
+			)
+			% [JSON.stringify(read), laid["file"]]
+		)
 	# The same value in the same type is no change, and the file is left alone: a save rewrites it
 	# whole. The type is compared as well, so an int setting the file holds as 50.0 is still put
 	# right.
@@ -254,6 +269,11 @@ func unset_project_setting(params: Dictionary) -> Dictionary:
 	var default_value: Variant = ProjectSettings.property_get_revert(setting_path)
 	var held: bool = ProjectSettings.has_setting(setting_path)
 	var value: Variant = ProjectSettings.get_setting(setting_path) if held else null
+	var laid: Dictionary = GdhSettingReads.laid_over(
+		setting_path, GdhSettingReads.override_files()
+	)
+	if held and not laid.is_empty():
+		value = laid["project"]
 	var answer: Dictionary = {
 		"setting_path": setting_path,
 		"default_value": _values.serialize_value(default_value) if default_value != null else null,
