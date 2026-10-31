@@ -2219,6 +2219,7 @@ export function exportAnswer(
   beside: readonly string[] = [],
   docCacheNote: string | null = null,
   bytes: number | null = null,
+  imports: ReturnType<typeof importedFirstAnswer> = {},
 ): ToolResponse {
   const { log } = ending;
   const written = after !== null && after !== before;
@@ -2235,6 +2236,7 @@ export function exportAnswer(
     // everything out still writes a pack, and only its size shows it.
     ...(written && bytes !== null ? { bytes } : {}),
     ...(beside.length === 0 ? {} : { alsoWritten: beside }),
+    ...imports,
     ...(notCopied.length === 0
       ? {}
       : {
@@ -7265,6 +7267,10 @@ class GodotServer {
         ['Give outputPath ending in .pck, or .zip for a zip of the resources'],
       );
     }
+    // The export's own scan imports what changed only by the editor's cache, so in a checkout
+    // without it a sidecar a tool wrote, naming no output, went into the build as an asset that
+    // fails to load.
+    const imported = await this.importWhatChanged(project.value.path);
     // Away from the project's own user://logs/, for the reason the operations are: the engine
     // renames that file when a process starts, so an export beside a running game rotated the
     // game's log out from under it. What this run printed is read off its streams just below and
@@ -7333,6 +7339,7 @@ class GodotServer {
       beside,
       docCacheNote,
       existsSync(output.absolutePath) ? statSync(output.absolutePath).size : null,
+      importedFirstAnswer(imported),
     );
   }
 

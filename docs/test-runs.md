@@ -307,6 +307,11 @@ never ends an engine that keeps printing, such as a case warning every frame; `-
 engine that has run that many seconds, naming the case it was in. An engine whose autoload did not
 start is ended as soon as it says so, since nothing a suite reports without it means anything.
 
+While other work keeps a quarter of the machine or more busy, both limits count the engine's own
+processor time rather than the clock, so an engine slowed by a crowded machine is not ended as if
+it had hung. A hung engine uses no processor, so eight times either limit on the clock still ends it
+however busy the machine is, and its ending says how it was counted.
+
 When an engine runs out of memory, which shows as the allocator's null, an image decode failing, or
 Windows' `STATUS_NO_MEMORY` or `STATUS_COMMITMENT_LIMIT`, every engine that failed runs again, one at
 a time, and those runs are the ones judged. One that fails again is headed as run again alone.
