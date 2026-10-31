@@ -56214,6 +56214,23 @@ async function testAWriteSaysWhatElseItChanged(): Promise<void> {
       ['anchor_bottom', 'anchor_right', 'grow_horizontal', 'grow_vertical', 'offset_bottom', 'offset_right'],
       `a preset sets the anchors, offsets and growth: ${JSON.stringify(filled)}`,
     );
+    // A scene's root out of a tree keeps the Position mode it was made with, which ignores a preset.
+    writeFileSync(
+      join(project, 'card.tscn'),
+      '[gd_scene format=3]\n\n[node name="Card" type="PanelContainer"]\n',
+    );
+    const rooted = await call('scene_node', {
+      scenePath: 'res://card.tscn',
+      op: 'set',
+      nodePath: '.',
+      properties: { anchors_preset: 15 },
+    });
+    assert.equal(get(rooted, 'properties', 'anchors_preset'), 15, JSON.stringify(rooted));
+    assert.match(
+      readFileSync(join(project, 'card.tscn'), 'utf8'),
+      /\nanchors_preset = 15\nanchor_right = 1\.0\nanchor_bottom = 1\.0\ngrow_horizontal = 2\ngrow_vertical = 2\n/,
+      `a root takes the full rect preset: ${readFileSync(join(project, 'card.tscn'), 'utf8')}`,
+    );
     const moved = await node({
       op: 'add',
       nodeType: 'Node2D',

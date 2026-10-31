@@ -40,6 +40,7 @@ const HEADINGS: int = PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_
 ## Control's layout_mode values, which the engine does not expose as constants.
 const LAYOUT_MODE_POSITION: int = 0
 const LAYOUT_MODE_ANCHORS: int = 1
+const LAYOUT_MODE_UNCONTROLLED: int = 3
 ## What a container sets on each child it lays out, beside the anchors and offsets.
 const PLACED_BY_A_CONTAINER: Array[String] = ["position", "size", "global_position"]
 
@@ -366,8 +367,14 @@ func _laid_out(control: Control, name: String) -> String:
 			)
 			% [control.name, parent.name, parent.get_class(), base]
 		)
-	if anchoring and GdhRead.as_int(control.get("layout_mode")) == LAYOUT_MODE_POSITION:
+	var mode: int = GdhRead.as_int(control.get("layout_mode"))
+	if anchoring and mode == LAYOUT_MODE_POSITION:
 		control.set("layout_mode", LAYOUT_MODE_ANCHORS)
+	# A scene's root reads as Uncontrolled but keeps the Position mode it was made with until it
+	# enters a tree, and the engine ignores a preset in that stored mode, so full rect read back as
+	# top left on every root a headless edit wrote.
+	elif anchoring and mode == LAYOUT_MODE_UNCONTROLLED:
+		control.set("layout_mode", LAYOUT_MODE_UNCONTROLLED)
 	return ""
 
 
