@@ -26,6 +26,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { CompiledHelper, HELPER_COMPILE_MS } from './compiled-helper.js';
+import { mendBeforeStart } from './uid-cache.js';
 
 /** The desktop every process started this way shares. */
 export const HIDDEN_DESKTOP = 'gdharness';
@@ -376,6 +377,8 @@ export function throughHelper(
   files: HelperFiles,
   assembly = helperAssembly(),
 ): { command: string; args: string[] } {
+  // The helper is what is spawned, with the engine's command line in a file it reads.
+  mendBeforeStart(args, how.directory);
   const fields = [
     how.desktop ?? '',
     windowsCommandLine(command, args),

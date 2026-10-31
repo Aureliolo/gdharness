@@ -18,6 +18,7 @@ import {
   spawnSync,
 } from 'node:child_process';
 import type { Readable, Writable } from 'node:stream';
+import { mendBeforeStart } from './uid-cache.js';
 
 /**
  * The one way this package and its tests start a process, so every one starts with no window.
@@ -51,6 +52,7 @@ export function spawnHidden(
   args: readonly string[],
   options: SpawnOptions = {},
 ): ChildProcess {
+  mendBeforeStart(args, options.cwd);
   return spawn(command, [...args], { ...options, windowsHide: true });
 }
 
@@ -64,6 +66,7 @@ export function spawnShown(
   args: readonly string[],
   options: SpawnOptions = {},
 ): ChildProcess {
+  mendBeforeStart(args, options.cwd);
   return spawn(command, [...args], { ...options, windowsHide: false });
 }
 
@@ -73,6 +76,7 @@ export function runHidden(
   args: readonly string[],
   options: ExecFileOptions = {},
 ): Promise<{ stdout: string; stderr: string }> {
+  mendBeforeStart(args, options.cwd ?? undefined);
   return new Promise((resolve, reject) => {
     execFile(
       command,
@@ -96,6 +100,7 @@ export function runSyncHidden(
   args: readonly string[],
   options: ExecFileSyncOptionsWithStringEncoding,
 ): string {
+  mendBeforeStart(args, options.cwd ?? undefined);
   return execFileSync(command, [...args], { ...options, windowsHide: true });
 }
 
@@ -115,5 +120,6 @@ export function spawnSyncHidden(
   args: readonly string[],
   options: SpawnSyncOptions = {},
 ): SpawnSyncReturns<string | Buffer> {
+  mendBeforeStart(args, options.cwd);
   return spawnSync(command, [...args], { ...options, windowsHide: true });
 }
