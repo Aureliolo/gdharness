@@ -424,9 +424,17 @@ the slots. A tool of a game's own that starts engines takes them the same way:
 6. From the first look that finds every slot held until the take ends, however it ends, keep a mark
    of the wait: `<directory>/waiting/<pid>-<n>.json`, with `n` unique within your process, made
    exclusively as a lock is (create the folder first if it is missing) and holding what your lock
-   will.
-7. When done, remove the lock, but only if it still names your pid.
-8. At each take, remove every `<n>.lock` numbered at or past the slot count whose holder has gone,
+   will, with `taker` (`gate`, `timing`, `tier` or `other`, as below) and `since`, when the take
+   began to wait in seconds since the epoch. A wait for memory rather than a slot names `taker`
+   `memory`.
+7. Take in the order you began to wait. At each look, read every live mark but your own and
+   `memory` ones; those whose `since` is earlier are ahead of you, the earliest first. A mark
+   naming no `since` waits since its file was made, and one naming another `taker` is `other`. Give
+   each, in turn, the first free slot of those it may take now (below, aged by its own `since`) not
+   given to one before it, and leave those slots alone. A slot you have left for 5 seconds you may
+   take, since one ahead takes a slot within a moment of its coming free. A timing leaves nothing.
+8. When done, remove the lock, but only if it still names your pid.
+9. At each take, remove every `<n>.lock` numbered at or past the slot count whose holder has gone,
    under its steal file as in step 4. Only a taker given more slots makes those, and no take of the
    count ever reads them, so nothing else frees them.
 

@@ -133,12 +133,16 @@ import {
   inAGate as runsInAGate,
   SHARE_COUNT_VARIABLE,
   SHARE_VARIABLE,
+  SLOT_YIELD_MS,
   type SlotHolder,
+  SlotLine,
   START_TOLERANCE_MS,
   slotEngineNamed,
+  slotsClaimed,
   slotsDrawnOn,
   slotTaker,
   slotWaitedSaid,
+  slotWaiters,
   slotWaitSaid,
   UNWRITTEN_MS,
   WAITING_FOLDER,
@@ -45277,10 +45281,10 @@ async function testASlotWaitLooksWhenTheSlotsChange(): Promise<void> {
     class Counted extends EngineSlots {
       looks = 0;
       waited: number[] = [];
-      override async takeFree(game = false, waitedMs = 0): Promise<string | null> {
+      override async takeFree(game = false, waitedMs = 0, line?: SlotLine): Promise<string | null> {
         this.looks += 1;
         this.waited.push(waitedMs);
-        return super.takeFree(game, waitedMs);
+        return super.takeFree(game, waitedMs, line);
       }
     }
     const slots = new Counted(directory, 1, me);
@@ -45836,8 +45840,8 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
     writeFileSync(join(waits, 'live.json'), JSON.stringify({ pid: process.pid, started }));
     assert.deepEqual(
       await takeAll(outside),
-      ['3.lock', '2.lock', '1.lock', '0.lock'],
-      'a gone gate and an unwritten mark keep no slots',
+      ['2.lock', '1.lock', '0.lock'],
+      'a gone gate and an unwritten mark keep no slots, and the live wait is left the first it takes',
     );
     assert.deepEqual(
       readdirSync(queued).sort(),
@@ -45988,6 +45992,94 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
 }
 
 /**
+ * Takers are served in the order they began to wait. A one-off waited 38 to 80 minutes for one slot
+ * while runs of seconds took turns on it, each the first to look as a lock went. A take leaves a free
+ * slot to a taker waiting longer that may take it, for {@link SLOT_YIELD_MS} at most, and reads the
+ * marks the games' tools write, which name `since` in seconds, or nothing beside the file's time.
+ */
+async function testTakersWaitTheirTurn(): Promise<void> {
+  assert.deepEqual(
+    [...slotsClaimed([[3, 2], [3]], [2, 3])],
+    [3],
+    'the second wants only what the first took',
+  );
+  assert.deepEqual(
+    [...slotsClaimed([[3], [3, 2]], [2, 3])].sort((a, b) => a - b),
+    [2, 3],
+    'each takes the first left to it',
+  );
+  assert.deepEqual([...slotsClaimed([[1]], [0])], [], 'one finding none of its own free takes none');
+
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-line-'));
+  const marks = join(directory, WAITING_FOLDER);
+  mkdirSync(marks, { recursive: true });
+  try {
+    const me = { pid: process.pid, started: await ownStart() };
+    // Live, since it names this process, and another taker's by its name.
+    const ahead = join(marks, '1-1.json');
+    writeFileSync(ahead, JSON.stringify({ ...me, taker: 'other', since: (Date.now() - 60_000) / 1000 }));
+    assert.deepEqual(
+      slotWaiters(directory).map((one) => [one.mark, one.taker, Math.round((Date.now() - one.since) / 1000)]),
+      [['1-1.json', 'other', 60]],
+      'a mark names its kind and since when, in seconds',
+    );
+
+    const late = new EngineSlots(directory, 2, me, undefined, () => 'other');
+    const first = await late.takeFree();
+    assert.equal(first, join(directory, '0.lock'), 'a newcomer leaves slot 1, the one ahead takes first');
+    assert.equal(await late.takeFree(), null, 'and waits rather than take it');
+    assert.deepEqual(late.drawn.left, [1], 'saying which it leaves');
+    assert.match(
+      slotWaitSaid(3000, 2, directory, late.holders(), late.drawn),
+      /It leaves free slot 1 to takers that began waiting before it, which go first\.$/,
+    );
+
+    let now = Date.now();
+    const line = new SlotLine('other', false, () => now);
+    assert.equal(await late.takeFree(false, 0, line), null, 'a take with its place in line leaves it too');
+    now += SLOT_YIELD_MS - 1;
+    assert.equal(await late.takeFree(false, 0, line), null, 'until it has left it for the yield');
+    now += 1;
+    assert.equal(await late.takeFree(false, 0, line), join(directory, '1.lock'), 'then takes it itself');
+    late.releaseAll();
+
+    const timing = new EngineSlots(directory, 2, me, undefined, () => 'timing');
+    assert.equal(await timing.takeFree(), join(directory, '1.lock'), 'a timing leaves nothing');
+    timing.releaseAll();
+
+    writeFileSync(ahead, JSON.stringify({ ...me, taker: 'other', since: (Date.now() + 60_000) / 1000 }));
+    const earlier = new EngineSlots(directory, 2, me, undefined, () => 'other');
+    assert.equal(
+      await earlier.takeFree(),
+      join(directory, '1.lock'),
+      'one that came later is not let go first',
+    );
+    earlier.releaseAll();
+
+    writeFileSync(ahead, JSON.stringify(me));
+    const anHourAgo = new Date(Date.now() - 3_600_000);
+    utimesSync(ahead, anHourAgo, anHourAgo);
+    assert.deepEqual(
+      slotWaiters(directory).map((one) => [one.taker, Math.round((Date.now() - one.since) / 60_000)]),
+      [['other', 60]],
+      'a mark naming neither is a one-off waiting since its file was made',
+    );
+    rmSync(ahead);
+
+    const memory = new EngineSlots(directory, 2, me);
+    const unmark = memory.markWaiting();
+    assert.equal(readdirSync(marks).length, 1, 'a wait for memory keeps a mark');
+    assert.deepEqual(slotWaiters(directory), [], 'which waits for no slot, so no take lets it go first');
+    const beside = new EngineSlots(directory, 2, me, undefined, () => 'other');
+    assert.equal(await beside.takeFree(), join(directory, '1.lock'), 'and a take beside it takes the slot');
+    beside.releaseAll();
+    unmark();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
+/**
  * A take that finds every slot held keeps a mark of its wait for as long as it waits, and only then.
  *
  * The games' gates read the marks to leave the time `gdharness test` stood waiting for slots others
@@ -46025,10 +46117,16 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
     const one = await markedSoon(1);
     assert.equal(one.length, 1, 'a take finding every slot held marks its wait');
     assert.match(one[0] ?? '', new RegExp(`^${String(process.pid)}-\\d+\\.json$`), 'named by pid and wait');
+    const said = JSON.parse(readFileSync(join(marks, one[0] ?? ''), 'utf8')) as Record<string, unknown>;
     assert.deepEqual(
-      JSON.parse(readFileSync(join(marks, one[0] ?? ''), 'utf8')),
-      holder,
-      'holding what its lock will',
+      { ...said, since: 0 },
+      { ...holder, taker: slotTaker(), since: 0 },
+      'holding what its lock will and its kind',
+    );
+    const since = said['since'];
+    assert.ok(
+      typeof since === 'number' && Math.abs(since * 1000 - Date.now()) < 10_000,
+      `and when it began to wait, in seconds: ${String(since)}`,
     );
     const besideIt = new AbortController();
     const another = waitFor(besideIt.signal);
@@ -70649,6 +70747,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
   testATakeSweepsGoneLocksPastTheCount,
   testASlotWaitLooksWhenTheSlotsChange,
+  testTakersWaitTheirTurn,
   testAWaitForASlotKeepsAMarkUntilItEnds,
   testGatesInTheQueueKeepTheirSlots,
   testAnEngineOnASlotLendsItToWhatItStarts,
