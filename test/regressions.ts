@@ -45456,18 +45456,21 @@ async function testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded(): Promis
   starved.restart(100);
   assert.deepEqual([starved.byClock, starved.byWork, starved.clock(110)], [0, 0, 10]);
 
-  // A process that is running, this one, answers how much processor it has used; a pid nothing
-  // holds is left out.
+  // A process that is running, this one, answers how much processor it has used; one that has
+  // exited is left out, and so is a pid no process can have.
   const busyUntil = Date.now() + 200;
   while (Date.now() < busyUntil) {
     // Some processor time of its own to read.
   }
-  const read = await processorSecondsOf([process.pid, 0x7ffffffe]);
-  assert.ok(
-    (read.get(process.pid) ?? 0) > 0,
-    `the platform answered for this process: ${JSON.stringify([...read])}`,
-  );
-  assert.equal(read.has(0x7ffffffe), false, JSON.stringify([...read]));
+  const exitedPid = spawnSyncHidden(process.execPath, ['-e', '0']).pid;
+  for (const others of [[exitedPid], [0x7ffffffe]]) {
+    const read = await processorSecondsOf([process.pid, ...others]);
+    assert.ok(
+      (read.get(process.pid) ?? 0) > 0,
+      `the platform answered for this process beside ${JSON.stringify(others)}: ${JSON.stringify([...read])}`,
+    );
+    assert.equal(read.size, 1, JSON.stringify([...read]));
+  }
 }
 
 /**
@@ -49583,13 +49586,49 @@ async function testARunawayEngineLogIsCutAndEnded(): Promise<void> {
       JSON.stringify(crowdedQuiet),
     );
     assert.ok(crowdedQuiet.seconds >= STARVED, JSON.stringify(crowdedQuiet));
-    const crowdedChatty = await counted('crowded-chatty', crowdedMachine, 1, chattily);
+    // Two seconds, since the stretches before the hidden desktop's helper names the engine's pid
+    // have no processor to read and count by the clock.
+    const crowdedChatty = await counted('crowded-chatty', crowdedMachine, 2, chattily);
     assert.match(
       String(crowdedChatty.ended),
-      /^the engine ran past the 1 s deadline, 8 times over on the clock \(\d+ s\), the machine kept busy by other work, so it was ended$/,
+      /^the engine ran past the 2 s deadline, 8 times over on the clock \(\d+ s\), the machine kept busy by other work, so it was ended$/,
       JSON.stringify(crowdedChatty),
     );
-    assert.ok(crowdedChatty.seconds >= STARVED, JSON.stringify(crowdedChatty));
+    assert.ok(crowdedChatty.seconds >= 2 * STARVED, JSON.stringify(crowdedChatty));
+
+    // A sample that lands as the engine exits puts its last stretch far past the deadline by the
+    // clock, as an exited engine's unread processor does; one that finished is not ended for it.
+    const exiting = join(scratch, 'exiting');
+    mkdirSync(exiting);
+    let looks = 0;
+    const asItExits = async (): Promise<Sample> => {
+      looks += 1;
+      if (looks > 1) {
+        const exitingPid = Number(/^pid (\d+)/.exec(readLog(join(exiting, 'engine.log')))?.[1]);
+        const until = Date.now() + 15_000;
+        while (
+          !(Number.isInteger(exitingPid) && exitingPid > 0 && !alive(exitingPid)) &&
+          Date.now() < until
+        ) {
+          await delay(50);
+        }
+      }
+      return { at: nowSeconds() + (looks > 1 ? 1000 : 0), machine: 0, processors: null };
+    };
+    const finishedWithin = await watchedEngine(
+      { ...launch, deadlineSeconds: 100, sample: asItExits },
+      join(scratch, '0.lock'),
+      ['-e', "console.log('pid ' + process.pid); setTimeout(() => console.log('done'), 1500)"],
+      exiting,
+      join(exiting, 'engine.log'),
+      60,
+    );
+    assert.deepEqual(
+      [finishedWithin.ended, finishedWithin.code],
+      [null, 0],
+      `an engine that exited is not ended for the stretch it exited in: ${JSON.stringify(finishedWithin)}`,
+    );
+    assert.ok(looks > 1, 'and the sample landed after it had started');
   } finally {
     sweep(scratch);
   }

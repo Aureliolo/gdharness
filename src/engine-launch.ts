@@ -440,6 +440,8 @@ export async function watchedEngine(
   void exited.then(() => {
     finished.now = true;
   });
+  // Read through a call, since the loop's own condition narrows the field for the code after an await.
+  const hasFinished = (): boolean => finished.now;
   const reading = openSync(log, 'r');
   // The engine itself: the hidden desktop's helper starts it and writes its pid down.
   const engineAt = (): number | undefined => {
@@ -479,9 +481,14 @@ export async function watchedEngine(
       running.counted(taken, pid);
       quiet.counted(taken, pid);
       const at = nowSeconds();
+      // An engine that exited while the sample was taken has no processor time left to read, so
+      // its last stretch counts by the clock and could put past a limit an engine that finished
+      // within it.
+      // The hidden desktop's helper exits a moment after the engine it started.
+      const gone = hasFinished() || (pid !== undefined && !alive(pid));
       // Silence alone never ends an engine that keeps printing, such as a case warning every frame.
       const deadline = launch.deadlineSeconds;
-      const over = deadline === null ? null : running.past(deadline, at);
+      const over = deadline === null || gone ? null : running.past(deadline, at);
       if (ended === null && deadline !== null && over !== null) {
         const stoppedIn = readRun(readLog(log)).stoppedIn;
         ended = `the engine ran past the ${String(deadline)} s deadline${countedBy(running, over, at)}${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended`;
@@ -509,7 +516,7 @@ export async function watchedEngine(
           ended = `the engine printed more than the ${String(LOG_LIMIT_BYTES / 1024 / 1024)} MiB a log may hold, so it was ended`;
           stop();
         }
-      } else if (ended === null && quiet.past(silenceSeconds, at) !== null) {
+      } else if (ended === null && !gone && quiet.past(silenceSeconds, at) !== null) {
         if (allowed.size !== size) {
           allowed = {
             size,

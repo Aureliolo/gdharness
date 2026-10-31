@@ -197,16 +197,20 @@ export async function processorSecondsOf(pids: readonly number[]): Promise<Map<n
         }
       }
     } else {
-      // ps exits 1 when any pid it was given has gone, and still prints the rest.
-      const stdout = await run('ps', ['-o', 'pid=,time=', '-p', pids.join(',')], {
-        timeout: ASK_TIMEOUT_MS,
-      }).then(
-        (done) => done.stdout,
-        (error: unknown) => {
-          const printed = (error as { stdout?: unknown }).stdout;
-          return typeof printed === 'string' ? printed : '';
-        },
-      );
+      // ps exits 1 when any pid it was given has gone, and still prints the rest; one it cannot
+      // take at all leaves it printing nothing, so each is then asked alone.
+      const asked = (some: readonly number[]): Promise<string> =>
+        run('ps', ['-o', 'pid=,time=', '-p', some.join(',')], { timeout: ASK_TIMEOUT_MS }).then(
+          (done) => done.stdout,
+          (error: unknown) => {
+            const printed = (error as { stdout?: unknown }).stdout;
+            return typeof printed === 'string' ? printed : '';
+          },
+        );
+      let stdout = await asked(pids);
+      if (stdout.trim() === '' && pids.length > 1) {
+        stdout = (await Promise.all(pids.map((pid) => asked([pid])))).join('\n');
+      }
       for (const line of stdout.split('\n')) {
         const [pid, time] = line.trim().split(/\s+/);
         const seconds = time === undefined ? undefined : secondsFromClock(time);
