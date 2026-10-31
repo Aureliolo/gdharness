@@ -137,7 +137,7 @@ static func masked(field: LineEdit) -> String:
 	return field.secret_character.repeat(field.text.length())
 
 
-## Whether [param node] draws a list of items rather than holding words in a `text`; see
+## Whether [param node] draws a list of items rather than holding words in a `text`. See
 ## [method items_of].
 static func draws_a_list(node: Node) -> bool:
 	return (
@@ -225,7 +225,7 @@ static func _text_of(node: Node) -> String:
 	if label != null:
 		return _label_says(label)
 	# A RichTextLabel's text is its markup when it reads BBCode, and nobody reads the tags: a
-	# dossier line came back as "[b][color=#4fc2d4]Mollum Telken[/color], [/b]..." and a phrase
+	# ledger line came back as `"[b][color=#3a7bd5]Elinor Garrow[/color], [/b]..."` and a phrase
 	# running across a tag could not be found or waited for. The parsed text is what is drawn, and
 	# it also holds what a game added with append_text(), which the property never shows. It is
 	# parsed from the translation already.

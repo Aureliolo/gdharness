@@ -148,8 +148,8 @@ func _check_a_button_that_presses_nothing() -> void:
 	await process_frame
 
 
-## Keys go to the field a focused dialog holds, and the answer says that field; a read-only field is
-## refused; a field that leaves the tree on Enter is still named.
+## Keys go to the field a focused dialog holds, and the answer says that field. A read-only field is
+## refused. A field that leaves the tree on Enter is still named.
 func _check_typing_where_the_keys_go() -> void:
 	var outside: LineEdit = LineEdit.new()
 	outside.name = "Outside"
@@ -296,7 +296,7 @@ func _check_choosing() -> void:
 ##
 ## A menu holding "Leave the hall" refused "Leave*" as no such item, where a click, a find and a
 ## wait all take the glob. Each rule is checked by what it chooses: a plain word as a contains, the
-## whole words ahead of an item that contains them, an enabled item ahead of a disabled one; and a
+## whole words ahead of an item that contains them, an enabled item ahead of a disabled one, and a
 ## glob or alternatives matching two items equally are refused with both named.
 func _check_choosing_by_what_it_says() -> void:
 	var doors: MenuButton = MenuButton.new()
@@ -511,7 +511,7 @@ func _room(parent: Node) -> MeshInstance3D:
 	return target
 
 
-## A 3D node under a HUD that lets the pointer pass, and one under a HUD that stops it; and a room
+## A 3D node under a HUD that lets the pointer pass, and one under a HUD that stops it, and a room
 ## in a SubViewport larger than what shows it.
 func _check_the_world_behind_the_interface() -> void:
 	var target: MeshInstance3D = _room(root)
@@ -711,7 +711,7 @@ func _check_words_in_a_rich_label() -> void:
 ## A word inside a sentence is not pressed for a control saying exactly that word which is hidden.
 ## #895: a tab reading "Out" sat in a collapsed drawer, and a click on it pressed a dispatch saying
 ## somebody "fell out in the hall". Refused, naming both, and pressed when the caller asks for the
-## sentence by index; with nothing else saying the word, pressed and said to be part of more.
+## sentence by index. With nothing else saying the word, pressed and said to be part of more.
 func _check_a_word_inside_a_sentence() -> void:
 	var tab: Button = _button("Tab", Vector2(2, 2), root, "Out")
 	tab.visible = false
@@ -867,7 +867,7 @@ func _check_a_word_said_inside_other_words() -> void:
 
 
 ## An item of an open menu is drawn by the menu rather than held as a control, so a click by its
-## words finds no control; the refusal names the menu and the call that chooses the item. #894: a
+## words finds no control. The refusal names the menu and the call that chooses the item. #894: a
 ## wait was met on an item's words and the click after it was refused with no word of choose.
 func _check_an_item_in_an_open_menu() -> void:
 	var hall: MenuButton = MenuButton.new()
@@ -930,7 +930,7 @@ func _check_words_held_together_by_a_space_that_does_not_break() -> void:
 			_fail("a typed space matches U+%04X" % code)
 	if GdhSays.matches("Ab%sCd" % String.chr(0x200b), "ab cd"):
 		_fail("and a zero-width space, which draws no space, is not one")
-	# A space stands for any one character only while a text is sorted out cheaply; what matches is
+	# A space stands for any one character only while a text is sorted out cheaply. What matches is
 	# still decided on the words spaced.
 	var nbsp: String = String.chr(0x00a0)
 	for case: Array in [
@@ -950,7 +950,7 @@ func _check_words_held_together_by_a_space_that_does_not_break() -> void:
 			_fail("%s says %s: %s" % [JSON.stringify(said), JSON.stringify(wanted), not expected])
 
 	var line: RichTextLabel = RichTextLabel.new()
-	line.name = "Dossier"
+	line.name = "Ledger"
 	line.bbcode_enabled = true
 	line.autowrap_mode = TextServer.AUTOWRAP_OFF
 	line.add_theme_font_size_override("normal_font_size", 4)

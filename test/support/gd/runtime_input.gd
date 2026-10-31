@@ -615,7 +615,7 @@ func _check_a_click_by_words(input: GdhInputCommands) -> void:
 ## over it.
 ## A click on a dropdown near the bottom of the screen, whose menu has no room below it and opens
 ## over it, under the pointer. A player's click opens the menu and leaves it open with nothing
-## chosen; the release of a click held for one frame landed on the item the menu opened under the
+## chosen. The release of a click held for one frame landed on the item the menu opened under the
 ## pointer and chose it.
 func _check_a_click_opening_a_menu_over_itself(input: GdhInputCommands) -> void:
 	var dropdown: OptionButton = OptionButton.new()

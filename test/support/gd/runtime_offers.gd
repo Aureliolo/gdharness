@@ -45,8 +45,8 @@ func _run() -> void:
 
 
 ## A key the focused field keeps from the game, and typing at a focus that is no field. Space into a
-## name field pressed no jump and the answer named only the focus; Enter ended the edit without a
-## word; and text typed with a button focused answered that it went into the button.
+## name field pressed no jump and the answer named only the focus. Enter ended the edit without a
+## word, and text typed with a button focused answered that it went into the button.
 func _check_keys_a_field_keeps(input: GdhInputCommands, typing: GdhTyping) -> void:
 	var field: LineEdit = LineEdit.new()
 	root.add_child(field)

@@ -564,8 +564,8 @@ static func drawn_over(target: Control) -> Node:
 
 ## Why [param node], which is not visible in the tree, is not, as a parenthesis to follow its path:
 ## which nodes hide it, nearest first, and what has taken its place. Reading visible off the node
-## itself says true when only an ancestor is hidden, so without this a caller had nothing to unhide;
-## every hidden one is named because unhiding only the nearest leaves the rest hiding it.
+## itself says true when only an ancestor is hidden, so without this a caller had nothing to unhide.
+## Every hidden one is named because unhiding only the nearest leaves the rest hiding it.
 ##
 ## What has taken its place is what a click at its centre reaches now, which is the screen a game
 ## shows instead. Without a control there, as for a 3D node, it is what is shown beside the
@@ -602,7 +602,7 @@ static func why_hidden(node: Node) -> String:
 ## What a click at the centre of [param target], which is hidden, would reach instead, or null.
 ##
 ## The topmost thing there that takes the pointer, whatever order it is drawn in relative to the
-## target, since the target is not drawn at all; and never a node holding the target, which covers
+## target, since the target is not drawn at all, and never a node holding the target, which covers
 ## its place by containing it and is not what took it.
 static func drawn_at(target: Control) -> Node:
 	var drawn: Array[Node] = _pointer_takers(target.get_tree().root)
@@ -636,7 +636,7 @@ static func _drawn_above(control: Control, other: Control) -> bool:
 	return layer > other_layer or (layer == other_layer and control.is_greater_than(other))
 
 
-## "; A, B and C are shown beside N" for [param beside] and the hidden node [param hidden], naming
+## `"; A, B and C are shown beside N"` for [param beside] and the hidden node [param hidden], naming
 ## three at most and counting the rest.
 static func _shown_beside(beside: Array[String], hidden: Node) -> String:
 	if beside.is_empty():
@@ -856,7 +856,7 @@ static func _holds(control: Control, point: Vector2) -> bool:
 	# A control scaled to nothing holds no point, and inverting its transform is an engine error.
 	if is_zero_approx(placed.determinant()):
 		return false
-	# The rectangle, which is the engine's own answer unless a script overrides `_has_point`; the
+	# The rectangle, which is the engine's own answer unless a script overrides `_has_point`. The
 	# engine does not offer the overridden answer to scripts.
 	return Rect2(Vector2.ZERO, control.size).has_point(placed.affine_inverse() * point)
 

@@ -4,7 +4,7 @@ extends RefCounted
 ##
 ## A scene is read off its SceneState rather than instantiated. Instantiating outside the editor
 ## runs every script's member initialisers and _init (measured on 4.7.2, with or without -e), so a
-## read with no editor would have run the game's code on every node; the editor gets placeholders
+## read with no editor would have run the game's code on every node. The editor gets placeholders
 ## and runs none. The state holds everything the file says, and the scenes it instances theirs,
 ## without making a node. Loading the file still does what loading does in the game: static
 ## initialisers run, and a resource with a script is made with it.
@@ -53,7 +53,7 @@ static func scene_node(scene_path: String, node_path: String) -> Dictionary:
 
 
 ## The node at [param node_path] in [param scene_path] as [method scene_node] answers it, when it is
-## a [param kind]; otherwise a refusal saying what the scene has there and where its nodes of that
+## a [param kind]. Otherwise a refusal saying what the scene has there and where its nodes of that
 ## kind are, so the caller has the path to pass. The file is read once, because every load prints
 ## the engine's warnings about it again.
 static func scene_node_of_kind(scene_path: String, node_path: String, kind: String) -> Dictionary:
@@ -143,7 +143,7 @@ static func _laid(scene_path: String) -> Dictionary:
 ## file's own entries for it applied over it. Answers a refusal, or "".
 ##
 ## [param within] is the files being laid, outermost first, so a scene that instances one of them
-## is refused rather than laid forever; the engine refuses to load such a scene, so this is only
+## is refused rather than laid forever. The engine refuses to load such a scene, so this is only
 ## reached through a state built some other way. [param loaded] is the scene [param state] is read
 ## from, when the caller has it loaded already.
 static func _lay(
@@ -229,7 +229,7 @@ static func _lay(
 			if loaded != null and not set_here.has(named):
 				set_here.append(named)
 	# Only the scene being read and the scenes it inherits share its root, the owner whose editable
-	# instances a write here sets; a file instanced below makes its own owner's editable.
+	# instances a write here sets. A file instanced below makes its own owner's editable.
 	if prefix == ".":
 		for editable: String in _editable_in(state.get_path(), loaded):
 			var at: String = _joined(prefix, editable)
@@ -558,7 +558,7 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 	var serialiser: GdhSerialisation = GdhSerialisation.new()
 	var properties: Dictionary = {}
 	# A headless engine runs a script that is not a tool as the file loads, so what its _init and
-	# setters gave other properties read as values the file sets; the file's own lines say which it
+	# setters gave other properties read as values the file sets. The file's own lines say which it
 	# does. The editor runs no such script.
 	var untooled: bool = script != null and not script.is_tool() and not Engine.is_editor_hint()
 	var from_file: bool = (

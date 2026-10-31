@@ -139,7 +139,7 @@ static func from_the_root(said: String, node_path: String, root_name: String) ->
 
 ## [param said], the refusal for a path a scene does not have, with where the path leaves it: the
 ## last node of the path it has, [param reached] from the root, called [param root_name], when that
-## is empty; the name below it that is missing; and [param children], the names that node has, as
+## is empty, the name below it that is missing, and [param children], the names that node has, as
 ## after a node was moved or renamed. Names up to [constant NAMED_CHILDREN] of them.
 static func missing_below(
 	said: String,
@@ -232,7 +232,7 @@ static func offered(said: String, word: String, names: Array) -> String:
 ## [param said], the refusal for [param property], which [param target] does not declare, with the
 ## names it declares nearest it when any are, as a misspelt one is usually one of them, or else the
 ## variables its script declares. The engine's own are not listed when none is near, since an object
-## has a hundred, while a script's are the few a caller most likely meant; an object with no script
+## has a hundred, while a script's are the few a caller most likely meant. An object with no script
 ## is told where they are listed instead, since the refusal alone left nothing to try.
 static func near_property(said: String, target: Object, property: String) -> String:
 	var headings: int = PROPERTY_USAGE_CATEGORY | PROPERTY_USAGE_GROUP | PROPERTY_USAGE_SUBGROUP
@@ -271,7 +271,7 @@ static func near_property(said: String, target: Object, property: String) -> Str
 
 
 ## How [param target] keeps the list [param property] names, when that is the label of one of the
-## engine's numbered lists, such as an OptionButton's Items; empty when it is not. The engine has no
+## engine's numbered lists, such as an OptionButton's Items. Empty when it is not. The engine has no
 ## property by that name, only a count and each entry's fields under a numbered prefix, so "items"
 ## was refused with nothing near it to offer.
 static func _list_called(target: Object, count: Dictionary, property: String) -> String:

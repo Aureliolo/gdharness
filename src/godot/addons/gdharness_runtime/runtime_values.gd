@@ -246,7 +246,7 @@ static func no_action(action: String) -> String:
 static func actions_of(event: InputEvent) -> Array[String]:
 	var named: Array[String] = []
 	# A motion matches every action on its axis, either way and at any distance, which would name
-	# ui_left for a stick held right; Input presses only those its direction reaches past their
+	# ui_left for a stick held right. Input presses only those its direction reaches past their
 	# deadzone.
 	var moved: bool = event is InputEventJoypadMotion
 	for action: StringName in InputMap.get_actions():
@@ -291,7 +291,7 @@ static func focus_noted(said: Dictionary, focused: String, host: Node) -> Dictio
 ##
 ## A key goes to the shortcuts last in the tree first and stops at the first button that takes it,
 ## while an InputEventShortcut reaches only the buttons holding that one Shortcut. So each Shortcut
-## is sent in that order, a frame apart, until a button is pressed; a button still decides by its
+## is sent in that order, a frame apart, until a button is pressed. A button still decides by its
 ## disabled, its visibility and its shortcut context, as it does for the key.
 static func press_shortcuts(root: Node, action: String) -> Dictionary:
 	var pressing: InputEventAction = InputEventAction.new()

@@ -57,10 +57,10 @@ func _run() -> void:
 
 ## A game's _physics_process goes on running while frames are waited for, by the time that passed.
 ## Reported from a game whose simulation steps there, read three ticks over a 120-frame wait of two
-## seconds; measured on its own copy afterwards, the wait let it step with the time, which is what
+## seconds. Measured on its own copy afterwards, the wait let it step with the time, which is what
 ## this holds. Counted in a node of the game's own rather than by the engine's counter, which goes
 ## on counting steps for a paused tree that runs nobody's _physics_process. By time rather than
-## frames, because a headless run's frames are not paced; a step either way absorbs where the wait
+## frames, because a headless run's frames are not paced. A step either way absorbs where the wait
 ## began and ended inside one.
 func _check_physics_steps_through_a_frame_wait() -> void:
 	var before: int = counter.physics_steps
@@ -87,7 +87,7 @@ func _wait(params: Dictionary) -> Dictionary:
 	return await node._execute_command("wait_until", asked)
 
 
-## The reported shape: 31, 34, 37, so 32 is never read. Equality runs out; at least 32 is met on the
+## The reported shape: 31, 34, 37, so 32 is never read. Equality runs out. At least 32 is met on the
 ## first look past it.
 func _check_a_counter_that_steps_past() -> void:
 	counter.day = 31

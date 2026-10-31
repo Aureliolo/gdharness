@@ -7,7 +7,7 @@ extends RefCounted
 ## from one run to the next) calls [method outcomes] for each arm with the number of runs and a
 ## callable playing run `i`. Run on its own, the scene plays every run here, as it always did. Under
 ## `gdharness spread`, each worker engine plays every Nth run from its own index and leaves what
-## each run answered; then one more engine runs the scene to gather, and there [method outcomes]
+## each run answered. Then one more engine runs the scene to gather, and there [method outcomes]
 ## plays nothing and answers every run's outcome, read back as the type it went in as. The bench
 ## folds them in run order either way, so a spread table is the same table to the last digit, floats
 ## included.
@@ -107,7 +107,7 @@ static func outcomes(arm: String, runs: int, play: Callable) -> Array:
 	return ordered
 
 
-## [param counted], each a dictionary of whole numbers, added up key by key; a key named in
+## [param counted], each a dictionary of whole numbers, added up key by key. A key named in
 ## [param largest] keeps the largest instead. Adding and taking the largest come out the same in
 ## any order, which is what lets a bench fold its runs however it likes.
 static func added(
@@ -143,7 +143,7 @@ static func added(
 
 
 ## Leaves one arm's outcomes, then the line saying so, which `gdharness spread` checks the share
-## against; the outcomes first, so a line is never there without them.
+## against. The outcomes first, so a line is never there without them.
 static func _leave(arm: String, runs: int, by_index: Dictionary[int, Variant]) -> void:
 	var left: Dictionary = { "arm": arm, "runs": runs, "outcomes": by_index }
 	if not _appended(

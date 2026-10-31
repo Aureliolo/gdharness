@@ -1,6 +1,6 @@
 extends SceneTree
 ## The commands that take time: a click that presses and releases a frame apart, and the waits for
-## frames and a property; the wait for a signal is runtime_signal.gd. They need the main loop
+## frames and a property. The wait for a signal is runtime_signal.gd. They need the main loop
 ## running, so the checks start on the first frame rather than in _init, and the fixture quits
 ## when they are done.
 
@@ -20,7 +20,7 @@ var presses: int = 0
 
 
 func _init() -> void:
-	# In the tree, because the commands ask it for the tree; announced somewhere private, so the
+	# In the tree, because the commands ask it for the tree. Announced somewhere private, so the
 	# fixture does not look like a game to a server running on this machine.
 	OS.set_environment(
 		"GDHARNESS_RUNTIME_DIR",
@@ -55,8 +55,8 @@ func _fail(message: String) -> void:
 
 
 func _run() -> void:
-	# A headless script run's window is 64 by 64 and the GUI delivers nothing outside the window;
-	# the new size is only in force from the next frame.
+	# A headless script run's window is 64 by 64 and the GUI delivers nothing outside the window.
+	# The new size is only in force from the next frame.
 	root.size = Vector2i(640, 480)
 	await process_frame
 
@@ -407,7 +407,7 @@ func _check_a_menu() -> void:
 
 
 ## A settings screen rebuilt on item_selected frees the button and its menu inside the pick. The
-## answer is read before the press and says the button went; the fixture's run fails on the engine
+## answer is read before the press and says the button went. The fixture's run fails on the engine
 ## error that reading a freed menu afterwards printed.
 func _check_a_pick_that_frees_the_menu() -> void:
 	var setting: OptionButton = OptionButton.new()
@@ -705,7 +705,7 @@ func _check_below_the_fold() -> void:
 	scroller.free()
 
 
-## A fresh panel with one button whose press does `to_it`, clicked; the panel is cleared away
+## A fresh panel with one button whose press does `to_it`, clicked. The panel is cleared away
 ## afterwards whatever the press did to it.
 func _click_a_button_that(to_it: Callable) -> Dictionary:
 	var panel: Panel = Panel.new()

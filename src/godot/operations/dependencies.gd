@@ -47,7 +47,7 @@ func _init(p_log: GdhLog) -> void:
 # Get dependencies for a resource with circular reference detection
 func get_dependencies(params: Dictionary) -> Dictionary:
 	var resource_path: String = str(params.get("resource_path", ""))
-	# No depth, or a depth of zero or less, means the whole chain; the walk stops at cycles.
+	# No depth, or a depth of zero or less, means the whole chain. The walk stops at cycles.
 	var depth: int = GdhRead.as_int(params.get("depth", 0))
 	var max_depth: int = depth if depth > 0 else 1000
 	var include_built_in: bool = GdhRead.as_bool(params.get("include_builtin", false))
@@ -421,7 +421,7 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 
 
 # The uid [param line], line [param index] of [param file_path], declares as the file's own: a
-# scene's or a resource's header, or an import sidecar's uid of the file it imports; empty for any
+# scene's or a resource's header, or an import sidecar's uid of the file it imports. Empty for any
 # other line.
 static func _own_uid(line: String, index: int, file_path: String) -> String:
 	var trimmed: String = line.strip_edges()
@@ -738,7 +738,7 @@ static func _cycle_key(cycle: Array[String]) -> String:
 	return "\n".join(PackedStringArray(cycle.slice(first) + cycle.slice(0, first)))
 
 
-## What [param path] names, each file once, as the entries the tree lists it by; read once a walk.
+## What [param path] names, each file once, as the entries the tree lists it by. Read once a walk.
 func _references(path: String, walk: GdhDependencyWalk) -> Array[Dictionary]:
 	if walk.references.has(path):
 		var known: Array[Dictionary] = walk.references[path]
@@ -937,7 +937,7 @@ func _files_by_uid() -> Dictionary:
 
 # The ext_resource paths in [param content] whose uid leads elsewhere, each with the file the uid
 # names. The engine loads an ext_resource by its uid whenever the uid is known, whatever the path
-# says, so a file moved outside the editor still loads, and the walk called it missing; every
+# says, so a file moved outside the editor still loads, and the walk called it missing. Every
 # pattern reads the old path, the bare res:// one included, so the paths are mapped before any of
 # them runs.
 func _moved_by_uid(content: String) -> Dictionary:
@@ -1009,7 +1009,7 @@ static func _shader_code(content: String) -> String:
 	return "".join(PackedStringArray(kept))
 
 
-# The path inside a preload(), load(), #include or ext_resource match; a bare res:// match is the
+# The path inside a preload(), load(), #include or ext_resource match. A bare res:// match is the
 # path. An ext_resource is read first, since its type or its path can hold the word load.
 func _referenced_path(matched: String) -> String:
 	var expression: String = ""

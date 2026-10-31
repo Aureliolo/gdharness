@@ -151,7 +151,7 @@ static func inherit(
 
 ## Makes the children of [param node], an instance in [param scene], editable or not, answering why
 ## it cannot or "". With them editable the scene keeps its own values for them, as the editor's
-## Editable Children does; made not editable again, the values it kept for them are dropped. The
+## Editable Children does. Made not editable again, the values it kept for them are dropped. The
 ## caller has had [method GdhSceneFile.foreign] refuse a node inside an instance that is not
 ## editable.
 static func set_editable(scene: GdhSceneFile, node: Node, editable: bool) -> String:
@@ -171,7 +171,7 @@ static func set_editable(scene: GdhSceneFile, node: Node, editable: bool) -> Str
 ## the new path. The engine finds
 ## a moved node's entries by its unique_id, but an editable instance only by its path, so a scene
 ## saved after the move lost the values it kept below one. The node paths each holds are carried
-## into [param carried], which holds those of [param changed] already; with [param new_path] "",
+## into [param carried], which holds those of [param changed] already. With [param new_path] "",
 ## for a node deleted, they are only named. Answers followed, the scenes rewritten, and
 ## notFollowed, each one left as it was with why, each only when it names any, with what
 ## [param carried] gives.
@@ -312,7 +312,7 @@ static func _instances_of(
 ## [param text] with every path [param moves] names, and every path below one, moved.
 ##
 ## Beside a path the saver writes the unique_ids of the nodes along it, which the loader follows
-## when the path has vanished. A rename leaves those ids as they were; with [param reparented] they
+## when the path has vanished. A rename leaves those ids as they were. With [param reparented] they
 ## run through the old parent, which still exists, so a recovery would find the wrong node. They are
 ## left out of each path moved, as a hand-written scene leaves them, and the next save writes them
 ## anew.

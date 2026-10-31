@@ -202,7 +202,7 @@ static func place(node: Node, asked: Variant) -> void:
 
 
 ## Whether [param basis] has axes that are not at right angles, which a node kept in place under a
-## parent scaled unevenly across its turn ends up with. A Node2D says so through skew; a Node3D has
+## parent scaled unevenly across its turn ends up with. A Node2D says so through skew. A Node3D has
 ## no property for it, and its position, rotation and scale read as if the axes were square.
 static func sheared(basis: Basis) -> bool:
 	var x: Vector3 = basis.x.normalized()

@@ -23,7 +23,7 @@ func _init() -> void:
 
 
 func _run() -> void:
-	# A headless script run's window is 64 by 64; a game's is the project's window size, which is
+	# A headless script run's window is 64 by 64. A game's is the project's window size, which is
 	# what this stands for. The new size is only in force from the next frame.
 	root.size = Vector2i(640, 480)
 	await process_frame

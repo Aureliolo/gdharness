@@ -297,10 +297,10 @@ const READS_ONLY: String = (
 ## read it, "board:size()" or "inbox:keys()", listed in [constant LIST_CALLS] and
 ## [constant MAP_CALLS]. An engine method that reads takes literal arguments in the brackets,
 ## "get_theme_stylebox(\"panel\"):content_margin_top", since what a control's theme gives it is only
-## reachable by naming what is asked for; see [method arguments_of].
+## reachable by naming what is asked for. See [method arguments_of].
 ##
 ## A step into a vector, a colour, a rectangle or a transform reads one of its components,
-## "size:x" or "global_transform:origin:y", by the names GDScript gives them; see
+## "size:x" or "global_transform:origin:y", by the names GDScript gives them. See
 ## [method GdhSerialisation.components_of]. It answers the calls in [constant VALUE_CALLS] too,
 ## "linear_velocity:length()".
 ##
@@ -387,7 +387,7 @@ static func object_at(root: Node, node: Node, node_path: String, given: Variant)
 
 
 ## Why [param record], a dictionary given where an object goes, names none. A resource built into a
-## scene is read as its class beside its properties and has no path; the runtime builds no resource
+## scene is read as its class beside its properties and has no path. The runtime builds no resource
 ## from those, so the remedy is the file, not the path the other records are told to use.
 static func _no_path_in(record: Dictionary) -> String:
 	if record.has("id"):
@@ -625,7 +625,7 @@ static func step_naming(key: Variant) -> String:
 
 ## [param reaching] split into its steps at each colon, except one inside a call's brackets or a
 ## quoted argument or key: `get_node("/root/Main"):name` is two steps, and so is
-## `stock:"base:dew"`; split at every colon a quoted argument holding one became a step that names
+## `stock:"base:dew"`. Split at every colon a quoted argument holding one became a step that names
 ## nothing.
 static func steps_of(reaching: String) -> PackedStringArray:
 	var steps: PackedStringArray = []
@@ -734,7 +734,7 @@ static func _arity(object: Object, method: String) -> Dictionary:
 ## A path is read, and a wait reads it every frame, so a call in one has to be a read. The engine
 ## marks its own reading methods const and `queue_free()`, `free()` and `set_name()` not, measured
 ## on 4.7.2, though it leaves some reads unmarked as well, `Engine.get_frames_drawn()` and
-## `get_time_scale()` among them; so the refusal says the mark is missing, not that the method
+## `get_time_scale()` among them, so the refusal says the mark is missing, not that the method
 ## changes anything, and points at runtime_invoke call, which calls it. A game's methods carry no
 ## such mark, so one declared `-> void` is taken at its word, as doing something and answering
 ## nothing, and one left untyped is trusted. Without this a find with property "queue_free()" freed
@@ -851,7 +851,7 @@ static func _native_flags(object: Object, method: String) -> int:
 
 ## Put [param value] where [param named] points, and answer the holder written into. Only ever
 ## called once [method can_read] agrees. Lists and maps are reference types, so writing into one
-## reaches the game's own copy; a vector or a transform is a copy, and the one answered is the
+## reaches the game's own copy. A vector or a transform is a copy, and the one answered is the
 ## changed copy, for [method write_back] to put where it came from.
 static func write(holder: Variant, named: String, value: Variant) -> Variant:
 	if holder is Array:

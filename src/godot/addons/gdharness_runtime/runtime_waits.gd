@@ -27,7 +27,7 @@ const LOOK_SLICE_USEC: int = 2000
 ## number that steps rather than lands, as a day counter on a fast clock goes from 31 to 34 between
 ## two looks and a wait for 32 never sees it.
 const COMPARES: Array[String] = ["==", "!=", ">=", "<=", ">", "<"]
-## The most signal watches kept at once; arming one past this lets the oldest go. Property watches
+## The most signal watches kept at once. Arming one past this lets the oldest go. Property watches
 ## are counted apart, to the same number.
 const MOST_WATCHES: int = 16
 ## The most changes a property watch keeps. Past it, each new one takes the last place, so what is
@@ -683,7 +683,7 @@ static func _not_comparable(
 		node_path, property, type_string(typeof(current)), GdhShapes.kind(wanted),
 	]
 	# A value that cannot become what the property holds is said as that, which names the remedy,
-	# before the comparison it would also fail; an object on either side is said as the comparison.
+	# before the comparison it would also fail. An object on either side is said as the comparison.
 	var objects: bool = typeof(current) == TYPE_OBJECT or typeof(wanted) == TYPE_OBJECT
 	if not objects and not GdhValues.acceptable(wanted, typeof(current)):
 		return (
@@ -792,7 +792,7 @@ static func _declared_slot(holder: Variant, named: String) -> Dictionary:
 ## sixth of its frame rate, and its clock, which advances by the frame's delta, lost three quarters
 ## of its time, so a wait for a date timed out on a clock that turned a day every thirty seconds.
 ## Each look is read a slice at a time, [constant LOOK_SLICE_USEC] to a frame, so the frames it runs
-## in keep their length; the last is read whole, since the wait answers on it.
+## in keep their length. The last is read whole, since the wait answers on it.
 ##
 ## The answer says how many frames the wait spanned, how many looks it took, how long they took
 ## between them and the longest they held one frame, which is how a caller sees what it cost and

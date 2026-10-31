@@ -285,7 +285,7 @@ func modify_resource(args: Dictionary) -> Dictionary:
 	if not FileAccess.file_exists(res_path):
 		return { "ok": false, "error": "No resource at %s; op=create makes one there." % res_path }
 	# The editor's copy of an imported file is rebuilt from the source on every import, and a save
-	# to it fails; edited through the cache, the editor kept the changed copy after the refusal.
+	# to it fails. Edited through the cache, the editor kept the changed copy after the refusal.
 	if FileAccess.file_exists(res_path + ".import"):
 		return {
 			"ok": false,
@@ -570,7 +570,7 @@ func set_theme_font_size(args: Dictionary) -> Dictionary:
 	)
 
 
-## Takes one item, such as "colors/font_color", or with none every item of a theme type, out of a
+## Takes one item, such as `"colors/font_color"`, or with none every item of a theme type, out of a
 ## Theme: a type is any name, so a misspelt one is written as given, and this is the way back.
 func remove_theme_item(args: Dictionary) -> Dictionary:
 	var theme_path: String = _ensure_res_path(str(args.get("resourcePath", "")))

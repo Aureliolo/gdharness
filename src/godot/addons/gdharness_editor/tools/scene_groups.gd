@@ -1,7 +1,7 @@
 @tool
 extends RefCounted
 ## The groups a node of a scene is in. A scene's own file puts a node in a group and can take it
-## out of one it put it in; a group the scene that makes the node puts it in, the one it is
+## out of one it put it in. A group the scene that makes the node puts it in, the one it is
 ## instanced from or one this scene inherits, can be changed only there, as the editor's group dock
 ## shows it locked.
 

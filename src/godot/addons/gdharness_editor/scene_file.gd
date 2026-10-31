@@ -624,7 +624,7 @@ func fixed(node: Node, deleting: bool = false) -> String:
 
 
 ## Each node the scenes [param state] inherits give it, by path, with the deepest file making it
-## more than values; a node [param state] makes itself is not in it.
+## more than values. A node [param state] makes itself is not in it.
 static func makers(state: SceneState) -> Dictionary:
 	var made_by: Dictionary = {}
 	var at: SceneState = state.get_base_scene_state()

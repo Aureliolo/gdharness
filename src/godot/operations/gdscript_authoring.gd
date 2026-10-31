@@ -138,7 +138,7 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 
 
 ## The uid in the .uid file beside [param path], written first when there is none, as the editor
-## writes it for a script it makes; empty when it could not be written. A sidecar already there is
+## writes it for a script it makes. Empty when it could not be written. A sidecar already there is
 ## the one the engine reads the script's uid from, so it is kept.
 static func _uid_beside(path: String) -> String:
 	var sidecar: String = path + ".uid"
@@ -290,7 +290,7 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 	OS.remove_logger(caught)
 	var parses: bool = _parses(made)
 	# The names checked above are the script's own, and a member the base class declares, or a body
-	# that does not compile, is found only by the engine; a script left broken by an addition breaks
+	# that does not compile, is found only by the engine. A script left broken by an addition breaks
 	# every scene that uses it, so it goes back as it was. One already broken is written, as the
 	# addition can be what mends it.
 	if parsed_before and not parses:
@@ -335,7 +335,7 @@ static func _reasons(raised: Array[Dictionary], path: String) -> String:
 
 # Why a script with [param named] as its class_name and extending [param base] cannot be written,
 # or "". A class_name another script holds does not compile ("hides a global script class"), and nor
-# does a base no class answers to; both were written and answered as made. Classes are read off the
+# does a base no class answers to. Both were written and answered as made. Classes are read off the
 # scripts as well as the class list, which a fresh clone has not written yet.
 static func _header_refusal(named: String, base: String) -> String:
 	var declared: Dictionary = _declared_classes()
@@ -427,7 +427,7 @@ static func _declared_classes() -> Dictionary:
 # Every reason [param modifications] cannot be made as asked, each naming the entry by position.
 #
 # A name the script already declares is one of them, as is one the call adds twice. GDScript gives a
-# class one namespace for its members, so a second `maximum` does not parse; and the engine reports
+# class one namespace for its members, so a second `maximum` does not parse, and the engine reports
 # only the first error it meets, so a second `func damage` behind it was written with nothing said.
 static func _modification_problems(modifications: Array, declared: Dictionary) -> Array[String]:
 	var problems: Array[String] = []
@@ -541,7 +541,7 @@ static func _insert(
 # Whether the engine accepts [param script], parsed under this project's own warning settings: a
 # script that does not load is one the caller wants to hear about now, and the reason is on stderr,
 # which comes back with the answer. A script that fails to parse still loads, as one that cannot be
-# instantiated; an abstract one that parses can be, on 4.7.
+# instantiated. An abstract one that parses can be, on 4.7.
 static func _parses(script: Script) -> bool:
 	return script != null and script.can_instantiate()
 
@@ -583,7 +583,7 @@ func _add_constant(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 			break
 	after = _past_class_doc(lines, after)
 	# Set apart from the header or the signals above and from what follows, as the style guide lays
-	# out its groups; one below the constants already there joins them.
+	# out its groups. One below the constants already there joins them.
 	var block: Array[String] = [const_line]
 	var above: String = lines[after - 1].strip_edges() if after > 0 else ""
 	var below: String = lines[after].strip_edges() if after < lines.size() else ""
@@ -620,7 +620,7 @@ func _add_variable(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 
 	# Every declaration this writes carries a type, so it parses in a project that treats an
 	# untyped or an inferred declaration as an error, which is the strictest setting Godot has.
-	# A value with no type gets the type the value evaluates to; a value nothing can evaluate
+	# A value with no type gets the type the value evaluates to. A value nothing can evaluate
 	# here, and a declaration with neither, are spelled out as Variant.
 	if not var_type.is_empty():
 		var_line += ": " + var_type

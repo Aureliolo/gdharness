@@ -10,11 +10,11 @@ const ESCAPED_BAR: String = ""
 ## given and the same words widened, and anything past a handful is a caller that has moved on.
 const SPLITS_KEPT: int = 8
 
-## Each `says` split into alternatives, by what was written; see [method alternatives].
+## Each `says` split into alternatives, by what was written. See [method alternatives].
 static var _splits: Dictionary[String, Array] = {}
-## Each `says` as the globs [method matches] tries first, by what was written; see [method _loose].
+## Each `says` as the globs [method matches] tries first, by what was written. See [method _loose].
 static var _globs: Dictionary[String, Array] = {}
-## Every space separator Unicode has besides the plain space, built once; see [method spaced].
+## Every space separator Unicode has besides the plain space, built once. See [method spaced].
 static var _spaces: RegEx = null
 
 

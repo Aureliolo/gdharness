@@ -80,7 +80,7 @@ static func kept_by_engine(object: Object, name: String, wanted: Variant, held: 
 
 ## The stored properties of [param object] that are not in [param names] and no longer hold what
 ## [param before] recorded. One the object did not have before, which a script set on it declares,
-## counts once it holds anything but its default; one it no longer has went with the old script.
+## counts once it holds anything but its default. One it no longer has went with the old script.
 static func differing(object: Object, before: Dictionary, names: Dictionary) -> Array[String]:
 	var changed: Array[String] = []
 	var now: Dictionary = stored(object)
@@ -111,7 +111,7 @@ static func default_of(object: Object, name: String) -> Variant:
 ## What the declaration of [param name] in [param script] or a script it extends initialises it to,
 ## when that is a value written out, such as [code]PackedStringArray()[/code], or null. The engine
 ## reports a default only for an initializer it folded into a constant, and it folds no constructor
-## call, so it gives none for such a property; the saver then writes it whatever it holds, and the
+## call, so it gives none for such a property. The saver then writes it whatever it holds, and the
 ## line read as a change some script had made.
 static func _initialised(script: Script, name: String, type: int) -> Variant:
 	var declaration: RegEx = RegEx.create_from_string(
@@ -157,7 +157,7 @@ static func reached(object: Object, property: String) -> Dictionary:
 	return ids
 
 
-## Adds what [param more] spares to [param into], both as [method reached] answers them; true for an
+## Adds what [param more] spares to [param into], both as [method reached] answers them. True for an
 ## id spares the whole resource, as one a tool rebuilt.
 static func spare(into: Dictionary, more: Dictionary) -> void:
 	for id: Variant in more:

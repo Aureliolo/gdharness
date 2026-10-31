@@ -21,7 +21,7 @@ static func read_point(params: Dictionary, x_key: String, y_key: String) -> Vari
 ## row, where the control draws it.
 ##
 ## For a control that draws its parts itself and hit-tests them in _gui_input, whose centre was all
-## a click could press; in a native window, where the game's window pixels do not reach, nothing
+## a click could press. In a native window, where the game's window pixels do not reach, nothing
 ## else could press the rest.
 static func point_in(params: Dictionary, node: Node, node_path: String, has_item: bool) -> Variant:
 	if not params.has("x") and not params.has("y"):
@@ -70,7 +70,7 @@ static func aim_of(params: Dictionary, root: Window) -> Variant:
 ## Where [param local], in the space of the node [param aim] names, arrives: {"viewport",
 ## "position"}, the viewport the pointer reaches it through and the point in that viewport's pixels,
 ## which is what an event sent there names. A Window's space is its own pixels, as the game's window
-## pixels are the root's; a canvas item's is its own, the one it draws and reads _gui_input in.
+## pixels are the root's. A canvas item's is its own, the one it draws and reads _gui_input in.
 static func carried(aim: Dictionary, local: Vector2, root: Window) -> Dictionary:
 	var node: Node = aim.get("node", root)
 	var reached: Dictionary = {}

@@ -25,8 +25,8 @@ func _init() -> void:
 
 
 func _run() -> void:
-	# A headless script run's window is 64 by 64, and words drawn outside it are not on the screen;
-	# the new size is only in force from the next frame.
+	# A headless script run's window is 64 by 64, and words drawn outside it are not on the screen.
+	# The new size is only in force from the next frame.
 	root.size = Vector2i(640, 480)
 	await process_frame
 	await _check_reading_rich_text()
@@ -215,12 +215,12 @@ func _paths(reply: Dictionary) -> Array[String]:
 
 
 ## A RichTextLabel reads as its words, not its markup. Its text is the BBCode when it reads BBCode,
-## and a dossier line came back as "[b][color=#4fc2d4]Mollum Telken[/color], [/b]...", so a phrase
+## and a ledger line came back as `"[b][color=#3a7bd5]Elinor Garrow[/color], [/b]..."`, so a phrase
 ## running across a tag could be neither read, found nor waited for. And a line a game adds with
 ## append_text() is in no property at all.
 func _check_reading_rich_text() -> void:
 	var dossier: VBoxContainer = VBoxContainer.new()
-	dossier.name = "Dossier"
+	dossier.name = "Ledger"
 	# Wide enough to read: with no width, rich text wraps at every character and runs off the
 	# window.
 	dossier.custom_minimum_size = Vector2(600, 0)
@@ -229,22 +229,22 @@ func _check_reading_rich_text() -> void:
 	marked.bbcode_enabled = true
 	marked.fit_content = true
 	marked.text = (
-		"[b][color=#4fc2d4]Mollum Telken[/color], [/b][color=#c2ae92]a thief-taker[/color]"
+		"[b][color=#3a7bd5]Elinor Garrow[/color], [/b][color=#b08850]a lamplighter[/color]"
 	)
 	dossier.add_child(marked)
 	var appended: RichTextLabel = RichTextLabel.new()
 	appended.fit_content = true
-	appended.append_text("Docket 72, [b]an errand[/b]")
+	appended.append_text("Parcel 72, [b]a delivery[/b]")
 	dossier.add_child(appended)
 	await process_frame
 
-	var said: Dictionary = await node._execute_command("read_text", { "root": "/root/Dossier" })
+	var said: Dictionary = await node._execute_command("read_text", { "root": "/root/Ledger" })
 	var lines: Array = said.get("lines", [])
-	if lines != ["Mollum Telken, a thief-taker", "Docket 72, an errand"]:
+	if lines != ["Elinor Garrow, a lamplighter", "Parcel 72, a delivery"]:
 		_fail("rich text reads as what is drawn, with no tags in it: %s" % str(said))
 
 	var found: Dictionary = await node._execute_command(
-		"find_nodes", { "says": "Telken, a thief", "root": "/root/Dossier" }
+		"find_nodes", { "says": "Garrow, a lamp", "root": "/root/Ledger" }
 	)
 	if found.get("count") != 1:
 		_fail("a phrase running across a tag is found: %s" % str(found))
@@ -258,12 +258,12 @@ func _check_reading_rich_text() -> void:
 	dossier.add_child(typed)
 	marked.visible_ratio = 0.5
 	await process_frame
-	var partway: Dictionary = await node._execute_command("read_text", { "root": "/root/Dossier" })
+	var partway: Dictionary = await node._execute_command("read_text", { "root": "/root/Ledger" })
 	var shown: Array = partway.get("lines", [])
-	if shown != ["Mollum Telken,", "Docket 72, an errand", "Spring"]:
+	if shown != ["Elinor Garrow,", "Parcel 72, a delivery", "Spring"]:
 		_fail("text being typed out reads as far as it is drawn: %s" % str(partway))
 	var early: Dictionary = await node._execute_command(
-		"find_nodes", { "says": "Spring 17", "root": "/root/Dossier" }
+		"find_nodes", { "says": "Spring 17", "root": "/root/Ledger" }
 	)
 	if early.get("count") != 0:
 		_fail("and its words are not found before they are shown: %s" % str(early))
@@ -318,7 +318,7 @@ func _check_reading_lists() -> void:
 	await process_frame
 	var opened: Dictionary = await node._execute_command("read_text", { "root": "/root/Board" })
 	var lines: Array = opened.get("lines", [])
-	# A titled separator is drawn as a heading and read in its place; one with no title draws no
+	# A titled separator is drawn as a heading and read in its place. One with no title draws no
 	# words.
 	if lines.slice(-3) != ["Hire", "Staff", "Dismiss"]:
 		_fail(

@@ -408,10 +408,10 @@ static func _key_misfit(target: Node, method: String, arguments: Array, index: i
 
 
 ## Takes out the track [code]track[/code] names by its type, nodePath and property as read answers
-## them, so a track read back can be passed as it stands; its keyframes are not looked at. Every
+## them, so a track read back can be passed as it stands. Its keyframes are not looked at. Every
 ## track of that shape goes, since the editor can make two for one path and both play. A method
 ## track given a method loses only the keys calling it, since add_track puts every method called on
-## one node in one track; the track goes once no key is left.
+## one node in one track. The track goes once no key is left.
 func remove_animation_track(args: Dictionary) -> Dictionary:
 	var scene_path: String = GdhSceneFile.res_path("", str(args.get("scenePath", "")))
 	var player_node_path: String = str(args.get("playerNodePath", "."))

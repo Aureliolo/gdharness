@@ -20,7 +20,7 @@ const GdhRead = preload("reading.gd")
 const GdhSame = preload("same_values.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhShapes = preload("value_shapes.gd")
-# The data types a Theme names its items by, as in "Button/colors/font_color", and what each holds.
+# The data types a Theme names its items by, as in `Button/colors/font_color`, and what each holds.
 const THEME_ITEMS: Dictionary[String, Array] = {
 	"colors": [TYPE_COLOR, ""],
 	"constants": [TYPE_INT, ""],
@@ -75,7 +75,7 @@ var _names_no_node: Dictionary = {}
 ##
 ## Three separate questions, asked in order, because a caller may say what it means in three
 ## ways: a dictionary that names its own type, a dictionary shaped like the type the property
-## declares, or a bare array positional for a vector. Each is its own function; asking all three
+## declares, or a bare array positional for a vector. Each is its own function. Asking all three
 ## in one was twenty-four exits deep and impossible to follow.
 ##
 ## [param elements] is what a typed Array or Dictionary holds, as [method GdhDeclared.elements_of]
@@ -216,8 +216,8 @@ func write_all(target: Object, properties: Dictionary) -> String:
 	var written_at: Dictionary[String, int] = {}
 	var writes: int = 0
 	# Which other property's write last changed each one already written, by name. A Gradient keeps
-	# one offset for each colour, so offsets given after colors cut them back, and the refusal said
-	# only that the engine had changed the colours.
+	# one offset for each colour, so offsets given after `colors` cut them back, and the refusal
+	# said only that the engine had changed the colours.
 	var undone_by: Dictionary[String, String] = {}
 	# A refusal of one of several leaves the others unwritten too, which a refusal naming only the
 	# one it refused left a caller to guess.
@@ -350,7 +350,7 @@ func _note_undone(
 ## sizes its children and the scene keeps none of that for them, so their anchors, offsets, position
 ## and size are refused with what a child does set. A control in Position mode ignores an anchor
 ## preset, and the inspector offers anchors only in Anchors mode, so writing one puts it there
-## first, as picking a preset in the editor does; alsoChanged then names layout_mode.
+## first, as picking a preset in the editor does, and alsoChanged then names layout_mode.
 func _laid_out(control: Control, name: String) -> String:
 	var base: String = name.get_slice(":", 0)
 	var anchoring: bool = base == "anchors_preset" or base.begins_with("anchor_")
@@ -454,7 +454,7 @@ func _write(target: Object, key: String, value: Variant) -> void:
 
 
 ## The declaration the last step of [param path] would have, typed as the component it reaches, so
-## a fraction for an integer vector's axis is refused as one for an int property is; or
+## a fraction for an integer vector's axis is refused as one for an int property is, or
 ## {"refused": why} for the first step that is not there.
 func _component_slot(target: Object, path: String) -> Dictionary:
 	var steps: PackedStringArray = path.split(":")
@@ -569,7 +569,7 @@ func value_for(target: Object, declared: Dictionary, raw: Variant) -> Array:
 
 
 ## A property holding a Node is given the node the path leads to from [param target], as the
-## editor's inspector gives it; the scene is saved with the path. A res:// path could never name a
+## editor's inspector gives it. The scene is saved with the path. A res:// path could never name a
 ## node, so the remedy a caller is given is a node path.
 func _node_reference(target: Object, property: String, raw: Variant) -> Array:
 	if raw == null:
@@ -898,7 +898,7 @@ func _parse_resource_tag(value: Dictionary) -> Array:
 		)
 		return [true, null]
 	# A plain Resource with a script or values of its own, as a read answers one built into a scene,
-	# is one to build; taken as nothing, writing such a read back cleared the property.
+	# is one to build. Taken as nothing, writing such a read back cleared the property.
 	if value.size() > 1:
 		return _parse_new_resource("Resource", value)
 	return [true, null]

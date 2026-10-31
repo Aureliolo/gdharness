@@ -45,7 +45,7 @@ func cannot_hover(window: Window) -> bool:
 
 
 ## Hovers what is under [param point], in [param viewport]'s own coordinates, when the engine could
-## not; answers whether it did. Where the engine hovers by itself, any hover supplied before is
+## not. Answers whether it did. Where the engine hovers by itself, any hover supplied before is
 ## taken down first, so a control is never entered twice.
 func follow(viewport: Viewport, point: Vector2) -> bool:
 	var window: Window = viewport as Window
@@ -246,7 +246,7 @@ func press_of(aim: Dictionary, viewport: Viewport, position: Vector2) -> Diction
 
 ## What a press at [param point], in [param viewport]'s own coordinates, goes to: the control the
 ## GUI picks, carried into a window embedded over the point and into what a SubViewportContainer
-## shows, as the engine carries it; null when nothing there takes the pointer.
+## shows, as the engine carries it. Null when nothing there takes the pointer.
 func _pressed_at(viewport: Viewport, point: Vector2) -> Node:
 	var windows: Array[Window] = viewport.get_embedded_subwindows()
 	for index: int in range(windows.size() - 1, -1, -1):

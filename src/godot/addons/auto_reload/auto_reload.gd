@@ -3,12 +3,12 @@ extends EditorPlugin
 ## Reloads the open scene and the scripts it carries when they change on disk, without the
 ## editor's confirmation popup. Every edit made through gdharness lands on disk, and an editor
 ## that keeps showing the old file is how a change reads as one that never happened. The
-## files are polled once a second; the editor's own watcher only fires on window focus.
+## files are polled once a second. The editor's own watcher only fires on window focus.
 
 const CHECK_INTERVAL_SECONDS: float = 1.0
 ## How long after a file's modification time its contents are compared as well. The time is in
 ## whole seconds, so a second write inside the second of the first leaves it as it was and changes
-## only the contents; past that second any write moves the time.
+## only the contents. Past that second any write moves the time.
 const SAME_SECOND_SECONDS: int = 5
 
 var _timer: Timer

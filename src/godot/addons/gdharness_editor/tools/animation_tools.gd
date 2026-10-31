@@ -28,7 +28,7 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 # Shared helpers
 # =============================================================================
 ## [param scene_path] opened for writing, with the node at [param node_path] in it, which must be a
-## [param kind] the scene owns. Answers [scene, node, refusal]; the refusal is {} when both were
+## [param kind] the scene owns. Answers [scene, node, refusal]. The refusal is {} when both were
 ## found.
 func _open_at(scene_path: String, node_path: String, kind: String) -> Array:
 	var scene: GdhSceneFile = GdhSceneFile.new()
@@ -143,7 +143,7 @@ func _parse_method_args(raw_args: Array) -> Array:
 ##
 ## A resource that is part of the scene file is saved with it. One kept in a .tres of its own was
 ## edited in memory while only the scene was saved, which refers to the file, so the edit was
-## answered as made and was gone; it is saved too. One inside some other file (an imported model,
+## answered as made and was gone. It is saved too. One inside some other file (an imported model,
 ## the scene this one inherits from) is refused, since nothing written here would keep the edit.
 func _homes(scene: GdhSceneFile, held: Array) -> Array:
 	var homes: Dictionary = {}
@@ -176,7 +176,7 @@ func _homes(scene: GdhSceneFile, held: Array) -> Array:
 
 ## The library a new animation called [param animation_name] goes in, as [library, why not, made]:
 ## the default one, or the one named before a slash, as the player names them ("moves/walk"). One
-## the player lacks is made, built into the scene, and made says so; no other op makes a library,
+## the player lacks is made, built into the scene, and made says so. No other op makes a library,
 ## so refusing one left "moves/walk" with no way to be written.
 func _library_for(player: AnimationPlayer, animation_name: String) -> Array:
 	var library: String = ""
@@ -576,7 +576,7 @@ func rename_animation(args: Dictionary) -> Dictionary:
 	if not homes[0]:
 		return scene.refuse(str(homes[1]))
 
-	# Read before the rename, since the player moves its autoplay to the new name on its own; it
+	# Read before the rename, since the player moves its autoplay to the new name on its own. It
 	# does not clear one when an animation is removed.
 	var autoplayed: bool = str(player.autoplay) == animation_name
 	library.rename_animation(StringName(animation_name.trim_prefix(prefix)), StringName(new_name))

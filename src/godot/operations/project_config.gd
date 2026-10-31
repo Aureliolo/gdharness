@@ -174,7 +174,7 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 			% [setting_path, "setting is" if near.size() == 1 else "settings are", ", ".join(near)]
 		)
 	# Written as given, since a file can be made after the setting names it, as an import makes a
-	# translation; said, since until then the engine complains of it on every boot.
+	# translation. Said, since until then the engine complains of it on every boot.
 	var missing: Array[String] = _missing_files(final_value)
 	if not missing.is_empty():
 		answer["missing_files"] = missing
@@ -443,7 +443,7 @@ func add_autoload(params: Dictionary) -> Dictionary:
 	var was_updated: bool = ProjectSettings.has_setting(setting)
 
 	# An asterisk in front of the path makes the autoload's name a global variable, the editor's
-	# "Global Variable" column. Without it the node still comes up under the root; only the name
+	# "Global Variable" column. Without it the node still comes up under the root. Only the name
 	# stops resolving.
 	var entry: String = ("*" if global else "") + path
 	if was_updated and str(ProjectSettings.get_setting(setting)) == entry:
@@ -455,7 +455,7 @@ func add_autoload(params: Dictionary) -> Dictionary:
 			"action": "unchanged",
 			"saved": false,
 		}
-	# The editor's Add replaces an entry of the same name too; said here, since the replaced script
+	# The editor's Add replaces an entry of the same name too. Said here, since the replaced script
 	# is no longer loaded and nothing else in the answer names it.
 	var held: String = str(ProjectSettings.get_setting(setting)) if was_updated else ""
 	ProjectSettings.set_setting(setting, entry)

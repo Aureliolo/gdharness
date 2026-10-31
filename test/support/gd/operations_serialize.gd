@@ -141,7 +141,7 @@ func _check_serialize() -> void:
 ## Keys that are not text, through JSON and back. JSON keys are text, so an int key was answered as
 ## its text and a dictionary written back from the answer had words where its numbers were.
 ## A 32-bit float read back as the decimal it was written as, where the double it widens to is
-## 0.200000002980232; and the shorter decimal, rebuilt, is the same 32 bits. A plain float is left
+## 0.200000002980232, and the shorter decimal, rebuilt, is the same 32 bits. A plain float is left
 ## as it is, since a 64-bit one shortened would be a different number.
 func _check_single_floats() -> void:
 	var colour: Variant = values.serialize_value(Color(0.2, 0.4, 0.6, 1))

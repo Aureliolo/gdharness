@@ -2,7 +2,7 @@ extends SceneTree
 ## A step written as a call in a path is a read. A find with property "queue_free()" freed every
 ## node it matched, and a wait on a method that advances the game called it once a frame and then
 ## said the game had reached the state the wait drove it to. The engine marks its reading methods
-## const; a game's own methods are judged by what they declare they return.
+## const. A game's own methods are judged by what they declare they return.
 
 const Checked = preload("checked.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")

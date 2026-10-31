@@ -75,7 +75,7 @@ static func _stepped(target: Object, name: String, at: int) -> Array:
 
 
 ## The refusal for [param name], which [param target] does not declare, when a step of it indexes a
-## list [param target] holds and names no resource in it; or "".
+## list [param target] holds and names no resource in it, or "".
 static func unlisted(target: Object, name: String) -> String:
 	var at: int = name.find("/")
 	while at > 0:
@@ -163,7 +163,7 @@ static func held_at(target: Object, property: String) -> Resource:
 ## only once the element exists, so a TileSet with no physics layer had no
 ## physics_layer_0/collision_layer to write. A list the engine declares as an array grows through
 ## the method named after its elements, add_physics_layer for physics_layer_, given the indices of
-## the lists around it; a list counted by a property, as a tile's polygons are by polygons_count,
+## the lists around it. A list counted by a property, as a tile's polygons are by polygons_count,
 ## grows by raising the count.
 static func grow(target: Object, name: String, called: String) -> String:
 	var steps: PackedStringArray = name.split("/")
@@ -255,7 +255,7 @@ static func class_called(target: Object) -> String:
 
 
 ## The refusal for [param name], which [param target] does not declare, when it runs through a
-## resource saved in a file other than [param home], the one [param target] is saved in; or "". The
+## resource saved in a file other than [param home], the one [param target] is saved in, or "". The
 ## write belongs in that file, since this one would be saved and that one left as it was: through a
 ## TileMapLayer's tile_set kept in a file of its own, or through the mesh of an instance's editable
 ## child, which is built into the scene the instance comes from.

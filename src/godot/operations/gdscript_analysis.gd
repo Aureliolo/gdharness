@@ -359,7 +359,7 @@ func _mark_virtuals(functions: Array[Dictionary], extends_name: String, from_pat
 
 # The native class at the top of this script's chain, or empty when the chain does not reach one.
 #
-# A base named by a script is followed; a base that is neither a script nor a class the engine knows
+# A base named by a script is followed. A base that is neither a script nor a class the engine knows
 # leaves nothing to ask, and then no function is called virtual rather than every underscore being
 # guessed at.
 func _native_ancestor(base: String, from_path: String) -> String:
@@ -388,7 +388,7 @@ func _native_ancestor(base: String, from_path: String) -> String:
 # `res://` path or as a `class_name` in the project's class list, and a script whose base is neither
 # has no ancestor to read, which the answer says by leaving `inherits_from` short rather than by
 # refusing. Each entry carries `inherited_from`, so a caller can tell a member the script declares
-# from one it is given; a name a script overrides appears twice, at both lines, on purpose.
+# from one it is given. A name a script overrides appears twice, at both lines, on purpose.
 func _add_inherited(answer: Dictionary, seen: Array[String]) -> void:
 	var inherits_from: Array[String] = []
 	var base: String = str(answer.get("extends", ""))
@@ -634,7 +634,7 @@ func _parse_variable(line: String, line_num: int) -> Dictionary:
 		"is_static": GdhPatterns.without_annotations(line).begins_with("static "),
 		"line": line_num,
 	}
-	# Only := types a variable by its value; one written with = alone holds any type.
+	# Only := types a variable by its value. One written with = alone holds any type.
 	var walrus: bool = (
 		"=" in var_text and var_text.split("=", true, 1)[0].strip_edges().ends_with(":")
 	)
@@ -857,7 +857,7 @@ static func _based_on_paths(extends_name: String, inner_classes: Array) -> Array
 	return paths
 
 
-## The text of [param literal], a string literal as written; empty for anything else.
+## The text of [param literal], a string literal as written. Empty for anything else.
 static func _unquoted(literal: String) -> String:
 	var text: String = literal.strip_edges()
 	if text.length() >= 2 and text[0] in ["\"", "'"] and text[-1] == text[0]:

@@ -264,7 +264,7 @@ func validate_project(params: Dictionary) -> Dictionary:
 		)
 
 	# A connection whose method or signal is not there loads without a word and fails only once the
-	# game runs, on every emission or not at all; the references check sees files, not members.
+	# game runs, on every emission or not at all. The references check sees files, not members.
 	checks_performed.append("connections")
 	for entry: Dictionary in GdhSceneConnections.new(_log).broken():
 		warnings.append(

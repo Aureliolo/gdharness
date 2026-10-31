@@ -593,7 +593,7 @@ static func held_by_children(node: Node, property: String) -> String:
 
 ## A sentence for each node path in [param given], by property, that names no node from
 ## [param node]. A path is written whatever it names, as the inspector writes one, since the node
-## may be added next; a joint whose node_a named nothing then joined nothing, and no answer said so.
+## may be added next. A joint whose node_a named nothing then joined nothing, and no answer said so.
 static func naming_nothing(node: Node, given: Dictionary) -> Dictionary:
 	var said: Dictionary = {}
 	for property: String in given:

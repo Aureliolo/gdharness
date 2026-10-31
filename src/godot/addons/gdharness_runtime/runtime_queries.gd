@@ -16,7 +16,7 @@ const FIND_LIMIT: int = 100
 ## What a find can be narrowed by, which is also what it refuses to answer without. Named once so
 ## the refusal lists the same set the walk reads.
 const FILTERS: PackedStringArray = ["class", "script", "name", "group", "says"]
-## The most lines one read answers with, unless asked for fewer. A screen is a few dozen; a
+## The most lines one read answers with, unless asked for fewer. A screen is a few dozen. A
 ## thousand is a tree somebody pointed this at by mistake.
 const READ_LIMIT: int = 500
 ## The most either can be asked for. A limit above it is refused rather than cut to it: the ceiling

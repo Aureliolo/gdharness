@@ -364,8 +364,8 @@ func _check_a_node_in_a_hidden_world() -> void:
 
 ## A card on its way out turns the pointer off for itself and everything in it, through
 ## mouse_behavior_recursive, leaving its button enabled and its mouse_filter as it was. By words,
-## the next card's button saying the same is the one meant rather than a tie; by path, the leaving
-## one is refused with the node that turned it off, where it answered landed false; alone, it is
+## the next card's button saying the same is the one meant rather than a tie. By path, the leaving
+## one is refused with the node that turned it off, where it answered landed false. Alone, it is
 ## refused by words too. Turned back on, the same button is pressed, so the refusal is the
 ## setting's.
 func _check_a_card_that_turned_the_pointer_off() -> void:

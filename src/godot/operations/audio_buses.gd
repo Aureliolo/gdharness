@@ -59,7 +59,7 @@ func remove_audio_bus(params: Dictionary) -> Dictionary:
 		)
 
 	# A bus sending to this one would be left sending to a name nothing has, which the engine reads
-	# as Master; sent on to where this one went instead, the chain it was part of keeps its shape.
+	# as Master. Sent on to where this one went instead, the chain it was part of keeps its shape.
 	var onward: String = AudioServer.get_bus_send(index)
 	var resent: Array[String] = []
 	for i: int in range(AudioServer.bus_count):
