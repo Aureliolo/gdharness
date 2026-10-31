@@ -25,6 +25,31 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
+function isContentBlock(value: unknown): value is ToolContentBlock {
+  return (
+    isRecord(value) &&
+    typeof value['type'] === 'string' &&
+    ['text', 'data', 'mimeType'].every((key) => value[key] === undefined || typeof value[key] === 'string')
+  );
+}
+
+/**
+ * The content of a tool result, or null when [response] is not one. A block that is not one is
+ * the server breaking the protocol, so it throws rather than being read past.
+ */
+export function contentOf(response: JsonRpcMessage | null | undefined): ToolContentBlock[] | null {
+  const result = response?.result;
+  if (!isRecord(result)) return null;
+  const content: unknown = result['content'];
+  if (!Array.isArray(content)) return null;
+  return content.map((block: unknown) => {
+    if (!isContentBlock(block)) {
+      throw new Error(`a tool result's content block is not one: ${JSON.stringify(block)}`);
+    }
+    return block;
+  });
+}
+
 /** Every complete JSON object on its own line; anything that is not one is dropped. */
 export function parseJsonLines(data: string): JsonRpcMessage[] {
   const messages: JsonRpcMessage[] = [];
@@ -50,9 +75,9 @@ export function parseJsonLines(data: string): JsonRpcMessage[] {
  * engine slots too, which comes of whatever else holds the machine's slots at the time.
  */
 export function textOf(response: JsonRpcMessage | null | undefined): string | null {
-  const result = response?.result;
-  if (!isRecord(result) || !Array.isArray(result['content'])) return null;
-  const text = (result['content'] as ToolContentBlock[])
+  const content = contentOf(response);
+  if (content === null) return null;
+  const text = content
     .filter((chunk) => !isFeedbackBlock(chunk) && slotWaitOf(chunk) === null)
     .map((chunk) => chunk.text ?? '')
     .join('');
@@ -89,9 +114,7 @@ function soleKeyOf(chunk: ToolContentBlock, key: string): unknown {
  * two lead with a sentence, and those were never JSON to begin with.
  */
 export function parseTextContent(response: JsonRpcMessage | null | undefined): unknown {
-  const result = response?.result;
-  if (!isRecord(result) || !Array.isArray(result['content'])) return null;
-  const answer = (result['content'] as ToolContentBlock[])[0]?.text;
+  const answer = contentOf(response)?.[0]?.text;
   if (answer === undefined || answer === '') return null;
   try {
     return JSON.parse(answer) as unknown;

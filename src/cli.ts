@@ -109,15 +109,16 @@ async function engine(projectPath?: string): Promise<HeadlessEngine> {
   if (recorded !== null) {
     return { godotPath: recorded, script: shippedOperationsScript(), debug: DEBUG_MODE };
   }
-  const main = located.named === null && projectPath !== undefined ? mainCheckoutOf(projectPath) : null;
-  const theirs = main === null ? null : recordedEnginePath(main);
-  if (main === null || theirs === null) {
+  const mainCheckout =
+    located.named === null && projectPath !== undefined ? mainCheckoutOf(projectPath) : null;
+  const theirs = mainCheckout === null ? null : recordedEnginePath(mainCheckout);
+  if (mainCheckout === null || theirs === null) {
     const refusal = GodotLocator.refusal(located);
     throw new UsageError(`${refusal.message} ${refusal.advice.join('. ')}.`);
   }
   // Said, because it is an engine this project's own files do not name.
   console.error(
-    `engine: ${theirs}, which the harness config of ${main} names; this project is a git worktree of it`,
+    `engine: ${theirs}, which the harness config of ${mainCheckout} names; this project is a git worktree of it`,
   );
   return { godotPath: theirs, script: shippedOperationsScript(), debug: DEBUG_MODE };
 }
@@ -325,11 +326,11 @@ function reportConnection(group: Group, launch: Launch, projectPath: string): Co
  * Both of these are easy to miss, because the old version keeps answering until they are done:
  * the harness holds the server it spawned, and the editor holds the addon it loaded at startup.
  */
-function nextSteps(projectPath: string, runtime: boolean): void {
+function nextSteps(projectPath: string, withRuntime: boolean): void {
   console.log('\nTwo things this cannot do for you:');
   console.log('  1. Reconnect the MCP server in your harness, so it spawns this version.');
   console.log('  2. Restart an open editor, or open the project. Then editor_status should answer.');
-  if (runtime && loaderState(projectPath) !== 'missing') {
+  if (withRuntime && loaderState(projectPath) !== 'missing') {
     console.log(
       `\nThe runtime autoload names res://${RUNTIME_AUTOLOAD.path}, which brings up the runtime the runtime_*\ntools talk to in a debug build that has the addon, and does nothing in a release export or a\nclone without addons/. Commit it with project.godot.`,
     );
@@ -340,7 +341,7 @@ async function setup(): Promise<void> {
   const projectPath = projectArgument(1);
   // The runtime addon is per-project like everything else setup installs, so it is not something
   // to opt into: without it a third of the tools have nothing to talk to.
-  const runtime = !args.includes('--no-runtime');
+  const withRuntime = !args.includes('--no-runtime');
   const godot = await engine(projectPath);
 
   for (const addon of installAddons(projectPath)) {
@@ -352,13 +353,13 @@ async function setup(): Promise<void> {
     said(outcome, `enabling ${name}`);
     console.log(`${name}: ${outcome.ok ? String(outcome.payload['action']) : 'failed'}`);
   }
-  if (runtime) {
+  if (withRuntime) {
     await registerRuntime(godot, projectPath);
   }
-  const classes = await runOperation(godot, 'refresh_class_cache', {}, projectPath);
-  said(classes, 'rebuilding the class list');
-  if (classes.ok) {
-    console.log(`class list rebuilt: ${String(classes.payload['classes'])} classes`);
+  const refreshed = await runOperation(godot, 'refresh_class_cache', {}, projectPath);
+  said(refreshed, 'rebuilding the class list');
+  if (refreshed.ok) {
+    console.log(`class list rebuilt: ${String(refreshed.payload['classes'])} classes`);
   }
 
   if (!args.includes('--no-connect')) {
@@ -391,7 +392,7 @@ async function setup(): Promise<void> {
 
   doctorReport(projectPath);
   if (!args.includes('--json')) {
-    nextSteps(projectPath, runtime);
+    nextSteps(projectPath, withRuntime);
   }
 }
 
@@ -588,8 +589,8 @@ async function upgrade(): Promise<void> {
   // The same rule setup uses, not the one uninstall uses. everySkillDirectory names every place a
   // copy could be, which is what you want when removing them and is how an upgrade came to create
   // two directories the install had deliberately not created.
-  for (const written of writeSkill(skillDirectories(already, projectPath, existsSync), version)) {
-    console.log(`skill: ${written.replaced ? 'replaced' : 'written'} ${written.path}`);
+  for (const copy of writeSkill(skillDirectories(already, projectPath, existsSync), version)) {
+    console.log(`skill: ${copy.replaced ? 'replaced' : 'written'} ${copy.path}`);
   }
 
   console.log(`\nOn ${version}. What is left for you:`);

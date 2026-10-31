@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, posix } from 'node:path';
 import { declaredClassOf, eachScript } from './class-cache.js';
 import { codeOf, shapeOf } from './gdscript-source.js';
+import { isRecord } from './records.js';
 import { parseProjectGodot } from './resources.js';
 import type { HandedSuite, RowShare, RunPrinted } from './suite-judge.js';
 import { writeWhole } from './whole-file.js';
@@ -190,7 +191,7 @@ export class ProjectScripts {
         return cases.size > 0
           ? {
               path,
-              cases: [...cases].sort(),
+              cases: [...cases].toSorted(),
               windowed: said ?? guessed,
               headless: said === false,
               together: together === true,
@@ -223,7 +224,7 @@ export class ProjectScripts {
     const named = roots.filter((root) => root.endsWith('.gd') && this.sources.has(root));
     return [...new Set([...named, ...this.searched(roots)])].flatMap((path) => {
       const cases = this.script(path)?.funcs.filter((name) => name.startsWith(CASE_PREFIX)) ?? [];
-      return cases.length === 0 || this.suite(path) !== null ? [] : [{ path, cases: [...cases].sort() }];
+      return cases.length === 0 || this.suite(path) !== null ? [] : [{ path, cases: [...cases].toSorted() }];
     });
   }
 
@@ -237,7 +238,7 @@ export class ProjectScripts {
             !this.notSearched.some((folder) => within(path, folder) && !within(root, folder)),
         ),
       )
-      .sort();
+      .toSorted();
   }
 
   /**
@@ -279,10 +280,38 @@ export type SuiteTimes = Readonly<Record<string, SuiteTime>>;
 export function readTimes(file: string): SuiteTimes {
   try {
     const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
-    return typeof parsed === 'object' && parsed !== null ? (parsed as SuiteTimes) : {};
+    return Object.fromEntries(
+      Object.entries(isRecord(parsed) ? parsed : {}).flatMap(([path, kept]): [string, SuiteTime][] => {
+        const time = suiteTimeOf(kept);
+        return time === null ? [] : [[path, time]];
+      }),
+    );
   } catch {
     return {};
   }
+}
+
+/** [param kept] as one suite's time, or null for a suite whose entry is not that shape. */
+function suiteTimeOf(kept: unknown): SuiteTime | null {
+  const { seconds, cases, rows }: Record<string, unknown> = isRecord(kept) ? kept : {};
+  if (typeof seconds !== 'number' || !isRecord(cases)) {
+    return null;
+  }
+  const caseSeconds = Object.fromEntries(
+    Object.entries(cases).flatMap(([name, spent]): [string, number][] =>
+      typeof spent === 'number' ? [[name, spent]] : [],
+    ),
+  );
+  const rowSeconds = Object.fromEntries(
+    Object.entries(isRecord(rows) ? rows : {}).flatMap(([name, spent]): [string, number[]][] =>
+      isNumberList(spent) ? [[name, spent]] : [],
+    ),
+  );
+  return { seconds, cases: caseSeconds, ...(isRecord(rows) ? { rows: rowSeconds } : {}) };
+}
+
+function isNumberList(value: unknown): value is number[] {
+  return Array.isArray(value) && value.every((one) => typeof one === 'number');
 }
 
 /**
@@ -459,7 +488,7 @@ function median(values: readonly number[]): number | undefined {
   if (values.length === 0) {
     return undefined;
   }
-  const sorted = [...values].sort((a, b) => a - b);
+  const sorted = [...values].toSorted((a, b) => a - b);
   const middle = Math.floor(sorted.length / 2);
   return sorted.length % 2 === 1 ? sorted[middle] : ((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2;
 }
@@ -564,7 +593,7 @@ export function dealt(units: readonly Unit[], declared: CasesBySuite, most: numb
     return [];
   }
   const windowed = units.filter((unit) => unit.windowed);
-  const headless = units.filter((unit) => !unit.windowed).sort(slowestFirst);
+  const headless = units.filter((unit) => !unit.windowed).toSorted(slowestFirst);
   // The windowed units stay together, so for the count they are one unit as slow as all of them.
   const together = windowed.reduce((sum, unit) => sum + unit.cost, 0);
   // A headless engine following them in their lane starts afresh.
@@ -630,7 +659,7 @@ export class Shares {
 
   constructor(units: readonly Unit[], declared: CasesBySuite, lanes: number) {
     this.windowed = units.filter((unit) => unit.windowed);
-    this.headless = units.filter((unit) => !unit.windowed).sort(slowestFirst);
+    this.headless = units.filter((unit) => !unit.windowed).toSorted(slowestFirst);
     this.declared = declared;
     this.all = units;
     this.lanes = Math.max(1, lanes);
@@ -749,14 +778,14 @@ function planOf(
       );
       shares[func] = rest
         ? { besides: dealtOut.filter((row) => !mine.includes(row)) }
-        : { only: mine.sort((a, b) => a - b) };
+        : { only: mine.toSorted((a, b) => a - b) };
     }
     return shares;
   };
   return {
     suites: [...held].map(([path, cases]) => {
       const rows = sharesOf(path, cases);
-      return { path, cases: [...cases].sort(), ...(Object.keys(rows).length > 0 ? { rows } : {}) };
+      return { path, cases: [...cases].toSorted(), ...(Object.keys(rows).length > 0 ? { rows } : {}) };
     }),
     skipping,
     cost: bin.reduce((sum, unit) => sum + unit.cost, 0),
@@ -778,7 +807,7 @@ export function windowNeedsOf(
       .flatMap((path) => (path.endsWith('.gd') ? (scripts.suite(path) ?? []) : scripts.suitesUnder([path])))
       .map((suite) => [suite.path, suite]),
   );
-  const sorted = [...suites.values()].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  const sorted = [...suites.values()].toSorted((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   return {
     needing: sorted.filter((suite) => suite.windowed).map((suite) => suite.path),
     headless: sorted.filter((suite) => suite.headless).map((suite) => suite.path),

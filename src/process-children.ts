@@ -126,7 +126,7 @@ function printedBy(command: string, args: readonly string[], env: NodeJS.Process
   return run(command, args, { timeout: ASK_TIMEOUT_MS, env }).then(
     ({ stdout }) => stdout,
     (error: unknown) => {
-      const printed = (error as { stdout?: unknown }).stdout;
+      const printed = error instanceof Error && 'stdout' in error ? error.stdout : undefined;
       return typeof printed === 'string' ? printed : '';
     },
   );
@@ -451,7 +451,7 @@ export function editorsOfProjectIn(tree: ProcessTree, projectPath: string): numb
       found.push(pid);
     }
   }
-  return found.sort((a, b) => a - b);
+  return found.toSorted((a, b) => a - b);
 }
 
 /**

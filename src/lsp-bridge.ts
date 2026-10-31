@@ -16,6 +16,7 @@ import { alive } from './alive.js';
 import { EngineUsageError } from './engine-launch.js';
 import { DEFAULT_LSP_PORT, GodotLSPClient } from './lsp_client.js';
 import { oneShotOptionOf, startTimesOf } from './process-children.js';
+import { isRecord } from './records.js';
 
 /** Kept in step with `EDITORS_RECORDED_PROTOCOL` in the editor addon's bridge_client.gd. */
 const EDITOR_RECORD_PROTOCOL = 1;
@@ -51,7 +52,8 @@ export function editorRecordsIn(projectPath: string): EditorRecord[] {
   for (const name of names) {
     const file = join(directory, name);
     try {
-      const said = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+      const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+      const said: Record<string, unknown> = isRecord(parsed) ? parsed : {};
       const { protocol, pid, lsp_port: lspPort, written_at_ms: writtenAtMs } = said;
       if (
         protocol === EDITOR_RECORD_PROTOCOL &&
@@ -66,7 +68,7 @@ export function editorRecordsIn(projectPath: string): EditorRecord[] {
       // Half written, or something else's: the next look reads it again.
     }
   }
-  return records.sort((a, b) => b.writtenAtMs - a.writtenAtMs);
+  return records.toSorted((a, b) => b.writtenAtMs - a.writtenAtMs);
 }
 
 /**
@@ -268,7 +270,7 @@ export async function runLspBridge(options: LspOptions): Promise<number> {
       break;
     }
     sayOnce(`no language server of ${options.projectPath} yet; waiting for its editor`);
-    await new Promise((resolve) => setTimeout(resolve, LOOK_AGAIN_MS));
+    await new Promise((settle) => setTimeout(settle, LOOK_AGAIN_MS));
   }
   note(
     [
@@ -286,7 +288,7 @@ export async function runLspBridge(options: LspOptions): Promise<number> {
 async function pipe(port: number): Promise<number> {
   const socket: Socket = connect({ host: HOST, port });
   socket.setNoDelay(true);
-  return await new Promise<number>((resolve) => {
+  return await new Promise<number>((exitWith) => {
     socket.once('connect', () => {
       process.stdin.pipe(socket);
       socket.pipe(process.stdout);
@@ -294,10 +296,10 @@ async function pipe(port: number): Promise<number> {
     process.stdin.once('end', () => socket.end());
     socket.once('error', (error) => {
       note(`the connection to port ${port} failed: ${error.message}`);
-      resolve(1);
+      exitWith(1);
     });
     socket.once('close', () => {
-      resolve(0);
+      exitWith(0);
     });
   });
 }

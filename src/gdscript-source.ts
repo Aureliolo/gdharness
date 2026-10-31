@@ -300,8 +300,17 @@ export interface ScriptShape {
 
 const NAME = '[\\p{L}_][\\p{L}\\p{N}_]*';
 const ANNOTATIONS = '(?:@[\\p{L}_][\\p{L}\\p{N}_]*(?:\\([^)]*\\))?\\s+)*';
+/** The keywords a declaration line opens with, each the kind of what it declares. */
+const DECLARATION_KEYWORDS = [
+  'func',
+  'var',
+  'const',
+  'signal',
+  'enum',
+  'class',
+] as const satisfies readonly DeclarationKind[];
 const DECLARATION_LINE = new RegExp(
-  `^(${ANNOTATIONS})(static\\s+)?(func|var|const|signal|enum|class)\\s+(${NAME})`,
+  `^(${ANNOTATIONS})(static\\s+)?(${DECLARATION_KEYWORDS.join('|')})\\s+(${NAME})`,
   'u',
 );
 const CLASS_NAME_LINE = new RegExp(`^${ANNOTATIONS}class_name\\s+(${NAME})`, 'u');
@@ -393,9 +402,9 @@ export function shapeOf(source: string): ScriptShape {
       const declared = DECLARATION_LINE.exec(body);
       if (declared !== null) {
         const [whole, , isStatic, keyword, declaredName] = declared;
-        if (keyword !== undefined && declaredName !== undefined) {
+        const kind = DECLARATION_KEYWORDS.find((one) => one === keyword);
+        if (kind !== undefined && declaredName !== undefined) {
           const offset = at + whole.length - declaredName.length;
-          const kind = keyword as DeclarationKind;
           declarations.push({ name: declaredName, kind, offset, isStatic: isStatic !== undefined });
           if (kind === 'enum') {
             const brace = body.indexOf('{');

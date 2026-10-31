@@ -10,6 +10,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { isRecord } from './records.js';
 import { currentRunner, runLine } from './runner.js';
 
 /** Only https, and nothing built from anything a caller supplies. */
@@ -123,12 +124,10 @@ function readCache(path: string): Cached | null {
       return null;
     }
     const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
-    if (typeof parsed !== 'object' || parsed === null) {
+    if (!isRecord(parsed)) {
       return null;
     }
-    const record = parsed as Record<string, unknown>;
-    const checkedAt = record['checkedAt'];
-    const latest = record['latest'];
+    const { checkedAt, latest } = parsed;
     if (typeof checkedAt !== 'number' || typeof latest !== 'string' || !VERSION.test(latest)) {
       return null;
     }
@@ -188,7 +187,7 @@ async function fetchLatest(registry: string): Promise<string | null> {
   }
   const chunks: Uint8Array[] = [];
   let size = 0;
-  for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+  for await (const chunk of response.body) {
     size += chunk.byteLength;
     if (size > MAX_BODY_BYTES) {
       return null;
@@ -196,10 +195,7 @@ async function fetchLatest(registry: string): Promise<string | null> {
     chunks.push(chunk);
   }
   const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-  if (typeof parsed !== 'object' || parsed === null) {
-    return null;
-  }
-  const version = (parsed as Record<string, unknown>)['version'];
+  const version = isRecord(parsed) ? parsed['version'] : undefined;
   return typeof version === 'string' && VERSION.test(version) ? version : null;
 }
 

@@ -1,4 +1,5 @@
 import process from 'node:process';
+import { errorCode } from './errors.js';
 import type { ChildProcess } from './spawn.js';
 
 /**
@@ -35,6 +36,6 @@ export function alive(pid: number | undefined | null): boolean {
     // EPERM is a process that is there and is somebody else's, which is still there. Only ESRCH
     // says there is nothing under that number, and reading the two the same way reports a run
     // started by another user as one that has ended.
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
+    return errorCode(error) === 'EPERM';
   }
 }

@@ -149,7 +149,7 @@ function everyWarning(godotPath: string): string[] {
     );
     const run = runScript(godotPath, dir, join(dir, 'warnings.gd'));
     const said = [run.stdout, run.stderr].join('\n');
-    const line = run.stdout.split('\n').find((text) => text.startsWith('WARNINGS:')) ?? '';
+    const line = run.stdout.split('\n').find((printed) => printed.startsWith('WARNINGS:')) ?? '';
     // Already filtered to the settings that take a level, by the engine's own idea of their type.
     // Three of the 52 do not: `enable`, `directory_rules`, which the callers here set for
     // themselves, and `renamed_in_godot_4_hint`.
@@ -903,7 +903,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     readFileSync(join(projectDir, 'made', 'resource_template.gd'), 'utf8'),
     /^extends Resource\n## Data kept in a \.tres file/,
   );
-  for (const [base, named] of [
+  for (const [base, spelling] of [
     ['Node', 'Node'],
     ['FixtureHero', 'FixtureHero, a Node2D,'],
   ] as const) {
@@ -916,7 +916,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     assert.match(
       misplaced.stderr,
       new RegExp(
-        `The resource template is written for a Resource, and extends ${named} is not one\\. Give extends a Resource class, or leave it out for Resource\\. Nothing was written\\.`,
+        `The resource template is written for a Resource, and extends ${spelling} is not one\\. Give extends a Resource class, or leave it out for Resource\\. Nothing was written\\.`,
       ),
       misplaced.stderr,
     );
@@ -1348,7 +1348,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     { name: 'FixtureHero', path: 'res://made/hero.gd' },
     JSON.stringify(declared),
   );
-  assert.deepEqual(classNames, [...classNames].sort(), 'listed by name');
+  assert.deepEqual(classNames, classNames.toSorted(), 'listed by name');
   // The newline ending the last line starts no line of its own, as an editor or wc counts them.
   const countedPath = join(projectDir, 'made', 'counted.gd');
   const counts = [
@@ -1529,9 +1529,9 @@ function testOperations(godotPath: string, projectDir: string): void {
   const turnedAround = (file: string): string => {
     const [preamble = '', ...sections] = file.split(/\n(?=\[)/);
     const reversed = sections.map((section) => {
-      const [head = '', ...lines] = section.replace(/\n+$/, '').split('\n');
+      const [head = '', ...body] = section.replace(/\n+$/, '').split('\n');
       const entries: string[] = [];
-      for (const line of lines) {
+      for (const line of body) {
         if (/^[\w"/.-]+=/.test(line) || entries.length === 0) {
           entries.push(line);
         } else {
@@ -1601,12 +1601,12 @@ function testOperations(godotPath: string, projectDir: string): void {
   // the editor writes and every line it did not touch, in the order the file had them, so from
   // here on a round trip has to give the bytes back and an addition has to keep every line that
   // was there.
-  const keptWhole = (before: string, after: string, what: string): void => {
-    assert.match(after, /^; Engine configuration file\.$/m, `${what} should keep the editor's header`);
-    const lines = after.split('\n');
+  const keptWhole = (original: string, rewritten: string, what: string): void => {
+    assert.match(rewritten, /^; Engine configuration file\.$/m, `${what} should keep the editor's header`);
+    const rewrittenLines = rewritten.split('\n');
     let from = 0;
-    for (const line of before.split('\n')) {
-      const at = lines.indexOf(line, from);
+    for (const line of original.split('\n')) {
+      const at = rewrittenLines.indexOf(line, from);
       assert.notEqual(at, -1, `${what} should keep the line ${JSON.stringify(line)}`);
       from = at + 1;
     }
@@ -1727,14 +1727,14 @@ function testOperations(godotPath: string, projectDir: string): void {
     ['Vector2', 'it is the built-in type Vector2'],
     ['match', 'it is a GDScript keyword'],
     ['2nd', 'it is not an identifier, which a script could name'],
-  ].map(([name, reason]) => {
-    const refused = runRefusedOperation(godotPath, projectDir, 'add_autoload', {
-      name,
+  ].map(([clash, reason]) => {
+    const rejected = runRefusedOperation(godotPath, projectDir, 'add_autoload', {
+      name: clash,
       path: 'made/hero.gd',
     });
     return [
-      refused.answer,
-      refused.stderr.includes(`"${name}" cannot name an autoload: ${reason}. Nothing was written`),
+      rejected.answer,
+      rejected.stderr.includes(`"${clash}" cannot name an autoload: ${reason}. Nothing was written`),
     ];
   });
   assert.deepEqual(
@@ -2209,17 +2209,17 @@ function testOperations(godotPath: string, projectDir: string): void {
   // Another language's classes are kept while their files are there: the rebuild reads GDScript
   // only and writes the list whole, so a C# project's global classes were dropped and called removed.
   const cacheFile = join(projectDir, '.godot', 'global_script_class_cache.cfg');
-  const csharp = (name: string, path: string): string =>
-    `{\n"base": &"Node",\n"class": &"${name}",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"C#",\n"path": "${path}"\n}`;
+  const csharp = (className: string, path: string): string =>
+    `{\n"base": &"Node",\n"class": &"${className}",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"C#",\n"path": "${path}"\n}`;
   writeFileSync(join(projectDir, 'made', 'Foe.cs'), 'public partial class Foe : Godot.Node {}\n');
   writeFileSync(
     cacheFile,
     `list=[${csharp('Foe', 'res://made/Foe.cs')}, ${csharp('Lost', 'res://made/Lost.cs')}]\n`,
   );
   try {
-    const kept = operation('refresh_class_cache', {});
-    assert.deepEqual(get(kept, 'carried'), ['Foe'], JSON.stringify(kept));
-    assert.deepEqual(get(kept, 'removed'), ['Lost'], 'one whose file has gone is dropped');
+    const refreshed = operation('refresh_class_cache', {});
+    assert.deepEqual(get(refreshed, 'carried'), ['Foe'], JSON.stringify(refreshed));
+    assert.deepEqual(get(refreshed, 'removed'), ['Lost'], 'one whose file has gone is dropped');
     assert.match(
       readFileSync(cacheFile, 'utf8'),
       /"class": &"Foe"[\s\S]*"language": &"C#"/,
@@ -2245,7 +2245,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   const absent = operation('get_uid', { resource_path: 'made/unimported.gd' });
   rmSync(join(projectDir, 'made', 'unimported.gd'));
   // The file is there and only its uid is not; exists: false was read as the file being gone.
-  assert.deepEqual([get(absent, 'uid'), Object.hasOwn(absent as object, 'exists')], [null, false]);
+  assert.deepEqual([get(absent, 'uid'), Object.hasOwn(asObject(absent), 'exists')], [null, false]);
   assert.equal(get(absent, 'file'), 'res://made/unimported.gd');
   assert.match(
     String(get(absent, 'message')),
@@ -2254,7 +2254,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   );
   const minted = operation('get_uid', { resource_path: 'made/hero.gd' });
   assert.deepEqual(
-    [Object.hasOwn(minted as object, 'exists'), get(minted, 'uid')],
+    [Object.hasOwn(asObject(minted), 'exists'), get(minted, 'uid')],
     [false, heroUid],
     'the sidecar create_script wrote is the uid the engine reads',
   );
@@ -2276,7 +2276,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     const uidOf = (path: string): unknown[] => {
       const answer = operation('get_uid', { resource_path: path });
       return [
-        Object.hasOwn(answer as object, 'exists'),
+        Object.hasOwn(asObject(answer), 'exists'),
         get(answer, 'uid'),
         get(answer, 'from') ?? get(answer, 'message'),
       ];
@@ -2404,27 +2404,27 @@ function testOperations(godotPath: string, projectDir: string): void {
     ],
   ];
   try {
-    for (const [name, source, note] of unloadable) {
-      mkdirSync(join(projectDir, 'addons', name), { recursive: true });
+    for (const [plugin, source, note] of unloadable) {
+      mkdirSync(join(projectDir, 'addons', plugin), { recursive: true });
       writeFileSync(
-        join(projectDir, 'addons', name, 'plugin.cfg'),
-        `[plugin]\n\nname="${name}"\nscript="plugin.gd"\n`,
+        join(projectDir, 'addons', plugin, 'plugin.cfg'),
+        `[plugin]\n\nname="${plugin}"\nscript="plugin.gd"\n`,
       );
       if (source !== '') {
-        writeFileSync(join(projectDir, 'addons', name, 'plugin.gd'), source);
+        writeFileSync(join(projectDir, 'addons', plugin, 'plugin.gd'), source);
       }
-      const answer = operation('enable_plugin', { plugin_name: name });
+      const answer = operation('enable_plugin', { plugin_name: plugin });
       assert.deepEqual(
         [get(answer, 'action'), get(answer, 'note')],
         ['enabled', note],
-        `${name} is enabled and the answer says why the editor will not load it: ${JSON.stringify(answer)}`,
+        `${plugin} is enabled and the answer says why the editor will not load it: ${JSON.stringify(answer)}`,
       );
-      operation('disable_plugin', { plugin_name: name });
+      operation('disable_plugin', { plugin_name: plugin });
     }
     assert.equal(readFileSync(projectFile, 'utf8'), beforePlugin, 'and each comes out again');
   } finally {
-    for (const [name] of unloadable) {
-      rmSync(join(projectDir, 'addons', name), { recursive: true, force: true });
+    for (const [plugin] of unloadable) {
+      rmSync(join(projectDir, 'addons', plugin), { recursive: true, force: true });
     }
   }
 
@@ -2493,7 +2493,8 @@ function testOperations(godotPath: string, projectDir: string): void {
   // What project.godot holds, the project's own and an engine action it rebinds, and none of the
   // engine's that it leaves alone.
   const actions = asArray(get(operation('list_input_actions', {}), 'actions'));
-  const listedAction = (name: string): unknown => actions.find((entry) => get(entry, 'name') === name);
+  const listedAction = (actionName: string): unknown =>
+    actions.find((entry) => get(entry, 'name') === actionName);
   assert.deepEqual(
     [
       get(listedAction('fixture_jump'), 'deadzone'),
@@ -2614,11 +2615,11 @@ function testOperations(godotPath: string, projectDir: string): void {
     ],
   ];
   for (const [event, refusal] of unbound) {
-    const refused = runRefusedOperation(godotPath, projectDir, 'add_input_action', {
+    const rejected = runRefusedOperation(godotPath, projectDir, 'add_input_action', {
       action_name: 'fixture_dash',
       events: [{ type: 'key', keycode: 'Space' }, event],
     });
-    assert.match(refused.stderr, refusal, `${JSON.stringify(event)}: ${refused.stderr}`);
+    assert.match(rejected.stderr, refusal, `${JSON.stringify(event)}: ${rejected.stderr}`);
   }
   assert.equal(readFileSync(projectFile, 'utf8'), beforeUi, 'and nothing is written for any of them');
   const aimed = operation('add_input_action', {
@@ -3315,9 +3316,9 @@ function testAFileClaimingTheSameUidIsNoUse(godotPath: string, _projectDir: stri
           ]),
           asArray(get(used, 'shares_uid'))
             .map(String)
-            .sort((a, b) => a.localeCompare(b)),
+            .toSorted((a, b) => a.localeCompare(b)),
         ],
-        [[['res://panel.tscn', [3]]], [...sharing].sort((a, b) => a.localeCompare(b))],
+        [[['res://panel.tscn', [3]]], sharing.toSorted((a, b) => a.localeCompare(b))],
         `${asked}: used by the scene alone, with the files claiming its uid named apart: ${JSON.stringify(used)}`,
       );
     }
@@ -3346,10 +3347,10 @@ function testASettingARunLaysOverIsNotTheProjects(godotPath: string, _projectDir
     const settings = join(dir, 'project.godot');
     writeFileSync(
       settings,
-      readFileSync(settings, 'utf8').replace(
+      `${readFileSync(settings, 'utf8').replace(
         '[application]\n',
         '[application]\nconfig/project_settings_override="res://laid.cfg"\n',
-      ) + '\n[display]\n\nwindow/size/viewport_width=800\n',
+      )}\n[display]\n\nwindow/size/viewport_width=800\n`,
     );
     writeFileSync(
       join(dir, 'override.cfg'),
@@ -4019,16 +4020,16 @@ async function testAnOperationLeavesARunningLogAlone(godotPath: string): Promise
     },
   );
   const moved = ['APPDATA', 'XDG_DATA_HOME'];
-  const saved = new Map(moved.map((name) => [name, process.env[name]]));
+  const saved = new Map(moved.map((variable) => [variable, process.env[variable]]));
   // Put back, rather than set back: assigning undefined to a variable stores the word "undefined",
   // and a relative XDG_DATA_HOME is one the engine warns about on stderr in every later operation,
   // which is how this leaked out of the case that set it and failed a different one.
   const restore = (): void => {
-    for (const [name, value] of saved) {
+    for (const [variable, value] of saved) {
       if (value === undefined) {
-        delete process.env[name];
+        delete process.env[variable];
       } else {
-        process.env[name] = value;
+        process.env[variable] = value;
       }
     }
   };
@@ -4059,7 +4060,7 @@ async function testAnOperationLeavesARunningLogAlone(godotPath: string): Promise
     assert.ok(answered.ok, `the operation should still answer: ${answered.ok ? '' : answered.message}`);
 
     // Time for the bench to write past wherever a truncation would have left the end.
-    const rows = (text: string): number => (text.match(/row \d{4}/g) ?? []).length;
+    const rows = (logText: string): number => (logText.match(/row \d{4}/g) ?? []).length;
     const grown = Date.now() + 30_000;
     while (rows(readFileSync(log, 'utf8')) <= rows(before) && Date.now() < grown) {
       await delay(500);
@@ -4095,8 +4096,8 @@ async function testAnOperationLeavesARunningLogAlone(godotPath: string): Promise
   // Checked here rather than left to whichever later case the engine happens to warn in. This
   // leaked once, and what reported it was an operation two cases further on writing a warning
   // about a relative path to stderr, which named neither the variable's owner nor this case.
-  for (const [name, value] of saved) {
-    assert.equal(process.env[name], value, `${name} should be back as it was, unset included`);
+  for (const [variable, value] of saved) {
+    assert.equal(process.env[variable], value, `${variable} should be back as it was, unset included`);
   }
 }
 
@@ -4886,13 +4887,13 @@ function testAConnectionNamesWhatItReaches(godotPath: string): void {
     const warned = asArray(get(validated, 'warnings'))
       .filter((warning) => get(warning, 'check') === 'connections')
       .map((warning) => asString(get(warning, 'message')))
-      .sort();
+      .toSorted();
     assert.deepEqual(warned, expected, JSON.stringify(get(validated, 'warnings')));
     const health = runOperation(godotPath, dir, 'get_project_health', { categories: ['scenes'] });
     const noted = asArray(get(health, 'checks', 'scenes', 'details'))
       .map((detail) => asString(detail))
       .filter((detail) => detail.includes(' connects '))
-      .sort();
+      .toSorted();
     assert.deepEqual(noted, expected, JSON.stringify(health));
   } finally {
     sweep(dir);
@@ -4961,7 +4962,7 @@ function testTheImporterIsAskedFirst(godotPath: string): void {
     // Older, and with the hash the editor recorded for the sidecar moved to match it, so the version
     // is the only thing that differs from a sidecar the editor wrote.
     const cachePath = join(dir, '.godot', 'editor', 'filesystem_cache10');
-    const md5 = (text: string): string => createHash('md5').update(text).digest('hex');
+    const md5 = (contents: string): string => createHash('md5').update(contents).digest('hex');
     const older = sidecar.replace(/^importer_version=\d+\n/m, '');
     const importedAt = statSync(sidecarPath).mtimeMs;
     writeFileSync(sidecarPath, older);
@@ -5081,7 +5082,11 @@ async function testTheAnswerIsTheOperations(godotPath: string): Promise<void> {
       JSON.stringify(extras),
     );
     assert.ok(
-      raised(get(extras, 'engine_messages_after_answer') as { text: string }[]),
+      raised(
+        asArray(get(extras, 'engine_messages_after_answer'), 'engine_messages_after_answer').map((entry) => ({
+          text: asString(get(entry, 'text'), 'a message text'),
+        })),
+      ),
       JSON.stringify(extras),
     );
 
@@ -5514,9 +5519,9 @@ function testTheClassListIsTheEnginesOwn(godotPath: string): void {
     assert.equal(imported.status, 0, `the engine imports the project: ${imported.stderr}`);
     const cache = join(projectDir, '.godot', 'global_script_class_cache.cfg');
     const theEngines = readFileSync(cache, 'utf8');
-    const bases = (text: string): Record<string, string> => {
+    const bases = (cacheText: string): Record<string, string> => {
       const found: Record<string, string> = {};
-      for (const entry of text.matchAll(/"base": &"([^"]*)",\s*"class": &"([^"]*)"/g)) {
+      for (const entry of cacheText.matchAll(/"base": &"([^"]*)",\s*"class": &"([^"]*)"/g)) {
         found[entry[2] ?? ''] = entry[1] ?? '';
       }
       return found;

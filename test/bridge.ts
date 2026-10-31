@@ -18,13 +18,7 @@ import { shippedRuntimeDigest } from '../src/setup.js';
 import { spawnHidden } from '../src/spawn.js';
 import { greeting } from './support/greeting.js';
 import { asArray, asObject, get, text } from './support/json.js';
-import {
-  isRecord,
-  type JsonRpcMessage,
-  parseTextContent,
-  type ToolContentBlock,
-  textOf,
-} from './support/json-rpc.js';
+import { contentOf, isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { listenOnAReservedPort, reservePort, ServerProcess, serverIdentity } from './support/server.js';
 import { sweep } from './support/sweep.js';
 
@@ -81,11 +75,6 @@ function createTestProjectFixture(): string {
     ['extends CharacterBody2D', '', 'func _ready():', '    pass', ''].join('\n'),
   );
   return projectPath;
-}
-
-function contentOf(response: JsonRpcMessage): ToolContentBlock[] {
-  const content = isRecord(response.result) ? response.result['content'] : undefined;
-  return Array.isArray(content) ? (content as ToolContentBlock[]) : [];
 }
 
 interface MockRuntimeOptions {
@@ -150,7 +139,10 @@ function startMockRuntime(directory: string, options: MockRuntimeOptions): Promi
     });
 
     const answer = (line: string): void => {
-      const request = JSON.parse(line) as Record<string, unknown>;
+      const request: unknown = JSON.parse(line);
+      if (!isRecord(request)) {
+        throw new Error(`the mock runtime was sent a line that is not an object: ${line}`);
+      }
       const id = request['id'];
       const params = isRecord(request['params']) ? request['params'] : {};
       switch (request['command']) {
@@ -351,7 +343,7 @@ async function main(): Promise<void> {
     // capability the server does not serve is a promise it breaks on the first request.
     const capabilities = get(init.result, 'capabilities');
     assert.deepEqual(
-      Object.keys(asObject(capabilities, 'capabilities')).sort(),
+      Object.keys(asObject(capabilities, 'capabilities')).toSorted(),
       ['completions', 'prompts', 'resources', 'tools'],
       `the server advertises what it serves and nothing else: ${JSON.stringify(capabilities)}`,
     );
@@ -729,7 +721,9 @@ async function main(): Promise<void> {
 
       for (const args of [{}, { op: 'viewport', viewportPath: '/root' }] as const) {
         const label = `runtime_capture ${JSON.stringify(args)}`;
-        const image = contentOf(await call('runtime_capture', args)).find((chunk) => chunk.type === 'image');
+        const image = (contentOf(await call('runtime_capture', args)) ?? []).find(
+          (chunk) => chunk.type === 'image',
+        );
         assert.ok(image, `${label} answers with an image block`);
         assert.equal(image.mimeType, 'image/png');
         assert.ok(image.data, `${label} carries the image bytes`);

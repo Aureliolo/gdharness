@@ -45,3 +45,8 @@ export function errorMessage(error: unknown, fallback = 'Unknown error'): string
 export function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(errorMessage(error), { cause: error });
 }
+
+/** The system error code a failed call carries, such as `ENOENT`, or undefined for any other throw. */
+export function errorCode(error: unknown): string | undefined {
+  return error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : undefined;
+}

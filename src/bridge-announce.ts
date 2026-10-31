@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { errorMessage } from './errors.js';
 import { startTimesOf } from './process-children.js';
+import { isRecord } from './records.js';
 
 /**
  * Where this server says its editor bridge is, so an editor can find it without anybody having
@@ -41,28 +42,21 @@ export const BRIDGE_ANNOUNCE_PROTOCOL = 1;
 export function readAnnouncement(path: string): BridgeAnnouncement | null {
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
-    if (typeof parsed !== 'object' || parsed === null) {
+    if (!isRecord(parsed)) {
       return null;
     }
-    const said = parsed as Record<keyof BridgeAnnouncement, unknown>;
+    const { protocol, host, port, pid, version, startedAt } = parsed;
     if (
-      said.protocol !== BRIDGE_ANNOUNCE_PROTOCOL ||
-      typeof said.host !== 'string' ||
-      typeof said.port !== 'number' ||
-      typeof said.pid !== 'number' ||
-      typeof said.version !== 'string' ||
-      typeof said.startedAt !== 'string'
+      protocol !== BRIDGE_ANNOUNCE_PROTOCOL ||
+      typeof host !== 'string' ||
+      typeof port !== 'number' ||
+      typeof pid !== 'number' ||
+      typeof version !== 'string' ||
+      typeof startedAt !== 'string'
     ) {
       return null;
     }
-    return {
-      protocol: said.protocol,
-      host: said.host,
-      port: said.port,
-      pid: said.pid,
-      version: said.version,
-      startedAt: said.startedAt,
-    };
+    return { protocol, host, port, pid, version, startedAt };
   } catch {
     return null;
   }

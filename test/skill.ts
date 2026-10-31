@@ -201,7 +201,7 @@ function testRemovingTakesOurDirectoriesAndNobodyElses(): void {
     assert.ok(claude?.skills);
     const directories = skillDirectories([claude], root, existsSync);
     writeSkill(directories, '9.9.9');
-    assert.deepEqual([...removeSkill(directories, root)].sort(), [...directories].sort());
+    assert.deepEqual(removeSkill(directories, root).toSorted(), directories.toSorted());
 
     assert.equal(existsSync(join(root, '.agents')), false, 'the directory gdharness made is gone');
     assert.equal(

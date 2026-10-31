@@ -68,6 +68,7 @@ import {
   readCommandLine,
   startTimesOf,
 } from './process-children.js';
+import { isRecord } from './records.js';
 import { readWhole, removeWhole, writeWhole } from './whole-file.js';
 
 /**
@@ -254,7 +255,7 @@ export function slotWaiters(directory: string): SlotWaiter[] {
     return [];
   }
   const found: SlotWaiter[] = [];
-  for (const mark of names.sort()) {
+  for (const mark of names.toSorted()) {
     let content: string | null;
     let madeAt: number;
     try {
@@ -267,7 +268,8 @@ export function slotWaiters(directory: string): SlotWaiter[] {
     if (content === null || holder === null || !alive(holder.pid)) {
       continue;
     }
-    const { taker, since } = JSON.parse(content) as { taker?: unknown; since?: unknown };
+    const parsed: unknown = JSON.parse(content);
+    const { taker, since }: Record<string, unknown> = isRecord(parsed) ? parsed : {};
     if (taker === MEMORY_TAKER) {
       continue;
     }
@@ -344,7 +346,7 @@ export class SlotLine {
         (one) =>
           one.mark !== this.mark && (one.since < this.since || (one.since === this.since && one.mark < own)),
       )
-      .sort((a, b) => a.since - b.since || (a.mark < b.mark ? -1 : 1));
+      .toSorted((a, b) => a.since - b.since || (a.mark < b.mark ? -1 : 1));
   }
 
   /**
@@ -359,7 +361,7 @@ export class SlotLine {
 
   /** The free slots it leaves to those waiting longer, lowest first. */
   leaves(): number[] {
-    return [...this.left.keys()].sort((a, b) => a - b);
+    return [...this.left.keys()].toSorted((a, b) => a - b);
   }
 }
 
@@ -512,12 +514,12 @@ export class FolderChanges {
    */
   async next(lookMs: number, settleMs: number, signal: AbortSignal | undefined): Promise<void> {
     if (!this.changed) {
-      await new Promise<void>((resolve) => {
+      await new Promise<void>((release) => {
         const done = (): void => {
           clearTimeout(timer);
           this.wake = null;
           signal?.removeEventListener('abort', done);
-          resolve();
+          release();
         };
         const timer = setTimeout(done, lookMs);
         this.wake = done;

@@ -12,6 +12,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { emptyRecord } from './dictionary.js';
 import { type DebugObserver, RUNTIME_ADDON } from './game-debugger.js';
 import {
   bodyCallsSuper,
@@ -23,6 +24,7 @@ import {
   shapeOf,
 } from './gdscript-source.js';
 import { type DebuggerMessage, framedCommand, type GodotValue, type SentValue } from './godot-variant.js';
+import { isRecord } from './records.js';
 import { parseProjectGodot } from './resources.js';
 import { RUNTIME_AUTOLOAD } from './setup.js';
 import { writeWhole } from './whole-file.js';
@@ -92,11 +94,70 @@ export function writeProfileFile(path: string, file: ProfileFile): boolean {
 /** The profile at [param path], or null where there is none or it cannot be read. */
 export function readProfileFile(path: string): ProfileFile | null {
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as ProfileFile;
-    return typeof parsed === 'object' && typeof parsed.connected === 'boolean' ? parsed : null;
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    if (!isRecord(parsed)) {
+      return null;
+    }
+    const { connected, listeningSince } = parsed;
+    if (connected === false) {
+      return typeof listeningSince === 'number' ? { connected, listeningSince } : null;
+    }
+    const totals = connected === true ? profileTotalsOf(parsed) : null;
+    return totals === null ? null : { ...totals, connected: true };
   } catch {
     return null;
   }
+}
+
+function isFunctionTotals(value: unknown): value is FunctionTotals {
+  return (
+    isRecord(value) &&
+    typeof value['calls'] === 'number' &&
+    typeof value['selfSeconds'] === 'number' &&
+    typeof value['totalSeconds'] === 'number'
+  );
+}
+
+/** [param value] as profile totals, or null when any part of it is not the shape [method snapshot] gives. */
+function profileTotalsOf(value: unknown): ProfileTotals | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const { startedAt, lastFrameAt, frames, complete, functions, unreadable } = value;
+  if (
+    typeof startedAt !== 'number' ||
+    (typeof lastFrameAt !== 'number' && lastFrameAt !== null) ||
+    typeof frames !== 'number' ||
+    typeof complete !== 'boolean' ||
+    !isRecord(functions) ||
+    typeof unreadable !== 'number'
+  ) {
+    return null;
+  }
+  // Without a prototype, since the keys are signatures the engine wrote.
+  const summed = emptyRecord<FunctionTotals>();
+  for (const [signature, totals] of Object.entries(functions)) {
+    if (!isFunctionTotals(totals)) {
+      return null;
+    }
+    summed[signature] = totals;
+  }
+  // The parts a file can be without, each taken where it has its type and left out where it has not.
+  const { frameFunctions, cappedFrames, totalCapped, dropped, firstFrame, lastFrame } = value;
+  return {
+    startedAt,
+    lastFrameAt,
+    frames,
+    complete,
+    functions: summed,
+    unreadable,
+    ...(typeof frameFunctions === 'number' ? { frameFunctions } : {}),
+    ...(typeof cappedFrames === 'number' ? { cappedFrames } : {}),
+    ...(typeof totalCapped === 'boolean' ? { totalCapped } : {}),
+    ...(typeof dropped === 'number' ? { dropped } : {}),
+    ...(typeof firstFrame === 'number' ? { firstFrame } : {}),
+    ...(typeof lastFrame === 'number' ? { lastFrame } : {}),
+  };
 }
 
 /** Where a project sizes its game's outgoing debugger queue, and the engine's default for it. */
@@ -448,8 +509,22 @@ export function writeProfileMark(path: string, mark: ProfileMark): boolean {
 /** The mark at [param path], or null where there is none or it cannot be read. */
 export function readProfileMark(path: string): ProfileMark | null {
   try {
-    const parsed = JSON.parse(readFileSync(path, 'utf8')) as ProfileMark;
-    return typeof parsed === 'object' && typeof parsed.totals === 'object' ? parsed : null;
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    if (!isRecord(parsed)) {
+      return null;
+    }
+    const { takenAt, projectPath, runStartedAt, coveredMs } = parsed;
+    const totals = profileTotalsOf(parsed['totals']);
+    if (
+      typeof takenAt !== 'number' ||
+      (typeof projectPath !== 'string' && projectPath !== null) ||
+      typeof runStartedAt !== 'number' ||
+      typeof coveredMs !== 'number' ||
+      totals === null
+    ) {
+      return null;
+    }
+    return { takenAt, projectPath, runStartedAt, coveredMs, totals };
   } catch {
     return null;
   }
@@ -568,7 +643,7 @@ function rowsOf(totals: ProfileTotals, sourceOf: SourceOf): ProfiledFunction[] {
         ...(property === null ? {} : { property }),
       };
     })
-    .sort((a, b) => b.selfMs - a.selfMs || b.totalMs - a.totalMs || a.function.localeCompare(b.function));
+    .toSorted((a, b) => b.selfMs - a.selfMs || b.totalMs - a.totalMs || a.function.localeCompare(b.function));
 }
 
 /** A function's own name, without the class the compiler puts in front of it. */

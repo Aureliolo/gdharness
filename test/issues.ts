@@ -21,6 +21,7 @@ import {
 } from '../src/issues.js';
 import { portFromEnv } from '../src/ports.js';
 import { spawnSyncHidden } from '../src/spawn.js';
+import { asObject } from './support/json.js';
 
 const report = defectReport('editor_scene op=open', new TypeError('Cannot read properties of undefined'));
 
@@ -139,25 +140,27 @@ assert.ok(
   typeof notice === 'object' && notice !== null && 'gdharness_feedback' in notice,
   'the feedback notice should be a JSON block under one named key',
 );
-const feedback = (
-  notice as { gdharness_feedback: { what_to_do?: unknown; enhancement_url?: unknown; why_here?: unknown } }
-).gdharness_feedback;
+const feedback = asObject(notice.gdharness_feedback, 'the feedback block');
 // Why it is on this answer at all, since on a plain success it read as something the call caused.
 assert.match(
-  String(feedback.why_here),
+  String(feedback['why_here']),
   /once every 250 answers, whatever the call was\. It is not about the answer it comes with/,
   'the notice says it is periodic and not about the answer it rides on',
 );
-assert.equal(feedback.enhancement_url, ENHANCEMENT_URL, 'and carry the link to open');
+assert.equal(feedback['enhancement_url'], ENHANCEMENT_URL, 'and carry the link to open');
 assert.equal(
   new URL(ENHANCEMENT_URL).searchParams.get('template'),
   'feature_request.md',
   'which should open the enhancement template',
 );
-assert.match(String(feedback.what_to_do), /offer to open an enhancement issue/, 'it should offer, not file');
-assert.match(String(feedback.what_to_do), /Only if they say yes/, 'and wait for a yes');
 assert.match(
-  String(feedback.what_to_do),
+  String(feedback['what_to_do']),
+  /offer to open an enhancement issue/,
+  'it should offer, not file',
+);
+assert.match(String(feedback['what_to_do']), /Only if they say yes/, 'and wait for a yes');
+assert.match(
+  String(feedback['what_to_do']),
   /a call you got wrong is not one/,
   'and say what does not count as a gap, since everything else here invites reporting',
 );

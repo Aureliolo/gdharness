@@ -13,6 +13,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { codeOf, shapeOf } from './gdscript-source.js';
+import { isRecord } from './records.js';
 import { readWhole } from './whole-file.js';
 
 /**
@@ -92,15 +93,15 @@ export function declaredClassLines(projectPath: string): Map<string, DeclaredCla
     }
   }
   const baseOf = (script: string, seen: Set<string>): string => {
-    const written = shapeOf(sources.get(script) ?? '').body.extendsAs;
-    if (written === null) {
+    const extendsAs = shapeOf(sources.get(script) ?? '').body.extendsAs;
+    if (extendsAs === null) {
       return 'RefCounted';
     }
-    const quote = written[0];
+    const quote = extendsAs[0];
     if (quote !== '"' && quote !== "'") {
-      return written;
+      return extendsAs;
     }
-    const given = written.slice(1, -1);
+    const given = extendsAs.slice(1, -1);
     const path = given.startsWith('res://')
       ? given
       : posix.join(posix.dirname(script), given).replace(/^res:\/(?!\/)/, 'res://');
@@ -109,7 +110,7 @@ export function declaredClassLines(projectPath: string): Map<string, DeclaredCla
       return name;
     }
     if (!sources.has(path) || seen.has(path)) {
-      return written;
+      return extendsAs;
     }
     seen.add(path);
     return baseOf(path, seen);
@@ -187,7 +188,7 @@ export function scriptsNaming(projectPath: string, classes: readonly string[]): 
       naming.push({ script, tool: TOOL.test(code) });
     }
   });
-  return naming.sort((a, b) => a.script.localeCompare(b.script));
+  return naming.toSorted((a, b) => a.script.localeCompare(b.script));
 }
 
 /**
@@ -206,7 +207,7 @@ export function scriptsDeclaring(projectPath: string, classes: readonly string[]
       declaring.push({ script, tool: TOOL.test(codeOf(source)) });
     }
   });
-  return declaring.sort((a, b) => a.script.localeCompare(b.script));
+  return declaring.toSorted((a, b) => a.script.localeCompare(b.script));
 }
 
 /** The classes the cache lists, with the path each is recorded at, or null when there is none. */
@@ -252,11 +253,11 @@ export function cacheChangesBetween(
   if (before === null || after === null) {
     return {};
   }
-  const added = [...after.keys()].filter((name) => !before.has(name)).sort();
-  const removed = [...before.keys()].filter((name) => !after.has(name)).sort();
+  const added = [...after.keys()].filter((name) => !before.has(name)).toSorted();
+  const removed = [...before.keys()].filter((name) => !after.has(name)).toSorted();
   const changed = [...after.keys()]
     .filter((name) => before.has(name) && before.get(name) !== after.get(name))
-    .sort();
+    .toSorted();
   return { added, removed, changed };
 }
 
@@ -300,8 +301,7 @@ export function classesWithAddonsCounted(
   const kept: unknown[] = [];
   const inAddons: Record<string, number> = {};
   for (const entry of classes) {
-    const path =
-      entry !== null && typeof entry === 'object' ? (entry as Record<string, unknown>)['path'] : '';
+    const path = isRecord(entry) ? entry['path'] : '';
     const addon = addonOf(typeof path === 'string' ? path : '');
     if (addon === undefined || listed.has(addon)) {
       kept.push(entry);
@@ -633,7 +633,7 @@ export function classesNamedIn(source: string, known: ReadonlyMap<string, string
       named.add(word);
     }
   }
-  return [...named].sort();
+  return [...named].toSorted();
 }
 
 /** The ways an engine says a script names a class it does not know. */
@@ -667,7 +667,7 @@ export function classesStartedWithout(
       }
     }
   }
-  return [...named].sort();
+  return [...named].toSorted();
 }
 
 /** A diagnostic the file on disk disproves, and the script that disproves it. */
@@ -826,7 +826,7 @@ function written(one: Contradicted): string {
 
 /** The scripts [param entries] are declared in, each once and in order. */
 function declaringScripts(entries: readonly Contradicted[]): string[] {
-  return [...new Set(entries.map((one) => one.declaredIn))].sort();
+  return [...new Set(entries.map((one) => one.declaredIn))].toSorted();
 }
 
 /**
@@ -849,7 +849,7 @@ function instanceRemedy(
         'That is the common case rather than the awkward one: an edit near a type that depends on ' +
         'something refreshes it before the fault is noticed, which is why a type with no ' +
         'dependencies is where this turns up'
-      : `, so changing ${[...dependsOn].sort().join(' or ')} and then rescanning is worth a try`;
+      : `, so changing ${[...dependsOn].toSorted().join(' or ')} and then rescanning is worth a try`;
   return (
     `${besideOthers ? `For ${entries.map(written).join(', ')}, run` : 'Run'} editor_rescan first: ` +
     'it costs about half a second, and it has cleared this in every reproduction measured since the ' +
@@ -1176,7 +1176,7 @@ export function cachedAtMissingPaths(cached: Map<string, string>, projectPath: s
       ([, path]) => path.startsWith('res://') && !existsSync(join(projectPath, path.slice('res://'.length))),
     )
     .map(([name]) => name)
-    .sort();
+    .toSorted();
 }
 
 /** The declarations a given cache records at a different path, or does not record at all. */
@@ -1215,7 +1215,7 @@ export interface UnseenClass {
  */
 export function heldButGone(projectPath: string, editorHolds: readonly string[]): string[] {
   const declared = declaredClasses(projectPath);
-  return editorHolds.filter((name) => !declared.has(name)).sort();
+  return editorHolds.filter((name) => !declared.has(name)).toSorted();
 }
 
 /**
@@ -1241,6 +1241,8 @@ export function unseenByEditor(projectPath: string, editorHolds: readonly string
       // classes and says nothing about files.
       // The same comparison `heldButGone` uses rather than a locale-aware one, so two lists of class
       // names in the same answer cannot be ordered by two different rules.
-      .sort((one, other) => (one.className < other.className ? -1 : one.className > other.className ? 1 : 0))
+      .toSorted((one, other) =>
+        one.className < other.className ? -1 : one.className > other.className ? 1 : 0,
+      )
   );
 }

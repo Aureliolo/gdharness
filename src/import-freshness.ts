@@ -319,5 +319,5 @@ export function staleImports(projectPath: string): StaleImport[] {
     }
   };
   visit(projectPath, 'res://');
-  return stale.sort((one, other) => one.path.localeCompare(other.path));
+  return stale.toSorted((one, other) => one.path.localeCompare(other.path));
 }

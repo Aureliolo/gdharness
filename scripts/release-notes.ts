@@ -22,6 +22,7 @@
  * installs.
  */
 
+import { isRecord } from '../src/records.js';
 import { isNewer } from '../src/update-check.js';
 
 /** A tag as the version inside it, since the ordering is over versions and the tags carry a v. */
@@ -115,7 +116,7 @@ export function counterpart(
   return history.find((entry) => entry.message.split('\n')[0] === subject)?.sha;
 }
 
-async function gh<T>(path: string): Promise<T> {
+async function gh(path: string): Promise<unknown> {
   const response = await fetch(`https://api.github.com/${path}`, {
     headers: {
       accept: 'application/vnd.github+json',
@@ -127,7 +128,35 @@ async function gh<T>(path: string): Promise<T> {
   if (!response.ok) {
     throw new Error(`GET ${path} answered ${response.status} ${response.statusText}`);
   }
-  return (await response.json()) as T;
+  const answered: unknown = await response.json();
+  return answered;
+}
+
+function field(value: unknown, key: string, what: string): unknown {
+  if (!isRecord(value)) {
+    throw new Error(`GitHub answered ${what} with something other than an object.`);
+  }
+  return value[key];
+}
+
+function text(value: unknown, key: string, what: string): string {
+  const found = field(value, key, what);
+  if (typeof found !== 'string') {
+    throw new Error(`GitHub answered ${what} without a string ${key}.`);
+  }
+  return found;
+}
+
+function list(value: unknown, what: string): unknown[] {
+  if (!Array.isArray(value)) {
+    throw new Error(`GitHub answered ${what} with something other than a list.`);
+  }
+  return value;
+}
+
+/** The subject and body of each commit in [param listed], a list of commits as GitHub writes them. */
+function messagesOf(listed: unknown, what: string): string[] {
+  return list(listed, what).map((entry) => text(field(entry, 'commit', what), 'message', what));
 }
 
 async function main(): Promise<void> {
@@ -146,28 +175,29 @@ async function main(): Promise<void> {
   // newer, the range comes back empty, and the notes say a release changed nothing. Which is how
   // this was found. A generator that is only correct when run at exactly one moment is one nobody
   // can check afterwards, and checking it afterwards is the whole point of deriving it from diffs.
-  const releases = await gh<{ tag_name: string }[]>(`repos/${repository}/releases?per_page=30`);
+  const releases = list(await gh(`repos/${repository}/releases?per_page=30`), 'the releases');
   const previous = releases
-    .map((release) => release.tag_name)
+    .map((release) => text(release, 'tag_name', 'a release'))
     .filter((name) => isNewer(version(tag), version(name)))
-    .sort((left, right) => (isNewer(version(left), version(right)) ? -1 : 1))
+    .toSorted((left, right) => (isNewer(version(left), version(right)) ? -1 : 1))
     .at(0);
   if (previous === undefined) {
     throw new Error(`No release older than ${tag} to compare against.`);
   }
 
-  type Compared = { status: string; commits: { commit: { message: string } }[] };
   let from = previous;
-  let compared = await gh<Compared>(`repos/${repository}/compare/${previous}...${tag}`);
-  if (compared.status === 'diverged') {
-    const tagged = await gh<{ commit: { message: string } }>(`repos/${repository}/commits/${previous}`);
-    const subject = tagged.commit.message.split('\n')[0] ?? '';
-    const history = await gh<{ sha: string; commit: { message: string } }[]>(
-      `repos/${repository}/commits?sha=${tag}&per_page=100`,
-    );
+  let compared = await gh(`repos/${repository}/compare/${previous}...${tag}`);
+  if (text(compared, 'status', 'the comparison') === 'diverged') {
+    const tagged = await gh(`repos/${repository}/commits/${previous}`);
+    const subject =
+      text(field(tagged, 'commit', 'the tagged commit'), 'message', 'the tagged commit').split('\n')[0] ?? '';
+    const history = list(await gh(`repos/${repository}/commits?sha=${tag}&per_page=100`), 'the history');
     const found = counterpart(
       subject,
-      history.map((entry) => ({ sha: entry.sha, message: entry.commit.message })),
+      history.map((entry) => ({
+        sha: text(entry, 'sha', 'a commit'),
+        message: text(field(entry, 'commit', 'a commit'), 'message', 'a commit'),
+      })),
     );
     if (found === undefined) {
       throw new Error(
@@ -175,26 +205,28 @@ async function main(): Promise<void> {
       );
     }
     from = found;
-    compared = await gh<Compared>(`repos/${repository}/compare/${from}...${tag}`);
+    compared = await gh(`repos/${repository}/compare/${from}...${tag}`);
   }
-  const numbers = pullRequestNumbers(compared.commits.map((entry) => entry.commit.message));
+  const numbers = pullRequestNumbers(
+    messagesOf(field(compared, 'commits', 'the comparison'), 'a compared commit'),
+  );
 
   const entries: Entry[] = [];
   for (const number of numbers) {
-    const pull = await gh<{
-      title: string;
-      user: { login: string };
-      labels: { name: string }[];
-    }>(`repos/${repository}/pulls/${number}`);
-    if (pull.labels.some((label) => label.name === IS_THE_RELEASE_ITSELF)) {
+    const pull = await gh(`repos/${repository}/pulls/${number}`);
+    const labels = list(field(pull, 'labels', 'a pull request'), 'the labels of a pull request');
+    if (labels.some((label) => text(label, 'name', 'a label') === IS_THE_RELEASE_ITSELF)) {
       continue;
     }
-    const files = await gh<{ filename: string }[]>(`repos/${repository}/pulls/${number}/files?per_page=100`);
+    const files = list(
+      await gh(`repos/${repository}/pulls/${number}/files?per_page=100`),
+      'the files of a pull request',
+    );
     entries.push({
       number,
-      title: pull.title,
-      author: pull.user.login,
-      ships: shipsToUsers(files.map((file) => file.filename)),
+      title: text(pull, 'title', 'a pull request'),
+      author: text(field(pull, 'user', 'a pull request'), 'login', 'the author of a pull request'),
+      ships: shipsToUsers(files.map((file) => text(file, 'filename', 'a changed file'))),
     });
   }
 

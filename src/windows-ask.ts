@@ -1,4 +1,3 @@
-import type { Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import process from 'node:process';
 import { type ChildProcessWithoutNullStreams, spawnHidden } from './spawn.js';
@@ -79,10 +78,16 @@ let out: Asked | null = null;
 const queued: Question[] = [];
 
 /**
- * A pipe as Node hands it over, where it can be let go of. Bun's pipes have no such calls, and
- * asked for them regardless every question threw before it was asked.
+ * Holds this process open on [param pipe], or lets go of it, where the pipe has the call: Node hands
+ * a pipe over as a socket that does. Bun's pipes have no such calls, and asked for them regardless
+ * every question threw before it was asked.
  */
-type Releasable = Partial<Pick<Socket, 'ref' | 'unref'>>;
+function holdOn(pipe: object, wanted: boolean): void {
+  const call: unknown = Reflect.get(pipe, wanted ? 'ref' : 'unref');
+  if (typeof call === 'function') {
+    Reflect.apply(call, pipe, []);
+  }
+}
 
 /** Whether the helper's output is holding this process open, so each change is made once. */
 let held = false;
@@ -97,12 +102,7 @@ function holding(child: ChildProcessWithoutNullStreams, wanted: boolean): void {
     return;
   }
   held = wanted;
-  const stdout = child.stdout as Releasable;
-  if (wanted) {
-    stdout.ref?.();
-  } else {
-    stdout.unref?.();
-  }
+  holdOn(child.stdout, wanted);
 }
 
 function running(): ChildProcessWithoutNullStreams {
@@ -153,8 +153,8 @@ function running(): ChildProcessWithoutNullStreams {
   child.once('exit', gone);
   child.once('error', gone);
   child.unref();
-  (child.stdin as Releasable).unref?.();
-  (child.stderr as Releasable).unref?.();
+  holdOn(child.stdin, false);
+  holdOn(child.stderr, false);
   // A new pipe holds the process until it is let go of.
   held = true;
   holding(child, false);

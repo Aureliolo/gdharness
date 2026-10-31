@@ -203,7 +203,7 @@ export async function processorSecondsOf(pids: readonly number[]): Promise<Map<n
         run('ps', ['-o', 'pid=,time=', '-p', some.join(',')], { timeout: ASK_TIMEOUT_MS }).then(
           (done) => done.stdout,
           (error: unknown) => {
-            const printed = (error as { stdout?: unknown }).stdout;
+            const printed = error instanceof Error && 'stdout' in error ? error.stdout : undefined;
             return typeof printed === 'string' ? printed : '';
           },
         );

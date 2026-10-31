@@ -107,7 +107,7 @@ export function sweepAbandonedScratch(directory = tmpdir()): void {
  * handle, which is the one part of this with no portable spelling.
  */
 export function discardWith(
-  remove: (path: string) => void,
+  removePath: (path: string) => void,
   paths: readonly (string | null | undefined)[],
 ): Surviving[] {
   const left: Surviving[] = [];
@@ -116,7 +116,7 @@ export function discardWith(
       continue;
     }
     try {
-      remove(path);
+      removePath(path);
     } catch (error) {
       left.push({ path, reason: error instanceof Error ? error.message : String(error) });
     }

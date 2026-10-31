@@ -26,7 +26,7 @@ assert.equal(
 );
 assert.equal(await Bun.file(checksumPath).exists(), true, `${archiveName}.sha256 should exist`);
 assert.deepEqual(
-  (await readdir(path.join(root, 'dist'))).sort(),
+  (await readdir(path.join(root, 'dist'))).toSorted(),
   [archiveName, `${archiveName}.sha256`],
   'release packing should remove stale version artifacts',
 );
@@ -150,10 +150,10 @@ for (const script of addonScripts) {
 const packedOperations = archiveEntries
   .filter((entry) => entry.startsWith('package/build/godot/operations/') && entry.endsWith('.gd'))
   .map((entry) => entry.slice('package/build/godot/operations/'.length))
-  .sort();
+  .toSorted();
 assert.deepEqual(
   packedOperations,
-  [...operationsModules].sort(),
+  operationsModules.toSorted(),
   'the packed operations directory should be exactly the modules listed here',
 );
 

@@ -164,9 +164,8 @@ function completeResourcePath(
   typed: string,
   getProjectPath: () => string | null,
 ): { values: string[]; total: number; hasMore: boolean } {
-  const kind = /^godot:\/\/(scene|script|resource)\/\{path\}$/.exec(uriTemplate)?.[1] as
-    | keyof typeof EXTENSIONS
-    | undefined;
+  const named = /^godot:\/\/(scene|script|resource)\/\{path\}$/.exec(uriTemplate)?.[1];
+  const kind = (['scene', 'script', 'resource'] as const).find((one) => one === named);
   const projectPath = getProjectPath();
   if (kind === undefined || projectPath === null) {
     return { values: [], total: 0, hasMore: false };

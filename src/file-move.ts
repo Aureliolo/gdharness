@@ -296,7 +296,9 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
   const scriptsInOrder = rewrites
     .map((rewrite) => rewrite.path)
     .filter((path) => path.endsWith('.gd'))
-    .sort((a, b) => graph.ancestors(`${a}#`).length - graph.ancestors(`${b}#`).length || a.localeCompare(b))
+    .toSorted(
+      (a, b) => graph.ancestors(`${a}#`).length - graph.ancestors(`${b}#`).length || a.localeCompare(b),
+    )
     .map(afterwards);
   const scenesChanged = rewrites
     .map((rewrite) => rewrite.path)
@@ -319,7 +321,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
         from,
         to,
         ...(isDirectory
-          ? { files: moves.size, paths: [...moves.keys()].map(afterwards).sort() }
+          ? { files: moves.size, paths: [...moves.keys()].map(afterwards).toSorted() }
           : { alongside: [...moves.keys()].filter((path) => path !== from).map(afterwards) }),
       },
       changed,

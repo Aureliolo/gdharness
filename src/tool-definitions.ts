@@ -146,7 +146,7 @@ export function callsWithoutProjectPath(): string[] {
       }
     }
   }
-  return calls.sort();
+  return calls.toSorted();
 }
 
 /**

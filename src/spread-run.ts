@@ -35,6 +35,7 @@ import {
 } from './engine-launch.js';
 import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
 import { readLog } from './log-read.js';
+import { isRecord } from './records.js';
 import { SHARE_SCRIPT } from './setup.js';
 import { type EngineEnd, exitNamed, readRun, versionFault } from './suite-judge.js';
 
@@ -155,11 +156,17 @@ export function armsPlayed(text: string): ArmPlayed[] | null {
     }
     try {
       const parsed: unknown = JSON.parse(line);
-      const { arm, runs, played } = (parsed ?? {}) as { arm?: unknown; runs?: unknown; played?: unknown };
-      if (typeof arm !== 'string' || !Number.isInteger(runs) || !Number.isInteger(played)) {
+      const { arm, runs, played }: Record<string, unknown> = isRecord(parsed) ? parsed : {};
+      if (
+        typeof arm !== 'string' ||
+        typeof runs !== 'number' ||
+        !Number.isInteger(runs) ||
+        typeof played !== 'number' ||
+        !Number.isInteger(played)
+      ) {
         return null;
       }
-      arms.push({ arm, runs: runs as number, played: played as number });
+      arms.push({ arm, runs, played });
     } catch {
       return null;
     }
@@ -278,7 +285,7 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
       console.log(`${options.scene} over ${plural(workers, 'worker')}.`);
     }
     const engine = (name: string, share: string): Promise<EngineLeft> =>
-      played(launch, slots, options, runDirectory, name, [
+      enginePlayed(launch, slots, options, runDirectory, name, [
         ...options.benchArguments,
         share,
         `${INTO}${shareDirectory}`,
@@ -352,7 +359,7 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
 }
 
 /** One engine of the run, the scene with [param benchArguments], in a slot of its own. */
-async function played(
+async function enginePlayed(
   launch: EngineLaunch,
   slots: EngineSlots,
   options: SpreadOptions,

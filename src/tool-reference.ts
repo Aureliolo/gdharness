@@ -6,6 +6,7 @@
  */
 
 import { ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
+import { isRecord } from './records.js';
 import {
   argumentsOf,
   effectsOf,
@@ -34,10 +35,7 @@ export function namedType(declared: unknown): string {
 export function argumentShape(schema: Readonly<Record<string, unknown>>): string {
   const named = namedType(schema['type']);
   const items = schema['items'];
-  const held =
-    typeof items === 'object' && items !== null && !Array.isArray(items)
-      ? namedType((items as Record<string, unknown>)['type'])
-      : 'any';
+  const held = isRecord(items) ? namedType(items['type']) : 'any';
   return named
     .split(' or ')
     .map((kind) => (kind === 'array' && held !== 'any' ? `array of ${held}s` : kind))
@@ -62,7 +60,7 @@ function headlessSection(): string[] {
       everyOp.set(tool, [...(everyOp.get(tool) ?? []), ...Object.keys(ops)]);
     }
   }
-  const byTool = [...everyOp].map(([tool, ops]) => `\`${tool}\` (${ops.join(', ')})`).sort();
+  const byTool = [...everyOp].map(([tool, ops]) => `\`${tool}\` (${ops.join(', ')})`).toSorted();
   return [
     '## What a gate can call',
     '',

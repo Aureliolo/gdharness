@@ -442,10 +442,10 @@ class PlanBuilder {
   }
 
   build(): Plan {
-    const edits = [...this.edits.values()].sort(
+    const edits = [...this.edits.values()].toSorted(
       (a, b) => a.file.localeCompare(b.file) || a.offset - b.offset,
     );
-    const mentions = [...this.mentions].sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+    const mentions = [...this.mentions].toSorted((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
     return { edits, mentions };
   }
 }
@@ -1019,8 +1019,8 @@ export function planMove(args: MoveArguments, plan: Plan): Plan {
     }
   }
   return {
-    edits: edits.sort((a, b) => a.file.localeCompare(b.file) || a.offset - b.offset),
-    mentions: mentions.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line),
+    edits: edits.toSorted((a, b) => a.file.localeCompare(b.file) || a.offset - b.offset),
+    mentions: mentions.toSorted((a, b) => a.file.localeCompare(b.file) || a.line - b.line),
   };
 }
 
@@ -1065,7 +1065,7 @@ export function mentionIgnored(
   }
   return {
     edits: plan.edits,
-    mentions: mentions.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line),
+    mentions: mentions.toSorted((a, b) => a.file.localeCompare(b.file) || a.line - b.line),
   };
 }
 
@@ -1101,7 +1101,7 @@ export function rewritesOf(
     }
     let after = file.text;
     let lastStart = Number.POSITIVE_INFINITY;
-    for (const edit of [...edits].sort((a, b) => b.offset - a.offset)) {
+    for (const edit of [...edits].toSorted((a, b) => b.offset - a.offset)) {
       if (edit.offset + edit.length > lastStart) {
         throw new Error(`two edits overlap in ${path} at offset ${edit.offset}`);
       }
@@ -1116,7 +1116,7 @@ export function rewritesOf(
       writeTo: move?.from === path ? move.absoluteTo : file.absolute,
     });
   }
-  return rewrites.sort((a, b) => a.path.localeCompare(b.path));
+  return rewrites.toSorted((a, b) => a.path.localeCompare(b.path));
 }
 
 /**

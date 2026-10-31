@@ -80,7 +80,7 @@ export function heldAtExit(lines: Iterable<string>): string | undefined {
   if (objects.size === 0 && inUse.length === 0) {
     return undefined;
   }
-  const counted = [...objects].sort(([a, many], [b, more]) => more - many || a.localeCompare(b));
+  const counted = [...objects].toSorted(([a, many], [b, more]) => more - many || a.localeCompare(b));
   const objectsSaid = counted.map(([name, many]) => `${String(many)} ${name}`);
   const ownFirst = [
     ...inUse.filter((path) => !path.startsWith('res://addons/')),
@@ -136,7 +136,7 @@ export function selfTypedExports(sources: Iterable<readonly [string, string]>): 
       }
     }
   }
-  return found.sort((a, b) => (a.script < b.script ? -1 : a.script > b.script ? 1 : 0));
+  return found.toSorted((a, b) => (a.script < b.script ? -1 : a.script > b.script ? 1 : 0));
 }
 
 /** [method selfTypedExports] for the scripts of the project at [param projectPath]. */

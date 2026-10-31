@@ -170,7 +170,13 @@ import {
   withoutTrailingSeparator,
 } from '../src/godot-bridge.js';
 import { GodotLocator, type Located, VERSION_STARTS, versionStartOf } from '../src/godot-path.js';
-import { DebuggerStream, decodeVariant, framedCommand, type SentValue } from '../src/godot-variant.js';
+import {
+  DebuggerStream,
+  decodeVariant,
+  framedCommand,
+  type GodotValue,
+  type SentValue,
+} from '../src/godot-variant.js';
 import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/harnesses.js';
 import {
   type ImportOutcome,
@@ -443,6 +449,7 @@ import {
   lanesOf,
   NOT_SEARCHED_SETTING,
   ProjectScripts,
+  readTimes,
   Shares,
   SPLIT_PAST_SECONDS,
   type SuiteTimes,
@@ -484,6 +491,7 @@ import { greeting } from './support/greeting.js';
 import { HIDDEN_SPAWN_PRELUDE } from './support/hidden-spawn.js';
 import { asArray, asNumber, asObject, asString, get, text } from './support/json.js';
 import {
+  contentOf,
   isFeedbackBlock,
   isRecord,
   type JsonRpcMessage,
@@ -513,19 +521,19 @@ import {
 async function withOccupiedBridgePort<T>(run: (port: number) => Promise<T>): Promise<T> {
   const port = await reservePort();
   const blocker = createServer();
-  await new Promise<void>((resolve, reject) => {
+  await new Promise<void>((settle, reject) => {
     blocker.once('error', reject);
     blocker.listen(port, '127.0.0.1', () => {
-      resolve();
+      settle();
     });
   });
   try {
     return await run(port);
   } finally {
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       blocker.close((err) => {
         if (err) reject(err);
-        else resolve();
+        else settle();
       });
     });
   }
@@ -565,7 +573,10 @@ class FakeSocket extends EventEmitter {
 }
 
 function connectFake(bridge: ReturnType<typeof createBridge>, socket: FakeSocket): void {
-  (bridge as unknown as { handleConnection: (socket: FakeSocket) => void }).handleConnection(socket);
+  // Private to the bridge and typed for a real WebSocket, so reached by name and checked to be there.
+  const handleConnection: unknown = Reflect.get(bridge, 'handleConnection');
+  assert.ok(typeof handleConnection === 'function', 'the bridge takes a connection through handleConnection');
+  Reflect.apply(handleConnection, bridge, [socket]);
 }
 
 /** The hello an editor sends once connected, which is where it says whose editor it is. */
@@ -591,6 +602,58 @@ function windowedRunRefused(): string | null {
 function resolveGodotPath(): string | null {
   const candidate = process.env['GODOT_PATH'];
   return candidate && existsSync(candidate) ? candidate : null;
+}
+
+/**
+ * The suite times a run wrote to [param file]. readTimes reads past a missing file and a malformed
+ * entry, as a run must, and a case checking what the writer wrote must not.
+ */
+function timesWritten(file: string): SuiteTimes {
+  const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+  assert.ok(isRecord(parsed), `${file} holds an object: ${JSON.stringify(parsed)}`);
+  const times = readTimes(file);
+  assert.deepEqual(Object.keys(times), Object.keys(parsed), `every entry in ${file} is a suite time`);
+  return times;
+}
+
+/** Whether [param value] has the fields of a run result the cases read, each of its kind. */
+function isRunResult(value: unknown): value is RunResult {
+  return (
+    isRecord(value) &&
+    typeof value['passed'] === 'boolean' &&
+    typeof value['seconds'] === 'number' &&
+    Array.isArray(value['problems']) &&
+    Array.isArray(value['suites']) &&
+    value['suites'].every((suite) => typeof get(suite, 'path') === 'string') &&
+    Array.isArray(value['engines']) &&
+    value['engines'].every(isRecord)
+  );
+}
+
+/** The run result a test command wrote to [param file], or an assertion failure naming it. */
+function readRunResult(file: string): RunResult {
+  const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+  assert.ok(isRunResult(parsed), `${file} holds no run result: ${JSON.stringify(parsed)}`);
+  return parsed;
+}
+
+/** Whether [param value] has the fields of a project_search answer the cases read. */
+function isSearchResult(value: unknown): value is SearchResult {
+  return (
+    isRecord(value) &&
+    Array.isArray(value['results']) &&
+    value['results'].every(
+      (entry) => typeof get(entry, 'file') === 'string' && Array.isArray(get(entry, 'matches')),
+    ) &&
+    isRecord(value['summary'])
+  );
+}
+
+/** A project_search answer from its JSON, or an assertion failure quoting it. */
+function searchAnswer(said: string): SearchResult {
+  const parsed: unknown = JSON.parse(said);
+  assert.ok(isSearchResult(parsed), `project_search answered no search result: ${said}`);
+  return parsed;
 }
 
 function testStaleDisconnectRegression(): void {
@@ -1113,7 +1176,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   const u32 = (value: number): void => {
     bytes.push(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
   };
-  const text = (value: string, nul = false): void => {
+  const putString = (value: string, nul = false): void => {
     const encoded = [...new TextEncoder().encode(value), ...(nul ? [0] : [])];
     u32(encoded.length);
     bytes.push(...encoded, ...Array.from({ length: (4 - (encoded.length % 4)) % 4 }, () => 0));
@@ -1121,7 +1184,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   u32(28);
   u32(6);
   u32(21);
-  text('res://a.gd::3::f');
+  putString('res://a.gd::3::f');
   u32(2 | (1 << 16));
   const wide = new DataView(new ArrayBuffer(8));
   wide.setBigInt64(0, 2n ** 40n, true);
@@ -1132,8 +1195,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   bytes.push(...new Uint8Array(narrow.buffer));
   u32(34);
   u32(2);
-  text('x', true);
-  text('yz', true);
+  putString('x', true);
+  putString('yz', true);
   u32(27);
   u32(1);
   u32(2);
@@ -1198,12 +1261,12 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
 
   // Frames summed per function past the servers' section, and the engine's totals replacing them.
   const aggregate = new ProfileAggregate(1000, 3);
-  const take = (message: string, data: unknown[]): void => {
-    aggregate.take({ message, thread: 1, data: data as never }, 2000);
+  const take = (message: string, data: GodotValue[]): void => {
+    aggregate.take({ message, thread: 1, data }, 2000);
   };
   take('servers:function_signature', ['res://w.gd::6::Work.square', 0]);
   take('servers:function_signature', ['res://w.gd::10::Work.busy', 1]);
-  const frame = (calls: number, numbered = 7): unknown[] => [
+  const frame = (calls: number, numbered = 7): GodotValue[] => [
     numbered,
     0.016,
     0.01,
@@ -1261,15 +1324,15 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   // A frame carrying as many as were asked for is counted, since the engine left out the rest; and a
   // function whose naming message never came is kept under its number.
   const tight = new ProfileAggregate(1000, 2);
-  const into = (message: string, data: unknown[]): void => {
-    tight.take({ message, thread: 1, data: data as never }, 2000);
+  const into = (message: string, data: GodotValue[]): void => {
+    tight.take({ message, thread: 1, data }, 2000);
   };
   into('servers:function_signature', ['res://w.gd::6::Work.square', 0]);
   into('servers:profile_frame', frame(1));
   into('servers:profile_frame', [...frame(1).slice(0, 13), 5, 0, 1, 0.002, 0.002, 0]);
   const tightFrames = tight.snapshot();
   assert.deepEqual(
-    [tightFrames.cappedFrames, tightFrames.frameFunctions, Object.keys(tightFrames.functions).sort()],
+    [tightFrames.cappedFrames, tightFrames.frameFunctions, Object.keys(tightFrames.functions).toSorted()],
     [1, 2, ['#1', 'res://w.gd::6::Work.square']],
     'one of the two frames at the cap, and the function never named kept as #1',
   );
@@ -1279,7 +1342,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   // What the game's debugger queue dropped, as the engine reports it once the queue has room: an
   // error message whose fields are the engine's OutputError, the count in its description. Another
   // error the game reported is not a drop.
-  const overflow = (count: number): unknown[] => [
+  const overflow = (count: number): GodotValue[] => [
     0,
     0,
     1,
@@ -1294,12 +1357,12 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   ];
   const lossy = new ProfileAggregate(1000, 2);
   assert.equal(lossy.snapshot().dropped, undefined, 'nothing dropped is left out');
-  lossy.take({ message: 'error', thread: 1, data: overflow(12) as never }, 2000);
+  lossy.take({ message: 'error', thread: 1, data: overflow(12) }, 2000);
   lossy.take(
-    { message: 'error', thread: 1, data: [0, 0, 1, 20, 'res://w.gd', 'f', 3, 'oops', '', false, 0] as never },
+    { message: 'error', thread: 1, data: [0, 0, 1, 20, 'res://w.gd', 'f', 3, 'oops', '', false, 0] },
     2000,
   );
-  lossy.take({ message: 'error', thread: 1, data: overflow(3) as never }, 2000);
+  lossy.take({ message: 'error', thread: 1, data: overflow(3) }, 2000);
   assert.equal(lossy.snapshot().dropped, 15, JSON.stringify(lossy.snapshot()));
 
   assert.deepEqual(signatureParts('res://w.gd::10::Work.busy'), {
@@ -1650,11 +1713,11 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     ['Crewing._ranked_by'],
     "and Class.name picks out the one class's",
   );
-  const crowded = [
+  const manyCalls = [
     'func many() -> void:',
     ...Array.from({ length: 41 }, () => '\t_ranked_by([], _strength)'),
   ].join('\n');
-  const capped = callersOf(crew, '_ranked_by', [['res://many.gd', crowded]]);
+  const capped = callersOf(crew, '_ranked_by', [['res://many.gd', manyCalls]]);
   assert.deepEqual(
     [capped.sites.length, capped.omitted, capped.sites.at(-1)?.line],
     [40, 1, 41],
@@ -1781,13 +1844,20 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     ['res://hall.gd', hall],
   ];
   for (const asked of ['GameClock.@speed_getter', 'GameClock.speed', '@speed_setter', 'speed']) {
-    const found = callersOf(clocked, asked, scriptsOfTheClock);
+    const ofTheClock = callersOf(clocked, asked, scriptsOfTheClock);
     assert.deepEqual(
       [
-        found.property,
+        ofTheClock.property,
         // The rows as the table has them, the profiler's share included: #1019 had it dropped here.
-        found.target.map((one) => [one.function, one.overheadMs]),
-        found.sites.map((one) => [one.script, one.line, one.within, one.access, one.called, one.withinCalls]),
+        ofTheClock.target.map((one) => [one.function, one.overheadMs]),
+        ofTheClock.sites.map((one) => [
+          one.script,
+          one.line,
+          one.within,
+          one.access,
+          one.called,
+          one.withinCalls,
+        ]),
       ],
       [
         true,
@@ -2306,9 +2376,13 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     '\tsuper()',
     '',
   ].join('\n');
-  const threaded = (coveredMs: number, sourceOf?: SourceOf): string =>
+  const threaded = (coveredMs: number, readSource?: SourceOf): string =>
     String(
-      answer({ totals: calibrated, coveredMs, ...(sourceOf === undefined ? {} : { sourceOf }) })['note'],
+      answer({
+        totals: calibrated,
+        coveredMs,
+        ...(readSource === undefined ? {} : { sourceOf: readSource }),
+      })['note'],
     );
   assert.match(
     threaded(100),
@@ -2329,12 +2403,12 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     mkdirSync(inside);
     writeFileSync(join(inside, 'crewing.gd'), crewing);
     writeFileSync(join(holder, 'outside.gd'), 'func outside() -> void:\n\tpass\n');
-    const read = projectSourceOf(inside);
+    const readInside = projectSourceOf(inside);
     assert.deepEqual(
       [
-        read('res://crewing.gd') === crewing,
-        read('res://../outside.gd'),
-        read('res://crewing.tscn::GDScript_x'),
+        readInside('res://crewing.gd') === crewing,
+        readInside('res://../outside.gd'),
+        readInside('res://crewing.tscn::GDScript_x'),
       ],
       [true, null, null],
       'the project script read, the one outside it and the built-in one not',
@@ -2723,8 +2797,10 @@ async function withFakeLanguageServer<T>(
         const start = headerEnd + 4;
         if (buffer.length < start + length) return;
 
-        const message = JSON.parse(buffer.slice(start, start + length)) as JsonRpcMessage;
+        const parsed: unknown = JSON.parse(buffer.slice(start, start + length));
         buffer = buffer.slice(start + length);
+        if (!isRecord(parsed)) continue;
+        const message: JsonRpcMessage = parsed;
         seen?.push(message);
 
         if (message.method === 'initialize') {
@@ -3001,14 +3077,15 @@ async function testEveryTwoHundredAndFiftiethAnswerAsksForWhatIsMissing(): Promi
       counts.push(Array.isArray(content) ? content.length : 0);
     }
     assert.deepEqual([...new Set(counts.slice(0, 249))], [1], 'the first 249 answers are one block each');
-    const blocks = asArray(get(last, 'result', 'content'));
+    const blocks = contentOf(last) ?? [];
     assert.equal(blocks.length, 2, `the 250th has the ask after it: ${JSON.stringify(blocks)}`);
-    assert.ok(isFeedbackBlock(blocks[1] as { type: string; text?: string }), JSON.stringify(blocks[1]));
+    const [answerBlock, askBlock] = blocks;
+    assert.ok(askBlock !== undefined && isFeedbackBlock(askBlock), JSON.stringify(askBlock));
     assert.ok(
-      !isFeedbackBlock(blocks[0] as { type: string; text?: string }),
+      answerBlock !== undefined && !isFeedbackBlock(answerBlock),
       'and the answer is not taken for it',
     );
-    assert.equal(textOf(last), get(blocks[0], 'text'), 'the suites read the answer without the ask');
+    assert.equal(textOf(last), answerBlock.text, 'the suites read the answer without the ask');
     // With no engine every answer is the same refusal, which is answer enough to count.
     assert.match(
       textOf(last) ?? '',
@@ -5041,7 +5118,7 @@ function testProjectGodotResistsPrototypeKeys(): void {
     'a [__proto__] section must not put a property on every object in the process',
   );
   assert.equal(
-    (Object as unknown as Record<string, unknown>)['polluted'],
+    Reflect.get(Object, 'polluted'),
     undefined,
     'a [constructor] section must not write onto the Object constructor',
   );
@@ -5216,9 +5293,9 @@ async function testEditorStatusPortConflict(): Promise<void> {
 async function testTheBridgeTakesThePortWhenItIsFreed(): Promise<void> {
   const port = await reservePort();
   const blocker = createServer();
-  await new Promise<void>((resolve, reject) => {
+  await new Promise<void>((settle, reject) => {
     blocker.once('error', reject);
-    blocker.listen(port, '127.0.0.1', resolve);
+    blocker.listen(port, '127.0.0.1', settle);
   });
   let holding = true;
   const letGo = async (): Promise<void> => {
@@ -5226,13 +5303,13 @@ async function testTheBridgeTakesThePortWhenItIsFreed(): Promise<void> {
       return;
     }
     holding = false;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       blocker.close((error) => {
         if (error) {
           reject(error);
           return;
         }
-        resolve();
+        settle();
       });
     });
   };
@@ -5363,8 +5440,8 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-moved-bridge-'));
   const wanted = await reservePort();
   const holder = createServer();
-  await new Promise<void>((resolve) => {
-    holder.listen(wanted, '127.0.0.1', resolve);
+  await new Promise<void>((settle) => {
+    holder.listen(wanted, '127.0.0.1', settle);
   });
   // Each server is spawned after the announcement it is meant to meet, and only once the one before
   // it has answered: a server reads the announcement as its process starts and claims the project
@@ -5467,9 +5544,9 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
     for (const started of servers) {
       await started.stop();
     }
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((settle) => {
       holder.close(() => {
-        resolve();
+        settle();
       });
     });
     sweep(project);
@@ -5729,16 +5806,16 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
           )
         : null;
     if (one.was === null && holder !== null && holder.exitCode === null) {
-      await new Promise((resolve) => holder.once('exit', resolve));
+      await new Promise((settle) => holder.once('exit', settle));
     }
     let quitAsked = false;
     const sockets: WebSocket[] = [];
     const connect = async (): Promise<WebSocket> => {
       const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
       sockets.push(socket);
-      await new Promise<void>((resolve, reject) => {
+      await new Promise<void>((settle, reject) => {
         socket.once('open', () => {
-          resolve();
+          settle();
         });
         socket.once('error', reject);
       });
@@ -5758,13 +5835,13 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
       } else {
         const first = await connect();
         first.on('message', (data: Buffer) => {
-          const message = JSON.parse(data.toString('utf8')) as { type?: string; tool?: string; id?: string };
-          if (message.type === 'tool_invoke' && message.tool === 'quit_editor') {
+          const message: unknown = JSON.parse(data.toString('utf8'));
+          if (get(message, 'type') === 'tool_invoke' && get(message, 'tool') === 'quit_editor') {
             quitAsked = true;
             first.send(
               JSON.stringify({
                 type: 'tool_result',
-                id: message.id,
+                id: get(message, 'id'),
                 success: true,
                 result: { ok: true, quitting: true, saved: ['res://world.tscn'] },
               }),
@@ -6003,9 +6080,9 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
     });
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -6158,15 +6235,15 @@ async function testATurnedAwayEditorLeavesTheServerUp(): Promise<void> {
     await server.initialize('regression-test');
     const opened = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     socket = opened;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       opened.once('open', () => {
-        resolve();
+        settle();
       });
       opened.once('error', reject);
     });
-    const closed = new Promise<{ code: number; reason: string }>((resolve) => {
+    const closed = new Promise<{ code: number; reason: string }>((settle) => {
       opened.once('close', (code: number, reason: Buffer) => {
-        resolve({ code, reason: String(reason) });
+        settle({ code, reason: String(reason) });
       });
     });
     opened.send(JSON.stringify(greeting(join(tmpdir(), `gdharness-turned-away-${'theirs'.repeat(15)}`))));
@@ -6221,8 +6298,8 @@ async function testATestServerTakesNoRealEditorsPort(): Promise<void> {
 async function testABridgeOnNoPortSaysSo(): Promise<void> {
   const port = await reservePort();
   const holder = createServer();
-  await new Promise<void>((resolve) => {
-    holder.listen(port, '127.0.0.1', resolve);
+  await new Promise<void>((settle) => {
+    holder.listen(port, '127.0.0.1', settle);
   });
   const project = mkdtempSync(join(tmpdir(), 'gdharness-no-port-'));
   const bridge = new GodotBridge(port, '127.0.0.1', 1000, project);
@@ -6238,9 +6315,9 @@ async function testABridgeOnNoPortSaysSo(): Promise<void> {
     assert.equal(bridge.getStatus().port, null, 'and once it has stopped');
   } finally {
     await bridge.stop();
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((settle) => {
       holder.close(() => {
-        resolve();
+        settle();
       });
     });
     sweep(project);
@@ -6258,8 +6335,8 @@ async function testAPredecessorThatKeepsThePortIsNotWaitedOnForEver(): Promise<v
   const project = mkdtempSync(join(tmpdir(), 'gdharness-held-over-'));
   const port = await reservePort();
   const holder = createServer();
-  await new Promise<void>((resolve) => {
-    holder.listen(port, '127.0.0.1', resolve);
+  await new Promise<void>((settle) => {
+    holder.listen(port, '127.0.0.1', settle);
   });
   mkdirSync(dirname(announcementPath(project)), { recursive: true });
   writeFileSync(
@@ -6307,9 +6384,9 @@ async function testAPredecessorThatKeepsThePortIsNotWaitedOnForEver(): Promise<v
     assert.equal(readAnnouncement(announcementPath(project))?.port, took, 'and announces where it went');
   } finally {
     await server.stop();
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((settle) => {
       holder.close(() => {
-        resolve();
+        settle();
       });
     });
     sweep(project);
@@ -6380,18 +6457,19 @@ async function testAnEditorAServerOpenedIsStartedAgain(): Promise<void> {
       await server.initialize('regression-test');
       const opening = new WebSocket(`ws://127.0.0.1:${port}/godot`);
       editor = opening;
-      await new Promise<void>((resolve, reject) => {
+      await new Promise<void>((settle, reject) => {
         opening.once('open', () => {
-          resolve();
+          settle();
         });
         opening.once('error', reject);
       });
 
       const asked: string[] = [];
       opening.on('message', (data: Buffer) => {
-        const message = JSON.parse(data.toString('utf8')) as { type?: string; tool?: string };
-        if (message.type === 'tool_invoke' && typeof message.tool === 'string') {
-          asked.push(message.tool);
+        const message: unknown = JSON.parse(data.toString('utf8'));
+        const tool = get(message, 'tool');
+        if (get(message, 'type') === 'tool_invoke' && typeof tool === 'string') {
+          asked.push(tool);
         }
       });
       opening.send(JSON.stringify(greeting(process.cwd(), { opened_by_a_server: opened })));
@@ -6494,20 +6572,25 @@ async function testACallWaitsForAnArrivingEditor(): Promise<void> {
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
     // Held in an object, since the asking side sets it from inside a handler.
     const times: { asked: number | null } = { asked: null };
     socket.on('message', (data: Buffer) => {
-      const message = JSON.parse(data.toString('utf8')) as { type?: string; tool?: string; id?: string };
-      if (message.type === 'tool_invoke' && message.tool === 'list_scene_nodes') {
+      const message: unknown = JSON.parse(data.toString('utf8'));
+      if (get(message, 'type') === 'tool_invoke' && get(message, 'tool') === 'list_scene_nodes') {
         times.asked = Date.now();
         socket.send(
-          JSON.stringify({ type: 'tool_result', id: message.id, success: true, result: { nodes: ['Main'] } }),
+          JSON.stringify({
+            type: 'tool_result',
+            id: get(message, 'id'),
+            success: true,
+            result: { nodes: ['Main'] },
+          }),
         );
       }
     });
@@ -6578,27 +6661,22 @@ async function testAnEditorRefusingAnUncachedClassSaysWhy(): Promise<void> {
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
     const asked: string[] = [];
     socket.on('message', (data: Buffer) => {
-      const message = JSON.parse(data.toString('utf8')) as {
-        type?: string;
-        tool?: string;
-        id?: string;
-        args?: Record<string, unknown>;
-      };
-      if (message.type === 'tool_invoke' && message.tool === 'create_resource') {
-        const type = String(message.args?.['resourceType']);
+      const message: unknown = JSON.parse(data.toString('utf8'));
+      if (get(message, 'type') === 'tool_invoke' && get(message, 'tool') === 'create_resource') {
+        const type = text(get(message, 'args', 'resourceType'));
         asked.push(type);
         socket.send(
           JSON.stringify({
             type: 'tool_result',
-            id: message.id,
+            id: get(message, 'id'),
             success: false,
             error: `${type} is neither an engine class nor a class_name in the project's class list.`,
           }),
@@ -6676,26 +6754,25 @@ async function testEditorStatusCountsOnlyOtherCallsInFlight(): Promise<void> {
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
     const held: { id: string | null } = { id: null };
     socket.on('message', (data: Buffer) => {
-      const message = JSON.parse(data.toString('utf8')) as { type?: string; tool?: string; id?: string };
-      if (message.type !== 'tool_invoke' || message.id === undefined) {
+      const message: unknown = JSON.parse(data.toString('utf8'));
+      const id = get(message, 'id');
+      if (get(message, 'type') !== 'tool_invoke' || typeof id !== 'string') {
         return;
       }
-      if (message.tool === 'list_scene_nodes') {
-        held.id = message.id;
+      if (get(message, 'tool') === 'list_scene_nodes') {
+        held.id = id;
         return;
       }
       setTimeout(() => {
-        socket.send(
-          JSON.stringify({ type: 'tool_result', id: message.id, success: true, result: { ok: true } }),
-        );
+        socket.send(JSON.stringify({ type: 'tool_result', id, success: true, result: { ok: true } }));
       }, 1500);
     });
     socket.send(JSON.stringify(greeting(project)));
@@ -6789,10 +6866,10 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
   // The language server's port accepts and the debug adapter's does not, so each reading is one
   // that was taken rather than one left at a default.
   const languageServer = createServer();
-  const lspPort = await new Promise<number>((resolve) => {
+  const lspPort = await new Promise<number>((settle) => {
     languageServer.listen(0, '127.0.0.1', () => {
       const address = languageServer.address();
-      resolve(typeof address === 'object' && address !== null ? address.port : 0);
+      settle(typeof address === 'object' && address !== null ? address.port : 0);
     });
   });
   const dapPort = await reservePort();
@@ -6802,9 +6879,9 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
     await server.initialize('regression-test');
     for (; attempts < 20 && met === 0; attempts += 1) {
       const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
-      await new Promise<void>((resolve, reject) => {
+      await new Promise<void>((settle, reject) => {
         socket.once('open', () => {
-          resolve();
+          settle();
         });
         socket.once('error', reject);
       });
@@ -6889,17 +6966,18 @@ async function testAnEditorIsReadOnceItHasSaidWhoItIs(): Promise<void> {
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
     const asked: string[] = [];
     socket.on('message', (data: Buffer) => {
-      const message = JSON.parse(data.toString('utf8')) as { type?: string; tool?: string };
-      if (message.type === 'tool_invoke' && typeof message.tool === 'string') {
-        asked.push(message.tool);
+      const message: unknown = JSON.parse(data.toString('utf8'));
+      const tool = get(message, 'tool');
+      if (get(message, 'type') === 'tool_invoke' && typeof tool === 'string') {
+        asked.push(tool);
       }
     });
     const call = async (name: string, args: Record<string, unknown>, ms = 20_000): Promise<string> =>
@@ -6978,17 +7056,18 @@ async function testAnEditorIsReadOnceItHasSaidWhoItIs(): Promise<void> {
     await silentServer.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${silentPort}/godot`);
     silent = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
     const asked: string[] = [];
     socket.on('message', (data: Buffer) => {
-      const message = JSON.parse(data.toString('utf8')) as { type?: string; tool?: string };
-      if (message.type === 'tool_invoke' && typeof message.tool === 'string') {
-        asked.push(message.tool);
+      const message: unknown = JSON.parse(data.toString('utf8'));
+      const tool = get(message, 'tool');
+      if (get(message, 'type') === 'tool_invoke' && typeof tool === 'string') {
+        asked.push(tool);
       }
     });
     let arriving = false;
@@ -7053,9 +7132,9 @@ async function testARestartWaitsForTheOldEditorToGo(): Promise<void> {
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -7233,9 +7312,9 @@ async function anAddonLackingAnOp(
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -7401,13 +7480,15 @@ function testCompletionsAreNarrowedToWhatWasTyped(): void {
     total: 2,
   });
   assert.deepEqual(
-    (narrowedCompletions(offered, 'POW')['completions'] as { label: string }[]).map((one) => one.label),
+    asArray(narrowedCompletions(offered, 'POW')['completions'], 'completions').map((one) =>
+      get(one, 'label'),
+    ),
     ['pow', 'power'],
     'regardless of case',
   );
   const many = Array.from({ length: 250 }, (_, at) => ({ label: `name${at}`, kind: 6 }));
   const capped = narrowedCompletions(many, '');
-  assert.equal((capped['completions'] as unknown[]).length, 100);
+  assert.equal(asArray(capped['completions'], 'completions').length, 100);
   assert.equal(capped['total'], 250);
   assert.equal(capped['omitted'], 150);
   assert.match(String(capped['note']), /150 more are offered here/);
@@ -7460,9 +7541,9 @@ async function testAnEditorCloseWaitsForItToGo(): Promise<void> {
       await server.initialize('regression-test');
       const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
       editor = socket;
-      await new Promise<void>((resolve, reject) => {
+      await new Promise<void>((settle, reject) => {
         socket.once('open', () => {
-          resolve();
+          settle();
         });
         socket.once('error', reject);
       });
@@ -7636,9 +7717,9 @@ async function testAServerEndsWithAnEditorStillOnTheBridge(): Promise<void> {
 
     const opened = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = opened;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       opened.once('open', () => {
-        resolve();
+        settle();
       });
       opened.once('error', reject);
     });
@@ -7717,9 +7798,9 @@ async function testAnEditorPortMovesOnlyWhenItIsHeld(): Promise<void> {
     assert.notEqual(moved, held, 'a port somebody is holding is not the one handed back');
     assert.ok(moved > 0 && moved <= 65535, `and what is handed back is a port: ${moved}`);
   } finally {
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((settle) => {
       holder.close(() => {
-        resolve();
+        settle();
       });
     });
   }
@@ -7918,9 +7999,9 @@ async function withStdioServer(
   // about refusals must not fall over on the thing it is there to see.
   const call: ToolCall = async (name, args, timeoutMs) => {
     const response = await request('tools/call', { name, arguments: args }, timeoutMs);
-    const text = textOf(response);
-    assert.ok(text !== null, `${name} answered with no text content: ${JSON.stringify(response)}`);
-    return text;
+    const said = textOf(response);
+    assert.ok(said !== null, `${name} answered with no text content: ${JSON.stringify(response)}`);
+    return said;
   };
 
   try {
@@ -7952,7 +8033,7 @@ function testDictionariesHaveNothingBehindThem(): void {
 
   // Copied key by key out of parsed JSON, which is how such a name arrives in the first place:
   // JSON.parse makes __proto__ an own enumerable property rather than a prototype.
-  const hostile = JSON.parse('{"__proto__": {"injected": true}}') as Record<string, unknown>;
+  const hostile = asObject(JSON.parse('{"__proto__": {"injected": true}}'), 'the parsed JSON');
   for (const key of Object.keys(hostile)) {
     blank[key] = hostile[key];
   }
@@ -8522,7 +8603,7 @@ async function testEveryToolTellsAClientWhatItCanChange(): Promise<void> {
     }
     assert.equal(hints.size, TOOL_SPECS.length, 'every tool is listed with its hints');
 
-    const classOf = (name: string): string => {
+    const classOf = (name: string): 'read' | 'additive' | 'destructive' => {
       const annotations = hints.get(name)?.annotations;
       assert.ok(annotations !== undefined, `${name} is listed`);
       if (annotations['readOnlyHint'] === true) {
@@ -8560,7 +8641,7 @@ async function testEveryToolTellsAClientWhatItCanChange(): Promise<void> {
 
     const counts = { read: 0, additive: 0, destructive: 0 };
     for (const name of hints.keys()) {
-      counts[classOf(name) as keyof typeof counts] += 1;
+      counts[classOf(name)] += 1;
     }
     assert.deepEqual(
       counts,
@@ -9273,7 +9354,7 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
       maxResults: 100,
     });
     assert.deepEqual(
-      found.results.map((entry) => entry.file).sort(),
+      found.results.map((entry) => entry.file).toSorted(),
       ['res://addons/auto_reload/theirs.gd', 'res://scripts/hero.gd'],
       'the search should read the project and nothing standing beside it',
     );
@@ -9281,7 +9362,7 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
     // Named, because an answer missing a copy the caller can see on disk reads as a search fault;
     // a hidden directory and our own addon are not the project's to have marked.
     assert.deepEqual(
-      [...(found.not_searched ?? [])].sort(),
+      [...(found.not_searched ?? [])].toSorted(),
       ['res://export/', 'res://lib/vendor/'],
       'the search should name every directory a .gdignore kept out',
     );
@@ -9325,14 +9406,14 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
     assert.equal(projectStructure(sandbox).scripts, 2, 'the count should agree with the search');
     assert.deepEqual(
       projectTexts(sandbox)
-        .map((text) => text.path)
+        .map((file) => file.path)
         .filter((path) => path.endsWith('.gd'))
-        .sort(),
+        .toSorted(),
       ['res://addons/auto_reload/theirs.gd', 'res://scripts/hero.gd'],
       'and so should what a rename reads',
     );
     assert.deepEqual(
-      ignoredTexts(sandbox).map((text) => text.path),
+      ignoredTexts(sandbox).map((file) => file.path),
       ['res://export/shipped.gd'],
       'an installed addon is not one of the ignored copies a rename mentions either',
     );
@@ -9389,7 +9470,7 @@ function testASearchReadsWhatItSaysItReads(): void {
 
     const everywhere = search('GameState');
     assert.deepEqual(
-      everywhere.results.map((entry) => entry.file).sort(),
+      everywhere.results.map((entry) => entry.file).toSorted(),
       ['res://Hero.cs', 'res://project.godot'],
       `every text file is read, and a binary one is not: ${JSON.stringify(everywhere)}`,
     );
@@ -9822,10 +9903,10 @@ function testTheReleaseButtonOffersWhatBothDocumentsDescribe(): void {
     [join('.github', 'CONTRIBUTING.md'), '## Versions'],
   ];
   for (const [file, heading] of sections) {
-    const text = readFileSync(join(process.cwd(), file), 'utf8');
-    const start = text.indexOf(heading);
+    const document = readFileSync(join(process.cwd(), file), 'utf8');
+    const start = document.indexOf(heading);
     assert.ok(start >= 0, `${file} should still have its ${heading} section`);
-    const after = text.slice(start + heading.length);
+    const after = document.slice(start + heading.length);
     const ends = after.indexOf('\n## ');
     const section = (ends < 0 ? after : after.slice(0, ends)).toLowerCase();
     for (const bump of offered) {
@@ -9928,17 +10009,14 @@ async function testAnEngineThatCrashesAtStartIsAskedAgain(): Promise<void> {
     let starts = 0;
     const waits: number[] = [];
     const locator = new GodotLocator(
-      async () => {
+      () => {
         const answer = answers[Math.min(starts, answers.length - 1)] ?? null;
         starts += 1;
-        if (answer !== null) {
-          throw answer;
-        }
-        return await Promise.resolve();
+        return answer === null ? Promise.resolve() : Promise.reject(answer);
       },
-      async (ms) => {
+      (ms) => {
         waits.push(ms);
-        return await Promise.resolve();
+        return Promise.resolve();
       },
     );
     return { found: await locator.find(), starts, waits };
@@ -9997,9 +10075,9 @@ async function testAnEngineThatCrashesAtStartIsAskedAgain(): Promise<void> {
         starts += 1;
         return await Promise.reject(startCrash);
       },
-      async (ms) => {
+      (ms) => {
         waits.push(ms);
-        return await Promise.resolve();
+        return Promise.resolve();
       },
     );
     const crashed = await crashing.find();
@@ -10322,11 +10400,11 @@ function testChangelogReach(): void {
  * calling the image a non-existent resource while it sat on disk.
  */
 function testANeverImportedFileIsSaidToBeOne(): void {
-  const entry = (text: string): LogEntry => ({
+  const entry = (line: string): LogEntry => ({
     index: 0,
     severity: 'error',
     source: 'stderr',
-    text,
+    text: line,
     detail: [],
   });
   const image = 'No loader found for resource: res://art/hero.png (expected type: Texture2D)';
@@ -11231,7 +11309,7 @@ function testAWallOfOneMessageCollapsesToItsShape(): void {
   assert.equal(counts.length, 24, `a shape said once is no group: ${counts.join(', ')}`);
   assert.deepEqual(
     counts,
-    [...counts].sort((one, other) => other - one),
+    [...counts].toSorted((one, another) => another - one),
     `groups come biggest first: ${counts.join(', ')}`,
   );
 }
@@ -11496,7 +11574,7 @@ async function testTheLifecycleLogSaysHowAServerEnded(): Promise<void> {
     (existsSync(log) ? readFileSync(log, 'utf8') : '')
       .split('\n')
       .filter((line) => line !== '')
-      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .map((line) => asObject(JSON.parse(line), `the log line ${line}`))
       .filter((line) => line['pid'] === pid);
   const exited = (server: ServerProcess): Promise<void> =>
     server.exited
@@ -11781,9 +11859,9 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
     const invoked: string[] = [];
     const arriving = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     socket = arriving;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       arriving.once('open', () => {
-        resolve();
+        settle();
       });
       arriving.once('error', reject);
     });
@@ -12082,7 +12160,7 @@ function testWhatADeclaredClassExtendsIsReadFromItsScript(): void {
     writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
     const lines = declaredClassLines(project);
     assert.deepEqual(
-      [...lines.entries()].sort(([one], [other]) => one.localeCompare(other)),
+      [...lines.entries()].toSorted(([one], [other]) => one.localeCompare(other)),
       [
         ['A', { path: 'res://a.gd', extends: 'C', abstract: false }],
         ['C', { path: 'res://sub/c.gd', extends: 'Node', abstract: false }],
@@ -12124,9 +12202,9 @@ async function testAGoneEditorsConsoleIsStillRead(): Promise<void> {
     textOf(await on.request('tools/call', { name, arguments: args })) ?? '';
   const greet = async (pid: number): Promise<WebSocket> => {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -12676,10 +12754,10 @@ async function testEveryHiddenStartIsStartedHidden(): Promise<void> {
     const offered = Object.entries(await import('../src/spawn.js'))
       .filter(([, value]) => typeof value === 'function')
       .map(([name]) => name)
-      .sort();
+      .toSorted();
     assert.deepEqual(
       offered,
-      [...Object.keys(hidden), 'spawnShown'].sort(),
+      [...Object.keys(hidden), 'spawnShown'].toSorted(),
       'every start src/spawn.ts offers is measured here',
     );
 
@@ -13399,8 +13477,8 @@ function testAGamesOwnArgumentsDoNotMakeItAnEditor(): void {
 function testAnAnnouncedGameIsJudgedBeforeItIsEnded(): void {
   const project = join(tmpdir(), 'announced-project');
   const announcedAt = Date.now();
-  const running = (text: string, startedAt: number | null = announcedAt - 3_000) =>
-    ({ kind: 'commandLine', text, ...(startedAt === null ? {} : { startedAt }) }) as const;
+  const running = (line: string, startedAt: number | null = announcedAt - 3_000) =>
+    ({ kind: 'commandLine', text: line, ...(startedAt === null ? {} : { startedAt }) }) as const;
   const game = `godot.exe --path ${project} --remote-debug tcp://127.0.0.1:6007`;
   assert.equal(
     judgeAnnouncedGame(running(game), project, announcedAt)?.executable,
@@ -15681,8 +15759,8 @@ function testAGameOnAnotherRuntimeAddonSaysSo(): void {
 async function testAnExitedGamesLastMessagesAreRead(): Promise<void> {
   const seen: string[] = [];
   let accepted: () => void = () => undefined;
-  const taken = new Promise<void>((resolve) => {
-    accepted = resolve;
+  const taken = new Promise<void>((settle) => {
+    accepted = settle;
   });
   const peer = await GameDebugger.open(
     [],
@@ -15780,8 +15858,8 @@ async function testAPauseAnswersWithTheGamesOwnScript(): Promise<void> {
   const armed = new Set<string>();
   let short: SentValue[][] = [];
   let accepted: () => void = () => undefined;
-  const taken = new Promise<void>((resolve) => {
-    accepted = resolve;
+  const taken = new Promise<void>((settle) => {
+    accepted = settle;
   });
   const peer = await GameDebugger.open(
     [],
@@ -16007,7 +16085,7 @@ async function testTheKeeperAnswersItsDebuggersQuestions(): Promise<void> {
     process.platform === 'win32'
       ? `\\\\.\\pipe\\gdharness-garbled-keeper-${process.pid}`
       : join(mkdtempSync(join(tmpdir(), 'gdharness-garbled-keeper-')), 'k.sock');
-  await new Promise<void>((resolve) => garbled.listen(address, resolve));
+  await new Promise<void>((settle) => garbled.listen(address, settle));
   try {
     assert.deepEqual(await askTheKeepersDebugger(address, { op: 'stack' }, 5_000), {
       unreached: 'it answered "unknown"',
@@ -16177,7 +16255,7 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
     return game;
   };
   const note = (): Record<string, unknown> =>
-    JSON.parse(readFileSync(runRecordPath(project, runtime), 'utf8')) as Record<string, unknown>;
+    asObject(JSON.parse(readFileSync(runRecordPath(project, runtime), 'utf8')), 'the run record');
   const status = async (server: ServerProcess): Promise<unknown> =>
     parseTextContent(
       await server.request('tools/call', { name: 'editor_status', arguments: {} }, ENGINE_CALL_TIMEOUT_MS),
@@ -16403,7 +16481,10 @@ async function testAStopAsksTheGameToCloseFirst(): Promise<void> {
       op: 'start',
       headless: true,
       runtimeWaitMs: WINDOWED_BOOT_MS,
-      env: { CLOSE_NOTES: join(notes, name), ...(extra['env'] as Record<string, string> | undefined) },
+      env: {
+        CLOSE_NOTES: join(notes, name),
+        ...(extra['env'] === undefined ? {} : asObject(extra['env'], 'the env asked for')),
+      },
       ...Object.fromEntries(Object.entries(extra).filter(([key]) => key !== 'env')),
     });
     assert.equal(
@@ -16425,7 +16506,7 @@ async function testAStopAsksTheGameToCloseFirst(): Promise<void> {
     }
     return started;
   };
-  const noted = (name: string): string[] => readdirSync(join(notes, name)).sort();
+  const noted = (name: string): string[] => readdirSync(join(notes, name)).toSorted();
   try {
     writeFileSync(
       join(project, 'project.godot'),
@@ -16534,7 +16615,7 @@ async function testAStopAsksTheGameToCloseFirst(): Promise<void> {
         }
       });
     assert.ok(announcement !== undefined, `the game's announcement under ${runtime}`);
-    const announced = JSON.parse(readFileSync(announcement, 'utf8')) as Record<string, unknown>;
+    const announced = asObject(JSON.parse(readFileSync(announcement, 'utf8')), "the game's announcement");
     const elsewhere = join(notes, 'elsewhere');
     writeFileSync(
       announcement,
@@ -17342,7 +17423,7 @@ async function testAClickInAWindowNothingEnteredPresses(): Promise<void> {
           y: 10,
         });
         assert.deepEqual(
-          ((await read('left')) as string[]).slice(-1),
+          asArray(await read('left'), 'the nodes left').slice(-1),
           ['Shown'],
           'and left when the pointer moved out of the container',
         );
@@ -17659,7 +17740,10 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
     };
     const record = async (nodePath: string): Promise<{ presses: unknown[]; motions: unknown[] }> => {
       const read = await call('runtime_invoke', { op: 'call', nodePath, method: 'record' });
-      return get(read, 'result') as { presses: unknown[]; motions: unknown[] };
+      return {
+        presses: asArray(get(read, 'result', 'presses'), `presses recorded on ${nodePath}`),
+        motions: asArray(get(read, 'result', 'motions'), `motions recorded on ${nodePath}`),
+      };
     };
     const run = async (headless: boolean): Promise<void> => {
       const how = headless ? 'headless' : 'windowed';
@@ -17972,11 +18056,21 @@ async function testATouchReachesTheGameAsAFinger(): Promise<void> {
       return parseTextContent(response) ?? textOf(response);
     };
     type Seen = { touches: unknown[]; drags: number[][]; buttons: unknown[]; motions: unknown[] };
-    const record = async (): Promise<Seen> =>
-      get(
+    const record = async (): Promise<Seen> => {
+      const seen = get(
         await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'record' }),
         'result',
-      ) as Seen;
+      );
+      const listed = (key: string): unknown[] => asArray(get(seen, key), `${key} recorded`);
+      return {
+        touches: listed('touches'),
+        drags: listed('drags').map((drag) =>
+          asArray(drag, 'a drag recorded').map((at) => asNumber(at, 'a drag')),
+        ),
+        buttons: listed('buttons'),
+        motions: listed('motions'),
+      };
+    };
     const touch = async (args: Record<string, unknown>): Promise<unknown> =>
       await call('runtime_input', { op: 'touch', ...args });
     const started = await call('editor_run', {
@@ -18094,10 +18188,10 @@ async function testATouchReachesTheGameAsAFinger(): Promise<void> {
     assert.equal(get(aimed, 'path'), pad, aimedShown);
     assert.deepEqual(get(aimed, 'position'), [50, 30], `in the window's pixels: ${aimedShown}`);
     // The pad was also given the earlier touches that landed on it; these are the aimed one's.
-    const padTouches = get(
-      await call('runtime_invoke', { op: 'call', nodePath: pad, method: 'record' }),
-      'result',
-    ) as unknown[];
+    const padTouches = asArray(
+      get(await call('runtime_invoke', { op: 'call', nodePath: pad, method: 'record' }), 'result'),
+      "the pad's touches",
+    );
     assert.deepEqual(
       padTouches.slice(-2),
       [
@@ -18515,18 +18609,18 @@ function testAWorktreeFindsItsMainCheckoutsEngine(): void {
     writeFileSync(join(root, 'next', '.git'), `gitdir: ${entry.replaceAll('\\', '/')}\n`);
 
     assert.equal(recordedEnginePath(worktree), null, 'the worktree names no engine of its own');
-    const main = mainCheckoutOf(worktree);
+    const mainCheckout = mainCheckoutOf(worktree);
     assert.ok(
-      main !== null && isSameDirectory(main, join(root, 'main', 'game')),
-      `the main checkout: ${main}`,
+      mainCheckout !== null && isSameDirectory(mainCheckout, join(root, 'main', 'game')),
+      `the main checkout: ${mainCheckout}`,
     );
-    assert.equal(recordedEnginePath(main), engine, "and its config's engine is the one found");
+    assert.equal(recordedEnginePath(mainCheckout), engine, "and its config's engine is the one found");
     const forward = engine.replaceAll('\\', '/');
     writeFileSync(
       join(root, 'main', 'game', '.mcp.json'),
       JSON.stringify({ mcpServers: { gdharness: { command: 'npx', env: { GODOT_PATH: forward } } } }),
     );
-    assert.equal(recordedEnginePath(main), forward, 'an absolute engine path is read as written');
+    assert.equal(recordedEnginePath(mainCheckout), forward, 'an absolute engine path is read as written');
     writeFileSync(
       join(root, 'main', 'game', '.mcp.json'),
       JSON.stringify({
@@ -18534,7 +18628,7 @@ function testAWorktreeFindsItsMainCheckoutsEngine(): void {
       }),
     );
     assert.equal(
-      recordedEnginePath(main),
+      recordedEnginePath(mainCheckout),
       engine,
       'a relative engine path is read from the project, made whole',
     );
@@ -18675,9 +18769,11 @@ async function testAGameThatDoesNotWelcomeIsRefused(): Promise<void> {
       socket.on('data', (chunk: string) => {
         buffered += chunk;
         for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
-          const asked = JSON.parse(buffered.slice(0, at)) as { id: number };
+          const asked: unknown = JSON.parse(buffered.slice(0, at));
           buffered = buffered.slice(at + 1);
-          socket.write(`${JSON.stringify({ id: asked.id, type: 'pong', protocol: RUNTIME_PROTOCOL })}\n`);
+          socket.write(
+            `${JSON.stringify({ id: get(asked, 'id'), type: 'pong', protocol: RUNTIME_PROTOCOL })}\n`,
+          );
         }
       });
       socket.on('error', () => {});
@@ -18741,9 +18837,9 @@ async function testAGameOnEveryInterfaceIsReached(): Promise<void> {
       socket.on('data', (chunk: string) => {
         buffered += chunk;
         for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
-          const asked = JSON.parse(buffered.slice(0, at)) as { id: number };
+          const asked: unknown = JSON.parse(buffered.slice(0, at));
           buffered = buffered.slice(at + 1);
-          socket.write(`${JSON.stringify({ id: asked.id, type: 'pong' })}\n`);
+          socket.write(`${JSON.stringify({ id: get(asked, 'id'), type: 'pong' })}\n`);
         }
       });
       socket.on('error', () => {});
@@ -18835,14 +18931,14 @@ async function testCallsSentTogetherWaitTheirTurnAtTheGame(): Promise<void> {
       socket.on('data', (chunk: string) => {
         buffered += chunk;
         for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
-          const asked = JSON.parse(buffered.slice(0, at)) as { id: number; params: { property?: string } };
+          const asked: unknown = JSON.parse(buffered.slice(0, at));
           buffered = buffered.slice(at + 1);
-          if (asked.params.property === 'slow') {
+          if (get(asked, 'params', 'property') === 'slow') {
             seen.slow += 1;
             continue;
           }
           seen.answered += 1;
-          socket.write(`${JSON.stringify({ id: asked.id, type: 'pong' })}\n`);
+          socket.write(`${JSON.stringify({ id: get(asked, 'id'), type: 'pong' })}\n`);
         }
       });
     }, 50);
@@ -19146,17 +19242,13 @@ async function testACaptureTheWaitRanOutOnKeepsItsFolder(): Promise<void> {
     socket.on('data', (chunk: string) => {
       buffered += chunk;
       for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
-        const asked = JSON.parse(buffered.slice(0, at)) as {
-          id: number;
-          command: string;
-          params: { output_path?: string };
-        };
+        const asked: unknown = JSON.parse(buffered.slice(0, at));
         buffered = buffered.slice(at + 1);
-        if (asked.command !== 'capture_screenshot') {
-          socket.write(`${JSON.stringify({ id: asked.id, type: 'pong' })}\n`);
+        if (get(asked, 'command') !== 'capture_screenshot') {
+          socket.write(`${JSON.stringify({ id: get(asked, 'id'), type: 'pong' })}\n`);
           continue;
         }
-        const path = asked.params.output_path ?? '';
+        const path = text(get(asked, 'params', 'output_path'));
         setTimeout(() => {
           saved.into = path;
           saved.folderWasThere = existsSync(dirname(path));
@@ -19164,7 +19256,7 @@ async function testACaptureTheWaitRanOutOnKeepsItsFolder(): Promise<void> {
             writeFileSync(path, 'png');
           }
           socket.write(
-            `${JSON.stringify({ id: asked.id, type: 'screenshot_file', path, width: 1, height: 1, format: 'png' })}\n`,
+            `${JSON.stringify({ id: get(asked, 'id'), type: 'screenshot_file', path, width: 1, height: 1, format: 'png' })}\n`,
           );
           answered();
         }, 1_500);
@@ -19266,17 +19358,13 @@ async function testACaptureSendsTheSmallerPicture(): Promise<void> {
     socket.on('data', (chunk: string) => {
       buffered += chunk;
       for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
-        const request = JSON.parse(buffered.slice(0, at)) as {
-          id: number;
-          command: string;
-          params: { output_path?: string };
-        };
+        const request: unknown = JSON.parse(buffered.slice(0, at));
         buffered = buffered.slice(at + 1);
-        if (request.command !== 'capture_screenshot') {
-          socket.write(`${JSON.stringify({ id: request.id, type: 'pong' })}\n`);
+        if (get(request, 'command') !== 'capture_screenshot') {
+          socket.write(`${JSON.stringify({ id: get(request, 'id'), type: 'pong' })}\n`);
           continue;
         }
-        const path = request.params.output_path ?? '';
+        const path = text(get(request, 'params', 'output_path'));
         const jpeg = jpegs[asked] ?? { bytes: null, named: 'beside' };
         asked += 1;
         writeFileSync(path, png);
@@ -19286,7 +19374,7 @@ async function testACaptureSendsTheSmallerPicture(): Promise<void> {
         }
         socket.write(
           `${JSON.stringify({
-            id: request.id,
+            id: get(request, 'id'),
             type: 'screenshot_file',
             path,
             jpegPath: jpeg.named === 'beside' ? beside : elsewhere,
@@ -19407,9 +19495,9 @@ async function testRuntimeConnectedIsAboutThisProjectsGames(): Promise<void> {
       socket.on('data', (chunk: string) => {
         buffered += chunk;
         for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
-          const asked = JSON.parse(buffered.slice(0, at)) as { id: number };
+          const asked: unknown = JSON.parse(buffered.slice(0, at));
           buffered = buffered.slice(at + 1);
-          socket.write(`${JSON.stringify({ id: asked.id, type: 'pong' })}\n`);
+          socket.write(`${JSON.stringify({ id: get(asked, 'id'), type: 'pong' })}\n`);
         }
       });
       socket.on('error', () => {});
@@ -19524,26 +19612,22 @@ async function testACallBesideAnotherOnTheGameSaysSo(): Promise<void> {
       socket.on('data', (chunk: string) => {
         buffered += chunk;
         for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
-          const asked = JSON.parse(buffered.slice(0, at)) as {
-            id: number;
-            command: string;
-            params: { output_path?: string };
-          };
+          const asked: unknown = JSON.parse(buffered.slice(0, at));
           buffered = buffered.slice(at + 1);
-          const writeTo = asked.params.output_path;
-          if (asked.command === 'capture_screenshot' && writeTo !== undefined) {
+          const writeTo = get(asked, 'params', 'output_path');
+          if (get(asked, 'command') === 'capture_screenshot' && typeof writeTo === 'string') {
             writeFileSync(writeTo, Buffer.from(ONE_PIXEL_PNG, 'base64'));
             socket.write(
-              `${JSON.stringify({ id: asked.id, type: 'screenshot_file', path: writeTo, width: 1, height: 1, format: 'png' })}\n`,
+              `${JSON.stringify({ id: get(asked, 'id'), type: 'screenshot_file', path: writeTo, width: 1, height: 1, format: 'png' })}\n`,
             );
-          } else if (asked.command === 'wait_frames') {
+          } else if (get(asked, 'command') === 'wait_frames') {
             setTimeout(() => {
               socket.write(
-                `${JSON.stringify({ id: asked.id, type: 'waited', frames: 90, elapsed_ms: 1500 })}\n`,
+                `${JSON.stringify({ id: get(asked, 'id'), type: 'waited', frames: 90, elapsed_ms: 1500 })}\n`,
               );
             }, 1500);
           } else {
-            socket.write(`${JSON.stringify({ id: asked.id, type: 'method_result', result: 7 })}\n`);
+            socket.write(`${JSON.stringify({ id: get(asked, 'id'), type: 'method_result', result: 7 })}\n`);
           }
         }
       });
@@ -20080,8 +20164,8 @@ async function testAStartWaitsForTheGameToAnnounceItself(): Promise<void> {
         directories: [directory],
       });
       assert.deepEqual(
-        both.map((one) => one.pid).sort((one, other) => one - other),
-        [...pids].sort((one, other) => one - other),
+        both.map((one) => one.pid).toSorted((one, other) => one - other),
+        [...pids].toSorted((one, other) => one - other),
         'two games announced in one look are both handed back',
       );
     } finally {
@@ -20153,7 +20237,10 @@ function testTheCureIsWrittenWhole(): void {
   assert.match(rescan, /editor_launch restart/, 'and names the restart for when it is not enough');
 
   // What a caller receives, as it is written: every file of the installed skill, whole.
-  const installed = [...skillFiles('0.0.0-test').entries()].map(([path, text]) => ({ where: path, text }));
+  const installed = [...skillFiles('0.0.0-test').entries()].map(([path, content]) => ({
+    where: path,
+    text: content,
+  }));
   assert.ok(
     installed.some(({ where }) => where === 'SKILL.md') &&
       installed.some(({ where }) => where.endsWith('tools.md')),
@@ -20200,13 +20287,13 @@ function testTheCureIsWrittenWhole(): void {
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
   // the caller is told to do to the file and not about one verb for it.
-  for (const { where, text } of offered) {
+  for (const { where, text: offering } of offered) {
     const found =
-      /\b(?:[Cc]hang(?:e|ing)|[Ee]dit(?:ing)?|[Tt]ouch(?:ing)?)\s+the\s+declaring\s+script\b/.exec(text);
+      /\b(?:[Cc]hang(?:e|ing)|[Ee]dit(?:ing)?|[Tt]ouch(?:ing)?)\s+the\s+declaring\s+script\b/.exec(offering);
     assert.equal(
       found,
       null,
-      `${where} should not tell a caller to edit correct source: ${text.slice(Math.max(0, (found?.index ?? 0) - 60), (found?.index ?? 0) + 80)}`,
+      `${where} should not tell a caller to edit correct source: ${offering.slice(Math.max(0, (found?.index ?? 0) - 60), (found?.index ?? 0) + 80)}`,
     );
   }
 }
@@ -20254,16 +20341,16 @@ function testEveryRemedyLeadsWithTheScan(): void {
     // across a line and a name split at a line break is the same name.
     { where: 'SKILL.md Editing', text: editing.replaceAll('`', '').replaceAll(/\s+/g, ' ') },
   ];
-  for (const { where, text } of choosing) {
+  for (const { where, text: choice } of choosing) {
     const named = remedies
-      .map((remedy) => ({ remedy, at: text.indexOf(remedy) }))
+      .map((remedy) => ({ remedy, at: choice.indexOf(remedy) }))
       .filter(({ at }) => at >= 0)
-      .sort((one, other) => one.at - other.at);
+      .toSorted((one, other) => one.at - other.at);
     assert.ok(named.length >= 2, `${where} chooses between remedies, naming ${named.length}`);
     assert.equal(
       named[0]?.remedy,
       'editor_rescan',
-      `${where} should lead with the scan, not ${named[0]?.remedy}: ${text.slice(Math.max(0, (named[0]?.at ?? 0) - 80), (named[0]?.at ?? 0) + 60)}`,
+      `${where} should lead with the scan, not ${named[0]?.remedy}: ${choice.slice(Math.max(0, (named[0]?.at ?? 0) - 80), (named[0]?.at ?? 0) + 60)}`,
     );
   }
 
@@ -20591,9 +20678,9 @@ async function testAnEditorOnTheShippedCodeIsNotCalledStale(): Promise<void> {
       await server.initialize('regression-test');
       const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
       editor = socket;
-      await new Promise<void>((resolve, reject) => {
+      await new Promise<void>((settle, reject) => {
         socket.once('open', () => {
-          resolve();
+          settle();
         });
         socket.once('error', reject);
       });
@@ -20779,7 +20866,7 @@ async function testAFreshServerAsksRatherThanInheritingAnAnswer(): Promise<void>
     assert.equal(asks, 1, 'and the server asks anyway, because it has just started');
 
     // Settled, so what the registry said is taken up rather than merely requested.
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((settle) => setTimeout(settle, 0));
     assert.equal(check.notice()?.latest, '0.13.36', 'the release published since is what it reports');
 
     check.refresh();
@@ -21675,8 +21762,8 @@ function testAFailedRunsLogsOutlastTheNextRun(): void {
     }
     sweepRunDirectories(runs);
     assert.deepEqual(
-      readdirSync(runs).sort(),
-      [...endedRuns.slice(2), live].sort(),
+      readdirSync(runs).toSorted(),
+      [...endedRuns.slice(2), live].toSorted(),
       'the five newest ended runs and the one still going stay, and the rest go',
     );
     assert.equal(
@@ -21840,9 +21927,9 @@ async function testWhatALaunchedEditorDroppedIsReadAsItArrives(): Promise<void> 
       );
       const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
       editor = socket;
-      await new Promise<void>((resolve, reject) => {
+      await new Promise<void>((settle, reject) => {
         socket.once('open', () => {
-          resolve();
+          settle();
         });
         socket.once('error', reject);
       });
@@ -21940,9 +22027,9 @@ async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
 
     await server.initialize('regression-test');
     const greet = async (socket: WebSocket, saying: Record<string, unknown> = {}): Promise<void> => {
-      await new Promise<void>((resolve, reject) => {
+      await new Promise<void>((settle, reject) => {
         socket.once('open', () => {
-          resolve();
+          settle();
         });
         socket.once('error', reject);
       });
@@ -22000,8 +22087,8 @@ async function testARestartSaysWhatTheEditorDropped(): Promise<void> {
       const made = createServer((socket) => {
         socket.destroy();
       });
-      await new Promise<void>((resolve) => {
-        made.listen(on, '127.0.0.1', resolve);
+      await new Promise<void>((settle) => {
+        made.listen(on, '127.0.0.1', settle);
       });
       return made;
     };
@@ -22083,8 +22170,8 @@ async function testARestartBindsAnAdapterThatCameBackWithoutItsPort(): Promise<v
       const made = createServer((socket) => {
         socket.destroy();
       });
-      await new Promise<void>((resolve) => {
-        made.listen(on, '127.0.0.1', resolve);
+      await new Promise<void>((settle) => {
+        made.listen(on, '127.0.0.1', settle);
       });
       return made;
     };
@@ -22095,9 +22182,9 @@ async function testARestartBindsAnAdapterThatCameBackWithoutItsPort(): Promise<v
     ];
     let adapter: Server | null = null;
     const greet = async (socket: WebSocket, saying: Record<string, unknown> = {}): Promise<void> => {
-      await new Promise<void>((resolve, reject) => {
+      await new Promise<void>((settle, reject) => {
         socket.once('open', () => {
-          resolve();
+          settle();
         });
         socket.once('error', reject);
       });
@@ -22777,9 +22864,9 @@ async function greetAsAStandInEditor(
   project: string,
 ): Promise<WebSocket> {
   const editor = new WebSocket(`ws://127.0.0.1:${bridgePort}/godot`);
-  await new Promise<void>((resolve, reject) => {
+  await new Promise<void>((settle, reject) => {
     editor.once('open', () => {
-      resolve();
+      settle();
     });
     editor.once('error', reject);
   });
@@ -24092,7 +24179,7 @@ async function testAnImportOrExportOverAStaleDocCacheRunsAgain(): Promise<void> 
       '\tprint("saved ", ResourceSaver.save(cache, path, ResourceSaver.FLAG_COMPRESS))\n' +
       '\tquit()\n',
   );
-  const cacheFile = (): string => {
+  const docCacheFile = (): string => {
     const found = existsSync(cacheDir)
       ? readdirSync(cacheDir).find((name) => /^editor_doc_cache-\d+\.\d+\.res$/.test(name))
       : undefined;
@@ -24100,7 +24187,7 @@ async function testAnImportOrExportOverAStaleDocCacheRunsAgain(): Promise<void> 
     return join(cacheDir, found);
   };
   const makeStale = async (): Promise<number> => {
-    const file = cacheFile();
+    const file = docCacheFile();
     const made = await runEngine(godotPath, [
       '--headless',
       '--path',
@@ -24147,10 +24234,10 @@ async function testAnImportOrExportOverAStaleDocCacheRunsAgain(): Promise<void> 
     assert.deepEqual(get(imported, 'uidsCreated'), ['second.gd'], shownImport);
     assert.ok(
       importNote.startsWith('The first import ended badly (') &&
-        importNote.includes(`after rebuilding the editor's class reference cache, ${cacheFile()}.`),
+        importNote.includes(`after rebuilding the editor's class reference cache, ${docCacheFile()}.`),
       `the import over a stale cache crashed, was run again, and says so: ${shownImport}`,
     );
-    assert.ok(statSync(cacheFile()).mtimeMs > staleAt, 'and the crashing run left a fresh cache');
+    assert.ok(statSync(docCacheFile()).mtimeMs > staleAt, 'and the crashing run left a fresh cache');
 
     const added = parseTextContent(
       await call('project_export', {
@@ -24167,7 +24254,7 @@ async function testAnImportOrExportOverAStaleDocCacheRunsAgain(): Promise<void> 
       outputPath: 'build/game.x86_64',
     });
     const shownExport = JSON.stringify(exported);
-    const verdict = ((get(exported, 'result', 'content') as { text?: string }[] | undefined) ?? [])
+    const verdict = (contentOf(exported) ?? [])
       .map((block) => {
         try {
           return JSON.parse(block.text ?? '') as unknown;
@@ -24394,7 +24481,7 @@ function testTheProjectPathSentenceNamesEveryCallThatTakesNone(): void {
   }
   assert.deepEqual(
     without,
-    [...new Set(walked)].sort(),
+    [...new Set(walked)].toSorted(),
     'the sentence names exactly the calls whose op takes none',
   );
   // Every one of them genuinely refuses the argument, which is what makes the sentence matter. A
@@ -24419,11 +24506,11 @@ function testTheProjectPathSentenceNamesEveryCallThatTakesNone(): void {
   }
 
   const shared = projectPathSentence();
-  for (const [what, text] of [
+  for (const [what, content] of [
     ['the tool reference', renderToolsMarkdown()],
     ['the skill', skillFiles('0.0.0').get('SKILL.md') ?? ''],
   ] as const) {
-    const sentence = text.split('\n').find((line) => line.includes('Every call takes'));
+    const sentence = content.split('\n').find((line) => line.includes('Every call takes'));
     assert.ok(sentence, `${what} should still open by saying which calls need a projectPath`);
     // The clause verbatim, not the names in it. Two renderings building the same sentence is the
     // arrangement that let one of them escape every backtick while the other did not, and a check
@@ -24582,7 +24669,7 @@ function testTheSkillNamesEverySettingTheAddonsRead(): void {
   // caller looks, one of them the bind address, which is the only one with a security answer.
   assert.ok(read.size >= 4, `the addons should read the settings they document: ${[...read].join(', ')}`);
   const skill = skillFiles('0.0.0').get('SKILL.md') ?? '';
-  const unsaid = [...read].filter((setting) => !skill.includes(setting)).sort();
+  const unsaid = [...read].filter((setting) => !skill.includes(setting)).toSorted();
   assert.deepEqual(unsaid, [], 'every setting the addons read should be named in the skill');
 
   // The bind address with its reason rather than only its name. A caller who reads that it exists
@@ -26762,7 +26849,7 @@ async function testARunImportsWhatChangedFirst(): Promise<void> {
         asArray(get(await answer('project_import', { op: 'status' }), 'resources'))
           .filter((one) => get(one, 'status') === 'needs_reimport')
           .map((one) => ({ path: text(get(one, 'path')), reason: text(get(one, 'reason')) }))
-          .sort((one, other) => one.path.localeCompare(other.path));
+          .toSorted((one, other) => one.path.localeCompare(other.path));
 
       const imported = await answer('project_import', { op: 'reimport' });
       assert.ok(asArray(get(imported, 'reimported')).includes('res://picture.png'), JSON.stringify(imported));
@@ -26800,7 +26887,7 @@ async function testARunImportsWhatChangedFirst(): Promise<void> {
       const checked = await answer('editor_run', { op: 'check' });
       assert.equal(get(checked, 'booted'), true, JSON.stringify(checked));
       assert.deepEqual(
-        asArray(get(checked, 'importedFirst')).map(String).sort(),
+        asArray(get(checked, 'importedFirst')).map(String).toSorted(),
         ['res://added.png', 'res://picture.png'],
         `the boot check imported both first: ${JSON.stringify(checked)}`,
       );
@@ -27294,9 +27381,9 @@ async function testAHeldScratchDirectoryGoesOnceLetGo(): Promise<void> {
         { stdio: ['ignore', 'pipe', 'ignore'] },
       );
       const holding = holder;
-      await new Promise<void>((resolve, reject) => {
+      await new Promise<void>((settle, reject) => {
         holding.stdout?.once('data', () => {
-          resolve();
+          settle();
         });
         holding.once('exit', () => {
           reject(new Error('the process meant to hold the file exited before it held it'));
@@ -27373,9 +27460,9 @@ async function testAClassCacheHeldShutIsReadOnceLetGo(): Promise<void> {
             { stdio: ['ignore', 'pipe', 'ignore'] },
           );
     const holding = holder;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       holding.stdout?.once('data', () => {
-        resolve();
+        settle();
       });
       holding.once('exit', () => {
         reject(new Error('the process meant to hold the cache exited before it held it'));
@@ -27403,7 +27490,7 @@ async function testAnAbandonedScratchDirectoryIsSweptAndNothingElse(): Promise<v
   const parent = mkdtempSync(join(tmpdir(), 'gdharness-abandoned-scratch-'));
   try {
     const exited = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
-    await new Promise((resolve) => exited.once('exit', resolve));
+    await new Promise((settle) => exited.once('exit', settle));
     const gone = exited.pid ?? 0;
     assert.equal(alive(gone), false, 'the owner stood in for has to have gone');
     const running = process.ppid;
@@ -27482,10 +27569,10 @@ async function testWhoIsHoldingAPortIsAskable(): Promise<void> {
 
   const held = createServer();
   try {
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       held.once('error', reject);
       held.listen(port, '127.0.0.1', () => {
-        resolve();
+        settle();
       });
     });
     const askedAt = Date.now();
@@ -27504,9 +27591,9 @@ async function testWhoIsHoldingAPortIsAskable(): Promise<void> {
     }
     console.log(`port holder regression: the platform answered in ${took}ms`);
   } finally {
-    await new Promise<void>((resolve) => {
+    await new Promise<void>((settle) => {
       held.close(() => {
-        resolve();
+        settle();
       });
     });
   }
@@ -27602,8 +27689,8 @@ async function testAnEditorsServersAreAskedOfTheirPorts(): Promise<void> {
     const made = createServer((socket) => {
       socket.destroy();
     });
-    await new Promise<void>((resolve) => {
-      made.listen(on, '127.0.0.1', resolve);
+    await new Promise<void>((settle) => {
+      made.listen(on, '127.0.0.1', settle);
     });
     return made;
   };
@@ -27620,9 +27707,9 @@ async function testAnEditorsServersAreAskedOfTheirPorts(): Promise<void> {
       );
     const opened = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     socket = opened;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       opened.once('open', () => {
-        resolve();
+        settle();
       });
       opened.once('error', reject);
     });
@@ -27710,9 +27797,9 @@ async function testAnEditorThatClearsBreakpointsIsSaidSo(): Promise<void> {
       }
       const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
       editor.socket = socket;
-      await new Promise<void>((resolve, reject) => {
+      await new Promise<void>((settle, reject) => {
         socket.once('open', () => {
-          resolve();
+          settle();
         });
         socket.once('error', reject);
       });
@@ -27802,9 +27889,9 @@ async function testAGameTheEditorHasStoppedPlayingIsNotStillActive(): Promise<vo
 
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -27948,7 +28035,7 @@ async function testAGameTheEditorHasStoppedPlayingIsNotStillActive(): Promise<vo
     // and it used to claim it had ended a game that had ended itself.
     playing = true;
     let pickedUp = false;
-    for (let waited = 0; waited < 10_000 && !pickedUp; waited += 100) {
+    for (let waitedMs = 0; waitedMs < 10_000 && !pickedUp; waitedMs += 100) {
       await delay(100);
       const seen = parseTextContent(
         await server.request('tools/call', { name: 'editor_status', arguments: {} }),
@@ -28101,9 +28188,9 @@ async function withAPlayingEditor(
         // A failure to reach the bridge rejects with an Error that says so. Rejected with the bare
         // event, it was reported as "[object ErrorEvent]" after two minutes on the Linux leg, twice,
         // with nothing naming the port, the server's answer or what the server said meanwhile.
-        await new Promise<void>((resolve, reject) => {
+        await new Promise<void>((settle, reject) => {
           socket.once('open', () => {
-            resolve();
+            settle();
           });
           socket.once('error', (event: { message?: string }) => {
             reject(
@@ -28189,9 +28276,9 @@ async function endGame(game: ChildProcess | null | undefined): Promise<void> {
   if (game?.exitCode !== null || game.signalCode !== null) {
     return;
   }
-  const gone = new Promise<void>((resolve) => {
+  const gone = new Promise<void>((settle) => {
     game.once('exit', () => {
-      resolve();
+      settle();
     });
   });
   game.kill();
@@ -28514,7 +28601,7 @@ async function testAKilledRunHasNoExitCode(): Promise<void> {
           await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
         );
       const note = (): Record<string, unknown> =>
-        JSON.parse(readFileSync(runRecordPath(project, runtimeDir), 'utf8')) as Record<string, unknown>;
+        asObject(JSON.parse(readFileSync(runRecordPath(project, runtimeDir), 'utf8')), 'the run record');
 
       const kept = await call('editor_run', {
         projectPath: project,
@@ -28924,7 +29011,7 @@ async function testAnAddedPresetExports(): Promise<void> {
     );
 
     const exported = await call({ op: 'run', preset: 'Penguin', outputPath: 'build/game.x86_64' });
-    const blocks = (get(exported, 'result', 'content') as { text?: string }[] | undefined) ?? [];
+    const blocks = contentOf(exported) ?? [];
     const verdict = blocks
       .map((block) => {
         try {
@@ -29609,9 +29696,12 @@ async function testAnExportedBuildIsStartedAndStopped(): Promise<void> {
       existsSync(said),
       `the build ran and wrote what it was given, so no debugger flag reached it: ${shown}\nIt printed: ${existsSync(transcript) ? readFileSync(transcript, 'utf8') : 'nothing'}`,
     );
-    const read = JSON.parse(readFileSync(said, 'utf8')) as { argv: string[]; holding: string[] };
-    assert.deepEqual(read.argv, [saves, said], JSON.stringify(read));
-    assert.ok(read.holding.length > 0, `its saves are moved to savesIn: ${JSON.stringify(read)}`);
+    const read: unknown = JSON.parse(readFileSync(said, 'utf8'));
+    assert.deepEqual(get(read, 'argv'), [saves, said], JSON.stringify(read));
+    assert.ok(
+      asArray(get(read, 'holding')).length > 0,
+      `its saves are moved to savesIn: ${JSON.stringify(read)}`,
+    );
     assert.ok(alive(pid), 'it runs until stopped');
 
     const stopped = parseTextContent(await call({ op: 'stop' }));
@@ -29706,15 +29796,19 @@ function testLibraryCopiesAreMovedAsideAndSwept(): void {
     const left = (): string[] =>
       ['bin', 'ext']
         .flatMap((folder) => readdirSync(join(project, folder)).map((name) => `${folder}/${name}`))
-        .sort();
+        .toSorted();
 
     const elsewhere = freeLibraryCopies(project, 'linux');
     assert.deepEqual([elsewhere.setAside, elsewhere.swept], [[], []]);
-    assert.deepEqual(left(), [...files, 'ext/game.gdextension'].sort(), 'nothing is touched outside Windows');
+    assert.deepEqual(
+      left(),
+      [...files, 'ext/game.gdextension'].toSorted(),
+      'nothing is touched outside Windows',
+    );
 
     const freed = freeLibraryCopies(project, 'win32');
     assert.deepEqual(
-      freed.setAside.map((path) => basename(path).replace(/-\d+-\d+$/, '')).sort(),
+      freed.setAside.map((path) => basename(path).replace(/-\d+-\d+$/, '')).toSorted(),
       ['~beside.dll.aside', '~game.dll.aside'],
       JSON.stringify(freed),
     );
@@ -34383,7 +34477,7 @@ async function testTheRendererIsChosenAndItsMemoryRead(): Promise<void> {
       typeof answered === 'object' && answered !== null,
       `metrics answers the GPU memory: ${textOf(asked) ?? JSON.stringify(asked)}`,
     );
-    assert.deepEqual(Object.keys(answered).sort(), [...gpuMemory].sort(), JSON.stringify(metrics));
+    assert.deepEqual(Object.keys(answered).toSorted(), [...gpuMemory].toSorted(), JSON.stringify(metrics));
     const memory = Object.fromEntries(
       gpuMemory.map((name) => [name, asNumber(get(metrics, 'data', name), JSON.stringify(metrics))]),
     );
@@ -35121,7 +35215,7 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
     assert.deepEqual(
       asArray(get(asArray(get(inStatic.answer, 'scopes'))[0], 'variables'))
         .map((one) => String(get(one, 'name')))
-        .sort(),
+        .toSorted(),
       ['step', 'sum', 'value'],
       inStatic.said,
     );
@@ -36045,7 +36139,7 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
     assert.deepEqual(
       keptUnder(sayingAbove)
         .map((element) => text(get(element, 'name')).replace('​', ''))
-        .sort(),
+        .toSorted(),
       ['Above words', 'Beneath words, Above words'],
       `the elements saying the words, by name: ${JSON.stringify(sayingAbove)}`,
     );
@@ -36241,12 +36335,16 @@ async function testACaptureOfOneNodeIsThatNodeAtItsOwnPixels(): Promise<void> {
           { name: 'runtime_capture', arguments: { op: 'screenshot', outputPath, ...args } },
           ENGINE_CALL_TIMEOUT_MS,
         );
-        const text = textOf(answered) ?? '';
+        const answerText = textOf(answered) ?? '';
         const image = asArray(get(answered, 'result', 'content')).find(
           (chunk) => get(chunk, 'type') === 'image',
         );
-        assert.equal(image !== undefined, existsSync(outputPath), `an image sent is an image saved: ${text}`);
-        return { text, png: existsSync(outputPath) ? pngPixels(readFileSync(outputPath)) : null };
+        assert.equal(
+          image !== undefined,
+          existsSync(outputPath),
+          `an image sent is an image saved: ${answerText}`,
+        );
+        return { text: answerText, png: existsSync(outputPath) ? pngPixels(readFileSync(outputPath)) : null };
       };
       const near = (actual: readonly number[], wanted: readonly number[]): boolean =>
         wanted.every((channel, index) => Math.abs((actual[index] ?? -1) - channel) <= 3);
@@ -36634,7 +36732,7 @@ async function testAFindByClassReachesWhatExtendsIt(): Promise<void> {
             ),
           )
             .map((node) => text(get(node, 'path')))
-            .sort();
+            .toSorted();
         assert.deepEqual(
           await found('Card'),
           ['/root/Main/Docket', '/root/Main/Intake', '/root/Main/Plain'],
@@ -38122,9 +38220,13 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       // filled empties at once. Eight are queued during a long frame, and on the first welcome a
       // second long call goes down that connection: taking one a frame, the game gets through only
       // the few frames before the call arrives, and the rest wait out the call.
-      const record = JSON.parse(
-        readFileSync(join(runtimeDir, `runtime-${held.game?.pid ?? 0}.json`), 'utf8'),
-      ) as { port: number };
+      const recordPort = asNumber(
+        get(
+          JSON.parse(readFileSync(join(runtimeDir, `runtime-${held.game?.pid ?? 0}.json`), 'utf8')),
+          'port',
+        ),
+        "the held game's runtime port",
+      );
       const longFrame = invoke('slow', [1500]);
       await delay(500);
       const welcomedAt: number[] = [];
@@ -38133,7 +38235,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         { length: 8 },
         async (_, index) =>
           await new Promise<string>((answer) => {
-            const socket = createConnection({ host: '127.0.0.1', port: record.port });
+            const socket = createConnection({ host: '127.0.0.1', port: recordPort });
             socket.setEncoding('utf8');
             let buffered = '';
             let first: string | null = null;
@@ -38460,7 +38562,7 @@ async function aRealBenchTakesItsWorkerWithIt(engine: string, tiedAtStart: boole
         assert.equal(get(stopped, 'endedPid'), benchPid, `${shape}: ${JSON.stringify(stopped)}`);
         assert.deepEqual(
           get(stopped, 'endedChildren'),
-          [workerPid, helperPid].sort((a, b) => a - b),
+          [workerPid, helperPid].toSorted((a, b) => a - b),
           `${shape}: the worker the bench opened and the helper the worker opened are ended with it: ${JSON.stringify(stopped)}`,
         );
         assert.equal(get(stopped, 'childrenLeft'), undefined, `${shape}: ${JSON.stringify(stopped)}`);
@@ -38572,7 +38674,7 @@ async function aStopEndsTheProjectsUnannouncedWorkers(engine: string): Promise<v
         ENGINE_CALL_TIMEOUT_MS,
       );
       const started = parseTextContent(startResponse) ?? { refused: textOf(startResponse) };
-      const workers: number[] = [];
+      let workers: number[] = [];
       let other = 0;
       const met = new MetProcesses();
       try {
@@ -38611,7 +38713,7 @@ async function aStopEndsTheProjectsUnannouncedWorkers(engine: string): Promise<v
           const bystanding = /^other (\d+)$/.exec(line);
           if (bystanding) other = Number(bystanding[1]);
         }
-        workers.sort((a, b) => a - b);
+        workers = workers.toSorted((a, b) => a - b);
         assert.equal(workers.length, 2, `${shape}: two workers: ${JSON.stringify(lines)}`);
         assert.ok(other > 0 && workers.every((pid) => pid > 0), `${shape}: every pid is a number`);
         await met.meet(...workers, other);
@@ -38732,17 +38834,17 @@ async function testARuntimeCallReachesThisServersOwnGame(): Promise<void> {
           const line = buffered.slice(0, newline);
           buffered = buffered.slice(newline + 1);
           newline = buffered.indexOf('\n');
-          const asked = JSON.parse(line) as { id: number; command: string; params: { output_path?: string } };
+          const asked: unknown = JSON.parse(line);
           // A capture is answered through the file the server named, as the addon answers it.
-          const into = asked.params.output_path;
-          if (asked.command === 'capture_screenshot' && into !== undefined) {
+          const into = get(asked, 'params', 'output_path');
+          if (get(asked, 'command') === 'capture_screenshot' && typeof into === 'string') {
             writeFileSync(into, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
             socket.write(
-              `${JSON.stringify({ id: asked.id, type: 'screenshot_file', path: into, width: 1, height: 1, format: 'png' })}\n`,
+              `${JSON.stringify({ id: get(asked, 'id'), type: 'screenshot_file', path: into, width: 1, height: 1, format: 'png' })}\n`,
             );
             continue;
           }
-          socket.write(`${JSON.stringify({ id: asked.id, type: 'tree', game: name })}\n`);
+          socket.write(`${JSON.stringify({ id: get(asked, 'id'), type: 'tree', game: name })}\n`);
         }
       });
       socket.on('error', () => {});
@@ -39145,7 +39247,11 @@ async function testTheProcessTableAgreesWithWmi(): Promise<void> {
       compared.push(pid);
     }
     const order = (a: number, b: number): number => a - b;
-    assert.deepEqual(compared.sort(order), [...pids].sort(order), `both processes were compared: ${wmi}`);
+    assert.deepEqual(
+      compared.toSorted(order),
+      [...pids].toSorted(order),
+      `both processes were compared: ${wmi}`,
+    );
     assert.equal(tree.get(probe.pid)?.parent, process.pid, 'the child names this process as its parent');
 
     const before = process.cpuUsage();
@@ -39246,12 +39352,12 @@ async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
   const met = new MetProcesses();
   try {
     assert.ok(typeof parent.pid === 'number');
-    const printed = await new Promise<string>((resolve) => {
-      let text = '';
+    const printed = await new Promise<string>((settle) => {
+      let said = '';
       parent.stdout.setEncoding('utf8');
       parent.stdout.on('data', (chunk: string) => {
-        text += chunk;
-        if (text.includes('\n')) resolve(text);
+        said += chunk;
+        if (said.includes('\n')) settle(said);
       });
     });
     child = Number(printed.trim());
@@ -39335,17 +39441,17 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
             held.bench = started;
             const benchPid = started.pid;
             assert.ok(typeof benchPid === 'number', 'the fixture needs a live bench');
-            const printed = await new Promise<string>((resolve) => {
-              let text = '';
+            const printed = await new Promise<string>((settle) => {
+              let said = '';
               started.stdout.setEncoding('utf8');
               started.stdout.on('data', (chunk: string) => {
-                text += chunk;
-                if (text.includes('\n')) resolve(text);
+                said += chunk;
+                if (said.includes('\n')) settle(said);
               });
             });
-            const pids = JSON.parse(printed.trim()) as { worker: number; other: number };
-            worker = pids.worker;
-            other = pids.other;
+            const pids: unknown = JSON.parse(printed.trim());
+            worker = asNumber(get(pids, 'worker'), 'the worker pid printed');
+            other = asNumber(get(pids, 'other'), 'the other pid printed');
             await met.meet(worker, other);
             const announce = (pid: number): void => {
               writeFileSync(
@@ -39369,7 +39475,7 @@ async function testAStopCanEndWhatTheGameStarted(): Promise<void> {
               announce(benchPid);
             }, 100);
             announceWorker = () => {
-              announce(pids.worker);
+              announce(worker);
             };
             return { ok: true, playing: true, scenePath: 'res://main.tscn', debugPort: adapter };
           }
@@ -39713,9 +39819,9 @@ async function pickUpAPlayedRun(
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -40017,7 +40123,7 @@ async function withAHeldGame(
   const port = await reservePort();
   const answerNothing: FramedPeerHandler = (message, socket) => {
     const command = String(message['command']);
-    const body =
+    const answer =
       command === 'threads'
         ? { threads: [{ id: 1, name: 'main' }] }
         : command === 'stackTrace'
@@ -40030,7 +40136,7 @@ async function withAHeldGame(
         request_seq: message['seq'],
         command,
         success: true,
-        body,
+        body: answer,
       }),
     );
   };
@@ -40073,9 +40179,9 @@ async function withAHeldGame(
         await server.initialize('regression-test');
         const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
         editor.socket = socket;
-        await new Promise<void>((resolve, reject) => {
+        await new Promise<void>((settle, reject) => {
           socket.once('open', () => {
-            resolve();
+            settle();
           });
           socket.once('error', reject);
         });
@@ -40454,7 +40560,10 @@ function testTheEditorHoldingAProjectIsNotARunOfIt(): void {
     arguments: ['--path', project],
     command: engine,
   };
-  const asked = (text: string): { kind: 'commandLine'; text: string } => ({ kind: 'commandLine', text });
+  const asked = (line: string): { kind: 'commandLine'; text: string } => ({
+    kind: 'commandLine',
+    text: line,
+  });
 
   // The positive first, and from the same record: an instrument that had stopped judging anything
   // would report every refusal below just as well.
@@ -41440,7 +41549,7 @@ async function testARunOutlivesItsServer(): Promise<void> {
       // the same mechanism. Asserted here rather than beside a run that has finished, where the
       // field is absent whatever the default is and the check could never fail.
       assert.ok(
-        !Object.hasOwn(output as Record<string, unknown>, 'cpuSeconds'),
+        !Object.hasOwn(asObject(output, 'the output read'), 'cpuSeconds'),
         `a read that did not ask for processor time does not go and get it: ${JSON.stringify(output)}`,
       );
       const printed = asArray(get(output, 'entries')).map((entry) => text(get(entry, 'text')));
@@ -41615,7 +41724,7 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
           path: 'res://scripts',
         });
         assert.deepEqual(
-          (JSON.parse(inScripts) as SearchResult).results.map((entry) => entry.file),
+          searchAnswer(inScripts).results.map((entry) => entry.file),
           ['res://scripts/hero.gd'],
           inScripts,
         );
@@ -41645,12 +41754,10 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
             'project_search takes maxResults as integer, not 1.5.',
           ],
         );
-        const one = JSON.parse(
+        const one = searchAnswer(
           await call('project_search', { projectPath: ours, query: 'extends', maxResults: 1 }),
-        ) as SearchResult;
-        const every = JSON.parse(
-          await call('project_search', { projectPath: ours, query: 'extends' }),
-        ) as SearchResult;
+        );
+        const every = searchAnswer(await call('project_search', { projectPath: ours, query: 'extends' }));
         assert.deepEqual(
           [
             one.results.flatMap((entry) => entry.matches).length,
@@ -41916,7 +42023,7 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
         );
         // The answer is a sentence and then the JSON, or the JSON alone, depending on whether a report was written.
         const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
-        const json = blocks.find((text) => text.trimStart().startsWith('{')) ?? '{}';
+        const json = blocks.find((block) => block.trimStart().startsWith('{')) ?? '{}';
         return JSON.parse(json) as unknown;
       };
       // A run that wrote its report says how long the whole call took beside gdUnit4's own seconds.
@@ -41969,16 +42076,16 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
         `a run cut off before its report answers with the lines asked for: ${JSON.stringify(passedLines.slice(0, 3))}`,
       );
       // A limit no engine starts in kills the run before it prints a line, which is not a hang.
-      const unstarted = await run('res://steady', 1);
+      const unstartedRun = await run('res://steady', 1);
       assert.deepEqual(
-        [get(unstarted, 'timedOut'), get(unstarted, 'hung')],
+        [get(unstartedRun, 'timedOut'), get(unstartedRun, 'hung')],
         [true, false],
-        JSON.stringify(unstarted),
+        JSON.stringify(unstartedRun),
       );
       assert.match(
-        String(get(unstarted, 'verdict')),
+        String(get(unstartedRun, 'verdict')),
         /^timed out after 1 ms before the engine printed anything, so it may still have been starting: timeoutMs counts milliseconds/,
-        JSON.stringify(unstarted),
+        JSON.stringify(unstartedRun),
       );
       const stuck = await run('res://stuck');
       assert.equal(get(stuck, 'hung'), true, `a run silent at the kill is hung: ${JSON.stringify(stuck)}`);
@@ -42466,9 +42573,9 @@ async function testAProfileIsWrittenPastAReader(): Promise<void> {
       ],
       { stdio: ['ignore', 'pipe', 'inherit'] },
     );
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       holder.stdout.once('data', () => {
-        resolve();
+        settle();
       });
       holder.once('exit', () => {
         reject(new Error('the holder exited before it held the file'));
@@ -42478,7 +42585,7 @@ async function testAProfileIsWrittenPastAReader(): Promise<void> {
   };
   const finished = async (holder: ChildProcess): Promise<void> => {
     if (holder.exitCode === null) {
-      await new Promise((resolve) => holder.once('exit', resolve));
+      await new Promise((settle) => holder.once('exit', settle));
     }
   };
   try {
@@ -42636,13 +42743,13 @@ async function testARunNoteIsNeverReadHalfWritten(): Promise<void> {
     if (Date.now() - began > 10_000) {
       console.log(`run note race regression took long: ${timing}`);
     }
-    const seen = JSON.parse(said) as Record<string, number>;
-    assert.ok((seen['parsed'] ?? 0) > 100, `the reader read the notes throughout: ${said}; ${timing}`);
+    const seen = asObject(JSON.parse(said), 'what the reader saw');
+    assert.ok(Number(seen['parsed'] ?? 0) > 100, `the reader read the notes throughout: ${said}; ${timing}`);
     assert.equal(seen['notes'], 3, `the run note, the editor-played run's and the latest run's: ${said}`);
     // Ten versions across the three notes is the reader having met the notes mid-rewrite many times
     // over; one version each is a reader that ran beside a writer that had stopped.
     assert.ok(
-      (seen['versions'] ?? 0) >= 10,
+      Number(seen['versions'] ?? 0) >= 10,
       `the reader met the notes as they were rewritten: ${said}; ${timing}`,
     );
     assert.deepEqual(
@@ -43120,7 +43227,7 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       const selves = rows.map((one) => Number(get(one, 'selfMs')));
       assert.deepEqual(
         selves,
-        [...selves].sort((a, b) => b - a),
+        [...selves].toSorted((a, b) => b - a),
         `sorted by self time: ${wholeShown}`,
       );
       assert.ok(Number(get(whole, 'scriptMs')) > 0, wholeShown);
@@ -43153,7 +43260,7 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         .filter((one) => String(get(one, 'function')).includes('lambda'))
         .map((one) => [get(one, 'line'), get(one, 'within'), Number(get(one, 'calls')) > 50]);
       assert.deepEqual(
-        lambdas.sort((a, b) => Number(a[0]) - Number(b[0])),
+        lambdas.toSorted((a, b) => Number(a[0]) - Number(b[0])),
         [
           [24, 'ranked', true],
           [26, 'ranked', true],
@@ -43187,7 +43294,7 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         get(one, 'withinCalls'),
       ]);
       assert.deepEqual(
-        sites.sort((a, b) => Number(a[1]) - Number(b[1])),
+        sites.toSorted((a, b) => Number(a[1]) - Number(b[1])),
         [
           ['res://harness/work.gd', 13, 'busy', true, 1],
           ['res://harness/work.gd', 19, '_ready', true, 1],
@@ -43464,7 +43571,7 @@ async function testAProfileSinceAMarkAnswersForOneAction(): Promise<void> {
   const press = since.totals.functions['res://main.gd::9::press'];
   assert.deepEqual(
     [
-      Object.keys(since.totals.functions).sort(),
+      Object.keys(since.totals.functions).toSorted(),
       press?.calls,
       Math.round((press?.selfSeconds ?? 0) * 1e6),
       Math.round((press?.totalSeconds ?? 0) * 1e6),
@@ -44113,18 +44220,26 @@ function testTheShippedRunnerRunsAFileOfSuites(): void {
     const lines = readFileSync(reached, 'utf8')
       .trim()
       .split('\n')
-      .map(
-        (line) =>
-          JSON.parse(line) as {
-            autoloads?: boolean;
-            began?: string;
-            suite?: string;
-            resident?: string[];
-            reached: string[];
-          },
-      );
+      .map((line) => {
+        const entry: unknown = JSON.parse(line);
+        const named = (key: string): string | undefined => {
+          const value = get(entry, key);
+          return value === undefined ? undefined : asString(value, `${key} in ${line}`);
+        };
+        const paths = (key: string): string[] =>
+          asArray(get(entry, key) ?? [], `${key} in ${line}`).map((path) =>
+            asString(path, `${key} in ${line}`),
+          );
+        return {
+          autoloads: get(entry, 'autoloads') === true,
+          began: named('began'),
+          suite: named('suite'),
+          resident: paths('resident'),
+          reached: paths('reached'),
+        };
+      });
     assert.deepEqual(
-      lines.map((line) => (line.autoloads === true ? 'autoloads' : (line.began ?? line.suite))),
+      lines.map((line) => (line.autoloads ? 'autoloads' : (line.began ?? line.suite))),
       [
         'autoloads',
         'res://tests/b_test.gd',
@@ -44323,7 +44438,9 @@ function testAnEngineRunIsReadCaseByCase(): void {
   assert.equal(closed.verdict, 'FAILED', 'with its verdict');
   assert.ok(Math.abs(closed.seconds - 62.03) < 1e-9, `a time past a minute: ${String(closed.seconds)}`);
   assert.deepEqual(
-    [...printed.errors].sort((a, b) => a.at - b.at).map((error) => [error.text, error.suite, error.during]),
+    [...printed.errors]
+      .toSorted((a, b) => a.at - b.at)
+      .map((error) => [error.text, error.suite, error.during]),
     [
       ['printed before any suite', null, null],
       ['said in before', S_TEST, 'before'],
@@ -45244,13 +45361,13 @@ function testARowSkippedForItsDataIsNoPass(): void {
 
   // A case gdUnit4 cannot run as declared is printed the same way with its reason on one line, and
   // a case skipped on purpose prints its own reason there, which fails nothing.
-  const declaredRun = (reason: string): string =>
+  const declaredRun = (skipReason: string): string =>
     cannedRun([
       caseLine(S_TEST, 'test_a', 'STARTED'),
       caseLine(S_TEST, 'test_a', 'PASSED', '0ms'),
       '  \u001b[38;2;0;206;209m\u001b[1m\u001b[4mReport:\u001b[0m',
       '  \u001b[38;2;128;128;128m\u001b[38;2;255;69;0mThis test is skipped!\u001b[0m',
-      `  Reason: '\u001b[38;2;30;144;255m${reason}\u001b[0m'`,
+      `  Reason: '\u001b[38;2;30;144;255m${skipReason}\u001b[0m'`,
       '\u001b[0m\u001b[38;2;128;128;128m\u001b[0m',
       caseLine(S_TEST, 'test_p', 'STARTED'),
       caseLine(S_TEST, 'test_p', 'PASSED', '5ms'),
@@ -45348,29 +45465,33 @@ async function testASlotWaitLooksWhenTheSlotsChange(): Promise<void> {
  */
 async function testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone(): Promise<void> {
   const now = 1_000_000;
-  const isAlive = (pid: number): boolean => pid === 10;
+  const onlyTenAlive = (pid: number): boolean => pid === 10;
   const startOf = (pid: number): number | undefined => (pid === 10 ? 5000 : undefined);
   const lock = (pid: number, started: number): string => JSON.stringify({ pid, started });
-  assert.equal(lockIsFree(lock(11, 5000), now, now, isAlive, startOf), true, 'a pid nothing has');
-  assert.equal(lockIsFree(lock(10, 5000), now, now, isAlive, startOf), false, 'its holder still running');
+  assert.equal(lockIsFree(lock(11, 5000), now, now, onlyTenAlive, startOf), true, 'a pid nothing has');
   assert.equal(
-    lockIsFree(lock(10, 5000 + START_TOLERANCE_MS), now, now, isAlive, startOf),
+    lockIsFree(lock(10, 5000), now, now, onlyTenAlive, startOf),
+    false,
+    'its holder still running',
+  );
+  assert.equal(
+    lockIsFree(lock(10, 5000 + START_TOLERANCE_MS), now, now, onlyTenAlive, startOf),
     false,
     'within the tolerance',
   );
   assert.equal(
-    lockIsFree(lock(10, 5000 + START_TOLERANCE_MS + 1), now, now, isAlive, startOf),
+    lockIsFree(lock(10, 5000 + START_TOLERANCE_MS + 1), now, now, onlyTenAlive, startOf),
     true,
     'a later process',
   );
   assert.equal(
-    lockIsFree(lock(10, 1), now, now, isAlive, () => undefined),
+    lockIsFree(lock(10, 1), now, now, onlyTenAlive, () => undefined),
     false,
     'an unknown start holds it',
   );
-  assert.equal(lockIsFree('', now - UNWRITTEN_MS, now, isAlive, startOf), false, 'a lock being written');
+  assert.equal(lockIsFree('', now - UNWRITTEN_MS, now, onlyTenAlive, startOf), false, 'a lock being written');
   assert.equal(
-    lockIsFree('{"pid": "x"}', now - UNWRITTEN_MS - 1, now, isAlive, startOf),
+    lockIsFree('{"pid": "x"}', now - UNWRITTEN_MS - 1, now, onlyTenAlive, startOf),
     true,
     'one never written',
   );
@@ -45386,7 +45507,7 @@ async function testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone(): Promise<void
     const slots = new EngineSlots(directory, 2, { pid: process.pid, started, by: 'gdharness test of /p' });
     const first = await slots.take();
     const second = await slots.take();
-    assert.deepEqual(readdirSync(directory).sort(), ['0.lock', '1.lock'], 'one file a slot');
+    assert.deepEqual(readdirSync(directory).toSorted(), ['0.lock', '1.lock'], 'one file a slot');
     assert.deepEqual(
       holderOf(readFileSync(first, 'utf8')),
       { pid: process.pid, started, by: 'gdharness test of /p' },
@@ -45500,7 +45621,7 @@ async function testATakeSweepsGoneLocksPastTheCount(): Promise<void> {
     const taken = await slots.takeFree();
     assert.equal(taken, join(directory, '0.lock'), 'the take itself goes on as it would');
     assert.deepEqual(
-      readdirSync(directory).sort(),
+      readdirSync(directory).toSorted(),
       ['0.lock', '1.lock', '18.lock', '18.lock.steal', '19.lock', 'notes.lock'],
       'the gone holders past the count are removed, and a live one and one being taken over stay',
     );
@@ -45868,7 +45989,7 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
       'a gone gate and an unwritten mark keep no slots, and the live wait is left the first it takes',
     );
     assert.deepEqual(
-      readdirSync(queued).sort(),
+      readdirSync(queued).toSorted(),
       ['writing.json'],
       "and the gone gate's mark is removed with its seat",
     );
@@ -46028,7 +46149,7 @@ async function testTakersWaitTheirTurn(): Promise<void> {
     'the second wants only what the first took',
   );
   assert.deepEqual(
-    [...slotsClaimed([[3], [3, 2]], [2, 3])].sort(([a], [b]) => a - b),
+    [...slotsClaimed([[3], [3, 2]], [2, 3])].toSorted(([a], [b]) => a - b),
     [
       [2, 1],
       [3, 0],
@@ -46145,7 +46266,7 @@ async function testTakersWaitTheirTurn(): Promise<void> {
 async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
   const marks = join(directory, WAITING_FOLDER);
-  const marked = (): string[] => (existsSync(marks) ? readdirSync(marks).sort() : []);
+  const marked = (): string[] => (existsSync(marks) ? readdirSync(marks).toSorted() : []);
   const markedSoon = async (count: number): Promise<string[]> => {
     const until = Date.now() + 5000;
     while (marked().length !== count && Date.now() < until) {
@@ -46171,7 +46292,7 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
     const one = await markedSoon(1);
     assert.equal(one.length, 1, 'a take finding every slot held marks its wait');
     assert.match(one[0] ?? '', new RegExp(`^${String(process.pid)}-\\d+\\.json$`), 'named by pid and wait');
-    const said = JSON.parse(readFileSync(join(marks, one[0] ?? ''), 'utf8')) as Record<string, unknown>;
+    const said = asObject(JSON.parse(readFileSync(join(marks, one[0] ?? ''), 'utf8')), 'the wait mark');
     assert.deepEqual(
       { ...said, since: 0 },
       { ...holder, taker: slotTaker(), since: 0 },
@@ -46237,9 +46358,9 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
 
 /** Writes [param files] under [param root], by path. */
 function writeTree(root: string, files: Readonly<Record<string, string>>): void {
-  for (const [path, text] of Object.entries(files)) {
+  for (const [path, content] of Object.entries(files)) {
     mkdirSync(dirname(join(root, path)), { recursive: true });
-    writeFileSync(join(root, path), text);
+    writeFileSync(join(root, path), content);
   }
 }
 
@@ -46646,8 +46767,8 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
         unit(`h${String(index)}`, cost, false, true),
       ),
     ];
-    const shape = (plans: readonly EnginePlan[]): unknown[] =>
-      plans.map((plan) => [plan.lane, plan.windowed, plan.suites.map((s) => s.path)]);
+    const shape = (dealtPlans: readonly EnginePlan[]): unknown[] =>
+      dealtPlans.map((plan) => [plan.lane, plan.windowed, plan.suites.map((s) => s.path)]);
     assert.deepEqual(
       shape(dealt(said, new Map(said.map((u) => [u.suite, u.cases])), 4)),
       shape(shared),
@@ -46717,24 +46838,24 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     }
     assert.ok(shares.empty, 'nothing is left once next answers null');
     assert.equal(shares.next(0), null, 'and every lane asking after that is told so');
-    const path = (name: string): string => `res://tests/${name}_test.gd`;
+    const suiteNamed = (name: string): string => `res://tests/${name}_test.gd`;
     assert.deepEqual(
       handed,
       [
-        [0, true, [path('scene')]],
-        [1, false, [path('h0'), path('h4')]],
-        [0, false, [path('h1'), path('h7')]],
-        [2, false, [path('h2')]],
-        [0, false, [path('h3')]],
-        [2, false, [path('h5')]],
-        [1, false, [path('h6')]],
-        [2, false, [path('h8')]],
+        [0, true, [suiteNamed('scene')]],
+        [1, false, [suiteNamed('h0'), suiteNamed('h4')]],
+        [0, false, [suiteNamed('h1'), suiteNamed('h7')]],
+        [2, false, [suiteNamed('h2')]],
+        [0, false, [suiteNamed('h3')]],
+        [2, false, [suiteNamed('h5')]],
+        [1, false, [suiteNamed('h6')]],
+        [2, false, [suiteNamed('h8')]],
       ],
       'the windowed suite first and alone, then the slowest up to a third of what is left, shrinking as it runs out',
     );
     assert.deepEqual(
-      handed.flatMap(([, , paths]) => paths).sort(),
-      quick.map((u) => u.suite).sort(),
+      handed.flatMap(([, , suitePaths]) => suitePaths).toSorted(),
+      quick.map((u) => u.suite).toSorted(),
       'every suite handed out once',
     );
     const staticEnd = Math.max(
@@ -46858,7 +46979,7 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     const turned = await inTurns([30, 10, 20, 5], 2, async (wait, index) => {
       going += 1;
       most = Math.max(most, going);
-      await new Promise((resolve) => setTimeout(resolve, wait));
+      await new Promise((settle) => setTimeout(settle, wait));
       going -= 1;
       return `${String(index)}:${String(wait)}`;
     });
@@ -46972,7 +47093,7 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     );
     assert.deepEqual(after[edge.path], times[edge.path], 'a suite that did not run keeps its times');
     assert.deepEqual(
-      Object.keys(after).sort(),
+      Object.keys(after).toSorted(),
       [big.path, edge.path, small.path],
       'and a suite the project no longer has is dropped',
     );
@@ -46999,7 +47120,7 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     };
     const rowUnits = unitsOf([matrix, lone_, small], rowTimes);
     assert.deepEqual(
-      rowUnits.map((unit) => [unit.suite, unit.cases, unit.row ?? null, unit.cost]),
+      rowUnits.map((rowUnit) => [rowUnit.suite, rowUnit.cases, rowUnit.row ?? null, rowUnit.cost]),
       [
         [matrix.path, ['test_face'], { index: 0, rest: false }, 7],
         [matrix.path, ['test_face'], { index: 1, rest: false }, 7],
@@ -47016,8 +47137,8 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     const rowDeclared = new Map([matrix, lone_, small].map((s) => [s.path, s.cases]));
     const rowPlans = dealt(rowUnits, rowDeclared, 4);
     type Shares = [readonly string[], Readonly<Record<string, RowShare>> | null];
-    const sharesOf = (plans: readonly EnginePlan[], path: string): Shares[] =>
-      plans.flatMap((plan) =>
+    const sharesOf = (dealtPlans: readonly EnginePlan[], path: string): Shares[] =>
+      dealtPlans.flatMap((plan) =>
         plan.suites.filter((s) => s.path === path).map((s): Shares => [s.cases, s.rows ?? null]),
       );
     assert.deepEqual(
@@ -47358,9 +47479,9 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
 
     const first = printOf(suite);
     assert.equal(printOf(suite), first, 'the same files, the same print');
-    const moves = (reached: readonly string[], path: string, text: string): boolean => {
+    const moves = (reached: readonly string[], path: string, content: string): boolean => {
       const before = printOf(reached);
-      writeFileSync(join(project, path), text);
+      writeFileSync(join(project, path), content);
       return printOf(reached) !== before;
     };
     assert.equal(moves(['res://reader.gd'], 'data/levels.json', '[2]\n'), true, 'the file it reads');
@@ -47395,7 +47516,7 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
       true,
       'the resource it asked about appearing',
     );
-    const changes = (path: string, text: string): boolean => moves(suite, path, text);
+    const changes = (path: string, content: string): boolean => moves(suite, path, content);
     assert.equal(
       changes('other.gd', 'class_name Other\nextends Node2D\n'),
       false,
@@ -47486,8 +47607,8 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
 
     // Of what the cache held, a load by a path that names nothing takes it all, one by a path begun
     // with a constant what lies under it, and one by a path it names none.
-    const held = (suite: string, resident: readonly string[]): string[] =>
-      new SuiteInputs(scripts, ['1']).inputsOfSuite(suite, { autoloads: [], during: [], resident });
+    const held = (suitePath: string, resident: readonly string[]): string[] =>
+      new SuiteInputs(scripts, ['1']).inputsOfSuite(suitePath, { autoloads: [], during: [], resident });
     const ofC = held('res://tests/c_test.gd', ['res://sound/a.ogg', 'res://helper.gd']);
     assert.ok(ofC.includes('res://sound/a.ogg'), `what the cache held under the start: ${ofC.join(', ')}`);
     assert.ok(!ofC.includes('res://helper.gd'), `and nothing else it held: ${ofC.join(', ')}`);
@@ -48076,9 +48197,9 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
     );
     assert.deepEqual(taken, [lineHeld, lineHeld, lineHeld], 'every lane takes the slot in turn');
     assert.equal(lines.length, 1, lines.join('\n'));
-    const line = lines[0] ?? '';
-    assert.match(line, /^Waiting [23] s so far for an engine: /, line);
-    assert.ok(line.endsWith(oneSlot), line);
+    const waiting = lines[0] ?? '';
+    assert.match(waiting, /^Waiting [23] s so far for an engine: /, waiting);
+    assert.ok(waiting.endsWith(oneSlot), waiting);
     assert.deepEqual([told.length, unheard], [1, []], `told at ${told.join(', ')}: ${unheard.join('\n')}`);
 
     writeFileSync(lineHeld, JSON.stringify(me));
@@ -48260,9 +48381,7 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
       assert.equal(get(checked, 'booted'), true, JSON.stringify(checked));
       assert.deepEqual(leftInSlots(slots), [], 'and the server gives it back once the run is read');
       // The answer says it too, since a caller reading only the answer saw a slow step and no reason.
-      const waits = asArray(get(answered, 'result', 'content'))
-        .map((block) => slotWaitOf(block as { type: string; text?: string }))
-        .filter((block) => block !== null);
+      const waits = (contentOf(answered) ?? []).map(slotWaitOf).filter((block) => block !== null);
       assert.equal(waits.length, 1, JSON.stringify(answered));
       assert.ok(asNumber(get(waits[0], 'waitedMs')) >= 1000, JSON.stringify(waits));
       assert.equal(
@@ -48276,9 +48395,7 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
       );
       assert.equal(get(JSON.parse(textOf(free) ?? '{}'), 'booted'), true, JSON.stringify(free));
       assert.deepEqual(
-        asArray(get(free, 'result', 'content'))
-          .map((block) => slotWaitOf(block as { type: string; text?: string }))
-          .filter((block) => block !== null),
+        (contentOf(free) ?? []).map(slotWaitOf).filter((block) => block !== null),
         [],
         `a call that found a slot free says nothing of slots: ${JSON.stringify(free)}`,
       );
@@ -48318,9 +48435,7 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
         rmSync(ours);
         const answer = await starting;
         const startedThere = JSON.parse(textOf(answer) ?? '{}') as unknown;
-        const waited = asArray(get(answer, 'result', 'content'))
-          .map((block) => slotWaitOf(block as { type: string; text?: string }))
-          .filter((block) => block !== null);
+        const waited = (contentOf(answer) ?? []).map(slotWaitOf).filter((block) => block !== null);
         assert.ok(asNumber(get(waited[0], 'waitedMs')) > budgetMs, JSON.stringify(waited));
         assert.equal(
           get(startedThere, 'runtime', 'listening'),
@@ -48460,7 +48575,7 @@ function testTheLspCommandFindsTheEditorsPort(): void {
     const removed = removeLeftRecords(editorRecordsIn(project), startedAt, (pid) => pid === 109);
     assert.equal(removed, 2);
     assert.deepEqual(
-      readdirSync(directory).sort(),
+      readdirSync(directory).toSorted(),
       ['101.json', '103.json', '104.json', '106.json', '109.json', 'notes.json'],
       'only the records provably left behind are deleted',
     );
@@ -48712,7 +48827,7 @@ async function testASpreadBenchGathersTheTableItPlaysAlone(): Promise<void> {
   }
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spread-'));
   const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spread-slots-'));
-  const runtimeDirectory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spread-runtime-'));
+  const spreadRuntime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spread-runtime-'));
   try {
     writeTree(project, {
       'project.godot':
@@ -48755,7 +48870,7 @@ async function testASpreadBenchGathersTheTableItPlaysAlone(): Promise<void> {
         '',
       ].join('\n'),
     });
-    const env = { ...process.env, GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDirectory };
+    const env = { ...process.env, GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: spreadRuntime };
     const cli = (...args: string[]): { said: string; status: number | null } => {
       const ran = spawnSyncHidden(process.execPath, [resolve('build', 'cli.js'), ...args], {
         encoding: 'utf8',
@@ -48791,8 +48906,8 @@ async function testASpreadBenchGathersTheTableItPlaysAlone(): Promise<void> {
       `the bench prints its table alone: ${aloneSaid}`,
     );
     assert.match(aloneSaid, /^added=\{ "won": 9, "most_x": 9 \}$/m, aloneSaid);
-    rmSync(runtimeDirectory, { recursive: true, force: true });
-    mkdirSync(runtimeDirectory);
+    rmSync(spreadRuntime, { recursive: true, force: true });
+    mkdirSync(spreadRuntime);
 
     const spread = cli('spread', project, 'bench/bench.tscn', '--workers', '3', '--slots', slots);
     assert.equal(spread.status, 0, spread.said);
@@ -48840,11 +48955,7 @@ async function testASpreadBenchGathersTheTableItPlaysAlone(): Promise<void> {
       /runtime listening/,
       `the gathering engine serves nothing: ${spread.said}`,
     );
-    assert.deepEqual(
-      readdirSync(runtimeDirectory),
-      [],
-      'no engine of the spread announced itself as the game',
-    );
+    assert.deepEqual(readdirSync(spreadRuntime), [], 'no engine of the spread announced itself as the game');
     assert.deepEqual(
       readdirSync(join(project, '.godot', 'gdharness', 'spread-runs')),
       [],
@@ -48918,7 +49029,7 @@ async function testASpreadBenchGathersTheTableItPlaysAlone(): Promise<void> {
   } finally {
     rmSync(project, { recursive: true, force: true });
     rmSync(slots, { recursive: true, force: true });
-    rmSync(runtimeDirectory, { recursive: true, force: true });
+    rmSync(spreadRuntime, { recursive: true, force: true });
   }
 }
 
@@ -48963,12 +49074,9 @@ function testATestRunDealsByAndRecordsIntoTheTimesItIsGiven(): void {
     const gateTimes = join(project, 'gate', 'suite-times.json');
     const first = test('--times', gateTimes);
     assert.equal(first.status, 0, first.said);
-    const recorded = (existsSync(gateTimes) ? JSON.parse(readFileSync(gateTimes, 'utf8')) : {}) as Record<
-      string,
-      { cases?: object }
-    >;
+    const recorded = readTimes(gateTimes);
     assert.deepEqual(
-      Object.keys(recorded['res://tests/ok_test.gd']?.cases ?? {}).sort(),
+      Object.keys(recorded['res://tests/ok_test.gd']?.cases ?? {}).toSorted(),
       ['test_one', 'test_two'],
       `what the run took, recorded into the file named: ${JSON.stringify(recorded)}`,
     );
@@ -48982,13 +49090,13 @@ function testATestRunDealsByAndRecordsIntoTheTimesItIsGiven(): void {
         'res://tests/ok_test.gd': { seconds: 30, cases: { test_one: 15, test_two: 15 } },
       }),
     );
-    const dealt = test('--engines', '2', '--times', gateTimes);
-    assert.equal(dealt.status, 0, dealt.said);
+    const byGateTimes = test('--engines', '2', '--times', gateTimes);
+    assert.equal(byGateTimes.status, 0, byGateTimes.said);
     // Dealt for two engines whatever the memory, which then decides only how many run at once.
     assert.match(
-      dealt.said,
+      byGateTimes.said,
       /^Dealt out case by case, since it took more than an engine's share of this run \(\d+ s\) last time: res:\/\/tests\/ok_test\.gd\.$/m,
-      `dealt by the times in the file named, the project's own being empty: ${dealt.said}`,
+      `dealt by the times in the file named, the project's own being empty: ${byGateTimes.said}`,
     );
     assert.equal(readFileSync(own, 'utf8'), '{}\n', "the project's own left as it was");
   } finally {
@@ -49084,25 +49192,22 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     );
     assert.ok(existsSync(join(project, '.godot', 'global_script_class_cache.cfg')), first.said);
     const state = join(project, '.godot', 'gdharness');
-    const times = JSON.parse(readFileSync(join(state, 'suite-times.json'), 'utf8')) as Record<
-      string,
-      { cases: Record<string, number> }
-    >;
+    const times = timesWritten(join(state, 'suite-times.json'));
     assert.deepEqual(
-      Object.keys(times).sort(),
+      Object.keys(times).toSorted(),
       ['res://tests/declared_test.gd', 'res://tests/ok_test.gd'],
       'both timed',
     );
-    assert.deepEqual(Object.keys(times['res://tests/ok_test.gd']?.cases ?? {}).sort(), [
+    assert.deepEqual(Object.keys(times['res://tests/ok_test.gd']?.cases ?? {}).toSorted(), [
       'test_one',
       'test_two',
     ]);
-    const passed = JSON.parse(readFileSync(join(state, 'suite-passed.json'), 'utf8')) as Record<
-      string,
-      string
-    >;
+    const passed = asObject(
+      JSON.parse(readFileSync(join(state, 'suite-passed.json'), 'utf8')),
+      'suite-passed.json',
+    );
     assert.deepEqual(
-      Object.keys(passed).sort(),
+      Object.keys(passed).toSorted(),
       ['res://tests/declared_test.gd', 'res://tests/ok_test.gd'],
       'both passed',
     );
@@ -49182,7 +49287,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     assert.doesNotMatch(uncached.said, /The import was skipped/, `it was imported: ${uncached.said}`);
 
     const resultFile = join(checkouts, 'result.json');
-    const resultOf = (): RunResult => JSON.parse(readFileSync(resultFile, 'utf8')) as RunResult;
+    const resultOf = (): RunResult => readRunResult(resultFile);
     const noisy = test(
       'tests/ok_test.gd',
       'tests/declared_test.gd',
@@ -49317,7 +49422,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       passedFile,
       JSON.stringify(
         Object.fromEntries(
-          Object.entries(JSON.parse(readFileSync(passedFile, 'utf8')) as Record<string, unknown>).filter(
+          Object.entries(asObject(JSON.parse(readFileSync(passedFile, 'utf8')), 'suite-passed.json')).filter(
             ([path]) => path !== 'res://tests/loads_test.gd',
           ),
         ),
@@ -49349,12 +49454,12 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       /Nothing at res:\/\/tests\/nothing_test\.gd in the project at /,
       'a path that is nowhere is missing from the project, not outside it',
     );
-    const passedAfter = JSON.parse(readFileSync(join(state, 'suite-passed.json'), 'utf8')) as Record<
-      string,
-      string
-    >;
+    const passedAfter = asObject(
+      JSON.parse(readFileSync(join(state, 'suite-passed.json'), 'utf8')),
+      'suite-passed.json',
+    );
     assert.deepEqual(
-      Object.keys(passedAfter).sort(),
+      Object.keys(passedAfter).toSorted(),
       ['res://tests/declared_test.gd', 'res://tests/ok_test.gd', 'res://tests/window_declared_test.gd'],
       'a failing suite is not kept as passed, so the next run asks it again',
     );
@@ -49420,7 +49525,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       `a passing run removes its logs, and its result says so: ${JSON.stringify(passedResult.engines)} ${JSON.stringify(passedResult.suites)}`,
     );
     assert.deepEqual(
-      passedResult.suites.map((suite) => suite.path).sort(),
+      passedResult.suites.map((suite) => suite.path).toSorted(),
       ['res://tests/declared_test.gd', 'res://tests/ok_test.gd'],
       'every suite it ran',
     );
@@ -49452,7 +49557,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       `each engine says its lane and when it started, inside the run: ${JSON.stringify(passedResult)}`,
     );
     assert.deepEqual(
-      [...new Set(passedResult.engines.flatMap((one) => one.suites))].sort(),
+      [...new Set(passedResult.engines.flatMap((one) => one.suites))].toSorted(),
       ['res://tests/declared_test.gd', 'res://tests/ok_test.gd'],
       'and the suites each was handed',
     );
@@ -49465,7 +49570,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     const quiet = test('tests/says_test.gd');
     assert.equal(quiet.status, 0, quiet.said);
     assert.deepEqual(
-      (JSON.parse(readFileSync(lastRunFile, 'utf8')) as RunResult).suites.map((suite) => suite.path),
+      readRunResult(lastRunFile).suites.map((suite) => suite.path),
       ['res://tests/says_test.gd'],
       'a run given no --result keeps its result there too',
     );
@@ -49473,7 +49578,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     assert.ok(!quiet.said.includes('frames per second: 4f2a'), quiet.said);
     // The failed runs above keep their logs, so what this one leaves is read against them.
     const runsOf = (): string[] =>
-      existsSync(join(state, 'test-runs')) ? readdirSync(join(state, 'test-runs')).sort() : [];
+      existsSync(join(state, 'test-runs')) ? readdirSync(join(state, 'test-runs')).toSorted() : [];
     const before = runsOf();
     const told = test('tests/says_test.gd', '--print-output');
     assert.equal(told.status, 0, told.said);
@@ -49500,7 +49605,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     const timesFile = join(state, 'suite-times.json');
     const timed = readFileSync(timesFile, 'utf8');
     const slowTimes = JSON.stringify({
-      ...(JSON.parse(timed) as object),
+      ...asObject(JSON.parse(timed), 'the times kept'),
       'res://tests/ok_test.gd': { seconds: 30, cases: { test_one: 15, test_two: 15 } },
     });
     writeFileSync(timesFile, slowTimes);
@@ -49611,7 +49716,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     writeFileSync(
       timesFile,
       JSON.stringify({
-        ...(JSON.parse(timesKept) as object),
+        ...asObject(JSON.parse(timesKept), 'the times kept'),
         'res://tests/ok_test.gd': { seconds: 201, cases: { test_one: 100, test_two: 100 } },
         'res://tests/hang_test.gd': { seconds: 0.6, cases: { test_hangs: 0.5 } },
       }),
@@ -50326,11 +50431,9 @@ async function testARunawayEngineLogIsCutAndEnded(): Promise<void> {
       looks += 1;
       if (looks > 1) {
         const exitingPid = Number(/^pid (\d+)/.exec(readLog(join(exiting, 'engine.log')))?.[1]);
+        const exited = (): boolean => Number.isInteger(exitingPid) && exitingPid > 0 && !alive(exitingPid);
         const until = Date.now() + 15_000;
-        while (
-          !(Number.isInteger(exitingPid) && exitingPid > 0 && !alive(exitingPid)) &&
-          Date.now() < until
-        ) {
+        while (!exited() && Date.now() < until) {
           await delay(50);
         }
       }
@@ -50411,10 +50514,10 @@ async function testAnEngineWritesItsLogThroughAPipeOnWindows(): Promise<void> {
       log,
       60,
     );
-    const text = readFileSync(log, 'utf8');
-    assert.equal(end.ended, null, text);
-    assert.equal(end.code, 0, text);
-    const said = text
+    const logged = readFileSync(log, 'utf8');
+    assert.equal(end.ended, null, logged);
+    assert.equal(end.code, 0, logged);
+    const said = logged
       .split(/\r?\n/)
       .filter((line) => /^(stdout is|held |out \d|err \d|the last line)/.test(line));
     assert.deepEqual(
@@ -50430,7 +50533,7 @@ async function testAnEngineWritesItsLogThroughAPipeOnWindows(): Promise<void> {
         'err 2',
         'the last line',
       ],
-      text,
+      logged,
     );
     if (process.platform !== 'win32') {
       return;
@@ -50633,8 +50736,7 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
       return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
     };
     const timesFile = join(project, '.godot', 'gdharness', 'suite-times.json');
-    const rowsTimed = (): number | undefined =>
-      (JSON.parse(readFileSync(timesFile, 'utf8')) as SuiteTimes)[path]?.rows?.['test_face']?.length;
+    const rowsTimed = (): number | undefined => timesWritten(timesFile)[path]?.rows?.['test_face']?.length;
     const first = test('--import', '--engines', '1');
     assert.equal(first.status, 0, first.said);
     assert.equal(rowsTimed(), 6, `each row is timed on its own: ${readFileSync(timesFile, 'utf8')}`);
@@ -50647,14 +50749,14 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
       }
       return ran;
     };
-    const slowed = (rows: number): string =>
-      JSON.stringify({
-        [path]: {
-          seconds: 5 * rows + 1,
-          cases: { test_face: 5 * rows, test_plain: 0.5 },
-          rows: { test_face: Array.from({ length: rows }, () => 5) },
-        },
-      });
+    const slowedTimes = (rows: number): SuiteTimes => ({
+      [path]: {
+        seconds: 5 * rows + 1,
+        cases: { test_face: 5 * rows, test_plain: 0.5 },
+        rows: { test_face: Array.from({ length: rows }, () => 5) },
+      },
+    });
+    const slowed = (rows: number): string => JSON.stringify(slowedTimes(rows));
     // Read off the dealt runs, since a run whose only suite is kept whole uses one engine anyway and
     // never says what memory held it to.
     let heldByMemory = false;
@@ -50668,7 +50770,7 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
       assert.equal(run.status, 0, `${what}: ${run.said}`);
       const ran = ranIn(run.said);
       assert.deepEqual(
-        [...ran].map(([row, pids]) => [row, pids.length]).sort((a, b) => (a[0] ?? 0) - (b[0] ?? 0)),
+        [...ran].map(([row, pids]) => [row, pids.length]).toSorted((a, b) => (a[0] ?? 0) - (b[0] ?? 0)),
         Array.from({ length: rows }, (_, row) => [row, 1]),
         `${what}: every row once: ${run.said}`,
       );
@@ -50714,7 +50816,7 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
     const keptRan = ranIn(kept.said);
     assert.deepEqual(
       [
-        [...keptRan].map(([row, pids]) => [row, pids.length]).sort((a, b) => (a[0] ?? 0) - (b[0] ?? 0)),
+        [...keptRan].map(([row, pids]) => [row, pids.length]).toSorted((a, b) => (a[0] ?? 0) - (b[0] ?? 0)),
         new Set([...keptRan.values()].flat()).size,
       ],
       [Array.from({ length: 6 }, (_, row) => [row, 1]), 1],
@@ -50742,7 +50844,7 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
     writeFileSync(
       timesFile,
       JSON.stringify({
-        ...(JSON.parse(slowed(6)) as SuiteTimes),
+        ...slowedTimes(6),
         'res://tests/other_a_test.gd': { seconds: 20, cases: { test_other: 20 } },
         'res://tests/other_b_test.gd': { seconds: 20, cases: { test_other: 20 } },
       }),
@@ -50752,7 +50854,7 @@ function testAParameterisedCaseIsDealtByItsRows(): void {
     const sharedRan = ranIn(shared.said);
     assert.deepEqual(
       [
-        [...sharedRan].map(([row, pids]) => [row, pids.length]).sort((a, b) => (a[0] ?? 0) - (b[0] ?? 0)),
+        [...sharedRan].map(([row, pids]) => [row, pids.length]).toSorted((a, b) => (a[0] ?? 0) - (b[0] ?? 0)),
         new Set([...sharedRan.values()].flat()).size,
       ],
       [Array.from({ length: 6 }, (_, row) => [row, 1]), 1],
@@ -50850,16 +50952,16 @@ async function testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly(): Promise<void> {
       ...[...inherited, 'test_sibling'].map((name) => `${sibling}:${name}`),
       ...['test_own_a', 'test_own_b'].map((name) => `${nested}:${name}`),
       ...inherited.map((name) => `res://tests/bare_test.gd:${name}`),
-    ].sort();
+    ].toSorted();
     const ranOf = (said: string): string[] =>
-      [...said.matchAll(/^CASE (\S+) IN \d+\s*$/gm)].map((found) => found[1] ?? '').sort();
+      [...said.matchAll(/^CASE (\S+) IN \d+\s*$/gm)].map((found) => found[1] ?? '').toSorted();
     const first = test('--import', '--engines', '1', '--print-output');
     assert.equal(first.status, 0, first.said);
     assert.deepEqual(ranOf(first.said), expected, `one engine runs every case once: ${first.said}`);
 
     // The shell suite slow enough to be dealt out case by case, and the rest quick enough to go whole.
     const timesFile = join(project, '.godot', 'gdharness', 'suite-times.json');
-    const times = JSON.parse(readFileSync(timesFile, 'utf8')) as SuiteTimes;
+    const times = timesWritten(timesFile);
     writeFileSync(
       timesFile,
       JSON.stringify({
@@ -51035,12 +51137,13 @@ async function testAnOrphanIsNamedWithTheCaseThatLeftIt(): Promise<void> {
     // engine of its own. A machine with room for one engine runs both together, and the nodes the
     // leaking suite keeps are then leaked at that engine's exit, which names no suite, so neither
     // is kept.
-    const passed = JSON.parse(
-      readFileSync(join(project, '.godot', 'gdharness', 'suite-passed.json'), 'utf8'),
-    ) as Record<string, unknown>;
+    const passed = asObject(
+      JSON.parse(readFileSync(join(project, '.godot', 'gdharness', 'suite-passed.json'), 'utf8')),
+      'suite-passed.json',
+    );
     const together = /^Failed: .* across 1 engine, /m.test(said);
     assert.deepEqual(
-      Object.keys(passed).sort(),
+      Object.keys(passed).toSorted(),
       together ? [] : ['res://tests/clean_test.gd'],
       `${together ? 'both in one engine' : 'an engine each'}: ${JSON.stringify(passed)}\n${said}`,
     );
@@ -51822,7 +51925,7 @@ async function testARunawayTestRunAnswersASizeTheClientTakes(): Promise<void> {
         `func test_many_${index}() -> void:`,
         ...Array.from(
           { length: 20 },
-          (_, line) => `\tassert_str("${`case ${index} line ${line} `.repeat(30)}").is_equal("other")`,
+          (_unused, line) => `\tassert_str("${`case ${index} line ${line} `.repeat(30)}").is_equal("other")`,
         ),
       ].join('\n'),
     );
@@ -51953,7 +52056,7 @@ async function testAStackOverflowIsNotAPass(): Promise<void> {
           ENGINE_CALL_TIMEOUT_MS,
         );
         const blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
-        return JSON.parse(blocks.find((text) => text.trimStart().startsWith('{')) ?? '{}') as unknown;
+        return JSON.parse(blocks.find((block) => block.trimStart().startsWith('{')) ?? '{}') as unknown;
       };
 
       const overflow = await run('res://overflow');
@@ -52454,17 +52557,17 @@ async function testGdUnitRunner(): Promise<void> {
   // listed error was printed twice more, once by the engine with a backtrace and once in gdUnit4's
   // list, and each dependent added a load failure: nineteen of them ran an answer past 15 kB.
   const logged = (
-    text: string,
+    line: string,
     detail: string[] = [],
     severity: LogEntry['severity'] = 'error',
   ): LogEntry => ({
     index: 0,
     severity,
     source: severity === 'info' ? 'stdout' : 'stderr',
-    text,
+    text: line,
     detail,
   });
-  const run = [
+  const stoppedRun = [
     logged('Godot Engine v4.7.2.stable.official', [], 'info'),
     logged('Parse Error: Could not resolve class "Motif", because of a parser error.', [
       'at: GDScript::reload (res://core/hearing.gd:6)',
@@ -52487,7 +52590,7 @@ async function testGdUnitRunner(): Promise<void> {
     logged('Abnormal exit with 105', [], 'info'),
   ];
   assert.deepEqual(
-    withoutListed(run, [
+    withoutListed(stoppedRun, [
       unresolved('res://core/motif.gd', 10, 'Base'),
       unresolved('res://core/hearing.gd', 6, 'Motif'),
       dependedOn('res://test/armed_test.gd'),
@@ -52501,10 +52604,14 @@ async function testGdUnitRunner(): Promise<void> {
     'what is listed goes, and an error at a line the list does not hold stays, as does a load failure of a script it does not name',
   );
   assert.equal(
-    withoutListed(run, [unresolved('res://core/hearing.gd', 6, 'Motif')])[1]?.detail[0],
+    withoutListed(stoppedRun, [unresolved('res://core/hearing.gd', 6, 'Motif')])[1]?.detail[0],
     'at: GDScript::reload (res://core/hearing.gd:7)',
   );
-  assert.deepEqual(withoutListed(run, []), run, 'a run with no script errors keeps every entry');
+  assert.deepEqual(
+    withoutListed(stoppedRun, []),
+    stoppedRun,
+    'a run with no script errors keeps every entry',
+  );
 
   // The paths a run is given, which the engine half below runs: one or a list, each held inside
   // the project, overlaps dropped, and anything that is not a path refused by where it sits.
@@ -52712,7 +52819,7 @@ async function testGdUnitRunner(): Promise<void> {
         // most of the answer.
         const named = asArray(get(run, 'suites'))
           .map((suite) => text(get(suite, 'name')))
-          .sort();
+          .toSorted();
         assert.deepEqual(named, ['summary_lies_test', 'sums_test'], JSON.stringify(named));
         assert.equal(get(run, 'suitesPassed'), 1);
         // And an engine message keeps the frames above gdUnit4 and says how many it left inside.
@@ -52894,7 +53001,7 @@ async function testGdUnitRunner(): Promise<void> {
           'extends GdUnitTestSuite\n\n\nfunc test_three_assertions_fail() -> void:\n\tassert_bool(false).is_true()\n\tassert_bool(false).is_true()\n\tassert_bool(false).is_true()\n',
         );
         const runs: unknown[] = [];
-        for (let run = 0; run < 4; run += 1) {
+        for (let attempt = 0; attempt < 4; attempt += 1) {
           const answer = JSON.parse(
             await call(
               'project_test',
@@ -53665,9 +53772,7 @@ async function testATestRunSaysHowFarItHasGot(): Promise<void> {
   const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-test-progress-'));
   const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
   const answerOf = (response: JsonRpcMessage): { note: string; json: unknown } => {
-    const result = response.result;
-    const content =
-      isRecord(result) && Array.isArray(result['content']) ? (result['content'] as { text?: string }[]) : [];
+    const content = contentOf(response) ?? [];
     const json = content.findLast((part) => part.text?.startsWith('{') === true)?.text;
     return {
       note: content[0]?.text ?? '',
@@ -54104,7 +54209,7 @@ function testEveryProcessStartsThroughTheHiddenSpawn(): void {
       const source = readFileSync(file, 'utf8');
       return starters.some((word) => source.includes(word)) || shell.test(source);
     })
-    .sort();
+    .toSorted();
   assert.deepEqual(
     starting,
     [join('src', 'spawn.ts'), join('test', 'support', 'hidden-spawn.ts')],
@@ -54436,7 +54541,7 @@ function testCommandLineSetup(): void {
       ['.agents', '.claude', '.github', '.cursor', '.kiro', '.cline', '.opencode']
         .map((dir) => join(projectDir, dir, 'skills', 'gdharness'))
         .filter((path) => existsSync(path))
-        .sort();
+        .toSorted();
     // A project that brings the runtime up its own way keeps doing so across an upgrade.
     //
     // Repointing a project's own loader takes away whatever that file refuses, and does it to the
@@ -54664,8 +54769,12 @@ function testCommandLineSetup(): void {
     assert.match(removed.stdout, /autoload removed, with res:\/\/gdharness\/loader\.gd/, removed.stdout);
     assert.doesNotMatch(stripped, /gdharness_editor\/plugin\.cfg/, 'and the editor plugin is off');
     assert.equal(existsSync(join(projectDir, '.agents')), false, 'the directory the skill made is gone');
-    const theirs = JSON.parse(readFileSync(shared, 'utf8')) as Record<string, Record<string, unknown>>;
-    assert.deepEqual(theirs['mcpServers'], { other: { command: 'theirs' } }, 'their server survives ours');
+    const theirs: unknown = JSON.parse(readFileSync(shared, 'utf8'));
+    assert.deepEqual(
+      get(theirs, 'mcpServers'),
+      { other: { command: 'theirs' } },
+      'their server survives ours',
+    );
 
     // Twice. The engine refuses to remove an autoload that is not registered and to disable a
     // plugin that is not enabled, so a second uninstall failed where the first had succeeded, and
@@ -54811,7 +54920,7 @@ function testTheWrittenConfigNamesAProgramThatStarts(): void {
 }
 
 /** The first group of a match, which a pattern written with one group always has. */
-function captured(match: RegExpMatchArray): string {
+function firstGroup(match: RegExpMatchArray): string {
   return match[1] ?? '';
 }
 
@@ -54826,8 +54935,8 @@ function namesIn(path: string, pattern: RegExp, what: string, least: number, wit
   // A table read out of the part of the file that holds it, when its entries are written like other
   // dictionaries in the same file: the runtime's commands and its announcement are both
   // `"name": _member,`.
-  const text = within === undefined ? source : (within.exec(source)?.[1] ?? '');
-  const found = new Set([...text.matchAll(pattern)].map(captured));
+  const table = within === undefined ? source : (within.exec(source)?.[1] ?? '');
+  const found = new Set([...table.matchAll(pattern)].map(firstGroup));
   // The reader is a regex over source, so it can come back empty for a table that was merely
   // reformatted, and an empty set agrees with everything. A floor is what makes it speak up.
   //
@@ -54847,7 +54956,7 @@ function namesIn(path: string, pattern: RegExp, what: string, least: number, wit
 /** Every name the server sends, by the call that sends it, with its multi-line spellings. */
 function namesSent(pattern: RegExp, what: string, least: number): Set<string> {
   const source = readFileSync('src/server.ts', 'utf8');
-  const found = new Set([...source.matchAll(pattern)].map(captured));
+  const found = new Set([...source.matchAll(pattern)].map(firstGroup));
   assert.ok(found.size >= least, `only ${found.size} of the ${what} were read from src/server.ts`);
   return found;
 }
@@ -54864,7 +54973,7 @@ function namesPassedTo(opener: RegExp, what: string, least: number): Set<string>
   const found = new Set<string>();
   for (const call of source.matchAll(opener)) {
     for (const quoted of source.slice(call.index, call.index + 200).matchAll(/'([a-z][a-z_]+)'/g)) {
-      found.add(captured(quoted));
+      found.add(firstGroup(quoted));
     }
   }
   assert.ok(found.size >= least, `only ${found.size} of the ${what} were read from src/server.ts`);
@@ -55020,21 +55129,21 @@ function testEveryEngineParameterCanBeSent(): void {
   const dispatcher = readFileSync('src/godot/operations/godot_operations.gd', 'utf8');
   const files = new Map(
     [...dispatcher.matchAll(/const ([A-Za-z]+) = preload\("([a-z_]+\.gd)"\)/g)].map((match) => [
-      captured(match),
+      firstGroup(match),
       readFileSync(join('src/godot/operations', match[2] ?? ''), 'utf8'),
     ]),
   );
 
   const declared = new Set(
     [...readFileSync('src/tool-definitions.ts', 'utf8').matchAll(/^ {6}([A-Za-z]+):/gm)].map((match) =>
-      snakeCased(captured(match)),
+      snakeCased(firstGroup(match)),
     ),
   );
   assert.ok(declared.size >= 40, `only ${declared.size} tool parameters were read`);
   // What the server adds on the way through, which no tool declares.
   const added = new Set(
     [...readFileSync('src/server.ts', 'utf8').matchAll(/\b([a-z][A-Za-z0-9]*): /g)].map((match) =>
-      snakeCased(captured(match)),
+      snakeCased(firstGroup(match)),
     ),
   );
 
@@ -55051,7 +55160,7 @@ function testEveryEngineParameterCanBeSent(): void {
     const body = source.slice(at, next === -1 ? source.length : next);
     for (const key of body.matchAll(/params(?:\.get\(|\[)"([a-z_]+)"/g)) {
       read += 1;
-      const name = captured(key);
+      const name = firstGroup(key);
       assert.ok(
         declared.has(name) || added.has(name),
         `${operation} reads ${name}, which no tool parameter spells`,
@@ -55077,7 +55186,7 @@ function parametersOf(block: string): string[] {
       }
     }
   }
-  return [...block.slice(open, end).matchAll(/^ {6}([A-Za-z]+):/gm)].map(captured);
+  return [...block.slice(open, end).matchAll(/^ {6}([A-Za-z]+):/gm)].map(firstGroup);
 }
 
 /**
@@ -55108,7 +55217,7 @@ function testEveryToolParameterIsRead(): void {
   const named = new Set<string>();
   const snaked = new Set<string>();
   const remember = (source: string, pattern: RegExp, into: Set<string>): void => {
-    for (const match of source.matchAll(pattern)) into.add(captured(match));
+    for (const match of source.matchAll(pattern)) into.add(firstGroup(match));
   };
 
   const walk = (dir: string): void => {
@@ -55409,8 +55518,8 @@ function testEveryShippedAddonIsInstalled(): void {
   try {
     const installed = installAddons(projectDir);
     assert.deepEqual(
-      installed.map((addon) => addon.name).sort(),
-      [...ADDONS].sort(),
+      installed.map((addon) => addon.name).toSorted(),
+      [...ADDONS].toSorted(),
       'an install should have put every addon in the list into the project',
     );
     for (const name of shipped) {
@@ -55738,8 +55847,8 @@ const ARGUMENT_MENTIONS = 10;
  */
 function testEveryArgumentTheSkillNamesIsOneTheOpTakes(): void {
   const phrase = /`([a-z_]+) ([a-z_]+)` with `([a-zA-Z_]+)`/g;
-  const wrongIn = (text: string): string[] =>
-    [...text.matchAll(phrase)]
+  const wrongIn = (content: string): string[] =>
+    [...content.matchAll(phrase)]
       .filter(([, tool, op, argument]) => {
         const declared = toolSpec(tool ?? '')?.parameters[argument ?? ''];
         const ops = declared?.ops;
@@ -55752,16 +55861,16 @@ function testEveryArgumentTheSkillNamesIsOneTheOpTakes(): void {
   assert.deepEqual(wrongIn('`runtime_input key` with `keycode`'), []);
 
   const sources = [
-    ...[...skillFiles('0.0.0')].map(([name, text]) => ({ where: `the skill: ${name}`, text })),
+    ...[...skillFiles('0.0.0')].map(([name, content]) => ({ where: `the skill: ${name}`, content })),
     ...readdirSync('docs')
       .filter((name) => name.endsWith('.md'))
-      .map((name) => ({ where: join('docs', name), text: readFileSync(join('docs', name), 'utf8') })),
+      .map((name) => ({ where: join('docs', name), content: readFileSync(join('docs', name), 'utf8') })),
     ...readdirSync('.')
       .filter((name) => name.endsWith('.md'))
-      .map((name) => ({ where: name, text: readFileSync(name, 'utf8') })),
+      .map((name) => ({ where: name, content: readFileSync(name, 'utf8') })),
   ];
-  const seen = sources.reduce((count, { text }) => count + [...text.matchAll(phrase)].length, 0);
-  const wrong = sources.flatMap(({ where, text }) => wrongIn(text).map((one) => `${where}: ${one}`));
+  const seen = sources.reduce((count, { content }) => count + [...content.matchAll(phrase)].length, 0);
+  const wrong = sources.flatMap(({ where, content }) => wrongIn(content).map((one) => `${where}: ${one}`));
   assert.deepEqual(wrong, [], 'every argument named for an op is one the op takes');
   assert.ok(seen >= ARGUMENT_MENTIONS, `only ${seen} phrases were read; the pattern is not matching`);
 }
@@ -55798,16 +55907,16 @@ const HABIT_PHRASES = [
 ] as const;
 
 /**
- * What [param text] holds that the project's prose may not, by rule.
+ * What [param content] holds that the project's prose may not, by rule.
  *
  * An em dash anywhere, and an en dash standing between spaces as one. In [param prose], also a
  * spaced double hyphen standing in for a dash, outside backticks and fenced blocks, where a command
  * line's own `--` lives, and the habit phrases.
  */
-function proseFaults(text: string, prose: boolean): string[] {
+function proseFaults(content: string, prose: boolean): string[] {
   const faults: string[] = [];
   let fenced = false;
-  for (const [index, line] of text.split('\n').entries()) {
+  for (const [index, line] of content.split('\n').entries()) {
     const at = `line ${index + 1}`;
     if (line.includes(EM_DASH)) {
       faults.push(`${at}: an em dash`);
@@ -55866,7 +55975,7 @@ function testShippedProseHasNoDashStandInsOrHabitPhrases(): void {
     'a fenced command line may hold its separator, and the prose after the fence is read again',
   );
 
-  const read: { where: string; text: string; prose: boolean }[] = [];
+  const read: { where: string; content: string; prose: boolean }[] = [];
   const kinds = /\.(ts|gd|md|yml|yaml|json|jsonc|cfg|tscn|sh|ps1|mjs)$/;
   const walk = (directory: string, prose: boolean): void => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -55879,7 +55988,7 @@ function testShippedProseHasNoDashStandInsOrHabitPhrases(): void {
         // The workflows are shell, where a double hyphen is a command's separator.
         read.push({
           where: path,
-          text: readFileSync(path, 'utf8'),
+          content: readFileSync(path, 'utf8'),
           prose: prose && !/\.ya?ml$/.test(entry.name),
         });
       }
@@ -55894,18 +56003,18 @@ function testShippedProseHasNoDashStandInsOrHabitPhrases(): void {
     if (entry.isFile() && kinds.test(entry.name) && !entry.name.endsWith('lock.json')) {
       read.push({
         where: entry.name,
-        text: readFileSync(entry.name, 'utf8'),
+        content: readFileSync(entry.name, 'utf8'),
         prose: entry.name.endsWith('.md'),
       });
     }
   }
-  read.push({ where: 'the tool reference', text: renderToolsMarkdown(), prose: true });
-  for (const [name, text] of skillFiles('0.0.0')) {
-    read.push({ where: `the skill: ${name}`, text, prose: true });
+  read.push({ where: 'the tool reference', content: renderToolsMarkdown(), prose: true });
+  for (const [name, content] of skillFiles('0.0.0')) {
+    read.push({ where: `the skill: ${name}`, content, prose: true });
   }
 
-  const faults = read.flatMap(({ where, text, prose }) =>
-    proseFaults(text, prose).map((fault) => `${where} ${fault}`),
+  const faults = read.flatMap(({ where, content, prose }) =>
+    proseFaults(content, prose).map((fault) => `${where} ${fault}`),
   );
   assert.deepEqual(faults, [], 'the prose holds no dash stand-ins and none of the habit phrases');
   assert.ok(
@@ -55915,14 +56024,14 @@ function testShippedProseHasNoDashStandInsOrHabitPhrases(): void {
 }
 
 /**
- * The sentences of [param text] that run into the next with no space between: a full stop or
+ * The sentences of [param content] that run into the next with no space between: a full stop or
  * other stop, then a capitalised word and a lower-case one, as in "{was, now}.A write is". A
  * description is assembled from template parts, and a part ending without its space reads fine in
  * the source on either side of the join.
  */
-function sentencesRunTogether(text: string): string[] {
-  return [...text.matchAll(/[a-z0-9)}\]"'`][.;:!?]([A-Z][a-z]* [a-z]+)/g)].map((found) =>
-    text.slice(Math.max(0, found.index - 20), found.index + 2 + (found[1]?.length ?? 0)),
+function sentencesRunTogether(content: string): string[] {
+  return [...content.matchAll(/[a-z0-9)}\]"'`][.;:!?]([A-Z][a-z]* [a-z]+)/g)].map((found) =>
+    content.slice(Math.max(0, found.index - 20), found.index + 2 + (found[1]?.length ?? 0)),
   );
 }
 
@@ -56075,14 +56184,14 @@ function testEveryToolNamedInProseIsATool(): void {
   // Every file the skill installs, not the one that is usually the whole of it. The reference beside
   // it is generated and is what a rename rewrites, so leaving it out reads a skill that cannot drift
   // and calls the pair checked.
-  for (const [name, text] of skillFiles('0.0.0')) {
-    sources.push([`the skill: ${name}`, text]);
+  for (const [name, content] of skillFiles('0.0.0')) {
+    sources.push([`the skill: ${name}`, content]);
   }
 
   let seen = 0;
   const wrong: string[] = [];
-  for (const [where, text] of sources) {
-    for (const found of text.matchAll(shaped)) {
+  for (const [where, content] of sources) {
+    for (const found of content.matchAll(shaped)) {
       // A real tool first, whatever else shares its spelling. Two modules here are named after the
       // tool they implement, so vocabulary taken from the filenames covers `runtime_capture` and
       // `runtime_input` as well, and skipping on that would stop checking two of the tools this is
@@ -56096,7 +56205,7 @@ function testEveryToolNamedInProseIsATool(): void {
         wrong.push(`${where} names ${found[0]}, which is not a tool`);
       }
     }
-    for (const found of text.matchAll(wildcard)) {
+    for (const found of content.matchAll(wildcard)) {
       seen += 1;
       if (!families.includes(found[1] ?? '')) {
         wrong.push(`${where} names the family ${found[0]}, which has no tools`);
@@ -56112,8 +56221,8 @@ function testEveryToolNamedInProseIsATool(): void {
   const opsOf = new Map(TOOL_SPECS.map((spec) => [spec.name, new Set(Object.keys(spec.operations ?? {}))]));
   const called = new RegExp(`\\b(${[...names].join('|')})\\s+([a-z][a-z0-9]*_[a-z0-9_]*)\\b`, 'g');
   let ops = 0;
-  for (const [where, text] of sources) {
-    for (const found of text.matchAll(called)) {
+  for (const [where, content] of sources) {
+    for (const found of content.matchAll(called)) {
       const [, tool, op] = found;
       const known = opsOf.get(tool ?? '');
       if (known === undefined || known.size === 0 || names.has(`${op}`)) {
@@ -56162,7 +56271,7 @@ function testTheEditorIsOfferedWhereItCanAnswer(): void {
     Object.entries(EDITOR_READS).flatMap(([tool, ops]) => Object.keys(ops).map((op) => `${tool} ${op}`)),
   );
   assert.ok(answerable.size >= 1, 'no op has an editor side, so this compared two empty sets');
-  assert.deepEqual([...offered].sort(), [...answerable].sort());
+  assert.deepEqual([...offered].toSorted(), [...answerable].toSorted());
 }
 
 /**
@@ -56362,7 +56471,7 @@ async function testAWriteSaysWhatElseItChanged(): Promise<void> {
     );
     const filled = await node({ op: 'set', nodePath: 'Panel', properties: { anchors_preset: 15 } });
     assert.deepEqual(
-      Object.keys(asObject(get(filled, 'alsoChanged'), 'alsoChanged')).sort(),
+      Object.keys(asObject(get(filled, 'alsoChanged'), 'alsoChanged')).toSorted(),
       ['anchor_bottom', 'anchor_right', 'grow_horizontal', 'grow_vertical', 'offset_bottom', 'offset_right'],
       `a preset sets the anchors, offsets and growth: ${JSON.stringify(filled)}`,
     );
@@ -58207,9 +58316,9 @@ async function testAToolWaitsOutTheEditorsScan(): Promise<void> {
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -58310,9 +58419,9 @@ async function testAnAnswerTooLargeToSendIsWrittenToAFile(): Promise<void> {
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -58404,9 +58513,9 @@ async function testTheEditorAnswersOnlyForItsOwnProject(): Promise<void> {
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -58660,9 +58769,9 @@ async function testAScanThatHasNotStartedIsNotFinished(): Promise<void> {
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -58734,9 +58843,9 @@ async function testARescanWaitsOutTheEditorsImport(): Promise<void> {
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -58842,9 +58951,9 @@ async function testARescanWaitsForTheEditorToSettle(): Promise<void> {
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -58928,9 +59037,9 @@ async function testARescanWaitsForItsScanToComplete(): Promise<void> {
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -59010,9 +59119,9 @@ async function testARescanCountsNoSlowAnswerAsScanning(): Promise<void> {
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -59197,9 +59306,9 @@ async function testAStartWaitsOutTheEditorsScan(): Promise<void> {
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -59570,9 +59679,9 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -59973,9 +60082,9 @@ async function testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt(): Promise<
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -60230,9 +60339,9 @@ async function testARebuildSaysWhatItsOwnEngineCouldNotKnow(): Promise<void> {
     // named all the same.
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -60363,9 +60472,9 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -60603,9 +60712,9 @@ async function testARepairThatCouldNotRunIsNotReported(): Promise<void> {
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -60801,9 +60910,9 @@ async function testTheDiagnosticsRemedyKnowsAnEditorThatWritesAShortList(): Prom
         const dialIn = async (server: ServerProcess, port: number, editorPid: number): Promise<void> => {
           const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
           sockets.push(socket);
-          await new Promise<void>((resolve, reject) => {
+          await new Promise<void>((settle, reject) => {
             socket.once('open', () => {
-              resolve();
+              settle();
             });
             socket.once('error', reject);
           });
@@ -60973,9 +61082,9 @@ async function testAClassWhoseScriptCameBackIsNotTheEditorsLoss(): Promise<void>
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -61010,7 +61119,7 @@ async function testAClassWhoseScriptCameBackIsNotTheEditorsLoss(): Promise<void>
     // A first rebuild, so there is a last rebuild holding Owing to lose it from.
     const first = await refresh();
     assert.deepEqual(
-      [...(cachedClasses(project)?.keys() ?? [])].sort(),
+      [...(cachedClasses(project)?.keys() ?? [])].toSorted(),
       ['Guild', 'Owing'],
       JSON.stringify(first),
     );
@@ -61081,9 +61190,9 @@ async function testAShortenedCacheIsRebuilt(): Promise<void> {
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
-    await new Promise<void>((resolve, reject) => {
+    await new Promise<void>((settle, reject) => {
       socket.once('open', () => {
-        resolve();
+        settle();
       });
       socket.once('error', reject);
     });
@@ -61439,8 +61548,8 @@ const RENAME_FIXTURE: Readonly<Record<string, string>> = {
 /** A copy of [RENAME_FIXTURE] in a directory of its own. */
 function renameProject(): string {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-rename-'));
-  for (const [file, text] of Object.entries(RENAME_FIXTURE)) {
-    writeFileSync(join(project, file), text);
+  for (const [file, content] of Object.entries(RENAME_FIXTURE)) {
+    writeFileSync(join(project, file), content);
   }
   return project;
 }
@@ -61491,7 +61600,7 @@ function renameReadings(report: Record<string, unknown>): { changed: string[]; l
       ),
     ),
   ];
-  return { changed: changed.sort(), left: [...new Set(left)].sort() };
+  return { changed: changed.toSorted(), left: [...new Set(left)].toSorted() };
 }
 
 const NO_LANGUAGE_SERVER: Pick<RenameServices, 'references' | 'definitions'> = {
@@ -61610,7 +61719,7 @@ async function testARenamedClassChangesItsUsesAndLeavesItsWords(): Promise<void>
         `res://told.gd:1`,
         `res://user.gd:${fixtureLine('user.gd', 'var typed')}`,
         `res://user.gd:${fixtureLine('user.gd', 'var kept')}`,
-      ].sort(),
+      ].toSorted(),
       'the declaration, extends, doc links, typed uses and the class a resource records',
     );
     assert.deepEqual(
@@ -61628,7 +61737,7 @@ async function testARenamedClassChangesItsUsesAndLeavesItsWords(): Promise<void>
         `res://user.gd:${fixtureLine('user.gd', 'print(')}:code`,
         `res://user.gd:${fixtureLine('user.gd', 'Holder.Told')}:doc`,
         `res://user.gd:${fixtureLine('user.gd', 'var kept')}:nodePath`,
-      ].sort(),
+      ].toSorted(),
       'every other occurrence is answered, each as what the tokenizer makes of its place',
     );
     // The line also holds an edit, and is quoted as it reads under changed rather than as it read.
@@ -61864,7 +61973,7 @@ async function testAMemberRenameFollowsWhatTheLanguageServerResolves(): Promise<
         `res://told.gd:${fixtureLine('told.gd', '\tsay(2)')}`,
         `res://user.gd:${fixtureLine('user.gd', 'typed.say')}`,
         `res://main.tscn:${fixtureLine('main.tscn', 'from="Told"')}`,
-      ].sort(),
+      ].toSorted(),
       'the override and its own call, doc links through either class, and the connection to a node running the subclass',
     );
     assert.deepEqual(get(say.report, 'overridesRenamed'), ['res://loud.gd']);
@@ -61896,7 +62005,7 @@ async function testAMemberRenameFollowsWhatTheLanguageServerResolves(): Promise<
         `res://told.gd:${fixtureLine('told.gd', '# say it')}:comment`,
         `res://told.gd:${fixtureLine('told.gd', 'call("say"')}:string`,
         `res://user.gd:${fixtureLine('user.gd', 'get_node')}:code`,
-      ].sort(),
+      ].toSorted(),
       'another class with the same method, a call on a value of unknown type, and what the server resolved by name in a comment or a string',
     );
     const resolvedComment = asArray(get(say.report, 'leftAlone')).find(
@@ -61916,7 +62025,7 @@ async function testAMemberRenameFollowsWhatTheLanguageServerResolves(): Promise<
         `res://main.tscn:${fixtureLine('main.tscn', 'level = 4')}`,
         `res://main.tscn:${fixtureLine('main.tscn', 'level = 5')}`,
         `res://told.gd:${fixtureLine('told.gd', 'var level')}`,
-      ].sort(),
+      ].toSorted(),
       'the value saved on a node running a subclass, on an instance of a scene whose root runs the class by UID, and on a resource',
     );
     assert.deepEqual(level.left, [`res://main.tscn:${fixtureLine('main.tscn', 'level = 6')}:scene`]);
@@ -62607,7 +62716,7 @@ function testAMovedFileIsNamedByItsNewPathEverywhere(): void {
     assert.deepEqual(
       asArray(get(outcome.report, 'changed'))
         .map((one) => text(get(one, 'file')))
-        .sort(),
+        .toSorted(),
       ['res://game.gd', 'res://scenes/main.tscn', 'res://scenes/spawner.gd'],
     );
     const binary = asArray(get(outcome.report, 'leftAlone')).find((one) => get(one, 'kind') === 'binary');
@@ -62670,7 +62779,7 @@ function testAMovedDirectoryTakesEverythingInIt(): void {
   try {
     const outcome = movedIn(project, 'scenes', 'levels');
     assert.ok(!existsSync(join(project, 'scenes')), 'the directory is gone from where it was');
-    assert.deepEqual(readdirSync(join(project, 'levels')).sort(), [
+    assert.deepEqual(readdirSync(join(project, 'levels')).toSorted(), [
       'hero.tscn',
       'main.tscn',
       'old.scn',
@@ -62707,7 +62816,7 @@ function testAMovedDirectoryTakesEverythingInIt(): void {
     assert.deepEqual(
       asArray(get(outcome.report, 'changed'))
         .map((one) => text(get(one, 'file')))
-        .sort(),
+        .toSorted(),
       ['res://game.gd', 'res://levels/main.tscn', 'res://project.godot'],
       'a changed file is named where it now is, and one whose relative path still reads the same is not changed',
     );
@@ -62926,7 +63035,7 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
     assert.deepEqual(
       asArray(get(renamed, 'compiled', 'checked'))
         .map((one) => text(one))
-        .sort(),
+        .toSorted(),
       ['res://loud.gd', 'res://user.gd', 'res://words/wording.gd'],
       'the moved script, its subclass and its user, each by name',
     );
@@ -63199,7 +63308,7 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
     const answerKeys = (answer: unknown): string[] =>
       Object.keys(asObject(answer))
         .filter((key) => !key.startsWith('engine_'))
-        .sort();
+        .toSorted();
     assert.deepEqual(answerKeys(tree), ['readBy', 'tree'], JSON.stringify(tree));
     assert.ok(!existsSync(join(project, 'init_ran.txt')), 'the read ran a node script of the scene');
 
@@ -63295,7 +63404,7 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
       await call('resource_edit', { op: 'read', resourcePath: 'res://panel.tres' }),
     );
     assert.equal(get(panel, 'resourceType'), 'StyleBoxFlat', JSON.stringify(panel));
-    assert.deepEqual(Object.keys(asObject(get(panel, 'properties'))).sort(), [
+    assert.deepEqual(Object.keys(asObject(get(panel, 'properties'))).toSorted(), [
       'bg_color',
       'corner_radius_top_left',
     ]);
@@ -63734,7 +63843,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       JSON.stringify(read),
     );
     assert.deepEqual(
-      Object.keys(asObject(get(read, 'properties'))).sort(),
+      Object.keys(asObject(get(read, 'properties'))).toSorted(),
       ['script', 'size'],
       `a read answers what the file holds, not what the scripts set: ${JSON.stringify(read)}`,
     );
@@ -63760,7 +63869,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       properties: { items: ['a'], unique_name_in_owner: true, script: 'res://bag.gd' },
     });
     assert.deepEqual(
-      sets('main.tscn', '[node name="Packed"').sort(),
+      sets('main.tscn', '[node name="Packed"').toSorted(),
       ['items = PackedStringArray("a")', 'script = ExtResource', 'unique_name_in_owner = true'],
       fileOf('main.tscn'),
     );
@@ -64029,7 +64138,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       fileOf(file)
         .split('\n')
         .filter((line) => line.startsWith('[connection'))
-        .sort();
+        .toSorted();
     const unmadeBefore = connectionsOf('quits.tscn');
     const relabelled = await written('scene_node', {
       op: 'set',
@@ -64308,15 +64417,15 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     );
     // The name offered is free, past a numbered one already taken, and a numbered name counts on.
     await written('scene_node', { op: 'add', scenePath: 'made.tscn', nodeName: 'Boss2', nodeType: 'Node' });
-    for (const [taken, free] of [
+    for (const [inUse, free] of [
       ['Boss', 'Boss3'],
       ['Boss2', 'Boss3'],
     ] as const) {
       assert.equal(
         textOf(
-          await call('scene_node', { op: 'add', scenePath: 'made.tscn', nodeName: taken, nodeType: 'Node' }),
+          await call('scene_node', { op: 'add', scenePath: 'made.tscn', nodeName: inUse, nodeType: 'Node' }),
         ),
-        `The root, Node2D, already has a child named ${taken}; ${free} is free there.`,
+        `The root, Node2D, already has a child named ${inUse}; ${free} is free there.`,
       );
     }
     await written('scene_node', { op: 'delete', scenePath: 'made.tscn', nodePath: 'Boss2' });
@@ -64571,7 +64680,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       `a resource built into the scene is read by its script's class, with what it holds: ${JSON.stringify(holderRead)}`,
     );
     assert.deepEqual(
-      Object.keys(asObject(heldStats)).sort(),
+      Object.keys(asObject(heldStats)).toSorted(),
       ['_type', 'hp', 'max_hp'],
       `and only what it holds away from its script's defaults: ${JSON.stringify(heldStats)}`,
     );
@@ -67110,8 +67219,8 @@ async function testAnInheritedSceneIsMadeWithNoEditor(): Promise<void> {
       nodeType: 'Node2D',
       nodeName: 'Own',
     });
-    const sources = (tree: unknown): unknown[] =>
-      asArray(get(tree, 'children')).map((child) => [
+    const sources = (root: unknown): unknown[] =>
+      asArray(get(root, 'children')).map((child) => [
         get(child, 'name'),
         get(child, 'inheritedFrom') ?? null,
       ]);
@@ -67689,7 +67798,7 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
       properties: { name: 'Surface' },
     });
     assert.deepEqual(
-      asArray(get(renamed, 'followed')).map(String).sort(),
+      asArray(get(renamed, 'followed')).map(String).toSorted(),
       ['res://long_desk.tscn', 'res://room.tscn', 'res://study.tscn'],
       JSON.stringify(renamed),
     );
@@ -67783,7 +67892,7 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
       newParentPath: 'Leg',
     });
     assert.deepEqual(
-      asArray(get(moved, 'followed')).map(String).sort(),
+      asArray(get(moved, 'followed')).map(String).toSorted(),
       ['res://room.tscn', 'res://study.tscn'],
       JSON.stringify(moved),
     );
@@ -67791,13 +67900,13 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
     assert.ok(again.includes('[editable path="DeskB/Leg/DeskLamp"]'), again);
     assert.match(lineOf('room.tscn', bulb), /^\[node name="Bulb" parent="DeskB\/Leg\/DeskLamp"/, again);
     assert.doesNotMatch(lineOf('room.tscn', bulb), /_id_path/, `the ids through Surface went: ${again}`);
-    const lamp = '[node name="DeskLamp" parent="DeskA/';
+    const studyLamp = '[node name="DeskLamp" parent="DeskA/';
     assert.match(
-      lineOf('study.tscn', lamp),
+      lineOf('study.tscn', studyLamp),
       /^\[node name="DeskLamp" parent="DeskA\/Leg"/,
       fileOf('study.tscn'),
     );
-    assert.doesNotMatch(lineOf('study.tscn', lamp), /_id_path/, fileOf('study.tscn'));
+    assert.doesNotMatch(lineOf('study.tscn', studyLamp), /_id_path/, fileOf('study.tscn'));
     assert.match(lineOf('room.tscn', signal), / from="DeskB\/Leg\/DeskLamp" /, again);
     assert.doesNotMatch(lineOf('room.tscn', signal), /_uid_path/, again);
     await call('scene_node', {
@@ -68046,7 +68155,7 @@ async function testAMovedNodeKeepsThePathsNamingIt(): Promise<void> {
     const ran = await runEngine(godotPath, ['--headless', '--path', project, '-s', 'res://check.gd']);
     const said = ran.log.all.map((entry) => entry.text);
     assert.ok(said.includes('checked'), `the check ran: ${said.join(' | ')}`);
-    return said.filter((text) => text.startsWith('unresolved ')).sort();
+    return said.filter((line) => line.startsWith('unresolved ')).toSorted();
   };
   // Each entry an answer lists, in one line: where, what, and the path from and to.
   const lines = (answer: unknown, field: string): string[] => {
@@ -68056,7 +68165,7 @@ async function testAMovedNodeKeepsThePathsNamingIt(): Promise<void> {
       typeof value === 'string' || typeof value === 'number' ? String(value) : JSON.stringify(value);
     return listed
       .map((entry) => {
-        const e = entry as Record<string, unknown>;
+        const e = asObject(entry, `an entry of ${field}`);
         const what =
           e['property'] === undefined ? `${said(e['animation'])}/${said(e['track'])}` : said(e['property']);
         const tail =
@@ -68067,7 +68176,7 @@ async function testAMovedNodeKeepsThePathsNamingIt(): Promise<void> {
               : '';
         return `${said(e['scenePath']).replace('res://', '')} ${said(e['nodePath'])} ${what} ${said(e['from'])}${tail}`;
       })
-      .sort();
+      .toSorted();
   };
   const kept = 'The animation is kept in res://well.tscn, and an edit here would not be saved there.';
   try {
@@ -68117,7 +68226,7 @@ async function testAMovedNodeKeepsThePathsNamingIt(): Promise<void> {
       JSON.stringify(renamed),
     );
     assert.deepEqual(
-      asArray(get(renamed, 'followed')).map(String).sort(),
+      asArray(get(renamed, 'followed')).map(String).toSorted(),
       ['res://plaza.tscn', 'res://square.tscn'],
       JSON.stringify(renamed),
     );
@@ -68132,7 +68241,7 @@ async function testAMovedNodeKeepsThePathsNamingIt(): Promise<void> {
       ...asWritten,
       'unresolved res://square.tscn Well1 metadata/bell Bucket/Bell',
       'unresolved res://square.tscn Well1/Anim swing/3 Bucket/Bell:visible',
-    ].sort();
+    ].toSorted();
     assert.deepEqual(
       await unresolved(),
       lostInSquare,
@@ -68319,12 +68428,12 @@ async function testAPropertyHoldingANodeFollowsIt(): Promise<void> {
     assert.ok(Array.isArray(listed), `${field} in ${JSON.stringify(answer)}`);
     return listed
       .map((entry) => {
-        const e = entry as Record<string, string | boolean | undefined>;
-        const to = e['to'] === undefined ? '' : ` -> ${String(e['to'])}`;
-        const cleared = e['cleared'] === undefined ? '' : ` cleared ${String(e['cleared'])}`;
+        const e = asObject(entry, `an entry of ${field}`);
+        const to = e['to'] === undefined ? '' : ` -> ${text(e['to'])}`;
+        const cleared = e['cleared'] === undefined ? '' : ` cleared ${text(e['cleared'])}`;
         return `${String(e['nodePath'])} ${String(e['property'])} ${String(e['from'])}${to}${cleared}`;
       })
-      .sort();
+      .toSorted();
   };
   try {
     const imported = await runImport(godotPath, project);
@@ -68611,7 +68720,7 @@ async function testAMovedNodeNamesTheScriptLinesReadingIt(): Promise<void> {
     '\treturn "%s" % $Bar/Gold.text',
     '',
   ];
-  const main = [
+  const mainScript = [
     'extends "res://base.gd"',
     '',
     '@onready var status: Label = $Status',
@@ -68622,7 +68731,7 @@ async function testAMovedNodeNamesTheScriptLinesReadingIt(): Promise<void> {
   const files: Record<string, string> = {
     'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Script lines"\n',
     'hud.gd': hud.join('\n'),
-    'main.gd': main.join('\n'),
+    'main.gd': mainScript.join('\n'),
     'base.gd': 'extends Node\n\n\nfunc toast() -> Node:\n\treturn $Toast\n',
     'hud.tscn':
       '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://hud.gd" id="1_hud"]\n\n' +
@@ -68677,7 +68786,7 @@ async function testAMovedNodeNamesTheScriptLinesReadingIt(): Promise<void> {
           `${text(get(entry, 'from'))}${to === undefined ? '' : ` -> ${text(to)}`}`
         );
       })
-      .sort((a, b) => a.localeCompare(b, 'en', { numeric: true }));
+      .toSorted((a, b) => a.localeCompare(b, 'en', { numeric: true }));
   try {
     const imported = await runImport(godotPath, project);
     assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
@@ -68696,7 +68805,7 @@ async function testAMovedNodeNamesTheScriptLinesReadingIt(): Promise<void> {
         `hud.tscn . hud.gd:${at(hud, '$"Bar/Gold"')} Bar/Gold -> Bar/Coins`,
         `hud.tscn . hud.gd:${at(hud, 'self.get_node_or_null')} Bar/Gold -> Bar/Coins`,
         `hud.tscn . hud.gd:${at(hud, '% $Bar/Gold')} Bar/Gold -> Bar/Coins`,
-        `main.tscn . main.gd:${at(main, '$Hud/Bar/Gold')} Hud/Bar/Gold -> Hud/Bar/Coins`,
+        `main.tscn . main.gd:${at(mainScript, '$Hud/Bar/Gold')} Hud/Bar/Gold -> Hud/Bar/Coins`,
       ],
       JSON.stringify(coins),
     );
@@ -68740,7 +68849,7 @@ async function testAMovedNodeNamesTheScriptLinesReadingIt(): Promise<void> {
     });
     assert.deepEqual(
       named(goldLabel),
-      [`main.tscn . main.gd:${at(main, '$Status')} Status -> GoldLabel`],
+      [`main.tscn . main.gd:${at(mainScript, '$Status')} Status -> GoldLabel`],
       JSON.stringify(goldLabel),
     );
 
@@ -68753,7 +68862,11 @@ async function testAMovedNodeNamesTheScriptLinesReadingIt(): Promise<void> {
     assert.deepEqual(named(toast), ['main.tscn . base.gd:5 Toast -> Overlay/Toast'], JSON.stringify(toast));
 
     const sign = await call({ op: 'delete', scenePath: 'main.tscn', nodePath: 'Sign' });
-    assert.deepEqual(named(sign), [`main.tscn . main.gd:${at(main, '$Sign')} Sign`], JSON.stringify(sign));
+    assert.deepEqual(
+      named(sign),
+      [`main.tscn . main.gd:${at(mainScript, '$Sign')} Sign`],
+      JSON.stringify(sign),
+    );
     assert.equal(readFileSync(join(project, 'main.gd'), 'utf8'), files['main.gd'], 'and so is this one');
   } finally {
     await server.stop();
@@ -69055,11 +69168,10 @@ async function testAProjectsFilesAndLayersAreNamedWithNoEditor(): Promise<void> 
     await call('project_settings', { op: 'set', setting: name, value });
   const references = async (): Promise<string[]> => {
     const read = await call('project_info', { include: ['validation'] });
-    const issues = get(parseTextContent(read), 'validation', 'issues') as {
-      check: string;
-      message: string;
-    }[];
-    return issues.filter((issue) => issue.check === 'references').map((issue) => issue.message);
+    const issues = asArray(get(parseTextContent(read), 'validation', 'issues'), 'validation issues');
+    return issues
+      .filter((issue) => get(issue, 'check') === 'references')
+      .map((issue) => asString(get(issue, 'message'), 'a validation issue message'));
   };
   const statusOf = async (path: string): Promise<unknown> =>
     get(parseTextContent(await call('project_import', { op: 'status', resourcePath: path })), 'resources', 0);
@@ -69233,10 +69345,10 @@ async function testA3DLevelIsReadAsItIsWritten(): Promise<void> {
 
     await node({ op: 'set', nodePath: 'Sun', properties: { rotation_degrees: { x: -45, y: 0, z: 0 } } });
     const sun = parseTextContent(await node({ op: 'get', nodePath: 'Sun' }));
-    const placed = get(sun, 'placement') as Record<string, Record<string, number>> | undefined;
+    const placed = get(sun, 'placement');
     assert.ok(placed !== undefined, JSON.stringify(sun));
-    assert.ok(Math.abs((placed['rotation_degrees']?.['x'] ?? 0) + 45) < 1e-3, JSON.stringify(placed));
-    assert.deepEqual(placed['scale'], { x: 1, y: 1, z: 1, _type: 'Vector3' }, JSON.stringify(placed));
+    assert.ok(Math.abs(asNumber(get(placed, 'rotation_degrees', 'x')) + 45) < 1e-3, JSON.stringify(placed));
+    assert.deepEqual(get(placed, 'scale'), { x: 1, y: 1, z: 1, _type: 'Vector3' }, JSON.stringify(placed));
     const leaning = parseTextContent(await node({ op: 'get', nodePath: 'Leaning' }));
     assert.ok(get(leaning, 'properties', 'transform') !== undefined, JSON.stringify(leaning));
     assert.equal(
@@ -69280,13 +69392,13 @@ async function testA3DLevelIsReadAsItIsWritten(): Promise<void> {
     );
 
     const meshes = parseTextContent(await node({ op: 'bake_navigation', nodePath: 'Paths' }));
-    assert.ok((get(meshes, 'polygons') as number) > 0, JSON.stringify(meshes));
+    assert.ok(asNumber(get(meshes, 'polygons')) > 0, JSON.stringify(meshes));
     assert.match(
       String(get(meshes, 'meshesNote')),
       /^The engine's warning that it had to parse RenderingServer meshes/,
     );
     const colliders = parseTextContent(await node({ op: 'bake_navigation', nodePath: 'Solid' }));
-    assert.ok((get(colliders, 'polygons') as number) > 0, JSON.stringify(colliders));
+    assert.ok(asNumber(get(colliders, 'polygons')) > 0, JSON.stringify(colliders));
     assert.equal(
       get(colliders, 'meshesNote'),
       undefined,
@@ -69294,7 +69406,7 @@ async function testA3DLevelIsReadAsItIsWritten(): Promise<void> {
     );
     // The group's node holds no mesh itself, its child does.
     const widely = parseTextContent(await node({ op: 'bake_navigation', nodePath: 'Widely' }));
-    assert.ok((get(widely, 'polygons') as number) > 0, JSON.stringify(widely));
+    assert.ok(asNumber(get(widely, 'polygons')) > 0, JSON.stringify(widely));
     assert.match(String(get(widely, 'meshesNote')), /^The engine's warning/, JSON.stringify(widely));
     const exactly = parseTextContent(await node({ op: 'bake_navigation', nodePath: 'Exactly' }));
     assert.equal(get(exactly, 'polygons'), 0, JSON.stringify(exactly));
@@ -69410,8 +69522,8 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
   const bake = async (scenePath: string, nodePath: string): Promise<JsonRpcMessage> =>
     await node(scenePath, { op: 'bake_navigation', nodePath });
   // The polygons a resource's text holds, counted as the file has them.
-  const polygonsIn = (text: string, after: string): number => {
-    const from = text.slice(text.indexOf(after));
+  const polygonsIn = (saved: string, after: string): number => {
+    const from = saved.slice(saved.indexOf(after));
     const line = /^polygons = (.*)$/m.exec(from)?.[1] ?? '';
     return line.split('PackedInt32Array(').length - 1;
   };
@@ -69491,7 +69603,7 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
     const walled = await bake('walled.tscn', 'Region');
     const saved = readFileSync(join(project, 'walled.tscn'), 'utf8');
     assert.equal(get(parseTextContent(walled), 'savedTo'), 'res://walled.tscn', textOf(walled) ?? '');
-    const polygons = get(parseTextContent(walled), 'polygons') as number;
+    const polygons = asNumber(get(parseTextContent(walled), 'polygons'));
     // The square alone bakes to one polygon; the wall inside it splits that up.
     assert.ok(polygons > 1, `the wall is carved out of the square: ${textOf(walled) ?? ''}`);
     assert.equal(polygonsIn(saved, 'id="NavigationPolygon_a"'), polygons, 'the file holds what was answered');
@@ -69541,7 +69653,7 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
     assert.equal(get(parseTextContent(grouped), 'savedTo'), 'res://outline.tres', textOf(grouped) ?? '');
     const kept = readFileSync(join(project, 'outline.tres'), 'utf8');
     // A pillar in the group, outside the region, is carved out of it.
-    assert.ok((get(parseTextContent(grouped), 'polygons') as number) > 1, textOf(grouped) ?? '');
+    assert.ok(asNumber(get(parseTextContent(grouped), 'polygons')) > 1, textOf(grouped) ?? '');
     assert.equal(polygonsIn(kept, '[resource]'), get(parseTextContent(grouped), 'polygons'), kept);
     assert.doesNotMatch(
       readFileSync(join(project, 'grouped.tscn'), 'utf8'),
@@ -69550,7 +69662,7 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
     );
 
     const room = await bake('room.tscn', 'Region');
-    assert.ok((get(parseTextContent(room), 'polygons') as number) > 0, textOf(room) ?? '');
+    assert.ok(asNumber(get(parseTextContent(room), 'polygons')) > 0, textOf(room) ?? '');
     assert.equal(
       polygonsIn(readFileSync(join(project, 'room.tscn'), 'utf8'), 'id="NavigationMesh_a"'),
       get(parseTextContent(room), 'polygons'),
@@ -70316,12 +70428,12 @@ async function rescanAsTheEditorOpens(godotPath: string, count: number): Promise
 function testEveryFixtureIsCalled(): void {
   const source = readFileSync(join('test', 'regressions.ts'), 'utf8');
   const defined = [...source.matchAll(/^(?:async )?function (test[A-Za-z0-9_]*)\(/gm)].map((match) =>
-    captured(match),
+    firstGroup(match),
   );
   assert.ok(defined.length > 50, `the pattern should still find the fixtures: found ${defined.length}`);
 
   const listed = new Set(
-    [...source.matchAll(/^ {2}(test[A-Za-z0-9_]*),$/gm)].map((match) => captured(match)),
+    [...source.matchAll(/^ {2}(test[A-Za-z0-9_]*),$/gm)].map((match) => firstGroup(match)),
   );
   const unreachable = defined.filter((name) => !listed.has(name));
   assert.deepEqual(unreachable, [], 'every fixture defined here should be in TESTS');
@@ -70347,8 +70459,8 @@ function testRegressionPartsCoverEveryTestOnceAndBalance(): void {
       const covered = split.flat();
       assert.equal(covered.length, names.length, `${platform}: ${parts} parts hold each regression once`);
       assert.deepEqual(
-        [...covered].sort(),
-        [...names].sort(),
+        [...covered].toSorted(),
+        [...names].toSorted(),
         `${platform}: ${parts} parts hold every regression`,
       );
       const loads = split.map((part) => part.reduce((total, name) => total + weight(name), 0));

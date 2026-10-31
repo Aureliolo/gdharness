@@ -10,6 +10,7 @@ import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { envValue } from './launch.js';
 import { isSameDirectory, isWithinRoot, resolveWithinProject } from './paths.js';
 import { portFromEnv } from './ports.js';
+import { isRecord } from './records.js';
 import type { ToolResponse } from './server-types.js';
 
 /** What an editor serves the language server on when nothing has moved it. */
@@ -224,7 +225,8 @@ export class GodotLSPClient {
     }
 
     if (this.connectPromise) {
-      return await this.connectPromise;
+      await this.connectPromise;
+      return;
     }
 
     this.connectPromise = new Promise<void>((resolveConnect, rejectConnect) => {
@@ -399,12 +401,10 @@ export class GodotLSPClient {
     this.socket.write(frame(payload));
   }
 
-  private handleMessage(parsed: unknown): void {
-    if (!parsed || typeof parsed !== 'object') {
+  private handleMessage(message: unknown): void {
+    if (!isRecord(message)) {
       return;
     }
-
-    const message: JsonRecord = parsed as JsonRecord;
 
     if (typeof message['id'] === 'number') {
       const pending = this.pendingRequests.get(message['id']);
@@ -414,7 +414,7 @@ export class GodotLSPClient {
 
         const errorPayload = message['error'];
         if (errorPayload && typeof errorPayload === 'object') {
-          const errorObject = errorPayload as JsonRecord;
+          const errorObject = asRecord(errorPayload);
           const code = typeof errorObject['code'] === 'number' ? errorObject['code'] : 'unknown';
           const messageText =
             typeof errorObject['message'] === 'string' ? errorObject['message'] : 'Unknown LSP error';
@@ -426,13 +426,13 @@ export class GodotLSPClient {
     }
 
     if (message['method'] === 'gdscript_client/changeWorkspace') {
-      const path = (message['params'] as JsonRecord | undefined)?.['path'];
+      const path = asRecord(message['params'])['path'];
       this.servedWorkspace = typeof path === 'string' ? path : null;
     }
 
     if (message['method'] === 'textDocument/publishDiagnostics') {
       const params = message['params'];
-      const paramsObject = params && typeof params === 'object' ? (params as JsonRecord) : null;
+      const paramsObject = isRecord(params) ? params : null;
       const uri = paramsObject && typeof paramsObject['uri'] === 'string' ? paramsObject['uri'] : null;
       const diagnostics =
         paramsObject && Array.isArray(paramsObject['diagnostics'])
@@ -750,14 +750,8 @@ export class GodotLSPClient {
       return result as unknown[];
     }
 
-    if (result && typeof result === 'object') {
-      const items = (result as JsonRecord)['items'];
-      if (Array.isArray(items)) {
-        return items as unknown[];
-      }
-    }
-
-    return [];
+    const items = asRecord(result)['items'];
+    return Array.isArray(items) ? (items as unknown[]) : [];
   }
 
   async getHover(filePath: string, content: string, line: number, character: number): Promise<unknown> {
@@ -876,19 +870,17 @@ function locationsIn(result: unknown): { file: string; line: number; character: 
       : [result];
   const found: { file: string; line: number; character: number }[] = [];
   for (const entry of entries) {
-    const location = entry as {
-      uri?: unknown;
-      range?: { start?: { line?: unknown; character?: unknown } };
-      targetUri?: unknown;
-      targetSelectionRange?: { start?: { line?: unknown; character?: unknown } };
-    };
-    const uri = location.uri ?? location.targetUri;
-    const start = location.range?.start ?? location.targetSelectionRange?.start;
-    if (typeof uri !== 'string' || typeof start?.line !== 'number' || typeof start.character !== 'number') {
+    const location = asRecord(entry);
+    const uri = location['uri'] ?? location['targetUri'];
+    const start = asRecord(
+      asRecord(location['range'])['start'] ?? asRecord(location['targetSelectionRange'])['start'],
+    );
+    const { line, character } = start;
+    if (typeof uri !== 'string' || typeof line !== 'number' || typeof character !== 'number') {
       continue;
     }
     try {
-      found.push({ file: fileURLToPath(uri), line: start.line, character: start.character });
+      found.push({ file: fileURLToPath(uri), line, character });
     } catch {
       // A location that is not a file is nothing a rename can write.
     }
@@ -996,7 +988,7 @@ const COMPLETION_KINDS = [
 ];
 
 function asRecord(value: unknown): JsonRecord {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as JsonRecord) : {};
+  return isRecord(value) ? value : {};
 }
 
 /** The protocol's numbered kind as its name, or the value as it came when it is not one. */
@@ -1212,11 +1204,11 @@ export async function handleLSPTool(
   args: unknown,
 ): Promise<ToolResponse> {
   try {
-    if (!args || typeof args !== 'object') {
+    if (!isRecord(args)) {
       throw new ArgumentRefusal('Tool arguments must be an object.');
     }
 
-    const parsedArgs = args as JsonRecord;
+    const parsedArgs = args;
     const projectPathValue = parsedArgs['projectPath'];
     const scriptPathValue = parsedArgs['scriptPath'];
 

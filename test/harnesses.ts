@@ -24,12 +24,14 @@ import {
   entryFor,
   groupByFile,
   HARNESSES,
+  type Harness,
   harnessById,
   harnessNote,
   launchFor,
   SERVER_KEY,
 } from '../src/harnesses.js';
 import { currentRunner, givenExecPath, type Runner, spawnFor } from '../src/runner.js';
+import { asObject, get } from './support/json.js';
 import { sweep } from './support/sweep.js';
 
 const LAUNCH = launchFor('9.9.9', '/opt/godot/godot', '/home/you/game', 'npx');
@@ -39,7 +41,19 @@ function project(): string {
 }
 
 function read(path: string): Record<string, unknown> {
-  return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  return asObject(JSON.parse(readFileSync(path, 'utf8')), path);
+}
+
+/** Where [harness] keeps its config inside [root], worked out here rather than asked of the code under test. */
+function projectFile(harness: Harness, root: string): string {
+  const { file } = harness;
+  assert.ok(typeof file === 'string', `${harness.id} keeps one file in the project`);
+  return join(root, file);
+}
+
+/** The servers section of [config], which every harness in these cases calls `mcpServers`. */
+function mcpServers(config: Record<string, unknown>): Record<string, unknown> {
+  return asObject(config['mcpServers'], 'mcpServers');
 }
 
 /**
@@ -188,10 +202,10 @@ function testAConfigIsWrittenWhereTheHarnessLooks(): void {
     try {
       const written = connect(harness, root, LAUNCH);
       assert.equal(written.action, 'written', `${harness.id} wrote a new file`);
-      assert.equal(written.path, join(root, harness.file as string), `${harness.id} wrote where it looks`);
+      assert.equal(written.path, projectFile(harness, root), `${harness.id} wrote where it looks`);
 
       const config = read(written.path);
-      const servers = config[harness.container] as Record<string, unknown>;
+      const servers = asObject(config[harness.container], harness.container);
       assert.ok(servers[SERVER_KEY], `${harness.id} holds gdharness under ${harness.container}`);
     } finally {
       sweep(root);
@@ -253,7 +267,7 @@ function testNothingAlreadyInTheFileIsLost(): void {
   assert.ok(harness, 'claude-code is in the table');
   const root = project();
   try {
-    const path = join(root, harness.file as string);
+    const path = projectFile(harness, root);
     writeFileSync(
       path,
       JSON.stringify({
@@ -266,7 +280,7 @@ function testNothingAlreadyInTheFileIsLost(): void {
     connect(harness, root, LAUNCH);
 
     const config = read(path);
-    const servers = config['mcpServers'] as Record<string, unknown>;
+    const servers = mcpServers(config);
     assert.deepEqual(servers['other'], { command: 'other-server' }, 'another server survives');
     assert.deepEqual(config['somethingElse'], { kept: true }, 'a key we know nothing about survives');
     assert.ok(servers[SERVER_KEY], 'and gdharness is there too');
@@ -284,8 +298,8 @@ function testWritingTwiceReplacesRatherThanDuplicates(): void {
     const second = connect(harness, root, launchFor('9.9.10', '/opt/godot/other', root, 'npx'));
     assert.equal(second.action, 'replaced', 'the second write says it replaced the entry');
 
-    const servers = read(second.path)['mcpServers'] as Record<string, Record<string, unknown>>;
-    assert.deepEqual(servers[SERVER_KEY]?.['args'], ['-y', 'gdharness@9.9.10'], 'the new version won');
+    const servers = mcpServers(read(second.path));
+    assert.deepEqual(get(servers, SERVER_KEY, 'args'), ['-y', 'gdharness@9.9.10'], 'the new version won');
     assert.equal(Object.keys(servers).length, 1, 'and there is still one gdharness');
   } finally {
     sweep(root);
@@ -309,11 +323,9 @@ function testAnUpgradeKeepsWhatWasPinnedByHand(): void {
     connect(harness, root, LAUNCH);
     const path = configPath(harness, root);
     const before = read(path);
-    const servers = before['mcpServers'] as Record<string, Record<string, unknown>>;
-    const entry = servers[SERVER_KEY];
-    assert.ok(entry, 'the install wrote an entry to pin anything in');
+    const entry = asObject(mcpServers(before)[SERVER_KEY], 'the entry the install wrote to pin anything in');
     entry['env'] = {
-      ...(entry['env'] as Record<string, string>),
+      ...asObject(entry['env'], 'the env the install wrote'),
       GDHARNESS_BRIDGE_PORT: '6515',
       GDHARNESS_LSP_PORT: '6015',
     };
@@ -322,9 +334,8 @@ function testAnUpgradeKeepsWhatWasPinnedByHand(): void {
 
     connect(harness, root, launchFor('9.9.10', '/opt/godot/other', root, 'npx'));
 
-    const after = (read(path)['mcpServers'] as Record<string, Record<string, unknown>>)[SERVER_KEY];
-    assert.ok(after, 'gdharness is still in the file');
-    const env = after['env'] as Record<string, string>;
+    const after = asObject(mcpServers(read(path))[SERVER_KEY], 'the gdharness entry still in the file');
+    const env = asObject(after['env'], 'the env after the upgrade');
     assert.equal(env['GDHARNESS_BRIDGE_PORT'], '6515', 'a port pinned by hand survives the upgrade');
     assert.equal(env['GDHARNESS_LSP_PORT'], '6015', 'and so does the next one');
     assert.equal(after['timeout'], 120, 'and a key on the entry gdharness knows nothing about');
@@ -355,8 +366,10 @@ function testAnInstallSaysWhatItLaunchedInsteadOf(): void {
     connect(harness, root, LAUNCH);
     const path = configPath(harness, root);
     const before = read(path);
-    const entry = (before['mcpServers'] as Record<string, Record<string, unknown>>)[SERVER_KEY];
-    assert.ok(entry, 'the install wrote an entry to point somewhere else');
+    const entry = asObject(
+      mcpServers(before)[SERVER_KEY],
+      'the entry the install wrote to point somewhere else',
+    );
     entry['command'] = 'node';
     entry['args'] = ['../gdharness/build/cli.js'];
     writeFileSync(path, `${JSON.stringify(before, null, 2)}\n`, 'utf8');
@@ -532,7 +545,7 @@ function testAConfigThatDoesNotParseIsLeftAlone(): void {
   assert.ok(harness, 'claude-code is in the table');
   const root = project();
   try {
-    const path = join(root, harness.file as string);
+    const path = projectFile(harness, root);
     const damaged = '{ this is not json';
     writeFileSync(path, damaged, 'utf8');
 
@@ -827,7 +840,7 @@ function testRemovingTakesOnlyOurEntry(): void {
   assert.ok(harness, 'cursor is in the table');
   const root = project();
   try {
-    const path = join(root, harness.file as string);
+    const path = projectFile(harness, root);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(
       path,
@@ -842,7 +855,7 @@ function testRemovingTakesOnlyOurEntry(): void {
     const removal = disconnect(harness, root);
     assert.equal(removal.action, 'removed');
     const config = read(path);
-    const servers = config['mcpServers'] as Record<string, unknown>;
+    const servers = mcpServers(config);
     assert.deepEqual(servers['other'], { command: 'other-server' }, 'their server survives');
     assert.deepEqual(config['somethingElse'], { kept: true }, 'and so does a key we know nothing about');
     assert.equal(SERVER_KEY in servers, false, 'ours is gone');
@@ -881,7 +894,7 @@ function testThereIsNothingToReportWhenWeWereNeverThere(): void {
     assert.equal(disconnect(harness, root).action, 'absent', 'no file at all');
     assert.equal(disconnect(toml, root).action, 'absent', 'and no advice about a file that is not there');
 
-    const path = join(root, harness.file as string);
+    const path = projectFile(harness, root);
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, JSON.stringify({ mcpServers: { other: { command: 'other' } } }), 'utf8');
     assert.equal(disconnect(harness, root).action, 'absent', 'a config holding only their servers');

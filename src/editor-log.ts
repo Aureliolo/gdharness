@@ -441,7 +441,7 @@ export function bursts(
       before: linesBefore(entries, first, collapsed, before),
     });
   }
-  return repeated.sort((one, other) => other.count - one.count);
+  return repeated.toSorted((one, other) => other.count - one.count);
 }
 
 function slotsOf(values: readonly (readonly string[])[], count: number): readonly Slot[] {

@@ -149,7 +149,7 @@ function isEmptyCollection(node: unknown): boolean {
     typeof node === 'object' &&
     node !== null &&
     'items' in node &&
-    Array.isArray((node as { items: unknown[] }).items) &&
-    (node as { items: unknown[] }).items.length === 0
+    Array.isArray(node.items) &&
+    node.items.length === 0
   );
 }

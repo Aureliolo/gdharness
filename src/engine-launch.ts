@@ -302,12 +302,11 @@ export async function inTurns<T, R>(
   run: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
   const answers: R[] = [];
-  let next = 0;
+  // One iterator for every lane, so each item is taken by whichever lane is free first, and once.
+  const queue = items.entries();
   const lane = async (): Promise<void> => {
-    while (next < items.length) {
-      const index = next;
-      next += 1;
-      answers[index] = await run(items[index] as T, index);
+    for (const [index, item] of queue) {
+      answers[index] = await run(item, index);
     }
   };
   await Promise.all(Array.from({ length: Math.max(1, Math.min(at, items.length)) }, lane));
@@ -511,8 +510,8 @@ export async function watchedEngine(
       const now = fstatSync(reading).size;
       if (now > size) {
         const chunk = Buffer.alloc(SCAN_BYTES);
-        for (let at = size; at < now; ) {
-          const got = readSync(reading, chunk, 0, Math.min(SCAN_BYTES, now - at), at);
+        for (let offset = size; offset < now; ) {
+          const got = readSync(reading, chunk, 0, Math.min(SCAN_BYTES, now - offset), offset);
           if (got === 0) {
             break;
           }
@@ -522,7 +521,7 @@ export async function watchedEngine(
             stop();
           }
           carried = scanned.slice(-AUTOLOAD_FAILED.length);
-          at += got;
+          offset += got;
         }
         size = now;
         quiet.restart(at);

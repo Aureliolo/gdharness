@@ -48,6 +48,7 @@ import { staleImports } from './import-freshness.js';
 import { hiddenWindowFlags } from './launch.js';
 import { freeLibraryCopies, seedExtensionList, unlistedExtensions } from './library-copies.js';
 import { prependTo, readLog } from './log-read.js';
+import { isRecord, isStringList } from './records.js';
 import { forceNextImport } from './reimport.js';
 import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
 import { EVERY_FILE, type PassedSuite, reachedBySuite, SuiteInputs } from './suite-inputs.js';
@@ -265,9 +266,9 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     }
   }
   const first = positional[0];
-  const named = first === undefined ? null : resolve(cwd, first);
-  const projectNamed = named !== null && existsSync(join(named, 'project.godot'));
-  const projectPath = projectNamed ? named : resolve(cwd);
+  const firstPath = first === undefined ? null : resolve(cwd, first);
+  const projectNamed = firstPath !== null && existsSync(join(firstPath, 'project.godot'));
+  const projectPath = projectNamed ? firstPath : resolve(cwd);
   if (!existsSync(join(projectPath, 'project.godot'))) {
     throw new EngineUsageError(`Not a Godot project: ${projectPath} holds no project.godot.`);
   }
@@ -375,7 +376,7 @@ function selectedSuites(scripts: ProjectScripts, options: TestOptions): Declared
 
 /** [param units] in the order [param order] asks: reversed by path, or shuffled by a seed. */
 function ordered(units: readonly Unit[], order: 'reversed' | number): Unit[] {
-  const sorted = [...units].sort((a, b) => a.suite.localeCompare(b.suite));
+  const sorted = [...units].toSorted((a, b) => a.suite.localeCompare(b.suite));
   if (order === 'reversed') {
     return sorted.reverse();
   }
@@ -739,7 +740,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         )
       : (await Promise.all(lanes.map((lane, at) => runLane(launch, lane, times, taken[at] ?? null, handed))))
           .flat()
-          .sort((a, b) => a.index - b.index);
+          .toSorted((a, b) => a.index - b.index);
     if (ran.some((engine) => engine.verdict.starved) && ran.some((engine) => !engine.verdict.passed)) {
       say('An engine ran out of memory, so every engine that failed runs again, one at a time.');
       const again: EngineRan[] = [];
@@ -909,14 +910,10 @@ function readPassed(file: string): Record<string, PassedSuite> {
     return {};
   }
   const passed: Record<string, PassedSuite> = {};
-  for (const [path, entry] of Object.entries(typeof parsed === 'object' && parsed !== null ? parsed : {})) {
-    const { print, inputs } = (entry ?? {}) as { print?: unknown; inputs?: unknown };
-    if (
-      typeof print === 'string' &&
-      Array.isArray(inputs) &&
-      inputs.every((input) => typeof input === 'string')
-    ) {
-      passed[path] = { print, inputs: inputs };
+  for (const [path, entry] of Object.entries(isRecord(parsed) ? parsed : {})) {
+    const { print, inputs }: Record<string, unknown> = isRecord(entry) ? entry : {};
+    if (typeof print === 'string' && isStringList(inputs)) {
+      passed[path] = { print, inputs };
     }
   }
   return passed;
@@ -969,7 +966,7 @@ function recordPassed(
         ? []
         : loaded.has(EVERY_FILE)
           ? [EVERY_FILE]
-          : [...loaded].sort();
+          : [...loaded].toSorted();
     if (kept.length > 0 && !inputs.modifiedAfter(kept, began)) {
       passed[path] = { print: inputs.printOf(kept), inputs: kept };
     } else {
@@ -1002,8 +999,8 @@ const COMPILE_CHECK = 'compiling every script together';
 class HandedSlot {
   private wanted = true;
   private handOver: (lock: string) => void = () => undefined;
-  readonly lock = new Promise<string>((resolve) => {
-    this.handOver = resolve;
+  readonly lock = new Promise<string>((received) => {
+    this.handOver = received;
   });
 
   /** Takes no slot after all, so every lane gives its own back to the machine. */
@@ -1137,7 +1134,7 @@ async function compileUnlessUnchanged(
 function readKeptPrint(file: string): string | null {
   try {
     const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
-    const print = (parsed as { print?: unknown } | null)?.print;
+    const print = isRecord(parsed) ? parsed['print'] : undefined;
     return typeof print === 'string' ? print : null;
   } catch {
     return null;
@@ -1193,7 +1190,7 @@ export function importNeeded(projectPath: string): string | null {
   if (unlisted.length > 0) {
     return `No import has listed the project's extensions, ${named(unlisted)}, so the engine would load none of them, and the project is imported first.`;
   }
-  const uncached = staleAgainst(cached, projectPath).sort();
+  const uncached = staleAgainst(cached, projectPath).toSorted();
   if (uncached.length > 0) {
     return `The class cache does not list ${named(uncached)} where the scripts declare ${uncached.length === 1 ? 'it' : 'them'}, so the project is imported first.`;
   }
@@ -1347,7 +1344,7 @@ async function runShares(
   };
   return (await Promise.all(Array.from({ length: lanes }, (_, at) => lane(at))))
     .flat()
-    .sort((a, b) => a.index - b.index);
+    .toSorted((a, b) => a.index - b.index);
 }
 
 /**
@@ -1475,7 +1472,7 @@ export function reportsFault(reports: string): string | null {
   const files = existsSync(reports)
     ? readdirSync(reports, { recursive: true, encoding: 'utf8' })
         .filter((file) => statSync(join(reports, file)).isFile())
-        .sort()
+        .toSorted()
     : [];
   if (files.length === 0) {
     return null;
@@ -1579,7 +1576,7 @@ function report(
             ],
       ),
     )
-    .sort((a, b) => b.seconds - a.seconds);
+    .toSorted((a, b) => b.seconds - a.seconds);
   const slowest = closed.slice(0, SLOWEST_NAMED);
   if (slowest.length > 1) {
     console.log(

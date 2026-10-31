@@ -302,7 +302,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
     }
     if (inUse.length > 0) {
       const places = inUse
-        .sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line)
+        .toSorted((a, b) => a.file.localeCompare(b.file) || a.line - b.line)
         .slice(0, 10)
         .map((place) => `${place.file}:${place.line}`);
       conflicts.push(
@@ -407,7 +407,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
   const scriptsInOrder = rewrites
     .map((rewrite) => rewrite.path)
     .filter((path) => path.endsWith('.gd'))
-    .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+    .toSorted((a, b) => rank(a) - rank(b) || a.localeCompare(b))
     .map((path) => (path === declaringPath && moveTo !== null ? moveTo : path));
   return {
     ok: true,
@@ -567,7 +567,7 @@ export function changedReport(
       file: rewrite.path,
       edits: count,
       lines: [...byLine.entries()]
-        .sort(([a], [b]) => a - b)
+        .toSorted(([a], [b]) => a - b)
         .map(([line, kinds]) => ({
           line: line + 1,
           kinds: [...kinds],
@@ -648,7 +648,7 @@ export function leftAloneReport(mentions: readonly Mention[], terms: readonly st
   // likeliest entry to break something silently, so it is put where a reader starts.
   const loudFirst = (mention: Mention): number =>
     mention.kind === 'string' && mention.why !== undefined ? 0 : 1;
-  const leftAlone = full.sort((a, b) => loudFirst(a) - loudFirst(b));
+  const leftAlone = full.toSorted((a, b) => loudFirst(a) - loudFirst(b));
   const inProse = [...prose.values()];
   const otherSymbols = [...others.entries()].map(([why, files]) => ({
     why,
@@ -734,7 +734,7 @@ export function writeLeftAloneDetail(projectPath: string, symbol: string, detail
   writeFileSync(path, `${JSON.stringify(detail, null, 2)}\n`, 'utf8');
   const kept = readdirSync(directory)
     .filter((name) => name.endsWith('.json'))
-    .sort()
+    .toSorted()
     .reverse();
   for (const old of kept.slice(10)) {
     rmSync(join(directory, old), { force: true });

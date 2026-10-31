@@ -365,7 +365,7 @@ export function ignoredLeftOut(
       }
     }
   }
-  return { leftOut: [...leftOut].sort(), unmatched };
+  return { leftOut: [...leftOut].toSorted(), unmatched };
 }
 
 /**
@@ -626,7 +626,7 @@ export function discoveryListing(
   }
   // gdUnit4 lists them in the order the filesystem hands it the directory, which Linux and
   // Windows disagree about, so the same project named its broken scripts in two orders.
-  const errors = found.sort((a, b) =>
+  const errors = found.toSorted((a, b) =>
     a.path < b.path ? -1 : a.path > b.path ? 1 : (a.line ?? 0) - (b.line ?? 0),
   );
   return { errors, from: start, to };
@@ -909,7 +909,7 @@ export function failedWithin(
   budget: number,
 ): { readonly failed: readonly FailedCase[]; readonly briefed: number } {
   const sizes = failed.map((entry) => JSON.stringify(entry).length);
-  const smallestFirst = sizes.map((_, index) => index).sort((a, b) => (sizes[a] ?? 0) - (sizes[b] ?? 0));
+  const smallestFirst = sizes.map((_, index) => index).toSorted((a, b) => (sizes[a] ?? 0) - (sizes[b] ?? 0));
   const whole = new Set<number>();
   let spent = 0;
   for (const index of smallestFirst) {

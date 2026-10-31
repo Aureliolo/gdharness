@@ -134,7 +134,7 @@ export function unlistedExtensions(projectPath: string): string[] {
     }
   };
   visit(projectPath, 'res://');
-  return found.sort();
+  return found.toSorted();
 }
 
 /**

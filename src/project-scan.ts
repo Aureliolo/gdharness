@@ -145,11 +145,11 @@ export function folderFiles(directory: string, extensions: readonly string[]): s
 }
 
 /**
- * Whether [param relative], a project-relative path, is under a folder of the project holding a
+ * Whether [param relativePath], a project-relative path, is under a folder of the project holding a
  * `.gdignore`, which the engine never loads anything from.
  */
-export function underGdignore(projectPath: string, relative: string): boolean {
-  const folders = relative.split('/').slice(0, -1);
+export function underGdignore(projectPath: string, relativePath: string): boolean {
+  const folders = relativePath.split('/').slice(0, -1);
   for (let depth = 1; depth <= folders.length; depth += 1) {
     if (gdignored(join(projectPath, ...folders.slice(0, depth)))) {
       return true;
@@ -192,7 +192,7 @@ export function steppedOverIn(directory: string): SteppedOver[] {
     }
   };
   visit(directory, '');
-  return found.sort((a, b) => a.folder.localeCompare(b.folder));
+  return found.toSorted((a, b) => a.folder.localeCompare(b.folder));
 }
 
 function filesBelow(root: string, extensions: readonly string[]): string[] {
@@ -214,7 +214,7 @@ function filesBelow(root: string, extensions: readonly string[]): string[] {
     }
   };
   visit(root, '');
-  return found.sort();
+  return found.toSorted();
 }
 
 /** The extensions Godot mints a `.uid` sidecar for. */
@@ -253,7 +253,7 @@ export function scriptsWithoutUid(projectPath: string): string[] {
     }
   };
   visit(projectPath, '');
-  return found.sort();
+  return found.toSorted();
 }
 
 /**
@@ -491,6 +491,7 @@ function compiledQuery(query: string, caseSensitive: boolean): RegExp {
     const why = errorMessage(error).split(': ').at(-1) ?? '';
     throw new Error(
       `'${query}' is not a regular expression: ${why.charAt(0).toLowerCase()}${why.slice(1)}. With regex true, a character such as ( ) [ ] { } . * + ? | ^ $ or \\ stands for itself only after a backslash, as in \\(; or leave regex out to search for the text as written.`,
+      { cause: error },
     );
   }
 }
@@ -596,7 +597,7 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
       ? undefined
       : met.size === 0
         ? 'No file was searched: there is no file there to search.'
-        : `No file was searched: none there has the extension ${[...extensions].join(', ')}. The extensions there are ${[...met].sort().join(', ')}.`,
+        : `No file was searched: none there has the extension ${[...extensions].join(', ')}. The extensions there are ${[...met].toSorted().join(', ')}.`,
   ].filter((note) => note !== undefined);
   return notes.length === 0 ? answered : { ...answered, note: notes.join(' ') };
 }

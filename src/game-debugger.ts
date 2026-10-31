@@ -89,6 +89,11 @@ export const RUNTIME_ADDON = 'res://addons/gdharness_runtime/';
 const RUNTIME_AUTOLOAD = `${RUNTIME_ADDON}runtime_autoload.gd`;
 let frameEnd: number | null = null;
 
+/** Whether the frame [param frames] is stopped in belongs to the runtime addon. */
+function topIsTheAddon(frames: readonly DebugFrame[]): boolean {
+  return frames[0]?.script.startsWith(RUNTIME_ADDON) ?? false;
+}
+
 /**
  * The line of the runtime autoload's _notification, the last it runs in a frame, read off the shipped
  * copy: a game is started only on this release's addon, so that is the copy it runs.
@@ -663,7 +668,7 @@ export class GameDebugger {
     let frames = await this.stack();
     let framesLeft = ADDON_FRAMES;
     let linesLeft = ADDON_LINES;
-    while (frames !== null && this.held !== null && (frames[0]?.script.startsWith(RUNTIME_ADDON) ?? false)) {
+    while (frames !== null && this.held !== null && topIsTheAddon(frames)) {
       if (until !== undefined && Date.now() >= until) {
         return { frames, gaveUp: 'time' };
       }

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { isRecord } from './json-rpc.js';
 
 /**
  * Reads into a parsed JSON value without claiming to know its shape.
@@ -15,19 +16,16 @@ export function get(value: unknown, ...path: (string | number)[]): unknown {
       if (!Array.isArray(current)) return undefined;
       current = current[step];
     } else {
-      if (typeof current !== 'object' || current === null || Array.isArray(current)) return undefined;
-      current = (current as Record<string, unknown>)[step];
+      if (!isRecord(current) || Array.isArray(current)) return undefined;
+      current = current[step];
     }
   }
   return current;
 }
 
 export function asObject(value: unknown, what = 'value'): Record<string, unknown> {
-  assert.ok(
-    typeof value === 'object' && value !== null && !Array.isArray(value),
-    `${what} should be an object`,
-  );
-  return value as Record<string, unknown>;
+  assert.ok(isRecord(value) && !Array.isArray(value), `${what} should be an object`);
+  return value;
 }
 
 export function asArray(value: unknown, what = 'value'): unknown[] {
@@ -36,13 +34,13 @@ export function asArray(value: unknown, what = 'value'): unknown[] {
 }
 
 export function asString(value: unknown, what = 'value'): string {
-  assert.equal(typeof value, 'string', `${what} should be a string`);
-  return value as string;
+  assert.ok(typeof value === 'string', `${what} should be a string`);
+  return value;
 }
 
 export function asNumber(value: unknown, what = 'value'): number {
-  assert.equal(typeof value, 'number', `${what} should be a number`);
-  return value as number;
+  assert.ok(typeof value === 'number', `${what} should be a number`);
+  return value;
 }
 
 /** A value as text for a message or a pattern match: strings as they are, anything else as JSON. */
@@ -57,8 +55,8 @@ export function text(value: unknown): string {
 export function lastJsonLine(output: string, what = 'output'): unknown {
   const line = output
     .split('\n')
-    .map((text) => text.trim())
-    .findLast((text) => text.startsWith('{'));
+    .map((raw) => raw.trim())
+    .findLast((trimmed) => trimmed.startsWith('{'));
   assert.ok(line, `${what} printed no JSON payload:\n${output.trim()}`);
   return JSON.parse(line) as unknown;
 }

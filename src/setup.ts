@@ -120,7 +120,7 @@ function runtimeAddonDigest(from: string = shippedAddonsDirectory()): string {
 function addonsDigest(names: readonly string[], from: string): string {
   const hash = createHash('sha256');
   const walk = (directory: string, relative: string): void => {
-    for (const name of readdirSync(directory).sort()) {
+    for (const name of readdirSync(directory).toSorted()) {
       if (name === VERSION_MARKER || name === DIGEST_MARKER) {
         continue;
       }

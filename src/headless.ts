@@ -17,6 +17,7 @@ import type { GameLog, LogEntry } from './game-log.js';
 import { IMPORTABLE_EXTENSIONS } from './import-freshness.js';
 import { freeLibraryCopies } from './library-copies.js';
 import { realAsFarAsItExists } from './paths.js';
+import { isRecord } from './records.js';
 import { forceNextImport } from './reimport.js';
 import { discard, scratchDirectory } from './scratch.js';
 import { notCompiledIn } from './script-origins.js';
@@ -633,8 +634,8 @@ function answerIn(
   const text = readFileSync(file, 'utf8');
   try {
     const parsed: unknown = JSON.parse(text);
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? { kind: 'answer', payload: parsed as OperationParams }
+    return isRecord(parsed)
+      ? { kind: 'answer', payload: parsed }
       : { kind: 'unreadable', why: `it is JSON but not an object: ${text.slice(0, 200)}` };
   } catch (error) {
     return {

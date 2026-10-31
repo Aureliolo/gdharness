@@ -7,6 +7,7 @@ import { errorMessage, Refusal, toError } from './errors.js';
 import { envValue } from './launch.js';
 import { isSameDirectory } from './paths.js';
 import { portFromEnv } from './ports.js';
+import { isRecord } from './records.js';
 import { addonMismatch, SERVER_VERSION } from './server-version.js';
 import { installedEditorDigest, shippedEditorDigest } from './setup.js';
 
@@ -145,9 +146,10 @@ const GREETING_FIELDS: Readonly<Record<string, 'string' | 'number' | 'boolean'>>
 };
 
 /** The greeting fields [param message] lacks or holds as the wrong type, in the order above. */
-export function greetingFaults(message: Record<string, unknown>): string[] {
+export function greetingFaults(message: object): string[] {
+  const sent = new Map<string, unknown>(Object.entries(message));
   return Object.entries(GREETING_FIELDS)
-    .filter(([field, type]) => typeof message[field] !== type)
+    .filter(([field, type]) => typeof sent.get(field) !== type)
     .map(([field]) => field);
 }
 
@@ -628,7 +630,7 @@ export class GodotBridge extends EventEmitter {
     return [...this.pendingRequests.values()]
       .filter((pending) => pending.counted)
       .map((pending) => ({ tool: pending.toolName, startedAt: pending.startedAt }))
-      .sort((a, b) => a.startedAt - b.startedAt);
+      .toSorted((a, b) => a.startedAt - b.startedAt);
   }
 
   public getStatus(): BridgeStatus {
@@ -725,6 +727,7 @@ export class GodotBridge extends EventEmitter {
         if (Date.now() >= giveUpAt) {
           throw new Error(
             `The editor was scanning or importing its files for all of ${Math.round(waitMs / 1000)} s, so ${toolName} was not run and nothing it would change was changed. editor_rescan says when the scan is over.`,
+            { cause: error },
           );
         }
       }
@@ -882,7 +885,7 @@ export class GodotBridge extends EventEmitter {
             return;
           }
           this.connectionInfo.projectPath = withoutTrailingSeparator(message.project_path);
-          const faults = greetingFaults(message as unknown as Record<string, unknown>);
+          const faults = greetingFaults(message);
           if (faults.length > 0) {
             // Another release's addon, which this server asks nothing but to quit. The connection is
             // kept for that: closed, the addon dials straight back, and only it can quit its editor.
@@ -1215,12 +1218,11 @@ export class GodotBridge extends EventEmitter {
     return typeof value === 'string' && value.length > 0 ? value : undefined;
   }
 
-  private isIncomingMessage(value: unknown): value is IncomingMessage {
-    if (!value || typeof value !== 'object') {
+  private isIncomingMessage(message: unknown): message is IncomingMessage {
+    if (!isRecord(message)) {
       return false;
     }
 
-    const message = value as Record<string, unknown>;
     const type = message['type'];
     if (type !== 'tool_result' && type !== 'pong' && type !== 'godot_ready') {
       return false;

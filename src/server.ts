@@ -127,7 +127,7 @@ import {
 } from './engine-leaks.js';
 import { type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-run.js';
 import { type CallSlot, onTheSlot, slotEngineNamed, slotForCall } from './engine-slots.js';
-import { errorMessage, Refusal } from './errors.js';
+import { errorCode, errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
 import { type DebugRequest, EVALUATE_MS, PAUSE_MS, READ_MS, STEP_MS } from './game-debugger.js';
 import {
@@ -245,6 +245,7 @@ import {
   underGdignore,
 } from './project-scan.js';
 import { setupPromptHandlers } from './prompts.js';
+import { isRecord } from './records.js';
 import { applyRewrites } from './rename.js';
 import {
   type NameTaken,
@@ -350,7 +351,7 @@ import {
 } from './setup.js';
 // No shell, so nothing to quote and no way to escape out of quoting: every argument below is an
 // array element, so a path full of backslashes, spaces or quotes is just a path.
-import { runHidden as run, spawnHidden } from './spawn.js';
+import { runHidden, spawnHidden } from './spawn.js';
 import {
   declaringAdvice,
   failedOnPushErrors,
@@ -582,32 +583,32 @@ function writtenFileRefusal(
     readonly writes: (where: string) => readonly string[];
   },
 ): string | null {
-  const { named, what } = rule;
+  const { named: argument, what } = rule;
   if (/^(res|user):\/\//.test(path)) {
-    return `${named} ${path} is a Godot path; ${what} is saved outside the project, at an absolute path on this machine.`;
+    return `${argument} ${path} is a Godot path; ${what} is saved outside the project, at an absolute path on this machine.`;
   }
   if (!isAbsolute(path)) {
-    return `${named} ${path} is not absolute; name the whole path, so where it is written does not depend on this server's directory.`;
+    return `${argument} ${path} is not absolute; name the whole path, so where it is written does not depend on this server's directory.`;
   }
   if (!rule.extensions.includes(extname(path).toLowerCase())) {
-    return `${named} ${path} does not end in ${rule.extensions.join(' or ')}, which is what ${what} is.`;
+    return `${argument} ${path} does not end in ${rule.extensions.join(' or ')}, which is what ${what} is.`;
   }
   const directory = realAsFarAsItExists(dirname(path));
   if (!existsSync(directory)) {
-    return `${named}'s directory ${dirname(path)} does not exist; ${what} creates no directories.`;
+    return `${argument}'s directory ${dirname(path)} does not exist; ${what} creates no directories.`;
   }
   const where = join(directory, basename(path));
   const inside = rule.projects.find(
     (project) => project !== '' && isWithinRoot(realAsFarAsItExists(project), where),
   );
   if (inside !== undefined) {
-    return `${named} ${path} is inside the project at ${inside}; ${what} is saved outside it, so it never becomes part of the game.`;
+    return `${argument} ${path} is inside the project at ${inside}; ${what} is saved outside it, so it never becomes part of the game.`;
   }
   const taken = rule.writes(where).find((file) => existsSync(file));
   if (taken !== undefined) {
     return taken === where
-      ? `${named} ${path} already exists; ${what} is not written over a file. Name a new one.`
-      : `${named} ${path} would write ${taken}, which already exists; ${what} is not written over a file. Name a new one.`;
+      ? `${argument} ${path} already exists; ${what} is not written over a file. Name a new one.`
+      : `${argument} ${path} would write ${taken}, which already exists; ${what} is not written over a file. Name a new one.`;
   }
   return null;
 }
@@ -655,9 +656,8 @@ export function movieRefusal(
 export function captureDetail(payload: OperationParams): string {
   const parts: string[] = [];
   const region = payload['region'];
-  if (region !== null && typeof region === 'object') {
-    const named = region as Record<string, unknown>;
-    const at = (key: string): string => String(Math.round(Number(named[key]) * 100) / 100);
+  if (isRecord(region)) {
+    const at = (key: string): string => String(Math.round(Number(region[key]) * 100) / 100);
     parts.push(
       `of the window region at ${at('x')},${at('y')}, ${at('width')}x${at('height')} window pixels${
         payload['clipped'] === true ? ', clipped to the window' : ''
@@ -665,10 +665,9 @@ export function captureDetail(payload: OperationParams): string {
     );
   }
   const drawnAt = payload['drawnAt'];
-  if (drawnAt !== null && typeof drawnAt === 'object') {
-    const drawn = drawnAt as Record<string, unknown>;
+  if (isRecord(drawnAt)) {
     parts.push(
-      `at the game's own pixels: it draws at ${String(drawn['width'])}x${String(drawn['height'])} and stretches that to its window`,
+      `at the game's own pixels: it draws at ${String(drawnAt['width'])}x${String(drawnAt['height'])} and stretches that to its window`,
     );
   }
   if (typeof payload['zoom'] === 'number') {
@@ -1576,13 +1575,13 @@ export function leftRunningNote(stranded: readonly { pid: number; protocol: numb
   if (stranded.length === 0) {
     return '';
   }
-  const named = stranded
+  const pids = stranded
     .map((one) => (one.protocol === null ? `pid ${one.pid}` : `pid ${one.pid} on protocol ${one.protocol}`))
     .join(', ');
   const [only] = stranded;
   return stranded.length === 1 && only !== undefined
-    ? ` A game of this project was already running and still is: ${named}. Starting this one did not end it, because this server did not start it. editor_run stop with pid ${only.pid} ends it and leaves this run going.`
-    : ` ${stranded.length} games of this project were already running and still are: ${named}. Starting this one did not end them, because this server did not start them. editor_run stop with the pid of each ends it and leaves this run going.`;
+    ? ` A game of this project was already running and still is: ${pids}. Starting this one did not end it, because this server did not start it. editor_run stop with pid ${only.pid} ends it and leaves this run going.`
+    : ` ${stranded.length} games of this project were already running and still are: ${pids}. Starting this one did not end them, because this server did not start them. editor_run stop with the pid of each ends it and leaves this run going.`;
 }
 
 /** The sentence a start adds to its message when it ended a run to happen. */
@@ -1837,7 +1836,7 @@ function wrongTypes(spec: ToolSpec, args: OperationParams): string[] {
 }
 
 export function misshapen(schema: unknown, value: unknown, path: string): string[] {
-  if (!isPlainObject(schema) || value === undefined || value === null) {
+  if (!isRecord(schema) || value === undefined || value === null) {
     return [];
   }
   const declared = schema['type'];
@@ -1854,7 +1853,7 @@ export function misshapen(schema: unknown, value: unknown, path: string): string
     return value.flatMap((element, index) => misshapen(schema['items'], element, `${path}[${index}]`));
   }
   const properties = schema['properties'];
-  if (!isPlainObject(properties) || !isPlainObject(value)) {
+  if (!isRecord(properties) || !isRecord(value)) {
     return [];
   }
   return Object.entries(value).flatMap(([field, held]) => {
@@ -1886,10 +1885,10 @@ export function misshapen(schema: unknown, value: unknown, path: string): string
  * is, and a schema that lists nothing asks nothing.
  */
 function unlistedValues(schema: unknown, value: unknown, path: string): string[] {
-  if (typeof schema !== 'object' || schema === null) {
+  if (!isRecord(schema)) {
     return [];
   }
-  const fields = schema as Readonly<Record<string, unknown>>;
+  const fields: Readonly<Record<string, unknown>> = schema;
   const listed = fields['enum'];
   if (Array.isArray(listed) && typeof value === 'string') {
     if (listed.includes(value)) {
@@ -1905,16 +1904,12 @@ function unlistedValues(schema: unknown, value: unknown, path: string): string[]
     return value.flatMap((element, index) => unlistedValues(fields['items'], element, `${path}[${index}]`));
   }
   const properties = fields['properties'];
-  if (isPlainObject(properties) && isPlainObject(value)) {
+  if (isRecord(properties) && isRecord(value)) {
     return Object.entries(value).flatMap(([field, held]) =>
       Object.hasOwn(properties, field) ? unlistedValues(properties[field], held, `${path}.${field}`) : [],
     );
   }
   return [];
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function outsideTheirLists(spec: ToolSpec, args: OperationParams): string[] {
@@ -2304,7 +2299,7 @@ export function writtenBeside(
   return [...after]
     .filter(([name, at]) => name !== output && before.get(name) !== at)
     .map(([name]) => (within === '.' ? name : `${within}/${name}`))
-    .sort();
+    .toSorted();
 }
 
 /** The files directly inside [param folder], each with when it was last written. */
@@ -2409,8 +2404,8 @@ function engineFlagsNote(args: readonly string[]): string | undefined {
   if (among.length === 0) {
     return undefined;
   }
-  const named = among.join(', ');
-  return `${named} ${among.length === 1 ? 'is a flag' : 'are flags'} the engine reads, and args goes to the game after --, where the engine does not read ${among.length === 1 ? 'it' : 'them'}. engineArgs hands the engine its own flags; ${among.length === 1 ? 'leave it' : 'leave them'} in args only for a game that reads ${among.length === 1 ? 'that flag' : 'those flags'} itself.`;
+  const flags = among.join(', ');
+  return `${flags} ${among.length === 1 ? 'is a flag' : 'are flags'} the engine reads, and args goes to the game after --, where the engine does not read ${among.length === 1 ? 'it' : 'them'}. engineArgs hands the engine its own flags; ${among.length === 1 ? 'leave it' : 'leave them'} in args only for a game that reads ${among.length === 1 ? 'that flag' : 'those flags'} itself.`;
 }
 
 /**
@@ -2430,9 +2425,9 @@ function racingNote(headless: boolean, engineArgs: readonly string[]): string | 
 
 /** What a script tab holding unsaved edits to each of [param scripts] does to what was written. */
 function unsavedInEditorNote(scripts: readonly string[]): string {
-  const named = scripts.join(', ');
+  const listed = scripts.join(', ');
   const one = scripts.length === 1;
-  return `${named} ${one ? 'is' : 'are'} open in the editor's script ${one ? 'tab' : 'tabs'} with unsaved edits, and saving ${one ? 'that tab' : 'them'} there writes ${one ? 'its' : 'their'} text over what was written here: close ${one ? 'it' : 'them'} without saving, or save first and edit again.`;
+  return `${listed} ${one ? 'is' : 'are'} open in the editor's script ${one ? 'tab' : 'tabs'} with unsaved edits, and saving ${one ? 'that tab' : 'them'} there writes ${one ? 'its' : 'their'} text over what was written here: close ${one ? 'it' : 'them'} without saving, or save first and edit again.`;
 }
 
 /**
@@ -2553,7 +2548,7 @@ function changedSettings(
   const names = new Set([...before.keys(), ...after.keys()]);
   return [...names]
     .filter((name) => JSON.stringify(before.get(name)) !== JSON.stringify(after.get(name)))
-    .sort();
+    .toSorted();
 }
 
 /**
@@ -2647,7 +2642,13 @@ export function foldedScriptErrors(errors: readonly ScriptError[]): {
 
 /** [param lists] without the ones that are empty, so an answer holds no field with nothing in it. */
 function nonEmpty<T extends Record<string, readonly unknown[]>>(lists: T): Partial<T> {
-  return Object.fromEntries(Object.entries(lists).filter(([, list]) => list.length > 0)) as Partial<T>;
+  const kept: Partial<T> = { ...lists };
+  for (const key in kept) {
+    if (Object.hasOwn(kept, key) && kept[key]?.length === 0) {
+      delete kept[key];
+    }
+  }
+  return kept;
 }
 
 /**
@@ -2785,10 +2786,10 @@ export function scriptErrorsNote(
   };
   // A declaring script that itself could not resolve a class is a step on the way, and the one
   // that failed on something else is the one to open, so it is named first.
-  const first = [...new Map(origins.map((origin) => [origin.path, origin])).values()].sort(
+  const first = [...new Map(origins.map((origin) => [origin.path, origin])).values()].toSorted(
     (a, b) => Number(unresolvedClassIn(a.message) !== null) - Number(unresolvedClassIn(b.message) !== null),
   );
-  const named = [
+  const causesSaid = [
     ...first.map(
       (origin) =>
         `${at(origin)} ${sentence(origin.message)} gdUnit4 did not name this script, which declares ${origin.declares}; the engine's own check of it found the error.${failedOn(origin.declares)}`,
@@ -2823,7 +2824,7 @@ export function scriptErrorsNote(
     unnamed === 0
       ? `No tests ran: gdUnit4 could not load ${scripts === 1 ? 'one script' : `${scripts} scripts`} while looking for suites, and it runs no suite at all when one fails to load.`
       : `No tests ran: ${scripts + unnamed} scripts did not compile, and gdUnit4 runs no suite at all when one fails to load. It could not load ${scripts === 1 ? 'one' : scripts} of them while looking for suites, and ${unnamed === 1 ? 'the one it did not name comes' : `the ${unnamed} it did not name come`} first.`;
-  return [opening, named, following, rest, after].filter((part) => part !== '').join(' ');
+  return [opening, causesSaid, following, rest, after].filter((part) => part !== '').join(' ');
 }
 
 /**
@@ -3687,7 +3688,7 @@ function windowNoteFor(needing: readonly string[], sharing: readonly string[] | 
 export function testPathsIn(
   projectPath: string,
   given: unknown,
-  named: 'path' | 'suites' = 'path',
+  argument: 'path' | 'suites' = 'path',
 ): { ok: true; value: string[] } | { ok: false; reason: string } {
   // The directories gdharness test looks in, so the tool and the gate run the same suites. Only
   // those there, since a default directory a project does not have is not a path it asked for;
@@ -3703,7 +3704,7 @@ export function testPathsIn(
   if (listed.length === 0) {
     return {
       ok: false,
-      reason: `${named} is an empty list: name a suite file or a directory${named === 'path' ? ', or leave path out for tests and test' : ''}.`,
+      reason: `${argument} is an empty list: name a suite file or a directory${argument === 'path' ? ', or leave path out for tests and test' : ''}.`,
     };
   }
   const resolved: string[] = [];
@@ -3711,7 +3712,7 @@ export function testPathsIn(
     if (typeof entry !== 'string' || entry.trim() === '') {
       return {
         ok: false,
-        reason: `${named}${Array.isArray(entries) ? `[${index}]` : ''} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a suite file or a directory in the project.`,
+        reason: `${argument}${Array.isArray(entries) ? `[${index}]` : ''} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a suite file or a directory in the project.`,
       };
     }
     const location = resolveWithinProject(projectPath, entry);
@@ -3775,16 +3776,16 @@ export function scriptsToDiagnose(
     if (!location.ok) {
       return { ok: false, reason: location.reason };
     }
-    const relative = location.relativePath.replace(/\/+$/, '');
+    const fromRoot = location.relativePath.replace(/\/+$/, '');
     if (!isDirectory(location.absolutePath)) {
-      found.push(relative);
+      found.push(fromRoot);
       continue;
     }
     const inside = folderFiles(location.absolutePath, ['.gd']).map((script) =>
-      relative === '' ? script : `${relative}/${script}`,
+      fromRoot === '' ? script : `${fromRoot}/${script}`,
     );
     if (inside.length === 0) {
-      empty.push(noScriptUnder(entry, location.absolutePath, relative));
+      empty.push(noScriptUnder(entry, location.absolutePath, fromRoot));
     }
     found.push(...inside);
   }
@@ -3815,9 +3816,9 @@ function scriptsUnderGdignore(projectPath: string, scripts: readonly string[]): 
 }
 
 /** Why a folder named gave no script, naming each folder below it that the walk stepped over. */
-function noScriptUnder(entry: string, absolute: string, relative: string): string {
+function noScriptUnder(entry: string, absolute: string, fromRoot: string): string {
   const said = (stepped: SteppedOver): string => {
-    const folder = [relative, stepped.folder].filter((step) => step !== '').join('/') || entry;
+    const folder = [fromRoot, stepped.folder].filter((step) => step !== '').join('/') || entry;
     return stepped.why === 'gdharness'
       ? `${folder} is an addon gdharness installed, whose scripts are checked when it is named`
       : `${folder} holds a .gdignore, so the engine never loads what is under it, and a script there is checked when the script is named`;
@@ -3930,11 +3931,11 @@ export function staleCopyNote(problem: string): string {
  * as written like any other, so a caller learned nothing until the import ignored it.
  */
 function unheldNote(changed: unknown): string {
-  if (!isPlainObject(changed)) {
+  if (!isRecord(changed)) {
     return '';
   }
   const unheld = Object.entries(changed)
-    .filter(([, change]) => isPlainObject(change) && change['was'] === null)
+    .filter(([, change]) => isRecord(change) && change['was'] === null)
     .map(([name]) => name);
   if (unheld.length === 0) {
     return '';
@@ -4582,9 +4583,9 @@ class GodotServer {
   private setupToolHandlers(protocol: ProtocolServer): void {
     // From the envelope every request carries, which the SDK lifts out of _meta under its own keys.
     const clientOf = (envelope: object | undefined): { name: string; version: string } | undefined => {
-      const named = (envelope as Record<string, unknown> | undefined)?.['io.modelcontextprotocol/clientInfo'];
-      if (typeof named === 'object' && named !== null) {
-        const { name, version } = named as Record<string, unknown>;
+      const client = isRecord(envelope) ? envelope['io.modelcontextprotocol/clientInfo'] : undefined;
+      if (isRecord(client)) {
+        const { name, version } = client;
         if (typeof name === 'string' && typeof version === 'string') {
           return { name, version };
         }
@@ -4613,9 +4614,9 @@ class GodotServer {
       }
       // Only a project, since it becomes the root the godot:// resources are read under: any
       // directory named here, the root of a drive included, was taken as one.
-      const named = args['projectPath'];
-      if (typeof named === 'string' && existsSync(join(named, 'project.godot'))) {
-        this.lastProjectPath = named;
+      const project = args['projectPath'];
+      if (typeof project === 'string' && existsSync(join(project, 'project.godot'))) {
+        this.lastProjectPath = project;
       }
       // Started here and not waited for: whatever it learns lands on a later call, and a
       // registry that never answers costs this one nothing.
@@ -4952,8 +4953,8 @@ class GodotServer {
       // question nobody asked: a caller who wrote `get` wants to know what `get` takes, not the
       // twenty arguments the other ten ops between them accept.
       const asked = readString(args, 'op');
-      const named = asked !== undefined && spec.operations?.[asked] !== undefined ? asked : null;
-      const wanted = named === null ? [...known] : [...argumentsOf(spec, named), 'op'];
+      const knownOp = asked !== undefined && spec.operations?.[asked] !== undefined ? asked : null;
+      const wanted = knownOp === null ? [...known] : [...argumentsOf(spec, knownOp), 'op'];
       // Each with what it takes, because the name alone hides the second form: a session that
       // guessed `suites` for a list of suite files was told `path` and not that path takes one.
       const shaped = wanted.map((name) => {
@@ -4961,7 +4962,7 @@ class GodotServer {
         if (schema !== undefined) {
           return `${name} (${argumentShape(schema)})`;
         }
-        return name === 'op' && named === null && spec.operations !== undefined
+        return name === 'op' && knownOp === null && spec.operations !== undefined
           ? `op (${Object.keys(spec.operations).join(', ')})`
           : name;
       });
@@ -4971,7 +4972,7 @@ class GodotServer {
       // upgrade says the second while sounding like the first. Without it the caller spends two
       // more calls working out which, and the answer only arrives when something else mentions the
       // version in passing.
-      const where = named === null ? spec.name : `${spec.name} ${named}`;
+      const where = knownOp === null ? spec.name : `${spec.name} ${knownOp}`;
       const spelled = unknown.flatMap((key) => {
         const camel = key.replace(/_([a-zA-Z0-9])/g, (_, letter: string) => letter.toUpperCase());
         return camel !== key && known.has(camel) ? [`${key} is spelled ${camel}`] : [];
@@ -5055,10 +5056,10 @@ class GodotServer {
       // Said apart, since "needs actionName" to a caller who sent one reads as a field the server
       // did not see, when what it refused was the empty value.
       const blank = missing.filter((field) => typeof args[field] === 'string');
-      const named = missing.map((field) =>
+      const fields = missing.map((field) =>
         blank.includes(field) ? `${field}, which was given empty` : field,
       );
-      const joined = named.join(blank.length > 0 ? '; ' : ', ');
+      const joined = fields.join(blank.length > 0 ? '; ' : ', ');
       return { ok: false, response: this.createErrorResponse(`${where} needs ${joined}.`) };
     }
     return { ok: true, op };
@@ -6144,13 +6145,11 @@ class GodotServer {
     // down, where no argument name announces them: `../../x.png` became `res://../../x.png`.
     const sources = args['sources'];
     if (Array.isArray(sources)) {
+      const listed: readonly unknown[] = sources;
       const resolved: unknown[] = [];
-      for (const source of sources) {
-        const texture: unknown =
-          typeof source === 'object' && source !== null
-            ? (source as Record<string, unknown>)['texture']
-            : undefined;
-        if (typeof texture !== 'string') {
+      for (const source of listed) {
+        const texture = isRecord(source) ? source['texture'] : undefined;
+        if (!isRecord(source) || typeof texture !== 'string') {
           resolved.push(source);
           continue;
         }
@@ -6158,7 +6157,7 @@ class GodotServer {
         if (!location.ok) {
           return { ok: false, response: this.createErrorResponse(location.reason, PATH_SOLUTIONS) };
         }
-        resolved.push({ ...(source as Record<string, unknown>), texture: `res://${location.relativePath}` });
+        resolved.push({ ...source, texture: `res://${location.relativePath}` });
       }
       contained['sources'] = resolved;
     }
@@ -6241,7 +6240,7 @@ class GodotServer {
     const cached =
       cachedAfter === null
         ? null
-        : [...cachedAfter].filter((path) => cachedBefore?.has(path) !== true).sort();
+        : [...cachedAfter].filter((path) => cachedBefore?.has(path) !== true).toSorted();
 
     return this.answer(
       withScanWait(
@@ -6390,7 +6389,8 @@ class GodotServer {
       });
     }
     const diffed = changedSettings(before, this.settingKeysOf(projectPath));
-    const changed = diffed === null ? null : [...new Set([...diffed, ...settingsNamedBy(op, args)])].sort();
+    const changed =
+      diffed === null ? null : [...new Set([...diffed, ...settingsNamedBy(op, args)])].toSorted();
     if (changed === null) {
       return this.jsonTextResponse({
         ...answer,
@@ -6548,9 +6548,9 @@ class GodotServer {
       return null;
     }
     const applied = updated.filter((name) => kept.includes(name));
-    const named = gone.join(', ');
+    const goneListed = gone.join(', ');
     return this.createErrorResponse(
-      `${named} ${gone.length === 1 ? 'is not an option' : 'are not options'} of this resource's importer: the reimport left ${gone.length === 1 ? 'it' : 'them'} out of the import file, so ${gone.length === 1 ? 'it changed' : 'they changed'} nothing.${applied.length === 0 ? '' : ` ${applied.join(', ')} ${applied.length === 1 ? 'was' : 'were'} applied.`} Its options are: ${kept.join(', ')}.`,
+      `${goneListed} ${gone.length === 1 ? 'is not an option' : 'are not options'} of this resource's importer: the reimport left ${gone.length === 1 ? 'it' : 'them'} out of the import file, so ${gone.length === 1 ? 'it changed' : 'they changed'} nothing.${applied.length === 0 ? '' : ` ${applied.join(', ')} ${applied.length === 1 ? 'was' : 'were'} applied.`} Its options are: ${kept.join(', ')}.`,
       ['project_import options lists every option with the value it holds'],
     );
   }
@@ -6928,7 +6928,7 @@ class GodotServer {
       if (section === 'classes' && outcome.ok && Array.isArray(outcome.payload['classes'])) {
         const declared: unknown[] = outcome.payload['classes'];
         const asked = readStringArray(args, 'addonClasses') ?? [];
-        const addons = Object.keys(classesWithAddonsCounted(declared, new Set()).inAddons).sort();
+        const addons = Object.keys(classesWithAddonsCounted(declared, new Set()).inAddons).toSorted();
         const unknownAddons = asked.filter((addon) => !addons.includes(addon));
         if (unknownAddons.length > 0) {
           return this.createErrorResponse(
@@ -6984,8 +6984,8 @@ class GodotServer {
 
   /** The extensions a search is limited to, when the call names any. */
   private fileTypes(args: OperationParams): { fileTypes?: readonly string[] } {
-    const named = readStringArray(args, 'fileTypes');
-    return named === undefined ? {} : { fileTypes: named };
+    const extensions = readStringArray(args, 'fileTypes');
+    return extensions === undefined ? {} : { fileTypes: extensions };
   }
 
   private handleSearchProject(args: OperationParams): ToolResponse {
@@ -7010,7 +7010,7 @@ class GodotServer {
       const folders = readdirSync(project.value.path, { withFileTypes: true })
         .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
         .map((entry) => entry.name)
-        .sort();
+        .toSorted();
       return this.createErrorResponse(
         `There is nothing at res://${place.relativePath} to search.${folders.length === 0 ? '' : ` The project's folders are ${folders.join(', ')}.`}`,
       );
@@ -7441,9 +7441,9 @@ class GodotServer {
     );
     // gdUnit4 searches a directory it is handed itself, into the folders the project keeps out of
     // every search, so a directory holding one is handed as the suites gdharness test finds in it.
-    const projectScripts = new ProjectScripts(project.value.path);
+    const scripts = new ProjectScripts(project.value.path);
     const present = paths.value.filter((path) => !missing.includes(path));
-    const asked = projectScripts.searchedAsTold(present);
+    const asked = scripts.searchedAsTold(present);
     const unusable = gdUnit4Unusable(project.value.path);
     // With nothing missing, an empty list is a directory whose suites all sit in folders the project
     // keeps out of the search, which the refusal below names.
@@ -7485,11 +7485,11 @@ class GodotServer {
     }
     // gdUnit4 says nothing of a script that declares cases and is no suite, so a suite whose extends
     // named the wrong class passed with none of its cases run. Named in the answer, and never a pass.
-    const uncollected = projectScripts.uncollectedUnder(present);
+    const uncollected = scripts.uncollectedUnder(present);
     // A directory with no suite in it started an engine for gdUnit4 to print that it found none, and
     // the answer carried that engine's command line and console beside exit code 0.
     const suiteless = present.filter(
-      (path) => !path.endsWith('.gd') && projectScripts.suitesUnder([path]).length === 0,
+      (path) => !path.endsWith('.gd') && scripts.suitesUnder([path]).length === 0,
     );
     const namedNoSuite = uncollected.filter((one) => present.includes(one.path));
     if (suiteless.length > 0 || namedNoSuite.length > 0) {
@@ -7497,9 +7497,9 @@ class GodotServer {
       const under = (path: string): boolean =>
         suiteless.some((folder) => path.startsWith(`${folder.replace(/\/+$/, '')}/`));
       const holding = uncollected.filter((script) => namedNoSuite.includes(script) || under(script.path));
-      const keptOut = projectScripts.notSearched
+      const keptOut = scripts.notSearched
         .map((folder) => `res://${folder.replace(/^res:\/\//, '')}`)
-        .filter((folder) => under(folder) && projectScripts.suitesUnder([folder]).length > 0);
+        .filter((folder) => under(folder) && scripts.suitesUnder([folder]).length > 0);
       const keptOutSaid =
         keptOut.length === 0
           ? 'no script there does'
@@ -7526,7 +7526,7 @@ class GodotServer {
     // the window it was given there: a scene that sets itself up only off the headless display
     // server answered six errors pointing at the game. A suite left out whole by ignore is not run.
     const leftOut = new Set(readStringArray(args, 'ignore') ?? []);
-    const needs = windowNeedsOf(projectScripts, selection.value?.suites ?? asked);
+    const needs = windowNeedsOf(scripts, selection.value?.suites ?? asked);
     const needing = needs.needing.filter((path) => !leftOut.has(basename(path, '.gd')));
     const noDisplay = resolveHeadless(undefined, { platform: process.platform, variables: process.env });
     const windowed = needing.length > 0 && !noDisplay;
@@ -7582,7 +7582,7 @@ class GodotServer {
       ignored.length === 0
         ? []
         : asked.flatMap((path) =>
-            path.endsWith('.gd') ? (projectScripts.suite(path) ?? []) : projectScripts.suitesUnder([path]),
+            path.endsWith('.gd') ? (scripts.suite(path) ?? []) : scripts.suitesUnder([path]),
           );
     // The engine's application data directory, beside the folder user:// is made in, so the
     // lists are not among what a suite finds there.
@@ -7750,7 +7750,7 @@ class GodotServer {
         existsSync(reportsDir) && notCompiled === null
           ? readdirSync(reportsDir)
               .filter((name) => name.startsWith('report_'))
-              .sort((a, b) => Number(a.slice('report_'.length)) - Number(b.slice('report_'.length)))
+              .toSorted((a, b) => Number(a.slice('report_'.length)) - Number(b.slice('report_'.length)))
           : [];
       const newest = written.at(-1);
       if (newest !== undefined) {
@@ -7903,7 +7903,7 @@ class GodotServer {
         }),
         ...(running === null ? {} : { suiteRunning: running }),
       };
-      const said =
+      const why =
         notCompiled !== null
           ? autoloadNotCompiledNote(notCompiled, foldedScriptErrors(scriptErrors), stopped.for !== null)
           : nothingRan !== null
@@ -7913,7 +7913,7 @@ class GodotServer {
               : reportProblem !== null
                 ? `The test run's report could not be read (${reportProblem}); the engine's own verdict was ${ranAs}.`
                 : `The test run wrote no report (${ranAs}).${finishedBeforeTheEnd(finished.length, failing.length, running)}`;
-      const note = missingNote === undefined ? said : `${said} ${missingNote}`;
+      const note = missingNote === undefined ? why : `${why} ${missingNote}`;
       // Kept in the project when nobody is left to read the answer, for the next run there to
       // hand back: the client that cut this call off is the one that will ask again.
       if (callSignal()?.aborted === true) {
@@ -8024,7 +8024,7 @@ class GodotServer {
       const [left, right] = [a.suite ?? '', b.suite ?? ''];
       return left < right ? -1 : left > right ? 1 : 0;
     };
-    const undeclaredAll = [...undeclaredFolded.values()].sort(bySuite).map((error) => ({
+    const undeclaredAll = [...undeclaredFolded.values()].toSorted(bySuite).map((error) => ({
       ...error,
       times: error.times > 1 ? error.times : undefined,
     }));
@@ -8043,21 +8043,21 @@ class GodotServer {
       countedLeaks.length > 0 ? heldAtExit(run.log.all.map((entry) => entry.text)) : undefined;
     // A declared text matches the whole line, so one declaring the start of a message that ends in
     // a number reads as both never printed and undeclared, and nothing said the two were one line.
-    const declaredNotPrinted = judgedErrors.neverPrinted.map((missing) => ({
-      suite: missing.suite,
-      case: missing.during,
-      text: missing.text,
-      warning: missing.warning ? true : undefined,
+    const declaredNotPrinted = judgedErrors.neverPrinted.map((unprinted) => ({
+      suite: unprinted.suite,
+      case: unprinted.during,
+      text: unprinted.text,
+      warning: unprinted.warning ? true : undefined,
       printedInstead: judgedErrors.printed.find(
         (error) =>
-          error.suite === missing.suite &&
-          error.during === missing.during &&
-          error.text.includes(missing.text),
+          error.suite === unprinted.suite &&
+          error.during === unprinted.during &&
+          error.text.includes(unprinted.text),
       )?.text,
     }));
     const erring = (path: string | null): { undeclared: number; notPrinted: number } => ({
       undeclared: undeclaredPrinted.filter((error) => error.suite === path).length,
-      notPrinted: judgedErrors.neverPrinted.filter((missing) => missing.suite === path).length,
+      notPrinted: judgedErrors.neverPrinted.filter((unprinted) => unprinted.suite === path).length,
     });
     // Errors only, since what this is taken from is the log's count of errors.
     const declaredAndPrinted =
@@ -8137,7 +8137,7 @@ class GodotServer {
       selection.value === null
         ? asked
             .flatMap((path) =>
-              path.endsWith('.gd') ? (projectScripts.suite(path) ?? []) : projectScripts.suitesUnder([path]),
+              path.endsWith('.gd') ? (scripts.suite(path) ?? []) : scripts.suitesUnder([path]),
             )
             .flatMap((suite) => {
               const ran = casePrinted.suites.get(suite.path);
@@ -8210,7 +8210,9 @@ class GodotServer {
             : undefined;
         }),
         ...[false, true].map((warning) => {
-          const count = declaredNotPrinted.filter((missing) => (missing.warning === true) === warning).length;
+          const count = declaredNotPrinted.filter(
+            (unprinted) => (unprinted.warning === true) === warning,
+          ).length;
           const word = warning ? 'warning' : 'error';
           return count > 0
             ? `${count === 1 ? `one declared ${word}` : `${String(count)} declared ${word}s`} never printed`
@@ -8365,7 +8367,7 @@ class GodotServer {
 
   private async godotVersion(godotPath: string): Promise<string | null> {
     try {
-      const { stdout } = await run(godotPath, ['--version'], { timeout: 10000 });
+      const { stdout } = await runHidden(godotPath, ['--version'], { timeout: 10000 });
       this.lastGodotVersion = stdout.trim();
       return this.lastGodotVersion;
     } catch (error) {
@@ -8614,11 +8616,11 @@ class GodotServer {
     scripts: readonly string[],
     why: Unanswered,
   ): Promise<{ answers: OperationParams[] } | { refusal: ToolResponse }> {
-    const named = scripts.map((script) => {
+    const resPaths = scripts.map((script) => {
       const contained = resolveWithinProject(projectPath, script);
       return contained.ok ? `res://${contained.relativePath}` : script;
     });
-    const checked = await this.compileScripts(projectPath, named);
+    const checked = await this.compileScripts(projectPath, resPaths);
     if (!checked.ok) {
       return {
         refusal: this.createErrorResponse(
@@ -8633,15 +8635,17 @@ class GodotServer {
         asParams(entry),
       ]),
     );
-    const errorsOf = scripts.map((_, at) => readArray(failures.get(named[at] ?? '') ?? {}, 'errors') ?? []);
-    const warned = await this.engineWarnings(projectPath, named);
+    const errorsOf = scripts.map(
+      (_, at) => readArray(failures.get(resPaths[at] ?? '') ?? {}, 'errors') ?? [],
+    );
+    const warned = await this.engineWarnings(projectPath, resPaths);
     const uncachedPer = uncachedFor(
       projectPath,
       errorsOf.map((errors) => errors.map((entry) => String(asParams(entry)['message']))),
     );
     return {
       answers: scripts.map((scriptPath, at) => {
-        const failure = failures.get(named[at] ?? '');
+        const failure = failures.get(resPaths[at] ?? '');
         const errors = (errorsOf[at] ?? []).map((entry) => {
           const { line, message } = asParams(entry);
           // Line 0 is the engine's for the whole script, a dependency that failed to compile.
@@ -8652,10 +8656,10 @@ class GodotServer {
         const warnings =
           warned === null
             ? []
-            : (warned.get(named[at] ?? '') ?? [])
+            : (warned.get(resPaths[at] ?? '') ?? [])
                 .filter(({ line, message }) => !raised.has(`${line}:${message}`))
                 .map(({ line, message }) => ({ severity: 'warning', message: asWarning(message), line }));
-        const diagnostics = [...errors, ...warnings].sort((a, b) => (a.line ?? 0) - (b.line ?? 0));
+        const diagnostics = [...errors, ...warnings].toSorted((a, b) => (a.line ?? 0) - (b.line ?? 0));
         const dependencies = readArray(failure ?? {}, 'dependencies_with_errors');
         const uncached = uncachedPer[at] ?? [];
         return {
@@ -8902,7 +8906,7 @@ class GodotServer {
         : {
             unseenBeforeAnUnfinishedScan: {
               editorPid: this.godotBridge.getStatus().editorPid ?? null,
-              classes: [...classes].sort(),
+              classes: [...classes].toSorted(),
             },
           }),
     });
@@ -9313,9 +9317,9 @@ class GodotServer {
    * reconnect, where the assignment was made by a process that is gone.
    */
   private editorServes(field: 'lspPort' | 'dapPort', variable: string, fallback: number): number {
-    const named = portFromEnvOrNull(variable);
-    if (named !== null) {
-      return named;
+    const fromEnv = portFromEnvOrNull(variable);
+    if (fromEnv !== null) {
+      return fromEnv;
     }
     const status = this.godotBridge.getStatus();
     return (status.connected ? status[field] : undefined) ?? fallback;
@@ -10140,10 +10144,10 @@ class GodotServer {
         );
       }
     }
-    const stopWaitMs = 10_000;
-    if (!(await this.waitForBridge(() => !alive(launched.pid), began + stopWaitMs))) {
+    const editorStopWaitMs = 10_000;
+    if (!(await this.waitForBridge(() => !alive(launched.pid), began + editorStopWaitMs))) {
       return this.createErrorResponse(
-        `The editor this server opened, pid ${launched.pid}, had not connected and was told to stop, and is still running after ${stopWaitMs / 1000}s.`,
+        `The editor this server opened, pid ${launched.pid}, had not connected and was told to stop, and is still running after ${editorStopWaitMs / 1000}s.`,
         ['editor_status says whether it has since connected'],
       );
     }
@@ -10335,11 +10339,11 @@ class GodotServer {
     }
     const arriving = await this.editorsNotYetConnected(project.value.path);
     if (arriving !== undefined && arriving.length > 0) {
-      const named = arriving
+      const pids = arriving
         .map((one) => `pid ${one.pid}${one.startedAt === null ? '' : `, started ${one.startedAt}`}`)
         .join('; ');
       return this.createErrorResponse(
-        `An editor of this project is already running (${named}) and has not reached this server yet: an editor dials in once it is up, later while it imports, so opening another would put two editors on one project and one language server port.`,
+        `An editor of this project is already running (${pids}) and has not reached this server yet: an editor dials in once it is up, later while it imports, so opening another would put two editors on one project and one language server port.`,
         [
           'editor_status names it under editorsNotYetConnected and says when it has connected',
           `If it never connects it is not reaching this server: end ${arriving.length === 1 ? 'that pid' : 'those pids'} and open again`,
@@ -11472,13 +11476,13 @@ class GodotServer {
    * games of the project announced since the play began: the line is the game saying which it is.
    */
   private announcedPidNamedBy(run: GodotProcess, line: string): number | undefined {
-    const named = /runtime-(\d+)\.json$/.exec(line.trim())?.[1];
-    if (named === undefined) {
+    const linePid = /runtime-(\d+)\.json$/.exec(line.trim())?.[1];
+    if (linePid === undefined) {
       return undefined;
     }
     const before = run.announcedBefore ?? new Set<number>();
     const theOne = this.announcedOfTheRunsProject(run, runtimesAnnounced().running).find(
-      (one) => one.pid === Number(named) && !before.has(one.pid) && this.isTheGameOf(run, one),
+      (one) => one.pid === Number(linePid) && !before.has(one.pid) && this.isTheGameOf(run, one),
     );
     if (theOne !== undefined) {
       this.tie(run, theOne);
@@ -11706,7 +11710,7 @@ class GodotServer {
       process.kill(running.pid);
     } catch (error) {
       landed = false;
-      const code = (error as NodeJS.ErrnoException).code;
+      const code = errorCode(error);
       if (code !== 'ESRCH') {
         declined = code ?? errorMessage(error);
       }
@@ -12356,7 +12360,7 @@ class GodotServer {
     }
     const among = this.announcedOfTheRunsProject(run, announced)
       .map((one) => one.pid)
-      .sort((one, other) => one - other)
+      .toSorted((one, other) => one - other)
       .join(',');
     if (among === '' || run.treeReadFor === among) {
       return;
@@ -12441,8 +12445,10 @@ class GodotServer {
     }
     // The run's own process can have ended by now; the editor's has not, while it plays the run.
     const under = new Set(descendantsIn(tree, root, root === run.pid ? beganBy(run) : undefined));
-    const nearest = announced.filter((one) => under.has(one.pid) && !gameBetween(tree, one.pid, root, games));
-    const theOne = nearest.length === 1 ? nearest[0] : undefined;
+    const directlyUnder = announced.filter(
+      (one) => under.has(one.pid) && !gameBetween(tree, one.pid, root, games),
+    );
+    const theOne = directlyUnder.length === 1 ? directlyUnder[0] : undefined;
     if (theOne !== undefined) {
       this.tie(run, theOne);
     }
@@ -13215,6 +13221,7 @@ class GodotServer {
     const cancelled = callSignal();
     let held = false;
     let holdAsked = 0;
+    // oxlint-disable-next-line eslint/no-unmodified-loop-condition -- the caller's cancellation aborts the signal while the loop awaits
     while (cancelled?.aborted !== true && (await this.runStillGoing(run)) && Date.now() < until) {
       this.drainEditorOutput(run);
       this.drainTranscript(run);
@@ -13515,15 +13522,15 @@ class GodotServer {
     args: OperationParams,
     ofWhatIsRead: string | null | undefined,
   ): ToolResponse | null {
-    const named = readNonEmptyString(args, 'projectPath');
-    if (named === undefined || ofWhatIsRead === null || ofWhatIsRead === undefined || ofWhatIsRead === '') {
+    const project = readNonEmptyString(args, 'projectPath');
+    if (project === undefined || ofWhatIsRead === null || ofWhatIsRead === undefined || ofWhatIsRead === '') {
       return null;
     }
-    if (isSameDirectory(named, ofWhatIsRead)) {
+    if (isSameDirectory(project, ofWhatIsRead)) {
       return null;
     }
     return this.createErrorResponse(
-      `editor_output reads what this server holds, which is of ${ofWhatIsRead}, and this call names ${named}.`,
+      `editor_output reads what this server holds, which is of ${ofWhatIsRead}, and this call names ${project}.`,
       [
         "Another project's run is read through that project's own gdharness server",
         'editor_status names every game running on the machine under runtimes',
@@ -13782,12 +13789,12 @@ class GodotServer {
     args: OperationParams,
     act: string,
   ): ToolResponse | null {
-    const named = readNonEmptyString(args, 'projectPath');
-    if (named === undefined || runsProject === null || isSameDirectory(runsProject, named)) {
+    const project = readNonEmptyString(args, 'projectPath');
+    if (project === undefined || runsProject === null || isSameDirectory(runsProject, project)) {
       return null;
     }
     return this.createErrorResponse(
-      `The run this server holds is of ${runsProject}, not ${named}, so nothing was ${act}. A run of ${named} is held by the server that started it, in that project's own session.`,
+      `The run this server holds is of ${runsProject}, not ${project}, so nothing was ${act}. A run of ${project} is held by the server that started it, in that project's own session.`,
     );
   }
 
@@ -13798,12 +13805,12 @@ class GodotServer {
     // to something nobody asked about, offered to be killed while the run the caller means goes on.
     await this.pickUpWhatTheEditorIsPlaying();
     const stopped = await this.currentRun();
-    const named = readNumber(args, 'pid');
+    const askedPid = readNumber(args, 'pid');
     if (
-      named !== undefined &&
-      (stopped === null || (named !== stopped.pid && named !== this.announcedPidOf(stopped)))
+      askedPid !== undefined &&
+      (stopped === null || (askedPid !== stopped.pid && askedPid !== this.announcedPidOf(stopped)))
     ) {
-      return await this.stopAnnouncedGame(named, readBoolean(args, 'andChildren') === true, args);
+      return await this.stopAnnouncedGame(askedPid, readBoolean(args, 'andChildren') === true, args);
     }
     if (!stopped) {
       return this.createErrorResponse(this.nothingOfOursIsRunning());
@@ -14059,7 +14066,7 @@ class GodotServer {
     for (const root of roots) {
       under.delete(root);
     }
-    const started = [...under].sort((a, b) => a - b);
+    const started = [...under].toSorted((a, b) => a - b);
     const found: GameUnderTheRun[] = [];
     const others: number[] = [];
     for (const pid of started) {
@@ -14142,10 +14149,10 @@ class GodotServer {
       return undefined;
     }
     const isEngine = (pid: number): boolean => this.theProjectsEngine(run, tree, pid, [root]) !== null;
-    const nearest = descendantsIn(tree, root, root === run.pid ? beganBy(run) : undefined).filter(
+    const outermostEngines = descendantsIn(tree, root, root === run.pid ? beganBy(run) : undefined).filter(
       (pid) => isEngine(pid) && !ancestorsIn(tree, pid, root).some((one) => one !== root && isEngine(one)),
     );
-    return nearest.length === 1 ? nearest[0] : undefined;
+    return outermostEngines.length === 1 ? outermostEngines[0] : undefined;
   }
 
   /**
@@ -14727,11 +14734,13 @@ class GodotServer {
       return [];
     }
     const known = cachedClasses(projectPath) ?? declaredClasses(projectPath);
-    const named = classesNamedIn(codeOf(source), known).map((name) => known.get(name) ?? '');
+    const declaring = classesNamedIn(codeOf(source), known).map((name) => known.get(name) ?? '');
     const loaded = [...source.matchAll(/\b(?:pre)?load\(\s*"(res:\/\/[^"]+\.gd)"\s*\)/g)].map(
       (found) => found[1] ?? '',
     );
-    return [...new Set([...named, ...loaded])].filter((path) => path !== '' && path !== resourcePath).sort();
+    return [...new Set([...declaring, ...loaded])]
+      .filter((path) => path !== '' && path !== resourcePath)
+      .toSorted();
   }
 
   /**
@@ -14922,13 +14931,13 @@ class GodotServer {
     const lost =
       noted === null || before === null
         ? []
-        : noted.rebuiltWith.filter((name) => !before.has(name) && after.has(name)).sort();
+        : noted.rebuiltWith.filter((name) => !before.has(name) && after.has(name)).toSorted();
     const cameBack = writtenBefore === null ? [] : declaredSince(projectPath, after, lost, writtenBefore);
     const droppedByTheEditor = lost.filter((name) => !cameBack.includes(name));
     const seenLosing = droppedByTheEditor.length > 0 && this.godotBridge.isConnected();
     writeClassNote(projectPath, {
       ...noted,
-      rebuiltWith: [...after.keys()].sort(),
+      rebuiltWith: [...after.keys()].toSorted(),
       ...(seenLosing ? { shortListEditorPid: this.godotBridge.getStatus().editorPid ?? null } : {}),
     });
     const notes: string[] = [];
@@ -15231,17 +15240,25 @@ class GodotServer {
       },
       {
         namesTaken: async (names, base) => {
-          const asked = await this.operation(
+          const answer = await this.operation(
             'names_taken',
             { names: [...names], base: base ?? '' },
             projectPath,
           );
-          if (!asked.ok) {
+          if (!answer.ok) {
             throw new Error(
-              `the engine could not be asked whether ${names.join(' or ')} is taken: ${asked.message}`,
+              `the engine could not be asked whether ${names.join(' or ')} is taken: ${answer.message}`,
             );
           }
-          return asParams(asked.payload['taken']) as Record<string, NameTaken>;
+          return Object.fromEntries(
+            Object.entries(asParams(answer.payload['taken'])).map(([name, entry]): [string, NameTaken] => {
+              const read = asParams(entry);
+              return [
+                name,
+                { as: readStringArray(read, 'as') ?? [], declaredBy: readString(read, 'declaredBy') ?? null },
+              ];
+            }),
+          );
         },
         references: async (absolute, text, at) =>
           await askTheLanguageServer((client) => client.getReferences(absolute, text, at.line, at.character)),
@@ -15410,14 +15427,14 @@ class GodotServer {
     }
     const projectPath = project.value.path;
     const typeArgument = TYPE_ARGUMENTS[command];
-    const named = typeArgument === undefined ? '' : (readString(contained.value, typeArgument) ?? '');
+    const typeName = typeArgument === undefined ? '' : (readString(contained.value, typeArgument) ?? '');
     const waited = await this.waitForTheEditorOpenedHere(contained.value, []);
     if (this.editorHasOpen(projectPath)) {
       const answered = await this.handleViaBridge(command, contained.value, askedAs);
       // The editor's class list is the one its last scan wrote to the cache, so the cache lacking a
       // class a script declares is why the editor called it no class at all.
-      if (answered.isError === true && declaredButUncached(projectPath, named) !== null) {
-        answered.content.push({ type: 'text', text: uncachedClassNote([named]) });
+      if (answered.isError === true && declaredButUncached(projectPath, typeName) !== null) {
+        answered.content.push({ type: 'text', text: uncachedClassNote([typeName]) });
       }
       return answered;
     }
@@ -15427,9 +15444,9 @@ class GodotServer {
       }
       const arriving = await this.editorsNotYetConnected(projectPath);
       if (arriving !== undefined && arriving.length > 0) {
-        const named = arriving.map((one) => `pid ${one.pid}`).join(', ');
+        const pids = arriving.map((one) => `pid ${one.pid}`).join(', ');
         return this.createErrorResponse(
-          `${askedAs} was not run: an editor of this project is running (${named}) and has not reached this server, and saving a scene or resource it holds would put back what a write made around it.`,
+          `${askedAs} was not run: an editor of this project is running (${pids}) and has not reached this server, and saving a scene or resource it holds would put back what a write made around it.`,
           [
             'editor_status names it under editorsNotYetConnected and says when it has connected; the write then goes through it',
             `If it never connects it is not reaching this server: end ${arriving.length === 1 ? 'that pid' : 'those pids'} and ask again`,
@@ -15439,7 +15456,7 @@ class GodotServer {
     }
     // A headless engine reads the class cache as it starts, so a class a script declares and the
     // cache lacks is put in it first, the way editor_run start does before a game.
-    const declaring = declaredButUncached(projectPath, named);
+    const declaring = declaredButUncached(projectPath, typeName);
     if (declaring !== null) {
       const rebuilt = await this.rebuildClassCache(projectPath);
       if (!rebuilt.ok) {
@@ -15459,7 +15476,7 @@ class GodotServer {
       ...(declaring === null
         ? {}
         : {
-            classCacheRebuilt: `${named} is declared in ${declaring} and .godot/global_script_class_cache.cfg did not list it, which is where an engine resolves a class name from, so the cache was rebuilt from the declarations on disk before the write.`,
+            classCacheRebuilt: `${typeName} is declared in ${declaring} and .godot/global_script_class_cache.cfg did not list it, which is where an engine resolves a class name from, so the cache was rebuilt from the declarations on disk before the write.`,
           }),
       ...(effect === 'reads'
         ? {
@@ -15671,7 +15688,7 @@ class GodotServer {
     }
     const done = await this.reloadInEditor(toReload, projectPath);
     const notReloaded = done.notReloaded;
-    const reloaded = [...reloadedByTheScan, ...done.reloaded].sort();
+    const reloaded = [...reloadedByTheScan, ...done.reloaded].toSorted();
 
     // From the scan's own reading of the cache as well as from the editor's list: the list is read
     // off the editor's file tree, which drops a moved script's class with the file, while the class
@@ -16034,7 +16051,7 @@ class GodotServer {
     args: OperationParams,
     askedAs?: string,
   ): Promise<ToolResponse | BridgeTimeout> {
-    const named = askedAs ?? toolName;
+    const callName = askedAs ?? toolName;
     if (!this.godotBridge.isConnected()) {
       const refused = await this.noEditorYet(args, []);
       if (refused !== null) {
@@ -16076,11 +16093,11 @@ class GodotServer {
             ? "the editor's Output panel"
             : `${editorLogPath(open)} for an editor editor_launch opened, or the Output panel of one opened by hand`;
         return this.createErrorResponse(
-          `The editor's gdharness addon is this ${SERVER_VERSION} server's own and still has no ${named}, so a script of the addon failed to load in this editor and the commands it holds were never registered. The script and the error are in ${log}.`,
+          `The editor's gdharness addon is this ${SERVER_VERSION} server's own and still has no ${callName}, so a script of the addon failed to load in this editor and the commands it holds were never registered. The script and the error are in ${log}.`,
           ['editor_status says which addon the editor holds'],
         );
       }
-      return this.createErrorResponse(`The editor answered ${named} with an error: ${message}`);
+      return this.createErrorResponse(`The editor answered ${callName} with an error: ${message}`);
     }
   }
 
@@ -16141,14 +16158,10 @@ class GodotServer {
     const top: unknown = answered['stack'][0];
     const held: unknown = answered['held'];
     // The error that stopped it, Breakpoint, Paused or Stepped, or nothing for a stop asked for.
-    const said =
-      typeof held === 'object' &&
-      held !== null &&
-      typeof (held as Record<string, unknown>)['reason'] === 'string'
-        ? String((held as Record<string, unknown>)['reason'])
-        : '';
+    const heldFor = isRecord(held) ? held['reason'] : undefined;
+    const said = typeof heldFor === 'string' ? heldFor : '';
     const reason = { '': 'pause', Paused: 'pause', Breakpoint: 'breakpoint', Stepped: 'step' }[said];
-    const frame = typeof top === 'object' && top !== null ? (top as Record<string, unknown>) : null;
+    const frame = isRecord(top) ? top : null;
     const where =
       frame === null
         ? 'between frames'

@@ -9,6 +9,7 @@
  */
 
 import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { errorCode } from './errors.js';
 
 /** How long a write waits out a reader holding the file, and how long it sleeps between tries. */
 const HELD_FILE_MS = 1000;
@@ -34,7 +35,7 @@ export function readWhole(path: string): string | null {
     try {
       return readFileSync(path, 'utf8');
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code ?? '';
+      const code = errorCode(error) ?? '';
       if (code === 'ENOENT') {
         return null;
       }
@@ -68,7 +69,7 @@ export function writeWhole(path: string, text: string): boolean {
       renameSync(partial, path);
       return true;
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code ?? '';
+      const code = errorCode(error) ?? '';
       if (!HELD_BY_A_READER.has(code) || Date.now() >= until) {
         try {
           rmSync(partial, { force: true });
@@ -96,7 +97,7 @@ export function removeWhole(path: string): boolean {
       rmSync(path, { force: true });
       return true;
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code ?? '';
+      const code = errorCode(error) ?? '';
       if (!HELD_BY_A_READER.has(code) || Date.now() >= until) {
         return false;
       }

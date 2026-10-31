@@ -131,7 +131,7 @@ function bothRunners(rest: string): string {
  * four that share `.mcp.json` first, which would read as a ranking it is not.
  */
 function pickable(): readonly Harness[] {
-  return [...HARNESSES].sort((left, right) => left.name.localeCompare(right.name, 'en'));
+  return [...HARNESSES].toSorted((left, right) => left.name.localeCompare(right.name, 'en'));
 }
 
 /**

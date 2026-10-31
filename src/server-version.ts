@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { isRecord } from './records.js';
 import { isNewer } from './update-check.js';
 
 /** Debug lines on stderr, and headless engines run with `--debug-godot`. */
@@ -6,10 +7,9 @@ export const DEBUG_MODE: boolean = process.env['GDHARNESS_DEBUG'] === '1';
 
 export const SERVER_VERSION = (() => {
   try {
-    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
-      version?: string;
-    };
-    return typeof pkg.version === 'string' ? pkg.version : '0.0.0';
+    const pkg: unknown = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    const version = isRecord(pkg) ? pkg['version'] : undefined;
+    return typeof version === 'string' ? version : '0.0.0';
   } catch {
     return '0.0.0';
   }

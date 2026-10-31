@@ -217,15 +217,15 @@ function profiledBy(path: string, projectPath: string): { observer: ProfileObser
       if (timer !== null) {
         clearTimeout(timer);
       }
-      latest = observer.totals() ?? latest;
+      const last = observer.totals() ?? latest;
+      latest = last;
+      if (last === null) {
+        return;
+      }
       // The keeper exits after this, so there is no later write to fall back on, and the engine's
       // own totals arrive only now. Each try waits out a held file for a while of its own.
       let tries = 0;
-      while (
-        latest !== null &&
-        !writeProfileFile(path, { ...latest, connected: true }) &&
-        tries < LAST_WRITE_TRIES
-      ) {
+      while (!writeProfileFile(path, { ...last, connected: true }) && tries < LAST_WRITE_TRIES) {
         tries += 1;
       }
     },

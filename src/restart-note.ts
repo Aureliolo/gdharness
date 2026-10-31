@@ -2,6 +2,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { errorMessage } from './errors.js';
 import type { EditorPorts } from './launch.js';
+import { isRecord } from './records.js';
 
 /**
  * A restart of an editor this server opened is two acts with a gap between them: the editor is
@@ -57,14 +58,22 @@ export function noteRestartBegun(note: RestartNote): void {
 export function restartOwed(projectPath: string): RestartNote | null {
   try {
     const parsed: unknown = JSON.parse(readFileSync(restartNotePath(projectPath), 'utf8'));
-    if (typeof parsed !== 'object' || parsed === null) {
+    if (!isRecord(parsed)) {
       return null;
     }
-    const said = parsed as Partial<RestartNote>;
-    if (typeof said.quitAt !== 'string' || typeof said.byPid !== 'number' || typeof said.ports !== 'object') {
+    const { projectPath: notedFor, editorPid, ports, quitAt, byPid } = parsed;
+    const { lsp, dap }: Record<string, unknown> = isRecord(ports) ? ports : {};
+    if (
+      typeof notedFor !== 'string' ||
+      (typeof editorPid !== 'number' && editorPid !== null) ||
+      typeof lsp !== 'number' ||
+      typeof dap !== 'number' ||
+      typeof quitAt !== 'string' ||
+      typeof byPid !== 'number'
+    ) {
       return null;
     }
-    return said as RestartNote;
+    return { projectPath: notedFor, editorPid, ports: { lsp, dap }, quitAt, byPid };
   } catch {
     return null;
   }

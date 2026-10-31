@@ -1,3 +1,4 @@
+import { isRecord } from './records.js';
 import type { OperationParams } from './server-types.js';
 
 /**
@@ -12,9 +13,7 @@ import type { OperationParams } from './server-types.js';
 
 /** Any value that is a plain object, as arguments, or an empty set of them. */
 export function asParams(value: unknown): OperationParams {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as OperationParams)
-    : {};
+  return isRecord(value) ? value : {};
 }
 
 export function readString(params: OperationParams, key: string): string | undefined {
@@ -98,7 +97,5 @@ export function readArray(params: OperationParams, key: string): unknown[] | und
 
 export function readParams(params: OperationParams, key: string): OperationParams | undefined {
   const value = params[key];
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as OperationParams)
-    : undefined;
+  return isRecord(value) ? value : undefined;
 }

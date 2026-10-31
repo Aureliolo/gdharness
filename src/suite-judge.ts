@@ -20,6 +20,7 @@ import {
 } from './engine-leaks.js';
 import type { LogEntry } from './game-log.js';
 import { type OrphansLeft, orphansLeftOn, orphansLeftSaid, scriptErrorsPrinted } from './junit.js';
+import { isRecord, isStringList } from './records.js';
 
 /** One case as the run reported it finishing. */
 interface CaseRan {
@@ -461,11 +462,19 @@ export function versionFault(said: string | null, wanted: string): string | null
 
 /** What each suite declares, as the runner's `--expected-out` wrote it, or nothing. */
 export function readExpected(file: string): Expected {
+  // A part that is not the shape the runner writes reads as declaring nothing.
+  const entriesOf = (value: unknown): [string, unknown][] => Object.entries(isRecord(value) ? value : {});
+  const lists = (value: unknown): Readonly<Record<string, readonly string[]>> =>
+    Object.fromEntries(
+      entriesOf(value).flatMap(([name, listed]): [string, string[]][] =>
+        isStringList(listed) ? [[name, listed]] : [],
+      ),
+    );
   const declared = (value: unknown): Declared =>
-    typeof value === 'object' && value !== null ? (value as Declared) : {};
+    Object.fromEntries(entriesOf(value).map(([suite, byFunction]) => [suite, lists(byFunction)]));
   try {
     const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
-    const read = typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : {};
+    const read: Record<string, unknown> = isRecord(parsed) ? parsed : {};
     return { errors: declared(read['errors']), warnings: declared(read['warnings']) };
   } catch {
     return { errors: {}, warnings: {} };
@@ -586,7 +595,7 @@ export function rowsAcross(
       continue;
     }
     const counts = new Map<number | null, number>();
-    for (const ran of suites.flatMap((suite) => suite?.cases ?? []).filter((ran) => ran.func === func)) {
+    for (const ran of suites.flatMap((suite) => suite?.cases ?? []).filter((one) => one.func === func)) {
       counts.set(ran.row, (counts.get(ran.row) ?? 0) + 1);
     }
     const said = (row: number | null): string => (row === null ? 'the case whole' : `row ${String(row)}`);
@@ -939,7 +948,7 @@ export function judgeCompile(printed: RunPrinted, end: EngineEnd): string[] {
  * when it was [param cutShort] and nothing picked says why.
  */
 function linesShown(lines: readonly string[], picked: ReadonlySet<number>, cutShort: boolean): string[] {
-  const summary = [...picked].filter((at) => at < lines.length).sort((a, b) => a - b);
+  const summary = [...picked].filter((at) => at < lines.length).toSorted((a, b) => a - b);
   const telling = summary.some(
     (at) => !/^(?:Overall Summary|Executed test|Total execution|\s*Exit code)/.test(lines[at]?.trim() ?? ''),
   );

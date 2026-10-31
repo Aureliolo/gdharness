@@ -20,6 +20,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import type { DebugAnswer, DebugRequest } from './game-debugger.js';
+import { isRecord } from './records.js';
 
 /** How a question for the game's debugger starts its line; the JSON of the request follows. */
 const DEBUG_PREFIX = 'debug ';
@@ -57,9 +58,44 @@ async function debuggedOrWhyNot(
     return JSON.stringify({ refused: 'This run has no debugger.' });
   }
   try {
-    return JSON.stringify(await debug(JSON.parse(asked) as DebugRequest));
+    const request = debugRequestOf(JSON.parse(asked));
+    if (request === null) {
+      return JSON.stringify({ refused: `The debugger takes no request like ${asked.slice(0, 200)}.` });
+    }
+    return JSON.stringify(await debug(request));
   } catch (error) {
     return JSON.stringify({ refused: `The debugger could not answer: ${errorText(error)}` });
+  }
+}
+
+const RESUMED_HOW = ['continue', 'next', 'step', 'out'] as const;
+
+/** The request [param asked] is, or null when it is not one the debugger takes. */
+function debugRequestOf(asked: unknown): DebugRequest | null {
+  if (!isRecord(asked)) {
+    return null;
+  }
+  const { op, script, line, set, how, frame, expression } = asked;
+  switch (op) {
+    case 'breakpoint':
+      return typeof script === 'string' && typeof line === 'number' && typeof set === 'boolean'
+        ? { op, script, line, set }
+        : null;
+    case 'pause':
+    case 'stack':
+    case 'output':
+    case 'state':
+      return { op };
+    case 'resume': {
+      const resumed = RESUMED_HOW.find((one) => one === how);
+      return resumed === undefined ? null : { op, how: resumed };
+    }
+    case 'variables':
+      return typeof frame === 'number' ? { op, frame } : null;
+    case 'evaluate':
+      return typeof frame === 'number' && typeof expression === 'string' ? { op, frame, expression } : null;
+    default:
+      return null;
   }
 }
 
@@ -165,8 +201,8 @@ export async function askTheKeepersDebugger(
   }
   try {
     const parsed: unknown = JSON.parse(answered);
-    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-      return parsed as DebugAnswer;
+    if (isRecord(parsed)) {
+      return parsed;
     }
   } catch {
     // Said below.

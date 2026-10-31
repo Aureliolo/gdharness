@@ -304,7 +304,10 @@ export function runtimesAnnounced(directories: readonly string[] = runtimeDirect
     }
   }
   const newest = (a: { pid: number }, b: { pid: number }): number => b.pid - a.pid;
-  return { running: [...running.values()].sort(newest), unspoken: [...unspoken.values()].sort(newest) };
+  return {
+    running: [...running.values()].toSorted(newest),
+    unspoken: [...unspoken.values()].toSorted(newest),
+  };
 }
 
 /** Only the games this server can talk to, for a caller with nothing to say about the rest. */
@@ -517,14 +520,14 @@ function announcedIn(directory: string): Announced[] {
   for (const { file, pid, running } of entries) {
     // A number answering to a signal is not the game unless the process behind it is the one that
     // wrote the file; one that is not is swept as a game that has gone, which is what it is.
-    const gone = !running || strangers.has(file);
-    const announced: Announced = gone ? { kind: 'rubbish' } : parseAnnouncement(file, pid);
+    const departed = !running || strangers.has(file);
+    const announced: Announced = departed ? { kind: 'rubbish' } : parseAnnouncement(file, pid);
     if (announced.kind === 'rubbish') {
       // A file that will not parse under a live number is one being written: the game opens it
       // empty and fills it in the same instant, and a look between the two reads nothing. The
       // next look reads it whole, and a sweep here takes an announcement the game has made and
       // will not make again, so its run is never found under any wait.
-      if (!gone) {
+      if (!departed) {
         continue;
       }
       // A game that announced and whose process has since gone, remembered before the file naming
@@ -1171,8 +1174,13 @@ export function runtimeRequest(
       });
       opened.on('data', (chunk: string) => {
         buffered += chunk;
+        // Answered, and not listening on for a late reply: nothing more that arrives is read. Every
+        // change to either comes with an answer, after which this returns.
+        if (done && !late) {
+          return;
+        }
         let newline = buffered.indexOf('\n');
-        while (newline !== -1 && (!done || late)) {
+        while (newline !== -1) {
           const line = buffered.slice(0, newline).trim();
           buffered = buffered.slice(newline + 1);
           newline = buffered.indexOf('\n');

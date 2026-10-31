@@ -1139,7 +1139,7 @@ function symbolNames(symbols: unknown[]): string[] {
 /** Every node path in a scene_tree answer, sorted, so a case says what the scene holds. */
 function nodePaths(tree: unknown): string[] {
   const children = asArray(get(tree, 'children'), 'children').flatMap(nodePaths);
-  return [asString(get(tree, 'path'), 'path'), ...children].sort();
+  return [asString(get(tree, 'path'), 'path'), ...children].toSorted();
 }
 
 /**
@@ -1331,6 +1331,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     const sampled = thread.account();
     throw new Error(
       `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${accountOf(server)}${sampled === '' ? '' : `\n\nThe editor's main thread, sampled every quarter second:\n${sampled}`}`,
+      { cause: failure },
     );
   } finally {
     thread.stop();
@@ -2034,7 +2035,7 @@ async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor)
     const followed: unknown = get(renamed, 'followed');
     assert.ok(Array.isArray(followed), text(renamed));
     assert.deepEqual(
-      followed.map(String).sort(),
+      followed.map(String).toSorted(),
       ['res://kin/big.tscn', 'res://kin/host.tscn'],
       text(renamed),
     );
@@ -2065,7 +2066,7 @@ async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor)
       `${fileText(project, 'kin/crate.tscn')}\n[node name="Lid" type="Sprite2D" parent="."]\n`,
     );
     await call('editor_rescan', { projectPath: project });
-    for (const [base, children] of [
+    for (const [base, childNames] of [
       ['kin/crate.tscn', ['Look']],
       ['kin/crate_copy.tscn', ['Look', 'Lid']],
     ] as const) {
@@ -2074,7 +2075,7 @@ async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor)
       const tree = get(await call('scene_tree', { projectPath: project, scenePath }), 'tree');
       assert.deepEqual(
         asArray(get(tree, 'children')).map((child) => get(child, 'name')),
-        children,
+        childNames,
         `${scenePath} inherits ${base}: ${fileText(project, scenePath)}`,
       );
     }
@@ -2146,7 +2147,7 @@ async function testAMovedNodeKeepsItsPathsInTheEditor({ call, refusal, project }
     const retargeted: unknown = get(renamed, 'retargeted');
     assert.ok(Array.isArray(retargeted), text(renamed));
     assert.deepEqual(
-      retargeted.map((entry) => `${String(get(entry, 'nodePath'))} ${String(get(entry, 'to'))}`).sort(),
+      retargeted.map((entry) => `${String(get(entry, 'nodePath'))} ${String(get(entry, 'to'))}`).toSorted(),
       ['Anim Boom:scale', 'Follow ../Boom'],
       text(renamed),
     );
@@ -2365,7 +2366,7 @@ async function testResources({ call, refusal, project }: Editor): Promise<void> 
   // same, which is the round trip a caller copying a look from one resource to the next depends on.
   const read = await call('resource_edit', { ...theme, op: 'read' });
   assert.equal(get(read, 'resourceType'), 'Theme', JSON.stringify(read));
-  const held = get(read, 'properties') as Record<string, unknown>;
+  const held = asObject(get(read, 'properties'), 'properties');
   assert.deepEqual(
     held,
     {
@@ -2383,7 +2384,8 @@ async function testResources({ call, refusal, project }: Editor): Promise<void> 
     'properties',
   );
   assert.ok(
-    'default_base_scale' in (everything as Record<string, unknown>) && !('default_base_scale' in held),
+    'default_base_scale' in asObject(everything, 'properties with defaults') &&
+      !('default_base_scale' in held),
     `includeDefaults adds what the file leaves at its default: ${JSON.stringify(everything)}`,
   );
   assert.match(
@@ -2438,7 +2440,7 @@ async function testABuiltInResourceIsReadWithWhatItHolds({ call, project }: Edit
       get(tally, '_type'),
       get(tally, 'script', 'path'),
       get(tally, 'count'),
-      Object.keys(asObject(tally)).sort(),
+      Object.keys(asObject(tally)).toSorted(),
     ],
     ['Resource', 'res://tally_made.gd', 3, ['_type', 'count', 'script']],
     `the resource is read with what it holds, and no _init ran for its defaults: ${JSON.stringify(tally)}`,
@@ -2835,7 +2837,7 @@ async function testAMoveBringsTheEditorAlong({ call, project }: Editor): Promise
   assert.deepEqual(
     asArray(get(moved, 'editor', 'retargetedTabs'))
       .map(String)
-      .sort(),
+      .toSorted(),
     ['res://moving/hero.tscn', 'res://moving/stage.tscn'],
     JSON.stringify(get(moved, 'editor')),
   );
@@ -3693,7 +3695,7 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
     rootNodeName: 'Arena',
     script: 'res://layers/tool_node.gd',
   });
-  assert.equal((made as { rootNodeName?: unknown }).rootNodeName, 'Arena', JSON.stringify(made));
+  assert.equal(get(made, 'rootNodeName'), 'Arena', JSON.stringify(made));
   assert.equal(
     get(made, 'script'),
     'res://layers/tool_node.gd',
@@ -3705,13 +3707,13 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
     'the root is saved under its name, carrying the script',
   );
   // A class a script declares, by its name, as the editor's create dialog offers it.
-  const clapped = (await call('scene_create', {
+  const clapped = await call('scene_create', {
     projectPath: project,
     scenePath: 'res://clapped.tscn',
     rootNodeType: 'Clapper',
-  })) as { rootNodeType?: unknown; scriptClass?: unknown; rootNodeName?: unknown };
+  });
   assert.deepEqual(
-    [clapped.rootNodeType, clapped.scriptClass, clapped.rootNodeName],
+    [get(clapped, 'rootNodeType'), get(clapped, 'scriptClass'), get(clapped, 'rootNodeName')],
     ['Node', 'Clapper', 'Clapper'],
     JSON.stringify(clapped),
   );
@@ -3725,14 +3727,18 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
     /path="res:\/\/clapper\.gd"/,
     fileText(project, 'clapped.tscn'),
   );
-  const added = (await call('scene_node', {
+  const added = await call('scene_node', {
     projectPath: project,
     scenePath: 'res://clapped.tscn',
     op: 'add',
     nodeName: 'Second',
     nodeType: 'Clapper',
-  })) as { nodeType?: unknown; scriptClass?: unknown };
-  assert.deepEqual([added.nodeType, added.scriptClass], ['Node', 'Clapper'], JSON.stringify(added));
+  });
+  assert.deepEqual(
+    [get(added, 'nodeType'), get(added, 'scriptClass')],
+    ['Node', 'Clapper'],
+    JSON.stringify(added),
+  );
   assert.match(nodeBody(fileText(project, 'clapped.tscn'), 'Second'), /script = ExtResource/);
   assert.match(
     await refusal('scene_create', {
@@ -3974,7 +3980,7 @@ async function testAReimportTakesInFilesTheEditorHasNotSeen({ call, project }: E
   assert.deepEqual(
     asArray(get(broken[0], 'paths'))
       .map((path) => asString(path))
-      .sort(),
+      .toSorted(),
     ['res://installed_avatars/broken0.png', 'res://installed_avatars/broken1.png'],
     text(reimported),
   );
@@ -5119,7 +5125,7 @@ async function testAClassReloadedOnceItsBaseExistsReachesItsUsers({
  * does, until the socket it answers with is destroyed. Answered once the server has published the
  * file's diagnostics, which is when it has parsed it.
  */
-async function holdOpen(port: number, project: string, file: string, text: string): Promise<Socket> {
+async function holdOpen(port: number, project: string, file: string, source: string): Promise<Socket> {
   const socket = connect(port, '127.0.0.1');
   let heard = '';
   const published = new Promise<void>((resolve, reject) => {
@@ -5140,8 +5146,8 @@ async function holdOpen(port: number, project: string, file: string, text: strin
       reject(error);
     });
   });
-  const send = (message: unknown): void => {
-    const body = JSON.stringify({ jsonrpc: '2.0', ...(message as object) });
+  const send = (message: Record<string, unknown>): void => {
+    const body = JSON.stringify({ jsonrpc: '2.0', ...message });
     socket.write(`Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n\r\n${body}`);
   };
   await new Promise<void>((resolve, reject) => {
@@ -5156,7 +5162,9 @@ async function holdOpen(port: number, project: string, file: string, text: strin
   send({ method: 'initialized', params: {} });
   send({
     method: 'textDocument/didOpen',
-    params: { textDocument: { uri: pathToFileURL(file).href, languageId: 'gdscript', version: 1, text } },
+    params: {
+      textDocument: { uri: pathToFileURL(file).href, languageId: 'gdscript', version: 1, text: source },
+    },
   });
   await published;
   return socket;
@@ -5357,7 +5365,7 @@ async function testAutoReloadKeepsUnsavedEdits({ call, project, printed }: Edito
   const path = 'res://watched/watched.tscn';
   const file = join(project, 'watched', 'watched.tscn');
   const before = readFileSync(file, 'utf8');
-  const count = (text: string): number => printed().split(text).length - 1;
+  const count = (phrase: string): number => printed().split(phrase).length - 1;
   const held = `${path} changed on disk while the editor holds unsaved changes to it`;
   const reloaded = `reloading: ${path}`;
   const heldBefore = count(held);
@@ -5701,8 +5709,8 @@ async function testAPlayedRunOutlivesTheServerUnderIt(godotPath: string): Promis
  */
 async function testAHeldGameIsStillHeldForTheReplacement(godotPath: string): Promise<void> {
   await withEditor(godotPath, async (own) => {
-    const main = { projectPath: own.project, scriptPath: 'res://main.gd' };
-    await own.call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+    const mainScript = { projectPath: own.project, scriptPath: 'res://main.gd' };
+    await own.call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
     const run = await own.play({ op: 'start', headless: true });
     assert.equal(get(run, 'through'), 'editor', `the editor should be the one playing: ${text(run)}`);
     const pid = asNumber(get(run, 'runtime', 'pid'), 'the played run needs a process of its own');
@@ -5904,7 +5912,7 @@ function lspMessages(bytes: Buffer): Record<string, unknown>[] {
       return messages;
     }
     messages.push(
-      JSON.parse(bytes.subarray(bodyStart, bodyStart + length).toString('utf8')) as Record<string, unknown>,
+      asObject(JSON.parse(bytes.subarray(bodyStart, bodyStart + length).toString('utf8')), 'an LSP message'),
     );
     at = bodyStart + length;
   }
@@ -6180,7 +6188,7 @@ async function stackWithin(
  * and the line the game printed after being let go.
  */
 async function testDebugging({ call, refusal, attempt, play, project }: Editor): Promise<void> {
-  const main = { projectPath: project, scriptPath: 'res://main.gd' };
+  const mainScript = { projectPath: project, scriptPath: 'res://main.gd' };
 
   // Nothing is playing, and the whole trap this replaces was that every one of these answered with
   // an empty stack: the same answer a game stopped in an empty frame gives. The case before this one
@@ -6197,7 +6205,7 @@ async function testDebugging({ call, refusal, attempt, play, project }: Editor):
   );
 
   // The print, so the frame the game stops in is _ready with the sum already worked out.
-  await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+  await call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
 
   // The autoload announces itself before the main scene is ready, which is where this run's
   // breakpoint is, so a game stopped there has already announced and the start says so.
@@ -6309,7 +6317,7 @@ async function testDebugging({ call, refusal, attempt, play, project }: Editor):
     'a stack asked for while the game runs should say so and name what stops it',
   );
 
-  await call('debug_breakpoint', { ...main, op: 'remove', line: BREAK_LINE });
+  await call('debug_breakpoint', { ...mainScript, op: 'remove', line: BREAK_LINE });
   // The game is left running: it is past the breakpoint and answering, which is what the runtime
   // cases need, and a game stopped at a breakpoint answers nothing at all.
 }
@@ -7445,9 +7453,9 @@ async function ticksWithin(attempt: Editor['attempt'], project: string, what: st
  * the server, whose own session the stop ended.
  */
 async function testAnAdapterIsBoundAgainInPlace({ call, project, dapPort }: Editor): Promise<void> {
-  const main = { projectPath: project, scriptPath: 'res://main.gd' };
+  const mainScript = { projectPath: project, scriptPath: 'res://main.gd' };
   // Through the adapter, so the server holds a session on it when it is stopped.
-  await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+  await call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
 
   const rebound = await call('editor_launch', { op: 'rebind' });
   assert.deepEqual(
@@ -7465,13 +7473,13 @@ async function testAnAdapterIsBoundAgainInPlace({ call, project, dapPort }: Edit
   const onlooker = new GodotDAPClient(dapPort);
   await onlooker.initialize();
   await onlooker.abandon();
-  const again = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+  const again = await call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
   assert.deepEqual(
     get(again, 'held'),
     [{ scriptPath: 'res://main.gd', lines: [BREAK_LINE] }],
     `and the server's next call goes through it: ${text(again)}`,
   );
-  await call('debug_breakpoint', { ...main, op: 'remove', line: BREAK_LINE });
+  await call('debug_breakpoint', { ...mainScript, op: 'remove', line: BREAK_LINE });
 }
 
 /**
@@ -7492,9 +7500,9 @@ async function testABreakpointHoldsForEveryPlay({
   project,
   dapPort,
 }: Editor): Promise<void> {
-  const main = { projectPath: project, scriptPath: 'res://main.gd' };
+  const mainScript = { projectPath: project, scriptPath: 'res://main.gd' };
   const one = [{ scriptPath: 'res://main.gd', lines: [BREAK_LINE] }];
-  const set = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+  const set = await call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
   assert.deepEqual(get(set, 'held'), one, `the set answer lists what is held: ${text(set)}`);
 
   // Godot clears every breakpoint in the editor when a session opens on its adapter unless the
@@ -7538,7 +7546,7 @@ async function testABreakpointHoldsForEveryPlay({
   // The adapter echoes a set back as an event naming the file its own way, which on Windows is
   // with forward slashes where this server names it with backslashes. Read as two files, the
   // echo of a line set here was listed as one the user had set in the gutter.
-  const again = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+  const again = await call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
   assert.deepEqual(get(again, 'held'), one, `a second set holds the same line: ${text(again)}`);
   assert.deepEqual(
     get(again, 'setInEditor'),
@@ -7578,7 +7586,7 @@ async function testABreakpointHoldsForEveryPlay({
     );
     await delay(1000);
     const theirs = [{ scriptPath: 'res://main.gd', lines: [gutterLine] }];
-    const listed = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+    const listed = await call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
     assert.deepEqual(
       get(listed, 'setInEditor'),
       theirs,
@@ -7606,7 +7614,7 @@ async function testABreakpointHoldsForEveryPlay({
     await gutter.abandon();
     await watcher.abandon();
   }
-  const back = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+  const back = await call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
   assert.deepEqual(get(back, 'held'), one, `set again for the plays: ${text(back)}`);
   assert.deepEqual(get(back, 'setInEditor'), [], `with the gutter's line gone: ${text(back)}`);
 
@@ -7626,7 +7634,7 @@ async function testABreakpointHoldsForEveryPlay({
   await stackWithin(attempt, 'the second play stops at the same breakpoint', (stack) => stack.length > 0);
   await call('debug_control', { op: 'continue' });
 
-  const removed = await call('debug_breakpoint', { ...main, op: 'remove', line: BREAK_LINE });
+  const removed = await call('debug_breakpoint', { ...mainScript, op: 'remove', line: BREAK_LINE });
   assert.deepEqual(get(removed, 'held'), [], `removing it empties the set: ${text(removed)}`);
   await call('editor_run', { op: 'stop' });
 
