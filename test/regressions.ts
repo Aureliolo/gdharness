@@ -64305,7 +64305,8 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
       '[node name="Close" type="Button" parent="."]\nlayout_mode = 0\n\n' +
       '[node name="Open" type="Button" parent="."]\nlayout_mode = 0\n\n' +
       '[connection signal="pressed" from="Close" to="." method="_on_quit" flags=6 binds= [3]]\n' +
-      '[connection signal="toggled" from="Open" to="Rows" method="queue_sort" unbinds=1]\n',
+      '[connection signal="toggled" from="Open" to="Rows" method="queue_sort" unbinds=1]\n' +
+      '[connection signal="resized" from="." to="Rows" method="queue_sort"]\n',
   };
   for (const [path, content] of Object.entries(files)) {
     writeFileSync(join(project, path), content);
@@ -64639,11 +64640,36 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
     assert.deepEqual(
       connections,
       [
+        '[connection signal="resized" from="." to="Rows" method="queue_sort"]',
         '[connection signal="pressed" from="Rows/Close" to="." method="_on_quit" flags=6 binds= [3]]',
         '[connection signal="toggled" from="Rows/Open" to="Rows" method="queue_sort" unbinds=1]',
         '[connection signal="pressed" from="Shelf/Close" to="." method="_on_quit" flags=6 binds= [3]]',
         '[connection signal="toggled" from="Shelf/Open" to="Shelf" method="queue_sort" unbinds=1]',
       ],
+      fileOf('panel.tscn'),
+    );
+    // A delete names each connection the file loses with the node: from it, from a node under it,
+    // and to it from outside.
+    const shelved = await node({ scenePath: 'panel.tscn', op: 'delete', nodePath: 'Rows' });
+    assert.deepEqual(
+      get(shelved, 'connectionsRemoved'),
+      [
+        { sourceNodePath: '.', signalName: 'resized', targetNodePath: 'Rows', methodName: 'queue_sort' },
+        { sourceNodePath: 'Rows/Close', signalName: 'pressed', targetNodePath: '.', methodName: '_on_quit' },
+        {
+          sourceNodePath: 'Rows/Open',
+          signalName: 'toggled',
+          targetNodePath: 'Rows',
+          methodName: 'queue_sort',
+        },
+      ],
+      JSON.stringify(shelved),
+    );
+    assert.deepEqual(
+      fileOf('panel.tscn')
+        .split('\n')
+        .filter((line) => line.startsWith('[connection')),
+      connections.slice(3),
       fileOf('panel.tscn'),
     );
     // What such a script changes as a write runs is put back before the file is saved, so the
@@ -64779,7 +64805,10 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
       JSON.stringify(gone),
     );
     const lone = await node({ op: 'delete', nodePath: 'Spawn' });
-    assert.deepEqual([get(lone, 'deletedNodePath'), get(lone, 'deletedWithIt')], ['Spawn', undefined]);
+    assert.deepEqual(
+      [get(lone, 'deletedNodePath'), get(lone, 'deletedWithIt'), get(lone, 'connectionsRemoved')],
+      ['Spawn', undefined, undefined],
+    );
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });
