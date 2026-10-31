@@ -5699,6 +5699,12 @@ async function testAHeldGameIsStillHeldForTheReplacement(godotPath: string): Pro
       'breakpoint',
       `held, seen by the first server: ${text(before)}`,
     );
+    // A held game does not end, so a wait answers where it is held rather than sitting out its time.
+    const waitAsked = Date.now();
+    const waited = await own.call('editor_run', { op: 'wait', timeoutMs: 60_000 });
+    const waitedMs = Date.now() - waitAsked;
+    assert.equal(get(waited, 'heldAt', 'reason'), 'breakpoint', `a wait says where: ${text(waited)}`);
+    assert.ok(waitedMs < 15_000, `and answered in ${waitedMs}ms: ${text(waited)}`);
 
     // A second session, attached while the first server holds the game. It was never sent the
     // stopped event, so what it knows it learned by asking on attach. This is the state a server
