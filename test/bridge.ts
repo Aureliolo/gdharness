@@ -326,8 +326,10 @@ async function main(): Promise<void> {
     },
   });
 
+  // The regressions' deadline for a call that starts an engine, as editor_classes does: a headless
+  // start on a machine at full load took longer than 15 seconds and failed a call that was fine.
   const call = async (name: string, args: unknown): Promise<JsonRpcMessage> =>
-    await server.request('tools/call', { name, arguments: args }, 15000);
+    await server.request('tools/call', { name, arguments: args }, 120_000);
   const payload = async (name: string, args: unknown): Promise<unknown> => {
     const response = await call(name, args);
     const parsed = parseTextContent(response);

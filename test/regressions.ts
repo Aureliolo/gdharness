@@ -484,6 +484,7 @@ import {
   toolSpec,
 } from '../src/tool-definitions.js';
 import { argumentShape, namedType, renderToolsMarkdown } from '../src/tool-reference.js';
+import { encodedUidCache, mendUidCache, type UidEntry, uidCacheEntries } from '../src/uid-cache.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { writeWhole } from '../src/whole-file.js';
 import { askWindows } from '../src/windows-ask.js';
@@ -10198,14 +10199,20 @@ async function testAnEngineThatCrashesAtStartIsAskedAgain(): Promise<void> {
  */
 function testAnAutoloadGitWillNotCarry(): void {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-ignored-'));
+  // A git hook in a linked worktree exports these, and git then reads them before the working
+  // directory: `git init` here set `core.bare` on the repository the suite was run from.
+  const env = { ...process.env };
+  delete env['GIT_DIR'];
+  delete env['GIT_WORK_TREE'];
+  delete env['GIT_INDEX_FILE'];
   const git = (...gitArgs: string[]): SpawnSyncReturns<string> =>
-    spawnSyncHidden('git', gitArgs, { cwd: project, encoding: 'utf8', timeout: 60000 });
+    spawnSyncHidden('git', gitArgs, { cwd: project, encoding: 'utf8', timeout: 60000, env });
   const doctor = (where: string, ...more: string[]): SpawnSyncReturns<string> =>
     spawnSyncHidden(process.execPath, [join(process.cwd(), 'build', 'cli.js'), 'doctor', ...more], {
       encoding: 'utf8',
       cwd: where,
       timeout: 60000,
-      env: withHome(process.env, join(project, '.home')),
+      env: withHome(env, join(project, '.home')),
     });
   const report = (where: string): unknown => JSON.parse(doctor(where, '--json').stdout);
   const troubles = (where: string): string[] =>
@@ -10272,6 +10279,7 @@ function testAnAutoloadGitWillNotCarry(): void {
       const outside = spawnSyncHidden('git', ['rev-parse', '--git-dir'], {
         cwd: elsewhere,
         encoding: 'utf8',
+        env,
       });
       if (outside.status !== 0) {
         cpSync(join(project, 'project.godot'), join(elsewhere, 'project.godot'));
@@ -14476,6 +14484,189 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
     await second?.stop();
     sweep(project);
     sweep(runtime);
+  }
+}
+
+/**
+ * A uid cache naming a file that is gone is set right before an engine starts on the project.
+ *
+ * A file moved with its `.uid` leaves every older cache naming the old path. An editor creates
+ * autoloads from the cache before it scans, and a boot never scans, so the autoload loaded from the
+ * deleted file. The entry points at the file declaring its uid now, through a `.uid`, an `.import`
+ * or a scene's header, and is dropped when none does. Each id is judged by its last entry, a name by
+ * its exact case, and only `res://` paths are judged. The ids here are the ones the uid texts name,
+ * one of them read back from a cache Godot wrote, so the decoding is held to the engine's.
+ */
+function testAUidCacheNamingAFileGoneIsMended(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-uid-cache-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'kept.gd': 'extends Node\n',
+      'Loader.gd': 'extends Node\n',
+      'deep/there.gd': 'extends Node\n',
+      'gdharness/loader.gd': 'extends Node\n',
+      'gdharness/loader.gd.uid': 'uid://bil88s3xjahd0\n',
+      'art/icon.png': '',
+      'art/icon.png.import': '[remap]\n\nimporter="texture"\ntype="CompressedTexture2D"\nuid="uid://5"\n',
+      'levels/first.tscn':
+        '[gd_scene load_steps=2 format=3 uid="uid://h"]\n\n[node name="First" type="Node"]\n',
+      'ignored/.gdignore': '',
+      'ignored/copy.gd.uid': 'uid://i\n',
+    });
+    mkdirSync(join(project, '.godot'));
+    const cache = join(project, '.godot', 'uid_cache.bin');
+    const stale: UidEntry[] = [
+      [1n, 'res://kept.gd'],
+      [2n, 'res://boot/gone.gd'],
+      [3n, 'res://loader.gd'],
+      [2972703169784048779n, 'res://boot/loader.gd'],
+      [5n, 'res://deep/old.gd'],
+      [6n, 'user://elsewhere.cfg'],
+      [5n, 'res://deep/there.gd'],
+      [30n, 'res://icon.png'],
+      [7n, 'res://first.tscn'],
+      [8n, 'res://copy.gd'],
+      [0xffff_ffff_ffff_fff0n, 'res://deep/gone_too.gd'],
+    ];
+    const kept: UidEntry[] = [
+      [1n, 'res://kept.gd'],
+      [2972703169784048779n, 'res://gdharness/loader.gd'],
+      [5n, 'res://deep/there.gd'],
+      [6n, 'user://elsewhere.cfg'],
+      [30n, 'res://art/icon.png'],
+      [7n, 'res://levels/first.tscn'],
+    ];
+    writeFileSync(cache, encodedUidCache(stale));
+    assert.deepEqual(
+      mendUidCache(project),
+      {
+        moved: [
+          [2972703169784048779n, 'res://boot/loader.gd', 'res://gdharness/loader.gd'],
+          [30n, 'res://icon.png', 'res://art/icon.png'],
+          [7n, 'res://first.tscn', 'res://levels/first.tscn'],
+        ],
+        dropped: [
+          [2n, 'res://boot/gone.gd'],
+          [3n, 'res://loader.gd'],
+          [8n, 'res://copy.gd'],
+          [0xffff_ffff_ffff_fff0n, 'res://deep/gone_too.gd'],
+        ],
+      },
+      'each entry naming a file gone moves to the file declaring its uid, outside a .gdignore, or goes',
+    );
+    assert.deepEqual(
+      readFileSync(cache),
+      encodedUidCache(kept),
+      'the cache keeps the rest, in the order they stood',
+    );
+    assert.deepEqual(readdirSync(join(project, '.godot')), ['uid_cache.bin'], 'nothing is left beside it');
+
+    // A sound cache, and one not in Godot's form, are left byte for byte.
+    const sound = readFileSync(cache);
+    assert.deepEqual(mendUidCache(project), { moved: [], dropped: [] });
+    assert.deepEqual(readFileSync(cache), sound);
+    const broken = encodedUidCache(stale).subarray(0, 30);
+    writeFileSync(cache, broken);
+    assert.deepEqual(mendUidCache(project), { moved: [], dropped: [] });
+    assert.deepEqual(readFileSync(cache), broken);
+
+    // Every way an engine is started mends the cache of the project its --path names, relative to
+    // its working directory too: a spawn, and on Windows the desktop helper, which is spawned with
+    // the engine's command line in a file.
+    const starts: [string, () => void][] = [
+      ['a spawn', () => spawnSyncHidden(process.execPath, ['-e', '0', '--path', project])],
+      [
+        'a spawn in the project',
+        () => spawnSyncHidden(process.execPath, ['-e', '0', '--path', '.'], { cwd: project }),
+      ],
+      [
+        'the desktop helper',
+        () =>
+          throughHelper({ directory: project }, 'godot.exe', ['--headless', '--path', project], {
+            spec: join(project, 'spec'),
+            pid: join(project, 'pid'),
+            error: join(project, 'error'),
+            stop: join(project, 'stop'),
+            step: join(project, 'step'),
+          }),
+      ],
+    ];
+    for (const [how, start] of starts) {
+      writeFileSync(cache, encodedUidCache(stale));
+      start();
+      assert.deepEqual(readFileSync(cache), encodedUidCache(kept), `${how} mends the cache first`);
+    }
+    // A command naming no project leaves every cache alone.
+    writeFileSync(cache, encodedUidCache(stale));
+    spawnSyncHidden(process.execPath, ['-e', '0'], { cwd: project });
+    assert.deepEqual(readFileSync(cache), encodedUidCache(stale));
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * An autoload named by its uid boots from where its script now is after the script moves.
+ *
+ * Reported by a downstream game: the script and its `.uid` moved to another folder, and the boot
+ * check failed loading the old path, because the engine resolved the uid from the cache the import
+ * had written. An autoload named by its path never asks the cache, so only the uid form shows it.
+ */
+async function testAMovedAutoloadBootsFromWhereItIs(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('moved autoload regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-moved-autoload-'));
+  const settings = (autoload: string): string =>
+    'config_version=5\n\n[application]\nconfig/name="MovedAutoload"\nrun/main_scene="res://main.tscn"\n\n' +
+    `[autoload]\nBoot="*${autoload}"\n`;
+  try {
+    writeTree(project, {
+      'project.godot': settings('res://boot/loader.gd'),
+      'main.tscn': '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n',
+      'boot/loader.gd':
+        'extends Node\n\n\nfunc _ready() -> void:\n\tprint("loader at ", get_script().resource_path)\n',
+    });
+    const imported = spawnSyncHidden(godotPath, ['--headless', '--path', project, '--import'], {
+      encoding: 'utf8',
+      timeout: ENGINE_CALL_TIMEOUT_MS,
+    });
+    assert.equal(imported.status, 0, `the import should finish: ${imported.stderr}`);
+    const uid = readFileSync(join(project, 'boot', 'loader.gd.uid'), 'utf8').trim();
+    assert.match(uid, /^uid:\/\/\w+$/, 'the import gives the script a uid');
+    const cached = (uidCacheEntries(readFileSync(join(project, '.godot', 'uid_cache.bin'))) ?? []).map(
+      ([, path]) => path,
+    );
+    assert.ok(
+      cached.includes('res://boot/loader.gd'),
+      `the cache names the script where it was: ${cached.join(', ')}`,
+    );
+
+    writeTree(project, {
+      'project.godot': settings(uid),
+      'gdharness/loader.gd': readFileSync(join(project, 'boot', 'loader.gd'), 'utf8'),
+      'gdharness/loader.gd.uid': `${uid}\n`,
+    });
+    rmSync(join(project, 'boot'), { recursive: true });
+
+    await withStdioServer(
+      async (call) => {
+        const said = await call('editor_run', { projectPath: project, op: 'check' }, ENGINE_CALL_TIMEOUT_MS);
+        const check: unknown = JSON.parse(said);
+        assert.equal(get(check, 'errors'), 0, `the moved autoload loads without an error: ${said}`);
+        assert.equal(get(check, 'booted'), true, said);
+        assert.match(said, /loader at res:\/\/gdharness\/loader\.gd/, 'and runs from where it is now');
+      },
+      { GODOT_PATH: godotPath },
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
   }
 }
 
@@ -70945,6 +71136,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnUncapturedConsoleSaysWhichEditorItIs,
   testAnEditorsProgressIsOneLinePerTask,
   testAnEditorWritesItsConsoleWhereTheServerLooks,
+  testAUidCacheNamingAFileGoneIsMended,
+  testAMovedAutoloadBootsFromWhereItIs,
   testACancelledCallEndsTheEngineItStarted,
   testAnErrorReportOutlivesItsGameForAnHour,
   testAPidPicksOneOfSeveralGames,
