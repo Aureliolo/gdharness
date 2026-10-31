@@ -64467,6 +64467,10 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
       '[connection signal="pressed" from="Close" to="." method="_on_quit" flags=6 binds= [3]]\n' +
       '[connection signal="toggled" from="Open" to="Rows" method="queue_sort" unbinds=1]\n' +
       '[connection signal="resized" from="." to="Rows" method="queue_sort"]\n',
+    'trail.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Gradient" path="res://gone.tres" id="1_gone"]\n\n' +
+      '[node name="Trail" type="Node2D"]\n\n' +
+      '[node name="Line" type="Line2D" parent="."]\ngradient = ExtResource("1_gone")\n',
   };
   for (const [path, content] of Object.entries(files)) {
     writeFileSync(join(project, path), content);
@@ -64808,6 +64812,26 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
       ],
       fileOf('panel.tscn'),
     );
+    // A scene naming a file that is gone loads without it, and a save would drop the reference and
+    // the value set from it, so a write is refused until the file is back.
+    const trailBefore = fileOf('trail.tscn');
+    assert.equal(
+      await refusal({ scenePath: 'trail.tscn', op: 'set', nodePath: 'Line', properties: { width: 4 } }),
+      'Nothing was written: res://trail.tscn names res://gone.tres, which is not there, so the engine loads the scene without it, and a save would drop it and what is set from it: line 8 on Line, gradient = ExtResource("1_gone"). Put the file back at that path, or change the [ext_resource] line in the scene to one that exists.',
+    );
+    assert.equal(fileOf('trail.tscn'), trailBefore, 'a refused write wrote nothing');
+    writeFileSync(join(project, 'gone.tres'), '[gd_resource type="Gradient" format=3]\n\n[resource]\n');
+    await node({ scenePath: 'trail.tscn', op: 'set', nodePath: 'Line', properties: { width: 4 } });
+    assert.match(fileOf('trail.tscn'), /^gradient = ExtResource\("[^"]+"\)$/m, fileOf('trail.tscn'));
+    assert.match(fileOf('trail.tscn'), /^width = 4\.0$/m, fileOf('trail.tscn'));
+    // An entry whose uid names a file the project has loads by the uid, whatever its path says.
+    const panelUid = readFileSync(join(project, 'panel.gd.uid'), 'utf8').trim();
+    writeFileSync(
+      join(project, 'moved.tscn'),
+      `[gd_scene format=3]\n\n[ext_resource type="Script" uid="${panelUid}" path="res://old/panel.gd" id="1_panel"]\n\n[node name="Moved" type="Control"]\nscript = ExtResource("1_panel")\n`,
+    );
+    await node({ scenePath: 'moved.tscn', op: 'set', nodePath: '.', properties: { visible: false } });
+    assert.match(fileOf('moved.tscn'), /^script = ExtResource\("[^"]+"\)$/m, fileOf('moved.tscn'));
     // A delete names each connection the file loses with the node: from it, from a node under it,
     // and to it from outside.
     const shelved = await node({ scenePath: 'panel.tscn', op: 'delete', nodePath: 'Rows' });
