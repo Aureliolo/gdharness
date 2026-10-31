@@ -95,6 +95,7 @@ import {
   writeEditorLogNote,
 } from '../src/editor-log.js';
 import {
+  countedBy,
   EngineUsageError,
   heldToCores,
   inTurns,
@@ -136,6 +137,7 @@ import {
   UNWRITTEN_MS,
   WAITING_FOLDER,
 } from '../src/engine-slots.js';
+import { crowded, nowSeconds, processorSecondsOf, type Sample, Spent, STARVED } from '../src/engine-spent.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
 import { answersTo, foldedRepeats, forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
@@ -29278,6 +29280,40 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
       statSync(join(project, 'build', 'tux.pck')).size,
       `its size is the file's: ${JSON.stringify(pack)}`,
     );
+    // What changed on disk is imported before the export and named, as before a run: a picture
+    // never imported, then its sidecar as a tool writes one, naming no output, in a checkout
+    // without the editor's cache, which the export's own scan passes over.
+    writeFileSync(join(project, 'dot.png'), solidPng(40, 160, 40));
+    const withNew = parseTextContent(
+      await call({ op: 'run', preset: 'Tux', outputPath: 'build/tux.pck', pack: true }),
+    );
+    assert.deepEqual(
+      [get(withNew, 'exported'), get(withNew, 'importedFirst')],
+      [true, ['res://dot.png']],
+      JSON.stringify(withNew),
+    );
+    const dotSidecar = join(project, 'dot.png.import');
+    writeFileSync(
+      dotSidecar,
+      readFileSync(dotSidecar, 'utf8')
+        .replace(/^path=.*\r?\n/m, '')
+        .replace(/\[deps\][\s\S]*?(?=\r?\n\[|$)/, ''),
+    );
+    assert.doesNotMatch(readFileSync(dotSidecar, 'utf8'), /^path=/m, 'the sidecar names no output');
+    for (const name of readdirSync(join(project, '.godot', 'editor'))) {
+      if (name.startsWith('filesystem_cache')) {
+        rmSync(join(project, '.godot', 'editor', name));
+      }
+    }
+    const unnamed = parseTextContent(
+      await call({ op: 'run', preset: 'Tux', outputPath: 'build/tux.pck', pack: true }),
+    );
+    assert.deepEqual(
+      [get(unnamed, 'exported'), get(unnamed, 'importedFirst')],
+      [true, ['res://dot.png']],
+      JSON.stringify(unnamed),
+    );
+    assert.match(readFileSync(dotSidecar, 'utf8'), /^path="res:\/\/\.godot\/imported\/dot\.png-/m);
     assert.match(
       await refused({ op: 'run', preset: 'Tux', outputPath: 'build/tux.pck', pack: true, debug: true }),
       /^A pack is exported as a release/,
@@ -45349,6 +45385,92 @@ async function testATakeSweepsGoneLocksPastTheCount(): Promise<void> {
  * back, and one not yet written names nobody.
  */
 /**
+ * An engine's deadline and silence count its own processor time while other work keeps a quarter of
+ * the machine or more busy, and the clock otherwise: by
+ * the clock alone, a crowded gate ended engines that had 465 processor seconds between them in 910
+ * s. A stuck engine uses no processor, so eight times the limit on the clock still ends it however
+ * busy the machine, and a stretch whose processor time was not read counts by the clock. The
+ * platform's reading is asked of a real process, since a platform that never answered would turn
+ * every stretch into the clock's and pass everything else here.
+ */
+async function testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded(): Promise<void> {
+  const cores = 4;
+  // Others hold a quarter of the machine exactly, and just under it.
+  assert.equal(crowded(10, 2, 2 + 10 * cores * 0.25, cores), true);
+  assert.equal(crowded(10, 2, 2 + 10 * cores * 0.24, cores), false);
+  assert.equal(crowded(0, 0, 100, cores), false, 'a stretch of no time crowds nothing');
+
+  const pid = 4242;
+  // A stretch of [stretch] seconds in which the engine used [work] and others [others] cores.
+  const counting = (
+    stretches: ReadonlyArray<{ stretch: number; work: number | undefined; others: number }>,
+  ): Spent => {
+    let at = 0;
+    let machine = 0;
+    let processor = 0;
+    const sampleAt = (): Sample => ({ at, machine, processors: new Map([[pid, processor]]) });
+    const spent = new Spent(0, sampleAt(), pid, cores);
+    for (const { stretch, work, others } of stretches) {
+      at += stretch;
+      machine += (work ?? 0) + others * stretch;
+      processor += work ?? 0;
+      spent.counted(work === undefined ? { at, machine, processors: new Map() } : sampleAt(), pid);
+    }
+    return spent;
+  };
+  const tenSeconds = (count: number, work: number | undefined, others: number) =>
+    Array.from({ length: count }, () => ({ stretch: 10, work, others }));
+
+  // Crowded, at a quarter of a core: a hundred seconds on the clock is twenty-five of its own.
+  const starved = counting(tenSeconds(10, 2.5, 2));
+  assert.deepEqual([starved.byClock, starved.byWork], [0, 25]);
+  assert.equal(starved.past(30, 100), null, 'a starved engine is not past a 30 s deadline at 100 s');
+  assert.equal(starved.past(20, 100), 'own', 'and is past a 20 s one');
+  assert.equal(
+    countedBy(starved, 'own', 100),
+    ' of its own, counted by its processor time while other work kept the machine busy (100 s on the clock)',
+  );
+
+  // The same engine on a free machine is timed by the clock.
+  const free = counting(tenSeconds(10, 2.5, 0));
+  assert.deepEqual([free.byClock, free.byWork], [100, 0]);
+  assert.equal(free.past(30, 100), 'own');
+  assert.equal(countedBy(free, 'own', 100), '', 'and its ending says nothing more');
+
+  // Stuck while others crowd it: nothing of its own, ended only by the clock's bound.
+  const stuck = counting(tenSeconds(25, 0, 3));
+  assert.equal(stuck.byWork, 0);
+  assert.equal(stuck.past(30, 240), null, `${String(STARVED)} times 30 s is not yet passed at 240 s`);
+  assert.equal(stuck.past(30, 241), 'clock');
+  assert.equal(
+    countedBy(stuck, 'clock', 241),
+    `, ${String(STARVED)} times over on the clock (241 s), the machine kept busy by other work`,
+  );
+
+  // Its processor unread while others crowd it: by the clock, as if the machine were free.
+  const unread = counting(tenSeconds(4, undefined, 3));
+  assert.deepEqual([unread.byClock, unread.byWork], [40, 0]);
+  assert.equal(unread.past(30, 40), 'own');
+
+  // A restart, as the log growing restarts a silence, counts from there.
+  starved.restart(100);
+  assert.deepEqual([starved.byClock, starved.byWork, starved.clock(110)], [0, 0, 10]);
+
+  // A process that is running, this one, answers how much processor it has used; a pid nothing
+  // holds is left out.
+  const busyUntil = Date.now() + 200;
+  while (Date.now() < busyUntil) {
+    // Some processor time of its own to read.
+  }
+  const read = await processorSecondsOf([process.pid, 0x7ffffffe]);
+  assert.ok(
+    (read.get(process.pid) ?? 0) > 0,
+    `the platform answered for this process: ${JSON.stringify([...read])}`,
+  );
+  assert.equal(read.has(0x7ffffffe), false, JSON.stringify([...read]));
+}
+
+/**
  * A process started by an engine on a slot runs one engine on that slot, named in GODOT_ENGINE_HELD,
  * only while the slot's holder is the nearest process above it running another executable. A game
  * an editor plays inherits the editor's environment and runs the editor's executable, so it takes a
@@ -48781,16 +48903,24 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       noEngine.said,
     );
 
-    // A case printing all the while is never silent, so only the deadline ends it.
+    // On a crowded machine a limit counts the engine's own processor time, and an engine waiting
+    // on timers has little of it, so its ending says how it was counted and may come only at the
+    // clock's bound, eight times the limit.
+    const underLoad = String.raw`(?: of its own, counted by its processor time while other work kept the machine busy \(\d+ s on the clock\)|, 8 times over on the clock \(\d+ s\), the machine kept busy by other work)?`;
+    // A case printing all the while is never silent, so only the deadline ends it. It runs past
+    // the clock's bound on the deadline, so a crowded machine ends it too.
     writeTree(project, {
       'tests/chatty_test.gd':
-        'extends GdUnitTestSuite\n\nfunc test_chatters() -> void:\n\tfor tick: int in 600:\n\t\tprint("tick %d" % tick)\n\t\tawait get_tree().create_timer(0.1).timeout\n',
+        'extends GdUnitTestSuite\n\nfunc test_chatters() -> void:\n\tfor tick: int in 1200:\n\t\tprint("tick %d" % tick)\n\t\tawait get_tree().create_timer(0.1).timeout\n',
     });
     const chatty = test('tests/chatty_test.gd', '--silence', '4', '--deadline', '12');
     rmSync(join(project, 'tests', 'chatty_test.gd'));
     assert.match(
       chatty.said,
-      /^ {2}the engine ran past the 12 s deadline while running res:\/\/tests\/chatty_test\.gd > test_chatters, so it was ended$/m,
+      new RegExp(
+        String.raw`^ {2}the engine ran past the 12 s deadline${underLoad} while running res:\/\/tests\/chatty_test\.gd > test_chatters, so it was ended$`,
+        'm',
+      ),
       chatty.said,
     );
     assert.doesNotMatch(chatty.said, /printed nothing for/, chatty.said);
@@ -48799,7 +48929,10 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     const hung = test('tests/hang_test.gd', '--silence', '4');
     assert.match(
       hung.said,
-      /^ {2}the engine printed nothing for 4 s while running res:\/\/tests\/hang_test\.gd > test_hangs, so it was ended$/m,
+      new RegExp(
+        String.raw`^ {2}the engine printed nothing for 4 s${underLoad} while running res:\/\/tests\/hang_test\.gd > test_hangs, so it was ended$`,
+        'm',
+      ),
       hung.said,
     );
     assert.equal(hung.status, 1, hung.said);
@@ -48830,7 +48963,10 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     writeFileSync(timesFile, timesKept);
     assert.match(
       besideALongOne.said,
-      /^ {2}the engine printed nothing for 4 s while running res:\/\/tests\/hang_test\.gd > test_hangs, so it was ended$/m,
+      new RegExp(
+        String.raw`^ {2}the engine printed nothing for 4 s${underLoad} while running res:\/\/tests\/hang_test\.gd > test_hangs, so it was ended$`,
+        'm',
+      ),
       besideALongOne.said,
     );
     assert.match(
@@ -49388,6 +49524,72 @@ async function testARunawayEngineLogIsCutAndEnded(): Promise<void> {
       await gone(silentPid),
       `a failure reading the log still ends the engine: pid ${String(silentPid)}`,
     );
+
+    // The deadline and the silence counted as the machine is: held free, each ends at its limit
+    // by the clock; held crowded by others while the engine does nothing, only the clock's bound
+    // ends it, at eight times the limit.
+    const freeMachine = (): Promise<Sample> =>
+      Promise.resolve({ at: nowSeconds(), machine: 0, processors: null });
+    const idleEverywhere = new (class extends Map<number, number> {
+      override get(): number {
+        return 0;
+      }
+    })();
+    const crowdedMachine = (): Promise<Sample> =>
+      Promise.resolve({
+        at: nowSeconds(),
+        machine: nowSeconds() * availableParallelism(),
+        processors: idleEverywhere,
+      });
+    const counted = async (
+      name: string,
+      sample: () => Promise<Sample>,
+      deadlineSeconds: number | null,
+      script: string,
+    ): Promise<{ ended: string | null; seconds: number }> => {
+      const directory = join(scratch, name);
+      mkdirSync(directory);
+      const began = Date.now();
+      const end = await watchedEngine(
+        { ...launch, deadlineSeconds, sample },
+        join(scratch, '0.lock'),
+        ['-e', script],
+        directory,
+        join(directory, 'engine.log'),
+        1,
+      );
+      return { ended: end.ended, seconds: (Date.now() - began) / 1000 };
+    };
+    const quietly = "console.log('started'); setInterval(() => {}, 1000)";
+    const chattily = "setInterval(() => console.log('tick'), 100)";
+    const freeQuiet = await counted('free-quiet', freeMachine, null, quietly);
+    assert.equal(
+      freeQuiet.ended,
+      'the engine printed nothing for 1 s, so it was ended',
+      JSON.stringify(freeQuiet),
+    );
+    assert.ok(freeQuiet.seconds < STARVED, JSON.stringify(freeQuiet));
+    const freeChatty = await counted('free-chatty', freeMachine, 1, chattily);
+    assert.equal(
+      freeChatty.ended,
+      'the engine ran past the 1 s deadline, so it was ended',
+      JSON.stringify(freeChatty),
+    );
+    assert.ok(freeChatty.seconds < STARVED, JSON.stringify(freeChatty));
+    const crowdedQuiet = await counted('crowded-quiet', crowdedMachine, null, quietly);
+    assert.match(
+      String(crowdedQuiet.ended),
+      /^the engine printed nothing for 1 s, 8 times over on the clock \(\d+ s\), the machine kept busy by other work, so it was ended$/,
+      JSON.stringify(crowdedQuiet),
+    );
+    assert.ok(crowdedQuiet.seconds >= STARVED, JSON.stringify(crowdedQuiet));
+    const crowdedChatty = await counted('crowded-chatty', crowdedMachine, 1, chattily);
+    assert.match(
+      String(crowdedChatty.ended),
+      /^the engine ran past the 1 s deadline, 8 times over on the clock \(\d+ s\), the machine kept busy by other work, so it was ended$/,
+      JSON.stringify(crowdedChatty),
+    );
+    assert.ok(crowdedChatty.seconds >= STARVED, JSON.stringify(crowdedChatty));
   } finally {
     sweep(scratch);
   }
@@ -69712,6 +69914,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWaitForASlotKeepsAMarkUntilItEnds,
   testGatesInTheQueueKeepTheirSlots,
   testAnEngineOnASlotLendsItToWhatItStarts,
+  testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded,
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testASuitesInputsAreWhatItsEngineLoaded,
   testTheCompileCheckAndUnattributedFaultsAreJudged,

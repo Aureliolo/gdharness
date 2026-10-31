@@ -10,6 +10,7 @@ import {
   fstatSync,
   openSync,
   readdirSync,
+  readFileSync,
   readSync,
   rmSync,
   statSync,
@@ -31,6 +32,7 @@ import {
   throughHelper,
 } from './desktop.js';
 import { onTheSlot } from './engine-slots.js';
+import { nowSeconds, type Past, type Sample, Spent, STARVED, sampled, watching } from './engine-spent.js';
 import { Refusal } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
 import { LOG_LIMIT_BYTES, readLog } from './log-read.js';
@@ -57,6 +59,21 @@ const WINDOWS_EXCEPTION = 0xc0000000;
 const MEMORY_KEPT = 4 * 1024 ** 3;
 const MEMORY_PER_ENGINE = 1.5 * 1024 ** 3;
 const LOOK_MS = 500;
+
+/**
+ * How [param spent] came past its limit at [param at], said only when other work crowded the
+ * machine, since the plain seconds are then not the clock's.
+ */
+export function countedBy(spent: Spent, past: Past, at: number): string {
+  const clock = Math.round(spent.clock(at));
+  if (past === 'clock') {
+    return `, ${String(STARVED)} times over on the clock (${String(clock)} s), the machine kept busy by other work`;
+  }
+  return spent.byWork === 0
+    ? ''
+    : ` of its own, counted by its processor time while other work kept the machine busy (${String(clock)} s on the clock)`;
+}
+
 /** How long Windows is given to say how much it can still commit, on a machine the run may load. */
 const COMMIT_ASK_MS = 15_000;
 /** What the engine prints when an autoload did not start, after which nothing it does can mean anything. */
@@ -299,6 +316,8 @@ export interface EngineLaunch {
   readonly running: Set<() => void>;
   /** How many processors, the first ones, every engine is held to, or null for all. */
   readonly cores: number | null;
+  /** Where readings of the machine and the engines come from, for a machine held free or crowded. */
+  readonly sample?: () => Promise<Sample>;
 }
 
 /**
@@ -422,21 +441,50 @@ export async function watchedEngine(
     finished.now = true;
   });
   const reading = openSync(log, 'r');
+  // The engine itself: the hidden desktop's helper starts it and writes its pid down.
+  const engineAt = (): number | undefined => {
+    if (helper === null) {
+      return child.pid;
+    }
+    try {
+      const pid = Number(readFileSync(helper.pid, 'utf8').trim());
+      return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  let pid = engineAt();
+  if (pid !== undefined) {
+    watching(pid, true);
+  }
   try {
     let size = 0;
-    const started = Date.now();
-    let lastGrowth = started;
+    const sample = launch.sample ?? sampled;
+    const first = await sample();
+    const running = new Spent(nowSeconds(), first, pid);
+    const quiet = new Spent(nowSeconds(), first, pid);
     // The end of what was scanned, so a marker split between two reads is still found.
     let carried = '';
     // The silence allowed for what the log shows running, read once for each size it reaches.
     let allowed = { size: -1, seconds: silenceSeconds };
     while (!finished.now) {
       await delay(LOOK_MS);
+      if (pid === undefined) {
+        pid = engineAt();
+        if (pid !== undefined) {
+          watching(pid, true);
+        }
+      }
+      const taken = await sample();
+      running.counted(taken, pid);
+      quiet.counted(taken, pid);
+      const at = nowSeconds();
       // Silence alone never ends an engine that keeps printing, such as a case warning every frame.
       const deadline = launch.deadlineSeconds;
-      if (ended === null && deadline !== null && Date.now() - started > deadline * 1000) {
+      const over = deadline === null ? null : running.past(deadline, at);
+      if (ended === null && deadline !== null && over !== null) {
         const stoppedIn = readRun(readLog(log)).stoppedIn;
-        ended = `the engine ran past the ${String(deadline)} s deadline${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended`;
+        ended = `the engine ran past the ${String(deadline)} s deadline${countedBy(running, over, at)}${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended`;
         stop();
       }
       const now = fstatSync(reading).size;
@@ -456,12 +504,12 @@ export async function watchedEngine(
           at += got;
         }
         size = now;
-        lastGrowth = Date.now();
+        quiet.restart(at);
         if (ended === null && size > LOG_LIMIT_BYTES) {
           ended = `the engine printed more than the ${String(LOG_LIMIT_BYTES / 1024 / 1024)} MiB a log may hold, so it was ended`;
           stop();
         }
-      } else if (ended === null && Date.now() - lastGrowth > silenceSeconds * 1000) {
+      } else if (ended === null && quiet.past(silenceSeconds, at) !== null) {
         if (allowed.size !== size) {
           allowed = {
             size,
@@ -471,7 +519,8 @@ export async function watchedEngine(
                 : Math.max(silenceSeconds, silenceIn(readRun(readLog(log)))),
           };
         }
-        if (Date.now() - lastGrowth <= allowed.seconds * 1000) {
+        const silent = quiet.past(allowed.seconds, at);
+        if (silent === null) {
           continue;
         }
         const { stoppedIn } = readRun(readLog(log));
@@ -480,7 +529,7 @@ export async function watchedEngine(
           helper !== null && !existsSync(helper.pid)
             ? `, and it never started ${helper.how}: ${helperStep(helper.step)}`
             : '';
-        ended = `the engine printed nothing for ${String(allowed.seconds)} s${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended${unstarted}`;
+        ended = `the engine printed nothing for ${String(allowed.seconds)} s${countedBy(quiet, silent, at)}${stoppedIn === null ? '' : ` while running ${stoppedIn}`}, so it was ended${unstarted}`;
         stop();
       }
     }
@@ -491,6 +540,9 @@ export async function watchedEngine(
   } finally {
     closeSync(reading);
     launch.running.delete(stop);
+    if (pid !== undefined) {
+      watching(pid, false);
+    }
   }
   const { code, signal } = await exited;
   // Read as soon as it is known, while the machine is still as the engine left it.
