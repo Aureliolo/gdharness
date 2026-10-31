@@ -22,7 +22,7 @@ import {
 } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { availableParallelism, homedir, tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
@@ -6777,6 +6777,31 @@ async function testEditorStatusCountsOnlyOtherCallsInFlight(): Promise<void> {
 async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-status-arrival-'));
   writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  // The state needs the greeting's read of the process table, which identifies the editor, to end
+  // while the call's own read is under way. Both start a moment apart and take about as long, so
+  // on POSIX the first read once armed is held until a later one ends; Windows lists through its
+  // own query, which is slow enough there that the race is met within the tries.
+  const held = process.platform === 'win32' ? null : join(project, 'ps-held');
+  if (held !== null) {
+    mkdirSync(held);
+    writeTree(held, {
+      ps: [
+        '#!/bin/sh',
+        `held='${held}'`,
+        'if [ -f "$held/armed" ] && mkdir "$held/first" 2>/dev/null; then',
+        '  until [ -f "$held/released" ]; do sleep 0.01; done',
+        '  sleep 0.2',
+        '  exec /bin/ps "$@"',
+        'fi',
+        '/bin/ps "$@"',
+        'said=$?',
+        '[ -f "$held/armed" ] && touch "$held/released"',
+        'exit $said',
+        '',
+      ].join('\n'),
+    });
+    chmodSync(join(held, 'ps'), 0o755);
+  }
   const port = await reservePort();
   const server = new ServerProcess({
     env: {
@@ -6784,6 +6809,7 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
       GDHARNESS_PROJECT: project,
       GDHARNESS_DEBUG: '1',
       GODOT_PATH: join(tmpdir(), 'gdharness-no-such-engine'),
+      ...(held === null ? {} : { PATH: `${held}${delimiter}${process.env['PATH'] ?? ''}` }),
     },
   });
   const marker = 'editor_status: the editor connected during the call';
@@ -6832,9 +6858,24 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
         socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
       });
       const before = marked();
+      if (held !== null) {
+        rmSync(join(held, 'first'), { recursive: true, force: true });
+        rmSync(join(held, 'released'), { force: true });
+        writeFileSync(join(held, 'armed'), '');
+      }
       const asking = server.request('tools/call', { name: 'editor_status', arguments: {} });
+      for (
+        let waited = 0;
+        held !== null && !existsSync(join(held, 'first')) && waited < 10_000;
+        waited += 10
+      ) {
+        await delay(10);
+      }
       socket.send(JSON.stringify(greeting(project, { lsp_port: lspPort, dap_port: dapPort })));
       const editor = get(parseTextContent(await asking), 'editor');
+      if (held !== null) {
+        rmSync(join(held, 'armed'));
+      }
       if (marked() > before) {
         met += 1;
         assert.deepEqual(
@@ -6864,6 +6905,9 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
     // The state is a race between the greeting and the process table, so it is tried until met; a
     // platform that never meets it in twenty tries says so rather than passing on the attempts.
     assert.ok(met > 0, `the editor never connected during a status call in ${String(attempts)} tries`);
+    if (held !== null) {
+      assert.equal(attempts, 1, 'with the first read held, the first try meets the state');
+    }
   } finally {
     await server.stop();
     languageServer.close();
@@ -49764,9 +49808,10 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     if (windowed === null) {
       // gdUnit4 minimises the window as its runner starts and after every suite, and a minimised
       // window draws nothing, so a suite rendering in it waited for a frame that never came. The
-      // second suite meets the window as the first one's end left it: filling the usable screen,
-      // which on macOS Godot reads as maximised even once minimised, as the runner's small screen
-      // made the default window and left it minimised.
+      // second suite meets the window as the first one's end left it. The macOS runner's screen is
+      // small enough that the default window fills its usable part, which Godot reads as maximised
+      // even once minimised, so there a run's first suite meets the window gdUnit4's start left
+      // minimised under that reading.
       const drawing = (name: string): string =>
         [
           'extends GdUnitTestSuite',
@@ -49811,13 +49856,6 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
           '\t\t]',
           '\t)',
           '\tassert_int(drawn).override_failure_message("no frame was drawn in 0.5 s, %s" % state).is_greater(0)',
-          '\tvar usable: Rect2i = DisplayServer.screen_get_usable_rect(DisplayServer.window_get_current_screen())',
-          '\tvar inset: Vector2i = DisplayServer.window_get_position() - DisplayServer.window_get_position_with_decorations()',
-          '\tvar framed: Vector2i = DisplayServer.window_get_size_with_decorations() - DisplayServer.window_get_size()',
-          '\tDisplayServer.window_set_position(usable.position + inset)',
-          '\tDisplayServer.window_set_size(usable.size - framed)',
-          '\tif OS.get_name() == "macOS":',
-          '\t\tassert_int(DisplayServer.window_get_mode()).is_equal(DisplayServer.WINDOW_MODE_MAXIMIZED)',
           '',
         ].join('\n');
       writeTree(project, {
