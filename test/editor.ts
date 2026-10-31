@@ -4445,6 +4445,24 @@ async function testASettingReadFromTheEditor({ call, refusal, project }: Editor)
     'boolean',
     `the editor should say at_default: ${text(width)}`,
   );
+  // The editor lays no override file over the project, so its value stands, with the file's beside it.
+  const laid = join(project, 'override.cfg');
+  writeFileSync(laid, '[display]\n\nwindow/size/viewport_width=1234\n');
+  try {
+    const overridden = await call('project_settings', {
+      projectPath: project,
+      op: 'get',
+      setting: 'display/window/size/viewport_width',
+      from: 'editor',
+    });
+    assert.deepEqual(
+      [get(overridden, 'value'), get(overridden, 'overridden_in')],
+      [get(width, 'value'), { file: 'res://override.cfg', value: 1234 }],
+      `the editor's value, and what a run reads from the file: ${text(overridden)}`,
+    );
+  } finally {
+    rmSync(laid, { force: true });
+  }
   const mobile = await call('project_settings', {
     projectPath: project,
     op: 'get',

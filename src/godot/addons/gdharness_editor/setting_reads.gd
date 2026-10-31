@@ -16,6 +16,13 @@ static func one(setting_path: String, values: GdhSerialisation) -> Dictionary:
 
 	if result["exists"]:
 		var value: Variant = ProjectSettings.get_setting(setting_path)
+		var laid: Dictionary = laid_over(setting_path, override_files())
+		if not laid.is_empty():
+			if not Engine.is_editor_hint():
+				value = laid["project"]
+			result["overridden_in"] = {
+				"file": laid["file"], "value": values.serialize_value(laid["value"]),
+			}
 		result["value"] = values.serialize_value(value)
 		# A setting the engine registers exists whether or not the project sets it, so exists did
 		# not say whether project.godot has a line for it. At its default it has none: the engine
@@ -54,17 +61,25 @@ static func one(setting_path: String, values: GdhSerialisation) -> Dictionary:
 ## wrong: 2 is as true as true is.
 static func under(prefix: String, values: GdhSerialisation) -> Dictionary:
 	var found: Array[Dictionary] = []
+	var overrides: Array[Dictionary] = override_files()
 	for property: Dictionary in ProjectSettings.get_property_list():
 		var name: String = str(property.get("name", ""))
 		if not name.begins_with(prefix):
 			continue
 		var kind: int = GdhRead.as_int(property.get("type", TYPE_NIL), TYPE_NIL)
 		var value: Variant = ProjectSettings.get_setting(name)
+		var laid: Dictionary = laid_over(name, overrides)
+		if not laid.is_empty() and not Engine.is_editor_hint():
+			value = laid["project"]
 		var described: Dictionary = {
 			"setting": name,
 			"type": type_named(kind, value),
 			"value": values.serialize_value(value),
 		}
+		if not laid.is_empty():
+			described["overridden_in"] = {
+				"file": laid["file"], "value": values.serialize_value(laid["value"]),
+			}
 		# As a single get says it, so a family read can be told apart into what the project sets and
 		# the engine's defaults: "input/" is ninety actions the engine ships and the project's few.
 		var default_value: Variant = ProjectSettings.property_get_revert(name)
@@ -79,6 +94,49 @@ static func under(prefix: String, values: GdhSerialisation) -> Dictionary:
 		func(a: Dictionary, b: Dictionary) -> bool: return a["setting"] < b["setting"]
 	)
 	return { "prefix": prefix, "count": found.size(), "settings": found }
+
+
+## The files a run lays over project.godot, loaded, in the order the engine lays them, each as
+## {"file", "config"}: res://override.cfg, then the file
+## application/config/project_settings_override
+## names. The editor lays neither, so a game keeping a player's window size in user:// had that size
+## answered headless as the project's own setting, while the editor answered the project's.
+static func override_files() -> Array[Dictionary]:
+	var files: Array[Dictionary] = []
+	var named: String = str(
+		ProjectSettings.get_setting("application/config/project_settings_override", "")
+	)
+	for file: String in ["res://override.cfg", named]:
+		var config: ConfigFile = ConfigFile.new()
+		if not file.is_empty() and config.load(file) == OK:
+			files.append({ "file": file, "config": config })
+	return files
+
+
+## What the last of [param overrides], from [method override_files], to set [param setting_path]
+## sets it to, as {"file", "value", "project"}, where project is what project.godot holds, or the
+## engine's default where it has no line: the value the editor holds, unsaved changes aside. Empty
+## when none sets it.
+static func laid_over(setting_path: String, overrides: Array[Dictionary]) -> Dictionary:
+	var at: int = setting_path.find("/")
+	if at <= 0:
+		return {}
+	var section: String = setting_path.left(at)
+	var key: String = setting_path.substr(at + 1)
+	for index: int in range(overrides.size() - 1, -1, -1):
+		var config: ConfigFile = overrides[index]["config"]
+		if not config.has_section_key(section, key):
+			continue
+		var project: ConfigFile = ConfigFile.new()
+		var held: Variant = ProjectSettings.property_get_revert(setting_path)
+		if project.load("res://project.godot") == OK and project.has_section_key(section, key):
+			held = project.get_value(section, key)
+		return {
+			"file": overrides[index]["file"],
+			"value": config.get_value(section, key),
+			"project": held,
+		}
+	return {}
 
 
 ## The type [param kind] names, with what [param value] holds when it is a typed array or
