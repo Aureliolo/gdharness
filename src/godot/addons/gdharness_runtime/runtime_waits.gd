@@ -990,6 +990,8 @@ class GdhLook:
 			if not is_instance_valid(next):
 				continue
 			var node: Node = next
+			if node.get_property_list().is_empty():
+				continue
 			if GdhSays.says(node, _said):
 				heard = true
 				if _include_hidden or GdhQueries.readable(node):
