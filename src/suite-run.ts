@@ -13,6 +13,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -558,9 +559,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       getLocalVersion(),
       readFileSync(shippedListedRunner(), 'utf8'),
       engineSaid(godotPath),
-      ...options.reachAlso.map(
-        (path) => `${path}\n${existsSync(path) ? readFileSync(path, 'latin1') : 'missing'}`,
-      ),
+      ...reachedAlsoSaid(options.projectPath, options.reachAlso),
     ];
     const everySuite = suites;
     const compileKept = options.changedOnly ? { file: join(state, COMPILED_FILE), scripts, always } : null;
@@ -976,10 +975,26 @@ function recordPassed(
   writeJson(file, passed);
 }
 
-/** The engine at [param godotPath] as the build it is, for a suite to have passed on. */
-function engineSaid(godotPath: string): string {
-  const stat = statSync(godotPath);
-  return `${resolve(godotPath)}\n${String(stat.size)}\n${String(stat.mtimeMs)}`;
+/**
+ * The engine at [param godotPath] as the build it is, for a suite to have passed on: the file it is
+ * past every link, so checkouts reaching one install through a junction each of their own key their
+ * suites alike, and a pass kept in one is a pass in the next.
+ */
+export function engineSaid(godotPath: string): string {
+  const engine = realpathSync.native(godotPath);
+  const stat = statSync(engine);
+  return `${engine}\n${String(stat.size)}\n${String(stat.mtimeMs)}`;
+}
+
+/**
+ * The files at [param paths] a run was told its suites depend on, each named by where it lies in
+ * [param projectPath], so the same file in another checkout keys the same suites.
+ */
+export function reachedAlsoSaid(projectPath: string, paths: readonly string[]): string[] {
+  return paths.map(
+    (path) =>
+      `${relative(projectPath, path).split(sep).join('/')}\n${existsSync(path) ? readFileSync(path, 'latin1') : 'missing'}`,
+  );
 }
 
 /** What compiling every script together found wrong, and where its engine's log is. */

@@ -549,7 +549,25 @@ class GdhRunner:
 			return
 		if Engine.is_embedded_in_editor():
 			return
-		if DisplayServer.window_get_mode() == DisplayServer.WINDOW_MODE_MINIMIZED:
+		var mode: DisplayServer.WindowMode = DisplayServer.window_get_mode()
+		if mode == DisplayServer.WINDOW_MODE_MAXIMIZED and not DisplayServer.window_can_draw():
+			# On macOS Godot reads a window whose frame fills the usable screen as maximised before
+			# asking whether it is minimised, and changing the mode from that reading unzooms it, so
+			# a minimised window that size, as a small screen makes the default one, stayed
+			# minimised. A point off it reads as what it is, and goes back once restored. Godot
+			# divides pixels by the scale into whole points, so a pixel moves nothing on a scaled
+			# screen.
+			var at: Vector2i = DisplayServer.window_get_position()
+			DisplayServer.window_set_position(
+				at + Vector2i(ceili(DisplayServer.screen_get_max_scale()), 0)
+			)
+			mode = DisplayServer.window_get_mode()
+			if mode == DisplayServer.WINDOW_MODE_MINIMIZED:
+				DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
+				minimise_pending = false
+			DisplayServer.window_set_position(at)
+			return
+		if mode == DisplayServer.WINDOW_MODE_MINIMIZED:
 			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
 			minimise_pending = false
 

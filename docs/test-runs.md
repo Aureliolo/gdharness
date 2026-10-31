@@ -563,9 +563,12 @@ Every suite also has these inputs:
 
 - `project.godot`
 - the gdharness version and runner
-- the engine executable's path, size and modification time
-- each file named with `--reach-also`
+- the engine executable's path past every link, size and modification time
+- each file named with `--reach-also`, by its path in the project
 - all of gdUnit4, an addon the runner loads
+
+So checkouts reaching one engine install through junctions of their own, with the records copied
+between them, keep each other's passes.
 
 ## Engine slots
 

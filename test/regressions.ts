@@ -22,7 +22,7 @@ import {
 } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { availableParallelism, homedir, tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
@@ -460,11 +460,13 @@ import {
   windowedSaid,
 } from '../src/suite-plan.js';
 import {
+  engineSaid,
   importFault,
   importNeeded,
   MemoryGate,
   memorySaid,
   type RunResult,
+  reachedAlsoSaid,
   reportsFault,
   roomSaid,
   sharesSaid,
@@ -6852,6 +6854,31 @@ async function testEditorStatusCountsOnlyOtherCallsInFlight(): Promise<void> {
 async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-status-arrival-'));
   writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  // The state needs the greeting's read of the process table, which identifies the editor, to end
+  // while the call's own read is under way. Both start a moment apart and take about as long, so
+  // on POSIX the first read once armed is held until a later one ends. Windows lists through its
+  // own query, which is slow enough there that the race is met within the tries.
+  const held = process.platform === 'win32' ? null : join(project, 'ps-held');
+  if (held !== null) {
+    mkdirSync(held);
+    writeTree(held, {
+      ps: [
+        '#!/bin/sh',
+        `held='${held}'`,
+        'if [ -f "$held/armed" ] && mkdir "$held/first" 2>/dev/null; then',
+        '  until [ -f "$held/released" ]; do sleep 0.01; done',
+        '  sleep 0.2',
+        '  exec /bin/ps "$@"',
+        'fi',
+        '/bin/ps "$@"',
+        'said=$?',
+        '[ -f "$held/armed" ] && touch "$held/released"',
+        'exit $said',
+        '',
+      ].join('\n'),
+    });
+    chmodSync(join(held, 'ps'), 0o755);
+  }
   const port = await reservePort();
   const server = new ServerProcess({
     env: {
@@ -6859,6 +6886,7 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
       GDHARNESS_PROJECT: project,
       GDHARNESS_DEBUG: '1',
       GODOT_PATH: join(tmpdir(), 'gdharness-no-such-engine'),
+      ...(held === null ? {} : { PATH: `${held}${delimiter}${process.env['PATH'] ?? ''}` }),
     },
   });
   const marker = 'editor_status: the editor connected during the call';
@@ -6907,9 +6935,23 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
         socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
       });
       const before = marked();
+      if (held !== null) {
+        rmSync(join(held, 'first'), { recursive: true, force: true });
+        rmSync(join(held, 'released'), { force: true });
+        writeFileSync(join(held, 'armed'), '');
+      }
       const asking = server.request('tools/call', { name: 'editor_status', arguments: {} });
+      if (held !== null) {
+        const first = join(held, 'first');
+        for (let waited = 0; !existsSync(first) && waited < 10_000; waited += 10) {
+          await delay(10);
+        }
+      }
       socket.send(JSON.stringify(greeting(project, { lsp_port: lspPort, dap_port: dapPort })));
       const editor = get(parseTextContent(await asking), 'editor');
+      if (held !== null) {
+        rmSync(join(held, 'armed'));
+      }
       if (marked() > before) {
         met += 1;
         assert.deepEqual(
@@ -6939,6 +6981,9 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
     // The state is a race between the greeting and the process table, so it is tried until met. A
     // platform that never meets it in twenty tries says so rather than passing on the attempts.
     assert.ok(met > 0, `the editor never connected during a status call in ${String(attempts)} tries`);
+    if (held !== null) {
+      assert.equal(attempts, 1, 'with the first read held, the first try meets the state');
+    }
   } finally {
     await server.stop();
     languageServer.close();
@@ -30293,13 +30338,15 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
       const waitOn = (nodePath: string, args: Record<string, unknown>): Promise<unknown> =>
         call('runtime_wait', { op: 'until', nodePath, timeoutMs: 2_000, ...args });
 
-      // How often it looked, over the part of the hall the size of the report's. A look that asks
+      // What a look costs, over the part of the hall the size of the report's. A look that asks
       // every node for its property list costs over a second here, and pacing then leaves one look
-      // in the wait besides the last. Read cheaply, a look costs milliseconds and there are dozens.
+      // in the wait besides the last. Read cheaply, a look costs milliseconds, or 46 to 61 on the
+      // macOS runner. There a wait of two seconds fitted four looks, so the count says how fast the
+      // runner is as much as how the look reads.
       const small = await waitOn('/root/Main/Small', { says: 'words nobody says' });
       assert.ok(
-        asNumber(get(small, 'looks')) >= 5,
-        `a words wait looks many times in two seconds on 3,500 nodes: ${JSON.stringify(small)}`,
+        asNumber(get(small, 'looking_ms')) / asNumber(get(small, 'looks')) < 200,
+        `a look at 3,500 nodes for words costs a fraction of a second: ${JSON.stringify(small)}`,
       );
 
       // Three waits of each kind taken in turn and added up. On the macOS runner the game's rate
@@ -37111,7 +37158,7 @@ async function testAPlayedGamesReportsReachTheOutput(): Promise<void> {
       writeFileSync(
         join(project, 'main.gd'),
         'extends Node\n\n\nfunc _ready() -> void:\n' +
-          '\tpush_error("clock: 7.5 is not one of the speeds on offer")\n' +
+          '\tpush_error("dial: 7.5 is past the last mark")\n' +
           '\tpush_warning("the ladder has five rungs")\n\n\n' +
           'func refuse(value: float) -> void:\n' +
           '\tpush_error("refused %s at runtime" % value)\n',
@@ -37160,7 +37207,7 @@ async function testAPlayedGamesReportsReachTheOutput(): Promise<void> {
       assert.equal(get(first, 'errors'), 1, JSON.stringify(lines(first)));
       assert.equal(get(first, 'warnings'), 1, JSON.stringify(lines(first)));
       assert.ok(
-        lines(first).includes('error: clock: 7.5 is not one of the speeds on offer'),
+        lines(first).includes('error: dial: 7.5 is past the last mark'),
         `the push_error is an error entry: ${JSON.stringify(lines(first))}`,
       );
       assert.ok(
@@ -37168,7 +37215,7 @@ async function testAPlayedGamesReportsReachTheOutput(): Promise<void> {
         `and the push_warning a warning entry: ${JSON.stringify(lines(first))}`,
       );
       const errorEntry = asArray(get(first, 'entries')).find(
-        (entry) => text(get(entry, 'text')) === 'clock: 7.5 is not one of the speeds on offer',
+        (entry) => text(get(entry, 'text')) === 'dial: 7.5 is past the last mark',
       );
       assert.match(
         asArray(get(errorEntry, 'detail')).map(text).join('\n'),
@@ -37178,7 +37225,7 @@ async function testAPlayedGamesReportsReachTheOutput(): Promise<void> {
       const transcript = text(get(first, 'transcript'));
       assert.match(
         readFileSync(transcript, 'utf8'),
-        /^ERROR: clock: 7\.5 is not one of the speeds on offer$/m,
+        /^ERROR: dial: 7\.5 is past the last mark$/m,
         "and the transcript carries the report in the engine's own line",
       );
 
@@ -46154,6 +46201,47 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
 }
 
 /**
+ * A suite's pass kept in one checkout is a pass in another of the same project on the same engine.
+ * A game hands each checkout the shared install through a junction of its own, and the key named
+ * the junction, so every cold checkout ran every suite again. A pin file named by its path did too.
+ */
+function testSuitePassesKeyAlikeInEveryCheckout(): void {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-checkouts-'));
+  try {
+    const install = join(root, 'install');
+    mkdirSync(install);
+    writeFileSync(join(install, 'godot.exe'), 'an engine');
+    const checkouts = ['gate', 'gate-probe-1'].map((name) => {
+      const checkout = join(root, name);
+      mkdirSync(join(checkout, '.tools'), { recursive: true });
+      symlinkSync(install, join(checkout, '.tools', 'godot'), 'junction');
+      mkdirSync(join(checkout, 'tools'));
+      writeFileSync(join(checkout, 'tools', 'versions.json'), '{"godot": "4.7.2"}');
+      return checkout;
+    });
+    const [gate, probe] = checkouts.map((checkout) => [
+      engineSaid(join(checkout, '.tools', 'godot', 'godot.exe')),
+      ...reachedAlsoSaid(checkout, [join(checkout, 'tools', 'versions.json'), join(checkout, 'gone.toml')]),
+    ]);
+    assert.deepEqual(probe, gate, 'the same engine and pins key alike in both checkouts');
+    assert.match(gate?.[0] ?? '', /install[\\/]godot\.exe\n9\n/, 'the engine named as the file it is');
+    assert.deepEqual(
+      gate?.slice(1),
+      ['tools/versions.json\n{"godot": "4.7.2"}', 'gone.toml\nmissing'],
+      'and each pin by where it lies in the project, with what it holds',
+    );
+    writeFileSync(join(checkouts[1] ?? '', 'tools', 'versions.json'), '{"godot": "4.8"}');
+    assert.notDeepEqual(
+      reachedAlsoSaid(checkouts[1] ?? '', [join(checkouts[1] ?? '', 'tools', 'versions.json')]),
+      gate.slice(1, 2),
+      'while a pin that differs keys apart',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
  * Takers are served in the order they began to wait. A one-off waited 38 to 80 minutes for one slot
  * while runs of seconds took turns on it, each the first to look as a lock went. A take leaves a free
  * slot to a taker waiting longer that may take it, for {@link SLOT_YIELD_MS} at most, and reads the
@@ -49843,7 +49931,10 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     if (windowed === null) {
       // gdUnit4 minimises the window as its runner starts and after every suite, and a minimised
       // window draws nothing, so a suite rendering in it waited for a frame that never came. The
-      // second suite meets the window as the first one's end left it.
+      // second suite meets the window as the first one's end left it. The macOS runner's screen is
+      // small enough that the default window fills its usable part, which Godot reads as maximised
+      // even once minimised, so there a run's first suite meets the window gdUnit4's start left
+      // minimised under that reading.
       const drawing = (name: string): string =>
         [
           'extends GdUnitTestSuite',
@@ -49869,18 +49960,17 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
           '\tassert_int(DisplayServer.window_get_mode()).is_not_equal(DisplayServer.WINDOW_MODE_MINIMIZED)',
           '\tvar counted: Callable = func() -> void: drawn += 1',
           '\tRenderingServer.frame_post_draw.connect(counted)',
-          // Godot skips drawing while the desktop reports none of its windows can be seen, as macOS
-          // does for a window every other one covers, so a failure names the window's state: on the
-          // macOS leg a maximised, unfocused window drew nothing, and whether it drew while it came
-          // back, with where it sat on the screen, tells a covered window from one never shown.
+          // Godot skips drawing while the desktop reports none of its windows can be seen, so a
+          // failure names the window's state.
           '\tvar until: int = Time.get_ticks_msec() + 500',
           '\twhile Time.get_ticks_msec() < until:',
           '\t\tawait get_tree().process_frame',
           '\tRenderingServer.frame_post_draw.disconnect(counted)',
           '\tvar state: String = (',
-          '\t\t"window mode %d, focused %s, %d frames drawn in the 1.5 s before, at %s size %s on a usable screen of %s"',
+          '\t\t"window mode %d, drawable %s, focused %s, %d frames drawn in the 1.5 s before, at %s size %s on a usable screen of %s"',
           '\t\t% [',
           '\t\t\tDisplayServer.window_get_mode(),',
+          '\t\t\tDisplayServer.window_can_draw(),',
           '\t\t\tDisplayServer.window_is_focused(),',
           '\t\t\tdrawn_waiting,',
           '\t\t\tDisplayServer.window_get_position(),',
@@ -53273,7 +53363,7 @@ async function testGdUnitRunner(): Promise<void> {
             '',
             '',
             'func test_a_mismatch_string_first() -> void:',
-            '\tassert_str("wanted deals 25; got deals 15").is_empty()',
+            '\tassert_str("wanted 25, got 15").is_empty()',
             '',
             '',
             'func test_the_sentence_after_others() -> void:',
@@ -70946,6 +71036,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
   testATakeSweepsGoneLocksPastTheCount,
   testASlotWaitLooksWhenTheSlotsChange,
+  testSuitePassesKeyAlikeInEveryCheckout,
   testTakersWaitTheirTurn,
   testAWaitForASlotKeepsAMarkUntilItEnds,
   testGatesInTheQueueKeepTheirSlots,
