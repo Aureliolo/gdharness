@@ -49764,7 +49764,9 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     if (windowed === null) {
       // gdUnit4 minimises the window as its runner starts and after every suite, and a minimised
       // window draws nothing, so a suite rendering in it waited for a frame that never came. The
-      // second suite meets the window as the first one's end left it.
+      // second suite meets the window as the first one's end left it: filling the usable screen,
+      // which on macOS Godot reads as maximised even once minimised, as the runner's small screen
+      // made the default window and left it minimised.
       const drawing = (name: string): string =>
         [
           'extends GdUnitTestSuite',
@@ -49790,18 +49792,17 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
           '\tassert_int(DisplayServer.window_get_mode()).is_not_equal(DisplayServer.WINDOW_MODE_MINIMIZED)',
           '\tvar counted: Callable = func() -> void: drawn += 1',
           '\tRenderingServer.frame_post_draw.connect(counted)',
-          // Godot skips drawing while the desktop reports none of its windows can be seen, as macOS
-          // does for a window every other one covers, so a failure names the window's state: on the
-          // macOS leg a maximised, unfocused window drew nothing, and whether it drew while it came
-          // back, with where it sat on the screen, tells a covered window from one never shown.
+          // Godot skips drawing while the desktop reports none of its windows can be seen, so a
+          // failure names the window's state.
           '\tvar until: int = Time.get_ticks_msec() + 500',
           '\twhile Time.get_ticks_msec() < until:',
           '\t\tawait get_tree().process_frame',
           '\tRenderingServer.frame_post_draw.disconnect(counted)',
           '\tvar state: String = (',
-          '\t\t"window mode %d, focused %s, %d frames drawn in the 1.5 s before, at %s size %s on a usable screen of %s"',
+          '\t\t"window mode %d, drawable %s, focused %s, %d frames drawn in the 1.5 s before, at %s size %s on a usable screen of %s"',
           '\t\t% [',
           '\t\t\tDisplayServer.window_get_mode(),',
+          '\t\t\tDisplayServer.window_can_draw(),',
           '\t\t\tDisplayServer.window_is_focused(),',
           '\t\t\tdrawn_waiting,',
           '\t\t\tDisplayServer.window_get_position(),',
@@ -49810,6 +49811,13 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
           '\t\t]',
           '\t)',
           '\tassert_int(drawn).override_failure_message("no frame was drawn in 0.5 s, %s" % state).is_greater(0)',
+          '\tvar usable: Rect2i = DisplayServer.screen_get_usable_rect(DisplayServer.window_get_current_screen())',
+          '\tvar inset: Vector2i = DisplayServer.window_get_position() - DisplayServer.window_get_position_with_decorations()',
+          '\tvar framed: Vector2i = DisplayServer.window_get_size_with_decorations() - DisplayServer.window_get_size()',
+          '\tDisplayServer.window_set_position(usable.position + inset)',
+          '\tDisplayServer.window_set_size(usable.size - framed)',
+          '\tif OS.get_name() == "macOS":',
+          '\t\tassert_int(DisplayServer.window_get_mode()).is_equal(DisplayServer.WINDOW_MODE_MAXIMIZED)',
           '',
         ].join('\n');
       writeTree(project, {
