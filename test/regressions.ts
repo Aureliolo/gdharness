@@ -45889,10 +45889,12 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
     // A slot already held is kept to its end whatever arrives in the queue.
     rmSync(join(queued, 'ticket.json'));
     rmSync(join(queued, 'ticket.json.seated'));
+    // A game held off the one-off's slot with no gate queued waited on a shared folder whose other
+    // slots were held, behind a slot nothing else wanted.
     assert.deepEqual(
       await takeAll(outside, true),
-      ['2.lock', '1.lock', '0.lock'],
-      "a game takes any slot but a one-off's with no gate queued",
+      ['3.lock', '2.lock', '1.lock', '0.lock'],
+      'a game takes any slot with no gate queued',
     );
     const held = await outside.takeFree();
     assert.equal(held === null ? null : basename(held), '3.lock', 'the queue empty again');

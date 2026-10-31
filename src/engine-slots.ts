@@ -202,9 +202,10 @@ export function keptSlotsOf(count: number): number {
 const GATE_KEPT = 1;
 
 /**
- * The slot of [param count] that neither a gate's own steps nor a game editor_run started take, the
- * last, or null when fewer than two are kept. A gate's steps could take every kept slot, and with
- * two games on the rest, one-off runs waited over an hour while gates kept arriving.
+ * The slot of [param count] that neither a gate's own steps nor a game editor_run started take while
+ * a gate is queued, the last, or null when fewer than two are kept. A gate's steps could take every
+ * kept slot, and with two games on the rest, one-off runs waited over an hour while gates kept
+ * arriving.
  */
 export function reservedSlotOf(count: number): number | null {
   return count - Math.max(1, count - keptSlotsOf(count)) >= 2 ? count - 1 : null;
@@ -586,8 +587,8 @@ export class EngineSlots {
    * held. Which it may take is asked again at every look, since a gate arriving in the queue or the
    * last one leaving changes them; a slot already held is kept to its end whatever arrives. A take
    * for a [param game] editor_run started marks its lock as a game's, and while a gate is queued finds
-   * none free once the games hold as many of the kept slots as {@link gamesKeptOf} gives them. A game
-   * never takes {@link reservedSlotOf}, and a one-off take that has waited [param waitedMs] of
+   * none free once the games hold as many of the kept slots as {@link gamesKeptOf} gives them, nor
+   * {@link reservedSlotOf}. A one-off take that has waited [param waitedMs] of
    * {@link ONE_OFF_AGED_MS} takes any slot.
    */
   async takeFree(game = false, waitedMs = 0): Promise<string | null> {
@@ -605,11 +606,9 @@ export class EngineSlots {
       taker,
       taker === 'gate' || taker === 'timing' || aged ? 'none' : await this.gateQueue(),
     );
-    if (game) {
+    if (game && this.drawn.limit === 'kept') {
       const reserve = reservedSlotOf(this.count);
       this.drawn = { ...this.drawn, numbers: this.drawn.numbers.filter((slot) => slot !== reserve) };
-    }
-    if (game && this.drawn.limit === 'kept') {
       const kept = this.count - Math.max(1, this.count - keptSlotsOf(this.count));
       const games = await this.heldByGames(Array.from({ length: kept }, (_, at) => this.count - kept + at));
       if (games.length >= gamesKeptOf(kept)) {

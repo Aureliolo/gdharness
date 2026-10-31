@@ -448,7 +448,8 @@ is removed with its `.seated` file.
 
 The last `kept = max(2, floor(count / 4))` slots are kept for engines outside a gate: 4 of 16. The
 first of them, `count - kept`, is a gate's own steps' (`GATE_KEPT`, one slot). Where two or more are
-kept, the last, `count - 1`, is a one-off's: neither a gate's own step nor a game takes it.
+kept, the last, `count - 1`, is a one-off's: while a mark is live, neither a gate's own step nor a
+game takes it.
 
 - A gate's engine takes only the slots below `count - kept`, and slot 0 at least, whatever the queue
   holds. A process runs inside a gate when `GODOT_ENGINE_SHARE` and `GODOT_ENGINE_SHARE_COUNT` are
@@ -460,8 +461,9 @@ kept, the last, `count - 1`, is a one-off's: neither a gate's own step nor a gam
 - Any other engine then takes the kept slots but the gate's own steps' one, the highest first. One
   that is not a game and has waited two minutes takes any slot, as it would with no mark live, so
   gates arriving all day never hold a one-off run back for good.
-- A game editor_run started is one of those, never takes the one-off's slot, and its lock carries
-  `"game": true`, kept when its keeper takes it over. While a mark is live, games hold at most
+- A game editor_run started is one of those, and its lock carries `"game": true`, kept when its
+  keeper takes it over. While a mark is live, a game does not take the one-off's slot, and games
+  hold at most
   `min(floor(kept / 2), kept - GATE_KEPT - 1)` of the kept slots between them: 2 of 16. Past that a
   game's start waits.
 
