@@ -46,7 +46,7 @@ import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
 import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
 import { staleImports } from './import-freshness.js';
 import { hiddenWindowFlags } from './launch.js';
-import { freeLibraryCopies, seedExtensionList } from './library-copies.js';
+import { freeLibraryCopies, seedExtensionList, unlistedExtensions } from './library-copies.js';
 import { prependTo, readLog } from './log-read.js';
 import { forceNextImport } from './reimport.js';
 import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
@@ -179,6 +179,9 @@ export interface RunResult {
  * so a run in a gate that keeps none of a passing step's output can still be read afterwards.
  */
 const LAST_RUN_FILE = 'last-run.json';
+
+/** Where a run keeps the print of what compiled together when it last passed. */
+const COMPILED_FILE = 'compiled-together.json';
 
 /** Where a run's result goes, and what it said of its deal. */
 interface ResultTargets {
@@ -530,13 +533,11 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     failsOnPushErrors: gdUnitFailsOnPushErrors(options.projectPath),
   };
   try {
-    // A project with no class cache has never been imported, and no suite can run in it: gdUnit4's
-    // own runner extends classes only the cache names. Nothing else has it open to race the import.
-    const neverImported = cachedClasses(options.projectPath) === null;
-    if (neverImported && !options.importFirst) {
-      console.log('The project has never been imported, so it is imported first.');
+    const needed = options.importFirst ? null : importNeeded(options.projectPath);
+    if (needed !== null) {
+      console.log(needed);
     }
-    if (options.importFirst || neverImported) {
+    if (options.importFirst || needed !== null) {
       const imported = await importProject(launch);
       if (imported !== null) {
         logs.keep();
@@ -561,6 +562,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       ),
     ];
     const everySuite = suites;
+    const compileKept = options.changedOnly ? { file: join(state, COMPILED_FILE), scripts, always } : null;
     if (options.changedOnly) {
       const inputs = new SuiteInputs(scripts, always);
       const passedBefore = readPassed(passedFile);
@@ -576,7 +578,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       }
       if (suites.length === 0) {
         console.log('Nothing has changed since every suite last passed.');
-        const compiled = await compileCheck(launch, everySuite);
+        const compiled = await compileUnlessUnchanged(launch, everySuite, compileKept);
         const problems = [...compiled.faults.map((fault) => `${COMPILE_CHECK}: ${fault}`), ...uncollected];
         if (problems.length === 0) {
           rmSync(runDirectory, { recursive: true, force: true });
@@ -721,7 +723,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     }
     // Once the lanes hold what slots were free, so it takes one only beside them.
     const handed = new HandedSlot();
-    const compiling = compileCheck(launch, everySuite, handed);
+    const compiling = compileUnlessUnchanged(launch, everySuite, compileKept, handed);
     // Awaited after the suites; a run failing before then reports its own error, not this one too.
     compiling.catch(() => undefined);
     let ran = shared
@@ -1004,6 +1006,11 @@ class HandedSlot {
     this.handOver = resolve;
   });
 
+  /** Takes no slot after all, so every lane gives its own back to the machine. */
+  decline(): void {
+    this.wanted = false;
+  }
+
   /** Hands [param lock] over when the check still wants a slot, and says whether it did. */
   give(lock: string): boolean {
     if (!this.wanted) {
@@ -1070,6 +1077,73 @@ async function compileCheck(
   return { faults: judgeCompile(readRun(readFileSync(log, 'utf8')), end), log };
 }
 
+/** Where a `--changed-only` run keeps what compiled together, and what it reads the files with. */
+interface CompileKept {
+  readonly file: string;
+  readonly scripts: ProjectScripts;
+  readonly always: readonly string[];
+}
+
+/**
+ * The files compiling [param suites] together beside every class of the game reads, followed from
+ * them and from each class the cache lists, and their print.
+ */
+function compiledPrint(
+  kept: CompileKept,
+  projectPath: string,
+  suites: readonly DeclaredSuite[],
+): { inputs: SuiteInputs; read: string[]; print: string } {
+  const inputs = new SuiteInputs(kept.scripts, kept.always);
+  const classes = [...(cachedClasses(projectPath)?.values() ?? [])];
+  const read = inputs.inputsOf([...suites.map((suite) => suite.path), ...classes]);
+  return { inputs, read, print: inputs.printOf(read) };
+}
+
+/**
+ * Compiles [param suites] together as [method compileCheck] does, unless [param kept] holds the
+ * print of the same files from when they last compiled together cleanly: then no engine starts and
+ * no slot is taken, which a `--changed-only` run with nothing to run otherwise waited for. A clean
+ * check is kept only when nothing it read changed while it ran.
+ */
+async function compileUnlessUnchanged(
+  launch: Launch,
+  suites: readonly DeclaredSuite[],
+  kept: CompileKept | null,
+  handed?: HandedSlot,
+): Promise<Compiled> {
+  if (kept === null) {
+    return compileCheck(launch, suites, handed);
+  }
+  const before = compiledPrint(kept, launch.projectPath, suites).print;
+  if (readKeptPrint(kept.file) === before) {
+    handed?.decline();
+    console.log(
+      'Every script compiled together on these same files when last checked, so it is not compiled again.',
+    );
+    return { faults: [], log: '' };
+  }
+  const began = Date.now();
+  const compiled = await compileCheck(launch, suites, handed);
+  const after = compiledPrint(kept, launch.projectPath, suites);
+  if (compiled.faults.length === 0 && !after.inputs.modifiedAfter(after.read, began)) {
+    writeJson(kept.file, { print: after.print });
+  } else {
+    rmSync(kept.file, { force: true });
+  }
+  return compiled;
+}
+
+/** The print [param file] keeps, or null. */
+function readKeptPrint(file: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
+    const print = (parsed as { print?: unknown } | null)?.print;
+    return typeof print === 'string' ? print : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Prints what [param compiled] found wrong under a heading of its own, with where its log is kept. */
 function printCompiled(compiled: Compiled, logs: RunLogs): void {
   if (compiled.faults.length === 0) {
@@ -1100,6 +1174,30 @@ export function importFault(printed: RunPrinted): string | null {
     ...(warnings === 0 ? [] : [warnings === 1 ? 'an engine warning' : `${String(warnings)} engine warnings`]),
   ].join(' and ');
   return `it printed ${counted}, the first ${first.warning ? 'warning' : 'error'} ${JSON.stringify(first.text)}`;
+}
+
+/**
+ * Why no suite can run in the project before it is imported, said as the run says it, or null.
+ *
+ * gdUnit4's own runner extends classes only the class cache names, so a project without a cache
+ * runs nothing, and a cache that lacks a class a script declares fails every suite reaching it. A
+ * project with no extension list loads none of its extensions, so every script using a class one
+ * adds fails to compile: setup writes the class cache without importing, which leaves exactly that.
+ */
+export function importNeeded(projectPath: string): string | null {
+  const cached = cachedClasses(projectPath);
+  if (cached === null) {
+    return 'The project has never been imported, so it is imported first.';
+  }
+  const unlisted = unlistedExtensions(projectPath);
+  if (unlisted.length > 0) {
+    return `No import has listed the project's extensions, ${named(unlisted)}, so the engine would load none of them, and the project is imported first.`;
+  }
+  const uncached = staleAgainst(cached, projectPath).sort();
+  if (uncached.length > 0) {
+    return `The class cache does not list ${named(uncached)} where the scripts declare ${uncached.length === 1 ? 'it' : 'them'}, so the project is imported first.`;
+  }
+  return null;
 }
 
 /**
@@ -1537,6 +1635,11 @@ function report(
   console.log(
     `Every engine's output is kept under ${logs.shown} until ${String(KEPT_RUN_DIRECTORIES)} later runs have failed.`,
   );
+  if (logs.shown !== logs.directory) {
+    console.log(
+      `That is a copy beside the main checkout. The run wrote them under ${logs.directory} in this worktree, and they go with it when the worktree is removed.`,
+    );
+  }
   return 1;
 }
 

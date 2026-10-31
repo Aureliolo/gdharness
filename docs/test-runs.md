@@ -36,12 +36,16 @@ command line itself is wrong.
   holds only the number of engines.
 - `--tests DIR`: where to look for suites, `tests` and `test` by default. May be given more than
   once.
-- `--import`: import the project in an engine of its own before the suites. A project that has
-  never been imported, with no class cache, is imported first without it.
+- `--import`: import the project in an engine of its own before the suites. Without it, a project
+  is still imported first when no suite could run in it as it stands: it has no class cache, it
+  holds a `.gdextension` and no `.godot/extension_list.cfg` (as `gdharness setup` leaves it, which
+  writes the class cache without importing), or the cache does not list a class a script declares
+  where the script declares it.
 - `--order reversed` or `--order SEED`: every suite in one engine, in reverse order of path or
   shuffled by a number, to find suites that depend on the order they run in.
 - `--changed-only`: leave out the suites that passed on exactly the files their engine loaded, all
-  of them unchanged. Every script is still compiled together.
+  of them unchanged. Every script is still compiled together, unless they compiled together
+  cleanly on the same files last time.
 - `--reach-also PATH`: a file every suite depends on, for `--changed-only`. May be given more than
   once.
 - `--print-output`: print everything each engine printed, before the verdict, as for a benchmark
@@ -214,8 +218,8 @@ it, its last 60 lines. The engine's whole output stays in
 `.godot/gdharness/test-runs/<start>-<pid>/engine-<n>/engine.log`, which the output names and which
 opens with the engine's verdict, so the file says why even for an engine that printed nothing. A
 project that is a worktree of another checkout has the logs of a failed run copied to the same place
-under the main checkout, and the output names the copy, since a gate running in a worktree of the
-commit removes the worktree once the run ends. Before
+under the main checkout, and the output names the copy and then the worktree's own, since a gate
+running in a worktree of the commit removes the worktree once the run ends. Before
 the verdict, a run over several engines says what each took beside what it was dealt, so an uneven
 deal is told from a slow suite, and a run of several suites names its five slowest. The last lines
 count the problems and name the run's directory. A run that passes leaves no logs. A failed run
@@ -329,7 +333,10 @@ a time, and those runs are the ones judged. One that fails again is headed as ru
 `--changed-only` leaves out every suite that passed last time on inputs that are all unchanged, and
 runs the rest. A gate can pass it: a suite is left out only when the files it ran on are the same
 to the byte, and every script is still compiled together in an engine of its own, so a script that
-no longer compiles fails the run even when every suite is left out.
+no longer compiles fails the run even when every suite is left out. That engine is left out too when
+the suites and every class the cache lists, with all they reach, are the same to the byte as when
+they last compiled together cleanly, so a run with nothing to run takes no engine slot and waits for
+none.
 
 A suite's inputs are what its engine recorded for it as the run went: its own script, what the
 autoloads loaded, every path a loader was asked for while the suite ran, and every project script

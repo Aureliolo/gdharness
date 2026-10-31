@@ -22,7 +22,7 @@ import {
 } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { availableParallelism, homedir, tmpdir } from 'node:os';
-import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
@@ -446,6 +446,7 @@ import {
 } from '../src/suite-plan.js';
 import {
   importFault,
+  importNeeded,
   MemoryGate,
   memorySaid,
   type RunResult,
@@ -27251,7 +27252,9 @@ async function testAHeldScratchDirectoryGoesOnceLetGo(): Promise<void> {
  * for real, as the scratch directory case holds a file: on Windows a process with it open and
  * shared with nobody, elsewhere its permissions taken away and given back by another process,
  * since this read blocks the thread a timer of its own would need. A plain read during the hold has
- * to be refused, or the case has shown nothing about the wait.
+ * to be refused, or the case has shown nothing about the wait. The holder lets go once a file it
+ * looks for every 10 ms appears, written just before the read: a hold of 400 ms on its own timer
+ * ran past the read's whole second on a loaded Windows runner.
  */
 async function testAClassCacheHeldShutIsReadOnceLetGo(): Promise<void> {
   if (process.platform !== 'win32' && process.getuid?.() === 0) {
@@ -27265,6 +27268,7 @@ async function testAClassCacheHeldShutIsReadOnceLetGo(): Promise<void> {
     cache,
     'list=[{\n"base": &"Node",\n"class": &"Held",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"GDScript",\n"path": "res://held.gd"\n}]\n',
   );
+  const letGo = join(project, 'let-go');
   let holder: ChildProcess | null = null;
   try {
     holder =
@@ -27274,13 +27278,18 @@ async function testAClassCacheHeldShutIsReadOnceLetGo(): Promise<void> {
             [
               '-NoProfile',
               '-Command',
-              `$f = [System.IO.File]::Open('${cache}', 'Open', 'Read', 'None'); [Console]::Out.WriteLine('holding'); Start-Sleep -Milliseconds 400; $f.Close()`,
+              `$f = [System.IO.File]::Open('${cache}', 'Open', 'Read', 'None'); [Console]::Out.WriteLine('holding'); $until = (Get-Date).AddSeconds(30); while (-not (Test-Path '${letGo}') -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 10 }; $f.Close()`,
             ],
             { stdio: ['ignore', 'pipe', 'ignore'] },
           )
-        : spawnHidden('sh', ['-c', `chmod 000 '${cache}'; echo holding; sleep 0.4; chmod 644 '${cache}'`], {
-            stdio: ['ignore', 'pipe', 'ignore'],
-          });
+        : spawnHidden(
+            'sh',
+            [
+              '-c',
+              `chmod 000 '${cache}'; echo holding; i=0; while [ ! -e '${letGo}' ] && [ $i -lt 3000 ]; do sleep 0.01; i=$((i+1)); done; chmod 644 '${cache}'`,
+            ],
+            { stdio: ['ignore', 'pipe', 'ignore'] },
+          );
     const holding = holder;
     await new Promise<void>((resolve, reject) => {
       holding.stdout?.once('data', () => {
@@ -27291,6 +27300,7 @@ async function testAClassCacheHeldShutIsReadOnceLetGo(): Promise<void> {
       });
     });
     assert.throws(() => readFileSync(cache, 'utf8'), 'a plain read is refused while the cache is held');
+    writeFileSync(letGo, '');
     assert.deepEqual([...(cachedClasses(project) ?? [])], [['Held', 'res://held.gd']]);
   } finally {
     await endGame(holder);
@@ -48782,6 +48792,24 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     );
     assert.equal(failing.status, 1, failing.said);
 
+    // A class the cache lacks has the run import first without --import, as setup's cache leaves it.
+    writeTree(project, { 'helper_thing.gd': 'class_name HelperThing\nextends Node\n' });
+    const uncached = test('tests/ok_test.gd');
+    rmSync(join(project, 'helper_thing.gd'));
+    rmSync(join(project, 'helper_thing.gd.uid'), { force: true });
+    const uncachedGone = spawnSyncHidden(process.execPath, ['build/cli.js', 'classes', project], {
+      encoding: 'utf8',
+      env,
+    });
+    assert.equal(uncachedGone.status, 0, `${uncachedGone.stdout}${uncachedGone.stderr}`);
+    assert.equal(uncached.status, 0, uncached.said);
+    assert.match(
+      uncached.said,
+      /^The class cache does not list HelperThing where the scripts declare it, so the project is imported first\.$/m,
+      uncached.said,
+    );
+    assert.doesNotMatch(uncached.said, /The import was skipped/, `it was imported: ${uncached.said}`);
+
     const resultFile = join(checkouts, 'result.json');
     const resultOf = (): RunResult => JSON.parse(readFileSync(resultFile, 'utf8')) as RunResult;
     const noisy = test(
@@ -48842,6 +48870,8 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       'tests/loads_test.gd':
         'extends GdUnitTestSuite\n\nfunc test_loads() -> void:\n\tvar loaded: Resource = load("res://data/" + "word.tres")\n\tassert_str(str(loaded.get_meta("word"))).is_not_empty()\n',
     });
+    const SKIPPED_COMPILE =
+      /^Every script compiled together on these same files when last checked, so it is not compiled again\.$/m;
     const loads = (): { said: string; status: number | null } =>
       test('tests/ok_test.gd', 'tests/loads_test.gd', '--changed-only');
     const loadsFirst = loads();
@@ -48852,9 +48882,18 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       loadsFirst.said,
     );
     assert.match(loadsFirst.said, /^Passed: 1 case in 1 suite across 1 engine, /m, loadsFirst.said);
-    const loadsAgain = loads();
+    assert.doesNotMatch(loadsFirst.said, SKIPPED_COMPILE, `a new suite is compiled: ${loadsFirst.said}`);
+    // With nothing to run and the scripts as they last compiled together, no engine starts, so the
+    // run takes no slot and does not wait for one.
+    const loadsHolder = await slotHeldElsewhere(join(slots, '0.lock'), 8000);
+    const loadsAgain = test('tests/ok_test.gd', 'tests/loads_test.gd', '--changed-only', '--slot-count', '1');
+    loadsHolder.kill();
+    // Killed before its own timer gives the slot back.
+    rmSync(join(slots, '0.lock'), { force: true });
     assert.equal(loadsAgain.status, 0, loadsAgain.said);
     assert.match(loadsAgain.said, /^Nothing has changed since every suite last passed\.$/m, loadsAgain.said);
+    assert.match(loadsAgain.said, SKIPPED_COMPILE, loadsAgain.said);
+    assert.doesNotMatch(loadsAgain.said, /for an engine/, `no slot waited for: ${loadsAgain.said}`);
     writeTree(project, { 'data/unused.tres': resource('two') });
     const unusedChanged = loads();
     assert.match(
@@ -48863,12 +48902,19 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       `a resource no engine loaded: ${unusedChanged.said}`,
     );
     // A class no suite loads that no longer compiles fails the run with every suite left out, since
-    // the scripts are still compiled together; the import puts it in the class cache.
+    // the scripts are still compiled together; the import puts it in the class cache. It first
+    // compiles, so the break changes the class's file and nothing the cache lists.
+    writeTree(project, {
+      'broken_thing.gd': 'class_name BrokenThing\nextends Node\n\n\nfunc said() -> void:\n\tpass\n',
+    });
+    const wholeAside = test('tests/ok_test.gd', 'tests/loads_test.gd', '--changed-only', '--import');
+    assert.equal(wholeAside.status, 0, wholeAside.said);
+    assert.doesNotMatch(wholeAside.said, SKIPPED_COMPILE, `a new class is compiled: ${wholeAside.said}`);
     writeTree(project, {
       'broken_thing.gd':
         'class_name BrokenThing\nextends Node\n\n\nfunc said() -> void:\n\tnowhere_at_all()\n',
     });
-    const brokenAside = test('tests/ok_test.gd', 'tests/loads_test.gd', '--changed-only', '--import');
+    const brokenAside = test('tests/ok_test.gd', 'tests/loads_test.gd', '--changed-only');
     rmSync(join(project, 'broken_thing.gd'));
     rmSync(join(project, 'broken_thing.gd.uid'), { force: true });
     const recached = spawnSyncHidden(process.execPath, ['build/cli.js', 'classes', project], {
@@ -48893,6 +48939,24 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       `the suite that loaded it runs again: ${wordChanged.said}`,
     );
     assert.match(wordChanged.said, /^Passed: 1 case in 1 suite across 1 engine, /m, wordChanged.said);
+    // A suite that runs while the compile check is left out gives its slot back to the machine, not
+    // to the check. Its pass is forgotten, so it runs on the files the check last compiled.
+    const passedFile = join(project, '.godot', 'gdharness', 'suite-passed.json');
+    writeFileSync(
+      passedFile,
+      JSON.stringify(
+        Object.fromEntries(
+          Object.entries(JSON.parse(readFileSync(passedFile, 'utf8')) as Record<string, unknown>).filter(
+            ([path]) => path !== 'res://tests/loads_test.gd',
+          ),
+        ),
+      ),
+    );
+    const besideSkipped = loads();
+    assert.equal(besideSkipped.status, 0, besideSkipped.said);
+    assert.match(besideSkipped.said, SKIPPED_COMPILE, besideSkipped.said);
+    assert.match(besideSkipped.said, /^Passed: 1 case in 1 suite across 1 engine, /m, besideSkipped.said);
+    assert.deepEqual(leftInSlots(slots), [], `its slot given back: ${besideSkipped.said}`);
     rmSync(join(project, 'tests', 'loads_test.gd'));
 
     const embedRefused = test('tests/window_test.gd');
@@ -49344,6 +49408,23 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     assert.equal(dirname(keptUnder ?? ''), mainRuns, `named beside the main checkout: ${gateSaid}`);
     const namedLog = /^everything it printed: (.+)$/m.exec(gateSaid)?.[1] ?? '';
     assert.ok(namedLog.startsWith(keptUnder ?? '\0'), `and so is the engine's log: ${gateSaid}`);
+    // The worktree's own logs are named too, so the copy is not taken for logs written to the
+    // wrong project.
+    const wroteUnder =
+      /^That is a copy beside the main checkout\. The run wrote them under (.+) in this worktree, and they go with it when the worktree is removed\.$/m.exec(
+        gateSaid,
+      )?.[1];
+    assert.equal(
+      wroteUnder,
+      join(gated, '.godot', 'gdharness', 'test-runs', basename(keptUnder ?? '')),
+      `the worktree's own named: ${gateSaid}`,
+    );
+    assert.match(
+      readFileSync(join(wroteUnder, relative(keptUnder ?? '', namedLog)), 'utf8'),
+      /nobody said this/,
+      'and the worktree holds them',
+    );
+    assert.doesNotMatch(noisy.said, /^That is a copy beside/m, 'a run in the main checkout names one place');
     rmSync(join(checkouts, 'gate'), { recursive: true, force: true });
     const keptLog = readFileSync(namedLog, 'utf8');
     assert.match(keptLog, /^gdharness: engine 0: 1 suite, /, 'the copy opens with the verdict');
@@ -50009,6 +50090,66 @@ function testAFreshCloneHasItsExtensionsListed(): void {
     } finally {
       sweep(bare);
     }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A test run imports first what setup left unimported. Setup writes the class cache without an
+ * import, so a project it set up has a cache and still no extension list, and the engine loads none
+ * of its extensions: every suite using a class one adds failed to compile until it was imported by
+ * hand. A cache lacking a class a script declares, or listing it at another path, fails the suites
+ * reaching it the same way. Each is put to it alone, then the project with all three current.
+ */
+function testATestRunImportsWhatSetupLeftUnimported(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-import-needed-'));
+  const cacheOf = (classes: Record<string, string>): string =>
+    `list=[${Object.entries(classes)
+      .map(
+        ([name, path]) =>
+          `{\n"base": &"Node",\n"class": &"${name}",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"GDScript",\n"path": "${path}"\n}`,
+      )
+      .join(', ')}]\n`;
+  const cache = join(project, '.godot', 'global_script_class_cache.cfg');
+  const list = join(project, '.godot', 'extension_list.cfg');
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'native/kit.gdextension': '[configuration]\n',
+      'kit/thing.gd': 'class_name KitThing\nextends Node\n',
+    });
+    assert.equal(
+      importNeeded(project),
+      'The project has never been imported, so it is imported first.',
+      'no cache at all',
+    );
+    mkdirSync(join(project, '.godot'));
+    writeFileSync(cache, cacheOf({ KitThing: 'res://kit/thing.gd' }));
+    assert.equal(
+      importNeeded(project),
+      "No import has listed the project's extensions, res://native/kit.gdextension, so the engine would load none of them, and the project is imported first.",
+      'a cache and no extension list, as setup leaves it',
+    );
+    writeFileSync(list, 'res://native/kit.gdextension\n');
+    assert.equal(importNeeded(project), null, 'everything current');
+    writeTree(project, { 'kit/other.gd': 'class_name KitOther\nextends Node\n' });
+    assert.equal(
+      importNeeded(project),
+      'The class cache does not list KitOther where the scripts declare it, so the project is imported first.',
+      'a class the cache lacks',
+    );
+    writeFileSync(cache, cacheOf({ KitThing: 'res://old/thing.gd', KitOther: 'res://kit/other.gd' }));
+    assert.equal(
+      importNeeded(project),
+      'The class cache does not list KitThing where the scripts declare it, so the project is imported first.',
+      'a class the cache has at another path',
+    );
+    writeFileSync(cache, cacheOf({ KitThing: 'res://kit/thing.gd', KitOther: 'res://kit/other.gd' }));
+    assert.equal(importNeeded(project), null, 'current again');
+    rmSync(list);
+    rmSync(join(project, 'native'), { recursive: true });
+    assert.equal(importNeeded(project), null, 'no extension list is needed with no extension');
   } finally {
     sweep(project);
   }
@@ -70036,6 +70177,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACleanupThatCannotFinishStillFinishes,
   testAHeldScratchDirectoryGoesOnceLetGo,
   testAClassCacheHeldShutIsReadOnceLetGo,
+  testATestRunImportsWhatSetupLeftUnimported,
   testAnAbandonedScratchDirectoryIsSweptAndNothingElse,
   testADiagnosticTheFileContradictsIsNamed,
   testAnImportThatCouldNotCopyAnExtensionRunsAgain,
