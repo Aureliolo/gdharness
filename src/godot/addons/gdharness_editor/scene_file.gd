@@ -89,7 +89,8 @@ var _unmade: Array[Dictionary] = []
 ##
 ## A write is refused while the editor holds unsaved changes to the scene: the file is reloaded
 ## into the editor after a write, which discards them without a prompt, and the editor saving its
-## copy later would discard the write instead.
+## copy later would discard the write instead. One is refused too while the scene names a file
+## that is gone ([method missing_said]).
 func open(scene_path: String, for_writing: bool) -> Dictionary:
 	path = scene_path
 	if not FileAccess.file_exists(path):
@@ -98,6 +99,9 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 		var held_back: String = unsaved_in_editor(path)
 		if not held_back.is_empty():
 			return { "ok": false, "error": held_back }
+		var missing: String = missing_said(path, FileAccess.get_file_as_string(path))
+		if not missing.is_empty():
+			return { "ok": false, "error": missing }
 	var packed: PackedScene = (
 		ResourceLoader.load(path, "PackedScene", ResourceLoader.CACHE_MODE_IGNORE) as PackedScene
 	)
@@ -123,6 +127,77 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 		if not unsettled.is_empty():
 			return refuse(("Nothing was written: " if for_writing else "Not read: ") + unsettled)
 	return {}
+
+
+## Why a write to the scene at [param scene_path], whose text is [param text], is refused, or "":
+## an [ext_resource] naming no file the project has, by its uid or by its path. The engine loads the
+## scene without it, so a save drops the entry and every value set from it, and the answer could
+## only call those values empty.
+static func missing_said(scene_path: String, text: String) -> String:
+	var gone: Dictionary = {}
+	var entry: RegEx = RegEx.create_from_string("(?m)^\\[ext_resource\\b[^\\n]*\\]")
+	var field: RegEx = RegEx.create_from_string('\\b(path|uid|id)="([^"]*)"')
+	for found: RegExMatch in entry.search_all(text):
+		var fields: Dictionary = {}
+		for one: RegExMatch in field.search_all(found.get_string()):
+			fields[one.get_string(1)] = one.get_string(2)
+		var uid: String = str(fields.get("uid", ""))
+		var by_uid: String = ""
+		if uid.begins_with("uid://") and ResourceUID.has_id(ResourceUID.text_to_id(uid)):
+			by_uid = ResourceUID.get_id_path(ResourceUID.text_to_id(uid))
+		var named: String = str(fields.get("path", ""))
+		if FileAccess.file_exists(by_uid) or FileAccess.file_exists(named):
+			continue
+		gone[str(fields.get("id", ""))] = named if not named.is_empty() else uid
+	if gone.is_empty():
+		return ""
+	var uses: PackedStringArray = []
+	var on: String = ""
+	var lines: PackedStringArray = text.split("\n")
+	var header: RegEx = RegEx.create_from_string('^\\[node name="([^"]*)"')
+	var parented: RegEx = RegEx.create_from_string('\\bparent="([^"]*)"')
+	for index: int in lines.size():
+		var line: String = lines[index]
+		if line.begins_with("["):
+			var node: RegExMatch = header.search(line)
+			var under: RegExMatch = parented.search(line)
+			if node == null:
+				on = line.get_slice(" ", 0).trim_prefix("[")
+			elif under == null or under.get_string(1) == ".":
+				on = node.get_string(1)
+			else:
+				on = under.get_string(1).path_join(node.get_string(1))
+			continue
+		for id: String in gone:
+			if line.contains('ExtResource("%s")' % id):
+				var said: String = "line %d on %s, %s" % [index + 1, on, line.strip_edges()]
+				var _used: bool = uses.append(said)
+				break
+	var paths: PackedStringArray = []
+	for id: String in gone:
+		var _named: bool = paths.append(str(gone[id]))
+	var one_file: bool = paths.size() == 1
+	return (
+		(
+			"Nothing was written: %s names %s, which %s not there, so the engine loads the scene "
+			+ "without %s, and a save would drop %s%s. Put the %s back at %s, or change the "
+			+ "[ext_resource] %s in the scene to %s that exists."
+		)
+		% [
+			scene_path,
+			", ".join(paths),
+			"is" if one_file else "are",
+			"it" if one_file else "them",
+			"it" if one_file else "them",
+			"" if uses.is_empty() else " and what is set from %s: %s" % [
+				"it" if one_file else "them", "; ".join(uses),
+			],
+			"file" if one_file else "files",
+			"that path" if one_file else "those paths",
+			"line" if one_file else "lines",
+			"one" if one_file else "ones",
+		]
+	)
 
 
 ## The connections the file holds, as it was opened, by their paths from [member root].
