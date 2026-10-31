@@ -453,11 +453,13 @@ import {
   windowedSaid,
 } from '../src/suite-plan.js';
 import {
+  engineSaid,
   importFault,
   importNeeded,
   MemoryGate,
   memorySaid,
   type RunResult,
+  reachedAlsoSaid,
   reportsFault,
   roomSaid,
   sharesSaid,
@@ -46016,6 +46018,47 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
 }
 
 /**
+ * A suite's pass kept in one checkout is a pass in another of the same project on the same engine.
+ * A game hands each checkout the shared install through a junction of its own, and the key named
+ * the junction, so every cold checkout ran every suite again; so did a pin file named by its path.
+ */
+function testSuitePassesKeyAlikeInEveryCheckout(): void {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-checkouts-'));
+  try {
+    const install = join(root, 'install');
+    mkdirSync(install);
+    writeFileSync(join(install, 'godot.exe'), 'an engine');
+    const checkouts = ['gate', 'gate-probe-1'].map((name) => {
+      const checkout = join(root, name);
+      mkdirSync(join(checkout, '.tools'), { recursive: true });
+      symlinkSync(install, join(checkout, '.tools', 'godot'), 'junction');
+      mkdirSync(join(checkout, 'tools'));
+      writeFileSync(join(checkout, 'tools', 'versions.json'), '{"godot": "4.7.2"}');
+      return checkout;
+    });
+    const [gate, probe] = checkouts.map((checkout) => [
+      engineSaid(join(checkout, '.tools', 'godot', 'godot.exe')),
+      ...reachedAlsoSaid(checkout, [join(checkout, 'tools', 'versions.json'), join(checkout, 'gone.toml')]),
+    ]);
+    assert.deepEqual(probe, gate, 'the same engine and pins key alike in both checkouts');
+    assert.match(gate?.[0] ?? '', /install[\\/]godot\.exe\n9\n/, 'the engine named as the file it is');
+    assert.deepEqual(
+      gate?.slice(1),
+      ['tools/versions.json\n{"godot": "4.7.2"}', 'gone.toml\nmissing'],
+      'and each pin by where it lies in the project, with what it holds',
+    );
+    writeFileSync(join(checkouts[1] ?? '', 'tools', 'versions.json'), '{"godot": "4.8"}');
+    assert.notDeepEqual(
+      reachedAlsoSaid(checkouts[1] ?? '', [join(checkouts[1] ?? '', 'tools', 'versions.json')]),
+      gate.slice(1, 2),
+      'while a pin that differs keys apart',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
  * Takers are served in the order they began to wait. A one-off waited 38 to 80 minutes for one slot
  * while runs of seconds took turns on it, each the first to look as a lock went. A take leaves a free
  * slot to a taker waiting longer that may take it, for {@link SLOT_YIELD_MS} at most, and reads the
@@ -70801,6 +70844,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
   testATakeSweepsGoneLocksPastTheCount,
   testASlotWaitLooksWhenTheSlotsChange,
+  testSuitePassesKeyAlikeInEveryCheckout,
   testTakersWaitTheirTurn,
   testAWaitForASlotKeepsAMarkUntilItEnds,
   testGatesInTheQueueKeepTheirSlots,

@@ -360,9 +360,11 @@ folder the script names (`FOLDER.path_join(name)`, `FOLDER + name`, `"res://data
 makes every file under that folder an input. One read by any other path computed at run time, or a
 `uid://` preload, makes every file in the project an input. A `user://` path is never one. Added to
 every suite are
-`project.godot`, the gdharness version and runner, the engine executable's path, size and
-modification time, and each file named with `--reach-also`. gdUnit4 is an addon the runner loads,
-so all of it is an input.
+`project.godot`, the gdharness version and runner, the engine executable's path past every link,
+size and modification time, and each file named with `--reach-also`, by its path in the project.
+So checkouts reaching one engine install through junctions of their own, with the records copied
+between them, keep each other's passes. gdUnit4 is an addon the runner loads, so all of it is an
+input.
 
 A suite is recorded as passed only when its engine raised nothing outside any suite and none of
 its inputs changed while it ran. The suites that passed are kept with their inputs in
