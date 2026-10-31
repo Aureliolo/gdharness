@@ -804,12 +804,15 @@ static func with_methods_offered(said: String, object: Object, method: String) -
 			# to a refusal.
 			var flags: int = entry.get("flags", 0)
 			var callable: bool = not object is Script or flags & METHOD_FLAG_STATIC
-			if callable and not name.is_empty() and not own.has(name):
+			# A property's setter and getter are named by the engine, @asked_setter, and offered
+			# they
+			# crowded out the script's own methods with names nobody means.
+			if callable and not name.begins_with("@") and not name.is_empty() and not own.has(name):
 				own.append(name)
 	var every: Array[String] = own.duplicate()
 	for entry: Dictionary in GdhValues.methods_of(object):
 		var name: String = str(entry.get("name", ""))
-		if not every.has(name):
+		if not name.begins_with("@") and not every.has(name):
 			every.append(name)
 	var close: PackedStringArray = GdhRead.nearest(method, PackedStringArray(every))
 	if not close.is_empty():
