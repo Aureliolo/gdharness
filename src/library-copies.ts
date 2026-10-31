@@ -93,6 +93,24 @@ export function seedExtensionList(projectPath: string): string[] | null {
   if (existsSync(list)) {
     return null;
   }
+  const found = unlistedExtensions(projectPath);
+  if (found.length === 0) {
+    return [];
+  }
+  mkdirSync(dirname(list), { recursive: true });
+  writeFileSync(list, `${found.join('\n')}\n`);
+  return found;
+}
+
+/**
+ * The `res://` paths of every `.gdextension` manifest in the project when it has no
+ * `.godot/extension_list.cfg`, sorted, or none when it has one: the engine loads only what the list
+ * names, so without it none of them.
+ */
+export function unlistedExtensions(projectPath: string): string[] {
+  if (existsSync(join(projectPath, '.godot', 'extension_list.cfg'))) {
+    return [];
+  }
   const found: string[] = [];
   const visit = (directory: string, resDirectory: string): void => {
     if (existsSync(join(directory, '.gdignore'))) {
@@ -116,13 +134,7 @@ export function seedExtensionList(projectPath: string): string[] | null {
     }
   };
   visit(projectPath, 'res://');
-  if (found.length === 0) {
-    return [];
-  }
-  found.sort();
-  mkdirSync(dirname(list), { recursive: true });
-  writeFileSync(list, `${found.join('\n')}\n`);
-  return found;
+  return found.sort();
 }
 
 /**

@@ -125,6 +125,21 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 	return {}
 
 
+## The connections the file holds, as it was opened, by their paths from [member root].
+func held_connections() -> Array[Dictionary]:
+	var held: Array[Dictionary] = []
+	for index: int in _state.get_connection_count():
+		held.append(
+			{
+				"sourceNodePath": str(_state.get_connection_source(index)),
+				"signalName": str(_state.get_connection_signal(index)),
+				"targetNodePath": str(_state.get_connection_target(index)),
+				"methodName": str(_state.get_connection_method(index)),
+			}
+		)
+	return held
+
+
 ## The connections in [param state] the engine did not make on [member root]: Object.connect
 ## refuses a callable that binds or unbinds arguments unless its target has the method, so the scene
 ## loads without them, in the editor as well, and every save drops them.

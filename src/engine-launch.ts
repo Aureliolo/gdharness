@@ -220,6 +220,14 @@ export function roomFor(
   };
 }
 
+/**
+ * Whether the memory [param available] has room for one more engine past what the machine keeps,
+ * beside [param starting] engines started too lately for what they take to show in it yet.
+ */
+export function roomForAnother(available: number, starting: number): boolean {
+  return available - MEMORY_KEPT - starting * MEMORY_PER_ENGINE >= MEMORY_PER_ENGINE;
+}
+
 /** The memory the machine can give engines, how the line on room words it, and why a reading failed. */
 export interface MemoryRoom {
   readonly bytes: number;
