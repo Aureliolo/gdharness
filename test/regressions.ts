@@ -69230,6 +69230,21 @@ async function testAHeadlessWriteSavesWhatTheEditorWould(): Promise<void> {
       '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://shaded.gd" id="1_shaded"]\n\n' +
       '[node name="Hall" type="Node"]\n\n[node name="Held" type="Node" parent="."]\nscript = ExtResource("1_shaded")\n\n' +
       '[node name="Shelf" type="Node" parent="."]\n\n[node name="Book" type="Node" parent="Shelf"]\n',
+    // An instance of a scene whose root has a script that is not a tool, the instancing scene
+    // naming that same script again, which a save leaves out since the instanced scene gives it.
+    'inner.gd': 'class_name Inner\nextends Node2D\n',
+    'outer.gd': 'extends Control\n',
+    'inner.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://inner.gd" id="1_inner"]\n\n' +
+      '[node name="Inner" type="Node2D"]\nscript = ExtResource("1_inner")\n',
+    'outer.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://outer.gd" id="1_outer"]\n' +
+      '[ext_resource type="PackedScene" path="res://inner.tscn" id="2_inner"]\n' +
+      '[ext_resource type="Script" path="res://inner.gd" id="3_inner"]\n\n' +
+      '[node name="Outer" type="Control"]\nscript = ExtResource("1_outer")\n\n' +
+      '[node name="Art" type="Node2D" parent="."]\n\n' +
+      '[node name="Inner" type="Node2D" parent="Art" instance=ExtResource("2_inner")]\n' +
+      'script = ExtResource("3_inner")\n',
   };
   for (const [path, content] of Object.entries(files)) {
     writeFileSync(join(project, path), content);
@@ -69330,6 +69345,17 @@ async function testAHeadlessWriteSavesWhatTheEditorWould(): Promise<void> {
       nodesIn('hall.tscn'),
       ['Hall', 'Shelf', 'Book', 'Held', 'Shelf2', 'Book', 'Held'],
       fileOf('hall.tscn'),
+    );
+
+    const read = await node({ op: 'get', scenePath: 'outer.tscn', nodePath: 'Art/Inner' });
+    assert.equal(get(read, 'properties', 'script', 'path'), 'res://inner.gd', JSON.stringify(read));
+    const renamed = await set('outer.tscn', 'Art/Inner', { name: 'Other' });
+    assert.equal(get(renamed, 'nodePath'), 'Art/Other', JSON.stringify(renamed));
+    assert.deepEqual(nodesIn('outer.tscn'), ['Outer', 'Art', 'Other'], fileOf('outer.tscn'));
+    assert.doesNotMatch(
+      fileOf('outer.tscn'),
+      /inner\.gd/,
+      `the instance keeps its scene's script without naming it again: ${fileOf('outer.tscn')}`,
     );
   } finally {
     await server.stop();
