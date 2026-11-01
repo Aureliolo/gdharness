@@ -201,19 +201,6 @@ export function keptSlotsOf(count: number): number {
   return Math.max(2, Math.floor(count / 4));
 }
 
-/** How many of the kept slots are a gate's own steps', the first of them. */
-const GATE_KEPT = 1;
-
-/**
- * The slot of [param count] that neither a gate's own steps nor a game editor_run started take while
- * a gate is queued, the last, or null when fewer than two are kept. A gate's steps could take every
- * kept slot, and with two games on the rest, one-off runs waited over an hour while gates kept
- * arriving.
- */
-export function reservedSlotOf(count: number): number | null {
-  return count - Math.max(1, count - keptSlotsOf(count)) >= 2 ? count - 1 : null;
-}
-
 /**
  * How long a one-off take, neither a gate's nor a game's, waits before it may take any free slot
  * the way it does when no gate is queued, gates' slots included, so a steady arrival of gates never
@@ -337,16 +324,31 @@ export class SlotLine {
     return { ...holder, ...(this.game ? { game: true } : {}), taker: this.taker, since: this.since / 1000 };
   }
 
-  /** The takers of [param waiters] waiting longer than this one, the longest first. */
+  /**
+   * The takers of [param waiters] ahead of this one, the first first. Gate work and one-offs that
+   * have waited {@link ONE_OFF_AGED_MS} go before younger one-offs, whenever each began, and each
+   * group in the order it began to wait. A game never counts as aged.
+   */
   ahead(waiters: readonly SlotWaiter[]): SlotWaiter[] {
+    const now = this.clock();
+    const young = (taker: SlotTaker, game: boolean, since: number): number =>
+      taker === 'other' && (game || now - since < ONE_OFF_AGED_MS) ? 1 : 0;
     // Before it has a mark of its own, a mark begun in the same millisecond was there at its look.
-    const own = this.mark ?? '￿';
+    const own = {
+      group: young(this.taker, this.game, this.since),
+      since: this.since,
+      mark: this.mark ?? '￿',
+    };
+    const placeOf = (one: SlotWaiter): typeof own => ({
+      group: young(one.taker, one.game, one.since),
+      since: one.since,
+      mark: one.mark,
+    });
+    const before = (a: typeof own, b: typeof own): number =>
+      a.group - b.group || a.since - b.since || (a.mark < b.mark ? -1 : a.mark > b.mark ? 1 : 0);
     return waiters
-      .filter(
-        (one) =>
-          one.mark !== this.mark && (one.since < this.since || (one.since === this.since && one.mark < own)),
-      )
-      .toSorted((a, b) => a.since - b.since || (a.mark < b.mark ? -1 : 1));
+      .filter((one) => one.mark !== this.mark && before(placeOf(one), own) < 0)
+      .toSorted((a, b) => before(placeOf(a), placeOf(b)));
   }
 
   /**
@@ -367,11 +369,10 @@ export class SlotLine {
 
 /**
  * How many kept slots of [param kept] the games editor_run started may hold between them while a
- * gate is queued: half, leaving at least one beside the gate's own steps' for a short headless call
- * no running game can take.
+ * gate is queued: half, and never the last, which stays for a short headless call.
  */
 export function gamesKeptOf(kept: number): number {
-  return Math.max(0, Math.min(Math.floor(kept / 2), kept - GATE_KEPT - 1));
+  return Math.max(0, Math.min(Math.floor(kept / 2), kept - 1));
 }
 
 /** The variable a timing sets in what it runs, with the slot it holds. A timing takes any slot. */
@@ -384,11 +385,11 @@ const TIER_VARIABLE = 'GODOT_ENGINE_TIER';
 /** The file beside a gate's mark in the queue once the gate has its seat. */
 const SEATED_SUFFIX = '.seated';
 /**
- * Which of a machine's slots a take is held to, when it is held to some: `tier` the kept ones a
- * gate's own steps take, and `games` none, for a game while games hold as many kept slots as they
- * may, its numbers then those the games hold.
+ * Which of a machine's slots a take is held to, when it is held to some: `gate` the gates' own,
+ * `kept` the kept ones, and `games` none, for a game while games hold as many kept slots as they may,
+ * its numbers then those the games hold.
  */
-type SlotLimit = 'gate' | 'kept' | 'tier' | 'games';
+type SlotLimit = 'gate' | 'kept' | 'games';
 
 /** The slot numbers a take may try, in order, and what holds it to them when something does. */
 export interface SlotsDrawn {
@@ -407,11 +408,12 @@ export type GateQueue = 'none' | 'queued';
 /**
  * The slot numbers of [param count] a take by [param taker] may try now, in the order it tries
  * them, and what holds it to them, given [param queue]. A gate's engine takes the first count less
- * the kept ones ({@link keptSlotsOf}), at least one, and a timing takes any. With no gate queued every
- * other takes any, the kept ones first so the gates' stay free longest. While one is queued a gate's
- * own step takes the kept ones but {@link reservedSlotOf}, the first of them first, and any other the
- * kept ones but the {@link GATE_KEPT} first. A gate's seat counts only the gates' slots, so work in the kept ones never
- * holds a seat back.
+ * the kept ones ({@link keptSlotsOf}), at least one, and a timing takes any. Gate work outside a seat
+ * (`tier`), a build or an upload among it, takes any, queued or not, the gates' from the top first,
+ * so it leaves the kept ones to side work and the lowest to the gates' engines: three uploads waited
+ * 50 minutes for the kept slots while gates' slots stood free. With no gate queued every other takes
+ * any, the kept ones first so the gates' stay free longest, and while one is queued the kept ones. A
+ * gate's seat counts only the gates' slots, so work in the kept ones never holds a seat back.
  */
 export function slotsDrawnOn(count: number, taker: SlotTaker, queue: GateQueue): SlotsDrawn {
   const gated = Math.max(1, count - keptSlotsOf(count));
@@ -420,14 +422,13 @@ export function slotsDrawnOn(count: number, taker: SlotTaker, queue: GateQueue):
   }
   const every = Array.from({ length: count }, (_, slot) => count - 1 - slot);
   const kept = every.slice(0, count - gated);
+  if (taker === 'tier') {
+    return { numbers: [...every.slice(count - gated), ...kept] };
+  }
   if (taker === 'timing' || queue === 'none' || kept.length === 0) {
     return { numbers: every };
   }
-  if (taker === 'tier') {
-    const reserve = reservedSlotOf(count);
-    return { numbers: [...kept].reverse().filter((slot) => slot !== reserve), limit: 'tier' };
-  }
-  return { numbers: kept.slice(0, Math.max(1, kept.length - GATE_KEPT)), limit: 'kept' };
+  return { numbers: kept, limit: 'kept' };
 }
 
 /** Whether [param env] says this process runs inside a gate, which names its share in both. */
@@ -744,10 +745,10 @@ export class EngineSlots {
    * held. Which it may take is asked again at every look, since a gate arriving in the queue or the
    * last one leaving changes them. A slot already held is kept to its end whatever arrives. A take
    * for a [param game] editor_run started marks its lock as a game's, and while a gate is queued finds
-   * none free once the games hold as many of the kept slots as {@link gamesKeptOf} gives them, nor
-   * {@link reservedSlotOf}. A one-off take that has waited [param waitedMs] of
-   * {@link ONE_OFF_AGED_MS} takes any slot. A take but a timing's leaves the free slots the takers
-   * waiting longer than [param line] take first ({@link SlotLine}). One given no line came last.
+   * none free once the games hold as many of the kept slots as {@link gamesKeptOf} gives them. A
+   * one-off take that has waited [param waitedMs] of {@link ONE_OFF_AGED_MS} takes any slot. A take
+   * but a timing's leaves the free slots the takers ahead of [param line] take first
+   * ({@link SlotLine}). One given no line came last.
    */
   async takeFree(game = false, waitedMs = 0, line?: SlotLine): Promise<string | null> {
     mkdirSync(this.directory, { recursive: true });
@@ -761,14 +762,8 @@ export class EngineSlots {
     const aged = taker === 'other' && !game && waitedMs >= ONE_OFF_AGED_MS;
     let queue: GateQueue | undefined;
     const queued = async (): Promise<GateQueue> => (queue ??= await this.gateQueue());
-    this.drawn = slotsDrawnOn(
-      this.count,
-      taker,
-      taker === 'gate' || taker === 'timing' || aged ? 'none' : await queued(),
-    );
+    this.drawn = slotsDrawnOn(this.count, taker, taker === 'other' && !aged ? await queued() : 'none');
     if (game && this.drawn.limit === 'kept') {
-      const reserve = reservedSlotOf(this.count);
-      this.drawn = { ...this.drawn, numbers: this.drawn.numbers.filter((slot) => slot !== reserve) };
       const kept = this.count - Math.max(1, this.count - keptSlotsOf(this.count));
       const games = await this.heldByGames(Array.from({ length: kept }, (_, at) => this.count - kept + at));
       if (games.length >= gamesKeptOf(kept)) {
@@ -836,20 +831,15 @@ export class EngineSlots {
       return new Map();
     }
     const now = Date.now();
-    const reserve = reservedSlotOf(this.count);
     const drawn: (readonly number[])[] = [];
     for (const one of ahead) {
       const aged = one.taker === 'other' && !one.game && now - one.since >= ONE_OFF_AGED_MS;
       const theirs = slotsDrawnOn(
         this.count,
         one.taker,
-        one.taker === 'gate' || one.taker === 'timing' || aged ? 'none' : await queued(),
+        one.taker === 'other' && !aged ? await queued() : 'none',
       );
-      drawn.push(
-        one.game && theirs.limit === 'kept'
-          ? theirs.numbers.filter((slot) => slot !== reserve)
-          : theirs.numbers,
-      );
+      drawn.push(theirs.numbers);
     }
     return new Map(
       [...slotsClaimed(drawn, open)].map(([slot, at]): [number, string] => [slot, ahead[at]?.mark ?? '']),
@@ -1296,10 +1286,7 @@ export function slotWaitSaid(
   const named = holdersNamed(taking, holders);
   const waiting = `${so}: ${slots}`;
   const back = `the engine starts when ${taking === 1 ? 'it' : 'one'} is given back`;
-  const starts =
-    drawn.limit === 'kept' || drawn.limit === 'tier' || drawn.limit === 'games'
-      ? `${back} or no gate is queued`
-      : back;
+  const starts = drawn.limit === 'kept' || drawn.limit === 'games' ? `${back} or no gate is queued` : back;
   const said =
     named.length === 0
       ? `${waiting}, by a gate or another tool, and ${starts}.`
@@ -1332,9 +1319,6 @@ function slotsSaid(taking: number, count: number, directory: string, limit: Slot
   }
   if (limit === 'gate') {
     return `${taking === 1 ? 'the one engine slot' : `the ${String(taking)} engine slots`} of the ${String(count)} ${where} a gate's engines draw on`;
-  }
-  if (limit === 'tier') {
-    return `${taking === 1 ? 'the one engine slot' : `the ${String(taking)} engine slots`} of the ${String(count)} ${where} a gate's own steps take while a gate is queued`;
   }
   if (limit === 'games') {
     return `${taking === 1 ? 'the one engine slot' : `the ${String(taking)} engine slots`} of the ${String(count)} ${where} that games editor_run started may hold while a gate is queued, the rest kept for short calls,`;
