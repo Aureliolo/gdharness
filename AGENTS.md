@@ -66,7 +66,8 @@ prefix. It also compiles the shipped scripts beside a class and an autoload for 
 
 The modules listed in `scripts/sync-shared-gd.ts` (`reading.gd`, `serialisation.gd`,
 `value_shapes.gd`, `property_values.gd`, `property_paths.gd`, `declared_values.gd`,
-`same_values.gd`, `file_reads.gd`, `file_walk.gd`, `animation_reads.gd` and `setting_reads.gd`) are
+`same_values.gd`, `file_reads.gd`, `file_walk.gd`, `animation_reads.gd`, `setting_reads.gd` and
+`picture_saves.gd`) are
 edited in `src/godot/operations/` only. `bun run sync:gd` writes the copies inside the addons. A
 regression fails on a copy that has drifted.
 
