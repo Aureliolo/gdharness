@@ -182,9 +182,24 @@ export function selectTests(
         return { ok: false, reason: `${said}: none of them declares a func test_ at the top level.` };
       }
       const written = declared.map((one) => `${nameOf(one.suite)}:${one.test}`);
-      const close = nearest(suiteNamed === null ? test : `${nameOf(suiteNamed)}:${test}`, [
-        ...new Set(suiteNamed === null ? declared.map((one) => one.test) : written),
-      ]);
+      // Compared without the test_ every case starts with, or the suite name before it: shared by
+      // every name offered, they made each one near whatever was asked.
+      const bare = (name: string): string => name.replace(/^test_/, '');
+      const inSuite =
+        suiteNamed === null
+          ? declared
+          : declared.filter((one) => one.suite === suitePath || nameOf(one.suite) === suiteNamed);
+      const spell = (one: { suite: string; test: string }): string =>
+        suiteNamed === null ? one.test : `${nameOf(one.suite)}:${one.test}`;
+      const close = [
+        ...new Set([
+          ...nearest(bare(test), [...new Set(inSuite.map((one) => bare(one.test)))]).flatMap((name) =>
+            inSuite.filter((one) => bare(one.test) === name).map(spell),
+          ),
+          // The case asked for, in a suite other than the one named.
+          ...(suiteNamed === null ? [] : declared.filter((one) => one.test === test).map(spell)),
+        ]),
+      ];
       return {
         ok: false,
         reason:
