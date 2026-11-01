@@ -488,6 +488,7 @@ import { encodedUidCache, mendUidCache, type UidEntry, uidCacheEntries } from '.
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { writeWhole } from '../src/whole-file.js';
 import { askWindows } from '../src/windows-ask.js';
+import { inTurnFor, writeLockOf } from '../src/write-turns.js';
 import { withHome } from './support/cli-home.js';
 import { containedEngine } from './support/contained-engine.js';
 import { greeting } from './support/greeting.js';
@@ -69011,6 +69012,146 @@ async function testAPropertyHoldingANodeFollowsIt(): Promise<void> {
 }
 
 /**
+ * Two headless writes to one scene at once both land, each with its own properties. Each loaded the
+ * file and the later save put back what it had read: a game's eight adds to one scene, two of them
+ * left running by its client, lost a Line2D and gave its antialiased to a Polygon2D.
+ */
+async function testTwoWritesToOneSceneAtOnceBothLand(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('writes at once regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-at-once-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-at-once-rt-'));
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="AtOnce"\n',
+    // Every engine loading the scene runs this, which holds each write open long enough to overlap.
+    'slow.gd': 'extends Node2D\n\n\nfunc _init() -> void:\n\tOS.delay_msec(3000)\n',
+    'floor.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://slow.gd" id="1_slow"]\n\n' +
+      '[node name="Floor" type="Node2D"]\nscript = ExtResource("1_slow")\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const add = async (
+    nodeName: string,
+    nodeType: string,
+    properties: Record<string, unknown>,
+  ): Promise<unknown> => {
+    const result = await server.request(
+      'tools/call',
+      {
+        name: 'scene_node',
+        arguments: {
+          projectPath: project,
+          op: 'add',
+          scenePath: 'floor.tscn',
+          parentNodePath: '.',
+          nodeType,
+          nodeName,
+          properties,
+        },
+      },
+      240_000,
+    );
+    const parsed = parseTextContent(result);
+    assert.ok(parsed !== null, `scene_node add answered: ${JSON.stringify(result)}`);
+    return parsed;
+  };
+  const scene = (): string => readFileSync(join(project, 'floor.tscn'), 'utf8');
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('at-once-engine');
+
+    const [ink, shade] = await Promise.all([
+      add('FloorInk', 'Line2D', { width: 1.5, antialiased: true }),
+      add('FloorShade', 'Polygon2D', { use_parent_material: true }),
+    ]);
+    assert.deepEqual([get(ink, 'nodePath'), get(shade, 'nodePath')], ['FloorInk', 'FloorShade']);
+    for (const answer of [ink, shade]) {
+      assert.equal(
+        get(answer, 'alsoSaved'),
+        undefined,
+        `neither saves the other's node: ${JSON.stringify(answer)}`,
+      );
+    }
+    const sections = scene().split('\n\n');
+    const of = (name: string): string => sections.find((one) => one.startsWith(`[node name="${name}"`)) ?? '';
+    assert.match(of('FloorInk'), /^width = 1\.5$/m, scene());
+    assert.match(of('FloorInk'), /^antialiased = true$/m, scene());
+    assert.match(of('FloorShade'), /^use_parent_material = true$/m, scene());
+    assert.doesNotMatch(of('FloorShade'), /antialiased/, scene());
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A write's turn holds across processes, since two sessions each run a server of their own: a lock
+ * another live process holds keeps the write waiting until it goes, and one whose holder has gone is
+ * taken over at once.
+ */
+async function testAWriteWaitsForAnotherProcesssTurn(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-turns-'));
+  const file = join(project, 'floor.tscn');
+  const lock = writeLockOf(project, file);
+  const other = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+  try {
+    const pid = other.pid ?? 0;
+    const started = (await startTimesOf([pid])).get(pid);
+    assert.ok(started !== undefined, `the stand-in's start is read: ${String(pid)}`);
+    mkdirSync(dirname(lock), { recursive: true });
+    writeFileSync(lock, JSON.stringify({ pid, started }));
+    const write = (): Promise<{ at: number; holder: number | undefined }> =>
+      Promise.resolve({ at: Date.now(), holder: holderOf(readFileSync(lock, 'utf8'))?.pid });
+    const turn = inTurnFor(project, file, write);
+    await delay(1500);
+    const given = Date.now();
+    rmSync(lock, { force: true });
+    const ran = await turn;
+    assert.ok(
+      ran.at >= given,
+      `the write waited for the other process's turn: ran ${String(ran.at)}, given ${String(given)}`,
+    );
+    assert.equal(ran.holder, process.pid, 'and wrote in a turn of its own');
+    assert.equal(existsSync(lock), false, 'which it gave back');
+
+    const exited = new Promise((resolved) => other.once('exit', resolved));
+    other.kill();
+    await exited;
+    writeFileSync(lock, JSON.stringify({ pid, started }));
+    const from = Date.now();
+    const taken = await inTurnFor(project, file, write);
+    assert.ok(
+      taken.at - from < 1000,
+      `a gone holder's turn is taken over at once: ${String(taken.at - from)} ms`,
+    );
+    assert.equal(taken.holder, process.pid, 'as a turn of its own');
+    assert.equal(existsSync(lock), false, 'and given back');
+  } finally {
+    other.kill();
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * A headless write saves what the editor would. A model-driven probe renamed a node in a scene whose
  * ShaderMaterial set none of its parameters, and the save wrote each as null, since the saver leaves
  * out a parameter at the default the renderer gives and a headless renderer gives none. The same
@@ -71137,6 +71278,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPropertyHoldingANodeFollowsIt,
   testTheProjectsOwnClassesAreListedAndAnAddonsCounted,
   testAHeadlessWriteSavesWhatTheEditorWould,
+  testTwoWritesToOneSceneAtOnceBothLand,
+  testAWriteWaitsForAnotherProcesssTurn,
   testAMovedNodeNamesTheScriptLinesReadingIt,
   testAHandWrittenValueIsNoChangeOfAScripts,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,

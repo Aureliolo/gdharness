@@ -404,6 +404,7 @@ import {
 } from './tool-definitions.js';
 import { argumentShape } from './tool-reference.js';
 import { isNewer, UpdateCheck } from './update-check.js';
+import { inTurnFor } from './write-turns.js';
 
 /**
  * The argument naming the class each editor tool makes, which may be a class_name a project script
@@ -15496,23 +15497,40 @@ class GodotServer {
         );
       }
     }
-    // A headless engine reads the class cache as it starts, so a class a script declares and the
-    // cache lacks is put in it first, the way editor_run start does before a game.
-    const declaring = declaredButUncached(projectPath, typeName);
-    if (declaring !== null) {
-      const rebuilt = await this.rebuildClassCache(projectPath);
-      if (!rebuilt.ok) {
-        return this.answer(rebuilt);
+    const run = async (): Promise<ToolResponse> => {
+      // A headless engine reads the class cache as it starts, so a class a script declares and the
+      // cache lacks is put in it first, the way editor_run start does before a game.
+      const declaring = declaredButUncached(projectPath, typeName);
+      if (declaring !== null) {
+        const rebuilt = await this.rebuildClassCache(projectPath);
+        if (!rebuilt.ok) {
+          return this.answer(rebuilt);
+        }
       }
-    }
-    const outcome = await this.operation(
-      'run_editor_tool',
-      { command, arguments: contained.value },
-      projectPath,
-    );
-    if (!outcome.ok) {
-      return this.answer(outcome);
-    }
+      const outcome = await this.operation(
+        'run_editor_tool',
+        { command, arguments: contained.value },
+        projectPath,
+      );
+      if (!outcome.ok) {
+        return this.answer(outcome);
+      }
+      return this.headlessAnswer(outcome, effect, typeName, declaring);
+    };
+    const written =
+      readNonEmptyString(contained.value, 'scenePath') ?? readNonEmptyString(contained.value, 'resourcePath');
+    const target =
+      effect === 'writes' && written !== undefined ? resolveWithinProject(projectPath, written) : null;
+    return target?.ok === true ? await inTurnFor(projectPath, target.absolutePath, run) : await run();
+  }
+
+  /** What a headless engine's run of an editor tool answers, with how it was read or written. */
+  private headlessAnswer(
+    outcome: Extract<HeadlessOutcome, { ok: true }>,
+    effect: 'reads' | 'writes',
+    typeName: string,
+    declaring: string | null,
+  ): ToolResponse {
     return this.jsonTextResponse({
       ...outcome.payload,
       ...(declaring === null
