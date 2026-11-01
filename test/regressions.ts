@@ -34256,8 +34256,16 @@ async function testACaptureBeforeTheFirstFrameWaitsForIt(): Promise<void> {
  *
  * Windowed, since nothing is drawn without a window. On Windows the server starts it on a desktop
  * of its own, where it renders and shows nothing, so it runs here as well as on CI.
+ *
+ * Run again in low-processor mode, where the engine draws a frame only when something has changed.
+ * A still game there draws none, so a capture waiting for the next drawn frame waited for good.
  */
 async function testASubViewportCaptureIsDrawnNow(): Promise<void> {
+  await aSubViewportCaptureIsDrawnNow(false);
+  await aSubViewportCaptureIsDrawnNow(true);
+}
+
+async function aSubViewportCaptureIsDrawnNow(lowProcessor: boolean): Promise<void> {
   const engine = resolveGodotPath();
   if (!engine) {
     if (process.env['GDHARNESS_REQUIRE_GODOT']) {
@@ -34278,14 +34286,18 @@ async function testASubViewportCaptureIsDrawnNow(): Promise<void> {
   });
   writeFileSync(
     join(project, 'project.godot'),
-    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Sub"\nrun/main_scene="res://main.tscn"\n\n' +
+    `; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Sub"\nrun/main_scene="res://main.tscn"\n${lowProcessor ? 'run/low_processor_mode=true\n' : ''}\n` +
       '[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
       '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
   );
   writeFileSync(
     join(project, 'main.gd'),
     'extends Node\n\n\nfunc _ready() -> void:\n\tawait get_tree().create_timer(1.0).timeout\n' +
-      '\t($Sub/Colour as ColorRect).color = Color(0, 0, 1)\n\tprint("turned blue")\n',
+      '\t($Sub/Colour as ColorRect).color = Color(0, 0, 1)\n' +
+      '\tprint("low processor ", OS.low_processor_usage_mode)\n\tprint("turned blue")\n' +
+      '\tawait get_tree().create_timer(1.0).timeout\n\tvar before: int = Engine.get_frames_drawn()\n' +
+      '\tawait get_tree().create_timer(1.0).timeout\n' +
+      '\tprint("drawn while still: ", Engine.get_frames_drawn() - before)\n',
   );
   writeFileSync(
     join(project, 'main.tscn'),
@@ -34312,11 +34324,17 @@ async function testASubViewportCaptureIsDrawnNow(): Promise<void> {
     );
     assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
     let printed = '';
-    for (let waited = 0; waited < 30_000 && !printed.includes('turned blue'); waited += 250) {
+    for (let waited = 0; waited < 30_000 && !printed.includes('drawn while still'); waited += 250) {
       await delay(250);
       printed = textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '';
     }
     assert.match(printed, /turned blue/, `the game should turn the rectangle blue: ${printed}`);
+    const how = lowProcessor ? 'in low-processor mode' : 'redrawn every frame';
+    assert.match(printed, new RegExp(`low processor ${String(lowProcessor)}`), `${how}: ${printed}`);
+    if (lowProcessor) {
+      // The fault needs a game that draws nothing while it waits.
+      assert.match(printed, /drawn while still: 0\b/, `${how}: the game is still: ${printed}`);
+    }
 
     const answered = await server.request(
       'tools/call',
@@ -34327,11 +34345,11 @@ async function testASubViewportCaptureIsDrawnNow(): Promise<void> {
       ENGINE_CALL_TIMEOUT_MS,
     );
     const image = asArray(get(answered, 'result', 'content')).find((chunk) => get(chunk, 'type') === 'image');
-    assert.ok(image !== undefined, `the capture should answer an image: ${JSON.stringify(answered)}`);
+    assert.ok(image !== undefined, `${how}: the capture should answer an image: ${JSON.stringify(answered)}`);
     const pixel = [...onePixelOf(Buffer.from(String(get(image, 'data')), 'base64'))];
     assert.ok(
       (pixel[2] ?? 0) > 200 && (pixel[0] ?? 255) < 50,
-      `the SubViewport as it is now, blue, not the red it last drew: ${pixel.join(',')}`,
+      `${how}: the SubViewport as it is now, blue, not the red it last drew: ${pixel.join(',')}`,
     );
     await stopItsRun(server);
     stopped = true;
