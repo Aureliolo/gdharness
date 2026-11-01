@@ -2120,7 +2120,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     '',
     '',
     'func go(kit: Variant) -> void:',
-    '\tFetched.lift(kit)',
+    '\tShelved.lift(kit)',
     '\tPlaced.lift(kit)',
     '\tself.lift(kit)',
     '\tlift(kit)',
@@ -2133,7 +2133,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     ['res://tests/oven_test.gd', oven],
     ['res://core/holder.gd', holding],
     ['res://core/stowed.gd', stowed],
-    ['res://core/fetched.gd', declaring('Fetched')],
+    ['res://core/shelved.gd', declaring('Shelved')],
     ['res://core/placed.gd', declaring('Placed')],
   ] as const;
   const placedAt = (name: string): unknown[] =>
@@ -2147,7 +2147,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       ['res://core/stowed.gd', 8, true],
       ['res://core/stowed.gd', 9, true],
     ],
-    'the Callable handed on and the calls, and none of the locals, the member variable or the call through Fetched',
+    'the Callable handed on and the calls, and none of the locals, the member variable or the call through Shelved',
   );
   assert.deepEqual(
     placedAt('lift'),
@@ -22736,11 +22736,11 @@ function testAStaleEnumMemberIsNamed(): void {
     'extends RefCounted',
     '',
     'enum Kind {',
-    '\tLUCK,  # the old default, GRUDGE came later',
+    '\tLUCK,  # the old default, SQUALL came later',
     '\tGLOW = 4,',
     '\tZZ_PROBE,',
     '}',
-    'enum Mood { CALM, GRUDGE }',
+    'enum Mood { CALM, SQUALL }',
     'enum { LOOSE_ONE, LOOSE_TWO = 7 }',
     '',
     'const MAX_TOKENS: int = 3',
@@ -22765,14 +22765,14 @@ function testAStaleEnumMemberIsNamed(): void {
   const classMember = (member: string): MissingMember => ({ kind: 'member', member, type: 'Token' });
 
   assert.equal(
-    declaresMember(token, enumMember('Kind', 'GRUDGE')),
+    declaresMember(token, enumMember('Kind', 'SQUALL')),
     false,
     'a word in a comment is not a value',
   );
   assert.equal(declaresMember(token, enumMember('Kind', 'ZZ_PROBE')), true, 'a value on its own line');
   assert.equal(declaresMember(token, enumMember('Kind', 'LUCK')), true, 'one with a comment after it');
   assert.equal(declaresMember(token, enumMember('Kind', 'GLOW')), true, 'one given a number');
-  assert.equal(declaresMember(token, enumMember('Mood', 'GRUDGE')), true, 'an enum written on one line');
+  assert.equal(declaresMember(token, enumMember('Mood', 'SQUALL')), true, 'an enum written on one line');
   assert.equal(
     declaresMember(token, enumMember('Size', 'SMALL')),
     false,
