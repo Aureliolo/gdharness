@@ -204,6 +204,21 @@ async function registerRuntime(godot: HeadlessEngine, projectPath: string): Prom
   console.log(`  ${useTheShippedLoader(RUNTIME_AUTOLOAD.name, path)}`);
 }
 
+/** Every command the help lists, for the refusal of one mistyped. */
+const COMMANDS = [
+  'setup',
+  'upgrade',
+  'uninstall',
+  'harnesses',
+  'doctor',
+  'runtime',
+  'classes',
+  'test',
+  'lsp',
+  'version',
+  'help',
+] as const;
+
 /** setup's own flags, so anything else beginning with `--` is read as naming a harness. */
 const SETUP_FLAGS = new Set(['--runtime', '--no-runtime', '--no-connect', '--no-skill', '--json', '--yes']);
 
@@ -508,6 +523,15 @@ async function uninstall(): Promise<void> {
   const addons = removeAddons(projectPath);
   for (const path of addons) {
     console.log(`removed ${path}`);
+  }
+  // The addons declare classes, and a class list still naming their deleted files is what the
+  // project's next headless run reads.
+  if (addons.length > 0) {
+    const refreshed = await runOperation(godot, 'refresh_class_cache', {}, projectPath);
+    said(refreshed, 'rebuilding the class list');
+    if (refreshed.ok) {
+      console.log(`class list rebuilt: ${String(refreshed.payload['classes'])} classes`);
+    }
   }
 
   const anything = addons.length > 0 || before.runtimeAutoloadPath !== null || enabled.length > 0;
@@ -966,8 +990,11 @@ async function main(): Promise<void> {
     case '-h':
       printHelp();
       return;
-    default:
-      throw new UsageError(`Unknown command: ${command}. Run gdharness help.`);
+    default: {
+      const [close] = nearest(command, [...COMMANDS]);
+      const offered = close === undefined ? '' : ` Did you mean ${close}?`;
+      throw new UsageError(`Unknown command: ${command}.${offered} Run gdharness help.`);
+    }
   }
 }
 

@@ -55167,6 +55167,11 @@ function testCommandLineSetup(): void {
     );
     assert.ok(existsSync(join(projectDir, '.agents', 'skills', 'gdharness', 'SKILL.md')), 'the skill is in');
 
+    assert.match(
+      readFileSync(join(projectDir, '.godot', 'global_script_class_cache.cfg'), 'utf8'),
+      /addons\/gdharness_tests\//,
+      'setup lists the classes the test addon declares',
+    );
     const removed = cli('uninstall', projectDir);
     assert.equal(removed.status, 0, `uninstall:\n${removed.stdout}${removed.stderr}`);
     assert.equal(
@@ -55184,6 +55189,11 @@ function testCommandLineSetup(): void {
       'the addons directory setup made is named as removed',
     );
     assert.equal(existsSync(join(projectDir, 'addons')), false, 'and is gone, holding nothing else');
+    // The test addon declares classes, and a list still naming their deleted files is read by the
+    // project's next headless run.
+    assert.match(removed.stdout, /class list rebuilt: \d+ classes/, removed.stdout);
+    const classList = readFileSync(join(projectDir, '.godot', 'global_script_class_cache.cfg'), 'utf8');
+    assert.doesNotMatch(classList, /addons\/gdharness/, classList);
     const stripped = readFileSync(join(projectDir, 'project.godot'), 'utf8');
     assert.doesNotMatch(stripped, /GdharnessRuntime/, 'the autoload is gone');
     assert.equal(existsSync(join(projectDir, 'gdharness')), false, 'with the loader it named');

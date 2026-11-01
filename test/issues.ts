@@ -191,5 +191,9 @@ const said = mistyped.stderr.toString();
 assert.equal(mistyped.status, 2, `a mistyped command should exit 2, said: ${said}`);
 assert.match(said, /Unknown command/, 'and name what was wrong with it');
 assert.doesNotMatch(said, /Do not open an issue/, 'and never read as a defect in gdharness');
+const nearly = spawnSyncHidden(process.execPath, ['src/cli.ts', 'doctr'], {
+  cwd: join(import.meta.dirname, '..'),
+}).stderr.toString();
+assert.match(nearly, /Unknown command: doctr\. Did you mean doctor\? Run gdharness help\./, nearly);
 
 console.log('issue reporting checks passed');
