@@ -69369,6 +69369,10 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
     '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://sample.gd" id="1_sample"]\n\n' +
       '[node name="Sample" type="Node2D"]\nscript = ExtResource("1_sample")\n',
   );
+  // The scene the editor shows when the capture is asked for, which it shows again after.
+  writeFileSync(join(project, 'other.tscn'), '[gd_scene format=3]\n\n[node name="Other" type="Node3D"]\n');
+  // Open beside it, so closing the captured scene's tab alone lands on a scene other than the one shown.
+  writeFileSync(join(project, 'third.tscn'), '[gd_scene format=3]\n\n[node name="Third" type="Node3D"]\n');
   const server = new ServerProcess({
     env: {
       GODOT_PATH: godotPath,
@@ -69391,6 +69395,13 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
   try {
     const imported = await runImport(godotPath, project);
     assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    // The editor reopens the scenes its layout names, as it does after a quit.
+    mkdirSync(join(project, '.godot', 'editor'), { recursive: true });
+    writeFileSync(
+      join(project, '.godot', 'editor', 'editor_layout.cfg'),
+      '[EditorNode]\n\nopen_scenes=PackedStringArray("res://other.tscn", "res://third.tscn")\n' +
+        'current_scene="res://other.tscn"\n',
+    );
     await server.initialize('editor-view');
     const opened = await call('editor_launch', { op: 'open', projectPath: project, hidden: true });
     assert.notEqual(get(opened.result, 'isError'), true, textOf(opened) ?? '');
@@ -69408,6 +69419,20 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
       `the hidden editor connected: ${JSON.stringify(status)}`,
     );
     assert.equal(get(status, 'editor', 'hidden'), true, `and says it is hidden: ${JSON.stringify(status)}`);
+    const shown = (said: unknown): unknown[] => [
+      get(said, 'editor', 'editedScene'),
+      get(said, 'editor', 'openScenes'),
+    ];
+    // The editor greets before it reopens the scenes of its layout.
+    for (let waited = 0; waited < 60_000 && get(status, 'editor', 'editedScene') === null; waited += 500) {
+      await delay(500);
+      status = parseTextContent(await call('editor_status', {}));
+    }
+    assert.deepEqual(
+      shown(status),
+      ['res://other.tscn', ['res://other.tscn', 'res://third.tscn']],
+      `the editor shows the other scene: ${JSON.stringify(status)}`,
+    );
 
     const picture = join(saved, 'view.png');
     const captured = await call('editor_capture', {
@@ -69444,6 +69469,12 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
     assert.ok(
       red > 100,
       `what the script draws in the editor is in the view: ${String(red)} red samples of ${view.width}x${view.height}`,
+    );
+    const after = parseTextContent(await call('editor_status', {}));
+    assert.deepEqual(
+      shown(after),
+      ['res://other.tscn', ['res://other.tscn', 'res://third.tscn']],
+      `the editor shows the other scene again, with the captured one closed: ${JSON.stringify(after)}`,
     );
 
     const scaled = await call('editor_capture', {
