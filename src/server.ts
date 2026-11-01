@@ -16056,7 +16056,8 @@ class GodotServer {
       [
         ...instead,
         'Open the project in the editor with editor_launch, or by hand',
-        'Enable the addon under Project > Project Settings > Plugins',
+        // With a project to read, editorAddonMissing has found the addon installed and enabled.
+        ...(project === null ? ['Enable the addon under Project > Project Settings > Plugins'] : []),
         'editor_status says whether the bridge is up and what it is listening on',
       ],
     );

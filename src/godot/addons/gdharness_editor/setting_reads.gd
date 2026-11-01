@@ -88,11 +88,11 @@ static func under(prefix: String, values: GdhSerialisation) -> Dictionary:
 		var base: String = override_base(name)
 		if not base.is_empty():
 			described["override_of"] = base
+		# Kept in the engine's order: its own settings as it registers them, so layer_2 comes
+		# before layer_10, then the project's as project.godot lists them, the order autoloads
+		# load in.
 		found.append(described)
 
-	found.sort_custom(
-		func(a: Dictionary, b: Dictionary) -> bool: return a["setting"] < b["setting"]
-	)
 	return { "prefix": prefix, "count": found.size(), "settings": found }
 
 

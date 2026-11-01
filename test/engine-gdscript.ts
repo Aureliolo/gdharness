@@ -4180,21 +4180,53 @@ function testAFamilyOfSettingsAnswersWithItsTypes(godotPath: string, projectDir:
         'loose=Dictionary[StringName, Variant]({})',
         'plain={}',
         '',
+        '[autoload]',
+        '',
+        'Zeta="*res://zeta.gd"',
+        'Alpha="*res://alpha.gd"',
+        'Mid="*res://mid.gd"',
+        '',
       ].join('\n'),
     );
+    for (const name of ['zeta', 'alpha', 'mid']) {
+      writeFileSync(join(typed, `${name}.gd`), 'extends Node\n');
+    }
     const kinds = asArray(
       get(runOperation(godotPath, typed, 'get_project_setting', { prefix: 'kinds/' }), 'settings'),
     );
+    // As project.godot lists them, the order a project's own settings are read in.
     assert.deepEqual(
       kinds.map((entry) => [get(entry, 'setting'), get(entry, 'type')]),
       [
         ['kinds/flags', 'Dictionary[String, bool]'],
-        ['kinds/loose', 'Dictionary[StringName, Variant]'],
         ['kinds/names', 'Array[String]'],
+        ['kinds/loose', 'Dictionary[StringName, Variant]'],
         ['kinds/plain', 'Dictionary'],
       ],
       JSON.stringify(kinds),
     );
+    // Godot loads autoloads in the order the file lists them, so the read keeps that order.
+    const autoloads = asArray(
+      get(runOperation(godotPath, typed, 'get_project_setting', { prefix: 'autoload/' }), 'settings'),
+    );
+    assert.deepEqual(
+      autoloads.map((entry) => get(entry, 'setting')),
+      ['autoload/Zeta', 'autoload/Alpha', 'autoload/Mid'],
+      JSON.stringify(autoloads),
+    );
+    // The engine's own settings come as it registers them, so the numbered layers count up.
+    const layers = asArray(
+      get(
+        runOperation(godotPath, typed, 'get_project_setting', { prefix: 'layer_names/2d_physics/' }),
+        'settings',
+      ),
+    );
+    assert.deepEqual(
+      layers.slice(0, 3).map((entry) => get(entry, 'setting')),
+      ['layer_names/2d_physics/layer_1', 'layer_names/2d_physics/layer_2', 'layer_names/2d_physics/layer_3'],
+      JSON.stringify(layers),
+    );
+    assert.equal(layers.length, 32);
   } finally {
     sweep(typed);
   }

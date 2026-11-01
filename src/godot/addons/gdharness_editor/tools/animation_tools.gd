@@ -306,6 +306,12 @@ func create_animation(args: Dictionary) -> Dictionary:
 	var player: AnimationPlayer = opened[1]
 	if player.has_animation(StringName(animation_name)):
 		return scene.refuse("Animation already exists: " + animation_name)
+	# The library the animation goes in is this call's own change, made or not.
+	var library_name: String = animation_name.get_slice(
+		"/",
+		0,
+	) if animation_name.contains("/") else ""
+	scene.asked(player, ["libraries/" + library_name])
 	var library: Array = _library_for(player, animation_name)
 	if library[0] == null:
 		return scene.refuse(str(library[1]))

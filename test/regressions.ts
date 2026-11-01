@@ -8260,6 +8260,8 @@ async function testANoEditorRefusalSaysWhetherOneCanConnect(): Promise<void> {
           `a project an editor could connect from: ${ready}`,
         );
         assert.match(ready, /Open the project in the editor with editor_launch/, ready);
+        // The addon is installed and enabled here, so enabling it is no remedy.
+        assert.doesNotMatch(ready, /Enable the addon under/, ready);
       },
       { GDHARNESS_RUNTIME_DIR: announced },
     );
@@ -23900,8 +23902,9 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         get(scriptsCheck, 'compiled'),
         asArray(get(scriptsCheck, 'details')).length,
       ],
-      [false, 6, 3],
-      `every script compiled, each failure a detail: ${shownInfo}`,
+      // Six scripts, three of which fail: compiled counts the three that compiled.
+      [false, 3, 3],
+      `the scripts that compiled, each failure a detail: ${shownInfo}`,
     );
     assert.ok(
       asArray(get(scriptsCheck, 'details')).includes(
@@ -55164,6 +55167,11 @@ function testCommandLineSetup(): void {
     );
     assert.ok(existsSync(join(projectDir, '.agents', 'skills', 'gdharness', 'SKILL.md')), 'the skill is in');
 
+    assert.match(
+      readFileSync(join(projectDir, '.godot', 'global_script_class_cache.cfg'), 'utf8'),
+      /addons\/gdharness_tests\//,
+      'setup lists the classes the test addon declares',
+    );
     const removed = cli('uninstall', projectDir);
     assert.equal(removed.status, 0, `uninstall:\n${removed.stdout}${removed.stderr}`);
     assert.equal(
@@ -55181,6 +55189,11 @@ function testCommandLineSetup(): void {
       'the addons directory setup made is named as removed',
     );
     assert.equal(existsSync(join(projectDir, 'addons')), false, 'and is gone, holding nothing else');
+    // The test addon declares classes, and a list still naming their deleted files is read by the
+    // project's next headless run.
+    assert.match(removed.stdout, /class list rebuilt: \d+ classes/, removed.stdout);
+    const classList = readFileSync(join(projectDir, '.godot', 'global_script_class_cache.cfg'), 'utf8');
+    assert.doesNotMatch(classList, /addons\/gdharness/, classList);
     const stripped = readFileSync(join(projectDir, 'project.godot'), 'utf8');
     assert.doesNotMatch(stripped, /GdharnessRuntime/, 'the autoload is gone');
     assert.equal(existsSync(join(projectDir, 'gdharness')), false, 'with the loader it named');
@@ -57424,6 +57437,19 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
       [true, undefined],
       JSON.stringify(empty),
     );
+    // A shader edited by hand has no create to answer for it, so its read says the same.
+    const reread = await answered({ op: 'read', resourcePath: 'res://broken.gdshader' });
+    assert.deepEqual(
+      [get(reread, 'resourceType'), get(reread, 'compiles'), get(reread, 'compileErrors')],
+      ['Shader', false, [{ line: 5, message: "Expected a ';'." }]],
+      JSON.stringify(reread),
+    );
+    const plainRead = await answered({ op: 'read', resourcePath: 'res://plain.gdshader' });
+    assert.deepEqual(
+      [get(plainRead, 'compiles'), get(plainRead, 'compileErrors')],
+      [true, undefined],
+      JSON.stringify(plainRead),
+    );
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
@@ -57737,6 +57763,25 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     const lit = await material('res://glow.tres', { 'shader_parameter/glow_power': 1.5 });
     assert.ok(parseTextContent(lit) !== null, textOf(lit) ?? JSON.stringify(lit));
     assert.match(readFileSync(join(project, 'glow.tres'), 'utf8'), /^shader_parameter\/glow_power = 1\.5$/m);
+    assert.equal(get(parseTextContent(lit), 'alsoSaved'), undefined, textOf(lit) ?? '');
+    // The engine loads only the uniforms the shader declares, so a renamed one's value is in the
+    // file and nowhere else, and the next save drops it.
+    writeFileSync(
+      join(project, 'glow.gdshader'),
+      'shader_type canvas_item;\n\nuniform float glow_strength : hint_range(0.0, 2.0) = 1.0;\nuniform vec4 tint : source_color;\n',
+    );
+    const tinted = await material('res://glow.tres', {
+      'shader_parameter/tint': { _type: 'Color', r: 1, g: 0, b: 0, a: 1 },
+    });
+    assert.deepEqual(
+      get(parseTextContent(tinted), 'alsoSaved'),
+      [{ property: 'shader_parameter/glow_power', was: '1.5' }],
+      textOf(tinted) ?? JSON.stringify(tinted),
+    );
+    assert.match(
+      readFileSync(join(project, 'glow.tres'), 'utf8'),
+      /^shader_parameter\/tint = Color\(1, 0, 0, 1\)$/m,
+    );
 
     // A resource built into a file is a new object each time the file loads, and the check that a
     // save kept what was set compared objects, so every one written into a resource file was
@@ -66515,6 +66560,8 @@ async function testAnAnimationIsRenamedAndRemovedWithNoEditor(): Promise<void> {
       ['kit/walk', 'kit'],
       JSON.stringify(kit),
     );
+    // The library is the call's own change, so it is not among the lines it did not ask for.
+    assert.equal(get(kit, 'alsoSaved'), undefined, JSON.stringify(kit));
     assert.match(
       fileOf('moves.tscn'),
       /\nlibraries\/kit = SubResource\("AnimationLibrary_/,
