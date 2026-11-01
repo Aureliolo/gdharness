@@ -610,7 +610,28 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 		var declared_class: String = str(script.get_global_name())
 		if not declared_class.is_empty():
 			answer["scriptClass"] = declared_class
+	# A shader file edited by hand is otherwise checked only where it is first drawn with.
+	if loaded is Shader and file == res_path:
+		var errors: Array[Dictionary] = shader_errors(file)
+		answer["compiles"] = errors.is_empty()
+		if not errors.is_empty():
+			answer["compileErrors"] = errors
 	return answer
+
+
+## The errors the engine raises compiling the shader at [param path], as {line, message} in order.
+## A shader is compiled once something reads what it declares, and a create answering only the path
+## left a missing semicolon to show up wherever the shader was first drawn with.
+static func shader_errors(path: String) -> Array[Dictionary]:
+	var caught: GdhShaderErrors = GdhShaderErrors.new()
+	OS.add_logger(caught)
+	var shader: Shader = (
+		ResourceLoader.load(path, "Shader", ResourceLoader.CACHE_MODE_IGNORE) as Shader
+	)
+	if shader != null:
+		var _uniforms: Array = shader.get_shader_uniform_list()
+	OS.remove_logger(caught)
+	return caught.raised
 
 
 ## The names the [code][resource][/code] section of [param text], a .tres file, sets, or those of
@@ -668,3 +689,28 @@ static func _kept_in(value: Variant, file: String, id: String, seen: Dictionary)
 				if found != null:
 					return found
 	return null
+
+
+## Every shader error the engine raises while it is attached, in order.
+class GdhShaderErrors:
+	extends Logger
+
+	var raised: Array[Dictionary] = []
+
+	func _log_message(_message: String, _error: bool) -> void:
+		pass
+
+	# The engine's own signature for a Logger, eight parameters and not this project's to shape.
+	# gdstyle:ignore=quality/max-parameters
+	func _log_error(
+		_function: String,
+		_file: String,
+		line: int,
+		code: String,
+		rationale: String,
+		_editor_notify: bool,
+		error_type: int,
+		_script_backtraces: Array[ScriptBacktrace],
+	) -> void:
+		if error_type == Logger.ERROR_TYPE_SHADER:
+			raised.append({ "line": line, "message": code if rationale.is_empty() else rationale })

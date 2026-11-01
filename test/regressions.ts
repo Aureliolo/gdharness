@@ -57427,6 +57427,19 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
       [true, undefined],
       JSON.stringify(empty),
     );
+    // A shader edited by hand has no create to answer for it, so its read says the same.
+    const reread = await answered({ op: 'read', resourcePath: 'res://broken.gdshader' });
+    assert.deepEqual(
+      [get(reread, 'resourceType'), get(reread, 'compiles'), get(reread, 'compileErrors')],
+      ['Shader', false, [{ line: 5, message: "Expected a ';'." }]],
+      JSON.stringify(reread),
+    );
+    const plainRead = await answered({ op: 'read', resourcePath: 'res://plain.gdshader' });
+    assert.deepEqual(
+      [get(plainRead, 'compiles'), get(plainRead, 'compileErrors')],
+      [true, undefined],
+      JSON.stringify(plainRead),
+    );
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
