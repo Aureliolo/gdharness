@@ -6085,6 +6085,7 @@ async function main(): Promise<void> {
     runFixture(godotPath, projectDir, 'runtime_signal');
     runFixture(godotPath, projectDir, 'runtime_calls');
     runFixture(godotPath, projectDir, 'runtime_lazy');
+    runFixture(godotPath, projectDir, 'runtime_lazy_quit');
     runFixture(godotPath, projectDir, 'runtime_capture');
     // An editor opened before its server has to keep asking. The wait is read back rather than
     // trusted: a client that connected before the fixture started listening would otherwise
