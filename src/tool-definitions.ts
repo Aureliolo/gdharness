@@ -1696,7 +1696,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['open', 'restart'],
         description:
-          "Open the editor with no sound out of the machine, started with --audio-driver Dummy, so a tool script, a preview or a scene playing in its viewport is heard by nobody. Default true on open, and on restart how the editor being replaced was started: pass false to hear it. The answer's arguments are what the editor was started with. The editor hands no audio driver to a game it plays, so editor_run's own silent decides that game's sound. A hidden editor is silent whatever silent says. A headless editor has no sound to turn off, so its arguments show no --audio-driver. On restart only for an editor a server opened. One opened by hand comes back as it was.",
+          "Open the editor with no sound out of the machine, started with --audio-driver Dummy, so a tool script, a preview or a scene playing in its viewport is heard by nobody. Default true on open, and on restart how the editor being replaced was started: pass false to hear it. The answer's arguments are what the editor was started with. The editor hands no audio driver to a game it plays, so editor_run's own silent decides that game's sound. A hidden editor is always silent, so silent: false is refused with one. A headless editor has no sound to turn off, so its arguments show no --audio-driver. On restart only for an editor a server opened. One opened by hand comes back as it was.",
       },
     },
     requires: [],

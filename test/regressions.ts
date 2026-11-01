@@ -5732,6 +5732,7 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
     args: Record<string, boolean>;
     silent: boolean;
     visible: boolean;
+    refused?: boolean;
   }[] = [
     { how: 'opened visible', act: 'open', args: {}, silent: true, visible: true },
     { how: 'opened visible with sound', act: 'open', args: { silent: false }, silent: false, visible: true },
@@ -5742,6 +5743,25 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
       args: { hidden: true, silent: false },
       silent: hiddenSilent,
       visible: false,
+      refused: true,
+    },
+    {
+      how: 'started again hidden with sound',
+      act: 'restart',
+      was: [],
+      args: { hidden: true, silent: false },
+      silent: hiddenSilent,
+      visible: false,
+      refused: true,
+    },
+    {
+      how: 'started again as it was, hidden, with sound',
+      act: 'restart',
+      was: ['--headless'],
+      args: { silent: false },
+      silent: hiddenSilent,
+      visible: false,
+      refused: true,
     },
     {
       how: 'started again hidden',
@@ -5857,14 +5877,36 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
     };
     try {
       await server.initialize('regression-test');
+      // A hidden editor asked for sound would play none, so the call is refused before anything starts.
+      const refusedForSound = (reply: JsonRpcMessage): void => {
+        const said = textOf(reply) ?? '';
+        assert.equal(get(reply, 'result', 'isError'), true, `${one.how}: refused: ${said}`);
+        assert.match(
+          said,
+          /^A hidden editor plays no sound, so silent: false is refused with it\..*Pass hidden: false to hear the editor, or leave silent out/s,
+          `${one.how}: saying what to pass: ${said}`,
+        );
+      };
       let answer: unknown;
       if (one.act === 'open') {
-        answer = parseTextContent(
-          await server.request('tools/call', {
-            name: 'editor_launch',
-            arguments: { op: 'open', projectPath: project, ...one.args },
-          }),
-        );
+        const reply = await server.request('tools/call', {
+          name: 'editor_launch',
+          arguments: { op: 'open', projectPath: project, ...one.args },
+        });
+        if (one.refused === true) {
+          refusedForSound(reply);
+          const status = parseTextContent(
+            await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+          );
+          assert.equal(
+            get(status, 'editor', 'awaitingLaunchedEditor'),
+            undefined,
+            `${one.how}: and nothing was started: ${JSON.stringify(status)}`,
+          );
+          ran += 1;
+          continue;
+        }
+        answer = parseTextContent(reply);
         assert.equal(get(answer, 'launched'), true, `${one.how}: ${JSON.stringify(answer)}`);
       } else {
         const first = await connect();
@@ -5909,6 +5951,12 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
           { name: 'editor_launch', arguments: { op: 'restart', ...one.args } },
           60_000,
         );
+        if (one.refused === true) {
+          refusedForSound(reply);
+          assert.equal(quitAsked, false, `${one.how}: and the editor was not asked to go`);
+          ran += 1;
+          continue;
+        }
         if (one.was === null) {
           const said = textOf(reply) ?? '';
           assert.equal(get(reply, 'result', 'isError'), true, `${one.how}: refused: ${said}`);
@@ -34256,8 +34304,16 @@ async function testACaptureBeforeTheFirstFrameWaitsForIt(): Promise<void> {
  *
  * Windowed, since nothing is drawn without a window. On Windows the server starts it on a desktop
  * of its own, where it renders and shows nothing, so it runs here as well as on CI.
+ *
+ * Run again in low-processor mode, where the engine draws a frame only when something has changed.
+ * A still game there draws none, so a capture waiting for the next drawn frame waited for good.
  */
 async function testASubViewportCaptureIsDrawnNow(): Promise<void> {
+  await aSubViewportCaptureIsDrawnNow(false);
+  await aSubViewportCaptureIsDrawnNow(true);
+}
+
+async function aSubViewportCaptureIsDrawnNow(lowProcessor: boolean): Promise<void> {
   const engine = resolveGodotPath();
   if (!engine) {
     if (process.env['GDHARNESS_REQUIRE_GODOT']) {
@@ -34278,14 +34334,18 @@ async function testASubViewportCaptureIsDrawnNow(): Promise<void> {
   });
   writeFileSync(
     join(project, 'project.godot'),
-    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Sub"\nrun/main_scene="res://main.tscn"\n\n' +
+    `; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Sub"\nrun/main_scene="res://main.tscn"\n${lowProcessor ? 'run/low_processor_mode=true\n' : ''}\n` +
       '[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
       '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
   );
   writeFileSync(
     join(project, 'main.gd'),
     'extends Node\n\n\nfunc _ready() -> void:\n\tawait get_tree().create_timer(1.0).timeout\n' +
-      '\t($Sub/Colour as ColorRect).color = Color(0, 0, 1)\n\tprint("turned blue")\n',
+      '\t($Sub/Colour as ColorRect).color = Color(0, 0, 1)\n' +
+      '\tprint("low processor ", OS.low_processor_usage_mode)\n\tprint("turned blue")\n' +
+      '\tawait get_tree().create_timer(1.0).timeout\n\tvar before: int = Engine.get_frames_drawn()\n' +
+      '\tawait get_tree().create_timer(1.0).timeout\n' +
+      '\tprint("drawn while still: ", Engine.get_frames_drawn() - before)\n',
   );
   writeFileSync(
     join(project, 'main.tscn'),
@@ -34312,11 +34372,17 @@ async function testASubViewportCaptureIsDrawnNow(): Promise<void> {
     );
     assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
     let printed = '';
-    for (let waited = 0; waited < 30_000 && !printed.includes('turned blue'); waited += 250) {
+    for (let waited = 0; waited < 30_000 && !printed.includes('drawn while still'); waited += 250) {
       await delay(250);
       printed = textOf(await server.request('tools/call', { name: 'editor_output', arguments: {} })) ?? '';
     }
     assert.match(printed, /turned blue/, `the game should turn the rectangle blue: ${printed}`);
+    const how = lowProcessor ? 'in low-processor mode' : 'redrawn every frame';
+    assert.match(printed, new RegExp(`low processor ${String(lowProcessor)}`), `${how}: ${printed}`);
+    if (lowProcessor) {
+      // The fault needs a game that draws nothing while it waits.
+      assert.match(printed, /drawn while still: 0\b/, `${how}: the game is still: ${printed}`);
+    }
 
     const answered = await server.request(
       'tools/call',
@@ -34327,11 +34393,11 @@ async function testASubViewportCaptureIsDrawnNow(): Promise<void> {
       ENGINE_CALL_TIMEOUT_MS,
     );
     const image = asArray(get(answered, 'result', 'content')).find((chunk) => get(chunk, 'type') === 'image');
-    assert.ok(image !== undefined, `the capture should answer an image: ${JSON.stringify(answered)}`);
+    assert.ok(image !== undefined, `${how}: the capture should answer an image: ${JSON.stringify(answered)}`);
     const pixel = [...onePixelOf(Buffer.from(String(get(image, 'data')), 'base64'))];
     assert.ok(
       (pixel[2] ?? 0) > 200 && (pixel[0] ?? 255) < 50,
-      `the SubViewport as it is now, blue, not the red it last drew: ${pixel.join(',')}`,
+      `${how}: the SubViewport as it is now, blue, not the red it last drew: ${pixel.join(',')}`,
     );
     await stopItsRun(server);
     stopped = true;
@@ -69351,6 +69417,10 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
     '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://sample.gd" id="1_sample"]\n\n' +
       '[node name="Sample" type="Node2D"]\nscript = ExtResource("1_sample")\n',
   );
+  // The scene the editor shows when the capture is asked for, which it shows again after.
+  writeFileSync(join(project, 'other.tscn'), '[gd_scene format=3]\n\n[node name="Other" type="Node3D"]\n');
+  // Open beside it, so closing the captured scene's tab alone lands on a scene other than the one shown.
+  writeFileSync(join(project, 'third.tscn'), '[gd_scene format=3]\n\n[node name="Third" type="Node3D"]\n');
   const server = new ServerProcess({
     env: {
       GODOT_PATH: godotPath,
@@ -69373,6 +69443,13 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
   try {
     const imported = await runImport(godotPath, project);
     assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    // The editor reopens the scenes its layout names, as it does after a quit.
+    mkdirSync(join(project, '.godot', 'editor'), { recursive: true });
+    writeFileSync(
+      join(project, '.godot', 'editor', 'editor_layout.cfg'),
+      '[EditorNode]\n\nopen_scenes=PackedStringArray("res://other.tscn", "res://third.tscn")\n' +
+        'current_scene="res://other.tscn"\n',
+    );
     await server.initialize('editor-view');
     const opened = await call('editor_launch', { op: 'open', projectPath: project, hidden: true });
     assert.notEqual(get(opened.result, 'isError'), true, textOf(opened) ?? '');
@@ -69390,6 +69467,20 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
       `the hidden editor connected: ${JSON.stringify(status)}`,
     );
     assert.equal(get(status, 'editor', 'hidden'), true, `and says it is hidden: ${JSON.stringify(status)}`);
+    const shown = (said: unknown): unknown[] => [
+      get(said, 'editor', 'editedScene'),
+      get(said, 'editor', 'openScenes'),
+    ];
+    // The editor greets before it reopens the scenes of its layout.
+    for (let waited = 0; waited < 60_000 && get(status, 'editor', 'editedScene') === null; waited += 500) {
+      await delay(500);
+      status = parseTextContent(await call('editor_status', {}));
+    }
+    assert.deepEqual(
+      shown(status),
+      ['res://other.tscn', ['res://other.tscn', 'res://third.tscn']],
+      `the editor shows the other scene: ${JSON.stringify(status)}`,
+    );
 
     const picture = join(saved, 'view.png');
     const captured = await call('editor_capture', {
@@ -69426,6 +69517,12 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
     assert.ok(
       red > 100,
       `what the script draws in the editor is in the view: ${String(red)} red samples of ${view.width}x${view.height}`,
+    );
+    const after = parseTextContent(await call('editor_status', {}));
+    assert.deepEqual(
+      shown(after),
+      ['res://other.tscn', ['res://other.tscn', 'res://third.tscn']],
+      `the editor shows the other scene again, with the captured one closed: ${JSON.stringify(after)}`,
     );
 
     const scaled = await call('editor_capture', {

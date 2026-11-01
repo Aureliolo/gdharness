@@ -545,6 +545,10 @@ function restartUnderway(note: RestartNote, now = Date.now()): boolean {
  */
 const HOLD_PING_MS = 2_000;
 
+// A hidden editor is always started silent: nobody sees it, so nobody should hear it either.
+const HIDDEN_WITH_SOUND = 'A hidden editor plays no sound, so silent: false is refused with it.';
+const HIDDEN_WITH_SOUND_FIX = 'Pass hidden: false to hear the editor, or leave silent out';
+
 /**
  * The frame rate a wait counts at, which is deliberately lower than any game draws.
  *
@@ -10037,6 +10041,10 @@ class GodotServer {
       }
     }
 
+    if (hidden && args['silent'] === false) {
+      return this.createErrorResponse(HIDDEN_WITH_SOUND, [HIDDEN_WITH_SOUND_FIX]);
+    }
+
     const settingsBefore = this.settingKeysOf(before.projectPath);
     const asked = mine
       ? await this.startItAgain(before.projectPath ?? '', before.editorPid, hidden, silent)
@@ -10402,6 +10410,9 @@ class GodotServer {
     // A restart can say so in its own answer because it waits for the editor to come back. This
     // returns as soon as the process exists, minutes before the save, so what it can do is
     // remember and let editor_status say it once the editor is actually there.
+    if (args['hidden'] === true && args['silent'] === false) {
+      return this.createErrorResponse(HIDDEN_WITH_SOUND, [HIDDEN_WITH_SOUND_FIX]);
+    }
     const before = this.settingKeysOf(project.value.path);
     // Read before the launch settles it, so the answer can say this open finished something
     // rather than started something.

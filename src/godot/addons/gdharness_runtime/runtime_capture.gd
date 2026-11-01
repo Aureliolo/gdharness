@@ -76,6 +76,8 @@ func capture_viewport(params: Dictionary) -> Dictionary:
 	# refuses that state itself.
 	if mode == SubViewport.UPDATE_ALWAYS or not _host.get_tree().root.can_draw():
 		return await _capture(viewport, params)
+	# Asked for before the wait: in low-processor mode a still game draws no frame of its own, and
+	# this request is what makes it draw the one waited for.
 	sub.render_target_update_mode = SubViewport.UPDATE_ONCE
 	await RenderingServer.frame_post_draw
 	var answer: Dictionary = await _capture(viewport, params)
