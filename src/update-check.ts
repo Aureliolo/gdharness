@@ -10,6 +10,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { isRecord } from './records.js';
 import { currentRunner, runLine } from './runner.js';
 
 /** Only https, and nothing built from anything a caller supplies. */
@@ -123,12 +124,10 @@ function readCache(path: string): Cached | null {
       return null;
     }
     const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
-    if (typeof parsed !== 'object' || parsed === null) {
+    if (!isRecord(parsed)) {
       return null;
     }
-    const record = parsed as Record<string, unknown>;
-    const checkedAt = record['checkedAt'];
-    const latest = record['latest'];
+    const { checkedAt, latest } = parsed;
     if (typeof checkedAt !== 'number' || typeof latest !== 'string' || !VERSION.test(latest)) {
       return null;
     }
@@ -188,7 +187,7 @@ async function fetchLatest(registry: string): Promise<string | null> {
   }
   const chunks: Uint8Array[] = [];
   let size = 0;
-  for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+  for await (const chunk of response.body) {
     size += chunk.byteLength;
     if (size > MAX_BODY_BYTES) {
       return null;
@@ -196,10 +195,7 @@ async function fetchLatest(registry: string): Promise<string | null> {
     chunks.push(chunk);
   }
   const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-  if (typeof parsed !== 'object' || parsed === null) {
-    return null;
-  }
-  const version = (parsed as Record<string, unknown>)['version'];
+  const version = isRecord(parsed) ? parsed['version'] : undefined;
   return typeof version === 'string' && VERSION.test(version) ? version : null;
 }
 
@@ -290,7 +286,7 @@ export class UpdateCheck {
    *
    * One definition, because two methods read it and they must not be able to disagree. Deciding
    * an answer is too old to use is what starts a fetch, and it is also what stops that answer
-   * being quoted meanwhile; written out twice and inverted, one of them drifts and the notice
+   * being quoted meanwhile. Written out twice and inverted, one of them drifts and the notice
    * goes back to naming a version the fetch beside it was started to replace.
    */
   private stale(now: number): boolean {
@@ -312,7 +308,7 @@ export class UpdateCheck {
     // call and starts a fetch precisely because the window has passed, so naming the version here
     // hands out something known stale together with an upgrade command for it. A server that had
     // just restarted read a note left hours earlier by a previous process and told its first
-    // caller to install a version and a half behind; the call after that named the right one.
+    // caller to install a version and a half behind. The call after that named the right one.
     //
     // Only while a fetch is actually in flight. A failed one backs off and leaves `checking`
     // false, and then this reports what it has again, because offline and behind is still worth

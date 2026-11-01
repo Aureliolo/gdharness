@@ -1,6 +1,6 @@
 /**
  * Where the engine is. GODOT_PATH when it is set, else the first conventional location that
- * answers `--version`; nothing is guessed, because a guessed path is a tool that fails later
+ * answers `--version`. Nothing is guessed, because a guessed path is a tool that fails later
  * with a message about the wrong thing.
  */
 
@@ -41,7 +41,7 @@ type VersionStart =
 /**
  * How the `--version` start that threw [param error] went. A Windows exception code, a signal, or a
  * failing exit with nothing printed is the engine crashing as it starts, which a loaded machine
- * makes Godot do now and then (0xC06D007F, a race in its input library's hook); output with a
+ * makes Godot do now and then (0xC06D007F, a race in its input library's hook). Output with a
  * failing exit, or a program that cannot be started at all, is an answer.
  */
 export function versionStartOf(error: unknown): VersionStart {
@@ -71,7 +71,7 @@ export function versionStartOf(error: unknown): VersionStart {
 }
 
 export class GodotLocator {
-  /** Why a path does not answer, or null for one that does; a path that only crashed is asked again. */
+  /** Why a path does not answer, or null for one that does. A path that only crashed is asked again. */
   private readonly answered = new Map<string, string | null>();
   private found: string | null = null;
   private readonly start: (path: string) => Promise<unknown>;
@@ -99,7 +99,7 @@ export class GodotLocator {
       // Made whole against the directory this process runs in, since the desktop helper starting a
       // windowed engine runs in another, where a relative path names nothing. Bare godot is the one
       // name looked up on PATH. An absolute one is kept as written, since setup writes it into the
-      // harness config and resolving respells X:/ as X:\ there.
+      // harness config and resolving respells D:/ as D:\ there.
       const path = named === 'godot' || isAbsolute(named) ? named : resolve(named);
       const reason = await this.whyNot(path);
       if (reason === null) {
@@ -128,7 +128,7 @@ export class GodotLocator {
       return {
         message: 'No Godot executable found.',
         advice: [
-          'Set GODOT_PATH to the Godot 4 executable',
+          'Set GODOT_PATH to a Godot 4.7 or newer executable',
           'Or install Godot where it is usually found, such as /usr/bin/godot or C:\\Program Files\\Godot',
         ],
       };
@@ -136,7 +136,7 @@ export class GodotLocator {
     return {
       message: `GODOT_PATH is set to ${located.named}, which ${located.reason ?? 'does not answer'}.`,
       advice: [
-        'Point GODOT_PATH at a Godot 4 executable that answers --version',
+        'Point GODOT_PATH at a Godot 4.7 or newer executable that answers --version',
         'Or unset it, and the usual install locations are searched instead',
       ],
     };
@@ -175,6 +175,6 @@ export class GodotLocator {
       }
       crashed = went.said;
     }
-    return `crashed on each of ${String(VERSION_STARTS)} starts with --version; the last time ${crashed}`;
+    return `crashed on each of ${String(VERSION_STARTS)} starts with --version, the last time ${crashed}`;
   }
 }

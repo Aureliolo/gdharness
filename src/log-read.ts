@@ -8,7 +8,7 @@ import { closeSync, fstatSync, openSync, readSync, renameSync, rmSync, writeSync
  */
 export const LOG_LIMIT_BYTES = 128 * 1024 * 1024;
 
-/** Of a log read in part, how much comes from its start; the rest is its end, where a run stops. */
+/** Of a log read in part, how much comes from its start. The rest is its end, where a run stops. */
 const HEAD_SHARE = 4;
 
 /**
@@ -32,13 +32,13 @@ export function readLog(path: string, limit = LOG_LIMIT_BYTES): string {
     const kept = head.subarray(0, headEnd);
     const ending = tail.subarray(tailStart);
     const skipped = size - kept.length - ending.length;
-    return `${kept.toString('utf8')}[gdharness: ${String(skipped)} bytes of this ${String(size)}-byte log were not read; at most ${String(limit)} are]\n${ending.toString('utf8')}`;
+    return `${kept.toString('utf8')}[gdharness: ${String(skipped)} bytes of this ${String(size)}-byte log were not read, since at most ${String(limit)} are]\n${ending.toString('utf8')}`;
   } finally {
     closeSync(fd);
   }
 }
 
-/** Puts [param text] before what [param path] holds, copying the rest a piece at a time. */
+/** Puts [param text] before what [param path] holds. The rest is copied a piece at a time. */
 export function prependTo(path: string, text: string): void {
   const whole = `${path}.whole`;
   renameSync(path, whole);

@@ -213,7 +213,7 @@ function consecutiveFrames(detail: readonly string[], at: number): Frame[] {
 
 /**
  * The cycle starting at [param from] that repeats at least twice in a row and covers the most
- * frames, the shorter on a tie, with how many whole times; or null when none repeats.
+ * frames, the shorter on a tie, with how many whole times, or null when none repeats.
  *
  * The most frames rather than the shortest cycle, because a cycle can hold a frame twice in a row:
  * `X X Y` over and over has `X X` at its start, and taking that would cut the cycle into pieces.
@@ -278,7 +278,7 @@ export function foldedRepeats(entries: readonly LogEntry[]): readonly FoldedEntr
  * Bytes arrive in the chunks the pipe makes of them, which can cut a character as easily as a
  * line, so each stream is decoded here and its last piece held back until the newline that
  * ends it turns up. An indented line after a headline is the headline's detail, and so are the
- * lines of a stderr error message that ends in a colon, up to its first indented line; anything
+ * lines of a stderr error message that ends in a colon, up to its first indented line. Anything
  * else starts an entry of its own.
  */
 export class GameLog {
@@ -352,7 +352,7 @@ export class GameLog {
   }
 
   private line(source: Stream, raw: string): void {
-    // Colour codes are for a terminal; a caller reading entries wants the words.
+    // Colour codes are for a terminal. A caller reading entries wants the words.
     const line = raw.replace(COLOUR_CODE, '');
     if (line.trim() === '') {
       return;

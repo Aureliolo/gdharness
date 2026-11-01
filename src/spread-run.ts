@@ -2,8 +2,8 @@
  * `gdharness spread`: a bench's runs played by several engines at once, and gathered back whole.
  *
  * The bench is a scene whose arms ask GdhShare (addons/gdharness_tests/share.gd) for their
- * outcomes. Each worker engine plays every Nth run of every arm and leaves what each run answered;
- * once every worker has played its whole share, one more engine runs the scene to gather, and that
+ * outcomes. Each worker engine plays every Nth run of every arm and leaves what each run answered.
+ * Once every worker has played its whole share, one more engine runs the scene to gather, and that
  * engine's output, the bench's table, is printed. A worker that failed, played a share other than
  * its own, or went another way through the arms than the rest fails the run before anything is
  * gathered, since a table over some of the runs reads like a table over all of them. Every engine
@@ -35,6 +35,7 @@ import {
 } from './engine-launch.js';
 import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
 import { readLog } from './log-read.js';
+import { isRecord } from './records.js';
 import { SHARE_SCRIPT } from './setup.js';
 import { type EngineEnd, exitNamed, readRun, versionFault } from './suite-judge.js';
 
@@ -84,7 +85,7 @@ export interface ArmPlayed {
   readonly played: number;
 }
 
-/** [param args], everything after `spread`, read into options; relative paths are read from [param cwd]. */
+/** [param args], everything after `spread`, read into options. Relative paths are read from [param cwd]. */
 export function spreadOptionsOf(args: readonly string[], cwd: string): SpreadOptions {
   const dashes = args.indexOf('--');
   const own = dashes === -1 ? args : args.slice(0, dashes);
@@ -110,7 +111,9 @@ export function spreadOptionsOf(args: readonly string[], cwd: string): SpreadOpt
   const projectNamed = named !== null && existsSync(join(named, 'project.godot'));
   const projectPath = projectNamed ? named : resolve(cwd);
   if (!existsSync(join(projectPath, 'project.godot'))) {
-    throw new EngineUsageError(`Not a Godot project: ${projectPath} holds no project.godot.`);
+    throw new EngineUsageError(
+      `Not a Godot project: ${projectPath} holds no project.godot. Run from the project directory, or name it on the command line.`,
+    );
   }
   const scenes = positional.slice(projectNamed ? 1 : 0);
   if (scenes.length !== 1) {
@@ -146,7 +149,7 @@ export function spreadOptionsOf(args: readonly string[], cwd: string): SpreadOpt
   };
 }
 
-/** The arms a worker's [param text], one JSON line each, says it played; null for a line it cannot read. */
+/** The arms a worker's [param text], one JSON line each, says it played. Null for a line it cannot read. */
 export function armsPlayed(text: string): ArmPlayed[] | null {
   const arms: ArmPlayed[] = [];
   for (const line of text.split(/\r?\n/)) {
@@ -155,11 +158,17 @@ export function armsPlayed(text: string): ArmPlayed[] | null {
     }
     try {
       const parsed: unknown = JSON.parse(line);
-      const { arm, runs, played } = (parsed ?? {}) as { arm?: unknown; runs?: unknown; played?: unknown };
-      if (typeof arm !== 'string' || !Number.isInteger(runs) || !Number.isInteger(played)) {
+      const { arm, runs, played }: Record<string, unknown> = isRecord(parsed) ? parsed : {};
+      if (
+        typeof arm !== 'string' ||
+        typeof runs !== 'number' ||
+        !Number.isInteger(runs) ||
+        typeof played !== 'number' ||
+        !Number.isInteger(played)
+      ) {
         return null;
       }
-      arms.push({ arm, runs: runs as number, played: played as number });
+      arms.push({ arm, runs, played });
     } catch {
       return null;
     }
@@ -225,7 +234,7 @@ interface EngineLeft {
   readonly seconds: number;
 }
 
-/** Plays [param options]'s bench with the engine at [param godotPath], answering the exit code. */
+/** Plays [param options]'s bench with the engine at [param godotPath]. Answers the exit code. */
 export async function runSpreadCommand(options: SpreadOptions, godotPath: string): Promise<number> {
   if (!existsSync(join(options.projectPath, SHARE_SCRIPT))) {
     throw new EngineUsageError(
@@ -278,7 +287,7 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
       console.log(`${options.scene} over ${plural(workers, 'worker')}.`);
     }
     const engine = (name: string, share: string): Promise<EngineLeft> =>
-      played(launch, slots, options, runDirectory, name, [
+      enginePlayed(launch, slots, options, runDirectory, name, [
         ...options.benchArguments,
         share,
         `${INTO}${shareDirectory}`,
@@ -341,7 +350,7 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
     const longest = Math.max(0, ...left.map((worker) => worker.seconds));
     console.log('');
     console.log(
-      `Spread: ${plural(runs, 'run')} in ${plural((arms[0] ?? []).length, 'arm')} over ${plural(workers, 'worker')}, ${((Date.now() - startedAt) / 1000).toFixed(1)} s; the longest worker took ${longest.toFixed(1)} s.`,
+      `Spread: ${plural(runs, 'run')} in ${plural((arms[0] ?? []).length, 'arm')} over ${plural(workers, 'worker')}, ${((Date.now() - startedAt) / 1000).toFixed(1)} s. The longest worker took ${longest.toFixed(1)} s.`,
     );
     rmSync(runDirectory, { recursive: true, force: true });
     return 0;
@@ -352,7 +361,7 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
 }
 
 /** One engine of the run, the scene with [param benchArguments], in a slot of its own. */
-async function played(
+async function enginePlayed(
   launch: EngineLaunch,
   slots: EngineSlots,
   options: SpreadOptions,

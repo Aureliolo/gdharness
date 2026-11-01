@@ -54,7 +54,7 @@ if (!existsSync(gdstyle)) {
 const command = lint
   ? ['check', '--max-warnings', '0']
   : ['fmt', ...(args.includes('--check') ? ['--check'] : [])];
-const ran = spawnSyncHidden(gdstyle, [...command, '--config', 'gdstyle.toml', ...files.sort()], {
+const ran = spawnSyncHidden(gdstyle, [...command, '--config', 'gdstyle.toml', ...files.toSorted()], {
   stdio: 'inherit',
 });
 if (ran.error !== undefined) {

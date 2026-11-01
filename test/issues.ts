@@ -21,6 +21,7 @@ import {
 } from '../src/issues.js';
 import { portFromEnv } from '../src/ports.js';
 import { spawnSyncHidden } from '../src/spawn.js';
+import { asObject } from './support/json.js';
 
 const report = defectReport('editor_scene op=open', new TypeError('Cannot read properties of undefined'));
 
@@ -32,8 +33,8 @@ assert.match(report, new RegExp(`gdharness ${pkg.version.replaceAll('.', '\\.')}
 assert.match(report, new RegExp(process.platform), 'and the platform it happened on');
 
 // The two sentences that decide what the agent does with it. Without the first it either loops on
-// a call that cannot succeed or walks away from one that would have worked on the next attempt;
-// without the second it files on somebody's behalf without asking.
+// a call that cannot succeed or walks away from one that would have worked on the next attempt.
+// Without the second it files on somebody's behalf without asking.
 assert.match(report, /Send the call once more before anything else/, 'a first sighting is worth a retry');
 assert.match(report, /Do not open an issue on your own initiative/, 'and hand the decision over');
 assert.match(report, /ask whether you may report it/, 'by asking the user first');
@@ -49,7 +50,7 @@ assert.match(report, /no way to open an issue yourself/, 'with the case where it
 // Both branches are asserted for what they offer, not for the absence of the other, so a fifth
 // wording that says nothing about retrying fails here rather than passing twice.
 const twice = defectReport('editor_scene op=open', new Error('EBUSY: locked'), { seenBefore: 1 });
-assert.match(twice, /sending the call again will not change it/, 'a repeat says the retry is spent');
+assert.match(twice, /Sending the call again will not change it/, 'a repeat says the retry is spent');
 assert.match(twice, /this exact failure once in this session already/, 'and counts what it has seen');
 assert.doesNotMatch(twice, /Send the call once more/, 'and does not also offer the retry');
 assert.match(
@@ -93,7 +94,11 @@ assert.match(report, /Godot +not known at the point this failed/, 'and an unknow
 // The one report nobody would think to send: the message itself being wrong. A failure this
 // program anticipates arriving dressed as one it does not is the misclassification that keeps
 // every future caller chasing a bug that is not there.
-assert.match(report, /this message is the defect/, 'a misfiled failure should invite its own report');
+assert.match(
+  report,
+  /Report it even when the cause was the project, the environment or the call, and say so/,
+  'a misfiled failure should invite its own report',
+);
 
 // A link that does not open is worse than no link: the agent hands it over and the user is stuck.
 const link = /(https:\/\/github\.com\/\S+)/.exec(report)?.[1];
@@ -106,7 +111,7 @@ assert.match(body, /Cannot read properties of undefined/, 'the prefilled body sh
 assert.match(body, /## What you did/, 'and the headings the template asks for');
 assert.match(
   body,
-  /rather than as a refusal naming what would have worked/,
+  /gdharness should have refused with what would have worked/,
   'and leave a place to say the message itself was the mistake',
 );
 assert.match(
@@ -139,25 +144,27 @@ assert.ok(
   typeof notice === 'object' && notice !== null && 'gdharness_feedback' in notice,
   'the feedback notice should be a JSON block under one named key',
 );
-const feedback = (
-  notice as { gdharness_feedback: { what_to_do?: unknown; enhancement_url?: unknown; why_here?: unknown } }
-).gdharness_feedback;
+const feedback = asObject(notice.gdharness_feedback, 'the feedback block');
 // Why it is on this answer at all, since on a plain success it read as something the call caused.
 assert.match(
-  String(feedback.why_here),
+  String(feedback['why_here']),
   /once every 250 answers, whatever the call was\. It is not about the answer it comes with/,
   'the notice says it is periodic and not about the answer it rides on',
 );
-assert.equal(feedback.enhancement_url, ENHANCEMENT_URL, 'and carry the link to open');
+assert.equal(feedback['enhancement_url'], ENHANCEMENT_URL, 'and carry the link to open');
 assert.equal(
   new URL(ENHANCEMENT_URL).searchParams.get('template'),
   'feature_request.md',
   'which should open the enhancement template',
 );
-assert.match(String(feedback.what_to_do), /offer to open an enhancement issue/, 'it should offer, not file');
-assert.match(String(feedback.what_to_do), /Only if they say yes/, 'and wait for a yes');
 assert.match(
-  String(feedback.what_to_do),
+  String(feedback['what_to_do']),
+  /offer to open an enhancement issue/,
+  'it should offer, not file',
+);
+assert.match(String(feedback['what_to_do']), /Only if they say yes/, 'and wait for a yes');
+assert.match(
+  String(feedback['what_to_do']),
   /a call you got wrong is not one/,
   'and say what does not count as a gap, since everything else here invites reporting',
 );

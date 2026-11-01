@@ -100,7 +100,7 @@ const DOWNLOAD_WAITS_MS = [2_000, 4_000, 8_000, 16_000, 32_000] as const;
  * The release asset, or a throw naming what came back instead.
  *
  * Retried, because a transient network failure here is a red build that says nothing about the
- * code; each failed attempt is printed so the log shows what the host answered and when.
+ * code. Each failed attempt is printed so the log shows what the host answered and when.
  */
 export async function download(
   url: string,
@@ -233,7 +233,7 @@ function contentsOf(zip: Buffer, entry: Entry): Buffer {
 /**
  * Opens the archive in process, because shelling out to tar or unzip makes the install depend
  * on which one PATH resolves. GNU tar cannot read a zip at all and is what a Windows machine
- * with git on it finds first, while Windows ships no unzip; that is one platform branch whose
+ * with git on it finds first, while Windows ships no unzip. That is one platform branch whose
  * two halves have to be right on a runner nobody here can reproduce. Reading the format is
  * about sixty lines and behaves the same everywhere.
  */
@@ -243,7 +243,7 @@ export function extract(zip: Buffer, into: string): void {
   // Every entry is judged and unpacked before the first one is written, so an archive that
   // turns out to be bad halfway through has put nothing on disk. It was fetched over the network
   // before anything looked at it, and a name such as `../x`, `/etc/x`, `D:/x` or `//host/share/x`
-  // otherwise writes wherever it likes; the containment check is the same arithmetic the
+  // otherwise writes wherever it likes. The containment check is the same arithmetic the
   // filesystem will do, shared with the server's own path handling. Holding the unpacked engine
   // in memory for a moment costs a few hundred megabytes on a runner that has gigabytes.
   const planned: { target: string; contents: Buffer | null }[] = [];

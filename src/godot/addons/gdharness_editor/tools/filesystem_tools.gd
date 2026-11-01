@@ -10,12 +10,12 @@ var _editor_plugin: EditorPlugin = null
 ## How many scans the editor has completed, counted off `sources_changed`, which it emits at the end
 ## of every scan once the reimport the scan found is done: the one moment a scan is over. Neither
 ## flag it offers says so. A threaded scan stops reporting itself when its thread finishes, and its
-## import runs a frame or more later when the thread is joined; an editor in the background took
+## import runs a frame or more later when the thread is joined. An editor in the background took
 ## long enough over that frame that a rescan answered before the import of 211 changed scenes began.
 var _scans_completed: int = 0
 ## When the last scan completed, on the engine's clock, or -1 before the first. The editor writes
 ## the class cache a frame after it stops reporting a scan, measured on 4.7.2, so a game started
-## in between reads a file being rewritten; how long ago the scan ended is what tells a caller
+## in between reads a file being rewritten. How long ago the scan ended is what tells a caller
 ## whether that write can still be coming.
 var _scan_finished_at_msec: int = -1
 ## How many reimports asked for through [method reimport_files] have finished. Counted here rather
@@ -63,7 +63,7 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 		uids = _reread_changed_uids(filesystem)
 		# Files the caller has just written, moved or deleted, read again one by one. The scan finds
 		# a script that appeared and leaves the global class of one that has gone in the editor's
-		# list, which it then writes back into the class cache at a path that is not there; reading
+		# list, which it then writes back into the class cache at a path that is not there. Reading
 		# the gone path again is what drops it.
 		var named: Variant = args.get("updateFiles", [])
 		if named is Array:
@@ -167,7 +167,7 @@ func scan_status(_args: Dictionary) -> Dictionary:
 	# The scenes open in tabs, the one shown and the ones holding unsaved edits: a scene edit on
 	# disk meets what the editor holds of it, and nothing said which scenes those were. A tab of a
 	# scene never saved has no path, and a new project's editor opens with an empty one, so it is
-	# left out of the open; one with edits is kept among the unsaved, as the edits a close would
+	# left out of the open. One with edits is kept among the unsaved, as the edits a close would
 	# lose.
 	var shown: Node = EditorInterface.get_edited_scene_root()
 	var open: Array[String] = []
@@ -226,7 +226,7 @@ func reimport_files(args: Dictionary) -> Dictionary:
 ## a move of its own: each cached resource and each open scene named for where it now is, so what
 ## holds them saves the new path, the editor's file list told of both ends, and each open scene that
 ## moved or that the move rewrote read again from the file. A scene with unsaved edits is left as it
-## is and named, since reading it again would discard them; its root names the new path either way.
+## is and named, since reading it again would discard them. Its root names the new path either way.
 ##
 ## A moved tab is read again even when its text did not change: the editor keeps each tab's path
 ## twice, on the root and in its own list, and a script can set only the first. The second is what

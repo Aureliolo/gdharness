@@ -236,8 +236,8 @@ const MAIN_GD = [
   //
   // Through a node that is not there rather than a Variant. The analyser knows every method on
   // a Variant is unsafe and this project has that warning at error level, so a Variant call is a
-  // parse error and the script never loads at all; a Node the scene has not got is a null the
-  // analyser cannot see, holding a method it knows perfectly well.
+  // parse error and the script never loads at all. A Node the scene has not got is a null the
+  // analyser cannot see, and it holds a method the analyser knows perfectly well.
   'func break_on_purpose() -> void:',
   '\tvar nobody: Node = get_node_or_null("NoSuchNode")',
   '\tstash = nobody.get_index()',
@@ -296,7 +296,7 @@ const TOWER_GD = [
 const BREAK_LINE = MAIN_GD.findIndex((line) => line.includes('print(')) + 1;
 
 interface Editor {
-  /** Calls a tool and answers with its payload, failing on a refusal. */
+  /** Calls a tool and answers with its payload. A refusal fails the case. */
   call: (name: string, args: Record<string, unknown>) => Promise<unknown>;
   /** Calls a tool that must be refused and answers with the sentence it was refused with. */
   refusal: (name: string, args: Record<string, unknown>) => Promise<string>;
@@ -306,7 +306,8 @@ interface Editor {
     args: Record<string, unknown>,
   ) => Promise<{ ok: boolean; text: string; answer: unknown }>;
   /**
-   * Starts a run of the project and answers once its runtime is listening, failing if it is not.
+   * Starts a run of the project and answers once its runtime is listening. A runtime that never
+   * listens fails the case.
    *
    * The tool's own wait for the announcement is five seconds, and a game a loaded runner is
    * booting can take longer: the answer then says `mayYetAnnounce` and names `runtimeWaitMs`,
@@ -1139,7 +1140,7 @@ function symbolNames(symbols: unknown[]): string[] {
 /** Every node path in a scene_tree answer, sorted, so a case says what the scene holds. */
 function nodePaths(tree: unknown): string[] {
   const children = asArray(get(tree, 'children'), 'children').flatMap(nodePaths);
-  return [asString(get(tree, 'path'), 'path'), ...children].sort();
+  return [asString(get(tree, 'path'), 'path'), ...children].toSorted();
 }
 
 /**
@@ -1206,7 +1207,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     return textOf(response) ?? '';
   };
 
-  // A refusal is an answer a case may expect and retry past; an error in the protocol is the server
+  // A refusal is an answer a case may expect and retry past. An error in the protocol is the server
   // failing to answer at all, which no case expects. It has no result, so it read as a success with
   // no text, and a caller parsing that text failed on the parse with the server's error unseen.
   const attempt = async (name: string, args: Record<string, unknown>) => {
@@ -1331,6 +1332,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
     const sampled = thread.account();
     throw new Error(
       `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${accountOf(server)}${sampled === '' ? '' : `\n\nThe editor's main thread, sampled every quarter second:\n${sampled}`}`,
+      { cause: failure },
     );
   } finally {
     thread.stop();
@@ -1713,7 +1715,7 @@ async function testAPathWritesOneComponent({ call, refusal, project }: Editor): 
       ],
       alpha: get(read, 'properties', 'modulate', 'a'),
       red: get(read, 'properties', 'modulate', 'r'),
-      // frame_coords is not stored; the frame it sets is, column 2 of the first row.
+      // frame_coords is not stored. The frame it sets is, column 2 of the first row.
       frame: get(read, 'properties', 'frame'),
     },
     { position: [4, -3], size: [30, 12], alpha: 0.5, red: 1, frame: 2 },
@@ -1726,7 +1728,7 @@ async function testAPathWritesOneComponent({ call, refusal, project }: Editor): 
 
   assert.match(
     await refusal('scene_node', set({ 'position:z': 1 })),
-    /Sprite2D\.position is a Vector2, so it has no z; it has x, y/,
+    /Sprite2D\.position is a Vector2, so it has no z\. It has x, y/,
     'a component the value does not have is refused, naming the ones it has',
   );
   assert.match(
@@ -2034,7 +2036,7 @@ async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor)
     const followed: unknown = get(renamed, 'followed');
     assert.ok(Array.isArray(followed), text(renamed));
     assert.deepEqual(
-      followed.map(String).sort(),
+      followed.map(String).toSorted(),
       ['res://kin/big.tscn', 'res://kin/host.tscn'],
       text(renamed),
     );
@@ -2065,7 +2067,7 @@ async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor)
       `${fileText(project, 'kin/crate.tscn')}\n[node name="Lid" type="Sprite2D" parent="."]\n`,
     );
     await call('editor_rescan', { projectPath: project });
-    for (const [base, children] of [
+    for (const [base, childNames] of [
       ['kin/crate.tscn', ['Look']],
       ['kin/crate_copy.tscn', ['Look', 'Lid']],
     ] as const) {
@@ -2074,7 +2076,7 @@ async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor)
       const tree = get(await call('scene_tree', { projectPath: project, scenePath }), 'tree');
       assert.deepEqual(
         asArray(get(tree, 'children')).map((child) => get(child, 'name')),
-        children,
+        childNames,
         `${scenePath} inherits ${base}: ${fileText(project, scenePath)}`,
       );
     }
@@ -2146,7 +2148,7 @@ async function testAMovedNodeKeepsItsPathsInTheEditor({ call, refusal, project }
     const retargeted: unknown = get(renamed, 'retargeted');
     assert.ok(Array.isArray(retargeted), text(renamed));
     assert.deepEqual(
-      retargeted.map((entry) => `${String(get(entry, 'nodePath'))} ${String(get(entry, 'to'))}`).sort(),
+      retargeted.map((entry) => `${String(get(entry, 'nodePath'))} ${String(get(entry, 'to'))}`).toSorted(),
       ['Anim Boom:scale', 'Follow ../Boom'],
       text(renamed),
     );
@@ -2365,7 +2367,7 @@ async function testResources({ call, refusal, project }: Editor): Promise<void> 
   // same, which is the round trip a caller copying a look from one resource to the next depends on.
   const read = await call('resource_edit', { ...theme, op: 'read' });
   assert.equal(get(read, 'resourceType'), 'Theme', JSON.stringify(read));
-  const held = get(read, 'properties') as Record<string, unknown>;
+  const held = asObject(get(read, 'properties'), 'properties');
   assert.deepEqual(
     held,
     {
@@ -2383,7 +2385,8 @@ async function testResources({ call, refusal, project }: Editor): Promise<void> 
     'properties',
   );
   assert.ok(
-    'default_base_scale' in (everything as Record<string, unknown>) && !('default_base_scale' in held),
+    'default_base_scale' in asObject(everything, 'properties with defaults') &&
+      !('default_base_scale' in held),
     `includeDefaults adds what the file leaves at its default: ${JSON.stringify(everything)}`,
   );
   assert.match(
@@ -2438,7 +2441,7 @@ async function testABuiltInResourceIsReadWithWhatItHolds({ call, project }: Edit
       get(tally, '_type'),
       get(tally, 'script', 'path'),
       get(tally, 'count'),
-      Object.keys(asObject(tally)).sort(),
+      Object.keys(asObject(tally)).toSorted(),
     ],
     ['Resource', 'res://tally_made.gd', 3, ['_type', 'count', 'script']],
     `the resource is read with what it holds, and no _init ran for its defaults: ${JSON.stringify(tally)}`,
@@ -2521,7 +2524,7 @@ async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise
       nodePath: 'Map',
       cells: [{ coords: { x: 5, y: 5 }, sourceId: 7, atlasCoords: { x: 0, y: 0 } }],
     }),
-    /names source 7, and the TileSet has source 0; sourceId -1 erases a cell\. Nothing was placed\./,
+    /names source 7, and the TileSet has source 0\. sourceId -1 erases a cell\. Nothing was placed\./,
     'a cell from a source the tile set has not should be refused',
   );
 
@@ -2639,7 +2642,7 @@ async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise
  * standalone copy of its base, and an add to a scene instancing another froze the instance root's
  * own position into it as an override. And pack saves only what the scene owns, so a property set
  * on a node inside an instance, or the node deleted or moved, was answered as done and was not in
- * the file; the move left two of it.
+ * the file. The move left two of it.
  */
 async function testAWriteKeepsWhatTheSceneComesFrom({ call, refusal, project }: Editor): Promise<void> {
   const inherited = { projectPath: project, scenePath: 'res://layers/inherited.tscn' };
@@ -2835,7 +2838,7 @@ async function testAMoveBringsTheEditorAlong({ call, project }: Editor): Promise
   assert.deepEqual(
     asArray(get(moved, 'editor', 'retargetedTabs'))
       .map(String)
-      .sort(),
+      .toSorted(),
     ['res://moving/hero.tscn', 'res://moving/stage.tscn'],
     JSON.stringify(get(moved, 'editor')),
   );
@@ -3045,18 +3048,18 @@ async function testASetIsReadBack({ call, refusal, project }: Editor): Promise<v
 
   assert.match(
     await refusal('scene_node', { ...scene, op: 'add', nodeType: 'Node', nodeName: 'Clock' }),
-    /: The root, \w+, already has a child named Clock; Clock2 is free there\.$/m,
+    /: The root, \w+, already has a child named Clock\. Clock2 is free there\.$/m,
   );
   assert.match(
     await refusal('scene_node', { ...scene, op: 'add', nodeType: 'Node', nodeName: 'a.b' }),
-    /a\.b is not a name a node can have; Godot would save it as a_b/,
+    /a\.b is not a name a node can have\. Godot would save it as a_b/,
   );
   assert.match(await refusal('scene_node', set('Bar', { name: 'Clock' })), /already has a child named Clock/);
   assert.equal(get(await call('scene_node', set('Bar', { name: 'Gauge' })), 'nodePath'), 'Gauge');
 
   assert.match(
     await refusal('scene_node', set('.', { Visibility: false })),
-    /: Node2D has no property Visibility; the nearest it has are visibility_layer, visible\.$/,
+    /: Node2D has no property Visibility\. The nearest it has are visibility_layer, visible\.$/,
   );
   await call('scene_node', { ...scene, op: 'add', nodeType: 'AudioStreamPlayer', nodeName: 'Speaker' });
   assert.match(
@@ -3219,7 +3222,7 @@ async function testSignalsAreTheFilesOwn({ call, refusal, project }: Editor): Pr
   // every one, the node's own class's first, since those are the ones it was made for.
   assert.match(
     await refusal('scene_signal', { ...ends, signalName: 'presed', op: 'connect', methodName: 'queue_free' }),
-    /Go has no signal presed; the nearest it has (?:is|are) pressed\b/,
+    /Go has no signal presed\. The nearest it has (?:is|are) pressed\b/,
   );
   const every = await refusal('scene_signal', {
     ...ends,
@@ -3227,8 +3230,8 @@ async function testSignalsAreTheFilesOwn({ call, refusal, project }: Editor): Pr
     op: 'connect',
     methodName: 'queue_free',
   });
-  assert.match(every, /Go has no signal qwxz; it has /, every);
-  const offered = (every.split('; it has ')[1] ?? '').replace(/\.$/, '').split(', ');
+  assert.match(every, /Go has no signal qwxz\. It has /, every);
+  const offered = (every.split('. It has ')[1] ?? '').replace(/\.$/, '').split(', ');
   assert.ok(
     ['toggled', 'resized', 'tree_entered'].every((name) => offered.includes(name)),
     `every signal is offered: ${every}`,
@@ -3299,10 +3302,13 @@ async function testSignalsAreTheFilesOwn({ call, refusal, project }: Editor): Pr
 /**
  * Animation edits land in the file that keeps them.
  *
- * A library in a .tres of its own was edited in memory and only the scene saved; an animation in a
- * named library was not found; a keyframe was read without the property it keys, so a pair of
- * numbers keyed on a position was stored as a list; a keyframe with no time went in at 0. And a
- * state or a transition the state machine refused was answered as added.
+ * The faults this holds:
+ * - a library in a .tres of its own was edited in memory and only the scene saved
+ * - an animation in a named library was not found
+ * - a keyframe was read without the property it keys, so a pair of numbers keyed on a position was
+ *   stored as a list
+ * - a keyframe with no time went in at 0
+ * - a state or a transition the state machine refused was answered as added.
  */
 async function testAnimationEditsLandWhereKept({ call, refusal, project }: Editor): Promise<void> {
   const scene = { projectPath: project, scenePath: 'res://moves/player.tscn', playerNodePath: 'Player' };
@@ -3501,7 +3507,7 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
       fromState: 'Start',
       toState: 'End',
     }),
-    'The editor answered scene_animation disconnect_states with an error: There is no transition from Start to End; the ones leaving Start go to Waiting.',
+    'The editor answered scene_animation disconnect_states with an error: There is no transition from Start to End. The ones leaving Start go to Waiting.',
   );
   const dropped = await call('scene_animation', { ...states, op: 'remove_state', stateName: 'Waiting' });
   assert.deepEqual(
@@ -3552,13 +3558,14 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
 /**
  * A tile set has tiles, and a painted cell names one.
  *
- * The atlas was given a texture and no tiles, so every cell painted from it drew nothing; a texture
- * that did not load was skipped and an empty set saved; and a cell naming a tile the source lacks
- * was counted as placed.
+ * The faults this holds:
+ * - the atlas was given a texture and no tiles, so every cell painted from it drew nothing
+ * - a texture that did not load was skipped and an empty set saved
+ * - a cell naming a tile the source lacks was counted as placed.
  */
 async function testTilesDrawWhatTheyName({ call, refusal, project }: Editor): Promise<void> {
   // The atlas is imported by the editor's first scan, which can still be running when a case run on
-  // its own starts; a rescan waits for it.
+  // its own starts. A rescan waits for it.
   await call('editor_rescan', { projectPath: project });
   const tileset = { projectPath: project, resourcePath: 'res://tiles/set.tres', op: 'create_tileset' };
   const made = await call('resource_edit', {
@@ -3613,7 +3620,7 @@ async function testTilesDrawWhatTheyName({ call, refusal, project }: Editor): Pr
   assert.match(nodeBody(fileText(project, 'tiles/map.tscn'), 'Ground'), /tile_map_data = PackedByteArray/);
   assert.match(
     await refusal('scene_node', cell({ x: 1, y: 0 })),
-    /cells\[0\] at \(0, 0\): source 0 has no tile at \(1, 0\); it has tiles at \(0, 0\)\. Nothing was placed\./,
+    /cells\[0\] at \(0, 0\): source 0 has no tile at \(1, 0\)\. It has tiles at \(0, 0\)\. Nothing was placed\./,
   );
   // The cells read back as cells, in the form set_tilemap_cells takes, rather than as the packed
   // bytes the scene stores them in.
@@ -3664,10 +3671,11 @@ async function testABakeReadsOnlyItsOwnScene({ call, project }: Editor): Promise
 /**
  * A create does not replace what is there, and makes what it was asked for or nothing.
  *
- * A scene or resource created over a file replaced it whole; a class that is not a node went into
- * a Node variable and came back as "Invalid tool result"; a script that did not load was skipped
- * and a plain resource saved; and an imported file was edited in the editor's cache and then
- * refused, leaving the edited copy behind.
+ * The faults this holds:
+ * - a scene or resource created over a file replaced it whole
+ * - a class that is not a node went into a Node variable and came back as "Invalid tool result"
+ * - a script that did not load was skipped and a plain resource saved
+ * - an imported file was edited in the editor's cache and then refused, and the edited copy stayed.
  */
 async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor): Promise<void> {
   const scene = { projectPath: project, scenePath: 'res://once.tscn' };
@@ -3693,7 +3701,7 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
     rootNodeName: 'Arena',
     script: 'res://layers/tool_node.gd',
   });
-  assert.equal((made as { rootNodeName?: unknown }).rootNodeName, 'Arena', JSON.stringify(made));
+  assert.equal(get(made, 'rootNodeName'), 'Arena', JSON.stringify(made));
   assert.equal(
     get(made, 'script'),
     'res://layers/tool_node.gd',
@@ -3705,13 +3713,13 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
     'the root is saved under its name, carrying the script',
   );
   // A class a script declares, by its name, as the editor's create dialog offers it.
-  const clapped = (await call('scene_create', {
+  const clapped = await call('scene_create', {
     projectPath: project,
     scenePath: 'res://clapped.tscn',
     rootNodeType: 'Clapper',
-  })) as { rootNodeType?: unknown; scriptClass?: unknown; rootNodeName?: unknown };
+  });
   assert.deepEqual(
-    [clapped.rootNodeType, clapped.scriptClass, clapped.rootNodeName],
+    [get(clapped, 'rootNodeType'), get(clapped, 'scriptClass'), get(clapped, 'rootNodeName')],
     ['Node', 'Clapper', 'Clapper'],
     JSON.stringify(clapped),
   );
@@ -3725,14 +3733,18 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
     /path="res:\/\/clapper\.gd"/,
     fileText(project, 'clapped.tscn'),
   );
-  const added = (await call('scene_node', {
+  const added = await call('scene_node', {
     projectPath: project,
     scenePath: 'res://clapped.tscn',
     op: 'add',
     nodeName: 'Second',
     nodeType: 'Clapper',
-  })) as { nodeType?: unknown; scriptClass?: unknown };
-  assert.deepEqual([added.nodeType, added.scriptClass], ['Node', 'Clapper'], JSON.stringify(added));
+  });
+  assert.deepEqual(
+    [get(added, 'nodeType'), get(added, 'scriptClass')],
+    ['Node', 'Clapper'],
+    JSON.stringify(added),
+  );
   assert.match(nodeBody(fileText(project, 'clapped.tscn'), 'Second'), /script = ExtResource/);
   assert.match(
     await refusal('scene_create', {
@@ -3778,7 +3790,7 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
   );
   assert.match(
     await refusal('scene_node', { ...scene, op: 'add', nodeType: 'Timer2', nodeName: 'Late' }),
-    /nodeType must be a node class or a class_name in the project's class list, and Timer2 is neither; the nearest (is|are) [^.]*\bTimer\b/,
+    /nodeType must be a node class or a class_name in the project's class list, and Timer2 is neither\. The nearest (is|are) [^.]*\bTimer\b/,
   );
   assert.match(
     await refusal('scene_node', { ...scene, op: 'duplicate', nodePath: '.', newName: 'Again' }),
@@ -3974,7 +3986,7 @@ async function testAReimportTakesInFilesTheEditorHasNotSeen({ call, project }: E
   assert.deepEqual(
     asArray(get(broken[0], 'paths'))
       .map((path) => asString(path))
-      .sort(),
+      .toSorted(),
     ['res://installed_avatars/broken0.png', 'res://installed_avatars/broken1.png'],
     text(reimported),
   );
@@ -4113,19 +4125,19 @@ async function testAScanWritesTheCacheFromTheEditor({ call, project }: Editor): 
  *
  * The sequence is the one `refresh_classes` prints as its own advice, run exactly as printed.
  * Downstream: the rebuild wrote a correct cache and named `Offer` as a class the editor was not
- * holding; the rescan it recommended then wrote the editor's own list over that file, dropped
+ * holding. The rescan it recommended then wrote the editor's own list over that file, dropped
  * `Offer`, and answered `ok: true`. The damage surfaced in a separate headless engine an hour
  * later as `Identifier "Offer" not declared in the current scope`, exit 105, which reads as a
  * broken test rather than as a clobbered cache. Twenty minutes and one misread failure.
  *
  * What is asked is the thing a caller following that advice is entitled to: after the rescan, the
  * class is still in the file. Whether the editor picked it up or the rescan was refused is the
- * engine's business and the answer's; losing it silently is not an option either way.
+ * engine's business and the answer's. Losing it silently is not an option either way.
  */
 async function testARescanKeepsWhatTheRebuildWrote({ call, project }: Editor): Promise<void> {
   const cache = join(project, '.godot', 'global_script_class_cache.cfg');
   // Enough files that the editor's scan takes real time. Reported from a project of 376 classes,
-  // where the scan reported itself finished 296ms in and the cache was written after that; a
+  // where the scan reported itself finished 296ms in and the cache was written after that. A
   // project of three files finishes inside the first poll and never shows the gap.
   const crowd = join(project, 'crowd');
   mkdirSync(crowd, { recursive: true });
@@ -4251,7 +4263,7 @@ async function testARescanDropsAClassWhoseScriptIsGone({ call, project }: Editor
   assert.equal(get(scanned, 'ok'), true, `the cache is right when the call comes back: ${text(scanned)}`);
 
   // The consequence the report named: a headless engine reading the cache now parses the script
-  // that shares the bare name. The engine having run is the positive beside that absence; what
+  // that shares the bare name. The engine having run is the positive beside that absence. What
   // else this project's three-frame boot reports at exit is its own business.
   const checked = await call('editor_run', { projectPath: project, op: 'check' });
   assert.equal(
@@ -4334,7 +4346,7 @@ async function testAPresetAddedBesideTheEditorIsNoted({ call, project }: Editor)
  * the editor answers would be satisfied by a server that quietly read the file and called it the
  * editor's, which is exactly the ambiguity the argument exists to remove, so the file is changed
  * underneath the editor first, by hand rather than through a tool, and then both are asked. Whether
- * an editor ever picks a change up on its own is the engine's business; what is asserted is that
+ * an editor ever picks a change up on its own is the engine's business. What is asserted is that
  * the two answers come from two places, and the editor's is the one it was holding.
  *
  * Then the other half: a write through project_settings is taken up by the editor. Written to the
@@ -4842,22 +4854,26 @@ async function testAMethodAddedToAnAnalysedTypeIsPickedUp({ call, project }: Edi
  * and ones that exist nowhere are reported in the words the contradiction check reads.
  *
  * The enum half of #763, and like the method case above, the half that does not misbehave here.
- * game-b reported `Cannot find member "ZZ_PROBE" in base "Charm.Kind"` against a declaring file
+ * game-b reported `Cannot find member "ZZ_PROBE" in base "Token.Kind"` against a declaring file
  * that had it, cleared by a reload of that script and not by a plain rescan. An editor this suite
  * starts resolves the new member even with the declaring script built and held and opened through
  * the language server, so the fault needs something an editor seconds old does not have. Held as
  * what the editor does, so a Godot that starts holding the old enum fails this rather than quietly
  * matching. The reload's constants show the built copy still without the new member at that same
- * moment, so the analyser here is not reading the built copy's enum; game-b's editor, up for
+ * moment, so the analyser here is not reading the built copy's enum. game-b's editor, up for
  * fourteen hours, was reading something that was stale.
  *
  * What has been tried here and read clean, so the next attempt starts past it, all on a headless
- * 4.7.2 editor with the declaring script built and held: diagnosing a dependent first and then a new
- * probe with nothing in between, game-b's own sequence; a plain rescan between the edit and the
- * diagnosis; reloading a dependent between them; six rounds of adding a member one at a time in
- * those orders; and the declaring script failing analysis on a class the editor had not loaded, the
- * extra ingredient in game-b's third reproduction. In every one the held copy lagged the file and
- * the analyser did not.
+ * 4.7.2 editor with the declaring script built and held:
+ * - diagnosing a dependent first and then a new probe with nothing in between, game-b's own
+ *   sequence
+ * - a plain rescan between the edit and the diagnosis
+ * - reloading a dependent between them
+ * - six rounds of adding a member one at a time in those orders
+ * - the declaring script failing analysis on a class the editor had not loaded, the extra
+ *   ingredient in game-b's third reproduction.
+ *
+ * In every one the held copy lagged the file and the analyser did not.
  *
  * The second half is the engine's own wording for a member that is genuinely missing, which is
  * what `missingMemberIn` reads: a change of wording would leave every stale enum member unnamed,
@@ -4948,7 +4964,7 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
       'Cannot find member "NEVER" in base "Peal.Kind".',
       'Cannot find member "NOWHERE" in base "Peal".',
       'Static function "nope()" not found in base "Peal".',
-      // Only because this project raises the unsafe method access warning to an error; on the
+      // Only because this project raises the unsafe method access warning to an error. On the
       // default warnings the line above is the whole of what a caller gets.
       'The method "nope()" is not present on the inferred type "Peal" (but may be present on a subtype). (Warning treated as error.)',
     ],
@@ -4961,7 +4977,7 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
   );
 
   // A reload the editor refuses answers with what the copy held and whether it still holds it. Held
-  // first, so there is a copy to keep; then a parse error in the file. The failed compile leaves the
+  // first, so there is a copy to keep, then a parse error in the file. The failed compile leaves the
   // copy unusable, and the addon compiles it again from the text it was built from, which is what
   // lets the answer say it is as it was.
   writeFileSync(join(project, 'tower.gd'), TOWER_GD.join('\n'));
@@ -5016,14 +5032,14 @@ async function testAnEnumMemberAddedToAHeldTypeIsPickedUp({ call, project }: Edi
  *
  * #879: a class was rewritten to extend a class written in the same change, and the editor parsed it
  * before the new base was a known class. Godot keeps that parse for every other script to resolve
- * the class through, and a reload drops it only when the text differs from what was parsed; the text
+ * the class through, and a reload drops it only when the text differs from what was parsed. The text
  * had not changed, only the classes around it. So the reload answered with every method while each
  * script naming the class still read "because of a parser error", until the editor restarted.
  *
  * The failed parse lasts only while something holds it. A language server client holding a file
  * open does, since the server keeps that file's parse and the parses it depends on, and an editor
- * open beside the project is such a client; the one gdharness itself uses closes each file once
- * answered, and with nothing holding the failed parse the next request parsed the class afresh and
+ * open beside the project is such a client. The one gdharness itself uses closes each file once
+ * answered. With nothing holding the failed parse, the next request parsed the class afresh and
  * every setup here read clean. So a second client opens a script naming the class while the base
  * is missing and keeps it open, the base is then written and registered, and the stale reading is
  * asserted before the reload, so the case shows it reached the state, and the clean one after it.
@@ -5119,7 +5135,7 @@ async function testAClassReloadedOnceItsBaseExistsReachesItsUsers({
  * does, until the socket it answers with is destroyed. Answered once the server has published the
  * file's diagnostics, which is when it has parsed it.
  */
-async function holdOpen(port: number, project: string, file: string, text: string): Promise<Socket> {
+async function holdOpen(port: number, project: string, file: string, source: string): Promise<Socket> {
   const socket = connect(port, '127.0.0.1');
   let heard = '';
   const published = new Promise<void>((resolve, reject) => {
@@ -5140,8 +5156,8 @@ async function holdOpen(port: number, project: string, file: string, text: strin
       reject(error);
     });
   });
-  const send = (message: unknown): void => {
-    const body = JSON.stringify({ jsonrpc: '2.0', ...(message as object) });
+  const send = (message: Record<string, unknown>): void => {
+    const body = JSON.stringify({ jsonrpc: '2.0', ...message });
     socket.write(`Content-Length: ${Buffer.byteLength(body, 'utf8')}\r\n\r\n${body}`);
   };
   await new Promise<void>((resolve, reject) => {
@@ -5156,7 +5172,9 @@ async function holdOpen(port: number, project: string, file: string, text: strin
   send({ method: 'initialized', params: {} });
   send({
     method: 'textDocument/didOpen',
-    params: { textDocument: { uri: pathToFileURL(file).href, languageId: 'gdscript', version: 1, text } },
+    params: {
+      textDocument: { uri: pathToFileURL(file).href, languageId: 'gdscript', version: 1, text: source },
+    },
   });
   await published;
   return socket;
@@ -5288,7 +5306,7 @@ async function testAMemberRenameWaitsForTheClassesItTypesBy({
   try {
     assert.match(
       await refusal('script_edit', rename),
-      /^Nothing was renamed: Gauge is a class this project declares that the editor has not loaded, so its language server cannot tell the type of a value of it, and a use of level through one would be left as it was\. editor_rescan brings it in; rename after it\./,
+      /^Nothing was renamed: Gauge is a class this project declares that the editor has not loaded, so its language server cannot tell the type of a value of it, and a use of level through one would be left as it was\. editor_rescan brings it in\. Rename after it\./,
     );
     assert.equal(readFileSync(join(dir, 'gauge.gd'), 'utf8'), gauge, 'and nothing was written');
     assert.equal(readFileSync(join(dir, 'reader.gd'), 'utf8'), reader, 'in either file');
@@ -5357,7 +5375,7 @@ async function testAutoReloadKeepsUnsavedEdits({ call, project, printed }: Edito
   const path = 'res://watched/watched.tscn';
   const file = join(project, 'watched', 'watched.tscn');
   const before = readFileSync(file, 'utf8');
-  const count = (text: string): number => printed().split(text).length - 1;
+  const count = (phrase: string): number => printed().split(phrase).length - 1;
   const held = `${path} changed on disk while the editor holds unsaved changes to it`;
   const reloaded = `reloading: ${path}`;
   const heldBefore = count(held);
@@ -5403,10 +5421,10 @@ async function testAutoReloadKeepsUnsavedEdits({ call, project, printed }: Edito
  * The member half holds what Godot 4.7.2 was measured to answer: the references of a method's own
  * declaration miss an override's own uses, a bare call inside the overriding class and a call on a
  * value typed as it, and only a definition asked at each finds them. Another class's method of the
- * same name and the name inside a string are left; a call on a value of unknown type cannot be
+ * same name and the name inside a string are left. A call on a value of unknown type cannot be
  * written in this project, whose warnings refuse it, so the regressions hold that one. The class
- * half moves the script as well, and holds
- * that the editor lets go of the old name: a scan alone keeps a class whose script has gone, and
+ * half moves the script as well, and holds that the editor lets go of the old name: a scan alone
+ * keeps a class whose script has gone, and
  * every scan after it writes the class back into the cache at a path that is not there.
  */
 async function testARenameFollowsTheEngine({ call, project, printed }: Editor): Promise<void> {
@@ -5651,7 +5669,7 @@ async function testAPlayedRunOutlivesTheServerUnderIt(godotPath: string): Promis
       );
       // The other half of the held-game case beside this one: a replacement attaching to a game
       // that is running must not take it for held. The attach asks the adapter for a stack, and a
-      // running game has to answer none; a stale frame left over from an earlier halt would read
+      // running game has to answer none. A stale frame left over from an earlier halt would read
       // here as a game sitting still.
       const picked = await answered('editor_output', {});
       assert.equal(get(picked, 'heldAt'), null, `a running game picked up is not held: ${text(picked)}`);
@@ -5693,16 +5711,16 @@ async function testAPlayedRunOutlivesTheServerUnderIt(godotPath: string): Promis
  * in after a reconnect, and the game itself is what says held: it accepts a runtime connection and
  * never answers a ping.
  *
- * So the three are held together, since any one alone fits another story: the first server's
- * reason is the event arriving on a socket that never attached; frames for a second session while
- * held is the instrument working; the replacement reading held from the runtime, refusing the stack
- * for the right reason, and the game ticking once let go, is what separates held from wedged and
- * from forgotten.
+ * So the three are held together, since any one alone fits another story:
+ * - the first server's reason is the event arriving on a socket that never attached
+ * - frames for a second session while held is the instrument working
+ * - the replacement reading held from the runtime, refusing the stack for the right reason, and the
+ *   game ticking once let go, is what separates held from wedged and from forgotten.
  */
 async function testAHeldGameIsStillHeldForTheReplacement(godotPath: string): Promise<void> {
   await withEditor(godotPath, async (own) => {
-    const main = { projectPath: own.project, scriptPath: 'res://main.gd' };
-    await own.call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+    const mainScript = { projectPath: own.project, scriptPath: 'res://main.gd' };
+    await own.call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
     const run = await own.play({ op: 'start', headless: true });
     assert.equal(get(run, 'through'), 'editor', `the editor should be the one playing: ${text(run)}`);
     const pid = asNumber(get(run, 'runtime', 'pid'), 'the played run needs a process of its own');
@@ -5904,7 +5922,7 @@ function lspMessages(bytes: Buffer): Record<string, unknown>[] {
       return messages;
     }
     messages.push(
-      JSON.parse(bytes.subarray(bodyStart, bodyStart + length).toString('utf8')) as Record<string, unknown>,
+      asObject(JSON.parse(bytes.subarray(bodyStart, bodyStart + length).toString('utf8')), 'an LSP message'),
     );
     at = bodyStart + length;
   }
@@ -5917,7 +5935,7 @@ function lspMessages(bytes: Buffer): Record<string, unknown>[] {
  * The fixture's editor serves on a port reserved for it rather than Godot's default, and the bridge
  * is given no port and no GDHARNESS_LSP_PORT, so the answer can come only from the record. The
  * initialize goes through untouched and is answered for this project, with no request to move to
- * another; the client closing its input ends the bridge cleanly. Asked about a project no editor
+ * another. The client closing its input ends the bridge cleanly. Asked about a project no editor
  * serves, given this editor's port, it refuses and names the project that port belongs to.
  */
 async function testTheLspCommandBridgesToTheEditor({ project, lspPort }: Editor): Promise<void> {
@@ -5992,7 +6010,7 @@ async function testTheLspCommandBridgesToTheEditor({ project, lspPort }: Editor)
     assert.match(
       refused.stderr,
       new RegExp(
-        `no language server of .+ answered in 0 s\\.\\n {2}port ${String(lspPort)} \\(--port\\): The language server on port ${String(lspPort)} belongs to the editor of .+; no editor of .+ answers there\\.`,
+        `no language server of .+ answered in 0 s\\.\\n {2}port ${String(lspPort)} \\(--port\\): The language server on port ${String(lspPort)} belongs to the editor of .+\\. No editor of .+ answers there\\.`,
       ),
       refused.stderr,
     );
@@ -6180,12 +6198,12 @@ async function stackWithin(
  * and the line the game printed after being let go.
  */
 async function testDebugging({ call, refusal, attempt, play, project }: Editor): Promise<void> {
-  const main = { projectPath: project, scriptPath: 'res://main.gd' };
+  const mainScript = { projectPath: project, scriptPath: 'res://main.gd' };
 
   // Nothing is playing, and the whole trap this replaces was that every one of these answered with
   // an empty stack: the same answer a game stopped in an empty frame gives. The case before this one
   // stopped its run, which is still the run the server holds, so the refusal is the one for a run
-  // that has ended; the property held is the same either way: no session, and the command to start
+  // that has ended. The property held is the same either way: no session, and the command to start
   // a run that has one.
   const noStack = await refusal('debug_state', { op: 'stack' });
   assert.match(noStack, /no debug session to answer for/, noStack);
@@ -6197,7 +6215,7 @@ async function testDebugging({ call, refusal, attempt, play, project }: Editor):
   );
 
   // The print, so the frame the game stops in is _ready with the sum already worked out.
-  await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+  await call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
 
   // The autoload announces itself before the main scene is ready, which is where this run's
   // breakpoint is, so a game stopped there has already announced and the start says so.
@@ -6309,7 +6327,7 @@ async function testDebugging({ call, refusal, attempt, play, project }: Editor):
     'a stack asked for while the game runs should say so and name what stops it',
   );
 
-  await call('debug_breakpoint', { ...main, op: 'remove', line: BREAK_LINE });
+  await call('debug_breakpoint', { ...mainScript, op: 'remove', line: BREAK_LINE });
   // The game is left running: it is past the breakpoint and answering, which is what the runtime
   // cases need, and a game stopped at a breakpoint answers nothing at all.
 }
@@ -6506,7 +6524,7 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
 
   // And the game is still running, which is the whole point of refusing. Frames rather than a
   // property read: a game held at a debugger break answers nothing at all, and a game that is
-  // merely alive still has to be advancing for anything after this to mean anything.
+  // merely alive still has to be counting frames for anything after this to mean anything.
   assert.equal(
     get(await call('runtime_wait', { ...game, op: 'frames', frames: 2 }), 'frames'),
     2,
@@ -6568,7 +6586,7 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
 
   // And on a wait, where the same conversion landed worst of all: the word became 0.0, 0.0 equalled
   // the property already, and the wait answered met: true with the real value beside it, in zero
-  // milliseconds, about a state nobody asked about. A refused call is read; a met is acted on.
+  // milliseconds, about a state nobody asked about. A refused call is read. A met is acted on.
   const impossible = await refusal('runtime_wait', {
     ...game,
     op: 'until',
@@ -6582,7 +6600,7 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
   // A property the node has not got, refused rather than waited on. Waiting answered "not met"
   // after the whole timeout, which is what a game that never got there answers too, while the
   // property read refuses the same typo in one call. Two tools disagreeing about a typo is the
-  // fault; that the wait was the slow one about it is how it stayed unnoticed.
+  // fault. The wait being the slow one about it is how it stayed unnoticed.
   const mistyped = await refusal('runtime_wait', {
     ...game,
     op: 'until',
@@ -6775,9 +6793,9 @@ async function testRuntime({ call, refusal, attempt, project, lspPort, dapPort }
  * A play is its own, and one that cannot start is not answered as started.
  *
  * The note naming a played run's transcript stays after the play, and a server picking up a later
- * play opened it on the editor saying it was playing, which does not say which play: the later play
- * was given the earlier one's console and start time; the editor's play number tells them apart. A main
- * scene that is not there got a dialog in the editor and no play, answered as `started: true`.
+ * play opened it on the editor saying it was playing, which does not say which play. The later play
+ * was given the earlier one's console and start time. The editor's play number tells them apart. A
+ * main scene that is not there got a dialog in the editor and no play, answered as `started: true`.
  */
 async function testAPlayIsItsOwn({ call, attempt, refusal, play, project }: Editor): Promise<void> {
   await attempt('editor_run', { op: 'stop' });
@@ -6869,9 +6887,10 @@ async function testAPlayIsItsOwn({ call, attempt, refusal, play, project }: Edit
  *
  * The editor's handlers take the profiler's messages before any addon is asked, so the addon reads
  * them off a signal of an editor node Godot does not expose: this is the case that says whether
- * that still reaches them. Twice: a play started with profile: true, which is armed before the play
- * and counts every call; and a play started without it, where asking switches the profiler on there
- * and then, says so, and counts only what came after.
+ * that still reaches them. Twice:
+ * - a play started with profile: true, which is armed before the play and counts every call
+ * - a play started without it, where asking switches the profiler on there and then, says so, and
+ *   counts only what came after.
  */
 async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Editor): Promise<void> {
   await attempt('editor_run', { op: 'stop' });
@@ -6933,7 +6952,7 @@ async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Edito
     );
 
     // The game quitting by itself sends the totals and waits for the editor to say it has read
-    // them: answered, it is gone within a few frames; unanswered, it waits out the runtime's three
+    // them. Answered, it is gone within a few frames. Unanswered, it waits out the runtime's three
     // seconds before it exits.
     const asked = Date.now();
     await attempt('runtime_invoke', {
@@ -7163,7 +7182,7 @@ async function testTheGameIsHandedItsOwnArguments({ call, attempt, play, project
  * a step, a `debug_state output`. A session that only ever calls `editor_output` speaks to it
  * through nothing, and that is the case a downstream project measured at tens of seconds before the
  * first line arrived, against the engine's own log holding it already. They read that as output
- * never arriving and filed it as loss; on a current version it is latency, and the difference is
+ * never arriving and filed it as loss. On a current version it is latency, and the difference is
  * only visible if somebody waits.
  *
  * So the number is what is asserted, not the eventual arrival. A budget rather than a measurement
@@ -7304,7 +7323,7 @@ async function testAPlayedRunsConsoleArrivesOnItsOwn({ call, play, project }: Ed
   );
   assert.match(
     text(get(ended, 'note')),
-    /is not the editor's to stop and was not signalled; andChildren ends/,
+    /is not the editor's to stop and was not signalled\. andChildren ends/,
     `and what a stop does not reach is said, with the argument that reaches it: ${text(ended)}`,
   );
 }
@@ -7331,7 +7350,7 @@ async function testAnErrorTheGameBrokeOnIsReported({ call, attempt, play, projec
   assert.equal(get(clean, 'heldAt'), null, 'and as held nowhere');
 
   // The call never returns: the game breaks inside it and stops answering, which is the whole
-  // shape of the failure. What it says is not the subject; what the console says next is.
+  // shape of the failure. What it says is not the subject. What the console says next is.
   await attempt('runtime_invoke', {
     ...game,
     op: 'call',
@@ -7445,9 +7464,9 @@ async function ticksWithin(attempt: Editor['attempt'], project: string, what: st
  * the server, whose own session the stop ended.
  */
 async function testAnAdapterIsBoundAgainInPlace({ call, project, dapPort }: Editor): Promise<void> {
-  const main = { projectPath: project, scriptPath: 'res://main.gd' };
+  const mainScript = { projectPath: project, scriptPath: 'res://main.gd' };
   // Through the adapter, so the server holds a session on it when it is stopped.
-  await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+  await call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
 
   const rebound = await call('editor_launch', { op: 'rebind' });
   assert.deepEqual(
@@ -7465,13 +7484,13 @@ async function testAnAdapterIsBoundAgainInPlace({ call, project, dapPort }: Edit
   const onlooker = new GodotDAPClient(dapPort);
   await onlooker.initialize();
   await onlooker.abandon();
-  const again = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+  const again = await call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
   assert.deepEqual(
     get(again, 'held'),
     [{ scriptPath: 'res://main.gd', lines: [BREAK_LINE] }],
     `and the server's next call goes through it: ${text(again)}`,
   );
-  await call('debug_breakpoint', { ...main, op: 'remove', line: BREAK_LINE });
+  await call('debug_breakpoint', { ...mainScript, op: 'remove', line: BREAK_LINE });
 }
 
 /**
@@ -7479,7 +7498,7 @@ async function testAnAdapterIsBoundAgainInPlace({ call, project, dapPort }: Edit
  *
  * Measured on 4.7.2: a breakpoint set through the adapter stopped the play after it and not the
  * one after that. The same session set it, continued past it, stopped the game and played again,
- * and the game ran straight through the line; setting it again before the play is what made the
+ * and the game ran straight through the line. Setting it again before the play is what made the
  * second play stop. Nothing said any of this: the set answer was the same both times and the
  * second play answered like the first. So the server sends every breakpoint it holds before each
  * play it starts and says so in the start answer. The set is also kept in the project for the
@@ -7492,9 +7511,9 @@ async function testABreakpointHoldsForEveryPlay({
   project,
   dapPort,
 }: Editor): Promise<void> {
-  const main = { projectPath: project, scriptPath: 'res://main.gd' };
+  const mainScript = { projectPath: project, scriptPath: 'res://main.gd' };
   const one = [{ scriptPath: 'res://main.gd', lines: [BREAK_LINE] }];
-  const set = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+  const set = await call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
   assert.deepEqual(get(set, 'held'), one, `the set answer lists what is held: ${text(set)}`);
 
   // Godot clears every breakpoint in the editor when a session opens on its adapter unless the
@@ -7538,7 +7557,7 @@ async function testABreakpointHoldsForEveryPlay({
   // The adapter echoes a set back as an event naming the file its own way, which on Windows is
   // with forward slashes where this server names it with backslashes. Read as two files, the
   // echo of a line set here was listed as one the user had set in the gutter.
-  const again = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+  const again = await call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
   assert.deepEqual(get(again, 'held'), one, `a second set holds the same line: ${text(again)}`);
   assert.deepEqual(
     get(again, 'setInEditor'),
@@ -7578,7 +7597,7 @@ async function testABreakpointHoldsForEveryPlay({
     );
     await delay(1000);
     const theirs = [{ scriptPath: 'res://main.gd', lines: [gutterLine] }];
-    const listed = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+    const listed = await call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
     assert.deepEqual(
       get(listed, 'setInEditor'),
       theirs,
@@ -7606,7 +7625,7 @@ async function testABreakpointHoldsForEveryPlay({
     await gutter.abandon();
     await watcher.abandon();
   }
-  const back = await call('debug_breakpoint', { ...main, op: 'set', line: BREAK_LINE });
+  const back = await call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
   assert.deepEqual(get(back, 'held'), one, `set again for the plays: ${text(back)}`);
   assert.deepEqual(get(back, 'setInEditor'), [], `with the gutter's line gone: ${text(back)}`);
 
@@ -7626,7 +7645,7 @@ async function testABreakpointHoldsForEveryPlay({
   await stackWithin(attempt, 'the second play stops at the same breakpoint', (stack) => stack.length > 0);
   await call('debug_control', { op: 'continue' });
 
-  const removed = await call('debug_breakpoint', { ...main, op: 'remove', line: BREAK_LINE });
+  const removed = await call('debug_breakpoint', { ...mainScript, op: 'remove', line: BREAK_LINE });
   assert.deepEqual(get(removed, 'held'), [], `removing it empties the set: ${text(removed)}`);
   await call('editor_run', { op: 'stop' });
 

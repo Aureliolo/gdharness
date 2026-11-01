@@ -8,7 +8,7 @@
  * scene, resource, script or project.godot is rewritten, where the dock asks each dependent's loader
  * to rename its dependencies. A relative path inside a moved file is rewritten too, which the dock
  * does not do. A scene or resource saved as .scn or .res names its dependencies in bytes this cannot
- * rewrite, so it is answered instead; it still finds a file that has a UID.
+ * rewrite, so it is answered instead. It still finds a file that has a UID.
  */
 
 import {
@@ -165,7 +165,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
   if (from === null) {
     return {
       ok: false,
-      reason: 'The project directory itself cannot be moved; give a file or a directory in it.',
+      reason: 'The project directory itself cannot be moved. Give a file or a directory in it.',
     };
   }
   if (to === null) {
@@ -175,7 +175,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
     return { ok: false, reason: `There is nothing at ${from} to move.` };
   }
   if (from === to) {
-    return { ok: false, reason: `${from} is already there; nothing to move.` };
+    return { ok: false, reason: `${from} is already there, so there is nothing to move.` };
   }
   const isDirectory = statSync(absoluteFrom).isDirectory();
   if (from === 'res://project.godot') {
@@ -296,7 +296,9 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
   const scriptsInOrder = rewrites
     .map((rewrite) => rewrite.path)
     .filter((path) => path.endsWith('.gd'))
-    .sort((a, b) => graph.ancestors(`${a}#`).length - graph.ancestors(`${b}#`).length || a.localeCompare(b))
+    .toSorted(
+      (a, b) => graph.ancestors(`${a}#`).length - graph.ancestors(`${b}#`).length || a.localeCompare(b),
+    )
     .map(afterwards);
   const scenesChanged = rewrites
     .map((rewrite) => rewrite.path)
@@ -319,7 +321,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
         from,
         to,
         ...(isDirectory
-          ? { files: moves.size, paths: [...moves.keys()].map(afterwards).sort() }
+          ? { files: moves.size, paths: [...moves.keys()].map(afterwards).toSorted() }
           : { alongside: [...moves.keys()].filter((path) => path !== from).map(afterwards) }),
       },
       changed,
@@ -332,27 +334,27 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
 /**
  * Makes every write of a planned move or none. Each file is checked against what the plan was made
  * from before anything is written, so an edit made in between is not overwritten with a plan that
- * never saw it; and a write that fails part of the way puts back everything already done.
+ * never saw it. A write that fails part of the way puts back everything already done.
  */
 export function applyFileMove(outcome: Extract<MoveOutcome, { ok: true }>): void {
   for (const rewrite of outcome.inPlace) {
     if (readFileSync(rewrite.absolute, 'utf8') !== rewrite.before) {
       throw new Error(
-        `${rewrite.path} changed on disk while the move was being worked out; nothing was written`,
+        `${rewrite.path} changed on disk while the move was being worked out, so nothing was written`,
       );
     }
   }
   for (const file of outcome.moved) {
     if (!existsSync(file.absoluteFrom)) {
-      throw new Error(`${file.from} is gone from disk; nothing was written`);
+      throw new Error(`${file.from} is gone from disk, so nothing was written`);
     }
     if (file.text !== null && readFileSync(file.absoluteFrom, 'utf8') !== file.text.before) {
       throw new Error(
-        `${file.from} changed on disk while the move was being worked out; nothing was written`,
+        `${file.from} changed on disk while the move was being worked out, so nothing was written`,
       );
     }
     if (existsSync(file.absoluteTo) && !sameFile(file.absoluteFrom, file.absoluteTo)) {
-      throw new Error(`${file.to} already exists; nothing was written`);
+      throw new Error(`${file.to} already exists, so nothing was written`);
     }
   }
   const undo: (() => void)[] = [];
@@ -395,7 +397,7 @@ export function applyFileMove(outcome: Extract<MoveOutcome, { ok: true }>): void
         step();
       } catch {
         // Putting back is best done for every file, so one that will not go back does not stop the
-        // rest; the error below says the move failed, which is the thing to act on.
+        // rest. The error below says the move failed, which is the thing to act on.
       }
     }
     throw error;

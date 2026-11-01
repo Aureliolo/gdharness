@@ -6,7 +6,7 @@ import { join, resolve as resolvePath } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type ChildProcess, spawnHidden } from '../../src/spawn.js';
-import { type JsonRpcMessage, parseJsonLines } from './json-rpc.js';
+import { isRecord, type JsonRpcMessage, parseJsonLines } from './json-rpc.js';
 import { fixtureNow, sweep } from './sweep.js';
 
 /** A runtime directory nothing else on this machine is using. */
@@ -19,7 +19,7 @@ function runtimeDirForTest(): string {
 /**
  * Every runtime directory and server made, with the fixture each was made for. A fixture its
  * deadline cut short never reaches its own stops and sweeps, and the engines it started name only
- * their projects on their command lines; which projects those were is in the run and editor notes
+ * their projects on their command lines. Which projects those were is in the run and editor notes
  * its servers kept in these directories.
  */
 const runtimeDirsMade: { directory: string; during: string | null }[] = [];
@@ -226,22 +226,19 @@ const ENVELOPE = {
   'io.modelcontextprotocol/clientCapabilities': {},
 };
 
-/** [params] with the 2026 envelope merged into its `_meta`, keeping what the caller put there. */
+/** [params] with the 2026 envelope merged into its `_meta`. What the caller put there stays. */
 function enveloped(params: unknown): unknown {
-  if (params !== undefined && (typeof params !== 'object' || params === null || Array.isArray(params))) {
-    return params;
-  }
-  const given = (params ?? {}) as Record<string, unknown>;
-  const meta = typeof given['_meta'] === 'object' && given['_meta'] !== null ? given['_meta'] : {};
-  return { ...given, _meta: { ...ENVELOPE, ...meta } };
+  if (params === undefined) return { _meta: { ...ENVELOPE } };
+  if (!isRecord(params) || Array.isArray(params)) return params;
+  const meta = isRecord(params['_meta']) ? params['_meta'] : {};
+  return { ...params, _meta: { ...ENVELOPE, ...meta } };
 }
 
 /** The name and version a server gave in the `_meta` of its opening answer. */
 export function serverIdentity(opening: JsonRpcMessage): Record<string, unknown> {
-  const result = opening.result as Record<string, unknown> | undefined;
-  const meta = result?.['_meta'] as Record<string, unknown> | undefined;
-  const found = meta?.['io.modelcontextprotocol/serverInfo'];
-  return typeof found === 'object' && found !== null ? (found as Record<string, unknown>) : {};
+  const meta = isRecord(opening.result) ? opening.result['_meta'] : undefined;
+  const found = isRecord(meta) ? meta['io.modelcontextprotocol/serverInfo'] : undefined;
+  return isRecord(found) ? found : {};
 }
 
 /**
@@ -284,8 +281,8 @@ function refuseAStaleBuild(entry: string): void {
 
 /**
  * The environment a test server is spawned with, and the runtime directory it was given, or null
- * when [param named] names its own. For a fixture that spawns the server some other way, such as
- * through an SDK client's transport; it sweeps the directory itself when done.
+ * when [param named] names its own. It is for a fixture that spawns the server some other way,
+ * such as through an SDK client's transport, and that sweeps the directory itself when done.
  */
 export function testServerEnvironment(named: Record<string, string> | undefined): {
   env: Record<string, string>;

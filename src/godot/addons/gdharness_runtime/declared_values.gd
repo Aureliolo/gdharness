@@ -288,7 +288,7 @@ static func outside(target: Object, declared: Dictionary, value: Variant, shown:
 			return ""
 		return (
 			(
-				"%s is none of the names %s lists: %s, which the inspector holds it to; the engine "
+				"%s is none of the names %s lists: %s, which the inspector holds it to. The engine "
 				+ "stores it as given."
 			)
 			% [shown, property, ", ".join(names)]
@@ -311,7 +311,7 @@ static func outside(target: Object, declared: Dictionary, value: Variant, shown:
 		if flags.is_empty() or stray == 0:
 			return ""
 		return (
-			"%d holds bits no flag of %s has (%d): its flags are %s; the engine stores it as given."
+			"%d holds bits no flag of %s has (%d): its flags are %s. The engine stores it as given."
 			% [whole, property, stray, _listed(flags)]
 		)
 	if hint != PROPERTY_HINT_RANGE:
@@ -327,7 +327,7 @@ static func outside(target: Object, declared: Dictionary, value: Variant, shown:
 		return ""
 	return (
 		(
-			"%s is outside the range %s declares, %s to %s, which the inspector holds it to; the "
+			"%s is outside the range %s declares, %s to %s, which the inspector holds it to. The "
 			+ "engine stores it as given."
 		)
 		% [shown, property, _bound(low), _bound(high)]
@@ -544,7 +544,7 @@ static func not_held(
 		return (
 			(
 				"%s.bus takes the name of one of the project's audio buses, and %s is none of "
-				+ "them, so it would play on %s; %s. project_info include audio_buses lists them, "
+				+ "them, so it would play on %s. %s. project_info include audio_buses lists them, "
 				+ "and project_settings add_audio_bus adds one. Nothing was written."
 			)
 			% [
@@ -552,21 +552,21 @@ static func not_held(
 				given[1],
 				AudioServer.get_bus_name(0),
 				(
-					"the buses are " + ", ".join(names)
+					"The buses are " + ", ".join(names)
 					if nearest.is_empty()
-					else "the nearest " + nearest
+					else "The nearest " + nearest
 				),
 			]
 		)
 	return (
-		"%s: it takes one of the names it lists, and %s is none of them; %s. Nothing was written."
+		"%s: it takes one of the names it lists, and %s is none of them. %s. Nothing was written."
 		% [
 			said,
 			given[1],
 			(
-				"it lists " + ", ".join(names)
+				"It lists " + ", ".join(names)
 				if nearest.is_empty()
-				else "the nearest it lists " + nearest
+				else "The nearest it lists " + nearest
 			),
 		]
 	)
@@ -593,7 +593,7 @@ static func held_by_children(node: Node, property: String) -> String:
 
 ## A sentence for each node path in [param given], by property, that names no node from
 ## [param node]. A path is written whatever it names, as the inspector writes one, since the node
-## may be added next; a joint whose node_a named nothing then joined nothing, and no answer said so.
+## may be added next. A joint whose node_a named nothing then joined nothing, and no answer said so.
 static func naming_nothing(node: Node, given: Dictionary) -> Dictionary:
 	var said: Dictionary = {}
 	for property: String in given:
@@ -610,7 +610,7 @@ static func naming_nothing(node: Node, given: Dictionary) -> Dictionary:
 		said[property] = (
 			(
 				"%s names no node from %s. It is written, as the editor writes one, since that "
-				+ "node may be added next; until it is, %s finds nothing."
+				+ "node may be added next. Until it is, %s finds nothing."
 			)
 			% [str(named), node.name, property]
 		)
@@ -624,7 +624,7 @@ static func no_uniform(material: ShaderMaterial, property: String) -> String:
 	var uniform: String = property.trim_prefix("shader_parameter/")
 	if material.shader == null:
 		return (
-			"The ShaderMaterial has no shader, so it has no parameter %s yet; set shader first."
+			"The ShaderMaterial has no shader, so it has no parameter %s yet. Set shader first."
 			% uniform
 		)
 	var shader: String = material.shader.resource_path
@@ -634,5 +634,5 @@ static func no_uniform(material: ShaderMaterial, property: String) -> String:
 		uniforms.append(str(entry["name"]))
 	var said: String = "%s declares no uniform %s, which %s would set" % [named, uniform, property]
 	if uniforms.is_empty():
-		return said + "; it declares no uniforms."
+		return said + ". It declares no uniforms."
 	return GdhRead.offered(said, uniform, uniforms) + "."

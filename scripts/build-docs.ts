@@ -3,7 +3,7 @@
  * The public site: markdown in, HTML out, one template and one stylesheet, both ours.
  *
  * Hand-rolled rather than a site framework because the site is small, the repository is
- * TypeScript, and a bespoke look is the point: a generator we own is less to carry than a
+ * TypeScript, and a look of our own is the point: a generator we own is less to carry than a
  * theme we would spend the same effort overriding.
  *
  * The tool reference is rendered from the tool definitions themselves, so it cannot drift from
@@ -131,7 +131,7 @@ function bothRunners(rest: string): string {
  * four that share `.mcp.json` first, which would read as a ranking it is not.
  */
 function pickable(): readonly Harness[] {
-  return [...HARNESSES].sort((left, right) => left.name.localeCompare(right.name, 'en'));
+  return [...HARNESSES].toSorted((left, right) => left.name.localeCompare(right.name, 'en'));
 }
 
 /**
@@ -334,7 +334,7 @@ function renderHomeText(): string {
     '# gdharness',
     '',
     'Drive a Godot 4 project from an agent: the editor that is open, the game that is running, and',
-    'the project on disk. An agent cannot see a running game; this makes one answerable.',
+    'the project on disk. An agent cannot see a running game. With gdharness it can ask one.',
     '',
     'Godot 4.7 or newer, and Node 22 or newer for `npx`. It runs under Bun 1.4 too.',
     '',

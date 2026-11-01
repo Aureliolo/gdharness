@@ -46,7 +46,7 @@ func _kept(scene: GdhSceneFile, saved: Node, node: Node, names: Array) -> String
 		var given: Variant = _properties.read_at(node, property)
 		if not scene.kept(saved, loaded, given):
 			# The file holds it, and the copy's own script set it again as the copy loaded, as it
-			# will wherever the scene loads; an editor saves the same.
+			# will wherever the scene loads. An editor saves the same.
 			if scene.stores(at, property, given):
 				var on: Dictionary = scene.loads_as.get_or_add(at, {})
 				if GdhHeadlessCheck.untooled(copy.get_script()):
@@ -417,7 +417,7 @@ func delete_node(args: Dictionary) -> Dictionary:
 
 
 ## The connections [param scene]'s file holds from or to [param at] or a node under it, which go
-## with the node; one an instanced scene makes inside itself is that scene's, and stays there.
+## with the node. One an instanced scene makes inside itself is that scene's, and stays there.
 static func _connections_with(scene: GdhSceneFile, at: String) -> Array[Dictionary]:
 	var cut: Array[Dictionary] = []
 	for held: Dictionary in scene.held_connections():
@@ -880,7 +880,7 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 
 	# Against the default the node would have in no scene: its script's for what the script
 	# declares, the class's for the rest. Compared with a bare instance of the class, every exported
-	# variable read as changed; and a value this scene sets back to the default was hidden, so the
+	# variable read as changed, and a value this scene sets back to the default was hidden, so the
 	# names this scene's file sets are always answered.
 	var set_here: Dictionary = scene.set_here(node)
 	var props: Dictionary = _properties_of(node, include_defaults, set_here)
@@ -898,8 +898,8 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 		var turned: Basis = Basis.from_euler(placed.rotation, placed.rotation_order)
 		rebuilt = Transform3D(turned * Basis.from_scale(placed.scale), placed.position)
 	if placed != null and props.has("transform") and rebuilt.is_equal_approx(placed.transform):
-		# Rounded, since a node never scaled came back with a scale of 0.99999994 out of the matrix;
-		# the transform beside it is exact.
+		# Rounded, since a node never scaled came back with a scale of 0.99999994 out of the matrix.
+		# The transform beside it is exact.
 		var step: Vector3 = Vector3.ONE * 0.00001
 		answer["placement"] = {
 			"position": _readable(node, placed.position.snapped(step)),
@@ -920,7 +920,7 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 		answer["busNote"] = (
 			(
 				"%s names the bus %s, which the project's bus layout does not have, so it plays on "
-				+ "%s; the buses are %s."
+				+ "%s. The buses are %s."
 			)
 			% [
 				str(node.name) if at == "." else at,
@@ -949,14 +949,14 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 		answer["instanceOf"] = node.scene_file_path
 		answer["editableChildren"] = scene.root.is_editable_instance(node)
 	scene.close()
-	# Only an editor holds anything unsaved; a headless engine answering false would say it looked.
+	# Only an editor holds anything unsaved. A headless engine answering false would say it looked.
 	if Engine.is_editor_hint():
 		answer["unsavedInEditor"] = GdhSceneFile.unsaved(scene_path)
 	answer.merge(cells)
 	# An empty answer read as a node with nothing on it, rather than one with nothing changed.
 	if props.is_empty() and not include_defaults:
 		answer["note"] = (
-			"Every property of this node is at its default, so none is listed; "
+			"Every property of this node is at its default, so none is listed. "
 			+ "includeDefaults: true lists them all."
 		)
 	return answer
@@ -1004,8 +1004,8 @@ func save_scene(args: Dictionary) -> Dictionary:
 		return _save_open_scene(scene_path)
 
 	# Of the editor's scene when it is open, since that is what a save means, and of the file as it
-	# loads otherwise. The editor's scene is packed where it is, as the editor's own save packs it;
-	# packing leaves the nodes as they were.
+	# loads otherwise. The editor's scene is packed where it is, as the editor's own save packs it.
+	# Packing leaves the nodes as they were.
 	var written: Dictionary = {}
 	if open_root != null:
 		var packed: PackedScene = PackedScene.new()

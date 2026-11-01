@@ -28,6 +28,7 @@ import {
 } from './config-formats.js';
 import { Refusal } from './errors.js';
 import { isSameDirectory } from './paths.js';
+import { isRecord } from './records.js';
 import { currentRunner, type Runner, spawnFor } from './runner.js';
 
 /** What gdharness is called wherever it is registered. */
@@ -603,10 +604,13 @@ function fileFor(harness: Harness, platform: NodeJS.Platform = process.platform)
 /** Where a harness's config actually is, for a given project. */
 export function configPath(harness: Harness, projectPath: string): string {
   const file = fileFor(harness);
-  if (harness.scope === 'project') {
-    return join(projectPath, file as string);
+  if (harness.scope !== 'project') {
+    return homePath(file);
   }
-  return homePath(file);
+  if (typeof file !== 'string') {
+    throw new Error(`${harness.name} keeps its config in the project, so its file is a path in the project`);
+  }
+  return join(projectPath, file);
 }
 
 /** The path as it should be read by a person, which for a home-scoped harness is not absolute. */
@@ -633,8 +637,8 @@ const OURS: readonly string[] = ['GODOT_PATH', 'GDHARNESS_PROJECT'];
  */
 function environmentFor(launch: Launch, held: unknown): Record<string, string> {
   const kept: Record<string, string> = {};
-  if (typeof held === 'object' && held !== null && !Array.isArray(held)) {
-    for (const [name, value] of Object.entries(held as Record<string, unknown>)) {
+  if (isRecord(held)) {
+    for (const [name, value] of Object.entries(held)) {
       if (typeof value === 'string' && !OURS.includes(name)) {
         kept[name] = value;
       }
@@ -652,10 +656,7 @@ function environmentFor(launch: Launch, held: unknown): Record<string, string> {
  * same reason [method merged] leaves the rest of the file alone.
  */
 export function entryFor(shape: Shape, launch: Launch, held?: unknown): Record<string, unknown> {
-  const before: Record<string, unknown> =
-    typeof held === 'object' && held !== null && !Array.isArray(held)
-      ? { ...(held as Record<string, unknown>) }
-      : {};
+  const before: Record<string, unknown> = isRecord(held) ? { ...held } : {};
   if (shape === 'opencode') {
     return {
       ...before,
@@ -683,15 +684,9 @@ export function entryFor(shape: Shape, launch: Launch, held?: unknown): Record<s
  * about: a harness config is the user's file that gdharness is a guest in.
  */
 function merged(existing: unknown, harness: Harness, launch: Launch): Record<string, unknown> {
-  const root: Record<string, unknown> =
-    typeof existing === 'object' && existing !== null && !Array.isArray(existing)
-      ? { ...(existing as Record<string, unknown>) }
-      : {};
+  const root: Record<string, unknown> = isRecord(existing) ? { ...existing } : {};
   const held = root[harness.container];
-  const servers: Record<string, unknown> =
-    typeof held === 'object' && held !== null && !Array.isArray(held)
-      ? { ...(held as Record<string, unknown>) }
-      : {};
+  const servers: Record<string, unknown> = isRecord(held) ? { ...held } : {};
   servers[SERVER_KEY] = entryFor(harness.shape, launch, servers[SERVER_KEY]);
   root[harness.container] = servers;
   return root;
@@ -850,11 +845,11 @@ export function registered(harness: Harness, projectPath: string): boolean {
   } catch {
     return false;
   }
-  if (typeof existing !== 'object' || existing === null || Array.isArray(existing)) {
+  if (!isRecord(existing)) {
     return false;
   }
-  const held = (existing as Record<string, unknown>)[harness.container];
-  return typeof held === 'object' && held !== null && !Array.isArray(held) && SERVER_KEY in held;
+  const held = existing[harness.container];
+  return isRecord(held) && SERVER_KEY in held;
 }
 
 /**
@@ -879,7 +874,7 @@ export function recordedEnginePath(projectPath: string): string | null {
       continue;
     }
     const named = reach(entryEnvironment(harness, projectPath), 'GODOT_PATH');
-    // Relative to the project, where the harness starts the server that reads it; an absolute one
+    // Relative to the project, where the harness starts the server that reads it. An absolute one
     // as written, for the same reason as GODOT_PATH itself.
     const path =
       typeof named !== 'string' || named === ''
@@ -1006,15 +1001,13 @@ export function servedProject(harness: Harness, projectPath: string): string | n
 
 /** One key of a value that may be anything at all, which is what a config file is until read. */
 function reach(held: unknown, key: string): unknown {
-  return typeof held === 'object' && held !== null && !Array.isArray(held)
-    ? (held as Record<string, unknown>)[key]
-    : undefined;
+  return isRecord(held) ? held[key] : undefined;
 }
 
 /**
  * gdharness taken back out of one harness's configuration.
  *
- * Only our own key is touched. A file that held other servers keeps them and stays; one that held
+ * Only our own key is touched. A file that held other servers keeps them and stays. One that held
  * nothing but gdharness is removed, because a file we created and then emptied is litter.
  */
 export function disconnect(harness: Harness, projectPath: string): Removed {
@@ -1043,11 +1036,11 @@ export function disconnect(harness: Harness, projectPath: string): Removed {
     // A config we cannot parse is one we never wrote to either, so there is nothing of ours in it.
     return { harness, path, action: 'absent' };
   }
-  if (typeof existing !== 'object' || existing === null || Array.isArray(existing)) {
+  if (!isRecord(existing)) {
     return { harness, path, action: 'absent' };
   }
 
-  const root = { ...(existing as Record<string, unknown>) };
+  const root = { ...existing };
   const held = root[harness.container];
   if (typeof held !== 'object' || held === null || Array.isArray(held) || !(SERVER_KEY in held)) {
     return { harness, path, action: 'absent' };
@@ -1072,7 +1065,7 @@ export function disconnect(harness: Harness, projectPath: string): Removed {
 export interface Written {
   readonly harness: Harness;
   readonly path: string;
-  /** `written` and `replaced` touched the file; the other two leave it to the reader. */
+  /** `written` and `replaced` touched the file. The other two leave it to the reader. */
   readonly action: 'written' | 'replaced' | 'command' | 'snippet';
   /** For `command`, what to run. For `snippet`, what to put in the file. */
   readonly command?: readonly string[];
@@ -1130,7 +1123,7 @@ export function harnessNote(
   const alsoByHand =
     repinned.byHand === 0
       ? ''
-      : `\n     ${repinned.byHand === 1 ? 'One harness above was' : `${repinned.byHand} harnesses above were`} handed a command to run instead; run it too.`;
+      : `\n     ${repinned.byHand === 1 ? 'One harness above was' : `${repinned.byHand} harnesses above were`} handed a command to run instead. Run it too.`;
   // What is running is read from the server's own announcement for the project, when a live one has
   // made one. The config's previous line is what the harness would spawn next, not what it spawned:
   // after two upgrades without a reconnect it named a version that had never run (#622).
@@ -1177,13 +1170,12 @@ export function harnessNote(
 
 /** How a held entry says gdharness is launched, or nothing when it does not say. */
 function launchedBy(entry: unknown): string | undefined {
-  if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+  if (!isRecord(entry)) {
     return undefined;
   }
-  const held = entry as Record<string, unknown>;
-  // opencode carries the whole line in `command`; everything else splits it across two keys.
-  const whole = held['command'];
-  const args: unknown[] = Array.isArray(held['args']) ? (held['args'] as unknown[]) : [];
+  // opencode carries the whole line in `command`. Everything else splits it across two keys.
+  const whole = entry['command'];
+  const args: unknown[] = Array.isArray(entry['args']) ? (entry['args'] as unknown[]) : [];
   const parts: unknown[] = Array.isArray(whole) ? (whole as unknown[]) : [whole, ...args];
   const said = parts.filter((part): part is string => typeof part === 'string');
   return said.length === 0 ? undefined : said.join(' ');
@@ -1220,10 +1212,7 @@ export function connect(harness: Harness, projectPath: string, launch: Launch): 
       throw new Refusal(`${path} is not valid JSON, so gdharness was not added to it.`, { cause });
     }
   }
-  const container =
-    typeof existing === 'object' && existing !== null && !Array.isArray(existing)
-      ? (existing as Record<string, unknown>)[harness.container]
-      : undefined;
+  const container = reach(existing, harness.container);
   const already = typeof container === 'object' && container !== null && SERVER_KEY in container;
 
   const written = put(
@@ -1232,7 +1221,7 @@ export function connect(harness: Harness, projectPath: string, launch: Launch): 
     `${JSON.stringify(merged(existing, harness, launch), null, 2)}\n`,
     already,
   );
-  const was = launchedBy((container as Record<string, unknown> | undefined)?.[SERVER_KEY]);
+  const was = launchedBy(reach(container, SERVER_KEY));
   const now = launchedBy(entryFor(harness.shape, launch));
   return was === undefined || was === now ? written : { ...written, wasLaunchedBy: was };
 }

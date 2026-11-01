@@ -29,6 +29,7 @@ import { errorMessage } from './errors.js';
 import { isSameDirectory, realAsFarAsItExists } from './paths.js';
 import { type CommandLineRead, linuxStartTimes, readCommandLine } from './process-children.js';
 import { askProcessTable } from './process-table.js';
+import { isRecord } from './records.js';
 import { runtimeDirectories, runtimeDirectory, STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
 import { runHidden } from './spawn.js';
 import { writeWhole } from './whole-file.js';
@@ -90,7 +91,7 @@ export interface RunRecord {
    * Absent while the run is going, and for a run whose keeper was ended before the game was.
    */
   readonly exitCode?: number;
-  /** The signal that ended it instead, under the same conditions; a signalled run has no code. */
+  /** The signal that ended it instead, under the same conditions. A signalled run has no code. */
   readonly exitSignal?: string;
   /** When it ended, written beside the code by the same keeper at the same moment. */
   readonly endedAt?: number;
@@ -179,10 +180,10 @@ export function writeLatestRun(servedBy: string, latest: LatestRun): void {
 export function readLatestRun(servedBy: string, directory = runtimeDirectory()): LatestRun | null {
   try {
     const fields: unknown = JSON.parse(readFileSync(latestRunPath(servedBy, directory), 'utf8'));
-    if (typeof fields !== 'object' || fields === null) {
+    if (!isRecord(fields)) {
       return null;
     }
-    const { projectPath, pid, startedAt } = fields as Record<string, unknown>;
+    const { projectPath, pid, startedAt } = fields;
     if (typeof projectPath !== 'string' || typeof startedAt !== 'number') {
       return null;
     }
@@ -295,24 +296,19 @@ function editorNoteAt(path: string): EditorRunNote | null {
   } catch {
     return null;
   }
-  if (!parsed || typeof parsed !== 'object') {
+  if (!isRecord(parsed)) {
     return null;
   }
-  const fields = parsed as Record<string, unknown>;
+  const fields = parsed;
   const projectPath = fields['projectPath'];
   const transcript = fields['transcript'];
   const startedAt = fields['startedAt'];
   if (typeof projectPath !== 'string' || typeof transcript !== 'string' || typeof startedAt !== 'number') {
     return null;
   }
-  const play = fields['play'];
-  const which =
-    typeof play === 'object' &&
-    play !== null &&
-    typeof (play as Record<string, unknown>)['play'] === 'number' &&
-    typeof (play as Record<string, unknown>)['editorPid'] === 'number'
-      ? (play as EditorPlay)
-      : undefined;
+  const { play: count, editorPid }: Record<string, unknown> = isRecord(fields['play']) ? fields['play'] : {};
+  const which: EditorPlay | undefined =
+    typeof count === 'number' && typeof editorPid === 'number' ? { play: count, editorPid } : undefined;
   return { projectPath, transcript, startedAt, ...(which === undefined ? {} : { play: which }) };
 }
 
@@ -390,7 +386,7 @@ export function everyRunRecord(): RunRecord[] {
       }
     }
   }
-  return found.sort((one, other) => other.startedAt - one.startedAt);
+  return found.toSorted((one, other) => other.startedAt - one.startedAt);
 }
 
 function recordAt(path: string): RunRecord | null {
@@ -400,10 +396,10 @@ function recordAt(path: string): RunRecord | null {
   } catch {
     return null;
   }
-  if (!parsed || typeof parsed !== 'object') {
+  if (!isRecord(parsed)) {
     return null;
   }
-  const fields = parsed as Record<string, unknown>;
+  const fields = parsed;
   const pid = fields['pid'];
   const transcript = fields['transcript'];
   const startedAt = fields['startedAt'];
@@ -455,11 +451,10 @@ function recordAt(path: string): RunRecord | null {
 }
 
 function restartedFromAt(value: unknown): RestartedFrom[] {
-  if (!value || typeof value !== 'object') {
+  if (!isRecord(value)) {
     return [];
   }
-  const fields = value as Record<string, unknown>;
-  const { pid, endedAt, exitCode, exitSignal } = fields;
+  const { pid, endedAt, exitCode, exitSignal } = value;
   if (typeof pid !== 'number' || typeof endedAt !== 'number') {
     return [];
   }
@@ -489,7 +484,7 @@ export async function runningAs(pid: number): Promise<RunningAs | null> {
       // that reads one reads the other for free and this runs before every signal.
       const [, ...rest] = answer.split('\n');
       const line = rest.join('\n').trim();
-      const began = await startedAt(pid, answer);
+      const began = await processStartOf(pid, answer);
       if (line !== '') {
         return { kind: 'commandLine', text: line, ...(began === null ? {} : { startedAt: began }) };
       }
@@ -502,10 +497,10 @@ export async function runningAs(pid: number): Promise<RunningAs | null> {
     const unread = 'unread' in read ? read.unread : 'Windows gave an empty command line';
     return 'image' in image
       ? { kind: 'image', text: image.image, unread }
-      : { kind: 'none', text: '', unread: `${unread}; tasklist ${image.why}` };
+      : { kind: 'none', text: '', unread: `${unread}, and tasklist ${image.why}` };
   }
   try {
-    const began = await startedAt(pid, null);
+    const began = await processStartOf(pid, null);
     const when = began === null ? {} : { startedAt: began };
     if (process.platform === 'linux') {
       const raw = readFileSync(`/proc/${pid}/cmdline`, 'utf8').replaceAll('\0', ' ').trim();
@@ -624,10 +619,10 @@ export async function readWindowsCommandLine(
  *
  * This is the one thing about a process that a recycled number cannot carry over. Everything else a
  * record holds is a property of the engine and the project, and a machine running a fan-out has
- * dozens of processes sharing all of them; what it does not have is a second process that started
+ * dozens of processes sharing all of them. What it does not have is a second process that started
  * when this run did.
  */
-async function startedAt(pid: number, windowsAnswer: string | null): Promise<number | null> {
+async function processStartOf(pid: number, windowsAnswer: string | null): Promise<number | null> {
   if (process.platform === 'win32') {
     // The first line of the answer above, asked in the same question, on a path that runs before
     // every signal.
@@ -658,8 +653,8 @@ async function windowsImage(pid: number): Promise<{ image: string } | { why: str
     const image = /^"([^"]+)"/.exec(csv.trim())?.[1];
     return image === undefined ? { why: 'named no process under that number' } : { image };
   } catch (error) {
-    const failed = error as NodeJS.ErrnoException & { killed?: boolean };
-    return { why: failed.killed === true ? 'did not answer within 15000 ms' : errorMessage(error) };
+    const killed = error instanceof Error && 'killed' in error && error.killed === true;
+    return { why: killed ? 'did not answer within 15000 ms' : errorMessage(error) };
   }
 }
 
@@ -694,7 +689,7 @@ export async function whyNotStillTheRecordedRun(record: RunRecord): Promise<stri
  * The weaker question, and the honest one to ask when picking a run back up rather than ending it.
  * A Windows process whose command line this server cannot read is named by `tasklist` and no more,
  * so all that can be had there is the executable's name. That is enough to go on calling a bench
- * running; it is not enough to signal one, and reporting a live bench as finished because an
+ * running. It is not enough to signal one, and reporting a live bench as finished because an
  * interpreter would not answer is its own wrong answer.
  */
 export async function couldStillBeTheRecordedRun(record: RunRecord): Promise<boolean> {
@@ -773,7 +768,7 @@ export function whyNotTheRun(
   //
   // Asked of both callers, unlike everything below. The weaker question is weaker because an image
   // name is not enough to tell two engines apart, not because picking a run back up deserves less
-  // care: this is not a guess that leans one way, it is a process that cannot be the one recorded.
+  // care: a process that cannot be the one recorded is no guess that leans one way.
   // Left out of it, a worker holding a recycled number is adopted and reported as the run still
   // going, which is the answer this project is asked to trust above every other.
   //
@@ -809,7 +804,7 @@ export function whyNotTheRun(
   }
   // Compared as a path where the line names one, rather than searched for as text: a game restarting
   // itself names the project as `ProjectSettings.globalize_path` gives it, with forward slashes and
-  // one at the end on Windows, and was refused as a process of another project; and searched for, a
+  // one at the end on Windows, and was refused as a process of another project. Searched for, a
   // project's path is found inside the path of every project whose name begins with it.
   const spelt = (path: string): string => {
     const forward = path.replaceAll('\\', '/').replace(/\/+$/, '');
@@ -841,7 +836,7 @@ export async function stillTheAnnouncedGame(
  * The whole command line has to be readable and be this project's engine run: `--path` on the
  * project and no editor flag, read as the engine reads them. The process has to have started
  * before its announcement was written, since a game announces from its first frames and a number
- * taken after that is somebody else's; and a platform that will not say when it started is not
+ * taken after that is somebody else's. A platform that will not say when it started is not
  * taken as having said yes.
  */
 export function judgeAnnouncedGame(

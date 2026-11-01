@@ -48,8 +48,8 @@ const WHOLE: int = 1
 ## counting from 0 in rank order.
 ##
 ## A control with something drawn over its centre that a pointer there would reach instead is not
-## on screen for a player, and a click at it lands on the thing on top. The screen a game shows
-## over its hall covers the hall's drawers without hiding them, so their words matched as well.
+## on screen for a player, and a click at it lands on the thing on top. A panel a game shows
+## over a screen covers its drawers without hiding them, so their words matched as well.
 static func control_saying(
 	root: Node, root_path: String, wanted: String, which: Variant
 ) -> Dictionary:
@@ -60,7 +60,7 @@ static func control_saying(
 	# The words of the control that matched, which a button pressed on a label's behalf has none of.
 	var said: Array[String] = []
 	var exact: Array[bool] = []
-	# Whether the words are only inside longer words there, "out" in "Scout".
+	# Whether the words are only inside longer words there, "away" in "Faraway".
 	var inside: Array[bool] = []
 	var hidden: Array[Node] = []
 	# Controls saying exactly the words that a click cannot reach, kept to say what a match on
@@ -150,8 +150,8 @@ static func control_saying(
 			if cover == null:
 				cover = over
 	# Stable, so matches of one rank keep the order they are drawn in. Words only inside longer
-	# words come after everything else: ranked as a button saying them as part of more, "Scout, 90"
-	# was pressed for "Out" over a control saying exactly "Out", and spent a game's silver.
+	# words come after everything else: ranked as a button saying them as part of more, a card was
+	# pressed over a control saying exactly the words, and spent something in the game.
 	open.sort_custom(
 		func(a: int, b: int) -> bool:
 			if inside[a] != inside[b]:
@@ -203,7 +203,7 @@ static func control_saying(
 			"type": "error",
 			"message":
 			(
-				"%s, so which to click is not clear; pass index, counting from 0%s: %s"
+				"%s, so which to click is not clear. Pass index, counting from 0%s: %s"
 				% [_described(best, ranks[0], wanted, under), order, _candidates(targets, lines)]
 			),
 		}
@@ -225,9 +225,9 @@ static func control_saying(
 			"index %s picks nothing: %s: %s" % [given, among, _candidates(targets, lines)],
 		}
 	# A match saying the words as part of more, while another control says exactly them, is a
-	# stand-in for that one, not the control meant: a tab reading "Out" sat in a collapsed drawer
-	# and a dispatch saying somebody "fell out in the hall" was pressed, and with the tab's own
-	# words on screen in a control that is not a button, a card reading "Scout, 90" was. Pressed
+	# stand-in for that one, not the control meant: a tab reading "Away" sat in a collapsed drawer
+	# and a line saying somebody "went away for good" was pressed, and with the tab's own
+	# words on screen in a control that is not a button, a card reading "Faraway, 90" was. Pressed
 	# only when asked for by index, which is the caller saying the match is what they meant.
 	var exact_elsewhere: Array[Node] = exact_out_of_reach.duplicate()
 	var elsewhere_as: Array[String] = out_of_reach_as.duplicate()
@@ -250,7 +250,7 @@ static func control_saying(
 			(
 				(
 					'no %s on screen%s says exactly "%s", so nothing was clicked: %s %s says it as '
-					+ 'part of "%s", while %s; pass index %d to press %s anyway'
+					+ 'part of "%s", while %s. Pass index %d to press %s anyway'
 				)
 				% [
 					"button" if exact_elsewhere.size() > exact_out_of_reach.size() else "control",
@@ -272,7 +272,7 @@ static func control_saying(
 			(
 				(
 					'no control on screen%s says "%s" as a word of its own, so nothing was '
-					+ 'clicked: %s %s has it only inside a longer word, "%s"; pass index %d to '
+					+ 'clicked: %s %s has it only inside a longer word, "%s". Pass index %d to '
 					+ "press %s anyway"
 				)
 				% [
@@ -287,8 +287,8 @@ static func control_saying(
 			),
 		}
 	# Words in a sentence on a control that lets the pointer through: the press lands on whatever is
-	# under it, which is nothing the words name. A line saying what "is out there" was the best
-	# match left for "Out" once the cards saying "Scout" were passed over.
+	# under it, which is nothing the words name. A line saying what "is far away" was the best
+	# match left for "Away" once the cards saying "Faraway" were passed over.
 	if (
 		which == null
 		and not wholes[index]
@@ -301,7 +301,7 @@ static func control_saying(
 				(
 					'no control on screen%s that takes a click says "%s", so nothing was clicked: '
 					+ '%s %s says it as part of "%s" and lets the pointer through to what is under '
-					+ "it; pass index %d to click there anyway"
+					+ "it. Pass index %d to click there anyway"
 				)
 				% [
 					under,
@@ -325,7 +325,7 @@ static func control_saying(
 				% [targets.size() - 1, _passed_over(ranks[0], ranks.slice(1), false)]
 			)
 		)
-		found["picked"] = "%s; %s" % [_described(1, ranks[0], wanted, under), others]
+		found["picked"] = "%s, and %s" % [_described(1, ranks[0], wanted, under), others]
 	if covered > 0:
 		found["covered"] = covered
 	var answer: Dictionary = { "path": str(targets[index].get_path()), "found": found }
@@ -377,9 +377,9 @@ static func pointer_turned_off_by(control: Control) -> Control:
 ## Whether one of [param wanted]'s alternatives is the whole of [param said], or the whole of one of
 ## its lines. A glob is matched against the whole text already, so every match of one is whole.
 ##
-## A line counts because a card is a title over a description: "WARD" over "wards 3" is the card
-## named WARD, and read as its words run together it said WARD only as part of more, level with
-## "WARDSPITE" over its own description, and a click on WARD was refused as not clear.
+## A line counts because a card is a title over a description: "GLOW" over "glows 3" is the card
+## named GLOW, and read as its words run together it said GLOW only as part of more, level with
+## "GLOWSHADE" over its own description, and a click on GLOW was refused as not clear.
 static func _says_exactly(written: String, wanted: String) -> bool:
 	var said: String = GdhSays.spaced(written)
 	for words: String in GdhSays.alternatives(wanted):
@@ -397,8 +397,8 @@ static func _says_exactly(written: String, wanted: String) -> bool:
 
 
 ## Whether [param written] has the plain words [param wanted] asks for only inside longer words,
-## never starting where a word starts: "out" in "Scout". Words starting a longer one count as said,
-## "Recruit" in "Recruits", and so does anything matched by a pattern.
+## never starting where a word starts: "away" in "Faraway". Words starting a longer one count as
+## said, "Recruit" in "Recruits", and so does anything matched by a pattern.
 static func _inside_a_word(written: String, wanted: String) -> bool:
 	var said: String = GdhSays.spaced(written).to_lower()
 	var found: bool = false
@@ -477,7 +477,7 @@ static func _offered_note(from: Node, drawn: Array[Node], areas: Array[Rect2]) -
 			and _cover_of(button, drawn, areas, aim) == null
 		)
 	var words: String = GdhWords.pressable_words(from, open, LISTED_CANDIDATES)
-	return "" if words.is_empty() else "; the buttons on screen say %s" % words
+	return "" if words.is_empty() else ". The buttons on screen say %s" % words
 
 
 ## What to add to a refusal that found nothing on screen, when words matched hidden controls: how
@@ -490,9 +490,9 @@ static func _hidden_note(hidden: Array[Node]) -> String:
 	for node: Node in hidden.slice(0, NAMED_HIDDEN):
 		named.append("%s%s" % [node.get_path(), why_hidden(node)])
 	if hidden.size() == 1:
-		return "; 1 hidden control says it, %s" % named[0]
+		return ". 1 hidden control says it, %s" % named[0]
 	return (
-		"; %d hidden controls say it, among them %s and %s"
+		". %d hidden controls say it, among them %s and %s"
 		% [hidden.size(), ", ".join(named.slice(0, -1)), named[-1]]
 	)
 
@@ -503,7 +503,7 @@ static func _outside_note(outside: int, root: Node) -> String:
 	if outside == 0:
 		return ""
 	var note: String = (
-		"; %d control%s it outside what the screen shows"
+		". %d control%s it outside what the screen shows"
 		% [outside, " says" if outside == 1 else "s say"]
 	)
 	var window: Window = root as Window
@@ -537,9 +537,9 @@ static func _covered_note(covered: int, cover: Node) -> String:
 	if covered == 0:
 		return ""
 	if covered == 1:
-		return "; 1 control says it under %s, which is drawn over it" % cover.get_path()
+		return ". 1 control says it under %s, which is drawn over it" % cover.get_path()
 	return (
-		"; %d controls say it under what is drawn over them, such as %s"
+		". %d controls say it under what is drawn over them, such as %s"
 		% [covered, cover.get_path()]
 	)
 
@@ -564,8 +564,8 @@ static func drawn_over(target: Control) -> Node:
 
 ## Why [param node], which is not visible in the tree, is not, as a parenthesis to follow its path:
 ## which nodes hide it, nearest first, and what has taken its place. Reading visible off the node
-## itself says true when only an ancestor is hidden, so without this a caller had nothing to unhide;
-## every hidden one is named because unhiding only the nearest leaves the rest hiding it.
+## itself says true when only an ancestor is hidden, so without this a caller had nothing to unhide.
+## Every hidden one is named because unhiding only the nearest leaves the rest hiding it.
 ##
 ## What has taken its place is what a click at its centre reaches now, which is the screen a game
 ## shows instead. Without a control there, as for a 3D node, it is what is shown beside the
@@ -586,7 +586,7 @@ static func why_hidden(node: Node) -> String:
 	var instead: Node = null if control == null else drawn_at(control)
 	if instead != null:
 		return (
-			" (%s; a click where it would be reaches %s)"
+			" (%s, and a click where it would be reaches %s)"
 			% [", and ".join(named), instead.get_path()]
 		)
 	var outermost: Node = hiding.back()
@@ -602,7 +602,7 @@ static func why_hidden(node: Node) -> String:
 ## What a click at the centre of [param target], which is hidden, would reach instead, or null.
 ##
 ## The topmost thing there that takes the pointer, whatever order it is drawn in relative to the
-## target, since the target is not drawn at all; and never a node holding the target, which covers
+## target, since the target is not drawn at all, and never a node holding the target, which covers
 ## its place by containing it and is not what took it.
 static func drawn_at(target: Control) -> Node:
 	var drawn: Array[Node] = _pointer_takers(target.get_tree().root)
@@ -636,20 +636,20 @@ static func _drawn_above(control: Control, other: Control) -> bool:
 	return layer > other_layer or (layer == other_layer and control.is_greater_than(other))
 
 
-## "; A, B and C are shown beside N" for [param beside] and the hidden node [param hidden], naming
-## three at most and counting the rest.
+## `", and A, B and C are shown beside N"` for [param beside] and the hidden node [param hidden].
+## It names three at most and counts the rest.
 static func _shown_beside(beside: Array[String], hidden: Node) -> String:
 	if beside.is_empty():
 		return ""
 	var at: String = str(hidden.get_path())
 	if beside.size() == 1:
-		return "; %s is shown beside %s" % [beside[0], at]
+		return ", and %s is shown beside %s" % [beside[0], at]
 	var listed: Array[String] = beside.slice(0, 3)
 	var rest: int = beside.size() - listed.size()
 	if rest > 0:
-		return "; %s and %d more are shown beside %s" % [", ".join(listed), rest, at]
+		return ", and %s and %d more are shown beside %s" % [", ".join(listed), rest, at]
 	var last: String = listed.pop_back()
-	return "; %s and %s are shown beside %s" % [", ".join(listed), last, at]
+	return ", and %s and %s are shown beside %s" % [", ".join(listed), last, at]
 
 
 ## The nodes whose visible is false and keeps [param node] from being drawn, nearest first. Walked
@@ -728,7 +728,7 @@ static func _pointer_takers(root: Node) -> Array[Node]:
 ## a control's however it is turned or scaled.
 ##
 ## Worked out once for a click rather than once for each match. A plain word on a screen of prose
-## matches a hundred labels, and asking all four thousand controls of a hall for their transform
+## matches a hundred labels, and asking all four thousand controls on screen for their transform
 ## for each of them took a click by words 80 ms, where the matching alone takes half that.
 static func _areas_of(drawn: Array[Node]) -> Array[Rect2]:
 	var areas: Array[Rect2] = []
@@ -856,7 +856,7 @@ static func _holds(control: Control, point: Vector2) -> bool:
 	# A control scaled to nothing holds no point, and inverting its transform is an engine error.
 	if is_zero_approx(placed.determinant()):
 		return false
-	# The rectangle, which is the engine's own answer unless a script overrides `_has_point`; the
+	# The rectangle, which is the engine's own answer unless a script overrides `_has_point`. The
 	# engine does not offer the overridden answer to scripts.
 	return Rect2(Vector2.ZERO, control.size).has_point(placed.affine_inverse() * point)
 
@@ -964,7 +964,7 @@ static func _candidates(targets: Array[Control], said: Array[String]) -> String:
 
 ## What to add to a refusal that found nothing on screen, when an open menu has an item saying the
 ## words: a menu draws its items rather than holding a control for each, so a click finds none,
-## while a wait for the words finds the item. A wait met on "Leave the hall" was followed by a click
+## while a wait for the words finds the item. A wait met on "Leave the shop" was followed by a click
 ## on it refused as nothing on screen saying it, with no word of the call that chooses it.
 static func _open_menu_note(root: Node, wanted: String) -> String:
 	var pending: Array[Node] = [root]
@@ -981,7 +981,7 @@ static func _open_menu_note(root: Node, wanted: String) -> String:
 					)
 					return (
 						(
-							'; the open menu %s has an item saying it, "%s", which a click cannot '
+							'. The open menu %s has an item saying it, "%s", which a click cannot '
 							+ 'reach: choose it with runtime_input choose, path %s and text "%s"'
 						)
 						% [menu.get_path(), text, named.get_path(), text]

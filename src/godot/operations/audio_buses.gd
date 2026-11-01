@@ -59,7 +59,7 @@ func remove_audio_bus(params: Dictionary) -> Dictionary:
 		)
 
 	# A bus sending to this one would be left sending to a name nothing has, which the engine reads
-	# as Master; sent on to where this one went instead, the chain it was part of keeps its shape.
+	# as Master. Sent on to where this one went instead, the chain it was part of keeps its shape.
 	var onward: String = AudioServer.get_bus_send(index)
 	var resent: Array[String] = []
 	for i: int in range(AudioServer.bus_count):
@@ -96,7 +96,7 @@ func get_audio_buses(_params: Dictionary) -> Dictionary:
 		answer["layout_on_disk"] = false
 		answer["note"] = (
 			(
-				"Nothing is at %s, so these are the engine's default buses; the first change to a "
+				"Nothing is at %s, so these are the engine's default buses. The first change to a "
 				+ "bus writes the layout there."
 			)
 			% layout
@@ -225,7 +225,7 @@ func set_audio_bus_send(params: Dictionary) -> Dictionary:
 	if target == bus_idx:
 		return _log.failure(
 			(
-				"%s cannot send to itself; it can send to %s."
+				"%s cannot send to itself. It can send to %s."
 				% [bus_name, ", ".join(_names().slice(0, bus_idx))]
 			)
 		)
@@ -269,7 +269,7 @@ func _no_index(index: int) -> String:
 	var held: PackedStringArray = []
 	for i: int in range(AudioServer.bus_count):
 		var _added: bool = held.append("%d %s" % [i, AudioServer.get_bus_name(i)])
-	return "No bus at index %d; the buses are %s." % [index, ", ".join(held)]
+	return "No bus at index %d. The buses are %s." % [index, ", ".join(held)]
 
 
 func _bus(index: int) -> Dictionary:

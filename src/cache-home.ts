@@ -18,7 +18,7 @@ export function cacheHome(
 
 /**
  * Where a pinned tool the scripts fetch is kept, in a folder named for it and its version. A
- * runner's own temporary folder on CI, which is thrown away with the runner; anywhere else the
+ * runner's own temporary folder on CI, which is thrown away with the runner. Anywhere else the
  * cache, since a temporary folder is swept: a pinned engine kept there vanished from under the
  * sessions pointing GODOT_PATH at it.
  */

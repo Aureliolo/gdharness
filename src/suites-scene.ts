@@ -4,7 +4,8 @@
  * `gdharness test` and project_test run suites as a `-s` script, which the profiler never attaches
  * to, so a game wanting to know what its suites cost by function kept a bench scene of its own
  * driving a runner of its own. `editor_run start` given `suites` plays the scene the tests addon
- * ships instead, handing it the runner `gdharness test` uses and a file of the suites to run.
+ * ships instead. That scene is handed the runner `gdharness test` uses and a file of the suites to
+ * run.
  */
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, relative, sep } from 'node:path';
@@ -14,7 +15,7 @@ import { shippedListedRunner } from './setup.js';
 /** The scene the tests addon plays suites in, from the project root. */
 export const SUITES_SCENE = 'addons/gdharness_tests/suites.tscn';
 
-/** When this process began, naming the one directory its suite runs share. */
+/** When this process began. It names the one directory its suite runs share. */
 const STARTED_AT = Date.now();
 
 /** Whether the project at [param projectPath] has the tests addon's suites scene. */

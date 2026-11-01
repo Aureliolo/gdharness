@@ -19,7 +19,7 @@ static func what_to_add(node_type: String, instance_path: String, scene_path: St
 		]
 	if not instance_path.is_empty():
 		# Asked before the cycle walk, which reads the file's dependencies and so loaded a file that
-		# was not there, laying the engine's error and a backtrace beneath the refusal.
+		# was not there and laid the engine's error and a backtrace beneath the refusal.
 		if not ResourceLoader.exists(instance_path, "PackedScene"):
 			var said: String = "No scene at %s to instance" % instance_path
 			var offered: String = GdhFileWalk.new().with_nearest_files(said, instance_path)
@@ -65,7 +65,7 @@ static func not_a_node_class(argument: String, given: String) -> String:
 	var close: PackedStringArray = GdhRead.nearest(given, classes)
 	if close.is_empty():
 		return said + "."
-	return "%s; the nearest %s %s." % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+	return "%s. The nearest %s %s." % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
 
 
 ## A new node of [param node_type], or an instance of [param packed] when there is one. The instance
@@ -202,7 +202,7 @@ static func place(node: Node, asked: Variant) -> void:
 
 
 ## Whether [param basis] has axes that are not at right angles, which a node kept in place under a
-## parent scaled unevenly across its turn ends up with. A Node2D says so through skew; a Node3D has
+## parent scaled unevenly across its turn ends up with. A Node2D says so through skew. A Node3D has
 ## no property for it, and its position, rotation and scale read as if the axes were square.
 static func sheared(basis: Basis) -> bool:
 	var x: Vector3 = basis.x.normalized()

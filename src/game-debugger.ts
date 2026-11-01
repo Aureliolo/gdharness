@@ -89,6 +89,11 @@ export const RUNTIME_ADDON = 'res://addons/gdharness_runtime/';
 const RUNTIME_AUTOLOAD = `${RUNTIME_ADDON}runtime_autoload.gd`;
 let frameEnd: number | null = null;
 
+/** Whether the frame [param frames] is stopped in belongs to the runtime addon. */
+function topIsTheAddon(frames: readonly DebugFrame[]): boolean {
+  return frames[0]?.script.startsWith(RUNTIME_ADDON) ?? false;
+}
+
 /**
  * The line of the runtime autoload's _notification, the last it runs in a frame, read off the shipped
  * copy: a game is started only on this release's addon, so that is the copy it runs.
@@ -564,7 +569,7 @@ export class GameDebugger {
     };
   }
 
-  /** The refusal of a read that needs a held game, naming [param what] the call asked for. */
+  /** Refuses a read that needs a held game and names [param what] the call asked for. */
   private notHeld(what: string): DebugAnswer {
     return {
       refused: `The game is running, not held, so it has no ${what}: debug_control pause stops it where it is, and a breakpoint stops it on its line.`,
@@ -597,7 +602,7 @@ export class GameDebugger {
       if (entered === null) {
         return {
           paused: false,
-          note: `The game has been asked to stop and had not within ${PAUSE_MS / 1000}s. It takes the request between frames, and in a script every 2048 lines it runs, so its main thread is in a loop that sleeps between few lines, or inside one long engine call or a native extension's own loop. The request stays with the game, which stops when it next reaches that point; debug_state stack reads where once it has.`,
+          note: `The game has been asked to stop and had not within ${PAUSE_MS / 1000}s. It takes the request between frames, and in a script every 2048 lines it runs, so its main thread is in a loop that sleeps between few lines, or inside one long engine call or a native extension's own loop. The request stays with the game, which stops when it next reaches that point. debug_state stack reads where once it has.`,
         };
       }
     }
@@ -615,7 +620,7 @@ export class GameDebugger {
       if (again === null) {
         return {
           paused: false,
-          note: `The game stopped between frames, where no script runs, so it was let go to stop at the next line of script it runs, and none ran within ${STEP_MS / 1000}s. It stops there when one does; debug_state stack reads it then.`,
+          note: `The game stopped between frames, where no script runs, so it was let go to stop at the next line of script it runs, and none ran within ${STEP_MS / 1000}s. It stops there when one does, and debug_state stack reads it then.`,
         };
       }
     }
@@ -625,7 +630,7 @@ export class GameDebugger {
     if (past === 'lost') {
       return {
         paused: false,
-        note: `The game stopped in gdharness's runtime addon and was let go on to reach its own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script it runs; debug_state stack reads it then.`,
+        note: `The game stopped in gdharness's runtime addon and was let go on to reach its own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script it runs, and debug_state stack reads it then.`,
       };
     }
     this.stoppedBy('Paused');
@@ -663,7 +668,7 @@ export class GameDebugger {
     let frames = await this.stack();
     let framesLeft = ADDON_FRAMES;
     let linesLeft = ADDON_LINES;
-    while (frames !== null && this.held !== null && (frames[0]?.script.startsWith(RUNTIME_ADDON) ?? false)) {
+    while (frames !== null && this.held !== null && topIsTheAddon(frames)) {
       if (until !== undefined && Date.now() >= until) {
         return { frames, gaveUp: 'time' };
       }
@@ -747,7 +752,7 @@ export class GameDebugger {
     }
     this.forget('debug_enter');
     // Over and out count lines only at the depth they start from, which held where no script runs
-    // is none, so either would let the game run on for good; into stops at its next line.
+    // is none, so either would let the game run on for good. A step into stops at its next line.
     this.send(held.hasStack ? how : 'step', [], held.thread);
     const entered = await this.next(GameDebugger.named('debug_enter'), STEP_MS);
     if (entered === null) {
@@ -766,14 +771,14 @@ export class GameDebugger {
       return {
         stepped: true,
         heldAgain: false,
-        note: `The step stopped in gdharness's runtime addon and was let go on to reach the game's own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script the game runs; debug_state stack reads it then.`,
+        note: `The step stopped in gdharness's runtime addon and was let go on to reach the game's own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script the game runs, and debug_state stack reads it then.`,
       };
     }
     this.stoppedBy('Stepped');
     const stack = past.frames ?? [];
     const top = stack[0];
     // The engine names every stop Breakpoint, so a step that ran into one cannot be told from a step
-    // that ended on its line; the line is what can be said.
+    // that ended on its line. The line is what can be said.
     const onBreakpoint = top !== undefined && this.breakpointLines.has(`${top.script}:${String(top.line)}`);
     return {
       stepped: true,
@@ -915,7 +920,7 @@ export class GameDebugger {
       refused:
         frames.length === 0
           ? 'The game is held where no script runs, so it has no frames: debug_control step_over takes it to the next line of script.'
-          : `The stack has no frame ${frame}; its frames are ${frames.map((each) => each.id).join(', ')}.`,
+          : `The stack has no frame ${frame}. Its frames are ${frames.map((each) => each.id).join(', ')}.`,
     };
   }
 

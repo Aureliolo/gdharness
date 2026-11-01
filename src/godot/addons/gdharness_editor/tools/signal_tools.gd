@@ -138,7 +138,7 @@ func connect_signal(args: Dictionary) -> Dictionary:
 		"flags": saved_flags,
 		"flagNames": flag_names(saved_flags),
 		# Connected either way, as the editor's own dialog allows, since the method may be written
-		# next; a caller told nothing learnt of a misspelt one only when the signal fired.
+		# next. A caller told nothing learnt of a misspelt one only when the signal fired.
 		"methodFound": method_found,
 	}
 	# Written all the same, for the reason a missing method is: the method may be changed next.

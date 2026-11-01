@@ -74,7 +74,7 @@ func capture_viewport(params: Dictionary) -> Dictionary:
 	# and the game's own mode put back after it.
 	var sub: SubViewport = viewport
 	var mode: SubViewport.UpdateMode = sub.render_target_update_mode
-	# Nothing is drawn without a window, so the frame waited for below may never come; the capture
+	# Nothing is drawn without a window, so the frame waited for below may never come. The capture
 	# refuses that state itself.
 	if mode == SubViewport.UPDATE_ALWAYS or not _host.get_tree().root.can_draw():
 		return await _capture(viewport, params)
@@ -144,7 +144,7 @@ func _cut_asked(params: Dictionary, in_window: bool) -> Dictionary:
 		GdhRead.as_int(params.get("width", 0)) > 0 or GdhRead.as_int(params.get("height", 0)) > 0
 	)
 	if region_given != null and not node_path.is_empty():
-		return _refused("region and nodePath each name the part to capture; give one of them")
+		return _refused("region and nodePath each name the part to capture. Give one of them")
 	if (region_given != null or not node_path.is_empty()) and not in_window:
 		return _refused(
 			(
@@ -160,7 +160,7 @@ func _cut_asked(params: Dictionary, in_window: bool) -> Dictionary:
 		return _refused(
 			(
 				"zoom enlarges by a whole factor and keeps every pixel square, and width and "
-				+ "height scale to a size; give one or the other"
+				+ "height scale to a size. Give one or the other"
 			)
 		)
 	var asked: Dictionary = { "zoom": zoom }
@@ -239,7 +239,7 @@ static func drawn_rect_of(node: Node) -> Variant:
 			item.get_viewport(), item.get_global_transform_with_canvas() * own
 		)
 	var no_extent: String = (
-		"%s is a %s, which has a position on screen and no extent; give region around the point "
+		"%s is a %s, which has a position on screen and no extent. Give region around the point "
 		+ "runtime_inspect rect answers for it"
 	)
 	return no_extent % [node.get_path(), node.get_class()]
@@ -286,7 +286,7 @@ static func cut(image: Image, picture: Rect2i, zoom: int) -> Image:
 	return part
 
 
-## The server names the file, so a game cannot point it at a path of its own choosing; a call
+## The server names the file, so a game cannot point it at a path of its own choosing. A call
 ## with no path is a call the server did not make.
 func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false) -> Dictionary:
 	var requested_path: String = str(params.get("output_path", ""))
@@ -324,7 +324,7 @@ func _capture(viewport: Viewport, params: Dictionary, with_windows: bool = false
 	# The game announces itself before its first frame, and until a frame has been drawn the texture
 	# holds nothing the game drew: blank on one machine, solid white on another, which a caller took
 	# for the game flashing white on boot. Measured on 4.7.2 with both renderers, only the first
-	# processed frame reads it so; the next one holds the scene.
+	# processed frame reads it so. The next one holds the scene.
 	while Engine.get_frames_drawn() == 0:
 		await _host.get_tree().process_frame
 

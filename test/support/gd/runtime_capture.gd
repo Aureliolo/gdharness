@@ -3,7 +3,7 @@ extends SceneTree
 ## and draws nothing, which is the same state as a minimised one: the viewport texture holds
 ## whatever was drawn last, here nothing at all, and a capture of it used to answer with a
 ## picture. The refusal is the whole check, since no fixture can minimise a window it has not
-## got; what it proves is that a frame nobody drew is not handed back as a success.
+## got. What it proves is that a frame nobody drew is not handed back as a success.
 
 const CaptureCommands = preload("res://addons/gdharness_runtime/runtime_capture.gd")
 const GdhValues = preload("res://addons/gdharness_runtime/runtime_values.gd")
@@ -64,7 +64,7 @@ func _fail(message: String) -> void:
 
 
 ## What a capture is scaled to. A width alone was ignored unless a height came with it, so asking
-## for a smaller picture sent back the full-size one; one side now keeps the picture's proportions.
+## for a smaller picture sent back the full-size one. One side alone keeps the proportions.
 func _check_scaling() -> void:
 	var drawn: Vector2i = Vector2i(1920, 1080)
 	var cases: Array[Array] = [
@@ -93,11 +93,11 @@ func _check_what_is_asked(capture: CaptureCommands, output_path: String) -> void
 	var cases: Array[Array] = [
 		[
 			{ "region": { "x": 0, "y": 0, "width": 4, "height": 4 }, "nodePath": "/root" },
-			"give one of them",
+			"to capture. Give one of them",
 		],
 		[{ "zoom": 0 }, "from 1 to 16, and 0"],
 		[{ "zoom": 17 }, "from 1 to 16, and 17"],
-		[{ "zoom": 2, "width": 100 }, "give one or the other"],
+		[{ "zoom": 2, "width": 100 }, "to a size. Give one or the other"],
 		[{ "region": { "x": 0, "y": 0, "width": 0, "height": 4 } }, "with an area"],
 		[{ "region": "the corner" }, "with an area"],
 		# A path naming nothing, which a headless game told only that it has no window.
@@ -277,8 +277,8 @@ func _check_refused(answer: Dictionary, what: String, output_path: String) -> vo
 			)
 		)
 		return
-	# This runs headless, so the refusal is the one for a game with no window at all; the one for a
-	# minimised window needs a window to minimise, which only a windowed run has.
+	# This runs headless, so the refusal is the one for a game with no window at all. The one for a
+	# minimised window needs a window to minimise, and only a windowed run has one.
 	var message: String = str(answer.get("message", ""))
 	if not message.contains("runs headless, so it has no window and draws nothing"):
 		_fail("the %s refusal should say the game has no window: %s" % [what, message])

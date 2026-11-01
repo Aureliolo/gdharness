@@ -60,14 +60,14 @@ export const PROMPT_SPECS: readonly PromptSpec[] = [
       {
         tool: 'editor_status',
         passes: [],
-        why: 'see whether an editor is connected and its addon matches; without one the run is a game of its own, not a fault',
+        why: 'see whether an editor is connected and its addon matches. Without one the run is a game of its own, not a fault',
       },
       { tool: 'editor_run', op: 'start', passes: ['projectPath', 'scene'], why: 'start the run' },
       {
         tool: 'editor_run',
         op: 'wait',
         passes: ['projectPath'],
-        why: 'wait for it to end; for a game that never quits on its own, editor_run stop instead once it has run long enough',
+        why: 'wait for it to end. For a game that never quits on its own, editor_run stop instead once it has run long enough',
       },
       { tool: 'editor_output', op: 'run', passes: [], why: 'read what it printed, with the clean verdict' },
     ],
@@ -84,7 +84,7 @@ export const PROMPT_SPECS: readonly PromptSpec[] = [
       {
         tool: 'editor_status',
         passes: [],
-        why: 'see whether an editor is connected and, if one is, whether its addon matches; no editor is no fault in the project, so leave it out of what is wrong',
+        why: 'see whether an editor is connected and, if one is, whether its addon matches. No editor is no fault in the project, so leave it out of what is wrong',
       },
       {
         tool: 'project_info',
@@ -143,7 +143,7 @@ function renderedPrompt(
   if (unknown.length > 0) {
     return {
       ok: false,
-      reason: `${spec.name} does not take ${unknown.join(', ')}; it takes ${[...takes].join(', ')}.`,
+      reason: `${spec.name} does not take ${unknown.join(', ')}. It takes ${[...takes].join(', ')}.`,
     };
   }
   const missing = spec.arguments.filter((argument) => argument.required && !given[argument.name]);

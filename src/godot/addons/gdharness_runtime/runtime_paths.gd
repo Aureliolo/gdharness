@@ -297,10 +297,10 @@ const READS_ONLY: String = (
 ## read it, "board:size()" or "inbox:keys()", listed in [constant LIST_CALLS] and
 ## [constant MAP_CALLS]. An engine method that reads takes literal arguments in the brackets,
 ## "get_theme_stylebox(\"panel\"):content_margin_top", since what a control's theme gives it is only
-## reachable by naming what is asked for; see [method arguments_of].
+## reachable by naming what is asked for. See [method arguments_of].
 ##
 ## A step into a vector, a colour, a rectangle or a transform reads one of its components,
-## "size:x" or "global_transform:origin:y", by the names GDScript gives them; see
+## "size:x" or "global_transform:origin:y", by the names GDScript gives them. See
 ## [method GdhSerialisation.components_of]. It answers the calls in [constant VALUE_CALLS] too,
 ## "linear_velocity:length()".
 ##
@@ -337,7 +337,7 @@ static func walk_to(node: Object, node_path: String, reaching: String) -> Dictio
 ## `{"message": ...}` saying why it names none.
 ##
 ## A colon path read from [param node], the node the call was made on, the way the method's own
-## path is: "_ladder:shop:_wares:-15". One beginning with a slash starts at the node it names
+## path is: "_league:store:_items:-15". One beginning with a slash starts at the node it names
 ## instead, "/root/Main/Hud" or "/root/Main:_game:run". A res:// or uid:// path names a resource
 ## file, which is loaded the way the game loads one, so a resource the game already holds is handed
 ## over as that instance. The records a read answers a node and a filed resource with carry such a
@@ -387,7 +387,7 @@ static func object_at(root: Node, node: Node, node_path: String, given: Variant)
 
 
 ## Why [param record], a dictionary given where an object goes, names none. A resource built into a
-## scene is read as its class beside its properties and has no path; the runtime builds no resource
+## scene is read as its class beside its properties and has no path. The runtime builds no resource
 ## from those, so the remedy is the file, not the path the other records are told to use.
 static func _no_path_in(record: Dictionary) -> String:
 	if record.has("id"):
@@ -439,7 +439,7 @@ static func _resource_at(path: String) -> Dictionary:
 		return { "message": "No resource at %s" % path }
 	var loaded: Resource = load(path)
 	if loaded == null:
-		return { "message": "%s did not load; the game's output says why" % path }
+		return { "message": "%s did not load. The game's output says why" % path }
 	return { "object": loaded }
 
 
@@ -580,7 +580,7 @@ static func can_read(holder: Variant, named: String) -> bool:
 ## counted as unclean for a read.
 ##
 ## A step written in double quotes is the key inside them, so a key holding a colon is one step:
-## Game D keys its stock by namespaced ids, "stock:\"base:dew\"", and split at that colon the
+## Game D keys its stock by namespaced ids, "stock:\"base:water\"", and split at that colon the
 ## step named a key "base" the map had never had.
 static func _key_in(map: Dictionary, named: String) -> Array:
 	var word: String = key_written(named)
@@ -625,8 +625,8 @@ static func step_naming(key: Variant) -> String:
 
 ## [param reaching] split into its steps at each colon, except one inside a call's brackets or a
 ## quoted argument or key: `get_node("/root/Main"):name` is two steps, and so is
-## `stock:"base:dew"`; split at every colon a quoted argument holding one became a step that names
-## nothing.
+## `stock:"base:water"`. Split at every colon a quoted argument holding one became a step that
+## names nothing.
 static func steps_of(reaching: String) -> PackedStringArray:
 	var steps: PackedStringArray = []
 	var step: String = ""
@@ -734,7 +734,7 @@ static func _arity(object: Object, method: String) -> Dictionary:
 ## A path is read, and a wait reads it every frame, so a call in one has to be a read. The engine
 ## marks its own reading methods const and `queue_free()`, `free()` and `set_name()` not, measured
 ## on 4.7.2, though it leaves some reads unmarked as well, `Engine.get_frames_drawn()` and
-## `get_time_scale()` among them; so the refusal says the mark is missing, not that the method
+## `get_time_scale()` among them, so the refusal says the mark is missing, not that the method
 ## changes anything, and points at runtime_invoke call, which calls it. A game's methods carry no
 ## such mark, so one declared `-> void` is taken at its word, as doing something and answering
 ## nothing, and one left untyped is trusted. Without this a find with property "queue_free()" freed
@@ -756,7 +756,7 @@ static func call_refused(
 	var scripted: Dictionary = _script_method(object, method)
 	if not scripted.is_empty() and (given > 0 or least > 0):
 		var why: String = (
-			"since nothing marks one as only reading%s; runtime_invoke call takes them" % READS_ONLY
+			"since nothing marks one as only reading%s. runtime_invoke call takes them" % READS_ONLY
 		)
 		return (
 			"%s.%s is the game's own and a path gives a game's method no arguments, %s"
@@ -784,7 +784,7 @@ static func call_refused(
 		return ""
 	if _native_flags(object, method) & METHOD_FLAG_CONST == 0:
 		return (
-			"%s.%s is not one the engine marks as only reading%s; runtime_invoke call calls it"
+			"%s.%s is not one the engine marks as only reading%s. runtime_invoke call calls it"
 			% [called_as, method, READS_ONLY]
 		)
 	return ""
@@ -817,14 +817,14 @@ static func with_methods_offered(said: String, object: Object, method: String) -
 	var close: PackedStringArray = GdhRead.nearest(method, PackedStringArray(every))
 	if not close.is_empty():
 		return (
-			"%s; the nearest it has %s %s"
-			% [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+			"%s The nearest it has %s %s"
+			% [GdhRead.ended(said), "is" if close.size() == 1 else "are", ", ".join(close)]
 		)
 	if own.is_empty():
 		return said
 	own.sort()
-	var offered: String = "its static functions are" if object is Script else "its script declares"
-	return "%s; %s %s" % [said, offered, ", ".join(PackedStringArray(own))]
+	var offered: String = "Its static functions are" if object is Script else "Its script declares"
+	return "%s %s %s" % [GdhRead.ended(said), offered, ", ".join(PackedStringArray(own))]
 
 
 ## The entry a script attached to [param object] declares for [param method], or an empty one when
@@ -851,7 +851,7 @@ static func _native_flags(object: Object, method: String) -> int:
 
 ## Put [param value] where [param named] points, and answer the holder written into. Only ever
 ## called once [method can_read] agrees. Lists and maps are reference types, so writing into one
-## reaches the game's own copy; a vector or a transform is a copy, and the one answered is the
+## reaches the game's own copy. A vector or a transform is a copy, and the one answered is the
 ## changed copy, for [method write_back] to put where it came from.
 static func write(holder: Variant, named: String, value: Variant) -> Variant:
 	if holder is Array:
@@ -1018,7 +1018,7 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 		var rest: String = ""
 		if keys.size() > 8:
 			rest = " and %d more" % [keys.size() - 8]
-		return "%s has no key %s; it is keyed by %s%s" % [called_as, named, ", ".join(some), rest]
+		return "%s has no key %s. It is keyed by %s%s" % [called_as, named, ", ".join(some), rest]
 	if composite(holder):
 		var kind: String = type_string(typeof(holder))
 		var sort: String = ("an " if kind.left(1) in ["A", "E", "I", "O", "U"] else "a ") + kind
@@ -1036,11 +1036,11 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 			return (
 				(
 					"%s is %s, and %s() is not one of the calls a path makes on one, which read it"
-					+ " and take no arguments: %s; its components are %s"
+					+ " and take no arguments: %s. Its components are %s"
 				)
 				% [called_as, sort, container_call, ", ".join(spelled), has]
 			)
-		return "%s is %s, so it has no %s; it has %s" % [called_as, sort, named, has]
+		return "%s is %s, so it has no %s. It has %s" % [called_as, sort, named, has]
 	if not holder is Object:
 		return (
 			"%s is %s, which has nothing to read %s off"
@@ -1054,7 +1054,7 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 	# for, and the caller is one pair of brackets away from what they meant.
 	if object.has_method(named):
 		return (
-			"%s has no property %s; it has a method of that name, which a path calls as %s()"
+			"%s has no property %s. It has a method of that name, which a path calls as %s()"
 			% [called_as, named, named]
 		)
 	return GdhRead.near_property("%s has no property %s" % [called_as, named], object, named)

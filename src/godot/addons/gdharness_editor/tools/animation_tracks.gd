@@ -209,13 +209,13 @@ func _add_track(
 		for blending: String in ["interpolation", "loopWrap"]:
 			if track.has(blending):
 				return _not_added(
-					"track.%s is for property tracks; a method key is not blended." % blending
+					"track.%s is for property tracks. A method key is not blended." % blending
 				)
 	else:
 		return _not_added(
 			(
 				(
-					"add_track makes property and method tracks, and track.type is %s; "
+					"add_track makes property and method tracks, and track.type is %s. "
 					+ "remove_track takes any."
 				)
 				% track_type
@@ -240,7 +240,7 @@ func _add_track(
 					(
 						(
 							"Track %d already animates %s and has a key at %s s, which "
-							+ "keyframes[%d] would replace. Nothing was written; replaceKeys true "
+							+ "keyframes[%d] would replace. Nothing was written. replaceKeys true "
 							+ "replaces it."
 						)
 						% [track_idx, str(path), _seconds(time), index]
@@ -408,10 +408,10 @@ static func _key_misfit(target: Node, method: String, arguments: Array, index: i
 
 
 ## Takes out the track [code]track[/code] names by its type, nodePath and property as read answers
-## them, so a track read back can be passed as it stands; its keyframes are not looked at. Every
+## them, so a track read back can be passed as it stands. Its keyframes are not looked at. Every
 ## track of that shape goes, since the editor can make two for one path and both play. A method
 ## track given a method loses only the keys calling it, since add_track puts every method called on
-## one node in one track; the track goes once no key is left.
+## one node in one track. The track goes once no key is left.
 func remove_animation_track(args: Dictionary) -> Dictionary:
 	var scene_path: String = GdhSceneFile.res_path("", str(args.get("scenePath", "")))
 	var player_node_path: String = str(args.get("playerNodePath", "."))
@@ -464,13 +464,13 @@ func remove_animation_track(args: Dictionary) -> Dictionary:
 			]
 		)
 		if held.is_empty():
-			return scene.refuse("%s; it has no tracks." % said)
-		return scene.refuse("%s; its tracks are %s." % [said, ", ".join(held)])
+			return scene.refuse("%s. It has no tracks." % said)
+		return scene.refuse("%s. Its tracks are %s." % [said, ", ".join(held)])
 	var calling: Array = _keys_calling(anim, matching, method)
 	if calling.is_empty():
 		return scene.refuse(
 			(
-				"%s's method track on %s has no key calling %s; its keys call %s."
+				"%s's method track on %s has no key calling %s. Its keys call %s."
 				% [animation_name, node_path, method, ", ".join(_methods_called(anim, matching))]
 			)
 		)
@@ -585,7 +585,7 @@ static func _keys_at(anim: Animation, calling: Array, times: Array) -> Array:
 	return [
 		at,
 		(
-			"has no key at %s s; its keys are at %s s. Nothing was removed."
+			"has no key at %s s. Its keys are at %s s. Nothing was removed."
 			% [", ".join(named), ", ".join(held)]
 		),
 	]

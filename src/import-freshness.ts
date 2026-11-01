@@ -20,7 +20,7 @@ export interface StaleImport {
 
 /**
  * The extensions the engine imports without a plugin, which `import_pipeline.gd` holds as
- * `IMPORTABLE_EXTENSIONS`; a case holds the two lists equal.
+ * `IMPORTABLE_EXTENSIONS`. A case holds the two lists equal.
  */
 export const IMPORTABLE_EXTENSIONS: readonly string[] = [
   'png',
@@ -115,7 +115,7 @@ function listed(value: string | undefined): string[] {
 
 /**
  * What the import of each of [param resPaths] wrote into the project itself rather than under
- * `.godot`, by source, leaving out a source that wrote nothing there. A CSV's import writes one
+ * `.godot`, by source. A source that wrote nothing there is left out. A CSV's import writes one
  * `.translation` per language beside it, which version control sees and
  * internationalization/locale/translations has to name, and no answer said which files it made.
  */
@@ -148,7 +148,7 @@ function onDisk(projectPath: string, resPath: string): string {
 
 /**
  * The md5 of each sidecar as the editor last imported it, keyed by `res://` path, from the newest
- * filesystem cache under `.godot/editor`, read as `import_pipeline.gd` reads it; empty without one.
+ * filesystem cache under `.godot/editor`, read as `import_pipeline.gd` reads it, or empty without one.
  */
 function importedSidecarMd5s(projectPath: string): Map<string, string> {
   const found = new Map<string, string>();
@@ -173,7 +173,7 @@ function importedSidecarMd5s(projectPath: string): Map<string, string> {
   } catch {
     return found;
   }
-  // The first line is the import settings version; then a "::<dir>::<time>" line opens each
+  // The first line is the import settings version. Then a "::<dir>::<time>" line opens each
   // directory, and each file line has nine "::" fields, the eighth "<>"-separated with the
   // sidecar's md5 sixth.
   let directory = 'res://';
@@ -265,7 +265,7 @@ function behind(
  * Every file under [param projectPath] whose import is behind it, walked as `project_import
  * status` walks: past names starting with a dot, folders holding a `.gdignore`, and addons
  * gdharness installed. A file with an importable extension and no import file has not been
- * imported; a sidecar whose source has gone is left to `project_import status`, since no import
+ * imported. A sidecar whose source has gone is left to `project_import status`, since no import
  * can bring it back.
  */
 export function staleImports(projectPath: string): StaleImport[] {
@@ -319,5 +319,5 @@ export function staleImports(projectPath: string): StaleImport[] {
     }
   };
   visit(projectPath, 'res://');
-  return stale.sort((one, other) => one.path.localeCompare(other.path));
+  return stale.toSorted((one, other) => one.path.localeCompare(other.path));
 }

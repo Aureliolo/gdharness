@@ -9,6 +9,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { isRecord, isStringList } from './records.js';
 
 /** A suite that finished with cases that did not pass, and which ones. */
 interface FailingSuite {
@@ -49,17 +50,44 @@ export function takeCutTestRun(projectPath: string): CutTestRun | null {
     return null;
   }
   try {
-    const run = JSON.parse(readFileSync(path, 'utf8')) as CutTestRun;
+    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
     rmSync(path, { force: true });
-    return typeof run.cutAt === 'string' &&
-      Array.isArray(run.paths) &&
-      run.paths.every((path) => typeof path === 'string')
-      ? run
-      : null;
+    return cutTestRunOf(parsed);
   } catch {
     rmSync(path, { force: true });
     return null;
   }
+}
+
+function isFailingSuite(value: unknown): value is FailingSuite {
+  return (
+    isRecord(value) &&
+    typeof value['path'] === 'string' &&
+    typeof value['errors'] === 'number' &&
+    typeof value['failures'] === 'number' &&
+    isStringList(value['failed'])
+  );
+}
+
+/**
+ * The run [param kept] describes, or null when it is not one. A part that is not the shape this
+ * writes is left out rather than handed on, since the answer quotes what is here as the run's.
+ */
+function cutTestRunOf(kept: unknown): CutTestRun | null {
+  if (!isRecord(kept)) {
+    return null;
+  }
+  const { cutAt, paths, suitesFinished, suitesFailing, suiteRunning } = kept;
+  if (typeof cutAt !== 'string' || !isStringList(paths)) {
+    return null;
+  }
+  return {
+    cutAt,
+    paths,
+    ...(isStringList(suitesFinished) ? { suitesFinished } : {}),
+    ...(Array.isArray(suitesFailing) ? { suitesFailing: suitesFailing.filter(isFailingSuite) } : {}),
+    ...(typeof suiteRunning === 'string' ? { suiteRunning } : {}),
+  };
 }
 
 /** The sentence an answer carries about [param run], which it holds under `previousRunCut`. */
@@ -70,5 +98,5 @@ export function cutTestRunNote(run: CutTestRun): string {
     finished === 0
       ? 'before any suite had finished'
       : `after ${finished === 1 ? 'one suite' : `${finished} suites`} had finished${failing === 0 ? '' : finished === 1 ? ', with failures' : `, ${failing} of them with failures`}`;
-  return `The test run before this one in this project, of ${run.paths.join(', ')}, was cut off by its client at ${run.cutAt} ${got}${run.suiteRunning === undefined ? '' : `, while ${run.suiteRunning} was running`}; what it finished is under previousRunCut.`;
+  return `The test run before this one in this project, of ${run.paths.join(', ')}, was cut off by its client at ${run.cutAt} ${got}${run.suiteRunning === undefined ? '' : `, while ${run.suiteRunning} was running`}. What it finished is under previousRunCut.`;
 }

@@ -77,7 +77,7 @@ func _why_none(file_path: String) -> String:
 		return "No .uid file beside it. refresh_uids writes one for every script and shader."
 	if kind in TEXT_RESOURCE_KINDS:
 		return (
-			"Its header carries no uid. The editor writes one when it saves the file; refresh_uids "
+			"Its header carries no uid. The editor writes one when it saves the file. refresh_uids "
 			+ "does not, and a headless save does not either."
 		)
 	if ResourceLoader.exists(file_path):

@@ -93,7 +93,7 @@ func connect_animation_states(args: Dictionary) -> Dictionary:
 	if not advances.has(advance_mode):
 		return {
 			"ok": false,
-			"error": "Unsupported advanceMode: %s; it is auto, enabled or disabled" % advance_mode,
+			"error": "Unsupported advanceMode: %s. It is auto, enabled or disabled" % advance_mode,
 		}
 	if not advance_condition.is_empty() and advance_mode != "auto":
 		return {
@@ -189,10 +189,10 @@ static func _no_state(sm: AnimationNodeStateMachine, state_name: String) -> Stri
 	var close: PackedStringArray = GdhRead.nearest(state_name, states)
 	if not close.is_empty():
 		return (
-			"%s; the nearest it has %s %s."
+			"%s. The nearest it has %s %s."
 			% [said, "is" if close.size() == 1 else "are", ", ".join(close)]
 		)
-	return "%s; its states are %s." % [said, ", ".join(states)]
+	return "%s. Its states are %s." % [said, ", ".join(states)]
 
 
 ## The state machine [param args] names, as [scene, machine, files, refusal, tree]: the machine is
@@ -276,9 +276,9 @@ func disconnect_animation_states(args: Dictionary) -> Dictionary:
 				var _listed: bool = leaving.append(str(sm.get_transition_to(index)))
 		var said: String = "There is no transition from %s to %s" % [from_state, to_state]
 		if leaving.is_empty():
-			return scene.refuse("%s; none leaves %s." % [said, from_state])
+			return scene.refuse("%s. None leaves %s." % [said, from_state])
 		return scene.refuse(
-			"%s; the ones leaving %s go to %s." % [said, from_state, ", ".join(leaving)]
+			"%s. The ones leaving %s go to %s." % [said, from_state, ", ".join(leaving)]
 		)
 	sm.remove_transition(StringName(from_state), StringName(to_state))
 	if sm.has_transition(StringName(from_state), StringName(to_state)):

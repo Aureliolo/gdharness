@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { isRecord } from './records.js';
 import { isNewer } from './update-check.js';
 
 /** Debug lines on stderr, and headless engines run with `--debug-godot`. */
@@ -6,10 +7,9 @@ export const DEBUG_MODE: boolean = process.env['GDHARNESS_DEBUG'] === '1';
 
 export const SERVER_VERSION = (() => {
   try {
-    const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
-      version?: string;
-    };
-    return typeof pkg.version === 'string' ? pkg.version : '0.0.0';
+    const pkg: unknown = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    const version = isRecord(pkg) ? pkg['version'] : undefined;
+    return typeof version === 'string' ? version : '0.0.0';
   } catch {
     return '0.0.0';
   }
@@ -45,12 +45,12 @@ export function sameCodeNote(addonVersion: string, serverVersion: string): strin
   // restart: it is this server that is behind.
   return isNewer(addonVersion, serverVersion)
     ? `${same}. This server is the older of the two, which a reconnect in your harness settles once the project pins ${addonVersion}.`
-    : `${same}; addonVersion is the version the editor loaded when it started.`;
+    : `${same}. addonVersion is the version the editor loaded when it started.`;
 }
 
 /**
  * Why the editor is not asked anything, and what to do about it, when it and this server run
- * different addon code; undefined when they agree.
+ * different addon code. Undefined when they agree.
  *
  * Which half is behind decides the answer, and getting it wrong sends the reader the wrong way.
  * An upgrade writes the new addon under a running editor, so the editor is the old half and a
@@ -84,7 +84,7 @@ export function addonMismatch(
   const editor = reported === '' ? 'an addon with no version marker' : `the ${reported} addon`;
   const both = `The editor is running ${editor} while this server ships ${serverVersion}, ${asked}`;
   if (reported !== '' && isNewer(reported, serverVersion)) {
-    return `${both} this server is the older half; reconnect it in your harness so it spawns ${reported}.`;
+    return `${both} this server is the older half. Reconnect it in your harness so it spawns ${reported}.`;
   }
   return `${both} ${restart}`;
 }
@@ -106,7 +106,7 @@ export function runtimeAddonUnknown(addon: { readonly version: string; readonly 
 
 /**
  * Why a game is not asked anything, and what to do about it, when it runs a runtime addon other
- * than this server's; undefined when it runs this server's or cannot say what it runs.
+ * than this server's. Undefined when it runs this server's or cannot say what it runs.
  *
  * The same question as `addonMismatch` asks of the editor, for the addon inside a game. A second
  * checkout of a project, a git worktree, carried a runtime addon three releases behind its server

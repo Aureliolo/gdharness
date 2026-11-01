@@ -79,13 +79,15 @@ class UsageError extends Refusal {}
  */
 function projectArgument(at: number): string {
   // The first thing that is not a flag. With the directory optional, `setup --cursor` is the
-  // natural thing to type and reads as a flag where the path used to be; taking the argument
+  // natural thing to type and reads as a flag where the path used to be. Taking the argument
   // positionally made it resolve `--cursor` as a directory and refuse the command the install
   // guide tells people to run.
   const named = args.slice(at).find((value) => !value.startsWith('--'));
   const projectPath = resolve(named ?? '.');
   if (!existsSync(join(projectPath, 'project.godot'))) {
-    throw new UsageError(`Not a Godot project: ${projectPath} holds no project.godot.`);
+    throw new UsageError(
+      `Not a Godot project: ${projectPath} holds no project.godot. Run from the project directory, or name it on the command line.`,
+    );
   }
   return projectPath;
 }
@@ -109,15 +111,16 @@ async function engine(projectPath?: string): Promise<HeadlessEngine> {
   if (recorded !== null) {
     return { godotPath: recorded, script: shippedOperationsScript(), debug: DEBUG_MODE };
   }
-  const main = located.named === null && projectPath !== undefined ? mainCheckoutOf(projectPath) : null;
-  const theirs = main === null ? null : recordedEnginePath(main);
-  if (main === null || theirs === null) {
+  const mainCheckout =
+    located.named === null && projectPath !== undefined ? mainCheckoutOf(projectPath) : null;
+  const theirs = mainCheckout === null ? null : recordedEnginePath(mainCheckout);
+  if (mainCheckout === null || theirs === null) {
     const refusal = GodotLocator.refusal(located);
     throw new UsageError(`${refusal.message} ${refusal.advice.join('. ')}.`);
   }
   // Said, because it is an engine this project's own files do not name.
   console.error(
-    `engine: ${theirs}, which the harness config of ${main} names; this project is a git worktree of it`,
+    `engine: ${theirs}, which the harness config of ${mainCheckout} names. This project is a git worktree of it`,
   );
   return { godotPath: theirs, script: shippedOperationsScript(), debug: DEBUG_MODE };
 }
@@ -145,7 +148,7 @@ function useTheShippedLoader(name: string, path: string): string {
  *
  * One function for setup, upgrade and `runtime on`, because the rule is one rule and three
  * phrasings of it would drift. An entry naming the shipped loader or the addon's own script is
- * ours to rewrite; one naming a script of the project's own is the project's, and is left with a
+ * ours to rewrite. One naming a script of the project's own is the project's, and is left with a
  * line saying how to use the shipped loader instead.
  *
  * A project's loader that is not on disk is still not rewritten, because a file can be absent for
@@ -187,7 +190,7 @@ async function registerRuntime(godot: HeadlessEngine, projectPath: string): Prom
     // top-level folders it knows into a pack.
     if (before === 'missing') {
       console.log(
-        `  every export carries ${dirname(RUNTIME_AUTOLOAD.path)}/, since the entry names it, and the loader does nothing in a release build: a check or export filter that keeps unknown top-level folders out of a pack has to allow it`,
+        `  a debug export carries ${dirname(RUNTIME_AUTOLOAD.path)}/. A check or export filter that keeps unknown top-level folders out of a debug pack has to allow it`,
       );
     }
     return;
@@ -204,6 +207,16 @@ async function registerRuntime(godot: HeadlessEngine, projectPath: string): Prom
 const SETUP_FLAGS = new Set(['--runtime', '--no-runtime', '--no-connect', '--no-skill', '--json', '--yes']);
 
 /**
+ * The refusal for a flag no command takes. `gdharness harnesses` alone lists only the harness
+ * flags, so a mistyped `--no-skill` sent its reader to a list without it.
+ */
+function unknownOption(flag: string): UsageError {
+  return new UsageError(
+    `Unknown option ${flag}. gdharness help lists each command's flags, and gdharness harnesses lists the harness flags.`,
+  );
+}
+
+/**
  * The harnesses named on the command line, which is how an agent drives this.
  *
  * An unknown flag is refused rather than ignored, because a silently dropped `--curser` leaves
@@ -214,7 +227,7 @@ function namedHarnesses(): readonly Harness[] {
   return flags.map((flag) => {
     const harness = harnessById(flag.slice(2));
     if (harness === undefined) {
-      throw new UsageError(`Unknown option ${flag}. Run gdharness harnesses for every flag it takes.`);
+      throw unknownOption(flag);
     }
     return harness;
   });
@@ -275,7 +288,7 @@ function reportSkipped(candidate: Candidate): void {
   const { harness, reason } = candidate;
   console.log(
     reason === 'machine-wide'
-      ? `${harness.name}: found, not touched. Its config is machine-wide; pass --${harness.id} to write it.`
+      ? `${harness.name}: found, not touched. Its config is machine-wide. Pass --${harness.id} to write it.`
       : `${harness.name}: installed, not touched. Pass --${harness.id} to set it up here.`,
   );
 }
@@ -325,13 +338,13 @@ function reportConnection(group: Group, launch: Launch, projectPath: string): Co
  * Both of these are easy to miss, because the old version keeps answering until they are done:
  * the harness holds the server it spawned, and the editor holds the addon it loaded at startup.
  */
-function nextSteps(projectPath: string, runtime: boolean): void {
+function nextSteps(projectPath: string, withRuntime: boolean): void {
   console.log('\nTwo things this cannot do for you:');
   console.log('  1. Reconnect the MCP server in your harness, so it spawns this version.');
   console.log('  2. Restart an open editor, or open the project. Then editor_status should answer.');
-  if (runtime && loaderState(projectPath) !== 'missing') {
+  if (withRuntime && loaderState(projectPath) !== 'missing') {
     console.log(
-      `\nThe runtime autoload names res://${RUNTIME_AUTOLOAD.path}, which brings up the runtime the runtime_*\ntools talk to in a debug build that has the addon, and does nothing in a release export or a\nclone without addons/. Commit it with project.godot.`,
+      `\nThe runtime autoload names res://${RUNTIME_AUTOLOAD.path}, which brings up the runtime the runtime_*\ntools talk to in a debug build that has the addon. It does nothing in a clone without addons/,\nand a release export leaves it out. Commit it with project.godot.`,
     );
   }
 }
@@ -340,7 +353,7 @@ async function setup(): Promise<void> {
   const projectPath = projectArgument(1);
   // The runtime addon is per-project like everything else setup installs, so it is not something
   // to opt into: without it a third of the tools have nothing to talk to.
-  const runtime = !args.includes('--no-runtime');
+  const withRuntime = !args.includes('--no-runtime');
   const godot = await engine(projectPath);
 
   for (const addon of installAddons(projectPath)) {
@@ -352,13 +365,13 @@ async function setup(): Promise<void> {
     said(outcome, `enabling ${name}`);
     console.log(`${name}: ${outcome.ok ? String(outcome.payload['action']) : 'failed'}`);
   }
-  if (runtime) {
+  if (withRuntime) {
     await registerRuntime(godot, projectPath);
   }
-  const classes = await runOperation(godot, 'refresh_class_cache', {}, projectPath);
-  said(classes, 'rebuilding the class list');
-  if (classes.ok) {
-    console.log(`class list rebuilt: ${String(classes.payload['classes'])} classes`);
+  const refreshed = await runOperation(godot, 'refresh_class_cache', {}, projectPath);
+  said(refreshed, 'rebuilding the class list');
+  if (refreshed.ok) {
+    console.log(`class list rebuilt: ${String(refreshed.payload['classes'])} classes`);
   }
 
   if (!args.includes('--no-connect')) {
@@ -378,7 +391,7 @@ async function setup(): Promise<void> {
       reportSkipped(candidate);
     }
     if (chosen.harnesses.length === 0) {
-      console.log('no harness configured; name one yourself, and gdharness harnesses lists them all');
+      console.log('no harness configured. Pass one by flag. gdharness harnesses lists them');
     }
 
     if (!args.includes('--no-skill')) {
@@ -391,7 +404,7 @@ async function setup(): Promise<void> {
 
   doctorReport(projectPath);
   if (!args.includes('--json')) {
-    nextSteps(projectPath, runtime);
+    nextSteps(projectPath, withRuntime);
   }
 }
 
@@ -415,7 +428,7 @@ async function uninstall(): Promise<void> {
     if (harness.scope === 'home' && named.length === 0) {
       if (registered(harness, projectPath)) {
         console.log(
-          `${harness.name}: left alone. Its config is machine-wide and may serve another project; pass --${harness.id} to remove it.`,
+          `${harness.name}: left alone. Its config is machine-wide and may serve another project. Pass --${harness.id} to remove it.`,
         );
       }
       continue;
@@ -470,7 +483,7 @@ async function uninstall(): Promise<void> {
   const loader = before.runtimeLoaderAutoload;
   if (loader !== null && loader.name !== RUNTIME_AUTOLOAD.name) {
     console.log(
-      `${loader.name} names res://${loader.path}, which brings the runtime up its own way. That line is this project's, so it is left in place; the addon it brings up is gone now, so take the entry out unless that file does nothing without it.`,
+      `${loader.name} names res://${loader.path}, which brings the runtime up its own way. That line is this project's, so it is left in place. The addon it brings up is gone now, so take the entry out unless that file does nothing without it.`,
     );
   }
 
@@ -490,7 +503,7 @@ async function uninstall(): Promise<void> {
 /**
  * The same project, on this version of gdharness.
  *
- * Setup asks which harnesses to write; an upgrade asks nothing, because the answer is already in
+ * Setup asks which harnesses to write. An upgrade asks nothing, because the answer is already in
  * the files: every config that has a gdharness entry gets it re-pinned, and one that has not is a
  * harness nobody asked us to write to. A machine-wide config is included when it holds our entry,
  * since a config we wrote pinning a version that is no longer installed is worse than a corrected
@@ -520,7 +533,7 @@ async function upgrade(): Promise<void> {
   const godot = await engine(projectPath);
   console.log(
     present.version === version
-      ? `already ${version}; reinstalling`
+      ? `already ${version}, reinstalling`
       : `${present.version ?? 'an unmarked copy'} -> ${version}`,
   );
 
@@ -567,7 +580,7 @@ async function upgrade(): Promise<void> {
       return true;
     }
     console.log(
-      `${harness.name}: left alone. Its config is machine-wide and ${serves === null ? 'names no project' : `serves ${serves}`}; pass --${harness.id} to point it at this one.`,
+      `${harness.name}: left alone. Its config is machine-wide and ${serves === null ? 'names no project' : `serves ${serves}`}. Pass --${harness.id} to point it at this one.`,
     );
     return false;
   });
@@ -588,8 +601,8 @@ async function upgrade(): Promise<void> {
   // The same rule setup uses, not the one uninstall uses. everySkillDirectory names every place a
   // copy could be, which is what you want when removing them and is how an upgrade came to create
   // two directories the install had deliberately not created.
-  for (const written of writeSkill(skillDirectories(already, projectPath, existsSync), version)) {
-    console.log(`skill: ${written.replaced ? 'replaced' : 'written'} ${written.path}`);
+  for (const copy of writeSkill(skillDirectories(already, projectPath, existsSync), version)) {
+    console.log(`skill: ${copy.replaced ? 'replaced' : 'written'} ${copy.path}`);
   }
 
   console.log(`\nOn ${version}. What is left for you:`);
@@ -682,7 +695,9 @@ function doctorReport(projectPath: string): void {
 async function runtime(): Promise<void> {
   const state = args[1];
   if (state !== 'on' && state !== 'off') {
-    throw new UsageError('gdharness runtime takes on or off, then the project directory.');
+    throw new UsageError(
+      `gdharness runtime takes on or off, not ${state ?? 'nothing'}. Example: gdharness runtime on path/to/project`,
+    );
   }
   const projectPath = projectArgument(2);
   const godot = await engine(projectPath);
@@ -768,10 +783,9 @@ Usage:
                                      written without a flag or a typed yes. It also writes the
                                      gdharness skill into .agents/skills, unless --no-skill.
   gdharness upgrade [project]        Reinstall the addons at this version and re-pin every config
-                                     that already names gdharness. Asks nothing: it touches only
-                                     what is already ours. Afterwards the editor needs restarting
-                                     so it loads the new addons, and the MCP server needs
-                                     reconnecting so it is spawned at the new version.
+                                     that already names gdharness. Asks nothing, and touches no
+                                     other config. Then reconnect the MCP server, and restart an
+                                     open editor if the output says the editor addons changed.
   gdharness uninstall [project] [--<harness>]
                                      Take it all back out: the addons, the editor plugins, the
                                      runtime autoload, the skill, and our own entry in every
@@ -780,9 +794,10 @@ Usage:
                                      so it is named rather than edited unless you ask by flag.
   gdharness harnesses                Every harness, its flag and the file it reads
   gdharness doctor [project] [--json]
-                                     Say what holds and what does not; exit 1 on a problem
-  gdharness runtime on|off [project] Register or remove the runtime autoload, which reaches
-                                     an export if it is left on
+                                     Check the install and name each problem. Exits 1 if there
+                                     is one
+  gdharness runtime on|off [project] Register or remove the runtime autoload. A release export
+                                     leaves it out
   gdharness classes [project]        Rebuild .godot/global_script_class_cache.cfg from disk
   gdharness test [project] [suite ...] [--engines N] [--slots DIR] [--slot-count N]
                  [--silence S] [--deadline S] [--tests DIR] [--changed-only] [--reach-also PATH]
@@ -799,10 +814,11 @@ Usage:
                                      prints what every engine printed, for a
                                      benchmark run by hand. --verbose starts every engine verbose,
                                      so a leak at exit is named. --result writes the outcome, each
-                                     suite's time and every problem as JSON for a gate. --times
+                                     suite's time and every problem as JSON. --times
                                      deals by and records into FILE instead of the project's own
                                      times. --runner prints the shipped runner's path.
-                                     docs/test-runs.md has the rest.
+                                     https://aureliolo.github.io/gdharness/test-runs.html has the
+                                     rest.
   gdharness spread [project] SCENE [--workers N] [--slots DIR] [--slot-count N] [--silence S]
                    [--deadline S] [--godot PATH] [--godot-version V] [--cores N] [-- ARGS]
                                      Play a bench scene's runs over several headless engines,
@@ -810,19 +826,20 @@ Usage:
                                      run order and print the bench's table: exit 1 when a worker
                                      failed or did not play its whole share. The bench asks
                                      GdhShare.outcomes for each arm's runs. ARGS go to every
-                                     engine. docs/spread.md has the rest.
+                                     engine. https://aureliolo.github.io/gdharness/spread.html has
+                                     the rest.
   gdharness lsp [project] [--port N] [--wait S]
                                      Bridge a stdio LSP client to the GDScript language server
                                      of the project's open editor, which it never starts: the
                                      port named, else GDHARNESS_LSP_PORT, else the one each
                                      editor of the project records, else 6005. Waits S seconds
-                                     (20) for one serving this project; exit 1 when none does.
+                                     (20) for one serving this project. Exit 1 when none does.
   gdharness version                  Show the installed version
   gdharness help                     Show this help
 
 The project defaults to the directory you are in, and has to hold a project.godot either way.
 Godot is found through GODOT_PATH, else in the usual places.
-More info: https://github.com/Aureliolo/gdharness
+Docs: https://aureliolo.github.io/gdharness
 `.trim(),
   );
 }
@@ -832,13 +849,13 @@ More info: https://github.com/Aureliolo/gdharness
  *
  * A mistyped flag used to be caught halfway through: `setup --curser` installed the addons,
  * enabled the plugins, registered the autoload and rebuilt the class list, and only then refused
- * the option, leaving a project half configured and the command exiting non-zero. A flag nobody
+ * the option. That left a project half configured and the command exiting non-zero. A flag nobody
  * recognises is a sentence nobody meant, so nothing happens until they all read.
  */
 function checkFlags(): void {
   for (const flag of args.slice(1).filter((arg) => arg.startsWith('--'))) {
     if (!SETUP_FLAGS.has(flag) && harnessById(flag.slice(2)) === undefined) {
-      throw new UsageError(`Unknown option ${flag}. Run gdharness harnesses for every flag it takes.`);
+      throw unknownOption(flag);
     }
   }
 }

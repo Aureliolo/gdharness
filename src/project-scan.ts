@@ -25,7 +25,7 @@ export const VERSION_MARKER = '.gdharness-version';
  * A vendored engine, an export directory, somebody else's project kept for reference: what is
  * under one is not imported, so it is not this project's content and counting or searching it
  * answers about files the engine will never load. A hundred megabytes of exported binary is the
- * cheap half of getting this wrong; the expensive half is a search that finds a match in a copy
+ * cheap half of getting this wrong. The expensive half is a search that finds a match in a copy
  * of the code nobody is running.
  *
  * An addon gdharness installed is stepped over too. The engine loads it, but nobody on the project
@@ -128,7 +128,7 @@ export function projectStructure(projectPath: string): ProjectStructure {
 
 /**
  * The project's files whose extension is one of [param extensions] (with the dot, lower case),
- * project-relative with forward slashes and sorted, stepping over what the engine steps over.
+ * project-relative with forward slashes and sorted. The walk steps over what the engine steps over.
  */
 export function projectFiles(projectPath: string, extensions: readonly string[]): string[] {
   return filesBelow(projectPath, extensions);
@@ -136,7 +136,7 @@ export function projectFiles(projectPath: string, extensions: readonly string[])
 
 /**
  * [method projectFiles] for one folder of a project that a caller named, relative to that folder.
- * The folder is walked even when gdharness installed it, since naming it asks for it; below it,
+ * The folder is walked even when gdharness installed it, since naming it asks for it. Below it,
  * as everywhere, what the engine steps over and what gdharness installed are stepped over. A walk
  * of its own here took in gdharness's addons, so a project's diagnostics checked fifty-five of
  * them beside its three scripts while every other answer called the three the project's.
@@ -146,11 +146,11 @@ export function folderFiles(directory: string, extensions: readonly string[]): s
 }
 
 /**
- * Whether [param relative], a project-relative path, is under a folder of the project holding a
+ * Whether [param relativePath], a project-relative path, is under a folder of the project holding a
  * `.gdignore`, which the engine never loads anything from.
  */
-export function underGdignore(projectPath: string, relative: string): boolean {
-  const folders = relative.split('/').slice(0, -1);
+export function underGdignore(projectPath: string, relativePath: string): boolean {
+  const folders = relativePath.split('/').slice(0, -1);
   for (let depth = 1; depth <= folders.length; depth += 1) {
     if (gdignored(join(projectPath, ...folders.slice(0, depth)))) {
       return true;
@@ -161,7 +161,7 @@ export function underGdignore(projectPath: string, relative: string): boolean {
 
 /** A folder [method folderFiles] steps over, and why. */
 export interface SteppedOver {
-  /** Relative to the folder walked, with forward slashes; empty for that folder itself. */
+  /** Relative to the folder walked, with forward slashes. Empty for that folder itself. */
   readonly folder: string;
   readonly why: 'gdignore' | 'gdharness';
 }
@@ -193,7 +193,7 @@ export function steppedOverIn(directory: string): SteppedOver[] {
     }
   };
   visit(directory, '');
-  return found.sort((a, b) => a.folder.localeCompare(b.folder));
+  return found.toSorted((a, b) => a.folder.localeCompare(b.folder));
 }
 
 function filesBelow(root: string, extensions: readonly string[]): string[] {
@@ -215,7 +215,7 @@ function filesBelow(root: string, extensions: readonly string[]): string[] {
     }
   };
   visit(root, '');
-  return found.sort();
+  return found.toSorted();
 }
 
 /** The extensions Godot mints a `.uid` sidecar for. */
@@ -254,7 +254,7 @@ export function scriptsWithoutUid(projectPath: string): string[] {
     }
   };
   visit(projectPath, '');
-  return found.sort();
+  return found.toSorted();
 }
 
 /**
@@ -469,7 +469,8 @@ function compiledQuery(query: string, caseSensitive: boolean): RegExp {
   } catch (error) {
     const why = errorMessage(error).split(': ').at(-1) ?? '';
     throw new Error(
-      `'${query}' is not a regular expression: ${why.charAt(0).toLowerCase()}${why.slice(1)}. With regex true, a character such as ( ) [ ] { } . * + ? | ^ $ or \\ stands for itself only after a backslash, as in \\(; or leave regex out to search for the text as written.`,
+      `'${query}' is not a regular expression: ${why.charAt(0).toLowerCase()}${why.slice(1)}. With regex true, a character such as ( ) [ ] { } . * + ? | ^ $ or \\ stands for itself only after a backslash, as in \\(. Leave regex out to search for the text as written.`,
+      { cause: error },
     );
   }
 }
@@ -570,12 +571,12 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
   const notes = [
     around === null
       ? undefined
-      : `${around.folder} is searched because path names it; a search of the whole project steps over it, since ${around.why}.`,
+      : `${around.folder} is searched because path names it. A search of the whole project steps over it, since ${around.why}.`,
     extensions === null || result.summary.files_searched > 0
       ? undefined
       : met.size === 0
         ? 'No file was searched: there is no file there to search.'
-        : `No file was searched: none there has the extension ${[...extensions].join(', ')}. The extensions there are ${[...met].sort().join(', ')}.`,
+        : `No file was searched: none there has the extension ${[...extensions].join(', ')}. The extensions there are ${[...met].toSorted().join(', ')}.`,
   ].filter((note) => note !== undefined);
   return notes.length === 0 ? answered : { ...answered, note: notes.join(' ') };
 }

@@ -1,3 +1,4 @@
+import { isRecord } from './records.js';
 import type { OperationParams } from './server-types.js';
 
 /**
@@ -12,9 +13,7 @@ import type { OperationParams } from './server-types.js';
 
 /** Any value that is a plain object, as arguments, or an empty set of them. */
 export function asParams(value: unknown): OperationParams {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as OperationParams)
-    : {};
+  return isRecord(value) ? value : {};
 }
 
 export function readString(params: OperationParams, key: string): string | undefined {
@@ -39,8 +38,8 @@ export function readNonEmptyString(params: OperationParams, key: string): string
 
 /**
  * A number greater than zero, or a string that is wholly one. Zero is not a usable limit or
- * depth anywhere it is read here, so it means the same as not sending the argument at all; and
- * clients that build their arguments as text send `"3"` where the schema says 3, which is the
+ * depth anywhere it is read here, so it means the same as not sending the argument at all.
+ * Clients that build their arguments as text send `"3"` where the schema says 3, which is the
  * same mismatch the runtime bridge fits arguments to their types for.
  */
 export function readPositiveNumber(params: OperationParams, key: string): number | undefined {
@@ -82,7 +81,7 @@ export function readBoolean(params: OperationParams, key: string): boolean | und
   return undefined;
 }
 
-/** An array whose every element is a string; a mixed array reads as absent rather than partial. */
+/** An array whose every element is a string. A mixed array reads as absent rather than partial. */
 export function readStringArray(params: OperationParams, key: string): string[] | undefined {
   const value = params[key];
   if (!Array.isArray(value)) {
@@ -98,7 +97,5 @@ export function readArray(params: OperationParams, key: string): unknown[] | und
 
 export function readParams(params: OperationParams, key: string): OperationParams | undefined {
   const value = params[key];
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-    ? (value as OperationParams)
-    : undefined;
+  return isRecord(value) ? value : undefined;
 }

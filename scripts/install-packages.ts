@@ -1,9 +1,9 @@
 /**
- * Installs the locked packages, giving each attempt three minutes and three attempts in all.
+ * Installs the locked packages, with three minutes for each attempt and three attempts in all.
  *
  * Bun sets no time limit on a registry request, so a fetch that never answers holds the install
- * until the job runs out of time, printing nothing. On a hosted runner a whole install takes under
- * half a minute; one that sat on a dead connection took fourteen and cost its job. An attempt
+ * until the job runs out of time and prints nothing. On a hosted runner a whole install takes under
+ * half a minute. One that sat on a dead connection took fourteen and cost its job. An attempt
  * past the limit is killed, and the next starts on an empty node_modules, since a package that
  * was being unpacked may be only partly there.
  */

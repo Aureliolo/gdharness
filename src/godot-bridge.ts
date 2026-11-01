@@ -7,6 +7,7 @@ import { errorMessage, Refusal, toError } from './errors.js';
 import { envValue } from './launch.js';
 import { isSameDirectory } from './paths.js';
 import { portFromEnv } from './ports.js';
+import { isRecord } from './records.js';
 import { addonMismatch, SERVER_VERSION } from './server-version.js';
 import { installedEditorDigest, shippedEditorDigest } from './setup.js';
 
@@ -20,7 +21,7 @@ const SECOND_CONNECTION_CLOSE_CODE = 4000;
 const MOST_CLOSE_REASON_BYTES = 123;
 
 /**
- * [param text] cut to fit a close frame, keeping its start or its end.
+ * [param text] cut to fit a close frame, with its start or its end kept.
  *
  * The protocol carries at most 123 bytes of reason, and `ws` throws past that rather than trimming.
  * It threw inside the message handler, where nothing catches it, so the process ended: a reason
@@ -69,7 +70,7 @@ export interface TurnedAway {
 
 /**
  * The option that makes a process one job that quits, null for none, undefined when it cannot be
- * told. Given to the server's own bridge; a bridge without it takes every editor that greets.
+ * told. Given to the server's own bridge. A bridge without it takes every editor that greets.
  */
 export type OneShotReader = (pid: number) => Promise<string | null | undefined>;
 
@@ -115,7 +116,7 @@ interface GodotReadyMessage {
   addon_version: string;
   addon_digest: string;
   editor_pid: number;
-  /** The three ports this editor serves, so a server talks to this one and not another; 0 when it could not find out. */
+  /** The three ports this editor serves, so a server talks to this one and not another, or 0 when it could not find out. */
   lsp_port: number;
   dap_port: number;
   debug_port: number;
@@ -145,9 +146,10 @@ const GREETING_FIELDS: Readonly<Record<string, 'string' | 'number' | 'boolean'>>
 };
 
 /** The greeting fields [param message] lacks or holds as the wrong type, in the order above. */
-export function greetingFaults(message: Record<string, unknown>): string[] {
+export function greetingFaults(message: object): string[] {
+  const sent = new Map<string, unknown>(Object.entries(message));
   return Object.entries(GREETING_FIELDS)
-    .filter(([field, type]) => typeof message[field] !== type)
+    .filter(([field, type]) => typeof sent.get(field) !== type)
     .map(([field]) => field);
 }
 
@@ -209,7 +211,7 @@ interface GodotConnectionInfo {
   lspPort?: number | undefined;
   dapPort?: number | undefined;
   debugPort?: number | undefined;
-  /** Whether a gdharness server started this editor; one nothing claims restarts itself. */
+  /** Whether a gdharness server started this editor. One nothing claims restarts itself. */
   openedByAServer?: boolean | undefined;
   /**
    * Whether another editor started this one: Godot's own restart, or the project manager opening a
@@ -222,7 +224,7 @@ interface GodotConnectionInfo {
    * Whether the editor keeps its breakpoints when a debug session opens.
    *
    * Godot clears every breakpoint in the script editor on a session's `initialize` unless
-   * `network/debug_adapter/sync_breakpoints` is on; the addon turns it on as it loads and reports
+   * `network/debug_adapter/sync_breakpoints` is on. The addon turns it on as it loads and reports
    * it here, so false is the setting turned off again by hand.
    */
   syncsBreakpoints?: boolean | undefined;
@@ -322,7 +324,7 @@ export function withoutTrailingSeparator(path: string): string {
 }
 
 /**
- * Whether an editor could still reach this bridge, counting one the server started itself.
+ * Whether an editor could still reach this bridge. One the server started itself counts.
  *
  * Two reasons and either is enough. The bridge may be young, which covers an editor that was
  * already running and has to notice the port. Or the server launched one and that process is still
@@ -490,7 +492,7 @@ export class GodotBridge extends EventEmitter {
       if (!held || !this.mayMove || !moveIfHeld) {
         throw error;
       }
-      this.log('warn', `Editor bridge port ${this.wantedPort} is held; taking another one.`);
+      this.log('warn', `Editor bridge port ${this.wantedPort} is held, so another one is taken.`);
       await this.listenOn(0);
     }
   }
@@ -628,7 +630,7 @@ export class GodotBridge extends EventEmitter {
     return [...this.pendingRequests.values()]
       .filter((pending) => pending.counted)
       .map((pending) => ({ tool: pending.toolName, startedAt: pending.startedAt }))
-      .sort((a, b) => a.startedAt - b.startedAt);
+      .toSorted((a, b) => a.startedAt - b.startedAt);
   }
 
   public getStatus(): BridgeStatus {
@@ -725,6 +727,7 @@ export class GodotBridge extends EventEmitter {
         if (Date.now() >= giveUpAt) {
           throw new Error(
             `The editor was scanning or importing its files for all of ${Math.round(waitMs / 1000)} s, so ${toolName} was not run and nothing it would change was changed. editor_rescan says when the scan is over.`,
+            { cause: error },
           );
         }
       }
@@ -882,7 +885,7 @@ export class GodotBridge extends EventEmitter {
             return;
           }
           this.connectionInfo.projectPath = withoutTrailingSeparator(message.project_path);
-          const faults = greetingFaults(message as unknown as Record<string, unknown>);
+          const faults = greetingFaults(message);
           if (faults.length > 0) {
             // Another release's addon, which this server asks nothing but to quit. The connection is
             // kept for that: closed, the addon dials straight back, and only it can quit its editor.
@@ -1003,7 +1006,7 @@ export class GodotBridge extends EventEmitter {
         this.log('warn', `Failed to send ping: ${errorMessage(error)}`);
       }
     }, KEEPALIVE_INTERVAL_MS);
-    // The socket and the server hold the process for as long as either is open; a ping left behind
+    // The socket and the server hold the process for as long as either is open. A ping left behind
     // by a connection nobody closed kept a finished test run alive for hours.
     this.pingInterval.unref();
   }
@@ -1037,7 +1040,7 @@ export class GodotBridge extends EventEmitter {
   }
 
   /**
-   * Turns away an editor from another project, saying whose server this is.
+   * Turns away an editor from another project and says whose server this is.
    *
    * The socket goes rather than the connection being left half made: it was never this server's
    * editor, so a reply of any kind would be answering for a project it cannot see.
@@ -1215,12 +1218,11 @@ export class GodotBridge extends EventEmitter {
     return typeof value === 'string' && value.length > 0 ? value : undefined;
   }
 
-  private isIncomingMessage(value: unknown): value is IncomingMessage {
-    if (!value || typeof value !== 'object') {
+  private isIncomingMessage(message: unknown): message is IncomingMessage {
+    if (!isRecord(message)) {
       return false;
     }
 
-    const message = value as Record<string, unknown>;
     const type = message['type'];
     if (type !== 'tool_result' && type !== 'pong' && type !== 'godot_ready') {
       return false;

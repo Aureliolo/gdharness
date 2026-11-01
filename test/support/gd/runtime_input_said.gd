@@ -42,7 +42,7 @@ func _everything() -> void:
 	InputMap.erase_action("shoot")
 	var bare: Dictionary = await input.inject_action({ "action": "dance" })
 	var none: String = (
-		"Action not found: dance; the project defines no actions of its own, and the engine's are "
+		"Action not found: dance. The project defines no actions of its own, and the engine's are "
 		+ "the ui_ ones."
 	)
 	if str(bare.get("message", "")) != none:
@@ -77,10 +77,10 @@ func _watching(action: String) -> Watcher:
 ## project's own, and with the engine's ui_ ones only for a name that starts like one.
 func _check_refusals(input: GdhInputCommands) -> void:
 	var cases: Array[Array] = [
-		["leapp", "Action not found: leapp; the nearest is leap."],
+		["leapp", "Action not found: leapp. The nearest is leap."],
 		[
 			"dance",
-			"Action not found: dance; the project's own actions are leap, shoot, beside the "
+			"Action not found: dance. The project's own actions are leap, shoot, beside the "
 			+ "engine's ui_ ones.",
 		],
 	]
@@ -91,7 +91,7 @@ func _check_refusals(input: GdhInputCommands) -> void:
 	var engine: Dictionary = await input.inject_action({ "action": "ui_cancle" })
 	var said: String = str(engine.get("message", ""))
 	if (
-		not said.begins_with("Action not found: ui_cancle; the nearest ")
+		not said.begins_with("Action not found: ui_cancle. The nearest ")
 		or not said.contains("ui_cancel")
 	):
 		_fail("a ui_ name should be offered the engine's nearest: %s" % JSON.stringify(engine))

@@ -13,14 +13,17 @@
  * the walk to follow.
  */
 
+import process from 'node:process';
+import { text } from 'node:stream/consumers';
 import { fileURLToPath } from 'node:url';
+import { isRecord, isStringList } from './records.js';
 import { type ChildProcess, spawnHidden } from './spawn.js';
 
 /** What to start, and for a run, where its output goes and how its record reads. */
 export interface OutsideSpec {
   readonly command: string;
   readonly args: readonly string[];
-  /** The environment it starts with; absent is the launcher's own, which is the server's. */
+  /** The environment it starts with. Absent is the launcher's own, which is the server's. */
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly run?: {
     readonly transcript: string;
@@ -115,11 +118,96 @@ export function sendSpec(child: ChildProcess, spec: SentSpec): void {
 
 /** The spec handed down this process's stdin. */
 export async function receivedSpec(): Promise<SentSpec> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) {
-    chunks.push(chunk as Buffer);
+  const received = await text(process.stdin);
+  const spec = sentSpecOf(JSON.parse(received));
+  if (spec === null) {
+    throw new Error(`What came down stdin is not a spec a server sends: ${received.slice(0, 200)}`);
   }
-  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as SentSpec;
+  return spec;
+}
+
+/** [param value] as the environment changes a spec carries, or null when it is not that. */
+function envChangesOf(value: unknown): Record<string, string | null> | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const changes: Record<string, string | null> = {};
+  for (const [name, change] of Object.entries(value)) {
+    if (typeof change !== 'string' && change !== null) {
+      return null;
+    }
+    changes[name] = change;
+  }
+  return changes;
+}
+
+/** [param value] as the run part of a spec, or null when it is not that. */
+function runOf(value: unknown): NonNullable<OutsideSpec['run']> | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const { transcript, startedAt, projectPath, servedBy, profile, breakpoints, debugged, slot } = value;
+  const held = slot === undefined ? undefined : slotOf(slot);
+  if (
+    typeof transcript !== 'string' ||
+    typeof startedAt !== 'number' ||
+    typeof projectPath !== 'string' ||
+    (servedBy !== undefined && typeof servedBy !== 'string') ||
+    (profile !== undefined && typeof profile !== 'string') ||
+    (breakpoints !== undefined && !isStringList(breakpoints)) ||
+    (debugged !== undefined && typeof debugged !== 'boolean') ||
+    held === null
+  ) {
+    return null;
+  }
+  return {
+    transcript,
+    startedAt,
+    projectPath,
+    ...(servedBy === undefined ? {} : { servedBy }),
+    ...(profile === undefined ? {} : { profile }),
+    ...(breakpoints === undefined ? {} : { breakpoints }),
+    ...(debugged === undefined ? {} : { debugged }),
+    ...(held === undefined ? {} : { slot: held }),
+  };
+}
+
+/** [param value] as the engine slot a run part hands over, or null when it is not that. */
+function slotOf(
+  value: unknown,
+): { readonly lock: string; readonly from: number; readonly by: string } | null {
+  const { lock, from, by }: Record<string, unknown> = isRecord(value) ? value : {};
+  return typeof lock === 'string' && typeof from === 'number' && typeof by === 'string'
+    ? { lock, from, by }
+    : null;
+}
+
+/** [param value] as a spec, or null when any part of it is not the shape [method sendSpec] writes. */
+function sentSpecOf(value: unknown): SentSpec | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const { command, args, envChanges, run, desktop, noActivate } = value;
+  const changes = envChangesOf(envChanges);
+  const ran = run === undefined ? undefined : runOf(run);
+  if (
+    typeof command !== 'string' ||
+    !isStringList(args) ||
+    changes === null ||
+    ran === null ||
+    (desktop !== undefined && typeof desktop !== 'string') ||
+    (noActivate !== undefined && typeof noActivate !== 'boolean')
+  ) {
+    return null;
+  }
+  return {
+    command,
+    args,
+    envChanges: changes,
+    ...(ran === undefined ? {} : { run: ran }),
+    ...(desktop === undefined ? {} : { desktop }),
+    ...(noActivate === undefined ? {} : { noActivate }),
+  };
 }
 
 /** What the launcher handed back: the pid of what it started, or why it could not. */

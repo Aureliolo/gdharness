@@ -3,6 +3,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 
+// Its own copy rather than src/records.ts: the release workflow and its test run this script alone.
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 const ROOT = process.cwd();
 const PACKAGE_JSON_PATH = path.join(ROOT, 'package.json');
 const SERVER_JSON_PATH = path.join(ROOT, 'server.json');
@@ -56,15 +61,12 @@ function replaceReleaseVersionReferences(content: string, nextVersion: string, p
 
 async function readManifest(filePath: string): Promise<VersionedManifest> {
   const parsed: unknown = JSON.parse(await fs.readFile(filePath, 'utf8'));
-  if (
-    typeof parsed !== 'object' ||
-    parsed === null ||
-    typeof (parsed as { version?: unknown }).version !== 'string' ||
-    typeof (parsed as { name?: unknown }).name !== 'string'
-  ) {
+  const manifest = isRecord(parsed) ? parsed : {};
+  const { name, version } = manifest;
+  if (typeof name !== 'string' || typeof version !== 'string') {
     throw new Error(`${filePath} has no string name and version.`);
   }
-  return parsed as VersionedManifest;
+  return { ...manifest, name, version };
 }
 
 async function writeText(filePath: string, content: string, dryRun: boolean): Promise<void> {
@@ -111,9 +113,10 @@ async function main(): Promise<void> {
   server.version = nextVersion;
   // The registry entry carries the npm version separately from the server's own, and a release
   // that moved one without the other would point the registry at a version nobody published.
-  for (const entry of Array.isArray(server['packages']) ? server['packages'] : []) {
-    if (typeof entry === 'object' && entry !== null) {
-      (entry as { version?: string }).version = nextVersion;
+  const packages: unknown = server['packages'];
+  for (const entry of Array.isArray(packages) ? (packages as unknown[]) : []) {
+    if (isRecord(entry)) {
+      entry['version'] = nextVersion;
     }
   }
   await writeText(SERVER_JSON_PATH, `${JSON.stringify(server, null, 2)}\n`, dryRun);

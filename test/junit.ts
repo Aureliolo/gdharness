@@ -474,13 +474,13 @@ function testARunawayCaseIsFoldedAndBounded(): void {
 
 function testASuiteWithASpaceInItsPathKeepsItsOrphans(): void {
   const found = orphansPrinted([
-    'Run Test Suite: res://my tests/docket_test.gd',
+    'Run Test Suite: res://my tests/ticket_test.gd',
     'Statistics: 3 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 2 orphans |	WARNING',
     'Overall Summary: 3 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 2 orphans |',
   ]);
   assert.deepEqual(
     found.suites,
-    [{ path: 'res://my tests/docket_test.gd', orphans: 2, left: [] }],
+    [{ path: 'res://my tests/ticket_test.gd', orphans: 2, left: [] }],
     JSON.stringify(found),
   );
 }
@@ -557,8 +557,8 @@ function testScriptErrorsAreReadOffTheConsole(): void {
     scriptErrorsPrinted(printed),
     'the same scripts read in the same order whichever order the platform listed them in',
   );
-  // A script that failed for a dependency's sake carries no line of its own, which the engine
-  // prints as 0; game-b's tier had four of them.
+  // A script that failed for a dependency's sake carries no line of its own, and the engine
+  // prints its line as 0. game-b's tier had four of them.
   assert.deepEqual(
     scriptErrorsPrinted([
       'Script errors were detected during test discovery!',
@@ -591,13 +591,13 @@ function testScriptErrorsAreReadOffTheConsole(): void {
  */
 function testOrphansAreReadOffTheConsole(): void {
   const printed = [
-    'Run Test Suite: res://test/guild_test.gd',
-    '	test_recruits	STATUS: PASSED	13ms',
+    'Run Test Suite: res://test/shop_test.gd',
+    '	test_sells	STATUS: PASSED	13ms',
     'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans |	PASSED',
-    'Run Test Suite: res://test/docket_test.gd',
-    'gdharness orphans: res://test/docket_test.gd > test_posts left 3: Timer, Node "Board" of res://board.gd, Label',
+    'Run Test Suite: res://test/ticket_test.gd',
+    'gdharness orphans: res://test/ticket_test.gd > test_posts left 3: Timer, Node "Board" of res://board.gd, Label',
     '	test_posts	STATUS: PASSED	9ms',
-    'gdharness orphans: res://test/docket_test.gd > after left 1: Node2D "Pin"',
+    'gdharness orphans: res://test/ticket_test.gd > after left 1: Node2D "Pin"',
     'Statistics: 3 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 4 orphans |	WARNING',
     'Overall Summary: 5 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 4 orphans |',
     'Executed test suites: (2/2)',
@@ -605,21 +605,21 @@ function testOrphansAreReadOffTheConsole(): void {
 
   const found = orphansPrinted(printed);
   assert.equal(found.total, 4, 'the run total comes off the summary line');
-  const docket = 'res://test/docket_test.gd';
+  const ticket = 'res://test/ticket_test.gd';
   assert.deepEqual(
     found.suites,
     [
       {
-        path: docket,
+        path: ticket,
         orphans: 4,
         left: [
           {
-            suite: docket,
+            suite: ticket,
             during: 'test_posts',
             count: 3,
             nodes: 'Timer, Node "Board" of res://board.gd, Label',
           },
-          { suite: docket, during: 'after', count: 1, nodes: 'Node2D "Pin"' },
+          { suite: ticket, during: 'after', count: 1, nodes: 'Node2D "Pin"' },
         ],
       },
     ],
@@ -628,25 +628,25 @@ function testOrphansAreReadOffTheConsole(): void {
   // A hook's auto_free() frees at the suite's end rather than the case's, and a suite whose cases
   // never began cannot tell its two hooks apart.
   const said = (during: string, count: number): string =>
-    orphansLeftSaid({ suite: docket, during, count, nodes: 'Node "Pin"' });
+    orphansLeftSaid({ suite: ticket, during, count, nodes: 'Node "Pin"' });
   assert.equal(
     said('test_posts', 2),
-    'res://test/docket_test.gd > test_posts left 2 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: Node "Pin". Free each one, or make it with auto_free(), which frees it once the case is over.',
+    'res://test/ticket_test.gd > test_posts left 2 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: Node "Pin". Free each one, or make it with auto_free(), which frees it once the case is over.',
   );
   assert.equal(
     said('before', 1),
-    `res://test/docket_test.gd's before() left 1 node neither freed nor in the tree, which gdUnit4 counts as orphans: Node "Pin". Free each one, or make it with auto_free(), which frees it once the suite is over.`,
+    `res://test/ticket_test.gd's before() left 1 node neither freed nor in the tree, which gdUnit4 counts as orphans: Node "Pin". Free each one, or make it with auto_free(), which frees it once the suite is over.`,
   );
-  assert.match(said('after', 1), /^res:\/\/test\/docket_test\.gd's after\(\) left 1 node /);
+  assert.match(said('after', 1), /^res:\/\/test\/ticket_test\.gd's after\(\) left 1 node /);
   assert.match(
     said('before or after', 1),
-    /^res:\/\/test\/docket_test\.gd's before\(\) or after\(\) left 1 node .+ once the suite is over\.$/,
+    /^res:\/\/test\/ticket_test\.gd's before\(\) or after\(\) left 1 node .+ once the suite is over\.$/,
   );
 
   // A clean run says nothing, which must stay nothing rather than becoming an empty warning.
   assert.deepEqual(
     orphansPrinted([
-      'Run Test Suite: res://test/guild_test.gd',
+      'Run Test Suite: res://test/shop_test.gd',
       'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans |	PASSED',
       'Overall Summary: 2 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans |',
     ]),
@@ -656,14 +656,14 @@ function testOrphansAreReadOffTheConsole(): void {
   // The totals are not a suite's. A summary line arriving with a suite still open would otherwise
   // be counted twice: once against that suite and once as the total.
   const onlyTotals = orphansPrinted([
-    'Run Test Suite: res://test/docket_test.gd',
+    'Run Test Suite: res://test/ticket_test.gd',
     'Overall Summary: 5 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 4 orphans |',
   ]);
   assert.deepEqual(onlyTotals, { total: 4, suites: [] });
 
   // And a summary line this stops recognising costs the total, not the rows under it.
   const noSummary = orphansPrinted([
-    'Run Test Suite: res://test/docket_test.gd',
+    'Run Test Suite: res://test/ticket_test.gd',
     'Statistics: 3 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 4 orphans |',
     'Run Test Suite: res://test/purse_test.gd',
     'Statistics: 1 test case | 0 errors | 0 failures | 0 flaky | 0 skipped | 2 orphans |',
@@ -772,7 +772,7 @@ function testOneLineFailingTwiceKeepsEachValue(): void {
  *     func test_the_sentence_alone() -> void:
  *         assert_str(FOUND).is_equal(WANTED)
  *     func test_a_mismatch_string_first() -> void:
- *         assert_str("wanted deals 25; got deals 15").is_empty()
+ *         assert_str("wanted 25, got 15").is_empty()
  *     func test_the_sentence_after_others() -> void:
  *         assert_str(FOUND).is_equal(WANTED)
  */
@@ -801,32 +801,32 @@ function readsItsOwnValue(ending: string): void {
     `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_the_sentence_alone${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 9ms${e}[0m`,
     `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
     `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
-    ` '${e}[38;2;30;144;255mevery word you speak is 1 louder, for every Astragon you have spoken this duel${e}[0m'`,
+    ` '${e}[38;2;30;144;255meach crate you stack is 1 taller, for every Ostrakon you have kept tonight${e}[0m'`,
     ` but was`,
-    ` '${e}[38;2;30;144;255mevery word you speak is 1 louder, for every ${e}[48;2;38;0;0m${e}[38;2;255;255;255mA${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255ms${e}[48;2;38;0;0m${e}[38;2;255;255;255mtragon${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mpell${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m you have spoken this duel${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_the_sentence_alone' in res://mixed/mixed_test.gd:12${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+    ` '${e}[38;2;30;144;255meach crate you stack is 1 taller, for every ${e}[48;2;38;0;0m${e}[38;2;255;255;255mO${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255ms${e}[48;2;38;0;0m${e}[38;2;255;255;255mtrakon${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mpell${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m you have kept tonight${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_the_sentence_alone' in res://mixed/mixed_test.gd:12${e}[0m${e}[38;2;128;128;128m${e}[0m`,
     `${e}[38;2;128;128;128m${e}[0m`,
     `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_a_mismatch_string_first${e}[0m${e}[38;2;34;139;34m STARTED${e}[0m${e}[38;2;128;128;128m${e}[0m`,
     `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_a_mismatch_string_first${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 9ms${e}[0m`,
     `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
     `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
     ` must be empty but was`,
-    ` '${e}[38;2;30;144;255mwanted deals 25; got deals 15${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_a_mismatch_string_first' in res://mixed/mixed_test.gd:16${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+    ` '${e}[38;2;30;144;255mwanted 25, got 15${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_a_mismatch_string_first' in res://mixed/mixed_test.gd:16${e}[0m${e}[38;2;128;128;128m${e}[0m`,
     `${e}[38;2;128;128;128m${e}[0m`,
     `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_the_sentence_after_others${e}[0m${e}[38;2;34;139;34m STARTED${e}[0m${e}[38;2;128;128;128m${e}[0m`,
     `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_the_sentence_after_others${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 9ms${e}[0m`,
     `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
     `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
-    ` '${e}[38;2;30;144;255mevery word you speak is 1 louder, for every Astragon you have spoken this duel${e}[0m'`,
+    ` '${e}[38;2;30;144;255meach crate you stack is 1 taller, for every Ostrakon you have kept tonight${e}[0m'`,
     ` but was`,
-    ` '${e}[38;2;30;144;255mevery word you speak is 1 louder, for every ${e}[48;2;38;0;0m${e}[38;2;255;255;255mA${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255ms${e}[48;2;38;0;0m${e}[38;2;255;255;255mtragon${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mpell${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m you have spoken this duel${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_the_sentence_after_others' in res://mixed/mixed_test.gd:20${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+    ` '${e}[38;2;30;144;255meach crate you stack is 1 taller, for every ${e}[48;2;38;0;0m${e}[38;2;255;255;255mO${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255ms${e}[48;2;38;0;0m${e}[38;2;255;255;255mtrakon${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mpell${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m you have kept tonight${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_the_sentence_after_others' in res://mixed/mixed_test.gd:20${e}[0m${e}[38;2;128;128;128m${e}[0m`,
     `${e}[38;2;128;128;128m${e}[0m`,
   ].join(ending);
-  const wanted = 'every word you speak is 1 louder, for every Astragon you have spoken this duel';
-  const found = 'every word you speak is 1 louder, for every spell you have spoken this duel';
-  const merged = 'every word you speak is 1 louder, for every Astragonpell you have spoken this duel';
+  const wanted = 'each crate you stack is 1 taller, for every Ostrakon you have kept tonight';
+  const found = 'each crate you stack is 1 taller, for every spell you have kept tonight';
+  const merged = 'each crate you stack is 1 taller, for every Ostrakonpell you have kept tonight';
   const at = (name: string, line: number): string => `\tat '${name}' in res://mixed/mixed_test.gd:${line}`;
   const arrayDetail = `Expecting:\n '[0, 75, 150]'\n but was\n '[0, 55, 110]'\n\nDifferences found:\nIndex\tCurrent\tExpected\t1\t55\t75\t2\t110\t150\t\n${at('test_a_array_failure_first', 8)}`;
-  const emptyDetail = `Expecting:\n must be empty but was\n 'wanted deals 25; got deals 15'\n${at('test_a_mismatch_string_first', 16)}`;
+  const emptyDetail = `Expecting:\n must be empty but was\n 'wanted 25, got 15'\n${at('test_a_mismatch_string_first', 16)}`;
   const [array, alone, empty, after] = withActualsPrinted(
     [
       { detail: arrayDetail },
@@ -1031,14 +1031,14 @@ function testFinishedSuitesAreReadOffTheConsole(): void {
   assert.equal(suitesPrinted(ended).running, null);
   assert.equal(
     testProgressMessage(printed, 125_400),
-    '2 suites have finished, 1 with failures; running res://test/c_test.gd; 2m 5s in.',
+    '2 suites have finished, 1 with failures, running res://test/c_test.gd, 2m 5s in.',
   );
   assert.equal(
     testProgressMessage(printed.slice(0, 4), 9_999),
-    'No suite has finished; running res://test/a_test.gd; 9s in.',
+    'No suite has finished, running res://test/a_test.gd, 9s in.',
   );
-  assert.equal(testProgressMessage(printed.slice(0, 7), 30_000), 'One suite has finished; 30s in.');
-  assert.equal(testProgressMessage([], 1_000), 'No suite has finished; 1s in.');
+  assert.equal(testProgressMessage(printed.slice(0, 7), 30_000), 'One suite has finished, 30s in.');
+  assert.equal(testProgressMessage([], 1_000), 'No suite has finished, 1s in.');
 }
 
 testWhatGdUnitWrites();

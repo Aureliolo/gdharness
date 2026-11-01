@@ -265,8 +265,8 @@ static func _names_nodes(property: Dictionary) -> bool:
 
 
 ## Carries the property [param name] of [param node], typed as nodes, from [param held], the paths
-## the file gives it. The nodes it holds moved with the move, so only what the file held is named;
-## marking it asked lets the write save the new paths the pack gives. A node the move deleted is
+## the file gives it. The nodes it holds moved with the move, so only what the file held is named.
+## Marking it asked lets the write save the new paths the pack gives. A node the move deleted is
 ## cleared, as the editor's save clears it, since no path reaches it.
 func _carry_nodes(
 	node: Node, name: String, held: Variant, was: String, now: String, entry: Dictionary
@@ -304,7 +304,7 @@ static func _unfreed(value: Variant) -> Variant:
 ## [param value], held by the node that was at [param was] and is at [param now], with each path in
 ## it carried, as [whether any was, the value]. A resource built into the scene is changed in place.
 ## [param entry] says where the value is held, for the record of each path. A path in a resource may
-## be relative to something other than its holder, as the editor allows; it is followed only when it
+## be relative to something other than its holder, as the editor allows. It is followed only when it
 ## names a node from where its holder was, as one relative to the holder does. A value
 ## [param elsewhere], a file other than the scene's, gives is named only when it names nothing since
 ## the move, which its own file's pass could not see.
@@ -539,7 +539,7 @@ func _tracks(mixer: AnimationMixer, now: String) -> void:
 
 ## Where an edit to [param animation], played from [param library], is saved, as {file, home, why,
 ## theirs}: file "" with the scene, or the file of its own it or its library is kept in, with home
-## the resource saved there; why, when nothing written here would keep the edit; theirs, when that
+## the resource saved there, why when nothing written here would keep the edit, and theirs when that
 ## is because it is kept in another scene or an imported file, whose tracks are written in its
 ## terms.
 func _home_of(animation: Animation, library: AnimationLibrary) -> Dictionary:

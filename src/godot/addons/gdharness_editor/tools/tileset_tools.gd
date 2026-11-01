@@ -72,7 +72,7 @@ func create_tileset(args: Dictionary) -> Dictionary:
 			return { "ok": false, "error": built[1] }
 		var atlas: TileSetAtlasSource = built[1]
 		# The first source sets the tile set's own tile size, which is what a TileMapLayer draws
-		# cells at; left at its default of 16 it did not match the atlas.
+		# cells at. Left at its default of 16 it did not match the atlas.
 		if index == 0:
 			tileset.tile_size = atlas.texture_region_size
 		var added: int = tileset.add_source(atlas)
@@ -288,7 +288,7 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 			var _named: bool = refusals.append(str(cell[1]))
 		checked.append(cell)
 	if not refusals.is_empty():
-		return scene.refuse("%s. Nothing was placed." % "; ".join(refusals))
+		return scene.refuse("%s. Nothing was placed." % ". ".join(refusals))
 	var wanted: Array = []
 	var erased: int = 0
 	for cell: Array in checked:
@@ -354,7 +354,7 @@ func _tile_node(scene: GdhSceneFile, node_path: String, layer: int) -> Array:
 	if single != null and layer != 0:
 		return [
 			null,
-			"%s is a TileMapLayer, which is one layer; layer applies to a TileMap" % node_path,
+			"%s is a TileMapLayer, which is one layer. layer applies to a TileMap" % node_path,
 		]
 	if layered != null and (layer < 0 or layer >= layered.get_layers_count()):
 		return [
@@ -407,7 +407,7 @@ func _cell(entry: Variant, index: int, tile_set: TileSet) -> Array:
 		return [
 			false,
 			(
-				"%s names source %d, and the TileSet has %s; sourceId -1 erases a cell"
+				"%s names source %d, and the TileSet has %s. sourceId -1 erases a cell"
 				% [named, source_id, _sources_of(tile_set)]
 			),
 		]
@@ -418,7 +418,7 @@ func _cell(entry: Variant, index: int, tile_set: TileSet) -> Array:
 		return [
 			false,
 			(
-				"%s: source %d has no tile at %s; it has %s"
+				"%s: source %d has no tile at %s. It has %s"
 				% [named, source_id, atlas_coords, _tiles_of(source)]
 			),
 		]

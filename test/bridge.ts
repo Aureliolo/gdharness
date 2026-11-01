@@ -18,13 +18,7 @@ import { shippedRuntimeDigest } from '../src/setup.js';
 import { spawnHidden } from '../src/spawn.js';
 import { greeting } from './support/greeting.js';
 import { asArray, asObject, get, text } from './support/json.js';
-import {
-  isRecord,
-  type JsonRpcMessage,
-  parseTextContent,
-  type ToolContentBlock,
-  textOf,
-} from './support/json-rpc.js';
+import { contentOf, isRecord, type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { listenOnAReservedPort, reservePort, ServerProcess, serverIdentity } from './support/server.js';
 import { sweep } from './support/sweep.js';
 
@@ -83,11 +77,6 @@ function createTestProjectFixture(): string {
   return projectPath;
 }
 
-function contentOf(response: JsonRpcMessage): ToolContentBlock[] {
-  const content = isRecord(response.result) ? response.result['content'] : undefined;
-  return Array.isArray(content) ? (content as ToolContentBlock[]) : [];
-}
-
 interface MockRuntimeOptions {
   /** The process the announcement claims to be. It has to be alive or the server drops it. */
   pid: number;
@@ -97,7 +86,7 @@ interface MockRuntimeOptions {
   protocol?: number;
   /** Accept connections and never answer, which is what a game paused at a breakpoint does. */
   silent?: boolean;
-  /** The runtime addon it says it loaded; this server's by default. */
+  /** The runtime addon it says it loaded, by default this server's. */
   addon?: { version: string; digest: string };
 }
 
@@ -150,7 +139,10 @@ function startMockRuntime(directory: string, options: MockRuntimeOptions): Promi
     });
 
     const answer = (line: string): void => {
-      const request = JSON.parse(line) as Record<string, unknown>;
+      const request: unknown = JSON.parse(line);
+      if (!isRecord(request)) {
+        throw new Error(`the mock runtime was sent a line that is not an object: ${line}`);
+      }
       const id = request['id'];
       const params = isRecord(request['params']) ? request['params'] : {};
       switch (request['command']) {
@@ -353,7 +345,7 @@ async function main(): Promise<void> {
     // capability the server does not serve is a promise it breaks on the first request.
     const capabilities = get(init.result, 'capabilities');
     assert.deepEqual(
-      Object.keys(asObject(capabilities, 'capabilities')).sort(),
+      Object.keys(asObject(capabilities, 'capabilities')).toSorted(),
       ['completions', 'prompts', 'resources', 'tools'],
       `the server advertises what it serves and nothing else: ${JSON.stringify(capabilities)}`,
     );
@@ -648,13 +640,13 @@ async function main(): Promise<void> {
         op: 'find',
         className: 'CharacterBody2D',
         namePattern: 'Play*',
-        says: 'Carry on',
+        says: 'Keep going',
         limit: 5,
       });
       assert.equal(get(found, 'nodes', 0, 'path'), '/root/Player', 'runtime_inspect find relays the paths');
       assert.deepEqual(
         get(found, 'asked'),
-        { class: 'CharacterBody2D', name: 'Play*', says: 'Carry on', root: '/root', limit: 5 },
+        { class: 'CharacterBody2D', name: 'Play*', says: 'Keep going', root: '/root', limit: 5 },
         'only the filters given are sent, under the addon names',
       );
       assert.match(
@@ -678,10 +670,10 @@ async function main(): Promise<void> {
         button: 2,
       });
       assert.equal(get(numbered, 'asked', 'button'), 2, JSON.stringify(numbered));
-      const byWords = await payload('runtime_input', { op: 'click', says: 'New guild', index: 1 });
+      const byWords = await payload('runtime_input', { op: 'click', says: 'New shop', index: 1 });
       assert.deepEqual(
         get(byWords, 'asked'),
-        { path: '', button: 'left', double: false, says: 'New guild', index: 1 },
+        { path: '', button: 'left', double: false, says: 'New shop', index: 1 },
         'a click by words carries them and the index, with no path to narrow the search',
       );
       assert.match(
@@ -731,7 +723,9 @@ async function main(): Promise<void> {
 
       for (const args of [{}, { op: 'viewport', viewportPath: '/root' }] as const) {
         const label = `runtime_capture ${JSON.stringify(args)}`;
-        const image = contentOf(await call('runtime_capture', args)).find((chunk) => chunk.type === 'image');
+        const image = (contentOf(await call('runtime_capture', args)) ?? []).find(
+          (chunk) => chunk.type === 'image',
+        );
         assert.ok(image, `${label} answers with an image block`);
         assert.equal(image.mimeType, 'image/png');
         assert.ok(image.data, `${label} carries the image bytes`);

@@ -3,6 +3,7 @@ import { dirname, isAbsolute, join, relative } from 'node:path';
 import type { HeldBreakpoint } from './dap_client.js';
 import { errorMessage } from './errors.js';
 import { realAsFarAsItExists } from './paths.js';
+import { isRecord } from './records.js';
 
 /**
  * The breakpoints set through this server, written down in the project.
@@ -67,19 +68,16 @@ export function writeBreakpointNote(projectPath: string, held: readonly HeldBrea
 export function readBreakpointNote(projectPath: string): HeldBreakpoint[] {
   try {
     const parsed: unknown = JSON.parse(readFileSync(breakpointNotePath(projectPath), 'utf8'));
-    if (
-      typeof parsed !== 'object' ||
-      parsed === null ||
-      !Array.isArray((parsed as BreakpointNote).breakpoints)
-    ) {
+    const breakpoints: unknown = isRecord(parsed) ? parsed['breakpoints'] : undefined;
+    if (!Array.isArray(breakpoints)) {
       return [];
     }
     const held: HeldBreakpoint[] = [];
-    for (const entry of (parsed as { breakpoints: unknown[] }).breakpoints) {
-      if (typeof entry !== 'object' || entry === null) {
+    for (const entry of breakpoints as unknown[]) {
+      if (!isRecord(entry)) {
         continue;
       }
-      const { script, lines: listed } = entry as { script?: unknown; lines?: unknown };
+      const { script, lines: listed } = entry;
       if (typeof script !== 'string' || isAbsolute(script) || script.split('/').includes('..')) {
         continue;
       }

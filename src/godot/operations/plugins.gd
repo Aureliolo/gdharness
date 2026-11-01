@@ -135,7 +135,7 @@ static func _why_not_loaded(plugin_cfg_path: String) -> String:
 	var script_path: String = plugin_cfg_path.get_base_dir().path_join(script_name)
 	if not FileAccess.file_exists(script_path):
 		return "%s does not exist, so the editor will not enable the plugin." % script_path
-	# Loaded only to learn whether the editor could; what the engine says of a script that does not
+	# Loaded only to learn whether the editor could. What the engine says of a script that does not
 	# parse is about a file the answer does not describe.
 	printerr(GdhLog.ASIDE)
 	var script: Script = ResourceLoader.load(
@@ -189,7 +189,7 @@ func disable_plugin(params: Dictionary) -> Dictionary:
 # folder names, because the list is written back whole: reading names off a pattern for
 # `res://addons/<name>/plugin.cfg` dropped a plugin one folder down, and the next enable or disable
 # wrote the list without it, disabling a plugin nobody named. The editor stores the engine
-# expression PackedStringArray(...), which loads as that type; the String form is what an older
+# expression PackedStringArray(...), which loads as that type. The String form is what an older
 # hand-edited file can carry.
 func _enabled_paths() -> Array[String]:
 	var paths: Array[String] = []

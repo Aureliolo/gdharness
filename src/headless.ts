@@ -17,6 +17,7 @@ import type { GameLog, LogEntry } from './game-log.js';
 import { IMPORTABLE_EXTENSIONS } from './import-freshness.js';
 import { freeLibraryCopies } from './library-copies.js';
 import { realAsFarAsItExists } from './paths.js';
+import { isRecord } from './records.js';
 import { forceNextImport } from './reimport.js';
 import { discard, scratchDirectory } from './scratch.js';
 import { notCompiledIn } from './script-origins.js';
@@ -30,7 +31,7 @@ export interface HeadlessEngine {
   readonly debug: boolean;
   /** Start the engine as an editor, which is the only engine that can make an exporter. */
   readonly editor?: boolean;
-  /** How long an operation's engine may run before it is ended; ten minutes when not given. */
+  /** How long an operation's engine may run before it is ended. Ten minutes when not given. */
   readonly ceiling?: { readonly ms: number; readonly said: string };
 }
 
@@ -127,7 +128,7 @@ export function engineExtras(
  * Why the messages printed after an operation answered are kept apart from its own.
  *
  * Godot starts a project's autoloads in every script run, after the script's `_init`, and has no
- * switch to leave them out; the operation is finished by then. Mixed in with the operation's own,
+ * switch to leave them out. The operation is finished by then. Mixed in with the operation's own,
  * an autoload's errors read as the operation's: a settings read on a project with a failing
  * autoload came back carrying that autoload's errors, every time, and a caller took the read to
  * have gone wrong.
@@ -145,7 +146,7 @@ export function withNotCompiled(note: string, entries: readonly LogEntry[]): str
   const path = entries.map(notCompiledIn).find((found) => found !== undefined);
   return path === undefined
     ? note
-    : `${note} ${path} did not compile, so every run of this project starts its autoloads without it until it is fixed; its errors are among these.`;
+    : `${note} ${path} did not compile, so every run of this project starts its autoloads without it until it is fixed. Its errors are among these.`;
 }
 
 /**
@@ -212,7 +213,7 @@ function withoutAsides(entries: readonly LogEntry[]): LogEntry[] {
   return kept;
 }
 
-/** At most this many of the newest problems ride on an answer; the rest are counted. */
+/** At most this many of the newest problems ride on an answer. The rest are counted. */
 const MESSAGES_KEPT = 200;
 /** How long one operation's engine may run, twice what an export is given. */
 const OPERATION_CEILING = { ms: 600_000, said: 'ten minutes' } as const;
@@ -529,7 +530,7 @@ async function operationOutcome(
   const waiting = marked(WAITING);
   const begun = marked(BEGUN);
   const ended = answered === -1 ? everything.length : answered;
-  // An operation that waited for the autoloads ran between the two marks; what came before the
+  // An operation that waited for the autoloads ran between the two marks. What came before the
   // first is its own start, and what came between them is the autoloads'.
   const problems =
     waiting === -1
@@ -633,8 +634,8 @@ function answerIn(
   const text = readFileSync(file, 'utf8');
   try {
     const parsed: unknown = JSON.parse(text);
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
-      ? { kind: 'answer', payload: parsed as OperationParams }
+    return isRecord(parsed)
+      ? { kind: 'answer', payload: parsed }
       : { kind: 'unreadable', why: `it is JSON but not an object: ${text.slice(0, 200)}` };
   } catch (error) {
     return {

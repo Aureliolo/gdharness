@@ -235,7 +235,7 @@ func add_input_action(params: Dictionary) -> Dictionary:
 
 	_log.info("Adding input action: " + action_name)
 	# The editor's Input Map refuses these, since project.godot keys an action by its name and
-	# the characters below are its own syntax there; a name holding one is written escaped and
+	# the characters below are its own syntax there. A name holding one is written escaped and
 	# reads back as a name nobody typed.
 	for index: int in action_name.length():
 		var code: int = action_name.unicode_at(index)
@@ -299,7 +299,7 @@ func add_input_action(params: Dictionary) -> Dictionary:
 		answer["old_deadzone"] = old_deadzone
 
 	# Through ProjectSettings so the file is saved the way the editor saves it, header and
-	# every other line kept; a ConfigFile of project.godot drops the comments on the way out.
+	# every other line kept. A ConfigFile of project.godot drops the comments on the way out.
 	ProjectSettings.set_setting(setting, action)
 	var err: Error = GdhProjectFile.save([setting])
 	if err != OK:
@@ -423,7 +423,7 @@ func remove_input_action(params: Dictionary) -> Dictionary:
 # The value project.godot stores for one input action.
 #
 # It has to be a Dictionary holding real InputEvent objects. The engine writes those as the
-# unquoted expression it parses back into an action; hand it the same thing as assembled
+# unquoted expression it parses back into an action. Hand it the same thing as assembled
 # text and it writes a quoted, escaped string, which loads as a String and leaves InputMap
 # with no action at all while add_input_action still reports the events it was given.
 func build_input_action(deadzone: float, events: Array) -> Dictionary:

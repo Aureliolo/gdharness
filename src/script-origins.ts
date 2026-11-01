@@ -2,9 +2,9 @@
  * The script whose parse error the others could not get past, which gdUnit4 never names.
  *
  * A parse error in a `class_name` script reaches a test run as every script using that class
- * failing with `Could not resolve class "Motif", because of a parser error.`, and the script
+ * failing with `Could not resolve class "Pattern", because of a parser error.`, and the script
  * declaring the class is in none of it: the run stops at discovery before loading it on its own,
- * so the engine prints no line naming it. One missing colon in `core/motif.gd` answered with
+ * so the engine prints no line naming it. One missing colon in `core/pattern.gd` answered with
  * twenty-nine scripts, every one of them fine, and the reader had to map the class to its file by
  * hand. That mapping is made here from the sources, and the declaring script is then put to the
  * engine's own check to find its line.
@@ -50,7 +50,7 @@ const MOST_CHECKED = 8;
  * The scripts declaring a class [param errors] could not resolve: under `origins` each error the
  * engine's check found in one, in the order they were reached, and under `unconfirmed` those it
  * found nothing in, or could not finish. A script already among [param errors] is
- * named there with its own error and is not checked again; one declaring a class that could not
+ * named there with its own error and is not checked again. One declaring a class that could not
  * itself be resolved is followed to the script declaring that one, which is the one to open.
  *
  * A class [param declared] does not hold is left unnamed rather than guessed: a script that declares

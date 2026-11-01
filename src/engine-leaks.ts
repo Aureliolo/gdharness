@@ -56,7 +56,7 @@ const IN_USE_NAMED = 8;
 const REFCOUNTED_HELD =
   'A RefCounted alive at exit is held by a cycle of references (two holding each other, or one ' +
   'holding a lambda that captures it) or by an Object never freed, rather than by a node left out ' +
-  'of the tree; a WeakRef on one side of the cycle, or clearing the reference once done, frees it.';
+  'of the tree. A WeakRef on one side of the cycle, or clearing the reference once done, frees it.';
 
 /**
  * What an engine started with `--verbose` names among [param lines] as it exits: the objects still
@@ -80,7 +80,7 @@ export function heldAtExit(lines: Iterable<string>): string | undefined {
   if (objects.size === 0 && inUse.length === 0) {
     return undefined;
   }
-  const counted = [...objects].sort(([a, many], [b, more]) => more - many || a.localeCompare(b));
+  const counted = [...objects].toSorted(([a, many], [b, more]) => more - many || a.localeCompare(b));
   const objectsSaid = counted.map(([name, many]) => `${String(many)} ${name}`);
   const ownFirst = [
     ...inUse.filter((path) => !path.startsWith('res://addons/')),
@@ -136,7 +136,7 @@ export function selfTypedExports(sources: Iterable<readonly [string, string]>): 
       }
     }
   }
-  return found.sort((a, b) => (a.script < b.script ? -1 : a.script > b.script ? 1 : 0));
+  return found.toSorted((a, b) => (a.script < b.script ? -1 : a.script > b.script ? 1 : 0));
 }
 
 /** [method selfTypedExports] for the scripts of the project at [param projectPath]. */

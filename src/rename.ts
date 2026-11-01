@@ -49,9 +49,9 @@ export interface Edit {
 
 /**
  * Where an occurrence was left alone. code, string, comment, doc and nodePath are the tokenizer's
- * view of a script; scene is a scene or resource file; text is any other file; ignored is any file
- * under a directory holding a `.gdignore`; binary is a scene or resource saved as .scn or .res,
- * which names its dependencies in bytes this cannot rewrite.
+ * view of a script. scene is a scene or resource file, and text is any other file. ignored is any
+ * file under a directory holding a `.gdignore`. binary is a scene or resource saved as .scn or
+ * .res, which names its dependencies in bytes this cannot rewrite.
  */
 type MentionKind = RegionKind | 'scene' | 'text' | 'ignored' | 'binary';
 
@@ -266,7 +266,7 @@ const DOC_LINK_KINDS = new Set([
 
 /** A `[...]` reference in documentation around an occurrence, read as Godot's doc markup reads it. */
 interface DocLink {
-  /** method, member, signal, constant or enum; null for a bare class reference. */
+  /** method, member, signal, constant or enum, or null for a bare class reference. */
   readonly kind: string | null;
   readonly parts: readonly string[];
   /** Which dotted part the occurrence is. */
@@ -326,7 +326,7 @@ function docBlockAt(text: string, offset: number): { joined: string; from: numbe
  * The doc link [param offset] is inside, or null. Read across the lines of its documentation
  * comment, because a link wraps where the prose does: `[constant` ending one `##` line and
  * `Folk.SKILL_MAX]` starting the next is one link, and read a line at a time only its first half
- * was renamed, leaving a reference to nothing after a rename that answered ok.
+ * was renamed. That left a reference to nothing after a rename that answered ok.
  */
 function docLinkAt(text: string, offset: number): DocLink | null {
   const block = docBlockAt(text, offset);
@@ -373,7 +373,7 @@ const DOC_KIND: Readonly<Record<DeclarationKind, string | null>> = {
   class: null,
 };
 
-/** Collects edits and mentions, keeping one edit per place however many reasons found it. */
+/** Collects edits and mentions, with one edit per place however many reasons found it. */
 class PlanBuilder {
   private readonly edits = new Map<string, Edit>();
   private readonly mentions: Mention[] = [];
@@ -442,10 +442,10 @@ class PlanBuilder {
   }
 
   build(): Plan {
-    const edits = [...this.edits.values()].sort(
+    const edits = [...this.edits.values()].toSorted(
       (a, b) => a.file.localeCompare(b.file) || a.offset - b.offset,
     );
-    const mentions = [...this.mentions].sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
+    const mentions = [...this.mentions].toSorted((a, b) => a.file.localeCompare(b.file) || a.line - b.line);
     return { edits, mentions };
   }
 }
@@ -463,8 +463,8 @@ function isWholeString(text: string, offset: number, name: string): boolean {
     return false;
   }
   // A colon after it makes it a dictionary key or a match pattern, `{"found": found}` or
-  // `"found":` under a match, which is the word as data rather than a name handed to call or get;
-  // flagged, three dictionary keys were sent to be checked as uses of a method.
+  // `"found":` under a match, which is the word as data rather than a name handed to call or get.
+  // Flagged, three dictionary keys were sent to be checked as uses of a method.
   let after = offset + name.length + 1;
   while (text[after] === ' ' || text[after] === '\t') {
     after += 1;
@@ -797,7 +797,7 @@ class SceneReader {
     return uid === undefined ? null : (this.uids.get(uid) ?? null);
   }
 
-  /** The script a section of [param path] runs, following an instanced scene to its root. */
+  /** The script a section of [param path] runs. An instanced scene is followed to its root. */
   scriptOf(path: string, section: Section, depth = 0): string | null {
     const script = section.properties.find((property) => property.key === 'script');
     if (script !== undefined) {
@@ -934,7 +934,7 @@ function literalsOf(file: ProjectText, script: Script | undefined): { offset: nu
 
 /**
  * The edits moving files: every string naming one by path, as a res:// path or relative to the
- * file it is in, written to name the new place in the same style; and in each moved file, every
+ * file it is in, written to name the new place in the same style, and in each moved file, every
  * relative path, which names a different file once it is somewhere else.
  */
 export function planMove(args: MoveArguments, plan: Plan): Plan {
@@ -1019,8 +1019,8 @@ export function planMove(args: MoveArguments, plan: Plan): Plan {
     }
   }
   return {
-    edits: edits.sort((a, b) => a.file.localeCompare(b.file) || a.offset - b.offset),
-    mentions: mentions.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line),
+    edits: edits.toSorted((a, b) => a.file.localeCompare(b.file) || a.offset - b.offset),
+    mentions: mentions.toSorted((a, b) => a.file.localeCompare(b.file) || a.line - b.line),
   };
 }
 
@@ -1065,7 +1065,7 @@ export function mentionIgnored(
   }
   return {
     edits: plan.edits,
-    mentions: mentions.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line),
+    mentions: mentions.toSorted((a, b) => a.file.localeCompare(b.file) || a.line - b.line),
   };
 }
 
@@ -1101,7 +1101,7 @@ export function rewritesOf(
     }
     let after = file.text;
     let lastStart = Number.POSITIVE_INFINITY;
-    for (const edit of [...edits].sort((a, b) => b.offset - a.offset)) {
+    for (const edit of [...edits].toSorted((a, b) => b.offset - a.offset)) {
       if (edit.offset + edit.length > lastStart) {
         throw new Error(`two edits overlap in ${path} at offset ${edit.offset}`);
       }
@@ -1116,24 +1116,24 @@ export function rewritesOf(
       writeTo: move?.from === path ? move.absoluteTo : file.absolute,
     });
   }
-  return rewrites.sort((a, b) => a.path.localeCompare(b.path));
+  return rewrites.toSorted((a, b) => a.path.localeCompare(b.path));
 }
 
 /**
  * Writes every rewrite or none. Each file is checked against what the plan was made from before
  * anything is written, so an edit made in between is not overwritten with a plan that never saw
- * it; and a write that fails part of the way puts back every file already written.
+ * it. A write that fails part of the way puts back every file already written.
  */
 export function applyRewrites(rewrites: readonly Rewrite[]): void {
   for (const rewrite of rewrites) {
     const now = readFileSync(rewrite.absolute, 'utf8');
     if (now !== rewrite.before) {
       throw new Error(
-        `${rewrite.path} changed on disk while the rename was being worked out; nothing was written`,
+        `${rewrite.path} changed on disk while the rename was being worked out, so nothing was written`,
       );
     }
     if (rewrite.writeTo !== rewrite.absolute && existsSync(rewrite.writeTo)) {
-      throw new Error(`${rewrite.writeTo} already exists; nothing was written`);
+      throw new Error(`${rewrite.writeTo} already exists, so nothing was written`);
     }
   }
   const done: { rewrite: Rewrite; movedUid: boolean }[] = [];
@@ -1165,7 +1165,7 @@ export function applyRewrites(rewrites: readonly Rewrite[]): void {
         }
       } catch {
         // Putting back is best done for every file, so one that will not go back does not stop the
-        // rest; the error below says the write failed, which is the thing to act on.
+        // rest. The error below says the write failed, which is the thing to act on.
       }
     }
     throw error;

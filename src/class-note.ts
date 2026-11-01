@@ -9,7 +9,7 @@ import { writeWhole } from './whole-file.js';
  *
  * Facts about an editor that outlives the server. What the last rebuild left in the cache is what
  * tells a class the files gained from one the editor wrote out, and the editor whose scan or save
- * wrote a shorter list than the file is the one a rescan cannot teach; the server that measured
+ * wrote a shorter list than the file is the one a rescan cannot teach. The server that measured
  * either is replaced at every reconnect, which is exactly when a stale editor has been up for
  * hours. Held in memory alone, every replacement offered that editor the rescan again until it saw
  * the loss for itself.
@@ -25,7 +25,7 @@ export interface ClassNote {
   /**
    * The classes an editor could not see before a scan whose end no server saw, by that editor's
    * pid. The scan may have brought them in after the rescan stopped waiting, and the scripts naming
-   * them stay compiled as the editor compiled them without them until each is reloaded; the next
+   * them stay compiled as the editor compiled them without them until each is reloaded. The next
    * rescan of the same editor does that, which it otherwise would not, since by then the editor
    * sees the classes and nothing marks them as new.
    */
