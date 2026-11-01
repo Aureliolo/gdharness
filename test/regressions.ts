@@ -8260,6 +8260,8 @@ async function testANoEditorRefusalSaysWhetherOneCanConnect(): Promise<void> {
           `a project an editor could connect from: ${ready}`,
         );
         assert.match(ready, /Open the project in the editor with editor_launch/, ready);
+        // The addon is installed and enabled here, so enabling it is no remedy.
+        assert.doesNotMatch(ready, /Enable the addon under/, ready);
       },
       { GDHARNESS_RUNTIME_DIR: announced },
     );
@@ -23897,7 +23899,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     assert.deepEqual(
       [
         get(scriptsCheck, 'passed'),
-        get(scriptsCheck, 'compiled'),
+        get(scriptsCheck, 'compile_checked'),
         asArray(get(scriptsCheck, 'details')).length,
       ],
       [false, 6, 3],

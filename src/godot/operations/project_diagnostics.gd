@@ -113,7 +113,8 @@ func get_project_health(params: Dictionary) -> Dictionary:
 			"total_scripts": script_files.size(),
 		}
 		if compiled.has("checked"):
-			scripts["compiled"] = GdhRead.as_int(compiled["checked"])
+			# How many were compiled to check them, failures included, so not a count of successes.
+			scripts["compile_checked"] = GdhRead.as_int(compiled["checked"])
 		else:
 			scripts["not_compiled"] = str(compiled.get("not_checked", "no compile was asked for"))
 		checks["scripts"] = scripts
