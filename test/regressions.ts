@@ -5732,6 +5732,7 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
     args: Record<string, boolean>;
     silent: boolean;
     visible: boolean;
+    refused?: boolean;
   }[] = [
     { how: 'opened visible', act: 'open', args: {}, silent: true, visible: true },
     { how: 'opened visible with sound', act: 'open', args: { silent: false }, silent: false, visible: true },
@@ -5742,6 +5743,25 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
       args: { hidden: true, silent: false },
       silent: hiddenSilent,
       visible: false,
+      refused: true,
+    },
+    {
+      how: 'started again hidden with sound',
+      act: 'restart',
+      was: [],
+      args: { hidden: true, silent: false },
+      silent: hiddenSilent,
+      visible: false,
+      refused: true,
+    },
+    {
+      how: 'started again as it was, hidden, with sound',
+      act: 'restart',
+      was: ['--headless'],
+      args: { silent: false },
+      silent: hiddenSilent,
+      visible: false,
+      refused: true,
     },
     {
       how: 'started again hidden',
@@ -5857,14 +5877,36 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
     };
     try {
       await server.initialize('regression-test');
+      // A hidden editor asked for sound would play none, so the call is refused before anything starts.
+      const refusedForSound = (reply: JsonRpcMessage): void => {
+        const said = textOf(reply) ?? '';
+        assert.equal(get(reply, 'result', 'isError'), true, `${one.how}: refused: ${said}`);
+        assert.match(
+          said,
+          /^A hidden editor plays no sound, so silent: false is refused with it\..*Pass hidden: false to hear the editor, or leave silent out/s,
+          `${one.how}: saying what to pass: ${said}`,
+        );
+      };
       let answer: unknown;
       if (one.act === 'open') {
-        answer = parseTextContent(
-          await server.request('tools/call', {
-            name: 'editor_launch',
-            arguments: { op: 'open', projectPath: project, ...one.args },
-          }),
-        );
+        const reply = await server.request('tools/call', {
+          name: 'editor_launch',
+          arguments: { op: 'open', projectPath: project, ...one.args },
+        });
+        if (one.refused === true) {
+          refusedForSound(reply);
+          const status = parseTextContent(
+            await server.request('tools/call', { name: 'editor_status', arguments: {} }),
+          );
+          assert.equal(
+            get(status, 'editor', 'awaitingLaunchedEditor'),
+            undefined,
+            `${one.how}: and nothing was started: ${JSON.stringify(status)}`,
+          );
+          ran += 1;
+          continue;
+        }
+        answer = parseTextContent(reply);
         assert.equal(get(answer, 'launched'), true, `${one.how}: ${JSON.stringify(answer)}`);
       } else {
         const first = await connect();
@@ -5909,6 +5951,12 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
           { name: 'editor_launch', arguments: { op: 'restart', ...one.args } },
           60_000,
         );
+        if (one.refused === true) {
+          refusedForSound(reply);
+          assert.equal(quitAsked, false, `${one.how}: and the editor was not asked to go`);
+          ran += 1;
+          continue;
+        }
         if (one.was === null) {
           const said = textOf(reply) ?? '';
           assert.equal(get(reply, 'result', 'isError'), true, `${one.how}: refused: ${said}`);
