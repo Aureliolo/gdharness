@@ -135,6 +135,8 @@ import {
   SLOT_YIELD_MS,
   type SlotHolder,
   SlotLine,
+  SPARE_FILE,
+  SPARE_STALE_MS,
   START_TOLERANCE_MS,
   slotEngineNamed,
   slotsClaimed,
@@ -143,6 +145,7 @@ import {
   slotWaitedSaid,
   slotWaiters,
   slotWaitSaid,
+  spareSaid,
   UNWRITTEN_MS,
   WAITING_FOLDER,
 } from '../src/engine-slots.js';
@@ -202,6 +205,7 @@ import {
   runArguments,
   SAVES_NOT_MOVED_NOTE,
   savesStayPut,
+  startedAs,
   userDataIn,
 } from '../src/launch.js';
 import { freeLibraryCopies, seedExtensionList } from '../src/library-copies.js';
@@ -490,6 +494,7 @@ import { askWindows } from '../src/windows-ask.js';
 import { inTurnFor, writeLockOf } from '../src/write-turns.js';
 import { withHome } from './support/cli-home.js';
 import { containedEngine } from './support/contained-engine.js';
+import { endEnginesUnder } from './support/engines.js';
 import { greeting } from './support/greeting.js';
 import { HIDDEN_SPAWN_PRELUDE } from './support/hidden-spawn.js';
 import { asArray, asNumber, asObject, asString, get, text } from './support/json.js';
@@ -503,7 +508,7 @@ import {
   textOf,
 } from './support/json-rpc.js';
 import { endWhatAnnouncedIn, MetProcesses } from './support/met.js';
-import { pixelPng, solidPng } from './support/png.js';
+import { pixelPng, readPng, solidPng } from './support/png.js';
 import { listenOnAReservedPort, reservePort, ServerProcess, stopServersOf } from './support/server.js';
 import { REGRESSION_SECONDS, regressionPart, secondsOn, UNMEASURED_SECONDS } from './support/shards.js';
 import { leftInSlots } from './support/slots.js';
@@ -5714,6 +5719,10 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
     const at = argv.indexOf('--audio-driver');
     return at >= 0 && argv[at + 1] === 'Dummy';
   };
+  // A hidden editor is headless, with no sound to turn off, except on Windows, where it draws on a
+  // desktop of its own and is always started silent.
+  const hiddenHeadless = process.platform !== 'win32';
+  const hiddenSilent = !hiddenHeadless;
   // `was` is what the editor being restarted was started with, which a restart reads off its process
   // for whatever the call leaves out. null is a process gone before it is read.
   const cases: readonly {
@@ -5726,13 +5735,20 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
   }[] = [
     { how: 'opened visible', act: 'open', args: {}, silent: true, visible: true },
     { how: 'opened visible with sound', act: 'open', args: { silent: false }, silent: false, visible: true },
-    { how: 'opened hidden', act: 'open', args: { hidden: true }, silent: false, visible: false },
+    { how: 'opened hidden', act: 'open', args: { hidden: true }, silent: hiddenSilent, visible: false },
+    {
+      how: 'opened hidden with sound',
+      act: 'open',
+      args: { hidden: true, silent: false },
+      silent: hiddenSilent,
+      visible: false,
+    },
     {
       how: 'started again hidden',
       act: 'restart',
       was: ['--audio-driver', 'Dummy'],
       args: { hidden: true },
-      silent: false,
+      silent: hiddenSilent,
       visible: false,
     },
     {
@@ -5740,7 +5756,15 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
       act: 'restart',
       was: ['--headless'],
       args: {},
-      silent: false,
+      silent: hiddenSilent,
+      visible: false,
+    },
+    {
+      how: 'started again as it was, hidden on its own desktop',
+      act: 'restart',
+      was: ['--audio-driver', 'Dummy', '--', '--gdharness-hidden'],
+      args: {},
+      silent: hiddenSilent,
       visible: false,
     },
     {
@@ -5919,8 +5943,13 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
       assert.equal(silence(argv), one.silent, `${one.how}: silent ${String(one.silent)}: ${argv.join(' ')}`);
       assert.equal(
         argv.includes('--headless'),
-        !one.visible,
-        `${one.how}: hidden ${String(!one.visible)}: ${argv.join(' ')}`,
+        !one.visible && hiddenHeadless,
+        `${one.how}: headless ${String(!one.visible && hiddenHeadless)}: ${argv.join(' ')}`,
+      );
+      assert.equal(
+        argv.includes('--gdharness-hidden'),
+        !one.visible && !hiddenHeadless,
+        `${one.how}: on a desktop of its own ${String(!one.visible && !hiddenHeadless)}: ${argv.join(' ')}`,
       );
       ran += 1;
     } finally {
@@ -14902,7 +14931,8 @@ async function testAnEditorWritesItsConsoleWhereTheServerLooks(): Promise<void> 
     const editor = spawnHidden(
       godotPath,
       [
-        ...editorArguments(project, { lsp: 0, dap: 0 }, editorLogPath(project), true, true),
+        // Headless on every platform: what the console holds does not depend on a window.
+        ...editorArguments(project, { lsp: 0, dap: 0 }, editorLogPath(project), true, true, 'linux'),
         '--quit-after',
         '2000',
       ],
@@ -21425,8 +21455,38 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
     ['-e', ...opened],
   );
   assert.deepEqual(
-    editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log', true, true),
+    editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log', true, true, 'linux'),
     ['-e', '--headless', ...opened],
+  );
+  // On Windows a hidden editor is a window on the hidden desktop, which draws its views.
+  assert.deepEqual(
+    editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log', true, false, 'win32'),
+    [
+      '-e',
+      '--disable-vsync',
+      '--max-fps',
+      '60',
+      '--audio-driver',
+      'Dummy',
+      ...opened,
+      '--',
+      '--gdharness-hidden',
+    ],
+  );
+  assert.deepEqual(
+    [
+      startedAs(
+        editorArguments('/p', { lsp: 1, dap: 2 }, '/log', true, false, 'win32')
+          .map((word) => `"${word}"`)
+          .join(' '),
+      ),
+      startedAs('godot -e --path /p'),
+    ],
+    [
+      { hidden: true, silent: true },
+      { hidden: false, silent: false },
+    ],
+    'and a restart reads it back as hidden',
   );
   // The scene as a res:// path and last: the engine reads it positionally, so text beginning
   // with a dash would otherwise be another option to it.
@@ -21621,8 +21681,8 @@ function testWhatThisServerStartsIsSilentUnlessAsked(): void {
     'and one asked for sound is not',
   );
   assert.ok(
-    !editorArguments('/p', { lsp: 1, dap: 2 }, '/log', true, true).includes('--audio-driver'),
-    'a hidden editor is headless, which is silent already',
+    !editorArguments('/p', { lsp: 1, dap: 2 }, '/log', true, true, 'linux').includes('--audio-driver'),
+    'a headless editor is silent already',
   );
 }
 
@@ -46384,6 +46444,61 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
         "and gate work outside a seat any, the gates' from the top first",
       );
     }
+    // The queue says how many of the gates' free slots no queued gate can take now. Side work takes
+    // those after the kept ones, and a game, which holds its slot for as long as it plays, never.
+    const spareFile = join(directory, SPARE_FILE);
+    const spareOf = (spare: unknown, writtenAgoMs: number, pid = process.pid): void => {
+      writeFileSync(spareFile, JSON.stringify({ spare, pid, started, written: Date.now() - writtenAgoMs }));
+    };
+    spareOf(2, 0);
+    assert.deepEqual(
+      [await takeAll(outside), await takeAll(outside, true)],
+      [['3.lock', '2.lock', '1.lock', '0.lock'], ['3.lock']],
+      'side work takes the spare slots of the gates, and a game only its share of the kept ones',
+    );
+    const kept = ['3.lock', '2.lock'];
+    for (const [why, write] of [
+      [
+        'none spare',
+        () => {
+          spareOf(0, 0);
+        },
+      ],
+      [
+        'a stale count',
+        () => {
+          spareOf(2, SPARE_STALE_MS + 1000);
+        },
+      ],
+      [
+        'a count whose writer has gone',
+        () => {
+          spareOf(2, 0, gone.pid);
+        },
+      ],
+      [
+        'a count that is no whole number',
+        () => {
+          spareOf('2', 0);
+        },
+      ],
+    ] as const) {
+      write();
+      assert.deepEqual(await takeAll(outside), kept, `and only the kept slots with ${why}`);
+    }
+    rmSync(spareFile);
+    assert.deepEqual(await takeAll(outside), kept, 'or with no count at all');
+    assert.equal(
+      spareSaid('{"spare": 3, "written": 1000}', 1000 + SPARE_STALE_MS),
+      3,
+      'a count is read up to its age limit',
+    );
+    assert.equal(spareSaid('{"spare": 3, "written": 1000}', 1001 + SPARE_STALE_MS), 0, 'and not past it');
+    assert.deepEqual(
+      slotsDrawnOn(16, 'other', 'spare'),
+      { numbers: every16 },
+      'the kept first, then the gates',
+    );
     assert.equal(
       slotWaitSaid(3000, 4, 'slots', outside.holders(), outside.drawn),
       'Waiting 3 s so far for an engine: the 2 engine slots of the 4 on this machine (slots) kept for engines outside a gate while a gate is queued are in use, by a gate or another tool, and the engine starts when one is given back or no gate is queued.',
@@ -69193,6 +69308,150 @@ async function testAWriteWaitsForAnotherProcesssTurn(): Promise<void> {
 }
 
 /**
+ * editor_capture shows what a scene's @tool script draws only in the editor. A game asked to check
+ * such a sample had no way to see it: runtime_capture needs a game, which never runs the editor
+ * branch, and a headless editor draws nothing. A hidden editor on Windows is a window on a desktop
+ * of its own, which draws without showing. Elsewhere it is headless, and the capture says so.
+ */
+async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('editor capture regression skipped (Godot not found)');
+    return;
+  }
+  const decoded = readPng(pixelPng(2, 1, (x) => (x === 0 ? [255, 0, 0, 255] : [0, 0, 255, 128])));
+  assert.deepEqual(
+    [decoded.pixel(0, 0), decoded.pixel(1, 0)],
+    [
+      [255, 0, 0, 255],
+      [0, 0, 255, 128],
+    ],
+  );
+  const project = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-editor-view-')));
+  const home = join(project, 'home');
+  mkdirSync(home);
+  const saved = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-view-out-'));
+  installAddons(project);
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="EditorView"\n\n[editor_plugins]\n\n' +
+      'enabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+  );
+  // Red in the editor only. A game, or a capture that read the view before the script drew, has none.
+  writeFileSync(
+    join(project, 'sample.gd'),
+    '@tool\nextends Node2D\n\n\nfunc _draw() -> void:\n\tif Engine.is_editor_hint():\n' +
+      '\t\tdraw_rect(Rect2(0, 0, 400, 400), Color(1, 0, 0))\n',
+  );
+  writeFileSync(
+    join(project, 'sample.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://sample.gd" id="1_sample"]\n\n' +
+      '[node name="Sample" type="Node2D"]\nscript = ExtResource("1_sample")\n',
+  );
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_DAP_PORT: String(await reservePort()),
+      HOME: home,
+      USERPROFILE: home,
+      APPDATA: home,
+      LOCALAPPDATA: home,
+      XDG_CONFIG_HOME: home,
+      XDG_DATA_HOME: home,
+      XDG_CACHE_HOME: home,
+      GDHARNESS_RUNTIME_DIR: join(home, 'runtime'),
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name, arguments: args }, 240_000);
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('editor-view');
+    const opened = await call('editor_launch', { op: 'open', projectPath: project, hidden: true });
+    assert.notEqual(get(opened.result, 'isError'), true, textOf(opened) ?? '');
+    let status: unknown = null;
+    for (let waited = 0; waited < 180_000; waited += 500) {
+      status = parseTextContent(await call('editor_status', {}));
+      if (get(status, 'editor', 'connected') === true) {
+        break;
+      }
+      await delay(500);
+    }
+    assert.equal(
+      get(status, 'editor', 'connected'),
+      true,
+      `the hidden editor connected: ${JSON.stringify(status)}`,
+    );
+    assert.equal(get(status, 'editor', 'hidden'), true, `and says it is hidden: ${JSON.stringify(status)}`);
+
+    const picture = join(saved, 'view.png');
+    const captured = await call('editor_capture', {
+      projectPath: project,
+      scenePath: 'sample.tscn',
+      outputPath: picture,
+    });
+    if (process.platform !== 'win32') {
+      assert.match(
+        textOf(captured) ?? '',
+        /^This editor runs headless, so it draws nothing to capture\./,
+        textOf(captured) ?? '',
+      );
+      return;
+    }
+    assert.match(
+      textOf(captured) ?? '',
+      /^The editor's 2D view of res:\/\/sample\.tscn: \d+x\d+ png\. Saved to /,
+      textOf(captured) ?? '',
+    );
+    const images = asArray(get(captured.result, 'content')).filter((block) => get(block, 'type') === 'image');
+    assert.equal(images.length, 1, 'the picture comes back in the answer');
+    const view = readPng(readFileSync(picture));
+    let red = 0;
+    for (let y = 0; y < view.height; y += 4) {
+      for (let x = 0; x < view.width; x += 4) {
+        const [r, g, b] = view.pixel(x, y);
+        if (r > 200 && g < 60 && b < 60) {
+          red += 1;
+        }
+      }
+    }
+    assert.ok(
+      red > 100,
+      `what the script draws in the editor is in the view: ${String(red)} red samples of ${view.width}x${view.height}`,
+    );
+
+    const scaled = await call('editor_capture', {
+      projectPath: project,
+      scenePath: 'sample.tscn',
+      width: 120,
+      inline: false,
+      outputPath: join(saved, 'small.png'),
+    });
+    assert.match(
+      textOf(scaled) ?? '',
+      /: 120x\d+ png, scaled from \d+x\d+\. Saved to .*\. Not sent, as inline: false asked$/,
+      textOf(scaled) ?? '',
+    );
+    assert.equal(readPng(readFileSync(join(saved, 'small.png'))).width, 120);
+  } finally {
+    await call('editor_launch', { op: 'close' }).catch(() => undefined);
+    await server.stop();
+    for (const { pid } of await endEnginesUnder(project)) {
+      console.log(`ended engine ${pid}, which was still holding the editor view fixture`);
+    }
+    rmSync(project, { recursive: true, force: true });
+    rmSync(saved, { recursive: true, force: true });
+  }
+}
+
+/**
  * A headless write saves what the editor would. A model-driven probe renamed a node in a scene whose
  * ShaderMaterial set none of its parameters, and the save wrote each as null, since the saver leaves
  * out a parameter at the default the renderer gives and a headless renderer gives none. The same
@@ -71347,6 +71606,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHeadlessWriteSavesWhatTheEditorWould,
   testTwoWritesToOneSceneAtOnceBothLand,
   testAWriteWaitsForAnotherProcesssTurn,
+  testTheEditorsViewShowsWhatToolScriptsDrawThere,
   testAMovedNodeNamesTheScriptLinesReadingIt,
   testAHandWrittenValueIsNoChangeOfAScripts,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,

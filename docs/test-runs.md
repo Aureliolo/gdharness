@@ -653,8 +653,10 @@ the wait.
 Take in the order you began to wait. At each look, read every live mark but your own and `memory`
 ones.
 
-- Gate work (`gate`, `timing` and `tier`) and `other` takers but games waiting two minutes or more
-  come first. Within each group, those whose `since` is earlier are ahead of you, the earliest first.
+- The first group is gate work (`gate`, `timing` and `tier`) and `other` takers that are not games
+  and have waited two minutes or more. The second is everyone else, games included.
+- The first group is ahead of the second. Within each group, those whose `since` is earlier are
+  ahead of you, the earliest first.
 - A mark naming no `since` waits since its file was made, and one naming another `taker` is `other`.
 - Give each, in turn, the first free slot of those it may take now (below, aged by its own `since`)
   not given to one before it. Leave those slots alone.
@@ -713,9 +715,19 @@ set. Each kind of engine takes:
 - A timing's engine, one with `GODOT_ENGINE_TIMED` set, takes any slot.
 - An engine with `GODOT_ENGINE_TIER` set (`fast` or `full` for a gate's own step, `ship` for a build
   or upload) takes any slot, whatever the queue holds. It tries the gates' slots from the top first.
-- Any other engine takes any slot while no mark is live, and only the kept slots while one is. After
-  two minutes of waiting, one that is not a game takes any slot, so gates never hold it back for
-  good.
+- Any other engine takes any slot while no mark is live, and only the kept slots while one is. It
+  also takes the gates' slots, from the top, while some are spare (see Spare slots of the gates).
+- After two minutes of waiting, one that is not a game takes any slot, so gates never hold it back
+  for good.
+
+### Spare slots of the gates
+
+The queue writes `<directory>/spare.json` as `{"spare", "pid", "started", "written"}`, `written` in
+milliseconds since the epoch. `spare` counts the gates' free slots no queued gate can take now, from
+the queue's seats, pool and memory. The file is written through a `.part` file and a rename, at
+every change and every five seconds while a gate waits. A missing file counts as none, as does one
+older than ten seconds or written by a holder that has gone. A game never takes a spare slot, since
+it holds one as long as it plays.
 
 ### Games and the kept slots
 
@@ -724,8 +736,8 @@ stays when its keeper takes the lock over. Games hold at most `min(floor(kept / 
 the kept slots between them (2 of 16) before a game's start waits.
 
 An engine outside a gate tries the highest-numbered slot first. The gates' slots then stay free
-longest. Which slots a take may try is asked again at every look. A
-slot already held is kept to its end, whatever arrives in the queue.
+longest. A take works out again at every look which slots it may try. A slot it already holds is
+kept to its end, whatever arrives in the queue.
 
 ### Removing locks on Windows
 
