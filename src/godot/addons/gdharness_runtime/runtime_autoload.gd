@@ -14,10 +14,12 @@ const GdhFrames = preload("runtime_frames.gd")
 const GdhRead = preload("reading.gd")
 ## Where the modules are loaded from. Kept in step with the markers below.
 const ADDON_DIR: String = "res://addons/gdharness_runtime/"
-## The modules that answer commands, loaded at the first command one answers rather than preloaded.
+## The modules that answer commands, compiled on the engine's loading threads rather than preloaded.
 ## A preload compiles as this script parses, and the modules are twelve thousand lines: compiling
 ## them took most of a second of every debug start, in games nobody asks anything, a bench's quiet
-## workers and script runs among them.
+## workers and script runs among them. Compiled at a command instead, they held that frame for up
+## to 590 ms, which a game's frame bench read as its own stall. So a served game compiles them on a
+## loading thread from its first frame, where a game nobody serves compiles none.
 const QUERIES: String = "runtime_queries.gd"
 const CHANGES: String = "runtime_changes.gd"
 const INPUT: String = "runtime_input.gd"
@@ -28,6 +30,11 @@ const CAPTURE: String = "runtime_capture.gd"
 const WAITS: String = "runtime_waits.gd"
 const ACCESSIBILITY: String = "runtime_accessibility.gd"
 const VALUES: String = "runtime_values.gd"
+## Every module in the order a loading thread compiles them: the values one first, since most others
+## are built with it, then by how soon a caller tends to need one.
+const MODULES: PackedStringArray = [
+	VALUES, QUERIES, WAITS, INPUT, TYPING, CHANGES, CAPTURE, PAD, TOUCH, ACCESSIBILITY,
+]
 ## Every module command, by the name a request uses, as the module and the method that answers it.
 const MODULE_COMMANDS: Dictionary = {
 	"get_tree": [QUERIES, "get_tree"],
@@ -132,11 +139,16 @@ const DIGEST_MARKER: String = "res://addons/gdharness_runtime/.gdharness-digest"
 var values: RefCounted:
 	get:
 		if _values == null:
-			_values = _loaded(VALUES).new()
+			_values = _compiled(VALUES).new()
 		return _values
 
 var _values: RefCounted
 var _frames: GdhFrames = GdhFrames.new()
+var _modules_requested: bool = false
+## The module path a loading thread is compiling, or "" for none.
+var _in_flight: String = ""
+## The module paths waiting for a loading thread, the next first.
+var _queued: Array[String] = []
 ## Each module loaded so far, by its file. Held here because a Callable holds its object by id
 ## rather than by reference, and a module referenced only by the Callable answering one command
 ## would be freed once it answered.
@@ -216,6 +228,11 @@ func _process(_delta: float) -> void:
 		return
 	_frames.note_frame(Time.get_ticks_usec())
 	_calibrate_the_profiler()
+	if not _modules_requested:
+		_modules_requested = true
+		_request_modules()
+	elif not _in_flight.is_empty() or not _queued.is_empty():
+		_advance_modules()
 
 	# Every connection waiting rather than one a frame: the engine queues eight a game has not taken
 	# and refuses the rest, so calls sent together would be refused as if the game were not up.
@@ -276,9 +293,58 @@ func _notification(what: int) -> void:
 		_cleanup()
 
 
-## The script of the module in [param file], compiled at the first call that needs it.
+## The script of the module in [param file], compiled here if no thread has it.
 static func _loaded(file: String) -> GDScript:
 	return load(ADDON_DIR + file) as GDScript
+
+
+## Queues every module not yet compiled for a loading thread. Called at the first frame a served
+## game runs, after its main scene has loaded.
+func _request_modules() -> void:
+	for file: String in MODULES:
+		var path: String = ADDON_DIR + file
+		if path != _in_flight and not _queued.has(path) and not ResourceLoader.has_cached(path):
+			_queued.append(path)
+	_advance_modules()
+
+
+## Takes the module a loading thread has finished and asks for the next. One at a time, because
+## many threaded loads at once have deadlocked a game's boot in Godot's loader.
+func _advance_modules() -> void:
+	if not _in_flight.is_empty():
+		var status: ResourceLoader.ThreadLoadStatus = ResourceLoader.load_threaded_get_status(
+			_in_flight
+		)
+		if status == ResourceLoader.THREAD_LOAD_IN_PROGRESS:
+			return
+		# Taken so the loader lets go of the request. A failed one answers null, and the module's
+		# first command then compiles it and reports why.
+		var _taken: Resource = ResourceLoader.load_threaded_get(_in_flight)
+		_in_flight = ""
+	while not _queued.is_empty():
+		var path: String = _queued.pop_front()
+		if ResourceLoader.has_cached(path):
+			continue
+		# A request the loader refuses leaves the module to be compiled at its first command.
+		if ResourceLoader.load_threaded_request(path, "GDScript") == OK:
+			_in_flight = path
+			return
+
+
+## The script of the module in [param file], finished in this frame when its loading thread has not
+## finished it yet. A command acts in the frame it arrives, so it never waits frames for its module:
+## a frame wait let 38 frames pass for three, and a signal fired before the wait began. Such a frame
+## is the runtime's slowness, and is left out of the timing.
+func _compiled(file: String) -> GDScript:
+	var path: String = ADDON_DIR + file
+	if not ResourceLoader.has_cached(path):
+		_frames.skip_this_frame()
+	if path == _in_flight:
+		var _taken: Resource = ResourceLoader.load_threaded_get(path)
+		_in_flight = ""
+	else:
+		_queued.erase(path)
+	return _loaded(file)
 
 
 ## The module in [param file], built at its first command with what it is built with.
@@ -286,7 +352,7 @@ func _module(file: String) -> Object:
 	var made: Object = _modules.get(file)
 	if made != null:
 		return made
-	var script: GDScript = _loaded(file)
+	var script: GDScript = _compiled(file)
 	match file:
 		QUERIES:
 			made = script.new(self, values, _frames)
@@ -295,7 +361,6 @@ func _module(file: String) -> Object:
 		_:
 			made = script.new(self, values)
 	_modules[file] = made
-	_frames.skip_this_frame()
 	return made
 
 
@@ -884,6 +949,12 @@ func _cleanup() -> void:
 	_clients.clear()
 	_pending.clear()
 	_outgoing.clear()
+	# A threaded request nobody takes leaves its load token behind, which the engine reports as a
+	# leaked instance at exit. Taken here, which waits for that one module to finish compiling.
+	_queued.clear()
+	if not _in_flight.is_empty():
+		var _taken: Resource = ResourceLoader.load_threaded_get(_in_flight)
+		_in_flight = ""
 
 	if _server:
 		_server.stop()

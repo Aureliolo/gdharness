@@ -1,6 +1,6 @@
 extends RefCounted
 ## How long the game's last frames took, timed from the runtime's first frame. Apart from the
-## queries that report it, because those are loaded at the first request and the frames before it
+## queries that report it, because those are compiled after that frame and the frames before them
 ## count too.
 
 ## How many frames the frame time is the mean of: two seconds at sixty frames a second.
@@ -39,8 +39,9 @@ func note_frame(now_usec: int) -> void:
 	_last_physics_frames = stepped
 
 
-## Leaves the frame in progress out of the timing, for one the runtime itself slowed: compiling a
-## module at its first command takes up to half a second, which is gdharness's and not the game's,
-## and would stand as the slowest frame for the next two seconds of readings.
+## Leaves the frame in progress out of the timing, for one the runtime itself slowed. A module a
+## command needs before its loading thread finished it is finished in the frame, which can take half
+## a second. That is gdharness's and not the game's, and would stand as the slowest frame for two
+## seconds of readings.
 func skip_this_frame() -> void:
 	_last_frame_usec = 0
