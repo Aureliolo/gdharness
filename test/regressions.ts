@@ -57903,6 +57903,24 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     });
     assert.ok(parseTextContent(bottom) !== null, textOf(bottom) ?? JSON.stringify(bottom));
     assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^vertical_alignment = 2$/m);
+    // In a project that makes untyped declarations errors, as strict games do, the line compiled to
+    // read the constant has to pass them too: HORIZONTAL_ALIGNMENT_CENTER was refused there.
+    const unstrict = readFileSync(join(project, 'project.godot'), 'utf8');
+    writeFileSync(
+      join(project, 'project.godot'),
+      `${unstrict}\n[debug]\n\ngdscript/warnings/untyped_declaration=2\ngdscript/warnings/inferred_declaration=2\n`,
+    );
+    const centred = await request('scene_node', {
+      scenePath: 'res://hero.tscn',
+      op: 'add',
+      nodeType: 'Label',
+      nodeName: 'Centred',
+      properties: { horizontal_alignment: 'HORIZONTAL_ALIGNMENT_CENTER' },
+    });
+    writeFileSync(join(project, 'project.godot'), unstrict);
+    assert.ok(parseTextContent(centred) !== null, textOf(centred) ?? JSON.stringify(centred));
+    assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^horizontal_alignment = 1$/m);
+    await request('scene_node', { ...hero, op: 'delete', nodePath: 'Centred' });
     assert.equal(
       textOf(
         await request('scene_node', {

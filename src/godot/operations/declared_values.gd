@@ -140,8 +140,9 @@ static func _global_constant(target: Object, declared: Dictionary, word: String)
 		)
 		if constant != wanted:
 			continue
+		# Typed, because a project that makes untyped declarations errors compiles this line too.
 		var reader: GDScript = GDScript.new()
-		reader.source_code = "extends RefCounted\nconst READ = %s\n" % constant
+		reader.source_code = "extends RefCounted\nconst READ: int = %s\n" % constant
 		if (reader.reload() == OK
 				and reader.get_script_constant_map().get("READ") == hinted[value_word]):
 			return hinted[value_word]
