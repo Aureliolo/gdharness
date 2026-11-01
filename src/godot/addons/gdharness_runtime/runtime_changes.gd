@@ -133,7 +133,7 @@ func set_property(params: Dictionary) -> Dictionary:
 			why += (
 				(
 					". %s is declared as %s, which is also how the engine names a script class "
-					+ "with no class_name; if it is one, the object given has the right class and "
+					+ "with no class_name. If it is one, the object given has the right class and "
 					+ "another script: it is %s"
 				)
 				% [named, str(slot["class"]), GdhValues.class_of(refused_object)]
@@ -484,7 +484,7 @@ func call_method(params: Dictionary) -> Dictionary:
 			var close: PackedStringArray = GdhRead.nearest(node_path, PackedStringArray(classes))
 			standing["message"] = (
 				(
-					"%s. No global class is called %s either%s; a static function is called with "
+					"%s. No global class is called %s either%s. A static function is called with "
 					+ "its class's name or its script's res:// path as the path."
 				)
 				% [
@@ -660,7 +660,7 @@ func call_method(params: Dictionary) -> Dictionary:
 			message += (
 				(
 					". The parameter is declared as %s, which is also how the engine names a "
-					+ "script class with no class_name; if it is one, the object given has the "
+					+ "script class with no class_name. If it is one, the object given has the "
 					+ "right class and another script: it is %s"
 				)
 				% checked

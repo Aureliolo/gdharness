@@ -226,16 +226,16 @@ static func no_action(action: String) -> String:
 	)
 	if not close.is_empty():
 		return (
-			"%s; the nearest %s %s."
+			"%s. The nearest %s %s."
 			% [said, "is" if close.size() == 1 else "are", ", ".join(close)]
 		)
 	if own.is_empty():
 		return (
-			"%s; the project defines no actions of its own, and the engine's are the ui_ ones."
+			"%s. The project defines no actions of its own, and the engine's are the ui_ ones."
 			% said
 		)
 	return (
-		"%s; the project's own actions are %s, beside the engine's ui_ ones."
+		"%s. The project's own actions are %s, beside the engine's ui_ ones."
 		% [said, ", ".join(own)]
 	)
 
@@ -404,7 +404,7 @@ static func class_at(root: Node, path: String) -> Dictionary:
 			"type": "error",
 			"message":
 			(
-				"%s did not compile, so none of its functions can be called; script_diagnostics on "
+				"%s did not compile, so none of its functions can be called. script_diagnostics on "
 				+ "it gives the error and its line."
 			) % script_path,
 		}

@@ -152,15 +152,19 @@ static func missing_below(
 	if children.size() > NAMED_CHILDREN:
 		shown += " and %d more" % (children.size() - NAMED_CHILDREN)
 	return (
-		"%s%s %s has no %s; %s."
+		"%s %s has no %s. %s."
 		% [
-			said,
-			"" if said.ends_with(".") else ".",
+			ended(said),
 			"The root, %s," % root_name if reached.is_empty() else "/".join(reached),
 			missing,
-			"its children are " + shown if not children.is_empty() else "it has no children",
+			"Its children are " + shown if not children.is_empty() else "It has no children",
 		]
 	)
+
+
+## [param said] with a full stop at its end, so another sentence can follow it.
+static func ended(said: String) -> String:
+	return said if said.ends_with(".") else said + "."
 
 
 ## [param said], the refusal for a [param kind] the scene does not have at [param node_path], with
@@ -180,7 +184,7 @@ static func not_of_kind(
 		return (
 			told
 			+ (
-				" The scene holds no %s; scene_node add with nodeType %s puts one in it."
+				" The scene holds no %s. scene_node add with nodeType %s puts one in it."
 				% [kind, kind]
 			)
 		)
@@ -222,10 +226,10 @@ static func offered(said: String, word: String, names: Array) -> String:
 	var every: PackedStringArray = PackedStringArray(names)
 	var close: PackedStringArray = nearest(word, every)
 	if close.is_empty():
-		return "%s; it has %s" % [said, ", ".join(every)]
+		return "%s It has %s" % [ended(said), ", ".join(every)]
 	return (
-		"%s; the nearest it has %s %s"
-		% [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+		"%s The nearest it has %s %s"
+		% [ended(said), "is" if close.size() == 1 else "are", ", ".join(close)]
 	)
 
 
@@ -243,7 +247,7 @@ static func near_property(said: String, target: Object, property: String) -> Str
 		if usage & PROPERTY_USAGE_ARRAY:
 			var listed: String = _list_called(target, declared, property)
 			if not listed.is_empty():
-				return "%s; %s" % [said, listed]
+				return "%s %s" % [ended(said), listed]
 		if not usage & headings:
 			names.append(str(declared.get("name", "")))
 		if usage & PROPERTY_USAGE_SCRIPT_VARIABLE and not usage & headings:
@@ -251,8 +255,8 @@ static func near_property(said: String, target: Object, property: String) -> Str
 	var close: PackedStringArray = nearest(property, PackedStringArray(names))
 	if not close.is_empty():
 		return (
-			"%s; the nearest it has %s %s"
-			% [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+			"%s The nearest it has %s %s"
+			% [ended(said), "is" if close.size() == 1 else "are", ", ".join(close)]
 		)
 	# With a script that declares nothing readable, as one that does not compile, the name is
 	# likelier the script's than the class's, so the class's list would point the wrong way.
@@ -261,13 +265,13 @@ static func near_property(said: String, target: Object, property: String) -> Str
 	if scripted.is_empty():
 		return (
 			(
-				"%s; editor_classes info with className %s and includeInherited true lists the "
+				"%s editor_classes info with className %s and includeInherited true lists the "
 				+ "ones it has"
 			)
-			% [said, target.get_class()]
+			% [ended(said), target.get_class()]
 		)
 	scripted.sort()
-	return "%s; its script declares %s" % [said, ", ".join(PackedStringArray(scripted))]
+	return "%s Its script declares %s" % [ended(said), ", ".join(PackedStringArray(scripted))]
 
 
 ## How [param target] keeps the list [param property] names, when that is the label of one of the
@@ -292,7 +296,7 @@ static func _list_called(target: Object, count: Dictionary, property: String) ->
 	)
 	return (
 		(
-			"it keeps its %s as %s, how many there are, and %s under %s for the first, %s for the "
+			"It keeps its %s as %s, how many there are, and %s under %s for the first, %s for the "
 			+ "second and so on: give %s before the fields of the entries it makes"
 		)
 		% [parts[0].to_lower(), counted, each, first, parts[1] + "1/", counted]

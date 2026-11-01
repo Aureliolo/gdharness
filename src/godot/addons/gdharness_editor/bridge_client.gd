@@ -265,7 +265,7 @@ func _resolve_server_url(explicit_url: String) -> String:
 	if raw != "":
 		if raw.is_valid_int() and int(raw) >= 1 and int(raw) <= 65535:
 			return "ws://127.0.0.1:%d/godot" % int(raw)
-		push_error("GDHARNESS_BRIDGE_PORT is %s, not a port; using %s" % [raw, DEFAULT_URL])
+		push_error("GDHARNESS_BRIDGE_PORT is %s, not a port, so %s is used" % [raw, DEFAULT_URL])
 
 	return DEFAULT_URL
 

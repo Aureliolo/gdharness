@@ -439,7 +439,7 @@ static func _resource_at(path: String) -> Dictionary:
 		return { "message": "No resource at %s" % path }
 	var loaded: Resource = load(path)
 	if loaded == null:
-		return { "message": "%s did not load; the game's output says why" % path }
+		return { "message": "%s did not load. The game's output says why" % path }
 	return { "object": loaded }
 
 
@@ -756,7 +756,7 @@ static func call_refused(
 	var scripted: Dictionary = _script_method(object, method)
 	if not scripted.is_empty() and (given > 0 or least > 0):
 		var why: String = (
-			"since nothing marks one as only reading%s; runtime_invoke call takes them" % READS_ONLY
+			"since nothing marks one as only reading%s. runtime_invoke call takes them" % READS_ONLY
 		)
 		return (
 			"%s.%s is the game's own and a path gives a game's method no arguments, %s"
@@ -784,7 +784,7 @@ static func call_refused(
 		return ""
 	if _native_flags(object, method) & METHOD_FLAG_CONST == 0:
 		return (
-			"%s.%s is not one the engine marks as only reading%s; runtime_invoke call calls it"
+			"%s.%s is not one the engine marks as only reading%s. runtime_invoke call calls it"
 			% [called_as, method, READS_ONLY]
 		)
 	return ""
@@ -817,14 +817,14 @@ static func with_methods_offered(said: String, object: Object, method: String) -
 	var close: PackedStringArray = GdhRead.nearest(method, PackedStringArray(every))
 	if not close.is_empty():
 		return (
-			"%s; the nearest it has %s %s"
-			% [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+			"%s The nearest it has %s %s"
+			% [GdhRead.ended(said), "is" if close.size() == 1 else "are", ", ".join(close)]
 		)
 	if own.is_empty():
 		return said
 	own.sort()
-	var offered: String = "its static functions are" if object is Script else "its script declares"
-	return "%s; %s %s" % [said, offered, ", ".join(PackedStringArray(own))]
+	var offered: String = "Its static functions are" if object is Script else "Its script declares"
+	return "%s %s %s" % [GdhRead.ended(said), offered, ", ".join(PackedStringArray(own))]
 
 
 ## The entry a script attached to [param object] declares for [param method], or an empty one when
@@ -1018,7 +1018,7 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 		var rest: String = ""
 		if keys.size() > 8:
 			rest = " and %d more" % [keys.size() - 8]
-		return "%s has no key %s; it is keyed by %s%s" % [called_as, named, ", ".join(some), rest]
+		return "%s has no key %s. It is keyed by %s%s" % [called_as, named, ", ".join(some), rest]
 	if composite(holder):
 		var kind: String = type_string(typeof(holder))
 		var sort: String = ("an " if kind.left(1) in ["A", "E", "I", "O", "U"] else "a ") + kind
@@ -1036,11 +1036,11 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 			return (
 				(
 					"%s is %s, and %s() is not one of the calls a path makes on one, which read it"
-					+ " and take no arguments: %s; its components are %s"
+					+ " and take no arguments: %s. Its components are %s"
 				)
 				% [called_as, sort, container_call, ", ".join(spelled), has]
 			)
-		return "%s is %s, so it has no %s; it has %s" % [called_as, sort, named, has]
+		return "%s is %s, so it has no %s. It has %s" % [called_as, sort, named, has]
 	if not holder is Object:
 		return (
 			"%s is %s, which has nothing to read %s off"
@@ -1054,7 +1054,7 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 	# for, and the caller is one pair of brackets away from what they meant.
 	if object.has_method(named):
 		return (
-			"%s has no property %s; it has a method of that name, which a path calls as %s()"
+			"%s has no property %s. It has a method of that name, which a path calls as %s()"
 			% [called_as, named, named]
 		)
 	return GdhRead.near_property("%s has no property %s" % [called_as, named], object, named)

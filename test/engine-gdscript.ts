@@ -994,7 +994,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     [
       'misnamed_base',
       { extends: 'FixtureHeroo' },
-      'extends names FixtureHeroo, which is neither an engine class nor a class_name this project declares; the nearest is FixtureHero. Nothing was written.',
+      'extends names FixtureHeroo, which is neither an engine class nor a class_name this project declares. The nearest is FixtureHero. Nothing was written.',
     ],
   ] as const) {
     const refused = runRefusedOperation(godotPath, projectDir, 'create_script', {
@@ -1202,7 +1202,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.match(
     duplicated.stderr,
     new RegExp(
-      `Nothing was changed: modification 1 adds speed, and the script already declares var speed on line ${speedLine}; modification 3 adds fresh, which modification 2 adds too; modification 4 is a constant with no defaultValue, and a constant needs a value\\. modify only adds members; to change one the script declares already, edit its lines in the file`,
+      `Nothing was changed: modification 1 adds speed, and the script already declares var speed on line ${speedLine}; modification 3 adds fresh, which modification 2 adds too; modification 4 is a constant with no defaultValue, and a constant needs a value\\. modify only adds members\\. To change one the script declares already, edit its lines in the file`,
     ),
     duplicated.stderr,
   );
@@ -2025,7 +2025,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   });
   assert.match(
     taken.stderr,
-    /There is already an export preset named 'Desktop', for Windows Desktop, exporting to 'build\/game\.exe'\. project_export run exports with it; give another name to add a second\./,
+    /There is already an export preset named 'Desktop', for Windows Desktop, exporting to 'build\/game\.exe'\. project_export run exports with it\. Give another name to add a second\./,
     taken.stderr,
   );
   const pathless = runRefusedOperation(godotPath, projectDir, 'add_export_preset', {
@@ -2286,7 +2286,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     assert.deepEqual(uidOf('bare_scene.tscn'), [
       false,
       null,
-      'Its header carries no uid. The editor writes one when it saves the file; refresh_uids does not, and a headless save does not either.',
+      'Its header carries no uid. The editor writes one when it saves the file. refresh_uids does not, and a headless save does not either.',
     ]);
     assert.deepEqual(uidOf('raw_art.png'), [
       false,
@@ -2653,7 +2653,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     { onDisk: get(unsaved, 'layout_on_disk'), note: get(unsaved, 'note') },
     {
       onDisk: false,
-      note: "Nothing is at res://default_bus_layout.tres, so these are the engine's default buses; the first change to a bus writes the layout there.",
+      note: "Nothing is at res://default_bus_layout.tres, so these are the engine's default buses. The first change to a bus writes the layout there.",
     },
     JSON.stringify(unsaved),
   );
@@ -5183,7 +5183,7 @@ async function testTheAnswerIsTheOperations(godotPath: string): Promise<void> {
     assert.equal(get(beside.payload, 'value'), 'Answered', JSON.stringify(beside.payload));
     assert.match(
       String(get(engineExtras(beside), 'engine_messages_after_answer_note')),
-      /none of these changes the answer\. res:\/\/broken\.gd did not compile, so every run of this project starts its autoloads without it until it is fixed; its errors are among these\.$/,
+      /none of these changes the answer\. res:\/\/broken\.gd did not compile, so every run of this project starts its autoloads without it until it is fixed\. Its errors are among these\.$/,
       JSON.stringify(engineExtras(beside)),
     );
   } finally {

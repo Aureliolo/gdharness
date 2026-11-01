@@ -118,7 +118,7 @@ async function engine(projectPath?: string): Promise<HeadlessEngine> {
   }
   // Said, because it is an engine this project's own files do not name.
   console.error(
-    `engine: ${theirs}, which the harness config of ${mainCheckout} names; this project is a git worktree of it`,
+    `engine: ${theirs}, which the harness config of ${mainCheckout} names. This project is a git worktree of it`,
   );
   return { godotPath: theirs, script: shippedOperationsScript(), debug: DEBUG_MODE };
 }
@@ -276,7 +276,7 @@ function reportSkipped(candidate: Candidate): void {
   const { harness, reason } = candidate;
   console.log(
     reason === 'machine-wide'
-      ? `${harness.name}: found, not touched. Its config is machine-wide; pass --${harness.id} to write it.`
+      ? `${harness.name}: found, not touched. Its config is machine-wide. Pass --${harness.id} to write it.`
       : `${harness.name}: installed, not touched. Pass --${harness.id} to set it up here.`,
   );
 }
@@ -379,7 +379,7 @@ async function setup(): Promise<void> {
       reportSkipped(candidate);
     }
     if (chosen.harnesses.length === 0) {
-      console.log('no harness configured; name one yourself, and gdharness harnesses lists them all');
+      console.log('no harness configured. Name one yourself, and gdharness harnesses lists them all');
     }
 
     if (!args.includes('--no-skill')) {
@@ -416,7 +416,7 @@ async function uninstall(): Promise<void> {
     if (harness.scope === 'home' && named.length === 0) {
       if (registered(harness, projectPath)) {
         console.log(
-          `${harness.name}: left alone. Its config is machine-wide and may serve another project; pass --${harness.id} to remove it.`,
+          `${harness.name}: left alone. Its config is machine-wide and may serve another project. Pass --${harness.id} to remove it.`,
         );
       }
       continue;
@@ -471,7 +471,7 @@ async function uninstall(): Promise<void> {
   const loader = before.runtimeLoaderAutoload;
   if (loader !== null && loader.name !== RUNTIME_AUTOLOAD.name) {
     console.log(
-      `${loader.name} names res://${loader.path}, which brings the runtime up its own way. That line is this project's, so it is left in place; the addon it brings up is gone now, so take the entry out unless that file does nothing without it.`,
+      `${loader.name} names res://${loader.path}, which brings the runtime up its own way. That line is this project's, so it is left in place. The addon it brings up is gone now, so take the entry out unless that file does nothing without it.`,
     );
   }
 
@@ -521,7 +521,7 @@ async function upgrade(): Promise<void> {
   const godot = await engine(projectPath);
   console.log(
     present.version === version
-      ? `already ${version}; reinstalling`
+      ? `already ${version}, reinstalling`
       : `${present.version ?? 'an unmarked copy'} -> ${version}`,
   );
 
@@ -568,7 +568,7 @@ async function upgrade(): Promise<void> {
       return true;
     }
     console.log(
-      `${harness.name}: left alone. Its config is machine-wide and ${serves === null ? 'names no project' : `serves ${serves}`}; pass --${harness.id} to point it at this one.`,
+      `${harness.name}: left alone. Its config is machine-wide and ${serves === null ? 'names no project' : `serves ${serves}`}. Pass --${harness.id} to point it at this one.`,
     );
     return false;
   });
@@ -781,7 +781,7 @@ Usage:
                                      so it is named rather than edited unless you ask by flag.
   gdharness harnesses                Every harness, its flag and the file it reads
   gdharness doctor [project] [--json]
-                                     Say what holds and what does not; exit 1 on a problem
+                                     Say what holds and what does not. Exit 1 on a problem
   gdharness runtime on|off [project] Register or remove the runtime autoload, which reaches
                                      an export if it is left on
   gdharness classes [project]        Rebuild .godot/global_script_class_cache.cfg from disk
@@ -817,7 +817,7 @@ Usage:
                                      of the project's open editor, which it never starts: the
                                      port named, else GDHARNESS_LSP_PORT, else the one each
                                      editor of the project records, else 6005. Waits S seconds
-                                     (20) for one serving this project; exit 1 when none does.
+                                     (20) for one serving this project. Exit 1 when none does.
   gdharness version                  Show the installed version
   gdharness help                     Show this help
 

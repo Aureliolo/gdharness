@@ -32,7 +32,7 @@ export function readLog(path: string, limit = LOG_LIMIT_BYTES): string {
     const kept = head.subarray(0, headEnd);
     const ending = tail.subarray(tailStart);
     const skipped = size - kept.length - ending.length;
-    return `${kept.toString('utf8')}[gdharness: ${String(skipped)} bytes of this ${String(size)}-byte log were not read; at most ${String(limit)} are]\n${ending.toString('utf8')}`;
+    return `${kept.toString('utf8')}[gdharness: ${String(skipped)} bytes of this ${String(size)}-byte log were not read, since at most ${String(limit)} are]\n${ending.toString('utf8')}`;
   } finally {
     closeSync(fd);
   }

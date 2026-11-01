@@ -283,7 +283,7 @@ func modify_resource(args: Dictionary) -> Dictionary:
 	if res_path == "res://":
 		return { "ok": false, "error": "resourcePath is required" }
 	if not FileAccess.file_exists(res_path):
-		return { "ok": false, "error": "No resource at %s; op=create makes one there." % res_path }
+		return { "ok": false, "error": "No resource at %s. op=create makes one there." % res_path }
 	# The editor's copy of an imported file is rebuilt from the source on every import, and a save
 	# to it fails. Edited through the cache, the editor kept the changed copy after the refusal.
 	if FileAccess.file_exists(res_path + ".import"):
@@ -601,8 +601,8 @@ func remove_theme_item(args: Dictionary) -> Dictionary:
 		theme.remove_type(control_type)
 	elif removed.is_empty() and held.is_empty():
 		var only: String = (
-			"%s holds no items, only the type it varies, %s; "
-			+ "without item, remove_theme_item takes it out."
+			"%s holds no items, only the type it varies, %s. "
+			+ "Without item, remove_theme_item takes it out."
 		)
 		return { "ok": false, "error": only % [control_type, base] }
 	elif removed.is_empty():

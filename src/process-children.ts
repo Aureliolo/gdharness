@@ -206,7 +206,7 @@ export function listingFailure(error: unknown): string {
           : 'failed';
   const said = typeof failed.stderr === 'string' ? failed.stderr.trim() : '';
   const asked = basename((failed.cmd ?? '').split(' ')[0] ?? '') || 'the listing';
-  return `${asked} ${how}${said === '' ? ', with nothing on stderr' : `; stderr: ${said.slice(0, 400)}`}`;
+  return `${asked} ${how}${said === '' ? ', with nothing on stderr' : `, and stderr held: ${said.slice(0, 400)}`}`;
 }
 
 /**

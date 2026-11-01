@@ -70,7 +70,7 @@ static func outcomes(arm: String, runs: int, play: Callable) -> Array:
 	_learn()
 	if _arms.has(arm):
 		push_error(
-			"GdhShare: the arm %s was played twice in one run; give each arm its own name" % arm
+			"GdhShare: the arm %s was played twice in one run. Give each arm its own name" % arm
 		)
 		return []
 	_arms[arm] = true
@@ -185,7 +185,7 @@ static func _gathered(arm: String, runs: int) -> Array:
 			(
 				(
 					"GdhShare: no worker played the arm %s, so this run went another way than "
-					+ "theirs; which arms a bench plays must depend on its command line alone"
+					+ "theirs. Which arms a bench plays must depend on its command line alone"
 				)
 				% arm
 			)
@@ -271,7 +271,7 @@ static func _learn() -> void:
 				_index = halves[0].to_int()
 				_workers = halves[1].to_int()
 			if _index < 0 or _index >= _workers:
-				push_error("GdhShare: %s names no worker; it takes <index>/<workers>" % given)
+				push_error("GdhShare: %s names no worker. It takes <index>/<workers>" % given)
 				_index = -1
 		elif given.begins_with(GATHER):
 			_gathering = given.trim_prefix(GATHER).to_int()

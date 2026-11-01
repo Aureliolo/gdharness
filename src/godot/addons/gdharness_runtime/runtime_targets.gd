@@ -203,7 +203,7 @@ static func control_saying(
 			"type": "error",
 			"message":
 			(
-				"%s, so which to click is not clear; pass index, counting from 0%s: %s"
+				"%s, so which to click is not clear. Pass index, counting from 0%s: %s"
 				% [_described(best, ranks[0], wanted, under), order, _candidates(targets, lines)]
 			),
 		}
@@ -250,7 +250,7 @@ static func control_saying(
 			(
 				(
 					'no %s on screen%s says exactly "%s", so nothing was clicked: %s %s says it as '
-					+ 'part of "%s", while %s; pass index %d to press %s anyway'
+					+ 'part of "%s", while %s. Pass index %d to press %s anyway'
 				)
 				% [
 					"button" if exact_elsewhere.size() > exact_out_of_reach.size() else "control",
@@ -272,7 +272,7 @@ static func control_saying(
 			(
 				(
 					'no control on screen%s says "%s" as a word of its own, so nothing was '
-					+ 'clicked: %s %s has it only inside a longer word, "%s"; pass index %d to '
+					+ 'clicked: %s %s has it only inside a longer word, "%s". Pass index %d to '
 					+ "press %s anyway"
 				)
 				% [
@@ -301,7 +301,7 @@ static func control_saying(
 				(
 					'no control on screen%s that takes a click says "%s", so nothing was clicked: '
 					+ '%s %s says it as part of "%s" and lets the pointer through to what is under '
-					+ "it; pass index %d to click there anyway"
+					+ "it. Pass index %d to click there anyway"
 				)
 				% [
 					under,
@@ -325,7 +325,7 @@ static func control_saying(
 				% [targets.size() - 1, _passed_over(ranks[0], ranks.slice(1), false)]
 			)
 		)
-		found["picked"] = "%s; %s" % [_described(1, ranks[0], wanted, under), others]
+		found["picked"] = "%s, and %s" % [_described(1, ranks[0], wanted, under), others]
 	if covered > 0:
 		found["covered"] = covered
 	var answer: Dictionary = { "path": str(targets[index].get_path()), "found": found }
@@ -477,7 +477,7 @@ static func _offered_note(from: Node, drawn: Array[Node], areas: Array[Rect2]) -
 			and _cover_of(button, drawn, areas, aim) == null
 		)
 	var words: String = GdhWords.pressable_words(from, open, LISTED_CANDIDATES)
-	return "" if words.is_empty() else "; the buttons on screen say %s" % words
+	return "" if words.is_empty() else ". The buttons on screen say %s" % words
 
 
 ## What to add to a refusal that found nothing on screen, when words matched hidden controls: how
@@ -490,9 +490,9 @@ static func _hidden_note(hidden: Array[Node]) -> String:
 	for node: Node in hidden.slice(0, NAMED_HIDDEN):
 		named.append("%s%s" % [node.get_path(), why_hidden(node)])
 	if hidden.size() == 1:
-		return "; 1 hidden control says it, %s" % named[0]
+		return ". 1 hidden control says it, %s" % named[0]
 	return (
-		"; %d hidden controls say it, among them %s and %s"
+		". %d hidden controls say it, among them %s and %s"
 		% [hidden.size(), ", ".join(named.slice(0, -1)), named[-1]]
 	)
 
@@ -503,7 +503,7 @@ static func _outside_note(outside: int, root: Node) -> String:
 	if outside == 0:
 		return ""
 	var note: String = (
-		"; %d control%s it outside what the screen shows"
+		". %d control%s it outside what the screen shows"
 		% [outside, " says" if outside == 1 else "s say"]
 	)
 	var window: Window = root as Window
@@ -537,9 +537,9 @@ static func _covered_note(covered: int, cover: Node) -> String:
 	if covered == 0:
 		return ""
 	if covered == 1:
-		return "; 1 control says it under %s, which is drawn over it" % cover.get_path()
+		return ". 1 control says it under %s, which is drawn over it" % cover.get_path()
 	return (
-		"; %d controls say it under what is drawn over them, such as %s"
+		". %d controls say it under what is drawn over them, such as %s"
 		% [covered, cover.get_path()]
 	)
 
@@ -586,7 +586,7 @@ static func why_hidden(node: Node) -> String:
 	var instead: Node = null if control == null else drawn_at(control)
 	if instead != null:
 		return (
-			" (%s; a click where it would be reaches %s)"
+			" (%s, and a click where it would be reaches %s)"
 			% [", and ".join(named), instead.get_path()]
 		)
 	var outermost: Node = hiding.back()
@@ -636,20 +636,20 @@ static func _drawn_above(control: Control, other: Control) -> bool:
 	return layer > other_layer or (layer == other_layer and control.is_greater_than(other))
 
 
-## `"; A, B and C are shown beside N"` for [param beside] and the hidden node [param hidden], naming
-## three at most and counting the rest.
+## `", and A, B and C are shown beside N"` for [param beside] and the hidden node [param hidden].
+## It names three at most and counts the rest.
 static func _shown_beside(beside: Array[String], hidden: Node) -> String:
 	if beside.is_empty():
 		return ""
 	var at: String = str(hidden.get_path())
 	if beside.size() == 1:
-		return "; %s is shown beside %s" % [beside[0], at]
+		return ", and %s is shown beside %s" % [beside[0], at]
 	var listed: Array[String] = beside.slice(0, 3)
 	var rest: int = beside.size() - listed.size()
 	if rest > 0:
-		return "; %s and %d more are shown beside %s" % [", ".join(listed), rest, at]
+		return ", and %s and %d more are shown beside %s" % [", ".join(listed), rest, at]
 	var last: String = listed.pop_back()
-	return "; %s and %s are shown beside %s" % [", ".join(listed), last, at]
+	return ", and %s and %s are shown beside %s" % [", ".join(listed), last, at]
 
 
 ## The nodes whose visible is false and keeps [param node] from being drawn, nearest first. Walked
@@ -981,7 +981,7 @@ static func _open_menu_note(root: Node, wanted: String) -> String:
 					)
 					return (
 						(
-							'; the open menu %s has an item saying it, "%s", which a click cannot '
+							'. The open menu %s has an item saying it, "%s", which a click cannot '
 							+ 'reach: choose it with runtime_input choose, path %s and text "%s"'
 						)
 						% [menu.get_path(), text, named.get_path(), text]

@@ -144,7 +144,7 @@ func _cut_asked(params: Dictionary, in_window: bool) -> Dictionary:
 		GdhRead.as_int(params.get("width", 0)) > 0 or GdhRead.as_int(params.get("height", 0)) > 0
 	)
 	if region_given != null and not node_path.is_empty():
-		return _refused("region and nodePath each name the part to capture; give one of them")
+		return _refused("region and nodePath each name the part to capture. Give one of them")
 	if (region_given != null or not node_path.is_empty()) and not in_window:
 		return _refused(
 			(
@@ -160,7 +160,7 @@ func _cut_asked(params: Dictionary, in_window: bool) -> Dictionary:
 		return _refused(
 			(
 				"zoom enlarges by a whole factor and keeps every pixel square, and width and "
-				+ "height scale to a size; give one or the other"
+				+ "height scale to a size. Give one or the other"
 			)
 		)
 	var asked: Dictionary = { "zoom": zoom }
@@ -239,7 +239,7 @@ static func drawn_rect_of(node: Node) -> Variant:
 			item.get_viewport(), item.get_global_transform_with_canvas() * own
 		)
 	var no_extent: String = (
-		"%s is a %s, which has a position on screen and no extent; give region around the point "
+		"%s is a %s, which has a position on screen and no extent. Give region around the point "
 		+ "runtime_inspect rect answers for it"
 	)
 	return no_extent % [node.get_path(), node.get_class()]

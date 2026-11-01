@@ -175,6 +175,6 @@ export class GodotLocator {
       }
       crashed = went.said;
     }
-    return `crashed on each of ${String(VERSION_STARTS)} starts with --version; the last time ${crashed}`;
+    return `crashed on each of ${String(VERSION_STARTS)} starts with --version, the last time ${crashed}`;
   }
 }

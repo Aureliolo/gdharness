@@ -159,7 +159,7 @@ static func started(given: PackedStringArray) -> GdhRunner:
 				(
 					(
 						"gdharness test: gdUnit4 %s registers no session hook %s, so the report it "
-						+ "writes is not turned off; report it to gdharness with the version."
+						+ "writes is not turned off. Report it to gdharness with the version."
 					)
 					% [GdUnit4Version.current(), path]
 				)
@@ -724,7 +724,7 @@ class GdhSessionCheck:
 						"gdharness test: gdUnit4 %s handed its session hooks the session before "
 						+ "announcing it, so the runner's indexed session is not the one they "
 						+ "read. This gdUnit4 starts a session differently from the ones gdharness "
-						+ "knows; report it to gdharness with the version."
+						+ "knows. Report it to gdharness with the version."
 					)
 					% GdUnit4Version.current()
 				)
@@ -742,8 +742,8 @@ class GdhSessionCheck:
 					(
 						"gdharness test: gdUnit4 %s ran %d cases without looking one up in the "
 						+ "runner's indexed session, so its console reads another session. This "
-						+ "gdUnit4 starts a session differently from the ones gdharness knows; "
-						+ "report it to gdharness with the version."
+						+ "gdUnit4 starts a session differently from the ones gdharness knows. "
+						+ "Report it to gdharness with the version."
 					)
 					% [GdUnit4Version.current(), _runner.cases_ended]
 				)

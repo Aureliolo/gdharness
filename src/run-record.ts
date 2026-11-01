@@ -497,7 +497,7 @@ export async function runningAs(pid: number): Promise<RunningAs | null> {
     const unread = 'unread' in read ? read.unread : 'Windows gave an empty command line';
     return 'image' in image
       ? { kind: 'image', text: image.image, unread }
-      : { kind: 'none', text: '', unread: `${unread}; tasklist ${image.why}` };
+      : { kind: 'none', text: '', unread: `${unread}, and tasklist ${image.why}` };
   }
   try {
     const began = await processStartOf(pid, null);

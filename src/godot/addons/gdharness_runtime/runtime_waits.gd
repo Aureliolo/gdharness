@@ -866,7 +866,7 @@ func _wait_until_said(
 		answer["unseen_note"] = (
 			(
 				"Something under %s says it, but is hidden or drawn outside the viewport or a "
-				+ "ScrollContainer, where the player cannot read it; includeHidden true counts it "
+				+ "ScrollContainer, where the player cannot read it. includeHidden true counts it "
 				+ "there too"
 			)
 			% node_path

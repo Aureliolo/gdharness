@@ -689,7 +689,7 @@ func _announce(bind_address: String) -> void:
 	if made != OK and made != ERR_ALREADY_EXISTS:
 		push_warning(
 			(
-				"[gdharness] cannot create %s (%s); the server will not find this game"
+				"[gdharness] cannot create %s (%s), so the server will not find this game"
 				% [directory, made]
 			)
 		)
@@ -704,7 +704,7 @@ func _announce(bind_address: String) -> void:
 	if file == null:
 		push_warning(
 			(
-				"[gdharness] cannot write %s (%s); the server will not find this game"
+				"[gdharness] cannot write %s (%s), so the server will not find this game"
 				% [staged, FileAccess.get_open_error()]
 			)
 		)
@@ -712,14 +712,14 @@ func _announce(bind_address: String) -> void:
 	var written: bool = file.store_string(JSON.stringify(_identity(bind_address)))
 	file.close()
 	if not written:
-		push_warning("[gdharness] cannot write %s; the server will not find this game" % staged)
+		push_warning("[gdharness] cannot write %s, so the server will not find this game" % staged)
 		_unstage(staged)
 		return
 	var moved: Error = DirAccess.rename_absolute(staged, path)
 	if moved != OK:
 		push_warning(
 			(
-				"[gdharness] cannot move %s to %s (%s); the server will not find this game"
+				"[gdharness] cannot move %s to %s (%s), so the server will not find this game"
 				% [staged, path, moved]
 			)
 		)
@@ -896,7 +896,7 @@ func _cleanup() -> void:
 		if removed != OK:
 			push_warning(
 				(
-					"[gdharness] cannot remove %s; the server will find a game that is gone"
+					"[gdharness] cannot remove %s, so the server will find a game that is gone"
 					% _announcement
 				)
 			)

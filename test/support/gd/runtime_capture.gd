@@ -93,11 +93,11 @@ func _check_what_is_asked(capture: CaptureCommands, output_path: String) -> void
 	var cases: Array[Array] = [
 		[
 			{ "region": { "x": 0, "y": 0, "width": 4, "height": 4 }, "nodePath": "/root" },
-			"give one of them",
+			"to capture. Give one of them",
 		],
 		[{ "zoom": 0 }, "from 1 to 16, and 0"],
 		[{ "zoom": 17 }, "from 1 to 16, and 17"],
-		[{ "zoom": 2, "width": 100 }, "give one or the other"],
+		[{ "zoom": 2, "width": 100 }, "to a size. Give one or the other"],
 		[{ "region": { "x": 0, "y": 0, "width": 0, "height": 4 } }, "with an area"],
 		[{ "region": "the corner" }, "with an area"],
 		# A path naming nothing, which a headless game told only that it has no window.

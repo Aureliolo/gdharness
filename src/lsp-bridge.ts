@@ -269,14 +269,14 @@ export async function runLspBridge(options: LspOptions): Promise<number> {
     if (Date.now() >= deadline) {
       break;
     }
-    sayOnce(`no language server of ${options.projectPath} yet; waiting for its editor`);
+    sayOnce(`no language server of ${options.projectPath} yet, waiting for its editor`);
     await new Promise((settle) => setTimeout(settle, LOOK_AGAIN_MS));
   }
   note(
     [
       `no language server of ${options.projectPath} answered in ${options.waitSeconds} s.`,
       ...last.map((line) => `  ${line}`),
-      '  Open the project in the Godot editor, which serves it; this does not start one, since a second',
+      '  Open the project in the Godot editor, which serves it. This does not start one, since a second',
       '  editor would take the port from yours. An editor serving another project holds the port when',
       '  two are open: start this one through gdharness, which moves it to a free port.',
     ].join('\n'),

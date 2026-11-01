@@ -1037,8 +1037,8 @@ func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 	elif (
 		why
 		!= (
-			'the one button on screen saying "Onward" as part of more;'
-			+ " the other one on screen is not an enabled button"
+			'the one button on screen saying "Onward" as part of more,'
+			+ " and the other one on screen is not an enabled button"
 		)
 	):
 		_fail("and says why, of the one it passed over: %s" % why)

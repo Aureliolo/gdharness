@@ -353,7 +353,7 @@ static func _name_refusal(animation_name: String) -> String:
 	if animation_name.count("/") > 1:
 		return (
 			(
-				"%s names a library and an animation in it with one slash, as moves/walk; a "
+				"%s names a library and an animation in it with one slash, as moves/walk. A "
 				+ "library holds no libraries."
 			)
 			% animation_name
@@ -391,7 +391,7 @@ static func _past_sentence(
 		return ""
 	return (
 		(
-			"%s is %s s long, and %s past its end, where %s: %s. %s; scene_animation set "
+			"%s is %s s long, and %s past its end, where %s: %s. %s, and scene_animation set "
 			+ "with a longer length plays %s."
 		)
 		% [

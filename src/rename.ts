@@ -1129,11 +1129,11 @@ export function applyRewrites(rewrites: readonly Rewrite[]): void {
     const now = readFileSync(rewrite.absolute, 'utf8');
     if (now !== rewrite.before) {
       throw new Error(
-        `${rewrite.path} changed on disk while the rename was being worked out; nothing was written`,
+        `${rewrite.path} changed on disk while the rename was being worked out, so nothing was written`,
       );
     }
     if (rewrite.writeTo !== rewrite.absolute && existsSync(rewrite.writeTo)) {
-      throw new Error(`${rewrite.writeTo} already exists; nothing was written`);
+      throw new Error(`${rewrite.writeTo} already exists, so nothing was written`);
     }
   }
   const done: { rewrite: Rewrite; movedUid: boolean }[] = [];

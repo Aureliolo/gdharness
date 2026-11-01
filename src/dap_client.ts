@@ -606,7 +606,7 @@ export class GodotDAPClient {
         this.halt = {
           reason: 'attached',
           description:
-            'held when this session attached; the stop that held it was reported to an earlier one',
+            'held when this session attached, and the stop that held it was reported to an earlier one',
           text: '',
         };
         this.holdKnown = true;
@@ -954,7 +954,7 @@ export class GodotDAPClient {
       throw new ReadRefusal(
         frames.length === 0
           ? 'The adapter gave no stack, so there is no frame to read variables from'
-          : `The stack the adapter gives now has no frame ${String(frameId)}; its frames are ${frames.map((each) => String(each['id'])).join(', ')}. Read the stack again for the frames the game is at now`,
+          : `The stack the adapter gives now has no frame ${String(frameId)}. Its frames are ${frames.map((each) => String(each['id'])).join(', ')}. Read the stack again for the frames the game is at now`,
       );
     }
 

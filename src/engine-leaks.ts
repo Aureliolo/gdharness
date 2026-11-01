@@ -56,7 +56,7 @@ const IN_USE_NAMED = 8;
 const REFCOUNTED_HELD =
   'A RefCounted alive at exit is held by a cycle of references (two holding each other, or one ' +
   'holding a lambda that captures it) or by an Object never freed, rather than by a node left out ' +
-  'of the tree; a WeakRef on one side of the cycle, or clearing the reference once done, frees it.';
+  'of the tree. A WeakRef on one side of the cycle, or clearing the reference once done, frees it.';
 
 /**
  * What an engine started with `--verbose` names among [param lines] as it exits: the objects still

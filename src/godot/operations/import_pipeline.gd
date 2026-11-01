@@ -497,7 +497,7 @@ func _never_imported(resource_path: String) -> String:
 			+ extension
 			+ " files through Blender, which it finds through the editor setting "
 			+ BLENDER_SETTING
-			+ ". An editor with it set imports them on its scan; an import pass with it unset "
+			+ ". An editor with it set imports them on its scan. An import pass with it unset "
 			+ "stops at the first one and imports nothing, and setting "
 			+ BLENDER_ENABLED
 			+ " to false has the engine leave them unimported"
@@ -508,7 +508,7 @@ func _never_imported(resource_path: String) -> String:
 	return (
 		"no importer built into the engine takes ."
 		+ extension
-		+ " files; one added by a plugin or an extension is known only to the editor, whose scan "
+		+ " files. One added by a plugin or an extension is known only to the editor, whose scan "
 		+ "imports them"
 	)
 

@@ -45,7 +45,7 @@ export function sameCodeNote(addonVersion: string, serverVersion: string): strin
   // restart: it is this server that is behind.
   return isNewer(addonVersion, serverVersion)
     ? `${same}. This server is the older of the two, which a reconnect in your harness settles once the project pins ${addonVersion}.`
-    : `${same}; addonVersion is the version the editor loaded when it started.`;
+    : `${same}. addonVersion is the version the editor loaded when it started.`;
 }
 
 /**
@@ -84,7 +84,7 @@ export function addonMismatch(
   const editor = reported === '' ? 'an addon with no version marker' : `the ${reported} addon`;
   const both = `The editor is running ${editor} while this server ships ${serverVersion}, ${asked}`;
   if (reported !== '' && isNewer(reported, serverVersion)) {
-    return `${both} this server is the older half; reconnect it in your harness so it spawns ${reported}.`;
+    return `${both} this server is the older half. Reconnect it in your harness so it spawns ${reported}.`;
   }
   return `${both} ${restart}`;
 }

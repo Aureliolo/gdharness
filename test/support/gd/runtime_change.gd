@@ -657,7 +657,7 @@ func _check_a_key_holding_a_colon() -> void:
 		"get_property", { "path": "/root/Holder", "property": "stock:base:dew" }
 	)
 	var listed: String = (
-		'has no key base; it is keyed by "base:dew", "base:salt", "say \\"hi\\"", "pick(1)"'
+		'has no key base. It is keyed by "base:dew", "base:salt", "say \\"hi\\"", "pick(1)"'
 	)
 	if split.get("type") != "error" or not str(split.get("message", "")).contains(listed):
 		_fail("the refusal writes each key as the step reaching it: %s" % JSON.stringify(split))

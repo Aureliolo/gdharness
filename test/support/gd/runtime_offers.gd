@@ -265,13 +265,13 @@ func _check_methods_offered(scripted: GdhInputCommands) -> void:
 		"I has no method inject_kye", scripted, "inject_kye"
 	)
 	if (
-		not near.begins_with("I has no method inject_kye; the nearest it has")
+		not near.begins_with("I has no method inject_kye. The nearest it has")
 		or not near.contains("inject_key")
 	):
 		_fail("a misspelt method names the nearest the object has: %s" % near)
 	var far: String = GdhPaths.with_methods_offered("I has no method nobody", scripted, "nobody")
 	if (
-		not far.begins_with("I has no method nobody; its script declares ")
+		not far.begins_with("I has no method nobody. Its script declares ")
 		or not far.contains("inject_mouse_drag, ")
 		or far.contains("get_class")
 	):
@@ -279,7 +279,7 @@ func _check_methods_offered(scripted: GdhInputCommands) -> void:
 	var engine_near: String = GdhPaths.with_methods_offered(
 		"N has no method get_parnt", plain, "get_parnt"
 	)
-	if not engine_near.contains("; the nearest it has") or not engine_near.contains("get_parent"):
+	if not engine_near.contains(". The nearest it has") or not engine_near.contains("get_parent"):
 		_fail("an engine method near the name is offered too: %s" % engine_near)
 	var bare: String = GdhPaths.with_methods_offered("N has no method nobody", plain, "nobody")
 	if bare != "N has no method nobody":
@@ -294,7 +294,7 @@ func _check_methods_offered(scripted: GdhInputCommands) -> void:
 	var holder: Node = Node.new()
 	holder.set_script(accessed)
 	var setters: String = GdhPaths.with_methods_offered("S has no method nobody", holder, "nobody")
-	if setters != "S has no method nobody; its script declares own":
+	if setters != "S has no method nobody. Its script declares own":
 		_fail("a setter the engine names is not offered: %s" % setters)
 	holder.free()
 	plain.free()

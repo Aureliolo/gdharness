@@ -612,10 +612,10 @@ export function inspectProject(projectPath: string): ProjectReport {
     const version = existsSync(marker) ? readFileSync(marker, 'utf8').trim() : null;
     const current = version === SERVER_VERSION;
     if (!installed) {
-      problems.push(`addons/${name} is not installed; run gdharness setup`);
+      problems.push(`addons/${name} is not installed. Run gdharness setup`);
     } else if (!current) {
       problems.push(
-        `addons/${name} is ${version ?? 'of an unknown version'}, this gdharness is ${SERVER_VERSION}; run gdharness setup`,
+        `addons/${name} is ${version ?? 'of an unknown version'}, this gdharness is ${SERVER_VERSION}. Run gdharness setup`,
       );
     }
     return { name, installed, version, current };
@@ -625,7 +625,7 @@ export function inspectProject(projectPath: string): ProjectReport {
   const pluginsEnabled = enabledPlugins(settings);
   for (const name of EDITOR_PLUGINS) {
     if (!pluginsEnabled.includes(name)) {
-      problems.push(`the ${name} plugin is not enabled in project.godot; run gdharness setup`);
+      problems.push(`the ${name} plugin is not enabled in project.godot. Run gdharness setup`);
     }
   }
   const autoload = settings['autoload'];
@@ -634,14 +634,14 @@ export function inspectProject(projectPath: string): ProjectReport {
   const runtimeAutoloadPath = typeof registered === 'string' ? registered.replace(/^\*/, '') : null;
   if (runtimeAutoloadPath === `res://${RUNTIME_SCRIPT}`) {
     problems.push(
-      `the ${RUNTIME_AUTOLOAD.name} autoload names the addon's own script, which a clone or an export without addons/ boots as a missing script; run gdharness setup to point it at res://${RUNTIME_AUTOLOAD.path}, the loader it writes`,
+      `the ${RUNTIME_AUTOLOAD.name} autoload names the addon's own script, which a clone or an export without addons/ boots as a missing script. Run gdharness setup to point it at res://${RUNTIME_AUTOLOAD.path}, the loader it writes`,
     );
   } else if (
     runtimeAutoloadPath === `res://${RUNTIME_AUTOLOAD.path}` &&
     loaderState(projectPath) === 'differs'
   ) {
     problems.push(
-      `res://${RUNTIME_AUTOLOAD.path} is not the loader this gdharness ships; run gdharness setup to write it again`,
+      `res://${RUNTIME_AUTOLOAD.path} is not the loader this gdharness ships. Run gdharness setup to write it again`,
     );
   }
 
@@ -674,7 +674,7 @@ export function inspectProject(projectPath: string): ProjectReport {
     if (!existsSync(join(projectPath, path))) {
       if (!addonMissing(path)) {
         problems.push(
-          `the ${name} autoload names res://${path}, which is not in this project, so it boots with a missing script; restore that file, or point the autoload at one that is here`,
+          `the ${name} autoload names res://${path}, which is not in this project, so it boots with a missing script. Restore that file, or point the autoload at one that is here`,
         );
       }
       continue;
@@ -683,7 +683,7 @@ export function inspectProject(projectPath: string): ProjectReport {
       ignoredAutoloads.push({ name, path });
     } else if (tracked !== null && !tracked.has(path)) {
       problems.push(
-        `the ${name} autoload names res://${path}, which git does not carry, so a clone boots with a missing script; commit that file, or point the autoload at one the project tracks`,
+        `the ${name} autoload names res://${path}, which git does not carry, so a clone boots with a missing script. Commit that file, or point the autoload at one the project tracks`,
       );
     }
   }
@@ -692,11 +692,11 @@ export function inspectProject(projectPath: string): ProjectReport {
   const staleClasses = cached === null ? [] : staleAgainst(cached, projectPath);
   if (cached === null) {
     problems.push(
-      'no .godot/global_script_class_cache.cfg: the engine knows no class_name; run project_import refresh_classes or open the editor',
+      'no .godot/global_script_class_cache.cfg: the engine knows no class_name. Run project_import refresh_classes or open the editor',
     );
   } else if (staleClasses.length > 0) {
     problems.push(
-      `the class cache does not list ${staleClasses.join(', ')}; run project_import refresh_classes or gdharness classes`,
+      `the class cache does not list ${staleClasses.join(', ')}. Run project_import refresh_classes or gdharness classes`,
     );
   }
 

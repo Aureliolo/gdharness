@@ -232,7 +232,7 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 		var refusal: String = "Nothing was changed: " + "; ".join(problems)
 		if _redeclares(modifications, declared):
 			refusal += (
-				". modify only adds members; to change one the script declares already,"
+				". modify only adds members. To change one the script declares already,"
 				+ " edit its lines in the file"
 			)
 		return _log.failure(refusal)
@@ -366,7 +366,7 @@ static func _header_refusal(named: String, base: String) -> String:
 		close = GdhRead.nearest(base, ClassDB.get_class_list())
 	if close.is_empty():
 		return said + "."
-	return said + "; the nearest %s %s." % ["is" if close.size() == 1 else "are", ", ".join(close)]
+	return said + ". The nearest %s %s." % ["is" if close.size() == 1 else "are", ", ".join(close)]
 
 
 ## Why [param template] cannot be written on [param base], or "". Each template's code calls
@@ -886,7 +886,7 @@ signal state_changed(old_state: String, new_state: String)
 
 var current_state: String = ""
 ## State objects by name. A state may define enter(), exit(), process(delta) and
-## physics_process(delta); whichever it has are called.
+## physics_process(delta). Whichever it has are called.
 var states: Dictionary = {}
 
 

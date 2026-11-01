@@ -733,7 +733,7 @@ export const VALUE_NOT_RECOVERED_NOTE =
  * printed "plain" on both sides, with the tags gone into terminal bold.
  */
 export const RENDERED_AWAY_NOTE =
-  '[gdharness: the two sides print alike, so what tells them apart is something gdUnit4 does not print. The usual cause is BBCode in the expected string, which gdUnit4 renders as formatting instead of showing; the value after "but was" is the one the assertion found.]';
+  '[gdharness: the two sides print alike, so what tells them apart is something gdUnit4 does not print. The usual cause is BBCode in the expected string, which gdUnit4 renders as formatting instead of showing. The value after "but was" is the one the assertion found.]';
 
 /**
  * [param failed] with each failing string equality's actual value put back, read off [param
@@ -1138,5 +1138,5 @@ export function testProgressMessage(printed: readonly string[], elapsedMs: numbe
     finished.length === 0
       ? 'No suite has finished'
       : `${finished.length === 1 ? 'One suite has' : `${finished.length} suites have`} finished${failing === 0 ? '' : `, ${failing} with failures`}`;
-  return `${done}${running === null ? '' : `; running ${running}`}; ${took} in.`;
+  return `${done}${running === null ? '' : `, running ${running}`}, ${took} in.`;
 }

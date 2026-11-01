@@ -724,7 +724,7 @@ func _check_a_word_inside_a_sentence() -> void:
 		not _says(refused, 'no control on screen says exactly "Out"')
 		or not said.contains("/root/Line")
 		or not said.contains("/root/Tab, hidden")
-		or not said.contains("pass index 0 to press /root/Line anyway")
+		or not said.contains(". Pass index 0 to press /root/Line anyway")
 		or _presses("Line") != 0
 	):
 		_fail(
@@ -831,7 +831,7 @@ func _check_a_word_said_inside_other_words() -> void:
 	var buried: Dictionary = await input.click({ "says": "Out" })
 	if (
 		not _says(buried, 'says "Out" as a word of its own')
-		or not _says(buried, '"Scout, 90"; pass index 0 to press /root/Look anyway')
+		or not _says(buried, '"Scout, 90". Pass index 0 to press /root/Look anyway')
 	):
 		_fail("words found only inside a longer word are refused: %s" % JSON.stringify(buried))
 	var anyway: Dictionary = await input.click({ "says": "Out", "index": 0 })

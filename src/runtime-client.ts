@@ -732,7 +732,7 @@ function theOneProject(endpoints: readonly RuntimeEndpoint[]): string | undefine
 function severalFrom(project: string, games: readonly RuntimeEndpoint[]): string {
   return (
     `${games.length} games are running from ${project}: ${games.map(describeWithin).join('; ')}. ` +
-    'Pass pid to choose one; projectPath cannot, because every one of them has this one. ' +
+    'Pass pid to choose one. projectPath cannot, because every one of them has this one. ' +
     'editor_status lists them under runtimes.'
   );
 }

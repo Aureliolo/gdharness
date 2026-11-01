@@ -469,7 +469,7 @@ function compiledQuery(query: string, caseSensitive: boolean): RegExp {
   } catch (error) {
     const why = errorMessage(error).split(': ').at(-1) ?? '';
     throw new Error(
-      `'${query}' is not a regular expression: ${why.charAt(0).toLowerCase()}${why.slice(1)}. With regex true, a character such as ( ) [ ] { } . * + ? | ^ $ or \\ stands for itself only after a backslash, as in \\(; or leave regex out to search for the text as written.`,
+      `'${query}' is not a regular expression: ${why.charAt(0).toLowerCase()}${why.slice(1)}. With regex true, a character such as ( ) [ ] { } . * + ? | ^ $ or \\ stands for itself only after a backslash, as in \\(. Leave regex out to search for the text as written.`,
       { cause: error },
     );
   }
@@ -571,7 +571,7 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
   const notes = [
     around === null
       ? undefined
-      : `${around.folder} is searched because path names it; a search of the whole project steps over it, since ${around.why}.`,
+      : `${around.folder} is searched because path names it. A search of the whole project steps over it, since ${around.why}.`,
     extensions === null || result.summary.files_searched > 0
       ? undefined
       : met.size === 0

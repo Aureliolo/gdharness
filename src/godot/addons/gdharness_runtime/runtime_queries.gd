@@ -117,7 +117,7 @@ func find_nodes(params: Dictionary) -> Dictionary:
 	var names: Array[String] = GdhSays.split_at_bars(wanted["name"])
 	if not wanted["name"].is_empty() and names.is_empty():
 		var bars_only: String = (
-			'name "%s" is only bars, so it names no node; write the names between them'
+			'name "%s" is only bars, so it names no node. Write the names between them'
 		)
 		return { "type": "error", "message": bars_only % wanted["name"] }
 
@@ -244,7 +244,7 @@ func find_nodes(params: Dictionary) -> Dictionary:
 			. append(
 				(
 					(
-						"name is matched as a glob against the whole name; %d %snode %s %s, which "
+						"name is matched as a glob against the whole name. %d %snode %s %s, which "
 						+ '"%s"%s would find'
 					)
 					% [
@@ -265,7 +265,7 @@ func find_nodes(params: Dictionary) -> Dictionary:
 			. append(
 				(
 					(
-						"says with a wildcard is matched as a glob against a node\'s whole text; "
+						"says with a wildcard is matched as a glob against a node\'s whole text. "
 						+ '"%s"%s would find %d %snode%s'
 					)
 					% [
@@ -284,7 +284,7 @@ func find_nodes(params: Dictionary) -> Dictionary:
 		answer["hidden"] = hidden
 		notes.append(
 			(
-				"%d matching node%s hidden and left out; includeHidden true answers with them too"
+				"%d matching node%s hidden and left out. includeHidden true answers with them too"
 				% [hidden, "" if hidden == 1 else "s"]
 			)
 		)
@@ -296,14 +296,14 @@ func find_nodes(params: Dictionary) -> Dictionary:
 				(
 					(
 						"%d matching node%s drawn outside the viewport or scrolled out of a "
-						+ "ScrollContainer and left out; includeHidden true answers with them too"
+						+ "ScrollContainer and left out. includeHidden true answers with them too"
 					)
 					% [out_of_view, "" if out_of_view == 1 else "s"]
 				)
 			)
 		)
 	if not notes.is_empty():
-		answer["note"] = " ".join(notes)
+		answer["note"] = ". ".join(notes) + "."
 	return answer
 
 
@@ -519,7 +519,7 @@ func read_text(params: Dictionary) -> Dictionary:
 				(
 					(
 						"%d line%s drawn outside the viewport or scrolled out of a "
-						+ "ScrollContainer, where the player cannot read them, left out; "
+						+ "ScrollContainer, where the player cannot read them, left out. "
 						+ "includeHidden true answers with them too"
 					)
 					% [tally["out_of_view"], "" if tally["out_of_view"] == 1 else "s"]
@@ -545,7 +545,7 @@ func read_text(params: Dictionary) -> Dictionary:
 			)
 		)
 	if not notes.is_empty():
-		answer["note"] = " ".join(notes)
+		answer["note"] = ". ".join(notes) + "."
 	return answer
 
 

@@ -494,7 +494,7 @@ func _component_slot(target: Object, path: String) -> Dictionary:
 			return {
 				"refused":
 				(
-					"%s.%s is %s, so it has no %s; it has %s."
+					"%s.%s is %s, so it has no %s. It has %s."
 					% [owner, walked, sort, step, ", ".join(has)]
 				),
 			}
@@ -746,7 +746,7 @@ func colour_from(raw: Variant, named: String) -> Array:
 		(
 			(
 				'%s is {"r": .., "g": .., "b": .., "a": ..} from 0 to 1, a optional, or an html '
-				+ 'code such as "#ff8000" or "#ff800080"; %s is neither.'
+				+ 'code such as "#ff8000" or "#ff800080". %s is neither.'
 			)
 			% [named, JSON.stringify(raw)]
 		),

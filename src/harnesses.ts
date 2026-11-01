@@ -1123,7 +1123,7 @@ export function harnessNote(
   const alsoByHand =
     repinned.byHand === 0
       ? ''
-      : `\n     ${repinned.byHand === 1 ? 'One harness above was' : `${repinned.byHand} harnesses above were`} handed a command to run instead; run it too.`;
+      : `\n     ${repinned.byHand === 1 ? 'One harness above was' : `${repinned.byHand} harnesses above were`} handed a command to run instead. Run it too.`;
   // What is running is read from the server's own announcement for the project, when a live one has
   // made one. The config's previous line is what the harness would spawn next, not what it spawned:
   // after two upgrades without a reconnect it named a version that had never run (#622).

@@ -920,7 +920,7 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 		answer["busNote"] = (
 			(
 				"%s names the bus %s, which the project's bus layout does not have, so it plays on "
-				+ "%s; the buses are %s."
+				+ "%s. The buses are %s."
 			)
 			% [
 				str(node.name) if at == "." else at,
@@ -956,7 +956,7 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 	# An empty answer read as a node with nothing on it, rather than one with nothing changed.
 	if props.is_empty() and not include_defaults:
 		answer["note"] = (
-			"Every property of this node is at its default, so none is listed; "
+			"Every property of this node is at its default, so none is listed. "
 			+ "includeDefaults: true lists them all."
 		)
 	return answer

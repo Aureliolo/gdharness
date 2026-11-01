@@ -165,7 +165,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
   if (from === null) {
     return {
       ok: false,
-      reason: 'The project directory itself cannot be moved; give a file or a directory in it.',
+      reason: 'The project directory itself cannot be moved. Give a file or a directory in it.',
     };
   }
   if (to === null) {
@@ -175,7 +175,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
     return { ok: false, reason: `There is nothing at ${from} to move.` };
   }
   if (from === to) {
-    return { ok: false, reason: `${from} is already there; nothing to move.` };
+    return { ok: false, reason: `${from} is already there, so there is nothing to move.` };
   }
   const isDirectory = statSync(absoluteFrom).isDirectory();
   if (from === 'res://project.godot') {
@@ -340,21 +340,21 @@ export function applyFileMove(outcome: Extract<MoveOutcome, { ok: true }>): void
   for (const rewrite of outcome.inPlace) {
     if (readFileSync(rewrite.absolute, 'utf8') !== rewrite.before) {
       throw new Error(
-        `${rewrite.path} changed on disk while the move was being worked out; nothing was written`,
+        `${rewrite.path} changed on disk while the move was being worked out, so nothing was written`,
       );
     }
   }
   for (const file of outcome.moved) {
     if (!existsSync(file.absoluteFrom)) {
-      throw new Error(`${file.from} is gone from disk; nothing was written`);
+      throw new Error(`${file.from} is gone from disk, so nothing was written`);
     }
     if (file.text !== null && readFileSync(file.absoluteFrom, 'utf8') !== file.text.before) {
       throw new Error(
-        `${file.from} changed on disk while the move was being worked out; nothing was written`,
+        `${file.from} changed on disk while the move was being worked out, so nothing was written`,
       );
     }
     if (existsSync(file.absoluteTo) && !sameFile(file.absoluteFrom, file.absoluteTo)) {
-      throw new Error(`${file.to} already exists; nothing was written`);
+      throw new Error(`${file.to} already exists, so nothing was written`);
     }
   }
   const undo: (() => void)[] = [];

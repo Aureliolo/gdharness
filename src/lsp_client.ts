@@ -90,7 +90,7 @@ const LANGUAGE_SERVER_RETRY_MS = 250;
 class LanguageServerNotListening extends Error {
   constructor(port: number, waitedMs: number) {
     super(
-      `The editor on the bridge says its language server is on port ${port}, and nothing accepted a connection there in ${String(waitedMs / 1000)}s. An editor starts it a few seconds after it reaches the bridge, so straight after editor_launch this is the editor still starting, and calling again answers. One that goes on refusing could not take the port; editor_output shows what the editor printed.`,
+      `The editor on the bridge says its language server is on port ${port}, and nothing accepted a connection there in ${String(waitedMs / 1000)}s. An editor starts it a few seconds after it reaches the bridge, so straight after editor_launch this is the editor still starting, and calling again answers. One that goes on refusing could not take the port. editor_output shows what the editor printed.`,
     );
   }
 }
@@ -111,7 +111,7 @@ class AnotherProjectsServer extends Refusal {
 
   constructor(port: number, serves: string, asked: string) {
     super(
-      `The language server on port ${port} belongs to the editor of ${serves}; no editor of ${asked} answers there.`,
+      `The language server on port ${port} belongs to the editor of ${serves}. No editor of ${asked} answers there.`,
     );
     this.serves = serves;
   }
@@ -1108,7 +1108,7 @@ export function narrowedCompletions(completions: readonly unknown[], typed: stri
     ...(matching.length > shown.length
       ? {
           omitted: matching.length - shown.length,
-          note: `${matching.length - shown.length} more are offered here than one answer carries; ask at a position after more of the name to narrow them.`,
+          note: `${matching.length - shown.length} more are offered here than one answer carries. Ask at a position after more of the name to narrow them.`,
         }
       : {}),
   };
@@ -1141,7 +1141,7 @@ function protocolPosition(args: JsonRecord): { line: number; character: number }
     character < 1
   ) {
     throw new ArgumentRefusal(
-      `line and character are counted from 1, as the editor shows them; got line ${String(line)} and character ${String(character)}.`,
+      `line and character are counted from 1, as the editor shows them. This call gave line ${String(line)} and character ${String(character)}.`,
     );
   }
   return { line: line - 1, character: character - 1 };

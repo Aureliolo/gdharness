@@ -492,7 +492,7 @@ export class GodotBridge extends EventEmitter {
       if (!held || !this.mayMove || !moveIfHeld) {
         throw error;
       }
-      this.log('warn', `Editor bridge port ${this.wantedPort} is held; taking another one.`);
+      this.log('warn', `Editor bridge port ${this.wantedPort} is held, so another one is taken.`);
       await this.listenOn(0);
     }
   }

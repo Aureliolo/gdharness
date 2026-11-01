@@ -856,7 +856,7 @@ function instanceRemedy(
     'scan timing was fixed: both in one project, the scan returning in 243ms and 275ms, and one in ' +
     'another where the same call also rebuilt the copy. ' +
     'The fault behind it is that a script the editor has loaded keeps the copy it built, and nothing ' +
-    `rebuilds that copy when the file changes; ${
+    `rebuilds that copy when the file changes. ${
       declaring.length === 1
         ? `editor_rescan with reloadScript set to ${declaring[0]} recompiles that copy`
         : `editor_rescan with reloadScript set to ${JSON.stringify(declaring)} recompiles those copies`
@@ -864,7 +864,7 @@ function instanceRemedy(
     'object and answers with what that added under methodsAdded and constantsAdded. Read that and the ' +
     'next diagnostics as two readings, because they are of two things: measured in one window on ' +
     'one editor, the analyser resolved a call to a newly added method while the built copy of that ' +
-    'same script did not have it. So the reload is worth doing and is not what clears these; the ' +
+    'same script did not have it. So the reload is worth doing and is not what clears these. The ' +
     'scan is. The other lever measured is that a held type is refreshed when something it ' +
     `depends on changes rather than when it changes itself${lever}. editor_launch restart has always ` +
     'worked and costs a window. project_import refresh_classes does not, and answers added: [] while ' +
@@ -927,7 +927,7 @@ export function notReloadedNote(broughtIn: readonly string[], notReloaded: reado
       `For ${tools.join(', ')}, ${tools.length === 1 ? 'a @tool script' : '@tool scripts'}, which ${tools.length === 1 ? 'runs' : 'run'} inside the editor and ${tools.length === 1 ? 'is' : 'are'} not reloaded from inside a call: editor_launch restart.`,
     );
   }
-  return `The scan brought in ${broughtIn.join(', ')}, and ${all.join(', ')} ${all.length === 1 ? 'names one of them and' : 'name them and'} could not be reloaded, so the editor still holds the copy it compiled before and reports what that copy has to the language server; dependentsNotReloaded says what each failed on. ${remedies.join(' ')}`;
+  return `The scan brought in ${broughtIn.join(', ')}, and ${all.join(', ')} ${all.length === 1 ? 'names one of them and' : 'name them and'} could not be reloaded, so the editor still holds the copy it compiled before and reports what that copy has to the language server. dependentsNotReloaded says what each failed on. ${remedies.join(' ')}`;
 }
 
 /** A reload the editor refused, and what the copy it holds had before and has now. */
@@ -1111,7 +1111,7 @@ export function uncachedForTheEngineNote(projectPath: string, types: readonly Un
     : `the engine that compiled these scripts resolves a class name from .godot/global_script_class_cache.cfg, which has not been written yet, as in a project no editor has opened, so the error is the missing cache rather than the script.`;
   return (
     `${named} ${one ? 'is' : 'are'} declared in this project${cacheExists ? ' and' : ', but'} ${state} ` +
-    'project_import refresh_classes writes the cache from the declarations on disk; editor_run start ' +
+    'project_import refresh_classes writes the cache from the declarations on disk. editor_run start ' +
     'writes it before a game, and an editor opening the project writes it when it scans.'
   );
 }

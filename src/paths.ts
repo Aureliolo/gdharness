@@ -202,7 +202,7 @@ export function resolveWithinProject(
     const example = tail.slice(besideIt ? -1 : -2).join('/') || 'scenes/main.tscn';
     return {
       ok: false,
-      reason: `Path '${trimmed}' is absolute and outside the project; give a path inside it, such as '${example}'.`,
+      reason: `Path '${trimmed}' is absolute and outside the project. Give a path inside it, such as '${example}'.`,
     };
   }
 
@@ -214,7 +214,7 @@ export function resolveWithinProject(
   if (kept.inner !== undefined) {
     return {
       ok: false,
-      reason: `Path '${trimmed}' names the resource ${kept.inner} kept inside ${kept.file}, not a file. resource_edit read reads one by that path; this argument takes a file.`,
+      reason: `Path '${trimmed}' names the resource ${kept.inner} kept inside ${kept.file}, not a file. resource_edit read reads one by that path, and this argument takes a file.`,
     };
   }
   if (withoutScheme.includes(':')) {

@@ -507,7 +507,7 @@ static func setter_ran(object: Object, property: String, refused: String) -> Str
 		(
 			(
 				"%s %s is not a tool script, so its setter ran in the headless engine writing this "
-				+ "as it runs in the game; an editor runs none and would have saved the value "
+				+ "as it runs in the game. An editor runs none and would have saved the value "
 				+ "given. "
 			)
 			% [refused, named]
@@ -539,7 +539,7 @@ static func move_script_set(answer: Dictionary, names: Array, owner: String) -> 
 		(
 			"%s's script is not a tool, so it ran in the headless engine that wrote the file, and "
 			+ "set %s as it did. The file does not hold %s, as a save from the editor, where the "
-			+ "script does not run, would not; the script sets %s again when it runs in the game."
+			+ "script does not run, would not. The script sets %s again when it runs in the game."
 		)
 		% [owner, ", ".join(listed), pronoun, pronoun]
 	)
@@ -547,6 +547,9 @@ static func move_script_set(answer: Dictionary, names: Array, owner: String) -> 
 
 ## Why [param name] on [param what] cannot be saved as the file held it.
 static func unasked(what: String, name: String, why: String = "") -> String:
+	var told: String = why.trim_suffix(".")
+	if not told.is_empty():
+		told = ". " + told.left(1).to_upper() + told.substr(1)
 	return (
 		(
 			(
@@ -554,7 +557,7 @@ static func unasked(what: String, name: String, why: String = "") -> String:
 				+ "ask for it: its script ran when a headless engine loaded or set it, as it does "
 				+ "in the game and not in an editor%s. "
 			)
-			% [what, name, "" if why.is_empty() else "; " + why.trim_suffix(".")]
+			% [what, name, told]
 		)
 		+ REMEDY
 	)

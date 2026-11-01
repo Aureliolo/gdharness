@@ -348,7 +348,7 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
     const longest = Math.max(0, ...left.map((worker) => worker.seconds));
     console.log('');
     console.log(
-      `Spread: ${plural(runs, 'run')} in ${plural((arms[0] ?? []).length, 'arm')} over ${plural(workers, 'worker')}, ${((Date.now() - startedAt) / 1000).toFixed(1)} s; the longest worker took ${longest.toFixed(1)} s.`,
+      `Spread: ${plural(runs, 'run')} in ${plural((arms[0] ?? []).length, 'arm')} over ${plural(workers, 'worker')}, ${((Date.now() - startedAt) / 1000).toFixed(1)} s. The longest worker took ${longest.toFixed(1)} s.`,
     );
     rmSync(runDirectory, { recursive: true, force: true });
     return 0;

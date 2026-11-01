@@ -764,7 +764,7 @@ static func unfit_name(node_name: String) -> String:
 	if valid != node_name:
 		return (
 			(
-				"%s is not a name a node can have; Godot would save it as %s. The characters "
+				"%s is not a name a node can have. Godot would save it as %s. The characters "
 				+ '. : @ / " %% cannot be in a node name.'
 			)
 			% [node_name, valid]
@@ -784,7 +784,7 @@ func unusable_name(parent: Node, child_name: String, moving: Node = null) -> Str
 		# The root by its name, since its path is ".", and ". already has a child" read as a typo.
 		var holder: String = "The root, %s," % parent.name if parent == root else path_of(parent)
 		return (
-			"%s already has a child named %s; %s is free there."
+			"%s already has a child named %s. %s is free there."
 			% [holder, child_name, _free_name(parent, child_name)]
 		)
 	return ""
@@ -1210,7 +1210,7 @@ func _stray_text(node: Node, name: String) -> String:
 			(
 				(
 					"the script of %s did not start when a headless engine instanced %s, so the "
-					+ "node would be saved without it; the engine's messages give its errors. "
+					+ "node would be saved without it. The engine's messages give its errors. "
 				)
 				% [at, path]
 			)

@@ -76,7 +76,7 @@ static func _pointer_noted(answer: Dictionary) -> Dictionary:
 			+ "get_global_mouse_position() and get_local_mouse_position() on what is drawn there, "
 			+ "read a meaningless position rather than where this put it. What reads the event "
 			+ "itself gets this position: the control under the pointer, its hover and tooltip, "
-			+ "and the game's input handlers. Said once a run; pointer_on_hidden_desktop marks "
+			+ "and the game's input handlers. Said once a run. pointer_on_hidden_desktop marks "
 			+ "every answer it applies to."
 		)
 	return answer
@@ -97,7 +97,7 @@ static func _hover_noted(answer: Dictionary, supplied: bool) -> Dictionary:
 			+ "engine would have: their mouse_entered and mouse_exited, and the hover a Button "
 			+ "presses on, and told the window the pointer is in it, so a motion reaches the "
 			+ "control under it. Viewport.gui_get_hovered_control() still answers null in this "
-			+ "window. Said once a run; hover_supplied marks every answer it applies to."
+			+ "window. Said once a run. hover_supplied marks every answer it applies to."
 		)
 	return answer
 

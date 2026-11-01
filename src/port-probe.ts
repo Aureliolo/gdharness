@@ -82,5 +82,5 @@ export function notListeningNote(
       : []),
     ...(servers.lsp.listening === false ? ['editor_launch restart binds the language server again'] : []),
   ].join(', and ');
-  return `The editor names ${named}, and nothing accepts connections there. Godot binds each once, as the editor starts, and reports a failure only in the editor's own log panel; ${needs}. ${cures}.${starting}`;
+  return `The editor names ${named}, and nothing accepts connections there. Godot binds each once, as the editor starts, and reports a failure only in the editor's own log panel. ${needs.charAt(0).toUpperCase()}${needs.slice(1)}. ${cures}.${starting}`;
 }

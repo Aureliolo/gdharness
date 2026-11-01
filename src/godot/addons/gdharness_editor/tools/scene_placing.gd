@@ -65,7 +65,7 @@ static func not_a_node_class(argument: String, given: String) -> String:
 	var close: PackedStringArray = GdhRead.nearest(given, classes)
 	if close.is_empty():
 		return said + "."
-	return "%s; the nearest %s %s." % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
+	return "%s. The nearest %s %s." % [said, "is" if close.size() == 1 else "are", ", ".join(close)]
 
 
 ## A new node of [param node_type], or an instance of [param packed] when there is one. The instance

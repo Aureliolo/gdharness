@@ -1255,7 +1255,7 @@ async function importProject(launch: Launch): Promise<string | null> {
       launch.silenceFloorSeconds,
     );
     if (ended.ended !== null || ended.code !== 0) {
-      return `${ended.ended ?? `the engine exited ${exitNamed(ended.code ?? 0)}`}; everything it printed is in ${launch.logs.named(log)}`;
+      return `${ended.ended ?? `the engine exited ${exitNamed(ended.code ?? 0)}`}, and everything it printed is in ${launch.logs.named(log)}`;
     }
     // Godot's import exits 0 whatever it printed, and a suite run on a failed import reads what
     // the import left behind.
@@ -1263,10 +1263,10 @@ async function importProject(launch: Launch): Promise<string | null> {
     const wrongEngine =
       launch.godotVersion === null ? null : versionFault(printed.engineVersion, launch.godotVersion);
     if (wrongEngine !== null) {
-      return `${wrongEngine}; everything it printed is in ${launch.logs.named(log)}`;
+      return `${wrongEngine}, and everything it printed is in ${launch.logs.named(log)}`;
     }
     const fault = importFault(printed);
-    return fault === null ? null : `${fault}; everything it printed is in ${launch.logs.named(log)}`;
+    return fault === null ? null : `${fault}, and everything it printed is in ${launch.logs.named(log)}`;
   } finally {
     launch.slots.release(lock);
   }
@@ -1494,7 +1494,7 @@ export function reportsFault(reports: string): string | null {
   }
   const shown = files.slice(0, REPORT_FILES_NAMED).map((file) => file.split(sep).join('/'));
   const more = files.length - shown.length;
-  return `gdUnit4 wrote ${plural(files.length, 'file')} into ${reports} (${shown.join(', ')}${more > 0 ? ` and ${String(more)} more` : ''}), a report the runner had turned off, so the gdUnit4 installed no longer honours a session hook marked off; report it to gdharness with gdUnit4's version`;
+  return `gdUnit4 wrote ${plural(files.length, 'file')} into ${reports} (${shown.join(', ')}${more > 0 ? ` and ${String(more)} more` : ''}), a report the runner had turned off, so the gdUnit4 installed no longer honours a session hook marked off. Report it to gdharness with gdUnit4's version`;
 }
 
 /** Prints how the run went and answers the exit code: what failed, in full, then one line of totals. */
@@ -1598,7 +1598,7 @@ function report(
       `The slowest suites: ${slowest.map((suite) => `${suite.path} ${suite.seconds.toFixed(1)} s`).join(', ')}.`,
     );
   }
-  const totals = `${plural(cases, 'case')} in ${plural(suites, 'suite')} across ${plural(ran.length, 'engine')}, ${took.toFixed(1)} s; the longest engine took ${longest.toFixed(1)} s.`;
+  const totals = `${plural(cases, 'case')} in ${plural(suites, 'suite')} across ${plural(ran.length, 'engine')}, ${took.toFixed(1)} s. The longest engine took ${longest.toFixed(1)} s.`;
   console.log('');
   const passed =
     failed.length === 0 && compiled.faults.length === 0 && across.length === 0 && uncollected.length === 0;

@@ -130,7 +130,7 @@ func _reload_scene(path: String) -> void:
 			(
 				(
 					"gdharness: %s changed on disk while the editor holds unsaved changes to it, "
-					+ "so it was not reloaded; saving it writes the editor's copy over the file"
+					+ "so it was not reloaded. Saving it writes the editor's copy over the file"
 				)
 				% path
 			)

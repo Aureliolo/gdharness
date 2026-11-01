@@ -602,7 +602,7 @@ export class GameDebugger {
       if (entered === null) {
         return {
           paused: false,
-          note: `The game has been asked to stop and had not within ${PAUSE_MS / 1000}s. It takes the request between frames, and in a script every 2048 lines it runs, so its main thread is in a loop that sleeps between few lines, or inside one long engine call or a native extension's own loop. The request stays with the game, which stops when it next reaches that point; debug_state stack reads where once it has.`,
+          note: `The game has been asked to stop and had not within ${PAUSE_MS / 1000}s. It takes the request between frames, and in a script every 2048 lines it runs, so its main thread is in a loop that sleeps between few lines, or inside one long engine call or a native extension's own loop. The request stays with the game, which stops when it next reaches that point. debug_state stack reads where once it has.`,
         };
       }
     }
@@ -620,7 +620,7 @@ export class GameDebugger {
       if (again === null) {
         return {
           paused: false,
-          note: `The game stopped between frames, where no script runs, so it was let go to stop at the next line of script it runs, and none ran within ${STEP_MS / 1000}s. It stops there when one does; debug_state stack reads it then.`,
+          note: `The game stopped between frames, where no script runs, so it was let go to stop at the next line of script it runs, and none ran within ${STEP_MS / 1000}s. It stops there when one does, and debug_state stack reads it then.`,
         };
       }
     }
@@ -630,7 +630,7 @@ export class GameDebugger {
     if (past === 'lost') {
       return {
         paused: false,
-        note: `The game stopped in gdharness's runtime addon and was let go on to reach its own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script it runs; debug_state stack reads it then.`,
+        note: `The game stopped in gdharness's runtime addon and was let go on to reach its own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script it runs, and debug_state stack reads it then.`,
       };
     }
     this.stoppedBy('Paused');
@@ -771,7 +771,7 @@ export class GameDebugger {
       return {
         stepped: true,
         heldAgain: false,
-        note: `The step stopped in gdharness's runtime addon and was let go on to reach the game's own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script the game runs; debug_state stack reads it then.`,
+        note: `The step stopped in gdharness's runtime addon and was let go on to reach the game's own script, and did not stop again within ${STEP_MS / 1000}s. It stops at the next line of script the game runs, and debug_state stack reads it then.`,
       };
     }
     this.stoppedBy('Stepped');
@@ -920,7 +920,7 @@ export class GameDebugger {
       refused:
         frames.length === 0
           ? 'The game is held where no script runs, so it has no frames: debug_control step_over takes it to the next line of script.'
-          : `The stack has no frame ${frame}; its frames are ${frames.map((each) => each.id).join(', ')}.`,
+          : `The stack has no frame ${frame}. Its frames are ${frames.map((each) => each.id).join(', ')}.`,
     };
   }
 

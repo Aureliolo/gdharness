@@ -277,7 +277,7 @@ export function settingsDroppedReport(
   }
   return {
     settingsDropped: dropped.map(([setting, was]) => ({ setting, was })),
-    settingsNote: `The editor saved project.godot and these keys are no longer in it, with the value each one held. Godot writes only what differs from its own defaults, so a key named deliberately at its default value is redundant to the editor and is dropped on save; it will be dropped again the next time one opens. If any of them were pinned on purpose, to keep "set to this on purpose" and "not set" apart, project_settings set puts one back: ${dropped.map(([setting, was]) => `setting "${setting}" value ${JSON.stringify(was)}`).join(', ')}. Nothing else will say they have gone until something depends on one.`,
+    settingsNote: `The editor saved project.godot and these keys are no longer in it, with the value each one held. Godot writes only what differs from its own defaults, so a key named deliberately at its default value is redundant to the editor and is dropped on save. It will be dropped again the next time one opens. If any of them were pinned on purpose, to keep "set to this on purpose" and "not set" apart, project_settings set puts one back: ${dropped.map(([setting, was]) => `setting "${setting}" value ${JSON.stringify(was)}`).join(', ')}. Nothing else will say they have gone until something depends on one.`,
   };
 }
 

@@ -584,31 +584,32 @@ function writtenFileRefusal(
   },
 ): string | null {
   const { named: argument, what } = rule;
+  const whatOpening = `${what.charAt(0).toUpperCase()}${what.slice(1)}`;
   if (/^(res|user):\/\//.test(path)) {
-    return `${argument} ${path} is a Godot path; ${what} is saved outside the project, at an absolute path on this machine.`;
+    return `${argument} ${path} is a Godot path. ${whatOpening} is saved outside the project, at an absolute path on this machine.`;
   }
   if (!isAbsolute(path)) {
-    return `${argument} ${path} is not absolute; name the whole path, so where it is written does not depend on this server's directory.`;
+    return `${argument} ${path} is not absolute. Name the whole path, so where it is written does not depend on this server's directory.`;
   }
   if (!rule.extensions.includes(extname(path).toLowerCase())) {
     return `${argument} ${path} does not end in ${rule.extensions.join(' or ')}, which is what ${what} is.`;
   }
   const directory = realAsFarAsItExists(dirname(path));
   if (!existsSync(directory)) {
-    return `${argument}'s directory ${dirname(path)} does not exist; ${what} creates no directories.`;
+    return `${argument}'s directory ${dirname(path)} does not exist. ${whatOpening} creates no directories.`;
   }
   const where = join(directory, basename(path));
   const inside = rule.projects.find(
     (project) => project !== '' && isWithinRoot(realAsFarAsItExists(project), where),
   );
   if (inside !== undefined) {
-    return `${argument} ${path} is inside the project at ${inside}; ${what} is saved outside it, so it never becomes part of the game.`;
+    return `${argument} ${path} is inside the project at ${inside}. ${whatOpening} is saved outside it, so it never becomes part of the game.`;
   }
   const taken = rule.writes(where).find((file) => existsSync(file));
   if (taken !== undefined) {
     return taken === where
-      ? `${argument} ${path} already exists; ${what} is not written over a file. Name a new one.`
-      : `${argument} ${path} would write ${taken}, which already exists; ${what} is not written over a file. Name a new one.`;
+      ? `${argument} ${path} already exists. ${whatOpening} is not written over a file. Name a new one.`
+      : `${argument} ${path} would write ${taken}, which already exists. ${whatOpening} is not written over a file. Name a new one.`;
   }
   return null;
 }
@@ -631,7 +632,7 @@ export function movieRefusal(
     return null;
   }
   if (headless) {
-    return '--write-movie needs a run that draws, and this one is headless: Movie Maker reads every frame back from the renderer, and the engine crashed on the first frame when asked headless. Start the run with headless: false; it is drawn on a desktop of its own and does not show.';
+    return '--write-movie needs a run that draws, and this one is headless: Movie Maker reads every frame back from the renderer, and the engine crashed on the first frame when asked headless. Start the run with headless: false. It is drawn on a desktop of its own and does not show.';
   }
   return writtenFileRefusal(engineArgs[at + 1] ?? '', {
     named: '--write-movie',
@@ -1155,7 +1156,7 @@ async function closeLikeAPlayer(
     return null;
   }
   return asked.payload['acceptsQuit'] === false
-    ? `it was asked to close and was still running ${closeWaitMs() / 1000} seconds later; its tree does not quit on a close by itself (auto_accept_quit is off), so its own handling of the close decides`
+    ? `it was asked to close and was still running ${closeWaitMs() / 1000} seconds later. Its tree does not quit on a close by itself (auto_accept_quit is off), so its own handling of the close decides`
     : `it was asked to close and was still running ${closeWaitMs() / 1000} seconds later`;
 }
 
@@ -1307,7 +1308,7 @@ export function stopVerdict(stop: {
     return {
       stopped: false,
       notSignalled: stop.endedPid,
-      note: `Nothing was ended: pid ${stop.endedPid ?? 'unknown'} no longer answers as the process this run was started as (${stop.notEndedBecause ?? 'its engine, its project and when it started'}), so it was not signalled. If that process is still the game, end it yourself, for instance with runtime_invoke calling get_tree().quit() when the game has the runtime addon; if it is not, it belongs to something else.`,
+      note: `Nothing was ended: pid ${stop.endedPid ?? 'unknown'} no longer answers as the process this run was started as (${stop.notEndedBecause ?? 'its engine, its project and when it started'}), so it was not signalled. If that process is still the game, end it yourself, for instance with runtime_invoke calling get_tree().quit() when the game has the runtime addon. If it is not, it belongs to something else.`,
       withChildren: false,
     };
   }
@@ -1497,8 +1498,8 @@ function aboutTheChildren(ended: ChildrenEnded | null, throughEditor: boolean): 
     "andChildren ends what it started that is a game of this project: announced as one, or this project's engine run with --path on it.";
   if (ended === null) {
     return throughEditor
-      ? `Anything that game started for itself, with OS.create_process or otherwise, is not the editor's to stop and was not signalled; ${reaches}`
-      : `Anything that game started for itself, with OS.create_process or otherwise, is a separate process this stop did not signal; ${reaches}`;
+      ? `Anything that game started for itself, with OS.create_process or otherwise, is not the editor's to stop and was not signalled. ${reaches}`
+      : `Anything that game started for itself, with OS.create_process or otherwise, is a separate process this stop did not signal. ${reaches}`;
   }
   if (ended.unknown === 'platform') {
     // Why, as well as that: a listing killed at its budget on a loaded machine is worth asking for
@@ -1593,7 +1594,7 @@ export function endedToStartThis(ended: EndedRun | null): string {
   const which =
     ended.pid === null ? 'The game the editor was playing' : `The run that was going, pid ${ended.pid},`;
   if (ended.ending === 'refused') {
-    return ` ${which} was not ended: that pid no longer answers as the process the run was started as, so nothing was signalled. If it is still the game, it is running beside this one and you have to end it yourself; if it is not, it belongs to something else.`;
+    return ` ${which} was not ended: that pid no longer answers as the process the run was started as, so nothing was signalled. If it is still the game, it is running beside this one and you have to end it yourself. If it is not, it belongs to something else.`;
   }
   if (ended.ending === 'unreached') {
     return ` ${which} was not ended here: the editor could not be asked to stop it. The editor stops a play before starting the next, so it is not running beside this one if this start reached the editor.`;
@@ -1601,7 +1602,7 @@ export function endedToStartThis(ended: EndedRun | null): string {
   if (ended.ending === 'lingering') {
     return ` ${which} was told to end to start this one and was still running ${stopWaitMs() / 1000} seconds later, so it is running beside this one: editor_status says when it has gone.`;
   }
-  return ` ${which} was ended to start this one; its output is no longer what editor_output answers about.`;
+  return ` ${which} was ended to start this one. Its output is no longer what editor_output answers about.`;
 }
 
 /** The wait a start gives its game to announce, and the boot it was sized to when it was. */
@@ -1687,7 +1688,7 @@ function lineNothingStopsOn(absolutePath: string, relativePath: string, line: nu
   }
   const next = code.findIndex((each, at) => at >= line && each.trim() !== '');
   return `res://${relativePath} line ${line} holds no code, so nothing stops there${
-    next === -1 ? ', and no line after it holds any' : `; the next line holding code is ${next + 1}`
+    next === -1 ? ', and no line after it holds any' : `. The next line holding code is ${next + 1}`
   }.`;
 }
 
@@ -2406,7 +2407,7 @@ function engineFlagsNote(args: readonly string[]): string | undefined {
     return undefined;
   }
   const flags = among.join(', ');
-  return `${flags} ${among.length === 1 ? 'is a flag' : 'are flags'} the engine reads, and args goes to the game after --, where the engine does not read ${among.length === 1 ? 'it' : 'them'}. engineArgs hands the engine its own flags; ${among.length === 1 ? 'leave it' : 'leave them'} in args only for a game that reads ${among.length === 1 ? 'that flag' : 'those flags'} itself.`;
+  return `${flags} ${among.length === 1 ? 'is a flag' : 'are flags'} the engine reads, and args goes to the game after --, where the engine does not read ${among.length === 1 ? 'it' : 'them'}. engineArgs hands the engine its own flags. ${among.length === 1 ? 'Leave it' : 'Leave them'} in args only for a game that reads ${among.length === 1 ? 'that flag' : 'those flags'} itself.`;
 }
 
 /**
@@ -2731,7 +2732,7 @@ export function finishedBeforeTheEnd(finished: number, failing: number, running:
   const listed =
     finished === 0
       ? ''
-      : `; ${finished === 1 ? 'it is' : 'they are'} under suitesFinished${failing === 0 ? '' : ', with the failing cases under suitesFailing'}, so a run of the rest need not repeat ${finished === 1 ? 'it' : 'them'}`;
+      : `. ${finished === 1 ? 'It is' : 'They are'} under suitesFinished${failing === 0 ? '' : ', with the failing cases under suitesFailing'}, so a run of the rest need not repeat ${finished === 1 ? 'it' : 'them'}`;
   return ` Before it ended, ${got}${running === null ? '' : `${finished === 0 ? ' and' : ', and'} ${running} was running`}${listed}.`;
 }
 
@@ -2793,7 +2794,7 @@ export function scriptErrorsNote(
   const causesSaid = [
     ...first.map(
       (origin) =>
-        `${at(origin)} ${sentence(origin.message)} gdUnit4 did not name this script, which declares ${origin.declares}; the engine's own check of it found the error.${failedOn(origin.declares)}`,
+        `${at(origin)} ${sentence(origin.message)} gdUnit4 did not name this script, which declares ${origin.declares}. The engine's own check of it found the error.${failedOn(origin.declares)}`,
     ),
     ...unconfirmed.map(
       (origin) =>
@@ -3014,10 +3015,10 @@ const PATH_SOLUTIONS = [
 function keptSolutions(file: string): string[] {
   return /\.t?scn$/.test(file)
     ? [
-        `Write it through the node holding it, with scene_node set on ${file} and a path through the property, such as "mesh/material/albedo_color"; scene_node get names the property that holds it`,
+        `Write it through the node holding it, with scene_node set on ${file} and a path through the property, such as "mesh/material/albedo_color". scene_node get names the property that holds it`,
       ]
     : [
-        `Write it through the file holding it, with resource_edit modify on ${file} and a path through the property, such as "material/albedo_color"; resource_edit read names the property that holds it`,
+        `Write it through the file holding it, with resource_edit modify on ${file} and a path through the property, such as "material/albedo_color". resource_edit read names the property that holds it`,
       ];
 }
 
@@ -3030,13 +3031,13 @@ const DESTINATION_ARGUMENTS: ReadonlySet<string> = new Set(['newPath', 'newScrip
  */
 function destinationSolutions(key: string): string[] {
   return [
-    `Give ${key} inside the project, relative to it, such as "scenes/main.tscn" or "res://scenes/main.tscn"; the file goes only where the project is, so copy it elsewhere by hand afterwards`,
+    `Give ${key} inside the project, relative to it, such as "scenes/main.tscn" or "res://scenes/main.tscn". The file goes only where the project is, so copy it elsewhere by hand afterwards`,
   ];
 }
 
 /** The same for an export's output, which is a file to write rather than one the project holds. */
 const OUTPUT_PATH_SOLUTIONS = [
-  'Give outputPath inside the project, relative to it, such as "build/game.exe" or "res://build/game.exe"; copy the build elsewhere once it is exported',
+  'Give outputPath inside the project, relative to it, such as "build/game.exe" or "res://build/game.exe". Copy the build elsewhere once it is exported',
 ];
 
 /**
@@ -3317,7 +3318,7 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
     dropped > 0
       ? droppedNote
       : reading.runtimeAddon === true
-        ? ' The runtime addon switches the profiler off as the game quits, and did not here: either it was no longer running in this game by then, which a project can arrange for some scenes; or the game ended without taking its tree down, as a crash or a kill does; or the totals did not reach the debugger before the game exited, which the game then says in its output.'
+        ? ' The runtime addon switches the profiler off as the game quits, and did not here, for one of three reasons. It may no longer have been running in this game by then, which a project can arrange for some scenes. The game may have ended without taking its tree down, as a crash or a kill does. Or the totals did not reach the debugger before the game exited, which the game then says in its output.'
         : addonNote;
   if (totals.complete && reading.running) {
     notes.push(
@@ -3373,7 +3374,7 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
   }
   if (reading.coveredMs > 0 && table.scriptMs > reading.coveredMs) {
     notes.push(
-      `scriptMs, ${table.scriptMs}ms, is more than the ${reading.coveredMs}ms the profile covers.${table.superCallers > 0 ? ' The super calls above, counted twice, can account for some or all of that; whatever they do not is' : ' One thread cannot spend more time than passes, so that is'} functions running on several threads at once, through WorkerThreadPool or Thread. The engine adds every thread's time to the same function and does not say which thread a call ran on, so a function's selfMs is summed over every thread it ran on rather than taken out of frames, and a function that waits for the others, through wait_for_group_task_completion or wait_to_finish, has the wait in its own selfMs as well.`,
+      `scriptMs, ${table.scriptMs}ms, is more than the ${reading.coveredMs}ms the profile covers.${table.superCallers > 0 ? ' The super calls above, counted twice, can account for some or all of that. Whatever they do not is' : ' One thread cannot spend more time than passes, so that is'} functions running on several threads at once, through WorkerThreadPool or Thread. The engine adds every thread's time to the same function and does not say which thread a call ran on, so a function's selfMs is summed over every thread it ran on rather than taken out of frames, and a function that waits for the others, through wait_for_group_task_completion or wait_to_finish, has the wait in its own selfMs as well.`,
     );
   }
   if (table.addonFunctions > 0) {
@@ -3421,14 +3422,14 @@ function overheadRowsReturned(table: ReturnType<typeof profiledFunctions>, one: 
   const theReturned = returned === 1 ? 'the one row returned' : `the ${returned} rows returned`;
   if (shown === 0) {
     return one
-      ? ` Its row, which carries that share as overheadMs, comes after ${theReturned}; limit ${table.overheadReach} returns it.`
-      : ` Their rows, which carry that share as overheadMs, come after ${theReturned}; limit ${table.overheadReach} returns them all.`;
+      ? ` Its row, which carries that share as overheadMs, comes after ${theReturned}. limit ${table.overheadReach} returns it.`
+      : ` Their rows, which carry that share as overheadMs, come after ${theReturned}. limit ${table.overheadReach} returns them all.`;
   }
   const among =
     returned === 1
       ? 'the one row returned is one of them'
       : `${shown} of them ${shown === 1 ? 'is' : 'are'} among ${theReturned}`;
-  return ` Their rows carry that share as overheadMs, and ${among}; limit ${table.overheadReach} returns them all.`;
+  return ` Their rows carry that share as overheadMs, and ${among}. limit ${table.overheadReach} returns them all.`;
 }
 
 /**
@@ -3482,7 +3483,7 @@ function cappedNotes(totals: ProfileTotals): string[] {
   const unnamed = unnamedCalled(totals);
   if (unnamed > 0) {
     notes.push(
-      `${unnamed === 1 ? 'One function' : `${unnamed} functions`} arrived without ${unnamed === 1 ? 'its name' : 'their names'}, shown as ${UNNAMED_PREFIX} and the number the engine gave ${unnamed === 1 ? 'it' : 'them'}: the engine names a function once, as it first appears, and the game's debugger queue was full when that message was sent. They are script functions of the game; which ones cannot be recovered from this profile.`,
+      `${unnamed === 1 ? 'One function' : `${unnamed} functions`} arrived without ${unnamed === 1 ? 'its name' : 'their names'}, shown as ${UNNAMED_PREFIX} and the number the engine gave ${unnamed === 1 ? 'it' : 'them'}: the engine names a function once, as it first appears, and the game's debugger queue was full when that message was sent. They are script functions of the game. Which ones they are cannot be recovered from this profile.`,
     );
   }
   return notes;
@@ -3623,8 +3624,8 @@ function uncaughtNote(uncaught: readonly LogEntry[]): string | undefined {
   }
   const count = uncaught.length === 1 ? 'one script error' : `${uncaught.length} script errors`;
   return (
-    `Every case passed, but the run printed ${count} that no case failed on, the first "${first.text}"; ` +
-    'they are under uncaughtScriptErrors. gdUnit4 fails a case on the script errors its logger sees, and ' +
+    `Every case passed, but the run printed ${count} that no case failed on, the first "${first.text}". ` +
+    'They are under uncaughtScriptErrors. gdUnit4 fails a case on the script errors its logger sees, and ' +
     'it did not see these, so the cases passed on whatever the faulted calls returned. A stack overflow is ' +
     'one it cannot see: it is raised deeper than the logger can be called.'
   );
@@ -3666,7 +3667,7 @@ function elsewhereIn(projectPath: string, asked: string): string {
 function windowNoteFor(needing: readonly string[], sharing: readonly string[] | null): string {
   const one = needing.length === 1;
   const why =
-    'A suite needs one when it declares const GDHARNESS_NEEDS_WINDOW: bool = true, or calls scene_runner and declares nothing; one that uses the scene runner only to stand a scene up declares it false and runs headless.';
+    'A suite needs one when it declares const GDHARNESS_NEEDS_WINDOW: bool = true, or calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares it false and runs headless.';
   if (sharing === null) {
     return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}, and this machine has no display, so the run was headless and input events went nowhere. ${why} Run under xvfb-run to give it a display.`;
   }
@@ -3845,7 +3846,7 @@ function engineChecked(why: string): OperationParams {
   return {
     checkedBy: 'engine',
     languageServer: why,
-    note: "No editor of this project is open to ask, so a headless engine compiled the scripts the way loading them does. It reports every error that stops a script compiling, at its line and without a column, but stops reading a script at its first syntax error, so an error after one shows once it is fixed, and so do its warnings, since a script that does not parse is not checked for any. A second engine reports the warnings, at the levels the project sets, by raising each warning set to warn as an error for that run only, since the engine tells a warning as one only to an editor; each comes at its line without a column, and warnings is null when that engine could not answer. editor_launch with hidden: true opens this project's editor without a window, and its language server reports both with their columns.",
+    note: "No editor of this project is open to ask, so a headless engine compiled the scripts the way loading them does. It reports every error that stops a script compiling, at its line and without a column, but stops reading a script at its first syntax error, so an error after one shows once it is fixed, and so do its warnings, since a script that does not parse is not checked for any. A second engine reports the warnings, at the levels the project sets, by raising each warning set to warn as an error for that run only, since the engine tells a warning as one only to an editor. Each comes at its line without a column, and warnings is null when that engine could not answer. editor_launch with hidden: true opens this project's editor without a window, and its language server reports both with their columns.",
   };
 }
 
@@ -4251,7 +4252,7 @@ class GodotServer {
     this.stopTryingTheBridge();
     const bridgeStatus = this.godotBridge.getStatus();
     console.error(
-      `[SERVER] Godot Editor Bridge came up on ${bridgeStatus.host}:${bridgeStatus.port}; editor tools are live.`,
+      `[SERVER] Godot Editor Bridge came up on ${bridgeStatus.host}:${bridgeStatus.port}, and editor tools are live.`,
     );
     this.announceTheBridge();
   }
@@ -4310,7 +4311,7 @@ class GodotServer {
         return;
       }
       console.error(
-        `[SERVER] pid ${successor} now serves ${this.ownProject}; this server is finished and is stopping.`,
+        `[SERVER] pid ${successor} now serves ${this.ownProject}, so this server is finished and is stopping.`,
       );
       this.noteTheEnd('superseded', { successor });
       void this.handleShutdown(`superseded by ${successor}`, 0);
@@ -4733,7 +4734,7 @@ class GodotServer {
               note:
                 savedAt === undefined
                   ? `The answer was ${bytes} bytes, past the ${ANSWER_BUDGET} this server sends in one message (Claude Code closes the connection past 16 MB), and writing it to a file failed: ${notSaved ?? 'no reason given'}. The fields of its top level that are short are kept here.`
-                  : `The answer was ${bytes} bytes, past the ${ANSWER_BUDGET} this server sends in one message (Claude Code closes the connection past 16 MB), so it was written whole to savedAt; read it from there. The fields of its top level that are short are kept here. The files are removed once this server has stopped.`,
+                  : `The answer was ${bytes} bytes, past the ${ANSWER_BUDGET} this server sends in one message (Claude Code closes the connection past 16 MB), so it was written whole to savedAt. Read it from there. The fields of its top level that are short are kept here. The files are removed once this server has stopped.`,
             },
           }),
         },
@@ -4813,7 +4814,7 @@ class GodotServer {
             'Restarting the editor would load that older addon code again, and reconnecting would start ' +
             'this same server version again, so neither brings the two into step. Tell the ' +
             `user, and offer to run  ${gdharnessCommand(SERVER_VERSION, this.ownProject === null ? 'upgrade' : `upgrade "${this.ownProject}"`)}  ` +
-            "in a shell, which replaces the addons with this server's; ask first, since it changes " +
+            "in a shell, which replaces the addons with this server's. Ask first, since it changes " +
             'files in their project. editor_launch restart then loads them.',
         },
       });
@@ -5115,7 +5116,7 @@ class GodotServer {
         }
         if (!this.godotBridge.isConnected()) {
           const refused = await this.noEditorYet(answerable, [
-            `${tool} ${op} was asked of the editor; from: "disk" reads the file instead`,
+            `${tool} ${op} was asked of the editor. from: "disk" reads the file instead`,
           ]);
           if (refused !== null) {
             return refused;
@@ -5609,7 +5610,7 @@ class GodotServer {
               ? { removed: true }
               : {
                   removed: false,
-                  why: `No breakpoint was held on line ${line} of res://${located.relativePath}, so there was nothing to remove; held lists the ones that are.`,
+                  why: `No breakpoint was held on line ${line} of res://${located.relativePath}, so there was nothing to remove. held lists the ones that are.`,
                 };
           }
         }
@@ -6385,7 +6386,7 @@ class GodotServer {
         },
         ...(unsavedScenes.length > 0
           ? {
-              note: `${unsavedScenes.join(', ')} ${unsavedScenes.length === 1 ? 'is' : 'are'} open in the editor with unsaved edits, so ${unsavedScenes.length === 1 ? 'it was' : 'they were'} not read again from the file and still ${unsavedScenes.length === 1 ? 'gives' : 'give'} the old bus; saving there writes it back.`,
+              note: `${unsavedScenes.join(', ')} ${unsavedScenes.length === 1 ? 'is' : 'are'} open in the editor with unsaved edits, so ${unsavedScenes.length === 1 ? 'it was' : 'they were'} not read again from the file and still ${unsavedScenes.length === 1 ? 'gives' : 'give'} the old bus. Saving there writes it back.`,
             }
           : {}),
       });
@@ -6656,7 +6657,7 @@ class GodotServer {
             stillImporting: true,
             asked: targets,
             ...sourceless,
-            note: `The editor's scan of the project had not finished after ${timeoutMs} ms, and the reimport waits for it. project_import status says what it has done so far; pass a longer timeoutMs to wait it out.`,
+            note: `The editor's scan of the project had not finished after ${timeoutMs} ms, and the reimport waits for it. project_import status says what it has done so far. Pass a longer timeoutMs to wait it out.`,
           },
         };
       }
@@ -6688,7 +6689,7 @@ class GodotServer {
             stillImporting: true,
             asked: targets,
             ...sourceless,
-            note: `The editor had not finished after ${timeoutMs} ms. project_import status says what it has done so far; pass a longer timeoutMs to wait it out.`,
+            note: `The editor had not finished after ${timeoutMs} ms. project_import status says what it has done so far. Pass a longer timeoutMs to wait it out.`,
           },
         };
       }
@@ -7095,7 +7096,7 @@ class GodotServer {
     }
     return this.jsonTextResponse({
       ...outcome.payload,
-      editorNote: `The editor open on this project read export_presets.cfg when it started and ${unseen}, and saving presets in its Export dialog writes its own list over the file. editor_launch restart loads the file; an export through project_export run reads the file and needs no restart.`,
+      editorNote: `The editor open on this project read export_presets.cfg when it started and ${unseen}, and saving presets in its Export dialog writes its own list over the file. editor_launch restart loads the file. An export through project_export run reads the file and needs no restart.`,
       ...engineExtras(outcome),
     });
   }
@@ -7303,7 +7304,7 @@ class GodotServer {
       const freed = freeLibraryCopies(project.value.path);
       if (freed.setAside.length > 0 || freed.swept.length > 0) {
         this.logDebug(
-          `Before the export: set aside ${freed.setAside.join(', ')}; swept ${freed.swept.join(', ')}`,
+          `Before the export: set aside ${freed.setAside.join(', ')}, and swept ${freed.swept.join(', ')}`,
         );
       }
       // An export of a real project is slow, so it gets five minutes rather than no limit.
@@ -7862,11 +7863,11 @@ class GodotServer {
         ? ranAs
         : ranAs === 'passed'
           ? `nothing at ${nothingAt}`
-          : `${ranAs}; nothing at ${nothingAt}`;
+          : `${ranAs}, with nothing at ${nothingAt}`;
     const missingNote =
       missing.length === 0
         ? undefined
-        : `Nothing at ${nothingAt}, so ${missing.length === 1 ? 'it was' : 'they were'} left out and only ${asked.join(', ')} ran; a run of fewer paths than were asked for is not called a pass.${elsewhereIn(project.value.path, missing[0] ?? '')}`;
+        : `Nothing at ${nothingAt}, so ${missing.length === 1 ? 'it was' : 'they were'} left out and only ${asked.join(', ')} ran. A run of fewer paths than were asked for is not called a pass.${elsewhereIn(project.value.path, missing[0] ?? '')}`;
     // Said on every answer from a run whose saves could not be moved, whichever way it ended: a
     // tier that failed still wrote wherever it wrote, and the run that found nothing to do is the
     // one exception, since it never started a game.
@@ -7913,7 +7914,7 @@ class GodotServer {
             : scriptErrors.length > 0
               ? scriptErrorsNote(printedErrors, declaring)
               : reportProblem !== null
-                ? `The test run's report could not be read (${reportProblem}); the engine's own verdict was ${ranAs}.`
+                ? `The test run's report could not be read (${reportProblem}). The engine's own verdict was ${ranAs}.`
                 : `The test run wrote no report (${ranAs}).${finishedBeforeTheEnd(finished.length, failing.length, running)}`;
       const note = missingNote === undefined ? why : `${why} ${missingNote}`;
       // Kept in the project when nobody is left to read the answer, for the next run there to
@@ -8287,16 +8288,16 @@ class GodotServer {
             ? `${casesNotRun.join(', ')} ${casesNotRun.length === 1 ? 'is a case' : 'are cases'} of a suite that ran and passed, and gdUnit4 never ran ${casesNotRun.length === 1 ? 'it' : 'them'} and said nothing of it, so the run is not called passed, as gdharness test judges it.`
             : undefined,
           rowsMismatched.length > 0
-            ? `gdUnit4 skipped what rowsMismatched names because the row's data does not fit the case's parameters, though it printed ${rowsMismatched.length === 1 ? 'the row' : 'each row'} passed first; each entry carries gdUnit4's reason. The run is not called passed, as gdharness test judges it.`
+            ? `gdUnit4 skipped what rowsMismatched names because the row's data does not fit the case's parameters, though it printed ${rowsMismatched.length === 1 ? 'the row' : 'each row'} passed first. Each entry carries gdUnit4's reason. The run is not called passed, as gdharness test judges it.`
             : undefined,
           casesUnrunnable.length > 0
-            ? `gdUnit4 skipped what casesUnrunnable names because it cannot run ${casesUnrunnable.length === 1 ? 'that case' : 'those cases'} as declared, though it printed ${casesUnrunnable.length === 1 ? 'it' : 'each'} passed first; each entry carries gdUnit4's reason. A parameter is filled only by _test_parameters, a fuzzer or a setting gdUnit4 names (timeout, do_skip, skip_reason, fuzzer_iterations, fuzzer_seed), and fuzzers come before the settings. The run is not called passed, as gdharness test judges it.`
+            ? `gdUnit4 skipped what casesUnrunnable names because it cannot run ${casesUnrunnable.length === 1 ? 'that case' : 'those cases'} as declared, though it printed ${casesUnrunnable.length === 1 ? 'it' : 'each'} passed first. Each entry carries gdUnit4's reason. A parameter is filled only by _test_parameters, a fuzzer or a setting gdUnit4 names (timeout, do_skip, skip_reason, fuzzer_iterations, fuzzer_seed), and fuzzers come before the settings. The run is not called passed, as gdharness test judges it.`
             : undefined,
           notSuites.length > 0
             ? 'What notSuites names declares cases gdUnit4 never runs, so the run is not called passed, as gdharness test judges it.'
             : undefined,
           briefed > 0
-            ? `${briefed} of the ${failed.length} failing cases, those with the largest reports, are named with their first message only, since their reports would have made the answer too large to deliver; pass one case's suite path to see its reports.`
+            ? `${briefed} of the ${failed.length} failing cases, those with the largest reports, are named with their first message only, since their reports would have made the answer too large to deliver. Pass one case's suite path to see its reports.`
             : undefined,
           notApplied.length > 0
             ? 'An ignore entry named a case that ran all the same: gdUnit4 leaves a case out only as suite_name:test_name, and reads an entry with no colon as a suite name or a piece of a suite path. ignoreNotApplied gives the form for each case that ran.'
@@ -8306,7 +8307,7 @@ class GodotServer {
             : undefined,
           uncaughtNote(uncaught),
           undeclaredErrors.length > 0
-            ? `An engine error or warning a suite does not declare fails the run, as gdharness test judges it; ${declaringAdvice(undeclaredErrors[0]?.case ?? 'test_name', undeclaredErrors[0]?.warning === true)}, once for each time it prints it${undeclaredErrors.some((error) => error.warning !== undeclaredErrors[0]?.warning) ? (undeclaredErrors[0]?.warning === true ? ', and an error in its GDHARNESS_EXPECTED_ERRORS' : ', and a warning in its GDHARNESS_EXPECTED_WARNINGS') : ''}.${declaredAs}`
+            ? `An engine error or warning a suite does not declare fails the run, as gdharness test judges it. ${declaringAdvice(undeclaredErrors[0]?.case ?? 'test_name', undeclaredErrors[0]?.warning === true)}, once for each time it prints it${undeclaredErrors.some((error) => error.warning !== undeclaredErrors[0]?.warning) ? (undeclaredErrors[0]?.warning === true ? ', and an error in its GDHARNESS_EXPECTED_ERRORS' : ', and a warning in its GDHARNESS_EXPECTED_WARNINGS') : ''}.${declaredAs}`
             : undefined,
           declaredNotPrinted.length > 0
             ? 'A declared error or warning the case did not print fails the run too, since the case no longer reaches what it was written to test.'
@@ -8318,7 +8319,7 @@ class GodotServer {
           countedLeaks.length > 0
             ? [
                 heldNamed === undefined
-                  ? 'What the engine still held as it exited fails the run, as gdharness test judges it; engineArgs ["--verbose"] has the engine name what it held.'
+                  ? 'What the engine still held as it exited fails the run, as gdharness test judges it. engineArgs ["--verbose"] has the engine name what it held.'
                   : `What the engine still held as it exited fails the run, as gdharness test judges it. ${heldNamed}`,
                 selfTypedSentence(projectSelfTypedExports(project.value.path)),
               ]
@@ -8851,7 +8852,7 @@ class GodotServer {
       // that had just told them not to rescan again.
       const remedy = this.editorWritesAShortList(projectPath)
         ? 'editor_rescan will not clear it here: this editor wrote the class cache from a list shorter than the file on its last scan and writes the same list on every scan, so editor_launch restart is what loads it.'
-        : 'editor_rescan clears it, measured against a real editor with waiting the same length ruled out; editor_launch restart also does, and costs more.';
+        : 'editor_rescan clears it, measured against a real editor with waiting the same length ruled out. editor_launch restart also does, and costs more.';
       notes.push(
         `${stale.map((type) => type.type).join(', ')} ${stale.length === 1 ? 'is' : 'are'} in the class cache and still unresolved here, which is the editor's loaded list being behind rather than anything on disk. A game launched now reads the cache and resolves ${stale.length === 1 ? 'it' : 'them'}, so the run and the diagnostics disagree. ${remedy}`,
       );
@@ -9004,7 +9005,7 @@ class GodotServer {
     }
     const names = unseen.map((entry) => entry.className).join(', ');
     const empty = Array.isArray(payload['completions']) && payload['completions'].length === 0;
-    const said = `The editor cannot see ${names} yet, though ${unseen.length === 1 ? 'its script declares it' : 'their scripts declare them'}, so the language server reads what reaches ${unseen.length === 1 ? 'it' : 'them'} as nothing${empty ? ', which is why no completions came back' : ''}. editor_rescan brings ${unseen.length === 1 ? 'it' : 'them'} in; then ask again.`;
+    const said = `The editor cannot see ${names} yet, though ${unseen.length === 1 ? 'its script declares it' : 'their scripts declare them'}, so the language server reads what reaches ${unseen.length === 1 ? 'it' : 'them'} as nothing${empty ? ', which is why no completions came back' : ''}. editor_rescan brings ${unseen.length === 1 ? 'it' : 'them'} in. Then ask again.`;
     return {
       ...answer,
       content: [{ type: 'text', text: answerJson({ ...payload, unseenByEditor: unseen, unseenNote: said }) }],
@@ -9203,7 +9204,7 @@ class GodotServer {
     }
     return {
       breakpointsAtRisk:
-        'This editor clears every breakpoint in its script editor whenever a debug session opens on its adapter, which this server does for its first breakpoint or stack read: network/debug_adapter/sync_breakpoints is off. The addon turns it on as it loads, so it was turned off since; turn it on in Editor Settings > Network > Debug Adapter, or editor_launch restart turns it on again.',
+        'This editor clears every breakpoint in its script editor whenever a debug session opens on its adapter, which this server does for its first breakpoint or stack read: network/debug_adapter/sync_breakpoints is off. The addon turns it on as it loads, so it was turned off since. Turn it on in Editor Settings > Network > Debug Adapter, or editor_launch restart turns it on again.',
     };
   }
 
@@ -9466,7 +9467,7 @@ class GodotServer {
               this.notHandedOverBy === null
                 ? 'by another process'
                 : `by pid ${this.notHandedOverBy}, the gdharness server this one replaced, which had not let go of it ${HANDOVER_MS / 1000} seconds after being told it was replaced`
-            } when the bridge started, so it took ${status.port} and announced that where the editor looks for it${this.announcedAt === null ? '' : `, ${this.announcedAt}`}. The editor finds it there; the next server started takes ${status.portWanted} again if it is free.`,
+            } when the bridge started, so it took ${status.port} and announced that where the editor looks for it${this.announcedAt === null ? '' : `, ${this.announcedAt}`}. The editor finds it there. The next server started takes ${status.portWanted} again if it is free.`,
       // Waiting for the server this one replaces to let go of the configured port, which it does
       // within seconds of seeing this one announced. Said so a bridge not yet listening reads as a
       // handover in progress rather than a bridge that failed.
@@ -9476,7 +9477,7 @@ class GodotServer {
           : {
               fromPid: this.handingOverFrom,
               port: this.godotBridge.configuredPort,
-              note: `The gdharness server this one replaced, pid ${this.handingOverFrom}, still holds port ${this.godotBridge.configuredPort} and is standing down; this server takes the port when it lets go, and takes another after ${HANDOVER_MS / 1000} seconds if it does not.`,
+              note: `The gdharness server this one replaced, pid ${this.handingOverFrom}, still holds port ${this.godotBridge.configuredPort} and is standing down. This server takes the port when it lets go, and takes another after ${HANDOVER_MS / 1000} seconds if it does not.`,
             },
       staleNote,
       addonNote:
@@ -11690,7 +11691,7 @@ class GodotServer {
       running.notEndedBecause = why;
       running.log.record(
         'warning',
-        `This run was not ended here: pid ${running.pid} no longer answers as the process the run was started as (${why}), so nothing was signalled. If that process is still the game, end it yourself; if it is not, it belongs to something else.`,
+        `This run was not ended here: pid ${running.pid} no longer answers as the process the run was started as (${why}), so nothing was signalled. If that process is still the game, end it yourself. If it is not, it belongs to something else.`,
       );
       return 'refused';
     }
@@ -11744,7 +11745,7 @@ class GodotServer {
           ? `gdharness signalled pid ${running.pid}, which the operating system described as ${described}, and it was still running ${stopWaitMs() / 1000} seconds later.`
           : landed
             ? `gdharness ended pid ${running.pid}, which the operating system described as ${described}.`
-            : `gdharness signalled pid ${running.pid} and it was already gone; the operating system had described it as ${described}.`,
+            : `gdharness signalled pid ${running.pid} and it was already gone. The operating system had described it as ${described}.`,
     );
     return gone ? 'gone' : 'lingering';
   }
@@ -11902,7 +11903,9 @@ class GodotServer {
     if (cancelled !== undefined) {
       const end = (): void => {
         if (child.exitCode === null && child.signalCode === null) {
-          this.logDebug(`The call waiting on pid ${child.pid ?? 'unknown'} was cancelled; ending it.`);
+          this.logDebug(
+            `The call waiting on pid ${child.pid ?? 'unknown'} was cancelled, so it is being ended.`,
+          );
           stop();
         }
       };
@@ -12941,7 +12944,7 @@ class GodotServer {
     ) {
       return this.createErrorResponse(
         `callersOf takes a function's name, or Class.name for the functions of one class, and ${JSON.stringify(callersName)} is neither.`,
-        ['editor_run profile names each function as it answers; pass one of those'],
+        ['editor_run profile names each function as it answers. Pass one of those'],
       );
     }
     const asked: MarkAsk = {
@@ -13048,8 +13051,8 @@ class GodotServer {
         started: true,
         functions: [],
         note: on
-          ? `The profiler was switched on now, for the game the editor is playing, and its first frame has arrived, so it covers what the game does from here on. Ask again for the functions; editor_run start with profile: true covers a game from its start.${unmarked}`
-          : `The profiler was switched on for the game the editor is playing, and no frame of it had arrived ${PROFILER_ON_MS}ms later: what the game does before the first one is not counted. Ask again for the functions; editor_run start with profile: true covers a game from its start.${unmarked}`,
+          ? `The profiler was switched on now, for the game the editor is playing, and its first frame has arrived, so it covers what the game does from here on. Ask again for the functions. editor_run start with profile: true covers a game from its start.${unmarked}`
+          : `The profiler was switched on for the game the editor is playing, and no frame of it had arrived ${PROFILER_ON_MS}ms later: what the game does before the first one is not counted. Ask again for the functions. editor_run start with profile: true covers a game from its start.${unmarked}`,
       });
     }
     const functions = asParams(held['functions']);
@@ -13389,7 +13392,7 @@ class GodotServer {
     if (launched === null && status.identifying === true) {
       return this.createErrorResponse(
         'An editor has opened the bridge and has not yet said who it is, so whose console to read cannot be told yet.',
-        ['Ask again in a moment; editor_status shows greeting until it has'],
+        ['Ask again in a moment. editor_status shows greeting until it has'],
       );
     }
     const projectPath =
@@ -13620,7 +13623,7 @@ class GodotServer {
     if (wanted && cpuSeconds === undefined && stillRunning(run)) {
       notes.push(
         processToAsk === null
-          ? 'cpu was asked for and there is no process to ask: the editor is playing this run and holds it, and the game announced no runtime, so nothing here has its process id. A game with the runtime addon announces one; editor_run start without a connected editor, or with args, starts the game here instead and that run answers cpuSeconds either way.'
+          ? 'cpu was asked for and there is no process to ask: the editor is playing this run and holds it, and the game announced no runtime, so nothing here has its process id. A game with the runtime addon announces one. editor_run start without a connected editor, or with args, starts the game here instead and that run answers cpuSeconds either way.'
           : 'cpu was asked for and this platform would not say what the run has used.',
       );
     }
@@ -13643,7 +13646,7 @@ class GodotServer {
     if (restarts.length > 0) {
       const chain = [...restarts.map((one) => one.pid), run.pid].join(' into ');
       notes.push(
-        `The game restarted itself with OS.set_restart_on_exit (pid ${chain}), so the run went on in the process it started; restartedFrom says how each one before it ended, and editor_run stop ends the one carrying it.${process.platform === 'win32' ? ' On Windows the engine gives that process no copy of its output, so what it printed is not below.' : ''}`,
+        `The game restarted itself with OS.set_restart_on_exit (pid ${chain}), so the run went on in the process it started. restartedFrom says how each one before it ended, and editor_run stop ends the one carrying it.${process.platform === 'win32' ? ' On Windows the engine gives that process no copy of its output, so what it printed is not below.' : ''}`,
       );
     }
     if (typeof run.endedHere === 'string') {
@@ -14446,7 +14449,7 @@ class GodotServer {
       );
     } else if (dropped.length > 0) {
       notes.push(
-        `The scan wrote the class cache from the list this editor is holding, and that list still has ${dropped.join(', ')} for a script that is gone, so the cache was rebuilt from the files without it. The editor goes on holding it and writes it back on every scan until it is restarted with editor_launch restart; until then a scan is followed by this same rebuild.`,
+        `The scan wrote the class cache from the list this editor is holding, and that list still has ${dropped.join(', ')} for a script that is gone, so the cache was rebuilt from the files without it. The editor goes on holding it and writes it back on every scan until it is restarted with editor_launch restart. Until then a scan is followed by this same rebuild.`,
       );
     }
     return this.jsonTextResponse({
@@ -14660,7 +14663,7 @@ class GodotServer {
         notReloaded.push({
           scriptPath,
           problem:
-            'a @tool script, which runs inside the editor, so it is not reloaded from here; editor_launch restart recompiles it',
+            'a @tool script, which runs inside the editor, so it is not reloaded from here. editor_launch restart recompiles it',
           tool: true,
         });
         continue;
@@ -14704,7 +14707,7 @@ class GodotServer {
         const left =
           answer['restored'] === true
             ? ''
-            : '; compiling it again from the text it was built from failed too, so the editor holds it unusable until it compiles';
+            : '. Compiling it again from the text it was built from failed too, so the editor holds it unusable until it compiles';
         return {
           answer,
           problem: `it did not compile: Godot answered error ${failed}${readString(answer, 'failedAs') ? `, ${readString(answer, 'failedAs')}` : ''}${left}`,
@@ -15401,7 +15404,7 @@ class GodotServer {
     return this.jsonTextResponse({
       ...outcome.payload,
       readBy:
-        'a headless engine, since no editor serves this project; unsaved changes in an editor are not seen',
+        'a headless engine, since no editor serves this project, so unsaved changes in an editor are not seen',
       ...engineExtras(outcome),
     });
   }
@@ -15453,7 +15456,7 @@ class GodotServer {
         return this.createErrorResponse(
           `${askedAs} was not run: an editor of this project is running (${pids}) and has not reached this server, and saving a scene or resource it holds would put back what a write made around it.`,
           [
-            'editor_status names it under editorsNotYetConnected and says when it has connected; the write then goes through it',
+            'editor_status names it under editorsNotYetConnected and says when it has connected, and the write then goes through it',
             `If it never connects it is not reaching this server: end ${arriving.length === 1 ? 'that pid' : 'those pids'} and ask again`,
           ],
         );
@@ -15486,7 +15489,7 @@ class GodotServer {
       ...(effect === 'reads'
         ? {
             readBy:
-              'a headless engine, since no editor serves this project; unsaved changes in an editor are not seen',
+              'a headless engine, since no editor serves this project, so unsaved changes in an editor are not seen',
           }
         : { writtenBy: 'a headless engine, since no editor serves this project' }),
       ...engineExtras(outcome),
@@ -15846,8 +15849,8 @@ class GodotServer {
       // than the file, the rescan is the call that loses classes rather than the one that loads.
       notes.push(
         projectPath !== '' && this.editorWritesAShortList(projectPath)
-          ? 'The cache on disk is right now, and the editor holding this project is still not resolving these: rewriting the file does not reach the list it already loaded. editor_rescan will not reach it either on this editor, whose last scan wrote the cache from a list shorter than the file and would again; editor_launch restart is what loads them.'
-          : 'The cache on disk is right now, and the editor holding this project is still not resolving these: rewriting the file does not reach the list it already loaded. editor_rescan does, on its own and with no change to the declaring script; editor_launch restart also does, and costs more.',
+          ? 'The cache on disk is right now, and the editor holding this project is still not resolving these: rewriting the file does not reach the list it already loaded. editor_rescan will not reach it either on this editor, whose last scan wrote the cache from a list shorter than the file and would again. editor_launch restart is what loads them.'
+          : 'The cache on disk is right now, and the editor holding this project is still not resolving these: rewriting the file does not reach the list it already loaded. editor_rescan does, on its own and with no change to the declaring script. editor_launch restart also does, and costs more.',
       );
     }
     if (stillHeld.length > 0) {
@@ -15903,7 +15906,7 @@ class GodotServer {
     const names = checked.unseen.map((entry) => entry.className);
     const one = names.length === 1;
     return this.createErrorResponse(
-      `Nothing was renamed: ${names.join(', ')} ${one ? 'is a class' : 'are classes'} this project declares that the editor has not loaded, so its language server cannot tell the type of a value of ${one ? 'it' : 'them'}, and a use of ${symbol} through one would be left as it was. editor_rescan brings ${one ? 'it' : 'them'} in; rename after it.`,
+      `Nothing was renamed: ${names.join(', ')} ${one ? 'is a class' : 'are classes'} this project declares that the editor has not loaded, so its language server cannot tell the type of a value of ${one ? 'it' : 'them'}, and a use of ${symbol} through one would be left as it was. editor_rescan brings ${one ? 'it' : 'them'} in. Rename after it.`,
       ['editor_rescan loads the classes the editor is missing, without restarting it'],
     );
   }
@@ -16231,7 +16234,7 @@ class GodotServer {
         heldAt: undefined,
         heldUnknown: true,
         heldNote:
-          'Whether this run is held at a breakpoint cannot be told from here: this server connected to the debugger after any stop, the adapter reports a stop only to the sessions connected when it happened, and the run has announced no runtime to ask instead. A game that draws nothing and answers nothing is held; debug_control continue lets a held game go.',
+          'Whether this run is held at a breakpoint cannot be told from here: this server connected to the debugger after any stop, the adapter reports a stop only to the sessions connected when it happened, and the run has announced no runtime to ask instead. A game that draws nothing and answers nothing is held. debug_control continue lets a held game go.',
       };
     }
     const reply = await runtimeRequest(endpoint, 'ping', {}, HOLD_PING_MS);
@@ -16243,7 +16246,7 @@ class GodotServer {
       return {
         heldAt: {
           reason: 'unanswered',
-          description: `the game accepted a runtime connection and did not answer a ping within ${HOLD_PING_MS}ms, which is what a game held at a breakpoint does, and what one stuck in a long frame does. This server connected to the debugger after the stop, so the adapter will not show it the stack; debug_control continue lets a held game go`,
+          description: `the game accepted a runtime connection and did not answer a ping within ${HOLD_PING_MS}ms, which is what a game held at a breakpoint does, and what one stuck in a long frame does. This server connected to the debugger after the stop, so the adapter will not show it the stack. debug_control continue lets a held game go`,
           text: '',
         },
       };
@@ -16308,7 +16311,7 @@ class GodotServer {
     const remaining = comingUpUntil - Date.now();
     if (remaining <= 0) {
       const seconds = Math.round((Date.now() - run.startedAt) / 1000);
-      return `The game this server started (${which}) has been running for ${seconds}s and has not announced its runtime, so there is nothing to talk to. A game that keeps the runtime off, as a project's own loader can for some scenes, never announces; editor_output says what it has printed.`;
+      return `The game this server started (${which}) has been running for ${seconds}s and has not announced its runtime, so there is nothing to talk to. A game that keeps the runtime off, as a project's own loader can for some scenes, never announces. editor_output says what it has printed.`;
     }
     const fresh = await announcedSince(project, new Set(already.map((one) => one.pid)), {
       budgetMs: Math.min(budgetMs, remaining),
@@ -16447,7 +16450,7 @@ class GodotServer {
     const sendsThePicture = readBoolean(callArgs, 'inline') !== false;
     if (expectsScreenshot && !sendsThePicture && saveTo === null) {
       return this.createErrorResponse(
-        'inline: false sends no picture back, so it needs outputPath to save one to; without it the capture would answer nothing to look at.',
+        'inline: false sends no picture back, so it needs outputPath to save one to. Without it the capture would answer nothing to look at.',
         [
           'Pass outputPath, an absolute path ending in .png outside the project',
           'Or leave inline out to have the picture sent',
@@ -16558,7 +16561,7 @@ class GodotServer {
         sent === null
           ? '. Not sent, as inline: false asked'
           : sent.mimeType === 'image/jpeg'
-            ? `. Sent as JPEG, ${kilobytes(sent.bytes)} against the PNG's ${kilobytes(sent.pngBytes)}${saveTo === null ? '' : '; the saved PNG is lossless'}`
+            ? `. Sent as JPEG, ${kilobytes(sent.bytes)} against the PNG's ${kilobytes(sent.pngBytes)}${saveTo === null ? '' : ', and the saved PNG is lossless'}`
             : '';
       return {
         content: [

@@ -246,7 +246,7 @@ func _check_reading_calls_take_literal_arguments() -> void:
 		_fail("and none of them ran: day %s, named %s" % [str(game.get("day")), game.name])
 	var unmarked: Dictionary = await _read("/root/Game", "get_tree_string()")
 	if not str(unmarked.get("message", "")).ends_with(
-		"only calls methods that read; runtime_invoke call calls it"
+		"only calls methods that read. runtime_invoke call calls it"
 	):
 		_fail(
 			"an unmarked engine method's refusal names the tool that calls it: %s" % str(unmarked)
@@ -278,7 +278,7 @@ func _check_a_returned_object_is_read() -> void:
 		some.get("result_properties") != { "dead_allowed": true, "terms:0": "first" }
 		or missing.size() != 1
 		or not str(missing[0]).ends_with(
-			"has no property nope; its script declares dead_allowed, terms, title"
+			"has no property nope. Its script declares dead_allowed, terms, title"
 		)
 	):
 		_fail("named paths are read off it, and one not there is listed: %s" % str(some))
@@ -332,7 +332,7 @@ func _check_each_returned_object_is_read() -> void:
 		)
 		or missing.size() != 2
 		or not str(missing[0]).begins_with("[lamp] ")
-		or not str(missing[0]).ends_with("has no property nope; its script declares id, worth")
+		or not str(missing[0]).ends_with("has no property nope. Its script declares id, worth")
 		or not str(missing[1]).begins_with("[rope] ")
 	):
 		_fail(

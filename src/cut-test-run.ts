@@ -98,5 +98,5 @@ export function cutTestRunNote(run: CutTestRun): string {
     finished === 0
       ? 'before any suite had finished'
       : `after ${finished === 1 ? 'one suite' : `${finished} suites`} had finished${failing === 0 ? '' : finished === 1 ? ', with failures' : `, ${failing} of them with failures`}`;
-  return `The test run before this one in this project, of ${run.paths.join(', ')}, was cut off by its client at ${run.cutAt} ${got}${run.suiteRunning === undefined ? '' : `, while ${run.suiteRunning} was running`}; what it finished is under previousRunCut.`;
+  return `The test run before this one in this project, of ${run.paths.join(', ')}, was cut off by its client at ${run.cutAt} ${got}${run.suiteRunning === undefined ? '' : `, while ${run.suiteRunning} was running`}. What it finished is under previousRunCut.`;
 }

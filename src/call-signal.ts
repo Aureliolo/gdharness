@@ -44,7 +44,7 @@ export const CALL_HEARTBEAT_MS = 20_000;
 export function stillGoingSaid(tool: string, op: string | null, elapsedMs: number): string {
   const seconds = Math.floor(elapsedMs / 1000);
   const took = seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
-  return `${op === null || op === '' ? tool : `${tool} ${op}`} is still going; ${took} in.`;
+  return `${op === null || op === '' ? tool : `${tool} ${op}`} is still going, ${took} in.`;
 }
 
 /** What a call says, and how often, when it has said nothing else for that long. */

@@ -801,9 +801,9 @@ function readsItsOwnValue(ending: string): void {
     `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_the_sentence_alone${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 9ms${e}[0m`,
     `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
     `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
-    ` '${e}[38;2;30;144;255meach lamp you light is 1 brighter, for everyAstragon you have lit tonight${e}[0m'`,
+    ` '${e}[38;2;30;144;255meach lamp you light is 1 brighter, for every Astragon you have lit tonight${e}[0m'`,
     ` but was`,
-    ` '${e}[38;2;30;144;255meach lamp you light is 1 brighter, for every${e}[48;2;38;0;0m${e}[38;2;255;255;255mA${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255ms${e}[48;2;38;0;0m${e}[38;2;255;255;255mtragon${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mpell${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m you have lit tonight${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_the_sentence_alone' in res://mixed/mixed_test.gd:12${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+    ` '${e}[38;2;30;144;255meach lamp you light is 1 brighter, for every ${e}[48;2;38;0;0m${e}[38;2;255;255;255mA${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255ms${e}[48;2;38;0;0m${e}[38;2;255;255;255mtragon${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mpell${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m you have lit tonight${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_the_sentence_alone' in res://mixed/mixed_test.gd:12${e}[0m${e}[38;2;128;128;128m${e}[0m`,
     `${e}[38;2;128;128;128m${e}[0m`,
     `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_a_mismatch_string_first${e}[0m${e}[38;2;34;139;34m STARTED${e}[0m${e}[38;2;128;128;128m${e}[0m`,
     `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_a_mismatch_string_first${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 9ms${e}[0m`,
@@ -816,14 +816,14 @@ function readsItsOwnValue(ending: string): void {
     `  ${e}[38;2;250;235;215mres://mixed/mixed_test.gd${e}[0m${e}[38;2;128;128;128m > ${e}[0m${e}[38;2;250;235;215mtest_the_sentence_after_others${e}[0m${e}[38;2;178;34;34m${e}[1m FAILED${e}[0m${e}[38;2;100;149;237m 9ms${e}[0m`,
     `  ${e}[38;2;0;206;209m${e}[1m${e}[4mReport:${e}[0m`,
     `  ${e}[38;2;128;128;128m${e}[38;2;255;69;0mExpecting:${e}[0m`,
-    ` '${e}[38;2;30;144;255meach lamp you light is 1 brighter, for everyAstragon you have lit tonight${e}[0m'`,
+    ` '${e}[38;2;30;144;255meach lamp you light is 1 brighter, for every Astragon you have lit tonight${e}[0m'`,
     ` but was`,
-    ` '${e}[38;2;30;144;255meach lamp you light is 1 brighter, for every${e}[48;2;38;0;0m${e}[38;2;255;255;255mA${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255ms${e}[48;2;38;0;0m${e}[38;2;255;255;255mtragon${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mpell${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m you have lit tonight${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_the_sentence_after_others' in res://mixed/mixed_test.gd:20${e}[0m${e}[38;2;128;128;128m${e}[0m`,
+    ` '${e}[38;2;30;144;255meach lamp you light is 1 brighter, for every ${e}[48;2;38;0;0m${e}[38;2;255;255;255mA${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255ms${e}[48;2;38;0;0m${e}[38;2;255;255;255mtragon${e}[0m${e}[38;2;30;144;255m${e}[48;2;38;0;0m${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[38;2;255;255;255mpell${e}[0m${e}[38;2;30;144;255m${e}[48;2;0;38;0m${e}[0m${e}[38;2;30;144;255m you have lit tonight${e}[0m'${e}[0m${e}[38;2;173;216;230m\tat 'test_the_sentence_after_others' in res://mixed/mixed_test.gd:20${e}[0m${e}[38;2;128;128;128m${e}[0m`,
     `${e}[38;2;128;128;128m${e}[0m`,
   ].join(ending);
-  const wanted = 'each lamp you light is 1 brighter, for everyAstragon you have lit tonight';
-  const found = 'each lamp you light is 1 brighter, for everyspell you have lit tonight';
-  const merged = 'each lamp you light is 1 brighter, for everyAstragonpell you have lit tonight';
+  const wanted = 'each lamp you light is 1 brighter, for every Astragon you have lit tonight';
+  const found = 'each lamp you light is 1 brighter, for every spell you have lit tonight';
+  const merged = 'each lamp you light is 1 brighter, for every Astragonpell you have lit tonight';
   const at = (name: string, line: number): string => `\tat '${name}' in res://mixed/mixed_test.gd:${line}`;
   const arrayDetail = `Expecting:\n '[0, 75, 150]'\n but was\n '[0, 55, 110]'\n\nDifferences found:\nIndex\tCurrent\tExpected\t1\t55\t75\t2\t110\t150\t\n${at('test_a_array_failure_first', 8)}`;
   const emptyDetail = `Expecting:\n must be empty but was\n 'wanted 25, got 15'\n${at('test_a_mismatch_string_first', 16)}`;
@@ -1031,14 +1031,14 @@ function testFinishedSuitesAreReadOffTheConsole(): void {
   assert.equal(suitesPrinted(ended).running, null);
   assert.equal(
     testProgressMessage(printed, 125_400),
-    '2 suites have finished, 1 with failures; running res://test/c_test.gd; 2m 5s in.',
+    '2 suites have finished, 1 with failures, running res://test/c_test.gd, 2m 5s in.',
   );
   assert.equal(
     testProgressMessage(printed.slice(0, 4), 9_999),
-    'No suite has finished; running res://test/a_test.gd; 9s in.',
+    'No suite has finished, running res://test/a_test.gd, 9s in.',
   );
-  assert.equal(testProgressMessage(printed.slice(0, 7), 30_000), 'One suite has finished; 30s in.');
-  assert.equal(testProgressMessage([], 1_000), 'No suite has finished; 1s in.');
+  assert.equal(testProgressMessage(printed.slice(0, 7), 30_000), 'One suite has finished, 30s in.');
+  assert.equal(testProgressMessage([], 1_000), 'No suite has finished, 1s in.');
 }
 
 testWhatGdUnitWrites();

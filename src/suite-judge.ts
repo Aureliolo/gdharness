@@ -841,7 +841,7 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
     faults.push(
       error.suite === null
         ? `an engine ${error.warning ? 'warning' : 'error'} outside every suite: ${error.text}`
-        : `an engine ${error.warning ? 'warning' : 'error'} in ${error.suite} > ${error.during ?? ''}: ${error.text}; ${declaringAdvice(error.during ?? '', error.warning)}`,
+        : `an engine ${error.warning ? 'warning' : 'error'} in ${error.suite} > ${error.during ?? ''}: ${error.text}${error.text.endsWith('.') ? '' : '.'} ${declaringAdvice(error.during ?? '', error.warning)}`,
     );
     if (error.suite === null) {
       unattributed += 1;
@@ -974,7 +974,7 @@ function linesShown(lines: readonly string[], picked: ReadonlySet<number>, cutSh
 
 /** What to do about an error, or a [param warning], printed during [param during] that its suite did not declare. */
 export function declaringAdvice(during: string, warning = false): string {
-  return `if the suite prints it on purpose, list its text under "${funcOf(during)}" in the suite's ${warning ? 'GDHARNESS_EXPECTED_WARNINGS' : 'GDHARNESS_EXPECTED_ERRORS'}`;
+  return `If the suite prints it on purpose, list its text under "${funcOf(during)}" in the suite's ${warning ? 'GDHARNESS_EXPECTED_WARNINGS' : 'GDHARNESS_EXPECTED_ERRORS'}`;
 }
 
 /**

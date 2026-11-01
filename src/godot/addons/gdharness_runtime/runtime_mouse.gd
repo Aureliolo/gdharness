@@ -29,7 +29,7 @@ static func point_in(params: Dictionary, node: Node, node_path: String, has_item
 	if node is Node3D:
 		return (
 			(
-				"%s is a 3D node, clicked where it is drawn; x and y name a point in a Control's "
+				"%s is a 3D node, clicked where it is drawn. x and y name a point in a Control's "
 				+ "own space"
 			)
 			% node_path
@@ -192,7 +192,7 @@ static func outside_noted(
 					"%s is outside %s viewport, %s in window pixels, so no control there receives"
 					% [point, which, shown]
 				)
-				+ " it; the game's _input and _unhandled_input still do."
+				+ " it. The game's _input and _unhandled_input still do."
 			)
 			break
 	return answer
@@ -270,7 +270,7 @@ static func takes_no_click(control: Control, node_path: String, paused: bool) ->
 	if not control.can_process():
 		var why: String = GdhTargets.why_it_does_not_process(control, node_path)
 		var over: Node = GdhTargets.drawn_over(control)
-		var cover: String = "" if over == null else "; %s is drawn over it" % over.get_path()
+		var cover: String = "" if over == null else ", and %s is drawn over it" % over.get_path()
 		if paused:
 			return (
 				(

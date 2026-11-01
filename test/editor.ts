@@ -1728,7 +1728,7 @@ async function testAPathWritesOneComponent({ call, refusal, project }: Editor): 
 
   assert.match(
     await refusal('scene_node', set({ 'position:z': 1 })),
-    /Sprite2D\.position is a Vector2, so it has no z; it has x, y/,
+    /Sprite2D\.position is a Vector2, so it has no z\. It has x, y/,
     'a component the value does not have is refused, naming the ones it has',
   );
   assert.match(
@@ -2524,7 +2524,7 @@ async function testResourcesOnNodes({ call, refusal, project }: Editor): Promise
       nodePath: 'Map',
       cells: [{ coords: { x: 5, y: 5 }, sourceId: 7, atlasCoords: { x: 0, y: 0 } }],
     }),
-    /names source 7, and the TileSet has source 0; sourceId -1 erases a cell\. Nothing was placed\./,
+    /names source 7, and the TileSet has source 0\. sourceId -1 erases a cell\. Nothing was placed\./,
     'a cell from a source the tile set has not should be refused',
   );
 
@@ -3048,18 +3048,18 @@ async function testASetIsReadBack({ call, refusal, project }: Editor): Promise<v
 
   assert.match(
     await refusal('scene_node', { ...scene, op: 'add', nodeType: 'Node', nodeName: 'Clock' }),
-    /: The root, \w+, already has a child named Clock; Clock2 is free there\.$/m,
+    /: The root, \w+, already has a child named Clock\. Clock2 is free there\.$/m,
   );
   assert.match(
     await refusal('scene_node', { ...scene, op: 'add', nodeType: 'Node', nodeName: 'a.b' }),
-    /a\.b is not a name a node can have; Godot would save it as a_b/,
+    /a\.b is not a name a node can have\. Godot would save it as a_b/,
   );
   assert.match(await refusal('scene_node', set('Bar', { name: 'Clock' })), /already has a child named Clock/);
   assert.equal(get(await call('scene_node', set('Bar', { name: 'Gauge' })), 'nodePath'), 'Gauge');
 
   assert.match(
     await refusal('scene_node', set('.', { Visibility: false })),
-    /: Node2D has no property Visibility; the nearest it has are visibility_layer, visible\.$/,
+    /: Node2D has no property Visibility\. The nearest it has are visibility_layer, visible\.$/,
   );
   await call('scene_node', { ...scene, op: 'add', nodeType: 'AudioStreamPlayer', nodeName: 'Speaker' });
   assert.match(
@@ -3222,7 +3222,7 @@ async function testSignalsAreTheFilesOwn({ call, refusal, project }: Editor): Pr
   // every one, the node's own class's first, since those are the ones it was made for.
   assert.match(
     await refusal('scene_signal', { ...ends, signalName: 'presed', op: 'connect', methodName: 'queue_free' }),
-    /Go has no signal presed; the nearest it has (?:is|are) pressed\b/,
+    /Go has no signal presed\. The nearest it has (?:is|are) pressed\b/,
   );
   const every = await refusal('scene_signal', {
     ...ends,
@@ -3230,8 +3230,8 @@ async function testSignalsAreTheFilesOwn({ call, refusal, project }: Editor): Pr
     op: 'connect',
     methodName: 'queue_free',
   });
-  assert.match(every, /Go has no signal qwxz; it has /, every);
-  const offered = (every.split('; it has ')[1] ?? '').replace(/\.$/, '').split(', ');
+  assert.match(every, /Go has no signal qwxz\. It has /, every);
+  const offered = (every.split('. It has ')[1] ?? '').replace(/\.$/, '').split(', ');
   assert.ok(
     ['toggled', 'resized', 'tree_entered'].every((name) => offered.includes(name)),
     `every signal is offered: ${every}`,
@@ -3507,7 +3507,7 @@ async function testAnimationEditsLandWhereKept({ call, refusal, project }: Edito
       fromState: 'Start',
       toState: 'End',
     }),
-    'The editor answered scene_animation disconnect_states with an error: There is no transition from Start to End; the ones leaving Start go to Waiting.',
+    'The editor answered scene_animation disconnect_states with an error: There is no transition from Start to End. The ones leaving Start go to Waiting.',
   );
   const dropped = await call('scene_animation', { ...states, op: 'remove_state', stateName: 'Waiting' });
   assert.deepEqual(
@@ -3620,7 +3620,7 @@ async function testTilesDrawWhatTheyName({ call, refusal, project }: Editor): Pr
   assert.match(nodeBody(fileText(project, 'tiles/map.tscn'), 'Ground'), /tile_map_data = PackedByteArray/);
   assert.match(
     await refusal('scene_node', cell({ x: 1, y: 0 })),
-    /cells\[0\] at \(0, 0\): source 0 has no tile at \(1, 0\); it has tiles at \(0, 0\)\. Nothing was placed\./,
+    /cells\[0\] at \(0, 0\): source 0 has no tile at \(1, 0\)\. It has tiles at \(0, 0\)\. Nothing was placed\./,
   );
   // The cells read back as cells, in the form set_tilemap_cells takes, rather than as the packed
   // bytes the scene stores them in.
@@ -3790,7 +3790,7 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
   );
   assert.match(
     await refusal('scene_node', { ...scene, op: 'add', nodeType: 'Timer2', nodeName: 'Late' }),
-    /nodeType must be a node class or a class_name in the project's class list, and Timer2 is neither; the nearest (is|are) [^.]*\bTimer\b/,
+    /nodeType must be a node class or a class_name in the project's class list, and Timer2 is neither\. The nearest (is|are) [^.]*\bTimer\b/,
   );
   assert.match(
     await refusal('scene_node', { ...scene, op: 'duplicate', nodePath: '.', newName: 'Again' }),
@@ -5306,7 +5306,7 @@ async function testAMemberRenameWaitsForTheClassesItTypesBy({
   try {
     assert.match(
       await refusal('script_edit', rename),
-      /^Nothing was renamed: Gauge is a class this project declares that the editor has not loaded, so its language server cannot tell the type of a value of it, and a use of level through one would be left as it was\. editor_rescan brings it in; rename after it\./,
+      /^Nothing was renamed: Gauge is a class this project declares that the editor has not loaded, so its language server cannot tell the type of a value of it, and a use of level through one would be left as it was\. editor_rescan brings it in\. Rename after it\./,
     );
     assert.equal(readFileSync(join(dir, 'gauge.gd'), 'utf8'), gauge, 'and nothing was written');
     assert.equal(readFileSync(join(dir, 'reader.gd'), 'utf8'), reader, 'in either file');
@@ -6010,7 +6010,7 @@ async function testTheLspCommandBridgesToTheEditor({ project, lspPort }: Editor)
     assert.match(
       refused.stderr,
       new RegExp(
-        `no language server of .+ answered in 0 s\\.\\n {2}port ${String(lspPort)} \\(--port\\): The language server on port ${String(lspPort)} belongs to the editor of .+; no editor of .+ answers there\\.`,
+        `no language server of .+ answered in 0 s\\.\\n {2}port ${String(lspPort)} \\(--port\\): The language server on port ${String(lspPort)} belongs to the editor of .+\\. No editor of .+ answers there\\.`,
       ),
       refused.stderr,
     );
@@ -7323,7 +7323,7 @@ async function testAPlayedRunsConsoleArrivesOnItsOwn({ call, play, project }: Ed
   );
   assert.match(
     text(get(ended, 'note')),
-    /is not the editor's to stop and was not signalled; andChildren ends/,
+    /is not the editor's to stop and was not signalled\. andChildren ends/,
     `and what a stop does not reach is said, with the argument that reaches it: ${text(ended)}`,
   );
 }

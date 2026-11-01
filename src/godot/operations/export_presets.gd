@@ -173,7 +173,7 @@ func add_export_preset(params: Dictionary) -> Dictionary:
 				(
 					(
 						"There is already an export preset named '%s', for %s, %s. "
-						+ "project_export run exports with it; give another name to add a second."
+						+ "project_export run exports with it. Give another name to add a second."
 					)
 					% [preset_name, config.get_value(held, "platform", ""), to]
 				)
@@ -687,7 +687,7 @@ static func _preset_named(preset_name: String) -> Variant:
 	if preset_name.is_empty():
 		return "preset is required: the name of the preset in export_presets.cfg"
 	if not FileAccess.file_exists(PRESETS_FILE):
-		return "This project has no export_presets.cfg; project_export add_preset adds a preset."
+		return "This project has no export_presets.cfg. project_export add_preset adds a preset."
 	var config: ConfigFile = ConfigFile.new()
 	var loading: Error = config.load(PRESETS_FILE)
 	if loading != OK:
@@ -733,7 +733,7 @@ static func _files_for(filter: String, given: Variant) -> Variant:
 	if not not_scenes.is_empty():
 		return (
 			(
-				"Nothing was written: export_filter scenes lists scenes, and %s %s not one; "
+				"Nothing was written: export_filter scenes lists scenes, and %s %s not one. "
 				+ "resources lists any file."
 			)
 			% [", ".join(not_scenes), "is" if not_scenes.size() == 1 else "are"]
@@ -859,7 +859,7 @@ static func _fitted(name: String, value: Variant, option: Dictionary) -> Variant
 		return {
 			"refused":
 			(
-				"%s is a %s, which this tool does not write; the editor's Export dialog does."
+				"%s is a %s, which this tool does not write. The editor's Export dialog does."
 				% [name, type_string(type)]
 			),
 		}

@@ -63,11 +63,11 @@ static func change(scene: GdhSceneFile, node: Node, adding: Array, removing: Arr
 		if not node.is_in_group(name):
 			var held: Array = _sorted(node.get_groups())
 			return (
-				"%s is in no group %s; %s."
+				"%s is in no group %s. %s."
 				% [
 					node.name,
 					name,
-					"it is in " + ", ".join(held) if not held.is_empty() else "it is in none",
+					"It is in " + ", ".join(held) if not held.is_empty() else "It is in none",
 				]
 			)
 		if not here.has(name):

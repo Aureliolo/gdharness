@@ -146,7 +146,7 @@ export function withNotCompiled(note: string, entries: readonly LogEntry[]): str
   const path = entries.map(notCompiledIn).find((found) => found !== undefined);
   return path === undefined
     ? note
-    : `${note} ${path} did not compile, so every run of this project starts its autoloads without it until it is fixed; its errors are among these.`;
+    : `${note} ${path} did not compile, so every run of this project starts its autoloads without it until it is fixed. Its errors are among these.`;
 }
 
 /**

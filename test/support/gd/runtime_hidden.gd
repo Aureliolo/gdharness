@@ -104,8 +104,8 @@ func _check_a_tab_under_a_hidden_hall() -> void:
 	hall.visible = false
 	var hidden: Dictionary = await input.click({ "path": TAB })
 	var expected: String = (
-		"%s is not visible (/root/Main/Hall is hidden;" % TAB
-		+ " /root/Main/Menu is shown beside /root/Main/Hall), so nothing can click it"
+		"%s is not visible (/root/Main/Hall is hidden," % TAB
+		+ " and /root/Main/Menu is shown beside /root/Main/Hall), so nothing can click it"
 	)
 	if not _says(hidden, expected) or _presses("Tab") != 0:
 		_fail(
@@ -120,12 +120,12 @@ func _check_a_tab_under_a_hidden_hall() -> void:
 		if beside.size() == 1:
 			var two: Dictionary = await input.click({ "path": TAB })
 			if not _says(
-				two, "; /root/Main/Menu and /root/Main/Ledger are shown beside /root/Main/Hall)"
+				two, ", and /root/Main/Menu and /root/Main/Ledger are shown beside /root/Main/Hall)"
 			):
 				_fail("two shown beside the hall are both named: %s" % JSON.stringify(two))
 	var four: Dictionary = await input.click({ "path": TAB })
 	var counted: String = (
-		"; /root/Main/Menu, /root/Main/Ledger, /root/Main/Purse"
+		", and /root/Main/Menu, /root/Main/Ledger, /root/Main/Purse"
 		+ " and 1 more are shown beside /root/Main/Hall)"
 	)
 	if not _says(four, counted):
@@ -146,8 +146,8 @@ func _check_a_tab_under_a_hidden_hall() -> void:
 	var nested: Dictionary = await input.click({ "path": TAB })
 	rail.visible = true
 	var outer: String = (
-		"(/root/Main/Hall/Rail is hidden, and /root/Main/Hall is hidden too;"
-		+ " /root/Main/Menu is shown beside /root/Main/Hall)"
+		"(/root/Main/Hall/Rail is hidden, and /root/Main/Hall is hidden too,"
+		+ " and /root/Main/Menu is shown beside /root/Main/Hall)"
 	)
 	if not _says(nested, outer):
 		_fail("what is shown is read beside the outermost hidden node: %s" % JSON.stringify(nested))
@@ -202,8 +202,8 @@ func _check_a_screen_drawn_over_a_hidden_one() -> void:
 	screen.visible = false
 	var covered: Dictionary = await input.click({ "path": "/root/Shown/Hall/Screen/Books" })
 	var expected: String = (
-		"/root/Shown/Hall/Screen/Books is not visible (/root/Shown/Hall/Screen is hidden;"
-		+ " a click where it would be reaches /root/Shown/Menu/Resume), so nothing can click it"
+		"/root/Shown/Hall/Screen/Books is not visible (/root/Shown/Hall/Screen is hidden,"
+		+ " and a click where it would be reaches /root/Shown/Menu/Resume), so nothing can click it"
 	)
 	if not _says(covered, expected) or _presses("Books") != 0 or _presses("Resume") != 0:
 		_fail(
@@ -222,9 +222,10 @@ func _check_a_screen_drawn_over_a_hidden_one() -> void:
 	var under: Dictionary = await input.click({ "path": "/root/Shown/Hall/Screen/Books" })
 	dialog.queue_free()
 	await process_frame
-	if not _says(
-		under, "(/root/Shown/Hall/Screen is hidden; a click where it would be reaches /root/Dialog)"
-	):
+	var drawn_there: String = (
+		"(/root/Shown/Hall/Screen is hidden, and a click where it would be reaches /root/Dialog)"
+	)
+	if not _says(under, drawn_there):
 		_fail("a dialog over a hidden tab is what is drawn there: %s" % JSON.stringify(under))
 	screen.visible = true
 	var reached: Dictionary = await input.click({ "path": "/root/Shown/Hall/Screen/Books" })
@@ -247,8 +248,8 @@ func _check_a_button_on_a_hidden_layer() -> void:
 	await process_frame
 	var on_layer: Dictionary = await input.click({ "path": "/root/Layer/Drawn" })
 	var by_layer: String = (
-		"/root/Layer/Drawn is not visible (/root/Layer is hidden;"
-		+ " /root/Beside is shown beside /root/Layer), so nothing can click it"
+		"/root/Layer/Drawn is not visible (/root/Layer is hidden,"
+		+ " and /root/Beside is shown beside /root/Layer), so nothing can click it"
 	)
 	if not _says(on_layer, by_layer) or _presses("Drawn") != 0:
 		_fail("a button on a hidden canvas layer names the layer: %s" % JSON.stringify(on_layer))
@@ -282,7 +283,7 @@ func _check_buttons_offered_for_words_nobody_shows() -> void:
 	lid.size = Vector2(32, 32)
 	await process_frame
 	var refused: Dictionary = await input.click({ "says": "Back" })
-	var offered: String = str(refused.get("message", "")).get_slice("the buttons on screen say ", 1)
+	var offered: String = str(refused.get("message", "")).get_slice("The buttons on screen say ", 1)
 	if not _says(refused, "1 hidden control says it") or offered != '"Play", "Quit"':
 		_fail(
 			"words only a hidden control says offer what is on screen: %s" % JSON.stringify(refused)
