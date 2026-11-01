@@ -69040,6 +69040,14 @@ async function testAHeadlessWriteSavesWhatTheEditorWould(): Promise<void> {
     'room.tscn':
       '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://panel.tscn" id="1_panel"]\n\n' +
       '[node name="Room" type="Node2D"]\n\n[node name="PanelA" parent="." instance=ExtResource("1_panel")]\n',
+    // A script that builds a child of its own, which a headless engine runs and the editor does not.
+    'shaded.gd':
+      'class_name Shaded\nextends Node\n\n\nfunc _init() -> void:\n\tvar shade := Panel.new()\n\tshade.name = "Shade"\n\tadd_child(shade)\n',
+    'layer.tscn': '[gd_scene format=3]\n\n[node name="Layer" type="CanvasLayer"]\n',
+    'hall.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://shaded.gd" id="1_shaded"]\n\n' +
+      '[node name="Hall" type="Node"]\n\n[node name="Held" type="Node" parent="."]\nscript = ExtResource("1_shaded")\n\n' +
+      '[node name="Shelf" type="Node" parent="."]\n\n[node name="Book" type="Node" parent="Shelf"]\n',
   };
   for (const [path, content] of Object.entries(files)) {
     writeFileSync(join(project, path), content);
@@ -69096,6 +69104,50 @@ async function testAHeadlessWriteSavesWhatTheEditorWould(): Promise<void> {
       get(back, 'notStored'),
       ['position'],
       `and at the default nothing does: ${JSON.stringify(back)}`,
+    );
+
+    // The children a script's _init builds are its own, made again at run time, and never saved.
+    const node = async (args: Record<string, unknown>): Promise<unknown> => {
+      const result = await server.request(
+        'tools/call',
+        { name: 'scene_node', arguments: { projectPath: project, ...args } },
+        240_000,
+      );
+      const parsed = parseTextContent(result);
+      assert.ok(parsed !== null, `scene_node answered: ${JSON.stringify(result)}`);
+      return parsed;
+    };
+    const nodesIn = (file: string): string[] =>
+      [...fileOf(file).matchAll(/^\[node name="([^"]+)"/gm)].map((found) => found[1] ?? '');
+    const added = await node({
+      op: 'add',
+      scenePath: 'layer.tscn',
+      parentNodePath: '.',
+      nodeType: 'Shaded',
+      nodeName: 'Pause',
+    });
+    assert.equal(get(added, 'nodePath'), 'Pause', JSON.stringify(added));
+    assert.deepEqual(nodesIn('layer.tscn'), ['Layer', 'Pause'], fileOf('layer.tscn'));
+    const moved2 = await node({
+      op: 'reparent',
+      scenePath: 'hall.tscn',
+      nodePath: 'Held',
+      newParentPath: 'Shelf',
+    });
+    assert.equal(get(moved2, 'newNodePath'), 'Shelf/Held', JSON.stringify(moved2));
+    assert.deepEqual(nodesIn('hall.tscn'), ['Hall', 'Shelf', 'Book', 'Held'], fileOf('hall.tscn'));
+    // A duplicate still owns the children the scene holds, and not those the copy's script builds.
+    const copied = await node({
+      op: 'duplicate',
+      scenePath: 'hall.tscn',
+      nodePath: 'Shelf',
+      newName: 'Shelf2',
+    });
+    assert.equal(get(copied, 'newNodePath'), 'Shelf2', JSON.stringify(copied));
+    assert.deepEqual(
+      nodesIn('hall.tscn'),
+      ['Hall', 'Shelf', 'Book', 'Held', 'Shelf2', 'Book', 'Held'],
+      fileOf('hall.tscn'),
     );
   } finally {
     await server.stop();
