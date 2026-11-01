@@ -23899,11 +23899,12 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     assert.deepEqual(
       [
         get(scriptsCheck, 'passed'),
-        get(scriptsCheck, 'compile_checked'),
+        get(scriptsCheck, 'compiled'),
         asArray(get(scriptsCheck, 'details')).length,
       ],
-      [false, 6, 3],
-      `every script compiled, each failure a detail: ${shownInfo}`,
+      // Six scripts, three of which fail: compiled counts the three that compiled.
+      [false, 3, 3],
+      `the scripts that compiled, each failure a detail: ${shownInfo}`,
     );
     assert.ok(
       asArray(get(scriptsCheck, 'details')).includes(
@@ -57739,6 +57740,25 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     const lit = await material('res://glow.tres', { 'shader_parameter/glow_power': 1.5 });
     assert.ok(parseTextContent(lit) !== null, textOf(lit) ?? JSON.stringify(lit));
     assert.match(readFileSync(join(project, 'glow.tres'), 'utf8'), /^shader_parameter\/glow_power = 1\.5$/m);
+    assert.equal(get(parseTextContent(lit), 'alsoSaved'), undefined, textOf(lit) ?? '');
+    // The engine loads only the uniforms the shader declares, so a renamed one's value is in the
+    // file and nowhere else, and the next save drops it.
+    writeFileSync(
+      join(project, 'glow.gdshader'),
+      'shader_type canvas_item;\n\nuniform float glow_strength : hint_range(0.0, 2.0) = 1.0;\nuniform vec4 tint : source_color;\n',
+    );
+    const tinted = await material('res://glow.tres', {
+      'shader_parameter/tint': { _type: 'Color', r: 1, g: 0, b: 0, a: 1 },
+    });
+    assert.deepEqual(
+      get(parseTextContent(tinted), 'alsoSaved'),
+      [{ property: 'shader_parameter/glow_power', was: '1.5' }],
+      textOf(tinted) ?? JSON.stringify(tinted),
+    );
+    assert.match(
+      readFileSync(join(project, 'glow.tres'), 'utf8'),
+      /^shader_parameter\/tint = Color\(1, 0, 0, 1\)$/m,
+    );
 
     // A resource built into a file is a new object each time the file loads, and the check that a
     // save kept what was set compared objects, so every one written into a resource file was

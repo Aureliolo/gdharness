@@ -333,8 +333,50 @@ func modify_resource(args: Dictionary) -> Dictionary:
 	if not failed.is_empty():
 		return { "ok": false, "error": failed }
 	_note_put_back(answer, resource, res_path)
+	var also: Array[Dictionary] = _also_saved(
+		resource, res_path, properties.keys(), previous, answer
+	)
+	if not also.is_empty():
+		answer["alsoSaved"] = also
 	answer["properties"] = _held(resource, properties.keys())
 	return answer
+
+
+## Each line of the main resource the save at [param path] changed or dropped that the call did not
+## ask for, as {property, was, saved} in the file's own text, was left out where [param previous]
+## set nothing and saved where the save sets nothing. The engine saves only what it loaded, so a
+## line it does not load, such as a shader parameter whose uniform was renamed or a variable a
+## script no longer declares, goes with the first save after it.
+func _also_saved(
+	resource: Resource, path: String, names: Array, previous: Variant, answer: Dictionary
+) -> Array[Dictionary]:
+	var noted: Array[Dictionary] = []
+	if not previous is PackedByteArray or not path.ends_with(".tres"):
+		return noted
+	var bytes: PackedByteArray = previous
+	var asked: Dictionary = {}
+	var changed: Dictionary = answer.get("alsoChanged", {})
+	var told: Array = names + _properties.moved_by_engine.keys() + changed.keys()
+	for key: Variant in told:
+		asked[str(key)] = true
+		asked[str(key).get_slice(":", 0)] = true
+	var after: String = FileAccess.get_file_as_string(path)
+	for change: Array in GdhHeadlessCheck.main_changes(bytes.get_string_from_utf8(), after, asked):
+		var property: String = str(change[0])
+		var was: Variant = change[2] if change[1] else null
+		if GdhHeadlessCheck.reads_the_same(
+			was,
+			change[3],
+			GdhHeadlessCheck.default_of(resource, property),
+		):
+			continue
+		var entry: Dictionary = { "property": property }
+		if change[1]:
+			entry["was"] = change[2]
+		if change[3] != null:
+			entry["saved"] = change[3]
+		noted.append(entry)
+	return noted
 
 
 ## Moves to setByScript each property alsoChanged in [param answer] gave a value [param resource] no
