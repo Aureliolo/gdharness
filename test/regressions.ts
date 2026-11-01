@@ -57426,6 +57426,7 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
       [false, [{ line: 5, message: "Expected a ';'." }]],
       JSON.stringify(broken),
     );
+    assert.equal(get(broken, 'engine_messages'), undefined, 'and only there');
     assert.ok(existsSync(join(project, 'broken.gdshader')), 'the shader is written as given');
     const empty = await answered({
       op: 'create_shader',
@@ -57444,6 +57445,7 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
       ['Shader', false, [{ line: 5, message: "Expected a ';'." }]],
       JSON.stringify(reread),
     );
+    assert.equal(get(reread, 'engine_messages'), undefined, 'and only there');
     const plainRead = await answered({ op: 'read', resourcePath: 'res://plain.gdshader' });
     assert.deepEqual(
       [get(plainRead, 'compiles'), get(plainRead, 'compileErrors')],
