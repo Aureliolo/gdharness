@@ -66517,6 +66517,8 @@ async function testAnAnimationIsRenamedAndRemovedWithNoEditor(): Promise<void> {
       ['kit/walk', 'kit'],
       JSON.stringify(kit),
     );
+    // The library is the call's own change, so it is not among the lines it did not ask for.
+    assert.equal(get(kit, 'alsoSaved'), undefined, JSON.stringify(kit));
     assert.match(
       fileOf('moves.tscn'),
       /\nlibraries\/kit = SubResource\("AnimationLibrary_/,
