@@ -125,7 +125,7 @@ func play_scene(args: Dictionary) -> Dictionary:
 ## with put in front when [param hidden] says the editor is there: the server's `hiddenWindowFlags`
 ## gives the reason. Nothing is added for a game the arguments already play headless, and no cap
 ## where [param capped] says the project sets one or the arguments do. In front because a `--` in
-## them makes everything after it the game's own; after `%command%` when they hold one, since what
+## them makes everything after it the game's own. After `%command%` when they hold one, since what
 ## goes before it is the command that runs the engine.
 static func with_hidden_window_flags(held: String, hidden: bool, capped: bool) -> String:
 	var words: PackedStringArray = held.split(" ", false)
@@ -284,7 +284,7 @@ func quit_editor(_args: Dictionary) -> Dictionary:
 ## started again, so the answer carries the first attempt's reason as well as the next one's.
 ##
 ## The debug adapter binds as its node enters the tree, which is early in the editor's start and
-## seconds before the language server, and does not try again; taking its node out of the tree and
+## seconds before the language server, and does not try again. Taking its node out of the tree and
 ## putting it back runs that start once more. The language server starts on the editor's first
 ## frame after it is ready and only once, so re-entering the tree would stop it for good, and it is
 ## never touched here.

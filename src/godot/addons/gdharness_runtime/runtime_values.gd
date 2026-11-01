@@ -226,16 +226,16 @@ static func no_action(action: String) -> String:
 	)
 	if not close.is_empty():
 		return (
-			"%s; the nearest %s %s."
+			"%s. The nearest %s %s."
 			% [said, "is" if close.size() == 1 else "are", ", ".join(close)]
 		)
 	if own.is_empty():
 		return (
-			"%s; the project defines no actions of its own, and the engine's are the ui_ ones."
+			"%s. The project defines no actions of its own, and the engine's are the ui_ ones."
 			% said
 		)
 	return (
-		"%s; the project's own actions are %s, beside the engine's ui_ ones."
+		"%s. The project's own actions are %s, beside the engine's ui_ ones."
 		% [said, ", ".join(own)]
 	)
 
@@ -246,7 +246,7 @@ static func no_action(action: String) -> String:
 static func actions_of(event: InputEvent) -> Array[String]:
 	var named: Array[String] = []
 	# A motion matches every action on its axis, either way and at any distance, which would name
-	# ui_left for a stick held right; Input presses only those its direction reaches past their
+	# ui_left for a stick held right. Input presses only those its direction reaches past their
 	# deadzone.
 	var moved: bool = event is InputEventJoypadMotion
 	for action: StringName in InputMap.get_actions():
@@ -291,7 +291,7 @@ static func focus_noted(said: Dictionary, focused: String, host: Node) -> Dictio
 ##
 ## A key goes to the shortcuts last in the tree first and stops at the first button that takes it,
 ## while an InputEventShortcut reaches only the buttons holding that one Shortcut. So each Shortcut
-## is sent in that order, a frame apart, until a button is pressed; a button still decides by its
+## is sent in that order, a frame apart, until a button is pressed. A button still decides by its
 ## disabled, its visibility and its shortcut context, as it does for the key.
 static func press_shortcuts(root: Node, action: String) -> Dictionary:
 	var pressing: InputEventAction = InputEventAction.new()
@@ -404,7 +404,7 @@ static func class_at(root: Node, path: String) -> Dictionary:
 			"type": "error",
 			"message":
 			(
-				"%s did not compile, so none of its functions can be called; script_diagnostics on "
+				"%s did not compile, so none of its functions can be called. script_diagnostics on "
 				+ "it gives the error and its line."
 			) % script_path,
 		}
@@ -544,7 +544,7 @@ func parameter_class(object: Object, method: String, index: int) -> String:
 ## carries its enum or range, and empty for anything that is not a property.
 ##
 ## Asked rather than read off the value in the slot, because an object slot can be empty: a
-## property typed `Gear` holding null reads as TYPE_NIL, and anything written into it passed the
+## property typed `Part` holding null reads as TYPE_NIL, and anything written into it passed the
 ## check and was then dropped by the engine, which answered with the slot still null.
 ##
 ## The script only for a typed container, the one place the engine hands it over. A property typed

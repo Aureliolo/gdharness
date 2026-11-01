@@ -21,7 +21,7 @@ static func read_point(params: Dictionary, x_key: String, y_key: String) -> Vari
 ## row, where the control draws it.
 ##
 ## For a control that draws its parts itself and hit-tests them in _gui_input, whose centre was all
-## a click could press; in a native window, where the game's window pixels do not reach, nothing
+## a click could press. In a native window, where the game's window pixels do not reach, nothing
 ## else could press the rest.
 static func point_in(params: Dictionary, node: Node, node_path: String, has_item: bool) -> Variant:
 	if not params.has("x") and not params.has("y"):
@@ -29,7 +29,7 @@ static func point_in(params: Dictionary, node: Node, node_path: String, has_item
 	if node is Node3D:
 		return (
 			(
-				"%s is a 3D node, clicked where it is drawn; x and y name a point in a Control's "
+				"%s is a 3D node, clicked where it is drawn. x and y name a point in a Control's "
 				+ "own space"
 			)
 			% node_path
@@ -70,7 +70,7 @@ static func aim_of(params: Dictionary, root: Window) -> Variant:
 ## Where [param local], in the space of the node [param aim] names, arrives: {"viewport",
 ## "position"}, the viewport the pointer reaches it through and the point in that viewport's pixels,
 ## which is what an event sent there names. A Window's space is its own pixels, as the game's window
-## pixels are the root's; a canvas item's is its own, the one it draws and reads _gui_input in.
+## pixels are the root's. A canvas item's is its own, the one it draws and reads _gui_input in.
 static func carried(aim: Dictionary, local: Vector2, root: Window) -> Dictionary:
 	var node: Node = aim.get("node", root)
 	var reached: Dictionary = {}
@@ -192,7 +192,7 @@ static func outside_noted(
 					"%s is outside %s viewport, %s in window pixels, so no control there receives"
 					% [point, which, shown]
 				)
-				+ " it; the game's _input and _unhandled_input still do."
+				+ " it. The game's _input and _unhandled_input still do."
 			)
 			break
 	return answer
@@ -270,7 +270,7 @@ static func takes_no_click(control: Control, node_path: String, paused: bool) ->
 	if not control.can_process():
 		var why: String = GdhTargets.why_it_does_not_process(control, node_path)
 		var over: Node = GdhTargets.drawn_over(control)
-		var cover: String = "" if over == null else "; %s is drawn over it" % over.get_path()
+		var cover: String = "" if over == null else ", and %s is drawn over it" % over.get_path()
 		if paused:
 			return (
 				(

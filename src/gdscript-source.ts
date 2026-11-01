@@ -71,7 +71,7 @@ function stringEnd(source: string, at: number): number {
   const fence = source.startsWith(quote.repeat(3), at) ? quote.repeat(3) : quote;
   let end = at + fence.length;
   while (end < source.length && !source.startsWith(fence, end)) {
-    // A single-quoted string ends at its line; an unterminated one is the tokenizer's error to
+    // A single-quoted string ends at its line. An unterminated one is the tokenizer's error to
     // report, and treating the rest of the file as a string would hide every use after it.
     if (fence.length === 1 && source[end] === '\n') {
       return end;
@@ -300,8 +300,17 @@ export interface ScriptShape {
 
 const NAME = '[\\p{L}_][\\p{L}\\p{N}_]*';
 const ANNOTATIONS = '(?:@[\\p{L}_][\\p{L}\\p{N}_]*(?:\\([^)]*\\))?\\s+)*';
+/** The keywords a declaration line opens with, each the kind of what it declares. */
+const DECLARATION_KEYWORDS = [
+  'func',
+  'var',
+  'const',
+  'signal',
+  'enum',
+  'class',
+] as const satisfies readonly DeclarationKind[];
 const DECLARATION_LINE = new RegExp(
-  `^(${ANNOTATIONS})(static\\s+)?(func|var|const|signal|enum|class)\\s+(${NAME})`,
+  `^(${ANNOTATIONS})(static\\s+)?(${DECLARATION_KEYWORDS.join('|')})\\s+(${NAME})`,
   'u',
 );
 const CLASS_NAME_LINE = new RegExp(`^${ANNOTATIONS}class_name\\s+(${NAME})`, 'u');
@@ -393,9 +402,9 @@ export function shapeOf(source: string): ScriptShape {
       const declared = DECLARATION_LINE.exec(body);
       if (declared !== null) {
         const [whole, , isStatic, keyword, declaredName] = declared;
-        if (keyword !== undefined && declaredName !== undefined) {
+        const kind = DECLARATION_KEYWORDS.find((one) => one === keyword);
+        if (kind !== undefined && declaredName !== undefined) {
           const offset = at + whole.length - declaredName.length;
-          const kind = keyword as DeclarationKind;
           declarations.push({ name: declaredName, kind, offset, isStatic: isStatic !== undefined });
           if (kind === 'enum') {
             const brace = body.indexOf('{');
@@ -642,7 +651,7 @@ function declaredClass(text: string, name: string): string | null {
 
 /**
  * [param name] as a local at zero-based [param index] of [param lines], the script's code split by
- * line, with the class its declaration gives it; or null when it is not one. A local is a parameter
+ * line, with the class its declaration gives it, or null when it is not one. A local is a parameter
  * of the function or a lambda around it, a `for` variable, a `var` or `const` declared earlier in a
  * block still open, or a `var` a match pattern binds.
  *

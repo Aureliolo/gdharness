@@ -5,6 +5,7 @@ import { Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { EVALUATE_MS } from './game-debugger.js';
 import { portFromEnv } from './ports.js';
+import { isRecord } from './records.js';
 import type { ToolResponse } from './server-types.js';
 
 /** What an editor serves the debug adapter on when nothing has moved it. */
@@ -25,7 +26,7 @@ const SCOPES_TIMEOUT_MS = 20_000;
 /**
  * How long a step is given to stop the game again before it is answered as running.
  *
- * A step over a line runs everything the line calls, so it is as long as the line is; this is the
+ * A step over a line runs everything the line calls, so it is as long as the line is. This is the
  * wait before saying so, not a limit on the step.
  */
 const STEP_LANDS_WITHIN_MS = 10_000;
@@ -75,6 +76,32 @@ interface DAPMessage {
 type DAPBody = Record<string, unknown>;
 
 type DAPArrayItem = Record<string, unknown>;
+
+/** What a response or an event from the adapter carries that this client reads. */
+type ReceivedMessage = Omit<DAPMessage, 'seq' | 'arguments'>;
+
+/**
+ * [param value] as a message from the adapter, or null when it is not one. Each field is taken only
+ * when it has the type the protocol gives it, so a handler reading one is reading what was sent.
+ */
+function receivedMessageOf(value: unknown): ReceivedMessage | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const { type, command, request_seq: requestSeq, success, message, body, event } = value;
+  if (type !== 'request' && type !== 'response' && type !== 'event') {
+    return null;
+  }
+  return {
+    type,
+    ...(typeof command === 'string' ? { command } : {}),
+    ...(typeof requestSeq === 'number' ? { request_seq: requestSeq } : {}),
+    ...(typeof success === 'boolean' ? { success } : {}),
+    ...(typeof message === 'string' ? { message } : {}),
+    ...(isRecord(body) ? { body } : {}),
+    ...(typeof event === 'string' ? { event } : {}),
+  };
+}
 
 /**
  * Why the game is sitting still, as the adapter last said it.
@@ -175,11 +202,11 @@ export class GodotDAPClient {
   /** Told whenever the set this side holds changes without a call: see [setBreakpointsSink]. */
   private onBreakpointsChanged: ((held: HeldBreakpoint[]) => void) | null = null;
 
-  /** How long a frame's scopes and values are waited for; see [SCOPES_TIMEOUT_MS]. */
+  /** How long a frame's scopes and values are waited for. See [SCOPES_TIMEOUT_MS]. */
   readonly scopesPatienceMs: number;
-  /** How long a step is given to stop the game again; see [STEP_LANDS_WITHIN_MS]. */
+  /** How long a step is given to stop the game again. See [STEP_LANDS_WITHIN_MS]. */
   readonly stepPatienceMs: number;
-  /** How long an evaluate's answer is waited for; see [EVALUATE_MS]. */
+  /** How long an evaluate's answer is waited for. See [EVALUATE_MS]. */
   readonly evaluatePatienceMs: number;
 
   constructor(
@@ -238,7 +265,12 @@ export class GodotDAPClient {
               );
               continue;
             }
-            this.handleMessage(received.value as DAPMessage);
+            const message = receivedMessageOf(received.value);
+            if (message === null) {
+              console.error('[GodotDAP] Discarding a message that is not a request, a response or an event');
+              continue;
+            }
+            this.handleMessage(message);
           }
         });
 
@@ -366,7 +398,7 @@ export class GodotDAPClient {
     });
   }
 
-  private handleMessage(message: DAPMessage): void {
+  private handleMessage(message: ReceivedMessage): void {
     if (message.type === 'response') {
       const requestSeq = message.request_seq;
       if (typeof requestSeq !== 'number') {
@@ -395,7 +427,7 @@ export class GodotDAPClient {
     }
   }
 
-  private handleEvent(event: DAPMessage): void {
+  private handleEvent(event: ReceivedMessage): void {
     const eventName = event.event;
     if (eventName === 'output') {
       const body = event.body;
@@ -461,11 +493,9 @@ export class GodotDAPClient {
     if (eventName === 'breakpoint') {
       const body = event.body;
       const breakpoint = body?.['breakpoint'];
-      const source =
-        typeof breakpoint === 'object' && breakpoint !== null ? (breakpoint as DAPBody)['source'] : undefined;
-      const path = typeof source === 'object' && source !== null ? (source as DAPBody)['path'] : undefined;
-      const line =
-        typeof breakpoint === 'object' && breakpoint !== null ? (breakpoint as DAPBody)['line'] : undefined;
+      const source = isRecord(breakpoint) ? breakpoint['source'] : undefined;
+      const path = isRecord(source) ? source['path'] : undefined;
+      const line = isRecord(breakpoint) ? breakpoint['line'] : undefined;
       if (typeof path !== 'string' || typeof line !== 'number') {
         return;
       }
@@ -557,7 +587,8 @@ export class GodotDAPClient {
     try {
       const threads = await this.sendRequest('threads');
       const listed = threads['threads'];
-      const first = Array.isArray(listed) ? (listed[0] as DAPArrayItem | undefined)?.['id'] : undefined;
+      const top: unknown = Array.isArray(listed) ? listed[0] : undefined;
+      const first = isRecord(top) ? top['id'] : undefined;
       if (typeof first !== 'number') {
         return;
       }
@@ -575,7 +606,7 @@ export class GodotDAPClient {
         this.halt = {
           reason: 'attached',
           description:
-            'held when this session attached; the stop that held it was reported to an earlier one',
+            'held when this session attached, and the stop that held it was reported to an earlier one',
           text: '',
         };
         this.holdKnown = true;
@@ -705,7 +736,7 @@ export class GodotDAPClient {
     if (clearing !== undefined) {
       lines.delete(clearing);
     }
-    const sorted = Array.from(lines).sort((a, b) => a - b);
+    const sorted = Array.from(lines).toSorted((a, b) => a - b);
     const answer = await this.sendRequest('setBreakpoints', {
       source: { path: filePath },
       breakpoints: sorted.map((breakpointLine) => ({ line: breakpointLine })),
@@ -715,7 +746,7 @@ export class GodotDAPClient {
     } else {
       this.breakpoints.set(key, new Set(mine));
     }
-    // What the editor now has in this file, as sent; the adapter echoes each toggle back as an
+    // What the editor now has in this file, as sent. The adapter echoes each toggle back as an
     // event as well, and a read between the answer and the echo should not say otherwise.
     if (lines.size === 0) {
       this.inEditor.delete(key);
@@ -740,7 +771,7 @@ export class GodotDAPClient {
       const mine = this.breakpoints.get(key);
       const rest = Array.from(lines)
         .filter((line) => !mine?.has(line))
-        .sort((a, b) => a - b);
+        .toSorted((a, b) => a - b);
       if (rest.length > 0) {
         theirs.push({ scriptPath: this.spelled.get(key) ?? key, lines: rest });
       }
@@ -765,7 +796,7 @@ export class GodotDAPClient {
       const filePath = this.spelled.get(key) ?? key;
       try {
         await this.sendBreakpoints(filePath, lines);
-        applied.push({ scriptPath: filePath, lines: Array.from(lines).sort((a, b) => a - b) });
+        applied.push({ scriptPath: filePath, lines: Array.from(lines).toSorted((a, b) => a - b) });
       } catch (error) {
         this.breakpoints.delete(key);
         refused.push({
@@ -784,7 +815,7 @@ export class GodotDAPClient {
   breakpointsHeld(): HeldBreakpoint[] {
     return Array.from(this.breakpoints, ([key, lines]) => ({
       scriptPath: this.spelled.get(key) ?? key,
-      lines: Array.from(lines).sort((a, b) => a - b),
+      lines: Array.from(lines).toSorted((a, b) => a - b),
     }));
   }
 
@@ -870,11 +901,7 @@ export class GodotDAPClient {
     });
 
     const stackFrames = response['stackFrames'];
-    if (Array.isArray(stackFrames)) {
-      return stackFrames as DAPArrayItem[];
-    }
-
-    return [];
+    return Array.isArray(stackFrames) ? stackFrames.filter(isRecord) : [];
   }
 
   /**
@@ -895,7 +922,7 @@ export class GodotDAPClient {
           await this.sendRequest('variables', { variablesReference }, VARIABLES_POLL_TIMEOUT_MS)
         )['variables'];
         if (Array.isArray(answered)) {
-          return answered as DAPArrayItem[];
+          return answered.filter(isRecord);
         }
       } catch {
         // Refused or unanswered: the dump is still coming.
@@ -920,14 +947,14 @@ export class GodotDAPClient {
   async getScopes(frameId?: number): Promise<{ name: string; variables: DAPArrayItem[] | null }[]> {
     await this.attach();
     const frames = await this.getStackTrace();
-    const frame = frameId === undefined ? frames[0] : frames.find((each) => each['id'] === frameId);
+    const stackFrame = frameId === undefined ? frames[0] : frames.find((each) => each['id'] === frameId);
     // Refused rather than answered empty: no scopes is what a frame with nothing in it says, and a
     // frame that is not there has not been read at all.
-    if (frame === undefined) {
+    if (stackFrame === undefined) {
       throw new ReadRefusal(
         frames.length === 0
           ? 'The adapter gave no stack, so there is no frame to read variables from'
-          : `The stack the adapter gives now has no frame ${String(frameId)}; its frames are ${frames.map((each) => String(each['id'])).join(', ')}. Read the stack again for the frames the game is at now`,
+          : `The stack the adapter gives now has no frame ${String(frameId)}. Its frames are ${frames.map((each) => String(each['id'])).join(', ')}. Read the stack again for the frames the game is at now`,
       );
     }
 
@@ -935,9 +962,10 @@ export class GodotDAPClient {
     let scopes: DAPArrayItem[] = [];
     while (scopes.length === 0 && Date.now() < deadline) {
       try {
-        const answered = (await this.sendRequest('scopes', { frameId: frame['id'] }))['scopes'];
-        if (Array.isArray(answered) && answered.length > 0) {
-          scopes = answered as DAPArrayItem[];
+        const answered = (await this.sendRequest('scopes', { frameId: stackFrame['id'] }))['scopes'];
+        const listed = Array.isArray(answered) ? answered.filter(isRecord) : [];
+        if (listed.length > 0) {
+          scopes = listed;
           break;
         }
       } catch {
@@ -947,7 +975,7 @@ export class GodotDAPClient {
     }
     if (scopes.length === 0) {
       throw new ReadRefusal(
-        `The scopes of frame ${String(frame['id'])} did not arrive from the game within ${this.scopesPatienceMs / 1000}s. They come from the game through the editor, so a busy machine can take longer: ask again`,
+        `The scopes of frame ${String(stackFrame['id'])} did not arrive from the game within ${this.scopesPatienceMs / 1000}s. They come from the game through the editor, so a busy machine can take longer: ask again`,
       );
     }
 
@@ -980,13 +1008,13 @@ export class GodotDAPClient {
   ): Promise<{ frame: number; value: string; type?: string }> {
     const scopes = await this.getScopes(frameId);
     const frames = await this.getStackTrace();
-    const frame = frameId ?? (typeof frames[0]?.['id'] === 'number' ? frames[0]['id'] : 0);
+    const frameNumber = frameId ?? (typeof frames[0]?.['id'] === 'number' ? frames[0]['id'] : 0);
     // The game evaluates on the frame's instance and, in a frame with none, leaves its debug loop
     // instead of answering, which lets the game go on. A frame with an instance lists it as self.
     const members = scopes.find((scope) => scope.name === 'Members');
     if (members?.variables?.some((variable) => variable['name'] === 'self') !== true) {
       throw new ReadRefusal(
-        `Frame ${frame} has no instance of its script to evaluate on, as a static function called on its class has none, and the engine lets the game go on rather than answer one there, so it was not asked. Evaluate in a frame below it, or read this one's locals with debug_state variables`,
+        `Frame ${frameNumber} has no instance of its script to evaluate on, as a static function called on its class has none, and the engine lets the game go on rather than answer one there, so it was not asked. Evaluate in a frame below it, or read this one's locals with debug_state variables`,
       );
     }
     const deadline = Date.now() + this.evaluatePatienceMs;
@@ -994,13 +1022,13 @@ export class GodotDAPClient {
       try {
         const answered = await this.sendRequest(
           'evaluate',
-          { expression, frameId: frame, context: 'watch' },
+          { expression, frameId: frameNumber, context: 'watch' },
           VARIABLES_POLL_TIMEOUT_MS,
         );
         const value = answered['result'];
         if (typeof value === 'string') {
           const type = answered['type'];
-          return { frame, value, ...(typeof type === 'string' ? { type } : {}) };
+          return { frame: frameNumber, value, ...(typeof type === 'string' ? { type } : {}) };
         }
       } catch {
         // Unanswered: the game's reply has not reached the adapter yet.
@@ -1048,8 +1076,9 @@ export class GodotDAPClient {
     try {
       const response = await this.sendRequest('threads');
       const threads = response['threads'];
-      if (Array.isArray(threads) && threads.length > 0) {
-        const id = (threads[0] as DAPArrayItem | undefined)?.['id'];
+      const first: unknown = Array.isArray(threads) ? threads[0] : undefined;
+      if (isRecord(first)) {
+        const id = first['id'];
         if (typeof id === 'number' && id > 0) {
           this.lastThreadId = id;
           return id;
@@ -1063,7 +1092,7 @@ export class GodotDAPClient {
   }
 
   /**
-   * Drop a connection whose framing has run away, naming the size that did it.
+   * Drop a connection whose framing has run away, and name the size that did it.
    *
    * Nothing downstream can recover from a stream this far out of step, and waiting quietly
    * for the rest of a body that is never coming is indistinguishable from an idle adapter.

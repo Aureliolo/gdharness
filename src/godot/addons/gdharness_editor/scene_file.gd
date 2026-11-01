@@ -599,7 +599,7 @@ func fixed(node: Node, deleting: bool = false) -> String:
 	if node.owner == null:
 		return foreign(node)
 	if node.owner != root:
-		# Editable children keep values here and no more; the scene instanced may have the node from
+		# Editable children keep values here and no more. The scene instanced may have the node from
 		# a scene it inherits, which is the one to edit.
 		var instanced: String = node.owner.scene_file_path
 		var packed: PackedScene = load(instanced) as PackedScene
@@ -624,7 +624,7 @@ func fixed(node: Node, deleting: bool = false) -> String:
 
 
 ## Each node the scenes [param state] inherits give it, by path, with the deepest file making it
-## more than values; a node [param state] makes itself is not in it.
+## more than values. A node [param state] makes itself is not in it.
 static func makers(state: SceneState) -> Dictionary:
 	var made_by: Dictionary = {}
 	var at: SceneState = state.get_base_scene_state()
@@ -764,7 +764,7 @@ static func unfit_name(node_name: String) -> String:
 	if valid != node_name:
 		return (
 			(
-				"%s is not a name a node can have; Godot would save it as %s. The characters "
+				"%s is not a name a node can have. Godot would save it as %s. The characters "
 				+ '. : @ / " %% cannot be in a node name.'
 			)
 			% [node_name, valid]
@@ -784,7 +784,7 @@ func unusable_name(parent: Node, child_name: String, moving: Node = null) -> Str
 		# The root by its name, since its path is ".", and ". already has a child" read as a typo.
 		var holder: String = "The root, %s," % parent.name if parent == root else path_of(parent)
 		return (
-			"%s already has a child named %s; %s is free there."
+			"%s already has a child named %s. %s is free there."
 			% [holder, child_name, _free_name(parent, child_name)]
 		)
 	return ""
@@ -1210,7 +1210,7 @@ func _stray_text(node: Node, name: String) -> String:
 			(
 				(
 					"the script of %s did not start when a headless engine instanced %s, so the "
-					+ "node would be saved without it; the engine's messages give its errors. "
+					+ "node would be saved without it. The engine's messages give its errors. "
 				)
 				% [at, path]
 			)

@@ -44,9 +44,10 @@ function encode(
   header.writeUInt32BE(height, 4);
   header.writeUInt8(8, 8);
   header.writeUInt8(colourType, 9);
-  const rows = Array.from({ length: height }, (_, y) =>
-    Buffer.from([0, ...Array.from({ length: width }, (_, x) => colour(x, y)).flat()]),
-  );
+  // Every scanline opens with its filter byte, 0 for none.
+  const scanline = (y: number): Buffer =>
+    Buffer.from([0, ...Array.from({ length: width }, (_, x) => colour(x, y)).flat()]);
+  const rows = Array.from({ length: height }, (_, y) => scanline(y));
   return Buffer.concat([
     Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
     chunk('IHDR', header),

@@ -144,7 +144,7 @@ static func _runnable_name(config: ConfigFile, platform: String) -> String:
 ## Adds an export preset to export_presets.cfg, written with the keys the editor's Project > Export
 ## writes for a new one, and every option in [code]known_options[/code] (what
 ## [method export_options] answers for the platform) at its default. The editor also writes the
-## options a new preset hides until another option shows them; its exporter fills those, and any
+## options a new preset hides until another option shows them. Its exporter fills those, and any
 ## option the file leaves out, with their defaults when it loads the file.
 func add_export_preset(params: Dictionary) -> Dictionary:
 	var preset_name: String = str(params.get("preset", "")).strip_edges()
@@ -173,7 +173,7 @@ func add_export_preset(params: Dictionary) -> Dictionary:
 				(
 					(
 						"There is already an export preset named '%s', for %s, %s. "
-						+ "project_export run exports with it; give another name to add a second."
+						+ "project_export run exports with it. Give another name to add a second."
 					)
 					% [preset_name, config.get_value(held, "platform", ""), to]
 				)
@@ -217,7 +217,7 @@ func add_export_preset(params: Dictionary) -> Dictionary:
 						str_to_var(str(described.get("defaultText", "null")))
 					)
 	# A section with nothing in it is not written, and the editor's loader reports a missing options
-	# section as an error; these two are options of every platform, empty in a new preset.
+	# section as an error. These two are options of every platform, empty in a new preset.
 	for name: String in TEMPLATE_OPTIONS:
 		if not config.has_section_key(section + ".options", name):
 			config.set_value(section + ".options", name, "")
@@ -587,7 +587,7 @@ func set_export_preset(params: Dictionary) -> Dictionary:
 	var saving: Error = config.save(PRESETS_FILE)
 	if saving != OK:
 		return _log.failure("Failed to save export_presets.cfg: " + error_string(saving))
-	# Written as given, since the file can come after the preset names it; said, since an export can
+	# Written as given, since the file can come after the preset names it. Said, since an export can
 	# fail on it until it does. A secret's path is a secret too, so only its option is named.
 	if not missing.is_empty():
 		answer["missing_files"] = missing
@@ -687,7 +687,7 @@ static func _preset_named(preset_name: String) -> Variant:
 	if preset_name.is_empty():
 		return "preset is required: the name of the preset in export_presets.cfg"
 	if not FileAccess.file_exists(PRESETS_FILE):
-		return "This project has no export_presets.cfg; project_export add_preset adds a preset."
+		return "This project has no export_presets.cfg. project_export add_preset adds a preset."
 	var config: ConfigFile = ConfigFile.new()
 	var loading: Error = config.load(PRESETS_FILE)
 	if loading != OK:
@@ -733,7 +733,7 @@ static func _files_for(filter: String, given: Variant) -> Variant:
 	if not not_scenes.is_empty():
 		return (
 			(
-				"Nothing was written: export_filter scenes lists scenes, and %s %s not one; "
+				"Nothing was written: export_filter scenes lists scenes, and %s %s not one. "
 				+ "resources lists any file."
 			)
 			% [", ".join(not_scenes), "is" if not_scenes.size() == 1 else "are"]
@@ -859,7 +859,7 @@ static func _fitted(name: String, value: Variant, option: Dictionary) -> Variant
 		return {
 			"refused":
 			(
-				"%s is a %s, which this tool does not write; the editor's Export dialog does."
+				"%s is a %s, which this tool does not write. The editor's Export dialog does."
 				% [name, type_string(type)]
 			),
 		}

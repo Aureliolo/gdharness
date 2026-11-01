@@ -49,6 +49,7 @@ import { staleImports } from './import-freshness.js';
 import { hiddenWindowFlags } from './launch.js';
 import { freeLibraryCopies, seedExtensionList, unlistedExtensions } from './library-copies.js';
 import { prependTo, readLog } from './log-read.js';
+import { isRecord, isStringList } from './records.js';
 import { forceNextImport } from './reimport.js';
 import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
 import { EVERY_FILE, type PassedSuite, reachedBySuite, SuiteInputs } from './suite-inputs.js';
@@ -151,7 +152,7 @@ export interface RunResult {
   }[];
   readonly engines: readonly {
     readonly index: number;
-    /** The slot's lane it was dealt to; the engines of one lane run one after another. */
+    /** The slot's lane it was dealt to. The engines of one lane run one after another. */
     readonly lane: number;
     /** When it started, in seconds after the command did, once it had a slot. */
     readonly startedAfter: number;
@@ -169,7 +170,7 @@ export interface RunResult {
   readonly logs: string | null;
   /** The engines asked for, before the room on the machine and the slots held the run to fewer. */
   readonly enginesAsked: number;
-  /** How many of the slots its lanes take were free as it began; fewer than the lanes is a shared run. */
+  /** How many of the slots its lanes take were free as it began. Fewer than the lanes is a shared run. */
   readonly slotsFree: number;
   /** What the run printed of its deal: the engines, what it split, and what held it. */
   readonly dealing: readonly string[];
@@ -243,7 +244,7 @@ const VALUED = new Set([
 ]);
 const SWITCHES = new Set(['--changed-only', '--import', '--print-output', '--verbose']);
 
-/** [param args], everything after `test`, read into options; relative paths are read from [param cwd]. */
+/** [param args], everything after `test`, read into options. Relative paths are read from [param cwd]. */
 export function testOptionsOf(args: readonly string[], cwd: string): TestOptions {
   const valued = new Map<string, string[]>();
   const switches = new Set<string>();
@@ -266,11 +267,13 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     }
   }
   const first = positional[0];
-  const named = first === undefined ? null : resolve(cwd, first);
-  const projectNamed = named !== null && existsSync(join(named, 'project.godot'));
-  const projectPath = projectNamed ? named : resolve(cwd);
+  const firstPath = first === undefined ? null : resolve(cwd, first);
+  const projectNamed = firstPath !== null && existsSync(join(firstPath, 'project.godot'));
+  const projectPath = projectNamed ? firstPath : resolve(cwd);
   if (!existsSync(join(projectPath, 'project.godot'))) {
-    throw new EngineUsageError(`Not a Godot project: ${projectPath} holds no project.godot.`);
+    throw new EngineUsageError(
+      `Not a Godot project: ${projectPath} holds no project.godot. Run from the project directory, or name it on the command line.`,
+    );
   }
   const last = (flag: string): string | undefined => valued.get(flag)?.at(-1);
   const order = last('--order');
@@ -376,7 +379,7 @@ function selectedSuites(scripts: ProjectScripts, options: TestOptions): Declared
 
 /** [param units] in the order [param order] asks: reversed by path, or shuffled by a seed. */
 function ordered(units: readonly Unit[], order: 'reversed' | number): Unit[] {
-  const sorted = [...units].sort((a, b) => a.suite.localeCompare(b.suite));
+  const sorted = [...units].toSorted((a, b) => a.suite.localeCompare(b.suite));
   if (order === 'reversed') {
     return sorted.reverse();
   }
@@ -471,7 +474,7 @@ interface Launch extends EngineLaunch {
   readonly failsOnPushErrors: boolean;
 }
 
-/** Runs the suites [param options] asks for with the engine at [param godotPath], answering the exit code. */
+/** Runs the suites [param options] asks for with the engine at [param godotPath]. Answers the exit code. */
 export async function runTestCommand(options: TestOptions, godotPath: string): Promise<number> {
   const unusable = gdUnit4Unusable(options.projectPath);
   if (unusable !== null) {
@@ -620,7 +623,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     const byMemory = roomWith(memory.bytes);
     // What the processors leave room for. Memory held a run to the engines it had room for at the
     // start for the whole of it, so one engine was dealt nearly everything while memory freed beside
-    // it; held by memory, the run is dealt for these and its engines start as memory has room.
+    // it. Held by memory, the run is dealt for these and its engines start as memory has room.
     const unheld = roomWith(Number.POSITIVE_INFINITY);
     const unheldUnits = unitsOf(suites, times, splitPastFor(suites, times, unheld.engines));
     const heldLanes = lanesOf(dealt(unheldUnits, declared, unheld.engines));
@@ -723,7 +726,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     // Once the lanes hold what slots were free, so it takes one only beside them.
     const handed = new HandedSlot();
     const compiling = compileUnlessUnchanged(launch, everySuite, compileKept, handed);
-    // Awaited after the suites; a run failing before then reports its own error, not this one too.
+    // Awaited after the suites. A run failing before then reports its own error, not this one too.
     compiling.catch(() => undefined);
     let ran = shared
       ? await runShares(
@@ -738,7 +741,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         )
       : (await Promise.all(lanes.map((lane, at) => runLane(launch, lane, times, taken[at] ?? null, handed))))
           .flat()
-          .sort((a, b) => a.index - b.index);
+          .toSorted((a, b) => a.index - b.index);
     if (ran.some((engine) => engine.verdict.starved) && ran.some((engine) => !engine.verdict.passed)) {
       say('An engine ran out of memory, so every engine that failed runs again, one at a time.');
       const again: EngineRan[] = [];
@@ -908,14 +911,10 @@ function readPassed(file: string): Record<string, PassedSuite> {
     return {};
   }
   const passed: Record<string, PassedSuite> = {};
-  for (const [path, entry] of Object.entries(typeof parsed === 'object' && parsed !== null ? parsed : {})) {
-    const { print, inputs } = (entry ?? {}) as { print?: unknown; inputs?: unknown };
-    if (
-      typeof print === 'string' &&
-      Array.isArray(inputs) &&
-      inputs.every((input) => typeof input === 'string')
-    ) {
-      passed[path] = { print, inputs: inputs };
+  for (const [path, entry] of Object.entries(isRecord(parsed) ? parsed : {})) {
+    const { print, inputs }: Record<string, unknown> = isRecord(entry) ? entry : {};
+    if (typeof print === 'string' && isStringList(inputs)) {
+      passed[path] = { print, inputs };
     }
   }
   return passed;
@@ -968,7 +967,7 @@ function recordPassed(
         ? []
         : loaded.has(EVERY_FILE)
           ? [EVERY_FILE]
-          : [...loaded].sort();
+          : [...loaded].toSorted();
     if (kept.length > 0 && !inputs.modifiedAfter(kept, began)) {
       passed[path] = { print: inputs.printOf(kept), inputs: kept };
     } else {
@@ -1017,8 +1016,8 @@ const COMPILE_CHECK = 'compiling every script together';
 class HandedSlot {
   private wanted = true;
   private handOver: (lock: string) => void = () => undefined;
-  readonly lock = new Promise<string>((resolve) => {
-    this.handOver = resolve;
+  readonly lock = new Promise<string>((received) => {
+    this.handOver = received;
   });
 
   /** Takes no slot after all, so every lane gives its own back to the machine. */
@@ -1048,7 +1047,7 @@ function doneWith(launch: Launch, lock: string, handed: HandedSlot | undefined):
  * Compiles [param suites] together beside every class of the game in an engine of its own, which
  * names every script that does not compile. Apart from the suites' engines, so those load only what
  * their suites do and what each records is what its suites could have used. Beside a run's suites
- * it runs in the slot [param handed] settles on; alone, in the next slot free.
+ * it runs in the slot [param handed] settles on. Alone, in the next slot free.
  */
 async function compileCheck(
   launch: Launch,
@@ -1127,7 +1126,7 @@ async function compileUnlessUnchanged(
   handed?: HandedSlot,
 ): Promise<Compiled> {
   if (kept === null) {
-    return compileCheck(launch, suites, handed);
+    return await compileCheck(launch, suites, handed);
   }
   const before = compiledPrint(kept, launch.projectPath, suites).print;
   if (readKeptPrint(kept.file) === before) {
@@ -1152,7 +1151,7 @@ async function compileUnlessUnchanged(
 function readKeptPrint(file: string): string | null {
   try {
     const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'));
-    const print = (parsed as { print?: unknown } | null)?.print;
+    const print = isRecord(parsed) ? parsed['print'] : undefined;
     return typeof print === 'string' ? print : null;
   } catch {
     return null;
@@ -1208,7 +1207,7 @@ export function importNeeded(projectPath: string): string | null {
   if (unlisted.length > 0) {
     return `No import has listed the project's extensions, ${named(unlisted)}, so the engine would load none of them, and the project is imported first.`;
   }
-  const uncached = staleAgainst(cached, projectPath).sort();
+  const uncached = staleAgainst(cached, projectPath).toSorted();
   if (uncached.length > 0) {
     return `The class cache does not list ${named(uncached)} where the scripts declare ${uncached.length === 1 ? 'it' : 'them'}, so the project is imported first.`;
   }
@@ -1258,7 +1257,7 @@ async function importProject(launch: Launch): Promise<string | null> {
       launch.silenceFloorSeconds,
     );
     if (ended.ended !== null || ended.code !== 0) {
-      return `${ended.ended ?? `the engine exited ${exitNamed(ended.code ?? 0)}`}; everything it printed is in ${launch.logs.named(log)}`;
+      return `${ended.ended ?? `the engine exited ${exitNamed(ended.code ?? 0)}`}, and everything it printed is in ${launch.logs.named(log)}`;
     }
     // Godot's import exits 0 whatever it printed, and a suite run on a failed import reads what
     // the import left behind.
@@ -1266,10 +1265,10 @@ async function importProject(launch: Launch): Promise<string | null> {
     const wrongEngine =
       launch.godotVersion === null ? null : versionFault(printed.engineVersion, launch.godotVersion);
     if (wrongEngine !== null) {
-      return `${wrongEngine}; everything it printed is in ${launch.logs.named(log)}`;
+      return `${wrongEngine}, and everything it printed is in ${launch.logs.named(log)}`;
     }
     const fault = importFault(printed);
-    return fault === null ? null : `${fault}; everything it printed is in ${launch.logs.named(log)}`;
+    return fault === null ? null : `${fault}, and everything it printed is in ${launch.logs.named(log)}`;
   } finally {
     launch.slots.release(lock);
   }
@@ -1362,7 +1361,7 @@ async function runShares(
   };
   return (await Promise.all(Array.from({ length: lanes }, (_, at) => lane(at))))
     .flat()
-    .sort((a, b) => a.index - b.index);
+    .toSorted((a, b) => a.index - b.index);
 }
 
 /**
@@ -1490,14 +1489,14 @@ export function reportsFault(reports: string): string | null {
   const files = existsSync(reports)
     ? readdirSync(reports, { recursive: true, encoding: 'utf8' })
         .filter((file) => statSync(join(reports, file)).isFile())
-        .sort()
+        .toSorted()
     : [];
   if (files.length === 0) {
     return null;
   }
   const shown = files.slice(0, REPORT_FILES_NAMED).map((file) => file.split(sep).join('/'));
   const more = files.length - shown.length;
-  return `gdUnit4 wrote ${plural(files.length, 'file')} into ${reports} (${shown.join(', ')}${more > 0 ? ` and ${String(more)} more` : ''}), a report the runner had turned off, so the gdUnit4 installed no longer honours a session hook marked off; report it to gdharness with gdUnit4's version`;
+  return `gdUnit4 wrote ${plural(files.length, 'file')} into ${reports} (${shown.join(', ')}${more > 0 ? ` and ${String(more)} more` : ''}), a report the runner had turned off, so the gdUnit4 installed no longer honours a session hook marked off. Report it to gdharness with gdUnit4's version`;
 }
 
 /** Prints how the run went and answers the exit code: what failed, in full, then one line of totals. */
@@ -1594,14 +1593,14 @@ function report(
             ],
       ),
     )
-    .sort((a, b) => b.seconds - a.seconds);
+    .toSorted((a, b) => b.seconds - a.seconds);
   const slowest = closed.slice(0, SLOWEST_NAMED);
   if (slowest.length > 1) {
     console.log(
       `The slowest suites: ${slowest.map((suite) => `${suite.path} ${suite.seconds.toFixed(1)} s`).join(', ')}.`,
     );
   }
-  const totals = `${plural(cases, 'case')} in ${plural(suites, 'suite')} across ${plural(ran.length, 'engine')}, ${took.toFixed(1)} s; the longest engine took ${longest.toFixed(1)} s.`;
+  const totals = `${plural(cases, 'case')} in ${plural(suites, 'suite')} across ${plural(ran.length, 'engine')}, ${took.toFixed(1)} s. The longest engine took ${longest.toFixed(1)} s.`;
   console.log('');
   const passed =
     failed.length === 0 && compiled.faults.length === 0 && across.length === 0 && uncollected.length === 0;

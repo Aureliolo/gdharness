@@ -8,7 +8,7 @@ assignees: ''
 
 **gdharness version**:
 **Godot version**:
-**Bun version**:
+**Runtime**:
 **OS**:
 **MCP client**:
 

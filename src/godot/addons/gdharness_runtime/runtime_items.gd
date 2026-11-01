@@ -162,7 +162,7 @@ static func _menu_title_size(menus: MenuBar, menu: int, style: StyleBox) -> Vect
 
 
 ## Scrolls [param control] until it draws [param item], and answers whether it asked anything to
-## move. A tab bar and a tree have a call for it; a list is scrolled by its own bar, by as little as
+## move. A tab bar and a tree have a call for it. A list is scrolled by its own bar, by as little as
 ## brings the whole entry in.
 static func _scroll_to(control: Control, item: Variant) -> bool:
 	var index: int = item if item is int else -1

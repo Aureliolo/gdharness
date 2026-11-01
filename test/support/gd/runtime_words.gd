@@ -25,8 +25,8 @@ func _init() -> void:
 
 
 func _run() -> void:
-	# A headless script run's window is 64 by 64, and words drawn outside it are not on the screen;
-	# the new size is only in force from the next frame.
+	# A headless script run's window is 64 by 64, and words drawn outside it are not on the screen.
+	# The new size is only in force from the next frame.
 	root.size = Vector2i(640, 480)
 	await process_frame
 	await _check_reading_rich_text()
@@ -137,9 +137,9 @@ func _check_names_as_alternatives() -> void:
 		var person: Node2D = Node2D.new()
 		person.name = called
 		cast.add_child(person)
-	var docket: Label = Label.new()
-	docket.name = "Docket"
-	cast.add_child(docket)
+	var ticket: Label = Label.new()
+	ticket.name = "Ticket"
+	cast.add_child(ticket)
 	# A bar is legal in a node name, so one written as `\|` stays a bar.
 	var barred: Node = Node.new()
 	barred.name = "Left|Right"
@@ -160,12 +160,12 @@ func _check_names_as_alternatives() -> void:
 	if _paths(globbed) != ["/root/Cast/Hero", "/root/Cast/Heroine"]:
 		_fail("an alternative can be a glob: %s" % str(globbed))
 
-	var near: Dictionary = await _find_in_cast("ero|Dock")
+	var near: Dictionary = await _find_in_cast("ero|Tick")
 	var said: String = str(near.get("note", ""))
 	if (
 		near.get("count") != 0
-		or not said.contains('3 node names contain "ero" or "Dock"')
-		or not said.contains('"*ero*|*Dock*" would find')
+		or not said.contains('3 node names contain "ero" or "Tick"')
+		or not said.contains('"*ero*|*Tick*" would find')
 	):
 		_fail(
 			(
@@ -215,12 +215,12 @@ func _paths(reply: Dictionary) -> Array[String]:
 
 
 ## A RichTextLabel reads as its words, not its markup. Its text is the BBCode when it reads BBCode,
-## and a dossier line came back as "[b][color=#4fc2d4]Mollum Telken[/color], [/b]...", so a phrase
+## and a ledger line came back as `"[b][color=#3a7bd5]Osric Halcott[/color], [/b]..."`, so a phrase
 ## running across a tag could be neither read, found nor waited for. And a line a game adds with
 ## append_text() is in no property at all.
 func _check_reading_rich_text() -> void:
 	var dossier: VBoxContainer = VBoxContainer.new()
-	dossier.name = "Dossier"
+	dossier.name = "Ledger"
 	# Wide enough to read: with no width, rich text wraps at every character and runs off the
 	# window.
 	dossier.custom_minimum_size = Vector2(600, 0)
@@ -229,22 +229,22 @@ func _check_reading_rich_text() -> void:
 	marked.bbcode_enabled = true
 	marked.fit_content = true
 	marked.text = (
-		"[b][color=#4fc2d4]Mollum Telken[/color], [/b][color=#c2ae92]a thief-taker[/color]"
+		"[b][color=#3a7bd5]Osric Halcott[/color], [/b][color=#b08850]a tax auditor[/color]"
 	)
 	dossier.add_child(marked)
 	var appended: RichTextLabel = RichTextLabel.new()
 	appended.fit_content = true
-	appended.append_text("Docket 72, [b]an errand[/b]")
+	appended.append_text("Parcel 72, [b]a delivery[/b]")
 	dossier.add_child(appended)
 	await process_frame
 
-	var said: Dictionary = await node._execute_command("read_text", { "root": "/root/Dossier" })
+	var said: Dictionary = await node._execute_command("read_text", { "root": "/root/Ledger" })
 	var lines: Array = said.get("lines", [])
-	if lines != ["Mollum Telken, a thief-taker", "Docket 72, an errand"]:
+	if lines != ["Osric Halcott, a tax auditor", "Parcel 72, a delivery"]:
 		_fail("rich text reads as what is drawn, with no tags in it: %s" % str(said))
 
 	var found: Dictionary = await node._execute_command(
-		"find_nodes", { "says": "Telken, a thief", "root": "/root/Dossier" }
+		"find_nodes", { "says": "Halcott, a tax", "root": "/root/Ledger" }
 	)
 	if found.get("count") != 1:
 		_fail("a phrase running across a tag is found: %s" % str(found))
@@ -253,17 +253,17 @@ func _check_reading_rich_text() -> void:
 	# before the player can read them. A Label by count, a RichTextLabel by ratio, which sets the
 	# count.
 	var typed: Label = Label.new()
-	typed.text = "Spring 17"
+	typed.text = "Monday 17"
 	typed.visible_characters = 6
 	dossier.add_child(typed)
 	marked.visible_ratio = 0.5
 	await process_frame
-	var partway: Dictionary = await node._execute_command("read_text", { "root": "/root/Dossier" })
+	var partway: Dictionary = await node._execute_command("read_text", { "root": "/root/Ledger" })
 	var shown: Array = partway.get("lines", [])
-	if shown != ["Mollum Telken,", "Docket 72, an errand", "Spring"]:
+	if shown != ["Osric Halcott,", "Parcel 72, a delivery", "Monday"]:
 		_fail("text being typed out reads as far as it is drawn: %s" % str(partway))
 	var early: Dictionary = await node._execute_command(
-		"find_nodes", { "says": "Spring 17", "root": "/root/Dossier" }
+		"find_nodes", { "says": "Monday 17", "root": "/root/Ledger" }
 	)
 	if early.get("count") != 0:
 		_fail("and its words are not found before they are shown: %s" % str(early))
@@ -289,9 +289,9 @@ func _check_reading_lists() -> void:
 	var _bram: int = names.add_item("Bram")
 	board.add_child(names)
 	var tree: Tree = Tree.new()
-	var guild: TreeItem = tree.create_item()
-	guild.set_text(0, "Guild")
-	var member: TreeItem = tree.create_item(guild)
+	var team: TreeItem = tree.create_item()
+	team.set_text(0, "Team")
+	var member: TreeItem = tree.create_item(team)
 	member.set_text(0, "Cass")
 	var kit: TreeItem = tree.create_item(member)
 	kit.set_text(0, "Blade")
@@ -301,12 +301,12 @@ func _check_reading_lists() -> void:
 	menu.add_item("Hire")
 	menu.add_separator()
 	menu.add_separator("Staff")
-	menu.add_item("Dismiss")
+	menu.add_item("Let go")
 	board.add_child(menu)
 	await process_frame
 
 	var closed: Dictionary = await node._execute_command("read_text", { "root": "/root/Board" })
-	if closed.get("lines", []) != ["Roster", "Ledger", "Ada", "Bram", "Guild", "Cass"]:
+	if closed.get("lines", []) != ["Roster", "Ledger", "Ada", "Bram", "Team", "Cass"]:
 		_fail(
 			(
 				"tabs, list items and tree rows read as lines, and not under a collapsed row: %s"
@@ -318,9 +318,9 @@ func _check_reading_lists() -> void:
 	await process_frame
 	var opened: Dictionary = await node._execute_command("read_text", { "root": "/root/Board" })
 	var lines: Array = opened.get("lines", [])
-	# A titled separator is drawn as a heading and read in its place; one with no title draws no
+	# A titled separator is drawn as a heading and read in its place. One with no title draws no
 	# words.
-	if lines.slice(-3) != ["Hire", "Staff", "Dismiss"]:
+	if lines.slice(-3) != ["Hire", "Staff", "Let go"]:
 		_fail(
 			"an open menu reads as its items and its separators' titles, in order: %s" % str(opened)
 		)

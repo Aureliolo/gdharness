@@ -14,7 +14,7 @@ extends Node
 ##
 ## Read off the editor's own filesystem entries rather than from
 ## `ProjectSettings.get_global_class_list()`. The entries are what the scan itself recorded, so
-## nothing but a scan can change them; the settings list is loaded from the cache file when it is
+## nothing but a scan can change them. The settings list is loaded from the cache file when it is
 ## first asked for, which makes it a poor witness against a cache that was just rewritten, and
 ## rewriting the cache is the call most in need of an honest answer here.
 ##
@@ -98,7 +98,7 @@ func reload_script(args: Dictionary) -> Dictionary:
 	# read "because of a parser error" until the editor restarted, for as long as anything held the
 	# parse, such as a file open in an editor's language server. Compiling once with a line more
 	# makes the texts differ, which drops that parse and those of the scripts that resolved through
-	# it; the file's own text is compiled below.
+	# it. The file's own text is compiled below.
 	script.source_code = text + "\n"
 	var _dropped: Error = script.reload(true)
 	script.source_code = text
@@ -136,7 +136,7 @@ func reload_script(args: Dictionary) -> Dictionary:
 ## Which of [code]scriptPaths[/code] the editor holds a compiled copy of whose text is not the
 ## file's, without loading or reloading anything. A script compiled against such a copy fails on the
 ## members the file has gained, and a reload of it fails the same way until the copy is reloaded
-## first; the rescan that met this blamed the new classes the script also named, which were fine.
+## first. The rescan that met this blamed the new classes the script also named, which were fine.
 ##
 ## Only a copy the editor already holds can be behind: one it has not loaded is compiled from the
 ## file when something asks for it. One open in a script tab with unsaved edits is answered apart,

@@ -175,7 +175,7 @@ function testAFilteredReadDoesNotConsumeWhatItDidNotReport(): void {
  *
  * Nothing in the crash handler's report is indented, so it was read as a column of info lines: a
  * run that ended on a segfault counted no errors and read as clean. The Windows report here is what
- * Godot 4.7.2 printed for `OS.crash`, cut to three native frames; the Linux and macOS handler opens
+ * Godot 4.7.2 printed for `OS.crash`, cut to three native frames. The Linux and macOS handler opens
  * with `handle_crash` instead and prints the rest the same way.
  */
 function testACrashIsAnErrorWithItsReport(): void {

@@ -12,6 +12,7 @@
 
 import { readFileSync } from 'node:fs';
 import process from 'node:process';
+import { isRecord } from '../src/records.js';
 
 const [branch, message, ...files] = process.argv.slice(2);
 
@@ -61,21 +62,21 @@ const response = await fetch('https://api.github.com/graphql', {
   body: JSON.stringify({ query, variables: { input } }),
 });
 
-interface CreateCommitResponse {
-  errors?: unknown;
-  data?: { createCommitOnBranch?: { commit?: { oid: string; url: string } } };
-}
+const payload: unknown = await response.json();
+const errors = isRecord(payload) ? payload['errors'] : undefined;
 
-const payload = (await response.json()) as CreateCommitResponse;
-
-if (!response.ok || payload.errors) {
-  console.error(JSON.stringify(payload.errors ?? payload, null, 2));
+if (!response.ok || errors) {
+  console.error(JSON.stringify(errors ?? payload, null, 2));
   process.exit(1);
 }
 
-const commit = payload.data?.createCommitOnBranch?.commit;
-if (!commit) {
+const data = isRecord(payload) ? payload['data'] : undefined;
+const created = isRecord(data) ? data['createCommitOnBranch'] : undefined;
+const commit = isRecord(created) ? created['commit'] : undefined;
+const oid = isRecord(commit) ? commit['oid'] : undefined;
+const url = isRecord(commit) ? commit['url'] : undefined;
+if (typeof oid !== 'string' || typeof url !== 'string') {
   console.error(`GitHub answered without a commit: ${JSON.stringify(payload)}`);
   process.exit(1);
 }
-console.log(`${commit.oid} ${commit.url}`);
+console.log(`${oid} ${url}`);

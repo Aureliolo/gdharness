@@ -27,7 +27,7 @@ const LOOK_SLICE_USEC: int = 2000
 ## number that steps rather than lands, as a day counter on a fast clock goes from 31 to 34 between
 ## two looks and a wait for 32 never sees it.
 const COMPARES: Array[String] = ["==", "!=", ">=", "<=", ">", "<"]
-## The most signal watches kept at once; arming one past this lets the oldest go. Property watches
+## The most signal watches kept at once. Arming one past this lets the oldest go. Property watches
 ## are counted apart, to the same number.
 const MOST_WATCHES: int = 16
 ## The most changes a property watch keeps. Past it, each new one takes the last place, so what is
@@ -683,7 +683,7 @@ static func _not_comparable(
 		node_path, property, type_string(typeof(current)), GdhShapes.kind(wanted),
 	]
 	# A value that cannot become what the property holds is said as that, which names the remedy,
-	# before the comparison it would also fail; an object on either side is said as the comparison.
+	# before the comparison it would also fail. An object on either side is said as the comparison.
 	var objects: bool = typeof(current) == TYPE_OBJECT or typeof(wanted) == TYPE_OBJECT
 	if not objects and not GdhValues.acceptable(wanted, typeof(current)):
 		return (
@@ -777,22 +777,22 @@ static func _declared_slot(holder: Variant, named: String) -> Dictionary:
 ## A screen rather than one node, because a panel following a clock builds its labels again every
 ## time it redraws and the engine names those `@Label@1163`. A wait holding one of them is waiting
 ## on a node that was freed a frame later, and that is what it answered: the date along the top of a
-## hall could not be waited on at all. What a caller is watching for is a word arriving on a screen,
-## and the screen is the part that stays put.
+## screen could not be waited on at all. What a caller is watching for is a word arriving on a
+## screen, and the screen is the part that stays put.
 ##
 ## On the screen, which is to say shown: a control carrying the words while hidden satisfied the
-## wait at once, so a duel screen whose "Carry on" button exists hidden through the whole sweep
+## wait at once, so a match screen whose "Keep going" button exists hidden through the whole sweep
 ## answered met in two milliseconds while the sweep was still animating, and every wait on that
 ## screen fell back to counting frames. [param include_hidden] asks the other question, for a
 ## caller waiting on words a hidden node holds.
 ##
 ## Paced by what a look costs, so the watching leaves the game its speed: every frame while a look
 ## is cheap, and on a screen large enough for one to cost a real share of a frame, often enough that
-## looking takes about a tenth of the time. Every frame on a hall of 3,500 nodes held the game at a
+## looking takes about a tenth of the time. Every frame over 3,500 nodes held the game at a
 ## sixth of its frame rate, and its clock, which advances by the frame's delta, lost three quarters
 ## of its time, so a wait for a date timed out on a clock that turned a day every thirty seconds.
 ## Each look is read a slice at a time, [constant LOOK_SLICE_USEC] to a frame, so the frames it runs
-## in keep their length; the last is read whole, since the wait answers on it.
+## in keep their length. The last is read whole, since the wait answers on it.
 ##
 ## The answer says how many frames the wait spanned, how many looks it took, how long they took
 ## between them and the longest they held one frame, which is how a caller sees what it cost and
@@ -866,7 +866,7 @@ func _wait_until_said(
 		answer["unseen_note"] = (
 			(
 				"Something under %s says it, but is hidden or drawn outside the viewport or a "
-				+ "ScrollContainer, where the player cannot read it; includeHidden true counts it "
+				+ "ScrollContainer, where the player cannot read it. includeHidden true counts it "
 				+ "there too"
 			)
 			% node_path

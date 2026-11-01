@@ -2,7 +2,7 @@
  * The editor's own console: where an editor gdharness opened writes it, and how to read it back.
  *
  * Nothing else here can see it. A parse error the editor prints while it loads reaches no plugin,
- * so the addon cannot scrape it; `editor_output` answers about game runs; and an editor in
+ * so the addon cannot scrape it. `editor_output` answers about game runs, and an editor in
  * self-contained mode writes no log of its own. A project downstream opened an editor that printed
  * hundreds of `Could not parse global class` lines at startup, and every tool gdharness has agreed
  * the project was fine, because every tool was reading something else. The only way to the wall
@@ -292,7 +292,7 @@ function theFirstOf(path: string): { text: string; of?: number } {
  * One value the shape below replaced, and how many different ones stood there.
  *
  * The values are half the diagnosis and normalising them away loses it. Four hundred lines of one
- * shape is a wall; four hundred lines whose class names are twenty-three `core/` classes and whose
+ * shape is a wall. Four hundred lines whose class names are twenty-three `core/` classes and whose
  * files are fifty-eight tests is a finding, and the second is what a reader goes on to ask about.
  *
  * `allDifferent` is the slot that says nothing: a line number that is never the same twice tells
@@ -393,7 +393,7 @@ export function shapeOf(text: string): { shape: string; values: string[] } {
  * away and a fixed count of lines would have missed as soon as the wall was longer.
  *
  * [param keep], when given, reports only the groups with a member it accepts. The groups are still
- * formed over every entry, so a count and the lines above a burst say what the console holds; what
+ * formed over every entry, so a count and the lines above a burst say what the console holds. What
  * a filtered read leaves out is the shapes it was not asking about. A read for one class's name
  * came back with twenty shapes that had nothing to do with it, three times over for three reads.
  */
@@ -441,7 +441,7 @@ export function bursts(
       before: linesBefore(entries, first, collapsed, before),
     });
   }
-  return repeated.sort((one, other) => other.count - one.count);
+  return repeated.toSorted((one, other) => other.count - one.count);
 }
 
 function slotsOf(values: readonly (readonly string[])[], count: number): readonly Slot[] {
@@ -476,7 +476,7 @@ function slotsOf(values: readonly (readonly string[])[], count: number): readonl
  * Worth more than either count on its own, because it is the finding rather than a measurement of
  * it. A wall whose class names and source paths move together says that every name that would not
  * resolve belongs to one directory and every file it is named in belongs to another, which is the
- * sentence a reader is trying to arrive at; two slots each reading "23 distinct" leaves them to
+ * sentence a reader is trying to arrive at. Two slots each reading "23 distinct" leaves them to
  * guess whether that is one correspondence or two independent spreads.
  */
 function theSlotItMovesWith(

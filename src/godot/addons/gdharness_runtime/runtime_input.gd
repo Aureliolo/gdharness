@@ -20,7 +20,7 @@ const GdhSays = preload("runtime_says.gd")
 ## everything that process starts. Kept in step with `DESKTOP_VARIABLE` in src/desktop.ts.
 const DESKTOP_VARIABLE: String = "GDHARNESS_DESKTOP"
 
-## Whether this run has had the pointer note in full; the game process is the run.
+## Whether this run has had the pointer note in full. The game process is the run.
 static var _pointer_explained: bool = false
 ## Whether this run has had the note on a supplied hover in full.
 static var _hover_explained: bool = false
@@ -76,7 +76,7 @@ static func _pointer_noted(answer: Dictionary) -> Dictionary:
 			+ "get_global_mouse_position() and get_local_mouse_position() on what is drawn there, "
 			+ "read a meaningless position rather than where this put it. What reads the event "
 			+ "itself gets this position: the control under the pointer, its hover and tooltip, "
-			+ "and the game's input handlers. Said once a run; pointer_on_hidden_desktop marks "
+			+ "and the game's input handlers. Said once a run. pointer_on_hidden_desktop marks "
 			+ "every answer it applies to."
 		)
 	return answer
@@ -97,7 +97,7 @@ static func _hover_noted(answer: Dictionary, supplied: bool) -> Dictionary:
 			+ "engine would have: their mouse_entered and mouse_exited, and the hover a Button "
 			+ "presses on, and told the window the pointer is in it, so a motion reaches the "
 			+ "control under it. Viewport.gui_get_hovered_control() still answers null in this "
-			+ "window. Said once a run; hover_supplied marks every answer it applies to."
+			+ "window. Said once a run. hover_supplied marks every answer it applies to."
 		)
 	return answer
 
@@ -539,7 +539,7 @@ func inject_mouse_drag(params: Dictionary) -> Dictionary:
 ## never pressed anything. The position is the control's centre carried into window pixels, so
 ## the caller never has to do that arithmetic.
 ##
-## A control out of sight inside a ScrollContainer is scrolled to first; the answer says so under
+## A control out of sight inside a ScrollContainer is scrolled to first. The answer says so under
 ## `scrolled_into_view`, because the view having moved is a thing that happened to the screen and
 ## the caller is the only one who can tell whether that matters.
 ##
@@ -635,7 +635,7 @@ func click(params: Dictionary) -> Dictionary:
 	#
 	# Out of sight against what it is clipped to rather than against the viewport: a row scrolled
 	# off the top of its container is inside the viewport, behind whatever is drawn up there, so
-	# the click went to that instead and said so. Measured on a hall whose staff panel had been
+	# the click went to that instead and said so. Measured on a screen whose list had been
 	# scrolled past: the button was at y 69 and its container started at y 166.
 	var scrolled: bool = item_scrolled
 	if not GdhScreen.in_sight(control, own, local):
@@ -745,7 +745,7 @@ func click(params: Dictionary) -> Dictionary:
 		var _hearing: int = toggle.pressed.connect(heard_press)
 	var press: InputEventMouseButton = await _click_button(viewport, position, button, double)
 	# The release is what a button acts on, and a queue_free it causes lands at the end of
-	# this frame; the frame passes so the answer describes the control as the click left it.
+	# this frame. The frame passes so the answer describes the control as the click left it.
 	await _host.get_tree().process_frame
 	if rich != null and is_instance_valid(rich) and rich.meta_clicked.is_connected(heard):
 		rich.meta_clicked.disconnect(heard)
@@ -795,8 +795,8 @@ func click(params: Dictionary) -> Dictionary:
 
 ## Why a click at [param control]'s centre, or at the point [param aimed] names, would reach
 ## nothing, or "" when it would reach it: the point outside the viewport it is drawn in, at
-## [param local]; outside the viewport showing that one on the screen, which [param reached] holds
-## with the point there; or clipped away by a ScrollContainer holding it. A refusal names the
+## [param local], outside the viewport showing that one on the screen, which [param reached] holds
+## with the point there, or clipped away by a ScrollContainer holding it. A refusal names the
 ## viewport or container at fault and the point in that one's own space, since naming another
 ## printed a point inside the rect it was said to be outside. The note on a game with no window goes
 ## only on the viewport that is the window's.

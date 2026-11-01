@@ -20,7 +20,7 @@ var failures: Array[String] = []
 
 func _init() -> void:
 	# Announced somewhere private, so the fixture does not look like a game to a server running
-	# on this machine; served although it is a script run, so its frames are timed as a game's are.
+	# on this machine. Served although it is a script run, so its frames are timed as a game's are.
 	OS.set_environment(
 		"GDHARNESS_RUNTIME_DIR",
 		OS.get_temp_dir().path_join("gdharness-lazy-%d" % OS.get_process_id())

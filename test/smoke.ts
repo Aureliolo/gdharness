@@ -41,7 +41,7 @@ async function webSocketOpens(url: string): Promise<boolean> {
       ws.close();
       resolve(true);
     });
-    // A refused socket can report more than one error; the promise settles once and the rest
+    // A refused socket can report more than one error. The promise settles once and the rest
     // must still land on a listener.
     ws.on('error', () => {
       clearTimeout(timer);

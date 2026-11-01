@@ -4,7 +4,7 @@ extends SceneTree
 # The command line the server runs is
 # `godot --headless --path <project> --script <this> <operation> @file:<params.json> <answer.json>`,
 # and the one JSON object written to the answer file is the answer. Everything an operation does
-# lives in a sibling module; this file is the command table and the wire format.
+# lives in a sibling module. This file is the command table and the wire format.
 #
 # A file rather than a line on stdout, because the project's autoloads run after `_init` and print
 # into the same stream: an autoload printing a dictionary in `_process` was the last JSON line out

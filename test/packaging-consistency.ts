@@ -26,7 +26,7 @@ assert.equal(
 );
 assert.equal(await Bun.file(checksumPath).exists(), true, `${archiveName}.sha256 should exist`);
 assert.deepEqual(
-  (await readdir(path.join(root, 'dist'))).sort(),
+  (await readdir(path.join(root, 'dist'))).toSorted(),
   [archiveName, `${archiveName}.sha256`],
   'release packing should remove stale version artifacts',
 );
@@ -150,10 +150,10 @@ for (const script of addonScripts) {
 const packedOperations = archiveEntries
   .filter((entry) => entry.startsWith('package/build/godot/operations/') && entry.endsWith('.gd'))
   .map((entry) => entry.slice('package/build/godot/operations/'.length))
-  .sort();
+  .toSorted();
 assert.deepEqual(
   packedOperations,
-  [...operationsModules].sort(),
+  operationsModules.toSorted(),
   'the packed operations directory should be exactly the modules listed here',
 );
 
@@ -284,7 +284,7 @@ try {
     );
   }
 
-  // Some archive tools on Windows do not restore executable mode; Bun can still run the prebuilt bin.
+  // Some archive tools on Windows do not restore executable mode. Bun can still run the prebuilt bin.
   await chmod(cliPath, 0o755);
   const cli = spawnSyncHidden(process.execPath, [cliPath, 'version'], { cwd: packedRoot });
   assert.equal(cli.status, 0, cli.stderr.toString());

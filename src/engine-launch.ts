@@ -267,7 +267,7 @@ export function memoryRoomOf(free: number, commit: number | string | null): Memo
 
 /**
  * How much more Windows will commit, in bytes, which is what GlobalMemoryStatusEx answers as
- * ullAvailPageFile; null off Windows, or why Windows did not say.
+ * ullAvailPageFile. Null off Windows, or why Windows did not say.
  */
 export async function windowsCommitLeft(): Promise<number | string | null> {
   if (process.platform !== 'win32') {
@@ -302,12 +302,11 @@ export async function inTurns<T, R>(
   run: (item: T, index: number) => Promise<R>,
 ): Promise<R[]> {
   const answers: R[] = [];
-  let next = 0;
+  // One iterator for every lane, so each item is taken by whichever lane is free first, and once.
+  const queue = items.entries();
   const lane = async (): Promise<void> => {
-    while (next < items.length) {
-      const index = next;
-      next += 1;
-      answers[index] = await run(items[index] as T, index);
+    for (const [index, item] of queue) {
+      answers[index] = await run(item, index);
     }
   };
   await Promise.all(Array.from({ length: Math.max(1, Math.min(at, items.length)) }, lane));
@@ -330,7 +329,7 @@ export interface EngineLaunch {
 
 /**
  * [param command] and [param args] held to the first [param cores] processors on Linux, through
- * taskset, which execs the command in its own place so the pid is the engine's; as they are
+ * taskset, which execs the command in its own place so the pid is the engine's. As they are
  * elsewhere, since Windows holds a process through the helper and macOS cannot.
  */
 export function heldToCores(
@@ -353,7 +352,7 @@ export function heldToCores(
  * settings file.
  *
  * [param silenceIn] lengthens the silence for what was running as the engine fell silent, read from
- * what it had printed; it is asked only once a silence passes [param silenceSeconds], since the log
+ * what it had printed. It is asked only once a silence passes [param silenceSeconds], since the log
  * is read again each time.
  */
 export async function watchedEngine(
@@ -511,8 +510,8 @@ export async function watchedEngine(
       const now = fstatSync(reading).size;
       if (now > size) {
         const chunk = Buffer.alloc(SCAN_BYTES);
-        for (let at = size; at < now; ) {
-          const got = readSync(reading, chunk, 0, Math.min(SCAN_BYTES, now - at), at);
+        for (let offset = size; offset < now; ) {
+          const got = readSync(reading, chunk, 0, Math.min(SCAN_BYTES, now - offset), offset);
           if (got === 0) {
             break;
           }
@@ -522,7 +521,7 @@ export async function watchedEngine(
             stop();
           }
           carried = scanned.slice(-AUTOLOAD_FAILED.length);
-          at += got;
+          offset += got;
         }
         size = now;
         quiet.restart(at);

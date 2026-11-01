@@ -43,7 +43,7 @@ export function withNearestFiles(
   const named = said.split(/[\s,;]+/).map((word) => word.replace(/[.:]+$/, ''));
   const namesakes = beside
     .filter((file) => file !== wanted && stem(file) === stem(wanted) && !named.includes(file))
-    .sort();
+    .toSorted();
   if (namesakes.length > 0) {
     const alone = namesakes.length === 1;
     return `${said}. The ${alone ? 'file' : 'files'} of that name beside it ${alone ? 'is' : 'are'} ${namesakes.join(', ')}.`;
@@ -69,12 +69,12 @@ export function withNearestFiles(
   return `${said}. None of the project's ${files.length} .${extension} files is named like it.`;
 }
 
-/** Up to three of [param names] closest to [param word], closest first, ignoring case. */
+/** Up to three of [param names] closest to [param word], closest first. Case is ignored. */
 export function nearest(word: string, names: readonly string[]): string[] {
   const wanted = word.toLowerCase();
   const score = (name: string): number => similarity(name.toLowerCase(), wanted);
   return names
     .filter((name) => score(name) >= 0.5)
-    .sort((one, other) => score(other) - score(one))
+    .toSorted((one, other) => score(other) - score(one))
     .slice(0, 3);
 }

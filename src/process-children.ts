@@ -57,7 +57,7 @@ export async function startTimesOf(pids: readonly number[]): Promise<Map<number,
  * psutil's create_time() reads it.
  *
  * Never late, and early by up to a second for the boot time's cut and a tick for the start's, as
- * [method linuxStartEarliest] answers; a CI runner dated one 1008 ms early. The same number in every
+ * [method linuxStartEarliest] answers. A CI runner dated one 1008 ms early. The same number in every
  * process that asks, since the boot time is the kernel's. `ps -o lstart` adds the same two and then
  * cuts the sum to the second,
  * up to two seconds early: on a CI runner the process a game restarted itself into was dated before
@@ -84,7 +84,7 @@ export async function linuxStartTimes(pids: readonly number[]): Promise<Map<numb
     } catch {
       continue;
     }
-    // After the name, which is in brackets and can hold spaces and brackets of its own; the start is
+    // After the name, which is in brackets and can hold spaces and brackets of its own. The start is
     // the twenty-second field, and the state after the name the third.
     const ticks = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19]);
     if (Number.isInteger(ticks) && ticks >= 0) {
@@ -126,7 +126,7 @@ function printedBy(command: string, args: readonly string[], env: NodeJS.Process
   return run(command, args, { timeout: ASK_TIMEOUT_MS, env }).then(
     ({ stdout }) => stdout,
     (error: unknown) => {
-      const printed = (error as { stdout?: unknown }).stdout;
+      const printed = error instanceof Error && 'stdout' in error ? error.stdout : undefined;
       return typeof printed === 'string' ? printed : '';
     },
   );
@@ -206,7 +206,7 @@ export function listingFailure(error: unknown): string {
           : 'failed';
   const said = typeof failed.stderr === 'string' ? failed.stderr.trim() : '';
   const asked = basename((failed.cmd ?? '').split(' ')[0] ?? '') || 'the listing';
-  return `${asked} ${how}${said === '' ? ', with nothing on stderr' : `; stderr: ${said.slice(0, 400)}`}`;
+  return `${asked} ${how}${said === '' ? ', with nothing on stderr' : `, and stderr held: ${said.slice(0, 400)}`}`;
 }
 
 /**
@@ -260,7 +260,7 @@ export function parseProcessTable(printed: string, started = false): ProcessTree
  * left there by whatever had held its number before, and a stop asked to end its workers named
  * them as processes it could not account for. A child cannot have started before its parent, so a
  * link to a parent that began later is to the number and not to the process. Only judged where
- * the listing says when each began; POSIX hands an orphan to init the moment its parent goes, so
+ * the listing says when each began. POSIX hands an orphan to init the moment its parent goes, so
  * its links are never stale and its listing carries no times.
  *
  * A parent that has gone is not listed, so its start is [param since] when the caller knows it: a
@@ -323,7 +323,7 @@ function childrenIn(tree: ProcessTree, pid: number, since?: number): number[] {
  * lives: ending it reparents them, to init on POSIX, so the tree has to be read while the parent
  * is still there. To any depth because the process a run holds is not always the game: a console
  * wrapper on Windows starts the engine as its child, and the engine's workers are the wrapper's
- * grandchildren. [param since] is when [param pid] began, for when it may have gone; every process
+ * grandchildren. [param since] is when [param pid] began, for when it may have gone. Every process
  * below it was found listed, with its own start.
  */
 export function descendantsIn(tree: ProcessTree, pid: number, since?: number): number[] {
@@ -433,7 +433,7 @@ export const CONSOLE_WRAPPER = /_console(\.exe)?$/i;
  *
  * Read from the process table because an editor that has not reached the bridge yet is known to
  * nothing else. A restart interrupted by a reconnect launched one and its server was ended before
- * it connected; the next server, seeing nothing connected and no restart owed, opened a second on
+ * it connected. The next server, seeing nothing connected and no restart owed, opened a second on
  * the same project and the same language server port.
  */
 export function editorsOfProjectIn(tree: ProcessTree, projectPath: string): number[] {
@@ -451,7 +451,7 @@ export function editorsOfProjectIn(tree: ProcessTree, projectPath: string): numb
       found.push(pid);
     }
   }
-  return found.sort((a, b) => a - b);
+  return found.toSorted((a, b) => a - b);
 }
 
 /**

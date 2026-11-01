@@ -1,7 +1,7 @@
 extends Node
 ## The runtime autoload: a TCP server inside the running game that the gdharness server asks
 ## about the scene tree, drives with input, and captures. This file is the server and the
-## command table; what each command does lives in a sibling module.
+## command table. What each command does lives in a sibling module.
 ##
 ## The port is whatever the operating system hands out, and the game announces it by writing
 ## one file named after its process id into a directory the server derives the same way. Two
@@ -250,7 +250,7 @@ func _process(_delta: float) -> void:
 	var gone: Array[StreamPeerTCP] = []
 	for client: StreamPeerTCP in _clients:
 		# A poll that fails is a client that has already gone, which the status check below is
-		# about to find; the answer is read so it is not dropped, not because it adds anything.
+		# about to find. The answer is read so it is not dropped, not because it adds anything.
 		var polled: Error = client.poll()
 		if polled != OK or client.get_status() != StreamPeerTCP.STATUS_CONNECTED:
 			gone.append(client)
@@ -485,7 +485,7 @@ func _note_the_exit() -> void:
 ## The debugger reads in order, so its answer comes once it has read everything the game queued
 ## before the totals, and a debugger that has fallen behind answers late rather than not at all. A
 ## debugger gdharness gave this game, the keeper of a run the server started or an editor with the
-## gdharness addon, is waited for until it answers; a fixed three seconds lost the totals of a run
+## gdharness addon, is waited for until it answers. A fixed three seconds lost the totals of a run
 ## whose first frame named 1536 functions, on a loaded runner that read them slower than that. Any
 ## other debugger may never answer, and holds the exit for the short wait only.
 ##
@@ -520,7 +520,7 @@ func _send_the_profile() -> void:
 
 
 ## Sends the debugger the message it answers once it has read everything sent before it, and waits
-## up to [param waits] ms for the answer, polling for it since the game's loop is over.
+## up to [param waits] ms for the answer. It polls for it since the game's loop is over.
 func _debugger_answered(waits: int) -> bool:
 	_profile_received = false
 	EngineDebugger.send_message(PROFILE_SENT, [])
@@ -694,7 +694,7 @@ func _start_server() -> void:
 
 
 ## The scene [param given] names for the engine to run, as a `res://` path, when it lies under one
-## of [param prefixes]; otherwise empty. The engine takes any bare argument ending in a scene's
+## of [param prefixes], and otherwise empty. The engine takes any bare argument ending in a scene's
 ## extension for the scene, relative to the project or absolute, so each is read as it would.
 static func quiet_scene_in(given: PackedStringArray, prefixes: Variant) -> String:
 	# A PackedStringArray as project.godot writes one, or an Array of strings as a hand might.
@@ -754,7 +754,7 @@ func _announce(bind_address: String) -> void:
 	if made != OK and made != ERR_ALREADY_EXISTS:
 		push_warning(
 			(
-				"[gdharness] cannot create %s (%s); the server will not find this game"
+				"[gdharness] cannot create %s (%s), so the server will not find this game"
 				% [directory, made]
 			)
 		)
@@ -769,7 +769,7 @@ func _announce(bind_address: String) -> void:
 	if file == null:
 		push_warning(
 			(
-				"[gdharness] cannot write %s (%s); the server will not find this game"
+				"[gdharness] cannot write %s (%s), so the server will not find this game"
 				% [staged, FileAccess.get_open_error()]
 			)
 		)
@@ -777,14 +777,14 @@ func _announce(bind_address: String) -> void:
 	var written: bool = file.store_string(JSON.stringify(_identity(bind_address)))
 	file.close()
 	if not written:
-		push_warning("[gdharness] cannot write %s; the server will not find this game" % staged)
+		push_warning("[gdharness] cannot write %s, so the server will not find this game" % staged)
 		_unstage(staged)
 		return
 	var moved: Error = DirAccess.rename_absolute(staged, path)
 	if moved != OK:
 		push_warning(
 			(
-				"[gdharness] cannot move %s to %s (%s); the server will not find this game"
+				"[gdharness] cannot move %s to %s (%s), so the server will not find this game"
 				% [staged, path, moved]
 			)
 		)
@@ -794,7 +794,7 @@ func _announce(bind_address: String) -> void:
 
 
 ## Takes a staged announcement down after a write or a move that failed. The answer is taken
-## rather than dropped, since these scripts compile under the game's own warning levels; a
+## rather than dropped, since these scripts compile under the game's own warning levels. A
 ## staged file that will not go either is nothing any server reads.
 func _unstage(staged: String) -> void:
 	var _removed: Error = DirAccess.remove_absolute(staged)
@@ -899,7 +899,7 @@ func _ping(_params: Dictionary) -> Dictionary:
 
 
 ## The game asked to close, as a player's close asks it: answered at once and delivered once the
-## answer has gone out. `acceptsQuit` says whether the tree quits on the request by itself; a game
+## answer has gone out. `acceptsQuit` says whether the tree quits on the request by itself. A game
 ## that turned that off decides for itself, and may ask the player first.
 func _close_game(_params: Dictionary) -> Dictionary:
 	_close_asked = true
@@ -967,7 +967,7 @@ func _cleanup() -> void:
 		if removed != OK:
 			push_warning(
 				(
-					"[gdharness] cannot remove %s; the server will find a game that is gone"
+					"[gdharness] cannot remove %s, so the server will find a game that is gone"
 					% _announcement
 				)
 			)

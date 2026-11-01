@@ -1,11 +1,8 @@
 # How it works
 
-Two halves: what an install puts where, and what talks to what once it is running.
+What an install puts where, and what talks to what once it runs.
 
 ## What an install puts where
-
-Everything belongs to one project. Twenty Godot projects means twenty installs, each with its own
-copy of the addons, its own pinned version and its own engine path.
 
 ```text
 your-project/
@@ -22,15 +19,24 @@ your-project/
 `-- .codex/config.toml         Codex, and the others with no project config
 ```
 
-The entry written into each config is the same everywhere: `gdharness@{{version}}` through the
-runner that installed it, with `GODOT_PATH` set to the engine found at the time. The version is
-pinned rather than `latest` because the server and the addons have to match; `editor_status`
-reports a mismatch as `addonIsStale`.
+Every config gets the same entry. It runs `gdharness@{{version}}` through the runner that installed
+it, with `GODOT_PATH` set to the engine found at setup. The version is pinned rather than `latest`
+because the server and the addons have to match. `editor_status` reports a mismatch as
+`addonIsStale`.
+
+### The runner in the entry
+
+The entry names its runner by path, not as `npx` or `bunx`. A harness spawns what the config names
+through PATH, and a runner's name is not always on PATH. A Bun installed under a project ships `bun`
+without `bunx`, so an entry saying `bunx` starts nothing.
+
+A Bun entry carries `--bun`. The published bundles start with `#!/usr/bin/env node`, because npx is
+Node. A runner honours that line. Without the flag, a Bun entry runs the server under whatever Node
+the machine has.
 
 ### What an upgrade reaches, and when
 
-Upgrading writes new files to disk. Which of them are being run is a separate question, and the
-three parts answer it differently:
+An upgrade writes new files to disk. Each part loads them at its own moment.
 
 | Part                       | Loaded                         | So a fix lands                   |
 | -------------------------- | ------------------------------ | -------------------------------- |
@@ -38,66 +44,67 @@ three parts answer it differently:
 | `addons/gdharness_editor`  | by the editor, at startup      | after `editor_launch restart`    |
 | the MCP server             | by the harness, when it spawns | only when the harness reconnects |
 
-So the halves of one project can be on different releases: an upgrade writes the addons under a
-running editor and game, and a server cannot replace itself, since nothing inside it can ask the
-harness for a restart. The server and the addons of one release ship together and are not kept
-working with any other release's, so a half running other code is refused rather than asked.
+So the halves of one project can run different releases. An upgrade writes the addons under a
+running editor and game. A server cannot replace itself, because nothing inside it can ask the
+harness for a restart. The server and the addons of one release work only with each other, so a
+half running other code is refused.
 
-The editor addon is judged by the code it loaded against the code this server ships, by a digest
-the install writes as `.gdharness-digest`, so an upgrade that leaves that code alone does not call
-the editor stale. An editor whose greeting lacks a field this release sends is another release's
-too. The bridge sends such an editor nothing but the quit that `editor_launch close` and
-`editor_launch restart` need, and every other editor-routed call is refused with the remedy:
-`editor_launch restart` when the project holds this server's addons, `gdharness upgrade` first when
-it does not, and a reconnect when the editor is the newer half. `editor_status` answers throughout,
-with `addonIsStale` and `staleNote`, and `projectIs` catches the other direction, a project upgraded
-while the server kept running. Read the version from `serverVersion` rather than from the pin when
-it matters, because the pin describes the next server and the process answering is whatever the
-harness spawned at the last reconnect.
+### A stale editor addon
 
-A game says which runtime addon it loaded, read from the same two markers in
-`addons/gdharness_runtime` when it starts, and `editor_status` judges each entry under `runtimes`
-the same way, with `addonVersion`, `addonIsStale` and `staleNote`. A `runtime_*` call to a stale
-game is refused with the note and not sent. The check is by digest rather than by the protocol
-number because a second checkout of a project, such as a git worktree, has its own `addons/`, and
-one was found running a runtime three releases behind its server with the protocol number
-unchanged. The note names the fix by what the game's own project holds: `gdharness upgrade` there
-when its addon is not this server's either, a restart of the game when it is, and a reconnect when
-the game is the newer half. A runtime of another protocol is not listed as reachable at all: the
-protocol moves whenever the wire changes, and such a game is named as unreadable with the half that
-is behind.
+The install writes a digest of each addon's code as `.gdharness-digest`, beside its
+`.gdharness-version`. The editor addon is stale when the digest of the code it loaded differs from
+the code this server ships. An upgrade that leaves that code alone does not make the editor stale.
+An editor whose greeting lacks a field this release sends is also another release's.
 
-The runner is named by its path rather than as `npx` or `bunx`. A harness spawns what the config
-names, through PATH, and a runner's name is not always on it: a Bun installed under a project
-ships a `bun` and no `bunx` beside it, so an entry saying `bunx` starts nothing. Writing a path
-costs nothing, because the entry carries an absolute `GODOT_PATH` already and so was never
-portable between machines.
+The bridge sends such an editor only the quit that `editor_launch close` and `editor_launch restart`
+need. Every other editor-routed call is refused with the remedy:
 
-A Bun entry carries `--bun`. The published bundles start `#!/usr/bin/env node`, because npx is
-Node and that line has to work, and a runner honours a shebang: without the flag a Bun entry
-starts the server under whatever Node the machine has, which makes the runtime a property of the
-machine rather than of the config.
+- `editor_launch restart` when the project holds this server's addons.
+- `gdharness upgrade` first when it does not.
+- A reconnect when the editor is the newer half.
+
+### Which release is running
+
+`editor_status` answers throughout, with `addonIsStale` and `staleNote`. Its `projectIs` catches a
+project upgraded while the server kept running. Read the running version from `serverVersion`, not
+from the pin. The pin names the next server. The process answering is whatever the harness spawned
+at its last reconnect.
+
+### A stale runtime addon
+
+A game reports the runtime addon it loaded, from the same two markers in `addons/gdharness_runtime`.
+`editor_status` judges each entry under `runtimes` the same way, with `addonVersion`, `addonIsStale`
+and `staleNote`. A `runtime_*` call to a stale game is refused with the note and not sent.
+
+The check uses the digest, not the protocol number. A second checkout of a project, such as a git
+worktree, has its own `addons/`. It can run an older runtime with an unchanged protocol number. The
+note names the fix from what the game's own project holds:
+
+- `gdharness upgrade` there when its addon is not this server's either.
+- A restart of the game when it is.
+- A reconnect when the game is the newer half.
+
+A runtime of another protocol is not listed as reachable. The protocol changes whenever the wire
+does. Such a game is named as unreadable, with the half that is behind.
 
 ## How setup decides what to write
 
 {{flow}}
 
-`setup` takes the directory to install into, and defaults to the one you are in. The third way out
-is a pipe, a CI job or an agent, where there is nobody to answer a question: it writes what the
-project has already committed to rather than hanging on an answer that is never coming.
+`setup` installs into the directory it is given, or the one you are in. The third way out is for a
+pipe, a CI job or an agent, where nobody can answer a question. There it writes what the project has
+already committed to and asks nothing.
 
-**Nothing outside the project is written without a flag or a typed yes.** A harness with no
-project-level config at all is then written where it lives, because that is its limitation rather
-than a choice we can make better for you, but never as a side effect of installing a project.
+What `setup` writes outside the project, and when, is in
+[the install guide](install.md#what-it-writes-and-where).
 
-Detection asks two questions of each harness: whether this project is already configured for it,
-and whether it is on this machine at all. The second reads the harness's own directory under home
-and never writes there.
+Detection asks two questions of each harness. Is this project already configured for it? Is the
+harness on this machine at all? The second reads the harness's own directory under home and never
+writes there.
 
 ## Every harness
 
-All but two are written for you, whatever the format, because a block to paste is a step that gets
-skipped or pasted into the wrong file.
+All but two are written for you, whatever the format.
 
 | Format | How it is written                          | What survives                                          |
 | ------ | ------------------------------------------ | ------------------------------------------------------ |
@@ -105,27 +112,26 @@ skipped or pasted into the wrong file.
 | TOML   | Our table appended, or replaced in place   | Every other byte: TOML tables are position-independent |
 | YAML   | Through a parser that round-trips comments | Their servers and the comments about them              |
 
-The two exceptions are nanobot and Autohand. Their config file is documented; the key they hold
-servers under is not, and an invented key writes a file that parses, loads and does nothing. Those
+The two exceptions are nanobot and Autohand. Their config file is documented. The key they hold
+servers under is not. An invented key writes a file that parses, loads and does nothing. Those two
 print the block instead.
 
-{{mcp-json-count}} harnesses read the same `.mcp.json`, so it is written once and all of them are
-named.
+{{mcp-json-count}} harnesses read the same `.mcp.json`. Setup writes it once and names all of them.
 
 {{harnesses}}
 
 ## Where the skill goes
 
-`.agents/skills/<name>/SKILL.md` is the cross-tool convention, and the reason there is one skill
-rather than an integration per harness.
+`.agents/skills/<name>/SKILL.md` is the cross-tool convention. It is why there is one skill rather
+than an integration per harness.
 
 | Where it goes          | Which harnesses                                                                             |
 | ---------------------- | ------------------------------------------------------------------------------------------- |
 | Reads `.agents/skills` | {{shared-skill-count}} of the {{harness-count}}, Codex among them, which looks nowhere else |
 | Needs its own copy     | Claude Code `.claude/skills`, Kiro `.kiro/skills`, Cline `.cline/skills`                    |
 
-A harness that does read the shared directory still gets its own copy when this project already
-keeps skills there, because that is where its author will look.
+A harness that reads the shared directory still gets its own copy when this project already keeps
+skills there. That is where its author will look.
 
 ## What gdharness is made of
 
@@ -147,7 +153,7 @@ gdharness
 |
 `-- server.ts             the MCP server: one call in, one answer out
     |-- tool-definitions  every tool, op and argument, in one table
-    |-- tool-args.ts      the refusals, which name the valid set
+    |-- tool-args.ts      reading arguments of each type
     |
     |-- godot-bridge.ts   websocket, 6505, the editor addon connects in
     |-- lsp_client.ts     tcp, 6005, diagnostics and symbols
@@ -159,131 +165,140 @@ addons, installed into your project
 |-- gdharness_editor      the bridge: scenes, resources, running the game
 |-- gdharness_runtime     an autoload: the running game answers through it
 |-- auto_reload           reloads the open scene when a file changes
-`-- gdharness_tests       waits, tween steps and input events for suites; GdhShare,
-                          GdhBench, and the scene suites are profiled in
+`-- gdharness_tests       waits, tween steps and input events, GdhShare, GdhBench,
+                          and the scene that profiles suites
 ```
 
-The CLI half never loads the MCP SDK, and the server half never reads the harness table. They share
-the engine locator and the project parsers and nothing else, which is why `setup` starts in well
-under a second on a machine that has never run the server.
+The CLI half never loads the MCP SDK. The server half never reads the harness table. They share only
+the engine locator and the project parsers. So `setup` starts in well under a second on a machine
+that has never run the server.
 
-`gdharness test` is the command a game's gate runs its gdUnit4 suites with, and
-[Test runs](test-runs.md) describes it, with the engine slots the games' own tools share. Each of
-its engines starts the shipped runner, `godot/tests/listed.gd`, from outside the project, which is
-the runner `project_test` starts as well. Both read what the engine printed with `suite-judge.ts`,
-from one file holding both of its streams in order, so a suite the tool passes is one the gate
-passes: the tool looks in the same directories and judges engine errors against the same
-declarations. `editor_run start` given `suites` plays the tests addon's `suites.tscn` instead, so
-the profiler sees the suites; the scene loads the same runner from where the server ships it and
-calls its `started`, since the addon must compile in a project without gdUnit4
-(`suites-scene.ts`).
-
-`gdharness spread` plays a bench scene over several engines, each holding one of the same slots,
-and [Spread benches](spread.md) describes it. Both commands start and watch their engines through
-`engine-launch.ts`. The bench asks the tests addon's GdhShare for its outcomes: in a worker it plays
-every Nth run and writes the outcomes with `store_var`, and in the one engine started after the
-workers it reads them back, so the bench folds the same values in the same order as it does alone.
-
-`gdharness lsp` connects a harness that speaks LSP over stdio to the GDScript language server of
-the project's open editor, passing the bytes through unparsed (`lsp-bridge.ts`). It never starts
-an editor. An editor it started would take the port from the one already open, which then does not
-try again, and every answer would come from a process nobody can see. The editor addon writes the
-ports each editor process serves to `.godot/gdharness-editors/<pid>.json` and removes the file as
-the editor closes. The bridge tries `--port` or `GDHARNESS_LSP_PORT` when given, and otherwise each
-live editor's port, newest first, then Godot's 6005. Before passing anything through, it checks
-that the port serves this project, since a port can belong to another project's editor. A record
-counts only while the process under its pid started before the record was written. Records whose
-process has gone are deleted. A gate's `--import` loads the addon too and writes a record, but its
-command line marks it as a one-off job, so it is passed over.
-
-Every tool is declared in one table and dispatched from it, so a tool the server answers is a tool
-the documentation lists and a fixture drives. The reference on this site is rendered from that same
+Every tool is declared in one table and dispatched from it. So every tool the server answers is one
+the documentation lists and a fixture drives. The reference on this site is rendered from the same
 table.
+
+### Test runs
+
+A CI job runs a project's gdUnit4 suites with `gdharness test`. [Test runs](test-runs.md) describes
+it and the engine slots it shares with other tools. Each of its engines starts the shipped runner,
+`godot/tests/listed.gd`, from outside the project. `project_test` starts the same runner.
+
+Both judge the engine's output with `suite-judge.ts`, from one file holding both streams in order.
+They look in the same directories and judge engine errors against the same declarations. So a suite
+the tool passes is one the gate passes.
+
+`editor_run start` given `suites` plays the tests addon's `suites.tscn` instead, so the profiler sees
+the suites. The scene loads the same runner from where the server ships it and calls its `started`
+(`suites-scene.ts`). It loads it at run time because the addon must compile in a project without
+gdUnit4.
+
+### Spread benches
+
+`gdharness spread` plays a bench scene over several engines, each holding one of the same slots.
+[Spread benches](spread.md) describes it. Both commands start and watch their engines through
+`engine-launch.ts`.
+
+The bench asks the tests addon's GdhShare for its outcomes. In a worker, GdhShare plays every Nth run
+and writes the outcomes with `store_var`. In the one engine started after the workers, it reads them
+back. So the bench folds the same values in the same order as it does alone.
+
+### The LSP bridge
+
+`gdharness lsp` connects a harness that speaks LSP over stdio to the GDScript language server of the
+project's open editor. It passes the bytes through unparsed (`lsp-bridge.ts`).
+
+It never starts an editor. A new editor would take the port from the open one, which does not try
+again. Every answer would then come from a process nobody can see.
+
+### Which editor the bridge reaches
+
+The editor addon writes the ports each editor process serves to
+`.godot/gdharness-editors/<pid>.json`. It removes the file as the editor closes.
+
+The bridge tries `--port` or `GDHARNESS_LSP_PORT` when given. Otherwise it tries each live editor's
+port, newest first, then Godot's 6005. A port can belong to another project's editor, so the bridge
+checks that it serves this project before passing anything through.
+
+A record counts only while the process under its pid started before the record was written. Records
+whose process has gone are deleted. A gate's `--import` loads the addon too and writes a record. Its
+command line marks it as a one-off job, so it is passed over.
 
 ## When a call fails
 
-Two kinds of failure, and the answer says which one it is.
+A failed call is a refusal or a defect, and the answer says which.
 
-A **refusal** is a failure the tool anticipated: an argument outside the valid set, a node that is
-not in the scene, an editor that is not connected. It names what would have worked instead, and it
-is the ordinary way a tool says no. Most of them are written by `tool-args.ts`.
+A **refusal** is a failure the tool anticipated. Examples are an argument outside the valid set, a
+node not in the scene, or an editor that is not connected. It names what would have worked instead.
+Most refusals are written in `server.ts`.
 
-A **defect** is everything left over: a throw nobody modelled, caught at the tool boundary in
-`server.ts` or by the catch at the bottom of `cli.ts`. That answer says up front that repeating the
-call will not help, since an exception message handed to an agent otherwise reads as something it
-did wrong. It carries the version, the runtime, the platform and a short signature that comes out
-the same for one bug on two machines, and it asks whoever is reading to tell the person whose
-machine this is and ask whether they may report it on their behalf.
+A **defect** is any other throw, caught at the tool boundary in `server.ts` or at the bottom of
+`cli.ts`. Its answer says first that this is a gdharness defect. Without that, an agent reads an
+exception message as something it did wrong. The answer carries the version, the runtime, the
+platform and a short signature that is the same for one bug on two machines.
 
-Nothing is sent from here, and no issue is opened without somebody seeing what it would contain:
-the report is about their project, and a public tracker is their decision. The link it offers is
-the issue form with those lines already filled in.
+### Retrying a defect
 
-It asks to be reported even when it turns out to be wrong. A failure that was really the project's
-or the environment's doing, arriving dressed as a defect, is a misclassification: the refusal that
-should have named what would have worked is missing, and every later caller hits the same wall. So
-that report is the more useful of the two, and the message and the form both say so.
+The first time, the answer asks for one retry. When the same signature comes back, it says a retry
+will not help. It asks the reader to ask the machine's owner before reporting it for them.
 
-Rarely, one answer in a few hundred also carries an invitation to say what is missing. A tool that
-should exist and does not is invisible from inside the server, and the only party that knows is the
-one that just worked around it. It asks for the same yes before anything is filed.
+### Reporting a defect
+
+Nothing is sent automatically. The agent asks the machine's owner first, because the report names
+their project's files. The link opens the issue form with the report filled in.
+
+A defect asks to be reported even when the fault was really the project's or the environment's.
+Then a refusal that should have named the fix is missing, and every later caller meets the same
+failure. The message and the form both ask for such a report.
+
+Every 250th answer also asks the caller which tool was missing. Only a caller that
+just worked around a missing tool knows of it. It asks for the same yes before anything is filed.
 
 ## The third kind of failure
 
-Neither of the two above is the failure this surface is most prone to. Every tool here answers in
-JSON, and JSON always looks certain. So the expensive failure is an answer that is well formed,
-confident, and means something other than what a reader will take it to mean.
+The costliest failure is a well-formed, confident answer that means something other than what the
+reader takes it to mean. Examples:
 
-Five of those were reported by two projects in one day:
+- diagnostics about code that had just compiled and run,
+- `No game is running` about a bench still printing,
+- hidden labels read back as visible.
 
-- five diagnostics about code the engine had just compiled and run green,
-- `No game is running` about a bench that had printed forty minutes of output,
-- four hidden labels read back as what the player can see,
-- `warnings` naming neither what was warned nor where,
-- a roster of twelve people rendered as the word `RefCounted` twelve times.
+### Every answer shows its own ambiguity
 
-Nothing broke in any of them. Each was a confident answer, and each cost somebody hours, because
-the only way to find out was to run the thing the tool was supposed to save them running.
+No tool here may say something true in shape and false in meaning without a field in the same
+answer that shows it.
 
-So: a tool here should not be able to say something true in shape and false in meaning without a
-field in the same answer that gives it away. `endedUnwatched` says a run ended with nobody
-collecting its code, so a missing code cannot read as zero. `hidden` says a filter took matches
-out, so none and four-all-hidden stop being the same answer. `omitted` says the cap dropped
-entries. A list that cannot be stepped into says how long it is, rather than saying it has no
-property by that name and sending somebody to look for one.
+- `endedUnwatched` says nobody collected a run's exit code, so a missing code cannot read as zero.
+- `hidden` says a filter took matches out, so none and four-all-hidden are different answers.
+- `omitted` says the cap dropped entries.
+- A list that cannot be stepped into says how long it is. It does not claim to lack the property.
 
-The sharpest statement of it came from one of the projects reporting these, about why it had
-written a `Get-Process` loop rather than trust an answer: a false negative and a true negative were
-spelled the same way, so the only reliable question was one asked of the operating system. Where
-two states a caller must tell apart arrive as one answer, the caller's only way out is to stop
-trusting the tool and go around it. That is the cost being avoided here, and it is higher than the
-cost of a feature that does not exist yet.
+When two states a caller must tell apart arrive as one answer, the caller stops trusting the tool.
+That cost is higher than the cost of a missing feature.
 
-A fix is not finished when the code is right. It is finished when the answers are still
-unambiguous afterwards, because a fix makes new states and hands them to the sentence that was
-already there. Teaching a server to claim only its own runs made "No game is running" mean both
-_nothing is running_ and _something is running that I have no claim on_, which is the fault it had
-just fixed, one layer in and written by the fixing. Read the sentences a change leaves behind.
+### A fix leaves sentences behind
+
+A fix is finished when the answers are still unambiguous afterwards, not when the code is right. A
+fix makes new states and hands them to sentences that were already there. A server that learned to
+claim only its own runs made "No game is running" ambiguous. It meant _nothing is running_ or
+_something I have no claim on is running_. Read the sentences a change leaves behind.
 
 ## How a test here is checked
 
-The same failure has a test-side spelling: an assertion that agrees with almost everything. Written
-as "the answer is not the complaint I am thinking of", it is satisfied by a crash, a timeout, an
-empty string and every refusal but one, so it stays green through the bug it was put there to hold.
-Four of them sat in `test/regressions.ts`, each guarding a call that was supposed to be accepted.
-An accepted call reaches something, and what it reaches is what gets asserted: the runtime that is
-not running, the console buffer answering with itself, the engine run failing under the operation
-that was asked for.
+An assertion that an answer is not one particular complaint agrees with almost everything. A crash,
+a timeout, an empty string and every other refusal satisfy it. So it stays green through the bug it
+was meant to hold. A test of a call that should be accepted asserts what the call reaches instead.
+That is the runtime that is not running, the console buffer answering with itself, or the engine run
+failing under the operation asked for.
 
-A fixture is checked by disarming the line it guards: break the code on purpose, say beforehand
-which tests should notice, run them, and compare. A prediction that misses is worth more than a
-green run, because it names a fixture that is not watching what its name says it watches.
+### Disarming a fixture
 
-For that to be readable the runner does not stop at the first failure. `bun test/regressions.ts`
-runs every regression whether or not the one before it failed and lists the ones that failed at the
-end, so a single disarm answers "which four noticed" rather than "one noticed, and the rest never
-ran". Any arguments select tests by name, loosely matched, for running one on its own while it is
-being written.
+A fixture is checked by disarming the line it guards. Break the code on purpose and say beforehand
+which tests should notice. Then run them and compare. A prediction that misses names a fixture
+that is not watching what its name says.
+
+`bun test/regressions.ts` runs every regression even after a failure and lists the failures at the
+end. So one disarm shows every test that noticed. Arguments select tests by name, loosely matched, to
+run one on its own while writing it.
 
 ## What talks to what
 
@@ -298,49 +313,62 @@ being written.
                             `- spawn -->  godot --headless   one engine per call
 ```
 
-The agent's side is MCP over stdio in the 2026-07-28 revision, which opens with `server/discover`
-and carries an envelope on every request. A client opening with the 2025 `initialize` is answered
-with the unsupported-protocol-version error naming 2026-07-28.
-
-Beside the tools it offers the `godot://` resources, with their paths completed from the project,
-three prompts written as the tool calls they make, and a few lines of instructions a client puts in
-front of its agent. Each tool tells a client whether it reads, adds or can destroy, worked out from
-its ops, which is what a client decides from whether to ask before a call. Results carry no
-`structuredContent`: Claude Code hands the model that field alone when a result has it, and every
-answer here that leads with prose or carries a notice would lose them.
-
-A call whose request carries a progress token is sent a progress notification at least every twenty
-seconds until it answers, whichever tool it is. Claude Code ends a call that has said nothing for
-thirty minutes, so a long `editor_run wait` was cut off while the game it watched kept running. A
-test run and a folder of diagnostics say how far they have got; any other call says it is still
-going and how long it has taken.
-
-`gdharness_editor`, the language server and the debug adapter are all inside the Godot editor you
-have open. `gdharness_runtime` is inside the running game. The spawned engine opens nothing and
+`gdharness_editor`, the language server and the debug adapter all live inside the Godot editor you
+have open. `gdharness_runtime` lives inside the running game. The spawned engine opens nothing and
 exits when the call is answered.
+
+The agent's side is MCP over stdio in the 2026-07-28 revision. It opens with `server/discover` and
+carries an envelope on every request. A client opening with the 2025 `initialize` gets the
+unsupported-protocol-version error naming 2026-07-28.
+
+### What the server offers beside the tools
+
+- The `godot://` resources, with their paths completed from the project.
+- Three prompts, written as the tool calls they make.
+- A few lines of instructions a client puts in front of its agent.
+
+Each tool tells a client whether it reads, adds or can destroy, worked out from its ops. A client
+decides from that whether to ask before a call.
+
+Results carry no `structuredContent`. When a result has that field, Claude Code hands the model that
+field alone. Every answer here that leads with prose or carries a notice would lose them.
+
+### Progress on long calls
+
+A call whose request carries a progress token gets a progress notification at least every twenty
+seconds until it answers. That holds for every tool. Claude Code ends a call that has said nothing
+for thirty minutes. A test run and a folder of diagnostics say how far they have got. Any other call
+says it is still going and how long it has taken.
 
 ## The servers' own log
 
-A client can end a server in the middle of a call and start another, and nothing on the client's
-side says why. So every server appends JSON lines to `servers.log` in the runtime directory, one
-file for all of the user's servers. `editor_status` names the file under `server.lifecycleLog`.
-Each line carries the time, the server's pid, its parent's pid and its version. The events are:
+A client can end a server mid-call and start another without saying why. So every server appends
+JSON lines to `servers.log` in the runtime directory, one file for all of the user's servers.
+`editor_status` names the file under `server.lifecycleLog`. Each line carries the time, the server's
+pid, its parent's pid and its version. The events are these.
 
 - `started`: the command line, working directory, project, and the `.mcp.json` beside it, if any.
-- `replaced`: written as a server starts while a live server of its project holds the
-  announcement, naming that `predecessor`.
-- `parent`: the parent's command line, which says which client started the server. It is asked
-  for five seconds in, so a server that lives only a moment (a test suite starts hundreds) costs
-  no process listing.
+- `replaced`: a server started while a live server of its project held the announcement. It names
+  that `predecessor`.
+- `parent`: the parent's command line, which names the client. It is read five seconds in, so a
+  server that lives a moment (a test suite starts hundreds) costs no process listing.
 - `client`: the name and version the client gave, written again whenever they change.
-- `ended`: the `cause`. This is `stdin:end` when the client closes its end, the signal's name,
-  `superseded` with the `successor`'s pid, `uncaughtException` or `unhandledRejection` with the
-  stack, or `exit:` and the code. It also lists the calls in flight, each with how long it had run.
+- `ended`: the `cause`, and the calls in flight with how long each had run.
 
-A server killed without warning writes no `ended` line, and on Windows every kill is that, since
+### Why a server ended
+
+| `cause`                                   | Meaning                                       |
+| ----------------------------------------- | --------------------------------------------- |
+| `stdin:end`                               | The client closed its end                     |
+| A signal's name                           | That signal ended it                          |
+| `superseded`                              | A successor took over, its pid in `successor` |
+| `uncaughtException`, `unhandledRejection` | A throw, with the stack                       |
+| `exit:` and the code                      | The process exited with that code             |
+
+A server killed without warning writes no `ended` line. On Windows every kill is that, since
 `TerminateProcess` runs no handler. So a `started` line with no `ended` line after it means
-something killed that server. Past a megabyte the file moves aside to `servers.log.1`, replacing
-the one there.
+something killed that server. Past a megabyte the file moves aside to `servers.log.1`. That replaces
+any older `servers.log.1`.
 
 ## Connections
 
@@ -354,487 +382,680 @@ the one there.
 | Runtime             | TCP loopback, server connects to the game     | assigned by the OS | `GDHARNESS_RUNTIME_DIR` for the announce file | Game running, autoload registered, debug build |
 | Headless operations | Process, one per call                         | none               | `GODOT_PATH` for the binary                   | Nothing                                        |
 
-**Godot keeps those three per machine, not per editor.** All three live in editor settings, which
-are one file for every editor on the machine, so two editors open at once want the same three
-numbers and the second binds none of them. Every script and debug tool in the session behind it is
-then answered by the first editor, about a different project, which is worse than not answering at
-all.
+### Godot's three editor ports are per machine
 
-So `editor_launch` opens an editor on the two Godot takes options for, `--lsp-port` and
-`--dap-port`, keeping 6005 and 6006 whenever they are free and taking anything else when they are
-not. It passes the same two in the environment, which is how the addon knows a server opened it.
-`editor_status` reports where the connected editor says it serves, and the server follows that
-rather than the default.
+Godot keeps the language server, debug adapter and debugger ports in its editor settings. Those are
+one file for every editor on the machine. So two editors open at once want the same three numbers.
+The second binds none of them. Every script and debug tool in its session is then answered by the
+first editor, about a different project.
 
-The language server says which project it serves, so what holds a port is checked there rather than
-assumed. Godot answers an `initialize` whose root is not its own project by telling the client to
-change to its project, ahead of the answer, and the script tools refuse on that, naming both
-projects.
+### Ports for an editor gdharness opens
 
-**Nothing is written into those settings, because they are shared.** The engine consumes the two
-options and hands neither back, so an editor that restarts itself comes up without them. Writing
-them into the settings made the restart work, and made a port chosen for one project the number in
-the one file every editor of that version reads: the next editor opened by hand inherited it and
-collided with the editor it had been moved away from. `editor_launch restart` starts such an editor
-again instead, with the same arguments, since whatever wrote them can write them a second time. An
-editor opened by hand is on the ports its own settings name and comes back on them by itself, so
-that one still gets Godot's own restart.
+`editor_launch` opens an editor with the two options Godot takes, `--lsp-port` and `--dap-port`.
+It keeps 6005 and 6006 when they are free and takes any free port when they are not. It passes the
+same two in the environment, which tells the addon a server opened it. `editor_status` reports where
+the connected editor says it serves. The server follows that rather than the default.
 
-The debugger is the third, and Godot takes no option for it, so the addon asks the operating system
-for one before every play. `editor_run` answers with the port it got.
+Godot takes no option for the debugger. So the addon asks the operating system for a port before
+every play. `editor_run` answers with the port it got.
 
-**One editor setting is written, once, and it is not a port.** Godot's debug adapter answers a
-session's `initialize` by clearing every breakpoint in the script editor, open scripts and closed
-ones alike, unless `network/debug_adapter/sync_breakpoints` is on, and it is off by default. A
-server opens a session for its first breakpoint or its first stack read, so a harness session took
-the user's breakpoints away on its first debug call. The addon turns the setting on as it loads,
-which the adapter picks up without a restart, and reports it in its greeting: `editor_status` and
-`debug_breakpoint` say `breakpointsAtRisk` about an editor running an addon that did not. With it
-on, a session opening is told the editor's breakpoints instead, and `debug_breakpoint` sends a
-file's whole list as the union of what it holds and what the editor has, so setting a line never
+### Which project a language server serves
+
+The language server says which project it serves, so a port's holder is checked rather than assumed.
+Godot answers an `initialize` whose root is not its own project by telling the client to change to
+its project, ahead of the answer. The script tools then refuse and name both projects.
+
+### No port is written into the settings
+
+The editor settings are shared, so gdharness writes no port into them. The engine consumes the two
+options and hands neither back. So an editor that restarts itself comes up without them. A port
+written into the settings would become the number every editor of that version reads. The next
+editor opened by hand would collide with the one it was moved away from.
+
+So `editor_launch restart` starts such an editor again with the same arguments. An editor opened by
+hand uses the ports its own settings name and comes back on them by itself. That one still gets
+Godot's own restart.
+
+### The one setting the addon writes
+
+Godot's debug adapter clears every breakpoint in the script editor when a session sends
+`initialize`. That covers open and closed scripts alike, unless
+`network/debug_adapter/sync_breakpoints` is on. It is off by default. A server opens a session for
+its first breakpoint or stack read. So without the setting, its first debug call takes the user's
+breakpoints away.
+
+The addon turns the setting on as it loads. The adapter picks it up without a restart. The addon
+reports it in its greeting. `editor_status` and `debug_breakpoint` say `breakpointsAtRisk` about an
+editor whose addon did not turn it on.
+
+With it on, an opening session is told the editor's breakpoints instead. `debug_breakpoint` sends a
+file's whole list as the union of what it holds and what the editor has. So setting a line never
 clears the ones set by hand.
 
+### Two projects at once
+
 Two projects, two harness sessions, two servers and two editors therefore work at once. A server
-`setup` wrote answers about its own project's game rather than whichever one it finds announced,
-so `runtime_*` needs no `projectPath` on a machine running two. One server still serves one
-editor: the bridge carries a single connection.
+`setup` wrote answers about its own project's game, not whichever game it finds announced. So
+`runtime_*` needs no `projectPath` on a machine running two. One server still serves one editor,
+because the bridge carries a single connection.
 
-Two servers on one project is the harder case, since their games announce the same project. A
-game the editor plays says which editor: the editor addon puts its process id into its own
-environment as it loads, every game it plays inherits that, and the runtime announces it as
-`editor_pid`. A game some other server started announces none, so a start waiting for its game's
-runtime passes over a stranger's announcement however fresh, and `editor_status` lists `editorPid`
-under each runtime so a caller can tell them apart too.
+### Two servers on one project
 
-**The editor bridge is not at a number anybody agreed on.** A server set up by `setup` knows which
-project it serves, so it takes 6505 when that is free and any free port when it is not, and writes
-where it landed to `.godot/gdharness-bridge.json` inside that project. The editor addon reads that
-file, and reads it again every few seconds, so it follows whichever server announced last.
+Two servers on one project is harder, because their games announce the same project. A game the
+editor plays says which editor. The editor addon puts its process id into its own environment as it
+loads. Every game it plays inherits that. The runtime announces it as `editor_pid`.
 
-Two things fall out of that, and both were real. Two projects open at once used to want the same
-port, and the second editor never had a bridge at all. And a harness reconnect leaves the server it
-replaced running, holding the port and still answering, with the editor no reason to look
-elsewhere: it now moves to the replacement by itself rather than waiting for somebody to end a
-process.
+A game some other server started announces none. So a start waiting for its game's runtime passes
+over a stranger's announcement, however fresh. `editor_status` lists `editorPid` under each runtime
+so a caller can tell them apart too.
 
-An announcement naming a process that has gone is ignored, and a server with no project to announce
-in, which is any config written by hand, holds out for its configured port instead: it keeps asking
-for it every two seconds and `editor_status` says it is waiting and why.
+### The bridge port
 
-**An editor gdharness opens writes its console to `.godot/gdharness-editor.log`,** because nothing
-can read it otherwise. What an editor prints goes to a console no plugin can reach, so the addon
-cannot scrape it from inside, and an editor in self-contained mode writes no log of its own: a
-project whose editor printed hundreds of parse errors at startup had every gdharness tool agreeing
-it was fine, and the only way to the wall was somebody reading the window. So `editor_launch` asks
-the engine for a log file as it starts, and `editor_output op: "editor"` reads it. The engine
-replaces that file when it opens it, so one file is one editor session from its first line, which
-is where a wall of startup errors will be. Beside it, `.godot/gdharness-editor.json` records which
-editor the log belongs to: a log from yesterday's editor is still on disk today, and reading it as
-this one's would answer with a session that has ended. The same note answers once no editor is
-connected: the log of the editor it names is read as that editor's, with whether it still runs, so
-an editor that closed or crashed can still be asked what it printed last. An editor somebody opened
-by hand has no log at all and is refused saying so.
+The editor bridge has no fixed number. A server set up by `setup` knows which project it serves. It
+takes 6505 when that is free and any free port when it is not. It writes where it landed to
+`.godot/gdharness-bridge.json` inside that project. The editor addon reads that file every few
+seconds, so it follows whichever server announced last.
+
+An announcement naming a process that has gone is ignored. A server with no project to announce in
+holds out for its configured port instead. That is any server whose config was written by hand. It
+asks for the port every two seconds. `editor_status` says it is waiting and why.
+
+### Reconnects and start order
+
+Two projects open at once each get a bridge. After a harness reconnect, the replaced server keeps
+running. It holds the port and still answers. The editor moves to the replacement by itself.
 
 The editor keeps asking from its end too, so the order the two start in does not matter. A socket
-pointed at a port nothing is listening on sits in its connect for thirty seconds before it gives
-up, which outlasts a harness reconnect: an editor opened ahead of its server reaches the bridge
-once the server is there, rather than waiting for somebody to restart it.
+pointed at a port nothing listens on waits thirty seconds in its connect before it gives up. That
+outlasts a harness reconnect. So an editor opened ahead of its server reaches the bridge once the
+server is there.
+
+### The editor's console log
+
+An editor gdharness opens writes its console to `.godot/gdharness-editor.log`. What an editor prints
+goes to a console no plugin can reach. An editor in self-contained mode writes no log of its own
+either. Without this file, hundreds of parse errors at startup go unseen by every tool.
+
+`editor_launch` asks the engine for the log file as it starts. `editor_output op: "editor"` reads it.
+The engine replaces that file when it opens it. So one file holds one editor session from its first
+line.
+
+### Which editor a log belongs to
+
+Beside it, `.godot/gdharness-editor.json` records which editor the log belongs to. A log from
+yesterday's editor is still on disk today. Once no editor is connected, the log is read as the named
+editor's, with whether it still runs. So an editor that closed or crashed can still be asked what it
+printed last. An editor somebody opened by hand has no log and is refused saying so.
 
 ## Which tools use which
 
-| Tools                                                                                                                | Route                                                                                                                                  | Needs running                                    |
-| -------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
-| `editor_rescan`, `editor_launch restart`, `close`                                                                    | Editor bridge                                                                                                                          | The editor, addon enabled                        |
-| `scene_tree`, `scene_animation read` and `read_states`, `resource_edit read`                                         | Editor bridge when an editor serves the project, otherwise headless operations                                                         | Nothing                                          |
-| `scene_create`, `scene_node`, `scene_signal`, `scene_animation` but its reads, `resource_edit` but `read` and `move` | Editor bridge when an editor serves the project, otherwise the editor addon's own tool in headless operations                          | Nothing                                          |
-| `script_diagnostics`                                                                                                 | Language server when this project's editor is open, otherwise headless operations, which report errors without columns and no warnings | Nothing, though only the editor reports warnings |
-| `script_info` except `structure`, `script_edit rename` of a member                                                   | Language server                                                                                                                        | The editor                                       |
-| `debug_*`, and the console `editor_output` returns                                                                   | Debug adapter                                                                                                                          | A game the editor is playing                     |
-| `runtime_*`                                                                                                          | Runtime                                                                                                                                | A game with the runtime autoload                 |
-| `project_*`, `editor_classes`, `script_info structure`, `script_edit` otherwise, and                                 | Headless operations                                                                                                                    | Nothing                                          |
-| `resource_edit move`                                                                                                 |                                                                                                                                        |                                                  |
-| `editor_run`                                                                                                         | Editor bridge when an editor is connected, otherwise a spawned game                                                                    | Nothing, though the editor changes what it does  |
-| `editor_status`                                                                                                      | All of them, reporting what answers                                                                                                    | Nothing                                          |
+| Tools                                                                                                                | Route                                                                                                                                  | Needs running                                   |
+| -------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| `editor_rescan`, `editor_launch restart`, `close`                                                                    | Editor bridge                                                                                                                          | The editor, addon enabled                       |
+| `scene_tree`, `scene_animation read` and `read_states`, `resource_edit read`                                         | Editor bridge when an editor serves the project, otherwise headless operations                                                         | Nothing                                         |
+| `scene_create`, `scene_node`, `scene_signal`, `scene_animation` but its reads, `resource_edit` but `read` and `move` | Editor bridge when an editor serves the project, otherwise the editor addon's own tool in headless operations                          | Nothing                                         |
+| `script_diagnostics`                                                                                                 | Language server when this project's editor is open, otherwise headless operations, which report errors without columns and no warnings | Nothing                                         |
+| `script_info` except `structure`, `script_edit rename` of a member                                                   | Language server                                                                                                                        | The editor                                      |
+| `debug_*`, and the console `editor_output` returns                                                                   | Debug adapter                                                                                                                          | A game the editor is playing                    |
+| `runtime_*`                                                                                                          | Runtime                                                                                                                                | A game with the runtime autoload                |
+| `project_*`, `editor_classes`, `script_info structure`, `script_edit` otherwise, `resource_edit move`                | Headless operations                                                                                                                    | Nothing                                         |
+| `editor_run`                                                                                                         | Editor bridge when an editor is connected, otherwise a spawned game                                                                    | Nothing, though the editor changes what it does |
+| `editor_status`                                                                                                      | All of them, to report what answers                                                                                                    | Nothing                                         |
 
-`script_edit rename` reads the project's files itself, through a GDScript tokenizer of its own in
-`src/gdscript-source.ts`, because the question it answers for every occurrence of a name is what
-the tokenizer makes of the place: code, a string, a comment, a `##` doc comment or a node path. A
-class is renamed from that alone: a global class is the only thing a bare identifier in code can
-name, unless the script declares something of its own by the name or the word follows a dot, and
-both of those are left for a person. A member needs the analyser, since which `say` is meant in
-`thing.say()` depends on the type of `thing`, so its uses come from the editor's language server:
-the references of the topmost declaration, then `textDocument/definition` at every other
-occurrence in code. The second pass is needed because Godot 4.7, asked at an override's
-declaration, answers for the method it overrides, and a call inside the overriding class or on a
-value typed as it is in neither answer. A definition answer with more than one place is the
-analyser listing every declaration of the name for a value it cannot type, and is left. Every
-change is written or none is, and afterwards an open editor is told to read each changed file
-again, its moved script's old path included, which is what makes it drop the old class: a scan
-alone picks up a class that has appeared and keeps one that has gone. With no editor the class
-cache is rebuilt, the UID table too when a script moved, and the changed scripts are compiled in
-a fresh engine.
+## Renames and moves
 
-`resource_edit move` (`src/file-move.ts`) is the same path rewriting for any file or directory,
-with the file's `.import` and `.uid` moving beside it, and it reads and writes the files itself as
-the rename does. A scene or resource saved as `.scn` or `.res` cannot be rewritten and is answered
-instead. An editor serving the project is then told what moved, as its own FileSystem dock tells
-itself: cached resources take over their new paths, open tabs are renamed and read again, and the
-settings the move rewrote in `project.godot` are taken from the file, which a rename moving an
-autoload's script does too. Each of those holds an old path the editor would otherwise save back.
-The editor keeps a tab's path twice, on the scene's root and in its own list of scenes, and a
-script can set only the first; reading the tab again is what renews the second. With no editor,
-an import pass rebuilds the UID table and the class cache, and the changed scripts are compiled.
+### Renaming a class
 
-`project_import refresh_classes` is the one headless call that also asks the editor what classes
-it holds, when one is connected and open on the same project. Rewriting the cache does not reach
-the list a running editor already loaded, so a class it cannot resolve stays unresolvable and the
-rebuild still answers `added: []`. Any such class comes back under `unseenByEditor`, and
-`classesUnchecked` says so when the editor would not answer, because a check that goes quiet on
-failure reads exactly like a clean project. `editor_rescan` reports the same two after its scan.
+`script_edit rename` reads the project's files itself, through its own GDScript tokenizer in
+`src/gdscript-source.ts`. For every occurrence of a name, the tokenizer tells code from a string, a
+comment, a `##` doc comment or a node path.
+
+A class is renamed from that alone. A bare identifier in code can name only a global class. The
+exceptions are a script that declares something of its own by that name and a word that follows a
+dot. Both are left for a person.
+
+### Renaming a member
+
+A member needs the analyser, since which `say` is meant in `thing.say()` depends on the type of
+`thing`. So its uses come from the editor's language server. The server first takes the references
+of the topmost declaration. Then it asks `textDocument/definition` at every other occurrence in
+code.
+
+The second pass is needed because Godot 4.7 answers for the overridden method when asked at an
+override's declaration. A call inside the overriding class, or on a value typed as it, is in neither
+answer. A definition answer with more than one place means the analyser cannot type the value. That
+occurrence is left.
+
+### After a rename
+
+Every change is written or none is. Afterwards an open editor is told to read each changed file
+again, including a moved script's old path. That is what makes it drop the old class. A scan alone
+picks up a class that has appeared and keeps one that has gone.
+
+With no editor, the class cache is rebuilt, and the UID table too when a script moved. Then the
+changed scripts are compiled in a fresh engine.
+
+### Moving a file
+
+`resource_edit move` (`src/file-move.ts`) rewrites paths the same way for any file or directory. The
+file's `.import` and `.uid` move beside it. Like the rename, it reads and writes the files itself. A
+scene or resource saved as `.scn` or `.res` cannot be rewritten and is refused.
+
+### Telling the editor about a move
+
+An editor serving the project is then told what moved, as its own FileSystem dock tells itself.
+Cached resources take over their new paths. Open tabs are renamed and read again. The settings the
+move rewrote in `project.godot` are taken from the file, as they are after a rename that moves an
+autoload's script. Each of those holds an old path the editor would otherwise save back.
+
+The editor keeps a tab's path twice, on the scene's root and in its own list of scenes. A script can
+set only the first. Reading the tab again renews the second. With no editor, an import pass rebuilds
+the UID table and the class cache. Then the changed scripts are compiled.
+
+## The class cache
+
+### What the editor has not seen
+
+`project_import refresh_classes` is the one headless call that also asks the editor which classes it
+holds. It asks when an editor is connected and open on the same project. Rewriting the cache does
+not reach the list a running editor already loaded. So a class it cannot resolve stays unresolvable,
+and the rebuild still answers `added: []`.
+
+Any such class comes back under `unseenByEditor`. `classesUnchecked` says so when the editor would
+not answer, because a check that goes quiet on failure reads like a clean project. `editor_rescan`
+reports the same two after its scan.
+
 A class the editor holds compiled from an older text of its file comes back under
-`heldBehindInEditor`, and `heldBehindUnchecked` says why when the editor would not say.
+`heldBehindInEditor`. `heldBehindUnchecked` says why when the editor would not say.
 
-The scan also writes `.godot/global_script_class_cache.cfg` from the list the editor is holding,
-so that file follows the editor rather than the project: a class the editor cannot resolve is one
-the scan drops out of the file, and the next fresh engine, CI run or clone starts from the
-narrower one. Reading the file after a scan therefore says nothing the editor has not already
-said, which is why `unseenByEditor` is the whole answer and not half of it.
+### What a scan writes
 
-The write lands a frame after the editor stops reporting the scan, measured on 4.7.2, and an engine
-reads the file as it boots, so one started during the scan or in that frame resolves no global
-class at all. Every engine the server starts on a project (a run, a boot check, a test run, a
-headless operation, the import pass) first asks an editor open on that project with the addon's
-`scan_status`, waits out a scan or import in progress, then waits for the cache to be newer than the
-scan's end or for two seconds past it, and says how long under `waitedForEditorScanMs`. A class
-cache rebuild waits before it reads the cache it compares against, so the list the editor writes is
-the one compared. A scan still going after thirty seconds is an import of large assets rather than
-a script scan, and the engine starts anyway with a `scanNote`. An editor that does not answer is
-not waited for.
+The scan also writes `.godot/global_script_class_cache.cfg` from the list the editor holds. So that
+file follows the editor rather than the project. A class the editor cannot resolve drops out of the
+file. The next fresh engine, CI run or clone then starts from the narrower list.
+
+Reading the file after a scan says nothing the editor has not already said. That is why
+`unseenByEditor` is the whole answer.
+
+### Engines wait for a scan
+
+The write lands a frame after the editor stops reporting the scan, measured on 4.7.2. An engine
+reads the file as it boots. So an engine started during the scan, or in that frame, resolves no
+global class at all.
+
+Every engine the server starts on a project therefore first asks an open editor with the addon's
+`scan_status`. That covers a run, a boot check, a test run, a headless operation and the import
+pass. The engine waits out a scan or import in progress. Then it waits until the cache is newer than
+the scan's end, or for two seconds past it. It reports how long under `waitedForEditorScanMs`.
+
+### Rebuilds and slow scans
+
+A class cache rebuild waits before it reads the cache it compares against. So it compares the list
+the editor writes. A scan still going after thirty seconds is an import of large assets, not a
+script scan. The engine then starts anyway, with a `scanNote`. An editor that does not answer is not
+waited for.
+
+### No saves during a scan
 
 Nothing the addon does saves a file while the editor scans or imports. A scan's thread ends by
-writing the editor's file list out to `.godot`, walking the list as it goes, and every save in the
-editor updates an entry of that list from the main thread, freeing what the entry held; a scene
-saved while a resource's scan was ending was followed by garbage decoded as text and a dropped
-connection. So the addon turns away every call but the few that only read or wait (`scan_status`,
-the rescan, the reimport, the play status and stop, the profile read) with `busy`, and the bridge
-asks again every tenth of a second for as long as a game start waits on a scan, then answers that
-nothing was run. A turned-away call did nothing, so asking again never runs it twice and one given
-up on never runs later. The scan a write asks for starts at the end of the frame rather than at
-once, so it begins after every save the write makes, and `scan_status` reports it as `pending`
-until then.
+writing the editor's file list to `.godot`. It walks the list as it writes. Every save in the editor
+updates an entry of that list from the main thread and frees what the entry held. A save at that
+moment has written garbage decoded as text and dropped the connection.
 
-The editor writes that file on every save as well, so an editor holding a shorter list than the
-files takes the same classes out of it between any two rebuilds, and each rebuild puts them back.
-Every rebuild the server runs, for `refresh_classes`, for a test run or after a scan, writes what
-it left into `.godot/gdharness-classes.json`; a class in that list that the cache no longer holds
-when the next rebuild begins is named under `lostSinceLastRebuild`, and the editor's pid goes into
-the same note as one whose scan or save writes the cache short. On that editor the rescan loads
-nothing, so `script_diagnostics` and `refresh_classes` send the caller to `editor_launch restart`
-rather than to it, from whichever server is running by then; a restarted editor has a new pid and
-is offered the rescan again.
+So the addon answers `busy` to every call except the few that only read or wait. Those are
+`scan_status`, the rescan, the reimport, the play status and stop, and the profile read. While a
+game start waits on a scan, the bridge asks again every tenth of a second. If the wait runs out, it
+answers that nothing was run.
 
-Neither of those reaches the language server, which keeps a cache of its own that nothing on the
-editor side invalidates. Godot answers about a file the client has opened from the copy the client
-handed it, and holds that parse, and that parse holds the parses of everything the file depends
-on. Keeping documents open therefore froze every dependency at the text it had when some open file
-first pulled it in: a `class_name` script edited outside the editor kept answering with the
-members it used to have, a filesystem scan could not touch it, and asking again re-parsed only the
-file asked about while the other open documents went on pinning the stale copy. So each ask gives
-its document back as soon as the answer arrives. A file the client does not own is read from disk,
-and the engine deliberately declines to keep that parse past the request, "since we can't
-invalidate the cache properly"; holding documents open was opting into exactly the cache it is
-refusing to keep.
+### Turned-away calls
+
+A turned-away call did nothing. So asking again never runs it twice, and one given up on never runs
+later. The scan a write asks for starts at the end of the frame, after every save the write makes.
+`scan_status` reports it as `pending` until then.
+
+### Classes lost between rebuilds
+
+The editor writes the class cache on every save as well. So an editor holding a shorter list than
+the files drops the same classes from it between rebuilds. Each rebuild puts them back.
+
+Every rebuild the server runs writes what it left into `.godot/gdharness-classes.json`. That covers
+`refresh_classes`, a test run and a rebuild after a scan. A class in that list that the cache lacks
+when the next rebuild begins is named under `lostSinceLastRebuild`. The same note names the editor's
+pid as one whose scan or save writes the cache short.
+
+On that editor the rescan loads nothing. So `script_diagnostics` and `refresh_classes` send the
+caller to `editor_launch restart` instead, from whichever server is running by then. A restarted
+editor has a new pid and is offered the rescan again.
+
+### The language server's own cache
+
+Neither a rescan nor a rebuild reaches the language server. It keeps a cache of its own that nothing
+on the editor side invalidates. Godot answers about a file the client has opened from the copy the
+client handed it. It holds that parse. That parse holds the parses of everything the file depends on.
+
+Keeping documents open would freeze every dependency at its text when an open file first pulled it
+in. A `class_name` script edited outside the editor would keep its old members. A filesystem scan
+could not touch it. Asking again re-parses only the file asked about, while the other open documents
+keep pinning the stale copy.
+
+### Each ask closes its document
+
+Each ask gives its document back as soon as the answer arrives. A file the client does not own is
+read from disk. The engine declines to keep that parse past the request, "since we can't invalidate
+the cache properly". Holding documents open would opt into exactly the cache it refuses to keep.
 
 ## Running the game
 
-`editor_run` asks the editor to play, and connects the debug adapter first so the game's first
-lines are not lost. The game then belongs to the editor's debugger: `debug_*` speaks to that
-session and `editor_output` reads the console over it.
+`editor_run` asks the editor to play. It connects the debug adapter first, so the game's first lines
+are not lost. The game then belongs to the editor's debugger. `debug_*` speaks to that session, and
+`editor_output` reads the console over it.
 
-Three things take that away and start the game here instead, and all three are things the editor
-cannot be given: the game's own `args`, which it builds from `editor/run/main_run_args` when it
-opens the project; `savesIn`, a directory for this run's `user://`, which Godot takes no flag for
-and which therefore has to be the environment; and `env`, variables for the run alone. A game the
-editor plays inherits the editor's environment, and a session cannot restart the editor to move
-one variable, so the windowed run somebody watches was the one run that could not be kept out of
-the player's saves. The run's environment is this server's, with `user://` moved when a directory
-was named and the caller's variables over that, and `GDHARNESS_RUNTIME_DIR` set last: the addon
-derives where it announces from the temporary directory where `XDG_RUNTIME_DIR` is unset, so a run
-given a temporary directory of its own would otherwise announce where nothing looks. Names
-beginning with `GDHARNESS_` are refused for the same reason.
+### What makes a run spawned
 
-A start waits for the game to announce its runtime, and the wait is sized to the project. The
-usual budget is five seconds, which a project that boots in eight overran on every start until
-the caller passed `runtimeWaitMs` each time. So the announcement's time against the run's start is
-noted in the project's `.godot/gdharness-boot.json` whenever a game is tied to its run, inside the
-wait or at the first status call after it, and the next start with no `runtimeWaitMs` waits half
-as long again as that: never less than the usual, never more than a minute, and never sized to a
-boot of more than five minutes, which is a run doing what it was asked before its first frame.
+Three arguments start the game here instead, because the editor cannot be given them.
 
-The adapter relays what the game prints and not what it reports. A `push_error` raised in a game
-the editor plays goes to the editor's own stderr, which nobody reads, and to the editor's Errors
-tab, which the adapter does not forward, so `editor_output` answered `clean: true` about a game
-that had just refused something out loud. The runtime addon takes the report where it is made: a
-`Logger` in the game, registered for a game carrying the editor's mark, writes every error and
-warning the engine reports to `runtime-<pid>.log` beside the game's announcement, in the lines
-the engine itself prints, with the `at:` line and the backtrace. The server reads that file by
-offset into the played run's transcript, and the transcript into the log, so a reported error is
-an entry with its severity the way one printed by a spawned run is. The report outlives its game
-by an hour, since the last errors are read after the game has gone; the announcement does not.
+- `args`, the game's own flags. The editor builds them from `editor/run/main_run_args` when it opens
+  the project.
+- `savesIn`, a directory for this run's `user://`. Godot takes no flag for it, so it goes in the
+  environment.
+- `env`, variables for this run alone.
 
-The report is found by the game the run is tied to. A worker the game starts that loads the
-runtime inherits the editor's mark and announces too, so where several games of the project have
-announced, the process tree decides: the run's game is the one with no other of them between it
-and the editor. A played run with no report found answers `errorsUnread` and no `clean`, since a
-count of what the adapter relayed says nothing about what the game raised.
+A game the editor plays inherits the editor's environment. A session cannot restart the editor to
+change one variable.
 
-Two streams read side by side lose their order: the prints arrived over the adapter as they came
-and the errors whenever the report was read, so a warning raised in `_ready` was listed after a
-print made a second later. So the report carries the prints too, from the line announcing the
-runtime (`[gdharness] runtime listening on ...`), which the logger prints as the first thing it
-writes them for. The server takes the adapter's lines up to that line and the report from it on,
-dropping the adapter's copies, so the console after it has the engine's own order. It switches when
-the adapter delivers the line, when there is no adapter to wait for (a run picked up after a
-reconnect, whose server before this one copied the report into the transcript byte for byte, so the
-new one reads on from where that copy ends), or two seconds after the line is in the report. A
-timer reads the report into the transcript four times a second while the run is held, so an error
-with no print after it reaches a watched transcript without anybody asking.
+### A spawned run's environment
 
-With no editor connected, the server spawns the game itself. It has no debug session, so `debug_*`
-will not answer for it, and its console is read from a file rather than over the adapter, stderr
-included, so nothing more is needed there and the game writes no report.
+The run's environment is this server's, with `user://` moved when a directory was named. The
+caller's variables go over that.
 
-**Editing a file while a game runs does not change that game.** `auto_reload` is an editor plugin:
-it polls the open scene and the scripts on that scene's node tree, and reloads them with
-`CACHE_MODE_REPLACE` in the editor's own process. The game is a separate process holding its own
-copy, and nothing crosses between them. Measured rather than reasoned: the same method answers 8
-throughout a run, and 12 from a game started afterwards, with only the file having changed. So a
-long bench is not a reason to stop editing, and the new code arrives on the next
-`editor_run start`. A script attached to nothing on the open scene, a helper hanging off no node,
-is watched by nothing at all.
+`GDHARNESS_RUNTIME_DIR` is set last. Where `XDG_RUNTIME_DIR` is unset, the addon derives where it
+announces from the temporary directory. So a run given its own temporary directory would otherwise
+announce where nothing looks. Names beginning with `GDHARNESS_` are refused for the same reason.
 
-That run belongs to the operating system rather than to the server. A harness restarts its MCP
-server whenever it likes, and Claude Code does it by killing the server's process tree, walking
-parent pids: benches forty minutes into a sweep were killed twice in one session by a reconnect
-nobody asked for, and spawning the run detached did not help, because a detached child is still a
-child to that walk. So the server starts `build/keeper.js` as a launcher, which starts a keeper and
-exits as soon as it has the game's pid; the keeper is the game's parent and nobody's child here,
-so the walk has nothing to follow. The editor `editor_launch` opens goes through the same launcher
-without a keeper. Both of the game's streams are written to a transcript under the runtime
-directory, with a note beside it naming the process and the file: one note per project, because
-the directory is shared by every server on the machine, and a single note was overwritten by
-whichever project started a run last, which left the other project's server nothing to find its run
-by after a reconnect. A file rather than a pipe
-because a pipe with no reader fills and then blocks the writer: surviving the server down a pipe
-would only trade a killed run for a wedged one.
+### How long a start waits
 
-Every process the server, its scripts and its tests start is started through `src/spawn.ts`, which
-starts it with `windowsHide`. A process with no console, which a server under a harness can be and a
-gate run detached always is, gives each console program it starts a console window of its own on
-the desktop in use: one gate run put about twenty Godot consoles on the screen of the person at the
-machine. The exception is a game, whose window is what it is run for and which the same flag would
-hide; the keeper starts it detached, so it gets no console either. Godot's own `OS.create_process`
-and `OS.execute` open no console unless asked to, and the shipped scripts never ask. A regression
-walks the source for any other way of starting a process, and another reads back, from the process
-started, the show state each start named.
+A start waits for the game to announce its runtime. The usual budget is five seconds, and
+`runtimeWaitMs` sets another. Whenever a game is tied to its run, the server notes how long the
+announcement took. The note goes into the project's `.godot/gdharness-boot.json`, inside the wait or
+at the first status call after it.
 
-On Windows an engine is started without SEM_NOGPFAULTERRORBOX in its error mode, so that Windows
-Error Reporting runs when it crashes and writes a dump where the machine keeps them. Node and Bun
-both set that bit in themselves as they start, and a process inherits its parent's mode, so every
-engine either started had it, and an engine dying of an access violation left neither a dump nor an
-Application Error event. Under Bun the server, the keeper and `gdharness test` clear the bit in
-themselves as they start. Node cannot call Windows itself, so under Node the keeper and
-`gdharness test` start their engines through the desktop helper, which sets the mode before it
-starts them. Either way SEM_FAILCRITICALERRORS and SEM_NOOPENFILEERRORBOX stay set, so a missing
-drive or file opens no box that nobody will answer. The headless operations a server runs itself
-start the engine as the server's child, which under Node still inherits the bit: a project that
-wants dumps from those runs gdharness under Bun. A regression reads each engine's mode from outside
-it, under both runtimes.
+The next start with no `runtimeWaitMs` waits half as long again as that boot. It never waits less
+than the usual budget or more than a minute. A boot of more than five minutes is never used, because
+that is a run doing its work before its first frame.
 
-The keeper writes the note once the game is up and its exit into the note when it ends, since it
-is the one process that can wait on the game; the server that started the run and any server that
-picks it up read the exit from there alike. Every note, and a profiled run's profile, is written
-to a file of its own and renamed over the old one, because other processes read it while it is
-written: rewritten in place, a note is empty between the truncate and the write, and a server
-reading it then finds no note at all. Windows refuses a rename over a file another process has
-open, so the write waits that out for up to a second, and a write that still fails is reported to
-the caller rather than thrown, since a throw inside the keeper ends the keeper. A process still
-there is reported as running, with everything printed while nobody was reading; one that is gone
-is answered with its output and the code the keeper wrote, or with `endedUnwatched` when the keeper
-went first and nothing wrote one,
-because a guessed zero reads as a run that finished its work. `editor_run stop` asks the keeper to
-end it, reads the exit the keeper writes for it, and takes the note away. The keeper listens on a
-named pipe, or a socket in a directory only its user can enter, whose address is in the note, so a
-server that picked the run up asks it the same way. It ends the game through the process handle it
-holds, or through the one the Windows helper holds for a game on the hidden desktop, and a handle
-cannot reach a later process given the same pid. Ending by pid needs proof that the pid is still
-the run first, which on Windows is a PowerShell query and `tasklist`: a windowed game rendering in
-software on a runner with no GPU loaded the machine until neither started in time, and the stop
-refused its own game three times in a day. The pid and that proof remain for a keeper that does not
-answer. Whatever the keeper says, the stop waits on the process itself before it calls the run
-ended.
+### Errors from a played game
 
-A game that restarts itself with `OS.set_restart_on_exit` is still the same run. Once the game has
-exited, its keeper looks for the engine started again in the last two seconds of its life: on Windows
-among the processes that still name it as their parent. On POSIX the engine starts the successor
-in a session of its own and init takes it as its parent, so the keeper looks for the engine
-writing its output into the run's transcript, which it inherited and which belongs to this run
-alone. From outside, a worker the game started in its last moments looks the same, so the
-runtime addon writes a note once the game's tree has gone, into a directory the keeper names in
-the game's environment, saying whether a restart is set. Where it says none, nothing is looked
-for; a game without the addon is judged by the listing alone. The keeper writes `endingAt` into
-the note while it looks,
-and a server waits that out rather than settling the run as ended. When the keeper finds the
-successor, it writes it into the note in the game's place, with `restartedFrom`. It then follows
-the successor, ends it on a stop, and records its end as the run's. On Windows the exit code is
-read through a handle a PowerShell opened as it listed the process. POSIX tells only a process's
-parent its exit code, so there the run ends with `exitNotTold`. A stop that closes the game like a
-player can set off the restart itself, and then goes on to end the successor. A successor that ends
-before the keeper's listing sees it is not followed.
+The adapter relays what the game prints, not what it reports. A `push_error` in a played game goes
+to the editor's own stderr and to its Errors tab. The adapter forwards neither.
 
-Otherwise one run is one process: what the
-game started for itself is not signalled and the answer says so, unless the stop is asked for
-`andChildren`, and then every process under the run's, to any depth,
-that is a game of the project goes with it, listed before the run is ended because ending it is
-what makes them nobody's children on POSIX. A game of the project is one announced as such, or one
-whose command line is the project's engine run with `--path` on the project: a project that keeps
-the runtime out of its benches on purpose, so that thirty-one workers do not each bind a port, has
-workers that never announce, and the fan-out this argument was written for was the one it could
-not reach. The engine is the executable of the run's own process or of one between the child and
-it, since a worker is started with the game's own executable, and an editor is refused whatever
-its path says. To any depth because the process the run holds is not always the game: the Windows
-console build is a wrapper that starts the engine as its child, so the game announces a number the
-handle does not have and a worker it opens is the handle's grandchild. The run's own game is told
-from a worker by the same tree, as the announced process under the handle with no announced
-process between the two, or, where nothing announced, as the project's engine under the handle
-with no such engine between, and the same reading serves a runtime call and a processor-time
-reading when nothing else has tied the run to its game. A process under the run that is neither
-is left and named, since what it is cannot be told from here.
+So the runtime addon catches the report where it is made. A `Logger` in the game writes every error
+and warning the engine reports to `runtime-<pid>.log`, beside the game's announcement. It is
+registered only for a game carrying the editor's mark. It writes the lines the engine itself prints,
+with the `at:` line and the backtrace.
 
-A run that has ended also says who ended it. `endedBy` names the call when that was this server,
-and is null when it was not, which is an answer rather than the absence of one: a bench that
-stopped on its own and a bench this server stopped are otherwise the same silence. Six deaths in
-one afternoon were each worked out by hand for want of that distinction, and the reflex they
-produced, watching a log stop growing, is wrong on a run that prints only at the end.
+The server reads that file by offset into the played run's transcript, and the transcript into the
+log. So a reported error is an entry with its severity, as in a spawned run. The report outlives its
+game by an hour, since the last errors are read after the game has gone. The announcement does not.
 
-Three things guard that, because reading a note is also claiming the right to end what it names, and
-the runtime directory is one per user rather than one per project.
+### Which report is the run's
 
-**Whose run it is.** The note is only picked up by a server that can show the run is its own: the
-project it was told to serve, or the project the editor on the bridge has open. A server that can
-name neither answers that nothing of _its_ is running, and says what is there and why it has no
-claim on it, rather than taking the run. "I cannot name a project" once read as "any note is
-mine", which is how a regression suite, whose servers are started with no project and no editor,
-adopted another project's bench and ended it to start its own: six times in fifty minutes, exit
-code 1 with nothing printed, while its owner bisected their own scenes looking for the cause.
+The report is found by the game the run is tied to. A worker the game starts that loads the runtime
+inherits the editor's mark and announces too. Where several games of the project have announced, the
+process tree decides. The run's game is the one with no other of them between it and the editor.
 
-**Which run it is.** Every start, spawned or played, writes down which run the project's servers
-started last, and a successor picks up only the note of that run. A stop takes its run's note away
-and a played run leaves none, so the newest note left can be one the predecessor had long moved
-past: a server named a run of the project's git worktree from that morning as the run, after the
-run of its own it had started and stopped that afternoon.
+A played run with no report found answers `errorsUnread` and no `clean`. A count of what the adapter
+relayed says nothing about what the game raised.
 
-**Which process it is.** A pid is handed out again as soon as it is free, so before anything is
-signalled the process has to answer as the run the server holds, which it started or picked up from
-the note: its engine, its project, and a start no later than the run's. The command line where the
-platform gives it, the executable where it does not, and no when it will not say; the flags are
-read as the engine reads its own, up to the `--` after which the game's begin, so a game given
-`-e` is not taken for an editor. Not knowing is not the same as knowing, and the caller asking is
-the one that kills. Held against what the server holds rather than against the note, because the
-note can be gone while the run goes on. A stop that signalled nothing answers `stopped: false` and
-names the number under `notSignalled`, since a caller reads `stopped`, not the warning beside it.
-For the same reason a game told to end that is still running when the stop's wait is over answers
-`stopped: false`, with the number under `stillGoing`.
+### Prints and errors in order
 
-A game no note names, left by a server before a reconnect or started some other way, is ended by
-`editor_run stop` with its `pid`, and only when it announced itself for this project and its whole
-command line is this project's engine run, started before the announcement was written.
+Two streams read side by side lose their order. The prints arrive over the adapter as they come. The
+errors arrive whenever the report is read. So the report carries the prints too, from the line
+announcing the runtime (`[gdharness] runtime listening on ...`). The logger writes prints into the
+report from that line on.
 
-The first of those is the one that mattered. The pid in that story was correctly identified as the
-run its note described, and the run was somebody else's.
+The server takes the adapter's lines up to that line and the report after it. It drops the adapter's
+copies, so the console after that line is in the engine's own order.
 
-The runs a caller waits on, `project_test` and `editor_run check`, stay ordinary children on
-pipes. The answer is the point of them and it belongs to the call that asked, so outliving the
-server would leave an engine nobody is reading and nobody will end.
+### When the console switches to the report
 
-`editor_run check` always spawns: headless, a few frames, then quit, answering with the boot
-verdict and every error and warning printed.
+The server switches at the first of these moments.
 
-`args` hands the game its own flags, the ones it reads back with `OS.get_cmdline_user_args()`,
-behind the `--` the engine stops reading at. A run carrying any is spawned rather than played by
-the editor.
+- The adapter delivers the line.
+- There is no adapter to wait for, as in a run picked up after a reconnect.
+- Two seconds have passed since the line reached the report.
 
-That is the engine's line, not a preference. The editor builds the game's command line out of
-`editor/run/main_run_args`, and it reads that when it opens the project: measured against 4.7.2,
-a value the addon wrote into the live settings was not on the command line of the game played a
-moment later, saving it to disk did not change that, and the same value put there before the
-editor started arrived. So the editor's debugger cannot hold such a run, and the run's keeper is its
-debugger instead: the game is started with `--remote-debug` pointed at the keeper, which speaks the
-engine's own debugger protocol to it (`src/game-debugger.ts`), and `debug_*` asks the keeper over
-its pipe. The keeper rather than the server, because the game dials once, as it starts, and the
-keeper is the one process that lives as long as the game. Every breakpoint the server holds is
-handed to the game as it starts, and one set while it runs reaches it at once. This debugger also
-pauses a running game, which the editor's adapter cannot, and the engine takes the pause between
-lines of script as well as between frames, so a game spinning in a script loop on its first frame
-can be broken into and asked where it is. A pause that lands between frames, or in the runtime
-addon, whose `_process` runs first in every frame as an autoload's does, is stepped on to the next
-line of the game's own script, since gdharness's code is not what anybody pausing a game means to
-read. Errors do not stop such a game (`--ignore-error-breaks`),
-as they did not when it had no debugger. A profiled run's profiler reads the same connection. A
-mark (`editor_run profile` with `mark`) is the profile's totals at that moment, written beside the
-run's note rather than held in the server, so a server that replaces this one counts
-`since: "mark"` from the same place.
+After a reconnect, the previous server had copied the report into the transcript byte for byte. The
+new one reads on from where that copy ends. A timer reads the report into the transcript four times
+a second while the run is held. So an error with no print after it reaches a watched transcript
+without anybody asking.
 
-`editor_output` answers with entries rather than lines: each `ERROR:`, `SCRIPT ERROR:` and
-`WARNING:` headline with its `at:` line and backtrace, the counts, and a `clean` verdict. It
-filters by severity, by text, and to what has arrived since the last call. A screenshot cannot do
-this job: a non-empty PNG says nothing about whether the game came up clean.
+### A spawned game
 
-The engine's own stdin debugger is never enabled. It breaks into a prompt on the first script
-error and never returns without a terminal.
+With no editor connected, the server spawns the game itself. Its debugger is its keeper, described
+under [The keeper as debugger](#the-keeper-as-debugger). Its console, stderr included, is read from
+a file rather than over the adapter. So nothing more is needed, and the game writes no report.
+
+### Editing while a game runs
+
+Editing a file while a game runs does not change that game. `auto_reload` is an editor plugin. It
+polls the open scene and the scripts on that scene's node tree. It reloads them with
+`CACHE_MODE_REPLACE` in the editor's own process. The game is a separate process with its own copy.
+
+So a long bench is no reason to stop editing. The new code arrives on the next
+`editor_run start`. A script attached to nothing on the open scene, such as a helper on no node, is
+watched by nothing.
+
+## The keeper
+
+### The run outlives the server
+
+A spawned run belongs to the operating system, not to the server. A harness restarts its MCP server
+whenever it likes. Claude Code does it by killing the server's process tree along parent pids. A
+detached child is still a child to that walk.
+
+So the server starts `build/keeper.js` as a launcher. The launcher starts a keeper and exits as soon
+as it has the game's pid. The keeper is the game's parent and nobody's child here, so the walk has
+nothing to follow. The editor `editor_launch` opens goes through the same launcher without a keeper.
+
+### The transcript and the note
+
+Both of the game's streams go to a transcript under the runtime directory. Beside it, a note names
+the process and the file. There is one note per project, because every server on the machine shares
+the directory.
+
+The output goes to a file rather than a pipe. A pipe with no reader fills and then blocks the
+writer, so a game writing into a pipe nobody reads would hang.
+
+### No console windows
+
+Every process the server, its scripts and its tests start goes through `src/spawn.ts`, which sets
+`windowsHide`. A process with no console gives each console program it starts a console window of
+its own on the desktop in use. A server under a harness can lack a console. A gate run detached
+always does.
+
+The exception is a game, whose window is the point of running it. The keeper starts it detached, so
+it gets no console either. Godot's own `OS.create_process` and `OS.execute` open no console unless
+asked, and the shipped scripts never ask.
+
+### Crash dumps on Windows
+
+On Windows an engine starts without `SEM_NOGPFAULTERRORBOX` in its error mode. So Windows Error
+Reporting runs when it crashes and writes a dump where the machine keeps them. Node and Bun both set
+that bit in themselves as they start. A child inherits its parent's mode. With the bit set, an
+engine dying of an access violation leaves no dump and no Application Error event.
+
+Under Bun, the server, the keeper and `gdharness test` clear the bit in themselves as they start.
+Node cannot call Windows itself. So under Node, the keeper and `gdharness test` start their engines
+through the desktop helper, which sets the mode first. Either way `SEM_FAILCRITICALERRORS` and
+`SEM_NOOPENFILEERRORBOX` stay set. A missing drive or file then opens no box nobody will answer.
+
+### Dumps from headless operations
+
+The headless operations a server runs itself start the engine as the server's child. Under Node that
+child still inherits the bit. A project that wants dumps from those runs gdharness under Bun. A
+regression reads each engine's mode from outside it, under both runtimes.
+
+### Writing the note
+
+The keeper writes the note once the game is up, and the exit into it when the game ends. It is the
+one process that can wait on the game. The server that started the run and any server that picks it
+up both read the exit from there.
+
+Every note, and a profiled run's profile, is written to a file of its own and renamed over the old
+one. Other processes read it while it is written. A note rewritten in place is empty between the
+truncate and the write.
+
+Windows refuses a rename over a file another process has open. So the write retries for up to a
+second. A write that still fails is reported to the caller rather than thrown, since a throw inside
+the keeper ends the keeper.
+
+### What a picked-up run answers
+
+A process still there is reported as running, with everything printed while nobody was reading. One
+that is gone is answered with its output and the code the keeper wrote. When the keeper went first
+and nothing wrote a code, the answer is `endedUnwatched`. A guessed zero would read as a run that
+finished its work.
+
+### Stopping a run
+
+`editor_run stop` asks the keeper to end the run. It reads the exit the keeper writes and takes the
+note away. The keeper listens on a named pipe, or on a socket in a directory only its user can
+enter. Its address is in the note, so a server that picked the run up asks the same way.
+
+The keeper ends the game through the process handle it holds. For a game on the hidden desktop it
+uses the handle the Windows helper holds. A handle cannot reach a later process given the same pid.
+
+### Ending by pid
+
+Ending by pid needs proof that the pid is still the run. On Windows that proof is a PowerShell query
+and `tasklist`, and on a loaded machine neither may start in time. The pid and that proof remain for
+a keeper that does not answer. Whatever the keeper says, the stop waits on the process itself before
+it calls the run ended.
+
+### A game that restarts itself
+
+A game that restarts itself with `OS.set_restart_on_exit` is still the same run. Once the game exits,
+its keeper looks for an engine started again in the last two seconds of the game's life. On Windows
+it looks among the processes that still name the game as their parent.
+
+On POSIX the engine starts the successor in a session of its own, and init adopts it. So there the
+keeper looks for the engine writing into the run's transcript. The successor inherited that file,
+and it belongs to this run alone.
+
+### Telling a restart from a worker
+
+From outside, a worker the game started in its last moments looks the same. So once the game's tree
+has gone, the runtime addon writes a note saying whether a restart is set. It writes it into a
+directory the keeper names in the game's environment. Where it says none, nothing is looked for. A
+game without the addon is judged by the listing alone.
+
+### Following the successor
+
+The keeper writes `endingAt` into the note while it looks. A server waits that out rather than
+settling the run as ended. When the keeper finds the successor, it writes it into the note in the
+game's place, with `restartedFrom`. It then follows the successor, ends it on a stop, and records
+its end as the run's. A successor that ends before the keeper's listing sees it is not followed.
+
+On Windows the exit code is read through a handle a PowerShell opened as it listed the process.
+POSIX tells only a process's parent its exit code. So there the run ends with `exitNotTold`. A stop
+that closes the game like a player can set off the restart itself. The stop then ends the successor
+too.
+
+### Children of a run
+
+Otherwise one run is one process. What the game started for itself is not signalled, and the answer
+says so. A stop with `andChildren` also ends every process under the run's, to any depth, that is a
+game of the project. They are listed before the run ends, because ending it makes them nobody's
+children on POSIX.
+
+A game of the project is one announced as such. It is also one whose command line is the project's
+engine run with `--path` on the project. Some projects keep the runtime out of their benches, so
+that thirty-one workers do not each bind a port. Those workers never announce.
+
+The engine is the executable of the run's own process, or of one between the child and it. A worker
+starts with the game's own executable. An editor is refused whatever its path says.
+
+### Why to any depth
+
+The process the run holds is not always the game. The Windows console build is a wrapper that starts
+the engine as its child. So the game announces a pid the handle does not have. A worker it opens is
+then the handle's grandchild.
+
+The run's own game is told from a worker by the same tree. It is the announced process under the
+handle with no announced process between the two. Where nothing announced, it is the project's
+engine under the handle with no such engine between.
+
+The same reading serves a runtime call and a processor-time reading when nothing else has tied the
+run to its game. A process under the run that is neither is left and named, since what it is cannot
+be told from here.
+
+### Who ended a run
+
+A run that has ended also says who ended it. `endedBy` names the call when that was this server, or
+is null when it was not. Without it, a bench that stopped on its
+own and a bench this server stopped look the same.
+
+Watching a log stop growing tells nothing on a run that prints only at the end.
+
+## Whose run a note is
+
+Reading a note also claims the right to end what it names. The runtime directory is one per user,
+not one per project. So three checks guard a note.
+
+### Whose run it is
+
+A server picks up a note only when it can show the run is its own. The run must be in the project it
+was told to serve, or in the project the editor on the bridge has open. A server that can name
+neither answers that nothing of _its_ is running. It says what is there and why it has no claim on
+it.
+
+So a regression suite, whose servers start with no project and no editor, never adopts another
+project's bench.
+
+### Which run it is
+
+Every start, spawned or played, records which run the project's servers started last. A successor
+picks up only the note of that run. A stop takes its run's note away, and a played run leaves none.
+So the newest note left can be one the predecessor had long moved past, such as one from a git
+worktree of the project.
+
+### Which process it is
+
+A pid is handed out again as soon as it is free. So before anything is signalled, the process must
+answer as the run the server holds. That is the run it started or picked up from the note. Its
+engine, its project and its start time, no later than the run's, must all match.
+
+The server reads the command line where the platform gives it and the executable where it does not.
+When the platform will not say, the answer is no. A process the platform will not describe is never
+signalled.
+
+The flags are read as the engine reads its own, up to the `--` after which the game's begin. So a
+game given `-e` is not taken for an editor. The process is held against what the server holds, not
+against the note, because the note can be gone while the run goes on.
+
+### What a stop answers
+
+A stop that signalled nothing answers `stopped: false` and names the pid under `notSignalled`. A
+caller reads `stopped`, not the warning beside it. For the same reason, a game told to end that is
+still running when the stop's wait is over answers `stopped: false`, with the pid under `stillGoing`.
+
+A game no note names may be left by a server before a reconnect, or started some other way.
+`editor_run stop` ends it by its `pid` only when two things hold. It announced itself for this
+project. Its whole command line is this project's engine run, started before the announcement was
+written.
+
+## Spawned runs
+
+### Runs a caller waits on
+
+`project_test` and `editor_run check` stay ordinary children on pipes. Their answer is the point,
+and it belongs to the call that asked. Outliving the server would leave an engine nobody reads and
+nobody will end.
+
+`editor_run check` always spawns. It runs headless for a few frames, then quits. It answers with the
+boot verdict and every error and warning printed.
+
+### Game arguments
+
+`args` hands the game its own flags, behind the `--` where the engine stops reading. The game reads
+them back with `OS.get_cmdline_user_args()`. A run carrying any is spawned rather than played by the
+editor.
+
+That is the engine's limit. The editor builds the game's command line from
+`editor/run/main_run_args`, and reads that setting only when it opens the project. So a value
+written later does not reach a played game.
+
+### The keeper as debugger
+
+The editor's debugger cannot hold a spawned run, so the run's keeper is its debugger. The game starts
+with `--remote-debug` pointed at the keeper, which speaks the engine's own debugger protocol
+(`src/game-debugger.ts`). `debug_*` asks the keeper over its pipe. The keeper hosts it, not the
+server, because the game dials once, as it starts. The keeper is the one process that lives as long
+as the game.
+
+Every breakpoint the server holds is handed to the game as it starts. One set while it runs reaches
+it at once. This debugger can also pause a running game, which the editor's adapter cannot. The
+engine takes the pause between lines of script as well as between frames. So a game spinning in a
+script loop on its first frame can be broken into and asked where it is.
+
+### Pauses land in the game's own code
+
+A pause can land between frames, or in the runtime addon, whose `_process` runs first in every frame
+as an autoload's does. Either way it is stepped on to the next line of the game's own script. Nobody
+pausing a game means to read gdharness's code. Errors do not stop such a game
+(`--ignore-error-breaks`).
+
+A profiled run's profiler reads the same connection. A mark (`editor_run profile` with `mark`) is the
+profile's totals at that moment. It is written beside the run's note, not held in the server. So a
+server that replaces this one counts `since: "mark"` from the same place.
+
+## Reading a running game
+
+### Reading the console
+
+`editor_output` answers with entries rather than lines. Each `ERROR:`, `SCRIPT ERROR:` and `WARNING:`
+headline comes with its `at:` line and backtrace. The answer adds the counts and a `clean` verdict.
+It filters by severity, by text, and to what has arrived since the last call. A screenshot cannot do
+this job, because a non-empty PNG says nothing about whether the game came up clean.
+
+The engine's own stdin debugger is never enabled. It breaks into a prompt on the first script error
+and never returns without a terminal.
+
+### The accessibility tree
 
 `runtime_inspect accessibility` is the one call that starts a process from inside the game. The
-engine builds the tree a screen reader reads only when something asks for it, gives a script no way
-to read it back, and nothing on gdharness's desktop asks; a UI Automation client running on the
-user's desktop cannot reach a window on that one either. So the runtime starts the system's own
-PowerShell as its child, which lands on whatever desktop the game is on, and the client's first
-question is what makes the engine build the tree. The game waits for it a frame at a time, since
-the client's questions are answered on the game's main thread and a blocking wait would hold both.
-The engine builds the tree at all only with `--accessibility always`, which `engineArgs` takes, or
-the project's setting at Always Active; the game cannot see the flag, which the engine consumes, so
-a window with nothing in it is what the refusal is judged by. UI Automation is Windows' own, and on
-Linux and macOS the call says so.
+engine builds the tree a screen reader reads only when something asks for it. It gives a script no
+way to read the tree back. Nothing on gdharness's desktop asks. A UI Automation client on the user's
+desktop cannot reach a window on that desktop either.
+
+So the runtime starts the system's own PowerShell as its child, which lands on whatever desktop the
+game is on. The client's first question makes the engine build the tree. The game waits for it a
+frame at a time, since the client's questions are answered on the game's main thread. A blocking
+wait would hold both.
+
+### When the engine builds the tree
+
+The engine builds the tree only with `--accessibility always`, which `engineArgs` takes, or with the
+project's setting at Always Active. The game cannot see the flag, because the engine consumes it. So
+the refusal judges by a window with nothing in it. UI Automation is Windows' own. On Linux and macOS
+the call says so.
 
 ## Finding a running game
 
-The runtime addon binds loopback on a port the OS assigns and writes a file named by its process
-id, holding the port and the project path. The server reads that directory:
+The runtime addon binds loopback on a port the OS assigns. It writes a file named by its process id
+with the port and the project path. The server reads that directory, which is
 `$GDHARNESS_RUNTIME_DIR`, else `$XDG_RUNTIME_DIR/gdharness`, else the temporary directory.
 
 Two games can run at once. `projectPath` picks between them, and `editor_status` lists what it can
 reach.
 
-A file whose process is gone is swept on the way past, and a file whose number is held by a process
-that began after the file was written is swept the same way: a game boots before it announces, so
-its start precedes its file, and a process that started later took the number after the game had
-gone. Measured downstream, where a shell held the number of a game ended an hour before and the
-file read as a game "still starting" through two further runs. The start time is asked of the
-operating system once per file, after the file is a minute old, and again once a minute after a
-confirmation. `editor_run stop` takes the file of the game it ended down itself, once the process
-has gone, so the common case never reaches that judgement. A file that will not parse under a
-number a live process holds is left for the next look, not swept, and the addon writes the file
-whole under a `.tmp` name and moves it into place: the directory is shared by every server on the
-machine, and one sweeping it would otherwise take a file it met between the game's open and its
-write.
+### Sweeping stale announcements
 
-A script run is not one of them. Autoloads come up for `godot -s` as well, so a test tier or a
-batch tool would bind a port and announce itself under the project's own path, and a client asking
-the runtime anything while sixteen of those run gets whichever answers first. The addon stays quiet
-there unless `gdharness/runtime/serve_script_runs` is true, which is for driving a `-s` script on
-purpose. A scene that is not the game, such as a bench and the worker engines it starts, is quiet
-the same way when the project lists its folder in `gdharness/runtime/quiet_scenes_under`, unless the
-run was started to be profiled from its start. The variable saying so is taken out of the
-environment as it is read, so the workers a profiled bench starts stay quiet.
+A file whose process is gone is swept on the way past. So is a file whose pid is held by a process
+that began after the file was written. A game boots before it announces, so its start precedes its
+file. A process that started later took the pid after the game had gone.
+
+The start time is asked of the operating system once per file, after the file is a minute old. It is
+asked again once a minute after a confirmation. `editor_run stop` removes the file of the game it
+ended, once the process has gone. So the common case never reaches that judgement.
+
+### Writing the announcement
+
+A file that will not parse, under a pid a live process holds, is left for the next look. The addon
+writes the file whole under a `.tmp` name and moves it into place. Every server on the machine
+shares the directory. A sweep could otherwise take a file between the game's open and its write.
+
+### Script runs stay quiet
+
+A script run is not a game. Autoloads come up for `godot -s` as well. So a test tier or a batch tool
+would bind a port and announce itself under the project's own path. A client asking the runtime
+anything while sixteen of those run gets whichever answers first. The addon stays quiet there unless
+`gdharness/runtime/serve_script_runs` is true, for driving a `-s` script on purpose.
+
+A scene that is not the game, such as a bench and the worker engines it starts, can be quiet the
+same way. The project lists its folder in `gdharness/runtime/quiet_scenes_under`. The exception is a
+run started to be profiled from its start. The variable saying so is taken out of the environment as
+it is read, so the workers a profiled bench starts stay quiet.
 
 ## Headless operations
 
@@ -844,353 +1065,561 @@ snake_case in the file the engine reads. The answer is the JSON object the scrip
 answer file. The engine's warnings and errors, and the script's own `[ERROR]` lines, come back under
 `engine_messages`.
 
-The answer goes to a file because the project's autoloads run after the operation and print to the
-same stdout. When the answer was the last JSON line printed, an autoload printing a dictionary in
-`_process` replaced it. With a file, a run that wrote no answer has failed whatever its exit code
-was. A run that wrote one and then exited badly (an autoload quitting with a code, say) still
-answers, with `engine_after_answer` saying how it ended, because the write it reports has happened.
+### Why the answer is a file
 
-Godot starts the project's autoloads in every script run and has no switch to leave them out, so an
+The project's autoloads run after the operation and print to the same stdout. An autoload printing a
+dictionary in `_process` could replace an answer read as the last JSON line. With a file, a run that
+wrote no answer has failed, whatever its exit code.
+
+A run that wrote one and then exited badly still answers, as when an autoload quits with a code.
+`engine_after_answer` then says how it ended, because the write it reports has happened.
+
+### Messages after the answer
+
+Godot starts the project's autoloads in every script run and has no switch to leave them out. So an
 operation always runs them once it has answered. The script prints `[gdharness] answered` on stderr
-when the answer is written, and what the engine reports after that line comes back under
-`engine_messages_after_answer`, with a note saying whose it is. Mixed into `engine_messages`, a
-failing autoload's errors rode on every settings read and read as the read failing.
+when the answer is written.
 
-The operations that compile the project's scripts (`check_scripts`, `create_script`,
+What the engine reports after that line comes back under `engine_messages_after_answer`, with a note
+saying whose it is. Mixed into `engine_messages`, a failing autoload's errors would ride on every
+settings read and look like the read failing.
+
+### Operations that wait for the autoloads
+
+Some operations compile the project's scripts. They are `check_scripts`, `create_script`,
 `modify_script`, `run_editor_tool`, and the scene, resource and animation reads, which load the
-scripts a file names) run on the first frame instead of in `_init`, after the autoloads have
-entered the tree. Before then the engine does not know an autoload's name, so every script naming
-one failed to compile with "Identifier not found", although the game and the editor ran it. Such an
-operation prints `[gdharness] waiting for the autoloads` in `_init` and `[gdharness] begun` when it
-starts, and what the engine reports between those two lines comes back under
+scripts a file names. They run on the first frame instead of in `_init`, after the autoloads have
+entered the tree. Before then the engine does not know an autoload's name. So every script naming one
+would fail to compile with "Identifier not found".
+
+Such an operation prints `[gdharness] waiting for the autoloads` in `_init` and `[gdharness] begun`
+when it starts. What the engine reports between those lines comes back under
 `engine_messages_before_operation`. An engine that ends before the second line never ran the
 operation, and the answer says so.
 
-An error raised inside the operations script itself refuses the answer: the engine hands the
-faulting function's caller a default value and exits 0, so the answer is missing whatever that
+### Errors in the operations script
+
+An error raised inside the operations script itself refuses the answer. The engine hands the
+faulting function's caller a default value and exits 0. So the answer would lack whatever that
 function would have given.
 
-`--log-file` keeps that engine out of the project's `user://logs/`. Godot renames `godot.log` when
-a process starts, so on a project with file logging on, one of these boots rotated a running
-bench's log out from under it, and the bench went on writing at the offset it still believed it
-was at: the operation's few hundred bytes, a zero-filled gap, then the bench's next row. These
-runs answer one question and exit, so their own log is of no use to anybody and goes beside the
-parameters instead.
+### The engine's own log
 
-That holds for every short-lived engine gdharness starts to answer something: the operations, and
-`project_export`, which reads its own output off the process and reports it. The engines that do
-write where the project keeps its logs are the ones that are the point rather than a means, a game
-and an editor, and a run's log is the run's. `project_test` is neither: its whole `user://` moves
-to a directory of its own, so a suite that saves a game cannot write into the saves somebody
-plays.
+`--log-file` keeps that engine out of the project's `user://logs/`. Godot renames `godot.log` when a
+process starts. So on a project with file logging on, a boot would rotate a running bench's log out
+from under it. The bench would keep writing at its old offset. That leaves a zero-filled gap after
+the operation's few hundred bytes.
 
-An import and an export start the engine as the editor, and Godot crashes as such a run exits when
-the editor's class reference cache is stale. The cache, `editor_doc_cache-<major>.<minor>.res` in
-the editor's cache folder, is keyed on the exact build, so two patch releases of one minor version
-on a machine, such as 4.7.1 and 4.7.2, each leave the other a stale one. The thread that reads the
-cache hands the rebuild to the main thread as a deferred call, the editor frees the class reference
-as it is torn down, and the deferred call runs after that. The run has done its work and written a
-fresh cache by then, so the next run is clean. When an import or an export ends badly and a cache in
-that folder was written while it ran, gdharness runs it once more and says why under
-`docCacheNote`. Windows reports the crash as an access violation, 0xC0000005, and a runtime that
-keeps only the low byte of an exit code, as Bun does, reports it as 5. On macOS the engine's crash
-handler prints the signal and the process then exits 0, so a run whose output holds that report
-counts as ending badly too.
+These runs answer one question and exit. So their log goes beside the parameters instead.
 
-Which tools this covers is worth knowing, because `project_settings get` reads like a look at a
-config file and is not: it starts an engine so that a setting nobody wrote into `project.godot`
-still answers with the default the engine registers for it.
+### Which engines keep their logs
 
-That engine is the file's reading, and an open editor holds a different one: what it has been told,
-including changes nobody has saved. `project_settings get` takes `from` to choose between them.
-`disk` is the default and is the only reading a push gate can use, because it needs no editor and
-any machine reproduces it. `editor` costs no engine start and answers what the editor is holding,
-and asking for it with no editor connected is refused rather than answered from the file, because
-an answer that silently changed its source is one the caller cannot tell from the one they asked
-for. Both readings run their values through the same serialiser, so a `Vector2` comes back spelled
-the same either way and a caller can compare the two. Only reads take the argument: a write goes
-to the file whichever way it is phrased, so there is nothing to choose between.
+The same holds for every short-lived engine gdharness starts to answer something. These are the
+operations and `project_export`, which reads its own output off the process and reports it.
 
-`scene_tree` and `resource_edit read` have no such choice to offer, because the editor reads them
-from the file as well: both go through `file_reads.gd`, which the editor's tools call and an
-operation runs when no editor serves the project. The answer differs only in what the editor
-alone can say, whether it holds unsaved changes to the scene, and the headless answer carries
-`readBy` instead. A scene is read off its `SceneState`, with each instanced scene laid where it
-is instanced, rather than instantiated: outside the editor, instantiating runs every node
-script's member initialisers and `_init`, so a read would have run the game's code on every node.
-The read matches entries to nodes as instantiating does. An entry that sets values on a node the
-scene it comes from has since renamed or moved is found by the node's `unique_id`, searched among
-the nodes owned by the nearest instance above it, and the node keeps its new name. `SceneState`
-does not give scripts the ids, so they are read from the text of a `.tscn`; a binary scene's entries
-are matched by path alone. Nor does it give them its list of editable instances, which is read off
-the scene's `_bundled` dictionary, from the scene being read and the scenes it inherits only: those
-share its root, and a scene instanced below lists the instances its own root keeps values for. The
-stored properties come from a bare node of each engine class with
-the file's values set on it, since what a node lists depends on its values and some setters set
-others. A resource kept inside a file (`res://hero.tscn::Animation_jump`, the path a property
-holding one is answered with) is found among what the file holds, because the engine loads such a
-path only while the file is cached and a read loads it uncached; the server takes the id off before
-the project boundary judges the path, which is a file's.
+A game and an editor are the point rather than a means. They write where the project keeps its logs.
+A run's log is the run's. `project_test` is neither. Its whole `user://` moves to a directory of its
+own, so a suite that saves a game cannot write into the saves somebody plays.
 
-`scene_animation read` and `read_states` share `animation_reads.gd` the same way. The editor
-hands it the node from the scene it opens; with no editor, the operation builds a bare
-`AnimationPlayer` or `AnimationTree` from the properties `file_reads.gd` lays for that node, its
-script left off, and asks that, so the libraries and the tree root are the ones the file stores
-and no script of the scene runs.
+### A stale class reference cache
 
-The scene and resource writes take the other way round. With no editor, `editor_tools.gd` runs the
+An import and an export start the engine as the editor. Godot crashes as such a run exits when the
+editor's class reference cache is stale. The cache, `editor_doc_cache-<major>.<minor>.res` in the
+editor's cache folder, is keyed on the exact build. Two patch releases of one minor version, such as
+4.7.1 and 4.7.2, each leave the other a stale cache.
+
+The thread that reads the cache hands the rebuild to the main thread as a deferred call. The editor
+frees the class reference as it is torn down. The deferred call runs after that. By then the run
+has done its work and written a fresh cache. So the next run is clean.
+
+### Retrying after that crash
+
+When an import or an export ends badly after a cache in that folder was written during the run,
+gdharness runs it once more. It says why under `docCacheNote`. Windows reports the crash as an
+access violation, 0xC0000005. A runtime that keeps only the low byte of an exit code, as Bun does,
+reports it as 5.
+
+On macOS the engine's crash handler prints the signal, and the process then exits 0. So a run whose
+output holds that report counts as ending badly too.
+
+## Reading settings
+
+`project_settings get` reads like a look at a config file and is not. It starts an engine, so a
+setting nobody wrote into `project.godot` still answers with the default the engine registers.
+
+### The disk or the editor
+
+The engine it starts reads the file. An open editor holds a different reading, including changes
+nobody has saved. `project_settings get` takes `from` to choose between them.
+
+- `disk` is the default and the only reading a CI job can use. It needs no editor, and any
+  machine reproduces it.
+- `editor` costs no engine start and answers what the editor holds.
+
+Asking for `editor` with no editor connected is refused rather than answered from the file. An answer
+that silently changed its source cannot be told from the one the caller asked for. Both readings run
+their values through the same serialiser. So a `Vector2` is spelled the same either way, and the two
+can be compared. Only reads take the argument, since a write goes to the file either way.
+
+## Reading scenes and resources
+
+`scene_tree` and `resource_edit read` offer no such choice, because the editor reads them from the
+file as well. Both go through `file_reads.gd`. The editor's tools call it, and an operation runs it
+when no editor serves the project. Only the editor's answer says whether it holds unsaved changes to
+the scene. The headless answer carries `readBy` instead.
+
+### A scene is read, not instantiated
+
+A scene is read off its `SceneState`, with each instanced scene laid where it is instanced. It is not
+instantiated. Instantiating outside the editor runs every node script's member initialisers and
+`_init`. So a read would run the game's code on every node.
+
+The read matches entries to nodes as instantiating does. An entry may set values on a node its source
+scene has since renamed or moved. That entry is found by the node's `unique_id`, among the nodes
+owned by the nearest instance above it. The node keeps its new name.
+
+`SceneState` does not give scripts the ids, so they are read from the text of a `.tscn`. A binary
+scene's entries are matched by path alone.
+
+### Editable instances and stored properties
+
+`SceneState` does not give scripts its list of editable instances either. That list is read off the
+scene's `_bundled` dictionary, from the scene being read and the scenes it inherits only. Those share
+its root. A scene instanced below lists the instances its own root keeps values for.
+
+The stored properties come from a bare node of each engine class with the file's values set on it.
+What a node lists depends on its values. Some setters also set others.
+
+### Resources inside a file
+
+A resource kept inside a file is found among what the file holds. Its path looks like
+`res://hero.tscn::Animation_jump`, the path a property holding one is answered with. The engine loads
+such a path only while the file is cached, and a read loads it uncached. The server takes the id off
+before the project boundary judges the path, which is a file's.
+
+### Animation reads
+
+`scene_animation read` and `read_states` share `animation_reads.gd` the same way. The editor hands it
+the node from the scene it opens. With no editor, the operation builds a bare `AnimationPlayer` or
+`AnimationTree` from the properties `file_reads.gd` lays for that node, with its script left off. So
+the libraries and the tree root are the ones the file stores, and no script of the scene runs.
+
+## Headless writes
+
+The scene and resource writes work the other way round. With no editor, `editor_tools.gd` runs the
 editor addon's own `scene_tools.gd`, `animation_tools.gd`, `animation_states.gd` or
-`resource_tools.gd` in a headless engine, preloaded from beside the operations in the package, so
-a write passes the checks the editor's does and answers in its shape, with `writtenBy` (or
-`readBy`) added. A write cannot avoid instancing the scene the way a read does, and outside the
-editor instancing runs every script, where the editor gives a script that is not a tool a
-placeholder. So `scene_file.gd` and `headless_check.gd` put back what scripts did:
-on opening, each node with such a script is compared with what the file stores for it, and a
-difference goes back to the file's value, or to what the node would load with if the file did not set
-it, read from the files of the scenes it is instanced from rather than by instancing them; on writing,
-a node the tool changed through such a script has every other property put back to what it held
-before. A node with no such script is left alone, because a script runs on its own node as the scene
-loads, and anything else a pack changes, such as a Control gaining its grow directions from the
-setter of `anchors_preset`, the editor's pack changes too. After the save, the embedded resources
-that carry a script, and the main resource of a resource file, are compared with the file's text
-before the write the same way and put back. Putting one property back can run a setter that changes
-another already put back, so a scene is packed and put back again until nothing differs, for up to
-four rounds; a resource file gets one. What still differs then is refused, with the file restored,
-and so is a scene whose script did not compile, which the engine instances without it. A line that
-only restates a property's default does not count against a write: the engine reports no default for
-an export initialised by a constructor call, such as `PackedStringArray()`, so every save writes one,
-the editor's too, and that default is read from the declaration in the script instead. Nor does a
-line the saver writes another way: a file written by hand may set a default outright, which the
-saver leaves out, or spell a value as `3` where the saver writes `3.0`, so the texts before and
-after are compared as the values they read as, a line that is not there reading as the default. A headless
-save also writes back the uid the file had, and the uid on each external resource it names, which an
-engine with no editor's file system drops, since only that tells the saver a path's uid. A reference
-is given the uid the uid cache holds for its path and no other: one the cache does not know (a file
-made with no editor since the last scan) warns on every load, and one the cache gives another file
-(the original of a scene copied whole) loads that file. A file left to be named by path for the
-first reason is listed under `namedByPath` with `project_import refresh_uids`, whose import pass
-gives the cache its uid. Each headless call is an engine of its own, so the list gathered in a
-static on `scene_file.gd` holds that call's saves alone. An animation library kept in a file of its
-own is saved beside the scene, and refused when it, or a resource it embeds, carries a script that
-is not a tool, since nothing compares that file with its text. An editor of the project that is
-running and has not reached this server holds its own copy of anything it has open, and saving that
-would put back what the engine wrote, so a write waits for it to connect instead.
+`resource_tools.gd` in a headless engine. They are preloaded from beside the operations in the
+package. So a write passes the checks the editor's does and answers in its shape, with `writtenBy`
+(or `readBy`) added.
 
-`project_export add_preset` writes `export_presets.cfg` from an operation in `export_presets.gd`,
-with the keys the editor's Export dialog writes for a new preset; the exporter fills every platform
-option the file leaves out with its default. An open editor is the one reader this misses. Godot
-reads the file when the editor starts and again only when an export platform comes or goes, so the
-editor does not list the new preset, and the next save of its Export dialog writes its own list
-over the file. The answer says so when an editor is connected; an export through `project_export
-run` starts an engine of its own, which reads the file. Whether templates are installed is read per
-platform, from the files in the engine version's templates directory, because that directory holds
-whichever platforms were installed into it.
+### Undoing what scripts did
 
-That serialiser is one file, copied into each addon by `bun run sync:gd` because an addon is
-installed as a directory and cannot preload out of one, and a fixture refuses a copy that has
-drifted. It used to be three, and the three disagreed: the same `Vector2` came back tagged `_type`
-from a headless read and `type` from the editor, and a `Rect2` came back as two corners from one
-and four numbers from the other. What is tagged is what JSON cannot carry. JSON does not refuse
-such a value, it writes the value's own text and moves on, so a `Polygon2D`'s points came back as
-the string `"[(1.0, 2.0), (3.0, 4.0)]"`, a `Quaternion` as `"(0, 0, 0, 1)"`, and each read like an
-answer while being unreadable back. Twenty-four of the engine's thirty-nine types were flattened
-that way and thirteen were handled, so the fixture walks the engine's own type list rather than a
-list kept here: every type is carried out through JSON and built back, and a type with no case
-fails rather than being skipped. What JSON does carry exactly is left alone, which is why a plugin
-list is still `["res://addons/x/plugin.cfg"]` rather than a wrapper around one; `type_convert`
-restores the exact packed type wherever the receiver knows which one it wanted.
+A write cannot avoid instancing the scene the way a read does. Outside the editor, instancing runs
+every script. The editor gives a script that is not a tool a placeholder. So `scene_file.gd` and
+`headless_check.gd` put back what such scripts did.
 
-Infinity and NaN are the numbers JSON cannot carry. The engine writes infinity as `1e99999` and NaN
-as `null`; the server reads the first as `Infinity` and writes both back out as `null`, so a
-property holding `INF` was answered as holding nothing. Each is tagged as
-`{"_type": "float", "value": "inf"}` (or `"-inf"`, `"nan"`), bare or as a component of a vector,
-colour or rectangle, and a write accepts the same tag. The fixture holds the wire text itself to
-having neither spelling, because a round trip through the engine's own JSON reads `1e99999` back as
-infinity and passes on the wire that loses it.
+On opening, each node with such a script is compared with what the file stores for it. A difference
+goes back to the file's value. Where the file does not set it, it goes back to what the node would
+load with. That value is read from the files of the scenes it is instanced from. On writing, a node
+the tool changed through such a script has every other property put back to what it held before.
 
-Whole numbers of 2^53 or more are the other numbers JSON cannot carry: the server and the engine
-both read a JSON number as a double, and from 2^53 on neighbouring whole numbers share one. A
-RefCounted's instance id has its top bit set and a resource uid is 63 bits, so both came back as a
-neighbouring id. Such a number is answered as its digits, `{"_type": "int", "value": "..."}`, and
-built back from them; one arriving as a bare number for an int is refused, since it may already be
-a neighbour of the one sent. An RID is answered as its id and built back from it, so a viewport's
-RID read off one call is an argument to the next.
+### Nodes without such a script
+
+A node with no such script is left alone. A script runs on its own node as the scene loads. Anything
+else a pack changes, the editor's pack changes too. An example is a Control gaining its grow
+directions from the setter of `anchors_preset`.
+
+### Embedded resources and rounds
+
+After the save, the embedded resources that carry a script are compared with the file's text before
+the write. So is the main resource of a resource file. They are put back the same way.
+
+Putting one property back can run a setter that changes another already put back. So a scene is
+packed and put back again until nothing differs, for up to four rounds. A resource file gets one.
+What still differs then is refused, with the file restored. So is a scene whose script did not
+compile, which the engine instances without it.
+
+### Lines that do not count against a write
+
+A line that only restates a property's default does not count against a write. The engine reports no
+default for an export initialised by a constructor call, such as `PackedStringArray()`. So every save
+writes one, the editor's too. That default is read from the declaration in the script instead.
+
+Nor does a line the saver writes another way. A file written by hand may set a default outright,
+which the saver leaves out. It may spell a value as `3` where the saver writes `3.0`. So the texts
+before and after are compared as the values they read as. A missing line reads as the default.
+
+### UIDs in a headless save
+
+A headless save also writes back the uid the file had, and the uid on each external resource it
+names. An engine with no editor's file system drops them, since only that tells the saver a path's
+uid. A reference gets the uid the uid cache holds for its path and no other.
+
+- A uid the cache does not know warns on every load. That happens for a file made with no editor
+  since the last scan.
+- A uid the cache gives another file loads that file. That happens for the original of a scene
+  copied whole.
+
+A file left to be named by path for the first reason is listed under `namedByPath`, with
+`project_import refresh_uids`. That import pass gives the cache its uid. Each headless call is an
+engine of its own. So the list gathered in a static on `scene_file.gd` holds that call's saves alone.
+
+### Library files and open editors
+
+An animation library kept in a file of its own is saved beside the scene. It is refused when it, or
+a resource it embeds, carries a script that is not a tool. Nothing compares that file with its text.
+
+An editor of the project that is running but has not reached this server holds its own copy of
+anything it has open. Saving that copy would put back what the engine wrote. So a write waits for it
+to connect instead.
+
+### Export presets
+
+`project_export add_preset` writes `export_presets.cfg` from an operation in `export_presets.gd`. It
+writes the keys the editor's Export dialog writes for a new preset. The exporter fills every platform
+option the file leaves out with its default.
+
+An open editor is the one reader this misses. Godot reads the file when the editor starts, and again
+only when an export platform comes or goes. So the editor does not list the new preset. The next save
+of its Export dialog writes its own list over the file.
+
+The answer says so when an editor is connected. An export through `project_export run` starts an
+engine of its own, which reads the file.
+
+### Export templates
+
+Whether templates are installed is read per platform, from the files in the engine version's
+templates directory. That directory holds whichever platforms were installed into it.
+
+## Values over JSON
+
+### The serialiser
+
+The serialiser both readings use is one file, `serialisation.gd`. `bun run sync:gd` copies it into
+each addon, because an addon is installed as a directory and cannot preload out of one. A fixture
+refuses a copy that has drifted.
+
+What is tagged is what JSON cannot carry. JSON does not refuse such a value. It writes the value's
+own text instead. A `Polygon2D`'s points would come back as the string `"[(1.0, 2.0), (3.0, 4.0)]"`
+and a `Quaternion` as `"(0, 0, 0, 1)"`. Each reads like an answer and cannot be read back.
+
+So the fixture walks the engine's own type list rather than a list kept here. Every type is carried
+out through JSON and built back. A type with no case fails rather than being skipped.
+
+### What is left untagged
+
+What JSON does carry exactly is left alone. So a plugin list is still `["res://addons/x/plugin.cfg"]`,
+not a wrapper around one. `type_convert` restores the exact packed type wherever the receiver knows
+which one it wanted.
+
+### Infinity and NaN
+
+Infinity and NaN are numbers JSON cannot carry. The engine writes infinity as `1e99999` and NaN as
+`null`. The server reads the first as `Infinity` and writes both back out as `null`. So a property
+holding `INF` would be answered as holding nothing.
+
+Each is tagged as `{"_type": "float", "value": "inf"}` (or `"-inf"`, `"nan"`), bare or as a
+component of a vector, colour or rectangle. A write accepts the same tag. The fixture holds the wire
+text itself to having neither spelling. A round trip through the engine's own JSON reads `1e99999`
+back as infinity, so it would pass on the wire that loses it.
+
+### Large whole numbers
+
+Whole numbers of 2^53 or more are the other numbers JSON cannot carry. The server and the engine
+both read a JSON number as a double. From 2^53 on, two neighbouring whole numbers share one.
+
+A RefCounted's instance id has its top bit set. A resource uid is 63 bits. Both would come back as a
+neighbouring id.
+
+Such a number is answered as its digits, `{"_type": "int", "value": "..."}`, and built back from
+them. One arriving as a bare number for an int is refused, since it may already be a neighbour of the
+one sent. An RID is answered as its id and built back from it. So a viewport's RID read off one call
+is an argument to the next.
+
+### Dictionary keys
+
+JSON keys are text. So a dictionary keyed by anything else is answered as its entries,
+`{"_type": "Dictionary", "entries": [[1, "a"]]}`. A write accepts the same. Answered as text, an int
+key would come back as `"1"`.
+
+A whole-number key is built back as an int. JSON gives every number as
+a float. A dictionary keys `1.0` apart from `1`.
+
+### Answers too large for the client
 
 An answer too large for the client never goes out. Claude Code closes the connection on a message
-past 16 MB, losing the call and every later tool until the server is reconnected, and the text is
-escaped again inside the JSON-RPC message. An answer past 4 MB is written to files in a scratch
-directory and answered with where, beside the short fields of its top level. `project_test` bounds
-its own answer first: identical reports in a case are folded, at most twenty different ones are
-kept, and past about a megabyte the failing cases with the largest reports are named with their
-first message only. A run of
-125 cases failing on one broken class answered 18 MB before that.
+past 16 MB. That loses the call and every later tool until the server reconnects. The text is also
+escaped again inside the JSON-RPC message.
 
-JSON keys are text, so a dictionary keyed by anything else is answered as its entries,
-`{"_type": "Dictionary", "entries": [[1, "a"]]}`, and a write accepts the same. Answered as text, an
-int key came back as `"1"`, and a dictionary read and written back had words for its keys. A
-whole-number key is built back as an int, since JSON gives every number as a float and a dictionary
-keys `1.0` apart from `1`.
+An answer past 4 MB is written to files in a scratch directory. The answer says where, beside the
+short fields of its top level. `project_test` bounds its own answer first. Identical reports in a
+case are folded, and at most twenty different ones are kept. Past about a megabyte, the failing
+cases with the largest reports are named with their first message only.
 
-The other direction, a value arriving to be written, is `property_values.gd`, which the editor
-addon carries as a copy, as it does `file_reads.gd`. It
-reads the serialiser's tags, so every shape a read answers with is a shape a write accepts, and adds
-the part only a property knows: the type wanted, so a dictionary shaped like a vector, or a bare pair
-of numbers, is read as one. `scene_node set`, `resource_edit` and `scene_animation` all go through
-it, which they did not before: they knew eighteen types, seven and three respectively, and a
-`Quaternion` keyframe or a `Rect2` written to a resource was stored as the dictionary it arrived as.
+## Writing values
+
+### Values arriving to be written
+
+A value arriving to be written goes through `property_values.gd`. The editor addon carries a copy,
+as it does of `file_reads.gd`. It reads the serialiser's tags, so every shape a read answers with is
+a shape a write accepts. It adds what only a property knows, the type wanted. So a dictionary shaped
+like a vector, or a bare pair of numbers, is read as one.
+
+`scene_node set`, `resource_edit` and `scene_animation` all go through it.
+
+### Refusing a lossy write
 
 It also decides whether the write happens at all. `Object.set` converts rather than refuses, and the
-conversion is silent and lossy: a word written to an `int` property is stored as `0`, to a `bool` as
-`true`, to a `Vector2` as `(0, 0)`, and a packed array takes whatever is in the list, so a polygon
-written as anything but points becomes that many zero vectors. The file is then saved holding a value
-nobody asked for while the answer reports the change as made, which leaves nothing to read afterwards
-that says otherwise. A value that cannot become the declared type is refused naming both types, a
-packed array is asked the same question of each element and names the index, and a property the
-object does not declare is refused rather than ignored. The running game asks the same question of an
-argument before `callv` and of a value before a wait compares it, through `acceptable` beside the
-serialiser, so the two sides cannot answer it differently.
+conversion is silent and lossy. A word written to an `int` property is stored as `0`, to a `bool` as
+`true`, to a `Vector2` as `(0, 0)`.
 
-What each tag has to carry, the fields it reads when they are there, and how a refusal says a type is
-written are `value_shapes.gd`, shared the same way. A value carrying a field its type does not have
-is not built, because a builder takes the fields it knows and drops the rest: `{"x": 1, "y": 2,
-"z": 3}` for a `Vector2` would be written as `(1, 2)` and answered as written. Every refusal of a
-value where such a type goes ends with the key that stopped it and the shape that is read, from the
-same function on every side, an element of a packed or typed list and a value of a typed map
-included: those are fitted one by one, so the refusal that names the index is where a caller learns
-why that element and not its neighbour was refused.
+A packed array takes whatever is in the list. So a polygon written as anything but points becomes
+that many zero vectors. The file would then hold a value nobody asked for while the answer reports
+the change as made.
 
-A value that passes is still read back once set, because a setter can refuse or change it and say so
-only in the editor's log: a `Timer` given a `wait_time` of 0 holds 1, a `Sprite2D` given a material
-for its texture holds nothing. Each property set in a call is set once more after the rest, so a
-`ProgressBar` given `value` before a larger `max_value` is not left clamped to the old maximum, and
-then anything still holding something other than what was sent is refused with what it holds. The
-stored properties the call was not given are read before and after it, and those a setter moved
-come back under `alsoChanged`: a `Gradient` given a third colour gives the new point an offset of 0,
-and a `Control` given a size keeps it as offsets, so the answer names what the file will hold beyond
-what was asked. A list is copied before the write, since a setter can add to one in place. A
-value past an export range, or a number none of an enum's values has, is stored as the engine
-stores it and named under `outsideDeclared`, since the inspector would not have let it be entered.
-An enum is written by the name of a value as well as its number. Both come from
-`declared_values.gd`, which the runtime addon carries too, so a set in the running game takes the
-same names and says the same under `outside_declared`, and a wait takes the names a set does. The
-element types of a typed `Array` or `Dictionary` export come from the property's declaration, since
-in the editor a script's exports sit behind a placeholder that stores whatever it is given.
+So a value that cannot become the declared type is refused with both types named. A packed array is
+asked the same of each element, and the refusal names the index. A property the object does not
+declare is refused rather than ignored.
 
-The scene tools never touch the editor's open scene. Each one works on a copy of the file, through
-`scene_file.gd`, which does for that copy what the editor does for its own:
+### The same check in the running game
 
-- It reads the file past the resource cache. The cached `PackedScene` is the one a preload or an
-  exported scene holds, and a write saves a new one without touching it, so each write started from
-  the copy before the last write and saved over it.
-- It instantiates with the editor's edit state. Without one the copy keeps no record of which nodes
-  came from another scene, and the pack wrote an inherited scene out as a standalone copy of its base
-  and froze each instanced scene's root properties into the scene instancing it.
-- It refuses to change what the scene does not own: a node inside an instanced scene whose children
-  are not editable here, a node a script made as the scene was instanced, and the removal or
-  renaming of a node a base scene gives. The pack saves only what the scene owns, so these were
-  answered as done and were not in the file. The refusal for a node inside an instance names the
-  `scene_node set editableChildren` calls that would let the scene keep its own values for it, one
-  for each instance around it that is not editable, outermost first, because the pack skips
-  everything under such an instance.
-- A node renamed or reparented is followed into the other `.tscn` files that name it by path:
-  those instancing or inheriting the scene, found from the `path=` of their external resources and
-  then from those of the scenes found, until no more are. In each one, `scene_kin.gd` takes where
-  the instances of the scene are from its read tree, then rewrites the editable paths, the entries'
-  names and parents, and the connections it names below them. Godot finds an entry whose node moved
-  by `unique_id`, and its parent by `parent_id_path`, but an editable path only by the path, so that
-  scene's next save dropped what it kept below the instance. A reparent also drops the ids saved
-  beside each rewritten path, since they run through the old parent, which still exists for a
-  recovery to find; a rename keeps every id. A scene that does not load, or that the
-  editor holds unsaved changes to, is left as it was and named under `notFollowed`.
-- The node paths a moved node leaves behind are carried by `scene_paths.gd`, as the editor's
-  `SceneTreeDock` carries them on a rename: NodePath values in properties, arrays, dictionaries and
-  the resources built into the scene, and the tracks of every player's animations, read from the
-  player's root node. It works each path out from where its holder was and where it pointed before
-  the move, rather than from the live tree, so the same code follows the paths in the scenes
-  `scene_kin.gd` reaches, which are loaded after the move and no longer resolve the old paths.
-  Each scene has its own terms. A value another file gives, the instanced scene's or a base's, is
-  in that file's terms and was carried by that file's own pass, so it is only named under
-  `notRetargeted` when the move has left it naming nothing. A track of an animation kept in another
-  scene or an imported file is treated the same way. An animation kept in a `.tres` of its own is
-  saved after the scene, and the editor shares that resource with every scene using it, so a write
-  that is refused puts its tracks back. A delete rewrites nothing and lists what is left naming the
-  deleted node under `stillNaming`, since dropping a track loses its keys.
-- Scripts are code and are left as they were, as the editor leaves them, but a line reading a moved
-  node as `$Status` fails once the move is saved. `script_paths.gd` reads the paths a script names
-  from its tokens (`$Path`, `%Unique`, and a string handed to `get_node` and its kin on the node
-  itself), and `scene_paths.gd` works each out from the node the script is on as it does a NodePath
-  value. Every line whose path no longer reaches its node is listed under `scriptsNaming`, with the
-  path that would. `scene_kin.gd` follows a move into a scene that holds a script and no NodePath for
-  this, and a script read in two scenes, as on an instance's root, is listed once.
-- It packs the copy and instantiates the pack before writing anything, and each tool checks its change
-  in that result, which is what loading the file will give. A property the node took but the file does
-  not keep, such as a variable a `@tool` script does not export, is refused there.
-- It refuses to write a scene the editor holds unsaved changes to, since the editor reloads a scene
-  written under it and the reload drops those changes without a prompt. After a write it replaces the
-  cached copy in place, so whatever holds the scene sees the change, and reloads every tab showing the
-  scene, not only the one in front.
+The running game asks the same of an argument before `callv` and of a value before a wait compares
+it. It does so through `acceptable` beside the serialiser, so the two sides cannot answer
+differently.
+
+### Value shapes
+
+`value_shapes.gd`, shared the same way, holds three things. They are what each tag has to carry, the
+fields it reads when present, and how a refusal spells a type. A value carrying a field its type
+does not have is not built. A builder takes the fields it knows and drops the rest. So
+`{"x": 1, "y": 2, "z": 3}` for a `Vector2` would be written as `(1, 2)` and answered as written.
+
+Every refusal of a value where such a type goes ends with the key that stopped it and the shape that
+is read. It comes from the same function on every side. That includes an element of a packed or
+typed list and a value of a typed map. Those are fitted one by one. So the refusal that names the
+index says why that element was refused and not its neighbour.
+
+### Reading back what a setter did
+
+A value that passes is still read back once set. A setter can refuse or change it and say so only in
+the editor's log. A `Timer` given a `wait_time` of 0 holds 1. A `Sprite2D` given a material for its
+texture holds nothing.
+
+Each property set in a call is set once more after the rest. So a `ProgressBar` given `value` before
+a larger `max_value` is not left clamped to the old maximum. Then anything still holding something
+other than what was sent is refused with what it holds.
+
+### What else a setter moved
+
+The stored properties the call was not given are read before and after it. Those a setter moved come
+back under `alsoChanged`. A `Gradient` given a third colour gives the new point an offset of 0. A
+`Control` given a size keeps it as offsets. So the answer names what the file will hold beyond what
+was asked.
+
+A list is copied before the write, since a setter can add to one in place.
+
+### Declared ranges and enums
+
+A value past an export range, or a number none of an enum's values has, is stored as the engine
+stores it. It is named under `outsideDeclared`, since the inspector would not have let it be entered.
+An enum is written by the name of a value as well as its number.
+
+Both come from `declared_values.gd`, which the runtime addon carries too. So a set in the running
+game takes the same names and says the same under `outside_declared`. A wait takes the names a set
+does.
+
+The element types of a typed `Array` or `Dictionary` export come from the property's declaration. In
+the editor, a script's exports sit behind a placeholder that stores whatever it is given.
+
+## Scene writes
+
+The scene tools never touch the editor's open scene. Each works on a copy of the file through
+`scene_file.gd`, which does for that copy what the editor does for its own.
+
+### Reading past the resource cache
+
+It reads the file past the resource cache. The cached `PackedScene` is the one a preload or an
+exported scene holds. A write saves a new one without touching it. So each write would otherwise
+start from the copy before the last write and save over it.
+
+### The editor's edit state
+
+It instantiates with the editor's edit state. Without one, the copy keeps no record of which nodes
+came from another scene. The pack would write an inherited scene out as a standalone copy of its
+base. It would also freeze each instanced scene's root properties into the scene instancing it.
+
+### What the scene does not own
+
+It refuses to change what the scene does not own.
+
+- A node inside an instanced scene whose children are not editable here.
+- A node a script made as the scene was instanced.
+- The removal or renaming of a node a base scene gives.
+
+The pack saves only what the scene owns. So these changes would be answered as done and be missing
+from the file.
+
+The refusal for a node inside an instance names the `scene_node set editableChildren` calls that let
+the scene keep its own values for it. There is one call for each instance around it that is not
+editable, outermost first. The pack skips everything under such an instance.
+
+### Following a move into other scenes
+
+A node renamed or reparented is followed into the other `.tscn` files that name it by path. Those
+are the scenes instancing or inheriting the scene, found from the `path=` of their external
+resources. The search repeats from the scenes found until it finds no more.
+
+In each one, `scene_kin.gd` takes where the scene's instances are from its read tree. Then it
+rewrites the editable paths, the entries' names and parents, and the connections it names below
+them. Godot finds an entry whose node moved by `unique_id`, and its parent by `parent_id_path`. It
+finds an editable path only by the path. So that scene's next save would drop what it kept below the
+instance.
+
+### Ids and scenes left alone
+
+A reparent also drops the ids saved beside each rewritten path. They run through the old parent,
+which still exists for a recovery to find. A rename keeps every id. A scene that does not load, or
+that the editor holds unsaved changes to, is left as it was and named under `notFollowed`.
+
+### Node paths a move leaves behind
+
+`scene_paths.gd` carries the node paths a moved node leaves behind, as the editor's `SceneTreeDock`
+does on a rename. It covers NodePath values in properties, arrays, dictionaries and the resources
+built into the scene. It covers the tracks of every player's animations, read from the player's root
+node.
+
+It works each path out from where its holder was and where it pointed before the move, not from the
+live tree. So the same code follows the paths in the scenes `scene_kin.gd` reaches. Those are loaded
+after the move and no longer resolve the old paths.
+
+### Paths another file gives
+
+Each scene has its own terms. A value another file gives, the instanced scene's or a base's, is in
+that file's terms. That file's own pass carried it. So it is named under `notRetargeted` only when
+the move has left it naming nothing. A track of an animation kept in another scene or an imported
+file is treated the same way.
+
+An animation kept in a `.tres` of its own is saved after the scene. The editor shares that resource
+with every scene using it, so a refused write puts its tracks back. A delete rewrites nothing. It
+lists what still names the deleted node under `stillNaming`, since dropping a track loses its keys.
+
+### Paths in scripts
+
+Scripts are code and are left as they were, as the editor leaves them. Even so, a line reading a
+moved node as `$Status` fails once the move is saved. `script_paths.gd` reads the paths a script
+names from its tokens. Those are `$Path`, `%Unique`, and a string handed to `get_node` and its kin on
+the node itself. `scene_paths.gd` works each out from the node the script is on, as it does a
+NodePath value.
+
+Every line whose path no longer reaches its node is listed under `scriptsNaming`, with the path that
+would. For this, `scene_kin.gd` follows a move into a scene that holds a script and no NodePath. A
+script read in two scenes, as on an instance's root, is listed once.
+
+### Checking before writing
+
+It packs the copy and instantiates the pack before writing anything. Each tool checks its change in
+that result, which is what loading the file will give. A property the node took but the file does
+not keep is refused there. An example is a variable a `@tool` script does not export.
+
+### Unsaved changes in the editor
+
+It refuses to write a scene the editor holds unsaved changes to. The editor reloads a scene written
+under it, and the reload drops those changes without a prompt. After a write it replaces the cached
+copy in place, so whatever holds the scene sees the change. It reloads every tab showing the scene,
+not only the one in front.
+
+### Saving through the editor
 
 `scene_create save` of a scene open in the editor saves the editor's copy through the editor's own
-save, bringing its tab to the front for the save and putting back the tab that was there.
+save. It brings that tab to the front for the save, then puts back the tab that was there.
+
 `scene_create` with `inherits` writes the new scene's text itself, as the editor's New Inherited
-Scene saves it, rather than packing an instance of the base: a headless engine instancing the base
-runs its scripts, and the pack would keep what they set as the new scene's own values. It names the
-base by uid on the same rule as a headless save, and loads the result back to check that it inherits
+Scene saves it. It does not pack an instance of the base. A headless engine instancing the base runs
+its scripts, and the pack would keep what they set as the new scene's own values. It names the base
+by uid on the same rule as a headless save. Then it loads the result back to check that it inherits
 the base.
-`resource_edit` reads the file back after saving a resource, and puts the old file back when a
+
+`resource_edit` reads the file back after saving a resource. It puts the old file back when a
 property set did not survive the save.
 
-`--path` also makes that project's GDScript warning levels the ones the operations script is
-compiled under, although the file lives in gdharness's own package and not in the project at all.
-Godot's escape hatch does not reach it: `debug/gdscript/warnings/directory_rules` exempts paths
-under `res://`, and this one is nowhere near. So a project that turns `unsafe_call_argument` or
-`return_value_discarded` up to error stops compiling gdharness, and loses every headless operation
-at once rather than the one it was using. The shipped GDScript is therefore written to survive
-every warning this engine has at error level: nothing untyped handed to a typed parameter, nothing
-answered and dropped. `test/engine-gdscript.ts` asks the engine for its own list of warnings rather
-than keeping one, turns all of them up, empties `directory_rules` so the addons are held to it too,
-and runs an operation from outside the project the way the server does.
+## The project's warnings and names
 
-The project's names reach into the shipped scripts too. Godot resolves a type by looking for a
-global class and then an autoload before it looks at the script's own constants and inner classes,
-so in a project with `class_name Log`, or an autoload called `Log`, a module's `var logger: Log`
-names the project's `Log` and not the logger it preloads, and the script refuses to compile at any
-warning level. An inner class of the same name is refused outright as hiding the global one. Every
-name a shipped script declares in a class's casing, a preloaded module, an inner class, an enum,
-therefore starts with `Gdh`, which no project's own names do. The engine suite declares a class
-and an autoload for each such name, without the prefix, and compiles and runs the shipped scripts
-beside them, and refuses a declared name in a class's casing that lacks it.
+### Warning levels
 
-Not everything under `debug/gdscript/warnings/` is a warning level, which is the part worth knowing
-before writing anything that sets them. On 4.7.2 there are 52 settings there and 49 take a level:
-`enable` and `renamed_in_godot_4_hint` are booleans and `directory_rules` is a dictionary of path to
-level. A loop that reads the prefix and writes 2 to each writes a level over a boolean, and nothing
-looks wrong afterwards because 2 is as true as true is. So the levels are picked out by the type the
-engine registers rather than by a list of the three exceptions, which would go stale the way the
-list of warnings did. `project_settings get` takes a `prefix` and answers with the type of each,
-which is the call to make before deciding what a family holds.
+`--path` also makes that project's GDScript warning levels the ones the operations script compiles
+under. That holds although the file lives in gdharness's own package, not in the project.
+`debug/gdscript/warnings/directory_rules` cannot exempt it, because its rules match only paths under
+`res://`.
 
-Beyond that log, one of these boots leaves the project alone. A `--script` run performs no
-filesystem scan and no import, so it writes nothing under `.godot`: a project that has only ever
-been scripted still has an empty one, and a settled project's class cache, uid cache and extension
-list come through a boot untouched. Measured across a settings read, a health walk, a class query
-and a validation. So a read-only call beside a running game is a call that leaves it alone, and
-`project_import refresh_classes` writes the class cache there because that is what it was asked to
-do.
+A project could turn `unsafe_call_argument` or `return_value_discarded` up to error. Then gdharness
+would stop compiling, and every headless operation would fail at once. So the shipped GDScript is
+written to survive every warning this engine has at error level. Nothing untyped goes to a typed
+parameter, and nothing returned is dropped.
 
-`project_import refresh_uids` is the exception to the paragraph above, because it is not a
-`--script` run: it is `--import`, the engine's own pass over the project, which is the only thing
-that mints a `.uid`. So it scans, it writes under `.godot`, and it writes a `.uid` beside each
-script and shader that had none. What it does not write is any file that already exists: the pass
-leaves every scene byte for byte as it was. That is worth stating rather than assuming, because the
-op previously loaded every scene and resaved it instead, and a headless resave rebuilds the header
-from what the engine could see, dropping `load_steps` and the scene's own `uid=` and so deleting
-the very references the op exists to keep resolvable.
+`test/engine-gdscript.ts` asks the engine for its own list of warnings rather than keeping one. It
+turns all of them up and empties `directory_rules`, so the addons are held to it too. It then runs
+an operation from outside the project, the way the server does.
 
-Every walk over a project directory stops at the same three things, whether the engine is doing
-the walking or the server is reading the directory itself: a name spelled with a dot,
-`node_modules`, and a directory holding a `.gdignore`. That is what the engine steps over, so
-nothing under one is imported and what is in there is not a resource, not a dependency, not a
-global class and not a search result. A vendored engine, an export directory and somebody else's
-project kept for reference are the usual reasons to have one, and answering about their files
-means naming things the engine will never load.
+### Names in the shipped scripts
+
+The project's names reach into the shipped scripts too. Godot resolves a type as a global class,
+then an autoload, before the script's own constants and inner classes. Take a project with
+`class_name Log`, or an autoload called `Log`. There a module's `var logger: Log` names the project's
+`Log`, not the logger it preloads. The script then refuses to compile at any warning level.
+
+An inner class of the same name is refused outright as hiding the global one. So every name a
+shipped script declares in a class's casing starts with `Gdh`. That covers a preloaded module, an
+inner class and an enum.
+
+The engine suite declares a class and an autoload for each such name, without the prefix. It
+compiles and runs the shipped scripts beside them. It also refuses a declared name in a class's
+casing that lacks the prefix.
+
+### Settings under the warnings prefix
+
+Not everything under `debug/gdscript/warnings/` is a warning level. On 4.7.2 there are 52 settings
+there, and 49 take a level. `enable` and `renamed_in_godot_4_hint` are booleans. `directory_rules`
+is a dictionary of path to level.
+
+A loop that writes 2 to each setting under the prefix writes a level over a boolean. Nothing looks
+wrong afterwards, because a boolean reads 2 as true.
+
+So the levels are picked out by the type the engine registers. A list of the three exceptions would
+go stale. `project_settings get` takes a `prefix` and answers with the type of each. Make that call
+before deciding what a family holds.
+
+## What a headless boot leaves alone
+
+Apart from its own log, a headless boot leaves the project alone. A `--script` run performs no
+filesystem scan and no import, so it writes nothing under `.godot`. A project that has only ever
+been scripted still has an empty one. A settled project's class cache, uid cache and extension list
+come through a boot untouched. That was measured across a settings read, a health walk, a class
+query and a validation.
+
+So a read-only call beside a running game leaves the game alone. `project_import refresh_classes`
+writes the class cache there because that is what it was asked to do.
+
+### `refresh_uids`
+
+`project_import refresh_uids` is the exception. It runs `--import`, the engine's own pass over the
+project, rather than `--script`. That pass is the only thing that mints a `.uid`.
+So it scans, writes under `.godot`, and writes a `.uid` beside each script and shader that had none.
+
+It writes no file that already exists. The pass leaves every scene byte for byte as it was. A
+headless resave would rebuild the header from what the engine could see. It would drop `load_steps`
+and the scene's own `uid=`. That would delete the very references the op exists to keep resolvable.
+
+## What a project walk skips
+
+Every walk over a project directory stops at the same three things. That holds whether the engine
+walks or the server reads the directory itself.
+
+- A name starting with a dot.
+- `node_modules`.
+- A directory holding a `.gdignore`.
+
+That is what the engine steps over. So nothing under one is imported. What is in there is not a
+resource, a dependency, a global class or a search result.
+
+A vendored engine, an export directory and somebody else's project kept for reference are the usual
+reasons to have one. Answering about their files would name things the engine will never load.

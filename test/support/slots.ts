@@ -26,5 +26,5 @@ export function leftInSlots(slots: string): string[] {
   return [
     ...readdirSync(slots).filter((name) => name !== WAITING_FOLDER),
     ...(existsSync(marks) ? readdirSync(marks).map((name) => `${WAITING_FOLDER}/${name}`) : []),
-  ].sort();
+  ].toSorted();
 }

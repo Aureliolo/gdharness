@@ -381,7 +381,7 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 	if elements <= windows.size():
 		var setting: String = _setting()
 		# The command line's --accessibility is consumed by the engine and not handed on, so only
-		# the setting and a screen reader can say the tree is built; otherwise an empty window is
+		# the setting and a screen reader can say the tree is built. Otherwise an empty window is
 		# most likely a game that builds none.
 		# 1 is a screen reader running, 0 none and -1 a platform that cannot say.
 		var read_aloud: bool = (
@@ -606,7 +606,7 @@ static func _match(element: Dictionary, made_by: Dictionary, placing: GdhPlacing
 ## Control, a RichTextLabel and each of its lines are containers. A RichTextLabel's text in a
 ## column of plain containers came out straight under the window. So the node is found where it
 ## must be: below the shown element's node, itself left out of the tree (a node that is shown would
-## have the part under it), drawn around the part, and, for text, holding its words.
+## have the part under it), drawn around the part, and, for text, one that holds its words.
 static func _attribute(
 	element: Dictionary, holder: Node, placing: GdhPlacing, is_window: bool
 ) -> void:

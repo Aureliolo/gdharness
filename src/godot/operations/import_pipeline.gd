@@ -4,8 +4,8 @@ const GdhRead = preload("reading.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhFileWalk = preload("file_walk.gd")
 const GdhLog = preload("logger.gd")
-## What the engine imports with no tool outside it, for finding what has not been imported yet;
-## everything imported already is found by its sidecar whatever its extension.
+## What the engine imports with no tool outside it, for finding what has not been imported yet.
+## Everything imported already is found by its sidecar whatever its extension.
 const IMPORTABLE_EXTENSIONS: Array[String] = [
 	"png",
 	"jpg",
@@ -95,7 +95,7 @@ func get_import_status(params: Dictionary) -> Dictionary:
 		if not full_path.begins_with("res://"):
 			full_path = "res://" + full_path
 
-		# missing_source is a sidecar whose source has gone; with neither, the path names nothing
+		# missing_source is a sidecar whose source has gone. With neither, the path names nothing
 		# the engine ever imported, and answering it as a lost source sent a caller to restore a
 		# file.
 		if (
@@ -300,7 +300,7 @@ static func _as_option(given: Variant, held: Variant) -> Variant:
 ## written as {"1818847073": 0.0}. The importer hands that to FontFile.opentype_feature_overrides,
 ## which keys features by their tag as an int, so the call reported success and the font kept its
 ## ligatures. A key is an int where the importer keys the option by OpenType tags, or where every
-## key the option holds already is one; a value is an int where every value held is, or for a tag.
+## key the option holds already is one. A value is an int where every value held is, or for a tag.
 ## Answers the dictionary under value, or why it cannot be written under refused.
 static func _keyed_as_option(
 	name: String, given: Dictionary, held: Variant, importer: String
@@ -421,7 +421,7 @@ func _import_status_of(resource_path: String, import_file_path: String) -> Dicti
 	# The checks are the ones EditorFileSystem::_test_for_reimport makes, in its order, so a
 	# resource reads as needing an import when the editor's next scan would import it. The
 	# importer's own two cannot be asked here, where no importer is loaded, so they are made from
-	# what was measured of the built-in ones; an importer a plugin adds is judged by its files
+	# what was measured of the built-in ones. An importer a plugin adds is judged by its files
 	# alone.
 	var sidecar: ConfigFile = ConfigFile.new()
 	var stale: Dictionary = (
@@ -497,7 +497,7 @@ func _never_imported(resource_path: String) -> String:
 			+ extension
 			+ " files through Blender, which it finds through the editor setting "
 			+ BLENDER_SETTING
-			+ ". An editor with it set imports them on its scan; an import pass with it unset "
+			+ ". An editor with it set imports them on its scan. An import pass with it unset "
 			+ "stops at the first one and imports nothing, and setting "
 			+ BLENDER_ENABLED
 			+ " to false has the engine leave them unimported"
@@ -508,7 +508,7 @@ func _never_imported(resource_path: String) -> String:
 	return (
 		"no importer built into the engine takes ."
 		+ extension
-		+ " files; one added by a plugin or an extension is known only to the editor, whose scan "
+		+ " files. One added by a plugin or an extension is known only to the editor, whose scan "
 		+ "imports them"
 	)
 
@@ -706,7 +706,7 @@ static func _md5_of_all(paths: Array[String]) -> String:
 
 
 ## The md5 of each resource's sidecar as the editor last imported it, keyed by path, from the cache
-## the editor writes under .godot/editor; empty when there is no cache or it cannot be read.
+## the editor writes under .godot/editor. Empty when there is no cache or it cannot be read.
 func _imported_sidecar_md5s() -> Dictionary:
 	if _sidecar_md5s != null:
 		return _sidecar_md5s
@@ -716,7 +716,7 @@ func _imported_sidecar_md5s() -> Dictionary:
 	var file: FileAccess = null if cache.is_empty() else FileAccess.open(cache, FileAccess.READ)
 	if file == null:
 		return found
-	# The first line is the import settings version; then a "::<dir>::<time>" line opens each
+	# The first line is the import settings version, then a "::<dir>::<time>" line opens each
 	# directory, and each file line is nine fields split by "::", the last holding the file's
 	# dependencies, which may contain the splitter. The eighth field is "<>"-separated, with the
 	# sidecar's md5 sixth.
@@ -765,12 +765,12 @@ static func _path_of(entry: String) -> String:
 	return entry if at < 0 else entry.substr(at + 2)
 
 
-## Every path [param resource_path] depends on, through the resources it depends on in turn; a set,
+## Every path [param resource_path] depends on, through the resources it depends on in turn. A set,
 ## keyed by path.
 static func _depended_on(resource_path: String) -> Dictionary[String, bool]:
 	var found: Dictionary[String, bool] = {}
 	var pending: Array[String] = [resource_path]
-	# Every path is followed once, which ends the walk and survives a cycle; a cap or a list of
+	# Every path is followed once, which ends the walk and survives a cycle. A cap or a list of
 	# extensions would leave out a material behind a long chain or in a saved .mesh.
 	while not pending.is_empty():
 		var next: String = pending.pop_back()
@@ -787,7 +787,7 @@ static func _shaped_by_a_script(sidecar: ConfigFile) -> bool:
 	return not str(sidecar.get_value("params", "import_script/path", "")).is_empty()
 
 
-## The files an import wrote, from its sidecar's [code]dest_files[/code]; empty when it lists none.
+## The files an import wrote, from its sidecar's [code]dest_files[/code]. Empty when it lists none.
 static func _outputs_of(sidecar: ConfigFile) -> Array[String]:
 	var outputs: Array[String] = []
 	var listed: Variant = sidecar.get_value("deps", "dest_files", [])

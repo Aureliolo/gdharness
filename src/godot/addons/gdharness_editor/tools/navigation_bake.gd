@@ -32,14 +32,14 @@ static func bake(scene: GdhSceneFile, region: Node) -> Dictionary:
 			scene
 			. refuse(
 				(
-					"%s is a %s, not a NavigationRegion2D or a NavigationRegion3D; %s."
+					"%s is a %s, not a NavigationRegion2D or a NavigationRegion3D. %s."
 					% [
 						at,
 						region.get_class(),
 						(
-							"the scene has none, and scene_node add puts one in"
+							"The scene has none, and scene_node add puts one in"
 							if regions.is_empty()
-							else "the scene's are at %s" % ", ".join(regions)
+							else "The scene's are at %s" % ", ".join(regions)
 						),
 					]
 				)
@@ -92,7 +92,7 @@ static func bake(scene: GdhSceneFile, region: Node) -> Dictionary:
 		answer["meshesNote"] = (
 			"The engine's warning that it had to parse RenderingServer meshes at runtime is about "
 			+ "a game rebaking as it runs, where reading a mesh back from the GPU stalls a frame. "
-			+ "A headless engine gives it for any bake read from MeshInstance3D nodes; this one "
+			+ "A headless engine gives it for any bake read from MeshInstance3D nodes. This one "
 			+ "ran once and is saved."
 		)
 
@@ -289,7 +289,7 @@ static func _nothing_read(scene: GdhSceneFile, held: Resource) -> String:
 		return said
 	return (
 		(
-			"%s %s %s outside what was read; the bake reads a node elsewhere once it is in the "
+			"%s %s %s outside what was read. The bake reads a node elsewhere once it is in the "
 			+ "group %s and source_geometry_mode is groups_with_children, or once it is moved "
 			+ "under the region."
 		)

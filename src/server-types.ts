@@ -62,7 +62,7 @@ export interface GodotProcess {
    * and then stopped was refused as one started without it.
    */
   profile?: string;
-  /** The scene a start of this server ran, which its boot is noted and read under; see `MAIN_SCENE`. */
+  /** The scene a start of this server ran, which its boot is noted and read under. See `MAIN_SCENE`. */
   bootScene?: string;
   /**
    * How this server ended the run, when it did: by asking the game to close, through the keeper
@@ -79,10 +79,10 @@ export interface GodotProcess {
    * pid still means it before anything is signalled: see `judgeRun`. Absent for a played run.
    */
   command?: string;
-  /** Set once the process has exited with a code; null while it runs, and for a signalled end. */
+  /** Set once the process has exited with a code. Null while it runs, and for a signalled end. */
   exitCode: number | null;
   /**
-   * The signal that ended the process, which then has no exit code; null otherwise.
+   * The signal that ended the process, which then has no exit code. Null otherwise.
    *
    * Its own field rather than a stand-in code, because every stand-in is a code some program can
    * exit with: -1 is also what a crash or `exit(-1)` leaves on Windows, and a caller reading a run
@@ -196,12 +196,12 @@ export interface GodotProcess {
    * the runtime's start, for a run the editor plays, and how far into it this server has read. The editor's game prints to the editor's
    * stderr, which nobody reads, and the debug adapter relays what the game prints and not what it
    * reports, so a `push_error` in a played game reached neither the log nor the transcript and
-   * the run was answered clean. Found beside the announcement once the run is tied to its game;
-   * null for a run that reached the boundary line with no report to be found, which is not read.
+   * the run was answered clean. Found beside the announcement once the run is tied to its game.
+   * Null for a run that reached the boundary line with no report to be found, which is not read.
    */
   errorReport?: string | null;
   errorReportOffset?: number;
-  /** The announced games the process tree was last read to tie this run among; see [tieThePlayedGame]. */
+  /** The announced games the process tree was last read to tie this run among. See [tieThePlayedGame]. */
   treeReadFor?: string;
   /**
    * True once the run's console is taken from the report rather than from the debug adapter.
@@ -242,8 +242,8 @@ export interface SpawnedGame extends GodotProcess {
 
 /**
  * Tool arguments as they arrive over MCP: keys chosen by the caller, values not yet checked.
- * `unknown` rather than `any` so that every read has to say what it expects the value to be;
- * the readers in `tool-args.ts` are where that happens.
+ * `unknown` rather than `any` so that every read has to say what it expects the value to be.
+ * The readers in `tool-args.ts` are where that happens.
  */
 export type OperationParams = Record<string, unknown>;
 

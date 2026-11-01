@@ -366,7 +366,7 @@ func _not_found(wanted: String, declared: Dictionary, answers_own: bool = false)
 			(
 				(
 					"Class not found: %s.%s editor_classes reads the engine's ClassDB, so a "
-					+ "class_name a project script declares is not in it either; script_info "
+					+ "class_name a project script declares is not in it either. script_info "
 					+ "structure reads one."
 				)
 				% [wanted, offered]

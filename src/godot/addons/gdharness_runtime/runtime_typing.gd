@@ -83,7 +83,7 @@ func inject_text(params: Dictionary) -> Dictionary:
 	if ended_editing(focused, before):
 		answer["editing_ended"] = true
 	# A control drawing its own field takes characters in its gui_input, so typing at one is not
-	# refused; but a focused button answered that the text went into it, which read as typed.
+	# refused, but a focused button answered that the text went into it, which read as typed.
 	if into != null and before.is_empty():
 		answer["note"] = (
 			(
@@ -98,7 +98,7 @@ func inject_text(params: Dictionary) -> Dictionary:
 
 
 ## What [param focused] says and whether it is being edited, read before keys go in, for
-## [method field_noted] and [method ended_editing] to compare with; empty where the focus is no
+## [method field_noted] and [method ended_editing] to compare with. Empty where the focus is no
 ## field. A [TextEdit] has no editing state of its own and counts as always edited.
 static func field_before(focused: Control) -> Dictionary:
 	var field: LineEdit = focused as LineEdit
@@ -333,7 +333,7 @@ func choose(params: Dictionary) -> Dictionary:
 	# whatever is behind it, and before the item is looked for, because opening is when a game fills
 	# a menu: one rebuilt on about_to_popup was read as it stood before, measured on 4.7.2, and the
 	# index found in the old items chose another item of the new ones. An OptionButton opens its
-	# own; a bare PopupMenu is popped where it already sits, which leaves a menu already open where
+	# own. A bare PopupMenu is popped where it already sits, which leaves a menu already open where
 	# it is.
 	var opened: bool = GdhMenus.open_the_menu(node, menu)
 	await _host.get_tree().process_frame

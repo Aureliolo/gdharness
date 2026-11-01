@@ -80,7 +80,7 @@ static func kept_by_engine(object: Object, name: String, wanted: Variant, held: 
 
 ## The stored properties of [param object] that are not in [param names] and no longer hold what
 ## [param before] recorded. One the object did not have before, which a script set on it declares,
-## counts once it holds anything but its default; one it no longer has went with the old script.
+## counts once it holds anything but its default. One it no longer has went with the old script.
 static func differing(object: Object, before: Dictionary, names: Dictionary) -> Array[String]:
 	var changed: Array[String] = []
 	var now: Dictionary = stored(object)
@@ -111,7 +111,7 @@ static func default_of(object: Object, name: String) -> Variant:
 ## What the declaration of [param name] in [param script] or a script it extends initialises it to,
 ## when that is a value written out, such as [code]PackedStringArray()[/code], or null. The engine
 ## reports a default only for an initializer it folded into a constant, and it folds no constructor
-## call, so it gives none for such a property; the saver then writes it whatever it holds, and the
+## call, so it gives none for such a property. The saver then writes it whatever it holds, and the
 ## line read as a change some script had made.
 static func _initialised(script: Script, name: String, type: int) -> Variant:
 	var declaration: RegEx = RegEx.create_from_string(
@@ -157,7 +157,7 @@ static func reached(object: Object, property: String) -> Dictionary:
 	return ids
 
 
-## Adds what [param more] spares to [param into], both as [method reached] answers them; true for an
+## Adds what [param more] spares to [param into], both as [method reached] answers them. True for an
 ## id spares the whole resource, as one a tool rebuilt.
 static func spare(into: Dictionary, more: Dictionary) -> void:
 	for id: Variant in more:
@@ -507,7 +507,7 @@ static func setter_ran(object: Object, property: String, refused: String) -> Str
 		(
 			(
 				"%s %s is not a tool script, so its setter ran in the headless engine writing this "
-				+ "as it runs in the game; an editor runs none and would have saved the value "
+				+ "as it runs in the game. An editor runs none and would have saved the value "
 				+ "given. "
 			)
 			% [refused, named]
@@ -539,7 +539,7 @@ static func move_script_set(answer: Dictionary, names: Array, owner: String) -> 
 		(
 			"%s's script is not a tool, so it ran in the headless engine that wrote the file, and "
 			+ "set %s as it did. The file does not hold %s, as a save from the editor, where the "
-			+ "script does not run, would not; the script sets %s again when it runs in the game."
+			+ "script does not run, would not. The script sets %s again when it runs in the game."
 		)
 		% [owner, ", ".join(listed), pronoun, pronoun]
 	)
@@ -547,6 +547,9 @@ static func move_script_set(answer: Dictionary, names: Array, owner: String) -> 
 
 ## Why [param name] on [param what] cannot be saved as the file held it.
 static func unasked(what: String, name: String, why: String = "") -> String:
+	var told: String = why.trim_suffix(".")
+	if not told.is_empty():
+		told = ". " + told.left(1).to_upper() + told.substr(1)
 	return (
 		(
 			(
@@ -554,7 +557,7 @@ static func unasked(what: String, name: String, why: String = "") -> String:
 				+ "ask for it: its script ran when a headless engine loaded or set it, as it does "
 				+ "in the game and not in an editor%s. "
 			)
-			% [what, name, "" if why.is_empty() else "; " + why.trim_suffix(".")]
+			% [what, name, told]
 		)
 		+ REMEDY
 	)

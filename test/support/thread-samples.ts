@@ -19,9 +19,9 @@ interface Sample {
  * What a process's main thread was doing, sampled from /proc on Linux, for a case that fails on
  * an engine that stopped answering and was answering again before anything could ask it why.
  *
- * A thread computing has its user or system time growing; one blocked names the kernel function it
- * waits in (do_wait is a wait for a child, futex_wait a lock); major faults climbing are its memory
- * paged back in; and a gap between two samples wider than the interval is this process not getting
+ * A thread computing has its user or system time growing. One blocked names the kernel function it
+ * waits in (do_wait is a wait for a child, futex_wait a lock). Major faults climbing are its memory
+ * paged back in. A gap between two samples wider than the interval is this process not getting
  * the processor either. Elsewhere it samples nothing and accounts for nothing.
  */
 export function sampleThread(pid: number | undefined): { account: () => string; stop: () => void } {

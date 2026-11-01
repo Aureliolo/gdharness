@@ -11,7 +11,9 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { parse as parseYaml } from 'yaml';
 import { HARNESSES, harnessById } from '../src/harnesses.js';
+import { isRecord } from '../src/records.js';
 import {
   removeSkill,
   SHARED_SKILLS,
@@ -21,25 +23,27 @@ import {
   writeSkill,
 } from '../src/skill.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
+import { SHARED_PARAGRAPHS, withSharedParagraphsLinked } from '../src/tool-reference.js';
 import { sweep } from './support/sweep.js';
 
 function project(): string {
   return mkdtempSync(join(tmpdir(), 'gdharness-skill-'));
 }
 
-/** The frontmatter, as the specification defines it rather than as YAML in general. */
+/**
+ * The frontmatter's top-level text fields, parsed as the YAML the format says it is. A reader
+ * splitting each line at its first colon passed a description holding a colon, which a YAML parser
+ * refuses.
+ */
 function frontmatter(text: string): Record<string, string> {
   assert.ok(text.startsWith('---\n'), 'the file opens with frontmatter');
   const end = text.indexOf('\n---\n', 4);
   assert.ok(end > 0, 'and the frontmatter is closed');
-  const fields: Record<string, string> = {};
-  for (const line of text.slice(4, end).split('\n')) {
-    const colon = line.indexOf(':');
-    if (colon > 0 && !line.startsWith(' ')) {
-      fields[line.slice(0, colon)] = line.slice(colon + 1).trim();
-    }
-  }
-  return fields;
+  const parsed: unknown = parseYaml(text.slice(4, end));
+  assert.ok(isRecord(parsed), `the frontmatter is a mapping: ${JSON.stringify(parsed)}`);
+  return Object.fromEntries(
+    Object.entries(parsed).flatMap(([key, value]) => (typeof value === 'string' ? [[key, value]] : [])),
+  );
 }
 
 function testTheSkillMeetsTheFormat(): void {
@@ -92,6 +96,7 @@ function testTheReferenceIsTheServersOwnToolList(): void {
   assert.deepEqual(
     answered.map((tool) => tool.name),
     [
+      'project_settings',
       'project_import',
       'project_test',
       'scene_node',
@@ -108,8 +113,27 @@ function testTheReferenceIsTheServersOwnToolList(): void {
   );
   for (const tool of answered) {
     assert.ok(
-      reference.includes(`The answer: ${tool.answer ?? ''}`),
+      reference.includes(`The answer: ${withSharedParagraphsLinked(tool.answer ?? '')}`),
       `${tool.name}'s answer is in the reference`,
+    );
+  }
+  // A paragraph several tools share is written once, under its own heading, and each tool links to
+  // it. Counted whole, so a copy left behind in one tool's text fails as surely as a missing one.
+  for (const { heading, text } of SHARED_PARAGRAPHS) {
+    assert.equal(
+      reference.split(text).length - 1,
+      1,
+      `the paragraph under ${heading} is in the reference exactly once`,
+    );
+    assert.ok(reference.includes(`## ${heading}\n\n${text}\n`), `and it is under ${heading}`);
+    const linkedFrom = TOOL_SPECS.filter((tool) =>
+      `${tool.description}${tool.answer ?? ''}`.includes(text),
+    ).length;
+    assert.ok(linkedFrom >= 2, `${heading} is shared by ${linkedFrom} tools`);
+    assert.equal(
+      reference.split(`(#${heading.toLowerCase().replaceAll(' ', '-')}) applies.`).length - 1,
+      linkedFrom,
+      `and every tool sharing it links to ${heading}`,
     );
   }
   assert.ok(
@@ -192,7 +216,7 @@ function testRewritingLeavesNothingStaleBehind(): void {
 
 /**
  * Uninstalling has to leave the project as it found it. The shared directory is one gdharness
- * creates, so its husk goes too; a harness's own directory is that harness's, and stays.
+ * creates, so its husk goes too. A harness's own directory is that harness's, and stays.
  */
 function testRemovingTakesOurDirectoriesAndNobodyElses(): void {
   const root = project();
@@ -201,7 +225,7 @@ function testRemovingTakesOurDirectoriesAndNobodyElses(): void {
     assert.ok(claude?.skills);
     const directories = skillDirectories([claude], root, existsSync);
     writeSkill(directories, '9.9.9');
-    assert.deepEqual([...removeSkill(directories, root)].sort(), [...directories].sort());
+    assert.deepEqual(removeSkill(directories, root).toSorted(), directories.toSorted());
 
     assert.equal(existsSync(join(root, '.agents')), false, 'the directory gdharness made is gone');
     assert.equal(

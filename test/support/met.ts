@@ -36,7 +36,7 @@ export async function endWhatAnnouncedIn(runtimeDir: string): Promise<void> {
  *
  * Windows hands a freed pid out again within seconds, and the seconds after a stop are when the
  * server spawns its listings and ends what is left. A successor read as gone and, five seconds on,
- * as running, which was another process under its number; and a cleanup that ends whatever runs
+ * as running, which was another process under its number. And a cleanup that ends whatever runs
  * under a remembered number can end somebody else's process. So a number is asked about together
  * with the start it was met with.
  */
@@ -52,12 +52,12 @@ export class MetProcesses {
   }
 
   /**
-   * Notes when each of [param pids] began; one already gone is noted as gone. A caller that cannot
+   * Notes when each of [param pids] began, and notes one already gone as gone. A caller that cannot
    * wait, such as an output handler, need not: [method end] waits for every meeting first.
    *
    * A number met before is met again, since every caller passes the number of the process it has
    * just been told of. Kept at its first start, a game started under a number an earlier game of the
-   * same fixture had freed was read as not running while it ran, and as gone before it had gone; the
+   * same fixture had freed was read as not running while it ran, and as gone before it had gone. The
    * earlier holder cannot still be there, because a number is not handed out while its holder runs.
    */
   meet(...pids: readonly number[]): Promise<void> {
@@ -106,7 +106,7 @@ export class MetProcesses {
     return said;
   }
 
-  /** Waits up to [param withinMs] for [param pid] to be gone, answering whether it went. */
+  /** Waits up to [param withinMs] for [param pid] to be gone, and answers whether it went. */
   async gone(pid: number, withinMs = 0): Promise<boolean> {
     const until = Date.now() + withinMs;
     for (;;) {

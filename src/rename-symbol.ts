@@ -1,7 +1,7 @@
 /**
  * script_edit rename, up to the writes: which symbol is meant, whether the new name is free, the
  * plan, and the report a caller reads. The server does the writing and what the editor and the
- * class cache need afterwards; the engine and the language server are handed in, so every refusal
+ * class cache need afterwards. The engine and the language server are handed in, so every refusal
  * here can be reached without either.
  */
 
@@ -172,7 +172,10 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
       request.newScriptPath === null
         ? ''
         : ' resource_edit move moves the script alone, with every path in the project naming it.';
-    return { ok: false, reason: `${symbol} is already called ${newName}; nothing to rename.${moving}` };
+    return {
+      ok: false,
+      reason: `${symbol} is already called ${newName}, so there is nothing to rename.${moving}`,
+    };
   }
   const declaringPath = resourcePathOf(projectPath, request.scriptPath);
   if (declaringPath === null) {
@@ -198,7 +201,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
   if (declaring === undefined) {
     return {
       ok: false,
-      reason: `${declaringPath} is not among the scripts the engine sees: it is under a directory holding a .gdignore, or one spelled with a dot.`,
+      reason: `${declaringPath} is not among the scripts the engine sees: it is under a directory holding a .gdignore, or one whose name starts with a dot.`,
     };
   }
   const declared = declaredIn(scripts);
@@ -284,7 +287,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
       }
     }
     // A bare use of the new name inside a class that inherits the member is a local, a parameter,
-    // or a global the member would hide; each either shadows the renamed member or is shadowed by
+    // or a global the member would hide. Each either shadows the renamed member or is shadowed by
     // it, and a project treating SHADOWED_VARIABLE as an error stops compiling. In a class whose
     // chain declares the new name as a member, a bare use is that member's, which the declaration
     // above already names: `return weight * stack` was offered as a local beside `stack` declared.
@@ -302,7 +305,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
     }
     if (inUse.length > 0) {
       const places = inUse
-        .sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line)
+        .toSorted((a, b) => a.file.localeCompare(b.file) || a.line - b.line)
         .slice(0, 10)
         .map((place) => `${place.file}:${place.line}`);
       conflicts.push(
@@ -407,7 +410,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
   const scriptsInOrder = rewrites
     .map((rewrite) => rewrite.path)
     .filter((path) => path.endsWith('.gd'))
-    .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+    .toSorted((a, b) => rank(a) - rank(b) || a.localeCompare(b))
     .map((path) => (path === declaringPath && moveTo !== null ? moveTo : path));
   return {
     ok: true,
@@ -436,7 +439,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
  * overrides and answers that method's references, while a bare call inside the overriding class,
  * or one on a value typed as that class, resolves to the override and is in neither answer. So the
  * second pass asks where every other occurrence of the name in code is declared. One answer naming
- * a declaration being renamed makes it a use; one answer naming anything else makes it not this
+ * a declaration being renamed makes it a use. One answer naming anything else makes it not this
  * member. More than one answer is the analyser offering every declaration of the name for a value
  * whose type it does not know, and that occurrence is left. Each occurrence is asked on its own
  * rather than settled with its symbol's references: a references request is a walk of every script
@@ -567,7 +570,7 @@ export function changedReport(
       file: rewrite.path,
       edits: count,
       lines: [...byLine.entries()]
-        .sort(([a], [b]) => a - b)
+        .toSorted(([a], [b]) => a - b)
         .map(([line, kinds]) => ({
           line: line + 1,
           kinds: [...kinds],
@@ -648,7 +651,7 @@ export function leftAloneReport(mentions: readonly Mention[], terms: readonly st
   // likeliest entry to break something silently, so it is put where a reader starts.
   const loudFirst = (mention: Mention): number =>
     mention.kind === 'string' && mention.why !== undefined ? 0 : 1;
-  const leftAlone = full.sort((a, b) => loudFirst(a) - loudFirst(b));
+  const leftAlone = full.toSorted((a, b) => loudFirst(a) - loudFirst(b));
   const inProse = [...prose.values()];
   const otherSymbols = [...others.entries()].map(([why, files]) => ({
     why,
@@ -700,7 +703,7 @@ export function leftAloneReport(mentions: readonly Mention[], terms: readonly st
 /**
  * How many grouped left-alone lines an answer carries before they go to a file instead. A member
  * named `found` left 1886 such lines, which kept an answer past what a caller's client shows
- * inline even once each list was only file and line numbers; what a reader acts on, the quoted
+ * inline even once each list was only file and line numbers. What a reader acts on, the quoted
  * entries and the counts, stays in the answer either way.
  */
 export const LEFT_ALONE_ANSWER_LINES = 300;
@@ -734,7 +737,7 @@ export function writeLeftAloneDetail(projectPath: string, symbol: string, detail
   writeFileSync(path, `${JSON.stringify(detail, null, 2)}\n`, 'utf8');
   const kept = readdirSync(directory)
     .filter((name) => name.endsWith('.json'))
-    .sort()
+    .toSorted()
     .reverse();
   for (const old of kept.slice(10)) {
     rmSync(join(directory, old), { force: true });
@@ -749,7 +752,7 @@ export function writeLeftAloneDetail(projectPath: string, symbol: string, detail
  */
 const PROSE_KINDS: ReadonlySet<string> = new Set(['comment', 'doc', 'string', 'text']);
 
-/** How much of a line an answer quotes; a longer one is cut to the part around what it is about. */
+/** How much of a line an answer quotes. A longer one is cut to the part around what it is about. */
 const QUOTED_CHARS = 240;
 
 /**

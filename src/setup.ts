@@ -3,7 +3,7 @@
  * turns the runtime autoload on or off, and reads back whether all of that holds.
  *
  * Every write that lands in project.godot goes through the engine's own operations, so the
- * file is written the way the editor writes it; the addon copy is a plain copy, whole and
+ * file is written the way the editor writes it. The addon copy is a plain copy, whole and
  * fresh each time, so an upgrade never leaves a file of the old version behind.
  */
 
@@ -120,7 +120,7 @@ function runtimeAddonDigest(from: string = shippedAddonsDirectory()): string {
 function addonsDigest(names: readonly string[], from: string): string {
   const hash = createHash('sha256');
   const walk = (directory: string, relative: string): void => {
-    for (const name of readdirSync(directory).sort()) {
+    for (const name of readdirSync(directory).toSorted()) {
       if (name === VERSION_MARKER || name === DIGEST_MARKER) {
         continue;
       }
@@ -243,7 +243,7 @@ export function loaderState(projectPath: string): 'current' | 'differs' | 'missi
   return lines(copy) === lines(shippedLoader()) ? 'current' : 'differs';
 }
 
-/** The shipped loader written into [param projectPath], answering whether anything changed. */
+/** The shipped loader written into [param projectPath]. Answers whether anything changed. */
 export function writeLoader(projectPath: string): boolean {
   if (loaderState(projectPath) === 'current') {
     return false;
@@ -611,22 +611,33 @@ export function inspectProject(projectPath: string): ProjectReport {
     const installed = existsSync(directory);
     const version = existsSync(marker) ? readFileSync(marker, 'utf8').trim() : null;
     const current = version === SERVER_VERSION;
-    if (!installed) {
-      problems.push(`addons/${name} is not installed; run gdharness setup`);
-    } else if (!current) {
+    if (installed && !current) {
       problems.push(
-        `addons/${name} is ${version ?? 'of an unknown version'}, this gdharness is ${SERVER_VERSION}; run gdharness setup`,
+        `addons/${name} is ${version ?? 'of an unknown version'}, this gdharness is ${SERVER_VERSION}. Run gdharness setup`,
       );
     }
     return { name, installed, version, current };
   });
+  // One line for every addon missing, because a project without gdharness lacks all four at once
+  // and four lines with one remedy read as four faults.
+  const missing = addons.filter((addon) => !addon.installed).map((addon) => addon.name);
+  if (missing.length === 1) {
+    problems.unshift(`addons/${missing.join('')} is not installed. Run gdharness setup`);
+  } else if (missing.length > 1) {
+    problems.unshift(
+      `${missing.length} addons are not installed (${missing.join(', ')}). Run gdharness setup`,
+    );
+  }
 
   const settings = parseProjectGodot(readFileSync(join(projectPath, 'project.godot'), 'utf8'));
   const pluginsEnabled = enabledPlugins(settings);
-  for (const name of EDITOR_PLUGINS) {
-    if (!pluginsEnabled.includes(name)) {
-      problems.push(`the ${name} plugin is not enabled in project.godot; run gdharness setup`);
-    }
+  const disabled = EDITOR_PLUGINS.filter((name) => !pluginsEnabled.includes(name));
+  if (disabled.length === 1) {
+    problems.push(`the ${disabled.join('')} plugin is not enabled in project.godot. Run gdharness setup`);
+  } else if (disabled.length > 1) {
+    problems.push(
+      `the ${disabled.join(' and ')} plugins are not enabled in project.godot. Run gdharness setup`,
+    );
   }
   const autoload = settings['autoload'];
   const registered = autoload === undefined ? undefined : readString(autoload, RUNTIME_AUTOLOAD.name);
@@ -634,14 +645,14 @@ export function inspectProject(projectPath: string): ProjectReport {
   const runtimeAutoloadPath = typeof registered === 'string' ? registered.replace(/^\*/, '') : null;
   if (runtimeAutoloadPath === `res://${RUNTIME_SCRIPT}`) {
     problems.push(
-      `the ${RUNTIME_AUTOLOAD.name} autoload names the addon's own script, which a clone or an export without addons/ boots as a missing script; run gdharness setup to point it at res://${RUNTIME_AUTOLOAD.path}, the loader it writes`,
+      `the ${RUNTIME_AUTOLOAD.name} autoload names the addon's own script, which a clone or an export without addons/ boots as a missing script. Run gdharness setup to point it at res://${RUNTIME_AUTOLOAD.path}, the loader it writes`,
     );
   } else if (
     runtimeAutoloadPath === `res://${RUNTIME_AUTOLOAD.path}` &&
     loaderState(projectPath) === 'differs'
   ) {
     problems.push(
-      `res://${RUNTIME_AUTOLOAD.path} is not the loader this gdharness ships; run gdharness setup to write it again`,
+      `res://${RUNTIME_AUTOLOAD.path} is not the loader this gdharness ships. Run gdharness setup to write it again`,
     );
   }
 
@@ -674,7 +685,7 @@ export function inspectProject(projectPath: string): ProjectReport {
     if (!existsSync(join(projectPath, path))) {
       if (!addonMissing(path)) {
         problems.push(
-          `the ${name} autoload names res://${path}, which is not in this project, so it boots with a missing script; restore that file, or point the autoload at one that is here`,
+          `the ${name} autoload names res://${path}, which is not in this project, so it boots with a missing script. Restore that file, or point the autoload at one that is here`,
         );
       }
       continue;
@@ -683,7 +694,7 @@ export function inspectProject(projectPath: string): ProjectReport {
       ignoredAutoloads.push({ name, path });
     } else if (tracked !== null && !tracked.has(path)) {
       problems.push(
-        `the ${name} autoload names res://${path}, which git does not carry, so a clone boots with a missing script; commit that file, or point the autoload at one the project tracks`,
+        `the ${name} autoload names res://${path}, which git does not carry, so a clone boots with a missing script. Commit that file, or point the autoload at one the project tracks`,
       );
     }
   }
@@ -692,11 +703,11 @@ export function inspectProject(projectPath: string): ProjectReport {
   const staleClasses = cached === null ? [] : staleAgainst(cached, projectPath);
   if (cached === null) {
     problems.push(
-      'no .godot/global_script_class_cache.cfg: the engine knows no class_name; run project_import refresh_classes or open the editor',
+      'no class cache (.godot/global_script_class_cache.cfg), so the engine knows no class_name. Run gdharness classes, or open the editor',
     );
   } else if (staleClasses.length > 0) {
     problems.push(
-      `the class cache does not list ${staleClasses.join(', ')}; run project_import refresh_classes or gdharness classes`,
+      `the class cache does not list ${staleClasses.join(', ')}. Run project_import refresh_classes or gdharness classes`,
     );
   }
 

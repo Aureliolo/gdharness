@@ -17,7 +17,7 @@ const DIGEST_MARKER: String = "res://addons/gdharness_editor/.gdharness-digest"
 ## step with `announcementPath` in src/bridge-announce.ts.
 const ANNOUNCEMENT: String = "res://.godot/gdharness-bridge.json"
 const ANNOUNCE_PROTOCOL: int = 1
-## Where each editor of this project says which ports it serves; see [method _ports_record].
+## Where each editor of this project says which ports it serves. See [method _ports_record].
 const EDITORS_RECORDED: String = "res://.godot/gdharness-editors"
 const EDITORS_RECORDED_PROTOCOL: int = 1
 const RECONNECT_DELAY: float = 3.0
@@ -172,7 +172,7 @@ func _process(_delta: float) -> void:
 ## The file saying which ports this editor serves, named by its process id, so `gdharness lsp` can
 ## find its language server when a server moved it off the default. One for each process rather
 ## than one for the project, because a gate's `--import` loads this addon too, and its plugin is
-## shown none of the options that would say so; the reader tells the two apart by command line.
+## shown none of the options that would say so. The reader tells the two apart by command line.
 ## Kept in step with `editorRecordsIn` in src/lsp-bridge.ts.
 static func _ports_record() -> String:
 	return ProjectSettings.globalize_path(EDITORS_RECORDED).path_join(
@@ -265,7 +265,7 @@ func _resolve_server_url(explicit_url: String) -> String:
 	if raw != "":
 		if raw.is_valid_int() and int(raw) >= 1 and int(raw) <= 65535:
 			return "ws://127.0.0.1:%d/godot" % int(raw)
-		push_error("GDHARNESS_BRIDGE_PORT is %s, not a port; using %s" % [raw, DEFAULT_URL])
+		push_error("GDHARNESS_BRIDGE_PORT is %s, not a port, so %s is used" % [raw, DEFAULT_URL])
 
 	return DEFAULT_URL
 
@@ -411,7 +411,7 @@ static func _asked_for(variable: String) -> int:
 ## Turns breakpoint syncing on, so a debug session opening does not clear the editor's breakpoints.
 ##
 ## With the setting off, Godot's adapter answers `initialize` by clearing every breakpoint in the
-## script editor, open and cached, and telling every session so; with it on, it tells the new
+## script editor, open and cached, and telling every session so. With it on, it tells the new
 ## session what is set and clears nothing. A server opens a session for its first breakpoint or
 ## its first stack read, so off meant a harness session took the user's breakpoints away on its
 ## first debug call, silently. The adapter reads the setting again the moment it changes, so this

@@ -20,14 +20,14 @@ static func menu_of(node: Node) -> PopupMenu:
 	return null
 
 
-## The items asked for, best first: the one at `index`; else the one whose whole words are `text`,
-## exactly and then case-insensitively; else every item `text` matches by the rules `says` has, a
+## The items asked for, best first: the one at `index`, else the one whose whole words are `text`,
+## exactly and then case-insensitively, else every item `text` matches by the rules `says` has, a
 ## plain word as a contains, a glob, and alternatives split at `|`, the enabled ones when any are.
 ## Empty when nothing matches, and more than one when several match equally well, which the caller
 ## refuses rather than guesses between.
 ##
 ## By the same rules as `says` because a caller who has learnt them from a click, a find and a wait
-## writes the same pattern here: "Leave*" was refused against a menu holding "Leave the hall", and
+## writes the same pattern here: "Leave*" was refused against a menu holding "Leave the shop", and
 ## the item had to be written out in full on a second call. The whole words still come first, so an
 ## item named in full is chosen over another whose words contain it.
 ##

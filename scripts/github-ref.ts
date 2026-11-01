@@ -6,7 +6,7 @@
  * Asked through the REST API with retries rather than through one `gh api` call whose failure is
  * read as "absent". A 503 during GitHub's incident on 2026-09-23 stopped a release being prepared
  * at the branch, and the same answer to the check for a taken tag reads as "free". Only a 404 is
- * absent; anything else is asked again, and named if the last attempt fails too.
+ * absent. Anything else is asked again, and named if the last attempt fails too.
  *
  * Creating can be repeated: a ref that already exists at the commit asked for is the ref wanted,
  * so a run retried after its create reached GitHub and the answer did not come back still succeeds.

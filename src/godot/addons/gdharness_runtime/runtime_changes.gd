@@ -81,7 +81,7 @@ func set_property(params: Dictionary) -> Dictionary:
 		return fitting
 	var given: Variant = fitting["value"]
 	# A component of a vector or a transform is written into a copy, which is put back where it was
-	# read from, setter and all; the read back is then taken off the game again, since the copy here
+	# read from, setter and all. The read back is then taken off the game again, since the copy here
 	# says only what was written into it.
 	var chain: Array[Dictionary] = reached["chain"]
 	var copied: bool = GdhPaths.composite(holder)
@@ -133,7 +133,7 @@ func set_property(params: Dictionary) -> Dictionary:
 			why += (
 				(
 					". %s is declared as %s, which is also how the engine names a script class "
-					+ "with no class_name; if it is one, the object given has the right class and "
+					+ "with no class_name. If it is one, the object given has the right class and "
 					+ "another script: it is %s"
 				)
 				% [named, str(slot["class"]), GdhValues.class_of(refused_object)]
@@ -165,7 +165,7 @@ func set_property(params: Dictionary) -> Dictionary:
 		answer["unchanged"] = true
 	_keep_reported(answer, "errors", caught.raised)
 	_keep_reported(answer, "warnings", caught.warned)
-	# The engine stores a number past an export range, or one no enum value has, as given; only the
+	# The engine stores a number past an export range, or one no enum value has, as given. Only the
 	# inspector holds a property to them, so the game now holds a value its own script never
 	# expected.
 	if holder is Object:
@@ -484,7 +484,7 @@ func call_method(params: Dictionary) -> Dictionary:
 			var close: PackedStringArray = GdhRead.nearest(node_path, PackedStringArray(classes))
 			standing["message"] = (
 				(
-					"%s. No global class is called %s either%s; a static function is called with "
+					"%s. No global class is called %s either%s. A static function is called with "
 					+ "its class's name or its script's res:// path as the path."
 				)
 				% [
@@ -631,7 +631,7 @@ func call_method(params: Dictionary) -> Dictionary:
 				var _noted: bool = outside.append(stray)
 
 	# Timed around the call alone, since the bridge's round trip is a second or more and swamps what
-	# one click's work costs; the frame metrics read whichever frame is last, which is not this one.
+	# one click's work costs. The frame metrics read whichever frame is last, which is not this one.
 	# Listened to as well, because a call the engine refused returns null like one that ran.
 	var caught: GdhCallErrors = GdhCallErrors.new()
 	OS.add_logger(caught)
@@ -639,7 +639,7 @@ func call_method(params: Dictionary) -> Dictionary:
 	var result: Variant = holder.callv(named, deserialized_args)
 	OS.remove_logger(caught)
 	# A method that awaits hands back its state at the first await and its value only when it ends,
-	# so the answer waits for the value; one that takes longer than the server waits is collected by
+	# so the answer waits for the value. One that takes longer than the server waits is collected by
 	# its requestId like any slow call.
 	var state: Object = result if result is Object else null
 	var awaited: bool = state != null and state.get_class() == "GDScriptFunctionState"
@@ -660,7 +660,7 @@ func call_method(params: Dictionary) -> Dictionary:
 			message += (
 				(
 					". The parameter is declared as %s, which is also how the engine names a "
-					+ "script class with no class_name; if it is one, the object given has the "
+					+ "script class with no class_name. If it is one, the object given has the "
 					+ "right class and another script: it is %s"
 				)
 				% checked
@@ -756,7 +756,7 @@ static func _reads_the_result(asked: Variant) -> bool:
 ##
 ## In the same answer because an object handed back is otherwise only its class and its instance
 ## id, and reading one field of it meant finding the same object again by a path into the game's
-## private state, which works only where the caller already knows a key; a catalogue of records
+## private state, which works only where the caller already knows a key. A catalogue of records
 ## handed back as a list took one call per record. A name that is not there is listed rather than
 ## refusing the answer, since the call has run by then and its result is what was asked.
 func _read_off_result(result: Variant, asked: Variant) -> Dictionary:
@@ -809,7 +809,7 @@ func _read_off_result(result: Variant, asked: Variant) -> Dictionary:
 
 
 ## What was read off one element of a list or a dictionary a call answered with, or null for one
-## that is no object; why a name was not there goes into [param missing], led by [param named].
+## that is no object. Why a name was not there goes into [param missing], led by [param named].
 func _read_off_element(
 	element: Variant, named: String, asked: Variant, missing: Array[String]
 ) -> Variant:
@@ -900,7 +900,7 @@ static func _walk_from(object: Object, path: String) -> Dictionary:
 ## up to all of them, or any number past that for one taking varargs.
 static func _argument_count_refused(holder: Object, method: String, given: int) -> String:
 	# A node's method list runs to hundreds of entries, and walking it costs a couple of
-	# milliseconds of the game's frame; a call giving exactly the arguments the method declares
+	# milliseconds of the game's frame. A call giving exactly the arguments the method declares
 	# needs no walk.
 	if given == holder.get_method_argument_count(method):
 		return ""

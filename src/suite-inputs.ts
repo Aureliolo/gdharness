@@ -8,10 +8,10 @@
  * every suite. The runner records instead ([GdhReached] in `listed.gd`), and a suite's inputs are
  * its own script, the autoloads and what it loaded, followed only along what compiles with a script
  * (its preloads, its base, the classes it names), what it loads by a path it names, and what a scene
- * or resource names; and what the cache held as it began, for a suite reaching a load by a computed
- * path, held to where that path is known to begin. A file a script reads
- * or a folder it lists by a literal or constant path is an input too; one read or listed by a path
- * worked out at run time makes every file in the project one, since nothing records those.
+ * or resource names. The inputs also include what the cache held as it began, for a suite reaching a
+ * load by a computed path, held to where that path is known to begin. A file a script reads or a
+ * folder it lists by a literal or constant path is an input too. One read or listed by a path worked
+ * out at run time makes every file in the project one, since nothing records those.
  */
 
 import { createHash } from 'node:crypto';
@@ -19,6 +19,7 @@ import { existsSync, readdirSync, readFileSync, type Stats, statSync } from 'nod
 import { join, posix } from 'node:path';
 import { classesNamedIn } from './class-cache.js';
 import { regionsOf } from './gdscript-source.js';
+import { isRecord } from './records.js';
 import type { ProjectScripts } from './suite-plan.js';
 
 /** The input standing for every file in the project, for a suite reaching a computed file read. */
@@ -56,7 +57,7 @@ const FILE_READ =
  * A load through the resource loaders, up to the start of its path. One the cache answers asks no
  * loader, so the recorder misses it whenever another suite of the engine already holds the resource:
  * gdUnit4 loads every suite of an engine before the first runs, with all they preload. One by a path
- * the script names is followed like a preload; one by a computed path is [constant CACHE_HELD].
+ * the script names is followed like a preload. One by a computed path is [constant CACHE_HELD].
  */
 const RESOURCE_LOAD = /(?:\bResourceLoader\.load(?:_threaded_request)?|(?<![\w.])(?<!\bfunc\s+)load)\(/g;
 const STRING_ARGUMENT = /^(?:"([^"]*)"|'([^']*)')$/;
@@ -115,22 +116,18 @@ export function reachedBySuite(file: string): Map<string, SuiteReached> {
     if (line.trim() === '') {
       continue;
     }
-    const parsed = JSON.parse(line) as {
-      autoloads?: unknown;
-      began?: unknown;
-      suite?: unknown;
-      reached?: unknown;
-      resident?: unknown;
-    };
-    if (parsed.autoloads === true) {
-      autoloads = paths(parsed.reached);
-    } else if (typeof parsed.began === 'string') {
-      resident.set(parsed.began, paths(parsed.resident));
-    } else if (typeof parsed.suite === 'string') {
+    const parsed: unknown = JSON.parse(line);
+    const recorded: Record<string, unknown> = isRecord(parsed) ? parsed : {};
+    const { began, suite } = recorded;
+    if (recorded['autoloads'] === true) {
+      autoloads = paths(recorded['reached']);
+    } else if (typeof began === 'string') {
+      resident.set(began, paths(recorded['resident']));
+    } else if (typeof suite === 'string') {
       // A suite whose beginning went unrecorded has no resident set to judge it by, so it has none.
-      const held = resident.get(parsed.suite);
+      const held = resident.get(suite);
       if (held !== undefined) {
-        bySuite.set(parsed.suite, { autoloads, during: paths(parsed.reached), resident: held });
+        bySuite.set(suite, { autoloads, during: paths(recorded['reached']), resident: held });
       }
     }
   }
@@ -280,7 +277,7 @@ export class SuiteInputs {
     if (stat.isDirectory()) {
       const inside = readdirSync(file)
         .filter((name) => !name.startsWith('.'))
-        .sort();
+        .toSorted();
       return { digest: inside.join('\n'), follows: [], also: [], modified: stat.mtimeMs };
     }
     const bytes = readFileSync(file);
@@ -439,7 +436,7 @@ export class SuiteInputs {
 function listed(inputs: ReadonlySet<string>): string[] {
   return inputs.has(EVERY_FILE)
     ? [EVERY_FILE]
-    : [...inputs].filter((path) => !path.startsWith(CACHE_HELD)).sort();
+    : [...inputs].filter((path) => !path.startsWith(CACHE_HELD)).toSorted();
 }
 
 /** A recorded path as an input: the addon it is in, or null for one outside the project's files. */
@@ -534,7 +531,7 @@ function walkSeen(root: string, seen: (file: string, under: string, stat: Stats)
     if (existsSync(join(directory, '.gdignore'))) {
       return;
     }
-    for (const entry of readdirSync(directory, { withFileTypes: true }).sort((a, b) =>
+    for (const entry of readdirSync(directory, { withFileTypes: true }).toSorted((a, b) =>
       a.name.localeCompare(b.name),
     )) {
       const file = join(directory, entry.name);

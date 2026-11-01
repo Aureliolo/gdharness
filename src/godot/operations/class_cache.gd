@@ -118,10 +118,10 @@ func _entry_for(path: String, skipped: Array[Dictionary]) -> Dictionary:
 #
 # - nothing extended: RefCounted;
 # - one name, a global class or a native one: that name, unresolved;
-# - a dotted name, `Heard.Named`, an inner class of a global class: nothing, as the scan does not
+# - a dotted name, `Outer.Inner`, an inner class of a global class: nothing, as the scan does not
 #   look names up;
 # - a path: what that script's class records, after walking into the inner classes named after
-#   the path, `"res://heard.gd".Named`, so a parent with a class_name is passed over for its own
+#   the path, `"res://outer.gd".Inner`, so a parent with a class_name is passed over for its own
 #   base. A path the engine cannot open records nothing, and it opens a relative one from the
 #   project root rather than from the script's folder.
 #
@@ -157,7 +157,7 @@ func _base_of(path: String, header: Dictionary, skipped: Array[Dictionary]) -> V
 
 
 # The path and the class names an `extends` names, from the text after the keyword:
-# `"res://heard.gd".Named` is the path and ["Named"], `Heard.Named` no path and two names. The
+# `"res://outer.gd".Inner` is the path and ["Inner"], `Outer.Inner` no path and two names. The
 # reading stops at whatever follows, a colon or a comment.
 static func _extends_parts(text: String) -> Dictionary:
 	var rest: String = text.strip_edges()

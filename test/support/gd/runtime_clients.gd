@@ -121,7 +121,7 @@ func _reply(index: int) -> Dictionary:
 ## byte, so a peer that has stopped reading freezes that loop: the listener never accepts again
 ## and every later request times out, for the rest of the run. Our own server is that peer, since
 ## it destroys its socket when a call times out, so one slow answer cost the whole session. Seen
-## on a real game: one query, then nothing ever answered again, ping included.
+## on a real game: one query, then nothing ever answered again, not even a ping.
 func _check_a_client_that_stopped_reading(node: Runtime) -> void:
 	node._start_server()
 	if node._port <= 0:
@@ -219,7 +219,7 @@ func _check_which_scenes_are_quiet() -> void:
 	var cases: Array[Array] = [
 		[["--headless", "--path", "/p", bench], PackedStringArray(["res://tests/"]), bench],
 		[[bench], ["res://tools/", "res://tests/"], bench],
-		[["res://ui/duel.tscn"], PackedStringArray(["res://tests/"]), ""],
+		[["res://ui/match.tscn"], PackedStringArray(["res://tests/"]), ""],
 		[[bench], PackedStringArray([""]), ""],
 		[["-s", "res://tests/run.gd"], PackedStringArray(["res://tests/"]), ""],
 		[[bench], "res://tests/", ""],
@@ -232,7 +232,7 @@ func _check_which_scenes_are_quiet() -> void:
 			_fail("%s under %s should find %s, not %s" % [given, row[1], row[2], found])
 
 
-## A close request the game declines leaves the runtime up; one it accepts takes it down.
+## A close request the game declines leaves the runtime up. One it accepts takes it down.
 ##
 ## A game that asks before quitting turns auto_accept_quit off, and the runtime cleaned up on the
 ## request itself, so a player answering No left the game running with no runtime and no

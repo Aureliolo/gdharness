@@ -174,7 +174,7 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 			% [setting_path, "setting is" if near.size() == 1 else "settings are", ", ".join(near)]
 		)
 	# Written as given, since a file can be made after the setting names it, as an import makes a
-	# translation; said, since until then the engine complains of it on every boot.
+	# translation. Said, since until then the engine complains of it on every boot.
 	var missing: Array[String] = _missing_files(final_value)
 	if not missing.is_empty():
 		answer["missing_files"] = missing
@@ -190,7 +190,7 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 		var made: Array[String] = _translations_made_by(missing)
 		if not made.is_empty():
 			said += (
-				"; project_import reimport makes the translation files from " + ", ".join(made)
+				". project_import reimport makes the translation files from " + ", ".join(made)
 			)
 		answer["note"] = (str(answer["note"]) + " " if answer.has("note") else "") + said + "."
 	ProjectSettings.set_setting(setting_path, final_value)
@@ -289,7 +289,7 @@ func unset_project_setting(params: Dictionary) -> Dictionary:
 		var near: PackedStringArray = PackedStringArray() if held else _settings_near(setting_path)
 		if not near.is_empty():
 			answer["note"] += (
-				" Nor does the engine declare it; the nearest %s %s."
+				" Nor does the engine declare it. The nearest %s %s."
 				% ["setting is" if near.size() == 1 else "settings are", ", ".join(near)]
 			)
 		return _with_what_holds(answer, setting_path)
@@ -415,7 +415,7 @@ func add_autoload(params: Dictionary) -> Dictionary:
 				(
 					"An autoload cannot be added disabled: Godot loads every autoload in the list "
 					+ "at every start. global: false keeps its name out of the global scope and "
-					+ "still loads it; remove_autoload is what stops it loading"
+					+ "still loads it. remove_autoload is what stops it loading"
 				)
 			)
 		)
@@ -443,7 +443,7 @@ func add_autoload(params: Dictionary) -> Dictionary:
 	var was_updated: bool = ProjectSettings.has_setting(setting)
 
 	# An asterisk in front of the path makes the autoload's name a global variable, the editor's
-	# "Global Variable" column. Without it the node still comes up under the root; only the name
+	# "Global Variable" column. Without it the node still comes up under the root. Only the name
 	# stops resolving.
 	var entry: String = ("*" if global else "") + path
 	if was_updated and str(ProjectSettings.get_setting(setting)) == entry:
@@ -455,7 +455,7 @@ func add_autoload(params: Dictionary) -> Dictionary:
 			"action": "unchanged",
 			"saved": false,
 		}
-	# The editor's Add replaces an entry of the same name too; said here, since the replaced script
+	# The editor's Add replaces an entry of the same name too. Said here, since the replaced script
 	# is no longer loaded and nothing else in the answer names it.
 	var held: String = str(ProjectSettings.get_setting(setting)) if was_updated else ""
 	ProjectSettings.set_setting(setting, entry)
@@ -484,7 +484,7 @@ func add_autoload(params: Dictionary) -> Dictionary:
 static func _not_an_autoload(path: String) -> String:
 	var refused: String = "%s is %s, and an autoload is a scene or a script extending Node"
 	if not ResourceLoader.exists(path):
-		return (refused + "; nothing was written.") % [path, "a file Godot does not load"]
+		return (refused + ". Nothing was written.") % [path, "a file Godot does not load"]
 	var loaded: Resource = load(path)
 	if loaded is PackedScene:
 		return ""
@@ -492,7 +492,7 @@ static func _not_an_autoload(path: String) -> String:
 		var kind: String = "nothing Godot could load"
 		if loaded != null:
 			kind = "a " + loaded.get_class()
-		return (refused + "; nothing was written.") % [path, kind]
+		return (refused + ". Nothing was written.") % [path, kind]
 	var script: Script = loaded
 	if not script.can_instantiate():
 		return ""
@@ -502,7 +502,7 @@ static func _not_an_autoload(path: String) -> String:
 	return (
 		(
 			"%s extends %s, which is not a Node, and Godot instantiates an autoload under the root "
-			+ "as a node, so every start of the game would fail to load it; nothing was written."
+			+ "as a node, so every start of the game would fail to load it. Nothing was written."
 		)
 		% [path, base]
 	)
@@ -530,7 +530,7 @@ static func _autoload_name_refusal(name: String) -> String:
 		return ""
 	return (
 		(
-			"%s cannot name an autoload: %s. Nothing was written; the editor's Autoload tab "
+			"%s cannot name an autoload: %s. Nothing was written. The editor's Autoload tab "
 			+ "refuses it too."
 		)
 		% [JSON.stringify(name), reason]
@@ -569,7 +569,7 @@ func list_autoloads(_params: Dictionary) -> Dictionary:
 		var value: String = str(ProjectSettings.get_setting(setting))
 		var path: String = value.trim_prefix("*")
 
-		# Enabled whatever the asterisk says, because every autoload listed is loaded; the asterisk
+		# Enabled whatever the asterisk says, because every autoload listed is loaded. The asterisk
 		# is whether its name is a global variable.
 		var autoload_info: Dictionary = {
 			"name": setting.trim_prefix("autoload/"),

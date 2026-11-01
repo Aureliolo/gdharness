@@ -34,7 +34,7 @@ const WINDOWS = process.platform === 'win32';
 function chunked(bytes: Buffer, cuts: readonly number[]): Buffer[] {
   const points = [...new Set(cuts.map((cut) => cut % (bytes.length + 1)))]
     .filter((cut) => cut > 0 && cut < bytes.length)
-    .sort((a, b) => a - b);
+    .toSorted((a, b) => a - b);
   const chunks: Buffer[] = [];
   let from = 0;
   for (const to of [...points, bytes.length]) {
@@ -95,12 +95,12 @@ const headerSpelling = fc.record<HeaderSpelling>({
 });
 
 function spelled(message: unknown, spelling: HeaderSpelling): Buffer {
-  const body = Buffer.from(JSON.stringify(message), 'utf8');
+  const payload = Buffer.from(JSON.stringify(message), 'utf8');
   const header =
     `${spelling.ahead}${spelling.before}` +
-    `${spelling.name}${spelling.separator}${body.length}${spelling.trailing}\r\n` +
+    `${spelling.name}${spelling.separator}${payload.length}${spelling.trailing}\r\n` +
     `${spelling.after}\r\n`;
-  return Buffer.concat([Buffer.from(header, 'ascii'), body]);
+  return Buffer.concat([Buffer.from(header, 'ascii'), payload]);
 }
 
 function everyHeaderSpellingIsRead(): void {
@@ -213,7 +213,7 @@ const projectLine = fc.oneof(
 );
 
 function projectFileNeverThrowsOrPollutes(): void {
-  const prototypeBefore = Object.getOwnPropertyNames(Object.prototype).sort();
+  const prototypeBefore = Object.getOwnPropertyNames(Object.prototype).toSorted();
 
   fc.assert(
     fc.property(fc.array(projectLine, { maxLength: 24 }), fc.constantFrom('\n', '\r\n'), (lines, eol) => {
@@ -229,7 +229,7 @@ function projectFileNeverThrowsOrPollutes(): void {
         }
       }
 
-      assert.deepEqual(Object.getOwnPropertyNames(Object.prototype).sort(), prototypeBefore);
+      assert.deepEqual(Object.getOwnPropertyNames(Object.prototype).toSorted(), prototypeBefore);
       assert.equal(Object.getPrototypeOf({}), Object.prototype);
     }),
     { numRuns: 1000 },
@@ -525,10 +525,10 @@ const archiveEntries = fc.uniqueArray(fc.oneof(fileEntry, directoryEntry), {
   maxLength: 6,
 });
 
-function inTemp(body: (dir: string) => void): void {
+function inTemp(work: (dir: string) => void): void {
   const dir = mkdtempSync(join(tmpdir(), 'gdharness-fuzz-zip-'));
   try {
-    body(dir);
+    work(dir);
   } finally {
     sweep(dir);
   }
@@ -644,7 +644,7 @@ const logText = fc
 
 /**
  * The pipe may cut the bytes anywhere, inside a line or inside a character, and the entries
- * are the same as if the whole text had arrived at once; every non-blank line lands in exactly
+ * are the same as if the whole text had arrived at once. Every non-blank line lands in exactly
  * one entry, and the severity counts add up to the entries.
  */
 function logsReadTheSameInAnyPieces(): void {
@@ -738,8 +738,8 @@ function reportsRoundTrip(): void {
           })),
         })),
         // In order of path, which is the order a report is read in whatever order it was written.
-        [...suites]
-          .sort((a, b) => {
+        suites
+          .toSorted((a, b) => {
             const [left, right] = [`res://test/${a.name}.gd`, `res://test/${b.name}.gd`];
             return left < right ? -1 : left > right ? 1 : 0;
           })

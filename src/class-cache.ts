@@ -13,6 +13,7 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { codeOf, shapeOf } from './gdscript-source.js';
+import { isRecord } from './records.js';
 import { readWhole } from './whole-file.js';
 
 /**
@@ -92,15 +93,15 @@ export function declaredClassLines(projectPath: string): Map<string, DeclaredCla
     }
   }
   const baseOf = (script: string, seen: Set<string>): string => {
-    const written = shapeOf(sources.get(script) ?? '').body.extendsAs;
-    if (written === null) {
+    const extendsAs = shapeOf(sources.get(script) ?? '').body.extendsAs;
+    if (extendsAs === null) {
       return 'RefCounted';
     }
-    const quote = written[0];
+    const quote = extendsAs[0];
     if (quote !== '"' && quote !== "'") {
-      return written;
+      return extendsAs;
     }
-    const given = written.slice(1, -1);
+    const given = extendsAs.slice(1, -1);
     const path = given.startsWith('res://')
       ? given
       : posix.join(posix.dirname(script), given).replace(/^res:\/(?!\/)/, 'res://');
@@ -109,7 +110,7 @@ export function declaredClassLines(projectPath: string): Map<string, DeclaredCla
       return name;
     }
     if (!sources.has(path) || seen.has(path)) {
-      return written;
+      return extendsAs;
     }
     seen.add(path);
     return baseOf(path, seen);
@@ -187,7 +188,7 @@ export function scriptsNaming(projectPath: string, classes: readonly string[]): 
       naming.push({ script, tool: TOOL.test(code) });
     }
   });
-  return naming.sort((a, b) => a.script.localeCompare(b.script));
+  return naming.toSorted((a, b) => a.script.localeCompare(b.script));
 }
 
 /**
@@ -206,7 +207,7 @@ export function scriptsDeclaring(projectPath: string, classes: readonly string[]
       declaring.push({ script, tool: TOOL.test(codeOf(source)) });
     }
   });
-  return declaring.sort((a, b) => a.script.localeCompare(b.script));
+  return declaring.toSorted((a, b) => a.script.localeCompare(b.script));
 }
 
 /** The classes the cache lists, with the path each is recorded at, or null when there is none. */
@@ -252,11 +253,11 @@ export function cacheChangesBetween(
   if (before === null || after === null) {
     return {};
   }
-  const added = [...after.keys()].filter((name) => !before.has(name)).sort();
-  const removed = [...before.keys()].filter((name) => !after.has(name)).sort();
+  const added = [...after.keys()].filter((name) => !before.has(name)).toSorted();
+  const removed = [...before.keys()].filter((name) => !after.has(name)).toSorted();
   const changed = [...after.keys()]
     .filter((name) => before.has(name) && before.get(name) !== after.get(name))
-    .sort();
+    .toSorted();
   return { added, removed, changed };
 }
 
@@ -300,8 +301,7 @@ export function classesWithAddonsCounted(
   const kept: unknown[] = [];
   const inAddons: Record<string, number> = {};
   for (const entry of classes) {
-    const path =
-      entry !== null && typeof entry === 'object' ? (entry as Record<string, unknown>)['path'] : '';
+    const path = isRecord(entry) ? entry['path'] : '';
     const addon = addonOf(typeof path === 'string' ? path : '');
     if (addon === undefined || listed.has(addon)) {
       kept.push(entry);
@@ -354,8 +354,8 @@ export function withAddonClassesCounted(
  * A member a diagnostic says is missing, and the global class it says is missing it.
  *
  * `method` and `property` are looked for on an instance of the type, `member` and `static method`
- * on the class itself, as in `Charm.MAX` and `Charm.make()`, and `enum member` in one of its enums,
- * as in `Charm.Kind.ZZ_PROBE`, where `enum` names the enum.
+ * on the class itself, as in `Token.MAX` and `Token.make()`, and `enum member` in one of its enums,
+ * as in `Token.Kind.ZZ_PROBE`, where `enum` names the enum.
  */
 export interface MissingMember {
   readonly member: string;
@@ -411,10 +411,10 @@ export function missingMemberIn(message: string): MissingMember | null {
  * The member an "external class member" diagnostic says is missing, and the class it was looked up
  * on, read from [param line], the diagnosed script's line the diagnostic is on.
  *
- * Godot names only the member: `Could not resolve external class member "READ_BY_THE_RUN".` So the
- * class is the identifier before `.READ_BY_THE_RUN` on that line, taken only when it is one of
- * [param classes]. game-b met 332 of these across 270 scripts, all stale, none of them checked,
- * because no type could be read from the message alone. A member reached through anything else,
+ * Godot names only the member: `Could not resolve external class member "LIMIT".` So the class is
+ * the identifier before `.LIMIT` on that line, taken only when it is one of [param classes]. game-b
+ * met 332 of these across 270 scripts, all stale and none of them checked, because no type could be
+ * read from the message alone. A member reached through anything else,
  * such as a constant holding a preloaded script, is left unread rather than guessed.
  */
 export function externalMemberIn(
@@ -436,7 +436,7 @@ export function externalMemberIn(
 
 /**
  * The script [param source] extends, as a resource path, or undefined for a native base or none.
- * A class name is looked up in [param classes]; a quoted path is taken as written, and one without
+ * A class name is looked up in [param classes]. A quoted path is taken as written, and one without
  * `res://` is read against [param from], the script's own path, as Godot reads it.
  */
 function baseScriptOf(
@@ -486,7 +486,7 @@ export function declaresMember(source: string, missing: MissingMember): boolean 
   }
   // What the class itself answers by name: a static variable or function, a constant, an enum or
   // inner class by its own name, and the values of an enum with no name, which land on the class. A
-  // plain variable or a signal is not among them; Godot denies `Peal.speed` for `var speed`, and is
+  // plain variable or a signal is not among them. Godot denies `Peal.speed` for `var speed`, and is
   // right to. An instance answers all of those and its variables, signals and functions besides.
   const kinds =
     missing.kind === 'property'
@@ -624,7 +624,7 @@ export function declaredButUncached(projectPath: string, name: string): string |
  * Read by name against the class list rather than by parsing GDScript, because a name that is a
  * declared global class is the only kind worth reporting and everything else in the file is noise.
  * A word inside a string or a comment can match, which costs a caller one wasted touch on a file
- * that was already fine; missing one costs them a restart.
+ * that was already fine. Missing one costs them a restart.
  */
 export function classesNamedIn(source: string, known: ReadonlyMap<string, string>): string[] {
   const named = new Set<string>();
@@ -633,7 +633,7 @@ export function classesNamedIn(source: string, known: ReadonlyMap<string, string
       named.add(word);
     }
   }
-  return [...named].sort();
+  return [...named].toSorted();
 }
 
 /** The ways an engine says a script names a class it does not know. */
@@ -667,7 +667,7 @@ export function classesStartedWithout(
       }
     }
   }
-  return [...named].sort();
+  return [...named].toSorted();
 }
 
 /** A diagnostic the file on disk disproves, and the script that disproves it. */
@@ -724,7 +724,7 @@ export function contradictedDiagnostics(
       continue;
     }
     // Up the chain of project scripts, because a member is the type's whether its own file declares
-    // it or a base does: `Shop extends Tariff` has `piece_sells` from tariff.gd, and the 270 scripts
+    // it or a base does: `Store extends PriceList` has `item_sells` from price_list.gd, and the 270 scripts
     // denying such members were exactly as stale as the four whose member sat in the named file.
     const seen = new Set<string>();
     let at = classes.get(missing.type);
@@ -754,7 +754,7 @@ export function contradictedDiagnostics(
  * It leads with the scan because that is what has cleared this, in two projects. Neither of them is
  * this one: the diagnostic has never gone stale in this project's own bench, so every figure here is
  * somebody else's reading and is attributed rather than claimed. That is for methods and
- * properties; an enum member or a constant is answered the other way round, in {@link classRemedy}.
+ * properties. An enum member or a constant is answered the other way round, in {@link classRemedy}.
  *
  * The count that used to sit here, one clearing in five attempts, is gone because it measured a
  * different tool. Those five were taken against a version where the rescan answered before the scan
@@ -819,14 +819,14 @@ export function staleAnalysisNote(
     .join(' ');
 }
 
-/** How a contradicted entry is written in Godot's own terms: `Bell.toll`, `Charm.Kind.ZZ_PROBE`. */
+/** How a contradicted entry is written in Godot's own terms: `Bell.toll`, `Token.Kind.ZZ_PROBE`. */
 function written(one: Contradicted): string {
   return [one.type, ...(one.enum === undefined ? [] : [one.enum]), one.member].join('.');
 }
 
 /** The scripts [param entries] are declared in, each once and in order. */
 function declaringScripts(entries: readonly Contradicted[]): string[] {
-  return [...new Set(entries.map((one) => one.declaredIn))].sort();
+  return [...new Set(entries.map((one) => one.declaredIn))].toSorted();
 }
 
 /**
@@ -849,14 +849,14 @@ function instanceRemedy(
         'That is the common case rather than the awkward one: an edit near a type that depends on ' +
         'something refreshes it before the fault is noticed, which is why a type with no ' +
         'dependencies is where this turns up'
-      : `, so changing ${[...dependsOn].sort().join(' or ')} and then rescanning is worth a try`;
+      : `, so changing ${[...dependsOn].toSorted().join(' or ')} and then rescanning is worth a try`;
   return (
     `${besideOthers ? `For ${entries.map(written).join(', ')}, run` : 'Run'} editor_rescan first: ` +
     'it costs about half a second, and it has cleared this in every reproduction measured since the ' +
     'scan timing was fixed: both in one project, the scan returning in 243ms and 275ms, and one in ' +
     'another where the same call also rebuilt the copy. ' +
     'The fault behind it is that a script the editor has loaded keeps the copy it built, and nothing ' +
-    `rebuilds that copy when the file changes; ${
+    `rebuilds that copy when the file changes. ${
       declaring.length === 1
         ? `editor_rescan with reloadScript set to ${declaring[0]} recompiles that copy`
         : `editor_rescan with reloadScript set to ${JSON.stringify(declaring)} recompiles those copies`
@@ -864,7 +864,7 @@ function instanceRemedy(
     'object and answers with what that added under methodsAdded and constantsAdded. Read that and the ' +
     'next diagnostics as two readings, because they are of two things: measured in one window on ' +
     'one editor, the analyser resolved a call to a newly added method while the built copy of that ' +
-    'same script did not have it. So the reload is worth doing and is not what clears these; the ' +
+    'same script did not have it. So the reload is worth doing and is not what clears these. The ' +
     'scan is. The other lever measured is that a held type is refreshed when something it ' +
     `depends on changes rather than when it changes itself${lever}. editor_launch restart has always ` +
     'worked and costs a window. project_import refresh_classes does not, and answers added: [] while ' +
@@ -909,7 +909,7 @@ export interface NotReloaded {
 /**
  * What a caller is told about the scripts naming a class the scan brought in that were not
  * reloaded, each with the remedy that fits it. One that was tried and refused is tried again with
- * `reloadScript`; a `@tool` script is not, because `reloadScript` refuses one for the same reason
+ * `reloadScript`. A `@tool` script is not, because `reloadScript` refuses one for the same reason
  * the rescan left it alone, so sending the caller there would only earn the refusal.
  */
 export function notReloadedNote(broughtIn: readonly string[], notReloaded: readonly NotReloaded[]): string {
@@ -927,7 +927,7 @@ export function notReloadedNote(broughtIn: readonly string[], notReloaded: reado
       `For ${tools.join(', ')}, ${tools.length === 1 ? 'a @tool script' : '@tool scripts'}, which ${tools.length === 1 ? 'runs' : 'run'} inside the editor and ${tools.length === 1 ? 'is' : 'are'} not reloaded from inside a call: editor_launch restart.`,
     );
   }
-  return `The scan brought in ${broughtIn.join(', ')}, and ${all.join(', ')} ${all.length === 1 ? 'names one of them and' : 'name them and'} could not be reloaded, so the editor still holds the copy it compiled before and reports what that copy has to the language server; dependentsNotReloaded says what each failed on. ${remedies.join(' ')}`;
+  return `The scan brought in ${broughtIn.join(', ')}, and ${all.join(', ')} ${all.length === 1 ? 'names one of them and' : 'name them and'} could not be reloaded, so the editor still holds the copy it compiled before and reports what that copy has to the language server. dependentsNotReloaded says what each failed on. ${remedies.join(' ')}`;
 }
 
 /** A reload the editor refused, and what the copy it holds had before and has now. */
@@ -970,7 +970,7 @@ export interface ReloadedFirst {
 /**
  * What a reload changed in the copy the editor holds, from its member lists before and after, with
  * how many it holds afterwards. A reload is asked whether it brought the copy up to the file, which
- * is the difference; the count is there because a reload that compiled nothing and answered OK is
+ * is the difference. The count is there because a reload that compiled nothing and answered OK is
  * the failure worth catching, and it shows as a copy holding no methods. Enum values come as
  * `Kind.SHORT` among the constants, since a copy holds an enum member as a constant.
  */
@@ -1011,7 +1011,7 @@ export function reloadDifference(reloaded: {
  * The members are not the whole of it. A failed reload leaves the copy unusable while its member
  * lists read as before, measured on 4.7.2: the editor can make no instance of it, and one it already
  * made has lost its methods. The addon compiles the text the copy was built from again, which puts
- * it back, and says whether that worked; the note says the copy is as it was only when it did.
+ * it back, and says whether that worked. The note says the copy is as it was only when it did.
  *
  * The advice on order is game-b's: the script failed while a class it names was behind in the
  * editor, and reloading that class first and then the script cleared it. Named by the classes the
@@ -1068,7 +1068,7 @@ export function failedReloadNote(failed: FailedReload): string {
  *
  * The scan is offered first and with its own limit rather than as the better remedy. A file another
  * engine has already imported reads as settled, so the editor's walk does not look inside it and the
- * declaration stays out of the list however many times it scans; that is the case the reading above
+ * declaration stays out of the list however many times it scans. That is the case the reading above
  * did not hit, and the one `refresh_classes` is for.
  */
 export function uncachedClassNote(types: readonly string[]): string {
@@ -1111,7 +1111,7 @@ export function uncachedForTheEngineNote(projectPath: string, types: readonly Un
     : `the engine that compiled these scripts resolves a class name from .godot/global_script_class_cache.cfg, which has not been written yet, as in a project no editor has opened, so the error is the missing cache rather than the script.`;
   return (
     `${named} ${one ? 'is' : 'are'} declared in this project${cacheExists ? ' and' : ', but'} ${state} ` +
-    'project_import refresh_classes writes the cache from the declarations on disk; editor_run start ' +
+    'project_import refresh_classes writes the cache from the declarations on disk. editor_run start ' +
     'writes it before a game, and an editor opening the project writes it when it scans.'
   );
 }
@@ -1176,7 +1176,7 @@ export function cachedAtMissingPaths(cached: Map<string, string>, projectPath: s
       ([, path]) => path.startsWith('res://') && !existsSync(join(projectPath, path.slice('res://'.length))),
     )
     .map(([name]) => name)
-    .sort();
+    .toSorted();
 }
 
 /** The declarations a given cache records at a different path, or does not record at all. */
@@ -1215,7 +1215,7 @@ export interface UnseenClass {
  */
 export function heldButGone(projectPath: string, editorHolds: readonly string[]): string[] {
   const declared = declaredClasses(projectPath);
-  return editorHolds.filter((name) => !declared.has(name)).sort();
+  return editorHolds.filter((name) => !declared.has(name)).toSorted();
 }
 
 /**
@@ -1241,6 +1241,8 @@ export function unseenByEditor(projectPath: string, editorHolds: readonly string
       // classes and says nothing about files.
       // The same comparison `heldButGone` uses rather than a locale-aware one, so two lists of class
       // names in the same answer cannot be ordered by two different rules.
-      .sort((one, other) => (one.className < other.className ? -1 : one.className > other.className ? 1 : 0))
+      .toSorted((one, other) =>
+        one.className < other.className ? -1 : one.className > other.className ? 1 : 0,
+      )
   );
 }

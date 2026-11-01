@@ -74,7 +74,7 @@ export function successorAmong(
 
 /**
  * The process [param exitedPid], a game of [param engine] started no earlier than
- * [param notBefore], restarted itself into as it exited at [param exitedAt], followed until it ends;
+ * [param notBefore], restarted itself into as it exited at [param exitedAt], followed until it ends,
  * or null when it restarted into none, or the platform would not list its processes.
  *
  * On Windows the successor still names the exited process as its parent, and Windows tells an exit
@@ -86,7 +86,7 @@ export function successorAmong(
  *
  * On POSIX it is handed to init as its parent goes, and the engine starts it in a session of its
  * own, so neither its parent nor its process group leads back to the game. What it keeps is the
- * output it inherited, which is [param transcript], a file opened for this run alone; without one
+ * output it inherited, which is [param transcript], a file opened for this run alone. Without one
  * nothing ties a process to this run, and an engine somebody else started in the same moment would
  * be taken for it. Only the parent is told an exit code there, and that is init by now, so it is
  * watched until it has gone.
@@ -194,7 +194,7 @@ async function followOnPosix(
   transcript: string,
 ): Promise<Followed | null> {
   // Linux dates a start from /proc, up to a second and a tick early, where its ps dates it up to two
-  // seconds early; see linuxStartTimes. macOS's ps cuts it to the second.
+  // seconds early. See linuxStartTimes. macOS's ps cuts it to the second.
   const linux = process.platform === 'linux';
   const early = linux ? await linuxStartEarliest() : 1000;
   let printed: string;

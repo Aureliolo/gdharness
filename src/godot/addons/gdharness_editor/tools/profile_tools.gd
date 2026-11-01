@@ -12,7 +12,7 @@ extends Node
 const GdhRead = preload("../reading.gd")
 ## The most functions a frame may carry when the server does not say. The engine names a function
 ## once, as it first appears, and the game's debugger queue drops those messages past its size, so
-## the server keeps this below the queue the project sets; this is that for the engine's default.
+## the server keeps this below the queue the project sets. This is that for the engine's default.
 const FRAME_FUNCTIONS: int = 1536
 const DEBUGGER_CLASS: String = "ScriptEditorDebugger"
 ## What a quitting game sends after its profile's totals, and the answer it waits for. Kept in step

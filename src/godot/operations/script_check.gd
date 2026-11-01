@@ -97,7 +97,7 @@ func check_scripts(params: Dictionary) -> Dictionary:
 ## Raises every warning the project sets to warn so that the engine reports it as an error, which is
 ## the one way it reports a warning outside an editor or a debugger. Not saved. The analyser reads
 ## the levels again only once the settings change has been flushed, at the next frame, so this is
-## called in `_init` and the scripts are loaded after it; the project's autoloads, compiled before
+## called in `_init` and the scripts are loaded after it. The project's autoloads, compiled before
 ## that frame, compile under the project's own levels. A warning set to ignore stays ignored, and
 ## @warning_ignore and the directory rules hold as they do in the editor, since the analyser applies
 ## them itself.
@@ -116,7 +116,7 @@ static func raise_warnings() -> void:
 ## The warnings of each script in [code]paths[/code], under the levels [method raise_warnings] left:
 ## [code]scripts[/code] holds each that has any, with its warnings' lines and the engine's messages
 ## as raised. The analyser runs before anything is compiled, so a script whose dependency failed on
-## a warning still reports its own, and loading on past a failure loses nothing; only what is raised
+## a warning still reports its own, and loading on past a failure loses nothing. Only what is raised
 ## at the script's own path is its, since a dependency is read on its own entry as well.
 func check_warnings(params: Dictionary) -> Dictionary:
 	var asked: Array = params.get("paths", [])

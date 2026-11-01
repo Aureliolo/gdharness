@@ -419,7 +419,7 @@ export function regressionPart(
   const weight = (name: string): number => seconds[name] ?? UNMEASURED_SECONDS;
   const order = names
     .map((name, at) => ({ name, at }))
-    .sort((a, b) => weight(b.name) - weight(a.name) || a.at - b.at);
+    .toSorted((a, b) => weight(b.name) - weight(a.name) || a.at - b.at);
   const loads = Array.from({ length: parts }, () => 0);
   const placed = new Map<string, number>();
   for (const { name } of order) {

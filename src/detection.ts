@@ -4,7 +4,7 @@
  * The list is ordered: the conventional install paths first, then whatever a scan of the
  * directories a release download lands in turns up, newest first. It is a pure function of the
  * platform and the home directory so that the order can be asserted without a machine laid out
- * a particular way; the caller runs each candidate and takes the first that answers --version.
+ * a particular way. The caller runs each candidate and takes the first that answers --version.
  */
 
 import { existsSync, readdirSync, statSync } from 'node:fs';
@@ -49,7 +49,7 @@ export function scanDirectoryForGodotBinaries(directory: string, platform: NodeJ
   }
 
   // A download directory also holds the archive the binary came out of, and on a shared drive
-  // the other platform's build; neither answers --version, so neither is worth the spawn.
+  // the other platform's build. Neither answers --version, so neither is worth the spawn.
   const pattern = platform === 'win32' ? /^godot.*\.exe$/i : /^godot(?!.*\.(?:exe|zip)$)/i;
 
   const matches: { name: string; mtime: number }[] = [];

@@ -99,7 +99,7 @@ function testRejectsNonZip() {
  * The host is handed in, the way the archive is above, so the case decides what it answers: a
  * 504 to the first four attempts and the bytes on the fifth is the outage the Windows leg met,
  * and it has to end in the bytes rather than a red build. The waits are recorded so the schedule
- * is what is held, not only that it ended well; and a host that never recovers has to end in a
+ * is what is held, not only that it ended well. A host that never recovers has to end in a
  * throw naming what it kept answering, after the whole schedule and not before.
  */
 async function testADownloadWaitsOutAGatewayTimeout(): Promise<void> {

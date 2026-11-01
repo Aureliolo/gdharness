@@ -107,7 +107,7 @@ func _check_signal() -> void:
 		"wait_signal", { "path": "/root/Scripted", "signal": "qwxz" }
 	)
 	if not str(offered.get("message", "")).begins_with(
-		"/root/Scripted has no signal qwxz; it has hit, died, timeout, "
+		"/root/Scripted has no signal qwxz. It has hit, died, timeout, "
 	):
 		_fail("a script's own signals are offered first, then its class's: %s" % str(offered))
 	scripted.queue_free()

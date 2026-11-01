@@ -16,11 +16,12 @@
 [![Bun](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2FAureliolo%2Fgdharness%2Fmain%2Fpackage.json&query=%24.engines.bun&label=bun&color=f9f1e1&logo=bun&logoColor=black)](https://bun.sh/)
 [![Licence](https://img.shields.io/github/license/Aureliolo/gdharness)](LICENSE)
 
-**An agent cannot see a running game.** It reads your scripts and guesses at the rest: whether the
+An agent cannot see a running game. It reads your scripts and guesses at the rest: whether the
 button is on screen, whether the panel updated, whether that error mattered.
 
-gdharness makes the engine answerable instead. What the screen says, where a control is, what a
-property reads right now, what the console printed, what broke and on which line.
+gdharness is an MCP server and four Godot addons. Through them the agent asks the open editor and
+the running game what the screen says and where a control is. It can also ask what a property holds
+now, what the console printed, and what broke on which line.
 
 ## Install
 
@@ -37,19 +38,18 @@ Or do it yourself, and pick your harness:
 ## The loop it exists for
 
 ```jsonc
-editor_run      { "op": "start", "projectPath": "C:/games/hall" }
+editor_run      { "op": "start", "projectPath": "C:/games/shop" }
 runtime_inspect { "op": "find", "says": "Buy" }              // the button, by the word on it
-runtime_input   { "op": "click", "nodePath": "/root/Hall/Ledger/BuyButton" }
-runtime_inspect { "op": "text", "nodePath": "/root/Hall/Ledger" }   // what the panel says now
-editor_output   { "projectPath": "C:/games/hall" }           // errors and warnings, with backtraces
+runtime_input   { "op": "click", "nodePath": "/root/Shop/Ledger/BuyButton" }
+runtime_inspect { "op": "text", "nodePath": "/root/Shop/Ledger" }   // what the panel says now
+editor_output   { "projectPath": "C:/games/shop" }           // errors and warnings, with backtraces
 ```
 
-The open editor plays the game, so its debugger holds it, which is what lets you set a breakpoint
-and read the variables in scope when it stops.
+The open editor plays the game, so you can set a breakpoint and read the variables in scope when it
+stops.
 
-Every answer is read back out of the engine after the fact, never echoed from the request. A tool
-that cannot answer says which state it is in and what would change it, rather than answering
-emptily, so a call that succeeded is a call that was understood.
+Every answer is read back from the engine, never echoed from the request. A tool that cannot answer
+says which state it is in and what would change it.
 
 ## At a glance
 
@@ -59,26 +59,26 @@ emptily, so a call that succeeded is a call that was understood.
 | Surface   | 30 tools named `domain_verb`, 4 `godot://` resources and 3 prompts                   |
 | Reaches   | The editor that is open, a game it is playing, and the project on disk               |
 | Harnesses | 35, written inside the project wherever the harness has a project config             |
-| Skill     | Written to `.agents/skills`, which every major harness reads                         |
+| Skill     | Written to `.agents/skills`, with a copy for Claude Code, Kiro and Cline             |
 | Install   | npm, or a Sigstore-signed archive with an SBOM, SLSA Build Level 3                   |
 | Proven    | Every tool driven against Godot 4.7.2 in CI, on Windows, Linux and macOS             |
-| Status    | 1.0: every release is a patch. [What a bump means](.github/CONTRIBUTING.md#versions) |
+| Status    | 1.x: every release is a patch. [What a bump means](.github/CONTRIBUTING.md#versions) |
 
-Older 4.x is likely to work and is not tested.
+Godot before 4.7 is not tested.
 
 ## Documentation
 
 [aureliolo.github.io/gdharness](https://aureliolo.github.io/gdharness): installing it, how the
 parts connect, and every tool, op and argument.
 
-[SECURITY.md](.github/SECURITY.md) is how to report something.
+[SECURITY.md](.github/SECURITY.md) is how to report a security fault.
 [CONTRIBUTING.md](.github/CONTRIBUTING.md) is what a change has to clear.
 
 ## Project
 
-Fork of [GoPeak](https://github.com/HaD0Yun/Doyunha-Gopeak) v2.3.9, September 2026, MIT: the
-original MCP server [godot-mcp](https://github.com/Coding-Solo/godot-mcp) by
-[Solomon Elias](https://github.com/Coding-Solo), GoPeak by [HaD0Yun](https://github.com/HaD0Yun),
-and completely reworked since to be hardened, condensed and more streamlined.
+Fork of [GoPeak](https://github.com/HaD0Yun/Doyunha-Gopeak) v2.3.9, September 2026, MIT. The
+original MCP server is [godot-mcp](https://github.com/Coding-Solo/godot-mcp) by
+[Solomon Elias](https://github.com/Coding-Solo), and GoPeak is by
+[HaD0Yun](https://github.com/HaD0Yun).
 
 Not affiliated with the Godot Foundation.

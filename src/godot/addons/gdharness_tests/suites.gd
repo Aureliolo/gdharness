@@ -20,7 +20,7 @@ func _ready() -> void:
 			(
 				(
 					"gdharness suites: no runner at '%s'. This scene is played by editor_run start "
-					+ "with suites, which names the runner after %s; it does nothing played any "
+					+ "with suites, which names the runner after %s. It does nothing played any "
 					+ "other way."
 				)
 				% [path, RUNNER]

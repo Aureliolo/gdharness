@@ -9,7 +9,7 @@ import { basename, join } from 'node:path';
  * The pass looks closer at a resource only when its sidecar's time differs from the one the editor
  * cached, and file times count whole seconds, so a sidecar rewritten in the second of its import
  * would be passed over: its time is moved on explicitly. The closer look reimports a resource with
- * no record of its import's hashes, so the record goes; and it stops at `valid=false` before
+ * no record of its import's hashes, so the record goes. It also stops at `valid=false` before
  * reaching the record, which keeps a failed import from being tried again, so that line goes too.
  * The import rewrites the sidecar and the record whole.
  */

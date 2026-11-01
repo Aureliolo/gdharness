@@ -1,6 +1,6 @@
 extends RefCounted
 
-# Everything printed is diagnostics; the answer goes to a file. The server reads `[ERROR]` lines as
+# Everything printed is diagnostics. The answer goes to a file. The server reads `[ERROR]` lines as
 # the operation's own errors, and the prefixes let a human read the rest without parsing it.
 #
 # Every module preloads this as `GdhLog`. `Logger` is a native class from Godot 4.5 on, and a

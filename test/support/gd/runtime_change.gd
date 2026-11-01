@@ -1,8 +1,11 @@
 extends SceneTree
-## Writes and calls on declarations the engine describes less than fully: a script class with no
-## `class_name`, which it names by the engine class the script extends; a slot declared as Variant,
-## which takes anything; a map keyed by numbers; a method given the wrong number of arguments. Each
-## refusal is checked beside the write or call that works, so a check that refused everything fails.
+## Writes and calls on declarations the engine describes less than fully:
+## - a script class with no `class_name`, which it names by the engine class the script extends
+## - a slot declared as Variant, which takes anything
+## - a map keyed by numbers
+## - a method given the wrong number of arguments.
+## Each refusal is checked beside the write or call that works, so a check that refused everything
+## fails.
 
 const Checked = preload("checked.gd")
 const GdhRead = preload("res://addons/gdharness_runtime/reading.gd")
@@ -15,7 +18,7 @@ const Walker = preload("res://change_walker.gd")
 
 var squad: Array[Walker] = []
 var by_name: Dictionary[String, Walker] = {}
-var gears: Array[Gear] = [Gear.new()]
+var parts: Array[Part] = [Part.new()]
 var quarrel: Walker = null
 var loose: Variant = null
 var shifting: Variant = 3
@@ -25,8 +28,8 @@ var by_id: Dictionary = {3: "three", 4.5: "four and a half", Vector2i(1, 2): "a 
 var counts: Dictionary[int, int] = {68: 6}
 var weights: Dictionary[float, String] = {2.0: "two"}
 var tagged: Dictionary[StringName, int] = {&"gold": 3}
-var stock: Dictionary[String, int] = {"base:dew": 1, "base:salt": 2, 'say "hi"': 3, "pick(1)": 4}
-var named_stock: Dictionary = {&"base:dew": 5}
+var stock: Dictionary[String, int] = {"base:water": 1, "base:sand": 2, 'say "hi"': 3, "pick(1)": 4}
+var named_stock: Dictionary = {&"base:water": 5}
 var spare: RefCounted = RefCounted.new()
 var spot: Vector2 = Vector2.ZERO
 var area: Rect2 = Rect2()
@@ -113,7 +116,7 @@ func _set(property: StringName, _value: Variant) -> bool:
 	return property == &"mood"
 
 
-class Gear:
+class Part:
 	extends RefCounted
 """
 
@@ -254,16 +257,16 @@ func _check_a_script_class_without_a_name() -> void:
 		_fail("and takes a Walker: %s" % JSON.stringify(mapped_right))
 
 	# An inner class has no global name and no file either.
-	var gears: Array = holder.get("gears")
-	var gear: Object = gears[0]
-	var inner: Dictionary = await _write("gears", ["/root/Holder:spare"])
+	var parts: Array = holder.get("parts")
+	var part: Object = parts[0]
+	var inner: Dictionary = await _write("parts", ["/root/Holder:spare"])
 	if (
 		inner.get("type") != "error"
 		or not str(inner.get("message", "")).contains("not an instance of an inner class")
 	):
 		_fail("a list of an inner class refuses another RefCounted: %s" % JSON.stringify(inner))
-	if holder.get("gears") != [gear]:
-		_fail("and keeps the gear it held: %s" % str(holder.get("gears")))
+	if holder.get("parts") != [part]:
+		_fail("and keeps the part it held: %s" % str(holder.get("parts")))
 
 	# A single slot and a parameter, where the declaration is only the engine class: the write is
 	# refused by what it reads back, and the call by the engine, each saying what the class may be.
@@ -475,7 +478,7 @@ func _check_a_value_given_by_its_fields() -> void:
 		)
 
 
-## A slot declared as Variant takes what it is given, as the engine does; one declared as a number
+## A slot declared as Variant takes what it is given, as the engine does. One declared as a number
 ## still refuses a word. The text null empties a Variant slot holding nothing, as a wait on it
 ## reads.
 func _check_a_slot_that_takes_anything() -> void:
@@ -631,37 +634,37 @@ func _check_maps_typed_by_key() -> void:
 ## one, quoted or not.
 func _check_a_key_holding_a_colon() -> void:
 	var read: Dictionary = await node._execute_command(
-		"get_property", { "path": "/root/Holder", "property": 'stock:"base:dew"' }
+		"get_property", { "path": "/root/Holder", "property": 'stock:"base:water"' }
 	)
 	if read.get("value") != 1:
-		_fail('stock:"base:dew" reads its entry: %s' % JSON.stringify(read))
-	var written: Dictionary = await _write('stock:"base:dew"', 2)
+		_fail('stock:"base:water" reads its entry: %s' % JSON.stringify(read))
+	var written: Dictionary = await _write('stock:"base:water"', 2)
 	var stock: Dictionary = holder.get("stock")
-	if written.get("type") != "property_set" or stock.get("base:dew") != 2 or stock.size() != 4:
+	if written.get("type") != "property_set" or stock.get("base:water") != 2 or stock.size() != 4:
 		_fail(
 			(
-				'stock:"base:dew" is written under its key: %s, %s'
+				'stock:"base:water" is written under its key: %s, %s'
 				% [JSON.stringify(written), str(stock)]
 			)
 		)
 	var met: Dictionary = await node._execute_command(
 		"wait_until",
-		{ "path": "/root/Holder", "property": 'stock:"base:dew"', "value": 2, "timeout_ms": 1000 }
+		{ "path": "/root/Holder", "property": 'stock:"base:water"', "value": 2, "timeout_ms": 1000 }
 	)
 	if met.get("met") != true or GdhRead.as_int(met.get("elapsed_ms"), 1000) >= 1000:
-		_fail('a wait on stock:"base:dew" is met at once: %s' % JSON.stringify(met))
+		_fail('a wait on stock:"base:water" is met at once: %s' % JSON.stringify(met))
 	var split: Dictionary = await node._execute_command(
-		"get_property", { "path": "/root/Holder", "property": "stock:base:dew" }
+		"get_property", { "path": "/root/Holder", "property": "stock:base:water" }
 	)
 	var listed: String = (
-		'has no key base; it is keyed by "base:dew", "base:salt", "say \\"hi\\"", "pick(1)"'
+		'has no key base. It is keyed by "base:water", "base:sand", "say \\"hi\\"", "pick(1)"'
 	)
 	if split.get("type") != "error" or not str(split.get("message", "")).contains(listed):
 		_fail("the refusal writes each key as the step reaching it: %s" % JSON.stringify(split))
 	for case: Array in [
 		['stock:"say \\"hi\\""', 3],
 		['stock:"pick(1)"', 4],
-		['named_stock:"base:dew"', 5],
+		['named_stock:"base:water"', 5],
 		['by_id:"4.5"', "four and a half"],
 	]:
 		var reached: Dictionary = await node._execute_command(

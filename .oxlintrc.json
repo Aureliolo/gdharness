@@ -10,23 +10,24 @@
   },
 
   // Written out rather than inherited from a category, so the file says what it enforces.
-  // These are the type-aware rules tsgolint implements, minus the seven below. Each one
+  // These are the type-aware rules tsgolint implements, minus the five below. Each one
   // was measured against src/ on its own before being turned on, and src/ is clean under
   // every one of them.
   //
-  // Not enabled, with what each would cost today. None of them was in the preset this
-  // replaces, so leaving them off is not a loss; taking any of them is its own piece of
-  // work rather than something to smuggle into a toolchain swap:
-  //   no-unsafe-type-assertion: 27
-  //   prefer-readonly: 21
-  //   prefer-readonly-parameter-types: 130
-  //   promise-function-async: 8
-  //   return-await: 86
-  //   strict-boolean-expressions: 149
-  //   strict-void-return: 3
-  //   strict-void-return's three are two promisify(execFile) calls, where the callback
-  //   genuinely returns a ChildProcess, and one arrow body worth tidying.
+  // Not enabled: prefer-readonly, prefer-readonly-parameter-types, promise-function-async,
+  // strict-boolean-expressions and strict-void-return. strict-void-return refuses two
+  // promisify(execFile) calls, where the callback genuinely returns a ChildProcess.
   "rules": {
+    // Every returned promise is awaited, inside a try or not: the await is what keeps the
+    // caller's frame in an async stack trace.
+    "typescript/return-await": ["error", "always"],
+    "typescript/no-unsafe-type-assertion": "error",
+    "typescript/no-explicit-any": "error",
+    "typescript/no-non-null-assertion": "error",
+    "unicorn/no-array-sort": "error",
+    "eslint/no-shadow": "error",
+    "eslint/no-unmodified-loop-condition": "error",
+    "eslint/preserve-caught-error": "error",
     "typescript/await-thenable": "error",
     "typescript/consistent-return": "error",
     "typescript/consistent-type-exports": "error",

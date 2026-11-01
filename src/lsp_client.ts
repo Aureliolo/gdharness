@@ -10,6 +10,7 @@ import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { envValue } from './launch.js';
 import { isSameDirectory, isWithinRoot, resolveWithinProject } from './paths.js';
 import { portFromEnv } from './ports.js';
+import { isRecord } from './records.js';
 import type { ToolResponse } from './server-types.js';
 
 /** What an editor serves the language server on when nothing has moved it. */
@@ -85,11 +86,11 @@ export class LSPTimeout extends Error {
 const LANGUAGE_SERVER_START_MS = 30_000;
 const LANGUAGE_SERVER_RETRY_MS = 250;
 
-/** A port the connected editor names as its language server's, refusing past the wait for it. */
+/** The refusal for a port the connected editor names as its language server's, past the wait for it. */
 class LanguageServerNotListening extends Error {
   constructor(port: number, waitedMs: number) {
     super(
-      `The editor on the bridge says its language server is on port ${port}, and nothing accepted a connection there in ${String(waitedMs / 1000)}s. An editor starts it a few seconds after it reaches the bridge, so straight after editor_launch this is the editor still starting, and calling again answers. One that goes on refusing could not take the port; editor_output shows what the editor printed.`,
+      `The editor on the bridge says its language server is on port ${port}, and nothing accepted a connection there in ${String(waitedMs / 1000)}s. An editor starts it a few seconds after it reaches the bridge, so straight after editor_launch this is the editor still starting, and calling again answers. One that goes on refusing could not take the port. editor_output shows what the editor printed.`,
     );
   }
 }
@@ -110,7 +111,7 @@ class AnotherProjectsServer extends Refusal {
 
   constructor(port: number, serves: string, asked: string) {
     super(
-      `The language server on port ${port} belongs to the editor of ${serves}; no editor of ${asked} answers there.`,
+      `The language server on port ${port} belongs to the editor of ${serves}. No editor of ${asked} answers there.`,
     );
     this.serves = serves;
   }
@@ -168,7 +169,7 @@ export class GodotLSPClient {
   private servedWorkspace: string | null = null;
   private diagnosticsWaiters = new Map<string, DiagnosticsWaiter>();
   private documentVersions = new Map<string, number>();
-  /** The last ask queued on each file, which the next one waits behind; see [withDocument]. */
+  /** The last ask queued on each file, which the next one waits behind. See [withDocument]. */
   private documentTurns = new Map<string, Promise<void>>();
 
   private readonly timeouts: LSPTimeouts;
@@ -224,7 +225,8 @@ export class GodotLSPClient {
     }
 
     if (this.connectPromise) {
-      return this.connectPromise;
+      await this.connectPromise;
+      return;
     }
 
     this.connectPromise = new Promise<void>((resolveConnect, rejectConnect) => {
@@ -355,7 +357,7 @@ export class GodotLSPClient {
 
     const framed = frame(payload);
 
-    return new Promise<unknown>((resolveRequest, rejectRequest) => {
+    return await new Promise<unknown>((resolveRequest, rejectRequest) => {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(id);
         rejectRequest(new LSPTimeout(method, timeoutMs));
@@ -399,12 +401,10 @@ export class GodotLSPClient {
     this.socket.write(frame(payload));
   }
 
-  private handleMessage(parsed: unknown): void {
-    if (!parsed || typeof parsed !== 'object') {
+  private handleMessage(message: unknown): void {
+    if (!isRecord(message)) {
       return;
     }
-
-    const message: JsonRecord = parsed as JsonRecord;
 
     if (typeof message['id'] === 'number') {
       const pending = this.pendingRequests.get(message['id']);
@@ -414,7 +414,7 @@ export class GodotLSPClient {
 
         const errorPayload = message['error'];
         if (errorPayload && typeof errorPayload === 'object') {
-          const errorObject = errorPayload as JsonRecord;
+          const errorObject = asRecord(errorPayload);
           const code = typeof errorObject['code'] === 'number' ? errorObject['code'] : 'unknown';
           const messageText =
             typeof errorObject['message'] === 'string' ? errorObject['message'] : 'Unknown LSP error';
@@ -426,13 +426,13 @@ export class GodotLSPClient {
     }
 
     if (message['method'] === 'gdscript_client/changeWorkspace') {
-      const path = (message['params'] as JsonRecord | undefined)?.['path'];
+      const path = asRecord(message['params'])['path'];
       this.servedWorkspace = typeof path === 'string' ? path : null;
     }
 
     if (message['method'] === 'textDocument/publishDiagnostics') {
       const params = message['params'];
-      const paramsObject = params && typeof params === 'object' ? (params as JsonRecord) : null;
+      const paramsObject = isRecord(params) ? params : null;
       const uri = paramsObject && typeof paramsObject['uri'] === 'string' ? paramsObject['uri'] : null;
       const diagnostics =
         paramsObject && Array.isArray(paramsObject['diagnostics'])
@@ -451,7 +451,7 @@ export class GodotLSPClient {
   }
 
   /**
-   * Drop a connection whose framing has run away, naming the size that did it.
+   * Drop a connection whose framing has run away, and name the size that did it.
    *
    * Nothing downstream can recover from a stream this far out of step, and waiting quietly
    * for the rest of a body that is never coming is indistinguishable from an idle server.
@@ -566,7 +566,7 @@ export class GodotLSPClient {
    * handed, and it keeps that parse for as long as the document stays open. The parse holds the
    * parses of everything the file depends on, so a `class_name` script edited outside the editor
    * is frozen at whatever it said when some open file first pulled it in, and every member added
-   * since reads as missing: `Static function "opening()" not found in base "Components"` about a
+   * since reads as missing: `Static function "first()" not found in base "Parts"` about a
    * static function the engine compiles and runs.
    *
    * Nothing on the editor side clears that. A filesystem scan, which is all `editor_rescan` can
@@ -682,7 +682,7 @@ export class GodotLSPClient {
     await this.ensureConnected();
     await this.ensureInitializedForFile(filePath);
 
-    return this.withDocument(filePath, async () => {
+    return await this.withDocument(filePath, async () => {
       const key = diagnosticsKey(this.toFileUri(filePath));
 
       const diagnosticsPromise = new Promise<unknown[]>((resolveDiagnostics, rejectDiagnostics) => {
@@ -750,21 +750,15 @@ export class GodotLSPClient {
       return result as unknown[];
     }
 
-    if (result && typeof result === 'object') {
-      const items = (result as JsonRecord)['items'];
-      if (Array.isArray(items)) {
-        return items as unknown[];
-      }
-    }
-
-    return [];
+    const items = asRecord(result)['items'];
+    return Array.isArray(items) ? (items as unknown[]) : [];
   }
 
   async getHover(filePath: string, content: string, line: number, character: number): Promise<unknown> {
     await this.ensureConnected();
     await this.ensureInitializedForFile(filePath);
 
-    return this.withDocument(filePath, async () => {
+    return await this.withDocument(filePath, async () => {
       const uri = this.syncDocument(filePath, content);
       try {
         return await this.sendRequest('textDocument/hover', {
@@ -876,19 +870,17 @@ function locationsIn(result: unknown): { file: string; line: number; character: 
       : [result];
   const found: { file: string; line: number; character: number }[] = [];
   for (const entry of entries) {
-    const location = entry as {
-      uri?: unknown;
-      range?: { start?: { line?: unknown; character?: unknown } };
-      targetUri?: unknown;
-      targetSelectionRange?: { start?: { line?: unknown; character?: unknown } };
-    };
-    const uri = location.uri ?? location.targetUri;
-    const start = location.range?.start ?? location.targetSelectionRange?.start;
-    if (typeof uri !== 'string' || typeof start?.line !== 'number' || typeof start.character !== 'number') {
+    const location = asRecord(entry);
+    const uri = location['uri'] ?? location['targetUri'];
+    const start = asRecord(
+      asRecord(location['range'])['start'] ?? asRecord(location['targetSelectionRange'])['start'],
+    );
+    const { line, character } = start;
+    if (typeof uri !== 'string' || typeof line !== 'number' || typeof character !== 'number') {
       continue;
     }
     try {
-      found.push({ file: fileURLToPath(uri), line: start.line, character: start.character });
+      found.push({ file: fileURLToPath(uri), line, character });
     } catch {
       // A location that is not a file is nothing a rename can write.
     }
@@ -996,7 +988,7 @@ const COMPLETION_KINDS = [
 ];
 
 function asRecord(value: unknown): JsonRecord {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as JsonRecord) : {};
+  return isRecord(value) ? value : {};
 }
 
 /** The protocol's numbered kind as its name, or the value as it came when it is not one. */
@@ -1042,7 +1034,7 @@ function linesIn(content: string): number {
 /**
  * The last line [param whole], a protocol range, covers, counted from one, and no later than
  * [param lastOfDocument]. The end of a range is exclusive, so one at the start of a line ends on the
- * line before it; and Godot ends a script's own class a line past the file, so on a script of five
+ * line before it. Godot ends a script's own class a line past the file, so on a script of five
  * lines it said the class ended on line 7.
  */
 function lastLineOf(whole: JsonRecord, lastOfDocument: number): number | null {
@@ -1081,7 +1073,7 @@ function shownSymbol(entry: unknown, lastOfDocument: number): JsonRecord {
   };
 }
 
-/** The most completions one answer carries; the rest are counted. */
+/** The most completions one answer carries. The rest are counted. */
 const MOST_COMPLETIONS = 100;
 
 /**
@@ -1116,7 +1108,7 @@ export function narrowedCompletions(completions: readonly unknown[], typed: stri
     ...(matching.length > shown.length
       ? {
           omitted: matching.length - shown.length,
-          note: `${matching.length - shown.length} more are offered here than one answer carries; ask at a position after more of the name to narrow them.`,
+          note: `${matching.length - shown.length} more are offered here than one answer carries. Ask at a position after more of the name to narrow them.`,
         }
       : {}),
   };
@@ -1149,7 +1141,7 @@ function protocolPosition(args: JsonRecord): { line: number; character: number }
     character < 1
   ) {
     throw new ArgumentRefusal(
-      `line and character are counted from 1, as the editor shows them; got line ${String(line)} and character ${String(character)}.`,
+      `line and character are counted from 1, as the editor shows them. This call gave line ${String(line)} and character ${String(character)}.`,
     );
   }
   return { line: line - 1, character: character - 1 };
@@ -1212,11 +1204,11 @@ export async function handleLSPTool(
   args: unknown,
 ): Promise<ToolResponse> {
   try {
-    if (!args || typeof args !== 'object') {
+    if (!isRecord(args)) {
       throw new ArgumentRefusal('Tool arguments must be an object.');
     }
 
-    const parsedArgs = args as JsonRecord;
+    const parsedArgs = args;
     const projectPathValue = parsedArgs['projectPath'];
     const scriptPathValue = parsedArgs['scriptPath'];
 

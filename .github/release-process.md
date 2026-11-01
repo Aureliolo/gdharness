@@ -2,34 +2,35 @@
 
 ## What a human does
 
-Run **Prepare release** from the Actions tab with `patch`, which is every release from 1.0.0 on
-([what a bump means](CONTRIBUTING.md#versions)); `minor` is for a release the owner has marked as
-one, and `major` and the exact-version field exist for the workflow's own completeness. It raises
-the version in `package.json`, `server.json` and the README on a `release/vX.Y.Z` branch, with a
-signed commit, opens the pull request, and links it in the run summary.
+Run **Prepare release** from the Actions tab with `patch`, the bump of every release from 1.0.0 on
+([what a bump means](CONTRIBUTING.md#versions)). `minor` is for a release the owner has marked as
+one. `major` and the exact-version field exist for the workflow's own completeness. The workflow
+raises the version in `package.json`, `server.json` and the README on a `release/vX.Y.Z` branch,
+with a signed commit. It opens the pull request and links it in the run summary.
 
-That pull request's checks are held at the start. GitHub creates the runs for anything a
-workflow opens with the job token but does not start them, so the merge box carries a banner
-offering **Approve workflows to run**. Click it, then merge once the checks are green.
-Everything after the merge is automatic.
+Nobody types a version twice and nobody creates a tag by hand. A hand-made tag is the release step
+that cannot be checked afterwards. It is also the one most likely to come from the wrong branch.
 
-Nobody types a version twice and nobody creates a tag by hand, which is the release step that
-cannot be checked afterwards and the one most likely to be done from the wrong branch.
+## Approving the checks
 
-That pull request is opened with the `release` label, which is how `scripts/release-notes.ts`
-keeps it out of the next release's changelog. The label has to exist in the repository: `gh` fails
-on one it cannot find, so deleting it stops a release being prepared rather than quietly putting
-the line back.
+That pull request's checks are held at the start. GitHub creates the runs for anything a workflow
+opens with the job token but does not start them. The merge box then offers **Approve workflows to
+run**. Click it, then merge once the checks are green. Everything after the merge is automatic.
+
+## The release label
+
+The pull request carries the `release` label, by which `scripts/release-notes.ts` keeps it out of
+the next release's changelog. The label has to exist in the repository. Deleting it stops a release
+being prepared rather than quietly putting the line back, because `gh` fails on a label it cannot
+find.
 
 ## What the changelog says
 
-`scripts/release-notes.ts` writes it, from the files each pull request touched rather than from
-its title. Entries are split into what reaches an installed copy, meaning `src/`, `package.json`,
-`README.md`, `LICENSE` or the packer itself, and what stays in this repository. A title describes
-a change, not its reach: "A live foreign run is not ended" is a fixture and "A transcript answers
-what was printed" is the server behaving differently, and in one flat list they read alike. Two
-projects downstream chose which release to take from that list on the same day and both chose
-wrong in the same direction.
+`scripts/release-notes.ts` writes it from the files each pull request touched, not from its title.
+Entries are split into what reaches an installed copy and what stays in this repository. Reaching an
+installed copy means touching `src/`, `package.json`, `README.md`, `LICENSE` or the packer itself.
+In one flat list a fixture and a change in the server's behaviour read alike, because a title
+describes a change, not its reach.
 
 Run it against any published tag to see what a release carried:
 
@@ -37,59 +38,70 @@ Run it against any published tag to see what a release carried:
 GITHUB_REPOSITORY=Aureliolo/gdharness GH_TOKEN="$(gh auth token)" bun scripts/release-notes.ts v0.12.5
 ```
 
-It picks the newest release below the tag, so it reads the same afterwards as it did at the time.
-An earlier version took the newest release that was not the tag, which is the same thing only at
-the moment of release and compares backwards on anything older.
+It compares against the newest release below the tag. It therefore reads the same afterwards as it
+did at the time.
 
 ## What happens on the merge
 
-`release-tag.yml` sees a new version on `main` with no matching tag, creates `vX.Y.Z`, and
-dispatches `release.yml` on it, since a tag it makes with the job token would otherwise start
-nothing. `release.yml` calls `release-build.yml`, which runs the first three jobs, then publishes:
+`release-tag.yml` sees a new version on `main` with no matching tag and creates `vX.Y.Z`. It then
+dispatches `release.yml` on the tag, since a tag made with the job token would otherwise start
+nothing. `release.yml` calls `release-build.yml` for the three build jobs, then publishes.
+
+## The build jobs (`release-build.yml`)
 
 1. **build_test** refuses to go on unless the tag matches `package.json` and `server.json`, the
-   release commit is reachable from `main`, and that commit carries a valid signature. Then it
-   builds, typechecks, runs the tests, audits production dependencies, checks the working tree
-   is still clean, and packs the archive and its SHA-256.
-2. **sbom** builds an SPDX SBOM of the archive: every file in it with its SHA-256, and every
-   production package the bundle was built from, read from the lockfile at the tag, since a
-   bundle names nothing on its own. The job then checks the SBOM against the archive's members
-   and `package.json`, because an SBOM that lists nothing looks exactly like a passing step
-   (`.github/syft.yaml` says what syft reads).
-3. **attest** signs the archive, its checksum and the SBOM through Sigstore, attests the SBOM
-   against the archive, and gathers both signed attestations into one JSON Lines file. It is the
-   only job with a token that can sign: see below.
-4. **publish**, in `release.yml`, rechecks the checksum, verifies that file against every
-   subject the way a user would (from the file, naming `release-build.yml` at the tag as the
-   builder), and creates the GitHub Release with all four files.
-5. **npm**, in `release.yml`, publishes that same signed archive to npm, which is how every
-   harness actually installs the server. Tokenless: npm's trusted publisher for the package
-   names this workflow and the job's OIDC token is the whole credential, so npm adds its own
-   provenance on top. The job ends there, because publishing cannot be undone and everything
-   after it either reports or depends on it.
-6. **npm serves what was signed**, in `release.yml`, downloads what the registry hands out and
-   fails unless those bytes hash to the archive that was signed. It reports: the release is on
-   npm by the time it runs, so a red job here is a reason to look, not a release that stopped.
-7. **installs**, in `release.yml`, installs the published version with `npx` on Linux, Windows
-   and macOS and runs it, because publishing is not installing. It reports for the same reason.
-8. **registry**, in `release.yml`, publishes `server.json` to the official MCP registry, the
-   entry that clients and every marketplace downstream of it read. Tokenless again: the
-   registry has no accounts, and grants the `io.github.Aureliolo/*` namespace to whatever this
-   workflow's OIDC token proves it is. It runs last because the registry checks that the npm
-   package exists at this version and carries a matching `mcpName`, and it reads the published
-   entry back before the job passes.
+   release commit is reachable from `main`, and that commit carries a valid signature. It then
+   builds, typechecks, runs the tests, audits production dependencies, checks the working tree is
+   still clean, and packs the archive and its SHA-256.
+2. **sbom** lists every file in the archive with its SHA-256 in an SPDX SBOM, with the production
+   packages from the lockfile at the tag. It checks the SBOM against the archive's members and
+   `package.json`, because an SBOM that lists nothing looks exactly like a passing step.
+3. **attest** signs the archive, its checksum and the SBOM through Sigstore. It attests the SBOM
+   against the archive and gathers both attestations into one JSON Lines file.
+
+Only the attest job has a token that can sign ([SLSA](#slsa) says why).
+
+## What the SBOM reads
+
+The SBOM takes its packages from the lockfile, because a bundle names nothing on its own.
+`.github/syft.yaml` says what syft reads.
+
+## The publish jobs (`release.yml`)
+
+1. **publish** rechecks the checksum and verifies that file against every subject the way a user
+   would, naming `release-build.yml` at the tag as the builder. It creates the GitHub Release with
+   all four files.
+2. **npm** publishes that same signed archive to npm, where every harness installs the server from.
+   It needs no token, because npm's trusted publisher names this workflow and takes the job's OIDC
+   token.
+
+npm adds its own provenance on top. The npm job does nothing after publishing, which cannot be
+undone. Every job after it either reports or depends on it.
+
+## The jobs after npm
+
+1. **npm serves what was signed** downloads what the registry hands out and fails unless those
+   bytes hash to the signed archive. It only reports, since the release is already on npm.
+2. **installs** installs the published version with `npx` on Linux, Windows and macOS and runs it,
+   because publishing is not installing. It only reports, for the same reason.
+3. **registry** publishes `server.json` to the official MCP registry, the entry that clients and
+   every marketplace downstream of it read. It needs no token, because the registry grants the
+   `io.github.Aureliolo/*` namespace to whatever this workflow's OIDC token proves it is.
+
+The registry job runs last, because the registry checks that the npm package exists at this
+version with a matching `mcpName`. It reads the published entry back before it passes.
 
 ## What a release carries
 
-- The archive, dependency-free: installing it contacts no registry.
+- The archive, dependency-free. Installing it contacts no registry.
 - A SHA-256 checksum.
 - An SPDX SBOM of the archive.
-- A Sigstore build-provenance attestation over all three, and an SBOM attestation tying the
-  SBOM to the archive. Both are keyless: there is no signing key anywhere, including in CI.
-  They are stored on the repository and attached to the release as
-  `gdharness-X.Y.Z.intoto.jsonl`, which is also the file OpenSSF Scorecard looks for.
+- A Sigstore build-provenance attestation over all three, and an SBOM attestation tying the SBOM
+  to the archive. Both are keyless, with no signing key anywhere, CI included.
 
-Releases are immutable, so a published one cannot be edited or replaced.
+The attestations are stored on the repository and attached to the release as
+`gdharness-X.Y.Z.intoto.jsonl`, the file OpenSSF Scorecard looks for. Releases are immutable. A
+published one cannot be edited or replaced.
 
 ## Verifying a release
 
@@ -104,82 +116,91 @@ gh attestation verify "gdharness-${VERSION}.tgz" --repo Aureliolo/gdharness \
   --deny-self-hosted-runners
 ```
 
-The checksum proves the bytes match what the release lists. The attestation proves GitHub
-Actions built those bytes from this repository, by the steps in `release-build.yml` at that
-tag, on a GitHub-hosted runner, which the checksum alone cannot: a checksum generated
-alongside a tampered archive agrees with it perfectly. Drop `--bundle` to read the same
-attestations from GitHub's API instead.
+The checksum proves the bytes match what the release lists. The attestation proves GitHub Actions
+built those bytes from this repository, by the steps in `release-build.yml` at that tag, on a
+GitHub-hosted runner. The checksum alone cannot prove that, because a checksum generated beside a
+tampered archive agrees with it perfectly. Drop `--bundle` to read the same attestations from
+GitHub's API instead.
 
 ## SLSA
 
-SLSA Build Level 3 on GitHub Actions means the build runs inside a reusable workflow, so the
-identity in the Sigstore certificate names the build steps rather than whatever workflow
-called them. `release-build.yml` is that workflow: it checks out the tag, builds, tests, packs,
-writes the SBOM and signs, and `release.yml` only decides when that happens and publishes the
-result. A verifier that passes `--signer-workflow .../release-build.yml` is requiring those
-exact steps, at the tag the provenance names, and no caller can change them.
+SLSA Build Level 3 on GitHub Actions means the build runs inside a reusable workflow. The identity
+in the Sigstore certificate then names the build steps rather than whatever workflow called them.
+`release-build.yml` is that workflow. It checks out the tag, builds, tests, packs, writes the SBOM
+and signs. `release.yml` only decides when that happens and publishes the result.
 
-Inside it, the build and the signing are separate jobs. `id-token: write` puts the signing
-token within reach of every step in the job that holds it, and the build runs `bun install`,
-so only the attest job, which downloads the finished bytes and signs them, is given that
-permission. Runners are GitHub-hosted and ephemeral, and signing is keyless: there is no key
-anywhere to take. The release build restores no Actions cache, which is the one way one run can
-reach into another on this platform: a cache entry can be written by any job on any branch,
-including a pull request from a fork.
+A verifier that passes `--signer-workflow .../release-build.yml` requires those exact steps at the
+tag the provenance names. No caller can change them.
+
+## Signing
+
+Inside that workflow, the build and the signing are separate jobs. `id-token: write` puts the
+signing token within reach of every step in the job holding it. The build runs `bun install`.
+Only the attest job, which downloads the finished bytes and signs them, is given that permission.
+
+Runners are GitHub-hosted and ephemeral. Signing is keyless, with no key anywhere to take.
+The release build restores no Actions cache, the one way one run can reach into another on this
+platform. Any job on any branch can write a cache entry, a pull request from a fork included.
 
 ## Versions that cannot be released
 
-A version whose tag exists cannot be released again, whether or not a release is attached to
-that tag. The ruleset on `v*` allows no deletion and no update by anyone, which is what makes a
-tag worth verifying a build against, and the cost is that the number is spent for good: cutting
-one twice would leave two different builds answering to one version. Prepare release refuses
-such a version, naming it, before it writes a branch.
+A version whose tag exists cannot be released again, whether or not a release is attached to that
+tag. The ruleset on `v*` allows no deletion and no update by anyone. That is what makes a tag worth
+verifying a build against. The cost is that the number is spent for good, since cutting it twice
+would leave two different builds answering to one version. Prepare release refuses such a version,
+naming it, before it writes a branch.
 
 ## When a release job fails
 
-Re-running the release workflow on the tag is the first thing to try, and it is safe. Each of the
-three steps that publish something asks what is already there before acting: the release job
-passes when the tag already carries exactly the four files, the npm job takes a version the
-registry already holds as done, and the MCP registry job publishes nothing it already serves
-correctly. Re-running a release whose jobs all went red therefore does the parts that did not
-happen and leaves alone the parts that did. "Tag release" can be run by hand too, and starts the
-release workflow again on a tag that already exists.
+Re-running the release workflow on the tag is safe and the first thing to try. Each of the three
+steps that publish something asks what is already there before acting. The release job passes when
+the tag already carries exactly the four files. The npm job takes a version the registry already
+holds as done. The MCP registry job publishes nothing it already serves correctly.
 
-- **Tag does not match package version**: the tag was created outside `release-tag.yml`, at a
-  commit whose `package.json` says something else. It cannot be taken back, because a push that
-  deletes a `v*` tag is refused by the ruleset. Go through Prepare release for the version that
-  should ship and leave the tag standing; like the case below, that number is spent.
-- **vX.Y.Z is tagged at another commit**: that version is already spent. Nothing can move the
-  tag, so raise the version past it; see above.
-- **Release commit is not reachable from main**: the tag points at a commit that never landed.
-- **Release commit carries no valid signature**: `main` requires signed commits, so this only
-  fires if that ruleset was bypassed or removed. That is exactly when you want to hear about it.
-- **Tests or build steps modified the checked-out release source**: something in the build
-  writes into the tree, which would mean the archive does not match the tagged commit.
-- **The SBOM's files are not the archive's members**, or **The SBOM does not list X**: syft
-  read something other than the unpacked archive and the lockfile, or a syft upgrade changed
-  what its catalogers see. The SBOM is wrong, not the archive; fix the sbom job and rerun the
-  workflow on the tag.
-- **Registry validation failed for package**: the registry could not find `mcpName` in the
-  package npm serves, or it does not match the name in `server.json`. `test:metadata` and
-  `test:packaging` both check that pair, so this means one of them was skipped or the packing
-  dropped the field.
-- **You do not have permission to publish this server**: `server.json` names something outside
-  `io.github.Aureliolo/*`, which is the only namespace a token from this repository is given.
-- **X was accepted; the registry had not served it five minutes later**: the publish went
-  through and the entry has not appeared. The release and npm are unaffected. Rerun the job: it
-  reads what the registry serves before publishing anything, so it will confirm the entry if it
-  has arrived by then and publish nothing twice. You can read it yourself at
+A re-run of a release whose jobs all went red therefore does only the parts that did not happen.
+Running "Tag release" by hand also starts the release workflow again on a tag that already exists.
+
+## Tag and commit failures
+
+- `Tag does not match package version` means the tag was created outside `release-tag.yml`, at a
+  commit whose `package.json` says something else. Leave the tag standing, since the ruleset refuses
+  deleting a `v*` tag, then go through Prepare release for the version that should ship.
+- `vX.Y.Z is tagged at another commit` means that version is already spent. Raise the version past
+  it, since nothing can move the tag.
+- `Release commit is not reachable from main` means the tag points at a commit that never landed.
+- `Release commit carries no valid signature` fires only if the ruleset requiring signed commits on
+  `main` was bypassed or removed. That is exactly when you want to hear about it.
+
+## Build and release failures
+
+- `Tests or build steps modified the checked-out release source` means something in the build
+  writes into the tree. The archive would then not match the tagged commit.
+- `The SBOM's files are not the archive's members` means syft read something besides the unpacked
+  archive and the lockfile. Fix the sbom job, not the archive, then rerun the workflow on the tag.
+- `The SBOM does not list X` can also mean a syft upgrade changed what its catalogers see. The fix
+  is the same.
+- `vX.Y.Z already has a release, and it carries ...` means the tag has a release with something
+  other than the four files, after an upload failed part way. Look at what is attached before
+  deciding anything, since a published release is not rewritten here.
+
+## Registry refusals
+
+- `Registry validation failed for package` means the registry could not find `mcpName` in the
+  package npm serves, or it does not match the name in `server.json`. One of `test:metadata` and
+  `test:packaging`, which both check that pair, was skipped, or the packing dropped the field.
+- `You do not have permission to publish this server` means `server.json` names something outside
+  `io.github.Aureliolo/*`, the only namespace a token from this repository is given.
+- `The registry serves ...` followed by `Expected: ...` means the publish will be refused, because
+  another entry for this version exists. Since a registry version is published only once, the
+  version is spent there until the next release replaces it.
+
+## Entries that have not appeared
+
+- `X was accepted; the registry had not served it five minutes later` means the publish went
+  through and the entry is not yet at
   `registry.modelcontextprotocol.io/v0.1/servers/io.github.Aureliolo%2Fgdharness/versions/latest`.
-- **The registry serves ...** followed by **Expected: ...**: an entry for this version exists and
-  is not the one this release publishes, so the publish is not skipped and will be refused. A
-  registry version is published once, so that version is spent there and the next release
-  replaces it.
-- **gdharness@X is published; the registry had not served it twenty minutes later**: npm took the
-  archive and has not served it back yet. The release, npm and the registry entry are unaffected;
-  only the comparison against the signed archive is outstanding. Rerun that job once
-  `npm view gdharness@X` answers. This happened on 1.0.11, where npm took 7m11s against a
-  five-minute window, and at the time it took two jobs down with it.
-- **vX.Y.Z already has a release, and it carries ...**: the tag has a release with something other
-  than the four files, which means an upload failed part way. A published release is not rewritten
-  here, so look at what is attached before deciding anything.
+  A rerun, which reads what the registry serves first, confirms an arrived entry and never
+  publishes twice.
+- `gdharness@X is published; the registry had not served it twenty minutes later` means npm took
+  the archive and has not served it back yet. Rerun that job once `npm view gdharness@X` answers,
+  since only the comparison against the signed archive is outstanding.

@@ -2,7 +2,7 @@ class_name GdhBench
 extends RefCounted
 ## Work played a step a frame, for the script profiler. The engine sends the profiler what each
 ## frame called and holds names for only so many functions a frame, so work played inside one frame
-## comes back with most of its functions unnamed; spread over frames, every step is named.
+## comes back with most of its functions unnamed. Spread over frames, every step is named.
 ##
 ##     func _ready() -> void:
 ##         var timed: Dictionary = await GdhBench.each_frame(get_tree(), 400, _run.advance)

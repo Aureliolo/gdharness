@@ -1,8 +1,8 @@
 extends SceneTree
-## A click on a toggle says the state either side of it. Reported from game-a: the
-## game clock's switch clicked three times answered clicked each time, and a wait for the clock to
-## move ran out on a clock left stopped. Each toggle here is checked beside a plain button, which
-## answers no state, so a check that wrote the field everywhere fails too.
+## A click on a toggle says the state either side of it. Reported from game-a: a pause switch
+## clicked three times answered clicked each time. A wait for the game to move on then ran out on a
+## game left paused. Each toggle here is checked beside a plain button, which answers no state, so
+## a check that wrote the field everywhere fails too.
 ##
 ## Everything sits in the 64 by 64 viewport a script run with no window has.
 

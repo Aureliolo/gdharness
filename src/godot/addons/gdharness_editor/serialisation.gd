@@ -15,7 +15,7 @@ const GdhShapes = preload("value_shapes.gd")
 const NUMBERS: Array[int] = [TYPE_BOOL, TYPE_INT, TYPE_FLOAT]
 const TEXTS: Array[int] = [TYPE_STRING, TYPE_STRING_NAME, TYPE_NODE_PATH]
 # 2^53. A JSON number is a double, and every whole number below this one in size has a double of
-# its own; from here on two or more share each double, so one arriving tells nobody which was sent.
+# its own. From here on two or more share each double, so one arriving tells nobody which was sent.
 const EXACT: int = 9_007_199_254_740_992
 # The types that cross as a plain JSON list and have to be built back into themselves. A list is
 # what a caller can write by hand and what the serialiser answers with, and the parameter or
@@ -136,7 +136,7 @@ func serialize_value(value: Variant) -> Variant:
 		return value
 	var carried: Variant = call(serialiser, value)
 	# The fixed shapes carry their components as bare floats, so an infinite one in a Vector2 is
-	# tagged here, and a 32-bit one shortened; containers reach their members through this already.
+	# tagged here, and a 32-bit one shortened. Containers reach their members through this already.
 	var type: int = typeof(value)
 	return (
 		carried
@@ -345,7 +345,7 @@ static func comparable(one: Variant, other: Variant) -> bool:
 ##
 ## A list of what is accepted rather than of what is refused, which is the way round that errs
 ## safely. The engine's own conversion table is not readable from GDScript, so either list is a
-## guess at it; guessing narrow costs a caller a refusal naming both types, and guessing wide costs
+## guess at it. Guessing narrow costs a caller a refusal naming both types, and guessing wide costs
 ## them the damage above. A refusal is the cheaper mistake, and it is the one they can act on.
 static func acceptable(value: Variant, type: int) -> bool:
 	if type == TYPE_NIL:
@@ -560,7 +560,7 @@ func _serialize_rid(value: RID) -> Dictionary:
 
 # A whole number from 2^53 on as its digits, because JSON numbers are doubles on the server's side
 # and on the engine's, and from there on neighbouring whole numbers share a double. A RefCounted's
-# instance id is one, with its top bit set, and a resource uid another; read as numbers they came
+# instance id is one, with its top bit set, and a resource uid another. Read as numbers they came
 # back as a neighbouring id, which named nothing or something else.
 func _serialize_int(value: int) -> Variant:
 	if value > -EXACT and value < EXACT:

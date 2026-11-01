@@ -37,7 +37,7 @@ const ORPHANS_LEFT: String = "gdharness orphans:"
 const ORPHANS_NAMED: int = 8
 ## The flags turning off a report, with the gdUnit4 hook that writes it. A gate reads what a run
 ## prints, and each report finds every case it hears of in the session to write them all out as the
-## run ends; project_test reads the JUnit one and turns off only the HTML one.
+## run ends, and project_test reads the JUnit one and turns off only the HTML one.
 const REPORTS_OFF: Dictionary[String, String] = {
 	"--html-report-off": "res://addons/gdUnit4/src/core/hooks/GdUnitHtmlReporterTestSessionHook.gd",
 	"--junit-report-off": "res://addons/gdUnit4/src/core/hooks/GdUnitXMLReporterTestSessionHook.gd",
@@ -72,7 +72,7 @@ const TOOL: String = "GdUnitCmdTool.gd"
 const GDUNIT: String = "--gdh-gdunit"
 ## How long a windowless engine sleeps after each frame. The engine's own default is the
 ## low-processor pause, 6.8 ms measured, which a run of suites awaiting frames spends thousands of
-## times; zero makes a frame's delta round to nothing, and a tween then never moves.
+## times. Zero makes a frame's delta round to nothing, and a tween then never moves.
 const FRAME_SLEEP_USEC: int = 1000
 ## What the engine's shutdown prints as it clears the newest script and the oldest, on an engine
 ## whose walk [GdhShutdownWalk] guards. Kept in step with the server's engine-leaks.ts, which reads
@@ -159,7 +159,7 @@ static func started(given: PackedStringArray) -> GdhRunner:
 				(
 					(
 						"gdharness test: gdUnit4 %s registers no session hook %s, so the report it "
-						+ "writes is not turned off; report it to gdharness with the version."
+						+ "writes is not turned off. Report it to gdharness with the version."
 					)
 					% [GdUnit4Version.current(), path]
 				)
@@ -624,7 +624,7 @@ class GdhRunner:
 
 	## [param args] with everything up to the script at [param own] given as gdUnit4's tool name.
 	## The path is compared with its separators and, on Windows, its case folded, since the engine
-	## reports the script as `X:/a/listed.gd` when it was started as `X:\a\listed.gd`.
+	## reports the script as `D:/a/listed.gd` when it was started as `D:\a\listed.gd`.
 	static func options_of(args: PackedStringArray, own: String) -> PackedStringArray:
 		var wanted: String = spelt(own)
 		var at: int = -1
@@ -678,7 +678,7 @@ class GdhIndexedSession:
 		var found: GdUnitTestCase = _by_id.get(str(id), null)
 		return found
 
-	## [param made] as an indexed session of its cases, reporting where it does; one already indexed
+	## [param made] as an indexed session of its cases, reporting where it does. One already indexed
 	## as it is.
 	static func of(made: GdUnitTestSession) -> GdUnitTestSession:
 		if made is GdhIndexedSession:
@@ -724,7 +724,7 @@ class GdhSessionCheck:
 						"gdharness test: gdUnit4 %s handed its session hooks the session before "
 						+ "announcing it, so the runner's indexed session is not the one they "
 						+ "read. This gdUnit4 starts a session differently from the ones gdharness "
-						+ "knows; report it to gdharness with the version."
+						+ "knows. Report it to gdharness with the version."
 					)
 					% GdUnit4Version.current()
 				)
@@ -742,8 +742,8 @@ class GdhSessionCheck:
 					(
 						"gdharness test: gdUnit4 %s ran %d cases without looking one up in the "
 						+ "runner's indexed session, so its console reads another session. This "
-						+ "gdUnit4 starts a session differently from the ones gdharness knows; "
-						+ "report it to gdharness with the version."
+						+ "gdUnit4 starts a session differently from the ones gdharness knows. "
+						+ "Report it to gdharness with the version."
 					)
 					% [GdUnit4Version.current(), _runner.cases_ended]
 				)
@@ -791,7 +791,7 @@ class GdhShutdownWalk:
 
 	## Every script loaded from a file under res://, and [param also], held until the theme database
 	## goes, which is after the walk and before the GDScript language does. Freed in the walk, a
-	## script can take the next one with it and end the walk; held, none is freed there, so the walk
+	## script can take the next one with it and end the walk. Held, none is freed there, so the walk
 	## reaches every script and what the engine reports at exit is only what was leaked. A script a
 	## run leaks is held by what leaked it as well, and is still reported.
 	static func hold(also: Array[GDScript]) -> void:
