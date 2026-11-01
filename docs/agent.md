@@ -62,9 +62,9 @@ template instead.
 ### The config and the autoload
 
 The config carries `GODOT_PATH` and `GDHARNESS_PROJECT`. No tool call takes its project from the
-environment. A call names it in `projectPath`. A `godot://` resource read has no arguments, and
-[the install guide](install.md) says where it looks. Reconnect the harness, then confirm the tools
-are listed.
+environment. A call that takes a project names it in `projectPath`. A `godot://` resource read
+has no arguments, and [the install guide](install.md) says where it looks. Reconnect the harness,
+then confirm the tools are listed.
 
 The runtime autoload names `res://gdharness/loader.gd`, which setup writes. It brings the runtime up
 only in a debug build that has the addon. It does nothing in a clone without `addons/`, and a

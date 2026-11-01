@@ -58,7 +58,7 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
   There is no ambient project.
 - \`runtime_*\` calls pick a game by \`projectPath\`, or by \`pid\` when several run from one
   project, as a bench and its workers do. \`debug_*\` calls go to the game this server started or
-  the editor is playing. \`debug_breakpoint\` also holds breakpoints when there is none.
+  the editor is playing. \`debug_breakpoint\` also holds breakpoints when no game runs.
   ${theGamePicked()}
 - An argument a tool does not declare is refused rather than ignored.
 - \`editor_status\` says whether an editor is connected and whether its addon matches the server.
