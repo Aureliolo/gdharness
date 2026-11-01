@@ -48,8 +48,8 @@ const WHOLE: int = 1
 ## counting from 0 in rank order.
 ##
 ## A control with something drawn over its centre that a pointer there would reach instead is not
-## on screen for a player, and a click at it lands on the thing on top. The screen a game shows
-## over its hall covers the hall's drawers without hiding them, so their words matched as well.
+## on screen for a player, and a click at it lands on the thing on top. A panel a game shows
+## over a screen covers its drawers without hiding them, so their words matched as well.
 static func control_saying(
 	root: Node, root_path: String, wanted: String, which: Variant
 ) -> Dictionary:
@@ -60,7 +60,7 @@ static func control_saying(
 	# The words of the control that matched, which a button pressed on a label's behalf has none of.
 	var said: Array[String] = []
 	var exact: Array[bool] = []
-	# Whether the words are only inside longer words there, "out" in "Scout".
+	# Whether the words are only inside longer words there, "away" in "Faraway".
 	var inside: Array[bool] = []
 	var hidden: Array[Node] = []
 	# Controls saying exactly the words that a click cannot reach, kept to say what a match on
@@ -150,8 +150,8 @@ static func control_saying(
 			if cover == null:
 				cover = over
 	# Stable, so matches of one rank keep the order they are drawn in. Words only inside longer
-	# words come after everything else: ranked as a button saying them as part of more, "Scout, 90"
-	# was pressed for "Out" over a control saying exactly "Out", and spent a game's silver.
+	# words come after everything else: ranked as a button saying them as part of more, a card was
+	# pressed over a control saying exactly the words, and spent something in the game.
 	open.sort_custom(
 		func(a: int, b: int) -> bool:
 			if inside[a] != inside[b]:
@@ -225,9 +225,9 @@ static func control_saying(
 			"index %s picks nothing: %s: %s" % [given, among, _candidates(targets, lines)],
 		}
 	# A match saying the words as part of more, while another control says exactly them, is a
-	# stand-in for that one, not the control meant: a tab reading "Out" sat in a collapsed drawer
-	# and a dispatch saying somebody "fell out in the hall" was pressed, and with the tab's own
-	# words on screen in a control that is not a button, a card reading "Scout, 90" was. Pressed
+	# stand-in for that one, not the control meant: a tab reading "Away" sat in a collapsed drawer
+	# and a line saying somebody "went away for good" was pressed, and with the tab's own
+	# words on screen in a control that is not a button, a card reading "Faraway, 90" was. Pressed
 	# only when asked for by index, which is the caller saying the match is what they meant.
 	var exact_elsewhere: Array[Node] = exact_out_of_reach.duplicate()
 	var elsewhere_as: Array[String] = out_of_reach_as.duplicate()
@@ -287,8 +287,8 @@ static func control_saying(
 			),
 		}
 	# Words in a sentence on a control that lets the pointer through: the press lands on whatever is
-	# under it, which is nothing the words name. A line saying what "is out there" was the best
-	# match left for "Out" once the cards saying "Scout" were passed over.
+	# under it, which is nothing the words name. A line saying what "is far away" was the best
+	# match left for "Away" once the cards saying "Faraway" were passed over.
 	if (
 		which == null
 		and not wholes[index]
@@ -377,9 +377,9 @@ static func pointer_turned_off_by(control: Control) -> Control:
 ## Whether one of [param wanted]'s alternatives is the whole of [param said], or the whole of one of
 ## its lines. A glob is matched against the whole text already, so every match of one is whole.
 ##
-## A line counts because a card is a title over a description: "WARD" over "wards 3" is the card
-## named WARD, and read as its words run together it said WARD only as part of more, level with
-## "WARDSPITE" over its own description, and a click on WARD was refused as not clear.
+## A line counts because a card is a title over a description: "GLOW" over "glows 3" is the card
+## named GLOW, and read as its words run together it said GLOW only as part of more, level with
+## "GLOWSHADE" over its own description, and a click on GLOW was refused as not clear.
 static func _says_exactly(written: String, wanted: String) -> bool:
 	var said: String = GdhSays.spaced(written)
 	for words: String in GdhSays.alternatives(wanted):
@@ -397,8 +397,8 @@ static func _says_exactly(written: String, wanted: String) -> bool:
 
 
 ## Whether [param written] has the plain words [param wanted] asks for only inside longer words,
-## never starting where a word starts: "out" in "Scout". Words starting a longer one count as said,
-## "Recruit" in "Recruits", and so does anything matched by a pattern.
+## never starting where a word starts: "away" in "Faraway". Words starting a longer one count as
+## said, "Recruit" in "Recruits", and so does anything matched by a pattern.
 static func _inside_a_word(written: String, wanted: String) -> bool:
 	var said: String = GdhSays.spaced(written).to_lower()
 	var found: bool = false
@@ -728,7 +728,7 @@ static func _pointer_takers(root: Node) -> Array[Node]:
 ## a control's however it is turned or scaled.
 ##
 ## Worked out once for a click rather than once for each match. A plain word on a screen of prose
-## matches a hundred labels, and asking all four thousand controls of a hall for their transform
+## matches a hundred labels, and asking all four thousand controls on screen for their transform
 ## for each of them took a click by words 80 ms, where the matching alone takes half that.
 static func _areas_of(drawn: Array[Node]) -> Array[Rect2]:
 	var areas: Array[Rect2] = []
@@ -964,7 +964,7 @@ static func _candidates(targets: Array[Control], said: Array[String]) -> String:
 
 ## What to add to a refusal that found nothing on screen, when an open menu has an item saying the
 ## words: a menu draws its items rather than holding a control for each, so a click finds none,
-## while a wait for the words finds the item. A wait met on "Leave the hall" was followed by a click
+## while a wait for the words finds the item. A wait met on "Leave the shop" was followed by a click
 ## on it refused as nothing on screen saying it, with no word of the call that chooses it.
 static func _open_menu_note(root: Node, wanted: String) -> String:
 	var pending: Array[Node] = [root]

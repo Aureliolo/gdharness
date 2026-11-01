@@ -519,7 +519,7 @@ func _check_a_click_by_words(input: GdhInputCommands) -> void:
 	var screen: Control = Control.new()
 	screen.size = Vector2(64, 64)
 	root.add_child(screen)
-	var new_guild: Button = _small_button(screen, "New guild", Vector2(2, 2))
+	var new_shop: Button = _small_button(screen, "New shop", Vector2(2, 2))
 	var left: Control = Control.new()
 	left.name = "Left"
 	screen.add_child(left)
@@ -538,14 +538,14 @@ func _check_a_click_by_words(input: GdhInputCommands) -> void:
 	secret.visible = false
 	await root.get_tree().process_frame
 
-	var once: Dictionary = await input.click({ "says": "New guild" })
+	var once: Dictionary = await input.click({ "says": "New shop" })
 	var found: Dictionary = once.get("found", {})
-	if once.get("type") != "clicked" or _presses(new_guild) != 1 or once.get("landed") != true:
+	if once.get("type") != "clicked" or _presses(new_shop) != 1 or once.get("landed") != true:
 		_fail("a click by words presses the one control saying them: %s" % JSON.stringify(once))
 	elif (
 		found.get("of") != 1
 		or found.get("index") != 0
-		or once.get("path") != str(new_guild.get_path())
+		or once.get("path") != str(new_shop.get_path())
 	):
 		_fail("and says which match it pressed: %s" % JSON.stringify(once))
 
@@ -591,8 +591,8 @@ func _check_a_click_by_words(input: GdhInputCommands) -> void:
 	):
 		_fail("words on a label press the button holding it: %s" % JSON.stringify(through))
 
-	var globbed: Dictionary = await input.click({ "says": "New g*" })
-	if _presses(new_guild) != 2:
+	var globbed: Dictionary = await input.click({ "says": "New s*" })
+	if _presses(new_shop) != 2:
 		_fail("a glob in says is matched as a find matches one: %s" % JSON.stringify(globbed))
 
 	var hidden: Dictionary = await input.click({ "says": "Secret" })
@@ -739,21 +739,21 @@ func _check_a_click_opening_a_menu_over_itself(input: GdhInputCommands) -> void:
 
 func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 	# Placed by centre, and a button in the default theme grows to about 31 pixels tall whatever
-	# size it is given: the page covers the top 48 rows, so the hall's two buttons have their
+	# size it is given: the page covers the top 48 rows, so the shop's two buttons have their
 	# centres under it and the button saying more has its centre below it.
-	var hall: Control = Control.new()
-	hall.size = Vector2(64, 64)
-	root.add_child(hall)
-	var _sentence: Label = _small_label(hall, "Word back", Vector2(2, 2))
-	var hall_back: Button = _small_button(hall, "Back", Vector2(34, 2))
-	var hall_only: Button = _small_button(hall, "Drawer", Vector2(2, 18))
+	var shop: Control = Control.new()
+	shop.size = Vector2(64, 64)
+	root.add_child(shop)
+	var _sentence: Label = _small_label(shop, "Heard back", Vector2(2, 2))
+	var shop_back: Button = _small_button(shop, "Back", Vector2(34, 2))
+	var shop_only: Button = _small_button(shop, "Drawer", Vector2(2, 18))
 	var page: Panel = Panel.new()
 	page.name = "Page"
 	page.size = Vector2(64, 48)
 	root.add_child(page)
 	var page_back: Button = _small_button(page, "Back", Vector2(34, 16))
-	var _told: Label = _small_label(page, "is back off a hunt", Vector2(2, 16))
-	var partly: Button = _small_button(root, "Back to hall", Vector2(2, 34))
+	var _told: Label = _small_label(page, "is back off a round", Vector2(2, 16))
+	var partly: Button = _small_button(root, "Back to shop", Vector2(2, 34))
 	# Drawn over the page's button and the one below it, and neither covers anything: a label lets
 	# the pointer through, and the panel reaches past the strip it is clipped to.
 	var caption: Label = _small_label(root, "Title", Vector2(34, 26))
@@ -770,7 +770,7 @@ func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 
 	var back: Dictionary = await input.click({ "says": "Back" })
 	var found: Dictionary = back.get("found", {})
-	if back.get("type") != "clicked" or _presses(page_back) != 1 or _presses(hall_back) != 0:
+	if back.get("type") != "clicked" or _presses(page_back) != 1 or _presses(shop_back) != 0:
 		_fail(
 			(
 				(
@@ -796,7 +796,7 @@ func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 		or not refused.contains(
 			"1 control says it under %s, which is drawn over it" % page.get_path()
 		)
-		or _presses(hall_only) != 0
+		or _presses(shop_only) != 0
 	):
 		_fail(
 			(
@@ -808,32 +808,32 @@ func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 	page.visible = false
 	await root.get_tree().process_frame
 	var uncovered: Dictionary = await input.click({ "says": "Back" })
-	if _presses(hall_back) != 1 or uncovered.get("path") != str(hall_back.get_path()):
+	if _presses(shop_back) != 1 or uncovered.get("path") != str(shop_back.get_path()):
 		_fail(
 			(
-				"with the page gone the hall's button is on screen again: %s"
+				"with the page gone the shop's button is on screen again: %s"
 				% JSON.stringify(uncovered)
 			)
 		)
-	for each: Node in [hall, page, partly, caption, strip]:
+	for each: Node in [shop, page, partly, caption, strip]:
 		each.queue_free()
 	await root.get_tree().process_frame
 
 	# Cards: a title over a description. The card whose title is exactly the words is the exact
 	# match, over the one whose title only starts with them.
-	var ward: Button = _small_button(root, "WARD\nwards 3", Vector2(2, 2))
-	var spite: Button = _small_button(root, "WARDSPITE\ntwo words", Vector2(34, 2))
+	var glow: Button = _small_button(root, "GLOW\nglows 3", Vector2(2, 2))
+	var shade: Button = _small_button(root, "GLOWSHADE\ntwo words", Vector2(34, 2))
 	await root.get_tree().process_frame
-	var titled: Dictionary = await input.click({ "says": "WARD" })
-	if _presses(ward) != 1 or _presses(spite) != 0:
+	var titled: Dictionary = await input.click({ "says": "GLOW" })
+	if _presses(glow) != 1 or _presses(shade) != 0:
 		_fail(
 			(
 				"a card whose title line is exactly the words is pressed over one saying more: %s"
 				% JSON.stringify(titled)
 			)
 		)
-	ward.queue_free()
-	spite.queue_free()
+	glow.queue_free()
+	shade.queue_free()
 	await root.get_tree().process_frame
 
 	# A cover away from the origin and scaled, so it covers the button only where it is drawn: its

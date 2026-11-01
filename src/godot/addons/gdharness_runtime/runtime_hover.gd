@@ -9,8 +9,7 @@ extends RefCounted
 ## it. An injected event never crosses anything, and on gdharness's own desktop no pointer ever
 ## enters a window, so nothing was hovered. A BaseButton takes a mouse press only while hovered, so
 ## every click on a button in such a window was dropped while the press itself was routed to it.
-## Reported from Game C, whose strip window holds its first-run question, and traced through Godot
-## 4.7.2's source.
+## Reported from Game C and traced through Godot 4.7.2's source.
 ##
 ## What is supplied is what the engine does once the window has been entered: the control its own
 ## search finds under the point, MOUSE_ENTER and mouse_entered on it and on each holder the pointer

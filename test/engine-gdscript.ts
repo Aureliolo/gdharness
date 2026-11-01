@@ -5470,9 +5470,9 @@ function testBinaryScenesAreScenes(godotPath: string, projectDir: string): void 
  * The class list a rebuild writes is the one the engine's own import writes, so a rebuild over a
  * current list changes nothing and says so.
  *
- * Reported from game-a: `class_name Tab extends Heard.Named`, an inner class of a
- * global class, was written with the base `Heard.Named` where the engine writes nothing, and every
- * refresh reported Tab changed. The engine's class scan does not look names up, so the rules here
+ * Reported from game-a: `class_name Leaf extends Outer.Inner`, an inner class of a global class,
+ * was written with the base `Outer.Inner` where the engine writes nothing. Every refresh then
+ * reported Leaf changed. The engine's class scan does not look names up, so the rules here
  * are its own and several are not what a reader would guess: a script extending another by path is
  * given that script's base rather than its class_name, a relative path is read from the project
  * root and not from the script's folder, and a parent that is missing still lists the class, with
@@ -5483,18 +5483,18 @@ function testTheClassListIsTheEnginesOwn(godotPath: string): void {
   const projectDir = createProject(godotPath);
   try {
     const scripts: Record<string, string> = {
-      'heard.gd':
-        'class_name Heard\nextends Node\n\n\nclass Named:\n\textends RefCounted\n\tvar label: String = ""\n\n\tclass Deeper:\n\t\textends Node\n',
+      'outer.gd':
+        'class_name Outer\nextends Node\n\n\nclass Inner:\n\textends RefCounted\n\tvar label: String = ""\n\n\tclass Deeper:\n\t\textends Node\n',
       'shapes.gd':
-        'class_name Shapes\nextends Node\n\n\nclass Bare:\n\tvar count: int = 0\n\n\nclass Inline extends Node2D:\n\tvar moved: int = 0\n\n\nclass ByPathAgain:\n\textends "res://heard.gd"\n',
-      'plain.gd': 'class_name Plain\nextends Heard\n',
-      'same_line.gd': 'class_name SameLine extends Heard.Named\n',
-      'tab.gd': 'class_name Tab\nextends Heard.Named\n',
-      'deep.gd': 'class_name Deep\nextends Heard.Named.Deeper\n',
-      'by_path.gd': 'class_name ByPath\nextends "res://heard.gd"\n',
-      'by_path_inner.gd': 'class_name ByPathInner\nextends "res://heard.gd".Named\n',
-      'by_path_deeper.gd': 'class_name ByPathDeeper\nextends "res://heard.gd".Named.Deeper\n',
-      'path_to_tab.gd': 'class_name PathToTab\nextends "res://tab.gd"\n',
+        'class_name Shapes\nextends Node\n\n\nclass Bare:\n\tvar count: int = 0\n\n\nclass Inline extends Node2D:\n\tvar moved: int = 0\n\n\nclass ByPathAgain:\n\textends "res://outer.gd"\n',
+      'plain.gd': 'class_name Plain\nextends Outer\n',
+      'same_line.gd': 'class_name SameLine extends Outer.Inner\n',
+      'leaf.gd': 'class_name Leaf\nextends Outer.Inner\n',
+      'deep.gd': 'class_name Deep\nextends Outer.Inner.Deeper\n',
+      'by_path.gd': 'class_name ByPath\nextends "res://outer.gd"\n',
+      'by_path_inner.gd': 'class_name ByPathInner\nextends "res://outer.gd".Inner\n',
+      'by_path_deeper.gd': 'class_name ByPathDeeper\nextends "res://outer.gd".Inner.Deeper\n',
+      'path_to_leaf.gd': 'class_name PathToLeaf\nextends "res://leaf.gd"\n',
       'missing.gd': 'class_name Missing\nextends "res://nowhere.gd"\n',
       'uses_bare.gd': 'class_name UsesBare\nextends "res://shapes.gd".Bare\n',
       'uses_inline.gd': 'class_name UsesInline\nextends "res://shapes.gd".Inline\n',
@@ -5503,9 +5503,9 @@ function testTheClassListIsTheEnginesOwn(godotPath: string): void {
       'nothing.gd': 'class_name Nothing\n',
       'more/sibling.gd': 'class_name Sibling\nextends Node3D\n',
       'more/beside.gd': 'class_name Beside\nextends "sibling.gd"\n',
-      'more/up.gd': 'class_name Up\nextends "../heard.gd"\n',
-      'more/from_root.gd': 'class_name FromRoot\nextends "heard.gd"\n',
-      'more/from_root_inner.gd': 'class_name FromRootInner\nextends "heard.gd".Named\n',
+      'more/up.gd': 'class_name Up\nextends "../outer.gd"\n',
+      'more/from_root.gd': 'class_name FromRoot\nextends "outer.gd"\n',
+      'more/from_root_inner.gd': 'class_name FromRootInner\nextends "outer.gd".Inner\n',
     };
     mkdirSync(join(projectDir, 'more'));
     for (const [name, source] of Object.entries(scripts)) {
@@ -5529,12 +5529,12 @@ function testTheClassListIsTheEnginesOwn(godotPath: string): void {
     // listing them would not pass by agreeing with a rebuild that had stopped too.
     assert.deepEqual(
       Object.fromEntries(
-        ['Tab', 'SameLine', 'ByPath', 'ByPathInner', 'Missing', 'UsesBare', 'Beside', 'FromRoot'].map(
+        ['Leaf', 'SameLine', 'ByPath', 'ByPathInner', 'Missing', 'UsesBare', 'Beside', 'FromRoot'].map(
           (name) => [name, bases(theEngines)[name]],
         ),
       ),
       {
-        Tab: '',
+        Leaf: '',
         SameLine: '',
         ByPath: 'Node',
         ByPathInner: 'RefCounted',

@@ -566,7 +566,7 @@ export class GodotLSPClient {
    * handed, and it keeps that parse for as long as the document stays open. The parse holds the
    * parses of everything the file depends on, so a `class_name` script edited outside the editor
    * is frozen at whatever it said when some open file first pulled it in, and every member added
-   * since reads as missing: `Static function "opening()" not found in base "Components"` about a
+   * since reads as missing: `Static function "first()" not found in base "Parts"` about a
    * static function the engine compiles and runs.
    *
    * Nothing on the editor side clears that. A filesystem scan, which is all `editor_rescan` can

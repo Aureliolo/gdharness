@@ -12,7 +12,7 @@ extends RefCounted
 ## is every label, button and field the interface is built out of.
 ##
 ## Read rather than looked up in the property list, which the engine builds afresh on every call: a
-## wait asks this of every node on the screen every frame, and on a hall of 3,500 nodes the lookup
+## wait asks this of every node on the screen every frame, and over 3,500 nodes the lookup
 ## took the game it was watching from 60 frames a second to 11. A node without the property reads
 ## as null, which is not a string.
 ##
@@ -21,8 +21,8 @@ extends RefCounted
 static func said_by(node: Node) -> String:
 	var own: String = drawn_by(node)
 	# A control showing a picture rather than words is named for a player who cannot see it, and
-	# that name is the one the words a caller asks by are meant for: the rail's "Out" tab is a
-	# square with an icon on it, and a click on "Out" found only the words around it.
+	# that name is the one the words a caller asks by are meant for: a side bar's "Away" tab is a
+	# square with an icon on it, and a click on "Away" found only the words around it.
 	if own.is_empty() and node is Control and not node is Label and not draws_a_list(node):
 		var control: Control = node
 		return control.atr(control.accessibility_name).strip_edges()

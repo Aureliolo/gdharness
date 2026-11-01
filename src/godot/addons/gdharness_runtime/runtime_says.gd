@@ -71,7 +71,7 @@ static func _loose(wanted: String) -> Array[String]:
 
 ## [param text] with every Unicode space separator written as a plain space, which is what a caller
 ## types for any of them. A game keeping a name on one line writes it with a non-breaking space, and
-## "Deskanem Bonituk" typed with a plain one found nothing while the screen showed exactly those
+## "Teodor Vasquelle" typed with a plain one found nothing while the screen showed exactly those
 ## words. One character for one, so a place found in the result is the same place in [param text].
 ##
 ## Text that is all ASCII holds none of them and is handed back as it is, which is most of a screen.
@@ -101,7 +101,7 @@ static func spaced(text: String) -> String:
 ## pattern that matches every node there is.
 ##
 ## Kept once split, since a find, a click or a wait asks about the same words for every node on the
-## screen: split afresh for each of them, one look over a hall of twenty thousand nodes took 210ms
+## screen: split afresh for each of them, one look over twenty thousand nodes took 210ms
 ## rather than 155ms. The array handed back is shared and not to be changed.
 static func alternatives(wanted: String) -> Array[String]:
 	var kept: Variant = _splits.get(wanted)

@@ -451,7 +451,7 @@ func _matches_apart_from_name(node: Node, wanted: Dictionary[String, String]) ->
 ## own class_name, or one it extends at any distance.
 ##
 ## The class_name alone answered 0 for `Card` over a tree of rows whose scripts extend Card two
-## steps down, IntakeRow extends DocketCard extends Card, while `is_class` reaches every native
+## steps down, InboxRow extends TicketCard extends Card, while `is_class` reaches every native
 ## subclass. A caller naming a class means what extends it, whichever side of the line the class
 ## is declared on.
 static func _script_is(attached: Script, wanted: String) -> bool:
@@ -468,15 +468,15 @@ static func _script_is(attached: Script, wanted: String) -> bool:
 ## The question a caller asks most often, and the one that cost the most to answer: reading a panel
 ## was a find for every label with the path of each beside it, a few hundred characters apiece to
 ## carry a sentence of six words. Long is the smaller half of it. A find answers off nodes nobody
-## can see, and a panel keeps its empty state in the tree beside its rows, so "Nothing posted" came
-## back next to the three things posted and was believed twice in one session.
+## can see, and a panel keeps its empty state in the tree beside its rows, so "Nothing listed" came
+## back next to the three things listed and was believed twice in one session.
 ##
 ## A hidden node is left out and so is everything under it, because what a player reads is what is
 ## drawn. [param include_hidden] asks for the lot instead, which is what a caller checking that
 ## something is not showing wants.
 ##
 ## [param limit] is the first few lines rather than all of them, which is how the top of a screen
-## is read without the hall under it: the bar along the top of a guild is eleven lines and the
+## is read without the rest under it: the bar along the top of a screen is eleven lines and the
 ## panel it sits on is two hundred. `omitted` says how many lines that left behind, so a screen
 ## whose interesting half is below the cut says so in a number rather than in a flag.
 func read_text(params: Dictionary) -> Dictionary:

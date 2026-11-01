@@ -37,11 +37,11 @@ Or do it yourself, and pick your harness:
 ## The loop it exists for
 
 ```jsonc
-editor_run      { "op": "start", "projectPath": "C:/games/hall" }
+editor_run      { "op": "start", "projectPath": "C:/games/shop" }
 runtime_inspect { "op": "find", "says": "Buy" }              // the button, by the word on it
-runtime_input   { "op": "click", "nodePath": "/root/Hall/Ledger/BuyButton" }
-runtime_inspect { "op": "text", "nodePath": "/root/Hall/Ledger" }   // what the panel says now
-editor_output   { "projectPath": "C:/games/hall" }           // errors and warnings, with backtraces
+runtime_input   { "op": "click", "nodePath": "/root/Shop/Ledger/BuyButton" }
+runtime_inspect { "op": "text", "nodePath": "/root/Shop/Ledger" }   // what the panel says now
+editor_output   { "projectPath": "C:/games/shop" }           // errors and warnings, with backtraces
 ```
 
 The open editor plays the game, so its debugger holds it. You can set a breakpoint and read the

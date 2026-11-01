@@ -474,13 +474,13 @@ function testARunawayCaseIsFoldedAndBounded(): void {
 
 function testASuiteWithASpaceInItsPathKeepsItsOrphans(): void {
   const found = orphansPrinted([
-    'Run Test Suite: res://my tests/docket_test.gd',
+    'Run Test Suite: res://my tests/ticket_test.gd',
     'Statistics: 3 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 2 orphans |	WARNING',
     'Overall Summary: 3 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 2 orphans |',
   ]);
   assert.deepEqual(
     found.suites,
-    [{ path: 'res://my tests/docket_test.gd', orphans: 2, left: [] }],
+    [{ path: 'res://my tests/ticket_test.gd', orphans: 2, left: [] }],
     JSON.stringify(found),
   );
 }
@@ -591,13 +591,13 @@ function testScriptErrorsAreReadOffTheConsole(): void {
  */
 function testOrphansAreReadOffTheConsole(): void {
   const printed = [
-    'Run Test Suite: res://test/guild_test.gd',
-    '	test_recruits	STATUS: PASSED	13ms',
+    'Run Test Suite: res://test/shop_test.gd',
+    '	test_sells	STATUS: PASSED	13ms',
     'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans |	PASSED',
-    'Run Test Suite: res://test/docket_test.gd',
-    'gdharness orphans: res://test/docket_test.gd > test_posts left 3: Timer, Node "Board" of res://board.gd, Label',
+    'Run Test Suite: res://test/ticket_test.gd',
+    'gdharness orphans: res://test/ticket_test.gd > test_posts left 3: Timer, Node "Board" of res://board.gd, Label',
     '	test_posts	STATUS: PASSED	9ms',
-    'gdharness orphans: res://test/docket_test.gd > after left 1: Node2D "Pin"',
+    'gdharness orphans: res://test/ticket_test.gd > after left 1: Node2D "Pin"',
     'Statistics: 3 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 4 orphans |	WARNING',
     'Overall Summary: 5 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 4 orphans |',
     'Executed test suites: (2/2)',
@@ -605,21 +605,21 @@ function testOrphansAreReadOffTheConsole(): void {
 
   const found = orphansPrinted(printed);
   assert.equal(found.total, 4, 'the run total comes off the summary line');
-  const docket = 'res://test/docket_test.gd';
+  const ticket = 'res://test/ticket_test.gd';
   assert.deepEqual(
     found.suites,
     [
       {
-        path: docket,
+        path: ticket,
         orphans: 4,
         left: [
           {
-            suite: docket,
+            suite: ticket,
             during: 'test_posts',
             count: 3,
             nodes: 'Timer, Node "Board" of res://board.gd, Label',
           },
-          { suite: docket, during: 'after', count: 1, nodes: 'Node2D "Pin"' },
+          { suite: ticket, during: 'after', count: 1, nodes: 'Node2D "Pin"' },
         ],
       },
     ],
@@ -628,25 +628,25 @@ function testOrphansAreReadOffTheConsole(): void {
   // A hook's auto_free() frees at the suite's end rather than the case's, and a suite whose cases
   // never began cannot tell its two hooks apart.
   const said = (during: string, count: number): string =>
-    orphansLeftSaid({ suite: docket, during, count, nodes: 'Node "Pin"' });
+    orphansLeftSaid({ suite: ticket, during, count, nodes: 'Node "Pin"' });
   assert.equal(
     said('test_posts', 2),
-    'res://test/docket_test.gd > test_posts left 2 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: Node "Pin". Free each one, or make it with auto_free(), which frees it once the case is over.',
+    'res://test/ticket_test.gd > test_posts left 2 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: Node "Pin". Free each one, or make it with auto_free(), which frees it once the case is over.',
   );
   assert.equal(
     said('before', 1),
-    `res://test/docket_test.gd's before() left 1 node neither freed nor in the tree, which gdUnit4 counts as orphans: Node "Pin". Free each one, or make it with auto_free(), which frees it once the suite is over.`,
+    `res://test/ticket_test.gd's before() left 1 node neither freed nor in the tree, which gdUnit4 counts as orphans: Node "Pin". Free each one, or make it with auto_free(), which frees it once the suite is over.`,
   );
-  assert.match(said('after', 1), /^res:\/\/test\/docket_test\.gd's after\(\) left 1 node /);
+  assert.match(said('after', 1), /^res:\/\/test\/ticket_test\.gd's after\(\) left 1 node /);
   assert.match(
     said('before or after', 1),
-    /^res:\/\/test\/docket_test\.gd's before\(\) or after\(\) left 1 node .+ once the suite is over\.$/,
+    /^res:\/\/test\/ticket_test\.gd's before\(\) or after\(\) left 1 node .+ once the suite is over\.$/,
   );
 
   // A clean run says nothing, which must stay nothing rather than becoming an empty warning.
   assert.deepEqual(
     orphansPrinted([
-      'Run Test Suite: res://test/guild_test.gd',
+      'Run Test Suite: res://test/shop_test.gd',
       'Statistics: 2 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans |	PASSED',
       'Overall Summary: 2 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans |',
     ]),
@@ -656,14 +656,14 @@ function testOrphansAreReadOffTheConsole(): void {
   // The totals are not a suite's. A summary line arriving with a suite still open would otherwise
   // be counted twice: once against that suite and once as the total.
   const onlyTotals = orphansPrinted([
-    'Run Test Suite: res://test/docket_test.gd',
+    'Run Test Suite: res://test/ticket_test.gd',
     'Overall Summary: 5 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 4 orphans |',
   ]);
   assert.deepEqual(onlyTotals, { total: 4, suites: [] });
 
   // And a summary line this stops recognising costs the total, not the rows under it.
   const noSummary = orphansPrinted([
-    'Run Test Suite: res://test/docket_test.gd',
+    'Run Test Suite: res://test/ticket_test.gd',
     'Statistics: 3 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 4 orphans |',
     'Run Test Suite: res://test/purse_test.gd',
     'Statistics: 1 test case | 0 errors | 0 failures | 0 flaky | 0 skipped | 2 orphans |',

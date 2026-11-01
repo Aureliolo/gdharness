@@ -635,7 +635,7 @@ func click(params: Dictionary) -> Dictionary:
 	#
 	# Out of sight against what it is clipped to rather than against the viewport: a row scrolled
 	# off the top of its container is inside the viewport, behind whatever is drawn up there, so
-	# the click went to that instead and said so. Measured on a hall whose staff panel had been
+	# the click went to that instead and said so. Measured on a screen whose list had been
 	# scrolled past: the button was at y 69 and its container started at y 166.
 	var scrolled: bool = item_scrolled
 	if not GdhScreen.in_sight(control, own, local):

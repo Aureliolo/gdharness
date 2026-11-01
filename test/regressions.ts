@@ -1000,14 +1000,14 @@ function testEngineEntriesFoldAndScriptErrorsAreKnown(): void {
   // Functions calling one another repeat a cycle of frames: the shape of game-b's overflow, an
   // eight-function cycle after the frames it started from, ending part-way round, then its caller.
   const cycle = [
-    'count_at',
-    '_fired',
-    'strength_of',
-    'gear',
-    'strength',
-    '_worn_strength',
-    'loadout',
-    'coin_held',
+    'step_one',
+    'step_two',
+    'step_three',
+    'step_four',
+    'step_five',
+    'step_six',
+    'step_seven',
+    'step_eight',
   ];
   const mutual = new GameLog();
   mutual.append(
@@ -1020,7 +1020,7 @@ function testEngineEntriesFoldAndScriptErrorsAreKnown(): void {
         { length: 8 * 125 + 3 },
         (_, at) => `       [${at + 1}] ${cycle[at % 8] ?? ''} (res://core/x.gd:${at % 8})`,
       ),
-      '       [1004] test_lends (res://tests/heriot_test.gd:30)',
+      '       [1004] test_steps (res://tests/steps_test.gd:30)',
       '',
     ].join('\n'),
   );
@@ -1030,10 +1030,10 @@ function testEngineEntriesFoldAndScriptErrorsAreKnown(): void {
     '[0] deepest (res://core/a.gd:1)',
     '[1-1000] these 8 frames, 125 times over:',
     ...cycle.map((name, at) => `  ${name} (res://core/x.gd:${at})`),
-    '[1001] count_at (res://core/x.gd:0)',
-    '[1002] _fired (res://core/x.gd:1)',
-    '[1003] strength_of (res://core/x.gd:2)',
-    '[1004] test_lends (res://tests/heriot_test.gd:30)',
+    '[1001] step_one (res://core/x.gd:0)',
+    '[1002] step_two (res://core/x.gd:1)',
+    '[1003] step_three (res://core/x.gd:2)',
+    '[1004] test_steps (res://tests/steps_test.gd:30)',
   ]);
   // A cycle holding one frame twice in a row is the cycle, not that frame twice and the rest apart.
   const doubled = new GameLog();
@@ -1544,8 +1544,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   // compiled and never run, and the note said functions with time were missing.
   const atTheCap = (lastSeconds: number): ProfileTotals => ({
     ...totals({
-      'res://crews.gd::4::Crews.busy': { calls: 10, selfSeconds: 0.4, totalSeconds: 0.4 },
-      'res://crews.gd::9::Crews.idle': { calls: 0, selfSeconds: lastSeconds, totalSeconds: lastSeconds },
+      'res://squads.gd::4::Squads.busy': { calls: 10, selfSeconds: 0.4, totalSeconds: 0.4 },
+      'res://squads.gd::9::Squads.idle': { calls: 0, selfSeconds: lastSeconds, totalSeconds: lastSeconds },
     }),
     frameFunctions: 1536,
     cappedFrames: 0,
@@ -1591,37 +1591,37 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   // Where a lambda is written and who names a function, off source shaped like a real project's: a
   // lambda whose body is on lines of its own, a string holding a line that begins with func, a
   // function written on one line, an inner class, and lambdas at a class's own level.
-  const crewing = [
-    'class_name Crewing',
+  const teams = [
+    'class_name Lineup',
     'extends Node',
     '',
     'var by_strength := func(a, b): return a < b',
-    'var named := "_ranked_by"',
+    'var named := "_sorted_by"',
     '',
     '',
-    'func _ranked_by(people: Array, key: Callable) -> Array:',
+    'func _sorted_by(people: Array, key: Callable) -> Array:',
     '\tpeople.sort_custom(func(a, b): return key.call(a) > key.call(b))',
     '\treturn people',
     '',
     '',
-    'func _brings_together(people: Array) -> Array:',
-    '\tvar ranked := _ranked_by(people, _strength)',
+    'func _joins_up(people: Array) -> Array:',
+    '\tvar ranked := _sorted_by(people, _strength)',
     '\tfor one in ranked:',
     '\t\tvar note := """',
     'func fake():',
     '"""',
     '\t\tvar pick := func pick_one(x):',
     '',
-    '\t\t\treturn _ranked_by([x], _strength)',
+    '\t\t\treturn _sorted_by([x], _strength)',
     '\t\tpick.call(one)',
     '\treturn ranked',
     '',
     '',
-    'static func _crews_among(c: Crewing) -> Array: return c._ranked_by([], c._strength)',
+    'static func _teams_among(c: Lineup) -> Array: return c._sorted_by([], c._strength)',
     '',
     '',
     'func _strength(_one: Variant) -> int:',
-    '\tvar later := _ranked_by  # _ranked_by( in a comment',
+    '\tvar later := _sorted_by  # _sorted_by( in a comment',
     '\treturn 0 if later else 1',
     '',
     '',
@@ -1633,60 +1633,60 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     '',
   ].join('\n');
   assert.deepEqual(
-    [9, 14, 21, 26, 36, 4, 38, 99].map((line) => enclosingFunction(crewing, line)),
-    ['_ranked_by', '_brings_together', '_brings_together', '_crews_among', 'sort', null, null, null],
+    [9, 14, 21, 26, 36, 4, 38, 99].map((line) => enclosingFunction(teams, line)),
+    ['_sorted_by', '_joins_up', '_joins_up', '_teams_among', 'sort', null, null, null],
     'each line in the named function written around it, and none for a line at a class level',
   );
   const other = [
     'class_name Other',
     '',
-    'func _ranked_by(x: Array) -> Array:',
+    'func _sorted_by(x: Array) -> Array:',
     '\treturn x',
     '',
     '',
-    'func send_out(c: Crewing) -> void:',
-    '\tc._ranked_by([], c._strength)',
+    'func send_out(c: Lineup) -> void:',
+    '\tc._sorted_by([], c._strength)',
     '',
     '',
-    'func _brings_together() -> void:',
-    '\t_ranked_by([])',
+    'func _joins_up() -> void:',
+    '\t_sorted_by([])',
     '',
   ].join('\n');
-  const crew = totals({
-    'res://crewing.gd::9::Crewing._ranked_by': { calls: 716, selfSeconds: 0.9, totalSeconds: 1.8 },
-    'res://crewing.gd::9::Crewing.<anonymous lambda>(lambda)': {
+  const teamTotals = totals({
+    'res://lineup.gd::9::Lineup._sorted_by': { calls: 716, selfSeconds: 0.9, totalSeconds: 1.8 },
+    'res://lineup.gd::9::Lineup.<anonymous lambda>(lambda)': {
       calls: 16000,
       selfSeconds: 0.4,
       totalSeconds: 0.4,
     },
-    'res://crewing.gd::14::Crewing._brings_together': { calls: 581, selfSeconds: 0.1, totalSeconds: 1.5 },
-    'res://crewing.gd::26::Crewing._crews_among': { calls: 10, selfSeconds: 0.05, totalSeconds: 2 },
-    'res://crewing.gd::21::Crewing.pick_one(lambda)': { calls: 581, selfSeconds: 0.02, totalSeconds: 0.5 },
-    'res://other.gd::4::Other._ranked_by': { calls: 5, selfSeconds: 0.01, totalSeconds: 0.01 },
+    'res://lineup.gd::14::Lineup._joins_up': { calls: 581, selfSeconds: 0.1, totalSeconds: 1.5 },
+    'res://lineup.gd::26::Lineup._teams_among': { calls: 10, selfSeconds: 0.05, totalSeconds: 2 },
+    'res://lineup.gd::21::Lineup.pick_one(lambda)': { calls: 581, selfSeconds: 0.02, totalSeconds: 0.5 },
+    'res://other.gd::4::Other._sorted_by': { calls: 5, selfSeconds: 0.01, totalSeconds: 0.01 },
   });
-  const sourceOf = (script: string): string | null => (script === 'res://crewing.gd' ? crewing : null);
+  const sourceOf = (script: string): string | null => (script === 'res://lineup.gd' ? teams : null);
   assert.deepEqual(
-    profiledFunctions(crew, 10, sourceOf).functions.map((one) => [one.function, one.within]),
+    profiledFunctions(teamTotals, 10, sourceOf).functions.map((one) => [one.function, one.within]),
     [
-      ['Crewing._ranked_by', undefined],
-      ['Crewing.<anonymous lambda>(lambda)', '_ranked_by'],
-      ['Crewing._brings_together', undefined],
-      ['Crewing._crews_among', undefined],
-      ['Crewing.pick_one(lambda)', '_brings_together'],
-      ['Other._ranked_by', undefined],
+      ['Lineup._sorted_by', undefined],
+      ['Lineup.<anonymous lambda>(lambda)', '_sorted_by'],
+      ['Lineup._joins_up', undefined],
+      ['Lineup._teams_among', undefined],
+      ['Lineup.pick_one(lambda)', '_joins_up'],
+      ['Other._sorted_by', undefined],
     ],
     'the lambda placed in the function it is written in, and nothing added to a named function',
   );
   assert.equal(
-    profiledFunctions(crew, 10).functions[1]?.within,
+    profiledFunctions(teamTotals, 10).functions[1]?.within,
     undefined,
     'and a lambda whose script cannot be read is left as the engine named it',
   );
   const scripts = [
-    ['res://crewing.gd', crewing],
+    ['res://lineup.gd', teams],
     ['res://other.gd', other],
   ] as const;
-  const found = callersOf(crew, '_ranked_by', scripts);
+  const found = callersOf(teamTotals, '_sorted_by', scripts);
   assert.deepEqual(
     found.sites.map((one) => [
       one.script,
@@ -1697,30 +1697,30 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       one.withinTotalMs,
     ]),
     [
-      ['res://crewing.gd', 26, '_crews_among', true, 10, 2000],
-      ['res://crewing.gd', 14, '_brings_together', true, 581, 1500],
-      ['res://crewing.gd', 21, '_brings_together', true, 581, 1500],
-      ['res://crewing.gd', 30, '_strength', false, undefined, undefined],
+      ['res://lineup.gd', 26, '_teams_among', true, 10, 2000],
+      ['res://lineup.gd', 14, '_joins_up', true, 581, 1500],
+      ['res://lineup.gd', 21, '_joins_up', true, 581, 1500],
+      ['res://lineup.gd', 30, '_strength', false, undefined, undefined],
       ['res://other.gd', 8, 'send_out', true, undefined, undefined],
-      ['res://other.gd', 12, '_brings_together', true, undefined, undefined],
+      ['res://other.gd', 12, '_joins_up', true, undefined, undefined],
     ],
     'every place in code naming it, by the time of the function each is in; not its declarations, the string or the comment',
   );
   assert.deepEqual(
     [found.target.map((one) => one.function), found.omitted],
-    [['Crewing._ranked_by', 'Other._ranked_by'], 0],
+    [['Lineup._sorted_by', 'Other._sorted_by'], 0],
     "the rows of every function by that name, since a bare name does not say which class's",
   );
   assert.deepEqual(
-    callersOf(crew, 'Crewing._ranked_by', scripts).target.map((one) => one.function),
-    ['Crewing._ranked_by'],
+    callersOf(teamTotals, 'Lineup._sorted_by', scripts).target.map((one) => one.function),
+    ['Lineup._sorted_by'],
     "and Class.name picks out the one class's",
   );
   const manyCalls = [
     'func many() -> void:',
-    ...Array.from({ length: 41 }, () => '\t_ranked_by([], _strength)'),
+    ...Array.from({ length: 41 }, () => '\t_sorted_by([], _strength)'),
   ].join('\n');
-  const capped = callersOf(crew, '_ranked_by', [['res://many.gd', manyCalls]]);
+  const capped = callersOf(teamTotals, '_sorted_by', [['res://many.gd', manyCalls]]);
   assert.deepEqual(
     [capped.sites.length, capped.omitted, capped.sites.at(-1)?.line],
     [40, 1, 41],
@@ -1728,20 +1728,23 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   );
 
   const withCallers = (name: string, from: readonly (readonly [string, string])[]): string =>
-    String(get(answer({ totals: crew, callersOf: { name, scripts: () => from } }), 'callers', 'note'));
-  assert.match(withCallers('_ranked_by', scripts), /^Found by name in the project's scripts/);
-  assert.match(withCallers('_ranked_by', []), /^No script in the project names _ranked_by in code/);
+    String(get(answer({ totals: teamTotals, callersOf: { name, scripts: () => from } }), 'callers', 'note'));
+  assert.match(withCallers('_sorted_by', scripts), /^Found by name in the project's scripts/);
+  assert.match(withCallers('_sorted_by', []), /^No script in the project names _sorted_by in code/);
   assert.match(
     withCallers('_strength', scripts),
     /The profile counts no call of _strength, so none of these places ran it while the profiler was on: withinCalls says the function a place is in ran, not that the line did\.$/,
   );
   // Places in functions that ran, and still no row: the line did not run, or the function fell past
   // the cap, or its name never arrived, each said only when this profile could have done it.
-  // Reported from game-a: SkinImage.tinted, with callers at withinCalls 14 and 6.
+  // Reported from game-a: a method with callers at withinCalls 14 and 6.
   const noted = (shaped: Partial<ProfileTotals>): string =>
     String(
       get(
-        answer({ totals: { ...crew, ...shaped }, callersOf: { name: '_strength', scripts: () => scripts } }),
+        answer({
+          totals: { ...teamTotals, ...shaped },
+          callersOf: { name: '_strength', scripts: () => scripts },
+        }),
         'callers',
         'note',
       ),
@@ -1762,7 +1765,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   const withUnnamed = (count: number): string =>
     noted({
       functions: {
-        ...crew.functions,
+        ...teamTotals.functions,
         ...Object.fromEntries(
           Array.from({ length: count }, (_, index) => [
             `${UNNAMED_PREFIX}${index + 1}`,
@@ -1778,49 +1781,52 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       complete: false,
       frameFunctions: 64,
       cappedFrames: 1,
-      functions: { ...crew.functions, [`${UNNAMED_PREFIX}9`]: { calls: 1, selfSeconds: 0, totalSeconds: 0 } },
+      functions: {
+        ...teamTotals.functions,
+        [`${UNNAMED_PREFIX}9`]: { calls: 1, selfSeconds: 0, totalSeconds: 0 },
+      },
     }),
     /the line did, or its calls took too little time to be among the 64 functions a frame carried, or it is the function whose name never arrived\.$/,
   );
 
   // A property's get and set blocks, as the compiler names them, which no script calls by name: a
   // place naming the property runs them. Asked by either block's name or the property's, the rows
-  // are both blocks' and the places are the property's. Reported from game-a and
-  // game-b, whose tables named OutcomeReach.@sinks_setter and GameClock.@speed_getter.
+  // are both blocks' and the places are the property's. Reported from game-a and game-b, whose
+  // tables named the blocks, such as `Metronome.@tempo_getter`.
   assert.deepEqual(
     [
-      '@speed_getter',
-      'GameClock.@speed_setter',
-      'Reach.@sinks_and_hexes_getter',
-      'speed',
-      'Clock.@speed',
+      '@tempo_getter',
+      'Metronome.@tempo_setter',
+      'Span.@drains_and_floods_getter',
+      'tempo',
+      'Clock.@tempo',
       'getter',
     ].map(propertyOf),
-    ['speed', 'speed', 'sinks_and_hexes', null, null, null],
+    ['tempo', 'tempo', 'drains_and_floods', null, null, null],
   );
   // The blocks name the property itself, as game-b's do: inside them that is the value stored,
   // which the engine reads and writes without running them, so those lines are not places. Each
   // place says whether it writes, which runs the set block, or reads. Reported from game-b as
-  // #1020: every place read called: false, the setter's own `sinks = value` among them.
+  // #1020: every place read called: false, the setter's own assignment among them.
   const clock = [
-    'class_name GameClock',
+    'class_name Metronome',
     '',
-    'var speed: int = 1:',
+    'var tempo: int = 1:',
     '\tget:',
-    '\t\treturn speed',
+    '\t\treturn tempo',
     '\tset(value):',
-    '\t\tspeed = value',
+    '\t\ttempo = value',
     '',
     '',
-    'func tick() -> int:',
-    '\tspeed += 1',
-    '\treturn speed',
+    'func beat() -> int:',
+    '\ttempo += 1',
+    '\treturn tempo',
     '',
   ].join('\n');
-  const hall = [
-    'func open(clock: GameClock) -> void:',
-    '\tclock.speed = 3',
-    '\tprint(clock.speed == 3)',
+  const stage = [
+    'func open(clock: Metronome) -> void:',
+    '\tclock.tempo = 3',
+    '\tprint(clock.tempo == 3)',
     '',
   ].join('\n');
   const clocked = totals({
@@ -1829,24 +1835,24 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       selfSeconds: 0.02,
       totalSeconds: 0.02,
     },
-    'res://clock.gd::5::GameClock.@speed_getter': { calls: 40, selfSeconds: 0.001, totalSeconds: 0.001 },
-    'res://clock.gd::7::GameClock.@speed_setter': { calls: 40_000, selfSeconds: 0.1, totalSeconds: 0.1 },
-    'res://clock.gd::11::GameClock.tick': { calls: 40, selfSeconds: 0.2, totalSeconds: 0.3 },
+    'res://clock.gd::5::Metronome.@tempo_getter': { calls: 40, selfSeconds: 0.001, totalSeconds: 0.001 },
+    'res://clock.gd::7::Metronome.@tempo_setter': { calls: 40_000, selfSeconds: 0.1, totalSeconds: 0.1 },
+    'res://clock.gd::11::Metronome.beat': { calls: 40, selfSeconds: 0.2, totalSeconds: 0.3 },
   });
   assert.deepEqual(
     profiledFunctions(clocked, 10).functions.map((one) => [one.function, one.property, one.overheadMs]),
     [
-      ['GameClock.tick', undefined, undefined],
-      ['GameClock.@speed_setter', 'speed', 80],
-      ['GameClock.@speed_getter', 'speed', undefined],
+      ['Metronome.beat', undefined, undefined],
+      ['Metronome.@tempo_setter', 'tempo', 80],
+      ['Metronome.@tempo_getter', 'tempo', undefined],
     ],
     'each block carries its property, and the setter is mostly the profiler',
   );
   const scriptsOfTheClock: [string, string][] = [
     ['res://clock.gd', clock],
-    ['res://hall.gd', hall],
+    ['res://stage.gd', stage],
   ];
-  for (const asked of ['GameClock.@speed_getter', 'GameClock.speed', '@speed_setter', 'speed']) {
+  for (const asked of ['Metronome.@tempo_getter', 'Metronome.tempo', '@tempo_setter', 'tempo']) {
     const ofTheClock = callersOf(clocked, asked, scriptsOfTheClock);
     assert.deepEqual(
       [
@@ -1865,21 +1871,21 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       [
         true,
         [
-          ['GameClock.@speed_setter', 80],
-          ['GameClock.@speed_getter', undefined],
+          ['Metronome.@tempo_setter', 80],
+          ['Metronome.@tempo_getter', undefined],
         ],
         [
-          ['res://clock.gd', 11, 'tick', 'write', undefined, 40],
-          ['res://clock.gd', 12, 'tick', 'read', undefined, 40],
-          ['res://hall.gd', 2, 'open', 'write', undefined, undefined],
-          ['res://hall.gd', 3, 'open', 'read', undefined, undefined],
+          ['res://clock.gd', 11, 'beat', 'write', undefined, 40],
+          ['res://clock.gd', 12, 'beat', 'read', undefined, 40],
+          ['res://stage.gd', 2, 'open', 'write', undefined, undefined],
+          ['res://stage.gd', 3, 'open', 'read', undefined, undefined],
         ],
       ],
       `asked as ${asked}`,
     );
   }
   assert.deepEqual(
-    callersOf(clocked, 'Other.speed', scriptsOfTheClock).target,
+    callersOf(clocked, 'Other.tempo', scriptsOfTheClock).target,
     [],
     "another class's property of that name is not this one",
   );
@@ -1932,25 +1938,25 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       ),
     );
   assert.match(
-    noteFor('GameClock.speed'),
+    noteFor('Metronome.tempo'),
     / It is a property, so each place says whether it writes it \(access write\), which runs its set block, or reads it \(access read\), which runs its get block: .* so those lines are not listed\.$/,
   );
-  assert.doesNotMatch(noteFor('tick'), /It is a property/, 'a function is not said to be one');
+  assert.doesNotMatch(noteFor('beat'), /It is a property/, 'a function is not said to be one');
 
   // A super call is in its caller's self time as well as in the overridden function's row, so the
   // rows calling super are marked: each way of writing one, and the places that only look like one.
-  const duel = [
+  const overrides = [
     'class_name Run',
-    'extends Pouched',
+    'extends Stowed',
     '',
     '',
-    'func _begin_duel(a: int) -> int:',
+    'func _begin_match(a: int) -> int:',
     '\tvar got := super(a)',
     '\treturn got',
     '',
     '',
     'func _begin_other() -> void:',
-    '\tsuper._begin_duel(1)',
+    '\tsuper._begin_match(1)',
     '',
     '',
     'func one_line() -> int: return super.one_line() + 1',
@@ -1975,17 +1981,17 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     '\tsupervisor.super_x(my_super(1))',
     '',
   ].join('\n');
-  const duelRows = (lines: readonly (readonly [number, string])[]): ProfileTotals =>
+  const overrideRows = (lines: readonly (readonly [number, string])[]): ProfileTotals =>
     totals(
       Object.fromEntries(
         lines.map(([line, name], at) => [
-          `res://duel.gd::${line}::Run.${name}`,
+          `res://overrides.gd::${line}::Run.${name}`,
           { calls: 1, selfSeconds: 0.1 * (lines.length - at), totalSeconds: 1 },
         ]),
       ),
     );
-  const duels = duelRows([
-    [6, '_begin_duel'],
+  const overridden = overrideRows([
+    [6, '_begin_match'],
     [11, '_begin_other'],
     [14, 'one_line'],
     [18, 'only_said'],
@@ -1995,15 +2001,16 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     [28, '<anonymous lambda>(lambda)'],
     [33, '_supervise'],
   ]);
-  const duelSource = (script: string): string | null => (script === 'res://duel.gd' ? duel : null);
+  const overrideSource = (script: string): string | null =>
+    script === 'res://overrides.gd' ? overrides : null;
   assert.deepEqual(
-    profiledFunctions(duels, 20, duelSource).functions.map((one) => [
+    profiledFunctions(overridden, 20, overrideSource).functions.map((one) => [
       one.line,
       one.function,
       one.selfIncludesSuper,
     ]),
     [
-      [6, 'Run._begin_duel', true],
+      [6, 'Run._begin_match', true],
       [11, 'Run._begin_other', true],
       [14, 'Run.one_line', true],
       [18, 'Run.only_said', undefined],
@@ -2016,20 +2023,20 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     'super( and super.name( in the body, on its header line or in a lambda; not in a comment, a string, a lambda written in the function, or a longer name holding super',
   );
   assert.match(
-    String(answer({ totals: duels, sourceOf: duelSource })['note']),
+    String(answer({ totals: overridden, sourceOf: overrideSource })['note']),
     /^5 functions call through super, marked selfIncludesSuper: the engine takes every other call out of the caller's self time, and not a super call, so their selfMs holds the overridden function's time, which that function's own row counts again\. Self time therefore cannot be added along an override chain, and scriptMs counts the time under a super call once more for each level above it\.$/,
   );
   assert.match(
-    String(answer({ totals: duelRows([[6, '_begin_duel']]), sourceOf: duelSource })['note']),
+    String(answer({ totals: overrideRows([[6, '_begin_match']]), sourceOf: overrideSource })['note']),
     /^One function calls through super, marked selfIncludesSuper: .* so its selfMs holds/,
   );
   assert.equal(
-    answer({ totals: duels })['note'],
+    answer({ totals: overridden })['note'],
     undefined,
     'nothing is said of a source that cannot be read',
   );
   assert.deepEqual(
-    callersOf(duels, '_begin_duel', [['res://duel.gd', duel]]).sites.map((one) => [
+    callersOf(overridden, '_begin_match', [['res://overrides.gd', overrides]]).sites.map((one) => [
       one.line,
       one.within,
       one.withinSelfIncludesSuper,
@@ -2040,8 +2047,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
 
   // A name that is something else where it is written is not the function: a parameter, a local in
   // a block still open, a for variable, a match binding, a lambda's parameter, a class's own
-  // variable. Reported from game-b as #989, where a helper's `lift: int` parameter was listed as
-  // `lift` handed on as a Callable. And a call through another class the project declares is that
+  // variable. Reported from game-b as #989, where a helper's `amount: int` parameter was listed as
+  // `amount` handed on as a Callable. And a call through another class the project declares is that
   // class's method when one class is asked about.
   const lifting = [
     'class_name Lifts',
@@ -2087,7 +2094,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     'func one_line(lift: int) -> int: return lift',
     '',
   ].join('\n');
-  const kiln = [
+  const oven = [
     'extends Node',
     '',
     '',
@@ -2107,26 +2114,26 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     '\tlift = 3',
     '',
   ].join('\n');
-  const pouched = [
-    'class_name Pouched',
+  const stowed = [
+    'class_name Stowed',
     'extends Placed',
     '',
     '',
-    'func go(loadout: Variant) -> void:',
-    '\tApported.lift(loadout)',
-    '\tPlaced.lift(loadout)',
-    '\tself.lift(loadout)',
-    '\tlift(loadout)',
+    'func go(kit: Variant) -> void:',
+    '\tFetched.lift(kit)',
+    '\tPlaced.lift(kit)',
+    '\tself.lift(kit)',
+    '\tlift(kit)',
     '',
   ].join('\n');
   const declaring = (name: string): string =>
     `class_name ${name}\n\n\nstatic func lift(x: Variant) -> void:\n\tprint(x)\n`;
   const project = [
     ['res://core/lifts.gd', lifting],
-    ['res://tests/kiln_test.gd', kiln],
+    ['res://tests/oven_test.gd', oven],
     ['res://core/holder.gd', holding],
-    ['res://core/pouched.gd', pouched],
-    ['res://core/apported.gd', declaring('Apported')],
+    ['res://core/stowed.gd', stowed],
+    ['res://core/fetched.gd', declaring('Fetched')],
     ['res://core/placed.gd', declaring('Placed')],
   ] as const;
   const placedAt = (name: string): unknown[] =>
@@ -2136,31 +2143,31 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     [
       ['res://core/lifts.gd', 13, false],
       ['res://core/lifts.gd', 20, true],
-      ['res://core/pouched.gd', 7, true],
-      ['res://core/pouched.gd', 8, true],
-      ['res://core/pouched.gd', 9, true],
+      ['res://core/stowed.gd', 7, true],
+      ['res://core/stowed.gd', 8, true],
+      ['res://core/stowed.gd', 9, true],
     ],
-    'the Callable handed on and the calls, and none of the locals, the member variable or the call through Apported',
+    'the Callable handed on and the calls, and none of the locals, the member variable or the call through Fetched',
   );
   assert.deepEqual(
     placedAt('lift'),
     [
       ['res://core/lifts.gd', 13, false],
       ['res://core/lifts.gd', 20, true],
-      ['res://core/pouched.gd', 6, true],
-      ['res://core/pouched.gd', 7, true],
-      ['res://core/pouched.gd', 8, true],
-      ['res://core/pouched.gd', 9, true],
+      ['res://core/stowed.gd', 6, true],
+      ['res://core/stowed.gd', 7, true],
+      ['res://core/stowed.gd', 8, true],
+      ['res://core/stowed.gd', 9, true],
     ],
     'and with no class asked about, the call through another class is listed as the note says',
   );
   // A receiver declared as another class is that class's object, whichever way it was declared: a
   // typed local, a new(), a cast, a typed parameter, a typed for variable, a variable of the class.
-  // Reported from game-b on 1.1.61, `made.lift(...)` with `var made: Outcome` above it. What says
+  // Reported from game-b on 1.1.61, `result.apply(...)` with `var result: Effect` above it. What says
   // nothing about the class stays: an untyped local, a receiver that is a member of something else,
   // and a variable declared as the class asked about.
   const paying = [
-    'class_name Payout',
+    'class_name Prize',
     'extends RefCounted',
     '',
     'var kept: Outcome = null',
@@ -2185,13 +2192,13 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     '',
   ].join('\n');
   const paid = [
-    ['res://core/payout.gd', paying],
+    ['res://core/prize.gd', paying],
     ['res://core/outcome.gd', declaring('Outcome')],
     ['res://core/placed.gd', declaring('Placed')],
   ] as const;
   const paidAt = (name: string): unknown[] =>
     callersOf(totals({}), name, paid)
-      .sites.filter((one) => one.script === 'res://core/payout.gd')
+      .sites.filter((one) => one.script === 'res://core/prize.gd')
       .map((one) => one.line);
   assert.deepEqual(
     paidAt('Placed.lift'),
@@ -2221,8 +2228,8 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       selfSeconds: 0.005,
       totalSeconds: 0.025,
     },
-    'res://crews.gd::40::Crews.fits': { calls: 600_000, selfSeconds: 1.3, totalSeconds: 1.3 },
-    'res://crews.gd::12::Crews.together': { calls: 10, selfSeconds: 0.5, totalSeconds: 1.8 },
+    'res://squads.gd::40::Squads.fits': { calls: 600_000, selfSeconds: 1.3, totalSeconds: 1.3 },
+    'res://squads.gd::12::Squads.joined': { calls: 10, selfSeconds: 0.5, totalSeconds: 1.8 },
   });
   const costed = profiledFunctions(calibrated, 10);
   assert.deepEqual(
@@ -2233,15 +2240,15 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   assert.deepEqual(
     costed.functions.map((one) => [one.function, one.overheadMs]),
     [
-      ['Crews.fits', 1200],
-      ['Crews.together', undefined],
+      ['Squads.fits', 1200],
+      ['Squads.joined', undefined],
     ],
     'the hot predicate is mostly the profiler; the function doing the work is not',
   );
   const costNote = String(answer({ totals: calibrated })['note']);
   assert.match(
     costNote,
-    /^The profiler costs about 2µs a call in this run, measured on an empty function the runtime addon calls as it goes on, .* One function has at least half its selfMs in it: Crews\.fits\. Its row carries that share as overheadMs\. That much of its time is the profiler's and goes once the profiler is off, whether the function is inlined or not\. What inlining saves is the call itself, .* not the work inside it\.$/,
+    /^The profiler costs about 2µs a call in this run, measured on an empty function the runtime addon calls as it goes on, .* One function has at least half its selfMs in it: Squads\.fits\. Its row carries that share as overheadMs\. That much of its time is the profiler's and goes once the profiler is off, whether the function is inlined or not\. What inlining saves is the call itself, .* not the work inside it\.$/,
     costNote,
   );
   assert.equal(get(answer({ totals: calibrated }), 'perCallOverheadUs'), 2);
@@ -2249,7 +2256,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     get(
       answer({
         totals: totals({
-          'res://crews.gd::40::Crews.fits': { calls: 600_000, selfSeconds: 1.3, totalSeconds: 1.3 },
+          'res://squads.gd::40::Squads.fits': { calls: 600_000, selfSeconds: 1.3, totalSeconds: 1.3 },
         }),
       }),
       'perCallOverheadUs',
@@ -2312,18 +2319,18 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
       },
       ...Object.fromEntries(
         Array.from({ length: count }, (_, index) => [
-          `res://crews.gd::${index + 1}::Crews.hot${index}`,
+          `res://squads.gd::${index + 1}::Squads.hot${index}`,
           { calls: 100_000, selfSeconds: 0.2 + index * 0.01, totalSeconds: 0.2 + index * 0.01 },
         ]),
       ),
     });
   assert.match(
     String(answer({ totals: hot(2) })['note']),
-    /2 functions have at least half their selfMs in it: Crews\.hot1 and Crews\.hot0\. Their rows carry that share as overheadMs\. That much of their time/,
+    /2 functions have at least half their selfMs in it: Squads\.hot1 and Squads\.hot0\. Their rows carry that share as overheadMs\. That much of their time/,
   );
   assert.match(
     String(answer({ totals: hot(7) })['note']),
-    /7 functions have at least half their selfMs in it: Crews\.hot6, Crews\.hot5, Crews\.hot4, Crews\.hot3, Crews\.hot2 and 2 more\. Their rows carry/,
+    /7 functions have at least half their selfMs in it: Squads\.hot6, Squads\.hot5, Squads\.hot4, Squads\.hot3, Squads\.hot2 and 2 more\. Their rows carry/,
   );
   // And where those rows are, since the field the note speaks of goes with any row a limit leaves
   // out. Reported from game-b as #1016: at limit 5 none of the 29 rows came back, and the note
@@ -2333,7 +2340,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     ...hot(count),
     functions: {
       ...hot(count).functions,
-      'res://crews.gd::90::Crews.heavy': { calls: 1, selfSeconds: 5, totalSeconds: 5 },
+      'res://squads.gd::90::Squads.heavy': { calls: 1, selfSeconds: 5, totalSeconds: 5 },
     },
   });
   const limited = (count: number, limit: number): string =>
@@ -2345,7 +2352,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     );
   assert.match(
     limited(7, 1),
-    /: Crews\.hot6, Crews\.hot5, Crews\.hot4, Crews\.hot3, Crews\.hot2 and 2 more\. Their rows, which carry that share as overheadMs, come after the one row returned\. limit 8 returns them all\. That much/,
+    /: Squads\.hot6, Squads\.hot5, Squads\.hot4, Squads\.hot3, Squads\.hot2 and 2 more\. Their rows, which carry that share as overheadMs, come after the one row returned\. limit 8 returns them all\. That much/,
   );
   assert.match(
     limited(7, 3),
@@ -2355,7 +2362,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   assert.match(limited(7, 8), / and 2 more\. Their rows carry that share as overheadMs\. That much/);
   assert.match(
     limited(1, 1),
-    /One function has at least half its selfMs in it: Crews\.hot0\. Its row, which carries that share as overheadMs, comes after the one row returned\. limit 2 returns it\. That much of its time/,
+    /One function has at least half its selfMs in it: Squads\.hot0\. Its row, which carries that share as overheadMs, comes after the one row returned\. limit 2 returns it\. That much of its time/,
   );
   // One row returned and it one of several: game-b's limit 1 read "none of the 1 returned".
   assert.match(
@@ -2371,11 +2378,11 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   // Every thread's time is added to the same function, so script time beyond the time covered is
   // threads at work, which the note says, and with a super call marked, that the super call can be
   // some of it. Reported from game-a: a worker-thread function topped the table.
-  const crewsWithSuper = [
-    'class_name Crews',
+  const squadsWithSuper = [
+    'class_name Squads',
     'extends Base',
     ...Array.from({ length: 8 }, () => ''),
-    'func together() -> void:',
+    'func joined() -> void:',
     '\tsuper()',
     '',
   ].join('\n');
@@ -2394,7 +2401,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   assert.doesNotMatch(threaded(1800), /is more than the/, 'no more than the time covered is one thread');
   assert.match(threaded(1799), /scriptMs, 1800ms, is more than the 1799ms/);
   assert.match(
-    threaded(100, (script) => (script === 'res://crews.gd' ? crewsWithSuper : null)),
+    threaded(100, (script) => (script === 'res://squads.gd' ? squadsWithSuper : null)),
     /is more than the 100ms the profile covers\. The super calls above, counted twice, can account for some or all of that\. Whatever they do not is functions running on several threads at once/,
   );
 
@@ -2404,14 +2411,14 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   try {
     const inside = join(holder, 'project');
     mkdirSync(inside);
-    writeFileSync(join(inside, 'crewing.gd'), crewing);
+    writeFileSync(join(inside, 'lineup.gd'), teams);
     writeFileSync(join(holder, 'outside.gd'), 'func outside() -> void:\n\tpass\n');
     const readInside = projectSourceOf(inside);
     assert.deepEqual(
       [
-        readInside('res://crewing.gd') === crewing,
+        readInside('res://lineup.gd') === teams,
         readInside('res://../outside.gd'),
-        readInside('res://crewing.tscn::GDScript_x'),
+        readInside('res://lineup.tscn::GDScript_x'),
       ],
       [true, null, null],
       'the project script read, the one outside it and the built-in one not',
@@ -2921,7 +2928,7 @@ async function withFakeLanguageServer<T>(
  * didChange naming a document the new server had never opened, which publishes nothing, so every
  * call timed out with "the language server may not be running" while documentSymbol on the same
  * file over the same socket answered completely and currently. Reported by another project on
- * 0.9.5 and reproduced here on 0.9.6: `guild.gd` answered clean in about a second, and after a
+ * 0.9.5 and reproduced here on 0.9.6: `main.gd` answered clean in about a second, and after a
  * restart the same call timed out.
  *
  * The stub publishes on didOpen alone, which is what Godot does, so the second ask is answered
@@ -3516,8 +3523,8 @@ async function testASymbolEndingAtALinesStartEndsOnTheLineBefore(): Promise<void
  * that parse alive for as long as the document is open. The parse holds the parses of everything
  * the file depends on, so a `class_name` script edited outside the editor stays at its old text
  * for every open file that uses it. A project hit this on 0.10.0 after adding a static method and
- * a constant to `components.gd` from outside the editor: `script_diagnostics` on two files that
- * use them answered `Static function "opening()" not found in base "Components"` and four more of
+ * a constant to `parts.gd` from outside the editor: `script_diagnostics` on two files that
+ * use them answered `Static function "first()" not found in base "Parts"` and four more of
  * the same shape, about code the engine had just compiled and run green.
  *
  * Nothing on the editor side reaches it. `editor_rescan` answered `ok` and changed nothing, and
@@ -11215,22 +11222,22 @@ function testAWallOfOneMessageCollapsesToItsShape(): void {
   const shaped = shapeOf('Parse Error: Could not parse global class "Run" from "res://core/run.gd"');
   assert.equal(shaped.shape, 'Parse Error: Could not parse global class … from …');
   assert.deepEqual(shaped.values, ['"Run"', '"res://core/run.gd"']);
-  const located = shapeOf('res://tests/pieces_test.gd:26 - Parse Error');
+  const located = shapeOf('res://tests/parts_test.gd:26 - Parse Error');
   assert.equal(located.shape, '… - Parse Error', 'a path and the line on it are one slot');
-  assert.deepEqual(located.values, ['res://tests/pieces_test.gd:26']);
+  assert.deepEqual(located.values, ['res://tests/parts_test.gd:26']);
 
   // The whole line the engine prints, which is a location and then the message. Three placeholders
   // and three values in the order they stand in the line: taken a pattern at a time the two quoted
   // values came back first and the location last, so the file an error was found in would have
   // been read as the script that would not parse.
   const wholeLine = shapeOf(
-    'res://tests/pieces_test.gd:26 - Parse Error: Could not parse global class "Run" from "res://core/run.gd"',
+    'res://tests/parts_test.gd:26 - Parse Error: Could not parse global class "Run" from "res://core/run.gd"',
   );
   assert.equal(wholeLine.shape, '… - Parse Error: Could not parse global class … from …');
-  assert.deepEqual(wholeLine.values, ['res://tests/pieces_test.gd:26', '"Run"', '"res://core/run.gd"']);
+  assert.deepEqual(wholeLine.values, ['res://tests/parts_test.gd:26', '"Run"', '"res://core/run.gd"']);
 
   const log = new GameLog();
-  const classes = ['Run', 'Encounter', 'Component', 'Run', 'Encounter'];
+  const classes = ['Run', 'Round', 'Part', 'Run', 'Round'];
   log.append(
     'transcript',
     [
@@ -11258,7 +11265,7 @@ function testAWallOfOneMessageCollapsesToItsShape(): void {
 
   // The slot that says something and the slot that says nothing, told apart. Three names across
   // five lines is the finding. Five different paths across five lines is the count again.
-  assert.deepEqual(wall.slots[0], { distinct: 3, some: ['"Run"', '"Encounter"', '"Component"'] });
+  assert.deepEqual(wall.slots[0], { distinct: 3, some: ['"Run"', '"Round"', '"Part"'] });
   assert.deepEqual(wall.slots[1], { distinct: 5, allDifferent: true });
 
   // The plugin line, which is info and sits above a burst five lines long.
@@ -11289,9 +11296,9 @@ function testAWallOfOneMessageCollapsesToItsShape(): void {
   // the whole console first, so the one kept is counted whole, with the same lines above it.
   const about = (phrase: string): readonly string[] =>
     bursts(log.everything(), 3, (entry) => answersTo(entry, 'info', phrase)).map((group) => group.shape);
-  assert.deepEqual(about('Encounter'), [wall.shape], 'a phrase in the first shape keeps that one only');
+  assert.deepEqual(about('Round'), [wall.shape], 'a phrase in the first shape keeps that one only');
   assert.equal(
-    bursts(log.everything(), 3, (entry) => answersTo(entry, 'info', 'Encounter'))[0]?.count,
+    bursts(log.everything(), 3, (entry) => answersTo(entry, 'info', 'Round'))[0]?.count,
     5,
     'counted over every line, not over the matching ones',
   );
@@ -11304,7 +11311,7 @@ function testAWallOfOneMessageCollapsesToItsShape(): void {
   const paired = new GameLog();
   paired.append(
     'transcript',
-    ['Run', 'Encounter', 'Component', 'Run']
+    ['Run', 'Round', 'Part', 'Run']
       .map(
         (name, at) =>
           `ERROR: res://tests/suite${at}.gd:${at + 4} - Could not parse global class "${name}" from "res://core/${name.toLowerCase()}.gd"`,
@@ -15507,8 +15514,8 @@ function testANotYetRuntimeIsNotTheSameAsNoRuntime(): void {
   assert.doesNotMatch(String(booting['note']), /reaches whichever game/, String(booting['note']));
 
   // The reason the wait ran out is often the caller's own arguments, and from where they sit that
-  // is invisible: the same project answers straight away without them. Reported from a run given
-  // `--days=600`, which simulates six years before it draws anything.
+  // is invisible: the same project answers straight away without them. Reported from a run given a
+  // game argument that makes it simulate a long stretch before it draws anything.
   const carrying = runtimeVerdict(null, {
     addon: true,
     budgetMs: 5_000,
@@ -16677,9 +16684,9 @@ async function testAStopGoesThroughTheKeeper(): Promise<void> {
  * A stop asks the game to close the way a player's close does, and ends it otherwise only when the
  * close does not.
  *
- * Reported from game-a as #1121: a stop ended the process, so a game keeping a crash
- * mark until its close never took the mark down, and its next start told the player it had crashed
- * and turned their mods off. The game here notes the close request and leaving the tree as files, in
+ * Reported from game-a as #1121: a stop ended the process, so a game keeping a crash mark until its
+ * close never took the mark down. Its next start then reported a crash that had not happened. The
+ * game here notes the close request and leaving the tree as files, in
  * a directory of each run's own. One closes, which is the stop the issue asked for. One turns off
  * auto_accept_quit and stays, so the stop sits out the close wait, ends it and says why. One is
  * stopped with graceful: false and sees no close at all. And a start ending the run before it closes
@@ -16897,9 +16904,9 @@ async function testAStopAsksTheGameToCloseFirst(): Promise<void> {
  * is drawn over it.
  *
  * Reported from game-a as #995: "has its processing disabled" said neither, and the
- * game's menu was over the hall, which took a find, a full-screen read and a guess to learn. Three
+ * game's menu was over the screen, which took a find, a full-screen read and a guess to learn. Three
  * buttons:
- * - one inheriting DISABLED from the hall it is in, under a panel drawn over it
+ * - one inheriting DISABLED from the screen it is in, under a panel drawn over it
  * - one set DISABLED itself with nothing over it
  * - one inheriting the root's pausable mode once the game is paused.
  */
@@ -16932,8 +16939,8 @@ async function testAClickThatDoesNotProcessSaysWhy(): Promise<void> {
       join(project, 'main.tscn'),
       '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
         '[node name="Main" type="Control"]\nscript = ExtResource("1")\n\n' +
-        '[node name="Hall" type="Control" parent="."]\nprocess_mode = 4\n\n' +
-        '[node name="Go" type="Button" parent="Hall"]\noffset_right = 30.0\noffset_bottom = 20.0\ntext = "Go"\n\n' +
+        '[node name="Screen" type="Control" parent="."]\nprocess_mode = 4\n\n' +
+        '[node name="Go" type="Button" parent="Screen"]\noffset_right = 30.0\noffset_bottom = 20.0\ntext = "Go"\n\n' +
         '[node name="Menu" type="Panel" parent="."]\noffset_right = 40.0\noffset_bottom = 40.0\n\n' +
         '[node name="Solo" type="Button" parent="."]\nprocess_mode = 4\noffset_left = 44.0\noffset_top = 2.0\noffset_right = 62.0\noffset_bottom = 20.0\ntext = "S"\n\n' +
         '[node name="Later" type="Button" parent="."]\noffset_left = 44.0\noffset_top = 40.0\noffset_right = 62.0\noffset_bottom = 60.0\ntext = "L"\n',
@@ -16957,9 +16964,9 @@ async function testAClickThatDoesNotProcessSaysWhy(): Promise<void> {
     assert.match(started, /"listening": true/, started);
 
     assert.match(
-      await call('runtime_input', { op: 'click', nodePath: '/root/Main/Hall/Go' }),
-      /\/root\/Main\/Hall\/Go does not process \(\/root\/Main\/Hall\/Go inherits process_mode DISABLED from \/root\/Main\/Hall\), so clicking it does nothing, and \/root\/Main\/Menu is drawn over it/,
-      'the hall that turned it off, and the menu over it',
+      await call('runtime_input', { op: 'click', nodePath: '/root/Main/Screen/Go' }),
+      /\/root\/Main\/Screen\/Go does not process \(\/root\/Main\/Screen\/Go inherits process_mode DISABLED from \/root\/Main\/Screen\), so clicking it does nothing, and \/root\/Main\/Menu is drawn over it/,
+      'the screen that turned it off, and the menu over it',
     );
     const solo = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Solo' });
     assert.match(
@@ -17478,10 +17485,10 @@ async function testAWatchRecordsAPropertyEveryFrame(): Promise<void> {
 /**
  * A click in a native window the platform has not said the pointer entered presses what it lands on.
  *
- * Reported from Game C as #1122: with subwindow embedding off, Godot hovers a control in a
- * native window only after the platform's mouse-enter, which an injected event never brings, and a
- * BaseButton takes a press only while hovered, so a click on its first-run "Yes", in a borderless
- * window at the screen's right edge, answered `landed: false, hovered: null` and pressed nothing.
+ * Reported from Game C as #1122: with subwindow embedding off, Godot hovers a control in a native
+ * window only after the platform's mouse-enter. An injected event never brings one, and a BaseButton
+ * takes a press only while hovered. So a click on a button in a second native window answered
+ * `landed: false, hovered: null` and pressed nothing.
  *
  * Windowed, which needs CI: the game's window goes to the right edge of the screen, away from where
  * any pointer rests, and opens a second native window beside it. Three buttons in the first, one
@@ -19461,7 +19468,7 @@ function testANotSentAnswerSaysWhatHeldIt(): void {
 /**
  * A capture the wait ran out on keeps its folder until the game has answered.
  *
- * Reported from game-a as #1150: a capture sent while the game played 45 days in one
+ * Reported from game-a as #1150: a capture sent while the game ran a long simulation in one
  * frame answered the timeout, and the server took the capture's folder away while the request sat in
  * the game. When the frame ended the game saved into a folder that was gone, the engine printed an
  * error, and the run read clean: false for a game that had raised nothing. The fake game holds the
@@ -21389,8 +21396,8 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
   // as its own and OS.get_cmdline_user_args() starts. Without the separator every one of them is
   // an option the engine has never heard of, and the game is handed nothing.
   assert.deepEqual(
-    runArguments({ projectPath: '/p', headless: true, scene: null, userArgs: ['--screen=hall'] }),
-    ['--headless', '--path', '/p', '--', '--screen=hall'],
+    runArguments({ projectPath: '/p', headless: true, scene: null, userArgs: ['--screen=shop'] }),
+    ['--headless', '--path', '/p', '--', '--screen=shop'],
   );
   // And no separator at all when there are none: a bare `--` is itself something a game can see,
   // so a run nobody gave arguments to should look exactly like one from before there were any.
@@ -22690,7 +22697,7 @@ function testADiagnosticTheFileContradictsIsNamed(): void {
  * reload as the remedy.
  *
  * Godot says `Cannot find member "X" in base "Class.Enum"` for these, which nothing read, so game-b
- * got a red diagnostic about `Ledger.Count.EXCHANGES_DRAWN` against a declaring file that had it, with
+ * got a red diagnostic about an enum member against a declaring file that had it, with
  * no contradictedByTheFile and no staleAnalysis, and the one remedy that cleared it went unnamed.
  * The messages below are the engine's own wording, taken from a headless 4.7.2 editor asked about a
  * member and a constant that exist nowhere.
@@ -22714,64 +22721,64 @@ function testAStaleEnumMemberIsNamed(): void {
   assert.equal(missingMemberIn('Cannot find member "LOW" in base "Peal::Tower.Pitch".'), null);
   assert.equal(missingMemberIn('Cannot find member "LOW" in base "Peal.Tower.Pitch".'), null);
 
-  const charm = [
-    'class_name Charm',
+  const token = [
+    'class_name Token',
     'extends RefCounted',
     '',
     'enum Kind {',
-    '\tLUCK,  # the old default, SPITE came later',
-    '\tWARD = 4,',
+    '\tLUCK,  # the old default, GRUDGE came later',
+    '\tGLOW = 4,',
     '\tZZ_PROBE,',
     '}',
-    'enum Mood { CALM, SPITE }',
+    'enum Mood { CALM, GRUDGE }',
     'enum { LOOSE_ONE, LOOSE_TWO = 7 }',
     '',
-    'const MAX_CHARMS: int = 3',
+    'const MAX_TOKENS: int = 3',
     'static var made: int = 0',
-    'signal worn',
+    'signal spent',
     '',
     '',
-    'class Pouch:',
+    'class Bag:',
     '\tenum Size { SMALL }',
     '',
     '',
     'func strongest() -> Kind:',
-    '\treturn Kind.WARD if MISSING_IN_A_BODY else Kind.LUCK',
+    '\treturn Kind.GLOW if MISSING_IN_A_BODY else Kind.LUCK',
     '',
   ].join('\n');
   const enumMember = (enumName: string, member: string): MissingMember => ({
     kind: 'enum member',
     member,
-    type: 'Charm',
+    type: 'Token',
     enum: enumName,
   });
-  const classMember = (member: string): MissingMember => ({ kind: 'member', member, type: 'Charm' });
+  const classMember = (member: string): MissingMember => ({ kind: 'member', member, type: 'Token' });
 
   assert.equal(
-    declaresMember(charm, enumMember('Kind', 'SPITE')),
+    declaresMember(token, enumMember('Kind', 'GRUDGE')),
     false,
     'a word in a comment is not a value',
   );
-  assert.equal(declaresMember(charm, enumMember('Kind', 'ZZ_PROBE')), true, 'a value on its own line');
-  assert.equal(declaresMember(charm, enumMember('Kind', 'LUCK')), true, 'one with a comment after it');
-  assert.equal(declaresMember(charm, enumMember('Kind', 'WARD')), true, 'one given a number');
-  assert.equal(declaresMember(charm, enumMember('Mood', 'SPITE')), true, 'an enum written on one line');
+  assert.equal(declaresMember(token, enumMember('Kind', 'ZZ_PROBE')), true, 'a value on its own line');
+  assert.equal(declaresMember(token, enumMember('Kind', 'LUCK')), true, 'one with a comment after it');
+  assert.equal(declaresMember(token, enumMember('Kind', 'GLOW')), true, 'one given a number');
+  assert.equal(declaresMember(token, enumMember('Mood', 'GRUDGE')), true, 'an enum written on one line');
   assert.equal(
-    declaresMember(charm, enumMember('Size', 'SMALL')),
+    declaresMember(token, enumMember('Size', 'SMALL')),
     false,
-    'an enum inside an inner class is the inner class’s, not Charm’s',
+    'an enum inside an inner class is the inner class’s, not Token’s',
   );
-  assert.equal(declaresMember(charm, enumMember('Mood', 'LUCK')), false, 'a value of another enum is not');
-  assert.equal(declaresMember(charm, enumMember('Kind', 'EXCHANGES_DRAWN')), false, 'nor one never written');
-  assert.equal(declaresMember(charm, enumMember('Tower', 'LUCK')), false, 'an enum the file lacks has none');
+  assert.equal(declaresMember(token, enumMember('Mood', 'LUCK')), false, 'a value of another enum is not');
+  assert.equal(declaresMember(token, enumMember('Kind', 'ROUNDS_PLAYED')), false, 'nor one never written');
+  assert.equal(declaresMember(token, enumMember('Tower', 'LUCK')), false, 'an enum the file lacks has none');
 
-  for (const member of ['MAX_CHARMS', 'made', 'Kind', 'Pouch', 'LOOSE_ONE', 'LOOSE_TWO']) {
-    assert.equal(declaresMember(charm, classMember(member)), true, `${member} is answered by the class`);
+  for (const member of ['MAX_TOKENS', 'made', 'Kind', 'Bag', 'LOOSE_ONE', 'LOOSE_TWO']) {
+    assert.equal(declaresMember(token, classMember(member)), true, `${member} is answered by the class`);
   }
-  for (const member of ['MISSING_IN_A_BODY', 'strongest_ever', 'CALM', 'SMALL', 'worn']) {
+  for (const member of ['MISSING_IN_A_BODY', 'strongest_ever', 'CALM', 'SMALL', 'spent']) {
     // CALM and SMALL are values of named enums, which the class does not answer by their own names,
-    // and worn is a signal, which the class is not asked for: Godot denies `Charm.worn`, rightly.
-    assert.equal(declaresMember(charm, classMember(member)), false, `${member} is not declared on the class`);
+    // and spent is a signal, which the class is not asked for: Godot denies `Token.spent`, rightly.
+    assert.equal(declaresMember(token, classMember(member)), false, `${member} is not declared on the class`);
   }
 
   // The class is asked only for what it holds itself, and only at its own top level. Each of these is
@@ -22834,14 +22841,14 @@ function testAStaleEnumMemberIsNamed(): void {
 
   const contradicted = contradictedDiagnostics(
     [
-      'Cannot find member "ZZ_PROBE" in base "Charm.Kind".',
-      'Cannot find member "MAX_CHARMS" in base "Charm".',
-      'Cannot find member "NEVER" in base "Charm.Kind".',
+      'Cannot find member "ZZ_PROBE" in base "Token.Kind".',
+      'Cannot find member "MAX_TOKENS" in base "Token".',
+      'Cannot find member "NEVER" in base "Token.Kind".',
       'Cannot find member "ZZ_PROBE" in base "Stranger.Kind".',
-      'The argument 3 of the function "per()" requires the subtype "Charm.Kind" but the supertype "Variant" was provided.',
+      'The argument 3 of the function "per()" requires the subtype "Token.Kind" but the supertype "Variant" was provided.',
     ],
-    new Map([['Charm', 'res://core/charm.gd']]),
-    (path) => (path === 'res://core/charm.gd' ? charm : null),
+    new Map([['Token', 'res://core/token.gd']]),
+    (path) => (path === 'res://core/token.gd' ? token : null),
   );
   assert.deepEqual(
     contradicted,
@@ -22849,11 +22856,11 @@ function testAStaleEnumMemberIsNamed(): void {
       {
         kind: 'enum member',
         member: 'ZZ_PROBE',
-        type: 'Charm',
+        type: 'Token',
         enum: 'Kind',
-        declaredIn: 'res://core/charm.gd',
+        declaredIn: 'res://core/token.gd',
       },
-      { kind: 'member', member: 'MAX_CHARMS', type: 'Charm', declaredIn: 'res://core/charm.gd' },
+      { kind: 'member', member: 'MAX_TOKENS', type: 'Token', declaredIn: 'res://core/token.gd' },
     ],
     'the two the file disproves, and not the member it lacks, the class the cache lacks or the follow-on',
   );
@@ -22867,7 +22874,7 @@ function testAStaleEnumMemberIsNamed(): void {
   );
   assert.match(
     alone,
-    /For Charm\.Kind\.ZZ_PROBE, Charm\.MAX_CHARMS, run editor_rescan with reloadScript set to res:\/\/core\/charm\.gd first\./,
+    /For Token\.Kind\.ZZ_PROBE, Token\.MAX_TOKENS, run editor_rescan with reloadScript set to res:\/\/core\/token\.gd first\./,
     `each is named as the source writes it, and the reload of the declaring script comes first: ${alone}`,
   );
   assert.match(
@@ -22891,7 +22898,7 @@ function testAStaleEnumMemberIsNamed(): void {
   assert.match(mixed, /reloadScript set to res:\/\/bell\.gd recompiles that copy/, 'with its own script');
   assert.match(
     mixed,
-    /For Charm\.Kind\.ZZ_PROBE, run editor_rescan with reloadScript set to res:\/\/core\/charm\.gd first\./,
+    /For Token\.Kind\.ZZ_PROBE, run editor_rescan with reloadScript set to res:\/\/core\/token\.gd first\./,
     'and the enum member to the reload of its own script',
   );
 
@@ -22900,17 +22907,17 @@ function testAStaleEnumMemberIsNamed(): void {
       probe,
       {
         ...probe,
-        type: 'Ledger',
+        type: 'Wallet',
         enum: 'Count',
-        member: 'EXCHANGES_DRAWN',
-        declaredIn: 'res://core/ledger.gd',
+        member: 'ROUNDS_PLAYED',
+        declaredIn: 'res://core/wallet.gd',
       },
     ],
     [],
   );
   assert.match(
     twoScripts,
-    /run editor_rescan with reloadScript set to \["res:\/\/core\/charm\.gd","res:\/\/core\/ledger\.gd"\] first\./,
+    /run editor_rescan with reloadScript set to \["res:\/\/core\/token\.gd","res:\/\/core\/wallet\.gd"\] first\./,
     `two declaring scripts are one call, given as a list: ${twoScripts}`,
   );
   assert.doesNotMatch(
@@ -22925,57 +22932,55 @@ function testAStaleEnumMemberIsNamed(): void {
  * class.
  *
  * On the default warnings Godot says only `Static function "nope()" not found in base "Peal"`, which
- * nothing read. A project met exactly that about `Components.opening()`. Where the unsafe method
+ * nothing read. A project met exactly that about `Parts.first()`. Where the unsafe method
  * access warning is raised to an error, the same call is also denied as a method of the inferred
  * type, and the two are one member rather than two entries with two remedies. Both wordings are the
  * engine's, taken from a headless 4.7.2 editor, and both orders are asserted since nothing fixes it.
  */
 function testAStaleStaticFunctionIsNamed(): void {
-  const staticDenial = 'Static function "opening()" not found in base "Components".';
+  const staticDenial = 'Static function "first()" not found in base "Parts".';
   const methodDenial =
-    'The method "opening()" is not present on the inferred type "Components" (but may be present on a subtype). (Warning treated as error.)';
+    'The method "first()" is not present on the inferred type "Parts" (but may be present on a subtype). (Warning treated as error.)';
   assert.deepEqual(missingMemberIn(staticDenial), {
     kind: 'static method',
-    member: 'opening',
-    type: 'Components',
+    member: 'first',
+    type: 'Parts',
   });
   assert.equal(
-    missingMemberIn('Static function "opening()" not found in base "Components.Inner".'),
+    missingMemberIn('Static function "first()" not found in base "Parts.Inner".'),
     null,
     'one on an inner class is not read, since the outer class could declare the same name',
   );
 
-  const components = [
-    'class_name Components',
+  const parts = [
+    'class_name Parts',
     'extends RefCounted',
     '',
     '',
-    'static func opening() -> int:',
+    'static func first() -> int:',
     '\treturn 1',
     '',
     '',
     'func closing() -> int:',
-    '\treturn Components.opening()',
+    '\treturn Parts.first()',
     '',
   ].join('\n');
   const staticMethod = (member: string): MissingMember => ({
     kind: 'static method',
     member,
-    type: 'Components',
+    type: 'Parts',
   });
-  assert.equal(declaresMember(components, staticMethod('opening')), true, 'a static func is declared');
+  assert.equal(declaresMember(parts, staticMethod('first')), true, 'a static func is declared');
   assert.equal(
-    declaresMember(components, staticMethod('closing')),
+    declaresMember(parts, staticMethod('closing')),
     false,
     'an instance func is not what a call on the class looks for',
   );
-  assert.equal(declaresMember(components, staticMethod('midgame')), false, 'nor is one never written');
+  assert.equal(declaresMember(parts, staticMethod('middle')), false, 'nor is one never written');
 
-  const classes = new Map([['Components', 'res://components.gd']]);
-  const sourceOf = (path: string): string | null => (path === 'res://components.gd' ? components : null);
-  const expected = [
-    { kind: 'static method', member: 'opening', type: 'Components', declaredIn: 'res://components.gd' },
-  ];
+  const classes = new Map([['Parts', 'res://parts.gd']]);
+  const sourceOf = (path: string): string | null => (path === 'res://parts.gd' ? parts : null);
+  const expected = [{ kind: 'static method', member: 'first', type: 'Parts', declaredIn: 'res://parts.gd' }];
   assert.deepEqual(
     contradictedDiagnostics([staticDenial, methodDenial], classes, sourceOf),
     expected,
@@ -22988,15 +22993,15 @@ function testAStaleStaticFunctionIsNamed(): void {
   );
   assert.deepEqual(
     contradictedDiagnostics([methodDenial], classes, sourceOf),
-    [{ kind: 'method', member: 'opening', type: 'Components', declaredIn: 'res://components.gd' }],
+    [{ kind: 'method', member: 'first', type: 'Parts', declaredIn: 'res://parts.gd' }],
     'and the method denial alone is still named as it was',
   );
   // A call on the class whose file declares the function without `static`: Godot's fresh answer is
   // "Cannot call non-static function", so the code is wrong. The static reading, refuted by the
   // file, still decides for that call, and the method reading a plain func satisfies does not claim it.
   const closingOnTheClass = [
-    'Static function "closing()" not found in base "Components".',
-    'The method "closing()" is not present on the inferred type "Components" (but may be present on a subtype). (Warning treated as error.)',
+    'Static function "closing()" not found in base "Parts".',
+    'The method "closing()" is not present on the inferred type "Parts" (but may be present on a subtype). (Warning treated as error.)',
   ];
   assert.deepEqual(
     contradictedDiagnostics(closingOnTheClass, classes, sourceOf),
@@ -23013,7 +23018,7 @@ function testAStaleStaticFunctionIsNamed(): void {
   assert.ok(called !== undefined);
   assert.match(
     staleAnalysisNote([called], []),
-    /For Components\.opening, run editor_rescan with reloadScript set to res:\/\/components\.gd first\./,
+    /For Parts\.first, run editor_rescan with reloadScript set to res:\/\/parts\.gd first\./,
     'and it is answered with the members of the class, the reload first',
   );
 }
@@ -23022,7 +23027,7 @@ function testAStaleStaticFunctionIsNamed(): void {
  * A reload that did not compile says whether the copy the editor holds survived it, and what it
  * lost when it did not.
  *
- * game-b's reload of `exchange.gd` answered "error 43" and nothing else, and the next reload found
+ * game-b's reload of a script answered "error 43" and nothing else, and the next reload found
  * the held copy with one method of the eleven it had held for days, so nobody could tell whether the
  * failed reload had done it. The branches the editor tier cannot reach are rendered here: a copy
  * that changed, the file naming no class, an editor that gave no name for its error, a copy the
@@ -23031,11 +23036,11 @@ function testAStaleStaticFunctionIsNamed(): void {
  * its member lists read as before, so the lists alone cannot say so.
  */
 function testAFailedReloadSaysWhatItKept(): void {
-  const exchange: FailedReload = {
-    script: 'res://core/exchange.gd',
+  const reloaded: FailedReload = {
+    script: 'res://lib/shape.gd',
     code: 43,
     codeName: 'Parse error',
-    heldBefore: ['_pierced', 'settle'],
+    heldBefore: ['_trimmed', 'settle'],
     heldAfter: ['settle'],
     constantsBefore: ['CAP'],
     constantsAfter: [],
@@ -23043,10 +23048,10 @@ function testAFailedReloadSaysWhatItKept(): void {
     restored: true,
     restoredAs: '',
   };
-  const gutted = failedReloadNote(exchange);
+  const gutted = failedReloadNote(reloaded);
   assert.match(
     gutted,
-    /^res:\/\/core\/exchange\.gd did not compile: Godot answered error 43, Parse error\./,
+    /^res:\/\/lib\/shape\.gd did not compile: Godot answered error 43, Parse error\./,
     gutted,
   );
   // A copy that changed is not also said to have had nothing reloaded, which the note once opened
@@ -23054,37 +23059,37 @@ function testAFailedReloadSaysWhatItKept(): void {
   assert.doesNotMatch(gutted, /[Nn]othing was reloaded/, 'a changed copy is not said to be untouched');
   assert.match(
     gutted,
-    /The copy the editor holds was compiled again from the text it was built from and changed even so, and has lost _pierced, CAP: anything diagnosed against it now is answered from what is left, and reloading it once it compiles rebuilds it\./,
+    /The copy the editor holds was compiled again from the text it was built from and changed even so, and has lost _trimmed, CAP: anything diagnosed against it now is answered from what is left, and reloading it once it compiles rebuilds it\./,
     'a copy the failure damaged is said to be damaged, with what went',
   );
   assert.doesNotMatch(gutted, /is as it was/, 'and is not also said to be intact');
   assert.match(gutted, /a member of Born or Rules that its file declares/, 'every class the file names');
 
   const alone = failedReloadNote({
-    ...exchange,
-    heldAfter: exchange.heldBefore,
-    constantsAfter: exchange.constantsBefore,
+    ...reloaded,
+    heldAfter: reloaded.heldBefore,
+    constantsAfter: reloaded.constantsBefore,
     names: [],
     codeName: '',
   });
   assert.equal(
     alone,
-    'res://core/exchange.gd did not compile: Godot answered error 43. The copy the editor holds was compiled again from the text it was built from, which puts it back as it was, with the members it held before, which listMembers lists. script_diagnostics on it gives the errors.',
+    'res://lib/shape.gd did not compile: Godot answered error 43. The copy the editor holds was compiled again from the text it was built from, which puts it back as it was, with the members it held before, which listMembers lists. script_diagnostics on it gives the errors.',
     'an intact copy, no class to name and no name for the error, each said as nothing more than it is',
   );
   // A member the copy gained is still a change, however unlikely: the claim is sameness.
   assert.match(
     failedReloadNote({
-      ...exchange,
-      heldAfter: [...exchange.heldBefore, 'extra'],
-      constantsAfter: exchange.constantsBefore,
+      ...reloaded,
+      heldAfter: [...reloaded.heldBefore, 'extra'],
+      constantsAfter: reloaded.constantsBefore,
     }),
     /and changed even so:/,
     'a copy that changed without losing anything is not called unchanged',
   );
 
   // The same members either side and still not as it was: the old text would not compile either.
-  const same = { ...exchange, heldAfter: exchange.heldBefore, constantsAfter: exchange.constantsBefore };
+  const same = { ...reloaded, heldAfter: reloaded.heldBefore, constantsAfter: reloaded.constantsBefore };
   const stuck = failedReloadNote({ ...same, restored: false, restoredAs: 'Parse error' });
   assert.match(
     stuck,
@@ -23918,11 +23923,11 @@ async function testDiagnosticsNameAStaleEnumMember(): Promise<void> {
     writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
     mkdirSync(join(project, '.godot'), { recursive: true });
     mkdirSync(join(project, 'core'), { recursive: true });
-    // Charm depends on Rope and Bell on nothing, so a lever offered for Bell's stale method must not
+    // Token depends on Rope and Bell on nothing, so a lever offered for Bell's stale method must not
     // name Rope, which only the enum member's script depends on.
     writeFileSync(
-      join(project, 'core', 'charm.gd'),
-      'class_name Charm\nextends RefCounted\n\nenum Kind { LUCK, ZZ_PROBE }\n\nvar rope: Rope = null\n',
+      join(project, 'core', 'token.gd'),
+      'class_name Token\nextends RefCounted\n\nenum Kind { LUCK, ZZ_PROBE }\n\nvar rope: Rope = null\n',
     );
     writeFileSync(join(project, 'core', 'rope.gd'), 'class_name Rope\nextends RefCounted\n');
     writeFileSync(
@@ -23931,12 +23936,12 @@ async function testDiagnosticsNameAStaleEnumMember(): Promise<void> {
     );
     writeFileSync(
       join(project, 'probe.gd'),
-      'extends Node\n\n\nfunc kind() -> Charm.Kind:\n\treturn Charm.Kind.ZZ_PROBE\n',
+      'extends Node\n\n\nfunc kind() -> Token.Kind:\n\treturn Token.Kind.ZZ_PROBE\n',
     );
     writeFileSync(
       join(project, '.godot', 'global_script_class_cache.cfg'),
       [
-        'list=[{\n"class": &"Charm",\n"path": "res://core/charm.gd"\n}, ',
+        'list=[{\n"class": &"Token",\n"path": "res://core/token.gd"\n}, ',
         '{\n"class": &"Rope",\n"path": "res://core/rope.gd"\n}, ',
         '{\n"class": &"Bell",\n"path": "res://core/bell.gd"\n}]\n',
       ].join(''),
@@ -23966,9 +23971,9 @@ async function testDiagnosticsNameAStaleEnumMember(): Promise<void> {
               {
                 kind: 'enum member',
                 member: 'ZZ_PROBE',
-                type: 'Charm',
+                type: 'Token',
                 enum: 'Kind',
-                declaredIn: 'res://core/charm.gd',
+                declaredIn: 'res://core/token.gd',
               },
               { kind: 'method', member: 'toll', type: 'Bell', declaredIn: 'res://core/bell.gd' },
             ],
@@ -23977,19 +23982,19 @@ async function testDiagnosticsNameAStaleEnumMember(): Promise<void> {
           const said = String(get(answer, 'staleAnalysis'));
           assert.match(
             said,
-            /For Charm\.Kind\.ZZ_PROBE, run editor_rescan with reloadScript set to res:\/\/core\/charm\.gd first\./,
+            /For Token\.Kind\.ZZ_PROBE, run editor_rescan with reloadScript set to res:\/\/core\/token\.gd first\./,
             'and the remedy is the reload of the script that declares it',
           );
           assert.match(said, /depend on no other global class/, `Bell's lever is its own: ${said}`);
-          assert.doesNotMatch(said, /changing Rope/, `and does not borrow Charm's dependency: ${said}`);
+          assert.doesNotMatch(said, /changing Rope/, `and does not borrow Token's dependency: ${said}`);
         } finally {
           await server.stop();
         }
       },
       undefined,
       [
-        'Cannot find member "ZZ_PROBE" in base "Charm.Kind".',
-        'The argument 3 of the function "per()" requires the subtype "Charm.Kind" but the supertype "Variant" was provided.',
+        'Cannot find member "ZZ_PROBE" in base "Token.Kind".',
+        'The argument 3 of the function "per()" requires the subtype "Token.Kind" but the supertype "Variant" was provided.',
         'The method "toll()" is not present on the inferred type "Bell".',
       ],
     );
@@ -24000,13 +24005,13 @@ async function testDiagnosticsNameAStaleEnumMember(): Promise<void> {
 
 /**
  * #945: a member the type inherits from a project base class is found in the base, and a diagnostic
- * naming only the member is read against its line. game-b's 270 stale scripts denied
- * `READ_BY_THE_RUN`, declared in GearReads, which GearKinds extends, with `Could not resolve external
- * class member` and no type. They also denied `piece_sells`, declared in Tariff, which Shop
- * extends. Four scripts, whose members sat in the named type's own file, were the only ones given a remedy, and
- * following it cleared all 274.
+ * naming only the member is read against its line. game-b's 270 stale scripts denied a constant
+ * declared in a base class the named type extends, with `Could not resolve external class member`
+ * and no type. They also denied a static function inherited the same way. Four scripts, whose
+ * members sat in the named type's own file, were the only ones given a remedy, and following it
+ * cleared all 274.
  *
- * GearKinds reaches its base by a relative path and Shop by name, the two ways a script extends
+ * PartKinds reaches its base by a relative path and Store by name, the two ways a script extends
  * another. A member nothing in the chain declares is still passed on, and a chain that loops ends.
  */
 async function testDiagnosticsFindAMemberInAProjectBase(): Promise<void> {
@@ -24037,26 +24042,26 @@ async function testDiagnosticsFindAMemberInAProjectBase(): Promise<void> {
     mkdirSync(join(project, '.godot'), { recursive: true });
     mkdirSync(join(project, 'core'), { recursive: true });
     writeFileSync(
-      join(project, 'core', 'tariff.gd'),
-      'class_name Tariff\nextends RefCounted\n\n\nstatic func piece_sells() -> int:\n\treturn 1\n',
+      join(project, 'core', 'price_list.gd'),
+      'class_name PriceList\nextends RefCounted\n\n\nstatic func item_sells() -> int:\n\treturn 1\n',
     );
-    writeFileSync(join(project, 'core', 'shop.gd'), 'class_name Shop\nextends Tariff\n');
+    writeFileSync(join(project, 'core', 'store.gd'), 'class_name Store\nextends PriceList\n');
     writeFileSync(
-      join(project, 'core', 'gear_reads.gd'),
-      'class_name GearReads\nextends RefCounted\n\nconst READ_BY_THE_RUN: int = 3\n',
+      join(project, 'core', 'part_reads.gd'),
+      'class_name PartReads\nextends RefCounted\n\nconst READ_PER_RUN: int = 3\n',
     );
-    writeFileSync(join(project, 'core', 'gear_kinds.gd'), 'class_name GearKinds\nextends "gear_reads.gd"\n');
+    writeFileSync(join(project, 'core', 'part_kinds.gd'), 'class_name PartKinds\nextends "part_reads.gd"\n');
     writeFileSync(
       join(project, 'probe.gd'),
-      'extends Node\n\n\nfunc sold() -> int:\n\treturn GearKinds.READ_BY_THE_RUN + Shop.piece_sells() + Shop.never_sold()\n',
+      'extends Node\n\n\nfunc sold() -> int:\n\treturn PartKinds.READ_PER_RUN + Store.item_sells() + Store.never_sold()\n',
     );
     writeFileSync(
       join(project, '.godot', 'global_script_class_cache.cfg'),
       [
-        'list=[{\n"class": &"Tariff",\n"path": "res://core/tariff.gd"\n}, ',
-        '{\n"class": &"Shop",\n"path": "res://core/shop.gd"\n}, ',
-        '{\n"class": &"GearReads",\n"path": "res://core/gear_reads.gd"\n}, ',
-        '{\n"class": &"GearKinds",\n"path": "res://core/gear_kinds.gd"\n}]\n',
+        'list=[{\n"class": &"PriceList",\n"path": "res://core/price_list.gd"\n}, ',
+        '{\n"class": &"Store",\n"path": "res://core/store.gd"\n}, ',
+        '{\n"class": &"PartReads",\n"path": "res://core/part_reads.gd"\n}, ',
+        '{\n"class": &"PartKinds",\n"path": "res://core/part_kinds.gd"\n}]\n',
       ].join(''),
     );
     await withFakeLanguageServer(
@@ -24081,31 +24086,35 @@ async function testDiagnosticsFindAMemberInAProjectBase(): Promise<void> {
             [
               {
                 kind: 'static method',
-                member: 'piece_sells',
-                type: 'Shop',
-                declaredIn: 'res://core/tariff.gd',
+                member: 'item_sells',
+                type: 'Store',
+                declaredIn: 'res://core/price_list.gd',
               },
               {
                 kind: 'member',
-                member: 'READ_BY_THE_RUN',
-                type: 'GearKinds',
-                declaredIn: 'res://core/gear_reads.gd',
+                member: 'READ_PER_RUN',
+                type: 'PartKinds',
+                declaredIn: 'res://core/part_reads.gd',
               },
             ],
             `each found in the base that declares it, and never_sold in none: ${JSON.stringify(answer)}`,
           );
           const said = String(get(answer, 'staleAnalysis'));
-          assert.match(said, /res:\/\/core\/tariff\.gd/, `the remedy reloads the declaring base: ${said}`);
-          assert.match(said, /res:\/\/core\/gear_reads\.gd/, said);
+          assert.match(
+            said,
+            /res:\/\/core\/price_list\.gd/,
+            `the remedy reloads the declaring base: ${said}`,
+          );
+          assert.match(said, /res:\/\/core\/part_reads\.gd/, said);
         } finally {
           await server.stop();
         }
       },
       undefined,
       [
-        { message: 'Could not resolve external class member "READ_BY_THE_RUN".', line: 4, character: 18 },
-        'Static function "piece_sells()" not found in base "Shop".',
-        'Static function "never_sold()" not found in base "Shop".',
+        { message: 'Could not resolve external class member "READ_PER_RUN".', line: 4, character: 18 },
+        'Static function "item_sells()" not found in base "Store".',
+        'Static function "never_sold()" not found in base "Store".',
       ],
     );
   } finally {
@@ -25020,7 +25029,7 @@ async function testAQuietSceneIsNotServed(): Promise<void> {
       `[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://${script}" id="1"]\n\n[node name="Main" type="Node"]\nscript = ExtResource("1")\n`;
     writeFileSync(join(project, 'tests', 'bench_run.tscn'), scene('scene.gd'));
     writeFileSync(join(project, 'tests', 'worker.tscn'), scene('worker.gd'));
-    writeFileSync(join(project, 'ui', 'duel.tscn'), scene('scene.gd'));
+    writeFileSync(join(project, 'ui', 'match.tscn'), scene('scene.gd'));
 
     const { GDHARNESS_PROFILE_FROM_START: _inherited, ...base } = process.env;
     let runs = 0;
@@ -25092,7 +25101,7 @@ async function testAQuietSceneIsNotServed(): Promise<void> {
       'and the worker, which inherits the bench environment, did not announce',
     );
 
-    served('a screen', await run('res://ui/duel.tscn', quiet), 'res://ui/duel.tscn');
+    served('a screen', await run('res://ui/match.tscn', quiet), 'res://ui/match.tscn');
     served('a bench with no quiet folders', await run(bench, settings), bench);
   } finally {
     await ended.end();
@@ -25257,15 +25266,15 @@ function testAClassTheEditorHoldsAfterItsScriptIsGoneIsNamed(): void {
  */
 function testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks(): void {
   for (const message of [
-    'Could not find base class "EndingLine".',
-    'Identifier "EndingLines" not declared in the current scope.',
+    'Could not find base class "ClosingLine".',
+    'Identifier "ClosingLines" not declared in the current scope.',
     'Could not find type "Game" in the current scope.',
     'Cannot find class "Game"',
   ]) {
     assert.ok(unknownTypeIn(message) !== null, `${message} names a type this can check`);
   }
-  assert.equal(unknownTypeIn('Could not find base class "EndingLine".'), 'EndingLine');
-  assert.equal(unknownTypeIn('Identifier "EndingLines" not declared in the current scope.'), 'EndingLines');
+  assert.equal(unknownTypeIn('Could not find base class "ClosingLine".'), 'ClosingLine');
+  assert.equal(unknownTypeIn('Identifier "ClosingLines" not declared in the current scope.'), 'ClosingLines');
   assert.equal(
     unknownTypeIn('The method "is_finished()" is not present on the inferred type "Game".'),
     null,
@@ -25273,17 +25282,17 @@ function testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks(): void 
   );
 
   const declared = new Map([
-    ['EndingLine', 'res://scripts/ending_line.gd'],
-    ['EndingLines', 'res://scripts/ending_lines.gd'],
+    ['ClosingLine', 'res://scripts/closing_line.gd'],
+    ['ClosingLines', 'res://scripts/closing_lines.gd'],
     ['Settled', 'res://scripts/settled.gd'],
   ]);
   const cached = new Map([['Settled', 'res://scripts/settled.gd']]);
 
   const found = unloadedTypes(
     [
-      'Could not find base class "EndingLine".',
-      'Identifier "EndingLines" not declared in the current scope.',
-      'Identifier "EndingLines" not declared in the current scope.',
+      'Could not find base class "ClosingLine".',
+      'Identifier "ClosingLines" not declared in the current scope.',
+      'Identifier "ClosingLines" not declared in the current scope.',
       'Could not find base class "Settled".',
       'Identifier "some_local" not declared in the current scope.',
     ],
@@ -25294,8 +25303,8 @@ function testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks(): void 
   assert.deepEqual(
     found,
     [
-      { type: 'EndingLine', declaredIn: 'res://scripts/ending_line.gd', inTheClassCache: false },
-      { type: 'EndingLines', declaredIn: 'res://scripts/ending_lines.gd', inTheClassCache: false },
+      { type: 'ClosingLine', declaredIn: 'res://scripts/closing_line.gd', inTheClassCache: false },
+      { type: 'ClosingLines', declaredIn: 'res://scripts/closing_lines.gd', inTheClassCache: false },
       { type: 'Settled', declaredIn: 'res://scripts/settled.gd', inTheClassCache: true },
     ],
     'each declared class once, with the cache answer that picks the remedy',
@@ -25310,7 +25319,7 @@ function testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks(): void 
     'a name the project declares nowhere is left alone',
   );
   assert.deepEqual(
-    unloadedTypes(['Could not find base class "EndingLine".'], new Map(), null),
+    unloadedTypes(['Could not find base class "ClosingLine".'], new Map(), null),
     [],
     'and a project that declares nothing yields nothing rather than everything',
   );
@@ -30461,13 +30470,12 @@ async function testAnRidAndAWholeNumberPast2To53GoBothWays(): Promise<void> {
  * A wait for words leaves the game it watches its speed.
  *
  * It looked through every node on the screen every frame, and asked each for its property list to
- * learn whether it had text: on a hall of 3,500 nodes the game fell from 60 frames a second to 11,
- * its clock lost three quarters of its time, and a wait for a date timed out on a clock that turned
- * a day every thirty seconds. Measured here as the frame rate during a words wait against the rate
- * during a property wait over the same time, in one game.
+ * learn whether it had text. On a screen of 3,500 nodes the game fell from 60 frames a second to 11.
+ * Its own clock slowed with it, and a wait for a date timed out. Measured here as the frame rate
+ * during a words wait against the rate during a property wait over the same time, in one game.
  *
  * Twenty thousand nodes rather than the reported 3,500, because two things keep the rate and each
- * needs a hall that shows it. Reading text cheaply makes a look on 3,500 nodes cost well under a
+ * needs a scene that shows it. Reading text cheaply makes a look on 3,500 nodes cost well under a
  * frame, so looking every frame kept the rate and pacing went untested. At this size a cheap look
  * still costs a real share of a frame, and only pacing keeps the rate. Pacing alone would keep the
  * rate over the expensive reading too, by looking once in the whole wait, which the count of looks
@@ -30502,9 +30510,9 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
           '\t\t\tlabel.text = "row %d cell %d" % [row, cell]\n\t\t\tline.add_child(label)\n' +
           '\t\tvar go: Button = Button.new()\n\t\tgo.text = "Go %d" % row\n\t\tline.add_child(go)\n' +
           '\t\tline.add_child(ColorRect.new())\n' +
-          '\tdate.text = "Spring 16"\n\tsmall.add_child(date)\n\n\n' +
-          'func turn_the_day() -> void:\n\tdate.text = "Spring 17"\n\n\n' +
-          'func turn_the_season() -> void:\n\tdate.text = "Summer 1"\n',
+          '\tdate.text = "Day 16"\n\tsmall.add_child(date)\n\n\n' +
+          'func turn_the_day() -> void:\n\tdate.text = "Day 17"\n\n\n' +
+          'func turn_the_week() -> void:\n\tdate.text = "Week 3"\n',
       );
       writeFileSync(
         join(project, 'main.tscn'),
@@ -30529,7 +30537,7 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
       const waitOn = (nodePath: string, args: Record<string, unknown>): Promise<unknown> =>
         call('runtime_wait', { op: 'until', nodePath, timeoutMs: 2_000, ...args });
 
-      // What a look costs, over the part of the hall the size of the report's. A look that asks
+      // What a look costs, over part of the scene the size of the report's. A look that asks
       // every node for its property list costs over a second here, and pacing then leaves one look
       // in the wait besides the last. Read cheaply, a look costs milliseconds, or 46 to 61 on the
       // macOS runner. There a wait of two seconds fitted four looks, so the count says how fast the
@@ -30541,7 +30549,7 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
       );
 
       // Three waits of each kind taken in turn and added up. On the macOS runner the game's rate
-      // drifts by up to a third between two windows with nothing changed: a hall nobody watched ran
+      // drifts by up to a third between two windows with nothing changed: a scene nobody watched ran
       // at 64, 59, 65 and 43 frames a second in four windows in a row. One wait of each compared
       // that drift as often as the watching, and fell below half twice (41.9 against 84, 36.5
       // against 73.5) while timing every frame showed the frames between looks keeping the pace of
@@ -30581,10 +30589,10 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
       );
 
       // Words that arrive after the last paced look and before the time runs out are still found:
-      // on the whole hall the looks are about half a second apart, so a wait of 300ms with the day
+      // on the whole scene the looks are about half a second apart, so a wait of 300ms with the day
       // turned 100ms into it meets only through the look taken as the time runs out.
       const [late] = await Promise.all([
-        call('runtime_wait', { op: 'until', nodePath: '/root/Main', says: 'Spring 17', timeoutMs: 300 }),
+        call('runtime_wait', { op: 'until', nodePath: '/root/Main', says: 'Day 17', timeoutMs: 300 }),
         delay(100).then(() =>
           call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'turn_the_day' }),
         ),
@@ -30595,7 +30603,7 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
         `words that came between looks are found: ${JSON.stringify(late)}`,
       );
       // A wait whose first look outlasts its time still lets the game run a whole frame before the
-      // last look. On a loaded runner a look over the whole hall outlasted the 300ms above, the last
+      // last look. On a loaded runner a look over the whole scene outlasted the 300ms above, the last
       // look followed in the same frame, and the day turned during the first one went unread.
       const outlasted = await call('runtime_wait', {
         op: 'until',
@@ -30612,19 +30620,19 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
       const turned = await call('runtime_wait', {
         op: 'until',
         nodePath: '/root/Main',
-        says: 'Spring 17',
+        says: 'Day 17',
         timeoutMs: 5_000,
       });
       assert.equal(get(turned, 'met'), true, JSON.stringify(turned));
 
-      // A look over the whole hall costs tens of milliseconds, and the paced looks read it a slice
+      // A look over the whole scene costs tens of milliseconds, and the paced looks read it a slice
       // to a frame, so none of them holds a frame the way the last look of the wait above did, which
       // is read whole. Read whole, every paced look held a frame that long, and a game logging its
       // own frame times saw a long frame every few dozen that came and went with the wait.
       const [season] = await Promise.all([
-        call('runtime_wait', { op: 'until', nodePath: '/root/Main', says: 'Summer 1', timeoutMs: 10_000 }),
+        call('runtime_wait', { op: 'until', nodePath: '/root/Main', says: 'Week 3', timeoutMs: 10_000 }),
         delay(500).then(() =>
-          call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'turn_the_season' }),
+          call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'turn_the_week' }),
         ),
       ]);
       const whole = asNumber(get(outlasted, 'longest_hold_ms'), JSON.stringify(outlasted));
@@ -31016,10 +31024,10 @@ async function testAPathStepsIntoAVectorsComponents(): Promise<void> {
 /**
  * A press held for a number of frames is held for exactly that many, counted by the game.
  *
- * game-d poured for as long as the button was held, and a press, a 60-frame wait and a release
- * sent as three calls held it for nearly three seconds, the time between the calls included. The
- * game here counts the process frames between seeing each press and seeing its release, a mouse
- * button and a key, the way a pour measures one.
+ * game-d acted for as long as the button was held. A press, a 60-frame wait and a release sent as
+ * three calls held it for nearly three seconds, the time between the calls included. The game here
+ * counts the process frames between seeing each press and seeing its release, a mouse button and a
+ * key, the way a held action measures one.
  */
 async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
   const engine = resolveGodotPath();
@@ -36114,12 +36122,12 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
       'focus_mode = 2\naccessibility_name = "Page"\nscript = ExtResource("2")\n\n' +
       '[node name="Three" type="Label" parent="."]\noffset_top = 120.0\noffset_right = 200.0\noffset_bottom = 143.0\n' +
       'tooltip_text = "Hover words"\naccessibility_description = "The third line"\ntext = "Three"\n\n' +
-      // A log line as game-a's hall draws one: a RichTextLabel with a link, in plain
-      // containers, all of which AccessKit leaves out, so its text surfaces under the window.
+      // A log line drawn as a RichTextLabel with a link, in plain containers, all of which
+      // AccessKit leaves out, so its text surfaces under the window.
       '[node name="Log" type="VBoxContainer" parent="."]\noffset_top = 160.0\noffset_right = 400.0\noffset_bottom = 200.0\n\n' +
       '[node name="Row" type="HBoxContainer" parent="Log"]\nlayout_mode = 2\n\n' +
       '[node name="Line" type="RichTextLabel" parent="Log/Row"]\nlayout_mode = 2\nsize_flags_horizontal = 3\n' +
-      'bbcode_enabled = true\nfit_content = true\ntext = "[url=docket]Awoh[/url] gave up waiting on docket 235"\n\n' +
+      'bbcode_enabled = true\nfit_content = true\ntext = "[url=ticket]Rena[/url] gave up waiting on ticket 235"\n\n' +
       // Two drawn on one rectangle, which only their words tell apart.
       '[node name="Under" type="RichTextLabel" parent="."]\noffset_top = 220.0\noffset_right = 300.0\noffset_bottom = 250.0\n' +
       'text = "Beneath words"\n\n' +
@@ -36132,7 +36140,7 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
       // Named so its path begins with the log's, which a narrowing to the log must not take.
       '[node name="Logbook" type="Label" parent="."]\noffset_top = 270.0\noffset_right = 300.0\noffset_bottom = 293.0\n' +
       'text = "Logbook words"\n\n' +
-      // A slider whose game says its value in words, as game-a's volume does.
+      // A slider whose game says its value in words.
       '[node name="Volume" type="HSlider" parent="."]\noffset_top = 310.0\noffset_right = 200.0\noffset_bottom = 330.0\n' +
       'value = 75.0\nscript = ExtResource("3")\n',
   );
@@ -36322,7 +36330,7 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
     );
     const saying = (words: string): unknown[] =>
       all.filter((child) => text(get(child, 'name') ?? '').includes(words));
-    const logLine = saying('gave up waiting on docket 235');
+    const logLine = saying('gave up waiting on ticket 235');
     assert.ok(logLine.length > 0, `the log line is in the tree: ${shown}`);
     assert.deepEqual(
       logLine.map((child) => [get(child, 'part_of'), get(child, 'part'), get(child, 'part_of_candidates')]),
@@ -36380,7 +36388,7 @@ async function testWhatTheGameTellsAScreenReaderIsRead(): Promise<void> {
       `and nothing made outside it, Logbook included: ${JSON.stringify(underLog)}`,
     );
     assert.ok(
-      logParts.some((element) => text(get(element, 'name') ?? '').includes('docket 235')),
+      logParts.some((element) => text(get(element, 'name') ?? '').includes('ticket 235')),
       JSON.stringify(underLog),
     );
     assert.equal(get(underLog, 'matched'), logParts.length, JSON.stringify(underLog));
@@ -36917,7 +36925,7 @@ function onePixelOf(png: Buffer): Buffer {
  * A find by className reaches the nodes whose script extends that class, at any distance.
  *
  * `className Card` answered 0 over a tree of rows whose scripts extend Card two steps down,
- * IntakeRow extends DocketCard extends Card: the match read the script's own class_name alone,
+ * InboxRow extends TicketCard extends Card: the match read the script's own class_name alone,
  * while a native class reaches every subclass through `is_class`. A caller naming a class means
  * what extends it, the way a typed `is` reads it, whichever side of the line the class is declared
  * on. Under the engine, since the matching is the addon's. The scripts extend by path so the
@@ -36940,18 +36948,18 @@ async function testAFindByClassReachesWhatExtendsIt(): Promise<void> {
           : { ok: true },
     async ({ server, project }) => {
       writeFileSync(join(project, 'card.gd'), 'class_name Card\nextends Node\n');
-      writeFileSync(join(project, 'docket_card.gd'), 'class_name DocketCard\nextends "res://card.gd"\n');
-      writeFileSync(join(project, 'intake_row.gd'), 'class_name IntakeRow\nextends "res://docket_card.gd"\n');
+      writeFileSync(join(project, 'ticket_card.gd'), 'class_name TicketCard\nextends "res://card.gd"\n');
+      writeFileSync(join(project, 'inbox_row.gd'), 'class_name InboxRow\nextends "res://ticket_card.gd"\n');
       writeFileSync(
         join(project, 'main.tscn'),
         '[gd_scene load_steps=4 format=3]\n\n' +
           '[ext_resource type="Script" path="res://card.gd" id="1"]\n' +
-          '[ext_resource type="Script" path="res://docket_card.gd" id="2"]\n' +
-          '[ext_resource type="Script" path="res://intake_row.gd" id="3"]\n\n' +
+          '[ext_resource type="Script" path="res://ticket_card.gd" id="2"]\n' +
+          '[ext_resource type="Script" path="res://inbox_row.gd" id="3"]\n\n' +
           '[node name="Main" type="Node"]\n\n' +
           '[node name="Plain" type="Node" parent="."]\nscript = ExtResource("1")\n\n' +
-          '[node name="Docket" type="Node" parent="."]\nscript = ExtResource("2")\n\n' +
-          '[node name="Intake" type="Node" parent="."]\nscript = ExtResource("3")\n\n' +
+          '[node name="Ticket" type="Node" parent="."]\nscript = ExtResource("2")\n\n' +
+          '[node name="Inbox" type="Node" parent="."]\nscript = ExtResource("3")\n\n' +
           '[node name="Buy" type="Button" parent="."]\ntext = "Buy"\n',
       );
       const started = parseTextContent(
@@ -36983,15 +36991,15 @@ async function testAFindByClassReachesWhatExtendsIt(): Promise<void> {
             .toSorted();
         assert.deepEqual(
           await found('Card'),
-          ['/root/Main/Docket', '/root/Main/Intake', '/root/Main/Plain'],
+          ['/root/Main/Inbox', '/root/Main/Plain', '/root/Main/Ticket'],
           'the base script class reaches everything that extends it',
         );
         assert.deepEqual(
-          await found('DocketCard'),
-          ['/root/Main/Docket', '/root/Main/Intake'],
+          await found('TicketCard'),
+          ['/root/Main/Inbox', '/root/Main/Ticket'],
           'a class in the middle reaches itself and what extends it',
         );
-        assert.deepEqual(await found('IntakeRow'), ['/root/Main/Intake'], 'the leaf reaches itself alone');
+        assert.deepEqual(await found('InboxRow'), ['/root/Main/Inbox'], 'the leaf reaches itself alone');
         assert.deepEqual(
           await found('BaseButton'),
           ['/root/Main/Buy'],
@@ -37038,7 +37046,7 @@ async function testAWrittenLineBreakMatchesATwoLineLabel(): Promise<void> {
       writeFileSync(
         join(project, 'main.tscn'),
         '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n\n' +
-          '[node name="Ward" type="Button" parent="."]\ntext = "WARD\\nshields 3"\n',
+          '[node name="Glow" type="Button" parent="."]\ntext = "GLOW\\nshines 3"\n',
       );
       const started = parseTextContent(
         await server.request(
@@ -37057,27 +37065,27 @@ async function testAWrittenLineBreakMatchesATwoLineLabel(): Promise<void> {
             await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
           );
         // The two characters, which is what a caller writing the break one escape short sends.
-        const written = await call('runtime_inspect', { op: 'find', says: 'WARD\\nshields 3' });
+        const written = await call('runtime_inspect', { op: 'find', says: 'GLOW\\nshines 3' });
         assert.equal(
           asArray(get(written, 'nodes'))
             .map((node) => text(get(node, 'path')))
             .join(','),
-          '/root/Main/Ward',
+          '/root/Main/Glow',
           `the break written as two characters finds the two-line button: ${JSON.stringify(written)}`,
         );
         // And the break itself, which the two characters are read as.
-        const broken = await call('runtime_inspect', { op: 'find', says: 'WARD\nshields 3' });
+        const broken = await call('runtime_inspect', { op: 'find', says: 'GLOW\nshines 3' });
         assert.equal(
           asArray(get(broken, 'nodes'))
             .map((node) => text(get(node, 'path')))
             .join(','),
-          '/root/Main/Ward',
+          '/root/Main/Glow',
           `and so does the break itself: ${JSON.stringify(broken)}`,
         );
         const waited = await call('runtime_wait', {
           op: 'until',
           nodePath: '/root/Main',
-          says: 'ward\\nSHIELDS',
+          says: 'glow\\nSHINES',
           timeoutMs: 2_000,
         });
         assert.equal(get(waited, 'met'), true, `a wait on the same words is met: ${JSON.stringify(waited)}`);
@@ -37085,7 +37093,7 @@ async function testAWrittenLineBreakMatchesATwoLineLabel(): Promise<void> {
         // none, the whole game is where the words are looked for.
         const anywhere = await call('runtime_wait', {
           op: 'until',
-          says: 'ward\\nSHIELDS',
+          says: 'glow\\nSHINES',
           timeoutMs: 2_000,
         });
         assert.equal(get(anywhere, 'met'), true, `and with no nodePath at all: ${JSON.stringify(anywhere)}`);
@@ -37098,7 +37106,7 @@ async function testAWrittenLineBreakMatchesATwoLineLabel(): Promise<void> {
           ),
         );
         assert.match(unnamed ?? '', /needs nodePath to wait for a property/, unnamed ?? '');
-        const absent = await call('runtime_inspect', { op: 'find', says: 'WARD\\nshields 4' });
+        const absent = await call('runtime_inspect', { op: 'find', says: 'GLOW\\nshines 4' });
         assert.deepEqual(
           asArray(get(absent, 'nodes')),
           [],
@@ -37682,8 +37690,8 @@ function testAPickedUpRunReadsItsReportOnFromTheTranscript(): void {
  * names, and the check is identity: the game compares what it was handed with its own element by
  * `is_same`.
  *
- * The parameter is a script class, `Gear`, because that is the reported shape and the one
- * `is_class` does not answer for. A `Helm` extending it stands at the end of the list, so a
+ * The parameter is a script class, `Part`, because that is the reported shape and the one
+ * `is_class` does not answer for. A `Wheel` extending it stands at the end of the list, so a
  * subclass has to be recognised through the script's inheritance. Each refusal is paired with the
  * game still holding what the last good call gave it, so a refusal is known not to have called
  * the method with something else.
@@ -37728,10 +37736,10 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       },
     async ({ server, project, runtimeDir, start }) => {
       writeFileSync(
-        join(project, 'gear.gd'),
-        'class_name Gear\nextends RefCounted\n\nconst KIND := "gear"\n\nvar label: String = ""\n',
+        join(project, 'part.gd'),
+        'class_name Part\nextends RefCounted\n\nconst KIND := "part"\n\nvar label: String = ""\n',
       );
-      writeFileSync(join(project, 'helm.gd'), 'class_name Helm\nextends Gear\n');
+      writeFileSync(join(project, 'wheel.gd'), 'class_name Wheel\nextends Part\n');
       // A class no node carries, whose static functions answer what the game's own rules would.
       writeFileSync(
         join(project, 'chooser.gd'),
@@ -37741,8 +37749,8 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       writeFileSync(join(project, 'main_rules.gd'), 'class_name Main\nextends RefCounted\n');
       writeFileSync(
         join(project, 'main.gd'),
-        'extends Node\n\nconst STOCK_NOTE := "held"\n\nvar wares: Array[Gear] = []\nvar worn: Gear = null\n' +
-          'var by_name: Dictionary[String, Gear] = {"head": null}\n' +
+        'extends Node\n\nconst STOCK_NOTE := "held"\n\nvar items: Array[Part] = []\nvar mounted: Part = null\n' +
+          'var by_name: Dictionary[String, Part] = {"head": null}\n' +
           'var spare: RefCounted = RefCounted.new()\nvar count: int = 3\nvar later_took: int = 0\n' +
           'var done_at: Array[int] = []\nvar tally: Dictionary[String, int] = {}\nvar board: Array[int] = []\n' +
           'var ledger: Dictionary = {"zeta": 1, "alpha": 2, "mid": 3}\n' +
@@ -37752,19 +37760,19 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           'var aim: Vector2 = Vector2.ZERO\n' +
           'var locked: int = 5:\n\tset(value):\n\t\tpass\n\n\n' +
           'func _ready() -> void:\n' +
-          '\tfor index: int in 4:\n\t\tvar piece: Gear = Gear.new()\n' +
-          '\t\tpiece.label = "piece %d" % index\n\t\twares.append(piece)\n' +
-          '\tvar helm: Helm = Helm.new()\n\thelm.label = "helm"\n\twares.append(helm)\n\n\n' +
-          'func wear(piece: Gear) -> String:\n\tworn = piece\n\treturn piece.label\n\n\n' +
-          'func take_off(piece: Gear) -> bool:\n\tworn = piece\n\treturn worn == null\n\n\n' +
-          'func worn_is(index: int) -> bool:\n\treturn is_same(worn, wares[index])\n\n\n' +
-          'func same(one: int, other: int) -> bool:\n\treturn is_same(wares[one], wares[other])\n\n\n' +
-          'func head_is(index: int) -> bool:\n\treturn is_same(by_name["head"], wares[index])\n\n\n' +
+          '\tfor index: int in 4:\n\t\tvar piece: Part = Part.new()\n' +
+          '\t\tpiece.label = "piece %d" % index\n\t\titems.append(piece)\n' +
+          '\tvar wheel: Wheel = Wheel.new()\n\twheel.label = "wheel"\n\titems.append(wheel)\n\n\n' +
+          'func mount(piece: Part) -> String:\n\tmounted = piece\n\treturn piece.label\n\n\n' +
+          'func unmount(piece: Part) -> bool:\n\tmounted = piece\n\treturn mounted == null\n\n\n' +
+          'func mounted_is(index: int) -> bool:\n\treturn is_same(mounted, items[index])\n\n\n' +
+          'func same(one: int, other: int) -> bool:\n\treturn is_same(items[one], items[other])\n\n\n' +
+          'func head_is(index: int) -> bool:\n\treturn is_same(by_name["head"], items[index])\n\n\n' +
           'func named(node: Node) -> String:\n\treturn node.name\n\n\n' +
           'func total(numbers: Array[int]) -> int:\n\tvar sum: int = 0\n\tfor n: int in numbers:\n\t\tsum += n\n' +
           '\treturn sum\n\n\n' +
-          'func armour(pieces: Array[Gear]) -> String:\n\tvar labels: Array[String] = []\n' +
-          '\tfor piece: Gear in pieces:\n\t\tlabels.append(piece.label)\n\treturn ", ".join(labels)\n\n\n' +
+          'func armour(pieces: Array[Part]) -> String:\n\tvar labels: Array[String] = []\n' +
+          '\tfor piece: Part in pieces:\n\t\tlabels.append(piece.label)\n\treturn ", ".join(labels)\n\n\n' +
           'func art_is_kept() -> bool:\n\treturn is_same(art, kept)\n\n\n' +
           'func width_of(texture: Texture2D) -> int:\n\treturn texture.get_width()\n\n\n' +
           'func aim_at(at: Vector2) -> float:\n\treturn at.x\n\n\n' +
@@ -37828,16 +37836,20 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           said: textOf(response) ?? '',
         };
       };
-      const wearing = async (index: number): Promise<unknown> => (await invoke('worn_is', [index])).result;
+      const wearing = async (index: number): Promise<unknown> => (await invoke('mounted_is', [index])).result;
 
-      const worn = await invoke('wear', ['wares:2']);
-      assert.equal(worn.result, 'piece 2', `a path from the node hands over that element: ${worn.said}`);
+      const mounted = await invoke('mount', ['items:2']);
+      assert.equal(
+        mounted.result,
+        'piece 2',
+        `a path from the node hands over that element: ${mounted.said}`,
+      );
       assert.equal(await wearing(2), true, 'and the game holds that very instance, not a copy');
 
-      const absolute = await invoke('wear', ['/root/Main:wares:-1']);
+      const absolute = await invoke('mount', ['/root/Main:items:-1']);
       assert.equal(
         absolute.result,
-        'helm',
+        'wheel',
         `a path from a named node, counting from the end: ${absolute.said}`,
       );
       assert.equal(await wearing(4), true, 'a subclass of the declared script class is accepted as it');
@@ -37901,35 +37913,35 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         /^res:\/\/broken\.gd did not compile, so none of its functions can be called\. script_diagnostics on it gives the error and its line\.$/,
       );
 
-      const cleared = await invoke('take_off', [null]);
+      const cleared = await invoke('unmount', [null]);
       assert.equal(cleared.result, true, `null still reaches an object parameter as null: ${cleared.said}`);
-      await invoke('wear', ['wares:4']);
+      await invoke('mount', ['items:4']);
 
       const refusals: [unknown, RegExp][] = [
         [
-          'wares:9',
-          /^\/root\/Main\.wear argument 1: \/root\/Main:wares is a list of 5, so there is no 9 in it$/,
+          'items:9',
+          /^\/root\/Main\.mount argument 1: \/root\/Main:items is a list of 5, so there is no 9 in it$/,
         ],
-        ['count', /^\/root\/Main\.wear argument 1: \/root\/Main:count holds int, not an object$/],
-        ['spare', /^\/root\/Main\.wear argument 1: spare is RefCounted, not a Gear$/],
+        ['count', /^\/root\/Main\.mount argument 1: \/root\/Main:count holds int, not an object$/],
+        ['spare', /^\/root\/Main\.mount argument 1: spare is RefCounted, not a Part$/],
         [
-          '/root/Nope:wares:0',
-          /^\/root\/Main\.wear argument 1: Node not found: \/root\/Nope\. \/root has no Nope\. Its children are GdharnessRuntime, Main\.$/,
+          '/root/Nope:items:0',
+          /^\/root\/Main\.mount argument 1: Node not found: \/root\/Nope\. \/root has no Nope\. Its children are GdharnessRuntime, Main\.$/,
         ],
         [
-          '/root/Main/Shelf:wares:0',
-          /^\/root\/Main\.wear argument 1: Node not found: \/root\/Main\/Shelf\. \/root\/Main has no Shelf\. Its children are Rack\.$/,
+          '/root/Main/Shelf:items:0',
+          /^\/root\/Main\.mount argument 1: Node not found: \/root\/Main\/Shelf\. \/root\/Main has no Shelf\. Its children are Rack\.$/,
         ],
         [{ _type: 'Object', class: 'RefCounted', id: 1 }, /argument 1: an object is named by its path/],
       ];
       for (const [given, expected] of refusals) {
-        const refused = await invoke('wear', [given]);
+        const refused = await invoke('mount', [given]);
         assert.equal(refused.result, undefined, `${JSON.stringify(given)} is refused: ${refused.said}`);
         assert.match(refused.said, expected, `and says why: ${refused.said}`);
         assert.equal(
           await wearing(4),
           true,
-          `wear was not called with anything for ${JSON.stringify(given)}`,
+          `mount was not called with anything for ${JSON.stringify(given)}`,
         );
       }
 
@@ -37954,7 +37966,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         'a path the scene has not either is told what the root has',
       );
       // A constant is read as its script declares it, through a path and from a script the object's
-      // extends too: the helm is a Helm, and Gear declares the constant.
+      // extends too: the wheel is a Wheel, and Part declares the constant.
       const readOff = async (property: string): Promise<unknown> =>
         get(
           parseTextContent(
@@ -37966,10 +37978,10 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           ),
           'value',
         );
-      assert.deepEqual([await readOff('STOCK_NOTE'), await readOff('wares:4:KIND')], ['held', 'gear']);
+      assert.deepEqual([await readOff('STOCK_NOTE'), await readOff('items:4:KIND')], ['held', 'part']);
 
       // The same naming on a write. Each slot starts empty or holding another piece, so the write
-      // is what puts the instance there: an empty `Gear` property reads as no type at all, and is
+      // is what puts the instance there: an empty `Part` property reads as no type at all, and is
       // told apart from an untyped one only by what it declares.
       const set = async (property: string, value: unknown): Promise<{ written: boolean; said: string }> => {
         const response = await server.request(
@@ -37979,14 +37991,14 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         );
         return { written: parseTextContent(response) !== null, said: textOf(response) ?? '' };
       };
-      await invoke('take_off', [null]);
-      const intoProperty = await set('worn', 'wares:1');
+      await invoke('unmount', [null]);
+      const intoProperty = await set('mounted', 'items:1');
       assert.ok(intoProperty.written, `an empty typed property takes a path: ${intoProperty.said}`);
       assert.equal(await wearing(1), true, 'and holds that very instance');
-      const intoList = await set('wares:0', 'wares:3');
+      const intoList = await set('items:0', 'items:3');
       assert.ok(intoList.written, `a typed list slot takes one: ${intoList.said}`);
       assert.equal((await invoke('same', [0, 3])).result, true, 'and holds the instance the path named');
-      const intoMap = await set('by_name:head', '/root/Main:wares:2');
+      const intoMap = await set('by_name:head', '/root/Main:items:2');
       assert.ok(intoMap.written, `an empty typed map slot takes one: ${intoMap.said}`);
       assert.equal(
         (await invoke('head_is', [2])).result,
@@ -37995,12 +38007,12 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       );
 
       const refusedWrites: [string, unknown, RegExp][] = [
-        ['worn', 'spare', /^\/root\/Main\.worn holds an object: spare is RefCounted, not a Gear$/],
-        ['wares:0', 'spare', /^\/root\/Main:wares\.0 holds an object: spare is RefCounted, not a Gear$/],
+        ['mounted', 'spare', /^\/root\/Main\.mounted holds an object: spare is RefCounted, not a Part$/],
+        ['items:0', 'spare', /^\/root\/Main:items\.0 holds an object: spare is RefCounted, not a Part$/],
         [
-          'worn',
+          'mounted',
           'count',
-          /^\/root\/Main\.worn holds an object: \/root\/Main:count holds int, not an object$/,
+          /^\/root\/Main\.mounted holds an object: \/root\/Main:count holds int, not an object$/,
         ],
         [
           'STOCK_NOTE',
@@ -38048,8 +38060,8 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       );
       const unfiled: [unknown, RegExp][] = [
         [
-          'res://gear.gd',
-          /^\/root\/Main\.art holds an object: res:\/\/gear\.gd is GDScript, not a Texture2D$/,
+          'res://part.gd',
+          /^\/root\/Main\.art holds an object: res:\/\/part\.gd is GDScript, not a Texture2D$/,
         ],
         ['res://nowhere.tres', /^\/root\/Main\.art holds an object: No resource at res:\/\/nowhere\.tres$/],
         [
@@ -38136,13 +38148,13 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       // And a typed list as an argument, which raised inside the game when handed a plain one.
       const summed = await invoke('total', [[1, 2, '3']]);
       assert.equal(summed.result, 6, `an Array[int] argument is built from the list: ${summed.said}`);
-      const pieces = await invoke('armour', [['wares:0', '/root/Main:wares:-1']]);
-      // wares:0 holds piece 3 by now, written there by the list-slot set above.
-      assert.equal(pieces.result, 'piece 3, helm', `and an Array[Gear] from paths: ${pieces.said}`);
+      const pieces = await invoke('armour', [['items:0', '/root/Main:items:-1']]);
+      // items:0 holds piece 3 by now, written there by the list-slot set above.
+      assert.equal(pieces.result, 'piece 3, wheel', `and an Array[Part] from paths: ${pieces.said}`);
       const stray = await invoke('armour', [[7]]);
       assert.match(
         stray.said,
-        /^\/root\/Main\.armour takes a typed list as argument 1: element 0 is 7(\.0)?, which cannot become Gear\.$/,
+        /^\/root\/Main\.armour takes a typed list as argument 1: element 0 is 7(\.0)?, which cannot become Part\.$/,
         stray.said,
       );
 
@@ -38313,7 +38325,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       };
       const read = async (property: string): Promise<{ parsed: unknown; said: string }> =>
         await tool('runtime_inspect', { op: 'property', nodePath: '/root/Main', property });
-      assert.equal(get((await read('wares:size()')).parsed, 'value'), 5, (await read('wares:size()')).said);
+      assert.equal(get((await read('items:size()')).parsed, 'value'), 5, (await read('items:size()')).said);
       assert.equal(get((await read('board:size()')).parsed, 'value'), 0, 'an empty list has a size too');
       assert.deepEqual(
         get((await read('by_name:keys()')).parsed, 'value'),
@@ -38321,15 +38333,15 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         'a map answers its keys',
       );
       // A map comes back in the order the game keeps it, which is the order its keys() and a loop
-      // over it give. Sorted on the way out of the game, a stock keyed base:dew, base:salt and
-      // base:moon_sand was read with moon_sand second while its keys() put it third.
+      // over it give. Sorted on the way out of the game, a stock keyed base:water, base:sand and
+      // base:clay was read with clay first while its keys() put it third.
       const ledgerOrder = ['zeta', 'alpha', 'mid'];
       assert.deepEqual(Object.keys(asObject(get((await read('ledger')).parsed, 'value'))), ledgerOrder);
       assert.deepEqual(get((await read('ledger:keys()')).parsed, 'value'), ledgerOrder, 'as keys() lists it');
       assert.match((await read('board:back()')).said, /is an empty list, so it has no back\(\)/);
-      assert.match((await read('wares:clear()')).said, /not one of the calls a path makes on one/);
+      assert.match((await read('items:clear()')).said, /not one of the calls a path makes on one/);
       assert.equal(
-        get((await read('wares:size()')).parsed, 'value'),
+        get((await read('items:size()')).parsed, 'value'),
         5,
         'and the refused call changed nothing',
       );
@@ -40031,13 +40043,13 @@ async function pickUpAPlayedRun(
     // The note the other run left: same project, so it passes every test of whose it is, which is
     // what made it the one adopted. Its own pid and its own transcript, with output in it.
     const transcript = join(runtimeDir, 'other-run.log');
-    writeFileSync(transcript, 'game-b weld bench\nrow 1 of the wrong table\n');
+    writeFileSync(transcript, 'game-b long bench\nrow 1 of the wrong table\n');
     // What the editor-played run had printed before the server was replaced, in the file the
     // server that started it was writing. Recovering this is the difference between explaining
     // the loss and not losing it.
     const played = join(runtimeDir, 'runs', 'run-1.log');
     mkdirSync(join(runtimeDir, 'runs'), { recursive: true });
-    writeFileSync(played, 'game-b weld shortlist bench\n[slices] 31 of 31 workers started\n');
+    writeFileSync(played, 'game-b second bench\n31 of 31 workers started\n');
 
     // Written where the server under test will look for it, which is the whole point of the case:
     // a note somewhere else is a note nothing adopts, and the disarm then shows "no game running"
@@ -40089,7 +40101,7 @@ async function pickUpAPlayedRun(
           ? {
               ok: true,
               playing: true,
-              scenePath: 'res://tests/bench_shortlist.tscn',
+              scenePath: 'res://tests/bench_second.tscn',
               debugPort: adapter,
               ...playing,
             }
@@ -40490,16 +40502,16 @@ async function withAHeldGame(
  */
 function testRunNotesAreKeptPerProject(): void {
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-notes-'));
-  const guild = join(tmpdir(), 'the-guild');
+  const shop = join(tmpdir(), 'the-shop');
   const bench = join(tmpdir(), 'the-bench');
   const had = process.env['GDHARNESS_RUNTIME_DIR'];
   process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
   try {
     const runs = join(runtimeDir, 'runs');
     mkdirSync(runs, { recursive: true });
-    const guildLog = join(runs, 'run-1.log');
+    const shopLog = join(runs, 'run-1.log');
     const benchLog = join(runs, 'run-2.log');
-    writeFileSync(guildLog, 'guild\n');
+    writeFileSync(shopLog, 'shop\n');
     writeFileSync(benchLog, 'bench\n');
     const note = (projectPath: string, pid: number, transcript: string) => ({
       pid,
@@ -40510,40 +40522,40 @@ function testRunNotesAreKeptPerProject(): void {
       arguments: ['--path', projectPath],
       command: 'godot',
     });
-    writeRunRecord(note(guild, 22520, guildLog));
+    writeRunRecord(note(shop, 22520, shopLog));
     writeRunRecord(note(bench, 31337, benchLog));
-    assert.equal(readRunRecord(guild)?.pid, 22520, 'the guild run is still its note after the bench started');
+    assert.equal(readRunRecord(shop)?.pid, 22520, 'the shop run is still its note after the bench started');
     assert.equal(readRunRecord(bench)?.pid, 31337, 'and the bench has its own');
     // The same project spelled the way an editor reports it, with forward slashes.
-    assert.equal(readRunRecord(guild.replaceAll('\\', '/'))?.pid, 22520, 'whichever way the path is spelled');
+    assert.equal(readRunRecord(shop.replaceAll('\\', '/'))?.pid, 22520, 'whichever way the path is spelled');
 
     recordRunEnded(bench, 31337, { exitCode: 0, exitSignal: null });
     assert.equal(readRunRecord(bench)?.exitCode, 0, "the bench's ending goes into the bench's note");
-    assert.equal(readRunRecord(guild)?.exitCode, undefined, 'and not into the guild run');
+    assert.equal(readRunRecord(shop)?.exitCode, undefined, 'and not into the shop run');
 
     // Old transcripts are swept, and one a note names is not, whichever project it is.
     const aDayAgo = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
-    utimesSync(guildLog, aDayAgo, aDayAgo);
+    utimesSync(shopLog, aDayAgo, aDayAgo);
     utimesSync(benchLog, aDayAgo, aDayAgo);
     // A run's profile mark goes with the run: kept while a note names it, swept once old otherwise.
-    const guildMark = profileMarkPath(readRunRecord(guild)?.startedAt ?? 0);
+    const shopMark = profileMarkPath(readRunRecord(shop)?.startedAt ?? 0);
     const strayMark = join(runs, 'run-3.profile-mark.json');
-    for (const mark of [guildMark, strayMark]) {
+    for (const mark of [shopMark, strayMark]) {
       writeFileSync(mark, '{}');
       utimesSync(mark, aDayAgo, aDayAgo);
     }
     sweepTranscripts();
-    assert.ok(existsSync(guildLog), "the guild run's transcript is kept while its note names it");
+    assert.ok(existsSync(shopLog), "the shop run's transcript is kept while its note names it");
     assert.ok(existsSync(benchLog), "and so is the bench's");
     assert.deepEqual(
-      [existsSync(guildMark), existsSync(strayMark)],
+      [existsSync(shopMark), existsSync(strayMark)],
       [true, false],
-      "the guild run's mark is kept, and a day-old mark of no run is swept",
+      "the shop run's mark is kept, and a day-old mark of no run is swept",
     );
 
     clearRunRecord(bench);
     assert.equal(readRunRecord(bench), null, 'clearing the bench takes its note away');
-    assert.equal(readRunRecord(guild)?.pid, 22520, 'and leaves the guild run');
+    assert.equal(readRunRecord(shop)?.pid, 22520, 'and leaves the shop run');
   } finally {
     if (had === undefined) {
       delete process.env['GDHARNESS_RUNTIME_DIR'];
@@ -43233,7 +43245,7 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       join(project, 'harness', 'work.gd'),
       [
         'class_name Work',
-        'extends "res://harness/ladder.gd"',
+        'extends "res://harness/league.gd"',
         '',
         '',
         'static func square(n: int) -> int:',
@@ -43248,7 +43260,7 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         '',
         '',
         'func _ready() -> void:',
-        '\tprint(busy(200000), duel(100000))',
+        '\tprint(busy(200000), bout(100000))',
         '\t# ranked(this comment is not a call)',
         '\tprint(ranked([3, 1, 2]), "ranked(nor this string)")',
         '\tget_tree().quit()',
@@ -43261,19 +43273,19 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         '\treturn values',
         '',
         '',
-        'func duel(rounds: int) -> int:',
+        'func bout(rounds: int) -> int:',
         '\treturn super(rounds) + 1',
         '',
       ].join('\n'),
     );
     writeFileSync(
-      join(project, 'harness', 'ladder.gd'),
+      join(project, 'harness', 'league.gd'),
       [
-        'class_name Ladder',
+        'class_name League',
         'extends Node',
         '',
         '',
-        'func duel(rounds: int) -> int:',
+        'func bout(rounds: int) -> int:',
         '\tvar sum := 0',
         '\tfor i in rounds:',
         '\t\tsum += i % 7',
@@ -43530,13 +43542,13 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
       // The override calling super is marked, as its self time holds the base's. The base is not.
       assert.deepEqual(
         [
-          get(row('Work.duel'), 'line'),
-          get(row('Work.duel'), 'selfIncludesSuper'),
-          get(row('Ladder.duel'), 'calls'),
-          get(row('Ladder.duel'), 'selfIncludesSuper'),
+          get(row('Work.bout'), 'line'),
+          get(row('Work.bout'), 'selfIncludesSuper'),
+          get(row('League.bout'), 'calls'),
+          get(row('League.bout'), 'selfIncludesSuper'),
         ],
         [31, true, 1, undefined],
-        `Work.duel calls super, Ladder.duel does not: ${wholeShown}`,
+        `Work.bout calls super, League.bout does not: ${wholeShown}`,
       );
 
       // Its two callers, from the source, each with its own numbers from the same profile. The
@@ -44269,21 +44281,21 @@ async function testATestRunNamesItsLeaksAndItsUnusedIgnores(): Promise<void> {
 
       // A script exporting an array of its own class is one Godot never frees, so a suite freeing
       // everything it makes still ends the run this way, and the note names the script.
-      mkdirSync(join(projectDir, 'looped'));
+      mkdirSync(join(projectDir, 'cycled'));
       writeFileSync(
-        join(projectDir, 'looped', 'looped.gd'),
-        'class_name Looped\nextends Resource\n\n@export var parts: Array[Looped] = []\n',
+        join(projectDir, 'cycled', 'cycled.gd'),
+        'class_name Cycled\nextends Resource\n\n@export var parts: Array[Cycled] = []\n',
       );
       writeFileSync(
-        join(projectDir, 'looped', 'looped_test.gd'),
-        'extends GdUnitTestSuite\n\n\nfunc test_makes_one() -> void:\n\tassert_int(Looped.new().parts.size()).is_equal(0)\n',
+        join(projectDir, 'cycled', 'cycled_test.gd'),
+        'extends GdUnitTestSuite\n\n\nfunc test_makes_one() -> void:\n\tassert_int(Cycled.new().parts.size()).is_equal(0)\n',
       );
-      const looped = await run({ path: 'res://looped' });
-      assert.deepEqual([get(looped, 'tests'), get(looped, 'passed')], [1, false], JSON.stringify(looped));
+      const cycled = await run({ path: 'res://cycled' });
+      assert.deepEqual([get(cycled, 'tests'), get(cycled, 'passed')], [1, false], JSON.stringify(cycled));
       assert.match(
-        text(get(looped, 'note')),
-        /Godot never frees a script exporting an array or dictionary typed with its own class once a run has loaded it, and reports it as leaked at exit: res:\/\/looped\/looped\.gd \(Looped\.parts\) does, so a run loading it ends with this report whatever else it frees\. Typed with a class it extends instead, as Array\[Resource\], it is freed\./,
-        JSON.stringify(looped),
+        text(get(cycled, 'note')),
+        /Godot never frees a script exporting an array or dictionary typed with its own class once a run has loaded it, and reports it as leaked at exit: res:\/\/cycled\/cycled\.gd \(Cycled\.parts\) does, so a run loading it ends with this report whatever else it frees\. Typed with a class it extends instead, as Array\[Resource\], it is freed\./,
+        JSON.stringify(cycled),
       );
     });
   } finally {
@@ -45237,24 +45249,24 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
       said,
     );
   }
-  const looped = [{ script: 'res://looped.gd', className: 'Looped', property: 'parts' }];
-  const leakedLooped = judgeEngine(
+  const cycled = [{ script: 'res://cycled.gd', className: 'Cycled', property: 'parts' }];
+  const leakedCycled = judgeEngine(
     readRun(
       `${rows([1])}\nWARNING: ObjectDB instances leaked at exit (run with --verbose for details).\nERROR: 2 resources still in use at exit (run with --verbose for details).`,
     ),
-    { ...declaredRows, selfTyped: looped },
+    { ...declaredRows, selfTyped: cycled },
     clean,
   );
   assert.deepEqual(
-    leakedLooped.faults,
+    leakedCycled.faults,
     [
       'the engine exited holding what it should have freed: WARNING: ObjectDB instances leaked at exit (run with --verbose for details).',
-      'the engine exited holding what it should have freed: ERROR: 2 resources still in use at exit (run with --verbose for details). Godot never frees a script exporting an array or dictionary typed with its own class once a run has loaded it, and reports it as leaked at exit: res://looped.gd (Looped.parts) does, so a run loading it ends with this report whatever else it frees. Typed with a class it extends instead, as Array[Resource], it is freed.',
+      'the engine exited holding what it should have freed: ERROR: 2 resources still in use at exit (run with --verbose for details). Godot never frees a script exporting an array or dictionary typed with its own class once a run has loaded it, and reports it as leaked at exit: res://cycled.gd (Cycled.parts) does, so a run loading it ends with this report whatever else it frees. Typed with a class it extends instead, as Array[Resource], it is freed.',
     ],
     'a script the engine never frees is named once, after the last of the lines it can account for',
   );
   assert.deepEqual(
-    judgeEngine(readRun(rows([1])), { ...declaredRows, selfTyped: looped }, clean).faults,
+    judgeEngine(readRun(rows([1])), { ...declaredRows, selfTyped: cycled }, clean).faults,
     [],
     'and a run that reported nothing held at exit says nothing of it',
   );
@@ -50641,7 +50653,12 @@ async function testARunawayEngineLogIsCutAndEnded(): Promise<void> {
         silent,
         join(silent, 'engine.log'),
         1,
-        () => {
+        (printed) => {
+          // A loaded machine starts the stand-in after the first second of silence has passed, and
+          // the case reads which process to look for from the pid line it prints.
+          if (!printed.lines.some((line) => line.startsWith('pid '))) {
+            return 60;
+          }
           throw new Error('the log could not be read');
         },
       ),
@@ -52593,10 +52610,10 @@ async function testGdUnitRunner(): Promise<void> {
   });
   assert.equal(
     scriptErrorsNote([
-      dependedOn('res://core/ladder.gd'),
-      dependedOn('res://core/pouched.gd'),
+      dependedOn('res://core/league.gd'),
+      dependedOn('res://core/planner.gd'),
       {
-        path: 'res://core/reward.gd',
+        path: 'res://core/prize.gd',
         line: 90,
         message:
           'Parse Error: The parameter "last" is never used in the function "from()". (Warning treated as error.)',
@@ -52604,7 +52621,7 @@ async function testGdUnitRunner(): Promise<void> {
       dependedOn('res://core/run.gd'),
       dependedOn('res://tests/run_test.gd'),
     ]),
-    'No tests ran: gdUnit4 could not load 5 scripts while looking for suites, and it runs no suite at all when one fails to load. res://core/reward.gd:90 Parse Error: The parameter "last" is never used in the function "from()". (Warning treated as error.) 4 more failed only because a script they depend on did: res://core/ladder.gd, res://core/pouched.gd, res://core/run.gd, res://tests/run_test.gd.',
+    'No tests ran: gdUnit4 could not load 5 scripts while looking for suites, and it runs no suite at all when one fails to load. res://core/prize.gd:90 Parse Error: The parameter "last" is never used in the function "from()". (Warning treated as error.) 4 more failed only because a script they depend on did: res://core/league.gd, res://core/planner.gd, res://core/run.gd, res://tests/run_test.gd.',
     'the script with an error of its own comes first, and a line the engine printed as 0 is not given',
   );
   assert.match(
@@ -52619,23 +52636,23 @@ async function testGdUnitRunner(): Promise<void> {
   // The answer beside that sentence: each error of a script's own in full, and the scripts that
   // failed only through a dependency by path, once each. game-b's tier answered nineteen copies
   // of the depended line, about ten kilobytes, under a first line that had counted them.
-  const reward = {
-    path: 'res://core/reward.gd',
+  const prize = {
+    path: 'res://core/prize.gd',
     line: 90,
     message:
       'Parse Error: The parameter "last" is never used in the function "from()". (Warning treated as error.)',
   };
   assert.deepEqual(
     foldedScriptErrors([
-      dependedOn('res://core/ladder.gd'),
-      reward,
+      dependedOn('res://core/league.gd'),
+      prize,
       dependedOn('res://core/run.gd'),
-      dependedOn('res://core/ladder.gd'),
-      { ...reward, line: 95 },
+      dependedOn('res://core/league.gd'),
+      { ...prize, line: 95 },
     ]),
     {
-      scriptErrors: [reward, { ...reward, line: 95 }],
-      failedThroughDependency: ['res://core/ladder.gd', 'res://core/run.gd'],
+      scriptErrors: [prize, { ...prize, line: 95 }],
+      failedThroughDependency: ['res://core/league.gd', 'res://core/run.gd'],
       followFromUnresolved: [],
     },
   );
@@ -52663,7 +52680,7 @@ async function testGdUnitRunner(): Promise<void> {
     message: `Parse Error: Could not resolve class "${name}", because of a parser error.`,
   });
   const declared = new Map([
-    ['Motif', 'res://core/motif.gd'],
+    ['Pattern', 'res://core/pattern.gd'],
     ['Base', 'res://core/base.gd'],
     ['Listed', 'res://core/listed.gd'],
     ['Quiet', 'res://core/quiet.gd'],
@@ -52677,13 +52694,13 @@ async function testGdUnitRunner(): Promise<void> {
     };
   const chain = await originsOf(
     [
-      unresolved('res://core/armed.gd', 94, 'Motif'),
-      unresolved('res://core/hearing.gd', 298, 'Motif'),
+      unresolved('res://core/armed.gd', 94, 'Pattern'),
+      unresolved('res://core/hearing.gd', 298, 'Pattern'),
       dependedOn('res://test/armed_test.gd'),
     ],
     declared,
     engineSays({
-      'res://core/motif.gd': [unresolved('res://core/motif.gd', 3, 'Base')],
+      'res://core/pattern.gd': [unresolved('res://core/pattern.gd', 3, 'Base')],
       'res://core/base.gd': [
         { path: 'res://core/other.gd', line: 1, message: 'Parse Error: elsewhere.' },
         {
@@ -52698,7 +52715,7 @@ async function testGdUnitRunner(): Promise<void> {
     chain,
     {
       origins: [
-        { ...unresolved('res://core/motif.gd', 3, 'Base'), declares: 'Motif' },
+        { ...unresolved('res://core/pattern.gd', 3, 'Base'), declares: 'Pattern' },
         {
           path: 'res://core/base.gd',
           line: 7,
@@ -52710,18 +52727,18 @@ async function testGdUnitRunner(): Promise<void> {
     },
     'followed to the script the declaring one could not resolve either, each checked once, and an error the check printed for another script left out',
   );
-  assert.deepEqual(checked, ['res://core/motif.gd', 'res://core/base.gd']);
+  assert.deepEqual(checked, ['res://core/pattern.gd', 'res://core/base.gd']);
   const chainNote = scriptErrorsNote(
     [
-      unresolved('res://core/armed.gd', 94, 'Motif'),
-      unresolved('res://core/hearing.gd', 298, 'Motif'),
+      unresolved('res://core/armed.gd', 94, 'Pattern'),
+      unresolved('res://core/hearing.gd', 298, 'Pattern'),
       dependedOn('res://test/armed_test.gd'),
     ],
     chain,
   );
   assert.equal(
     chainNote,
-    'No tests ran: 5 scripts did not compile, and gdUnit4 runs no suite at all when one fails to load. It could not load 3 of them while looking for suites, and the 2 it did not name come first. res://core/base.gd:7 Parse Error: Expected ":" after function declaration. gdUnit4 did not name this script, which declares Base. The engine\'s own check of it found the error. res://core/motif.gd:3 Parse Error: Could not resolve class "Base", because of a parser error. gdUnit4 did not name this script, which declares Motif. The engine\'s own check of it found the error. res://core/armed.gd:94, res://core/hearing.gd:298 could not resolve Motif because of it. One more failed only because a script it depends on did: res://test/armed_test.gd.',
+    'No tests ran: 5 scripts did not compile, and gdUnit4 runs no suite at all when one fails to load. It could not load 3 of them while looking for suites, and the 2 it did not name come first. res://core/base.gd:7 Parse Error: Expected ":" after function declaration. gdUnit4 did not name this script, which declares Base. The engine\'s own check of it found the error. res://core/pattern.gd:3 Parse Error: Could not resolve class "Base", because of a parser error. gdUnit4 did not name this script, which declares Pattern. The engine\'s own check of it found the error. res://core/armed.gd:94, res://core/hearing.gd:298 could not resolve Pattern because of it. One more failed only because a script it depends on did: res://test/armed_test.gd.',
     'the script to open is named first with its line, and those that failed on its class after it',
   );
 
@@ -52791,10 +52808,10 @@ async function testGdUnitRunner(): Promise<void> {
     message: `Parse Error: Could not parse global class "${name}" from "res://core/${name.toLowerCase()}.gd".`,
   });
   const hearingErrors = [
-    unresolved('res://core/hearing.gd', 6, 'Motif'),
+    unresolved('res://core/hearing.gd', 6, 'Pattern'),
     variant('res://core/hearing.gd', 6, 'held'),
-    reparsed('res://core/hearing.gd', 10, 'Motif'),
-    unresolved('res://core/hearing.gd', 10, 'Motif'),
+    reparsed('res://core/hearing.gd', 10, 'Pattern'),
+    unresolved('res://core/hearing.gd', 10, 'Pattern'),
     variant('res://core/hearing.gd', 11, 'held'),
     reparsed('res://core/hearing.gd', 12, 'Other'),
     variant('res://core/sound.gd', 4, 'rang'),
@@ -52804,15 +52821,15 @@ async function testGdUnitRunner(): Promise<void> {
     foldedScriptErrors(hearingErrors),
     {
       scriptErrors: [
-        unresolved('res://core/hearing.gd', 6, 'Motif'),
-        unresolved('res://core/hearing.gd', 10, 'Motif'),
+        unresolved('res://core/hearing.gd', 6, 'Pattern'),
+        unresolved('res://core/hearing.gd', 10, 'Pattern'),
         reparsed('res://core/hearing.gd', 12, 'Other'),
         variant('res://core/sound.gd', 4, 'rang'),
       ],
       failedThroughDependency: ['res://test/hearing_test.gd'],
       followFromUnresolved: [
         variant('res://core/hearing.gd', 6, 'held'),
-        reparsed('res://core/hearing.gd', 10, 'Motif'),
+        reparsed('res://core/hearing.gd', 10, 'Pattern'),
         variant('res://core/hearing.gd', 11, 'held'),
       ],
     },
@@ -52820,30 +52837,30 @@ async function testGdUnitRunner(): Promise<void> {
   );
   assert.equal(
     scriptErrorsNote(hearingErrors),
-    'No tests ran: gdUnit4 could not load 3 scripts while looking for suites, and it runs no suite at all when one fails to load. res://core/hearing.gd:6 Parse Error: Could not resolve class "Motif", because of a parser error. res://core/sound.gd:4 Parse Error: The method "rang()" is not present on the inferred type "Variant" (but may be present on a subtype). (Warning treated as error.) One more failed only because a script it depends on did: res://test/hearing_test.gd. 2 more errors in those scripts are under scriptErrors. 3 more errors come only from a class that did not resolve, which the engine reads as Variant, and are under followFromUnresolved.',
+    'No tests ran: gdUnit4 could not load 3 scripts while looking for suites, and it runs no suite at all when one fails to load. res://core/hearing.gd:6 Parse Error: Could not resolve class "Pattern", because of a parser error. res://core/sound.gd:4 Parse Error: The method "rang()" is not present on the inferred type "Variant" (but may be present on a subtype). (Warning treated as error.) One more failed only because a script it depends on did: res://test/hearing_test.gd. 2 more errors in those scripts are under scriptErrors. 3 more errors come only from a class that did not resolve, which the engine reads as Variant, and are under followFromUnresolved.',
   );
   assert.match(
     scriptErrorsNote([
-      unresolved('res://core/hearing.gd', 6, 'Motif'),
+      unresolved('res://core/hearing.gd', 6, 'Pattern'),
       variant('res://core/hearing.gd', 6, 'held'),
     ]),
     /\. One more error comes only from a class that did not resolve, which the engine reads as Variant, and is under followFromUnresolved\.$/,
   );
   checked.length = 0;
   const looped = await originsOf(
-    [unresolved('res://core/a.gd', 2, 'Motif')],
+    [unresolved('res://core/a.gd', 2, 'Pattern')],
     declared,
     engineSays({
-      'res://core/motif.gd': [unresolved('res://core/motif.gd', 3, 'Base')],
-      'res://core/base.gd': [unresolved('res://core/base.gd', 3, 'Motif')],
+      'res://core/pattern.gd': [unresolved('res://core/pattern.gd', 3, 'Base')],
+      'res://core/base.gd': [unresolved('res://core/base.gd', 3, 'Pattern')],
     }),
   );
   assert.deepEqual(
     looped.origins.map((origin) => origin.path),
-    ['res://core/motif.gd', 'res://core/base.gd'],
+    ['res://core/pattern.gd', 'res://core/base.gd'],
     'two classes failing on each other end the walk',
   );
-  assert.deepEqual(checked, ['res://core/motif.gd', 'res://core/base.gd']);
+  assert.deepEqual(checked, ['res://core/pattern.gd', 'res://core/base.gd']);
   // Each check is an engine start, so a run that failed on many broken classes at once is not
   // made to wait on one for each of them.
   checked.length = 0;
@@ -52871,10 +52888,10 @@ async function testGdUnitRunner(): Promise<void> {
   });
   const stoppedRun = [
     logged('Godot Engine v4.7.2.stable.official', [], 'info'),
-    logged('Parse Error: Could not resolve class "Motif", because of a parser error.', [
+    logged('Parse Error: Could not resolve class "Pattern", because of a parser error.', [
       'at: GDScript::reload (res://core/hearing.gd:6)',
     ]),
-    logged('Parse Error: Could not resolve class "Motif", because of a parser error.', [
+    logged('Parse Error: Could not resolve class "Pattern", because of a parser error.', [
       'at: GDScript::reload (res://core/hearing.gd:7)',
     ]),
     logged('Compile Error: Failed to compile depended scripts.', [
@@ -52885,7 +52902,7 @@ async function testGdUnitRunner(): Promise<void> {
     ]),
     logged('Failed to load script "res://core/elsewhere.gd" with error "Compilation failed".'),
     logged('Script errors were detected during test discovery!', [], 'info'),
-    logged('  Parse Error: Could not resolve class "Motif", because of a parser error.', [], 'info'),
+    logged('  Parse Error: Could not resolve class "Pattern", because of a parser error.', [], 'info'),
     logged('\tat res://core/hearing.gd:6', [], 'info'),
     logged('  Compile Error: Failed to compile depended scripts.', [], 'info'),
     logged('\tat res://test/armed_test.gd:0', [], 'info'),
@@ -52893,20 +52910,20 @@ async function testGdUnitRunner(): Promise<void> {
   ];
   assert.deepEqual(
     withoutListed(stoppedRun, [
-      unresolved('res://core/motif.gd', 10, 'Base'),
-      unresolved('res://core/hearing.gd', 6, 'Motif'),
+      unresolved('res://core/pattern.gd', 10, 'Base'),
+      unresolved('res://core/hearing.gd', 6, 'Pattern'),
       dependedOn('res://test/armed_test.gd'),
     ]).map((entry) => entry.text),
     [
       'Godot Engine v4.7.2.stable.official',
-      'Parse Error: Could not resolve class "Motif", because of a parser error.',
+      'Parse Error: Could not resolve class "Pattern", because of a parser error.',
       'Failed to load script "res://core/elsewhere.gd" with error "Compilation failed".',
       'Abnormal exit with 105',
     ],
     'what is listed goes, and an error at a line the list does not hold stays, as does a load failure of a script it does not name',
   );
   assert.equal(
-    withoutListed(stoppedRun, [unresolved('res://core/hearing.gd', 6, 'Motif')])[1]?.detail[0],
+    withoutListed(stoppedRun, [unresolved('res://core/hearing.gd', 6, 'Pattern')])[1]?.detail[0],
     'at: GDScript::reload (res://core/hearing.gd:7)',
   );
   assert.deepEqual(
@@ -53036,8 +53053,8 @@ async function testGdUnitRunner(): Promise<void> {
     );
     mkdirSync(join(projectDir, 'scripts'));
     writeFileSync(
-      join(projectDir, 'scripts', 'guild_ledger.gd'),
-      'class_name GuildLedger\nextends RefCounted\n',
+      join(projectDir, 'scripts', 'shop_ledger.gd'),
+      'class_name ShopLedger\nextends RefCounted\n',
     );
 
     await withStdioServer(
@@ -53085,7 +53102,7 @@ async function testGdUnitRunner(): Promise<void> {
             added: get(run, 'classes', 'added'),
             addedInAddons: get(run, 'classes', 'addedInAddons'),
           },
-          { added: ['GuildLedger'], addedInAddons: { gdUnit4: inGdUnit } },
+          { added: ['ShopLedger'], addedInAddons: { gdUnit4: inGdUnit } },
         );
         assert.ok(
           existsSync(join(elsewhere, 'results.xml')),
@@ -53542,8 +53559,8 @@ async function testGdUnitRunner(): Promise<void> {
           [
             'extends GdUnitTestSuite',
             '',
-            'const WANTED: String = "for every Astragon you have spoken"',
-            'const FOUND: String = "for every spell you have spoken"',
+            'const WANTED: String = "for every Astragon you have lit"',
+            'const FOUND: String = "for every spell you have lit"',
             '',
             '',
             'func test_a_array_failure_first() -> void:',
@@ -53625,7 +53642,7 @@ async function testGdUnitRunner(): Promise<void> {
         for (const name of ['test_the_sentence_alone', 'test_the_sentence_after_others']) {
           assert.ok(
             detailOf(name).endsWith(
-              ` but was\n 'for every spell you have spoken'\n\tat '${name}' in res://mixed/mixed_test.gd:${name === 'test_the_sentence_alone' ? 12 : 20}`,
+              ` but was\n 'for every spell you have lit'\n\tat '${name}' in res://mixed/mixed_test.gd:${name === 'test_the_sentence_alone' ? 12 : 20}`,
             ),
             `${name} says the value it found: ${JSON.stringify(detailOf(name))}`,
           );
@@ -53834,11 +53851,11 @@ async function testGdUnitRunner(): Promise<void> {
         // Every script using the class fails to resolve it and the engine prints nothing naming
         // the script itself, so its path and line come from the engine's check of it. The engine
         // places the error on the line after the missing colon, the first it could not parse.
-        mkdirSync(join(projectDir, 'motif'));
+        mkdirSync(join(projectDir, 'pattern'));
         writeFileSync(
-          join(projectDir, 'motif', 'motif.gd'),
+          join(projectDir, 'pattern', 'pattern.gd'),
           [
-            'class_name RegressionMotif',
+            'class_name RegressionPattern',
             'extends RefCounted',
             '',
             '',
@@ -53852,19 +53869,19 @@ async function testGdUnitRunner(): Promise<void> {
           ].join('\n'),
         );
         writeFileSync(
-          join(projectDir, 'motif', 'hearing.gd'),
+          join(projectDir, 'pattern', 'hearing.gd'),
           [
             'class_name RegressionHearing',
             'extends RefCounted',
             '',
             '',
             'func beats() -> int:',
-            '\treturn RegressionMotif.plain(2)',
+            '\treturn RegressionPattern.plain(2)',
             '',
             '',
             'func twice() -> int:',
-            '\tvar motif: RegressionMotif = RegressionMotif.new()',
-            '\treturn motif.held() * 2',
+            '\tvar pattern: RegressionPattern = RegressionPattern.new()',
+            '\treturn pattern.held() * 2',
             '',
           ].join('\n'),
         );
@@ -53875,7 +53892,7 @@ async function testGdUnitRunner(): Promise<void> {
           `${settingsBefore}\n[debug]\n\ngdscript/warnings/unsafe_method_access=2\n`,
         );
         writeFileSync(
-          join(projectDir, 'motif', 'hearing_test.gd'),
+          join(projectDir, 'pattern', 'hearing_test.gd'),
           [
             'extends GdUnitTestSuite',
             '',
@@ -53885,68 +53902,70 @@ async function testGdUnitRunner(): Promise<void> {
             '',
           ].join('\n'),
         );
-        const motif = await call(
+        const pattern = await call(
           'project_test',
-          { projectPath: projectDir, path: 'res://motif/hearing_test.gd' },
+          { projectPath: projectDir, path: 'res://pattern/hearing_test.gd' },
           ENGINE_CALL_TIMEOUT_MS * 3,
         );
-        const motifNote = motif.slice(0, motif.indexOf('{'));
-        const motifAnswer: unknown = JSON.parse(motif.slice(motif.indexOf('{')));
+        const patternNote = pattern.slice(0, pattern.indexOf('{'));
+        const patternAnswer: unknown = JSON.parse(pattern.slice(pattern.indexOf('{')));
         assert.deepEqual(
-          asArray(get(motifAnswer, 'scriptErrors'))[0],
+          asArray(get(patternAnswer, 'scriptErrors'))[0],
           {
-            path: 'res://motif/motif.gd',
+            path: 'res://pattern/pattern.gd',
             line: 10,
             message: 'Parse Error: Unexpected "Indent" in class body.',
-            declares: 'RegressionMotif',
+            declares: 'RegressionPattern',
           },
-          motif,
+          pattern,
         );
         assert.match(
-          motifNote,
-          /^No tests ran: 3 scripts did not compile, and gdUnit4 runs no suite at all when one fails to load\. It could not load 2 of them while looking for suites, and the one it did not name comes first\. res:\/\/motif\/motif\.gd:10 Parse Error: Unexpected "Indent" in class body\. gdUnit4 did not name this script, which declares RegressionMotif\. The engine's own check of it found the error\. res:\/\/motif\/hearing\.gd:6 could not resolve RegressionMotif because of it\. One more failed only because a script it depends on did: res:\/\/motif\/hearing_test\.gd\. [\s\S]* more errors come only from a class that did not resolve, which the engine reads as Variant, and are under followFromUnresolved\.$/,
-          motif,
+          patternNote,
+          /^No tests ran: 3 scripts did not compile, and gdUnit4 runs no suite at all when one fails to load\. It could not load 2 of them while looking for suites, and the one it did not name comes first\. res:\/\/pattern\/pattern\.gd:10 Parse Error: Unexpected "Indent" in class body\. gdUnit4 did not name this script, which declares RegressionPattern\. The engine's own check of it found the error\. res:\/\/pattern\/hearing\.gd:6 could not resolve RegressionPattern because of it\. One more failed only because a script it depends on did: res:\/\/pattern\/hearing_test\.gd\. [\s\S]* more errors come only from a class that did not resolve, which the engine reads as Variant, and are under followFromUnresolved\.$/,
+          pattern,
         );
         // #911: one number for one run, in the head and in the verdict beside it.
-        assert.equal(get(motifAnswer, 'verdict'), 'script errors in 3 scripts, so no suite ran', motif);
-        const followed = asArray(get(motifAnswer, 'followFromUnresolved'));
-        assert.ok(followed.length >= 2, motif);
+        assert.equal(get(patternAnswer, 'verdict'), 'script errors in 3 scripts, so no suite ran', pattern);
+        const followed = asArray(get(patternAnswer, 'followFromUnresolved'));
+        assert.ok(followed.length >= 2, pattern);
         for (const error of followed) {
-          assert.equal(get(error, 'path'), 'res://motif/hearing.gd', motif);
+          assert.equal(get(error, 'path'), 'res://pattern/hearing.gd', pattern);
           assert.match(
             text(get(error, 'message')),
-            /inferred type "Variant"|Could not parse global class "RegressionMotif"/,
-            motif,
+            /inferred type "Variant"|Could not parse global class "RegressionPattern"/,
+            pattern,
           );
         }
         assert.ok(
           followed.some((error) => Number(get(error, 'line')) === 11),
-          `a line using a variable typed with the class, not only the line that failed to resolve it: ${motif}`,
+          `a line using a variable typed with the class, not only the line that failed to resolve it: ${pattern}`,
         );
         assert.deepEqual(
-          asArray(get(motifAnswer, 'scriptErrors'))
+          asArray(get(patternAnswer, 'scriptErrors'))
             .map((error) => text(get(error, 'message')))
             .filter((message) => /inferred type "Variant"|Could not parse global class/.test(message)),
           [],
-          motif,
+          pattern,
         );
         // What the answer carries beside them: what the run printed, without the errors listed
         // above it a second and third time.
-        const motifEntries = asArray(get(motifAnswer, 'entries')).map((entry) => text(get(entry, 'text')));
+        const patternEntries = asArray(get(patternAnswer, 'entries')).map((entry) =>
+          text(get(entry, 'text')),
+        );
         assert.ok(
-          motifEntries.some((line) => line.startsWith('Godot Engine v')),
-          motif,
+          patternEntries.some((line) => line.startsWith('Godot Engine v')),
+          pattern,
         );
         assert.deepEqual(
-          motifEntries.filter((line) =>
+          patternEntries.filter((line) =>
             /Failed to compile depended scripts|Could not resolve class|Failed to load script|Script errors were detected|^\s*at res:\/\//.test(
               line,
             ),
           ),
           [],
-          motif,
+          pattern,
         );
-        rmSync(join(projectDir, 'motif'), { recursive: true, force: true });
+        rmSync(join(projectDir, 'pattern'), { recursive: true, force: true });
         writeFileSync(join(projectDir, 'project.godot'), settingsBefore);
       },
       { GODOT_PATH: godotPath },
@@ -59960,28 +59979,28 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
   try {
     writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
     mkdirSync(join(project, '.godot'), { recursive: true });
-    writeFileSync(join(project, 'base.gd'), 'class_name CharteredRun\nextends Node\n');
-    writeFileSync(join(project, 'charters_test.gd'), 'extends CharteredRun\n');
-    writeFileSync(join(project, 'uses.gd'), 'extends Node\n\nvar run: CharteredRun\n');
+    writeFileSync(join(project, 'base.gd'), 'class_name PlannedRun\nextends Node\n');
+    writeFileSync(join(project, 'planned_test.gd'), 'extends PlannedRun\n');
+    writeFileSync(join(project, 'uses.gd'), 'extends Node\n\nvar run: PlannedRun\n');
     // Refused the way the editor addon refuses one that does not compile: a call that ran, with
     // Godot's error and the readings of the copy it kept.
-    writeFileSync(join(project, 'refuses.gd'), 'extends Node\n\nvar run: CharteredRun\n');
-    writeFileSync(join(project, 'other.gd'), 'extends Node\n\nvar chartered := 1\n');
+    writeFileSync(join(project, 'refuses.gd'), 'extends Node\n\nvar run: PlannedRun\n');
+    writeFileSync(join(project, 'other.gd'), 'extends Node\n\nvar planned := 1\n');
     // The name in prose and in text only, which is not a use: reloading on a comment is how the
     // editor addon's own tool executor was reloaded mid-call and took a Linux editor down.
     writeFileSync(
       join(project, 'note.gd'),
-      'extends Node\n# CharteredRun is described here\nvar label := "CharteredRun"\nvar doc := """\nCharteredRun\n"""\n',
+      'extends Node\n# PlannedRun is described here\nvar label := "PlannedRun"\nvar doc := """\nPlannedRun\n"""\n',
     );
     // A use in a @tool script, which runs inside the editor and is left for a restart, and one whose
     // @tool shares its line with another annotation, which is a tool script all the same.
-    writeFileSync(join(project, 'tooling.gd'), '@tool\nextends Node\n\nvar run: CharteredRun\n');
+    writeFileSync(join(project, 'tooling.gd'), '@tool\nextends Node\n\nvar run: PlannedRun\n');
     writeFileSync(
       join(project, 'marked.gd'),
-      '@icon("res://icon.svg") @tool\nextends Node\n\nvar run: CharteredRun\n',
+      '@icon("res://icon.svg") @tool\nextends Node\n\nvar run: PlannedRun\n',
     );
     const cache = join(project, '.godot', 'global_script_class_cache.cfg');
-    const cached = 'list=[{\n"class": &"CharteredRun",\n"path": "res://base.gd"\n}]\n';
+    const cached = 'list=[{\n"class": &"PlannedRun",\n"path": "res://base.gd"\n}]\n';
     writeFileSync(cache, cached);
 
     await server.initialize('regression-test');
@@ -60006,7 +60025,7 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
       const tool = String(message['tool']);
       const args = isRecord(message['args']) ? message['args'] : {};
       if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
-        holds = ['CharteredRun'];
+        holds = ['PlannedRun'];
         writeFileSync(cache, cached);
       }
       if (tool === 'reload_script') {
@@ -60042,8 +60061,8 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
                   result:
                     scriptPath === 'res://refuses.gd' || scriptPath === 'base.gd'
                       ? uncompiled
-                      : scriptPath === 'res://Charters_Test.gd'
-                        ? { ok: true, script: 'res://charters_test.gd', methods: ['run_once'] }
+                      : scriptPath === 'res://Planned_Test.gd'
+                        ? { ok: true, script: 'res://planned_test.gd', methods: ['run_once'] }
                         : scriptPath === 'res://grown.gd'
                           ? {
                               ok: true,
@@ -60082,15 +60101,15 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
     });
     const said = textOf(scanned) ?? JSON.stringify(scanned);
     const answer = parseTextContent(scanned);
-    assert.deepEqual(asArray(get(answer, 'broughtIn') ?? []).map(String), ['CharteredRun'], said);
+    assert.deepEqual(asArray(get(answer, 'broughtIn') ?? []).map(String), ['PlannedRun'], said);
     assert.deepEqual(
       reloadsAskedFor,
-      ['res://base.gd', 'res://charters_test.gd', 'res://refuses.gd', 'res://uses.gd'],
+      ['res://base.gd', 'res://planned_test.gd', 'res://refuses.gd', 'res://uses.gd'],
       `the script declaring the class, then the scripts naming it, and not one that does not name it: ${said}`,
     );
     assert.deepEqual(
       asArray(get(answer, 'dependentsReloaded') ?? []).map(String),
-      ['res://charters_test.gd'],
+      ['res://planned_test.gd'],
       said,
     );
     const notReloaded = asArray(get(answer, 'dependentsNotReloaded') ?? []);
@@ -60110,7 +60129,7 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
     // kept, and counting them as reloaded is the mistake this guards.
     assert.equal(
       problemOf('res://refuses.gd'),
-      'it did not compile: Godot answered error 43, Parse error. The editor holds none of what it is compiled against, CharteredRun (res://base.gd), behind its file, so no stale copy is what it fails on.',
+      'it did not compile: Godot answered error 43, Parse error. The editor holds none of what it is compiled against, PlannedRun (res://base.gd), behind its file, so no stale copy is what it fails on.',
       said,
     );
     for (const tool of ['res://marked.gd', 'res://tooling.gd']) {
@@ -60147,7 +60166,7 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
     );
     assert.equal(
       get(asked, 'reloadProblem'),
-      'res://refuses.gd did not compile: Godot answered error 43, Parse error. The copy the editor holds was compiled again from the text it was built from, which puts it back as it was, with the members it held before, which listMembers lists. script_diagnostics on it gives the errors. The editor holds none of what it is compiled against, CharteredRun (res://base.gd), behind its file, so no stale copy is what it fails on.',
+      'res://refuses.gd did not compile: Godot answered error 43, Parse error. The copy the editor holds was compiled again from the text it was built from, which puts it back as it was, with the members it held before, which listMembers lists. script_diagnostics on it gives the errors. The editor holds none of what it is compiled against, PlannedRun (res://base.gd), behind its file, so no stale copy is what it fails on.',
       JSON.stringify(asked),
     );
     assert.deepEqual(
@@ -60186,7 +60205,7 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
     const reloadedByName = parseTextContent(
       await server.request('tools/call', {
         name: 'editor_rescan',
-        arguments: { projectPath: project, reloadScript: 'res://charters_test.gd' },
+        arguments: { projectPath: project, reloadScript: 'res://planned_test.gd' },
       }),
     );
     assert.deepEqual(
@@ -60198,15 +60217,15 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
     const recased = parseTextContent(
       await server.request('tools/call', {
         name: 'editor_rescan',
-        arguments: { projectPath: project, reloadScript: 'res://Charters_Test.gd' },
+        arguments: { projectPath: project, reloadScript: 'res://Planned_Test.gd' },
       }),
     );
     assert.deepEqual(
       [get(recased, 'reloadedAs'), get(recased, 'methodsHeld')],
-      ['res://charters_test.gd', 1],
+      ['res://planned_test.gd', 1],
       `a path in another case says which spelling was reloaded: ${JSON.stringify(recased)}`,
     );
-    // #947: a reload answers with what it changed, not with every member twice. gear.gd's reload
+    // #947: a reload answers with what it changed, not with every member twice. A script's reload
     // answered two lists of about six hundred constants around the one enum member it added.
     const grown = parseTextContent(
       await server.request('tools/call', {
@@ -60324,7 +60343,7 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
     }
     assert.doesNotMatch(
       String(get(ownClass, 'reloadProblem')),
-      /If they deny a member of CharteredRun/,
+      /If they deny a member of PlannedRun/,
       `a script is not told to reload its own class first: ${JSON.stringify(ownClass)}`,
     );
 
@@ -60353,11 +60372,11 @@ async function testARescanReloadsWhatNamesAClassItBroughtIn(): Promise<void> {
  * A script that fails to compile against a class the editor holds behind its file has that class
  * reloaded first, and is tried again.
  *
- * Reported downstream: an addon update added KitMenu and gave KitManifest a constant and a static
- * method, both used by the loader. The rescan brought KitMenu in, the loader would not reload, and
- * the answer said the loader named the new classes and could not be reloaded, which sent the caller
- * after classes that were fine. The editor still held KitManifest as it was before the update, and
- * reloading it and then the loader cleared it, four calls later.
+ * Reported downstream: an addon update added a class, and gave another a constant and a static
+ * method, both used by the loader. The rescan brought the new class in, and the loader would not
+ * reload. The answer said the loader named the new classes and could not be reloaded, which sent
+ * the caller after classes that were fine. The editor still held the changed class as it was before
+ * the update. Reloading it and then the loader cleared it, four calls later.
  *
  * The fixture editor holds manifest.gd behind its file until it is reloaded, and fails the loader
  * while it does. A loader broken in itself is still refused, and its problem says no script it is
@@ -60376,16 +60395,16 @@ async function testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt(): Promise<
     mkdirSync(join(project, 'kit'), { recursive: true });
     writeFileSync(
       join(project, 'kit', 'manifest.gd'),
-      'class_name KitManifest\nextends RefCounted\n\nconst REFUSED := 1\n\n\nstatic func who_of() -> int:\n\treturn 0\n',
+      'class_name ToolManifest\nextends RefCounted\n\nconst REFUSED := 1\n\n\nstatic func who_of() -> int:\n\treturn 0\n',
     );
-    writeFileSync(join(project, 'kit', 'menu.gd'), 'class_name KitMenu\nextends RefCounted\n');
+    writeFileSync(join(project, 'kit', 'menu.gd'), 'class_name ToolMenu\nextends RefCounted\n');
     writeFileSync(
       join(project, 'kit', 'loader.gd'),
-      'extends Node\n\nvar menu: KitMenu\n\n\nfunc _ready() -> void:\n\tprint(KitManifest.REFUSED, KitManifest.who_of())\n',
+      'extends Node\n\nvar menu: ToolMenu\n\n\nfunc _ready() -> void:\n\tprint(ToolManifest.REFUSED, ToolManifest.who_of())\n',
     );
     const cache = join(project, '.godot', 'global_script_class_cache.cfg');
     const entry = (name: string, path: string): string => `{\n"class": &"${name}",\n"path": "${path}"\n}`;
-    writeFileSync(cache, `list=[${entry('KitManifest', 'res://kit/manifest.gd')}]\n`);
+    writeFileSync(cache, `list=[${entry('ToolManifest', 'res://kit/manifest.gd')}]\n`);
 
     await server.initialize('regression-test');
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
@@ -60397,7 +60416,7 @@ async function testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt(): Promise<
       socket.once('error', reject);
     });
 
-    let holds = ['KitManifest'];
+    let holds = ['ToolManifest'];
     let manifestBehind = true;
     let loaderBroken = false;
     let behindRefused = false;
@@ -60412,10 +60431,10 @@ async function testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt(): Promise<
       const args = isRecord(message['args']) ? message['args'] : {};
       let result: Record<string, unknown>;
       if (tool === 'rescan_filesystem' && args['statusOnly'] !== true) {
-        holds = ['KitManifest', 'KitMenu'];
+        holds = ['ToolManifest', 'ToolMenu'];
         writeFileSync(
           cache,
-          `list=[${entry('KitManifest', 'res://kit/manifest.gd')}, ${entry('KitMenu', 'res://kit/menu.gd')}]\n`,
+          `list=[${entry('ToolManifest', 'res://kit/manifest.gd')}, ${entry('ToolMenu', 'res://kit/menu.gd')}]\n`,
         );
         result = { ok: true, scanning: false, importing: false, pending: false };
       } else if (tool === 'rescan_filesystem' || tool === 'scan_status') {
@@ -60517,7 +60536,7 @@ async function testAScriptFailingOnAClassHeldBehindIsReloadedAfterIt(): Promise<
     assert.deepEqual(reloadsAskedFor, ['res://kit/loader.gd'], broken.said);
     assert.match(
       text(get(broken.answer, 'reloadProblem')),
-      / The editor holds none of what it is compiled against, KitManifest \(res:\/\/kit\/manifest\.gd\), KitMenu \(res:\/\/kit\/menu\.gd\), behind their files, so no stale copy is what it fails on\.$/,
+      / The editor holds none of what it is compiled against, ToolManifest \(res:\/\/kit\/manifest\.gd\), ToolMenu \(res:\/\/kit\/menu\.gd\), behind their files, so no stale copy is what it fails on\.$/,
       broken.said,
     );
     assert.equal(get(broken.answer, 'reloadedFirst'), undefined, broken.said);
@@ -60597,11 +60616,11 @@ async function testARebuildSaysWhatItsOwnEngineCouldNotKnow(): Promise<void> {
     mkdirSync(join(project, '.godot'), { recursive: true });
     mkdirSync(join(project, 'kit'), { recursive: true });
     mkdirSync(join(project, 'boot'), { recursive: true });
-    writeFileSync(join(project, 'kit', 'manifest.gd'), 'class_name KitManifest\nextends RefCounted\n');
-    writeFileSync(join(project, 'kit', 'menu.gd'), 'class_name KitMenu\nextends RefCounted\n');
+    writeFileSync(join(project, 'kit', 'manifest.gd'), 'class_name ToolManifest\nextends RefCounted\n');
+    writeFileSync(join(project, 'kit', 'menu.gd'), 'class_name ToolMenu\nextends RefCounted\n');
     writeFileSync(
       join(project, 'boot', 'guard.gd'),
-      'extends Node\n\n\nfunc _ready() -> void:\n\tprint(KitMenu.new())\n',
+      'extends Node\n\n\nfunc _ready() -> void:\n\tprint(ToolMenu.new())\n',
     );
     writeFileSync(
       join(project, 'boot', 'broken.gd'),
@@ -60609,7 +60628,7 @@ async function testARebuildSaysWhatItsOwnEngineCouldNotKnow(): Promise<void> {
     );
     writeFileSync(
       join(project, '.godot', 'global_script_class_cache.cfg'),
-      'list=[{\n"base": &"RefCounted",\n"class": &"KitManifest",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"GDScript",\n"path": "res://kit/manifest.gd"\n}]\n',
+      'list=[{\n"base": &"RefCounted",\n"class": &"ToolManifest",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"GDScript",\n"path": "res://kit/manifest.gd"\n}]\n',
     );
     await server.initialize('regression-test');
     const refresh = async (): Promise<{ said: string; answer: unknown }> => {
@@ -60622,11 +60641,11 @@ async function testARebuildSaysWhatItsOwnEngineCouldNotKnow(): Promise<void> {
     };
 
     const rebuilt = await refresh();
-    assert.deepEqual(get(rebuilt.answer, 'staleInThisEngine'), ['KitMenu'], rebuilt.said);
+    assert.deepEqual(get(rebuilt.answer, 'staleInThisEngine'), ['ToolMenu'], rebuilt.said);
     const note = text(get(rebuilt.answer, 'engine_messages_after_answer_note'));
     assert.match(
       note,
-      /^The engine that rebuilt the class list loaded the old one when it started, which did not hold KitMenu, and compiled the autoloads against it after answering, so its errors naming that class are its own and not the scripts'\. A second engine started on the rebuilt list ran the autoloads and reported what is under autoloadsOnTheRebuiltList\./,
+      /^The engine that rebuilt the class list loaded the old one when it started, which did not hold ToolMenu, and compiled the autoloads against it after answering, so its errors naming that class are its own and not the scripts'\. A second engine started on the rebuilt list ran the autoloads and reported what is under autoloadsOnTheRebuiltList\./,
       rebuilt.said,
     );
     assert.match(note, /res:\/\/boot\/broken\.gd did not compile/, rebuilt.said);
@@ -60639,11 +60658,11 @@ async function testARebuildSaysWhatItsOwnEngineCouldNotKnow(): Promise<void> {
       `the second engine still reports what is broken: ${rebuilt.said}`,
     );
     assert.ok(
-      !recompiled.some((line) => line.includes('KitMenu')),
+      !recompiled.some((line) => line.includes('ToolMenu')),
       `and not the class it now knows: ${rebuilt.said}`,
     );
 
-    // With an editor holding KitManifest compiled from an older text: no change to the list, and
+    // With an editor holding ToolManifest compiled from an older text: no change to the list, and
     // named all the same.
     const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
     editor = socket;
@@ -60685,7 +60704,7 @@ async function testARebuildSaysWhatItsOwnEngineCouldNotKnow(): Promise<void> {
               unsavedInEditor: [],
             }
           : tool === 'global_classes'
-            ? { ok: true, classes: ['KitManifest', 'KitMenu'] }
+            ? { ok: true, classes: ['ToolManifest', 'ToolMenu'] }
             : { ok: true, scanning: false, importing: false, pending: false };
       socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
     });
@@ -60700,15 +60719,15 @@ async function testARebuildSaysWhatItsOwnEngineCouldNotKnow(): Promise<void> {
     const withEditor = await refresh();
     assert.deepEqual(
       get(withEditor.answer, 'heldBehindInEditor'),
-      [{ className: 'KitManifest', scriptPath: 'res://kit/manifest.gd' }],
+      [{ className: 'ToolManifest', scriptPath: 'res://kit/manifest.gd' }],
       withEditor.said,
     );
     assert.match(
       text(get(withEditor.answer, 'note')),
-      /The editor holds KitManifest compiled from a text its file no longer has.*editor_rescan with reloadScript set to res:\/\/kit\/manifest\.gd reloads it/,
+      /The editor holds ToolManifest compiled from a text its file no longer has.*editor_rescan with reloadScript set to res:\/\/kit\/manifest\.gd reloads it/,
       withEditor.said,
     );
-    // The list the second rebuild started with held KitMenu, so nothing is its engine's own.
+    // The list the second rebuild started with held ToolMenu, so nothing is its engine's own.
     assert.equal(get(withEditor.answer, 'staleInThisEngine'), undefined, withEditor.said);
 
     // An editor that will not say what it holds behind is said not to have, rather than answered
@@ -60727,7 +60746,7 @@ async function testARebuildSaysWhatItsOwnEngineCouldNotKnow(): Promise<void> {
     const twoBehind = await refresh();
     assert.match(
       text(get(twoBehind.answer, 'note')),
-      /The editor holds KitManifest, KitMenu compiled from texts their files no longer have.*editor_rescan with reloadScript set to \["res:\/\/kit\/manifest\.gd","res:\/\/kit\/menu\.gd"\] reloads each,/,
+      /The editor holds ToolManifest, ToolMenu compiled from texts their files no longer have.*editor_rescan with reloadScript set to \["res:\/\/kit\/manifest\.gd","res:\/\/kit\/menu\.gd"\] reloads each,/,
       twoBehind.said,
     );
   } finally {
@@ -61382,9 +61401,9 @@ async function testAClassWhoseScriptCameBackIsNotTheEditorsLoss(): Promise<void>
   try {
     writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
     mkdirSync(join(project, '.godot'), { recursive: true });
-    writeFileSync(join(project, 'guild.gd'), 'class_name Guild\nextends Node\n');
-    const owing = join(project, 'owing.gd');
-    writeFileSync(owing, 'class_name Owing\nextends Node\n');
+    writeFileSync(join(project, 'shop.gd'), 'class_name Shop\nextends Node\n');
+    const balance = join(project, 'balance.gd');
+    writeFileSync(balance, 'class_name Balance\nextends Node\n');
     const cache = join(project, '.godot', 'global_script_class_cache.cfg');
 
     await server.initialize('regression-test');
@@ -61404,7 +61423,7 @@ async function testAClassWhoseScriptCameBackIsNotTheEditorsLoss(): Promise<void>
       const result =
         String(message['tool']) === 'rescan_filesystem'
           ? { ok: true, scanning: false, importing: false, pending: false }
-          : { ok: true, classes: ['Guild'] };
+          : { ok: true, classes: ['Shop'] };
       socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
     });
     socket.send(JSON.stringify(greeting(project)));
@@ -61424,28 +61443,28 @@ async function testAClassWhoseScriptCameBackIsNotTheEditorsLoss(): Promise<void>
           ENGINE_CALL_TIMEOUT_MS,
         ),
       );
-    // A first rebuild, so there is a last rebuild holding Owing to lose it from.
+    // A first rebuild, so there is a last rebuild holding Balance to lose it from.
     const first = await refresh();
     assert.deepEqual(
       [...(cachedClasses(project)?.keys() ?? [])].toSorted(),
-      ['Guild', 'Owing'],
+      ['Balance', 'Shop'],
       JSON.stringify(first),
     );
 
     // The stash: the script goes, and the editor writes the list it sees, which is right.
-    rmSync(owing);
-    writeFileSync(cache, 'list=[{\n"class": &"Guild",\n"path": "res://guild.gd"\n}]\n');
+    rmSync(balance);
+    writeFileSync(cache, 'list=[{\n"class": &"Shop",\n"path": "res://shop.gd"\n}]\n');
     const hourAgo = Date.now() / 1000 - 3600;
     utimesSync(cache, hourAgo, hourAgo);
     // The pop: the script is written again, after the cache.
-    writeFileSync(owing, 'class_name Owing\nextends Node\n');
+    writeFileSync(balance, 'class_name Balance\nextends Node\n');
 
     const second = await refresh();
     const said = JSON.stringify(second);
-    assert.deepEqual(asArray(get(second, 'lostSinceLastRebuild') ?? []).map(String), ['Owing'], said);
+    assert.deepEqual(asArray(get(second, 'lostSinceLastRebuild') ?? []).map(String), ['Balance'], said);
     assert.match(
       text(get(second, 'note')),
-      /Owing left the cache while its script was gone: the script is newer than the cache the editor last wrote, so it listed what was on disk then\. editor_rescan picks it up\./,
+      /Balance left the cache while its script was gone: the script is newer than the cache the editor last wrote, so it listed what was on disk then\. editor_rescan picks it up\./,
       said,
     );
     assert.doesNotMatch(text(get(second, 'note')), /editor_launch restart is what/, said);
@@ -61918,16 +61937,16 @@ const NO_LANGUAGE_SERVER: Pick<RenameServices, 'references' | 'definitions'> = {
 
 /**
  * A long line is quoted around the name, under changed and under leftAlone. Reported from a member
- * rename in a game whose cockpit keeps one JSON record a line: three cards naming the word in their
- * notes came back whole under leftAlone, the longest eight thousand characters.
+ * rename in a game that keeps a file of one JSON record a line. Three records naming the word came
+ * back whole under leftAlone, the longest eight thousand characters.
  */
 async function testALongLineIsQuotedAroundTheName(): Promise<void> {
   const project = renameProject();
   try {
-    mkdirSync(join(project, 'cards'));
-    writeFileSync(join(project, 'cards', '.gdignore'), '');
+    mkdirSync(join(project, 'records'));
+    writeFileSync(join(project, 'records', '.gdignore'), '');
     writeFileSync(
-      join(project, 'cards', 'board.json'),
+      join(project, 'records', 'entries.json'),
       `{"note": "${'x'.repeat(990)} Told ${'y'.repeat(1000)}"}\n`,
     );
     const padding = 'p'.repeat(400);
@@ -61940,18 +61959,18 @@ async function testALongLineIsQuotedAroundTheName(): Promise<void> {
         projectPath: project,
         scriptPath: join(project, 'told.gd'),
         symbol: 'Told',
-        newName: 'Wording',
+        newName: 'Phrasing',
         newScriptPath: null,
       },
       { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
     );
     assert.ok(outcome.ok, `the rename was refused: ${JSON.stringify(outcome)}`);
-    const card = asArray(get(outcome.report, 'leftAlone')).find(
-      (one) => get(one, 'file') === 'res://cards/board.json',
+    const record = asArray(get(outcome.report, 'leftAlone')).find(
+      (one) => get(one, 'file') === 'res://records/entries.json',
     );
     // The word is at 1001 of the trimmed line, so the quote starts 80 before it.
     assert.equal(
-      get(card, 'text'),
+      get(record, 'text'),
       `...${'x'.repeat(79)} Told ${'y'.repeat(155)}...`,
       JSON.stringify(get(outcome.report, 'leftAlone')),
     );
@@ -61960,13 +61979,13 @@ async function testALongLineIsQuotedAroundTheName(): Promise<void> {
     );
     assert.deepEqual(
       asArray(get(changed, 'lines')).map((one) => get(one, 'text')),
-      [`${`var held: Wording = null; var pad := "${padding}`.slice(0, 240)}...`],
+      [`${`var held: Phrasing = null; var pad := "${padding}`.slice(0, 240)}...`],
       JSON.stringify(changed),
     );
     // A short line is quoted whole, as it always was.
     assert.ok(
       asArray(get(outcome.report, 'changed')).some((one) =>
-        asArray(get(one, 'lines')).some((line) => get(line, 'text') === 'class_name Wording'),
+        asArray(get(one, 'lines')).some((line) => get(line, 'text') === 'class_name Phrasing'),
       ),
       JSON.stringify(get(outcome.report, 'changed')),
     );
@@ -61976,19 +61995,19 @@ async function testALongLineIsQuotedAroundTheName(): Promise<void> {
   // A move quotes what it left alone around the path it moved.
   const moving = moveProject();
   try {
-    mkdirSync(join(moving, 'cards'));
-    writeFileSync(join(moving, 'cards', '.gdignore'), '');
+    mkdirSync(join(moving, 'records'));
+    writeFileSync(join(moving, 'records', '.gdignore'), '');
     writeFileSync(
-      join(moving, 'cards', 'board.json'),
+      join(moving, 'records', 'entries.json'),
       `{"note": "${'x'.repeat(990)} res://scenes/hero.tscn ${'y'.repeat(1000)}"}\n`,
     );
     const outcome = planFileMove(moving, join(moving, 'scenes/hero.tscn'), join(moving, 'actors/hero.tscn'));
     assert.ok(outcome.ok, JSON.stringify(outcome));
-    const card = asArray(get(outcome.report, 'leftAlone')).find(
-      (one) => get(one, 'file') === 'res://cards/board.json',
+    const record = asArray(get(outcome.report, 'leftAlone')).find(
+      (one) => get(one, 'file') === 'res://records/entries.json',
     );
     assert.equal(
-      get(card, 'text'),
+      get(record, 'text'),
       `...${'x'.repeat(79)} res://scenes/hero.tscn ${'y'.repeat(137)}...`,
       JSON.stringify(get(outcome.report, 'leftAlone')),
     );
@@ -62011,7 +62030,7 @@ async function testARenamedClassChangesItsUsesAndLeavesItsWords(): Promise<void>
         projectPath: project,
         scriptPath: join(project, 'told.gd'),
         symbol: 'Told',
-        newName: 'Wording',
+        newName: 'Phrasing',
         newScriptPath: null,
       },
       { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
@@ -62053,7 +62072,7 @@ async function testARenamedClassChangesItsUsesAndLeavesItsWords(): Promise<void>
       asArray(get(outcome.report, 'leftAlone'))
         .filter((one) => get(one, 'line') === fixtureLine('user.gd', 'var kept'))
         .map((one) => get(one, 'text')),
-      ['var kept: Wording = $Told'],
+      ['var kept: Phrasing = $Told'],
       JSON.stringify(get(outcome.report, 'leftAlone')),
     );
     assert.deepEqual(
@@ -62094,10 +62113,10 @@ async function testARenamedClassChangesItsUsesAndLeavesItsWords(): Promise<void>
 
     applyRewrites(outcome.rewrites);
     const loud = readFileSync(join(project, 'loud.gd'), 'utf8');
-    assert.match(loud, /^extends Wording$/m);
-    assert.match(loud, /## A \[Wording\] that shouts: \[method Wording\.say\], \[method Loud\.say\]\./);
+    assert.match(loud, /^extends Phrasing$/m);
+    assert.match(loud, /## A \[Phrasing\] that shouts: \[method Phrasing\.say\], \[method Loud\.say\]\./);
     assert.match(loud, /# Told, because it is the whole of what Loud says\./, 'the comment keeps its word');
-    assert.match(readFileSync(join(project, 'data.tres'), 'utf8'), /script_class="Wording"/);
+    assert.match(readFileSync(join(project, 'data.tres'), 'utf8'), /script_class="Phrasing"/);
     assert.equal(readFileSync(join(project, 'shadow.gd'), 'utf8'), RENAME_FIXTURE['shadow.gd']);
   } finally {
     rmSync(project, { recursive: true, force: true });
@@ -62179,7 +62198,7 @@ async function testARenameRefusesANameAlreadyTaken(): Promise<void> {
         projectPath: project,
         scriptPath: join(project, 'told.gd'),
         symbol: 'Told',
-        newName: 'Wording',
+        newName: 'Phrasing',
         newScriptPath: join(project, '..', 'escaped.gd'),
       },
       { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
@@ -62381,7 +62400,7 @@ async function testAUseUnderACommentEndingInAFullStopIsRenamed(): Promise<void> 
         projectPath: project,
         scriptPath: join(project, 'told.gd'),
         symbol: 'Told',
-        newName: 'Wording',
+        newName: 'Phrasing',
         newScriptPath: null,
       },
       { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
@@ -62399,7 +62418,7 @@ async function testAUseUnderACommentEndingInAFullStopIsRenamed(): Promise<void> 
     applyRewrites(outcome.rewrites);
     assert.equal(
       readFileSync(join(project, 'maker.gd'), 'utf8'),
-      maker.replace('\tTold.new()', '\tWording.new()'),
+      maker.replace('\tTold.new()', '\tPhrasing.new()'),
     );
   } finally {
     rmSync(project, { recursive: true, force: true });
@@ -62432,8 +62451,8 @@ async function testADocLinkWrappedAcrossLinesIsRenamedWhole(): Promise<void> {
         .map((line) => `${asNumber(get(line, 'line'))}: ${text(get(line, 'text'))}`);
     };
     assert.deepEqual(
-      await rename('Told', 'Wording'),
-      ['3: ## Wording.LOUD] beside a [method', '4: ## Wording.say] link.'],
+      await rename('Told', 'Phrasing'),
+      ['3: ## Phrasing.LOUD] beside a [method', '4: ## Phrasing.say] link.'],
       'the class named on the lines after two links open',
     );
     assert.deepEqual(
@@ -62622,7 +62641,7 @@ async function testAStringThatIsTheNameWholeIsListedFirst(): Promise<void> {
       ];
     };
 
-    const forClass = await left('Told', 'Wording');
+    const forClass = await left('Told', 'Phrasing');
     assert.deepEqual(
       forClass.map(({ line, kind }) => `${String(line)}:${kind}`),
       ['3:string', '8:string', '9:string'],
@@ -62669,7 +62688,7 @@ async function testALargeRenameAnswerPutsItsGroupedLinesInAFile(): Promise<void>
         projectPath: project,
         scriptPath: join(project, 'told.gd'),
         symbol: 'Told',
-        newName: 'Wording',
+        newName: 'Phrasing',
         newScriptPath: null,
       },
       { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
@@ -62750,8 +62769,8 @@ async function testAnIgnoredFolderIsListedAndLeftUnchanged(): Promise<void> {
         projectPath: project,
         scriptPath: join(project, 'told.gd'),
         symbol: 'Told',
-        newName: 'Wording',
-        newScriptPath: join(project, 'speech', 'wording.gd'),
+        newName: 'Phrasing',
+        newScriptPath: join(project, 'speech', 'phrasing.gd'),
       },
       { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
     );
@@ -62776,7 +62795,7 @@ async function testAnIgnoredFolderIsListedAndLeftUnchanged(): Promise<void> {
       `each says why it was left: ${JSON.stringify(why)}`,
     );
     applyRewrites(outcome.rewrites);
-    assert.ok(existsSync(join(project, 'speech', 'wording.gd')), 'the script moved');
+    assert.ok(existsSync(join(project, 'speech', 'phrasing.gd')), 'the script moved');
     assert.equal(readFileSync(join(project, 'sdk', 'mod.gd'), 'utf8'), mod);
   } finally {
     rmSync(project, { recursive: true, force: true });
@@ -62805,30 +62824,30 @@ async function testAMovedScriptIsNamedByItsNewPathEverywhere(): Promise<void> {
         projectPath: linked,
         scriptPath: join(linked, 'told.gd'),
         symbol: 'Told',
-        newName: 'Wording',
-        newScriptPath: join(linked, 'words', 'wording.gd'),
+        newName: 'Phrasing',
+        newScriptPath: join(linked, 'words', 'phrasing.gd'),
       },
       { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
     );
     assert.ok(outcome.ok, `the move was refused: ${JSON.stringify(outcome)}`);
     applyRewrites(outcome.rewrites);
     assert.ok(!existsSync(join(project, 'told.gd')) && !existsSync(join(project, 'told.gd.uid')));
-    assert.equal(readFileSync(join(project, 'words', 'wording.gd.uid'), 'utf8'), 'uid://btold\n');
-    const moved = readFileSync(join(project, 'words', 'wording.gd'), 'utf8');
-    assert.match(moved, /^class_name Wording$/m);
+    assert.equal(readFileSync(join(project, 'words', 'phrasing.gd.uid'), 'utf8'), 'uid://btold\n');
+    const moved = readFileSync(join(project, 'words', 'phrasing.gd'), 'utf8');
+    assert.match(moved, /^class_name Phrasing$/m);
     assert.match(
       moved,
       /preload\("\.\.\/helper\.gd"\)/,
       'a relative path in the moved script still names its file',
     );
     const user = readFileSync(join(project, 'user.gd'), 'utf8');
-    assert.match(user, /preload\("res:\/\/words\/wording\.gd"\)/);
-    assert.match(user, /preload\("words\/wording\.gd"\)/, 'a relative path stays relative');
+    assert.match(user, /preload\("res:\/\/words\/phrasing\.gd"\)/);
+    assert.match(user, /preload\("words\/phrasing\.gd"\)/, 'a relative path stays relative');
     assert.match(
       readFileSync(join(project, 'project.godot'), 'utf8'),
-      /Speaker="\*res:\/\/words\/wording\.gd"/,
+      /Speaker="\*res:\/\/words\/phrasing\.gd"/,
     );
-    assert.match(readFileSync(join(project, 'data.tres'), 'utf8'), /path="res:\/\/words\/wording\.gd"/);
+    assert.match(readFileSync(join(project, 'data.tres'), 'utf8'), /path="res:\/\/words\/phrasing\.gd"/);
     assert.match(
       readFileSync(join(project, 'notes.md'), 'utf8'),
       /res:\/\/told\.gd/,
@@ -62862,7 +62881,7 @@ async function testARenameWritesEveryFileOrNone(): Promise<void> {
           projectPath: project,
           scriptPath: join(project, 'told.gd'),
           symbol: 'Told',
-          newName: 'Wording',
+          newName: 'Phrasing',
           newScriptPath: null,
         },
         { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
@@ -62948,8 +62967,8 @@ function movedIn(
 
 /**
  * A path from the project's root without res://, the way a build script or a note names a file, is
- * answered under leftAlone. Reported from a folder move in a game whose Python gate listed the
- * moved scripts as `"game/store/icons.gd"`: nothing was changed or named, and the gate broke.
+ * answered under leftAlone. Reported from a folder move in a game whose own check listed the moved
+ * scripts as `"src/ui/badge.gd"`. Nothing was changed or named, and the check broke.
  */
 function testAMoveNamesAPathFromTheRootItLeftAlone(): void {
   const project = moveProject();
@@ -63332,8 +63351,8 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
       await rename({
         scriptPath: 'res://told.gd',
         symbol: 'Told',
-        newName: 'Wording',
-        newScriptPath: 'res://words/wording.gd',
+        newName: 'Phrasing',
+        newScriptPath: 'res://words/phrasing.gd',
       }),
     );
     assert.equal(get(renamed, 'ok'), true, `the rename did not settle: ${JSON.stringify(renamed)}`);
@@ -63344,28 +63363,34 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
       asArray(get(renamed, 'compiled', 'checked'))
         .map((one) => text(one))
         .toSorted(),
-      ['res://loud.gd', 'res://user.gd', 'res://words/wording.gd'],
+      ['res://loud.gd', 'res://user.gd', 'res://words/phrasing.gd'],
       'the moved script, its subclass and its user, each by name',
     );
     assert.equal(get(renamed, 'uidTable'), 'rebuilt by an import pass');
     // Measured from before the call: the import pass writes the cache ahead of the rebuild.
     assert.deepEqual(
       ['added', 'removed', 'changed'].map((key) => get(renamed, 'classCache', key)),
-      [['Wording'], ['Told'], ['Loud']],
+      [['Phrasing'], ['Told'], ['Loud']],
       `the subclass changes with the base it names: ${JSON.stringify(get(renamed, 'classCache'))}`,
     );
     assert.ok(!existsSync(join(project, 'told.gd')) && !existsSync(join(project, 'told.gd.uid')));
     assert.equal(
-      readFileSync(join(project, 'words', 'wording.gd.uid'), 'utf8'),
+      readFileSync(join(project, 'words', 'phrasing.gd.uid'), 'utf8'),
       uid,
       'the UID moved with it',
     );
     const cache = readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8');
-    assert.match(cache, /"class": &"Wording",[\s\S]*?"path": "res:\/\/words\/wording\.gd"/);
+    assert.match(cache, /"class": &"Phrasing",[\s\S]*?"path": "res:\/\/words\/phrasing\.gd"/);
     assert.doesNotMatch(cache, /&"Told"/, 'the old name is gone from the cache');
-    assert.match(readFileSync(join(project, 'loud.gd'), 'utf8'), /extends Wording\n[\s\S]*Wording\.new\(\)/);
-    assert.match(readFileSync(join(project, 'user.gd'), 'utf8'), /preload\("res:\/\/words\/wording\.gd"\)/);
-    assert.match(readFileSync(join(project, 'words', 'wording.gd'), 'utf8'), /preload\("\.\.\/helper\.gd"\)/);
+    assert.match(
+      readFileSync(join(project, 'loud.gd'), 'utf8'),
+      /extends Phrasing\n[\s\S]*Phrasing\.new\(\)/,
+    );
+    assert.match(readFileSync(join(project, 'user.gd'), 'utf8'), /preload\("res:\/\/words\/phrasing\.gd"\)/);
+    assert.match(
+      readFileSync(join(project, 'words', 'phrasing.gd'), 'utf8'),
+      /preload\("\.\.\/helper\.gd"\)/,
+    );
     // What a fresh engine resolves the UID to, which is what a scene naming the script by its UID
     // loads: the engine's own table, not the sidecar.
     writeFileSync(
@@ -63380,7 +63405,7 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
         timeout: 120_000,
       },
     );
-    assert.match(probed.stdout, /UID PATH res:\/\/words\/wording\.gd/, `${probed.stdout}\n${probed.stderr}`);
+    assert.match(probed.stdout, /UID PATH res:\/\/words\/phrasing\.gd/, `${probed.stdout}\n${probed.stderr}`);
     rmSync(join(project, 'probe.gd'));
 
     // A class renamed in place, beside a script naming it that does not compile for a reason of its
@@ -63421,8 +63446,8 @@ async function testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight(): Promis
     rmSync(join(project, 'broken.gd'));
 
     const said = async (args: Record<string, unknown>): Promise<string> =>
-      textOf(await rename({ scriptPath: 'res://words/wording.gd', ...args })) ?? '';
-    const native = await said({ symbol: 'Wording', newName: 'Node' });
+      textOf(await rename({ scriptPath: 'res://words/phrasing.gd', ...args })) ?? '';
+    const native = await said({ symbol: 'Phrasing', newName: 'Node' });
     assert.match(native, /Node is a native class/, native);
     // A virtual, which the engine's class_has_method does not count as a method of Node.
     const virtual = await said({ symbol: '_ready', newName: 'begin' });

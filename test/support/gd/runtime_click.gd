@@ -294,7 +294,7 @@ func _check_choosing() -> void:
 
 ## An item is chosen by the rules every `says` matches words by, after its whole words.
 ##
-## A menu holding "Leave the hall" refused "Leave*" as no such item, where a click, a find and a
+## A menu holding "Leave the shop" refused "Leave*" as no such item, where a click, a find and a
 ## wait all take the glob. Each rule is checked by what it chooses: a plain word as a contains, the
 ## whole words ahead of an item that contains them, an enabled item ahead of a disabled one, and a
 ## glob or alternatives matching two items equally are refused with both named.
@@ -303,7 +303,7 @@ func _check_choosing_by_what_it_says() -> void:
 	doors.name = "Doors"
 	root.add_child(doors)
 	var menu: PopupMenu = doors.get_popup()
-	for item: String in ["The guide", "Leave", "Leave the hall", "Leave quietly"]:
+	for item: String in ["The manual", "Leave", "Leave the shop", "Leave quietly"]:
 		menu.add_item(item)
 	menu.set_item_disabled(3, true)
 	await process_frame
@@ -314,14 +314,14 @@ func _check_choosing_by_what_it_says() -> void:
 	var missing: Dictionary = await typing.choose({ "path": "/root/Doors", "text": "Stay" })
 	if not _says(missing, "has no such item"):
 		_fail("words no item says are refused: %s" % JSON.stringify(missing))
-	for case: Array in [["hall", 2], ["Leave", 1], ["quietly|hall", 2], ["The*", 0]]:
+	for case: Array in [["shop", 2], ["Leave", 1], ["quietly|shop", 2], ["The*", 0]]:
 		fired.clear()
 		var chosen: Dictionary = await typing.choose({ "path": "/root/Doors", "text": case[0] })
 		if chosen.get("index") != case[1] or fired != [case[1]]:
 			_fail("%s chooses item %d: %s %s" % [case[0], case[1], JSON.stringify(chosen), fired])
 	var ties: Dictionary[String, String] = {
-		"Leave*": "1: Leave, 2: Leave the hall",
-		"guide|hall": "0: The guide, 2: Leave the hall",
+		"Leave*": "1: Leave, 2: Leave the shop",
+		"manual|shop": "0: The manual, 2: Leave the shop",
 	}
 	for tie: String in ties:
 		fired.clear()
@@ -336,7 +336,7 @@ func _check_choosing_by_what_it_says() -> void:
 	# A refusal is followed by the call it asks for, on the same menu.
 	fired.clear()
 	var retried: Dictionary = await typing.choose(
-		{ "path": "/root/Doors", "text": "Leave the hall" }
+		{ "path": "/root/Doors", "text": "Leave the shop" }
 	)
 	if retried.get("index") != 2 or fired != [2]:
 		_fail("a choice after a refusal is taken: %s %s" % [JSON.stringify(retried), fired])
@@ -709,19 +709,19 @@ func _check_words_in_a_rich_label() -> void:
 
 
 ## A word inside a sentence is not pressed for a control saying exactly that word which is hidden.
-## #895: a tab reading "Out" sat in a collapsed drawer, and a click on it pressed a dispatch saying
-## somebody "fell out in the hall". Refused, naming both, and pressed when the caller asks for the
+## #895: a tab reading "Away" sat in a collapsed drawer, and a click on it pressed a line saying
+## somebody "went away for good". Refused, naming both, and pressed when the caller asks for the
 ## sentence by index. With nothing else saying the word, pressed and said to be part of more.
 func _check_a_word_inside_a_sentence() -> void:
-	var tab: Button = _button("Tab", Vector2(2, 2), root, "Out")
+	var tab: Button = _button("Tab", Vector2(2, 2), root, "Away")
 	tab.visible = false
-	var line: Button = _button("Line", Vector2(2, 20), root, "they fell out")
+	var line: Button = _button("Line", Vector2(2, 20), root, "they fell away")
 	line.size = Vector2(40, 10)
 	await process_frame
-	var refused: Dictionary = await input.click({ "says": "Out" })
+	var refused: Dictionary = await input.click({ "says": "Away" })
 	var said: String = str(refused.get("message", ""))
 	if (
-		not _says(refused, 'no control on screen says exactly "Out"')
+		not _says(refused, 'no control on screen says exactly "Away"')
 		or not said.contains("/root/Line")
 		or not said.contains("/root/Tab, hidden")
 		or not said.contains(". Pass index 0 to press /root/Line anyway")
@@ -733,9 +733,9 @@ func _check_a_word_inside_a_sentence() -> void:
 				% JSON.stringify(refused)
 			)
 		)
-	var asked: Dictionary = await input.click({ "says": "Out", "index": 0 })
+	var asked: Dictionary = await input.click({ "says": "Away", "index": 0 })
 	var found: Dictionary = asked.get("found", {})
-	if _presses("Line") != 1 or found.get("partOf") != "they fell out":
+	if _presses("Line") != 1 or found.get("partOf") != "they fell away":
 		_fail(
 			(
 				"and is pressed when asked for by index, said to be part of more: %s"
@@ -744,9 +744,9 @@ func _check_a_word_inside_a_sentence() -> void:
 		)
 	tab.queue_free()
 	await process_frame
-	var alone: Dictionary = await input.click({ "says": "Out" })
+	var alone: Dictionary = await input.click({ "says": "Away" })
 	var alone_found: Dictionary = alone.get("found", {})
-	if _presses("Line") != 2 or alone_found.get("partOf") != "they fell out":
+	if _presses("Line") != 2 or alone_found.get("partOf") != "they fell away":
 		_fail(
 			(
 				(
@@ -760,33 +760,32 @@ func _check_a_word_inside_a_sentence() -> void:
 	await process_frame
 
 
-## The screen #895 was reported from again on 1.1.46, built up from what was on it and taken away
-## one piece at a time. No control's text said "Out": the tab saying it was a picture named for a
-## player who cannot see it, once hidden in a drawer and once on the rail as "Open Out", beside
-## cards saying "Scout, 90" and a line saying what "is out there". The card was pressed, and spent
-## the game's silver.
+## The screen #895 was reported from again on 1.1.46, rebuilt from what was on it and taken away
+## one piece at a time. No control's text held the word. The tab showing it was a picture named
+## after it, once in a drawer and once on a side bar. Cards and a line beside it held the word
+## inside longer text. The card was pressed, which spent something in the game.
 func _check_a_word_said_inside_other_words() -> void:
-	var drawer: Button = _button("DrawerOut", Vector2(2, 2), root)
-	drawer.accessibility_name = "Out"
+	var drawer: Button = _button("DrawerAway", Vector2(2, 2), root)
+	drawer.accessibility_name = "Away"
 	drawer.visible = false
-	var rail: Button = _button("RailOut", Vector2(2, 2), root)
-	rail.accessibility_name = "Open Out"
-	var card: Button = _button("Look", Vector2(20, 2), root, "Scout, 90")
+	var bar: Button = _button("BarAway", Vector2(2, 2), root)
+	bar.accessibility_name = "Open Away"
+	var card: Button = _button("Look", Vector2(20, 2), root, "Faraway, 90")
 	var there: Label = Label.new()
 	there.name = "There"
-	there.text = "what is out there"
+	there.text = "what is far away"
 	there.add_theme_font_size_override("font_size", 4)
 	there.position = Vector2(2, 30)
 	root.add_child(there)
 	await process_frame
 
-	var refused: Dictionary = await input.click({ "says": "Out" })
+	var refused: Dictionary = await input.click({ "says": "Away" })
 	var said: String = str(refused.get("message", ""))
 	if (
-		not _says(refused, 'no control on screen says exactly "Out"')
-		or not said.contains("/root/RailOut")
-		or not said.contains("/root/DrawerOut, hidden")
-		or _presses("RailOut") + _presses("Look") != 0
+		not _says(refused, 'no control on screen says exactly "Away"')
+		or not said.contains("/root/BarAway")
+		or not said.contains("/root/DrawerAway, hidden")
+		or _presses("BarAway") + _presses("Look") != 0
 	):
 		_fail(
 			(
@@ -794,15 +793,15 @@ func _check_a_word_said_inside_other_words() -> void:
 				% JSON.stringify(refused)
 			)
 		)
-	var asked: Dictionary = await input.click({ "says": "Out", "index": 0 })
-	if _presses("RailOut") != 1 or _presses("Look") != 0:
+	var asked: Dictionary = await input.click({ "says": "Away", "index": 0 })
+	if _presses("BarAway") != 1 or _presses("Look") != 0:
 		_fail("and is pressed by index, not the card: %s" % JSON.stringify(asked))
 
 	drawer.queue_free()
 	await process_frame
-	var named: Dictionary = await input.click({ "says": "Out" })
+	var named: Dictionary = await input.click({ "says": "Away" })
 	var found: Dictionary = named.get("found", {})
-	if _presses("RailOut") != 2 or _presses("Look") != 0 or found.get("partOf") != "Open Out":
+	if _presses("BarAway") != 2 or _presses("Look") != 0 or found.get("partOf") != "Open Away":
 		_fail(
 			(
 				"with nothing else saying it, the picture named for it is pressed: %s"
@@ -810,9 +809,9 @@ func _check_a_word_said_inside_other_words() -> void:
 			)
 		)
 
-	rail.queue_free()
+	bar.queue_free()
 	await process_frame
-	var through: Dictionary = await input.click({ "says": "Out" })
+	var through: Dictionary = await input.click({ "says": "Away" })
 	if (
 		not _says(through, "lets the pointer through")
 		or not str(through.get("message", "")).contains("/root/There")
@@ -824,17 +823,17 @@ func _check_a_word_said_inside_other_words() -> void:
 			)
 		)
 	if _presses("Look") != 0:
-		_fail("and the card saying Scout is not pressed in its place")
+		_fail("and the card saying Faraway is not pressed in its place")
 
 	there.queue_free()
 	await process_frame
-	var buried: Dictionary = await input.click({ "says": "Out" })
+	var buried: Dictionary = await input.click({ "says": "Away" })
 	if (
-		not _says(buried, 'says "Out" as a word of its own')
-		or not _says(buried, '"Scout, 90". Pass index 0 to press /root/Look anyway')
+		not _says(buried, 'says "Away" as a word of its own')
+		or not _says(buried, '"Faraway, 90". Pass index 0 to press /root/Look anyway')
 	):
 		_fail("words found only inside a longer word are refused: %s" % JSON.stringify(buried))
-	var anyway: Dictionary = await input.click({ "says": "Out", "index": 0 })
+	var anyway: Dictionary = await input.click({ "says": "Away", "index": 0 })
 	if _presses("Look") != 1:
 		_fail("and pressed when asked for by index: %s" % JSON.stringify(anyway))
 	card.queue_free()
@@ -844,14 +843,14 @@ func _check_a_word_said_inside_other_words() -> void:
 	# fixture holds with "Onward".
 	var heading: Label = Label.new()
 	heading.name = "Heading"
-	heading.text = "Out"
+	heading.text = "Away"
 	heading.mouse_filter = Control.MOUSE_FILTER_STOP
 	heading.position = Vector2(2, 30)
 	root.add_child(heading)
-	_put("Beyond", Vector2(2, 2), root, "Out there")
+	_put("Beyond", Vector2(2, 2), root, "Away from here")
 	await process_frame
-	var beside: Dictionary = await input.click({ "says": "Out" })
-	if not _says(beside, 'no button on screen says exactly "Out"') or _presses("Beyond") != 0:
+	var beside: Dictionary = await input.click({ "says": "Away" })
+	if not _says(beside, 'no button on screen says exactly "Away"') or _presses("Beyond") != 0:
 		_fail("an exact match on screen that is not a button is named: %s" % JSON.stringify(beside))
 	heading.queue_free()
 	root.get_node("Beyond").queue_free()
@@ -870,18 +869,18 @@ func _check_a_word_said_inside_other_words() -> void:
 ## words finds no control. The refusal names the menu and the call that chooses the item. #894: a
 ## wait was met on an item's words and the click after it was refused with no word of choose.
 func _check_an_item_in_an_open_menu() -> void:
-	var hall: MenuButton = MenuButton.new()
-	hall.name = "Hall"
-	root.add_child(hall)
-	var menu: PopupMenu = hall.get_popup()
-	for item: String in ["Stay", "Leave the hall"]:
+	var shop: MenuButton = MenuButton.new()
+	shop.name = "Shop"
+	root.add_child(shop)
+	var menu: PopupMenu = shop.get_popup()
+	for item: String in ["Stay", "Leave the shop"]:
 		menu.add_item(item)
 	await process_frame
-	hall.show_popup()
+	shop.show_popup()
 	await process_frame
-	var refused: Dictionary = await input.click({ "says": "Leave the hall" })
+	var refused: Dictionary = await input.click({ "says": "Leave the shop" })
 	if not _says(
-		refused, 'choose it with runtime_input choose, path /root/Hall and text "Leave the hall"'
+		refused, 'choose it with runtime_input choose, path /root/Shop and text "Leave the shop"'
 	):
 		_fail(
 			(
@@ -891,10 +890,10 @@ func _check_an_item_in_an_open_menu() -> void:
 		)
 	menu.hide()
 	await process_frame
-	var closed: Dictionary = await input.click({ "says": "Leave the hall" })
+	var closed: Dictionary = await input.click({ "says": "Leave the shop" })
 	if _says(closed, "runtime_input choose"):
 		_fail("and a closed menu is not named: %s" % JSON.stringify(closed))
-	hall.queue_free()
+	shop.queue_free()
 	await process_frame
 
 
@@ -903,17 +902,17 @@ func _check_an_item_in_an_open_menu() -> void:
 func _check_a_field_by_its_placeholder() -> void:
 	var search: LineEdit = LineEdit.new()
 	search.name = "Search"
-	search.placeholder_text = "Search the reports"
+	search.placeholder_text = "Search the list"
 	search.position = Vector2(2, 2)
 	search.size = Vector2(60, 12)
 	root.add_child(search)
 	await process_frame
-	var clicked: Dictionary = await input.click({ "says": "Search the reports" })
+	var clicked: Dictionary = await input.click({ "says": "Search the list" })
 	if clicked.get("path") != "/root/Search" or not search.has_focus():
 		_fail("an empty field is clicked by its placeholder: %s" % JSON.stringify(clicked))
-	search.text = "hall"
+	search.text = "shop"
 	await process_frame
-	var filled: Dictionary = await input.click({ "says": "Search the reports" })
+	var filled: Dictionary = await input.click({ "says": "Search the list" })
 	if not _says(filled, "no control on screen"):
 		_fail("and not once it holds text, which is drawn instead: %s" % JSON.stringify(filled))
 	search.queue_free()
@@ -940,8 +939,8 @@ func _check_words_held_together_by_a_space_that_does_not_break() -> void:
 		["AbXCd and more", "ab cd*", false],
 		["first line\nsecond words", "second words", true],
 		["Two\nlines", "two\\nlines", true],
-		["We lost%sthe hall" % nbsp, "won|lost the", true],
-		["We lostXthe hall", "won|lost the", false],
+		["We lost%sthe match" % nbsp, "won|lost the", true],
+		["We lostXthe match", "won|lost the", false],
 	]:
 		var said: String = case[0]
 		var wanted: String = case[1]
@@ -1011,12 +1010,12 @@ func _check_a_dialog_under_a_clipping_container() -> void:
 	var asking: AcceptDialog = AcceptDialog.new()
 	asking.name = "Asking"
 	inside.add_child(asking)
-	_put("Leave", Vector2(4, 4), asking, "Leave it")
+	_put("Later", Vector2(4, 4), asking, "Not now")
 	asking.popup(Rect2i(0, 0, 40, 40))
 	await process_frame
 	await process_frame
-	var clicked: Dictionary = await input.click({ "says": "Leave it" })
-	if clicked.get("path") != "/root/Holder/Inside/Asking/Leave" or _presses("Leave") != 1:
+	var clicked: Dictionary = await input.click({ "says": "Not now" })
+	if clicked.get("path") != "/root/Holder/Inside/Asking/Later" or _presses("Later") != 1:
 		_fail("a dialog's button is clicked wherever the dialog sits: %s" % JSON.stringify(clicked))
 	if holder.scroll_vertical != 0:
 		_fail(
@@ -1064,8 +1063,8 @@ func _check_a_dialog_under_a_clipping_container() -> void:
 	var confirm: ConfirmationDialog = ConfirmationDialog.new()
 	confirm.name = "Confirm"
 	confirm.borderless = true
-	confirm.ok_button_text = "Go ahead"
-	confirm.cancel_button_text = "Leave it"
+	confirm.ok_button_text = "Continue"
+	confirm.cancel_button_text = "Hold off"
 	var small: Theme = Theme.new()
 	small.default_font_size = 4
 	confirm.theme = small
@@ -1078,7 +1077,7 @@ func _check_a_dialog_under_a_clipping_container() -> void:
 	Checked.done(
 		confirm.canceled.connect(count_cancel) as Error, "counting the confirmation's cancel"
 	)
-	var left: Dictionary = await input.click({ "says": "Leave it" })
+	var left: Dictionary = await input.click({ "says": "Hold off" })
 	if cancelled[0] != 1:
 		_fail("the confirmation's own cancel is pressed by its words: %s" % JSON.stringify(left))
 	page.queue_free()

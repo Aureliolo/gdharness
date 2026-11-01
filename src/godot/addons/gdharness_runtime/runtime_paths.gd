@@ -337,7 +337,7 @@ static func walk_to(node: Object, node_path: String, reaching: String) -> Dictio
 ## `{"message": ...}` saying why it names none.
 ##
 ## A colon path read from [param node], the node the call was made on, the way the method's own
-## path is: "_ladder:shop:_wares:-15". One beginning with a slash starts at the node it names
+## path is: "_league:store:_items:-15". One beginning with a slash starts at the node it names
 ## instead, "/root/Main/Hud" or "/root/Main:_game:run". A res:// or uid:// path names a resource
 ## file, which is loaded the way the game loads one, so a resource the game already holds is handed
 ## over as that instance. The records a read answers a node and a filed resource with carry such a
@@ -580,7 +580,7 @@ static func can_read(holder: Variant, named: String) -> bool:
 ## counted as unclean for a read.
 ##
 ## A step written in double quotes is the key inside them, so a key holding a colon is one step:
-## Game D keys its stock by namespaced ids, "stock:\"base:dew\"", and split at that colon the
+## Game D keys its stock by namespaced ids, "stock:\"base:water\"", and split at that colon the
 ## step named a key "base" the map had never had.
 static func _key_in(map: Dictionary, named: String) -> Array:
 	var word: String = key_written(named)
@@ -625,8 +625,8 @@ static func step_naming(key: Variant) -> String:
 
 ## [param reaching] split into its steps at each colon, except one inside a call's brackets or a
 ## quoted argument or key: `get_node("/root/Main"):name` is two steps, and so is
-## `stock:"base:dew"`. Split at every colon a quoted argument holding one became a step that names
-## nothing.
+## `stock:"base:water"`. Split at every colon a quoted argument holding one became a step that
+## names nothing.
 static func steps_of(reaching: String) -> PackedStringArray:
 	var steps: PackedStringArray = []
 	var step: String = ""

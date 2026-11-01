@@ -52,9 +52,9 @@ func _ready() -> void:
 
 
 func _played(run: int) -> Dictionary:
- var duel: Duel = Duel.new(SEED + run)
- duel.play()
- return {"won": 1 if duel.won else 0, "most_turns": duel.turns}
+ var bout: Bout = Bout.new(SEED + run)
+ bout.play()
+ return {"won": 1 if bout.won else 0, "most_turns": bout.turns}
 ```
 
 In a worker `GdhShare.working()` is true. The bench prints no table there. The helper

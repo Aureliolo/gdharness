@@ -219,7 +219,7 @@ func _check_which_scenes_are_quiet() -> void:
 	var cases: Array[Array] = [
 		[["--headless", "--path", "/p", bench], PackedStringArray(["res://tests/"]), bench],
 		[[bench], ["res://tools/", "res://tests/"], bench],
-		[["res://ui/duel.tscn"], PackedStringArray(["res://tests/"]), ""],
+		[["res://ui/match.tscn"], PackedStringArray(["res://tests/"]), ""],
 		[[bench], PackedStringArray([""]), ""],
 		[["-s", "res://tests/run.gd"], PackedStringArray(["res://tests/"]), ""],
 		[[bench], "res://tests/", ""],

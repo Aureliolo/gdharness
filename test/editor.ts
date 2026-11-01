@@ -4854,7 +4854,7 @@ async function testAMethodAddedToAnAnalysedTypeIsPickedUp({ call, project }: Edi
  * and ones that exist nowhere are reported in the words the contradiction check reads.
  *
  * The enum half of #763, and like the method case above, the half that does not misbehave here.
- * game-b reported `Cannot find member "ZZ_PROBE" in base "Charm.Kind"` against a declaring file
+ * game-b reported `Cannot find member "ZZ_PROBE" in base "Token.Kind"` against a declaring file
  * that had it, cleared by a reload of that script and not by a plain rescan. An editor this suite
  * starts resolves the new member even with the declaring script built and held and opened through
  * the language server, so the fault needs something an editor seconds old does not have. Held as

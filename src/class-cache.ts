@@ -354,8 +354,8 @@ export function withAddonClassesCounted(
  * A member a diagnostic says is missing, and the global class it says is missing it.
  *
  * `method` and `property` are looked for on an instance of the type, `member` and `static method`
- * on the class itself, as in `Charm.MAX` and `Charm.make()`, and `enum member` in one of its enums,
- * as in `Charm.Kind.ZZ_PROBE`, where `enum` names the enum.
+ * on the class itself, as in `Token.MAX` and `Token.make()`, and `enum member` in one of its enums,
+ * as in `Token.Kind.ZZ_PROBE`, where `enum` names the enum.
  */
 export interface MissingMember {
   readonly member: string;
@@ -411,10 +411,10 @@ export function missingMemberIn(message: string): MissingMember | null {
  * The member an "external class member" diagnostic says is missing, and the class it was looked up
  * on, read from [param line], the diagnosed script's line the diagnostic is on.
  *
- * Godot names only the member: `Could not resolve external class member "READ_BY_THE_RUN".` So the
- * class is the identifier before `.READ_BY_THE_RUN` on that line, taken only when it is one of
- * [param classes]. game-b met 332 of these across 270 scripts, all stale, none of them checked,
- * because no type could be read from the message alone. A member reached through anything else,
+ * Godot names only the member: `Could not resolve external class member "LIMIT".` So the class is
+ * the identifier before `.LIMIT` on that line, taken only when it is one of [param classes]. game-b
+ * met 332 of these across 270 scripts, all stale and none of them checked, because no type could be
+ * read from the message alone. A member reached through anything else,
  * such as a constant holding a preloaded script, is left unread rather than guessed.
  */
 export function externalMemberIn(
@@ -724,7 +724,7 @@ export function contradictedDiagnostics(
       continue;
     }
     // Up the chain of project scripts, because a member is the type's whether its own file declares
-    // it or a base does: `Shop extends Tariff` has `piece_sells` from tariff.gd, and the 270 scripts
+    // it or a base does: `Store extends PriceList` has `item_sells` from price_list.gd, and the 270 scripts
     // denying such members were exactly as stale as the four whose member sat in the named file.
     const seen = new Set<string>();
     let at = classes.get(missing.type);
@@ -819,7 +819,7 @@ export function staleAnalysisNote(
     .join(' ');
 }
 
-/** How a contradicted entry is written in Godot's own terms: `Bell.toll`, `Charm.Kind.ZZ_PROBE`. */
+/** How a contradicted entry is written in Godot's own terms: `Bell.toll`, `Token.Kind.ZZ_PROBE`. */
 function written(one: Contradicted): string {
   return [one.type, ...(one.enum === undefined ? [] : [one.enum]), one.member].join('.');
 }

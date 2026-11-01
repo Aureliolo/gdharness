@@ -544,7 +544,7 @@ func parameter_class(object: Object, method: String, index: int) -> String:
 ## carries its enum or range, and empty for anything that is not a property.
 ##
 ## Asked rather than read off the value in the slot, because an object slot can be empty: a
-## property typed `Gear` holding null reads as TYPE_NIL, and anything written into it passed the
+## property typed `Part` holding null reads as TYPE_NIL, and anything written into it passed the
 ## check and was then dropped by the engine, which answered with the slot still null.
 ##
 ## The script only for a typed container, the one place the engine hands it over. A property typed

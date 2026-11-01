@@ -9,7 +9,7 @@ const GdhRead = preload("res://addons/gdharness_runtime/reading.gd")
 const Runtime = preload("res://addons/gdharness_runtime/runtime_autoload.gd")
 const HERO_SCRIPT: String = "res://query_hero.gd"
 ## What the hero carries, which is the shape a game keeps everything in: objects hanging off a
-## node rather than properties of it. Two deep, because one is the easy case and a guild's clock
+## node rather than properties of it. Two deep, because one is the easy case and a game's clock
 ## speed is two.
 const HERO_SOURCE: String = """extends Node2D
 
@@ -122,11 +122,11 @@ func _paths(reply: Dictionary) -> Array[String]:
 ## state in the tree beside its rows.
 func _check_reading_the_screen(panel: Panel) -> void:
 	var heading: Label = Label.new()
-	heading.text = "  Your guild  "
+	heading.text = "  Your shop  "
 	panel.add_child(heading)
 	# Below its heading in the tree, and read in that order.
 	var quiet: Label = Label.new()
-	quiet.text = "Nothing posted"
+	quiet.text = "Nothing listed"
 	quiet.visible = false
 	panel.add_child(quiet)
 	var blank: Label = Label.new()
@@ -148,13 +148,13 @@ func _check_reading_the_screen(panel: Panel) -> void:
 	# silence.
 	var choices: OptionButton = OptionButton.new()
 	choices.add_item("Everything")
-	choices.add_item("A client would not pay")
+	choices.add_item("A buyer walked away")
 	panel.add_child(choices)
 	await process_frame
 
 	var said: Dictionary = await node._execute_command("read_text", { "root": "/root/Panel" })
 	var lines: Array = said.get("lines", [])
-	if lines != ["Your guild", "Sign", "4", "Everything"]:
+	if lines != ["Your shop", "Sign", "4", "Everything"]:
 		_fail("the screen should read as what is drawn on it, in order: %s" % str(said))
 	if said.get("count") != 4 or said.get("truncated") != false or said.get("omitted") != 0:
 		_fail("and say how many lines that was, and that none were left behind: %s" % str(said))
@@ -165,7 +165,7 @@ func _check_reading_the_screen(panel: Panel) -> void:
 		"read_text", { "root": "/root/Panel", "limit": 2 }
 	)
 	var first_lines: Array = few.get("lines", [])
-	if first_lines != ["Your guild", "Sign"]:
+	if first_lines != ["Your shop", "Sign"]:
 		_fail("a limit should be the first lines and no more: %s" % str(few))
 	# How many were left behind rather than that some were: a screen cut two lines short and one
 	# cut two hundred short read the same, and the dialog somebody was looking for was under the
@@ -189,7 +189,7 @@ func _check_reading_the_screen(panel: Panel) -> void:
 		"read_text", { "root": "/root/Panel", "include_hidden": true }
 	)
 	var every_line: Array = everything.get("lines", [])
-	if not every_line.has("Nothing posted"):
+	if not every_line.has("Nothing listed"):
 		_fail("and hidden text should be there for the asking: %s" % str(everything))
 
 	var nowhere: Dictionary = await node._execute_command("read_text", { "root": "/root/Nowhere" })
@@ -239,7 +239,7 @@ func _check_a_name_written_as_a_word() -> void:
 ##
 ## A panel that keeps a label for every line that might apply and hides the ones that do not is the
 ## normal way to keep a row rather than rebuild it, and a find over it answered with the lot: a
-## project read back "none of them came back any the wiser" on four dockets nobody had scouted,
+## project read back the same line on four rows nobody had opened,
 ## every line correct and every line hidden. Telling them apart cost a `visible` call per node,
 ## which is the cost reading a property off each match exists to avoid.
 ##
@@ -330,12 +330,12 @@ func _check_hidden_nodes_can_be_left_out() -> void:
 
 	var shown_row: Label = Label.new()
 	shown_row.name = "ShownRow"
-	shown_row.text = "scouted twice"
+	shown_row.text = "checked twice"
 	shelf.add_child(shown_row)
 
 	var hidden_row: Label = Label.new()
 	hidden_row.name = "HiddenRow"
-	hidden_row.text = "never scouted"
+	hidden_row.text = "never checked"
 	hidden_row.visible = false
 	shelf.add_child(hidden_row)
 
@@ -348,7 +348,7 @@ func _check_hidden_nodes_can_be_left_out() -> void:
 
 	var inside: Label = Label.new()
 	inside.name = "InsideRow"
-	inside.text = "put away"
+	inside.text = "set aside"
 	closed.add_child(inside)
 
 	var everything: Dictionary = await node._execute_command(
@@ -386,7 +386,7 @@ func _check_hidden_nodes_can_be_left_out() -> void:
 	var values: Array[String] = []
 	for row: Dictionary in rows:
 		values.append(str(row.get("value", "")))
-	if values != ["scouted twice"]:
+	if values != ["checked twice"]:
 		_fail("the property is still read off what is left: %s" % str(with_text))
 
 	await _check_a_tree_reads_the_properties_named(shelf)
@@ -411,7 +411,7 @@ func _check_a_tree_reads_the_properties_named(shelf: Control) -> void:
 		var child_properties: Dictionary = child.get("properties", {})
 		if child_properties.has("text"):
 			texts[str(child.get("name", ""))] = child_properties.get("text")
-	if texts != { "ShownRow": "scouted twice", "HiddenRow": "never scouted" }:
+	if texts != { "ShownRow": "checked twice", "HiddenRow": "never checked" }:
 		_fail("each label carries its text and the drawer none: %s" % str(named))
 	var whole: Dictionary = await node._execute_command(
 		"get_tree", { "root": "/root/Shelf", "depth": 1 }
@@ -432,7 +432,7 @@ func _check_a_tree_reads_the_properties_named(shelf: Control) -> void:
 ## asking about: a [RefCounted] hanging off a node, holding another one.
 ##
 ## Read through colons the way [method Object.get_indexed] does, so the op named after reading
-## properties is the one that reads a guild's day or a clock's speed. Both halves are checked: the
+## properties is the one that reads a game's day or a clock's speed. Both halves are checked: the
 ## value at the end of a path, and what a path that goes wrong says, since a caller who cannot tell
 ## a missing step from a null one is back to guessing.
 func _check_reading_through_a_path() -> void:
@@ -485,10 +485,10 @@ func _check_reading_through_a_path() -> void:
 
 ## The state a management game actually keeps: a list of plain objects hanging off a node.
 ##
-## A roster, a board, an in-tray, a town of rival houses. None of them are Nodes, so a find cannot
+## A roster, a board, an in-tray, a list of rivals. None of them are Nodes, so a find cannot
 ## reach them, and the path walk stopped at the list: `roster:0:called` answered that the roster
 ## held no object to read 0 off. A project changed what a person is dealt, measured it over
-## eighteen hundred simulated guilds, and could not look at one person in the running game.
+## eighteen hundred simulated games, and could not look at one person in the running game.
 ##
 ## An index walks into a list the way a name walks into an object, a negative one counts from the
 ## end, and a key walks into a map. What is not there says what was there instead, because "has no
@@ -750,7 +750,7 @@ func _check_the_time_work_takes() -> void:
 
 
 ## What a game does hangs off its nodes the same way its state does, so the op that calls a method
-## reaches through the same colons the op that writes one does. Reading a guild's day while being
+## reaches through the same colons the op that writes one does. Reading a game's day while being
 ## unable to ask it for the next one is half of what a node holds.
 ##
 ## Read back afterwards off the same holder, because a call that answered a number nobody can find
@@ -976,10 +976,10 @@ func _check() -> void:
 	# Away from the panel, whose contents are what the reading checks below count. What matters
 	# here is that it carries words rather than what sort of control it is: a label, a button and a
 	# field all answer the same question about themselves.
-	var docket: Label = Label.new()
-	docket.name = "Docket"
-	docket.text = "Sign the docket"
-	level.add_child(docket)
+	var ticket: Label = Label.new()
+	ticket.name = "Ticket"
+	ticket.text = "Sign the ticket"
+	level.add_child(ticket)
 
 	var by_class: Dictionary = await node._execute_command(
 		"find_nodes", { "class": "Node2D", "root": "/root/Level" }
@@ -1010,37 +1010,37 @@ func _check() -> void:
 	# is @Button@1412 all the way down, and reaching one meant listing every button on it and
 	# reading them back one at a time to find the one saying "Post".
 	var by_words: Dictionary = await node._execute_command("find_nodes", { "says": "sign THE" })
-	if _paths(by_words) != ["/root/Level/Docket"]:
+	if _paths(by_words) != ["/root/Level/Ticket"]:
 		_fail("find by what a node says, in part and whatever the case: %s" % str(by_words))
-	var unsaid: Dictionary = await node._execute_command("find_nodes", { "says": "turn away" })
+	var unsaid: Dictionary = await node._execute_command("find_nodes", { "says": "send off" })
 	if unsaid.get("count") != 0:
 		_fail("and nothing at all when nothing says it: %s" % str(unsaid))
 	# A glob, because the field beside this one takes one and nobody writes `*sign*` in the two of
 	# them meaning different things. As a contains only, a pattern matched nothing and the empty
 	# answer read as a control that is not on the screen.
-	var by_glob: Dictionary = await node._execute_command("find_nodes", { "says": "*THE dock*" })
-	if _paths(by_glob) != ["/root/Level/Docket"]:
+	var by_glob: Dictionary = await node._execute_command("find_nodes", { "says": "*THE tick*" })
+	if _paths(by_glob) != ["/root/Level/Ticket"]:
 		_fail("a pattern in says is a glob rather than characters to find: %s" % str(by_glob))
-	var whole_thing: Dictionary = await node._execute_command("find_nodes", { "says": "docket*" })
+	var whole_thing: Dictionary = await node._execute_command("find_nodes", { "says": "ticket*" })
 	if whole_thing.get("count") != 0:
 		_fail("and a glob is matched against the whole of what is said: %s" % str(whole_thing))
 	# Written as a prefix by habit for words in the middle of a label, which is the miss that read
 	# as the words not being on screen: the answer says what the glob open at both ends would find.
-	if not str(whole_thing.get("note", "")).contains('"*docket*" would find 1 node'):
+	if not str(whole_thing.get("note", "")).contains('"*ticket*" would find 1 node'):
 		_fail(
 			"a glob that missed words further in says which glob finds them: %s" % str(whole_thing)
 		)
 	# Alternatives: either one finds the node, and a glob among them that missed words further in is
 	# widened in the note with the other alternative kept.
 	var either: Dictionary = await node._execute_command(
-		"find_nodes", { "says": "turn away|sign THE" }
+		"find_nodes", { "says": "send off|sign THE" }
 	)
-	if _paths(either) != ["/root/Level/Docket"]:
+	if _paths(either) != ["/root/Level/Ticket"]:
 		_fail("says finds what any one of its alternatives finds: %s" % str(either))
 	var either_prefix: Dictionary = await node._execute_command(
-		"find_nodes", { "says": "dragon|docket*" }
+		"find_nodes", { "says": "dragon|ticket*" }
 	)
-	if not str(either_prefix.get("note", "")).contains('"dragon|*docket*" would find 1 node'):
+	if not str(either_prefix.get("note", "")).contains('"dragon|*ticket*" would find 1 node'):
 		_fail(
 			"and a missed glob among alternatives is widened in the note: %s" % str(either_prefix)
 		)

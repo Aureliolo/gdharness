@@ -640,13 +640,13 @@ async function main(): Promise<void> {
         op: 'find',
         className: 'CharacterBody2D',
         namePattern: 'Play*',
-        says: 'Carry on',
+        says: 'Keep going',
         limit: 5,
       });
       assert.equal(get(found, 'nodes', 0, 'path'), '/root/Player', 'runtime_inspect find relays the paths');
       assert.deepEqual(
         get(found, 'asked'),
-        { class: 'CharacterBody2D', name: 'Play*', says: 'Carry on', root: '/root', limit: 5 },
+        { class: 'CharacterBody2D', name: 'Play*', says: 'Keep going', root: '/root', limit: 5 },
         'only the filters given are sent, under the addon names',
       );
       assert.match(
@@ -670,10 +670,10 @@ async function main(): Promise<void> {
         button: 2,
       });
       assert.equal(get(numbered, 'asked', 'button'), 2, JSON.stringify(numbered));
-      const byWords = await payload('runtime_input', { op: 'click', says: 'New guild', index: 1 });
+      const byWords = await payload('runtime_input', { op: 'click', says: 'New shop', index: 1 });
       assert.deepEqual(
         get(byWords, 'asked'),
-        { path: '', button: 'left', double: false, says: 'New guild', index: 1 },
+        { path: '', button: 'left', double: false, says: 'New shop', index: 1 },
         'a click by words carries them and the index, with no path to narrow the search',
       );
       assert.match(

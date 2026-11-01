@@ -386,8 +386,8 @@ func _check_a_menu() -> void:
 	picker.position = Vector2(350, 200)
 	picker.size = Vector2(160, 30)
 	picker.add_item("Everything", 10)
-	picker.add_item("Word back", 20)
-	picker.add_item("Trouble", 30)
+	picker.add_item("Heard back", 20)
+	picker.add_item("Problems", 30)
 	picker.set_item_disabled(2, true)
 	var chosen: Array[int] = []
 	Checked.done(
@@ -454,24 +454,24 @@ func _check_a_heading_is_not_a_choice() -> void:
 	filter.position = Vector2(350, 200)
 	filter.size = Vector2(160, 30)
 	filter.add_item("Everything", 10)
-	filter.add_separator("Quests")
-	filter.add_item("Quests", 20)
+	filter.add_separator("Orders")
+	filter.add_item("Orders", 20)
 	filter.add_separator()
-	filter.add_separator("The work")
-	filter.add_item("Hiring", 30)
+	filter.add_separator("The tasks")
+	filter.add_item("Staffing", 30)
 	root.add_child(filter)
 	await process_frame
 
 	var took: Dictionary = await node._execute_command(
-		"choose", { "path": "/root/Filter", "text": "Quests" }
+		"choose", { "path": "/root/Filter", "text": "Orders" }
 	)
 	if took.get("type") != "chosen" or took.get("index") != 2:
 		_fail("an item sharing its heading's words should be the one chosen: %s" % str(took))
 
 	var heading: Dictionary = await node._execute_command(
-		"choose", { "path": "/root/Filter", "text": "The work" }
+		"choose", { "path": "/root/Filter", "text": "The tasks" }
 	)
-	if not str(heading.get("message", "")).contains("item 4, The work, is a separator heading"):
+	if not str(heading.get("message", "")).contains("item 4, The tasks, is a separator heading"):
 		_fail("a heading asked for alone should be refused as one: %s" % str(heading))
 
 	var missing: Dictionary = await node._execute_command(
@@ -479,7 +479,7 @@ func _check_a_heading_is_not_a_choice() -> void:
 	)
 	var listed: String = str(missing.get("message", ""))
 	if not listed.contains(
-		"0: Everything, 1: Quests (a heading), 2: Quests, 4: The work (a heading), 5: Hiring"
+		"0: Everything, 1: Orders (a heading), 2: Orders, 4: The tasks (a heading), 5: Staffing"
 	):
 		_fail(
 			"a refusal should list headings as headings and leave out a bare separator: %s" % listed
@@ -490,7 +490,7 @@ func _check_a_heading_is_not_a_choice() -> void:
 
 func _check_choosing_by_what_it_says(chosen: Array[int]) -> void:
 	var took: Dictionary = await node._execute_command(
-		"choose", { "path": "/root/Picker", "text": "Word back" }
+		"choose", { "path": "/root/Picker", "text": "Heard back" }
 	)
 	if took.get("type") != "chosen":
 		_fail("an option should be choosable by what it says: %s" % str(took))
@@ -499,7 +499,7 @@ func _check_choosing_by_what_it_says(chosen: Array[int]) -> void:
 		_fail("and answer with which one it was: %s" % str(took))
 	# The button in front of the menu, because that is what the player is looking at and the one
 	# thing a press that did nothing would leave unchanged.
-	if took.get("selected") != 1 or took.get("shows") != "Word back":
+	if took.get("selected") != 1 or took.get("shows") != "Heard back":
 		_fail("and the button should be showing it: %s" % str(took))
 	if chosen != [1]:
 		_fail("and the engine's own signal should have fired once: %s" % str(chosen))
@@ -517,7 +517,7 @@ func _check_choosing_by_where_it_is() -> void:
 ## be one nobody could tell a typo from a greyed-out row in.
 func _check_a_menu_says_no() -> void:
 	var greyed: Dictionary = await node._execute_command(
-		"choose", { "path": "/root/Picker", "text": "Trouble" }
+		"choose", { "path": "/root/Picker", "text": "Problems" }
 	)
 	if greyed.get("type") != "error" or not str(greyed.get("message", "")).contains("disabled"):
 		_fail("a disabled item should be refused and said to be: %s" % str(greyed))
@@ -546,8 +546,8 @@ func _check_a_translated_menu() -> void:
 	var words: Translation = Translation.new()
 	words.locale = TranslationServer.get_locale()
 	words.add_message("ACT_ENGAGE", "Hire")
-	words.add_message("ACT_RELEASE", "Dismiss")
-	words.add_message("ACT_TAX", "Levy")
+	words.add_message("ACT_RELEASE", "Let go")
+	words.add_message("ACT_FEE", "Bill")
 	TranslationServer.add_translation(words)
 	var orders: OptionButton = OptionButton.new()
 	orders.name = "Orders"
@@ -555,17 +555,17 @@ func _check_a_translated_menu() -> void:
 	orders.size = Vector2(160, 30)
 	orders.add_item("ACT_ENGAGE", 10)
 	orders.add_item("ACT_RELEASE", 20)
-	orders.add_item("ACT_TAX", 30)
+	orders.add_item("ACT_FEE", 30)
 	orders.set_item_disabled(2, true)
 	root.add_child(orders)
 	await process_frame
 
 	var took: Dictionary = await node._execute_command(
-		"choose", { "path": "/root/Orders", "text": "Dismiss" }
+		"choose", { "path": "/root/Orders", "text": "Let go" }
 	)
 	if took.get("type") != "chosen" or took.get("index") != 1:
 		_fail("a translated item should be chosen by the words it shows: %s" % str(took))
-	elif took.get("text") != "Dismiss" or took.get("shows") != "Dismiss":
+	elif took.get("text") != "Let go" or took.get("shows") != "Let go":
 		_fail("and the answer should name it as shown: %s" % str(took))
 
 	var by_key: Dictionary = await node._execute_command(
@@ -577,13 +577,13 @@ func _check_a_translated_menu() -> void:
 	var missing: Dictionary = await node._execute_command(
 		"choose", { "path": "/root/Orders", "text": "Nothing like it" }
 	)
-	if not str(missing.get("message", "")).contains("0: Hire, 1: Dismiss, 2: Levy"):
+	if not str(missing.get("message", "")).contains("0: Hire, 1: Let go, 2: Bill"):
 		_fail("a refusal should list the items as shown: %s" % str(missing))
 
 	var greyed: Dictionary = await node._execute_command(
-		"choose", { "path": "/root/Orders", "text": "Levy" }
+		"choose", { "path": "/root/Orders", "text": "Bill" }
 	)
-	if not str(greyed.get("message", "")).contains("item 2, Levy, is disabled"):
+	if not str(greyed.get("message", "")).contains("item 2, Bill, is disabled"):
 		_fail("a disabled item should be named as shown: %s" % str(greyed))
 
 	orders.free()
@@ -673,7 +673,7 @@ func _check_below_the_fold() -> void:
 
 	# And the other way past the fold. A row scrolled off the top is still inside the viewport, so
 	# a click aimed at it went to whatever is drawn up there and reported that it had not landed.
-	# Found in a real hall: the staff panel's button sat at y 69 with its container starting at 166.
+	# Found in a real game, where the button sat above the top of its container.
 	var first: Button = Button.new()
 	first.name = "Topmost"
 	first.custom_minimum_size = Vector2(180, 40)
@@ -967,7 +967,7 @@ func _check_until_a_reference_is_let_go() -> void:
 ## holding a node that is freed on the next redraw, and that is what it answered.
 func _check_until_something_says_it() -> void:
 	var rebuilt: Label = Label.new()
-	rebuilt.text = "Spring 1, year 1"
+	rebuilt.text = "Day 1, week 1"
 	button.get_parent().add_child(rebuilt)
 	var turning: Callable = func() -> void:
 		await process_frame
@@ -976,27 +976,27 @@ func _check_until_something_says_it() -> void:
 		rebuilt.get_parent().remove_child(rebuilt)
 		rebuilt.queue_free()
 		var fresh: Label = Label.new()
-		fresh.text = "Spring 2, year 1"
+		fresh.text = "Day 2, week 1"
 		button.get_parent().add_child(fresh)
 	turning.call()
 
 	var came: Dictionary = await node._execute_command(
-		"wait_until", { "path": "/root/Panel", "says": "spring 2" }
+		"wait_until", { "path": "/root/Panel", "says": "day 2" }
 	)
-	if came.get("met") != true or came.get("says") != "spring 2":
+	if came.get("met") != true or came.get("says") != "day 2":
 		_fail("a wait should see words arrive on a panel, whatever the case: %s" % str(came))
 
 	# A glob, matched over the whole text as a find and a click match it, rather than as words with
 	# a star in them, which nothing on the screen says.
 	var globbed: Dictionary = await node._execute_command(
-		"wait_until", { "path": "/root/Panel", "says": "spring 2*", "timeout_ms": 500 }
+		"wait_until", { "path": "/root/Panel", "says": "day 2*", "timeout_ms": 500 }
 	)
 	if globbed.get("met") != true:
 		_fail("a glob in says is matched as a find matches one: %s" % str(globbed))
 
 	# Alternatives: any one of them on screen meets the wait, a glob among them included.
 	var either: Dictionary = await node._execute_command(
-		"wait_until", { "path": "/root/Panel", "says": "*won*|spring 2*|lost", "timeout_ms": 500 }
+		"wait_until", { "path": "/root/Panel", "says": "*won*|day 2*|lost", "timeout_ms": 500 }
 	)
 	if either.get("met") != true:
 		_fail("any one of several alternatives in says meets a wait: %s" % str(either))
@@ -1029,7 +1029,7 @@ func _check_until_something_says_it() -> void:
 	barred.free()
 
 	var never: Dictionary = await node._execute_command(
-		"wait_until", { "path": "/root/Panel", "says": "Autumn 4", "timeout_ms": 60 }
+		"wait_until", { "path": "/root/Panel", "says": "Day 9", "timeout_ms": 60 }
 	)
 	if never.get("met") != false or GdhRead.as_int(never.get("elapsed_ms", 0)) < 60:
 		_fail("and give up saying so when they never come: %s" % str(never))
@@ -1052,21 +1052,21 @@ func _check_until_something_says_it() -> void:
 ## milliseconds while the sweep was still going, so every wait on that screen fell back to
 ## counting frames. Hidden nodes count only when asked for.
 func _check_words_on_a_hidden_node_are_not_yet_shown() -> void:
-	var carry_on: Button = Button.new()
-	carry_on.name = "CarryOn"
-	carry_on.text = "Carry on"
-	carry_on.visible = false
-	button.get_parent().add_child(carry_on)
+	var keep_going: Button = Button.new()
+	keep_going.name = "KeepGoing"
+	keep_going.text = "Keep going"
+	keep_going.visible = false
+	button.get_parent().add_child(keep_going)
 
 	var not_yet: Dictionary = await node._execute_command(
-		"wait_until", { "path": "/root/Panel", "says": "carry on", "timeout_ms": 60 }
+		"wait_until", { "path": "/root/Panel", "says": "keep going", "timeout_ms": 60 }
 	)
 	if not_yet.get("met") != false or not_yet.get("include_hidden") != false:
 		_fail("words on a hidden button are not shown yet: %s" % str(not_yet))
 
 	var asked_for: Dictionary = await node._execute_command(
 		"wait_until",
-		{ "path": "/root/Panel", "says": "carry on", "include_hidden": true, "timeout_ms": 60 }
+		{ "path": "/root/Panel", "says": "keep going", "include_hidden": true, "timeout_ms": 60 }
 	)
 	if asked_for.get("met") != true or asked_for.get("include_hidden") != true:
 		_fail("and count when hidden ones are asked for: %s" % str(asked_for))
@@ -1075,13 +1075,13 @@ func _check_words_on_a_hidden_node_are_not_yet_shown() -> void:
 	var showing: Callable = func() -> void:
 		await process_frame
 		await process_frame
-		carry_on.visible = true
+		keep_going.visible = true
 	showing.call()
 	var shown: Dictionary = await node._execute_command(
-		"wait_until", { "path": "/root/Panel", "says": "carry on" }
+		"wait_until", { "path": "/root/Panel", "says": "keep going" }
 	)
 	if shown.get("met") != true or GdhRead.as_int(shown.get("elapsed_ms", 0)) < 1:
 		_fail("the wait ends when the button is shown, and not before: %s" % str(shown))
 
-	carry_on.queue_free()
+	keep_going.queue_free()
 	await process_frame

@@ -216,7 +216,7 @@ export function engineFlagsAmongGameArgs(args: readonly string[]): string[] {
  *
  * The game's own arguments go last, behind the `--` the engine splits on: everything after it is
  * what `OS.get_cmdline_user_args()` answers, and everything before it the engine reads as its
- * own. A caller passing `--screen=hall` means the game's flag, so the separator is added here
+ * own. A caller passing `--screen=shop` means the game's flag, so the separator is added here
  * rather than left to be remembered.
  */
 export function runArguments(options: RunOptions): string[] {
@@ -369,7 +369,7 @@ export const EDITOR_PID_VARIABLE = 'GDHARNESS_EDITOR_PID';
  *
  * A test tier is the case that matters. Godot resolves `user://` from the environment, so a suite
  * that saves a game writes into the same folder as the copy of that game somebody plays: run the
- * tier while a guild is open and the tier's own files land in the player's save list, and a suite
+ * tier while a game is open and the tier's own files land in the player's save list, and a suite
  * that tidies up after itself rewrites every real save on the way out. Found by using this tool on
  * a project whose own gate had guarded against it for months, which is the sort of thing a harness
  * should not leave to each project to discover.

@@ -777,18 +777,18 @@ static func _declared_slot(holder: Variant, named: String) -> Dictionary:
 ## A screen rather than one node, because a panel following a clock builds its labels again every
 ## time it redraws and the engine names those `@Label@1163`. A wait holding one of them is waiting
 ## on a node that was freed a frame later, and that is what it answered: the date along the top of a
-## hall could not be waited on at all. What a caller is watching for is a word arriving on a screen,
-## and the screen is the part that stays put.
+## screen could not be waited on at all. What a caller is watching for is a word arriving on a
+## screen, and the screen is the part that stays put.
 ##
 ## On the screen, which is to say shown: a control carrying the words while hidden satisfied the
-## wait at once, so a duel screen whose "Carry on" button exists hidden through the whole sweep
+## wait at once, so a match screen whose "Keep going" button exists hidden through the whole sweep
 ## answered met in two milliseconds while the sweep was still animating, and every wait on that
 ## screen fell back to counting frames. [param include_hidden] asks the other question, for a
 ## caller waiting on words a hidden node holds.
 ##
 ## Paced by what a look costs, so the watching leaves the game its speed: every frame while a look
 ## is cheap, and on a screen large enough for one to cost a real share of a frame, often enough that
-## looking takes about a tenth of the time. Every frame on a hall of 3,500 nodes held the game at a
+## looking takes about a tenth of the time. Every frame over 3,500 nodes held the game at a
 ## sixth of its frame rate, and its clock, which advances by the frame's delta, lost three quarters
 ## of its time, so a wait for a date timed out on a clock that turned a day every thirty seconds.
 ## Each look is read a slice at a time, [constant LOOK_SLICE_USEC] to a frame, so the frames it runs
