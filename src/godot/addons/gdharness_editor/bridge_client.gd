@@ -48,6 +48,9 @@ const DAP_ASKED: String = "GDHARNESS_DAP_PORT"
 ## What a server that opened this editor says about itself, so that being opened by one is stated
 ## rather than guessed at from the ports. Kept in step with `OPENED_BY_A_SERVER` in src/launch.ts.
 const OPENED_BY_A_SERVER: String = "GDHARNESS_OPENED_BY_A_SERVER"
+## Set for an editor a server started on its hidden desktop. Kept in step with `DESKTOP_VARIABLE`
+## in src/desktop.ts.
+const DESKTOP_VARIABLE: String = "GDHARNESS_DESKTOP"
 ## Put into this editor's own environment as it loads, so every game it plays inherits it and
 ## the runtime addon can announce which editor played it. A game of the same project that some
 ## other server started has no such variable, or another editor's number, and that is what
@@ -357,8 +360,10 @@ func _handle_connect() -> void:
 			# Whether a session opening on the adapter is told this editor's breakpoints or takes
 			# them away, so a server can say which before it sets one.
 			"syncs_breakpoints": _syncs_breakpoints(),
-			# Whether this editor runs with no window, which for one opened by hand only it can say.
-			"hidden": DisplayServer.get_name() == "headless",
+			# Whether this editor runs with no window anybody sees, which for one opened by hand
+			# only
+			# it can say: headless, or a window on the hidden desktop a server started it on.
+			"hidden": DisplayServer.get_name() == "headless" or _on_the_hidden_desktop(),
 			# Whether a server started this editor, which is the only kind that can be started again
 			# as itself: the engine hands back none of the arguments it was given, so the arguments
 			# have to come from whoever wrote them. See `restart_editor` in play_tools.gd.
@@ -440,6 +445,12 @@ func _keep_breakpoints_through_sessions() -> void:
 			% SYNC_BREAKPOINTS_SETTING
 		)
 	)
+
+
+## Whether a server started this editor on its hidden desktop, where its window draws and never
+## shows.
+static func _on_the_hidden_desktop() -> bool:
+	return OS.get_name() == "Windows" and not OS.get_environment(DESKTOP_VARIABLE).is_empty()
 
 
 ## Whether the editor shares its breakpoints with a session as it opens. See the setting.

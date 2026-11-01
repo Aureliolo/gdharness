@@ -106,7 +106,10 @@ func _on_disconnected() -> void:
 ## Whether [param tool_name] waits for the editor to finish scanning or importing. A save during a
 ## scan updates the file list the scan's thread is writing out (see SceneFile.scan_later), and an
 ## import can run frames of the editor from inside itself, the one handling this call among them.
+## Every call waits out a capture, which shows a scene for frames before it reads the view.
 func turned_away(tool_name: String) -> bool:
+	if _tool_executor != null and _tool_executor.capturing():
+		return true
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
 	return (
 		not ANSWERED_WHILE_SCANNING.has(tool_name)
@@ -124,7 +127,7 @@ func _on_tool_requested(request_id: String, tool_name: String, args: Dictionary)
 		_client.send_busy(request_id, tool_name)
 		return
 
-	var result: Dictionary = _tool_executor.execute_tool(tool_name, args)
+	var result: Dictionary = await _tool_executor.execute_tool(tool_name, args)
 	var success: bool = result.get("ok", false)
 
 	if success:

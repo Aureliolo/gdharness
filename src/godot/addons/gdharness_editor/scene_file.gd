@@ -1197,6 +1197,11 @@ func _strays(state: SceneState) -> Array[Array]:
 				continue
 			if not held and GdhHeadlessCheck.at_default(node, name):
 				continue
+			# Set in the file to what the node would have anyway, such as an instance naming the
+			# script its own scene gives it. The pack leaves it out, as the editor's does, and the
+			# node loads the same.
+			if held and not stored.has(name) and GdhSame.same(node.get(name), filed[name]):
+				continue
 			if _engine_kept.has("%d:%s" % [id, name]):
 				continue
 			stray.append([node, name, held, filed.get(name)])

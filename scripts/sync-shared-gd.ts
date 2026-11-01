@@ -31,6 +31,7 @@ export const SHARED_GDSCRIPT: Readonly<Record<string, readonly string[]>> = {
   'declared_values.gd': ['gdharness_editor', 'gdharness_runtime'],
   'file_reads.gd': ['gdharness_editor'],
   'file_walk.gd': ['gdharness_editor'],
+  'picture_saves.gd': ['gdharness_editor', 'gdharness_runtime'],
   'property_paths.gd': ['gdharness_editor'],
   'property_values.gd': ['gdharness_editor'],
   'reading.gd': ['gdharness_editor', 'gdharness_runtime'],

@@ -46,6 +46,7 @@ export interface Surviving {
 export type ScratchKind =
   | 'answers'
   | 'desktop'
+  | 'editor-capture'
   | 'export'
   | 'import'
   | 'params'
@@ -55,6 +56,7 @@ export type ScratchKind =
 const KINDS: readonly ScratchKind[] = [
   'answers',
   'desktop',
+  'editor-capture',
   'export',
   'import',
   'params',

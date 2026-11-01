@@ -250,6 +250,26 @@ function testACrashIsAnErrorWithItsReport(): void {
     'a frame that names its library is kept',
   );
 
+  // Windows' handler for an exception names no signal, as for one in Main::cleanup at quit.
+  const atQuit = new GameLog();
+  atQuit.append(
+    'transcript',
+    [
+      'CrashHandlerException: Program crashed',
+      'Engine version: Godot Engine v4.7.2.stable.custom_build (0000000000000000000000000000000000000000)',
+      '[0] _Mtx_lock (mutex.cpp:165)',
+      '[2] GDScriptInstance::~GDScriptInstance (modules\\gdscript\\gdscript.cpp:2072)',
+      '[9] Main::cleanup (main\\main.cpp:5354)',
+      '-- END OF C++ BACKTRACE --',
+      '',
+    ].join('\r\n'),
+  );
+  assert.deepEqual(
+    atQuit.all.map((entry) => [entry.severity, entry.text, entry.detail.length]),
+    [['error', 'CrashHandlerException: Program crashed', 4]],
+    'a crash naming no signal is the one error, its backtrace its detail',
+  );
+
   // The words alone, printed by a game, are not a crash: only the handler's own opening is.
   const quoted = new GameLog();
   quoted.append('stdout', 'the log said: CrashHandlerException: Program crashed with signal 11\n');
