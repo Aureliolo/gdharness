@@ -623,6 +623,12 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 ## A shader is compiled once something reads what it declares, and a create answering only the path
 ## left a missing semicolon to show up wherever the shader was first drawn with.
 static func shader_errors(path: String) -> Array[Dictionary]:
+	# A headless engine's output comes back with the answer, where these errors came a second time
+	# with a backtrace through gdharness's own scripts. The marks are logger.gd's ASIDE and RESUMED,
+	# which the editor addon does not ship, and an editor's Output panel would show them.
+	var headless: bool = not Engine.is_editor_hint()
+	if headless:
+		printerr("[gdharness] aside")
 	var caught: GdhShaderErrors = GdhShaderErrors.new()
 	OS.add_logger(caught)
 	var shader: Shader = (
@@ -631,6 +637,8 @@ static func shader_errors(path: String) -> Array[Dictionary]:
 	if shader != null:
 		var _uniforms: Array = shader.get_shader_uniform_list()
 	OS.remove_logger(caught)
+	if headless:
+		printerr("[gdharness] resumed")
 	return caught.raised
 
 
