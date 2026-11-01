@@ -50,6 +50,15 @@ func _loaded() -> PackedStringArray:
 	return held
 
 
+## The file of the module a loading thread is part way through, or "".
+func _on_a_thread() -> String:
+	var path: String = node._in_flight
+	if path.is_empty():
+		return ""
+	var status: ResourceLoader.ThreadLoadStatus = ResourceLoader.load_threaded_get_status(path)
+	return path.get_file() if status == ResourceLoader.THREAD_LOAD_IN_PROGRESS else ""
+
+
 func _every_module_loaded() -> bool:
 	var held: PackedStringArray = _loaded()
 	return Array(Runtime.MODULES).all(func(file: String) -> bool: return held.has(file))
@@ -93,44 +102,55 @@ func _run() -> void:
 			)
 		)
 
-	# The rest come over the frames that follow, none of which is held for a compile. A module
-	# compiled in a frame holds it at least as long as compiling it took, measured below.
-	var slowest: int = 0
+	# The rest come over the frames that follow, each compiling on a thread while the frames go on.
+	# Seen from here, which runs on the main thread: a module compiled in a frame is never caught
+	# part done. Frame times cannot tell it, since a macOS runner's idle frames reached 67 ms.
+	var waiting: PackedStringArray = []
+	for file: String in Runtime.MODULES:
+		if not ResourceLoader.has_cached(Runtime.ADDON_DIR + file):
+			var _added: bool = waiting.push_back(file)
+	var seen: Dictionary = {}
 	var frames: int = 0
-	# Each frame as "microseconds while compiling file", for a failure to say where the time went.
-	var timeline: Array[String] = []
 	var until: int = Time.get_ticks_msec() + 20000
-	var last: int = Time.get_ticks_usec()
-	while not _every_module_loaded() and Time.get_ticks_msec() < until:
-		var compiling_then: String = node._in_flight.get_file()
+	var timeline: Array[String] = []
+	# The thread runs beside this code, so the cache is read once a frame and each frame's reading
+	# is compared with the last one. Two readings would let a module become ready between them.
+	var cached_before: PackedStringArray = _loaded()
+	var threaded_before: String = _on_a_thread()
+	while (
+		not waiting.is_empty()
+		and Array(waiting).any(func(file: String) -> bool: return not cached_before.has(file))
+		and Time.get_ticks_msec() < until
+	):
+		if not threaded_before.is_empty():
+			var counted: int = seen.get(threaded_before, 0)
+			seen[threaded_before] = counted + 1
 		await process_frame
-		var now: int = Time.get_ticks_usec()
-		slowest = maxi(slowest, now - last)
-		timeline.append("%d %s" % [now - last, compiling_then])
-		last = now
 		frames += 1
+		var cached_after: PackedStringArray = _loaded()
+		var threaded_after: String = _on_a_thread()
+		# A module another one preloads compiles inside that one's load, on the same thread. The
+		# runtime may ask for that one after this check in the same frame, so either end counts.
+		for file: String in waiting:
+			if not cached_before.has(file) and cached_after.has(file):
+				timeline.append(
+					"frame %d: %s ready, %s to %s" % [frames, file, threaded_before, threaded_after]
+				)
+				if not threaded_before.is_empty() or not threaded_after.is_empty():
+					var pulled_in: int = seen.get(file, 0)
+					seen[file] = pulled_in + 1
+		cached_before = cached_after
+		threaded_before = threaded_after
 	if not _every_module_loaded():
 		failures.append("a served game compiles every module: %s" % ", ".join(_loaded()))
-	var idle_slowest: int = 0
-	last = Time.get_ticks_usec()
-	for _frame: int in 30:
-		await process_frame
-		var now: int = Time.get_ticks_usec()
-		idle_slowest = maxi(idle_slowest, now - last)
-		last = now
-	var largest: int = 0
-	for file: String in Runtime.MODULES:
-		largest = maxi(largest, _compiling_usec(file))
-	if frames < 2 or slowest * 2 > largest:
-		failures.append(
-			(
+	for file: String in waiting:
+		if not seen.has(file):
+			failures.append(
 				(
-					"the modules compile over %d frames, the slowest %d us, against %d us for one"
-					+ " and %d us for the slowest of 30 frames after: %s"
+					"%s compiles on a loading thread while frames go on, over %d frames: %s"
+					% [file, frames, "; ".join(timeline)]
 				)
-				% [frames, slowest, largest, idle_slowest, ", ".join(timeline)]
 			)
-		)
 
 	# A module's first command, once the thread has it, holds the frame for no compile.
 	var held_from: int = Time.get_ticks_usec()
@@ -170,8 +190,7 @@ func _run() -> void:
 					"ok": true,
 					"frames_timed": timed,
 					"frames_compiling": frames,
-					"slowest_usec": slowest,
-					"largest_compile_usec": largest,
+					"frames_seen_compiling": seen,
 					"held_usec": held,
 					"compiling_usec": compiling,
 				}
