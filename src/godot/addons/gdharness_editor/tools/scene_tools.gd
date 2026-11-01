@@ -482,7 +482,10 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 	duplicated_node.name = new_name
 	target_parent.add_child(duplicated_node)
 	GdhPlacing.place(duplicated_node, place)
-	GdhPlacing.own(duplicated_node, root)
+	var made: Dictionary = {}
+	for copy: Variant in copies.values():
+		made[copy] = true
+	GdhPlacing.own(duplicated_node, root, made)
 	GdhPlacing.reconnect(copies, source)
 	scene.copied(copies)
 

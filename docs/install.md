@@ -247,7 +247,7 @@ The old version keeps answering until you do two more things:
    It takes about seven seconds.
 
 An editor gdharness opened comes back visible, on Windows without taking the focus. Given
-`hidden: true`, the restart brings it back headless and out of sight. A headless editor you started
+`hidden: true`, the restart brings it back out of sight. A headless editor you started
 by hand cannot be restarted this way. Start it again by hand.
 
 The `editor_status` tool confirms with `addonIsStale` false. `addonVersion` stays at the older

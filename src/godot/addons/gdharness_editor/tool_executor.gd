@@ -17,6 +17,7 @@ const GdhClassTools = preload("tools/class_tools.gd")
 const GdhSettingsTools = preload("tools/settings_tools.gd")
 const GdhFilesystemTools = preload("tools/filesystem_tools.gd")
 const GdhProfileTools = preload("tools/profile_tools.gd")
+const GdhViewTools = preload("tools/view_tools.gd")
 
 var _editor_plugin: EditorPlugin = null
 var _scene_tools: GdhSceneTools = null
@@ -31,6 +32,7 @@ var _class_tools: GdhClassTools = null
 var _settings_tools: GdhSettingsTools = null
 var _filesystem_tools: GdhFilesystemTools = null
 var _profile_tools: GdhProfileTools = null
+var _view_tools: GdhViewTools = null
 var _tool_map: Dictionary = {}
 var _initialized: bool = false
 
@@ -48,6 +50,7 @@ func set_editor_plugin(plugin: EditorPlugin) -> void:
 	_class_tools.set_editor_plugin(plugin)
 	_filesystem_tools.set_editor_plugin(plugin)
 	_profile_tools.set_editor_plugin(plugin)
+	_view_tools.set_editor_plugin(plugin)
 
 
 func _init_tools() -> void:
@@ -103,6 +106,10 @@ func _init_tools() -> void:
 	_profile_tools.name = "ProfileTools"
 	add_child(_profile_tools)
 
+	_view_tools = GdhViewTools.new()
+	_view_tools.name = "ViewTools"
+	add_child(_view_tools)
+
 	_tool_map = {
 		# Scene tools
 		"create_scene": [_scene_tools, "create_scene"],
@@ -148,6 +155,7 @@ func _init_tools() -> void:
 		# The script profiler on a game the editor plays
 		"profile_start": [_profile_tools, "profile_start"],
 		"profile_read": [_profile_tools, "profile_read"],
+		"capture_editor_view": [_view_tools, "capture_editor_view"],
 		# Animation tools
 		"read_animations": [_animation_tools, "read_animations"],
 		"read_animation_states": [_animation_tools, "read_animation_states"],
@@ -164,6 +172,11 @@ func _init_tools() -> void:
 	}
 
 
+## Whether a capture is waiting for the editor to draw, which another call must not move it from.
+func capturing() -> bool:
+	return _view_tools != null and _view_tools.capturing
+
+
 func execute_tool(tool_name: String, args: Dictionary) -> Dictionary:
 	if not _tool_map.has(tool_name):
 		return { "ok": false, "error": "Unknown tool: " + tool_name }
@@ -177,7 +190,8 @@ func execute_tool(tool_name: String, args: Dictionary) -> Dictionary:
 
 	GdhSceneFile.also_saved.clear()
 	GdhSceneFile.unmade_note = ""
-	var result: Variant = node.call(method, args)
+	# Awaited for the tools that wait for the editor to draw. The rest answer at once.
+	var result: Variant = await node.call(method, args)
 	if result is Dictionary:
 		var answered: Dictionary = result
 		if not GdhSceneFile.also_saved.is_empty():

@@ -163,14 +163,16 @@ static func reconnect(copies: Dictionary, top: Node) -> void:
 					)
 
 
-## Owns [param node] and the nodes under it to [param root], except those an instanced scene
-## inside it owns: giving those to the root made the pack write the instance's own nodes into this
-## scene as overrides.
-static func own(node: Node, root: Node) -> void:
+## Owns [param node] to [param root], and under it the nodes the root owns already and those of
+## [param placed], the copies a duplicate placed. A node nothing owns is not the scene's: a script's
+## _init made it, which a headless engine runs and the editor does not, and owning it saved it into
+## the scene, where the script makes it again at run time. An instanced scene's own nodes stay its
+## own: giving those to the root made the pack write them into this scene as overrides.
+static func own(node: Node, root: Node, placed: Dictionary = {}) -> void:
 	node.owner = root
 	for child: Node in node.get_children():
-		if child.owner == null or child.owner == root:
-			own(child, root)
+		if child.owner == root or placed.has(child):
+			own(child, root, placed)
 
 
 ## Why [param asked] is not a position [param node] can take among [param parent]'s children, or ""

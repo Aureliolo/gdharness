@@ -123,6 +123,7 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 | End a game of the project that no server is holding | \`editor_run stop\` with its \`pid\` from \`editor_status\` \`runtimes\`, never a process kill by hand: it is ended only when it announced itself for the project and its command line is the project's engine run |
 | Play a game without touching the player's saves | \`editor_run start\` with \`savesIn\`, a directory for this run's \`user://\`: the editor plays with its own environment, so a run given one is started by the server, and the answer says under \`savesNote\` when the platform ignores it |
 | A picture, for a person who asked to see one | \`runtime_capture\` |
+| What a scene's @tool scripts draw in the editor | \`editor_capture\`, the editor's own 2D or 3D view of the scene. No game runs their editor branch |
 
 These need the runtime autoload, which \`gdharness setup\` registers. \`runtime_capture\` needs a
 window and refuses headless rather than handing back the last frame anything drew. On Windows a

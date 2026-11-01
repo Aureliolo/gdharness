@@ -129,13 +129,14 @@ import {
   ONE_OFF_AGED_MS,
   ownStart,
   QUEUED_FOLDER,
-  reservedSlotOf,
   inAGate as runsInAGate,
   SHARE_COUNT_VARIABLE,
   SHARE_VARIABLE,
   SLOT_YIELD_MS,
   type SlotHolder,
   SlotLine,
+  SPARE_FILE,
+  SPARE_STALE_MS,
   START_TOLERANCE_MS,
   slotEngineNamed,
   slotsClaimed,
@@ -144,6 +145,7 @@ import {
   slotWaitedSaid,
   slotWaiters,
   slotWaitSaid,
+  spareSaid,
   UNWRITTEN_MS,
   WAITING_FOLDER,
 } from '../src/engine-slots.js';
@@ -203,6 +205,7 @@ import {
   runArguments,
   SAVES_NOT_MOVED_NOTE,
   savesStayPut,
+  startedAs,
   userDataIn,
 } from '../src/launch.js';
 import { freeLibraryCopies, seedExtensionList } from '../src/library-copies.js';
@@ -488,8 +491,10 @@ import { encodedUidCache, mendUidCache, type UidEntry, uidCacheEntries } from '.
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { writeWhole } from '../src/whole-file.js';
 import { askWindows } from '../src/windows-ask.js';
+import { inTurnFor, writeLockOf } from '../src/write-turns.js';
 import { withHome } from './support/cli-home.js';
 import { containedEngine } from './support/contained-engine.js';
+import { endEnginesUnder } from './support/engines.js';
 import { greeting } from './support/greeting.js';
 import { HIDDEN_SPAWN_PRELUDE } from './support/hidden-spawn.js';
 import { asArray, asNumber, asObject, asString, get, text } from './support/json.js';
@@ -503,7 +508,7 @@ import {
   textOf,
 } from './support/json-rpc.js';
 import { endWhatAnnouncedIn, MetProcesses } from './support/met.js';
-import { pixelPng, solidPng } from './support/png.js';
+import { pixelPng, readPng, solidPng } from './support/png.js';
 import { listenOnAReservedPort, reservePort, ServerProcess, stopServersOf } from './support/server.js';
 import { REGRESSION_SECONDS, regressionPart, secondsOn, UNMEASURED_SECONDS } from './support/shards.js';
 import { leftInSlots } from './support/slots.js';
@@ -5714,6 +5719,10 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
     const at = argv.indexOf('--audio-driver');
     return at >= 0 && argv[at + 1] === 'Dummy';
   };
+  // A hidden editor is headless, with no sound to turn off, except on Windows, where it draws on a
+  // desktop of its own and is always started silent.
+  const hiddenHeadless = process.platform !== 'win32';
+  const hiddenSilent = !hiddenHeadless;
   // `was` is what the editor being restarted was started with, which a restart reads off its process
   // for whatever the call leaves out. null is a process gone before it is read.
   const cases: readonly {
@@ -5726,13 +5735,20 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
   }[] = [
     { how: 'opened visible', act: 'open', args: {}, silent: true, visible: true },
     { how: 'opened visible with sound', act: 'open', args: { silent: false }, silent: false, visible: true },
-    { how: 'opened hidden', act: 'open', args: { hidden: true }, silent: false, visible: false },
+    { how: 'opened hidden', act: 'open', args: { hidden: true }, silent: hiddenSilent, visible: false },
+    {
+      how: 'opened hidden with sound',
+      act: 'open',
+      args: { hidden: true, silent: false },
+      silent: hiddenSilent,
+      visible: false,
+    },
     {
       how: 'started again hidden',
       act: 'restart',
       was: ['--audio-driver', 'Dummy'],
       args: { hidden: true },
-      silent: false,
+      silent: hiddenSilent,
       visible: false,
     },
     {
@@ -5740,7 +5756,15 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
       act: 'restart',
       was: ['--headless'],
       args: {},
-      silent: false,
+      silent: hiddenSilent,
+      visible: false,
+    },
+    {
+      how: 'started again as it was, hidden on its own desktop',
+      act: 'restart',
+      was: ['--audio-driver', 'Dummy', '--', '--gdharness-hidden'],
+      args: {},
+      silent: hiddenSilent,
       visible: false,
     },
     {
@@ -5919,8 +5943,13 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
       assert.equal(silence(argv), one.silent, `${one.how}: silent ${String(one.silent)}: ${argv.join(' ')}`);
       assert.equal(
         argv.includes('--headless'),
-        !one.visible,
-        `${one.how}: hidden ${String(!one.visible)}: ${argv.join(' ')}`,
+        !one.visible && hiddenHeadless,
+        `${one.how}: headless ${String(!one.visible && hiddenHeadless)}: ${argv.join(' ')}`,
+      );
+      assert.equal(
+        argv.includes('--gdharness-hidden'),
+        !one.visible && !hiddenHeadless,
+        `${one.how}: on a desktop of its own ${String(!one.visible && !hiddenHeadless)}: ${argv.join(' ')}`,
       );
       ran += 1;
     } finally {
@@ -8720,7 +8749,7 @@ async function testEveryToolTellsAClientWhatItCanChange(): Promise<void> {
     }
     assert.deepEqual(
       counts,
-      { read: 12, additive: 4, destructive: 14 },
+      { read: 13, additive: 4, destructive: 14 },
       'each class holds what the table holds',
     );
 
@@ -14902,7 +14931,8 @@ async function testAnEditorWritesItsConsoleWhereTheServerLooks(): Promise<void> 
     const editor = spawnHidden(
       godotPath,
       [
-        ...editorArguments(project, { lsp: 0, dap: 0 }, editorLogPath(project), true, true),
+        // Headless on every platform: what the console holds does not depend on a window.
+        ...editorArguments(project, { lsp: 0, dap: 0 }, editorLogPath(project), true, true, 'linux'),
         '--quit-after',
         '2000',
       ],
@@ -21425,8 +21455,38 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
     ['-e', ...opened],
   );
   assert.deepEqual(
-    editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log', true, true),
+    editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log', true, true, 'linux'),
     ['-e', '--headless', ...opened],
+  );
+  // On Windows a hidden editor is a window on the hidden desktop, which draws its views.
+  assert.deepEqual(
+    editorArguments('/p', { lsp: 6005, dap: 6006 }, '/p/.godot/gdharness-editor.log', true, false, 'win32'),
+    [
+      '-e',
+      '--disable-vsync',
+      '--max-fps',
+      '60',
+      '--audio-driver',
+      'Dummy',
+      ...opened,
+      '--',
+      '--gdharness-hidden',
+    ],
+  );
+  assert.deepEqual(
+    [
+      startedAs(
+        editorArguments('/p', { lsp: 1, dap: 2 }, '/log', true, false, 'win32')
+          .map((word) => `"${word}"`)
+          .join(' '),
+      ),
+      startedAs('godot -e --path /p'),
+    ],
+    [
+      { hidden: true, silent: true },
+      { hidden: false, silent: false },
+    ],
+    'and a restart reads it back as hidden',
   );
   // The scene as a res:// path and last: the engine reads it positionally, so text beginning
   // with a dash would otherwise be another option to it.
@@ -21621,8 +21681,8 @@ function testWhatThisServerStartsIsSilentUnlessAsked(): void {
     'and one asked for sound is not',
   );
   assert.ok(
-    !editorArguments('/p', { lsp: 1, dap: 2 }, '/log', true, true).includes('--audio-driver'),
-    'a hidden editor is headless, which is silent already',
+    !editorArguments('/p', { lsp: 1, dap: 2 }, '/log', true, true, 'linux').includes('--audio-driver'),
+    'a headless editor is silent already',
   );
 }
 
@@ -45639,6 +45699,16 @@ function testACrashIsReadFromTheCrashHandlersReport(): void {
     inTheReport.join('\n'),
   );
   assert.ok(!inTheReport.some((fault) => fault.includes('quit(5)')), inTheReport.join('\n'));
+  // Windows' handler for an exception names no signal.
+  const unsignalled = report(official, []).map((line) =>
+    line.replace('Program crashed with signal 11', 'Program crashed'),
+  );
+  const exception = judgeEngine(readRun(ran(...unsignalled)), handed, exited5).faults;
+  assert.deepEqual(
+    exception.filter((fault) => fault.startsWith('the engine')),
+    [`the engine crashed ${during}, with 2.5 GB of memory free as it ended`],
+    exception.join('\n'),
+  );
 
   // The same frames under another build are other code, so only the crash is said.
   const elsewhere = judgeEngine(readRun(ran(...report('0'.repeat(40), queueFrames))), handed, exited5).faults;
@@ -46256,32 +46326,28 @@ async function testAnEngineOnASlotLendsItToWhatItStarts(): Promise<void> {
 
 async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
   // A quarter of the slots, at least two, kept for engines outside a gate, and half of those at most
-  // for the games editor_run started. That leaves one beside a gate's own steps' for short calls.
+  // for the games editor_run started, never the last, which stays for short calls.
   assert.deepEqual(
     [2, 4, 8, 12, 16, 32].map((count) => keptSlotsOf(count)),
     [2, 2, 2, 3, 4, 8],
   );
   assert.deepEqual(
     [1, 2, 3, 4, 8].map((kept) => gamesKeptOf(kept)),
-    [0, 0, 1, 2, 4],
+    [0, 1, 1, 2, 4],
   );
   const every16 = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
   assert.deepEqual(slotsDrawnOn(16, 'other', 'none'), { numbers: every16 });
-  assert.deepEqual(slotsDrawnOn(16, 'other', 'queued'), { numbers: [15, 14, 13], limit: 'kept' });
+  assert.deepEqual(slotsDrawnOn(16, 'other', 'queued'), { numbers: [15, 14, 13, 12], limit: 'kept' });
   assert.deepEqual(slotsDrawnOn(16, 'gate', 'queued'), {
     numbers: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
     limit: 'gate',
   });
   assert.deepEqual(slotsDrawnOn(16, 'timing', 'queued'), { numbers: every16 }, 'a timing takes any slot');
+  const tiered = [11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 15, 14, 13, 12];
   assert.deepEqual(
     [slotsDrawnOn(16, 'tier', 'queued'), slotsDrawnOn(16, 'tier', 'none')],
-    [{ numbers: [12, 13, 14], limit: 'tier' }, { numbers: every16 }],
-    "a gate's own step the kept four but the last while a gate is queued, the first of them first, and any slot when none is",
-  );
-  assert.deepEqual(
-    [1, 2, 3, 4, 16].map((count) => reservedSlotOf(count)),
-    [null, null, 2, 3, 15],
-    "the last slot is a one-off's alone wherever two or more are kept",
+    [{ numbers: tiered }, { numbers: tiered }],
+    "gate work outside a seat takes any slot, queued or not, the gates' from the top first",
   );
   assert.deepEqual(slotsDrawnOn(2, 'gate', 'none'), { numbers: [0], limit: 'gate' });
   assert.deepEqual(slotsDrawnOn(2, 'other', 'queued'), { numbers: [1], limit: 'kept' });
@@ -46291,11 +46357,12 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
       slotTaker({ [SHARE_VARIABLE]: 'share', [SHARE_COUNT_VARIABLE]: '3', GODOT_ENGINE_TIMED: 'x' }),
       slotTaker({ GODOT_ENGINE_TIMED: '/slots/3.lock', GODOT_ENGINE_TIER: 'fast' }),
       slotTaker({ GODOT_ENGINE_TIER: 'full' }),
+      slotTaker({ GODOT_ENGINE_TIER: 'ship' }),
       slotTaker({ GODOT_ENGINE_TIER: '' }),
       slotTaker({}),
     ],
-    ['gate', 'timing', 'tier', 'other', 'other'],
-    "a gate, a timing, a gate's own step, and anything else",
+    ['gate', 'timing', 'tier', 'tier', 'other', 'other'],
+    "a gate, a timing, a gate's own step, anything shipping, and anything else",
   );
   assert.deepEqual(
     [
@@ -46358,7 +46425,7 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
     rmSync(join(waits, 'live.json'));
 
     // A live gate, seated or not: a seat counts only the gates' slots, so work beside the gates keeps
-    // the kept ones but the gate's own steps'.
+    // the kept ones, and gate work outside a seat takes any.
     writeFileSync(join(queued, 'ticket.json'), JSON.stringify({ pid: process.pid, started }));
     for (const seat of ['waiting for its seat', 'seated']) {
       if (seat === 'seated') {
@@ -46366,24 +46433,79 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
       }
       assert.deepEqual(
         await takeAll(outside),
-        ['3.lock'],
-        `a gate ${seat} leaves work beside it the last slot`,
+        ['3.lock', '2.lock'],
+        `a gate ${seat} leaves work beside it the kept slots`,
       );
       assert.equal(outside.drawn.limit, 'kept', JSON.stringify(outside.drawn));
       assert.deepEqual(await takeAll(gate), ['0.lock', '1.lock'], 'and its engines take only those');
       assert.deepEqual(
         await takeAll(tier),
-        ['2.lock'],
-        "and the gates' own steps the kept one that is not a one-off's alone",
+        ['1.lock', '0.lock', '3.lock', '2.lock'],
+        "and gate work outside a seat any, the gates' from the top first",
       );
     }
+    // The queue says how many of the gates' free slots no queued gate can take now. Side work takes
+    // those after the kept ones, and a game, which holds its slot for as long as it plays, never.
+    const spareFile = join(directory, SPARE_FILE);
+    const spareOf = (spare: unknown, writtenAgoMs: number, pid = process.pid): void => {
+      writeFileSync(spareFile, JSON.stringify({ spare, pid, started, written: Date.now() - writtenAgoMs }));
+    };
+    spareOf(2, 0);
+    assert.deepEqual(
+      [await takeAll(outside), await takeAll(outside, true)],
+      [['3.lock', '2.lock', '1.lock', '0.lock'], ['3.lock']],
+      'side work takes the spare slots of the gates, and a game only its share of the kept ones',
+    );
+    const kept = ['3.lock', '2.lock'];
+    for (const [why, write] of [
+      [
+        'none spare',
+        () => {
+          spareOf(0, 0);
+        },
+      ],
+      [
+        'a stale count',
+        () => {
+          spareOf(2, SPARE_STALE_MS + 1000);
+        },
+      ],
+      [
+        'a count whose writer has gone',
+        () => {
+          spareOf(2, 0, gone.pid);
+        },
+      ],
+      [
+        'a count that is no whole number',
+        () => {
+          spareOf('2', 0);
+        },
+      ],
+    ] as const) {
+      write();
+      assert.deepEqual(await takeAll(outside), kept, `and only the kept slots with ${why}`);
+    }
+    rmSync(spareFile);
+    assert.deepEqual(await takeAll(outside), kept, 'or with no count at all');
+    assert.equal(
+      spareSaid('{"spare": 3, "written": 1000}', 1000 + SPARE_STALE_MS),
+      3,
+      'a count is read up to its age limit',
+    );
+    assert.equal(spareSaid('{"spare": 3, "written": 1000}', 1001 + SPARE_STALE_MS), 0, 'and not past it');
+    assert.deepEqual(
+      slotsDrawnOn(16, 'other', 'spare'),
+      { numbers: every16 },
+      'the kept first, then the gates',
+    );
     assert.equal(
       slotWaitSaid(3000, 4, 'slots', outside.holders(), outside.drawn),
-      'Waiting 3 s so far for an engine: the one engine slot of the 4 on this machine (slots) kept for engines outside a gate while a gate is queued is in use, by a gate or another tool, and the engine starts when it is given back or no gate is queued.',
+      'Waiting 3 s so far for an engine: the 2 engine slots of the 4 on this machine (slots) kept for engines outside a gate while a gate is queued are in use, by a gate or another tool, and the engine starts when one is given back or no gate is queued.',
     );
     assert.equal(
       slotWaitSaid(3000, 4, 'slots', tier.holders(), tier.drawn),
-      "Waiting 3 s so far for an engine: the one engine slot of the 4 on this machine (slots) a gate's own steps take while a gate is queued is in use, by a gate or another tool, and the engine starts when it is given back or no gate is queued.",
+      'Waiting 3 s so far for an engine: all 4 engine slots on this machine (slots) are in use, by a gate or another tool, and the engine starts when one is given back.',
     );
     assert.equal(
       slotWaitSaid(1000, 2, 'slots', [holder], slotsDrawnOn(2, 'other', 'queued')),
@@ -46395,11 +46517,11 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
         String(process.pid) +
         ').',
     );
-    // Of four kept, no game takes one: two would leave none beside the gate's own steps'.
+    // Of two kept, games hold one, and the other stays for a short call.
     assert.deepEqual(
       await takeAll(outside, true),
-      [],
-      'with two kept, a game takes none while a gate is queued',
+      ['3.lock'],
+      'with two kept, a game takes one while a gate is queued',
     );
     assert.equal(outside.drawn.limit, 'games', JSON.stringify(outside.drawn));
     // Gates kept arriving and one-off runs waited over an hour for the kept slots.
@@ -46409,15 +46531,13 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
         await takeAll(outside, false, ONE_OFF_AGED_MS),
         await takeAll(outside, true, ONE_OFF_AGED_MS),
       ],
-      [['3.lock'], ['3.lock', '2.lock', '1.lock', '0.lock'], []],
+      [['3.lock', '2.lock'], ['3.lock', '2.lock', '1.lock', '0.lock'], ['3.lock']],
       "a one-off that has waited two minutes takes any slot, the gates' too, and a game never does",
     );
 
     // A slot already held is kept to its end whatever arrives in the queue.
     rmSync(join(queued, 'ticket.json'));
     rmSync(join(queued, 'ticket.json.seated'));
-    // A game held off the one-off's slot with no gate queued waited on a shared folder whose other
-    // slots were held, behind a slot nothing else wanted.
     assert.deepEqual(
       await takeAll(outside, true),
       ['3.lock', '2.lock', '1.lock', '0.lock'],
@@ -46431,13 +46551,17 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
       true,
       'a gate arriving takes nothing already held',
     );
-    assert.deepEqual(await takeAll(outside), [], 'and the last slot is the one it holds');
-    assert.deepEqual(await takeAll(tier), ['2.lock'], "while a gate's own step takes the other kept one");
+    assert.deepEqual(await takeAll(outside), ['2.lock'], 'and of the kept slots it takes the one not held');
+    assert.deepEqual(
+      await takeAll(tier),
+      ['1.lock', '0.lock', '2.lock'],
+      'while gate work outside a seat takes every one not held',
+    );
     if (held !== null) {
       outside.release(held);
     }
 
-    // Sixteen slots, four kept: games hold two between them, and a short call still has the last.
+    // Sixteen slots, four kept: games hold two between them, and a short call still has the others.
     // A probe's headless scene edit waited an hour behind the one game a session had started.
     const sixteen = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-game-slots-'));
     try {
@@ -46450,8 +46574,8 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
       const games = [await sessions.takeFree(true), await sessions.takeFree(true)];
       assert.deepEqual(
         games.map((lock) => (lock === null ? null : basename(lock))),
-        ['14.lock', '13.lock'],
-        "two games take the highest kept slots but the one-off's",
+        ['15.lock', '14.lock'],
+        'two games take the highest kept slots',
       );
       assert.deepEqual(
         games.map((lock) => (lock === null ? null : holderOf(readFileSync(lock, 'utf8'))?.game)),
@@ -46461,7 +46585,7 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
       assert.equal(await sessions.takeFree(true), null, 'a third game waits');
       assert.deepEqual(
         sessions.drawn,
-        { numbers: [13, 14], limit: 'games' },
+        { numbers: [14, 15], limit: 'games' },
         'held by the games holding theirs',
       );
       assert.equal(
@@ -46471,8 +46595,8 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
       const short = await sessions.takeFree();
       assert.equal(
         short === null ? null : basename(short),
-        '15.lock',
-        "while a short call takes the one-off's",
+        '13.lock',
+        'while a short call takes a kept slot the games leave',
       );
       if (short !== null) {
         sessions.release(short);
@@ -46488,6 +46612,21 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
       rmSync(first, { force: true });
       if (games[1] !== null && games[1] !== undefined) {
         sessions.release(games[1]);
+      }
+
+      // An upload beside a queued gate takes a gates' slot at once, where side work waits for a kept
+      // one: three uploads waited 50 minutes for the kept slots while gates' slots stood free.
+      for (const slot of [0, 1, 2, 3, 4, 5, 6, 7, 12, 13, 14, 15]) {
+        writeFileSync(join(sixteen, `${String(slot)}.lock`), JSON.stringify(holder));
+      }
+      const upload = new EngineSlots(sixteen, 16, holder, undefined, () =>
+        slotTaker({ GODOT_ENGINE_TIER: 'ship' }),
+      );
+      const uploaded = await upload.takeFree();
+      assert.equal(uploaded === null ? null : basename(uploaded), '11.lock', 'an upload starts at once');
+      assert.equal(await sessions.takeFree(), null, 'and side work waits for a kept slot');
+      if (uploaded !== null) {
+        upload.release(uploaded);
       }
     } finally {
       rmSync(sixteen, { recursive: true, force: true });
@@ -46589,6 +46728,24 @@ async function testTakersWaitTheirTurn(): Promise<void> {
     );
     tied.mark = '1-0.json';
     assert.deepEqual(tied.ahead([waiter]), [], 'and once the take has a mark, a tie goes by name');
+    // Gate work goes before younger side work whenever each began, and side work that has waited two
+    // minutes with it. A game never counts as aged. Uploads waited behind side work begun before them.
+    const sideWork = { mark: 'a.json', taker: 'other', since: began - 10_000, game: false } as const;
+    const gateWork = { mark: 'b.json', taker: 'tier', since: began, game: false } as const;
+    const agedSide = { mark: 'c.json', taker: 'other', since: began - 121_000, game: false } as const;
+    const agedGame = { mark: 'd.json', taker: 'other', since: began - 1_200_000, game: true } as const;
+    assert.deepEqual(
+      new SlotLine('other', false, () => began)
+        .ahead([sideWork, gateWork, agedSide, agedGame])
+        .map((one) => one.mark),
+      ['c.json', 'b.json', 'd.json', 'a.json'],
+      'aged side work, then gate work, then the rest in the order they began',
+    );
+    assert.deepEqual(
+      new SlotLine('tier', false, () => began).ahead([sideWork, agedGame]),
+      [],
+      'and gate work has no younger side work ahead of it',
+    );
     writeFileSync(ahead, JSON.stringify({ ...me, taker: 'other', since: (Date.now() - 60_000) / 1000 }));
 
     const late = new EngineSlots(directory, 2, me, undefined, () => 'other');
@@ -69011,6 +69168,291 @@ async function testAPropertyHoldingANodeFollowsIt(): Promise<void> {
 }
 
 /**
+ * Two headless writes to one scene at once both land, each with its own properties. Each loaded the
+ * file and the later save put back what it had read: a game's eight adds to one scene, two of them
+ * left running by its client, lost a Line2D and gave its antialiased to a Polygon2D.
+ */
+async function testTwoWritesToOneSceneAtOnceBothLand(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('writes at once regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-at-once-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-at-once-rt-'));
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="AtOnce"\n',
+    // Every engine loading the scene runs this, which holds each write open long enough to overlap.
+    'slow.gd': 'extends Node2D\n\n\nfunc _init() -> void:\n\tOS.delay_msec(3000)\n',
+    'floor.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://slow.gd" id="1_slow"]\n\n' +
+      '[node name="Floor" type="Node2D"]\nscript = ExtResource("1_slow")\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const add = async (
+    nodeName: string,
+    nodeType: string,
+    properties: Record<string, unknown>,
+  ): Promise<unknown> => {
+    const result = await server.request(
+      'tools/call',
+      {
+        name: 'scene_node',
+        arguments: {
+          projectPath: project,
+          op: 'add',
+          scenePath: 'floor.tscn',
+          parentNodePath: '.',
+          nodeType,
+          nodeName,
+          properties,
+        },
+      },
+      240_000,
+    );
+    const parsed = parseTextContent(result);
+    assert.ok(parsed !== null, `scene_node add answered: ${JSON.stringify(result)}`);
+    return parsed;
+  };
+  const scene = (): string => readFileSync(join(project, 'floor.tscn'), 'utf8');
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('at-once-engine');
+
+    const [ink, shade] = await Promise.all([
+      add('FloorInk', 'Line2D', { width: 1.5, antialiased: true }),
+      add('FloorShade', 'Polygon2D', { use_parent_material: true }),
+    ]);
+    assert.deepEqual([get(ink, 'nodePath'), get(shade, 'nodePath')], ['FloorInk', 'FloorShade']);
+    for (const answer of [ink, shade]) {
+      assert.equal(
+        get(answer, 'alsoSaved'),
+        undefined,
+        `neither saves the other's node: ${JSON.stringify(answer)}`,
+      );
+    }
+    const sections = scene().split('\n\n');
+    const of = (name: string): string => sections.find((one) => one.startsWith(`[node name="${name}"`)) ?? '';
+    assert.match(of('FloorInk'), /^width = 1\.5$/m, scene());
+    assert.match(of('FloorInk'), /^antialiased = true$/m, scene());
+    assert.match(of('FloorShade'), /^use_parent_material = true$/m, scene());
+    assert.doesNotMatch(of('FloorShade'), /antialiased/, scene());
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A write's turn holds across processes, since two sessions each run a server of their own: a lock
+ * another live process holds keeps the write waiting until it goes, and one whose holder has gone is
+ * taken over at once.
+ */
+async function testAWriteWaitsForAnotherProcesssTurn(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-turns-'));
+  const file = join(project, 'floor.tscn');
+  const lock = writeLockOf(project, file);
+  const other = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+  try {
+    const pid = other.pid ?? 0;
+    const started = (await startTimesOf([pid])).get(pid);
+    assert.ok(started !== undefined, `the stand-in's start is read: ${String(pid)}`);
+    mkdirSync(dirname(lock), { recursive: true });
+    writeFileSync(lock, JSON.stringify({ pid, started }));
+    const write = (): Promise<{ at: number; holder: number | undefined }> =>
+      Promise.resolve({ at: Date.now(), holder: holderOf(readFileSync(lock, 'utf8'))?.pid });
+    const turn = inTurnFor(project, file, write);
+    await delay(1500);
+    const given = Date.now();
+    rmSync(lock, { force: true });
+    const ran = await turn;
+    assert.ok(
+      ran.at >= given,
+      `the write waited for the other process's turn: ran ${String(ran.at)}, given ${String(given)}`,
+    );
+    assert.equal(ran.holder, process.pid, 'and wrote in a turn of its own');
+    assert.equal(existsSync(lock), false, 'which it gave back');
+
+    const exited = new Promise((resolved) => other.once('exit', resolved));
+    other.kill();
+    await exited;
+    writeFileSync(lock, JSON.stringify({ pid, started }));
+    const from = Date.now();
+    const taken = await inTurnFor(project, file, write);
+    assert.ok(
+      taken.at - from < 1000,
+      `a gone holder's turn is taken over at once: ${String(taken.at - from)} ms`,
+    );
+    assert.equal(taken.holder, process.pid, 'as a turn of its own');
+    assert.equal(existsSync(lock), false, 'and given back');
+  } finally {
+    other.kill();
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * editor_capture shows what a scene's @tool script draws only in the editor. A game asked to check
+ * such a sample had no way to see it: runtime_capture needs a game, which never runs the editor
+ * branch, and a headless editor draws nothing. A hidden editor on Windows is a window on a desktop
+ * of its own, which draws without showing. Elsewhere it is headless, and the capture says so.
+ */
+async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('editor capture regression skipped (Godot not found)');
+    return;
+  }
+  const decoded = readPng(pixelPng(2, 1, (x) => (x === 0 ? [255, 0, 0, 255] : [0, 0, 255, 128])));
+  assert.deepEqual(
+    [decoded.pixel(0, 0), decoded.pixel(1, 0)],
+    [
+      [255, 0, 0, 255],
+      [0, 0, 255, 128],
+    ],
+  );
+  const project = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-editor-view-')));
+  const home = join(project, 'home');
+  mkdirSync(home);
+  const saved = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-view-out-'));
+  installAddons(project);
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="EditorView"\n\n[editor_plugins]\n\n' +
+      'enabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+  );
+  // Red in the editor only. A game, or a capture that read the view before the script drew, has none.
+  writeFileSync(
+    join(project, 'sample.gd'),
+    '@tool\nextends Node2D\n\n\nfunc _draw() -> void:\n\tif Engine.is_editor_hint():\n' +
+      '\t\tdraw_rect(Rect2(0, 0, 400, 400), Color(1, 0, 0))\n',
+  );
+  writeFileSync(
+    join(project, 'sample.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://sample.gd" id="1_sample"]\n\n' +
+      '[node name="Sample" type="Node2D"]\nscript = ExtResource("1_sample")\n',
+  );
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_DAP_PORT: String(await reservePort()),
+      HOME: home,
+      USERPROFILE: home,
+      APPDATA: home,
+      LOCALAPPDATA: home,
+      XDG_CONFIG_HOME: home,
+      XDG_DATA_HOME: home,
+      XDG_CACHE_HOME: home,
+      GDHARNESS_RUNTIME_DIR: join(home, 'runtime'),
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name, arguments: args }, 240_000);
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('editor-view');
+    const opened = await call('editor_launch', { op: 'open', projectPath: project, hidden: true });
+    assert.notEqual(get(opened.result, 'isError'), true, textOf(opened) ?? '');
+    let status: unknown = null;
+    for (let waited = 0; waited < 180_000; waited += 500) {
+      status = parseTextContent(await call('editor_status', {}));
+      if (get(status, 'editor', 'connected') === true) {
+        break;
+      }
+      await delay(500);
+    }
+    assert.equal(
+      get(status, 'editor', 'connected'),
+      true,
+      `the hidden editor connected: ${JSON.stringify(status)}`,
+    );
+    assert.equal(get(status, 'editor', 'hidden'), true, `and says it is hidden: ${JSON.stringify(status)}`);
+
+    const picture = join(saved, 'view.png');
+    const captured = await call('editor_capture', {
+      projectPath: project,
+      scenePath: 'sample.tscn',
+      outputPath: picture,
+    });
+    if (process.platform !== 'win32') {
+      assert.equal(get(captured.result, 'isError'), true, textOf(captured) ?? '');
+      assert.match(
+        textOf(captured) ?? '',
+        /^The editor answered editor_capture with an error: This editor runs headless, so it draws nothing to capture\. Use a visible editor, or a hidden one on Windows\.$/,
+        textOf(captured) ?? '',
+      );
+      return;
+    }
+    assert.match(
+      textOf(captured) ?? '',
+      /^The editor's 2D view of res:\/\/sample\.tscn: \d+x\d+ png\. Saved to /,
+      textOf(captured) ?? '',
+    );
+    const images = asArray(get(captured.result, 'content')).filter((block) => get(block, 'type') === 'image');
+    assert.equal(images.length, 1, 'the picture comes back in the answer');
+    const view = readPng(readFileSync(picture));
+    let red = 0;
+    for (let y = 0; y < view.height; y += 4) {
+      for (let x = 0; x < view.width; x += 4) {
+        const [r, g, b] = view.pixel(x, y);
+        if (r > 200 && g < 60 && b < 60) {
+          red += 1;
+        }
+      }
+    }
+    assert.ok(
+      red > 100,
+      `what the script draws in the editor is in the view: ${String(red)} red samples of ${view.width}x${view.height}`,
+    );
+
+    const scaled = await call('editor_capture', {
+      projectPath: project,
+      scenePath: 'sample.tscn',
+      width: 120,
+      inline: false,
+      outputPath: join(saved, 'small.png'),
+    });
+    assert.match(
+      textOf(scaled) ?? '',
+      /: 120x\d+ png, scaled from \d+x\d+\. Saved to .*\. Not sent, as inline: false asked$/,
+      textOf(scaled) ?? '',
+    );
+    assert.equal(readPng(readFileSync(join(saved, 'small.png'))).width, 120);
+  } finally {
+    await call('editor_launch', { op: 'close' }).catch(() => undefined);
+    await server.stop();
+    for (const { pid } of await endEnginesUnder(project)) {
+      console.log(`ended engine ${pid}, which was still holding the editor view fixture`);
+    }
+    rmSync(project, { recursive: true, force: true });
+    rmSync(saved, { recursive: true, force: true });
+  }
+}
+
+/**
  * A headless write saves what the editor would. A model-driven probe renamed a node in a scene whose
  * ShaderMaterial set none of its parameters, and the save wrote each as null, since the saver leaves
  * out a parameter at the default the renderer gives and a headless renderer gives none. The same
@@ -69040,6 +69482,29 @@ async function testAHeadlessWriteSavesWhatTheEditorWould(): Promise<void> {
     'room.tscn':
       '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://panel.tscn" id="1_panel"]\n\n' +
       '[node name="Room" type="Node2D"]\n\n[node name="PanelA" parent="." instance=ExtResource("1_panel")]\n',
+    // A script that builds a child of its own, which a headless engine runs and the editor does not.
+    'shaded.gd':
+      'class_name Shaded\nextends Node\n\n\nfunc _init() -> void:\n\tvar shade := Panel.new()\n\tshade.name = "Shade"\n\tadd_child(shade)\n',
+    'layer.tscn': '[gd_scene format=3]\n\n[node name="Layer" type="CanvasLayer"]\n',
+    'hall.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://shaded.gd" id="1_shaded"]\n\n' +
+      '[node name="Hall" type="Node"]\n\n[node name="Held" type="Node" parent="."]\nscript = ExtResource("1_shaded")\n\n' +
+      '[node name="Shelf" type="Node" parent="."]\n\n[node name="Book" type="Node" parent="Shelf"]\n',
+    // An instance of a scene whose root has a script that is not a tool, the instancing scene
+    // naming that same script again, which a save leaves out since the instanced scene gives it.
+    'inner.gd': 'class_name Inner\nextends Node2D\n',
+    'outer.gd': 'extends Control\n',
+    'inner.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://inner.gd" id="1_inner"]\n\n' +
+      '[node name="Inner" type="Node2D"]\nscript = ExtResource("1_inner")\n',
+    'outer.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://outer.gd" id="1_outer"]\n' +
+      '[ext_resource type="PackedScene" path="res://inner.tscn" id="2_inner"]\n' +
+      '[ext_resource type="Script" path="res://inner.gd" id="3_inner"]\n\n' +
+      '[node name="Outer" type="Control"]\nscript = ExtResource("1_outer")\n\n' +
+      '[node name="Art" type="Node2D" parent="."]\n\n' +
+      '[node name="Inner" type="Node2D" parent="Art" instance=ExtResource("2_inner")]\n' +
+      'script = ExtResource("3_inner")\n',
   };
   for (const [path, content] of Object.entries(files)) {
     writeFileSync(join(project, path), content);
@@ -69096,6 +69561,61 @@ async function testAHeadlessWriteSavesWhatTheEditorWould(): Promise<void> {
       get(back, 'notStored'),
       ['position'],
       `and at the default nothing does: ${JSON.stringify(back)}`,
+    );
+
+    // The children a script's _init builds are its own, made again at run time, and never saved.
+    const node = async (args: Record<string, unknown>): Promise<unknown> => {
+      const result = await server.request(
+        'tools/call',
+        { name: 'scene_node', arguments: { projectPath: project, ...args } },
+        240_000,
+      );
+      const parsed = parseTextContent(result);
+      assert.ok(parsed !== null, `scene_node answered: ${JSON.stringify(result)}`);
+      return parsed;
+    };
+    const nodesIn = (file: string): string[] =>
+      [...fileOf(file).matchAll(/^\[node name="([^"]+)"/gm)].map((found) => found[1] ?? '');
+    const added = await node({
+      op: 'add',
+      scenePath: 'layer.tscn',
+      parentNodePath: '.',
+      nodeType: 'Shaded',
+      nodeName: 'Pause',
+    });
+    assert.equal(get(added, 'nodePath'), 'Pause', JSON.stringify(added));
+    assert.deepEqual(nodesIn('layer.tscn'), ['Layer', 'Pause'], fileOf('layer.tscn'));
+    const moved2 = await node({
+      op: 'reparent',
+      scenePath: 'hall.tscn',
+      nodePath: 'Held',
+      newParentPath: 'Shelf',
+    });
+    assert.equal(get(moved2, 'newNodePath'), 'Shelf/Held', JSON.stringify(moved2));
+    assert.deepEqual(nodesIn('hall.tscn'), ['Hall', 'Shelf', 'Book', 'Held'], fileOf('hall.tscn'));
+    // A duplicate still owns the children the scene holds, and not those the copy's script builds.
+    const copied = await node({
+      op: 'duplicate',
+      scenePath: 'hall.tscn',
+      nodePath: 'Shelf',
+      newName: 'Shelf2',
+    });
+    assert.equal(get(copied, 'newNodePath'), 'Shelf2', JSON.stringify(copied));
+    assert.deepEqual(
+      nodesIn('hall.tscn'),
+      ['Hall', 'Shelf', 'Book', 'Held', 'Shelf2', 'Book', 'Held'],
+      fileOf('hall.tscn'),
+    );
+
+    const read = await node({ op: 'get', scenePath: 'outer.tscn', nodePath: 'Art/Inner' });
+    assert.equal(get(read, 'properties', 'script', 'path'), 'res://inner.gd', JSON.stringify(read));
+    const renamed = await set('outer.tscn', 'Art/Inner', { name: 'Other' });
+    assert.equal(get(renamed, 'nodePath'), 'Art/Other', JSON.stringify(renamed));
+    assert.deepEqual(nodesIn('outer.tscn'), ['Outer', 'Art', 'Other'], fileOf('outer.tscn'));
+    assert.doesNotMatch(
+      fileOf('outer.tscn'),
+      /inner\.gd/,
+      `the instance keeps its scene's script without naming it again: ${fileOf('outer.tscn')}`,
     );
   } finally {
     await server.stop();
@@ -71085,6 +71605,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPropertyHoldingANodeFollowsIt,
   testTheProjectsOwnClassesAreListedAndAnAddonsCounted,
   testAHeadlessWriteSavesWhatTheEditorWould,
+  testTwoWritesToOneSceneAtOnceBothLand,
+  testAWriteWaitsForAnotherProcesssTurn,
+  testTheEditorsViewShowsWhatToolScriptsDrawThere,
   testAMovedNodeNamesTheScriptLinesReadingIt,
   testAHandWrittenValueIsNoChangeOfAScripts,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,

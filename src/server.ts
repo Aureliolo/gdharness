@@ -404,6 +404,7 @@ import {
 } from './tool-definitions.js';
 import { argumentShape } from './tool-reference.js';
 import { isNewer, UpdateCheck } from './update-check.js';
+import { inTurnFor } from './write-turns.js';
 
 /**
  * The argument naming the class each editor tool makes, which may be a class_name a project script
@@ -5389,6 +5390,9 @@ class GodotServer {
         return await this.handleEditorStatus();
       case 'editor_rescan':
         return await this.handleRescanFilesystem(args);
+
+      case 'editor_capture':
+        return await this.handleEditorCapture(args);
 
       case 'runtime_inspect': {
         const patience = readPositiveNumber(args, 'timeoutMs') ?? this.runtimeTimeoutMs();
@@ -10531,7 +10535,7 @@ class GodotServer {
         GDHARNESS_DAP_PORT: String(ports.dap),
         [OPENED_BY_A_SERVER]: '1',
       },
-      // A hidden editor is headless and on a desktop of its own as well, because the games it plays
+      // A hidden editor is on a desktop of its own, headless or not, because the games it plays
       // are its children and land where it is. A visible one is the user's editor, on the desktop
       // in use, and is shown without being activated so that opening it takes nobody's keyboard.
       ...(hidden ? { desktop: HIDDEN_DESKTOP } : { noActivate: true }),
@@ -14221,6 +14225,92 @@ class GodotServer {
    * so the addon can only start the scan and report whether one is running. A caller that has
    * just written a script needs the scan to have landed before the new class_name resolves.
    */
+  /**
+   * editor_capture: the editor's 2D or 3D view of a scene, saved by the editor at a path this server
+   * names, so an editor cannot point the reader at a file of its own choosing.
+   */
+  private async handleEditorCapture(args: OperationParams): Promise<ToolResponse> {
+    const projectPath = readNonEmptyString(args, 'projectPath') ?? '';
+    const saveTo = readNonEmptyString(args, 'outputPath') ?? null;
+    const sendsThePicture = readBoolean(args, 'inline') !== false;
+    if (!sendsThePicture && saveTo === null) {
+      return this.createErrorResponse(
+        'inline: false sends no picture back, so it needs outputPath to save one to.',
+        [
+          'Pass outputPath, an absolute path ending in .png outside the project',
+          'Or leave inline out to have the picture sent',
+        ],
+      );
+    }
+    if (saveTo !== null) {
+      const refusal = captureDestinationRefusal(saveTo, [
+        ...(projectPath === '' ? [] : [projectPath]),
+        ...(this.ownProject === null ? [] : [this.ownProject]),
+      ]);
+      if (refusal !== null) {
+        return this.createErrorResponse(refusal);
+      }
+    }
+    const folder = scratchDirectory('editor-capture');
+    const picture = join(folder, 'capture.png');
+    try {
+      const asked = await this.handleViaBridge(
+        'capture_editor_view',
+        { ...args, output_path: picture },
+        'editor_capture',
+      );
+      if (asked.isError === true) {
+        return asked;
+      }
+      const payload = asParams(JSON.parse(asked.content[0]?.text ?? '{}'));
+      const returned = readString(payload, 'path');
+      if (readString(payload, 'type') !== 'screenshot_file' || returned === undefined) {
+        return this.createErrorResponse(`The editor answered a capture with ${JSON.stringify(payload)}`);
+      }
+      if (normalize(returned) !== normalize(picture)) {
+        return this.createErrorResponse(
+          `Rejected capture file path outside the managed capture path: '${returned}'`,
+        );
+      }
+      if (saveTo !== null) {
+        try {
+          copyFileSync(picture, saveTo, constants.COPYFILE_EXCL);
+        } catch (error) {
+          return this.createErrorResponse(
+            `The capture was taken and could not be saved at ${saveTo}: ${errorMessage(error)}`,
+          );
+        }
+      }
+      const sent = sendsThePicture ? pictureToSend(picture, readString(payload, 'jpegPath')) : null;
+      const view = readString(payload, 'view') === '3d' ? '3D' : '2D';
+      const drawnAt = payload['drawnAt'];
+      const scaled = isRecord(drawnAt)
+        ? `, scaled from ${String(drawnAt['width'])}x${String(drawnAt['height'])}`
+        : '';
+      const unsaved =
+        payload['unsavedInEditor'] === true
+          ? ". The picture includes the scene's unsaved changes in the editor"
+          : '';
+      const how =
+        sent === null
+          ? '. Not sent, as inline: false asked'
+          : sent.mimeType === 'image/jpeg'
+            ? `. Sent as JPEG, ${kilobytes(sent.bytes)} against the PNG's ${kilobytes(sent.pngBytes)}${saveTo === null ? '' : ', and the saved PNG is lossless'}`
+            : '';
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `The editor's ${view} view of ${readString(payload, 'scenePath') ?? 'the scene'}: ${String(readNumber(payload, 'width') ?? 0)}x${String(readNumber(payload, 'height') ?? 0)} png${scaled}${unsaved}${saveTo === null ? '' : `. Saved to ${saveTo}`}${how}`,
+          },
+          ...(sent === null ? [] : [{ type: 'image' as const, data: sent.data, mimeType: sent.mimeType }]),
+        ],
+      };
+    } finally {
+      discard(folder);
+    }
+  }
+
   private async handleRescanFilesystem(args: OperationParams): Promise<ToolResponse> {
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 30000;
     const started = Date.now();
@@ -15496,23 +15586,40 @@ class GodotServer {
         );
       }
     }
-    // A headless engine reads the class cache as it starts, so a class a script declares and the
-    // cache lacks is put in it first, the way editor_run start does before a game.
-    const declaring = declaredButUncached(projectPath, typeName);
-    if (declaring !== null) {
-      const rebuilt = await this.rebuildClassCache(projectPath);
-      if (!rebuilt.ok) {
-        return this.answer(rebuilt);
+    const run = async (): Promise<ToolResponse> => {
+      // A headless engine reads the class cache as it starts, so a class a script declares and the
+      // cache lacks is put in it first, the way editor_run start does before a game.
+      const declaring = declaredButUncached(projectPath, typeName);
+      if (declaring !== null) {
+        const rebuilt = await this.rebuildClassCache(projectPath);
+        if (!rebuilt.ok) {
+          return this.answer(rebuilt);
+        }
       }
-    }
-    const outcome = await this.operation(
-      'run_editor_tool',
-      { command, arguments: contained.value },
-      projectPath,
-    );
-    if (!outcome.ok) {
-      return this.answer(outcome);
-    }
+      const outcome = await this.operation(
+        'run_editor_tool',
+        { command, arguments: contained.value },
+        projectPath,
+      );
+      if (!outcome.ok) {
+        return this.answer(outcome);
+      }
+      return this.headlessAnswer(outcome, effect, typeName, declaring);
+    };
+    const written =
+      readNonEmptyString(contained.value, 'scenePath') ?? readNonEmptyString(contained.value, 'resourcePath');
+    const target =
+      effect === 'writes' && written !== undefined ? resolveWithinProject(projectPath, written) : null;
+    return target?.ok === true ? await inTurnFor(projectPath, target.absolutePath, run) : await run();
+  }
+
+  /** What a headless engine's run of an editor tool answers, with how it was read or written. */
+  private headlessAnswer(
+    outcome: Extract<HeadlessOutcome, { ok: true }>,
+    effect: 'reads' | 'writes',
+    typeName: string,
+    declaring: string | null,
+  ): ToolResponse {
     return this.jsonTextResponse({
       ...outcome.payload,
       ...(declaring === null

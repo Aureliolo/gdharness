@@ -6,6 +6,7 @@ extends SceneTree
 ## got. What it proves is that a frame nobody drew is not handed back as a success.
 
 const CaptureCommands = preload("res://addons/gdharness_runtime/runtime_capture.gd")
+const Pictures = preload("res://addons/gdharness_runtime/picture_saves.gd")
 const GdhValues = preload("res://addons/gdharness_runtime/runtime_values.gd")
 const Checked = preload("checked.gd")
 
@@ -77,7 +78,7 @@ func _check_scaling() -> void:
 	for case: Array in cases:
 		var width: int = case[0]
 		var height: int = case[1]
-		var scaled: Vector2i = CaptureCommands.scaled_to(drawn, width, height)
+		var scaled: Vector2i = Pictures.scaled_to(drawn, width, height)
 		if scaled != case[2]:
 			_fail(
 				(
@@ -205,7 +206,7 @@ func _check_saving() -> void:
 	Checked.done(DirAccess.make_dir_recursive_absolute(folder), "making %s" % folder)
 	var opaque: Image = Image.create(16, 8, false, Image.FORMAT_RGBA8)
 	opaque.fill(Color(0.2, 0.4, 0.8, 1.0))
-	var answer: Dictionary = CaptureCommands.saved(opaque, folder.path_join("opaque.png"))
+	var answer: Dictionary = Pictures.saved(opaque, folder.path_join("opaque.png"))
 	var jpeg_path: String = str(answer.get("jpegPath", ""))
 	if jpeg_path != folder.path_join("opaque.jpg"):
 		_fail("an opaque capture should name the JPEG beside its PNG: %s" % JSON.stringify(answer))
@@ -226,7 +227,7 @@ func _check_saving() -> void:
 
 	var clear: Image = Image.create(16, 8, false, Image.FORMAT_RGBA8)
 	clear.fill(Color(0.2, 0.4, 0.8, 0.5))
-	var see_through: Dictionary = CaptureCommands.saved(clear, folder.path_join("clear.png"))
+	var see_through: Dictionary = Pictures.saved(clear, folder.path_join("clear.png"))
 	if see_through.has("jpegPath") or FileAccess.file_exists(folder.path_join("clear.jpg")):
 		_fail("a capture with transparency should have no JPEG: %s" % JSON.stringify(see_through))
 	if see_through.get("path", "") != folder.path_join("clear.png"):

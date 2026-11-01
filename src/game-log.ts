@@ -43,8 +43,9 @@ const HEADLINE = /^(USER )?(SCRIPT ERROR|SHADER ERROR|ERROR|WARNING):\s?(.*)$/;
  * The line the engine's crash handler starts its report with: `CrashHandlerException` on Windows,
  * `handle_crash` on Linux and macOS. Nothing in the report is indented, so read as ordinary lines
  * it was a column of info entries, and a run that crashed counted no errors and read as clean.
+ * Windows' handler for an exception, such as one in `Main::cleanup` as a game quits, names no signal.
  */
-const CRASH = /^(?:CrashHandlerException|handle_crash): Program crashed with signal \d+/;
+const CRASH = /^(?:CrashHandlerException|handle_crash): Program crashed(?: with signal \d+)?\s*$/;
 
 /**
  * The line gdUnit4 prints as a case starts and ends, indented like an error's detail. A windowed

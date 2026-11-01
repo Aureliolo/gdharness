@@ -653,8 +653,11 @@ the wait.
 Take in the order you began to wait. At each look, read every live mark but your own and `memory`
 ones.
 
-- Those whose `since` is earlier are ahead of you, the earliest first. A mark naming no `since`
-  waits since its file was made, and one naming another `taker` is `other`.
+- The first group is gate work (`gate`, `timing` and `tier`) and `other` takers that are not games
+  and have waited two minutes or more. The second is everyone else, games included.
+- The first group is ahead of the second. Within each group, those whose `since` is earlier are
+  ahead of you, the earliest first.
+- A mark naming no `since` waits since its file was made, and one naming another `taker` is `other`.
 - Give each, in turn, the first free slot of those it may take now (below, aged by its own `since`)
   not given to one before it. Leave those slots alone.
 - You may take a slot you have left for 5 seconds, since one ahead takes a slot within a moment of
@@ -700,10 +703,7 @@ One whose holder has gone is removed with its `.seated` file.
 
 ### The kept slots
 
-The last `kept = max(2, floor(count / 4))` slots are kept for engines outside a gate, 4 of 16. The
-first of them, `count - kept`, is for a gate's own steps (`GATE_KEPT`, one slot). Where two or more
-are kept, the last, `count - 1`, is for one-off runs. While a mark is live, neither a gate's own
-step nor a game takes it.
+The last `kept = max(2, floor(count / 4))` slots are kept for engines outside a gate, 4 of 16.
 
 ### Which slots each engine takes
 
@@ -713,23 +713,31 @@ set. Each kind of engine takes:
 - A gate's engine takes only the slots below `count - kept`, and slot 0 at least, whatever the queue
   holds. A gate's seat counts only these slots, so work in the kept ones never holds a seat back.
 - A timing's engine, one with `GODOT_ENGINE_TIMED` set, takes any slot.
-- Any other engine takes any slot while no mark is live.
-- While a mark is live, a gate's own step outside its seat takes the kept slots but the one-off's,
-  `count - kept` first. Such a step has `GODOT_ENGINE_TIER` set (`fast` or `full`).
-- Any other engine then takes the kept slots but the gate's own steps' one, the highest first. After
-  two minutes of waiting, one that is not a game takes any slot, so gates never hold it back for
-  good.
+- An engine with `GODOT_ENGINE_TIER` set (`fast` or `full` for a gate's own step, `ship` for a build
+  or upload) takes any slot, whatever the queue holds. It tries the gates' slots from the top first.
+- Any other engine takes any slot while no mark is live, and only the kept slots while one is. It
+  also takes the gates' slots, from the top, while some are spare (see Spare slots of the gates).
+- After two minutes of waiting, one that is not a game takes any slot, so gates never hold it back
+  for good.
+
+### Spare slots of the gates
+
+The queue writes `<directory>/spare.json` as `{"spare", "pid", "started", "written"}`, `written` in
+milliseconds since the epoch. `spare` counts the gates' free slots no queued gate can take now, from
+the queue's seats, pool and memory. The file is written through a `.part` file and a rename, at
+every change and every five seconds while a gate waits. A missing file counts as none, as does one
+older than ten seconds or written by a holder that has gone. A game never takes a spare slot, since
+it holds one as long as it plays.
 
 ### Games and the kept slots
 
 A game `editor_run` started is one of those other engines. Its lock carries `"game": true`, which
-stays when its keeper takes the lock over. While a mark is live, a game does not take the one-off's
-slot. Games hold at most `min(floor(kept / 2), kept - GATE_KEPT - 1)` of the kept slots between
-them (2 of 16) before a game's start waits.
+stays when its keeper takes the lock over. Games hold at most `min(floor(kept / 2), kept - 1)` of
+the kept slots between them (2 of 16) before a game's start waits.
 
-An engine outside a gate tries the highest-numbered slot first, a gate's own step excepted. The
-gates' slots then stay free longest. Which slots a take may try is asked again at every look. A
-slot already held is kept to its end, whatever arrives in the queue.
+An engine outside a gate tries the highest-numbered slot first. The gates' slots then stay free
+longest. A take works out again at every look which slots it may try. A slot it already holds is
+kept to its end, whatever arrives in the queue.
 
 ### Removing locks on Windows
 

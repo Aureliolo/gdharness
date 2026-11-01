@@ -56,7 +56,7 @@ cannot answer says which state it is in and what would change it.
 |           |                                                                                      |
 | --------- | ------------------------------------------------------------------------------------ |
 | Needs     | Godot 4.7 or newer, Node 22 or newer. Runs under Bun 1.4 too.                        |
-| Surface   | 30 tools named `domain_verb`, 4 `godot://` resources and 3 prompts                   |
+| Surface   | 31 tools named `domain_verb`, 4 `godot://` resources and 3 prompts                   |
 | Reaches   | The editor that is open, a game it is playing, and the project on disk               |
 | Harnesses | 35, written inside the project wherever the harness has a project config             |
 | Skill     | Written to `.agents/skills`, with a copy for Claude Code, Kiro and Cline             |

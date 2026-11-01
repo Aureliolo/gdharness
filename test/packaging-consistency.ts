@@ -87,6 +87,7 @@ const operationsModules = [
   'input_actions.gd',
   'logger.gd',
   'patterns.gd',
+  'picture_saves.gd',
   'plugins.gd',
   'project_config.gd',
   'project_diagnostics.gd',

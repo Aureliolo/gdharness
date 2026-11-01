@@ -105,6 +105,7 @@ function testTheReferenceIsTheServersOwnToolList(): void {
       'editor_output',
       'editor_status',
       'editor_rescan',
+      'editor_capture',
       'runtime_inspect',
       'runtime_input',
       'runtime_wait',

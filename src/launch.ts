@@ -258,9 +258,10 @@ export interface EditorPorts {
  * The engine's argument list for opening the editor on a project.
  *
  * Visible unless [param hidden]: the editor is the user's, and the owner wants one ordinary editor
- * on the desktop in use. Hidden is headless, for somebody who wants it gone entirely. A headless
- * editor serves the bridge, the language server, the debug adapter and the games it plays as a
- * windowed one does, which is the editor the editor tests have always run. Pure for the same reason
+ * on the desktop in use. Hidden on Windows is a window on the hidden desktop, which draws, so its
+ * 2D and 3D views can be captured, and shows nowhere. Hidden on any other [param platform] is
+ * headless. A hidden editor serves the bridge, the language server, the debug adapter and the
+ * games it plays as a visible one does. Pure for the same reason
  * as the rest of this file, since the editor is spawned detached and its argv appears in no tool's
  * answer.
  *
@@ -281,14 +282,18 @@ export function editorArguments(
   logFile: string,
   hidden: boolean,
   silent: boolean,
+  platform: NodeJS.Platform = process.platform,
 ): string[] {
+  const headless = hidden && platform !== 'win32';
+  const windowed = hidden && !headless;
   return [
     '-e',
-    ...(hidden ? ['--headless'] : []),
+    ...(headless ? ['--headless'] : []),
+    ...(windowed ? hiddenWindowFlags([], false) : []),
     // The editor's own sound: a tool script, a preview, a scene playing in the viewport. A
-    // headless editor has none already. The games it plays are not given it, since the editor
-    // hands them no audio driver of its own.
-    ...(silent && !hidden ? ['--audio-driver', 'Dummy'] : []),
+    // headless editor has none already, and a hidden one is never heard. The games it plays are
+    // not given it, since the editor hands them no audio driver of its own.
+    ...((silent || hidden) && !headless ? ['--audio-driver', 'Dummy'] : []),
     '--path',
     projectPath,
     '--lsp-port',
@@ -297,8 +302,13 @@ export function editorArguments(
     String(ports.dap),
     '--log-file',
     logFile,
+    // Godot passes over what follows `--`, so this marks the editor hidden where a restart reads it.
+    ...(windowed ? ['--', HIDDEN_EDITOR_MARK] : []),
   ];
 }
+
+/** What a hidden editor with a window carries on its command line, after `--`. */
+const HIDDEN_EDITOR_MARK = '--gdharness-hidden';
 
 /**
  * Whether an editor was started hidden and silent, read off the command line the operating system
@@ -311,7 +321,7 @@ export function editorArguments(
  */
 export function startedAs(commandLine: string): { hidden: boolean; silent: boolean } {
   const words = commandLineWords(commandLine);
-  const hidden = words.includes('--headless');
+  const hidden = words.includes('--headless') || words.includes(HIDDEN_EDITOR_MARK);
   const driver = words.indexOf('--audio-driver');
   return { hidden, silent: hidden || (driver >= 0 && words[driver + 1] === 'Dummy') };
 }
