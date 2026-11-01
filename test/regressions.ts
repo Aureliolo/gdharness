@@ -45639,6 +45639,16 @@ function testACrashIsReadFromTheCrashHandlersReport(): void {
     inTheReport.join('\n'),
   );
   assert.ok(!inTheReport.some((fault) => fault.includes('quit(5)')), inTheReport.join('\n'));
+  // Windows' handler for an exception names no signal.
+  const unsignalled = report(official, []).map((line) =>
+    line.replace('Program crashed with signal 11', 'Program crashed'),
+  );
+  const exception = judgeEngine(readRun(ran(...unsignalled)), handed, exited5).faults;
+  assert.deepEqual(
+    exception.filter((fault) => fault.startsWith('the engine')),
+    [`the engine crashed ${during}, with 2.5 GB of memory free as it ended`],
+    exception.join('\n'),
+  );
 
   // The same frames under another build are other code, so only the crash is said.
   const elsewhere = judgeEngine(readRun(ran(...report('0'.repeat(40), queueFrames))), handed, exited5).faults;

@@ -629,7 +629,7 @@ export function rowsAcross(
 }
 
 /** The line Godot's crash handler starts its report with, and the signal it names. */
-const CRASH_HEADER = /^(?:CrashHandlerException|handle_crash): Program crashed with signal (\d+)/;
+const CRASH_HEADER = /^(?:CrashHandlerException|handle_crash): Program crashed(?: with signal (\d+))?$/;
 
 /** The build a crash report names, as `Engine version: Godot Engine v... (<commit>)`. */
 const CRASH_BUILD = /^Engine version: .*\(([0-9a-f]{40})\)$/;
@@ -650,19 +650,34 @@ const QUEUE_OVERFLOW_FRAMES: ReadonlyMap<string, readonly string[]> = new Map([
   ['ed1daf0bf001b61586d9930840f2f1394092c079', ['main+3e1082a', 'main+3e0f4aa']],
 ]);
 
+/** What Godot's crash handler printed, if it printed a report. */
+interface CrashReported {
+  /** Whether the handler printed its report, as against only the overflow's line. */
+  readonly reported: boolean;
+  /** The signal the report names. Windows' handler for an exception names none. */
+  readonly signal: string | undefined;
+  readonly overflowed: boolean;
+}
+
 /** What Godot's crash handler reported in [param lines]: the signal and whether the call queue overflowed. */
-function crashIn(lines: readonly string[]): { readonly signal: string; readonly overflowed: boolean } | null {
+function crashIn(lines: readonly string[]): CrashReported | null {
   const trimmed = lines.map((line) => line.trim());
   const at = trimmed.findIndex((line) => CRASH_HEADER.test(line));
   const said = trimmed.some((line) => line.includes(QUEUE_OVERFLOW_LINE));
   if (at === -1) {
-    return said ? { signal: '', overflowed: true } : null;
+    return said ? { reported: false, signal: undefined, overflowed: true } : null;
   }
   const report = trimmed.slice(at);
   const build = report.map((line) => CRASH_BUILD.exec(line)?.[1]).find((commit) => commit !== undefined);
   const frames = build === undefined ? undefined : QUEUE_OVERFLOW_FRAMES.get(build);
   const framed = frames?.every((frame) => report.some((line) => line.includes(`(${frame})`))) === true;
-  return { signal: CRASH_HEADER.exec(trimmed[at] ?? '')?.[1] ?? '', overflowed: said || framed };
+  return { reported: true, signal: CRASH_HEADER.exec(trimmed[at] ?? '')?.[1], overflowed: said || framed };
+}
+
+/** The engine crashing as [param crashed] reports it, with [param during] after the verb. */
+function crashSaid(crashed: CrashReported, during: string): string {
+  const signal = crashed.signal === undefined ? '' : `, its crash handler reporting signal ${crashed.signal}`;
+  return `the engine crashed${during}${signal}`;
 }
 
 /** Where [param running] had got to, as a clause: ` while <suite> > <case> ran`, or empty. */
@@ -726,8 +741,8 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
         ? ''
         : `, with ${(end.freeBytes / 1024 ** 3).toFixed(1)} GB of memory free as it ended`;
     faults.push(
-      crashed !== null && crashed.signal !== ''
-        ? `the engine crashed${whileRunning(printed.running)}, its crash handler reporting signal ${crashed.signal}${free}`
+      crashed?.reported === true
+        ? `${crashSaid(crashed, whileRunning(printed.running))}${free}`
         : end.code === null
           ? `the engine was ended by ${end.signal ?? 'a signal'}${free}`
           : `the engine exited ${exitNamed(end.code)}${free}`,
@@ -735,7 +750,7 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
   }
   if (crashed?.overflowed === true) {
     faults.push(
-      `the engine's call queue overflowed${whileRunning(printed.running)}: something queued deferred calls without end within one frame, most often a layout that changes the size it is laid out from in a deferred handler, so the frame never ends${crashed.signal === '' ? '' : ', and the engine crashed reporting the overflow'}`,
+      `the engine's call queue overflowed${whileRunning(printed.running)}: something queued deferred calls without end within one frame, most often a layout that changes the size it is laid out from in a deferred handler, so the frame never ends${crashed.reported ? ', and the engine crashed reporting the overflow' : ''}`,
     );
   }
   if (printed.lines.every((line) => line.trim() === '')) {
@@ -921,8 +936,8 @@ export function judgeCompile(printed: RunPrinted, end: EngineEnd): string[] {
     faults.push(end.ended);
   } else if (end.code !== 0) {
     faults.push(
-      crashed !== null && crashed.signal !== ''
-        ? `the engine crashed, its crash handler reporting signal ${crashed.signal}`
+      crashed?.reported === true
+        ? crashSaid(crashed, '')
         : end.code === null
           ? `the engine was ended by ${end.signal ?? 'a signal'}`
           : `the engine exited ${exitNamed(end.code)}`,
