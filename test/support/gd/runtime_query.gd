@@ -419,6 +419,21 @@ func _check_a_tree_reads_the_properties_named(shelf: Control) -> void:
 	var whole_top: Dictionary = whole.get("root", {})
 	if whole_top.has("properties"):
 		_fail("a tree asked for no properties carries none: %s" % str(whole))
+	# The last level says how many children it leaves out, so a container is not read as empty.
+	var alone: Dictionary = await node._execute_command(
+		"get_tree", { "root": "/root/Shelf", "depth": 0 }
+	)
+	var alone_top: Dictionary = alone.get("root", {})
+	if (alone_top.has("children")
+			or alone_top.get("children_not_shown") != shelf.get_child_count(true)):
+		_fail("the node alone counts the children it leaves out: %s" % str(alone))
+	for child: Dictionary in whole_top.get("children", []):
+		var held: Node = shelf.get_node(NodePath(str(child.get("name", ""))))
+		var below: int = held.get_child_count(true)
+		if child.has("children") or child.get("children_not_shown", 0) != below:
+			_fail("the last level counts what is under each node: %s" % str(child))
+		if below == 0 and child.has("children_not_shown"):
+			_fail("a node with nothing under it says nothing: %s" % str(child))
 	var refused: Dictionary = await node._execute_command(
 		"get_tree", { "root": "/root/Shelf", "properties": "text" }
 	)

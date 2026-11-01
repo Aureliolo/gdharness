@@ -156,7 +156,12 @@ import {
   runOperation,
   withNotCompiled,
 } from './headless.js';
-import { EDITOR_READS, ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
+import {
+  DEPENDENCY_OPERATIONS,
+  EDITOR_READS,
+  ENGINE_PASSES,
+  HEADLESS_OPERATIONS,
+} from './headless-operations.js';
 import { importedIntoTheProject, staleImports } from './import-freshness.js';
 import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
 import {
@@ -4867,8 +4872,8 @@ class GodotServer {
           'only with their agreement: a yes now, or a standing instruction of theirs, such as one ' +
           'in their AGENTS.md or CLAUDE.md, to upgrade on every release. Without either, offer it ' +
           'and wait, since it replaces the addons in their project. Afterwards reconnect the MCP ' +
-          'server. Restart the editor with editor_launch restart only when upgrade says the editor ' +
-          'addons changed.',
+          'server. Restart an open editor with editor_launch restart only when the upgrade output ' +
+          'asks for it.',
       },
     });
   }
@@ -5175,7 +5180,7 @@ class GodotServer {
         return this.handleSearchProject(args);
       case 'project_dependencies':
         return await this.headless(
-          args['direction'] === 'reverse' ? 'find_resource_usages' : 'get_dependencies',
+          DEPENDENCY_OPERATIONS[args['direction'] === 'reverse' ? 'reverse' : 'forward'],
           args,
         );
       case 'project_export':
@@ -5655,12 +5660,16 @@ class GodotServer {
               : {
                   runningGame:
                     told['taken'] === false
-                      ? `Told to the running game (pid ${kept?.pid ?? '?'}), which this server started, and not taken by it within ${READ_MS / 1000}s: a game reads its debugger between frames and every 2048 lines of script, so one inside a long frame takes the line once that frame ends.`
-                      : `Told to the running game (pid ${kept?.pid ?? '?'}), which this server started, and taken by it: anything it runs from now on stops there.`,
+                      ? `Told to the running game (pid ${kept?.pid ?? '?'}), which this server started, and not taken by it within ${READ_MS / 1000}s: a game reads its debugger between frames and every 2048 lines of script, so one inside a long frame takes the change once that frame ends.`
+                      : op === 'set'
+                        ? `Told to the running game (pid ${kept?.pid ?? '?'}), which this server started, and taken by it: anything it runs from now on stops there.`
+                        : `Told to the running game (pid ${kept?.pid ?? '?'}), which this server started, and taken by it: it no longer stops on that line.`,
                 }),
           note: editor
             ? 'The editor keeps a breakpoint set this way for one play. Every breakpoint held here is sent again before each play editor_run starts, handed to every game this server starts itself, and kept in the project for the server after a reconnect.'
-            : 'No editor is connected, so the breakpoints under held are kept here: every game this server starts is handed them as it starts, an editor that connects is sent them before its first play, and they are kept in the project for the server after a reconnect.',
+            : held.length === 0
+              ? 'No editor is connected and no breakpoint is held here, so the next game this server starts and the next editor to connect are given none.'
+              : 'No editor is connected, so the breakpoints under held are kept here: every game this server starts is handed them as it starts, an editor that connects is sent them before its first play, and they are kept in the project for the server after a reconnect.',
           ...(editor ? this.breakpointsAtRisk() : {}),
         });
       }
@@ -7991,7 +8000,7 @@ class GodotServer {
     // of them is most of the answer: a hundred and three clean suites came back as fifteen
     // kilobytes of names and timings around the one line saying it passed. Counted instead, so the
     // answer is the size of what went wrong.
-    // Judged as gdharness test judges them, so a suite the tool passes is one the gate passes: an
+    // Judged as gdharness test judges them, so a suite the tool passes is one gdharness test passes: an
     // engine error a suite did not declare fails it, and so does one it declared and never printed.
     const judgedErrors = unexpectedErrors(casePrinted, declaredErrors, [...casePrinted.suites.keys()]);
     // Less those already under uncaughtScriptErrors, and folded with how often each was printed: a
@@ -10079,7 +10088,7 @@ class GodotServer {
     }
     if (!before.connected || before.editorPid === undefined) {
       return this.createErrorResponse(
-        `An editor has opened the bridge and has not said who it is within ${greetingWaitMs() / 1000}s, so there is no process to wait on once it is asked to go.`,
+        `An editor has opened the bridge and has not said who it is within ${greetingWaitMs() / 1000}s, so there is no process to wait on once it is asked to quit.`,
         ['editor_status says when it has, under greeting while it has not', 'Then ask for the close again'],
       );
     }
@@ -10664,7 +10673,7 @@ class GodotServer {
     // A release build refuses the debugger's flags and quits, and the profiler is the debugger.
     if (exported !== null && readBoolean(args, 'profile') === true) {
       return this.createErrorResponse(
-        'An exported build cannot be profiled, because a release build quits when given --remote-debug. Leave out executable to profile the project.',
+        'An exported build is started without the debugger, because a release build quits on --remote-debug. A profile needs the debugger, so leave out executable to profile the project.',
       );
     }
     const own = readStringArray(args, 'args') ?? [];
@@ -14434,7 +14443,7 @@ class GodotServer {
       );
     } else if (unseen.length > 0) {
       notes.push(
-        'The scan finished and these classes are still not in the list the editor resolves against, so every use of them reads as an unknown identifier. Its walk skips a file another engine has already imported. Rescan again on its own, which is the measured cure and needs no change to the declaring script, or restart the editor with editor_launch restart.',
+        'The scan finished and these classes are still not in the list the editor resolves against, so every use of them reads as an unknown identifier. Its walk skips a file another engine has already imported. Call editor_rescan again on its own, which is the measured cure and needs no change to the declaring script, or restart the editor with editor_launch restart.',
       );
     }
     if (dependents !== null && dependents.notReloaded.length > 0) {

@@ -36,6 +36,7 @@ import {
 import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headless.js';
 import { defectReport } from './issues.js';
 import { lspOptionsOf, runLspBridge } from './lsp-bridge.js';
+import { nearest } from './nearest.js';
 import { isSameDirectory } from './paths.js';
 import { editorsOfProjectIn, processTree } from './process-children.js';
 import { Ask, interactive } from './prompt.js';
@@ -207,13 +208,30 @@ async function registerRuntime(godot: HeadlessEngine, projectPath: string): Prom
 const SETUP_FLAGS = new Set(['--runtime', '--no-runtime', '--no-connect', '--no-skill', '--json', '--yes']);
 
 /**
- * The refusal for a flag no command takes. `gdharness harnesses` alone lists only the harness
- * flags, so a mistyped `--no-skill` sent its reader to a list without it.
+ * The refusal for a flag no command takes, with the known flag nearest it. `gdharness harnesses`
+ * alone lists only the harness flags, so a mistyped `--no-skill` sent its reader to a list without
+ * it.
  */
 function unknownOption(flag: string): UsageError {
-  return new UsageError(
-    `Unknown option ${flag}. gdharness help lists each command's flags, and gdharness harnesses lists the harness flags.`,
+  const known = [...SETUP_FLAGS, ...HARNESSES.map((harness) => `--${harness.id}`)];
+  const [close] = nearest(
+    flag.slice(2),
+    known.map((name) => name.slice(2)),
   );
+  const offered = close === undefined ? '' : ` Did you mean --${close}?`;
+  return new UsageError(
+    `Unknown option ${flag}.${offered} gdharness help lists each command's flags, and gdharness harnesses lists the harness flags.`,
+  );
+}
+
+/**
+ * Whether a command was asked for its help, before any `--` that hands the rest to an engine. A
+ * `doctor --help` refused as an unknown option sent its reader to the command they had just asked.
+ */
+function asksForHelp(): boolean {
+  const own = args.slice(1);
+  const handedOn = own.indexOf('--');
+  return (handedOn === -1 ? own : own.slice(0, handedOn)).some((arg) => arg === '--help' || arg === '-h');
 }
 
 /**
@@ -696,7 +714,7 @@ async function runtime(): Promise<void> {
   const state = args[1];
   if (state !== 'on' && state !== 'off') {
     throw new UsageError(
-      `gdharness runtime takes on or off, not ${state ?? 'nothing'}. Example: gdharness runtime on path/to/project`,
+      `gdharness runtime takes on or off${state === undefined ? '' : `, not ${state}`}. Example: gdharness runtime on path/to/project`,
     );
   }
   const projectPath = projectArgument(2);
@@ -785,11 +803,11 @@ Usage:
   gdharness upgrade [project]        Reinstall the addons at this version and re-pin every config
                                      that already names gdharness. Asks nothing, and touches no
                                      other config. Then reconnect the MCP server, and restart an
-                                     open editor if the output says the editor addons changed.
+                                     open editor when the upgrade output asks for it.
   gdharness uninstall [project] [--<harness>]
-                                     Take it all back out: the addons, the editor plugins, the
-                                     runtime autoload, the skill, and our own entry in every
-                                     config it can parse. Other servers in those files are
+                                     Remove the addons, the editor plugins, the runtime
+                                     autoload, the skill and gdharness's entry in every config
+                                     it can parse. Other servers in those files are
                                      untouched. A machine-wide config may serve another project,
                                      so it is named rather than edited unless you ask by flag.
   gdharness harnesses                Every harness, its flag and the file it reads
@@ -893,6 +911,10 @@ async function main(): Promise<void> {
       ? `gdharness ${command}`
       : `a gdharness server${served === undefined || served === '' ? '' : ` of ${served}`}`,
   );
+  if (command !== undefined && asksForHelp()) {
+    printHelp();
+    return;
+  }
   if (command === 'test') {
     await test();
     return;

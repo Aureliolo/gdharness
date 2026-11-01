@@ -459,8 +459,8 @@ An engine that prints nothing for 300 seconds is ended, and the case it was in i
 
 A case may stay silent for four times its last time, when that is longer than the limit. At the
 default limit, that is a case whose last time was over 75 seconds. For a row of a parameterised
-case it is the row's time. A suite's hooks, and the stretch between its cases, get the time the
-suite spent outside its cases.
+case it is the row's time. A suite's hooks, and the stretch between its cases, get four times the
+time the suite spent outside its cases.
 
 The limit follows what the engine is running, not the slowest suite dealt to it. A long suite does
 not let a suite beside it hang for as long.

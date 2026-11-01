@@ -954,6 +954,12 @@ func _serialize_node_tree(
 				_serialize_node_tree(child, depth + 1, max_depth, include_properties, named)
 			)
 		result["children"] = children
+	else:
+		# Below the depth asked for, said rather than left out: a container with nothing under it
+		# read as empty, and the buttons of a dialog six levels down were never looked for.
+		var below: int = node.get_child_count(true)
+		if below > 0:
+			result["children_not_shown"] = below
 
 	return result
 

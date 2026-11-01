@@ -6,8 +6,8 @@ import { dictionary } from './dictionary.js';
  *
  * Kept apart from the server because it is the fact a caller most needs before wiring gdharness
  * into anything automatic. A push gate cannot depend on an editor being open, because an editor is
- * a person's window, so these are the only calls a gate can make. The tool reference renders the
- * list from here rather than describing it in prose, which is how it stays true.
+ * a person's window. These calls never need one. The tool reference renders the list from here
+ * rather than describing it in prose, which is how it stays true.
  */
 export const HEADLESS_OPERATIONS: Readonly<Record<string, Readonly<Record<string, string>>>> = dictionary({
   project_settings: dictionary({
@@ -56,6 +56,20 @@ export const HEADLESS_OPERATIONS: Readonly<Record<string, Readonly<Record<string
  */
 export const ENGINE_PASSES: Readonly<Record<string, Readonly<Record<string, string>>>> = dictionary({
   project_import: dictionary({ refresh_uids: 'import', reimport: 'import' }),
+});
+
+/** The engine operation `project_dependencies` sends for each `direction`. */
+export const DEPENDENCY_OPERATIONS = {
+  forward: 'get_dependencies',
+  reverse: 'find_resource_usages',
+} as const;
+
+/**
+ * Tools with no op that always answer from a short-lived headless engine, with the operations each
+ * sends. Apart from the table above, which is keyed by op, so the reference lists these too.
+ */
+export const HEADLESS_TOOLS: Readonly<Record<string, readonly string[]>> = dictionary({
+  project_dependencies: Object.values(DEPENDENCY_OPERATIONS),
 });
 
 /**

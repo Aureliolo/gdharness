@@ -5,7 +5,7 @@
  * so neither can describe a tool the server does not have or miss one it does.
  */
 
-import { ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
+import { ENGINE_PASSES, HEADLESS_OPERATIONS, HEADLESS_TOOLS } from './headless-operations.js';
 import { isRecord } from './records.js';
 import {
   ALSO_SAVED,
@@ -55,20 +55,22 @@ export function argumentShape(schema: Readonly<Record<string, unknown>>): string
  * Rendered from the dispatch table rather than written out, so a tool that stops being headless,
  * or a new one that is, cannot leave this paragraph quietly wrong.
  */
-function headlessSection(): string[] {
+export function headlessSection(): string[] {
   const everyOp = new Map<string, string[]>();
   for (const table of [HEADLESS_OPERATIONS, ENGINE_PASSES]) {
     for (const [tool, ops] of Object.entries(table)) {
       everyOp.set(tool, [...(everyOp.get(tool) ?? []), ...Object.keys(ops)]);
     }
   }
-  const byTool = [...everyOp].map(([tool, ops]) => `\`${tool}\` (${ops.join(', ')})`).toSorted();
+  const byTool = [
+    ...[...everyOp].map(([tool, ops]) => `\`${tool}\` (${ops.join(', ')})`),
+    ...Object.keys(HEADLESS_TOOLS).map((tool) => `\`${tool}\``),
+  ].toSorted();
   return [
     '## Calls a CI job can make',
     '',
     'These answer from a short-lived headless engine: no editor window, no running game, and no',
-    'process or port outliving the answer. They are the only calls an automatic check can make at',
-    'all, because every other tool needs an editor somebody has open or a game somebody is running.',
+    'process or port outliving the answer.',
     '',
     ...byTool.map((line) => `- ${line}`),
     '',
@@ -77,11 +79,14 @@ function headlessSection(): string[] {
     'write under `.godot`, and `project_import refresh_uids` writes a `.uid` beside each script that',
     "had none. A CI job checks with the reading ops. Each op's own summary below says which is which.",
     '',
-    '`scene_create`, `scene_node`, `scene_signal` and `resource_edit` go through the editor when one',
-    'serves the project and through a headless engine when none does, so they need nothing open',
-    'either. A CI job can call them, and checks with the reads among them. Everything else',
-    'needs the editor (`editor_*`, `debug_*`, `scene_animation` but its reads) or a running game',
-    '(`runtime_*`).',
+    '`scene_create`, `scene_node`, `scene_signal`, `scene_animation`, `scene_tree` and `resource_edit`',
+    'go through the editor when one serves the project and through a headless engine when none does.',
+    '`project_info`, `project_search`, `project_test` and `script_diagnostics` need no editor either.',
+    'A CI job can call all of them, and checks with the reads among them. `editor_run check` boots the',
+    'project in a headless engine of its own, so a CI job can call it too. The other `editor_*`',
+    'calls, and the `debug_*` and `runtime_*` ones, act on an editor or a running game.',
+    '`editor_run start` starts a game with no editor open. `debug_breakpoint` holds breakpoints until',
+    'a game runs.',
     '',
     '`project_settings get` with `from: "editor"` asks the open editor instead of the file and',
     'starts no engine. A CI job leaves it alone, because there is no editor on a build machine and',
@@ -159,8 +164,9 @@ export function renderToolsMarkdown(): string {
     `${TOOL_SPECS.length} tools, named \`domain_verb\`. A tool that does several related things takes an`,
     '`op`. An unknown op or argument is refused with the valid set listed. Generated from the server.',
     '',
-    `${projectPathSentence()}: the \`runtime_*\` and \`debug_*\` ones pick between running games`,
-    'instead, and the others answer about the editor on this server.',
+    `${projectPathSentence()}. The \`debug_*\` calls among them answer about the game this server`,
+    'started or the editor is playing, and the `editor_*` ones about the editor on this server. A',
+    '`runtime_*` call takes `projectPath` only to pick a game.',
     '',
     theGamePicked(),
     '',
