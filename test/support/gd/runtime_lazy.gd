@@ -50,13 +50,19 @@ func _loaded() -> PackedStringArray:
 	return held
 
 
-## The file of the module a loading thread is part way through, or "".
+## The file of the module a loading thread has, part way through or finished and not yet taken by
+## the runtime, or "". A small module can finish on a fast machine between two of these readings,
+## one a frame, which left it seen by neither. A compile on the main thread never sets _in_flight.
 func _on_a_thread() -> String:
 	var path: String = node._in_flight
 	if path.is_empty():
 		return ""
 	var status: ResourceLoader.ThreadLoadStatus = ResourceLoader.load_threaded_get_status(path)
-	return path.get_file() if status == ResourceLoader.THREAD_LOAD_IN_PROGRESS else ""
+	var threaded: bool = (
+		status == ResourceLoader.THREAD_LOAD_IN_PROGRESS
+		or status == ResourceLoader.THREAD_LOAD_LOADED
+	)
+	return path.get_file() if threaded else ""
 
 
 func _every_module_loaded() -> bool:
