@@ -1788,7 +1788,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['start', 'check'],
         description:
-          "An absolute directory for this run's user://, so a game that saves writes nowhere near the copy somebody plays: opening a save writes the one being left, and a game that autosaves writes on its own. Godot takes no flag for it, so this is the environment, and the run is started by this server rather than played by the editor, which cannot be given one. It does not have to exist: the engine makes it, and the Godot/app_userdata/<project> tree under it, measured on 4.7.2. Whatever the run, runtime.userDir in the answer is the directory user:// is, as the game's engine resolved it. On macOS the engine reads user:// off HOME and ignores it, also measured, and the answer says so under savesNote rather than leaving the caller to find out from the player's save list.",
+          "An absolute directory for this run's user://, so a game that saves writes nowhere near the copy somebody plays: opening a save writes the one being left, and a game that autosaves writes on its own. Godot takes no flag for it, so this is the environment, and the run is started by this server rather than played by the editor, which cannot be given one. It does not have to exist: the engine makes it, measured on 4.7.2. Under it goes Godot/app_userdata/<project>, or only the custom folder's name for a project that sets application/config/use_custom_user_dir. Whatever the run, runtime.userDir in the answer is the directory user:// is, as the game's engine resolved it. On macOS the engine reads user:// off HOME and ignores it, also measured, and the answer says so under savesNote rather than leaving the caller to find out from the player's save list.",
       },
       env: {
         type: 'object',
@@ -2118,7 +2118,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'integer',
         minimum: 0,
         ops: ['tree'],
-        description: 'tree: levels to descend, 0 for the node alone. Default 3.',
+        description:
+          'tree: levels to descend, 0 for the node alone. Default 3. A node at the last level that has children answers children_not_shown with their count instead of children.',
       },
       includeProperties: {
         type: 'boolean',
