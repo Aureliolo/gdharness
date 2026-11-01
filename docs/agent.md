@@ -61,9 +61,9 @@ template instead.
 
 ### The config and the autoload
 
-The config carries `GODOT_PATH` and `GDHARNESS_PROJECT`. Every tool call carries its own
-`projectPath`, and no call takes its project from the environment. Reconnect the harness, then
-confirm the tools are listed.
+The config carries `GODOT_PATH` and `GDHARNESS_PROJECT`. No tool call takes its project from the
+environment. A call that needs one names it in `projectPath`. A `godot://` resource read, which has
+no arguments, uses `GDHARNESS_PROJECT`. Reconnect the harness, then confirm the tools are listed.
 
 The runtime autoload names `res://gdharness/loader.gd`, which setup writes. It brings the runtime up
 only in a debug build that has the addon. It does nothing in a clone without `addons/`, and a
@@ -90,8 +90,8 @@ npx -y gdharness@<new> upgrade
 ```
 
 `upgrade` re-pins every config that already names gdharness and touches no config that does not.
-Then reconnect the MCP server, and restart an open editor with `editor_launch restart` when
-`upgrade` says the editor addons changed. Confirm with `editor_status`: `addonIsStale` false.
+Then reconnect the MCP server, and restart an open editor with `editor_launch restart` when the
+`upgrade` output asks for it. Confirm with `editor_status`: `addonIsStale` false.
 Skipping either step when it is needed leaves the old version answering. `addonVersion` stays at
 the older number when the editor code did not change.
 
@@ -113,8 +113,8 @@ tar -xzf "gdharness-${VERSION}.tgz" -C .tools/gdharness --strip-components=1
 node .tools/gdharness/build/cli.js setup
 ```
 
-A failed check stops the install. Without `gh`, `install.md` has the `cosign` command and the
-browser lookup. If no check ran, say so rather than calling it verified.
+If a check fails, stop. Do not unpack or run the archive. Without `gh`, `install.md` has the
+`cosign` command and the browser lookup. If no check ran, say so rather than calling it verified.
 
 ## Rules
 

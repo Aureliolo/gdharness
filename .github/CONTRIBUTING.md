@@ -2,8 +2,7 @@
 
 ## The rules that decide whether a change lands
 
-- **Every tool change comes with a fixture.** A change that adds or alters a tool comes with one
-  driving it against a pinned Godot in CI.
+- **Every tool change comes with a fixture** driving it against a pinned Godot in CI.
 - **A fixture asserts the invariant, not the reading.** A case that writes down a measurement keeps
   it in force after the evidence is gone, and then fails the correction.
 - **A tool refuses rather than answering emptily.** An empty or partial result that could be a
@@ -115,18 +114,24 @@ uv sync --locked           # yamllint, into .venv
 bun run build
 ```
 
-Checks, all of which CI runs:
+Checks CI runs:
 
 ```bash
 bun run ci                 # build, typecheck, format:check, lint, then the eleven test:ci files
 bun run test:integration   # the bridge against a mock editor and a mock runtime
 bun run test:metadata
-bun run format             # Biome for the code, Prettier for the prose and YAML (writes)
 bun run lint               # Biome, then oxlint with its type-aware rules, then knip, then markdownlint
 bun run lint:gd            # gdstyle's linter
-bun run format:gd          # gdstyle's formatter, writes
+bun run format:gd:check    # gdstyle's formatter, checking only
 uv run yamllint --strict .
 bun run docs               # the public site, into site/; refuses a page nothing links to
+```
+
+Fixes and tools:
+
+```bash
+bun run format             # Biome for the code, Prettier for the prose and YAML (writes)
+bun run format:gd          # gdstyle's formatter, writes
 bun run watch              # TypeScript watch mode
 ```
 
@@ -172,7 +177,7 @@ checker covers everything Bun runs.
 │   ├── lsp_client.ts      # Godot language server client
 │   ├── dap_client.ts      # Godot debug adapter client
 │   └── godot/             # GDScript, copied verbatim into the bundle
-│       ├── addons/        # The Godot addons: editor, runtime, auto reload
+│       ├── addons/        # The Godot addons: editor, runtime, auto reload, tests
 │       ├── operations/    # Headless engine operations
 │       └── tests/         # The gdUnit4 runner project_test and gdharness test start
 ├── test/

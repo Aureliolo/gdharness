@@ -48,8 +48,8 @@ editor_output   { "projectPath": "C:/games/shop" }           // errors and warni
 The open editor plays the game, so you can set a breakpoint and read the variables in scope when it
 stops.
 
-Every answer is read back from the engine, never echoed from the request. A tool that cannot answer
-says which state it is in and what would change it.
+Every write answers with what the engine holds afterwards, never an echo of the request. A tool
+that cannot answer says which state it is in and what would change it.
 
 ## At a glance
 

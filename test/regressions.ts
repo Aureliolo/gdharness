@@ -185,7 +185,7 @@ import {
   runImport,
   runOperation,
 } from '../src/headless.js';
-import { EDITOR_READS, HEADLESS_OPERATIONS } from '../src/headless-operations.js';
+import { EDITOR_READS, HEADLESS_OPERATIONS, HEADLESS_TOOLS } from '../src/headless-operations.js';
 import { IMPORTABLE_EXTENSIONS, staleImports } from '../src/import-freshness.js';
 import { RENDERED_AWAY_NOTE, type ScriptError } from '../src/junit.js';
 import { askTheKeepersDebugger, askTheKeeperToStop, listenForTheServer } from '../src/keeper-channel.js';
@@ -483,7 +483,7 @@ import {
   theGamePicked,
   toolSpec,
 } from '../src/tool-definitions.js';
-import { argumentShape, namedType, renderToolsMarkdown } from '../src/tool-reference.js';
+import { argumentShape, headlessSection, namedType, renderToolsMarkdown } from '../src/tool-reference.js';
 import { encodedUidCache, mendUidCache, type UidEntry, uidCacheEntries } from '../src/uid-cache.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { writeWhole } from '../src/whole-file.js';
@@ -9818,16 +9818,17 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
       assert.ok(help.includes(flag), `gdharness help, which the refusal names, lists ${flag}: ${help}`);
     }
     assert.match(run(['harnesses']).stdout, /--cursor/, 'and gdharness harnesses lists the harness flags');
-    for (const typo of [
-      ['setup', '--curser'],
-      ['doctor', '--jsonn'],
-      ['doctor', '--help'],
-      ['uninstall', '--claude'],
-    ]) {
+    // A typo is offered the flag it is nearest, and one near none is offered nothing.
+    for (const [typo, offered] of [
+      [['setup', '--curser'], ' Did you mean --cursor?'],
+      [['doctor', '--jsonn'], ' Did you mean --json?'],
+      [['uninstall', '--claude'], ' Did you mean --claude-code?'],
+      [['setup', '--zzzz'], ''],
+    ] as const) {
       const refused = run(typo);
       assert.equal(
         refused.stderr.trim(),
-        `gdharness: Unknown option ${typo[1]}. gdharness help lists each command's flags, and gdharness harnesses lists the harness flags.`,
+        `gdharness: Unknown option ${typo[1]}.${offered} gdharness help lists each command's flags, and gdharness harnesses lists the harness flags.`,
         `${typo.join(' ')} should be refused, naming where the flags are listed`,
       );
       assert.equal(refused.status, 2, 'as a usage error');
@@ -9836,6 +9837,28 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
         `${typo.join(' ')} should have written nothing before refusing`,
       );
     }
+    // Asking a command for its help prints the help. It was refused as an unknown option, sending
+    // its reader to the help they had just asked for.
+    for (const asked of [
+      ['doctor', '--help'],
+      ['setup', '-h'],
+      ['runtime', '--help'],
+      ['test', '--help'],
+    ]) {
+      const answered = run(asked);
+      assert.equal(answered.status, 0, `${asked.join(' ')} should succeed: ${answered.stderr}`);
+      assert.equal(answered.stdout, help, `${asked.join(' ')} should print gdharness help`);
+      assert.ok(!existsSync(join(project, 'addons')), `${asked.join(' ')} should have written nothing`);
+    }
+    // A runtime with no state is told what it takes, and a wrong word is named back.
+    assert.equal(
+      run(['runtime']).stderr.trim(),
+      'gdharness: gdharness runtime takes on or off. Example: gdharness runtime on path/to/project',
+    );
+    assert.equal(
+      run(['runtime', 'maybe']).stderr.trim(),
+      'gdharness: gdharness runtime takes on or off, not maybe. Example: gdharness runtime on path/to/project',
+    );
 
     const nowhere = cli(elsewhere);
     assert.match(
@@ -20491,7 +20514,7 @@ async function testAStartWaitsForTheGameToAnnounceItself(): Promise<void> {
  */
 function testTheCureIsWrittenWhole(): void {
   const rescan = toolSpec('editor_rescan')?.description ?? '';
-  assert.match(rescan, /The cure is this call on its own/, 'the tool that is the cure says so');
+  assert.match(rescan, /Calling it again is the cure/, 'the tool that is the cure says so');
   assert.match(rescan, /editor_launch restart/, 'and names the restart for when it is not enough');
 
   // What a caller receives, as it is written: every file of the installed skill, whole.
@@ -20510,7 +20533,7 @@ function testTheCureIsWrittenWhole(): void {
   assert.match(skill, /Could not find type/, 'the skill still explains the fault');
   assert.match(
     skill,
-    /needs no change to the declaring script/,
+    /needs\s+no\s+change\s+to\s+the\s+declaring\s+script/,
     'and its Editing paragraph names the cure the rescan description names',
   );
 
@@ -20540,7 +20563,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 49, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 50, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -24847,6 +24870,27 @@ function testEveryArgumentInTheReferenceIsDescribed(): void {
     described.length > 100,
     `the reference should be full of described arguments: ${described.length}`,
   );
+}
+
+/**
+ * The reference's list of calls a CI job can make names every tool that always answers headless.
+ *
+ * `project_dependencies` runs only a headless engine and was left out, because the list was built
+ * from tables keyed by op and the tool has none. It is held by name as the positive, beside every
+ * entry of the tables the list is built from.
+ */
+function testTheHeadlessListNamesEveryHeadlessTool(): void {
+  const listed = headlessSection()
+    .map((line) => /^- `([a-z_]+)`/.exec(line)?.[1])
+    .filter((name) => name !== undefined);
+  assert.ok(
+    listed.includes('project_dependencies'),
+    `project_dependencies, which runs only a headless engine, is listed: ${listed.join(', ')}`,
+  );
+  for (const tool of [...Object.keys(HEADLESS_OPERATIONS), ...Object.keys(HEADLESS_TOOLS)]) {
+    assert.ok(listed.includes(tool), `${tool} answers headless and should be listed: ${listed.join(', ')}`);
+  }
+  assert.equal(new Set(listed).size, listed.length, `each tool is listed once: ${listed.join(', ')}`);
 }
 
 /**
@@ -29896,7 +29940,7 @@ async function testAnExportedBuildIsStartedAndStopped(): Promise<void> {
     const profiled = textOf(await call({ op: 'start', executable: build, profile: true })) ?? '';
     assert.match(
       profiled,
-      /^An exported build cannot be profiled, because a release build quits when given --remote-debug\./,
+      /^An exported build is started without the debugger, because a release build quits on --remote-debug\. A profile needs the debugger/,
     );
 
     // Silent unless asked otherwise, as every run is: the engine flag goes before the build's own
@@ -35029,6 +35073,11 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
       line: 1,
     });
     assert.deepEqual([get(deleted.answer, 'removed'), get(deleted.answer, 'held')], [true, []], deleted.said);
+    assert.equal(
+      get(deleted.answer, 'note'),
+      'No editor is connected and no breakpoint is held here, so the next game this server starts and the next editor to connect are given none.',
+      deleted.said,
+    );
 
     const set = await call('debug_breakpoint', {
       projectPath: project,
@@ -35446,7 +35495,17 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       timeoutMs: 2_000,
     });
     assert.equal(get(noting.answer, 'pending'), true, noting.said);
-    await call('debug_breakpoint', { projectPath: project, op: 'remove', scriptPath: 'main.gd', line: 27 });
+    const unheld = await call('debug_breakpoint', {
+      projectPath: project,
+      op: 'remove',
+      scriptPath: 'main.gd',
+      line: 27,
+    });
+    assert.match(
+      text(get(unheld.answer, 'runningGame')),
+      /^Told to the running game \(pid \d+\), which this server started, and taken by it: it no longer stops on that line\.$/,
+      unheld.said,
+    );
     await call('debug_control', { op: 'continue' });
     const goneOn = await call('runtime_inspect', {
       op: 'property',
@@ -55347,7 +55406,15 @@ function testEveryDispatchedNameExistsOnBothSides(): void {
       );
     }
   }
-  const dispatched = new Set(Object.values(HEADLESS_OPERATIONS).flatMap((ops) => Object.values(ops)));
+  for (const [tool, operations] of Object.entries(HEADLESS_TOOLS)) {
+    for (const operation of operations) {
+      assert.ok(engine.has(operation), `${tool} is dispatched to ${operation}, which the engine has not`);
+    }
+  }
+  const dispatched = new Set([
+    ...Object.values(HEADLESS_OPERATIONS).flatMap((ops) => Object.values(ops)),
+    ...Object.values(HEADLESS_TOOLS).flat(),
+  ]);
   // project_info's sections, the CLI and the export options read in an editor-mode engine reach
   // operations no tool op names, so those are read from the source that names them rather than
   // assumed.
@@ -71130,6 +71197,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAListingFailureSaysWhichFailureItWas,
   testThePowerShellHelperGoesWithItsProcess,
   testEveryArgumentInTheReferenceIsDescribed,
+  testTheHeadlessListNamesEveryHeadlessTool,
   testTheReferencePrintsEveryShapeOfType,
   testTheSkillNamesEverySettingTheAddonsRead,
   testTheSkillNamesTheSettingThatServesAScriptRun,
