@@ -112,8 +112,9 @@ be open at once, as [how it works](architecture.html#connections) explains. With
 config written by hand, the server waits for its configured port, 6505 unless
 `GDHARNESS_BRIDGE_PORT` names another.
 
-Every tool call still carries its own `projectPath`. No call takes its project from the
-environment.
+No tool call takes its project from the environment. A call that needs one names it in
+`projectPath`. A `godot://` resource read has no arguments, so it reads `GDHARNESS_PROJECT`, then the
+connected editor's project, then the last `projectPath` a call named.
 
 An existing config keeps everything already in it, including other servers. One that does not
 parse is refused rather than replaced.
@@ -126,7 +127,7 @@ runs the same version.
 Two of them, `gdharness_editor` and `auto_reload`, are also named in `project.godot`'s
 `editor_plugins/enabled`, which almost every project commits.
 
-Commit the addons with `project.godot`. A clone with the plugin entries and no addons still opens.
+A clone with the plugin entries and no addons still opens.
 The editor prints `Addon ... failed to load. No directory found` once per missing addon and leaves
 `project.godot` alone.
 
@@ -242,8 +243,8 @@ The old version keeps answering until you do two more things:
 
 1. Reconnect the MCP server so the harness re-spawns it. In Claude Code, run `/mcp` and reconnect,
    with no need to restart the harness.
-2. If `upgrade` says the editor addons changed, restart an open editor with
-   `editor_launch restart`. It takes about seven seconds.
+2. When the `upgrade` output asks for it, restart an open editor with `editor_launch restart`.
+   It takes about seven seconds.
 
 An editor gdharness opened comes back visible, on Windows without taking the focus. Given
 `hidden: true`, the restart brings it back headless and out of sight. A headless editor you started
@@ -266,7 +267,7 @@ upgrade them itself.
 | `setup`              | Addons in, editor plugins on, class list rebuilt                   |
 | `setup --no-connect` | The same, and no harness configuration written                     |
 | `upgrade`            | Reinstalls the addons and re-pins configs at this version          |
-| `uninstall`          | Removes everything setup wrote                                     |
+| `uninstall`          | Removes the addons, plugin entries, autoload, skill and configs    |
 | `doctor`             | Checks the install and names each problem. Exits 1 if there is one |
 | `classes`            | Rebuilds the class cache from disk                                 |
 | `runtime on` / `off` | Registers the runtime autoload, or takes it out again              |

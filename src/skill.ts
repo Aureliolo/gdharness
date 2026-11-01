@@ -54,10 +54,11 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 
 ## Start here
 
-- ${projectPathSentence()}. Those but the \`debug_*\` ones answer about the editor this server is
-  connected to. There is no ambient project.
-- \`runtime_*\` and \`debug_*\` pick a game by \`projectPath\`, or by \`pid\` when several run
-  from one project, as a bench and its workers do.
+- ${projectPathSentence()}. Those answer about the editor or game this server is connected to.
+  There is no ambient project.
+- \`runtime_*\` calls pick a game by \`projectPath\`, or by \`pid\` when several run from one
+  project, as a bench and its workers do. \`debug_*\` calls go to the game this server started or
+  the editor is playing. \`debug_breakpoint\` also holds breakpoints when no game runs.
   ${theGamePicked()}
 - An argument a tool does not declare is refused rather than ignored.
 - \`editor_status\` says whether an editor is connected and whether its addon matches the server.
@@ -79,16 +80,16 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
   growing, a process list or a timeout. From outside, a bench between prints looks the same as a
   dead one.
 - \`endedBy\` says whether gdharness ended a run. \`running\` comes from the operating system when
-  the run has a pid: every run started through \`editor_run\`, and every editor-played run whose
-  game announced its runtime. A played game with no runtime addon has none, so \`running\` is the
-  editor's answer and can lag by seconds. \`editor_status\` lists a game under \`runtimes\`
-  without asking the editor.
+  the run has a pid: every run this server started itself, and every editor-played run whose game
+  announced its runtime. An editor-played game with no runtime addon has no pid, so \`running\` is
+  the editor's answer and can lag by seconds. \`editor_status\` does not list such a game under
+  \`runtimes\`.
 - When every tool says the project is fine and something is still wrong, read the editor's own
   console with \`editor_output op: "editor"\`. It runs from the editor's first line, with repeats
   grouped under \`repeated\`. It exists only for an editor gdharness opened, and one opened by hand
   is refused. The line before a burst of parse errors often names the plugin behind it.
 - One server, one editor. A second project needs a second harness session with its own server.
-  Refuse a second editor on one project.
+  Never open a second editor on a project that already has one.
 
 ## Measuring a running game
 
@@ -143,9 +144,10 @@ prefixes, empty by default. A run started on a scene under one of them neither s
 announces, nor do the engines it starts, unless it was started to be profiled from its start.
 
 The autoload names \`res://${RUNTIME_AUTOLOAD.path}\`, the loader \`gdharness setup\` writes, which
-brings the runtime up only in a debug build that has the addon. A release export leaves the entry,
-the loader and the addons out. A debug export keeps them. The loader is committed with \`project.godot\`, and \`gdharness doctor\` says when it differs
-from the one gdharness ships.
+brings the runtime up only in a debug build that has the addon. A release export leaves out the
+entry, the loader and the runtime, editor and auto_reload addons. A debug export keeps them. The
+loader is committed with \`project.godot\`, and \`gdharness doctor\` says when it differs from the
+one gdharness ships.
 
 ## At a breakpoint
 
@@ -164,11 +166,11 @@ so take it off when the question it was for is answered.
 
 \`scene_tree\` reads what a scene holds, rather than what the \`.tscn\` text implies, and
 \`resource_edit read\` reads a resource. Writes go through \`scene_create\`, \`scene_node\`,
-\`scene_signal\` and the other \`resource_edit\` ops but \`move\`. All of them use the editor when
-one serves the project, so the files keep their formatting, and a headless engine otherwise. The
-headless engine runs the scene's scripts, so the answer puts back what they changed. It refuses a
-file where it cannot, such as a scene whose script does not compile. For those, open the editor
-(\`editor_launch\` with \`hidden: true\`) and ask again.
+\`scene_signal\`, \`scene_animation\` and every \`resource_edit\` op but \`move\`. All of them use
+the editor when one serves the project, so the files keep their formatting, and a headless engine
+otherwise. The headless engine runs the scene's scripts, so the answer puts back what they
+changed. It refuses a file where it cannot, such as a scene whose script does not compile. For
+those, open the editor (\`editor_launch\` with \`hidden: true\`) and ask again.
 
 \`script_info\` comes from the editor's own language server, and so does
 \`script_diagnostics\` when this project's editor is open. Without it a headless engine compiles the
@@ -178,9 +180,8 @@ scripts and reports their errors, with lines but no columns and no warnings.
 \`project_export\`, \`project_test\`, \`script_edit\`, \`script_info structure\` and
 \`editor_classes\` need nothing open: they run a short headless engine and are gone before the
 answer is printed. The exception is \`script_edit rename\` of a method, variable, signal or other
-member, which asks the editor's language server which uses are that class's. \`project_settings
-get\` also starts an engine, so a setting absent from \`project.godot\` answers with the engine's
-default.
+member, which asks the editor's language server which uses are that class's. A setting absent
+from \`project.godot\` comes back from \`project_settings get\` with the engine's default.
 
 To rename a class or a member across the project, use \`script_edit rename\` rather than a text
 replacement. It changes the uses the engine resolves, doc links and what scenes record, and lists
@@ -210,10 +211,10 @@ its own copy. So a long run is not a reason to stop editing, and the new code ar
 
 A wall of "Could not find type" on the project's own classes means the editor is not holding
 them. \`editor_rescan\` asks it to scan and names any class it still cannot resolve under
-\`unseenByEditor\`: its walk skips a file a headless engine has already imported, so the
-declaration and the cache can both be right while the editor stays blind to it. Run
-\`editor_rescan\` again, which needs no change to the declaring script. \`editor_launch restart\`
-also fixes it, at the cost of an editor restart.
+\`unseenByEditor\`: the editor's own scan skips a file a headless engine has already imported, so
+the declaration and the cache can both be right while the editor stays blind to it. For a class
+under \`unseenByEditor\`, run \`editor_rescan\` again, which needs no change to the declaring
+script. \`editor_launch restart\` also fixes it.
 
 With no editor open, the headless engine that compiles for \`script_diagnostics\` and for
 \`project_info\`'s health and validation resolves class names only from that cache file. A
@@ -226,7 +227,9 @@ The scan writes \`.godot/global_script_class_cache.cfg\` from the list the edito
 a class it cannot resolve would go out of that file with it. The answer names that loss under
 \`cacheLost\` and rebuilds the cache from the declarations on disk, naming what came back under
 \`cacheRestored\`, so no fresh engine, CI run or clone inherits the short file. That is the same
-class \`unseenByEditor\` names, and the loss is not a reason to refuse the scan.
+class \`unseenByEditor\` names, and the loss is not a reason to refuse the scan. An editor that lost
+classes this way still holds the short list and writes it again on every scan. Restart it with
+\`editor_launch restart\` before the next \`editor_rescan\`.
 
 The editor also scans on its own, when files change under it, and it rewrites that file just after
 the scan ends. Every engine this server starts on the project (a run, a boot check, a test run, a

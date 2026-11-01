@@ -9,6 +9,8 @@ your-project/
 |-- addons/gdharness_editor/   the bridge: scenes, resources, running the game
 |-- addons/gdharness_runtime/  an autoload: the running game answers here
 |-- addons/auto_reload/        reloads what changed on disk
+|-- addons/gdharness_tests/    GdhShare, GdhBench and the suites scene
+|-- gdharness/loader.gd        brings the runtime up in a debug build
 |-- project.godot              two plugin entries and one autoload
 |-- .mcp.json                  Claude Code, Copilot CLI, Qoder, Command Code
 |-- .cursor/mcp.json           Cursor, and one file per other harness
@@ -185,7 +187,7 @@ it and the engine slots it shares with other tools. Each of its engines starts t
 
 Both judge the engine's output with `suite-judge.ts`, from one file holding both streams in order.
 They look in the same directories and judge engine errors against the same declarations. So a suite
-the tool passes is one the gate passes.
+`project_test` passes is one `gdharness test` passes.
 
 `editor_run start` given `suites` plays the tests addon's `suites.tscn` instead, so the profiler sees
 the suites. The scene loads the same runner from where the server ships it and calls its `started`

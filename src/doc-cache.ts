@@ -76,7 +76,7 @@ export function docCachesWritten(directory: string): ReadonlyMap<string, number>
  * What a caller is told when [param ran], an import or an export, did not exit cleanly, or exited 0
  * after its crash handler reported a crash, as one on macOS does, and a class reference cache was
  * written while it ran, going by [param before] and [param after] from
- * {@link docCachesWritten}; null for any other run. [param what] names the run, `import` or
+ * {@link docCachesWritten}. It is null for any other run. [param what] names the run, `import` or
  * `export`, and the caller runs it again when this is not null.
  */
 export function docCacheCrash(
