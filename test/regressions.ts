@@ -6836,13 +6836,30 @@ async function testEditorStatusCountsOnlyOtherCallsInFlight(): Promise<void> {
     socket.send(
       JSON.stringify({ type: 'tool_result', id: held.id, success: true, result: { nodes: ['Main'] } }),
     );
-    assert.match(
-      textOf(await asked) ?? '',
-      /Main/,
-      'and the held call is answered once the editor answers it',
+    const read = parseTextContent(await asked);
+    assert.deepEqual(
+      { nodes: get(read, 'nodes'), readBy: get(read, 'readBy') },
+      { nodes: ['Main'], readBy: 'the editor' },
+      `the held call is answered once the editor answers it, naming the editor as the reader: ${JSON.stringify(read)}`,
     );
     const after = await status();
     assert.equal(get(after, 'editor', 'pendingRequests'), 0, JSON.stringify(get(after, 'editor')));
+    // A write through the editor names it too, as a headless write names its engine.
+    const written = parseTextContent(
+      await server.request(
+        'tools/call',
+        {
+          name: 'scene_node',
+          arguments: { projectPath: project, scenePath: 'res://main.tscn', op: 'delete', nodePath: 'Gone' },
+        },
+        30_000,
+      ),
+    );
+    assert.deepEqual(
+      { ok: get(written, 'ok'), writtenBy: get(written, 'writtenBy') },
+      { ok: true, writtenBy: 'the editor' },
+      JSON.stringify(written),
+    );
   } finally {
     editor?.terminate();
     await server.stop();
