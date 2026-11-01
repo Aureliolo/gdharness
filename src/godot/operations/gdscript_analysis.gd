@@ -331,6 +331,23 @@ static func _not_a_script(path: String) -> String:
 			)
 		"tres", "res":
 			return said + ": resource_edit read reads a resource."
+		"":
+			# A class name given where the path goes.
+			var named: String = path.get_file()
+			for entry: Dictionary in ProjectSettings.get_global_class_list():
+				if str(entry.get("class", "")) == named:
+					return (
+						said
+						+ (
+							": %s is the class_name of %s. Call script_info with that path."
+							% [named, str(entry.get("path", ""))]
+						)
+					)
+			if ClassDB.class_exists(named):
+				return (
+					said
+					+ ": %s is an engine class. Call editor_classes info for its members." % named
+				)
 	return said + "."
 
 

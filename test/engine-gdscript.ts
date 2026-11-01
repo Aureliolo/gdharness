@@ -3200,6 +3200,8 @@ function testAReferenceIsMissingOnlyWhereTheEngineMissesIt(godotPath: string, _p
     // Every operation that reads a named file refuses one that is not there the same way. A script
     // named unlike the operations and addons this project carries, which are scripts of it too.
     writeFileSync(join(dir, 'zebra_pen.gd'), 'extends Node\n');
+    writeFileSync(join(dir, 'keeper.gd'), 'class_name Keeper\nextends Node\n');
+    importAll();
     const nearStage = 'The nearest .tscn file is res://stage.tscn.';
     const nearZebra = 'The nearest .gd file is res://zebra_pen.gd.';
     for (const [name, params, said] of [
@@ -3255,6 +3257,22 @@ function testAReferenceIsMissingOnlyWhereTheEngineMissesIt(godotPath: string, _p
         'get_script_info',
         { script_path: 'res://notes.txt' },
         'res://notes.txt is not a GDScript file, and script_info reads .gd files only.',
+      ],
+      // A class name given where the path goes.
+      [
+        'get_script_info',
+        { script_path: 'Timer' },
+        'res://Timer is not a GDScript file, and script_info reads .gd files only: Timer is an engine class. Call editor_classes info for its members.',
+      ],
+      [
+        'get_script_info',
+        { script_path: 'Keeper' },
+        'res://Keeper is not a GDScript file, and script_info reads .gd files only: Keeper is the class_name of res://keeper.gd. Call script_info with that path.',
+      ],
+      [
+        'get_script_info',
+        { script_path: 'Nobody' },
+        'res://Nobody is not a GDScript file, and script_info reads .gd files only.',
       ],
       [
         'modify_script',
