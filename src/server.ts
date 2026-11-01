@@ -4104,6 +4104,29 @@ class GodotServer {
     return { content: [{ type: 'text', text: answerJson(payload) }] };
   }
 
+  /**
+   * An answer the editor gave, saying so under readBy or writtenBy as a headless one does. A caller
+   * told the headless engine by a field and the editor by its absence could not tell the editor from
+   * an answer that left the field out.
+   */
+  private byTheEditor(answered: ToolResponse, effect: 'reads' | 'writes'): ToolResponse {
+    const [first, ...rest] = answered.content;
+    if (answered.isError === true || first?.type !== 'text') {
+      return answered;
+    }
+    let payload: unknown;
+    try {
+      payload = JSON.parse(first.text);
+    } catch {
+      return answered;
+    }
+    if (!isRecord(payload)) {
+      return answered;
+    }
+    const said = effect === 'reads' ? { readBy: 'the editor' } : { writtenBy: 'the editor' };
+    return { ...answered, content: [{ type: 'text', text: answerJson({ ...payload, ...said }) }, ...rest] };
+  }
+
   // -------------------------------------------------------------------------------------------
   // Lifecycle
   // -------------------------------------------------------------------------------------------
@@ -15398,7 +15421,7 @@ class GodotServer {
     const projectPath = project.value.path;
     await this.waitForTheEditorOpenedHere(args, []);
     if (this.editorHasOpen(projectPath)) {
-      return await throughTheEditor();
+      return this.byTheEditor(await throughTheEditor(), 'reads');
     }
     const where = resolveWithinProject(projectPath, readNonEmptyString(args, pathKey) ?? '');
     if (!where.ok) {
@@ -15455,7 +15478,7 @@ class GodotServer {
       if (answered.isError === true && declaredButUncached(projectPath, typeName) !== null) {
         answered.content.push({ type: 'text', text: uncachedClassNote([typeName]) });
       }
-      return answered;
+      return this.byTheEditor(answered, effect);
     }
     if (effect === 'writes') {
       if (waited !== null) {

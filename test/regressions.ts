@@ -6836,13 +6836,30 @@ async function testEditorStatusCountsOnlyOtherCallsInFlight(): Promise<void> {
     socket.send(
       JSON.stringify({ type: 'tool_result', id: held.id, success: true, result: { nodes: ['Main'] } }),
     );
-    assert.match(
-      textOf(await asked) ?? '',
-      /Main/,
-      'and the held call is answered once the editor answers it',
+    const read = parseTextContent(await asked);
+    assert.deepEqual(
+      { nodes: get(read, 'nodes'), readBy: get(read, 'readBy') },
+      { nodes: ['Main'], readBy: 'the editor' },
+      `the held call is answered once the editor answers it, naming the editor as the reader: ${JSON.stringify(read)}`,
     );
     const after = await status();
     assert.equal(get(after, 'editor', 'pendingRequests'), 0, JSON.stringify(get(after, 'editor')));
+    // A write through the editor names it too, as a headless write names its engine.
+    const written = parseTextContent(
+      await server.request(
+        'tools/call',
+        {
+          name: 'scene_node',
+          arguments: { projectPath: project, scenePath: 'res://main.tscn', op: 'delete', nodePath: 'Gone' },
+        },
+        30_000,
+      ),
+    );
+    assert.deepEqual(
+      { ok: get(written, 'ok'), writtenBy: get(written, 'writtenBy') },
+      { ok: true, writtenBy: 'the editor' },
+      JSON.stringify(written),
+    );
   } finally {
     editor?.terminate();
     await server.stop();
@@ -57886,6 +57903,24 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     });
     assert.ok(parseTextContent(bottom) !== null, textOf(bottom) ?? JSON.stringify(bottom));
     assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^vertical_alignment = 2$/m);
+    // In a project that makes untyped declarations errors, as strict games do, the line compiled to
+    // read the constant has to pass them too: HORIZONTAL_ALIGNMENT_CENTER was refused there.
+    const unstrict = readFileSync(join(project, 'project.godot'), 'utf8');
+    writeFileSync(
+      join(project, 'project.godot'),
+      `${unstrict}\n[debug]\n\ngdscript/warnings/untyped_declaration=2\ngdscript/warnings/inferred_declaration=2\n`,
+    );
+    const centred = await request('scene_node', {
+      scenePath: 'res://hero.tscn',
+      op: 'add',
+      nodeType: 'Label',
+      nodeName: 'Centred',
+      properties: { horizontal_alignment: 'HORIZONTAL_ALIGNMENT_CENTER' },
+    });
+    writeFileSync(join(project, 'project.godot'), unstrict);
+    assert.ok(parseTextContent(centred) !== null, textOf(centred) ?? JSON.stringify(centred));
+    assert.match(readFileSync(join(project, 'hero.tscn'), 'utf8'), /^horizontal_alignment = 1$/m);
+    await request('scene_node', { ...hero, op: 'delete', nodePath: 'Centred' });
     assert.equal(
       textOf(
         await request('scene_node', {
