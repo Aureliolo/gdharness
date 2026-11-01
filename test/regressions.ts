@@ -8749,7 +8749,7 @@ async function testEveryToolTellsAClientWhatItCanChange(): Promise<void> {
     }
     assert.deepEqual(
       counts,
-      { read: 12, additive: 4, destructive: 14 },
+      { read: 13, additive: 4, destructive: 14 },
       'each class holds what the table holds',
     );
 
@@ -69398,9 +69398,10 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
       outputPath: picture,
     });
     if (process.platform !== 'win32') {
+      assert.equal(get(captured.result, 'isError'), true, textOf(captured) ?? '');
       assert.match(
         textOf(captured) ?? '',
-        /^This editor runs headless, so it draws nothing to capture\./,
+        /^The editor answered editor_capture with an error: This editor runs headless, so it draws nothing to capture\. Use a visible editor, or a hidden one on Windows\.$/,
         textOf(captured) ?? '',
       );
       return;
