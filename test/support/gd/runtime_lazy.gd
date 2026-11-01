@@ -97,24 +97,38 @@ func _run() -> void:
 	# compiled in a frame holds it at least as long as compiling it took, measured below.
 	var slowest: int = 0
 	var frames: int = 0
+	# Each frame as "microseconds while compiling file", for a failure to say where the time went.
+	var timeline: Array[String] = []
 	var until: int = Time.get_ticks_msec() + 20000
 	var last: int = Time.get_ticks_usec()
 	while not _every_module_loaded() and Time.get_ticks_msec() < until:
+		var compiling_then: String = node._in_flight.get_file()
 		await process_frame
 		var now: int = Time.get_ticks_usec()
 		slowest = maxi(slowest, now - last)
+		timeline.append("%d %s" % [now - last, compiling_then])
 		last = now
 		frames += 1
 	if not _every_module_loaded():
 		failures.append("a served game compiles every module: %s" % ", ".join(_loaded()))
+	var idle_slowest: int = 0
+	last = Time.get_ticks_usec()
+	for _frame: int in 30:
+		await process_frame
+		var now: int = Time.get_ticks_usec()
+		idle_slowest = maxi(idle_slowest, now - last)
+		last = now
 	var largest: int = 0
 	for file: String in Runtime.MODULES:
 		largest = maxi(largest, _compiling_usec(file))
 	if frames < 2 or slowest * 2 > largest:
 		failures.append(
 			(
-				"the modules compile over %d frames, the slowest %d us, against %d us for one"
-				% [frames, slowest, largest]
+				(
+					"the modules compile over %d frames, the slowest %d us, against %d us for one"
+					+ " and %d us for the slowest of 30 frames after: %s"
+				)
+				% [frames, slowest, largest, idle_slowest, ", ".join(timeline)]
 			)
 		)
 
