@@ -218,7 +218,9 @@ export function lspOptionsOf(args: readonly string[], cwd: string): LspOptions {
   }
   const projectPath = resolve(cwd, named ?? '.');
   if (!existsSync(join(projectPath, 'project.godot'))) {
-    throw new EngineUsageError(`Not a Godot project: ${projectPath} holds no project.godot.`);
+    throw new EngineUsageError(
+      `Not a Godot project: ${projectPath} holds no project.godot. Run from the project directory, or name it on the command line.`,
+    );
   }
   return { projectPath, port, waitSeconds };
 }

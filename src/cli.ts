@@ -85,7 +85,9 @@ function projectArgument(at: number): string {
   const named = args.slice(at).find((value) => !value.startsWith('--'));
   const projectPath = resolve(named ?? '.');
   if (!existsSync(join(projectPath, 'project.godot'))) {
-    throw new UsageError(`Not a Godot project: ${projectPath} holds no project.godot.`);
+    throw new UsageError(
+      `Not a Godot project: ${projectPath} holds no project.godot. Run from the project directory, or name it on the command line.`,
+    );
   }
   return projectPath;
 }
@@ -188,7 +190,7 @@ async function registerRuntime(godot: HeadlessEngine, projectPath: string): Prom
     // top-level folders it knows into a pack.
     if (before === 'missing') {
       console.log(
-        `  every export carries ${dirname(RUNTIME_AUTOLOAD.path)}/, since the entry names it, and the loader does nothing in a release build: a check or export filter that keeps unknown top-level folders out of a pack has to allow it`,
+        `  a debug export carries ${dirname(RUNTIME_AUTOLOAD.path)}/. A check or export filter that keeps unknown top-level folders out of a debug pack has to allow it`,
       );
     }
     return;
@@ -205,6 +207,16 @@ async function registerRuntime(godot: HeadlessEngine, projectPath: string): Prom
 const SETUP_FLAGS = new Set(['--runtime', '--no-runtime', '--no-connect', '--no-skill', '--json', '--yes']);
 
 /**
+ * The refusal for a flag no command takes. `gdharness harnesses` alone lists only the harness
+ * flags, so a mistyped `--no-skill` sent its reader to a list without it.
+ */
+function unknownOption(flag: string): UsageError {
+  return new UsageError(
+    `Unknown option ${flag}. gdharness help lists each command's flags, and gdharness harnesses lists the harness flags.`,
+  );
+}
+
+/**
  * The harnesses named on the command line, which is how an agent drives this.
  *
  * An unknown flag is refused rather than ignored, because a silently dropped `--curser` leaves
@@ -215,7 +227,7 @@ function namedHarnesses(): readonly Harness[] {
   return flags.map((flag) => {
     const harness = harnessById(flag.slice(2));
     if (harness === undefined) {
-      throw new UsageError(`Unknown option ${flag}. Run gdharness harnesses for every flag it takes.`);
+      throw unknownOption(flag);
     }
     return harness;
   });
@@ -332,7 +344,7 @@ function nextSteps(projectPath: string, withRuntime: boolean): void {
   console.log('  2. Restart an open editor, or open the project. Then editor_status should answer.');
   if (withRuntime && loaderState(projectPath) !== 'missing') {
     console.log(
-      `\nThe runtime autoload names res://${RUNTIME_AUTOLOAD.path}, which brings up the runtime the runtime_*\ntools talk to in a debug build that has the addon, and does nothing in a release export or a\nclone without addons/. Commit it with project.godot.`,
+      `\nThe runtime autoload names res://${RUNTIME_AUTOLOAD.path}, which brings up the runtime the runtime_*\ntools talk to in a debug build that has the addon. It does nothing in a clone without addons/,\nand a release export leaves it out. Commit it with project.godot.`,
     );
   }
 }
@@ -379,7 +391,7 @@ async function setup(): Promise<void> {
       reportSkipped(candidate);
     }
     if (chosen.harnesses.length === 0) {
-      console.log('no harness configured. Name one yourself, and gdharness harnesses lists them all');
+      console.log('no harness configured. Pass one by flag. gdharness harnesses lists them');
     }
 
     if (!args.includes('--no-skill')) {
@@ -683,7 +695,9 @@ function doctorReport(projectPath: string): void {
 async function runtime(): Promise<void> {
   const state = args[1];
   if (state !== 'on' && state !== 'off') {
-    throw new UsageError('gdharness runtime takes on or off, then the project directory.');
+    throw new UsageError(
+      `gdharness runtime takes on or off, not ${state ?? 'nothing'}. Example: gdharness runtime on path/to/project`,
+    );
   }
   const projectPath = projectArgument(2);
   const godot = await engine(projectPath);
@@ -769,10 +783,9 @@ Usage:
                                      written without a flag or a typed yes. It also writes the
                                      gdharness skill into .agents/skills, unless --no-skill.
   gdharness upgrade [project]        Reinstall the addons at this version and re-pin every config
-                                     that already names gdharness. Asks nothing: it touches only
-                                     what is already ours. Afterwards the editor needs restarting
-                                     so it loads the new addons, and the MCP server needs
-                                     reconnecting so it is spawned at the new version.
+                                     that already names gdharness. Asks nothing, and touches no
+                                     other config. Then reconnect the MCP server, and restart an
+                                     open editor if the output says the editor addons changed.
   gdharness uninstall [project] [--<harness>]
                                      Take it all back out: the addons, the editor plugins, the
                                      runtime autoload, the skill, and our own entry in every
@@ -781,9 +794,10 @@ Usage:
                                      so it is named rather than edited unless you ask by flag.
   gdharness harnesses                Every harness, its flag and the file it reads
   gdharness doctor [project] [--json]
-                                     Say what holds and what does not. Exit 1 on a problem
-  gdharness runtime on|off [project] Register or remove the runtime autoload, which reaches
-                                     an export if it is left on
+                                     Check the install and name each problem. Exits 1 if there
+                                     is one
+  gdharness runtime on|off [project] Register or remove the runtime autoload. A release export
+                                     leaves it out
   gdharness classes [project]        Rebuild .godot/global_script_class_cache.cfg from disk
   gdharness test [project] [suite ...] [--engines N] [--slots DIR] [--slot-count N]
                  [--silence S] [--deadline S] [--tests DIR] [--changed-only] [--reach-also PATH]
@@ -800,10 +814,11 @@ Usage:
                                      prints what every engine printed, for a
                                      benchmark run by hand. --verbose starts every engine verbose,
                                      so a leak at exit is named. --result writes the outcome, each
-                                     suite's time and every problem as JSON for a gate. --times
+                                     suite's time and every problem as JSON. --times
                                      deals by and records into FILE instead of the project's own
                                      times. --runner prints the shipped runner's path.
-                                     docs/test-runs.md has the rest.
+                                     https://aureliolo.github.io/gdharness/test-runs.html has the
+                                     rest.
   gdharness spread [project] SCENE [--workers N] [--slots DIR] [--slot-count N] [--silence S]
                    [--deadline S] [--godot PATH] [--godot-version V] [--cores N] [-- ARGS]
                                      Play a bench scene's runs over several headless engines,
@@ -811,7 +826,8 @@ Usage:
                                      run order and print the bench's table: exit 1 when a worker
                                      failed or did not play its whole share. The bench asks
                                      GdhShare.outcomes for each arm's runs. ARGS go to every
-                                     engine. docs/spread.md has the rest.
+                                     engine. https://aureliolo.github.io/gdharness/spread.html has
+                                     the rest.
   gdharness lsp [project] [--port N] [--wait S]
                                      Bridge a stdio LSP client to the GDScript language server
                                      of the project's open editor, which it never starts: the
@@ -823,7 +839,7 @@ Usage:
 
 The project defaults to the directory you are in, and has to hold a project.godot either way.
 Godot is found through GODOT_PATH, else in the usual places.
-More info: https://github.com/Aureliolo/gdharness
+Docs: https://aureliolo.github.io/gdharness
 `.trim(),
   );
 }
@@ -839,7 +855,7 @@ More info: https://github.com/Aureliolo/gdharness
 function checkFlags(): void {
   for (const flag of args.slice(1).filter((arg) => arg.startsWith('--'))) {
     if (!SETUP_FLAGS.has(flag) && harnessById(flag.slice(2)) === undefined) {
-      throw new UsageError(`Unknown option ${flag}. Run gdharness harnesses for every flag it takes.`);
+      throw unknownOption(flag);
     }
   }
 }

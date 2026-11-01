@@ -271,7 +271,9 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
   const projectNamed = firstPath !== null && existsSync(join(firstPath, 'project.godot'));
   const projectPath = projectNamed ? firstPath : resolve(cwd);
   if (!existsSync(join(projectPath, 'project.godot'))) {
-    throw new EngineUsageError(`Not a Godot project: ${projectPath} holds no project.godot.`);
+    throw new EngineUsageError(
+      `Not a Godot project: ${projectPath} holds no project.godot. Run from the project directory, or name it on the command line.`,
+    );
   }
   const last = (flag: string): string | undefined => valued.get(flag)?.at(-1);
   const order = last('--order');

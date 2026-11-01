@@ -611,22 +611,33 @@ export function inspectProject(projectPath: string): ProjectReport {
     const installed = existsSync(directory);
     const version = existsSync(marker) ? readFileSync(marker, 'utf8').trim() : null;
     const current = version === SERVER_VERSION;
-    if (!installed) {
-      problems.push(`addons/${name} is not installed. Run gdharness setup`);
-    } else if (!current) {
+    if (installed && !current) {
       problems.push(
         `addons/${name} is ${version ?? 'of an unknown version'}, this gdharness is ${SERVER_VERSION}. Run gdharness setup`,
       );
     }
     return { name, installed, version, current };
   });
+  // One line for every addon missing, because a project without gdharness lacks all four at once
+  // and four lines with one remedy read as four faults.
+  const missing = addons.filter((addon) => !addon.installed).map((addon) => addon.name);
+  if (missing.length === 1) {
+    problems.unshift(`addons/${missing.join('')} is not installed. Run gdharness setup`);
+  } else if (missing.length > 1) {
+    problems.unshift(
+      `${missing.length} addons are not installed (${missing.join(', ')}). Run gdharness setup`,
+    );
+  }
 
   const settings = parseProjectGodot(readFileSync(join(projectPath, 'project.godot'), 'utf8'));
   const pluginsEnabled = enabledPlugins(settings);
-  for (const name of EDITOR_PLUGINS) {
-    if (!pluginsEnabled.includes(name)) {
-      problems.push(`the ${name} plugin is not enabled in project.godot. Run gdharness setup`);
-    }
+  const disabled = EDITOR_PLUGINS.filter((name) => !pluginsEnabled.includes(name));
+  if (disabled.length === 1) {
+    problems.push(`the ${disabled.join('')} plugin is not enabled in project.godot. Run gdharness setup`);
+  } else if (disabled.length > 1) {
+    problems.push(
+      `the ${disabled.join(' and ')} plugins are not enabled in project.godot. Run gdharness setup`,
+    );
   }
   const autoload = settings['autoload'];
   const registered = autoload === undefined ? undefined : readString(autoload, RUNTIME_AUTOLOAD.name);
@@ -692,7 +703,7 @@ export function inspectProject(projectPath: string): ProjectReport {
   const staleClasses = cached === null ? [] : staleAgainst(cached, projectPath);
   if (cached === null) {
     problems.push(
-      'no .godot/global_script_class_cache.cfg: the engine knows no class_name. Run project_import refresh_classes or open the editor',
+      'no class cache (.godot/global_script_class_cache.cfg), so the engine knows no class_name. Run gdharness classes, or open the editor',
     );
   } else if (staleClasses.length > 0) {
     problems.push(

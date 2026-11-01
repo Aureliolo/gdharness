@@ -50,7 +50,7 @@ assert.match(report, /no way to open an issue yourself/, 'with the case where it
 // Both branches are asserted for what they offer, not for the absence of the other, so a fifth
 // wording that says nothing about retrying fails here rather than passing twice.
 const twice = defectReport('editor_scene op=open', new Error('EBUSY: locked'), { seenBefore: 1 });
-assert.match(twice, /sending the call again will not change it/, 'a repeat says the retry is spent');
+assert.match(twice, /Sending the call again will not change it/, 'a repeat says the retry is spent');
 assert.match(twice, /this exact failure once in this session already/, 'and counts what it has seen');
 assert.doesNotMatch(twice, /Send the call once more/, 'and does not also offer the retry');
 assert.match(
@@ -94,7 +94,11 @@ assert.match(report, /Godot +not known at the point this failed/, 'and an unknow
 // The one report nobody would think to send: the message itself being wrong. A failure this
 // program anticipates arriving dressed as one it does not is the misclassification that keeps
 // every future caller chasing a bug that is not there.
-assert.match(report, /this message is the defect/, 'a misfiled failure should invite its own report');
+assert.match(
+  report,
+  /Report it even when the cause was the project, the environment or the call, and say so/,
+  'a misfiled failure should invite its own report',
+);
 
 // A link that does not open is worse than no link: the agent hands it over and the user is stuck.
 const link = /(https:\/\/github\.com\/\S+)/.exec(report)?.[1];
@@ -107,7 +111,7 @@ assert.match(body, /Cannot read properties of undefined/, 'the prefilled body sh
 assert.match(body, /## What you did/, 'and the headings the template asks for');
 assert.match(
   body,
-  /rather than as a refusal naming what would have worked/,
+  /gdharness should have refused with what would have worked/,
   'and leave a place to say the message itself was the mistake',
 );
 assert.match(

@@ -4089,7 +4089,7 @@ class GodotServer {
     if (possibleSolutions.length > 0) {
       response.content.push({
         type: 'text',
-        text: `Possible solutions:\n- ${possibleSolutions.join('\n- ')}`,
+        text: `Next:\n- ${possibleSolutions.join('\n- ')}`,
       });
     }
     return response;
@@ -4866,8 +4866,9 @@ class GodotServer {
           'Tell the user a newer gdharness is out, with what changed. Run the upgrade command ' +
           'only with their agreement: a yes now, or a standing instruction of theirs, such as one ' +
           'in their AGENTS.md or CLAUDE.md, to upgrade on every release. Without either, offer it ' +
-          'and wait, since it replaces the addons in their project. Afterwards the MCP server has ' +
-          'to be reconnected and the editor restarted with editor_launch restart.',
+          'and wait, since it replaces the addons in their project. Afterwards reconnect the MCP ' +
+          'server. Restart the editor with editor_launch restart only when upgrade says the editor ' +
+          'addons changed.',
       },
     });
   }
@@ -5788,7 +5789,7 @@ class GodotServer {
       return {
         ok: false,
         response: this.createErrorResponse(`savesIn must be an absolute path, not "${savesIn}".`, [
-          "Name the directory user:// should be under, such as a temporary directory of this run's own",
+          'Pass an absolute directory for user://, such as a new temporary directory',
         ]),
       };
     }
@@ -5943,7 +5944,8 @@ class GodotServer {
         response: this.createErrorResponse(
           'The game is running, not stopped, so it has no stack and no scope to read.',
           [
-            'debug_breakpoint set puts a breakpoint on before the run, and it is waiting when the game starts',
+            'Set a breakpoint with debug_breakpoint set before the run',
+            'Or, for a game this server started, stop it where it is with debug_control pause',
             'editor_output reads what the running game is printing',
           ],
         ),
@@ -10097,7 +10099,7 @@ class GodotServer {
     const gone = await this.waitForBridge(() => !alive(pid) && !holding(), began + editorRestartTimeoutMs());
     if (!gone && alive(pid)) {
       return this.createErrorResponse(
-        `The editor saved and was asked to go, and pid ${pid} is still running after ${editorRestartTimeoutMs() / 1000}s.`,
+        `The editor saved and was asked to quit, and pid ${pid} is still running after ${editorRestartTimeoutMs() / 1000}s.`,
         [
           'It may be asking what to do about unsaved changes, or a script may be holding up its exit',
           'editor_status says whether it is still connected',
@@ -10106,7 +10108,7 @@ class GodotServer {
     }
     if (!gone) {
       return this.createErrorResponse(
-        `The editor saved and was asked to go, and pid ${pid} has exited, but its connection to the bridge was still open after ${editorRestartTimeoutMs() / 1000}s.`,
+        `The editor saved and was asked to quit, and pid ${pid} has exited, but its connection to the bridge was still open after ${editorRestartTimeoutMs() / 1000}s.`,
         ['editor_status says whether it is still connected'],
       );
     }
@@ -10281,7 +10283,7 @@ class GodotServer {
       // holds and bind neither, while reporting both, and the answer was "restarted".
       restartSettled(projectPath);
       return this.createErrorResponse(
-        `The editor was asked to go and pid ${editorPid ?? 'unknown'} is still running after ${editorRestartTimeoutMs() / 1000}s, so no replacement was started: it would find the language server and debug adapter ports still held.`,
+        `The editor was asked to quit and pid ${editorPid ?? 'unknown'} is still running after ${editorRestartTimeoutMs() / 1000}s, so no replacement was started: it would find the language server and debug adapter ports still held.`,
         [
           'It may be asking what to do about unsaved changes, or a script may be holding up its exit',
           `editor_launch open starts one on ${projectPath} once it has gone`,
@@ -10296,7 +10298,7 @@ class GodotServer {
     restartSettled(projectPath);
     if (opened.error !== null) {
       return this.createErrorResponse(
-        `The editor was asked to go and could not be started again: ${opened.error}`,
+        `The editor was asked to quit and could not be started again: ${opened.error}`,
         [`editor_launch opens one on ${projectPath}`],
       );
     }
@@ -10662,7 +10664,7 @@ class GodotServer {
     // A release build refuses the debugger's flags and quits, and the profiler is the debugger.
     if (exported !== null && readBoolean(args, 'profile') === true) {
       return this.createErrorResponse(
-        'A profile is read through the debugger, and an exported build is started without one, since a release build quits when given --remote-debug. Profile the project without executable.',
+        'An exported build cannot be profiled, because a release build quits when given --remote-debug. Leave out executable to profile the project.',
       );
     }
     const own = readStringArray(args, 'args') ?? [];
@@ -12682,7 +12684,7 @@ class GodotServer {
       const behind = whichHalfIsBehind([unreadable]);
       return (
         `A game is running for ${unreadable.project.path}, pid ${unreadable.pid}, announced in protocol` +
-        ` ${unreadable.protocol}, which this server does not speak: it speaks ${RUNTIME_PROTOCOL}, so ${behind}.` +
+        ` ${unreadable.protocol}. This server speaks ${RUNTIME_PROTOCOL}, so ${behind}.` +
         ` Until then the runtime_* tools cannot reach it, and editor_run stop with pid ${unreadable.pid} ends it.` +
         ' A run started here is a separate process rather than a replacement, so starting one leaves' +
         ' this game running as well.'
@@ -16038,7 +16040,7 @@ class GodotServer {
       return answered;
     }
     return this.createErrorResponse(
-      `The editor took ${askedAs ?? toolName} in and did not answer within ${String(answered.waitedMs / 1000)}s. An editor importing files answers nothing until the import is over, and a hidden one imports on the thread that answers.`,
+      `The editor took ${askedAs ?? toolName} in and did not answer within ${String(answered.waitedMs / 1000)}s. An editor answers nothing while it imports files.`,
       [
         'editor_status says whether it is scanning or importing',
         'The editor still carries the request out once it is free, so read what it changed before asking again',
@@ -16450,7 +16452,7 @@ class GodotServer {
     const sendsThePicture = readBoolean(callArgs, 'inline') !== false;
     if (expectsScreenshot && !sendsThePicture && saveTo === null) {
       return this.createErrorResponse(
-        'inline: false sends no picture back, so it needs outputPath to save one to. Without it the capture would answer nothing to look at.',
+        'inline: false sends no picture back, so it needs outputPath to save one to.',
         [
           'Pass outputPath, an absolute path ending in .png outside the project',
           'Or leave inline out to have the picture sent',

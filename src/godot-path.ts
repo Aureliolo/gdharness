@@ -128,7 +128,7 @@ export class GodotLocator {
       return {
         message: 'No Godot executable found.',
         advice: [
-          'Set GODOT_PATH to the Godot 4 executable',
+          'Set GODOT_PATH to a Godot 4.7 or newer executable',
           'Or install Godot where it is usually found, such as /usr/bin/godot or C:\\Program Files\\Godot',
         ],
       };
@@ -136,7 +136,7 @@ export class GodotLocator {
     return {
       message: `GODOT_PATH is set to ${located.named}, which ${located.reason ?? 'does not answer'}.`,
       advice: [
-        'Point GODOT_PATH at a Godot 4 executable that answers --version',
+        'Point GODOT_PATH at a Godot 4.7 or newer executable that answers --version',
         'Or unset it, and the usual install locations are searched instead',
       ],
     };

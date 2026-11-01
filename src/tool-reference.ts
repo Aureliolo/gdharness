@@ -8,12 +8,14 @@
 import { ENGINE_PASSES, HEADLESS_OPERATIONS } from './headless-operations.js';
 import { isRecord } from './records.js';
 import {
+  ALSO_SAVED,
   argumentsOf,
   effectsOf,
   projectPathSentence,
   TOOL_SPECS,
   type ToolSpec,
   theGamePicked,
+  WITHOUT_AN_EDITOR,
 } from './tool-definitions.js';
 
 /** What a schema's `type` is called in prose, for the one argument or two that take either. */
@@ -43,7 +45,7 @@ export function argumentShape(schema: Readonly<Record<string, unknown>>): string
 }
 
 /**
- * Which calls a push gate can make, listed rather than described.
+ * Which calls a CI job can make, listed rather than described.
  *
  * The rest of this page says what each tool does and not what it needs to exist before it can do
  * it, and that is the fact somebody wiring gdharness into CI needs first: an editor is a person's
@@ -62,7 +64,7 @@ function headlessSection(): string[] {
   }
   const byTool = [...everyOp].map(([tool, ops]) => `\`${tool}\` (${ops.join(', ')})`).toSorted();
   return [
-    '## What a gate can call',
+    '## Calls a CI job can make',
     '',
     'These answer from a short-lived headless engine: no editor window, no running game, and no',
     'process or port outliving the answer. They are the only calls an automatic check can make at',
@@ -70,25 +72,51 @@ function headlessSection(): string[] {
     '',
     ...byTool.map((line) => `- ${line}`),
     '',
-    'Needing nothing is not the same as changing nothing, and a gate wants both. Most of these',
-    'write to the project because that is what they are for: `script_edit create` writes a file,',
+    'Most of these still write to the project: `script_edit create` writes a file,',
     '`project_settings set` rewrites `project.godot`, `project_import reimport` and `refresh_classes`',
     'write under `.godot`, and `project_import refresh_uids` writes a `.uid` beside each script that',
-    'had none. The reading ops are the ones to gate on, and which is which is in each',
-    "op's own summary below rather than assumed from this list.",
+    "had none. A CI job checks with the reading ops. Each op's own summary below says which is which.",
     '',
     '`scene_create`, `scene_node`, `scene_signal` and `resource_edit` go through the editor when one',
     'serves the project and through a headless engine when none does, so they need nothing open',
-    'either. A gate can call them, and the reads among them are the ones to gate on. Everything else',
+    'either. A CI job can call them, and checks with the reads among them. Everything else',
     'needs the editor (`editor_*`, `debug_*`, `scene_animation` but its reads) or a running game',
     '(`runtime_*`).',
     '',
-    'One of these can be pointed the other way: `project_settings get` takes `from: "editor"` to ask',
-    'the open editor instead of the file, which is a different reading and costs no engine start. A',
-    'gate leaves it alone, because there is no editor on a build machine and the call is refused',
-    'rather than answered from the file.',
+    '`project_settings get` with `from: "editor"` asks the open editor instead of the file and',
+    'starts no engine. A CI job leaves it alone, because there is no editor on a build machine and',
+    'the call is refused rather than answered from the file.',
     '',
   ];
+}
+
+/**
+ * Paragraphs several tools' descriptions share, each stated once under its own heading.
+ *
+ * The tool list a client loads has no headings, so each description there carries the paragraph
+ * whole. On this page it would be the same paragraph three or four times, so each copy becomes a
+ * link to the one here.
+ */
+export const SHARED_PARAGRAPHS: readonly { readonly heading: string; readonly text: string }[] = [
+  { heading: 'Editor or headless engine', text: WITHOUT_AN_EDITOR },
+  { heading: 'What a scene write also saves', text: ALSO_SAVED },
+];
+
+function anchorOf(heading: string): string {
+  return heading.toLowerCase().replaceAll(' ', '-');
+}
+
+/** [text] with each shared paragraph in it replaced by a link to its section. */
+export function withSharedParagraphsLinked(text: string): string {
+  return SHARED_PARAGRAPHS.reduce(
+    (linked, { heading, text: shared }) =>
+      linked.replaceAll(shared, `[${heading}](#${anchorOf(heading)}) applies.`),
+    text,
+  );
+}
+
+function sharedSections(): string[] {
+  return SHARED_PARAGRAPHS.flatMap(({ heading, text }) => [`## ${heading}`, '', text, '']);
 }
 
 /**
@@ -96,6 +124,9 @@ function headlessSection(): string[] {
  * the hint is per tool, and `scene_node get` is not the call a client asks about.
  */
 function whatItCanChange(tool: ToolSpec): string {
+  if (tool.changes !== undefined) {
+    return tool.changes;
+  }
   if (effectsOf(tool).every((effect) => effect === 'read')) {
     return 'Changes nothing.';
   }
@@ -129,18 +160,29 @@ export function renderToolsMarkdown(): string {
     '`op`. An unknown op or argument is refused with the valid set listed. Generated from the server.',
     '',
     `${projectPathSentence()}: the \`runtime_*\` and \`debug_*\` ones pick between running games`,
-    'instead, and the others answer about the editor on this server. The pick, when a call names',
-    `neither \`projectPath\` nor \`pid\`: ${theGamePicked()}. An argument a tool does not`,
-    'declare is refused rather than ignored. Answers are read from the engine after the change, not',
-    'echoed from the request. Engine stderr comes back under `engine_messages`.',
+    'instead, and the others answer about the editor on this server.',
+    '',
+    theGamePicked(),
+    '',
+    'An argument a tool does not declare is refused rather than ignored. Answers are read from the',
+    'engine after the change, not echoed from the request. Engine stderr comes back under',
+    '`engine_messages`.',
     '',
     ...headlessSection(),
+    ...sharedSections(),
   ];
 
   for (const tool of TOOL_SPECS) {
-    lines.push(`## ${tool.name}`, '', `${tool.title}. ${whatItCanChange(tool)}`, '', tool.description, '');
+    lines.push(
+      `## ${tool.name}`,
+      '',
+      whatItCanChange(tool),
+      '',
+      withSharedParagraphsLinked(tool.description),
+      '',
+    );
     if (tool.answer !== undefined) {
-      lines.push(`The answer: ${tool.answer}`, '');
+      lines.push(`The answer: ${withSharedParagraphsLinked(tool.answer)}`, '');
     }
 
     const operations = Object.entries(tool.operations ?? {});

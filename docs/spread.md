@@ -76,15 +76,15 @@ does when the bench runs alone.
 
 ## What a bench keeps to
 
-- **An outcome is a plain value**, such as a number, a string, a vector, or an array or dictionary
-  of them. An object cannot pass between engines, so `GdhShare` refuses one with an error that fails
+- An outcome is a plain value, such as a number, a string, a vector, or an array or dictionary of
+  them. An object cannot pass between engines, so `GdhShare` refuses one with an error that fails
   the run.
-- **Which arms a bench plays, and how many runs each has, depend on its command line alone.** Every
-  engine runs the whole scene, so an arm chosen by the clock or by one worker's file differs
-  between engines.
-- **Each arm has its own name.** An arm asked for twice in one run is refused.
-- **The scene quits when it is done.** An engine that never quits is ended after its silence and
-  fails the run.
+- Which arms a bench plays, and how many runs each has, depend on its command line alone. Every
+  engine runs the whole scene, so an arm chosen by the clock or by one worker's file differs between
+  engines.
+- Each arm has its own name. An arm asked for twice in one run is refused.
+- The scene quits when it is done. An engine that never quits is ended after its silence and fails
+  the run.
 
 ## What each engine gets
 

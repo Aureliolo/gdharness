@@ -16,7 +16,7 @@ godot --version   # >= 4.7.0
 node --version    # >= 22, for npx; or bun --version >= 1.4, for bunx
 ```
 
-Either runtime, not both. `setup` finds Godot itself. Set `GODOT_PATH` to the binary if it is
+You need one of the two runtimes. `setup` finds Godot itself. Set `GODOT_PATH` to the binary if it is
 somewhere unusual.
 
 ## 2. Install
@@ -38,7 +38,7 @@ is written and nothing answers.
 
 ### Outside the project
 
-**It writes nothing outside the project directory without a flag or an answered prompt.** Run from
+Nothing outside the project directory is written without a flag or an answered prompt. Run from
 a pipe, as you are, it asks nothing. It writes the harnesses this project already uses and names
 the rest. Do not pass a machine-wide harness's flag on the reader's behalf, since it changes every
 other project they open with that harness. Report what it named and let them choose.
@@ -49,7 +49,8 @@ It also writes `.agents/skills/gdharness/`, the operating contract for this serv
 your harness reads. The three harnesses that do not read the shared directory get a copy in
 `.claude/skills`, `.kiro/skills` or `.cline/skills`. Read `SKILL.md` before your first tool call.
 
-`gdharness harnesses` lists every flag:
+`gdharness help` lists every command's flags, and `gdharness harnesses` the harness flags. Three
+matter here:
 
 - `--no-connect` installs the addons and writes no config at all.
 - `--no-skill` leaves the skill out.
@@ -60,14 +61,14 @@ template instead.
 
 ### The config and the autoload
 
-The config carries `GODOT_PATH` and `GDHARNESS_PROJECT`. Nothing else is read from the environment.
-Every tool call carries its own `projectPath`. Reconnect the harness, then confirm the tools are
-listed.
+The config carries `GODOT_PATH` and `GDHARNESS_PROJECT`. Every tool call carries its own
+`projectPath`, and no call takes its project from the environment. Reconnect the harness, then
+confirm the tools are listed.
 
 The runtime autoload names `res://gdharness/loader.gd`, which setup writes. It brings the runtime up
-only in a debug build that has the addon. It does nothing in a release export or in a clone without
-`addons/`. Commit it with `project.godot` and leave it on. Without it, `runtime_*` has nothing to
-talk to.
+only in a debug build that has the addon. It does nothing in a clone without `addons/`, and a
+release export leaves it out. Commit it with `project.godot` and leave it on. Without it,
+`runtime_*` has nothing to talk to.
 
 ## 3. Verify
 
@@ -91,8 +92,8 @@ npx -y gdharness@<new> upgrade
 `upgrade` re-pins every config that already names gdharness and touches no config that does not.
 Then reconnect the MCP server, and restart an open editor with `editor_launch restart` when
 `upgrade` says the editor addons changed. Confirm with `editor_status`: `addonIsStale` false.
-Skipping either step when it is needed leaves the old version answering. `addonVersion` can
-still be the older number when the editor code did not change, and that is fine.
+Skipping either step when it is needed leaves the old version answering. `addonVersion` stays at
+the older number when the editor code did not change.
 
 ## Installing from the signed archive instead
 

@@ -334,7 +334,7 @@ function renderHomeText(): string {
     '# gdharness',
     '',
     'Drive a Godot 4 project from an agent: the editor that is open, the game that is running, and',
-    'the project on disk. An agent cannot see a running game; this makes one answerable.',
+    'the project on disk. An agent cannot see a running game. With gdharness it can ask one.',
     '',
     'Godot 4.7 or newer, and Node 22 or newer for `npx`. It runs under Bun 1.4 too.',
     '',

@@ -2,12 +2,12 @@
 
 ## The rules that decide whether a change lands
 
-- **No fixture, no ship.** A change that adds or alters a tool comes with a fixture driving it
-  against a pinned Godot in CI.
+- **Every tool change comes with a fixture.** A change that adds or alters a tool comes with one
+  driving it against a pinned Godot in CI.
 - **A fixture asserts the invariant, not the reading.** A case that writes down a measurement keeps
   it in force after the evidence is gone, and then fails the correction.
-- **A tool fails rather than answers.** An empty or partial result that could be a silent failure
-  gets no success payload.
+- **A tool refuses rather than answering emptily.** An empty or partial result that could be a
+  silent failure gets no success payload.
 - **An unknown argument or enum value is an error** naming the valid set, never a silent default.
 - **Every mutation reads back.** A tool that writes returns the engine's actual state afterwards,
   read from the engine, not an echo of the request.
@@ -19,7 +19,7 @@
 - **Never dress an unmodelled failure as a refusal.** The caller then spends its turns rephrasing a
   call that was right, while nobody hears about the bug.
 - **A refusal says what the thing is and what would have worked.** "`editor_run check` is a boot
-  probe" ends the attempt, while "invalid op" makes the next attempt the same attempt.
+  probe" ends the attempt, while "invalid op" leads the caller to repeat the same call.
 - **A refusal names the version that decided, where one did.** That separates a wrong call from one
   that is only too new for the server answering it.
 - **Answers are sized.** Anything that can return a lot takes a detail level and defaults to the
@@ -27,15 +27,15 @@
 
 ## Versions
 
-- **Patch** is every release. A corrected answer is a patch even when its output changes shape,
-  because a tool kept wrong for whoever parsed it is not worth asking.
+- **Patch** is every release, a corrected answer included, even when its output changes shape. A
+  wrong answer is never kept for a caller who parsed it.
 - An addition nothing has to adapt to is a patch too, such as a new argument, field, tool or op, or
   an argument reaching further. Ignore all of it and your calls still work.
 - **Minor** comes only when the owner marks a release as one, announced ahead. Nothing earns one on
   its own.
 - No **major** is planned.
 
-Until gdharness has users outside its own projects, nothing is kept working for an older release.
+Until gdharness has users outside the owner's own projects, nothing is kept working for an older release.
 The server and the addons of one release work with each other only. An editor or a game on another
 release's addon is refused with the command that brings it into step. A rename or a removal ships in
 a minor.
@@ -45,13 +45,13 @@ a minor.
 Five things, for each language present. A language that arrives without all five arrives with them
 in the same change.
 
-|              | TypeScript                                                                                                                                                                    | GDScript                                                                                                                                                              | YAML                                                                       | Markdown                               |
-| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | -------------------------------------- |
-| Formatter    | Biome                                                                                                                                                                         | gdstyle, the fixtures included                                                                                                                                        | Prettier                                                                   | Prettier, prose wrap preserved         |
-| Linter       | Biome, oxlint type-aware                                                                                                                                                      | gdstyle, every finding failing, with the lane's `gdstyle.toml`                                                                                                        | yamllint `--strict`, actionlint and zizmor at `pedantic` for the workflows | markdownlint, every rule, lines at 100 |
-| Type checker | `tsc`, `@tsconfig/strictest`, over `src`, `test` and `scripts` alike                                                                                                          | the engine: `test:engine` parses every shipped script and fixture with all 43 GDScript warnings as errors, addons included, and proves the gate bites by planting one | -                                                                          | -                                      |
-| Dead code    | knip: every file, export and dependency is reached from an entry point                                                                                                        | -                                                                                                                                                                     | -                                                                          | -                                      |
-| Fuzzing      | fast-check properties in `test/fuzz.ts` over every reader of bytes nobody here wrote: the Content-Length framing, `project.godot`, paths inside a project, the engine archive | -                                                                                                                                                                     | -                                                                          | -                                      |
+|              | TypeScript                                                                                                                                                                    | GDScript                                                                                                                                                            | YAML                                                                       | Markdown                               |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | -------------------------------------- |
+| Formatter    | Biome                                                                                                                                                                         | gdstyle, the fixtures included                                                                                                                                      | Prettier                                                                   | Prettier, prose wrap preserved         |
+| Linter       | Biome, oxlint type-aware                                                                                                                                                      | gdstyle, every finding failing, with `gdstyle.toml`                                                                                                                 | yamllint `--strict`, actionlint and zizmor at `pedantic` for the workflows | markdownlint, every rule, lines at 100 |
+| Type checker | `tsc`, `@tsconfig/strictest`, over `src`, `test` and `scripts` alike                                                                                                          | the engine: `test:engine` parses every shipped script and fixture with all 49 engine warnings (4.7.2) as errors, addons included, and checks a planted one fails it | -                                                                          | -                                      |
+| Dead code    | knip: every file, export and dependency is reached from an entry point                                                                                                        | -                                                                                                                                                                   | -                                                                          | -                                      |
+| Fuzzing      | fast-check properties in `test/fuzz.ts` over every reader of bytes nobody here wrote: the Content-Length framing, `project.godot`, paths inside a project, the engine archive | -                                                                                                                                                                   | -                                                                          | -                                      |
 
 ## Lint rules
 
@@ -118,10 +118,10 @@ bun run build
 Checks, all of which CI runs:
 
 ```bash
-bun run ci                 # build, typecheck over src, test and scripts, regression, detection, archive and property tests
+bun run ci                 # build, typecheck, format:check, lint, then the eleven test:ci files
 bun run test:integration   # the bridge against a mock editor and a mock runtime
 bun run test:metadata
-bun run format             # Biome for the code, Prettier for the prose and YAML; writes
+bun run format             # Biome for the code, Prettier for the prose and YAML (writes)
 bun run lint               # Biome, then oxlint with its type-aware rules, then knip, then markdownlint
 bun run lint:gd            # gdstyle's linter
 bun run format:gd          # gdstyle's formatter, writes
@@ -182,8 +182,7 @@ checker covers everything Bun runs.
 └── scripts/               # Build, pack, release and site tooling
 ```
 
-[release-process.md](./release-process.md) says how a release is cut, signed and verified. That is
-a maintainer's job rather than a reader's, so it lives here rather than on the site.
+[release-process.md](./release-process.md) says how a release is cut, signed and verified.
 
 The site at <https://aureliolo.github.io/gdharness> is built from `docs/` by
 `scripts/build-docs.ts` and published by `.github/workflows/docs.yml`. The tool reference is

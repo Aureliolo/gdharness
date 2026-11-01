@@ -7,8 +7,8 @@
 | Godot        | 4.7.0 or newer                                             |
 | Node, or Bun | Node 22 or newer for `npx`, or Bun 1.4 or newer for `bunx` |
 
-Install one of the two runtimes, not both. `npx` ships with Node and `bunx` with Bun. The server
-runs under either.
+You need one of the two runtimes. `npx` ships with Node and `bunx` with Bun. The server runs under
+either.
 
 `setup` finds Godot itself, in the usual install locations. Set `GODOT_PATH` to the binary if yours
 is somewhere else. Then `setup` writes that path into the config it generates. Without either,
@@ -49,8 +49,7 @@ Write ~/.codex/config.toml? That affects every project. [y/N]
 ```
 
 Name harnesses by flag and it asks nothing. That is how a script or an agent runs it. With no
-terminal and no flags, it writes the harnesses this project already uses and names the rest. It can
-never hang waiting for an answer nobody can give.
+terminal and no flags, it writes the harnesses this project already uses and names the rest.
 
 ```bash
 # exactly these two, no questions
@@ -68,7 +67,7 @@ npx -y gdharness@{{version}} setup --no-connect
 
 ## What it writes, and where
 
-**Nothing outside the project directory without a flag or a typed yes.** {{home-count}} of the
+Nothing outside the project directory is written without a flag or a typed yes. {{home-count}} of the
 {{harness-count}} have no project-level config at all. For those, a yes writes the machine-wide
 file, because they read no other.
 
@@ -108,33 +107,31 @@ The version is pinned rather than `latest`, because the server and the addons it
 match. With `latest` they drift apart. The `editor_status` tool reports that as `addonIsStale`.
 
 `GDHARNESS_PROJECT` is which project this server was set up for. The server writes the editor
-bridge's address into that project, so the editor finds it wherever it landed. That lets two
-projects be open at once, as [how it works](architecture.html#connections) explains. Without it, as
-in a config written by hand, the bridge holds out for its fixed port.
+bridge's port into that project, so the editor finds the server on any port. That lets two projects
+be open at once, as [how it works](architecture.html#connections) explains. Without it, as in a
+config written by hand, the server waits for its configured port, 6505 unless
+`GDHARNESS_BRIDGE_PORT` names another.
 
-Every tool call still carries its own `projectPath`. Nothing else is read from the environment.
+Every tool call still carries its own `projectPath`. No call takes its project from the
+environment.
 
 An existing config keeps everything already in it, including other servers. One that does not
 parse is refused rather than replaced.
 
 ## Committing what it installed
 
-The four addons land in `addons/`. Commit them like any other Godot addon. Neither Godot's
-version-control page nor GitHub's `Godot.gitignore` excludes `addons/`. A project that has not
-chosen otherwise commits them, so everybody on the team has the same version without running
-anything.
+The four addons land in `addons/`. Commit them like any other Godot addon, so everybody on the team
+runs the same version.
 
 Two of them, `gdharness_editor` and `auto_reload`, are also named in `project.godot`'s
 `editor_plugins/enabled`, which almost every project commits.
 
-Commit the files with it. A clone that has the entries without the
-addons still opens the editor. It prints one warning per missing addon,
-`Addon ... failed to load. No directory found`, and carries on. The warning is not an error and
-leaves `project.godot` as it is. A teammate who has not installed gdharness loses
-nothing but quiet.
+Commit the addons with `project.godot`. A clone with the plugin entries and no addons still opens.
+The editor prints `Addon ... failed to load. No directory found` once per missing addon and leaves
+`project.godot` alone.
 
-Every script arrives with the `.uid` file that fixes its identity. With it, two clones commit the
-same one and no editor has to invent it.
+Commit the `.uid` file beside each script too. Without it, each clone's editor generates its own
+uid.
 
 ### If your project ignores the addons
 
@@ -145,10 +142,9 @@ version somewhere committed and install from it instead. Each addon records its 
 
 ### The loader in a clone
 
-The runtime autoload does not stand in the way. `project.godot` is committed, and its runtime entry
-names `res://gdharness/loader.gd` rather than the addon. The loader is committed with it and does
-nothing until the addon is there. A clone or a CI runner without `addons/` boots cleanly. Commit the
-loader, as [the runtime autoload](#the-runtime-autoload) explains.
+A clone or CI runner without `addons/` boots cleanly. The runtime entry names
+`res://gdharness/loader.gd`, which does nothing until the addon is there. Commit the loader with
+`project.godot`, as [the runtime autoload](#the-runtime-autoload) explains.
 
 To check, `gdharness doctor` asks git which of the files your autoloads name are in the index,
 since those are what a clone gets. A file nobody added is a problem that fails `setup` and `doctor`.
@@ -165,7 +161,7 @@ on the machine, it says nothing rather than guessing.
 | `project_info`                            | The project name and main scene.                           |
 | `editor_run` start, `editor_output`, stop | The game starts, its console comes back, it stops.         |
 
-`gdharness doctor` exits 1 on any problem and names it.
+`gdharness doctor` checks the install, names each problem, and exits 1 if there is one.
 
 ## Silent windowed runs
 
@@ -261,25 +257,24 @@ loaded, not by the version number on it.
 
 An upgrade of the main checkout does not reach the untracked `addons/` of a git worktree. `upgrade`
 names each worktree whose addons are on another version, with the command to run there. It does not
-upgrade them itself. A worktree pins its own version and can be on a branch that wants the one it
-has.
+upgrade them itself.
 
 ## The rest of the CLI
 
-| Command              | What it does                                            |
-| -------------------- | ------------------------------------------------------- |
-| `setup`              | Addons in, editor plugins on, class list rebuilt        |
-| `setup --no-connect` | The same, and no harness configuration written          |
-| `upgrade`            | The same project, on this version                       |
-| `uninstall`          | All of it back out again                                |
-| `doctor`             | Says what holds and what does not. Exits 1 on a problem |
-| `classes`            | Rebuilds the class cache from disk                      |
-| `runtime on` / `off` | Registers the runtime autoload, or takes it out again   |
-| `harnesses`          | Every harness, its flag and the file it reads           |
+| Command              | What it does                                                       |
+| -------------------- | ------------------------------------------------------------------ |
+| `setup`              | Addons in, editor plugins on, class list rebuilt                   |
+| `setup --no-connect` | The same, and no harness configuration written                     |
+| `upgrade`            | Reinstalls the addons and re-pins configs at this version          |
+| `uninstall`          | Removes everything setup wrote                                     |
+| `doctor`             | Checks the install and names each problem. Exits 1 if there is one |
+| `classes`            | Rebuilds the class cache from disk                                 |
+| `runtime on` / `off` | Registers the runtime autoload, or takes it out again              |
+| `harnesses`          | Every harness, its flag and the file it reads                      |
 
 Each of these except `harnesses` takes the project directory as its argument. It defaults to the one
-you are in. The directory has to hold a `project.godot` either way, so the default cannot act on a
-folder that is not a Godot project. An unknown flag stops the command before it does anything.
+you are in. The directory must hold a `project.godot`. An unknown flag stops the command before it
+does anything. `gdharness help` lists each command's flags.
 
 ### Addon versions
 
@@ -294,10 +289,9 @@ gdharness uninstall
 ```
 
 It removes the addons, the editor plugin entries, the runtime autoload and the skill. It also
-removes gdharness's own entry from every config it can parse. Other servers in those files keep
-their entries in a file that stays. A file that held nothing but gdharness goes with it, as does the
-`.agents/skills` directory it created. A harness's own directory is left alone, empty or not,
-because it belongs to the harness.
+removes gdharness's own entry from every config it can parse. Other servers' entries stay. A file
+left with nothing in it is deleted, as is an `.agents/skills` directory setup created. A harness's
+own directory stays, even when empty.
 
 A machine-wide config may be serving another project, so it is named rather than edited:
 
@@ -312,11 +306,8 @@ the project settings.
 
 ## The runtime autoload
 
-`setup` registers it, because without it the `runtime_*` tools have nothing to talk to. Like
-everything else `setup` installs, it belongs to that project alone. The project gets its own copy
-of the addon and its own entry in its `project.godot`. Twenty Godot projects means twenty
-independent installs, each pinned to its own version and its own engine. `--no-runtime` leaves it
-out.
+`setup` registers it, because without it the `runtime_*` tools have nothing to talk to. Each
+project gets its own copy of the addon and its own entry. `--no-runtime` leaves it out.
 
 ```bash
 gdharness runtime on
@@ -327,8 +318,8 @@ gdharness runtime off
 
 The entry names `res://gdharness/loader.gd`, a loader `setup` writes outside `addons/` so that it
 is committed with `project.godot`. The loader brings the runtime up as a child of its own node,
-only in a debug build that has the addon. Anywhere else it does nothing. A release export carries
-it and nothing comes up. The runtime itself also refuses to serve outside a debug build.
+only in a debug build that has the addon. Anywhere else it does nothing. A release export leaves it
+out, as [Exports](#exports) says. The runtime itself also refuses to serve outside a debug build.
 
 The runtime comes up before the main scene's `_ready`, so a scene that does its work there can be
 reached while it does. `gdharness doctor` says when the loader differs from the one this gdharness
@@ -336,8 +327,8 @@ ships. Then `setup` and `upgrade` write it again.
 
 ### Entries that name something else
 
-An entry naming the addon's own script boots a build without `addons/` with a missing script. So
-`setup`, `upgrade` and `runtime on` point it at the loader.
+An entry naming the addon's own script fails in a build without `addons/`, so `setup`, `upgrade`
+and `runtime on` point it at the loader.
 
 An entry naming a loader of your own is left where you put it. Each of those commands says so and
 says how to use the shipped one instead. Take your entry out of `[autoload]`, delete your loader
@@ -346,13 +337,11 @@ and run `gdharness runtime on`.
 ### Script runs
 
 Autoloads come up for `godot -s` too, which is how a test tier and most batch tools are run. The
-runtime refuses to serve those as well, since a script run has no game in it to answer about.
-Otherwise a project whose suite starts sixteen engines at once would announce sixteen games under
-its own path. A `runtime_*` call would then reach whichever replied first. Set
+runtime refuses to serve those as well, since a script run has no game in it to answer about. Set
 `gdharness/runtime/serve_script_runs` to true in `project.godot` to drive a `-s` script on purpose.
 
-The loader's node, `/root/GdharnessRuntime`, is there in every engine all the same, a script run's
-included. Whether it exists says nothing about whether gdharness can reach the game. A test that
+The loader's node, `/root/GdharnessRuntime`, exists in every engine, script runs included. Its
+presence does not mean gdharness can reach the game. A test that
 needs to know asks `get_node("/root/GdharnessRuntime").serving()`. It is true only while the
 runtime under it is listening.
 
@@ -369,12 +358,10 @@ a debug pack has to allow that one.
 
 ### Scenes that are not the game
 
-A scene that is not the game, such as a bench, is handed to the engine the way a screen is. It is
-served like the game unless you list its folder. Set `gdharness/runtime/quiet_scenes_under` to the
-`res://` folders of such scenes, for example `PackedStringArray("res://tests/")`. A run started on a
-scene under one of them neither serves nor announces, and nor do the engines it starts. A run
-started to be profiled from its start is served all the same, since only the runtime hands its
-totals back as it quits.
+A scene that is not the game, such as a bench, is served like the game unless you list its folder
+in `gdharness/runtime/quiet_scenes_under`, for example `PackedStringArray("res://tests/")`. A run
+started on a scene there neither serves nor announces, and nor do the engines it starts. A run
+profiled from its start is served anyway.
 
 ## Installing from the signed archive
 
@@ -413,15 +400,10 @@ weaker than either command above.
 
 macOS: `shasum -a 256 -c`. PowerShell: `Get-FileHash gdharness-$VERSION.tgz -Algorithm SHA256`.
 
-**A failed check means stop.** Then unpack and run it from where it landed:
+If a check fails, do not install the archive. Otherwise unpack and run it from where it landed:
 
 ```bash
 mkdir -p .tools/gdharness
 tar -xzf "gdharness-${VERSION}.tgz" -C .tools/gdharness --strip-components=1
 node .tools/gdharness/build/cli.js setup /path/to/project
 ```
-
-## Before the first change
-
-Nothing. Your agent reads the skill the install writes. A tool that cannot answer says which state
-it is in and what changes it, rather than answering emptily.

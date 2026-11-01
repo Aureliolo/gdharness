@@ -201,7 +201,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
   if (declaring === undefined) {
     return {
       ok: false,
-      reason: `${declaringPath} is not among the scripts the engine sees: it is under a directory holding a .gdignore, or one spelled with a dot.`,
+      reason: `${declaringPath} is not among the scripts the engine sees: it is under a directory holding a .gdignore, or one whose name starts with a dot.`,
     };
   }
   const declared = declaredIn(scripts);

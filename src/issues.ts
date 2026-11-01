@@ -94,7 +94,7 @@ function filledTemplate(where: string, message: string, godotVersion?: string): 
   return [
     `**gdharness version**: ${SERVER_VERSION}`,
     `**Godot version**: ${godotVersion ?? ''}`,
-    `**Bun version**: ${runtime()}`,
+    `**Runtime**: ${runtime()}`,
     `**OS**: ${process.platform} ${process.arch}`,
     '**MCP client**:',
     '',
@@ -108,7 +108,7 @@ function filledTemplate(where: string, message: string, godotVersion?: string): 
     '',
     '## What happened',
     '',
-    'gdharness failed in a way it does not model.',
+    'gdharness failed in a way it does not handle.',
     '',
     '```text',
     message,
@@ -116,9 +116,8 @@ function filledTemplate(where: string, message: string, godotVersion?: string): 
     '',
     `Signature: \`${defectSignature(where, message)}\``,
     '',
-    'If the real cause turned out to be the project, the environment or the call, say so here:',
-    'reaching you as a defect rather than as a refusal naming what would have worked is then the',
-    'thing to fix.',
+    'If the real cause turned out to be the project, the environment or the call, say so here.',
+    'gdharness should have refused with what would have worked.',
     '',
     '## Anything that makes it reproducible',
     '',
@@ -184,9 +183,7 @@ export function defectReport(where: string, error: unknown, context: DefectConte
   const width = Math.max(...facts(where, message, godotVersion).map(([label]) => (label ?? '').length));
 
   return [
-    'gdharness failed in a way it does not model. Whatever went wrong underneath, it reached you',
-    'as a crash rather than as a refusal naming what would have worked, and that much is a defect',
-    'in gdharness however the rest of it turns out.',
+    'gdharness failed in a way it does not handle. That is a gdharness defect, whatever caused it.',
     '',
     ...(seenBefore === 0
       ? [
@@ -196,8 +193,8 @@ export function defectReport(where: string, error: unknown, context: DefectConte
           'further only spends turns.',
         ]
       : [
-          `You have had this exact failure ${seenBefore === 1 ? 'once' : `${seenBefore} times`} in this session already, so it is a`,
-          'state rather than a passing one, and sending the call again will not change it.',
+          `You have had this exact failure ${seenBefore === 1 ? 'once' : `${seenBefore} times`} in this session already.`,
+          'Sending the call again will not change it.',
         ]),
     '',
     ...facts(where, message, godotVersion).map(
@@ -213,11 +210,9 @@ export function defectReport(where: string, error: unknown, context: DefectConte
     url,
     '',
     'If they say yes and you have no way to open an issue yourself, give them that link and',
-    'those lines, and stay with them while they file it.',
+    'those lines.',
     '',
-    'Worth reporting either way. If you can see that what actually went wrong was the project,',
-    'the environment or the call, then this message is the defect: a failure gdharness knows',
-    'about is meant to arrive as a refusal naming what would have worked, not as this. Say that',
-    'in the report and it is the more useful of the two.',
+    'Report it even when the cause was the project, the environment or the call, and say so in',
+    'the report.',
   ].join('\n');
 }

@@ -9774,7 +9774,7 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
     const here = cli(project);
     assert.match(
       here.output,
-      /addons\/gdharness_editor is not installed/,
+      /4 addons are not installed \(gdharness_editor, /,
       `doctor with no argument should report on the directory it ran in: ${here.output}`,
     );
 
@@ -9804,21 +9804,31 @@ function testProjectDefaultsToTheWorkingDirectory(): void {
     // A flag nobody recognises stops the command before it starts. `setup --curser` once installed
     // the addons, enabled the plugins, registered the autoload and rebuilt the class list. It
     // refused the option only afterwards, and the project was left half configured.
-    for (const typo of [
-      ['setup', '--curser'],
-      ['doctor', '--jsonn'],
-      ['uninstall', '--claude'],
-    ]) {
-      const refused = spawnSyncHidden(process.execPath, [join(process.cwd(), 'build', 'cli.js'), ...typo], {
+    // The refusal names the two commands that list flags between them. It used to send every
+    // reader to `gdharness harnesses`, which lists no `--no-skill`, `--yes` or `--json`.
+    const run = (line: readonly string[]) =>
+      spawnSyncHidden(process.execPath, [join(process.cwd(), 'build', 'cli.js'), ...line], {
         encoding: 'utf8',
         cwd: project,
         timeout: 60000,
         env: withHome(process.env, join(sandbox, 'home')),
       });
-      assert.match(
-        `${refused.stdout}${refused.stderr}`,
-        /Unknown option/,
-        `${typo.join(' ')} should be refused`,
+    const help = run(['help']).stdout;
+    for (const flag of ['--no-runtime', '--no-connect', '--no-skill', '--yes', '--json']) {
+      assert.ok(help.includes(flag), `gdharness help, which the refusal names, lists ${flag}: ${help}`);
+    }
+    assert.match(run(['harnesses']).stdout, /--cursor/, 'and gdharness harnesses lists the harness flags');
+    for (const typo of [
+      ['setup', '--curser'],
+      ['doctor', '--jsonn'],
+      ['doctor', '--help'],
+      ['uninstall', '--claude'],
+    ]) {
+      const refused = run(typo);
+      assert.equal(
+        refused.stderr.trim(),
+        `gdharness: Unknown option ${typo[1]}. gdharness help lists each command's flags, and gdharness harnesses lists the harness flags.`,
+        `${typo.join(' ')} should be refused, naming where the flags are listed`,
       );
       assert.equal(refused.status, 2, 'as a usage error');
       assert.ok(
@@ -10025,7 +10035,7 @@ async function testAnEngineThatDoesNotAnswerIsNamed(): Promise<void> {
       );
       assert.match(
         refused,
-        /Point GODOT_PATH at a Godot 4 executable/,
+        /Point GODOT_PATH at a Godot 4\.7 or newer executable/,
         `${label}: and what to do: ${refused}`,
       );
       assert.doesNotMatch(
@@ -10359,10 +10369,10 @@ function testAnAutoloadNamingAFileThatIsNotThere(): void {
       0,
       `our own script is covered by the addon line and not said twice: ${said.join(' | ')}`,
     );
-    assert.equal(
-      said.filter((problem) => problem.includes('is not installed')).length,
-      ADDONS.length,
-      'which is the line that covers it, one for each addon',
+    assert.deepEqual(
+      said.filter((problem) => problem.includes('not installed')),
+      [`${ADDONS.length} addons are not installed (${ADDONS.join(', ')}). Run gdharness setup`],
+      'which is the line that covers it, one line naming every addon',
     );
     const loader = get(report, 'runtimeLoaderAutoload');
     assert.equal(get(loader, 'exists'), false, 'and the loader entry says its file is not there');
@@ -15193,8 +15203,8 @@ function testAPidPicksOneOfSeveralGames(): void {
   // each other whatever it says, so each claim is put to the thing it describes: `pid` settles a
   // bench, and `projectPath` settles two projects running one game each.
   const sentence = theGamePicked();
-  assert.match(sentence, /`pid` when they are all one project/, sentence);
-  assert.match(sentence, /`projectPath` when they are not/, sentence);
+  assert.match(sentence, /`pid` within one project/, sentence);
+  assert.match(sentence, /`projectPath` across projects/, sentence);
   assert.deepEqual(
     chooseRuntime([game(51, project), game(52, other)], other),
     { endpoint: game(52, other) },
@@ -20530,7 +20540,7 @@ function testTheCureIsWrittenWhole(): void {
   ];
   // What the tree holds today and not a comfortable minimum, so one place going quiet lowers this
   // in the same change and somebody confirms it was meant.
-  assert.equal(offered.length, 48, `the places offering a remedy should all be found, not ${offered.length}`);
+  assert.equal(offered.length, 49, `the places offering a remedy should all be found, not ${offered.length}`);
 
   // Across whitespace, because a rendered file wraps where the source did not and a sentence that
   // breaks at "the" is the same sentence. Change, edit and touch, because the claim is about what
@@ -20572,7 +20582,7 @@ function testTheCureIsWrittenWhole(): void {
 function testEveryRemedyLeadsWithTheScan(): void {
   const remedies = ['editor_rescan', 'editor_launch restart', 'project_import refresh_classes'] as const;
   const skill = skillFiles('0.0.0-test').get('SKILL.md') ?? '';
-  const editing = skill.slice(skill.indexOf('## Editing'), skill.indexOf('## Refusals are useful'));
+  const editing = skill.slice(skill.indexOf('## Editing'), skill.indexOf('## Refusals'));
   assert.ok(editing.length > 200, 'the Editing section is found and holds its paragraphs');
 
   const choosing: { where: string; text: string }[] = [
@@ -20809,10 +20819,10 @@ function testTheStaleHalfIsNamedCorrectly(): void {
 
   const behind = addonMismatch('0.4.2', '0.5.0', theirs, ours) ?? '';
   assert.match(behind, /editor_launch restart/, 'an old editor is restarted');
-  assert.doesNotMatch(behind, /reconnect/, 'and reconnecting the server would not help it');
+  assert.doesNotMatch(behind, /reconnect/i, 'and reconnecting the server would not help it');
 
   const ahead = addonMismatch('0.6.0', '0.5.0', theirs, ours) ?? '';
-  assert.match(ahead, /reconnect/, 'an old server is reconnected');
+  assert.match(ahead, /reconnect/i, 'an old server is reconnected');
   assert.doesNotMatch(ahead, /editor_launch restart/, 'and restarting the editor would widen it');
   assert.match(ahead, /0\.6\.0/, 'naming the version the harness should be spawning');
 
@@ -23788,7 +23798,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       /is absolute and outside the project\. Give a path inside it, such as 'elsewhere\.gd'\./,
       outside,
     );
-    assert.match(outside, /Possible solutions:\n- Give the path relative to the project/, outside);
+    assert.match(outside, /Next:\n- Give the path relative to the project/, outside);
     const info = await server.request(
       'tools/call',
       { name: 'script_info', arguments: { projectPath: project, scriptPath: 'checked/holdr.gd' } },
@@ -24923,7 +24933,11 @@ function testTheSkillNamesEverySettingTheAddonsRead(): void {
 
   // The bind address with its reason rather than only its name. A caller who reads that it exists
   // and not why it is loopback is one who moves it to reach a game on another machine.
-  assert.match(skill, /none of it authenticated/, 'and the bind address should say what it guards');
+  assert.match(
+    skill,
+    /The runtime takes unauthenticated `call_method`, `set_property` and input/,
+    'and the bind address should say what it guards',
+  );
 }
 
 function testTheSkillNamesTheSettingThatServesAScriptRun(): void {
@@ -29882,7 +29896,7 @@ async function testAnExportedBuildIsStartedAndStopped(): Promise<void> {
     const profiled = textOf(await call({ op: 'start', executable: build, profile: true })) ?? '';
     assert.match(
       profiled,
-      /^A profile is read through the debugger, and an exported build is started without one/,
+      /^An exported build cannot be profiled, because a release build quits when given --remote-debug\./,
     );
 
     // Silent unless asked otherwise, as every run is: the engine flag goes before the build's own
@@ -48926,7 +48940,10 @@ function testTheLspCommandFindsTheEditorsPort(): void {
       [['--wait', '-1'], /^--wait takes a number of seconds, not -1\.$/],
       [['--verbose'], /^Unknown option --verbose\. gdharness lsp takes --port N and --wait S\.$/],
       [[project, 'other'], /^gdharness lsp takes one project, and was given .+ and other\.$/],
-      [[join(project, '.godot')], /^Not a Godot project: .+ holds no project\.godot\.$/],
+      [
+        [join(project, '.godot')],
+        /^Not a Godot project: .+ holds no project\.godot\. Run from the project directory, or name it on the command line\.$/,
+      ],
     ] as const) {
       assert.throws(
         () => lspOptionsOf(args, project),
@@ -54754,7 +54771,10 @@ function testCommandLineSetup(): void {
 
     const before = cli('doctor', projectDir);
     assert.equal(before.status, 1, `doctor fails a bare project:\n${before.stdout}${before.stderr}`);
-    assert.match(before.stdout, /addons\/gdharness_editor is not installed/);
+    assert.match(
+      before.stdout,
+      /^problem: 4 addons are not installed \(gdharness_editor, gdharness_runtime, auto_reload, gdharness_tests\)\. Run gdharness setup$/m,
+    );
 
     const setup = cli('setup', projectDir);
     assert.equal(setup.status, 0, `setup:\n${setup.stdout}${setup.stderr}`);
@@ -54779,8 +54799,8 @@ function testCommandLineSetup(): void {
     );
     assert.doesNotMatch(setup.stdout, /runtime off/, 'rather than to turn it off before an export');
     const ships =
-      /^ {2}every export carries gdharness\/, since the entry names it, and the loader does nothing in a release build: a check or export filter that keeps unknown top-level folders out of a pack has to allow it$/m;
-    assert.match(setup.stdout, ships, 'and that its new folder goes into every export');
+      /^ {2}a debug export carries gdharness\/\. A check or export filter that keeps unknown top-level folders out of a debug pack has to allow it$/m;
+    assert.match(setup.stdout, ships, 'and that its new folder goes into a debug export');
 
     const healthy = cli('doctor', projectDir, '--json');
     assert.equal(healthy.status, 0, `doctor after setup:\n${healthy.stdout}${healthy.stderr}`);
@@ -69716,7 +69736,7 @@ async function testA3DLevelIsReadAsItIsWritten(): Promise<void> {
     );
     assert.equal(
       built,
-      'Path \'res://arena.tscn::StandardMaterial3D_g\' names the resource StandardMaterial3D_g kept inside res://arena.tscn, not a file. resource_edit read reads one by that path, and this argument takes a file.Possible solutions:\n- Write it through the node holding it, with scene_node set on res://arena.tscn and a path through the property, such as "mesh/material/albedo_color". scene_node get names the property that holds it',
+      'Path \'res://arena.tscn::StandardMaterial3D_g\' names the resource StandardMaterial3D_g kept inside res://arena.tscn, not a file. resource_edit read reads one by that path, and this argument takes a file.Next:\n- Write it through the node holding it, with scene_node set on res://arena.tscn and a path through the property, such as "mesh/material/albedo_color". scene_node get names the property that holds it',
     );
     const through = parseTextContent(
       await node({ op: 'set', nodePath: 'Paths/Ground', properties: { 'mesh/material/roughness': 0.8 } }),

@@ -1,7 +1,7 @@
 # Test runs
 
 `gdharness test` runs a project's gdUnit4 suites over several engines and judges everything they
-print. A game's gate runs it, so every game runs its suites the same way. Each engine waits for one
+print. Each engine waits for one
 of the machine's engine slots and is ended when it goes silent. It is judged on its output line by
 line rather than on its exit code.
 
@@ -63,7 +63,7 @@ when the command line itself is wrong.
 ## Output options
 
 - `--print-output`: print everything each engine printed before the verdict, as for a benchmark
-  written as a suite and run by hand. A gate never passes it.
+  written as a suite and run by hand.
 - `--verbose`: start every engine with Godot's `--verbose` to name a leak at exit, where the engine
   otherwise prints only two counts. The verdict counts the objects left alive by class and names
   the resources still in use, the project's own before its addons'.
@@ -121,7 +121,7 @@ Those functions are the cases it is expected to run, which is how a case that ne
 A project keeps folders out of every search by listing them in `gdharness/tests/not_searched`, a
 `PackedStringArray` of `res://` paths in `project.godot`. Benches written as suites and run by hand
 go there. A suite in such a folder still runs when it is named, or a folder at or inside the listed
-one is. project_test reads the same setting.
+one is. `project_test` reads the same setting.
 
 ```ini
 [gdharness]
@@ -165,8 +165,7 @@ must also cost more than an engine's even share of the run. That share is the co
 over the engines there is room for. An engine holding part of such a suite skips the rest. The run
 names each suite it dealt out that way.
 
-A suite within its share is balanced by the rest. Split, it would build what its cases share again
-in every engine they land in.
+A suite within its share is balanced by the rest.
 
 ### Splitting a parameterised case
 
@@ -199,9 +198,9 @@ engines than the smallest of these:
 - What it takes to keep each engine busy for as long as the slowest unit or 5 seconds, whichever
   is longer. One more is added for each unit with a case never timed.
 
-The median is a guess. A suite just split out of a slow one, or every suite of a project's first
-run, is unlikely to cost it. A run held below `--engines` by processors or memory says which on its
-first line.
+The median is only a guess at what an untimed case costs. It guesses worst for a suite just split
+out of a slow one, and for every suite on a project's first run. A run held below `--engines` by
+processors or memory says which on its first line.
 
 ### Free memory
 
@@ -291,8 +290,8 @@ alive until that walk is over, so the walk finishes. It prints a line as the wal
 another as it ends.
 
 A run whose walk still stopped part way lists what the engine reported under "not counted against
-the run" instead of failing on it. What a test leaks itself, a script it holds included, still
-holds what it reaches. It is still reported and still fails the run.
+the run" instead of failing on it. What a test leaks itself, a script it holds included, is still
+reported and still fails the run.
 
 ### Exit codes
 
@@ -316,18 +315,10 @@ with them, and 101 is left out beside the line.
 
 ### gdUnit4 checks
 
-The runner swaps the session gdUnit4 makes for one that finds each case by its id in a dictionary.
-gdUnit4's own walks every case of the session for each lookup, which grows with the square of a
-run's cases.
-
-The swap holds only while gdUnit4 announces a session before it hands it to its hooks and its
-console. A session hook of the runner's own fails the run, with gdUnit4's version, when it is
-handed another session. So do cases that ran without one lookup reaching it.
-
-The runner turns both reports off by marking their hooks. A report turned off by an option that
-gdUnit4 no longer registers a hook for fails the run the same way. So does any file in an engine's
-reports folder, since a file there means gdUnit4 no longer reads the mark. These checks run against
-the gdUnit4 the project installs.
+The runner replaces gdUnit4's test session with a faster one and turns gdUnit4's reports off. If
+the installed gdUnit4 no longer works the way the runner relies on, the run fails and names
+gdUnit4's version. A file in an engine's reports folder fails it too, since it means gdUnit4 no
+longer reads the runner's mark.
 
 ## What a failed run prints
 
@@ -419,10 +410,8 @@ A project whose scene runner suites pass headless turns the guess off for every 
 ### The windowed engine
 
 All the windowed suites go to one windowed engine, which starts first, counts toward `--engines`
-and runs nothing else. A suite dealt there would meet the real display server. The screen size and
-scale, the keyboard layout and the display features it reports would be the machine's rather than
-the headless server's. Setting the root viewport's size would leave it the window's, and it would
-run slower for drawing frames.
+and runs nothing else. A suite there sees the machine's real screen size, scale and keyboard
+layout, and runs slower for drawing frames.
 
 ### After the windowed engine
 
@@ -459,22 +448,22 @@ stays headless, and the note says so.
 
 ### macOS runners
 
-On a GitHub macOS runner, whose GPU is virtual, Godot's Metal driver under the Forward+ renderer
-prints `timeout waiting for fence` as a windowed engine draws. That engine error fails the run. It
-showed in eight of ten windowed runs drawing thirty frames. It showed in none of ten under the
-Mobile or Compatibility renderer, or with the Vulkan driver. A project rendering with Forward+ that
-runs windowed suites there can set `rendering/rendering_device/driver.macos` to `vulkan`.
+On a GitHub macOS runner, Metal under Forward+ often prints `timeout waiting for fence` in a
+windowed engine, which fails the run. Mobile, Compatibility and the Vulkan driver do not. A Forward+
+project can set `rendering/rendering_device/driver.macos` to `vulkan`.
 
 ## Silence and memory
 
 An engine that prints nothing for 300 seconds is ended, and the case it was in is named.
 `--silence` changes the 300.
 
-Something that took longer last time has four times its own last time. For a case that is the
-case's time, and for a row of a parameterised case the row's. A suite's hooks, and the stretch
-between its cases, get the time the suite spent outside its cases. The limit follows what the
-engine is running, not the slowest suite dealt to it. A long suite does not let a suite beside it
-hang for as long.
+A case may stay silent for four times its last time, when that is longer than the limit. At the
+default limit, that is a case whose last time was over 75 seconds. For a row of a parameterised
+case it is the row's time. A suite's hooks, and the stretch between its cases, get the time the
+suite spent outside its cases.
+
+The limit follows what the engine is running, not the slowest suite dealt to it. A long suite does
+not let a suite beside it hang for as long.
 
 ### Deadlines
 
@@ -540,9 +529,9 @@ The engine answers a load of a resource it holds from its cache without asking a
 loads every suite of an engine, with all they preload, before the first one runs. So a load the
 cache answers is never recorded.
 
-A suite loading by a path worked out at run time therefore also has the project files the cache
-held as it began. The engine's suites are left out of those. It has all of them, or only those
-under the start of a path begun with a literal or constant (`SOUNDS + take + ".ogg"`).
+A suite loading by a path worked out at run time therefore has more inputs. They are the project
+files the cache held as it began, other than the engine's suites. With a literal or constant prefix
+(`SOUNDS + take + ".ogg"`), only the files under that prefix count.
 
 The cache holds a resource only while something refers to it. What an earlier suite loaded and let
 go is not among a later suite's inputs, because loading it again asks a loader.
@@ -670,16 +659,16 @@ ones.
   not given to one before it. Leave those slots alone.
 - You may take a slot you have left for 5 seconds, since one ahead takes a slot within a moment of
   its coming free. From then on, leave that waiter nothing.
-- A mark that lets a slot stand is waiting for something else, such as memory. A timing leaves
-  nothing.
+- A waiter that leaves a free slot untaken is waiting for something else, such as memory.
+- A `timing` taker leaves no slot to those ahead, because its queue has already given it its turn.
 
 ### Step 6: give the slot back
 
 - When done, remove the lock, but only if it still names your pid.
 - At each take, remove every `<n>.lock` numbered at or past the slot count whose holder has gone,
   under its steal file as in step 3.
-- Only a taker given more slots makes those. No take of the count reads them, so nothing else frees
-  them.
+- Only a taker given a larger slot count makes those locks. Takers with the normal count never look
+  at them, so nobody else frees them.
 
 ### A slot lent to a child
 

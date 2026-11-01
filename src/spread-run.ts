@@ -111,7 +111,9 @@ export function spreadOptionsOf(args: readonly string[], cwd: string): SpreadOpt
   const projectNamed = named !== null && existsSync(join(named, 'project.godot'));
   const projectPath = projectNamed ? named : resolve(cwd);
   if (!existsSync(join(projectPath, 'project.godot'))) {
-    throw new EngineUsageError(`Not a Godot project: ${projectPath} holds no project.godot.`);
+    throw new EngineUsageError(
+      `Not a Godot project: ${projectPath} holds no project.godot. Run from the project directory, or name it on the command line.`,
+    );
   }
   const scenes = positional.slice(projectNamed ? 1 : 0);
   if (scenes.length !== 1) {

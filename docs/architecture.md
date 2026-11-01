@@ -4,9 +4,6 @@ What an install puts where, and what talks to what once it runs.
 
 ## What an install puts where
 
-Everything belongs to one project. Twenty Godot projects means twenty installs, each with its own
-copy of the addons, its own pinned version and its own engine path.
-
 ```text
 your-project/
 |-- addons/gdharness_editor/   the bridge: scenes, resources, running the game
@@ -31,8 +28,7 @@ because the server and the addons have to match. `editor_status` reports a misma
 
 The entry names its runner by path, not as `npx` or `bunx`. A harness spawns what the config names
 through PATH, and a runner's name is not always on PATH. A Bun installed under a project ships `bun`
-without `bunx`, so an entry saying `bunx` starts nothing. The entry carries an absolute `GODOT_PATH`
-already, so it was never portable between machines.
+without `bunx`, so an entry saying `bunx` starts nothing.
 
 A Bun entry carries `--bun`. The published bundles start with `#!/usr/bin/env node`, because npx is
 Node. A runner honours that line. Without the flag, a Bun entry runs the server under whatever Node
@@ -99,9 +95,8 @@ does. Such a game is named as unreadable, with the half that is behind.
 pipe, a CI job or an agent, where nobody can answer a question. There it writes what the project has
 already committed to and asks nothing.
 
-**Nothing outside the project is written without a flag or a typed yes.** A harness with no
-project-level config is then written where it lives. That is the harness's own limitation. It never
-happens as a side effect of installing a project.
+What `setup` writes outside the project, and when, is in
+[the install guide](install.md#what-it-writes-and-where).
 
 Detection asks two questions of each harness. Is this project already configured for it? Is the
 harness on this machine at all? The second reads the harness's own directory under home and never
@@ -109,8 +104,7 @@ writes there.
 
 ## Every harness
 
-All but two are written for you, whatever the format. A block to paste is a step that gets skipped
-or pasted into the wrong file.
+All but two are written for you, whatever the format.
 
 | Format | How it is written                          | What survives                                          |
 | ------ | ------------------------------------------ | ------------------------------------------------------ |
@@ -159,7 +153,7 @@ gdharness
 |
 `-- server.ts             the MCP server: one call in, one answer out
     |-- tool-definitions  every tool, op and argument, in one table
-    |-- tool-args.ts      the refusals, which name the valid set
+    |-- tool-args.ts      reading arguments of each type
     |
     |-- godot-bridge.ts   websocket, 6505, the editor addon connects in
     |-- lsp_client.ts     tcp, 6005, diagnostics and symbols
@@ -171,8 +165,8 @@ addons, installed into your project
 |-- gdharness_editor      the bridge: scenes, resources, running the game
 |-- gdharness_runtime     an autoload: the running game answers through it
 |-- auto_reload           reloads the open scene when a file changes
-`-- gdharness_tests       waits, tween steps and input events for suites; GdhShare,
-                          GdhBench, and the scene suites are profiled in
+`-- gdharness_tests       waits, tween steps and input events, GdhShare, GdhBench,
+                          and the scene that profiles suites
 ```
 
 The CLI half never loads the MCP SDK. The server half never reads the harness table. They share only
@@ -185,8 +179,8 @@ table.
 
 ### Test runs
 
-A game's gate runs its gdUnit4 suites with `gdharness test`. [Test runs](test-runs.md) describes it,
-with the engine slots the games' own tools share. Each of its engines starts the shipped runner,
+A CI job runs a project's gdUnit4 suites with `gdharness test`. [Test runs](test-runs.md) describes
+it and the engine slots it shares with other tools. Each of its engines starts the shipped runner,
 `godot/tests/listed.gd`, from outside the project. `project_test` starts the same runner.
 
 Both judge the engine's output with `suite-judge.ts`, from one file holding both streams in order.
@@ -235,41 +229,38 @@ A failed call is a refusal or a defect, and the answer says which.
 
 A **refusal** is a failure the tool anticipated. Examples are an argument outside the valid set, a
 node not in the scene, or an editor that is not connected. It names what would have worked instead.
-Most refusals are written by `tool-args.ts`.
+Most refusals are written in `server.ts`.
 
 A **defect** is any other throw, caught at the tool boundary in `server.ts` or at the bottom of
-`cli.ts`. Its answer says first that repeating the call will not help. Without that, an agent reads
-an exception message as something it did wrong. The answer carries the version, the runtime, the
-platform and a short signature that is the same for one bug on two machines. It asks the reader to
-ask the machine's owner before reporting it for them.
+`cli.ts`. Its answer says first that this is a gdharness defect. Without that, an agent reads an
+exception message as something it did wrong. The answer carries the version, the runtime, the
+platform and a short signature that is the same for one bug on two machines.
+
+### Retrying a defect
+
+The first time, the answer asks for one retry. When the same signature comes back, it says a retry
+will not help. It asks the reader to ask the machine's owner before reporting it for them.
 
 ### Reporting a defect
 
-Nothing is sent from here. No issue is opened before somebody sees what it would contain. The report
-is about their project. A public tracker is their decision. The link it offers opens the issue form
-with those lines filled in.
+Nothing is sent automatically. The agent asks the machine's owner first, because the report names
+their project's files. The link opens the issue form with the report filled in.
 
 A defect asks to be reported even when the fault was really the project's or the environment's.
-Then a refusal that should have named the fix is missing, and every later caller hits the same wall.
-The message and the form both say such a report is the more useful kind.
+Then a refusal that should have named the fix is missing, and every later caller meets the same
+failure. The message and the form both ask for such a report.
 
-About one answer in a few hundred also asks the caller which tool was missing. Only a caller that
+Every 250th answer also asks the caller which tool was missing. Only a caller that
 just worked around a missing tool knows of it. It asks for the same yes before anything is filed.
 
 ## The third kind of failure
 
-Every tool here answers in JSON. JSON always looks certain. The costliest failure is an answer that
-is well formed and confident but means something other than what the reader takes it to mean. Two
-projects reported these five in one day:
+The costliest failure is a well-formed, confident answer that means something other than what the
+reader takes it to mean. Examples:
 
-- five diagnostics about code the engine had just compiled and run green,
-- `No game is running` about a bench that had printed forty minutes of output,
-- four hidden labels read back as what the player can see,
-- `warnings` naming neither what was warned nor where,
-- a roster of twelve people rendered as the word `RefCounted` twelve times.
-
-Nothing broke in any of them. Each cost somebody hours, because finding out meant running what the
-tool should have saved them running.
+- diagnostics about code that had just compiled and run,
+- `No game is running` about a bench still printing,
+- hidden labels read back as visible.
 
 ### Every answer shows its own ambiguity
 
@@ -282,8 +273,7 @@ answer that shows it.
 - A list that cannot be stepped into says how long it is. It does not claim to lack the property.
 
 When two states a caller must tell apart arrive as one answer, the caller stops trusting the tool.
-One project wrote a `Get-Process` loop because a false negative and a true negative were spelled
-alike. That cost is higher than the cost of a missing feature.
+That cost is higher than the cost of a missing feature.
 
 ### A fix leaves sentences behind
 
@@ -303,8 +293,8 @@ failing under the operation asked for.
 ### Disarming a fixture
 
 A fixture is checked by disarming the line it guards. Break the code on purpose and say beforehand
-which tests should notice. Then run them and compare. A prediction that misses is worth more than a
-green run. It names a fixture that is not watching what its name says.
+which tests should notice. Then run them and compare. A prediction that misses names a fixture
+that is not watching what its name says.
 
 `bun test/regressions.ts` runs every regression even after a failure and lists the failures at the
 end. So one disarm shows every test that noticed. Arguments select tests by name, loosely matched, to
@@ -751,8 +741,7 @@ Editing a file while a game runs does not change that game. `auto_reload` is an 
 polls the open scene and the scripts on that scene's node tree. It reloads them with
 `CACHE_MODE_REPLACE` in the editor's own process. The game is a separate process with its own copy.
 
-In a measured run, the same method answered 8 throughout and 12 from a game started afterwards, with
-only the file changed. So a long bench is no reason to stop editing. The new code arrives on the next
+So a long bench is no reason to stop editing. The new code arrives on the next
 `editor_run start`. A script attached to nothing on the open scene, such as a helper on no node, is
 watched by nothing.
 
@@ -775,7 +764,7 @@ the process and the file. There is one note per project, because every server on
 the directory.
 
 The output goes to a file rather than a pipe. A pipe with no reader fills and then blocks the
-writer. That would trade a killed run for a wedged one.
+writer, so a game writing into a pipe nobody reads would hang.
 
 ### No console windows
 
@@ -786,8 +775,7 @@ always does.
 
 The exception is a game, whose window is the point of running it. The keeper starts it detached, so
 it gets no console either. Godot's own `OS.create_process` and `OS.execute` open no console unless
-asked, and the shipped scripts never ask. One regression walks the source for any other way of
-starting a process. Another reads back, from the started process, the show state each start named.
+asked, and the shipped scripts never ask.
 
 ### Crash dumps on Windows
 
@@ -904,7 +892,7 @@ be told from here.
 ### Who ended a run
 
 A run that has ended also says who ended it. `endedBy` names the call when that was this server, or
-is null when it was not. Null is an answer in its own right. Without it, a bench that stopped on its
+is null when it was not. Without it, a bench that stopped on its
 own and a bench this server stopped look the same.
 
 Watching a log stop growing tells nothing on a run that prints only at the end.
@@ -938,8 +926,8 @@ answer as the run the server holds. That is the run it started or picked up from
 engine, its project and its start time, no later than the run's, must all match.
 
 The server reads the command line where the platform gives it and the executable where it does not.
-When the platform will not say, the answer is no. Not knowing is not knowing, and the caller asking
-is the one that kills.
+When the platform will not say, the answer is no. A process the platform will not describe is never
+signalled.
 
 The flags are read as the engine reads its own, up to the `--` after which the game's begin. So a
 game given `-e` is not taken for an editor. The process is held against what the server holds, not
@@ -974,9 +962,8 @@ them back with `OS.get_cmdline_user_args()`. A run carrying any is spawned rathe
 editor.
 
 That is the engine's limit. The editor builds the game's command line from
-`editor/run/main_run_args`, and reads that setting when it opens the project. Measured against
-4.7.2, a value the addon wrote into the live settings did not reach the game played a moment later.
-Saving it to disk did not change that. The same value set before the editor started arrived.
+`editor/run/main_run_args`, and reads that setting only when it opens the project. So a value
+written later does not reach a played game.
 
 ### The keeper as debugger
 
@@ -1165,7 +1152,7 @@ setting nobody wrote into `project.godot` still answers with the default the eng
 The engine it starts reads the file. An open editor holds a different reading, including changes
 nobody has saved. `project_settings get` takes `from` to choose between them.
 
-- `disk` is the default and the only reading a push gate can use. It needs no editor, and any
+- `disk` is the default and the only reading a CI job can use. It needs no editor, and any
   machine reproduces it.
 - `editor` costs no engine start and answers what the editor holds.
 
@@ -1560,9 +1547,9 @@ property set did not survive the save.
 ### Warning levels
 
 `--path` also makes that project's GDScript warning levels the ones the operations script compiles
-under. That holds although the file lives in gdharness's own package, not in the project. Godot's
-escape hatch does not reach it. `debug/gdscript/warnings/directory_rules` exempts paths under
-`res://`, and this one is nowhere near.
+under. That holds although the file lives in gdharness's own package, not in the project.
+`debug/gdscript/warnings/directory_rules` cannot exempt it, because its rules match only paths under
+`res://`.
 
 A project could turn `unsafe_call_argument` or `return_value_discarded` up to error. Then gdharness
 would stop compiling, and every headless operation would fail at once. So the shipped GDScript is
@@ -1582,7 +1569,7 @@ then an autoload, before the script's own constants and inner classes. Take a pr
 
 An inner class of the same name is refused outright as hiding the global one. So every name a
 shipped script declares in a class's casing starts with `Gdh`. That covers a preloaded module, an
-inner class and an enum. No project's own names start that way.
+inner class and an enum.
 
 The engine suite declares a class and an autoload for each such name, without the prefix. It
 compiles and runs the shipped scripts beside them. It also refuses a declared name in a class's
@@ -1595,7 +1582,7 @@ there, and 49 take a level. `enable` and `renamed_in_godot_4_hint` are booleans.
 is a dictionary of path to level.
 
 A loop that writes 2 to each setting under the prefix writes a level over a boolean. Nothing looks
-wrong afterwards, because 2 is as true as true is.
+wrong afterwards, because a boolean reads 2 as true.
 
 So the levels are picked out by the type the engine registers. A list of the three exceptions would
 go stale. `project_settings get` takes a `prefix` and answers with the type of each. Make that call
@@ -1627,7 +1614,7 @@ and the scene's own `uid=`. That would delete the very references the op exists 
 Every walk over a project directory stops at the same three things. That holds whether the engine
 walks or the server reads the directory itself.
 
-- A name spelled with a dot.
+- A name starting with a dot.
 - `node_modules`.
 - A directory holding a `.gdignore`.
 

@@ -23,6 +23,7 @@ import {
   writeSkill,
 } from '../src/skill.js';
 import { TOOL_SPECS } from '../src/tool-definitions.js';
+import { SHARED_PARAGRAPHS, withSharedParagraphsLinked } from '../src/tool-reference.js';
 import { sweep } from './support/sweep.js';
 
 function project(): string {
@@ -95,6 +96,7 @@ function testTheReferenceIsTheServersOwnToolList(): void {
   assert.deepEqual(
     answered.map((tool) => tool.name),
     [
+      'project_settings',
       'project_import',
       'project_test',
       'scene_node',
@@ -111,8 +113,27 @@ function testTheReferenceIsTheServersOwnToolList(): void {
   );
   for (const tool of answered) {
     assert.ok(
-      reference.includes(`The answer: ${tool.answer ?? ''}`),
+      reference.includes(`The answer: ${withSharedParagraphsLinked(tool.answer ?? '')}`),
       `${tool.name}'s answer is in the reference`,
+    );
+  }
+  // A paragraph several tools share is written once, under its own heading, and each tool links to
+  // it. Counted whole, so a copy left behind in one tool's text fails as surely as a missing one.
+  for (const { heading, text } of SHARED_PARAGRAPHS) {
+    assert.equal(
+      reference.split(text).length - 1,
+      1,
+      `the paragraph under ${heading} is in the reference exactly once`,
+    );
+    assert.ok(reference.includes(`## ${heading}\n\n${text}\n`), `and it is under ${heading}`);
+    const linkedFrom = TOOL_SPECS.filter((tool) =>
+      `${tool.description}${tool.answer ?? ''}`.includes(text),
+    ).length;
+    assert.ok(linkedFrom >= 2, `${heading} is shared by ${linkedFrom} tools`);
+    assert.equal(
+      reference.split(`(#${heading.toLowerCase().replaceAll(' ', '-')}) applies.`).length - 1,
+      linkedFrom,
+      `and every tool sharing it links to ${heading}`,
     );
   }
   assert.ok(
