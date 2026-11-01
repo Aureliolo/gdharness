@@ -58262,22 +58262,34 @@ async function testATestRunTakesTheCasesNamed(): Promise<void> {
       const missed = await run({ path: 'res://test/math_test.gd:test_dobles' });
       assert.match(
         missed.text,
-        /^No suite under res:\/\/test\/math_test\.gd has a case res:\/\/test\/math_test\.gd:test_dobles\. The nearest are math_test:test_doubles, /m,
+        /^No suite under res:\/\/test\/math_test\.gd has a case res:\/\/test\/math_test\.gd:test_dobles\. The nearest is math_test:test_doubles\.$/m,
         missed.text,
       );
       // A name no suite declares is refused before an engine starts, with the nearest names.
       const misspelt = await run({ tests: ['test_dobles'] });
       assert.match(
         misspelt.text,
-        /^No suite under res:\/\/test has a case test_dobles\. The nearest are test_doubles, /m,
+        /^No suite under res:\/\/test has a case test_dobles\. The nearest is test_doubles\.$/m,
         misspelt.text,
       );
       const elsewhere = await run({ tests: ['math_extra_test:test_halves'] });
       assert.match(
         elsewhere.text,
-        /^No suite under res:\/\/test has a case math_extra_test:test_halves\. The nearest /m,
+        /^No suite under res:\/\/test has a case math_extra_test:test_halves\. The nearest is math_test:test_halves\.$/m,
         elsewhere.text,
       );
+      // The test_ every case starts with, and the suite named before one, make no name near.
+      for (const unlike of ['test_matches_nothing_here', 'math_test:test_matches_nothing_here']) {
+        const far = await run({ tests: [unlike] });
+        assert.match(
+          far.text,
+          new RegExp(
+            `^No suite under res://test has a case ${unlike}\\. The cases there are [^\\n]*\\bmath_test:test_adds\\b`,
+            'm',
+          ),
+          far.text,
+        );
+      }
       // A script named on its own that declares no case is refused before an engine starts, rather
       // than run to gdUnit4 finding nothing. A directory holding one runs the suites beside it, as
       // every run here shows.
