@@ -54,11 +54,11 @@ that is running, and the project on disk. ${TOOL_SPECS.length} tools, named \`do
 
 ## Start here
 
-- ${projectPathSentence()}. The \`editor_*\` ones answer about the editor this server is connected
-  to. There is no ambient project.
+- ${projectPathSentence()}. Those answer about the editor or game this server is connected to.
+  There is no ambient project.
 - \`runtime_*\` calls pick a game by \`projectPath\`, or by \`pid\` when several run from one
   project, as a bench and its workers do. \`debug_*\` calls go to the game this server started or
-  the editor is playing.
+  the editor is playing. \`debug_breakpoint\` also holds breakpoints when there is none.
   ${theGamePicked()}
 - An argument a tool does not declare is refused rather than ignored.
 - \`editor_status\` says whether an editor is connected and whether its addon matches the server.
@@ -145,7 +145,7 @@ announces, nor do the engines it starts, unless it was started to be profiled fr
 
 The autoload names \`res://${RUNTIME_AUTOLOAD.path}\`, the loader \`gdharness setup\` writes, which
 brings the runtime up only in a debug build that has the addon. A release export leaves out the
-entry, the loader, and the runtime, editor and auto_reload addons. A debug export keeps them. The
+entry, the loader and the runtime, editor and auto_reload addons. A debug export keeps them. The
 loader is committed with \`project.godot\`, and \`gdharness doctor\` says when it differs from the
 one gdharness ships.
 
@@ -214,7 +214,7 @@ them. \`editor_rescan\` asks it to scan and names any class it still cannot reso
 \`unseenByEditor\`: the editor's own scan skips a file a headless engine has already imported, so
 the declaration and the cache can both be right while the editor stays blind to it. For a class
 under \`unseenByEditor\`, run \`editor_rescan\` again, which needs no change to the declaring
-script. \`editor_launch restart\` also fixes it, at the cost of an editor restart.
+script. \`editor_launch restart\` also fixes it.
 
 With no editor open, the headless engine that compiles for \`script_diagnostics\` and for
 \`project_info\`'s health and validation resolves class names only from that cache file. A
