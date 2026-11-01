@@ -215,7 +215,7 @@ func _paths(reply: Dictionary) -> Array[String]:
 
 
 ## A RichTextLabel reads as its words, not its markup. Its text is the BBCode when it reads BBCode,
-## and a ledger line came back as `"[b][color=#3a7bd5]Elinor Garrow[/color], [/b]..."`, so a phrase
+## and a ledger line came back as `"[b][color=#3a7bd5]Osric Halcott[/color], [/b]..."`, so a phrase
 ## running across a tag could be neither read, found nor waited for. And a line a game adds with
 ## append_text() is in no property at all.
 func _check_reading_rich_text() -> void:
@@ -229,7 +229,7 @@ func _check_reading_rich_text() -> void:
 	marked.bbcode_enabled = true
 	marked.fit_content = true
 	marked.text = (
-		"[b][color=#3a7bd5]Elinor Garrow[/color], [/b][color=#b08850]a lamplighter[/color]"
+		"[b][color=#3a7bd5]Osric Halcott[/color], [/b][color=#b08850]a tax auditor[/color]"
 	)
 	dossier.add_child(marked)
 	var appended: RichTextLabel = RichTextLabel.new()
@@ -240,11 +240,11 @@ func _check_reading_rich_text() -> void:
 
 	var said: Dictionary = await node._execute_command("read_text", { "root": "/root/Ledger" })
 	var lines: Array = said.get("lines", [])
-	if lines != ["Elinor Garrow, a lamplighter", "Parcel 72, a delivery"]:
+	if lines != ["Osric Halcott, a tax auditor", "Parcel 72, a delivery"]:
 		_fail("rich text reads as what is drawn, with no tags in it: %s" % str(said))
 
 	var found: Dictionary = await node._execute_command(
-		"find_nodes", { "says": "Garrow, a lamp", "root": "/root/Ledger" }
+		"find_nodes", { "says": "Halcott, a tax", "root": "/root/Ledger" }
 	)
 	if found.get("count") != 1:
 		_fail("a phrase running across a tag is found: %s" % str(found))
@@ -260,7 +260,7 @@ func _check_reading_rich_text() -> void:
 	await process_frame
 	var partway: Dictionary = await node._execute_command("read_text", { "root": "/root/Ledger" })
 	var shown: Array = partway.get("lines", [])
-	if shown != ["Elinor Garrow,", "Parcel 72, a delivery", "Monday"]:
+	if shown != ["Osric Halcott,", "Parcel 72, a delivery", "Monday"]:
 		_fail("text being typed out reads as far as it is drawn: %s" % str(partway))
 	var early: Dictionary = await node._execute_command(
 		"find_nodes", { "says": "Monday 17", "root": "/root/Ledger" }

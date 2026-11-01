@@ -53576,8 +53576,8 @@ async function testGdUnitRunner(): Promise<void> {
           [
             'extends GdUnitTestSuite',
             '',
-            'const WANTED: String = "for every Astragon you have lit"',
-            'const FOUND: String = "for every spell you have lit"',
+            'const WANTED: String = "for every Ostrakon you have kept"',
+            'const FOUND: String = "for every spell you have kept"',
             '',
             '',
             'func test_a_array_failure_first() -> void:',
@@ -53659,7 +53659,7 @@ async function testGdUnitRunner(): Promise<void> {
         for (const name of ['test_the_sentence_alone', 'test_the_sentence_after_others']) {
           assert.ok(
             detailOf(name).endsWith(
-              ` but was\n 'for every spell you have lit'\n\tat '${name}' in res://mixed/mixed_test.gd:${name === 'test_the_sentence_alone' ? 12 : 20}`,
+              ` but was\n 'for every spell you have kept'\n\tat '${name}' in res://mixed/mixed_test.gd:${name === 'test_the_sentence_alone' ? 12 : 20}`,
             ),
             `${name} says the value it found: ${JSON.stringify(detailOf(name))}`,
           );
