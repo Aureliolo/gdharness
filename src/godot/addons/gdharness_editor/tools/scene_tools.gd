@@ -301,18 +301,26 @@ func add_node(args: Dictionary) -> Dictionary:
 	if not unplaceable.is_empty():
 		return scene.refuse(unplaceable)
 
-	# In the tree before its properties, so a property holding a node can find it by path.
+	# In the tree before its properties, so a property holding a node can find it by path. The
+	# script goes on once the node is in place, as an add and then a set of the script would put
+	# it. What the parent gives the node, such as a Container's layout mode, is then what the node
+	# held before its script, and only what the script's _init changed is put back.
 	var new_node: Node = GdhPlacing.made(packed, node_type)
-	if class_script != null:
-		scene.asked(new_node, ["script"])
-		new_node.set_script(class_script)
 	new_node.name = node_name
 	parent.add_child(new_node)
 	GdhPlacing.place(new_node, place)
 	GdhPlacing.own(new_node, root)
+	if class_script != null:
+		scene.asked(new_node, ["script"])
+		new_node.set_script(class_script)
+		# The script's _init can name the node, and the call's name is the one kept.
+		new_node.name = node_name
 	var unsettled: String = scene.settle()
 	if not unsettled.is_empty():
 		return scene.refuse("Nothing was written: " + unsettled)
+	if GdhPlacing.cornered(new_node, packed):
+		scene.asked(new_node, ["layout_mode"])
+		new_node.set("layout_mode", GdhPlacing.ANCHORS_MODE)
 	scene.asked(new_node, properties.keys())
 	var unwritten: String = _properties.write_all(new_node, properties)
 	scene.asked(new_node, _properties.moved_by_engine.keys())

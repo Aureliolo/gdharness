@@ -102,12 +102,21 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 		var missing: String = missing_said(path, FileAccess.get_file_as_string(path))
 		if not missing.is_empty():
 			return { "ok": false, "error": missing }
+	# A script the scene's scripts load that fails to compile names no node, so nothing else sees
+	# it.
+	var failed: GdhHeadlessCheck.GdhParseErrors = GdhHeadlessCheck.GdhParseErrors.new()
+	var watching: bool = for_writing and not Engine.is_editor_hint()
+	if watching:
+		OS.add_logger(failed)
 	var packed: PackedScene = (
 		ResourceLoader.load(path, "PackedScene", ResourceLoader.CACHE_MODE_IGNORE) as PackedScene
 	)
+	if packed != null:
+		root = packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
+	if watching:
+		OS.remove_logger(failed)
 	if packed == null:
 		return { "ok": false, "error": "Failed to load %s as a scene" % path }
-	root = packed.instantiate(PackedScene.GEN_EDIT_STATE_MAIN)
 	if root == null:
 		return { "ok": false, "error": "Failed to instantiate " + path }
 	_state = packed.get_state()
@@ -124,6 +133,8 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 		if for_writing:
 			_text = FileAccess.get_file_as_string(path)
 		var unsettled: String = settle()
+		if unsettled.is_empty() and for_writing:
+			unsettled = failed.refusal(path)
 		if not unsettled.is_empty():
 			return refuse(("Nothing was written: " if for_writing else "Not read: ") + unsettled)
 	return {}
@@ -1123,7 +1134,7 @@ func _settled(packed: PackedScene) -> Array:
 			var name: String = found[1]
 			var wanted: Variant = found[3] if found[2] else _unset_value(node, name)
 			var held: Variant = node.get(name)
-			node.set(name, wanted)
+			GdhHeadlessCheck.restore(node, name, wanted)
 			if GdhHeadlessCheck.kept_by_engine(node, name, wanted, held):
 				_engine_kept["%d:%s" % [node.get_instance_id(), name]] = true
 		for found: Array in moved:
@@ -1131,7 +1142,9 @@ func _settled(packed: PackedScene) -> Array:
 			var before: Dictionary = _before[node.get_instance_id()]
 			var restored: Dictionary = restored_by_write.get_or_add(node.get_instance_id(), {})
 			for name: String in found[1]:
-				node.set(name, before.get(name, GdhHeadlessCheck.default_of(node, name)))
+				GdhHeadlessCheck.restore(
+					node, name, before.get(name, GdhHeadlessCheck.default_of(node, name))
+				)
 				restored[name] = true
 		current = PackedScene.new()
 		var packing: Error = current.pack(root)

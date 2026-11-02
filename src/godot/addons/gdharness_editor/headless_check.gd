@@ -66,6 +66,16 @@ static func through_script(object: Object, names: Dictionary) -> bool:
 	return false
 
 
+## Sets [param name] on [param object] back to [param value]. A metadata entry put back to nothing
+## is removed. Set to null through its property, Godot keeps the entry holding null, and the saver
+## writes a line that erases what the node's script sets each time the scene loads.
+static func restore(object: Object, name: String, value: Variant) -> void:
+	if value == null and name.begins_with("metadata/"):
+		object.remove_meta(name.trim_prefix("metadata/"))
+		return
+	object.set(name, value)
+
+
 ## Whether [param object] still holds [param held] for [param name] once set to [param wanted]
 ## because the engine derives it, as it keeps layout_mode at Container under a container: an engine
 ## property, so no script code ran for the set, and an editor saves the same.
@@ -574,3 +584,45 @@ class GdhSaved:
 		path = at
 		before = held
 		resave = again
+
+
+## Every script that failed to compile while it is attached, as {file, line, message} in order.
+class GdhParseErrors:
+	extends Logger
+
+	var raised: Array[Dictionary] = []
+
+	func _log_message(_message: String, _error: bool) -> void:
+		pass
+
+	# The engine's own signature for a Logger, eight parameters and not this project's to shape.
+	# gdstyle:ignore=quality/max-parameters
+	func _log_error(
+		_function: String,
+		file: String,
+		line: int,
+		code: String,
+		_rationale: String,
+		_editor_notify: bool,
+		error_type: int,
+		_script_backtraces: Array[ScriptBacktrace],
+	) -> void:
+		if error_type == Logger.ERROR_TYPE_SCRIPT and code.begins_with("Parse Error: "):
+			raised.append(
+				{ "file": file, "line": line, "message": code.trim_prefix("Parse Error: ") }
+			)
+
+	## Why a write is refused for what was raised, or "" when nothing was.
+	func refusal(scene_path: String) -> String:
+		if raised.is_empty():
+			return ""
+		var first: Dictionary = raised[0]
+		return (
+			(
+				"%s does not compile in a headless engine (line %d: %s), and it loads with %s, "
+				+ "so the scene's scripts would not run as they do in the game. A class_name added "
+				+ "since the class cache was built is taken in by project_import refresh_classes. "
+				+ "Fix the script or refresh the classes, then ask again."
+			)
+			% [first["file"], first["line"], first["message"], scene_path]
+		)
