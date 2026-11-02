@@ -49819,7 +49819,7 @@ function testATestRunDealsByAndRecordsIntoTheTimesItIsGiven(): void {
  * The project the test command's two regressions run in, with gdUnit4 copied in, the folders beside
  * it, and the command run on it.
  */
-function testCommandProject(
+function commandTestProject(
   godotPath: string,
   gdunit: string,
 ): {
@@ -49836,7 +49836,7 @@ function testCommandProject(
   // rendering: on a GitHub macOS runner, whose GPU is virtual, Godot's Metal driver under Forward+
   // printed "timeout waiting for fence" in eight of ten windowed runs drawing thirty frames, and
   // Mobile, Compatibility and Vulkan in none of ten each. That error fails a run, as it should.
-  writeTree(project, testCommandTree());
+  writeTree(project, commandTestTree());
   cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
   const env = { ...process.env, GODOT_PATH: godotPath };
   const test = (...args: string[]): { said: string; status: number | null } => {
@@ -49851,7 +49851,7 @@ function testCommandProject(
 }
 
 /** Godot and gdUnit4 for the test command's regressions, or null when either is missing. */
-function testCommandEngines(): { godotPath: string; gdunit: string } | null {
+function commandTestEngines(): { godotPath: string; gdunit: string } | null {
   const godotPath = resolveGodotPath();
   const gdunit = process.env['GDUNIT4_PATH'];
   if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
@@ -49864,7 +49864,7 @@ function testCommandEngines(): { godotPath: string; gdunit: string } | null {
   return { godotPath, gdunit };
 }
 
-function testCommandTree(): Record<string, string> {
+function commandTestTree(): Record<string, string> {
   return {
     'project.godot':
       '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="TestCommand"\n\n' +
@@ -49901,11 +49901,11 @@ function testCommandTree(): Record<string, string> {
 }
 
 async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
-  const engines = testCommandEngines();
+  const engines = commandTestEngines();
   if (engines === null) {
     return;
   }
-  const { project, slots, checkouts, env, test } = testCommandProject(engines.godotPath, engines.gdunit);
+  const { project, slots, checkouts, env, test } = commandTestProject(engines.godotPath, engines.gdunit);
   try {
     // Without --import: a project with no class cache is imported whatever the switches say, since
     // gdUnit4's runner extends classes only the cache names.
@@ -50181,12 +50181,12 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
  * regression holding every case of the command ran near its deadline on a loaded runner.
  */
 async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
-  const engines = testCommandEngines();
+  const engines = commandTestEngines();
   if (engines === null) {
     return;
   }
   const { godotPath } = engines;
-  const { project, slots, checkouts, env, test } = testCommandProject(godotPath, engines.gdunit);
+  const { project, slots, checkouts, env, test } = commandTestProject(godotPath, engines.gdunit);
   try {
     const state = join(project, '.godot', 'gdharness');
     const resultFile = join(checkouts, 'result.json');
