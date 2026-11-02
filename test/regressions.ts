@@ -20273,14 +20273,26 @@ async function testARuntimeThatCameAndWentIsSaidToHave(): Promise<void> {
   try {
     await withStdioServer(
       async (call) => {
-        const started = async (dir: string): Promise<unknown> =>
-          JSON.parse(
+        // Each game quits on its own, and its run is waited out before the next project's start,
+        // which this server refuses while it holds a run of another project.
+        const started = async (dir: string): Promise<unknown> => {
+          const answer: unknown = JSON.parse(
             await call(
               'editor_run',
               { projectPath: dir, op: 'start', headless: true, runtimeWaitMs: 20_000 },
               ENGINE_CALL_TIMEOUT_MS,
             ),
           );
+          const ended: unknown = JSON.parse(
+            await call(
+              'editor_run',
+              { projectPath: dir, op: 'wait', timeoutMs: 20_000 },
+              ENGINE_CALL_TIMEOUT_MS,
+            ),
+          );
+          assert.equal(get(ended, 'running'), false, `the run of ${dir} ended: ${JSON.stringify(ended)}`);
+          return answer;
+        };
         const cameAndWent = /^the game's runtime came up and the game quit before this start could reach it/;
         const real = await started(cameUp);
         const output = await call('editor_output', { contains: 'runtime listening on' });
