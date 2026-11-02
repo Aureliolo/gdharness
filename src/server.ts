@@ -3028,6 +3028,7 @@ export const PROJECT_FILE_ARGUMENTS = [
   'resourcePath',
   'newPath',
   'newScriptPath',
+  'newScenePath',
   'path',
   'script',
 ];
@@ -5223,6 +5224,8 @@ class GodotServer {
             return await editorOrEngine('duplicate_node', 'writes');
           case 'reparent':
             return await editorOrEngine('reparent_node', 'writes');
+          case 'save_branch':
+            return await editorOrEngine('save_branch', 'writes');
           case 'delete':
             return await editorOrEngine('delete_node', 'writes');
           case 'bake_navigation':

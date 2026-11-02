@@ -37,6 +37,7 @@ import { pathToFileURL } from 'node:url';
 import { alive } from '../src/alive.js';
 import { readBreakpointNote } from '../src/breakpoint-note.js';
 import { GodotDAPClient } from '../src/dap_client.js';
+import { withoutLooksElsewhere } from '../src/editor-log.js';
 import { staleImports } from '../src/import-freshness.js';
 import { NOT_INHERITED, RESOLVED_ELSEWHERE } from '../src/rename.js';
 import { readLatestRun } from '../src/run-record.js';
@@ -1395,6 +1396,153 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
       console.warn(held);
     }
   }
+}
+
+/**
+ * A write to a scene holding a ViewportTexture is reported with nothing about the texture's
+ * viewport path. Godot looks the path up in the scene of the editor's current tab as the addon
+ * loads the scene, and prints "Path to node is invalid". The editor's own console as gdharness
+ * reads it leaves that out, and keeps the same error from a game's own script.
+ */
+async function testAWriteBesideAViewportTextureSaysNothingOfItsPath({
+  call,
+  project,
+  printed,
+}: Editor): Promise<void> {
+  mkdirSync(join(project, 'viewport_texture'), { recursive: true });
+  writeFileSync(
+    join(project, 'viewport_texture', 'view.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n' +
+      '[sub_resource type="ViewportTexture" id="1"]\nresource_local_to_scene = true\nviewport_path = NodePath("Ground")\n\n' +
+      '[node name="Root" type="Node2D"]\n\n' +
+      '[node name="Ground" type="SubViewport" parent="."]\n\n' +
+      '[node name="Picture" type="Sprite2D" parent="."]\ntexture = SubResource("1")\n',
+  );
+  const scene = { projectPath: project, scenePath: 'res://viewport_texture/view.tscn' };
+  await call('editor_rescan', { projectPath: project });
+  const before = printed().length;
+  await call('scene_node', {
+    ...scene,
+    op: 'set',
+    nodePath: 'Picture',
+    properties: { position: { x: 12, y: 34 } },
+  });
+  await delay(1000);
+  assert.deepEqual(
+    get(await call('scene_node', { ...scene, op: 'get', nodePath: 'Picture' }), 'properties', 'position'),
+    { _type: 'Vector2', x: 12, y: 34 },
+    'the write went through',
+  );
+  assert.match(
+    fileText(project, 'viewport_texture/view.tscn'),
+    /viewport_path = NodePath\("Ground"\)/,
+    'and the texture still names its viewport',
+  );
+  const said = printed().slice(before);
+  assert.doesNotMatch(withoutLooksElsewhere(said), /Path to node is invalid/, said.slice(-3000));
+  const theirs = said.replaceAll('res://addons/gdharness_editor/', 'res://game/');
+  assert.equal(withoutLooksElsewhere(theirs), theirs, "a game's own load of such a scene is left as printed");
+}
+
+/**
+ * save_branch through the editor: the branch, painted cells and all, becomes a scene of its own,
+ * and the scene instances it where the branch was and keeps what it named there.
+ */
+async function testABranchIsSavedAsItsOwnScene({ call, refusal, project }: Editor): Promise<void> {
+  mkdirSync(join(project, 'branch'), { recursive: true });
+  await call('editor_rescan', { projectPath: project });
+  await call('resource_edit', {
+    projectPath: project,
+    resourcePath: 'res://branch/set.tres',
+    op: 'create_tileset',
+    sources: [{ texture: 'res://tiles/atlas.png', tileSize: { x: 4, y: 4 } }],
+  });
+  writeFileSync(
+    join(project, 'branch', 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n' +
+      '[ext_resource type="TileSet" path="res://branch/set.tres" id="1"]\n\n' +
+      '[node name="Main" type="Node2D"]\n\n' +
+      '[node name="Follow" type="RemoteTransform2D" parent="."]\nremote_path = NodePath("%Tiles")\n\n' +
+      '[node name="Branch" type="Node2D" parent="."]\nposition = Vector2(8, 9)\n\n' +
+      '[node name="Tiles" type="TileMapLayer" parent="Branch"]\nunique_name_in_owner = true\n' +
+      'tile_set = ExtResource("1")\n\n' +
+      '[node name="Sprite" type="Sprite2D" parent="Branch"]\n\n' +
+      '[connection signal="visibility_changed" from="Follow" to="Branch/Sprite" method="hide"]\n',
+  );
+  await call('editor_rescan', { projectPath: project });
+  const host = { projectPath: project, scenePath: 'res://branch/main.tscn' };
+  await call('scene_node', {
+    ...host,
+    op: 'set_tilemap_cells',
+    nodePath: 'Branch/Tiles',
+    cells: [
+      { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
+      { coords: { x: 2, y: 3 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
+    ],
+  });
+  const tilesOf = async (scenePath: string, nodePath: string): Promise<unknown> => {
+    const read = await call('scene_node', { projectPath: project, scenePath, op: 'get', nodePath });
+    return { count: get(read, 'cellCount'), cells: get(read, 'cells') };
+  };
+  const cells = await tilesOf(host.scenePath, 'Branch/Tiles');
+  assert.equal(get(cells, 'count'), 2, JSON.stringify(cells));
+  const idOf = (scene: string): string =>
+    / unique_id=(\d+)/.exec(
+      scene.split('\n').find((line) => line.startsWith('[node name="Branch"')) ?? '',
+    )?.[1] ?? 'none';
+  const branchId = idOf(fileText(project, 'branch/main.tscn'));
+  assert.match(branchId, /^\d+$/, fileText(project, 'branch/main.tscn'));
+
+  const saved = await call('scene_node', {
+    ...host,
+    op: 'save_branch',
+    nodePath: 'Branch',
+    newScenePath: 'res://branch/part.tscn',
+  });
+  assert.deepEqual(
+    get(saved, 'retargeted'),
+    [
+      {
+        scenePath: 'res://branch/main.tscn',
+        nodePath: 'Follow',
+        property: 'remote_path',
+        from: '%Tiles',
+        to: '../Branch/Tiles',
+      },
+    ],
+    text(saved),
+  );
+  const tree = await call('scene_tree', host);
+  assert.deepEqual(
+    asArray(get(tree, 'tree', 'children'), 'children').map((child) => [
+      get(child, 'name'),
+      get(child, 'instanceOf'),
+    ]),
+    [
+      ['Follow', undefined],
+      ['Branch', 'res://branch/part.tscn'],
+    ],
+    text(tree),
+  );
+  const held = fileText(project, 'branch/main.tscn');
+  assert.equal(idOf(held), branchId, held);
+  assert.equal(nodeBody(held, 'Branch'), 'position = Vector2(8, 9)', held);
+  assert.ok(
+    held.includes('[connection signal="visibility_changed" from="Follow" to="Branch/Sprite" method="hide"]'),
+    held,
+  );
+  assert.deepEqual(await tilesOf(host.scenePath, 'Branch/Tiles'), cells, 'the instance has the cells');
+  assert.deepEqual(await tilesOf('res://branch/part.tscn', 'Tiles'), cells, 'the new scene has the cells');
+  assert.ok(!nodeBody(fileText(project, 'branch/part.tscn'), 'Branch').includes('position'));
+  assert.match(
+    await refusal('scene_node', {
+      ...host,
+      op: 'save_branch',
+      nodePath: 'Branch',
+      newScenePath: 'res://branch/again.tscn',
+    }),
+    /is an instance of res:\/\/branch\/part\.tscn/,
+  );
 }
 
 /** Building a scene node by node, with the tree and the file read back after each step. */
@@ -7824,6 +7972,11 @@ async function main(): Promise<void> {
   // the debug adapter, so a filtered run is for working on a case rather than for believing one.
   const CASES: [string, (editor: Editor) => Promise<void>][] = [
     ['testSceneNodes', testSceneNodes],
+    [
+      'testAWriteBesideAViewportTextureSaysNothingOfItsPath',
+      testAWriteBesideAViewportTextureSaysNothingOfItsPath,
+    ],
+    ['testABranchIsSavedAsItsOwnScene', testABranchIsSavedAsItsOwnScene],
     ['testValuesSurviveBeingRead', testValuesSurviveBeingRead],
     ['testAValueTheSceneCannotHoldIsRefused', testAValueTheSceneCannotHoldIsRefused],
     ['testAPathWritesOneComponent', testAPathWritesOneComponent],

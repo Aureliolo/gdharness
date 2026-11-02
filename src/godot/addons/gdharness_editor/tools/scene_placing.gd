@@ -145,18 +145,10 @@ static func reconnect(copies: Dictionary, top: Node) -> void:
 					and (target == top or top.is_ancestor_of(target as Node))
 				):
 					continue
-				# Unbound and then bound again as Node.duplicate does: a callable made
-				# from the method alone would save the copy without the arguments the
-				# original passes.
-				var aimed: Callable = Callable(to, callable.get_method())
-				var unbound: int = callable.get_unbound_arguments_count()
-				if unbound > 0:
-					aimed = aimed.unbind(unbound)
-				if callable.get_bound_arguments_count() > 0:
-					aimed = aimed.bindv(callable.get_bound_arguments())
+				var joined: Callable = aimed(callable, to)
 				if (
-					not copy.is_connected(signal_name, aimed)
-					and copy.connect(signal_name, aimed, flags) != OK
+					not copy.is_connected(signal_name, joined)
+					and copy.connect(signal_name, joined, flags) != OK
 				):
 					push_error(
 						(
@@ -164,6 +156,19 @@ static func reconnect(copies: Dictionary, top: Node) -> void:
 							% [signal_name, source.name]
 						)
 					)
+
+
+## [param callable] aimed at [param to], unbound and then bound again as Node.duplicate does: a
+## callable made from the method alone would save the connection without the arguments the original
+## passes.
+static func aimed(callable: Callable, to: Object) -> Callable:
+	var aimed_at: Callable = Callable(to, callable.get_method())
+	var unbound: int = callable.get_unbound_arguments_count()
+	if unbound > 0:
+		aimed_at = aimed_at.unbind(unbound)
+	if callable.get_bound_arguments_count() > 0:
+		aimed_at = aimed_at.bindv(callable.get_bound_arguments())
+	return aimed_at
 
 
 ## Owns [param node] to [param root], and under it the nodes the root owns already and those of

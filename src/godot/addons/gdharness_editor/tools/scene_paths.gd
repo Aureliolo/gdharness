@@ -44,6 +44,9 @@ var _homes: Dictionary = {}
 ## rewrite that is not saved is put back.
 var _outside: Array[Array] = []
 var _scene: GdhSceneFile = null
+## Each unique name a node of this scene had that is unique only inside an instance now, to the
+## node's path from the root, for a %unique path through it to be written as the plain path.
+var _enclosed: Dictionary = {}
 var _moves: Dictionary = {}
 var _back: Dictionary = {}
 var _seen: Dictionary = {}
@@ -64,7 +67,7 @@ static func moved(given: String, moves: Dictionary) -> String:
 ## Carries [param moves], from the root of [param scene], into the paths it holds. Called after the
 ## move and before the write. Answers how many paths it rewrote.
 func carry(scene: GdhSceneFile, moves: Dictionary) -> int:
-	if moves.is_empty():
+	if moves.is_empty() and _enclosed.is_empty():
 		return 0
 	_scene = scene
 	_moves = moves
@@ -108,6 +111,14 @@ func carry(scene: GdhSceneFile, moves: Dictionary) -> int:
 			_tracks(mixer, now)
 		_scripts(node, was, now)
 	return retargeted.size() - before
+
+
+## Carries into [param scene] a branch saved as a scene of its own and instanced in its place, as
+## [method carry] does: each %unique path through one of [param enclosed], a unique name to its
+## node's path from the root, is written as the plain path. Answers how many paths it rewrote.
+func carry_enclosed(scene: GdhSceneFile, enclosed: Dictionary) -> int:
+	_enclosed = enclosed
+	return carry(scene, {})
 
 
 ## Opens [param scene_path], carries [param moves] into it, and writes it when that rewrote a path.
@@ -389,8 +400,12 @@ func _after(path: NodePath, was: String, now: String) -> Array:
 		var _named: bool = names.append(str(path.get_name(index)))
 	var start: String = was
 	var unique: bool = names[0].begins_with("%")
+	var enclosed: bool = false
 	if unique:
 		start = _unique_was(names[0].substr(1), now)
+		if start.is_empty() and _enclosed.has(names[0].substr(1)):
+			start = _enclosed[names[0].substr(1)]
+			enclosed = true
 		if start.is_empty():
 			return [UNCHANGED, ""]
 		names = names.slice(1)
@@ -398,7 +413,7 @@ func _after(path: NodePath, was: String, now: String) -> Array:
 	if target_was.is_empty():
 		return [UNCHANGED, ""]
 	var target_now: String = moved(target_was, _moves)
-	if target_now == target_was and now == was:
+	if target_now == target_was and now == was and not enclosed:
 		return [UNCHANGED, ""]
 	if target_now.is_empty():
 		return [DELETED, ""]
@@ -408,8 +423,9 @@ func _after(path: NodePath, was: String, now: String) -> Array:
 		return [UNCHANGED, ""]
 	if holder.get_node_or_null(NodePath(path.get_concatenated_names())) == target:
 		return [UNCHANGED, ""]
-	var to: String = str(holder.get_path_to(target, unique))
-	if unique:
+	var through_unique: bool = unique and not enclosed
+	var to: String = str(holder.get_path_to(target, through_unique))
+	if through_unique:
 		to = _unique_to(start, target, to)
 	if path.get_subname_count() > 0:
 		to += ":" + path.get_concatenated_subnames()

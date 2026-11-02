@@ -30,6 +30,7 @@ const PUTTING_BACK_PASSES: int = 4
 const GdhRead = preload("reading.gd")
 const GdhSame = preload("same_values.gd")
 const GdhSerialisation = preload("serialisation.gd")
+const GdhSceneFile = preload("scene_file.gd")
 const GdhSceneUids = preload("scene_uids.gd")
 
 ## Whether a scan asked for through [method scan_later] is still to start, which a caller waiting
@@ -429,6 +430,64 @@ func copied(copies: Dictionary) -> void:
 		var original: Node = source
 		var copy: Node = copies[source]
 		_copied_from[copy.get_instance_id()] = original.get_instance_id()
+
+
+## A scene to write at [param branch_path] whose root is [param top], a node of this one about to be
+## taken out of it, keeping what this file stores on each node of [param top] and what the tool
+## asked of them. A connection the engine could not make goes with it when both its ends are in
+## [param top]. One with a single end there is taken out of this scene's and answered, that end
+## given as its path from [param top] under sourceBelow or targetBelow, for [method rejoin_unmade].
+## Answers [scene, those connections].
+func split_off(top: Node, branch_path: String) -> Array:
+	var branch: GdhSceneFile = GdhSceneFile.new()
+	branch.root = top
+	branch.path = branch_path
+	branch._text = _text
+	branch._reached = _reached.duplicate()
+	var nodes: Array[Node] = [top]
+	nodes.append_array(top.find_children("*", "", true, false))
+	for node: Node in nodes:
+		var id: int = node.get_instance_id()
+		if _filed.has(id):
+			branch._filed[id] = _filed[id]
+		if _asked.has(id):
+			branch._asked[id] = _asked[id]
+		if _before.has(id):
+			branch._before[id] = _before[id]
+	var crossing: Array[Dictionary] = []
+	var still: Array[Dictionary] = []
+	for held: Dictionary in _unmade:
+		var source_in: bool = _within(held["source"], top)
+		var target_in: bool = _within(held["target"], top)
+		if source_in and target_in:
+			branch._unmade.append(held)
+			continue
+		if not source_in and not target_in:
+			still.append(held)
+			continue
+		var end: String = "source" if source_in else "target"
+		var below: Node = held[end]
+		held[end + "Below"] = str(top.get_path_to(below))
+		crossing.append(held)
+	_unmade = still
+	return [branch, crossing]
+
+
+## Puts back each of [param crossing], from [method split_off], among the connections a write keeps,
+## its end below the branch now on the node at that path below [param instance].
+func rejoin_unmade(crossing: Array[Dictionary], instance: Node) -> void:
+	for held: Dictionary in crossing:
+		for end: String in ["source", "target"]:
+			if held.has(end + "Below"):
+				held[end] = instance.get_node_or_null(NodePath(str(held[end + "Below"])))
+		_unmade.append(held)
+
+
+static func _within(held: Variant, top: Node) -> bool:
+	if not is_instance_valid(held) or not held is Node:
+		return false
+	var node: Node = held
+	return node == top or top.is_ancestor_of(node)
 
 
 ## Why [param scene_path] cannot be written while the editor has it open, or "".

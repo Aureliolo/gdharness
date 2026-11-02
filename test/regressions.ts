@@ -11827,6 +11827,43 @@ function testAWallOfOneMessageCollapsesToItsShape(): void {
 }
 
 /**
+ * The editor's console leaves out the error Godot prints about a ViewportTexture's path as the
+ * addon loads a scene, and keeps the same error raised from a game's own script. The block is the
+ * engine's own, from an editor on 4.7.2.
+ */
+function testTheEditorsConsoleLeavesOutTheLookElsewhere(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-console-elsewhere-'));
+  const block = (frame: string): string =>
+    "ERROR: Path to node is invalid: 'Ground'.\n" +
+    '   at: _setup_local_to_scene (scene/main/viewport.cpp:216)\n' +
+    '   GDScript backtrace (most recent call first):\n' +
+    `       [0] open (${frame}:115)\n` +
+    '       [1] _open (res://addons/gdharness_editor/tools/scene_tools.gd:33)\n';
+  try {
+    writeEditorLogNote(project, 4242);
+    writeFileSync(
+      editorLogPath(project),
+      `Godot Engine v4.7.2.stable.official\n${block('res://addons/gdharness_editor/scene_file.gd')}` +
+        `${block('res://game/loader.gd')}ERROR: Parse Error: something\n` +
+        block('res://addons/gdharness_editor/scene_file.gd').replaceAll('\n', '\r\n'),
+    );
+    const read = editorConsole(project, 4242, true);
+    assert.ok(!('kind' in read), JSON.stringify(read));
+    if (!('kind' in read)) {
+      const errors = read.log.everything().filter((entry) => entry.severity === 'error');
+      assert.deepEqual(
+        errors.map((entry) => entry.text.split('\n')[0]),
+        ["Path to node is invalid: 'Ground'.", 'Parse Error: something'],
+        `the game's own error and the other stay, the addon's two go: ${JSON.stringify(errors)}`,
+      );
+      assert.match(JSON.stringify(errors[0]), /res:\/\/game\/loader\.gd/, "the one kept is the game's");
+    }
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * There is no console to read, said three different ways.
  *
  * An empty answer is the one thing this must never give, because an editor that printed nothing
@@ -72006,6 +72043,340 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
  * - an image written since the import is named as not yet imported, with the call that imports
  *   it, which this then makes and follows.
  */
+/**
+ * scene_node save_branch with no editor: the branch, painted cells and all, becomes a scene of its
+ * own, and the scene it came from instances that scene in its place and keeps what it named there.
+ */
+async function testABranchIsSavedAsItsOwnSceneWithNoEditor(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('save_branch without an editor regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-branch-engine-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-branch-engine-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Branch"\n',
+  );
+  writeFileSync(
+    join(project, 'tiles.png'),
+    pixelPng(8, 8, () => [200, 40, 40, 255]),
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    // A tool script, so a headless write does not put back what the call changed on the root.
+    '@tool\nextends Node2D\n\n@export var tiles_path: NodePath\n@export var sprite: Sprite2D\n\n\n' +
+      'func hit() -> void:\n\tpass\n\n\nfunc tiles() -> Node:\n\treturn %Tiles\n',
+  );
+  writeFileSync(
+    join(project, 'hand.gd'),
+    'extends Node2D\n\n@export var target: NodePath\n@export var player: Node2D\n\n\n' +
+      'func poke() -> void:\n\tpass\n\n\nfunc far() -> Node:\n\treturn %After\n',
+  );
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 240_000);
+  const host = { scenePath: 'res://main.tscn' };
+  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
+  const idOf = (scene: string, header: RegExp): string => {
+    const line = scene.split('\n').find((one) => header.test(one)) ?? '';
+    return / unique_id=(\d+)/.exec(line)?.[1] ?? `no unique_id on ${line}`;
+  };
+  const nodeBody = (scene: string, name: string): string => {
+    const found = new RegExp(`\\[node name="${name}"[^\\n]*\\n([\\s\\S]*?)(?=\\r?\\n\\[|$)`).exec(scene);
+    assert.ok(found, `the scene has no node ${name}:\n${scene}`);
+    return (found[1] ?? '').trim();
+  };
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('branch-engine');
+    await call('resource_edit', {
+      op: 'create_tileset',
+      resourcePath: 'res://set.tres',
+      sources: [{ texture: 'res://tiles.png', tileSize: { x: 4, y: 4 } }],
+    });
+    writeFileSync(
+      join(project, 'leaf.tscn'),
+      '[gd_scene format=3]\n\n[node name="Leaf" type="Node2D"]\n\n[node name="Inner" type="Node2D" parent="."]\n',
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=8 format=3]\n\n' +
+        '[ext_resource type="Script" path="res://main.gd" id="1"]\n' +
+        '[ext_resource type="Script" path="res://hand.gd" id="2"]\n' +
+        '[ext_resource type="TileSet" path="res://set.tres" id="3"]\n' +
+        '[ext_resource type="PackedScene" path="res://leaf.tscn" id="5"]\n\n' +
+        '[sub_resource type="CanvasItemMaterial" id="4"]\nblend_mode = 1\n\n' +
+        '[sub_resource type="Animation" id="6"]\nresource_name = &"flash"\ntracks/0/type = "value"\n' +
+        'tracks/0/imported = false\ntracks/0/enabled = true\ntracks/0/path = NodePath("%Tiles:modulate")\n' +
+        'tracks/0/interp = 1\ntracks/0/loop_wrap = true\n' +
+        'tracks/0/keys = {"times": PackedFloat32Array(0), "transitions": PackedFloat32Array(1), "update": 0, "values": [Color(1, 1, 1, 1)]}\n\n' +
+        '[sub_resource type="AnimationLibrary" id="7"]\n_data = {&"flash": SubResource("6")}\n\n' +
+        '[node name="Main" type="Node2D" node_paths=PackedStringArray("sprite")]\nscript = ExtResource("1")\n' +
+        'tiles_path = NodePath("%Tiles")\n' +
+        'sprite = NodePath("Branch/Sprite")\n\n' +
+        '[node name="Before" type="Node2D" parent="."]\n\n' +
+        '[node name="Branch" type="Node2D" parent="." groups=["props"]]\nunique_name_in_owner = true\n' +
+        'position = Vector2(30, 40)\nrotation = 0.5\nscale = Vector2(2, 2)\n\n' +
+        '[node name="Tiles" type="TileMapLayer" parent="Branch"]\nunique_name_in_owner = true\n' +
+        'tile_set = ExtResource("3")\n\n' +
+        '[node name="Sprite" type="Sprite2D" parent="Branch"]\nmaterial = SubResource("4")\n\n' +
+        '[node name="Hand" type="Node2D" parent="Branch" node_paths=PackedStringArray("player")]\n' +
+        'script = ExtResource("2")\n' +
+        'target = NodePath("../Sprite")\nplayer = NodePath("../../Before")\n\n' +
+        '[node name="Arm" type="Node2D" parent="Branch"]\nscript = ExtResource("2")\ntarget = NodePath("../Tiles")\n\n' +
+        '[node name="Leaf" parent="Branch" instance=ExtResource("5")]\n\n' +
+        '[node name="Inner" parent="Branch/Leaf"]\nposition = Vector2(5, 6)\n\n' +
+        '[node name="After" type="Node2D" parent="."]\nunique_name_in_owner = true\n\n' +
+        '[node name="Player" type="AnimationPlayer" parent="."]\nlibraries = {&"": SubResource("7")}\n\n' +
+        '[connection signal="visibility_changed" from="Branch/Sprite" to="Branch/Hand" method="poke"]\n' +
+        '[connection signal="visibility_changed" from="Branch/Sprite" to="Branch/Hand" method="gone" binds= [1]]\n' +
+        '[connection signal="visibility_changed" from="Before" to="Branch/Sprite" method="gone" binds= [2]]\n' +
+        '[connection signal="visibility_changed" from="Branch" to="." method="hit"]\n' +
+        '[connection signal="visibility_changed" from="Before" to="Branch/Hand" method="poke"]\n' +
+        '[connection signal="visibility_changed" from="Branch/Hand" to="." method="hit"]\n\n' +
+        '[editable path="Branch/Leaf"]\n',
+    );
+    // A scene inheriting this one and one instancing it, each keeping a value inside the branch.
+    writeFileSync(
+      join(project, 'heir.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://main.tscn" id="1"]\n\n' +
+        '[node name="Main" instance=ExtResource("1")]\n\n' +
+        '[node name="Sprite" parent="Branch"]\nmodulate = Color(1, 0, 0, 1)\n',
+    );
+    writeFileSync(
+      join(project, 'outer.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://main.tscn" id="1"]\n\n' +
+        '[node name="Outer" type="Node2D"]\n\n[node name="Main" parent="." instance=ExtResource("1")]\n\n' +
+        '[node name="Sprite" parent="Main/Branch"]\nmodulate = Color(0, 1, 0, 1)\n\n[editable path="Main"]\n',
+    );
+    const painted = await call('scene_node', {
+      ...host,
+      op: 'set_tilemap_cells',
+      nodePath: 'Branch/Tiles',
+      cells: [
+        { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
+        { coords: { x: 3, y: -2 }, sourceId: 0, atlasCoords: { x: 1, y: 1 } },
+        { coords: { x: -5, y: 7 }, sourceId: 0, atlasCoords: { x: 1, y: 0 } },
+      ],
+    });
+    assert.equal(get(parseTextContent(painted), 'placed'), 3, textOf(painted) ?? '');
+    const tilesOf = async (scene: Record<string, unknown>, nodePath: string): Promise<unknown> => {
+      const read = parseTextContent(await call('scene_node', { ...scene, op: 'get', nodePath }));
+      return { count: get(read, 'cellCount'), cells: get(read, 'cells') };
+    };
+    const cells = await tilesOf(host, 'Branch/Tiles');
+    assert.equal(get(cells, 'count'), 3, JSON.stringify(cells));
+    const branchId = idOf(fileOf('main.tscn'), /^\[node name="Branch"/);
+    assert.match(branchId, /^\d+$/, fileOf('main.tscn'));
+
+    const saved = parseTextContent(
+      await call('scene_node', {
+        ...host,
+        op: 'save_branch',
+        nodePath: 'Branch',
+        newScenePath: 'parts/branch',
+      }),
+    );
+    assert.deepEqual(
+      [get(saved, 'nodePath'), get(saved, 'newScenePath'), get(saved, 'index')],
+      ['Branch', 'res://parts/branch.tscn', 1],
+      JSON.stringify(saved),
+    );
+    assert.deepEqual(
+      get(saved, 'retargeted'),
+      [
+        {
+          scenePath: 'res://main.tscn',
+          nodePath: '.',
+          property: 'tiles_path',
+          from: '%Tiles',
+          to: 'Branch/Tiles',
+        },
+        {
+          scenePath: 'res://main.tscn',
+          nodePath: 'Player',
+          animation: 'flash',
+          track: 0,
+          from: '%Tiles:modulate',
+          to: 'Branch/Tiles:modulate',
+        },
+      ],
+      JSON.stringify(saved),
+    );
+    assert.deepEqual(
+      get(saved, 'scriptsNaming'),
+      [
+        {
+          scenePath: 'res://main.tscn',
+          nodePath: '.',
+          script: 'res://main.gd',
+          line: 13,
+          from: '%Tiles',
+          to: 'Branch/Tiles',
+        },
+        // A unique node outside the branch, which the new scene's own nodes cannot reach by name.
+        {
+          scenePath: 'res://parts/branch.tscn',
+          nodePath: 'Hand',
+          script: 'res://hand.gd',
+          line: 12,
+          from: '%After',
+        },
+        {
+          scenePath: 'res://parts/branch.tscn',
+          nodePath: 'Arm',
+          script: 'res://hand.gd',
+          line: 12,
+          from: '%After',
+        },
+      ],
+      JSON.stringify(saved),
+    );
+    assert.deepEqual(get(saved, 'followed'), ['res://heir.tscn', 'res://outer.tscn'], JSON.stringify(saved));
+    assert.deepEqual(
+      get(saved, 'namesOutside'),
+      [{ nodePath: 'Hand', property: 'player', names: 'Before', cleared: true }],
+      JSON.stringify(saved),
+    );
+
+    // The original instances the new scene where the branch was, as the same node.
+    const tree = parseTextContent(await call('scene_tree', host));
+    assert.deepEqual(
+      asArray(get(tree, 'tree', 'children')).map((child) => [get(child, 'name'), get(child, 'instanceOf')]),
+      [
+        ['Before', undefined],
+        ['Branch', 'res://parts/branch.tscn'],
+        ['After', undefined],
+        ['Player', undefined],
+      ],
+      JSON.stringify(tree),
+    );
+    const written = fileOf('main.tscn');
+    assert.ok(written.includes('tracks/0/path = NodePath("Branch/Tiles:modulate")'), written);
+    assert.equal(idOf(written, /^\[node name="Branch"/), branchId, written);
+    const entry = nodeBody(written, 'Branch');
+    // Rotation and scale stay in the new scene, which keeps them as the branch had them.
+    assert.deepEqual(
+      entry.split('\n'),
+      ['unique_name_in_owner = true', 'position = Vector2(30, 40)'],
+      written,
+    );
+    for (const line of [
+      '[connection signal="visibility_changed" from="Branch" to="." method="hit"]',
+      '[connection signal="visibility_changed" from="Before" to="Branch/Hand" method="poke"]',
+      '[connection signal="visibility_changed" from="Before" to="Branch/Sprite" method="gone" binds= [2]]',
+    ]) {
+      assert.ok(written.includes(line), `the scene keeps ${line}: ${written}\n${JSON.stringify(saved)}`);
+    }
+    assert.ok(!written.includes('Leaf'), `the instance inside the branch went with it: ${written}`);
+    // A connection out of the branch from below its top is either in the file or named as lost.
+    const outOf = {
+      sourceNodePath: 'Branch/Hand',
+      signalName: 'visibility_changed',
+      targetNodePath: '.',
+      methodName: 'hit',
+    };
+    const lost = asArray(get(saved, 'connectionsLost') ?? []);
+    assert.notEqual(
+      lost.some((one) => JSON.stringify(one) === JSON.stringify(outOf)),
+      written.includes('[connection signal="visibility_changed" from="Branch/Hand" to="." method="hit"]'),
+      `${JSON.stringify(lost)}\n${written}`,
+    );
+    assert.ok(!written.includes('Branch/Sprite" to'), `the branch's own connection went with it: ${written}`);
+    assert.ok(!written.includes('[node name="Tiles"'), `the branch's nodes went with it: ${written}`);
+
+    // The paths that named nodes of the branch still name them.
+    const root = parseTextContent(await call('scene_node', { ...host, op: 'get', nodePath: '.' }));
+    assert.deepEqual(
+      [get(root, 'properties', 'tiles_path'), get(root, 'properties', 'sprite')],
+      [
+        { _type: 'NodePath', path: 'Branch/Tiles' },
+        { _type: 'NodePath', path: 'Branch/Sprite' },
+      ],
+      JSON.stringify(root),
+    );
+    assert.deepEqual(await tilesOf(host, 'Branch/Tiles'), cells, 'the instance has the cells');
+
+    // The new scene holds the branch as it was, its root back at the origin.
+    const part = { scenePath: 'res://parts/branch.tscn' };
+    assert.deepEqual(await tilesOf(part, 'Tiles'), cells, 'the new scene has the cells');
+    const made = fileOf('parts/branch.tscn');
+    const top = nodeBody(made, 'Branch');
+    assert.ok(!top.includes('position') && !top.includes('unique_name_in_owner'), made);
+    assert.match(made, /^\[node name="Branch" type="Node2D" unique_id=\d+ groups=\["props"\]\]$/m, made);
+    for (const line of [
+      'rotation = 0.5',
+      'scale = Vector2(2, 2)',
+      'blend_mode = 1',
+      'target = NodePath("../Sprite")',
+      '[connection signal="visibility_changed" from="Sprite" to="Hand" method="poke"]',
+      '[connection signal="visibility_changed" from="Sprite" to="Hand" method="gone" binds= [1]]',
+      '[editable path="Leaf"]',
+    ]) {
+      assert.ok(made.includes(line), `the new scene holds ${line}: ${made}`);
+    }
+    assert.equal(nodeBody(made, 'Inner'), 'position = Vector2(5, 6)', made);
+    assert.ok(nodeBody(made, 'Tiles').includes('unique_name_in_owner = true'), made);
+    assert.ok(!nodeBody(made, 'Hand').includes('player'), `the node outside is cleared: ${made}`);
+    assert.match(
+      nodeBody(made, 'Arm'),
+      /^script = ExtResource\("[^"]+"\)\ntarget = NodePath\("\.\.\/Tiles"\)$/,
+      made,
+    );
+
+    // The scenes keeping a value inside the branch keep it through their next write.
+    for (const [file, scene, nodePath, colour] of [
+      ['heir.tscn', 'res://heir.tscn', 'Before', 'Color(1, 0, 0, 1)'],
+      ['outer.tscn', 'res://outer.tscn', '.', 'Color(0, 1, 0, 1)'],
+    ] as const) {
+      const set = await call('scene_node', {
+        scenePath: scene,
+        op: 'set',
+        nodePath,
+        properties: { position: { x: 1, y: 2 } },
+      });
+      assert.equal(get(parseTextContent(set), 'ok') ?? true, true, textOf(set) ?? '');
+      assert.equal(nodeBody(fileOf(file), 'Sprite'), `modulate = ${colour}`, fileOf(file));
+    }
+
+    for (const [args, said] of [
+      [{ nodePath: '.', newScenePath: 'res://whole.tscn' }, /The root is the whole scene/],
+      [{ nodePath: 'Before', newScenePath: 'res://parts/branch.tscn' }, /already exists/],
+      [{ nodePath: 'Before', newScenePath: 'res://main.tscn' }, /the scene the branch is in/],
+      [
+        { nodePath: 'Branch', newScenePath: 'res://again.tscn' },
+        /is an instance of res:\/\/parts\/branch\.tscn/,
+      ],
+      [
+        { nodePath: 'Branch/Tiles', newScenePath: 'res://again.tscn' },
+        /inside the scene instanced at Branch/,
+      ],
+    ] as const) {
+      const refused = await call('scene_node', { ...host, op: 'save_branch', ...args });
+      assert.match(textOf(refused) ?? '', said, JSON.stringify(args));
+    }
+    assert.ok(!existsSync(join(project, 'again.tscn')) && !existsSync(join(project, 'whole.tscn')));
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
 async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -72828,6 +73199,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStateMachineWrittenWithNoEditorRunsAsWritten,
   testANodeKeepsItsGroupsAndItsPlace,
   testAThemeAndATilesetWithNoEditor,
+  testABranchIsSavedAsItsOwnSceneWithNoEditor,
   testAControlIsLaidOutAsTheEditorLaysItOut,
   testAProjectsFilesAndLayersAreNamedWithNoEditor,
   testANavigationRegionIsBakedWithNoEditor,
@@ -73109,6 +73481,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameTooNewToTalkToIsStillAGame,
   testAWallOfOneMessageCollapsesToItsShape,
   testAnUncapturedConsoleSaysWhichEditorItIs,
+  testTheEditorsConsoleLeavesOutTheLookElsewhere,
   testAnEditorsProgressIsOneLinePerTask,
   testAnEditorWritesItsConsoleWhereTheServerLooks,
   testAUidCacheNamingAFileGoneIsMended,
