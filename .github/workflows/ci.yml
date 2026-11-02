@@ -197,9 +197,9 @@ jobs:
     with:
       # renovate: datasource=github-runners depName=windows
       runner: windows-2025
-      # Four where the others take three: Windows runs the regressions slowest and installs slowest,
-      # and in three parts its jobs took up to eighteen minutes of their twenty.
-      regression-parts: '["1/4", "2/4", "3/4", "4/4"]'
+      # Five: Windows runs the regressions slowest and installs slowest, and by its own figures four
+      # parts carry about 1040 of the 1200 seconds a part's run is given, five about 830.
+      regression-parts: '["1/5", "2/5", "3/5", "4/5", "5/5"]'
 
   engine-macos-parts:
     name: engine macos

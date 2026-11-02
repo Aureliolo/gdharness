@@ -207,10 +207,14 @@ The editor's language server reads every script in the project before it answers
 after the editor starts. The server waits three minutes for that. A project whose language server
 reads for longer sets `GDHARNESS_LSP_INITIALIZE_TIMEOUT_MS`.
 
+### Shorter waits
+
 Three shorter waits can be set the same way, in milliseconds:
 
 - `GDHARNESS_SCAN_WAIT_MS` (30 seconds): how long a start waits for the editor to finish scanning.
-  After it, the start goes ahead and says so.
+  After it, the start goes ahead and says so. A call the editor turns away while busy waits this
+  long after the editor last moved on, and at most ten times as long. A client that asks for
+  progress hears what the editor is doing.
 - `GDHARNESS_STOP_WAIT_MS` (10 seconds): how long a stop waits for what it ended to be gone. After
   it, the stop answers that it is still running.
 - `GDHARNESS_GREETING_WAIT_MS` (10 seconds): how long a restart waits for a newly connected editor

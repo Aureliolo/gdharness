@@ -7,6 +7,7 @@ extends EditorPlugin
 const GdhBridgeClient = preload("bridge_client.gd")
 const GdhToolExecutor = preload("tool_executor.gd")
 const GdhReleaseExport = preload("release_export.gd")
+const GdhSceneFile = preload("scene_file.gd")
 ## The tools answered while the editor scans or imports, because none of them saves a file: the
 ## ones a caller waits on a scan with, and the ones that only read or stop a played game.
 const ANSWERED_WHILE_SCANNING: Array[String] = [
@@ -27,10 +28,6 @@ const ANSWERED_DURING_A_TASK: Array[String] = [
 ]
 
 var _client: GdhBridgeClient
-## The editor's progress dialog, which Godot keeps for the editor's whole life and exposes no other
-## way. Looked for once, and again only if it has gone.
-var _progress: Node = null
-var _progress_sought: bool = false
 var _tool_executor: GdhToolExecutor
 var _status_label: Label
 var _release_export: GdhReleaseExport
@@ -127,7 +124,7 @@ func _on_disconnected() -> void:
 func turned_away(tool_name: String) -> bool:
 	if _tool_executor != null and _tool_executor.capturing():
 		return true
-	if not ANSWERED_DURING_A_TASK.has(tool_name) and _in_a_task():
+	if not ANSWERED_DURING_A_TASK.has(tool_name) and GdhSceneFile.in_a_task():
 		return true
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
 	return (
@@ -136,25 +133,19 @@ func turned_away(tool_name: String) -> bool:
 	)
 
 
-## Whether the editor's progress dialog is showing, which it does for as long as a task is open.
-func _in_a_task() -> bool:
-	if _progress != null and not is_instance_valid(_progress):
-		_progress = null
-		_progress_sought = false
-	if not _progress_sought:
-		_progress_sought = true
-		_progress = _found_progress(get_tree().root)
-	return _progress is CanvasItem and (_progress as CanvasItem).visible
-
-
-static func _found_progress(top: Node) -> Node:
-	var pending: Array[Node] = [top]
-	while not pending.is_empty():
-		var node: Node = pending.pop_back()
-		if node.is_class("ProgressDialog"):
-			return node
-		pending.append_array(node.get_children(true))
-	return null
+## What the editor is doing that turns calls away, and a mark that changes as it gets on with it,
+## as [what, mark]. The server keeps asking while the mark changes: registering forty classes in a
+## hidden editor took over thirty seconds, every one of them a step.
+func busy_with() -> Array[String]:
+	if _tool_executor != null and _tool_executor.capturing():
+		return ["capturing its view", ""]
+	var labels: Array[String] = GdhSceneFile.task_labels()
+	if not labels.is_empty():
+		return ["running its task \"%s\"" % labels[0].trim_suffix("..."), "\n".join(labels)]
+	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
+	if filesystem.is_importing():
+		return ["importing its files", ""]
+	return ["scanning its files", str(filesystem.get_scanning_progress())]
 
 
 func _on_tool_requested(request_id: String, tool_name: String, args: Dictionary) -> void:
@@ -164,7 +155,8 @@ func _on_tool_requested(request_id: String, tool_name: String, args: Dictionary)
 	# Turned away rather than held, so the server asks again: a call held here could run after the
 	# server had given up on it.
 	if turned_away(tool_name):
-		_client.send_busy(request_id, tool_name)
+		var busy: Array[String] = busy_with()
+		_client.send_busy(request_id, tool_name, busy[0], busy[1])
 		return
 
 	var result: Dictionary = await _tool_executor.execute_tool(tool_name, args)
