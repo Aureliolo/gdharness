@@ -212,6 +212,18 @@ project's open editor. It passes the bytes through unparsed (`lsp-bridge.ts`).
 It never starts an editor. A new editor would take the port from the open one, which does not try
 again. Every answer would then come from a process nobody can see.
 
+### Opening the editor from the command line
+
+`gdharness editor open` opens the project's editor the way `editor_launch open` does
+(`editor-open.ts`). Both take a lock file in the project's `.godot` folder and look for a running
+editor inside it, so two opens at once make one editor. An editor already running is left as it is.
+
+`--until PID` ties the editor to that process. A holder process outside every process tree waits for
+it to end. It then writes a request into `.godot/gdharness-editor-quits/<editor pid>`, which the
+addon checks once a second before saving and quitting. Godot cannot watch the process itself, since
+`OS.is_process_running` answers false for any process it did not start. The tie is a word after `--`
+on the editor's command line, so a restart carries it.
+
 ### Which editor the bridge reaches
 
 The editor addon writes the ports each editor process serves to

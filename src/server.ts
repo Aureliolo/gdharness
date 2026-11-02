@@ -109,14 +109,22 @@ import { dictionary, emptyRecord } from './dictionary.js';
 import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
 import {
   bursts,
-  clearEditorLog,
   type EditorLogNote,
   editorConsole,
   editorLogPath,
   readEditorLogNote,
   theConsoleWasNotCaptured,
-  writeEditorLogNote,
 } from './editor-log.js';
+import {
+  type EditorOpened,
+  type EditorStart,
+  editorAddonMissing,
+  editorRestartTimeoutMs,
+  inTurnToOpen,
+  openEditorProcess,
+  portsForAnEditor,
+  restartUnderway,
+} from './editor-open.js';
 import {
   EXIT_LEAK,
   heldAtExit,
@@ -188,12 +196,10 @@ import { askTheKeepersDebugger, askTheKeeperToStop } from './keeper-channel.js';
 import {
   EDITOR_PID_VARIABLE,
   type EditorPorts,
-  editorArguments,
   engineFlags,
   engineFlagsAmongGameArgs,
   environmentFor,
   envValue,
-  OPENED_BY_A_SERVER,
   RESERVED_VARIABLE_PREFIX,
   resolveHeadless,
   resolveSilent,
@@ -223,7 +229,7 @@ import {
   resolveWithinProject,
 } from './paths.js';
 import { acceptsConnections, notListeningNote } from './port-probe.js';
-import { freePort, portFromEnvOrNull } from './ports.js';
+import { portFromEnvOrNull } from './ports.js';
 import {
   ancestorsIn,
   CONSOLE_WRAPPER,
@@ -456,18 +462,6 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const PARENT_ASKED_AFTER_MS = 5_000;
 
 /**
- * How long a restart waits for the old editor to go, and then for the new one to come back.
- *
- * Ninety seconds is long enough for an editor to save, close, start again and rescan a large
- * project, and not longer: an editor that has not come back by then is stuck on something a person
- * has to look at, usually a dialog, and saying so beats holding the caller's call open in silence.
- * A project whose import runs past it sets GDHARNESS_EDITOR_RESTART_TIMEOUT_MS.
- */
-function editorRestartTimeoutMs(): number {
-  return waitFromEnv('GDHARNESS_EDITOR_RESTART_TIMEOUT_MS', 90_000);
-}
-
-/**
  * How long a restarted editor is given to start its language server and debug adapter once it has
  * greeted. The two came up within a few seconds of each other downstream, in either order.
  */
@@ -525,18 +519,6 @@ function kilobytes(bytes: number): string {
 function savedScenesOf(asked: ToolResponse, as = 'savedScenes'): OperationParams {
   const saved = readStringArray(asParams(JSON.parse(asked.content[0]?.text ?? '{}')), 'saved');
   return saved === undefined ? {} : { [as]: saved };
-}
-
-/**
- * Whether the restart a note records can still be in progress.
- *
- * A note lasts from the quit to the launch, which is the exit wait and the few seconds a launch
- * takes, so a live writer is not enough: a note older than that whose writer's pid answers names a
- * process that reused the number, and trusting it would refuse every launch on the project for as
- * long as that process lived.
- */
-function restartUnderway(note: RestartNote, now = Date.now()): boolean {
-  return alive(note.byPid) && now - Date.parse(note.quitAt) < editorRestartTimeoutMs() + 30_000;
 }
 
 /**
@@ -2448,32 +2430,6 @@ function unsavedInEditorNote(scripts: readonly string[]): string {
   const listed = scripts.join(', ');
   const one = scripts.length === 1;
   return `${listed} ${one ? 'is' : 'are'} open in the editor's script ${one ? 'tab' : 'tabs'} with unsaved edits, and saving ${one ? 'that tab' : 'them'} there writes ${one ? 'its' : 'their'} text over what was written here: close ${one ? 'it' : 'them'} without saving, or save first and edit again.`;
-}
-
-/**
- * Why no editor of [param projectPath] would ever dial in, read off the project's own addon, or
- * null when the addon is installed and enabled, or there is no project there to read.
- */
-function editorAddonMissing(projectPath: string): { why: string; remedies: string[] } | null {
-  if (!existsSync(join(projectPath, 'project.godot'))) {
-    return null;
-  }
-  const report = inspectProject(projectPath);
-  const installed = report.addons.some((addon) => addon.name === 'gdharness_editor' && addon.installed);
-  if (installed && report.pluginsEnabled.includes('gdharness_editor')) {
-    return null;
-  }
-  return {
-    why: `the gdharness editor addon is not ${installed ? 'enabled' : 'installed'} in ${projectPath}`,
-    remedies: installed
-      ? [
-          'project_settings enable_plugin with pluginName gdharness_editor enables it',
-          'Or enable it under Project Settings, Plugins, in an editor opened by hand',
-        ]
-      : [
-          `No gdharness tool installs the addon: run  ${gdharnessCommand(SERVER_VERSION, `setup "${projectPath}" --no-connect`)}  in a shell, which installs and enables the addons and writes no harness configuration`,
-        ],
-  };
 }
 
 /**
@@ -10078,12 +10034,16 @@ class GodotServer {
     // refused while it is still running rather than replaced on a guess.
     let hidden = args['hidden'] === true;
     let silent = resolveSilent(args['silent']);
-    if (mine && (typeof args['hidden'] !== 'boolean' || typeof args['silent'] !== 'boolean')) {
+    // Read whatever the call says, since the process the editor saves and quits at is on its
+    // command line only, and an editor opened to end with a session keeps ending with it.
+    let until: number | null = null;
+    if (mine) {
       const was = before.editorPid === undefined ? null : await runningAs(before.editorPid);
       if (was?.kind === 'commandLine') {
         const as = startedAs(was.text);
         hidden = typeof args['hidden'] === 'boolean' ? args['hidden'] : as.hidden;
         silent = typeof args['silent'] === 'boolean' ? args['silent'] : as.silent;
+        until = as.until;
       } else if (typeof args['hidden'] !== 'boolean') {
         const why =
           was === null ? 'the operating system would not say' : (was.unread ?? 'it gave no command line');
@@ -10100,7 +10060,7 @@ class GodotServer {
 
     const settingsBefore = this.settingKeysOf(before.projectPath);
     const asked = mine
-      ? await this.startItAgain(before.projectPath ?? '', before.editorPid, hidden, silent)
+      ? await this.startItAgain(before.projectPath ?? '', before.editorPid, { hidden, silent, until })
       : await this.handleViaBridge('restart_editor', {});
     if (asked.isError === true) {
       return asked;
@@ -10335,8 +10295,7 @@ class GodotServer {
   private async startItAgain(
     projectPath: string,
     editorPid: number | undefined,
-    hidden: boolean,
-    silent: boolean,
+    start: EditorStart,
   ): Promise<ToolResponse> {
     const engine = await this.engine(projectPath);
     if (!engine.ok) {
@@ -10388,7 +10347,7 @@ class GodotServer {
       );
     }
 
-    const opened = await this.openAnEditor(engine.value, projectPath, ports, hidden, silent);
+    const opened = await this.openAnEditor(engine.value, projectPath, ports, start);
     // Settled either way: a launch that failed is answered to the caller who asked, which is not
     // an interruption, and leaving the note would have the next server explain a failure this one
     // already explained.
@@ -10440,11 +10399,16 @@ class GodotServer {
         'Another project wants its own gdharness server, which is its own harness session',
       ]);
     }
-    const refused = this.anEditorThatCannotConnect(project.value.path);
+    return await inTurnToOpen(project.value.path, () => this.launchInTurn(args, project.value));
+  }
+
+  /** editor_launch open once no other open of the project's editor is under way. */
+  private async launchInTurn(args: OperationParams, project: { path: string }): Promise<ToolResponse> {
+    const refused = this.anEditorThatCannotConnect(project.path);
     if (refused !== null) {
       return refused;
     }
-    const arriving = await this.editorsNotYetConnected(project.value.path);
+    const arriving = await this.editorsNotYetConnected(project.path);
     if (arriving !== undefined && arriving.length > 0) {
       const pids = arriving
         .map((one) => `pid ${one.pid}${one.startedAt === null ? '' : `, started ${one.startedAt}`}`)
@@ -10457,12 +10421,12 @@ class GodotServer {
         ],
       );
     }
-    const engine = await this.engine(project.value.path);
+    const engine = await this.engine(project.path);
     if (!engine.ok) {
       return engine.response;
     }
-    this.logDebug(`Launching Godot editor for project: ${project.value.path}`);
-    const ports = await this.portsForAnEditor();
+    this.logDebug(`Launching Godot editor for project: ${project.path}`);
+    const ports = await portsForAnEditor();
     // Read before the editor is started, for the same reason the restart reads it: opening a
     // project imports it and saves project.godot, and Godot drops a key that is at its own default.
     // A restart can say so in its own answer because it waits for the editor to come back. This
@@ -10471,26 +10435,24 @@ class GodotServer {
     if (args['hidden'] === true && args['silent'] === false) {
       return this.createErrorResponse(HIDDEN_WITH_SOUND, [HIDDEN_WITH_SOUND_FIX]);
     }
-    const before = this.settingKeysOf(project.value.path);
+    const before = this.settingKeysOf(project.path);
     // Read before the launch settles it, so the answer can say this open finished something
     // rather than started something.
-    const unfinished = restartOwed(project.value.path);
-    const opened = await this.openAnEditor(
-      engine.value,
-      project.value.path,
-      ports,
-      args['hidden'] === true,
-      resolveSilent(args['silent']),
-    );
+    const unfinished = restartOwed(project.path);
+    const opened = await this.openAnEditor(engine.value, project.path, ports, {
+      hidden: args['hidden'] === true,
+      silent: resolveSilent(args['silent']),
+      until: null,
+    });
     if (opened.error !== null) {
       return this.createErrorResponse(`Could not start the editor: ${opened.error}`);
     }
-    restartSettled(project.value.path);
-    this.launchedFrom = { projectPath: project.value.path, before };
+    restartSettled(project.path);
+    this.launchedFrom = { projectPath: project.path, before };
     return this.jsonTextResponse({
       launched: true,
       pid: opened.pid,
-      projectPath: project.value.path,
+      projectPath: project.path,
       engineNote: engine.note ?? undefined,
       lspPort: ports.lsp,
       dapPort: ports.dap,
@@ -10578,46 +10540,12 @@ class GodotServer {
     engine: string,
     projectPath: string,
     ports: EditorPorts,
-    hidden: boolean,
-    silent: boolean,
-  ): Promise<{ pid: number | null; error: string | null; arguments: readonly string[] }> {
-    // Told rather than left to derive. A game is started by the editor and inherits its
-    // environment, not this server's, so an editor opened without TMP or TEMP set announces its
-    // games somewhere this server never looks first. Passing the directory down makes the two
-    // agree by construction for every editor gdharness opened. The two ports are in the environment
-    // as well as on the command line because the engine keeps what it was told to itself, and the
-    // third variable is this server saying it opened this editor, which is what decides who may
-    // open it again.
-    clearEditorLog(projectPath);
-    // An editor being restarted may not have let its library copies go yet.
-    freeLibraryCopies(projectPath);
-    // Through a launcher that exits once the editor is up, so the editor is nobody's child here: the
-    // harness ends a server by killing its process tree, at every reconnect, and an editor spawned
-    // as this server's child went with it however detached it was.
-    const args = editorArguments(projectPath, ports, editorLogPath(projectPath), hidden, silent);
-    const launched = await launchOutsideTheTree({
-      command: engine,
-      args,
-      env: {
-        ...process.env,
-        GDHARNESS_RUNTIME_DIR: runtimeDirectory(),
-        GDHARNESS_LSP_PORT: String(ports.lsp),
-        GDHARNESS_DAP_PORT: String(ports.dap),
-        [OPENED_BY_A_SERVER]: '1',
-      },
-      // A hidden editor is on a desktop of its own, headless or not, because the games it plays
-      // are its children and land where it is. A visible one is the user's editor, on the desktop
-      // in use, and is shown without being activated so that opening it takes nobody's keyboard.
-      ...(hidden ? { desktop: HIDDEN_DESKTOP } : { noActivate: true }),
-    });
-    if ('error' in launched) {
-      return { pid: null, error: launched.error, arguments: args };
+    start: EditorStart,
+  ): Promise<EditorOpened> {
+    const opened = await openEditorProcess(engine, projectPath, ports, start);
+    if (opened.pid === null) {
+      return opened;
     }
-    // Which editor the log beside it belongs to, so a server that did not open this editor can
-    // still tell its console from the one a previous editor left on disk. As soon as the pid is
-    // known, since this server can be replaced at any moment after it, and a note written later
-    // leaves an editor writing a console nothing can claim.
-    writeEditorLogNote(projectPath, launched.pid);
     // Remembered so that "nothing is coming" and "the editor this server just started is still
     // importing" stop being the same answer. The grace window is measured from the bridge taking
     // its port, which is the right reference for an editor that was already up and has to notice,
@@ -10628,30 +10556,14 @@ class GodotServer {
     // it: an editor that exited without connecting left its number behind, and a later process the
     // operating system handed it to answered yes, so the server reported an editor still on its way
     // and named a pid belonging to something else. The launcher leaves no handle to ask instead.
-    const startedAt = (await startTimesOf([launched.pid])).get(launched.pid) ?? null;
-    // Again with the start time, which a server reading this console after the editor has gone
-    // needs to tell the editor from a later process holding its pid.
-    if (startedAt !== null) {
-      writeEditorLogNote(projectPath, launched.pid, startedAt);
-    }
-    this.launchedEditor = { pid: launched.pid, startedAt, projectPath, arguments: args };
+    this.launchedEditor = {
+      pid: opened.pid,
+      startedAt: opened.startedAt,
+      projectPath,
+      arguments: opened.arguments,
+    };
     this.closedHere = null;
-    return { pid: launched.pid, error: null, arguments: args };
-  }
-
-  /**
-   * The ports to open an editor on: the defaults whenever they are free, and anything else when
-   * they are not.
-   *
-   * Godot serves the language server and the debug adapter on one port each for the whole machine,
-   * so the second editor open binds neither and every script and debug tool behind it is answered
-   * by the first editor, about a different project. A port named in the environment is somebody's
-   * decision and is passed on rather than moved.
-   */
-  private async portsForAnEditor(): Promise<EditorPorts> {
-    const lsp = portFromEnvOrNull('GDHARNESS_LSP_PORT') ?? (await freePort(DEFAULT_LSP_PORT));
-    const dap = portFromEnvOrNull('GDHARNESS_DAP_PORT') ?? (await freePort(DEFAULT_DAP_PORT));
-    return { lsp, dap };
+    return opened;
   }
 
   /**
