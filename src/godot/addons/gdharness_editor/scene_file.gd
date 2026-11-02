@@ -41,6 +41,10 @@ static var also_saved: Array[Dictionary] = []
 ## What a write said of the connections it kept in the file though the engine cannot make them,
 ## gathered for that call's answer as [member also_saved] is.
 static var unmade_note: String = ""
+## The editor's progress dialog, which Godot keeps for the editor's whole life and exposes no other
+## way. Looked for once, and again only if it has gone.
+static var _progress: Node = null
+static var _progress_sought: bool = false
 
 var root: Node = null
 var path: String = ""
@@ -1090,17 +1094,57 @@ static func scan_later() -> void:
 ## before it is still to be joined, which is a frame or two after that scan stops reporting itself,
 ## so a scan that leaves the editor not scanning is asked for once more once that is over. Asked of
 ## a scan that ended within the call, the second costs one more scan.
+##
+## It waits out a task of the progress dialog too, whose every step runs a frame of the editor from
+## inside itself. A scan's end registers the classes it found in such a task, after the scan has
+## stopped reporting itself and its thread has been joined (4.7.2's
+## [code]EditorFileSystem::_notification[/code]). A scan started from that frame ran beside the end
+## of the one before, which crashed the editor or left it scanning.
 static func _start_scan() -> void:
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
 	var tree: SceneTree = Engine.get_main_loop()
-	while filesystem.is_scanning() or filesystem.is_importing():
+	while filesystem.is_scanning() or filesystem.is_importing() or in_a_task():
 		await tree.process_frame
 	filesystem.scan()
 	if not filesystem.is_scanning():
 		await tree.process_frame
 		await tree.process_frame
+		while in_a_task():
+			await tree.process_frame
 		filesystem.scan()
 	scan_due = false
+
+
+## Whether the editor's progress dialog is showing, which it does for as long as a task is open.
+static func in_a_task() -> bool:
+	if _progress != null and not is_instance_valid(_progress):
+		_progress = null
+		_progress_sought = false
+	if not _progress_sought:
+		_progress_sought = true
+		_progress = _found_progress((Engine.get_main_loop() as SceneTree).root)
+	return _progress is CanvasItem and (_progress as CanvasItem).visible
+
+
+## The labels of the progress dialog's open tasks, each task's title then the step it is on, which
+## change as the task goes on. Empty when no task is open.
+static func task_labels() -> Array[String]:
+	var labels: Array[String] = []
+	if not in_a_task():
+		return labels
+	for label: Node in _progress.find_children("*", "Label", true, false):
+		labels.append(str(label.get("text")))
+	return labels
+
+
+static func _found_progress(top: Node) -> Node:
+	var pending: Array[Node] = [top]
+	while not pending.is_empty():
+		var node: Node = pending.pop_back()
+		if node.is_class("ProgressDialog"):
+			return node
+		pending.append_array(node.get_children(true))
+	return null
 
 
 ## Whether the editor holds unsaved changes to [param scene_path], for a read to say that the file

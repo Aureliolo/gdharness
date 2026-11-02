@@ -59306,8 +59306,10 @@ async function testAReadAskedOfTheEditorIsNotAnsweredFromDisk(): Promise<void> {
 }
 
 /**
- * A tool the editor turns away because it is scanning or importing is asked for again until the
- * editor takes it, and the caller is told when the editor stays busy for the whole wait.
+ * A tool the editor turns away because it is busy is asked for again until the editor takes it.
+ * The wait runs from the last time the editor moved on, up to ten times the wait, and the caller is
+ * told what the editor was doing when it gives up. A hidden editor registering forty new classes
+ * took over thirty seconds, stepping all the while, and calls were refused at thirty.
  *
  * A save during a scan updates the file list the scan's thread is writing out, so the addon turns
  * away every call that could save until the scan is over. The fixture editor turns calls away as
@@ -59334,6 +59336,10 @@ async function testAToolWaitsOutTheEditorsScan(): Promise<void> {
     },
   });
   let busyFor = 0;
+  // Busy until then however many times it is asked, with a mark that moves on each time when moving.
+  let busyUntil = 0;
+  let moving = false;
+  let step = 0;
   const told: string[] = [];
   let editor: WebSocket | null = null;
   try {
@@ -59356,16 +59362,21 @@ async function testAToolWaitsOutTheEditorsScan(): Promise<void> {
       if (tool === 'scan_status') {
         result = { scanning: false, importing: false, pending: false };
       } else if (tool === 'files_moved') {
-        told.push(busyFor > 0 ? 'busy' : 'done');
-        if (busyFor > 0) {
+        const busy = busyFor > 0 || Date.now() < busyUntil;
+        told.push(busy ? 'busy' : 'done');
+        if (busy) {
           busyFor -= 1;
+          step += moving ? 1 : 0;
           socket.send(
             JSON.stringify({
               type: 'tool_result',
               id: message['id'],
               success: false,
               busy: true,
-              error: 'The editor is scanning or importing its files, so files_moved was not run.',
+              busyWith: 'running its task "Registering global classes"',
+              progress: `Registering global classes...\nGdhMany${String(step)}`,
+              error:
+                'The editor is running its task "Registering global classes", so files_moved was not run.',
             }),
           );
           return;
@@ -59382,42 +59393,86 @@ async function testAToolWaitsOutTheEditorsScan(): Promise<void> {
       knows = get(parseTextContent(status), 'editor', 'connected') === true;
     }
     assert.ok(knows, 'the fixture editor should have connected, or this proves nothing');
-    const move = async (from: string, to: string): Promise<unknown> =>
+    const move = async (from: string, to: string, progressToken?: string): Promise<unknown> =>
       parseTextContent(
         await server.request(
           'tools/call',
           {
             name: 'resource_edit',
             arguments: { op: 'move', projectPath: project, resourcePath: from, newPath: to },
+            ...(progressToken === undefined ? {} : { _meta: { progressToken } }),
           },
           60_000,
         ),
       );
 
     busyFor = 1;
-    const waited = await move('res://hero.tscn', 'res://actors/hero.tscn');
+    const waited = await move('res://hero.tscn', 'res://actors/hero.tscn', 'moving');
     assert.deepEqual(
       told,
       ['busy', 'done'],
       `the editor busy once is asked again: ${JSON.stringify(waited)}`,
     );
+    const heard = server.notifications
+      .filter((message) => message.method === 'notifications/progress')
+      .map((message) => (isRecord(message.params) ? message.params : {}))
+      .filter((params) => params['progressToken'] === 'moving')
+      .map((params) => text(params['message']));
+    assert.deepEqual(
+      heard,
+      ['Waiting for the editor, which is running its task "Registering global classes".'],
+      'a call waiting on the editor is told what the editor is doing',
+    );
     assert.deepEqual(get(waited, 'editor', 'reloadedScenes'), ['res://stage.tscn'], JSON.stringify(waited));
     assert.equal(get(waited, 'ok'), true, JSON.stringify(waited));
 
+    // A task that keeps stepping for twice the wait is waited for.
     told.length = 0;
+    busyFor = 0;
+    moving = true;
+    busyUntil = Date.now() + 3000;
+    const stepped = await move('res://actors/hero.tscn', 'res://hero.tscn');
+    assert.equal(
+      get(stepped, 'ok'),
+      true,
+      `a task moving on past the wait is waited for: ${JSON.stringify(stepped)}`,
+    );
+    assert.equal(told.at(-1), 'done', told.join(', '));
+
+    told.length = 0;
+    moving = false;
+    busyUntil = 0;
     busyFor = Number.POSITIVE_INFINITY;
-    const gaveUp = await move('res://actors/hero.tscn', 'res://hero.tscn');
+    const gaveUp = await move('res://hero.tscn', 'res://actors/hero.tscn');
     assert.ok(
       told.length >= 2 && told.every((one) => one === 'busy'),
       `asked until the wait ran out: ${told.join(', ')}`,
     );
     assert.match(
       text(get(gaveUp, 'note')),
-      /was scanning or importing its files for all of 2 s, so files_moved was not run and nothing it would change was changed/,
+      /The editor was running its task "Registering global classes" and had not moved on in 2 s, so files_moved was not run and nothing it would change was changed\. Ask again once the editor is done\./,
       JSON.stringify(gaveUp),
     );
     assert.equal(get(gaveUp, 'ok'), false, 'an editor left on the old paths is not a move that settled');
-    assert.ok(existsSync(join(project, 'hero.tscn')), 'the move itself is made whatever the editor says');
+    assert.ok(
+      existsSync(join(project, 'actors', 'hero.tscn')),
+      'the move itself is made whatever the editor says',
+    );
+
+    // One that keeps stepping is waited for ten times the wait and no longer.
+    told.length = 0;
+    moving = true;
+    const ceiling = Date.now();
+    const tooLong = await move('res://actors/hero.tscn', 'res://hero.tscn');
+    assert.match(
+      text(get(tooLong, 'note')),
+      /The editor was running its task "Registering global classes" for all of 15 s, so files_moved was not run/,
+      JSON.stringify(tooLong),
+    );
+    assert.ok(
+      Date.now() - ceiling >= 15_000,
+      `and waited out the ten times: ${String(Date.now() - ceiling)} ms`,
+    );
   } finally {
     editor?.terminate();
     await server.stop();
