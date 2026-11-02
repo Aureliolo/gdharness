@@ -313,6 +313,8 @@ func add_node(args: Dictionary) -> Dictionary:
 	if class_script != null:
 		scene.asked(new_node, ["script"])
 		new_node.set_script(class_script)
+		# The script's _init can name the node, and the call's name is the one kept.
+		new_node.name = node_name
 	var unsettled: String = scene.settle()
 	if not unsettled.is_empty():
 		return scene.refuse("Nothing was written: " + unsettled)
