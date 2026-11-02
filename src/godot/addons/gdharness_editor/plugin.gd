@@ -17,8 +17,20 @@ const ANSWERED_WHILE_SCANNING: Array[String] = [
 	"stop_playing",
 	"profile_read",
 ]
+## The tools answered inside a task of the editor's progress dialog, because none of them writes
+## anything the editor's task could be in the middle of.
+const ANSWERED_DURING_A_TASK: Array[String] = [
+	"scan_status",
+	"playing_status",
+	"stop_playing",
+	"profile_read",
+]
 
 var _client: GdhBridgeClient
+## The editor's progress dialog, which Godot keeps for the editor's whole life and exposes no other
+## way. Looked for once, and again only if it has gone.
+var _progress: Node = null
+var _progress_sought: bool = false
 var _tool_executor: GdhToolExecutor
 var _status_label: Label
 var _release_export: GdhReleaseExport
@@ -107,14 +119,42 @@ func _on_disconnected() -> void:
 ## scan updates the file list the scan's thread is writing out (see SceneFile.scan_later), and an
 ## import can run frames of the editor from inside itself, the one handling this call among them.
 ## Every call waits out a capture, which shows a scene for frames before it reads the view.
+##
+## A task in the editor's progress dialog runs frames of the editor from inside itself at every
+## step, so a call handled then runs in the middle of that task. A save there asked for the script
+## classes again while the editor was registering them, and the two registrations walked one list,
+## which crashed the editor at its next scan.
 func turned_away(tool_name: String) -> bool:
 	if _tool_executor != null and _tool_executor.capturing():
+		return true
+	if not ANSWERED_DURING_A_TASK.has(tool_name) and _in_a_task():
 		return true
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
 	return (
 		not ANSWERED_WHILE_SCANNING.has(tool_name)
 		and (filesystem.is_scanning() or filesystem.is_importing())
 	)
+
+
+## Whether the editor's progress dialog is showing, which it does for as long as a task is open.
+func _in_a_task() -> bool:
+	if _progress != null and not is_instance_valid(_progress):
+		_progress = null
+		_progress_sought = false
+	if not _progress_sought:
+		_progress_sought = true
+		_progress = _found_progress(get_tree().root)
+	return _progress is CanvasItem and (_progress as CanvasItem).visible
+
+
+static func _found_progress(top: Node) -> Node:
+	var pending: Array[Node] = [top]
+	while not pending.is_empty():
+		var node: Node = pending.pop_back()
+		if node.is_class("ProgressDialog"):
+			return node
+		pending.append_array(node.get_children(true))
+	return null
 
 
 func _on_tool_requested(request_id: String, tool_name: String, args: Dictionary) -> void:
