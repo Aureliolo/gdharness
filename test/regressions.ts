@@ -20344,6 +20344,14 @@ async function testARuntimeCallWaitsForTheGameThisServerStarted(): Promise<void>
   }
   const project = mkdtempSync(join(tmpdir(), 'gdharness-coming-up-'));
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-coming-up-runtime-'));
+  // A project of its own, so a start naming it gets as far as the run this server holds.
+  const elsewhere = mkdtempSync(join(tmpdir(), 'gdharness-not-this-project-'));
+  writeFileSync(
+    join(elsewhere, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Elsewhere"\n' +
+      'run/main_scene="res://main.tscn"\n',
+  );
+  writeFileSync(join(elsewhere, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
   const server = new ServerProcess({ env: { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDir } });
   const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
     textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
@@ -20351,10 +20359,16 @@ async function testARuntimeCallWaitsForTheGameThisServerStarted(): Promise<void>
     writeFileSync(
       join(project, 'project.godot'),
       '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="ComingUp"\n' +
-        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\nSlow="*res://slow.gd"\n' +
         `${RUNTIME_AUTOLOAD.name}="*res://${RUNTIME_SCRIPT}"\n`,
     );
     writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    // Loaded ahead of the runtime addon, so the game announces seconds after its start answers. An
+    // empty game announced before a start with no wait had answered, and the call never landed first.
+    writeFileSync(
+      join(project, 'slow.gd'),
+      'extends Node\n\n\nfunc _init() -> void:\n\tOS.delay_msec(3000)\n',
+    );
     cpSync(
       join('src', 'godot', 'addons', 'gdharness_runtime'),
       join(project, 'addons', 'gdharness_runtime'),
@@ -20378,14 +20392,28 @@ async function testARuntimeCallWaitsForTheGameThisServerStarted(): Promise<void>
     // refused leaves the second start to end the first run instead, which is a different path.
     // A stop or a wait carrying projectPath, as one copied from the start does: another project's
     // is refused and the run goes on, and this project's is taken.
-    const elsewhere = join(tmpdir(), 'gdharness-not-this-project');
     for (const op of ['stop', 'wait', 'profile']) {
       assert.match(
         await call('editor_run', { op, projectPath: elsewhere }),
-        /The run this server holds is of .*, not .*gdharness-not-this-project, so nothing was/,
+        /The run this server holds is of .*, not .*gdharness-not-this-project-\w+, so nothing was/,
         `${op} naming another project is refused`,
       );
     }
+    // A start for another project, which ended this run and started that one in its place.
+    const other = await call('editor_run', {
+      projectPath: elsewhere,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 60_000,
+    });
+    assert.match(
+      other,
+      new RegExp(
+        `^This server holds a run of .*gdharness-coming-up-\\w+ \\(pid ${String(firstPid)}\\), and one server holds one run, so .*gdharness-not-this-project-\\w+ was not started and that run goes on\\..*editor_run stop with projectPath`,
+        's',
+      ),
+      `a start naming another project is refused: ${other}`,
+    );
     // This run was started without the profiler, so a profile naming its own project reaches it
     // and is told that, rather than being refused for the argument.
     assert.match(
@@ -20436,6 +20464,7 @@ async function testARuntimeCallWaitsForTheGameThisServerStarted(): Promise<void>
     await server.stop();
     sweep(project);
     sweep(runtimeDir);
+    sweep(elsewhere);
   }
 }
 
@@ -69550,6 +69579,146 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
 }
 
 /**
+ * A call reaching the editor while it registers script classes waits until it has.
+ *
+ * The editor's progress dialog runs frames of the editor at every step of a task, and the bridge
+ * handled calls in those frames. A scene_node add saved its scene there, and the save asked for
+ * the script classes again inside the editor's own registration of them. The editor logged "Task
+ * 'update_scripts_classes' already exists", and the two registrations walked one list, which crashed
+ * the editor at its next scan. Here the scan the first saves start registers forty new classes,
+ * while adds to several scenes are kept in flight, so one is waiting whenever the task runs a frame.
+ */
+async function testACallWaitsOutTheEditorsProgressTask(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('editor progress task regression skipped (Godot not found)');
+    return;
+  }
+  const project = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-editor-task-')));
+  const home = join(project, 'home');
+  mkdirSync(home);
+  installAddons(project);
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="EditorTask"\n\n[editor_plugins]\n\n' +
+      'enabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+  );
+  const scenes = Array.from({ length: 6 }, (_, at) => `scene_${String(at)}.tscn`);
+  for (const scene of scenes) {
+    writeFileSync(join(project, scene), '[gd_scene format=3]\n\n[node name="Root" type="Node"]\n');
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_DAP_PORT: String(await reservePort()),
+      HOME: home,
+      USERPROFILE: home,
+      APPDATA: home,
+      LOCALAPPDATA: home,
+      XDG_CONFIG_HOME: home,
+      XDG_DATA_HOME: home,
+      XDG_CACHE_HOME: home,
+      GDHARNESS_RUNTIME_DIR: join(home, 'runtime'),
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name, arguments: args }, 240_000);
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('editor-task');
+    const opened = await call('editor_launch', { op: 'open', projectPath: project, hidden: true });
+    assert.notEqual(get(opened.result, 'isError'), true, textOf(opened) ?? '');
+    let connected = false;
+    for (let waited = 0; waited < 180_000 && !connected; waited += 500) {
+      await delay(500);
+      connected = get(parseTextContent(await call('editor_status', {})), 'editor', 'connected') === true;
+    }
+    assert.ok(connected, 'the hidden editor connected');
+
+    const classes = 40;
+    mkdirSync(join(project, 'many'));
+    for (let at = 0; at < classes; at += 1) {
+      writeFileSync(
+        join(project, 'many', `many_${String(at)}.gd`),
+        `class_name GdhMany${String(at)}\nextends RefCounted\n\nvar held: int = ${String(at)}\n`,
+      );
+    }
+    // Each save has the editor scan, and the first scan finds the new classes and registers them.
+    // For a fixed time, since every save asks for another scan.
+    const until = Date.now() + 8000;
+    const added: string[][] = scenes.map(() => []);
+    const refused: string[] = [];
+    await Promise.all(
+      scenes.map(async (scene, which) => {
+        for (let at = 0; (Date.now() < until || at < 3) && refused.length === 0; at += 1) {
+          const name = `Added${String(at)}`;
+          const reply = await call('scene_node', {
+            projectPath: project,
+            scenePath: `res://${scene}`,
+            op: 'add',
+            nodeType: 'Node',
+            nodeName: name,
+          });
+          if (get(reply.result, 'isError') === true) {
+            refused.push(`${scene} ${name}: ${textOf(reply) ?? ''}`);
+          } else {
+            added[which]?.push(name);
+          }
+        }
+      }),
+    );
+    const log = readFileSync(join(project, '.godot', 'gdharness-editor.log'), 'utf8');
+    assert.doesNotMatch(
+      log,
+      /Task '\w+' already exists|Do not use progress dialog/,
+      `no call ran inside the editor's task: ${log.slice(0, 3000)}`,
+    );
+    assert.deepEqual(refused, [], 'every add was answered');
+    let idle = false;
+    for (let waited = 0; waited < 120_000 && !idle; waited += 500) {
+      const scan = get(parseTextContent(await call('editor_status', {})), 'editor', 'scan');
+      idle = get(scan, 'scanning') === false && get(scan, 'importing') === false;
+      if (!idle) {
+        await delay(500);
+      }
+    }
+    assert.ok(idle, 'the editor finished scanning');
+    assert.ok(
+      added.every((names) => names.length >= 3),
+      `each scene took its adds: ${JSON.stringify(added)}`,
+    );
+    const cache = readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8');
+    assert.ok(
+      cache.includes(`GdhMany${String(classes - 1)}`),
+      'the editor registered the new classes, which is the task the adds met',
+    );
+    scenes.forEach((scene, which) => {
+      const saved = readFileSync(join(project, scene), 'utf8');
+      for (const name of added[which] ?? []) {
+        assert.ok(
+          saved.includes(`[node name="${name}" type="Node" parent="."`),
+          `${scene} holds ${name}: ${saved}`,
+        );
+      }
+    });
+  } finally {
+    await call('editor_launch', { op: 'close' }).catch(() => undefined);
+    await server.stop();
+    for (const { pid } of await endEnginesUnder(project)) {
+      console.log(`ended engine ${pid}, which was still holding the editor task fixture`);
+    }
+    sweep(project);
+  }
+}
+
+/**
  * A headless write saves what the editor would. A model-driven probe renamed a node in a scene whose
  * ShaderMaterial set none of its parameters, and the save wrote each as null, since the saver leaves
  * out a parameter at the default the renderer gives and a headless renderer gives none. The same
@@ -71705,6 +71874,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTwoWritesToOneSceneAtOnceBothLand,
   testAWriteWaitsForAnotherProcesssTurn,
   testTheEditorsViewShowsWhatToolScriptsDrawThere,
+  testACallWaitsOutTheEditorsProgressTask,
   testAMovedNodeNamesTheScriptLinesReadingIt,
   testAHandWrittenValueIsNoChangeOfAScripts,
   testAOneShotEngineRunIsTurnedAwayAtTheBridge,

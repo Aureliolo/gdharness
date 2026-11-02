@@ -10796,7 +10796,17 @@ class GodotServer {
     await this.pickUpWhatTheEditorIsPlaying();
     let ended: EndedRun | null = null;
     const before = await this.currentRun();
-    if (before !== null && (await this.runStillGoing(before))) {
+    const going = before !== null && (await this.runStillGoing(before));
+    // One server holds one run. Ending another project's run for this start stopped a bench in one
+    // worktree when a start came from another, and the answer's `ended` went unread.
+    if (going && before.projectPath !== null && !isSameDirectory(before.projectPath, project.value.path)) {
+      const pid = before.pid ?? this.announcedPidOf(before);
+      return this.createErrorResponse(
+        `This server holds a run of ${before.projectPath}${pid === undefined ? '' : ` (pid ${String(pid)})`}, and one server holds one run, so ${project.value.path} was not started and that run goes on.`,
+        [`editor_run stop with projectPath ${before.projectPath} ends it`, 'Then ask for this start again'],
+      );
+    }
+    if (going) {
       this.logDebug('Ending the running game before starting another');
       const endingFrom = Date.now();
       const ending = await this.endActiveGame(
