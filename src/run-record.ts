@@ -200,24 +200,44 @@ export function readLatestRun(servedBy: string, directory = runtimeDirectory()):
  * the child keeps its own copy, and this process has no reason to hold one open for a file it
  * only ever reads by offset.
  */
+/**
+ * A new transcript for a run started at [startedAt], made by this call alone. The runs folder is one
+ * for the machine, and servers woken by one gate freeing its slots start in the same millisecond, so
+ * a name taken already gets a number after the time.
+ */
 export function openTranscript(startedAt: number): { path: string; fd: number } {
   mkdirSync(runsDirectory(), { recursive: true });
-  const path = join(runsDirectory(), `run-${startedAt}.log`);
-  return { path, fd: openSync(path, 'a') };
+  for (let taken = 0; ; taken += 1) {
+    const path = join(
+      runsDirectory(),
+      taken === 0 ? `run-${startedAt}.log` : `run-${startedAt}-${taken}.log`,
+    );
+    try {
+      return { path, fd: openSync(path, 'wx') };
+    } catch (error) {
+      if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) {
+        throw error;
+      }
+    }
+  }
 }
 
 /** Where a profiled run's script profile is kept: beside its transcript, and swept with it. */
-export function profilePath(startedAt: number): string {
-  return join(runsDirectory(), `run-${startedAt}.profile.json`);
+export function profilePath(transcript: string): string {
+  return transcript.replace(/\.log$/, '.profile.json');
 }
 
 /**
- * Where the mark `editor_run profile` sets in a run is kept, beside the run's profile, so a server
- * that replaces the one that set it reads it too. Named by the run's start for a run the editor
- * plays as well, which has no profile file of its own.
+ * Where the mark `editor_run profile` sets in a run is kept, beside the run's transcript, so a
+ * server that replaces the one that set it reads it too. A run picked up with no transcript is
+ * named by its start.
  */
-export function profileMarkPath(startedAt: number): string {
-  return join(runsDirectory(), `run-${startedAt}.profile-mark.json`);
+export function profileMarkPath(run: {
+  readonly transcript: string | null;
+  readonly startedAt: number;
+}): string {
+  const transcript = run.transcript ?? join(runsDirectory(), `run-${run.startedAt}.log`);
+  return transcript.replace(/\.log$/, '.profile-mark.json');
 }
 
 export function writeRunRecord(record: RunRecord): void {
@@ -893,7 +913,7 @@ export function sweepTranscripts(keepMs = 24 * 60 * 60 * 1000, now = Date.now())
   const kept = new Set(
     everyRunRecord().flatMap((record) => [
       record.transcript,
-      profileMarkPath(record.startedAt),
+      profileMarkPath(record),
       ...(record.profile === undefined ? [] : [record.profile]),
     ]),
   );

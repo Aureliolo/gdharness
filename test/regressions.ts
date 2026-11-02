@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
   chmodSync,
+  closeSync,
   cpSync,
   existsSync,
   linkSync,
@@ -19,6 +20,7 @@ import {
   symlinkSync,
   utimesSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { availableParallelism, homedir, tmpdir } from 'node:os';
@@ -278,7 +280,9 @@ import {
   judgeRun,
   listeningPid,
   listeningPidInNetstat,
+  openTranscript,
   profileMarkPath,
+  profilePath,
   readLatestRun,
   readRunRecord,
   readWindowsCommandLine,
@@ -40760,6 +40764,41 @@ async function withAHeldGame(
  * each is read, ended and cleared without touching the other, and a transcript either note names
  * outlives the sweep of old ones.
  */
+function testTwoRunsStartedInOneMillisecondKeepTheirOwnFiles(): void {
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-same-start-'));
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
+  try {
+    const startedAt = 1_762_070_000_000;
+    const first = openTranscript(startedAt);
+    const second = openTranscript(startedAt);
+    writeSync(first.fd, 'the first game\n');
+    writeSync(second.fd, 'the second game\n');
+    closeSync(first.fd);
+    closeSync(second.fd);
+    assert.notEqual(first.path, second.path, 'each run has a transcript of its own');
+    assert.equal(readFileSync(first.path, 'utf8'), 'the first game\n');
+    assert.equal(readFileSync(second.path, 'utf8'), 'the second game\n');
+    assert.notEqual(profilePath(first.path), profilePath(second.path), 'and a profile of its own');
+    assert.notEqual(
+      profileMarkPath({ transcript: first.path, startedAt }),
+      profileMarkPath({ transcript: second.path, startedAt }),
+      'and a profile mark of its own',
+    );
+    assert.equal(
+      basename(profilePath(second.path)),
+      basename(second.path).replace(/\.log$/, '.profile.json'),
+    );
+  } finally {
+    if (had === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = had;
+    }
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
 function testRunNotesAreKeptPerProject(): void {
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-notes-'));
   const shop = join(tmpdir(), 'the-shop');
@@ -40798,7 +40837,9 @@ function testRunNotesAreKeptPerProject(): void {
     utimesSync(shopLog, aDayAgo, aDayAgo);
     utimesSync(benchLog, aDayAgo, aDayAgo);
     // A run's profile mark goes with the run: kept while a note names it, swept once old otherwise.
-    const shopMark = profileMarkPath(readRunRecord(shop)?.startedAt ?? 0);
+    const shopRecord = readRunRecord(shop);
+    assert.ok(shopRecord !== null, 'the shop run has a note');
+    const shopMark = profileMarkPath(shopRecord);
     const strayMark = join(runs, 'run-3.profile-mark.json');
     for (const mark of [shopMark, strayMark]) {
       writeFileSync(mark, '{}');
@@ -49774,7 +49815,43 @@ function testATestRunDealsByAndRecordsIntoTheTimesItIsGiven(): void {
   }
 }
 
-async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
+/**
+ * The project the test command's two regressions run in, with gdUnit4 copied in, the folders beside
+ * it, and the command run on it.
+ */
+function commandTestProject(
+  godotPath: string,
+  gdunit: string,
+): {
+  project: string;
+  slots: string;
+  checkouts: string;
+  env: NodeJS.ProcessEnv;
+  test: (...args: string[]) => { said: string; status: number | null };
+} {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-command-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-slots-'));
+  const checkouts = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-checkouts-'));
+  // The Compatibility renderer, since the windowed cases are about where suites run and not about
+  // rendering: on a GitHub macOS runner, whose GPU is virtual, Godot's Metal driver under Forward+
+  // printed "timeout waiting for fence" in eight of ten windowed runs drawing thirty frames, and
+  // Mobile, Compatibility and Vulkan in none of ten each. That error fails a run, as it should.
+  writeTree(project, commandTestTree());
+  cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+  const env = { ...process.env, GODOT_PATH: godotPath };
+  const test = (...args: string[]): { said: string; status: number | null } => {
+    const ran = spawnSyncHidden(
+      process.execPath,
+      ['build/cli.js', 'test', project, '--slots', slots, ...args],
+      { encoding: 'utf8', env, timeout: 4 * ENGINE_CALL_TIMEOUT_MS },
+    );
+    return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
+  };
+  return { project, slots, checkouts, env, test };
+}
+
+/** Godot and gdUnit4 for the test command's regressions, or null when either is missing. */
+function commandTestEngines(): { godotPath: string; gdunit: string } | null {
   const godotPath = resolveGodotPath();
   const gdunit = process.env['GDUNIT4_PATH'];
   if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
@@ -49782,63 +49859,54 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
     }
     console.log('test command regression skipped (Godot or gdUnit4 not found)');
+    return null;
+  }
+  return { godotPath, gdunit };
+}
+
+function commandTestTree(): Record<string, string> {
+  return {
+    'project.godot':
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="TestCommand"\n\n' +
+      '[rendering]\nrenderer/rendering_method="gl_compatibility"\n',
+    'tests/ok_test.gd':
+      'extends GdUnitTestSuite\n\nfunc test_one() -> void:\n\tassert_int(1).is_equal(1)\n\n\nfunc test_two() -> void:\n\tawait get_tree().process_frame\n\tassert_int(2).is_equal(2)\n',
+    'tests/declared_test.gd': [
+      'extends GdUnitTestSuite',
+      '',
+      'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {"before": ["said in before"], "test_rows": ["row said"]}',
+      'const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_rows": ["row warned"]}',
+      '',
+      'func before() -> void:',
+      '\tpush_error("said in before")',
+      '',
+      '',
+      '@warning_ignore("unused_parameter")',
+      'func test_rows(value: int, test_parameters := [[1], [2]]) -> void:',
+      '\tpush_error("row said")',
+      '\tpush_warning("row warned")',
+      '\tassert_int(value).is_greater(0)',
+      '',
+    ].join('\n'),
+    'tests/noisy_test.gd':
+      'extends GdUnitTestSuite\n\nfunc test_noisy() -> void:\n\tpush_error("nobody said this")\n\tassert_bool(true).is_true()\n',
+    'tests/hang_test.gd':
+      'extends GdUnitTestSuite\n\nfunc test_hangs() -> void:\n\tawait get_tree().create_timer(60.0).timeout\n',
+    // The root refuses a change of embedding while a window is up, and says so only in a warning.
+    'tests/window_test.gd': windowSuite(''),
+    'tests/window_declared_test.gd': windowSuite(
+      `const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_window": [${JSON.stringify(EMBED_REFUSED)}]}\n`,
+    ),
+  };
+}
+
+async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null) {
     return;
   }
-  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-command-'));
-  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-slots-'));
-  const checkouts = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-checkouts-'));
+  const { project, slots, checkouts, env, test } = commandTestProject(engines.godotPath, engines.gdunit);
   try {
-    // The Compatibility renderer, since the windowed cases are about where suites run and not about
-    // rendering: on a GitHub macOS runner, whose GPU is virtual, Godot's Metal driver under Forward+
-    // printed "timeout waiting for fence" in eight of ten windowed runs drawing thirty frames, and
-    // Mobile, Compatibility and Vulkan in none of ten each. That error fails a run, as it should.
-    writeTree(project, {
-      'project.godot':
-        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="TestCommand"\n\n' +
-        '[rendering]\nrenderer/rendering_method="gl_compatibility"\n',
-      'tests/ok_test.gd':
-        'extends GdUnitTestSuite\n\nfunc test_one() -> void:\n\tassert_int(1).is_equal(1)\n\n\nfunc test_two() -> void:\n\tawait get_tree().process_frame\n\tassert_int(2).is_equal(2)\n',
-      'tests/declared_test.gd': [
-        'extends GdUnitTestSuite',
-        '',
-        'const GDHARNESS_EXPECTED_ERRORS: Dictionary = {"before": ["said in before"], "test_rows": ["row said"]}',
-        'const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_rows": ["row warned"]}',
-        '',
-        'func before() -> void:',
-        '\tpush_error("said in before")',
-        '',
-        '',
-        '@warning_ignore("unused_parameter")',
-        'func test_rows(value: int, test_parameters := [[1], [2]]) -> void:',
-        '\tpush_error("row said")',
-        '\tpush_warning("row warned")',
-        '\tassert_int(value).is_greater(0)',
-        '',
-      ].join('\n'),
-      'tests/noisy_test.gd':
-        'extends GdUnitTestSuite\n\nfunc test_noisy() -> void:\n\tpush_error("nobody said this")\n\tassert_bool(true).is_true()\n',
-      'tests/hang_test.gd':
-        'extends GdUnitTestSuite\n\nfunc test_hangs() -> void:\n\tawait get_tree().create_timer(60.0).timeout\n',
-      // The root refuses a change of embedding while a window is up, and says so only in a warning.
-      'tests/window_test.gd': windowSuite(''),
-      'tests/window_declared_test.gd': windowSuite(
-        `const GDHARNESS_EXPECTED_WARNINGS: Dictionary = {"test_window": [${JSON.stringify(EMBED_REFUSED)}]}\n`,
-      ),
-    });
-    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
-    const env = { ...process.env, GODOT_PATH: godotPath };
-    const test = (...args: string[]): { said: string; status: number | null } => {
-      const ran = spawnSyncHidden(
-        process.execPath,
-        ['build/cli.js', 'test', project, '--slots', slots, ...args],
-        {
-          encoding: 'utf8',
-          env,
-          timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
-        },
-      );
-      return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
-    };
     // Without --import: a project with no class cache is imported whatever the switches say, since
     // gdUnit4's runner extends classes only the cache names.
     const first = test('tests/ok_test.gd', 'tests/declared_test.gd');
@@ -50103,6 +50171,29 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     assert.match(besideSkipped.said, /^Passed: 1 case in 1 suite across 1 engine, /m, besideSkipped.said);
     assert.deepEqual(leftInSlots(slots), [], `its slot given back: ${besideSkipped.said}`);
     rmSync(join(project, 'tests', 'loads_test.gd'));
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
+/**
+ * The test command's windows, results, deals, engines and slots, on a project of their own: one
+ * regression holding every case of the command ran near its deadline on a loaded runner.
+ */
+async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const { godotPath } = engines;
+  const { project, slots, checkouts, env, test } = commandTestProject(godotPath, engines.gdunit);
+  try {
+    const state = join(project, '.godot', 'gdharness');
+    const resultFile = join(checkouts, 'result.json');
+    const resultOf = (): RunResult => readRunResult(resultFile);
+    // Passed once first, so the window suites below are kept as passed beside them.
+    const first = test('tests/ok_test.gd', 'tests/declared_test.gd');
+    assert.equal(first.status, 0, first.said);
 
     const embedRefused = test('tests/window_test.gd');
     assert.equal(embedRefused.status, 1, embedRefused.said);
@@ -50334,78 +50425,6 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       noEngine.said,
     );
 
-    // On a crowded machine a limit counts the engine's own processor time, and an engine waiting
-    // on timers has little of it, so its ending says how it was counted and may come only at the
-    // clock's bound, eight times the limit.
-    const underLoad = String.raw`(?: of its own, counted by its processor time while other work kept the machine busy \(\d+ s on the clock\)|, 8 times over on the clock \(\d+ s\), the machine kept busy by other work)?`;
-    // A case printing all the while is never silent, so only the deadline ends it. It runs past
-    // the clock's bound on the deadline, so a crowded machine ends it too.
-    writeTree(project, {
-      'tests/chatty_test.gd':
-        'extends GdUnitTestSuite\n\nfunc test_chatters() -> void:\n\tfor tick: int in 1200:\n\t\tprint("tick %d" % tick)\n\t\tawait get_tree().create_timer(0.1).timeout\n',
-    });
-    const chatty = test('tests/chatty_test.gd', '--silence', '4', '--deadline', '12');
-    rmSync(join(project, 'tests', 'chatty_test.gd'));
-    assert.match(
-      chatty.said,
-      new RegExp(
-        String.raw`^ {2}the engine ran past the 12 s deadline${underLoad} while running res:\/\/tests\/chatty_test\.gd > test_chatters, so it was ended$`,
-        'm',
-      ),
-      chatty.said,
-    );
-    assert.doesNotMatch(chatty.said, /printed nothing for/, chatty.said);
-    assert.equal(chatty.status, 1, chatty.said);
-
-    const hung = test('tests/hang_test.gd', '--silence', '4');
-    assert.match(
-      hung.said,
-      new RegExp(
-        String.raw`^ {2}the engine printed nothing for 4 s${underLoad} while running res:\/\/tests\/hang_test\.gd > test_hangs, so it was ended$`,
-        'm',
-      ),
-      hung.said,
-    );
-    assert.equal(hung.status, 1, hung.said);
-    // Counted against the faults printed under the engine's heading, which a run cut short has
-    // several of from one engine.
-    const faultLines =
-      /^--- engine \d+:.*\n((?: {2}\S.*\n)+)/m.exec(hung.said)?.[1]?.trimEnd().split('\n') ?? [];
-    assert.ok(faultLines.length > 1, hung.said);
-    assert.match(
-      hung.said,
-      new RegExp(`^Failed: ${String(faultLines.length)} problems, listed above\\.`, 'm'),
-      hung.said,
-    );
-    assert.deepEqual(leftInSlots(slots), [], 'its slot given back too');
-
-    // A suite timed as long beside it in the same engine leaves the hanging case its own silence:
-    // held to the slowest suite dealt, it would wait out the case's 60 s timer and end unjudged.
-    const timesKept = readFileSync(timesFile, 'utf8');
-    writeFileSync(
-      timesFile,
-      JSON.stringify({
-        ...asObject(JSON.parse(timesKept), 'the times kept'),
-        'res://tests/ok_test.gd': { seconds: 201, cases: { test_one: 100, test_two: 100 } },
-        'res://tests/hang_test.gd': { seconds: 0.6, cases: { test_hangs: 0.5 } },
-      }),
-    );
-    const besideALongOne = test('tests/ok_test.gd', 'tests/hang_test.gd', '--engines', '1', '--silence', '4');
-    writeFileSync(timesFile, timesKept);
-    assert.match(
-      besideALongOne.said,
-      new RegExp(
-        String.raw`^ {2}the engine printed nothing for 4 s${underLoad} while running res:\/\/tests\/hang_test\.gd > test_hangs, so it was ended$`,
-        'm',
-      ),
-      besideALongOne.said,
-    );
-    assert.match(
-      besideALongOne.said,
-      /^--- engine \d+: 2 suites, /m,
-      `both in one engine: ${besideALongOne.said}`,
-    );
-
     // An autoload that cannot start makes every suite after it meaningless, so the run ends there
     // rather than reporting cases that ran without it.
     const godotFile = join(project, 'project.godot');
@@ -50621,7 +50640,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
       /nobody said this/,
       'and the worktree holds them',
     );
-    assert.doesNotMatch(noisy.said, /^That is a copy beside/m, 'a run in the main checkout names one place');
+    assert.doesNotMatch(pushed.said, /^That is a copy beside/m, 'a run in the main checkout names one place');
     rmSync(join(checkouts, 'gate'), { recursive: true, force: true });
     const keptLog = readFileSync(namedLog, 'utf8');
     assert.match(keptLog, /^gdharness: engine 0: 1 suite, /, 'the copy opens with the verdict');
@@ -50853,6 +50872,123 @@ function testTheShutdownWalkIsHeldAndARealLeakStillFails(): void {
     );
   } finally {
     sweep(project, slots);
+  }
+}
+
+/**
+ * A run's silence and deadline end an engine that is hung or never stops printing. Each can wait to
+ * eight times its limit on a crowded machine, so these runs have a deadline of their own rather
+ * than one shared with the rest of the test command's cases.
+ */
+function testATestRunsLimitsEndAHungOrChattyEngine(): void {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('test limits regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-limits-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-limits-slots-'));
+  try {
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="TestLimits"\n\n' +
+        '[rendering]\nrenderer/rendering_method="gl_compatibility"\n',
+      'tests/ok_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_one() -> void:\n\tassert_int(1).is_equal(1)\n\n\nfunc test_two() -> void:\n\tawait get_tree().process_frame\n\tassert_int(2).is_equal(2)\n',
+      'tests/hang_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_hangs() -> void:\n\tawait get_tree().create_timer(60.0).timeout\n',
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const env = { ...process.env, GODOT_PATH: godotPath };
+    const test = (...args: string[]): { said: string; status: number | null } => {
+      const ran = spawnSyncHidden(
+        process.execPath,
+        ['build/cli.js', 'test', project, '--slots', slots, ...args],
+        { encoding: 'utf8', env, timeout: 4 * ENGINE_CALL_TIMEOUT_MS },
+      );
+      return { said: `${ran.stdout}${ran.stderr}`, status: ran.status };
+    };
+    // Imports the project and times its suite, which the run beside a long suite rewrites.
+    const first = test('tests/ok_test.gd');
+    assert.equal(first.status, 0, first.said);
+    const timesFile = join(project, '.godot', 'gdharness', 'suite-times.json');
+
+    // On a crowded machine a limit counts the engine's own processor time, and an engine waiting
+    // on timers has little of it, so its ending says how it was counted and may come only at the
+    // clock's bound, eight times the limit.
+    const underLoad = String.raw`(?: of its own, counted by its processor time while other work kept the machine busy \(\d+ s on the clock\)|, 8 times over on the clock \(\d+ s\), the machine kept busy by other work)?`;
+    // A case printing all the while is never silent, so only the deadline ends it. It runs past
+    // the clock's bound on the deadline, so a crowded machine ends it too.
+    writeTree(project, {
+      'tests/chatty_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_chatters() -> void:\n\tfor tick: int in 1200:\n\t\tprint("tick %d" % tick)\n\t\tawait get_tree().create_timer(0.1).timeout\n',
+    });
+    const chatty = test('tests/chatty_test.gd', '--silence', '4', '--deadline', '12');
+    rmSync(join(project, 'tests', 'chatty_test.gd'));
+    assert.match(
+      chatty.said,
+      new RegExp(
+        String.raw`^ {2}the engine ran past the 12 s deadline${underLoad} while running res:\/\/tests\/chatty_test\.gd > test_chatters, so it was ended$`,
+        'm',
+      ),
+      chatty.said,
+    );
+    assert.doesNotMatch(chatty.said, /printed nothing for/, chatty.said);
+    assert.equal(chatty.status, 1, chatty.said);
+
+    const hung = test('tests/hang_test.gd', '--silence', '4');
+    assert.match(
+      hung.said,
+      new RegExp(
+        String.raw`^ {2}the engine printed nothing for 4 s${underLoad} while running res:\/\/tests\/hang_test\.gd > test_hangs, so it was ended$`,
+        'm',
+      ),
+      hung.said,
+    );
+    assert.equal(hung.status, 1, hung.said);
+    // Counted against the faults printed under the engine's heading, which a run cut short has
+    // several of from one engine.
+    const faultLines =
+      /^--- engine \d+:.*\n((?: {2}\S.*\n)+)/m.exec(hung.said)?.[1]?.trimEnd().split('\n') ?? [];
+    assert.ok(faultLines.length > 1, hung.said);
+    assert.match(
+      hung.said,
+      new RegExp(`^Failed: ${String(faultLines.length)} problems, listed above\\.`, 'm'),
+      hung.said,
+    );
+    assert.deepEqual(leftInSlots(slots), [], 'its slot given back too');
+
+    // A suite timed as long beside it in the same engine leaves the hanging case its own silence:
+    // held to the slowest suite dealt, it would wait out the case's 60 s timer and end unjudged.
+    writeFileSync(
+      timesFile,
+      JSON.stringify({
+        ...asObject(JSON.parse(readFileSync(timesFile, 'utf8')), 'the times kept'),
+        'res://tests/ok_test.gd': { seconds: 201, cases: { test_one: 100, test_two: 100 } },
+        'res://tests/hang_test.gd': { seconds: 0.6, cases: { test_hangs: 0.5 } },
+      }),
+    );
+    const besideALongOne = test('tests/ok_test.gd', 'tests/hang_test.gd', '--engines', '1', '--silence', '4');
+    assert.match(
+      besideALongOne.said,
+      new RegExp(
+        String.raw`^ {2}the engine printed nothing for 4 s${underLoad} while running res:\/\/tests\/hang_test\.gd > test_hangs, so it was ended$`,
+        'm',
+      ),
+      besideALongOne.said,
+    );
+    assert.match(
+      besideALongOne.said,
+      /^--- engine \d+: 2 suites, /m,
+      `both in one engine: ${besideALongOne.said}`,
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(slots, { recursive: true, force: true });
   }
 }
 
@@ -69903,6 +70039,311 @@ async function testAHeadlessWriteSavesWhatTheEditorWould(): Promise<void> {
 }
 
 /**
+ * A headless write of a node whose script sets its own properties as it is made saves what the
+ * editor would, and a scene saved that way can be written again.
+ *
+ * Reported downstream: an add of a script-class Container child or of a Control setting its anchors
+ * in _init was refused, though an add and a set wrote the same node. Metadata a script set was saved
+ * as null, which erases it on load and refused every later write. An instance under a Control was
+ * saved at layout mode 0 with its offsets at 0. A scene whose script did not compile was written,
+ * and a set naming a property at its default was refused.
+ */
+async function testAHeadlessWriteOfScriptedNodesSavesWhatTheEditorWould(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('headless scripted write regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-scripted-write-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-scripted-write-rt-'));
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="ScriptedWrite"\n',
+    'paper.gd':
+      'class_name Paper\nextends PanelContainer\n\n@export var pinned: bool = true\n@export var bound: bool = false\n\n\n' +
+      'func _init() -> void:\n\tadd_theme_stylebox_override("panel", StyleBoxFlat.new())\n',
+    'letter.tscn':
+      '[gd_scene format=3]\n\n[node name="Letter" type="Control"]\n\n' +
+      '[node name="Middle" type="CenterContainer" parent="."]\n',
+    'full_rect.gd':
+      'class_name FullRectButtons\nextends Control\n\n\nfunc _init() -> void:\n' +
+      '\tset_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)\n',
+    'holder.gd': 'extends Control\n',
+    'stage.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://holder.gd" id="1_holder"]\n\n' +
+      '[node name="Stage" type="Node2D"]\n\n[node name="Holder" type="Control" parent="."]\n' +
+      'script = ExtResource("1_holder")\n',
+    'tagged.gd':
+      'class_name Tagged\nextends Label\n\n\nfunc _init() -> void:\n\tset_meta("size_given", 12)\n',
+    'screen.tscn':
+      '[gd_scene format=3]\n\n[node name="Screen" type="Control"]\n\n' +
+      '[node name="Box" type="Control" parent="."]\n\n[node name="Other" type="Control" parent="."]\n',
+    'side.gd': 'extends Control\n',
+    'side.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://side.gd" id="1_side"]\n\n' +
+      '[node name="Side" type="Control"]\nlayout_mode = 3\nanchors_preset = 0\n' +
+      'offset_left = 670.0\noffset_top = 12.0\noffset_right = 670.0\noffset_bottom = 12.0\n' +
+      'script = ExtResource("1_side")\n',
+    'base_note.gd':
+      'class_name BaseNote\nextends Node\n\n@export var pinned: bool = true\n@export var bound: bool = false\n',
+    'note.gd': 'extends BaseNote\n\nvar helper: NoSuchHelper\n',
+    'fine_note.gd': 'extends BaseNote\n',
+    'note.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://note.gd" id="1_note"]\n\n' +
+      '[node name="Note" type="Node"]\nscript = ExtResource("1_note")\n',
+    'fine.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://fine_note.gd" id="1_fine"]\n\n' +
+      '[node name="Fine" type="Node"]\nscript = ExtResource("1_fine")\npinned = true\nbound = false\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
+  const node = async (args: Record<string, unknown>): Promise<{ said: string; error: boolean }> => {
+    const result = await server.request(
+      'tools/call',
+      { name: 'scene_node', arguments: { projectPath: project, ...args } },
+      240_000,
+    );
+    return { said: textOf(result) ?? '', error: get(result, 'result', 'isError') === true };
+  };
+  const written = async (args: Record<string, unknown>, what: string): Promise<string> => {
+    const { said, error } = await node(args);
+    assert.equal(error, false, `${what}: ${said}`);
+    return said;
+  };
+  const failures: string[] = [];
+  const check = async (what: string, body: () => Promise<void>): Promise<void> => {
+    try {
+      await body();
+    } catch (error) {
+      failures.push(`${what}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('scripted-write');
+
+    await check('a script-class Container child', async () => {
+      await written(
+        {
+          op: 'add',
+          scenePath: 'letter.tscn',
+          parentNodePath: 'Middle',
+          nodeType: 'Paper',
+          nodeName: 'Sheet',
+          properties: { pinned: false, bound: true },
+        },
+        'the add of a Paper under a CenterContainer',
+      );
+      assert.match(
+        fileOf('letter.tscn'),
+        /\[node name="Sheet" type="PanelContainer" parent="Middle"/,
+        fileOf('letter.tscn'),
+      );
+      assert.match(fileOf('letter.tscn'), /^pinned = false$/m, fileOf('letter.tscn'));
+      assert.match(fileOf('letter.tscn'), /^bound = true$/m, fileOf('letter.tscn'));
+      assert.doesNotMatch(fileOf('letter.tscn'), /theme_override_styles/, fileOf('letter.tscn'));
+    });
+
+    await check('a Control setting its anchors in _init', async () => {
+      await written(
+        {
+          op: 'add',
+          scenePath: 'stage.tscn',
+          parentNodePath: 'Holder',
+          nodeType: 'FullRectButtons',
+          nodeName: 'Buttons',
+        },
+        'the add of a FullRectButtons under a Control',
+      );
+      const after = fileOf('stage.tscn');
+      assert.match(after, /\[node name="Buttons" type="Control" parent="Holder"/, after);
+      await written(
+        { op: 'set', scenePath: 'stage.tscn', nodePath: 'Holder', properties: { visible: false } },
+        'a later write to the scene',
+      );
+      assert.match(fileOf('stage.tscn'), /\[node name="Buttons"/, fileOf('stage.tscn'));
+    });
+
+    await check('metadata a script sets', async () => {
+      await written(
+        {
+          op: 'add',
+          scenePath: 'screen.tscn',
+          parentNodePath: 'Box',
+          nodeType: 'Tagged',
+          nodeName: 'Naming',
+        },
+        'the add of a Tagged label',
+      );
+      await written(
+        { op: 'set', scenePath: 'screen.tscn', nodePath: 'Other', properties: { visible: false } },
+        'a write to a sibling',
+      );
+      assert.doesNotMatch(fileOf('screen.tscn'), /metadata\/size_given/, fileOf('screen.tscn'));
+      writeFileSync(
+        join(project, 'screen.tscn'),
+        fileOf('screen.tscn').replace(
+          /(\[node name="Naming"[^\n]*\n(?:[^\n[]+\n)*)/,
+          '$1metadata/size_given = null\n',
+        ),
+      );
+      assert.match(
+        fileOf('screen.tscn'),
+        /^metadata\/size_given = null$/m,
+        'the fixture writes the null line',
+      );
+      await written(
+        { op: 'delete', scenePath: 'screen.tscn', nodePath: 'Box/Naming' },
+        'a delete of the label whose file line erases what its script set',
+      );
+      assert.doesNotMatch(fileOf('screen.tscn'), /Naming/, fileOf('screen.tscn'));
+    });
+
+    await check('an instance under a Control', async () => {
+      await written(
+        {
+          op: 'add',
+          scenePath: 'screen.tscn',
+          parentNodePath: 'Box',
+          instancePath: 'res://side.tscn',
+          nodeName: 'Side',
+        },
+        'the add of the instance',
+      );
+      await written(
+        { op: 'set', scenePath: 'screen.tscn', nodePath: 'Other', properties: { visible: true } },
+        'a write to another node',
+      );
+      const loadsAt = async (when: string): Promise<void> => {
+        const { said } = await node({ op: 'get', scenePath: 'screen.tscn', nodePath: 'Box/Side' });
+        const read = JSON.parse(said) as unknown;
+        assert.deepEqual(
+          [get(read, 'properties', 'offset_left'), get(read, 'properties', 'offset_top')],
+          [670, 12],
+          `${when}, the instance loads where its own scene places it: ${fileOf('screen.tscn')}`,
+        );
+      };
+      assert.match(
+        fileOf('screen.tscn'),
+        /\[node name="Side" parent="Box"[^\n]*instance=/,
+        fileOf('screen.tscn'),
+      );
+      await loadsAt('once added');
+      await written(
+        { op: 'set', scenePath: 'screen.tscn', nodePath: 'Other', properties: { script: 'res://holder.gd' } },
+        "a script set on the instance's sibling",
+      );
+      await loadsAt("after a sibling's script");
+      await written(
+        { op: 'set', scenePath: 'screen.tscn', nodePath: 'Box/Side', editableChildren: true },
+        "the instance's children made editable",
+      );
+      await written(
+        { op: 'set', scenePath: 'screen.tscn', nodePath: 'Other', properties: { visible: false } },
+        'a write after that',
+      );
+      await loadsAt('after editable children');
+    });
+
+    await check('a scene whose script does not compile', async () => {
+      const before = fileOf('note.tscn');
+      const { said, error } = await node({
+        op: 'add',
+        scenePath: 'note.tscn',
+        parentNodePath: '.',
+        nodeType: 'Node',
+        nodeName: 'Child',
+      });
+      assert.equal(error, true, `refused: ${said}`);
+      assert.equal(fileOf('note.tscn'), before, 'and nothing written');
+    });
+
+    await check('a scene whose script needs a class missing from the class cache', async () => {
+      writeFileSync(join(project, 'late_helper.gd'), 'class_name LateHelper\nextends RefCounted\n');
+      writeFileSync(join(project, 'late_note.gd'), 'extends BaseNote\n\nvar helper: LateHelper\n');
+      const scene =
+        '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://late_note.gd" id="1_late"]\n\n' +
+        '[node name="Late" type="Node"]\nscript = ExtResource("1_late")\n';
+      writeFileSync(join(project, 'late.tscn'), scene);
+      const { said, error } = await node({
+        op: 'add',
+        scenePath: 'late.tscn',
+        parentNodePath: '.',
+        nodeType: 'Node',
+        nodeName: 'Child',
+      });
+      assert.equal(error, true, `refused: ${said}`);
+      assert.equal(fileOf('late.tscn'), scene, 'and nothing written');
+    });
+
+    await check("a script the scene's script loads that needs a class missing from the cache", async () => {
+      writeFileSync(
+        join(project, 'late_fill.gd'),
+        'class_name LateFill\nextends RefCounted\n\n\nstatic func into(_node: Node) -> void:\n\tpass\n',
+      );
+      writeFileSync(
+        join(project, 'swatch.gd'),
+        'extends Node\n\n\nfunc fill() -> void:\n\tLateFill.into(self)\n',
+      );
+      writeFileSync(
+        join(project, 'swatch.tscn'),
+        '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://swatch.gd" id="1_swatch"]\n\n' +
+          '[node name="Swatch" type="Node"]\nscript = ExtResource("1_swatch")\n',
+      );
+      writeFileSync(
+        join(project, 'deep_note.gd'),
+        'extends BaseNote\n\nconst SWATCH: PackedScene = preload("res://swatch.tscn")\n',
+      );
+      const scene =
+        '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://deep_note.gd" id="1_deep"]\n\n' +
+        '[node name="Deep" type="Node"]\nscript = ExtResource("1_deep")\n';
+      writeFileSync(join(project, 'deep.tscn'), scene);
+      const { said, error } = await node({
+        op: 'add',
+        scenePath: 'deep.tscn',
+        parentNodePath: '.',
+        nodeType: 'Node',
+        nodeName: 'Child',
+      });
+      assert.equal(error, true, `refused: ${said}`);
+      assert.match(
+        said,
+        /^Nothing was written: res:\/\/swatch\.gd does not compile in a headless engine \(line 5: /,
+        said,
+      );
+      assert.match(said, /project_import refresh_classes/, said);
+      assert.equal(fileOf('deep.tscn'), scene, 'and nothing written');
+    });
+
+    await check('a set naming a property at its default', async () => {
+      await written(
+        { op: 'set', scenePath: 'fine.tscn', nodePath: '.', properties: { pinned: true, bound: false } },
+        'the set of the values the file holds',
+      );
+    });
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+  assert.deepEqual(failures, [], 'every case writes as the editor would');
+}
+
+/**
  * project_info's classes, with an addon's counted unless asked for. A model-driven probe on a game
  * carrying two large addons asked for them, got 686 classes in 88 thousand characters, which the
  * harness moved out of the conversation, and went back to searching the files. 19 were the game's.
@@ -71883,6 +72324,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPropertyHoldingANodeFollowsIt,
   testTheProjectsOwnClassesAreListedAndAnAddonsCounted,
   testAHeadlessWriteSavesWhatTheEditorWould,
+  testAHeadlessWriteOfScriptedNodesSavesWhatTheEditorWould,
   testTwoWritesToOneSceneAtOnceBothLand,
   testAWriteWaitsForAnotherProcesssTurn,
   testTheEditorsViewShowsWhatToolScriptsDrawThere,
@@ -72210,6 +72652,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFailedRunsLogsOutlastTheNextRun,
   testAnExitCodeOutlivesTheServerThatSawIt,
   testRunNotesAreKeptPerProject,
+  testTwoRunsStartedInOneMillisecondKeepTheirOwnFiles,
   testAStopThatSignalsNothingSaysSo,
   testANoteIsNamedTheSameBeforeAndAfterItsProjectExists,
   testAGamesOwnArgumentsDoNotMakeItAnEditor,
@@ -72258,6 +72701,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheTestHelpersWaitStepAndPress,
   testASpreadBenchGathersTheTableItPlaysAlone,
   testTheTestCommandRunsAndJudgesAProject,
+  testTheTestCommandDealsAndReportsARun,
+  testATestRunsLimitsEndAHungOrChattyEngine,
   testATestRunDealsByAndRecordsIntoTheTimesItIsGiven,
   testTheShutdownWalkIsHeldAndARealLeakStillFails,
   testAParameterisedCaseIsDealtByItsRows,
@@ -72436,8 +72881,8 @@ async function main(): Promise<void> {
     }
   };
   // A regression that hangs fails by name rather than taking the leg's whole budget with it: a job
-  // its own limit ends uploads no log, so nothing says which test it was. The slowest took 142s on
-  // the Windows leg, so five minutes is room for a loaded runner rather than a limit anything meets.
+  // its own limit ends uploads no log, so nothing says which test it was. Five minutes is room for a
+  // loaded runner, and a regression that comes near it on a CI leg is split.
   // The variable shortens it to check the deadline.
   const deadlineMs = Number(process.env['GDHARNESS_REGRESSION_DEADLINE_MS'] ?? 5 * 60_000);
   // The time the whole run has, which CI sets below the job's limit. A deadline alone did not keep

@@ -12076,7 +12076,7 @@ class GodotServer {
     // by killing its process tree at every reconnect, and a run spawned here went with it however
     // detached it was. The keeper is the game's parent, writes its record and its exit, and is
     // nobody's child here once the launcher has gone.
-    const profile = profiled ? profilePath(startedAt) : undefined;
+    const profile = profiled ? profilePath(transcript.path) : undefined;
     // A profiled game is told so, and holds its start until the keeper's switch reaches it.
     const gameEnv = onTheSlot(
       profiled ? { ...(env ?? process.env), [PROFILE_FROM_START]: '1' } : (env ?? process.env),
@@ -13164,7 +13164,7 @@ class GodotServer {
     limit: number,
     asked: MarkAsk,
   ): ToolResponse {
-    const markPath = profileMarkPath(run.startedAt);
+    const markPath = profileMarkPath(run);
     const now = Date.now();
     let shown = reading;
     const lead: string[] = [];
