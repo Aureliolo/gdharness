@@ -4,6 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
   chmodSync,
+  closeSync,
   cpSync,
   existsSync,
   linkSync,
@@ -19,6 +20,7 @@ import {
   symlinkSync,
   utimesSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { availableParallelism, homedir, tmpdir } from 'node:os';
@@ -278,7 +280,9 @@ import {
   judgeRun,
   listeningPid,
   listeningPidInNetstat,
+  openTranscript,
   profileMarkPath,
+  profilePath,
   readLatestRun,
   readRunRecord,
   readWindowsCommandLine,
@@ -40760,6 +40764,41 @@ async function withAHeldGame(
  * each is read, ended and cleared without touching the other, and a transcript either note names
  * outlives the sweep of old ones.
  */
+function testTwoRunsStartedInOneMillisecondKeepTheirOwnFiles(): void {
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-same-start-'));
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
+  try {
+    const startedAt = 1_762_070_000_000;
+    const first = openTranscript(startedAt);
+    const second = openTranscript(startedAt);
+    writeSync(first.fd, 'the first game\n');
+    writeSync(second.fd, 'the second game\n');
+    closeSync(first.fd);
+    closeSync(second.fd);
+    assert.notEqual(first.path, second.path, 'each run has a transcript of its own');
+    assert.equal(readFileSync(first.path, 'utf8'), 'the first game\n');
+    assert.equal(readFileSync(second.path, 'utf8'), 'the second game\n');
+    assert.notEqual(profilePath(first.path), profilePath(second.path), 'and a profile of its own');
+    assert.notEqual(
+      profileMarkPath({ transcript: first.path, startedAt }),
+      profileMarkPath({ transcript: second.path, startedAt }),
+      'and a profile mark of its own',
+    );
+    assert.equal(
+      basename(profilePath(second.path)),
+      basename(second.path).replace(/\.log$/, '.profile.json'),
+    );
+  } finally {
+    if (had === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = had;
+    }
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
 function testRunNotesAreKeptPerProject(): void {
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-notes-'));
   const shop = join(tmpdir(), 'the-shop');
@@ -40798,7 +40837,9 @@ function testRunNotesAreKeptPerProject(): void {
     utimesSync(shopLog, aDayAgo, aDayAgo);
     utimesSync(benchLog, aDayAgo, aDayAgo);
     // A run's profile mark goes with the run: kept while a note names it, swept once old otherwise.
-    const shopMark = profileMarkPath(readRunRecord(shop)?.startedAt ?? 0);
+    const shopRecord = readRunRecord(shop);
+    assert.ok(shopRecord !== null, 'the shop run has a note');
+    const shopMark = profileMarkPath(shopRecord);
     const strayMark = join(runs, 'run-3.profile-mark.json');
     for (const mark of [shopMark, strayMark]) {
       writeFileSync(mark, '{}');
@@ -72611,6 +72652,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFailedRunsLogsOutlastTheNextRun,
   testAnExitCodeOutlivesTheServerThatSawIt,
   testRunNotesAreKeptPerProject,
+  testTwoRunsStartedInOneMillisecondKeepTheirOwnFiles,
   testAStopThatSignalsNothingSaysSo,
   testANoteIsNamedTheSameBeforeAndAfterItsProjectExists,
   testAGamesOwnArgumentsDoNotMakeItAnEditor,
