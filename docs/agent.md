@@ -62,7 +62,9 @@ template instead.
 ### The config and the autoload
 
 The config carries `GODOT_PATH` and `GDHARNESS_PROJECT`. No tool call takes its project from the
-environment. A call that takes a project names it in `projectPath`. A `godot://` resource read
+environment. A call that takes a project names it in `projectPath`. A project other than
+`GDHARNESS_PROJECT` runs the engine its own config names, such as a second checkout pinned to
+another engine. The answer names that engine under `engineNote`. A `godot://` resource read
 has no arguments, and [the install guide](install.md) says where it looks. Reconnect the harness,
 then confirm the tools are listed.
 

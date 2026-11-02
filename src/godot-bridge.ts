@@ -3,6 +3,7 @@ import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import type { RawData } from 'ws';
 import { WebSocket, WebSocketServer } from 'ws';
+import { callProgress } from './call-signal.js';
 import { errorMessage, Refusal, toError } from './errors.js';
 import { envValue } from './launch.js';
 import { isSameDirectory } from './paths.js';
@@ -97,8 +98,12 @@ interface ToolResultMessage {
   success: boolean;
   result?: unknown;
   error?: string;
-  /** The tool was not run because the editor was scanning or importing, and can be asked again. */
+  /** The tool was not run because the editor was busy, and can be asked again. */
   busy?: boolean;
+  /** What the editor was busy with, such as "scanning its files". */
+  busyWith?: string;
+  /** A mark that changes as the editor gets on with what it is busy with. */
+  progress?: string;
 }
 
 interface PingMessage {
@@ -371,17 +376,24 @@ export class AddonOfAnotherRelease extends Error {}
  */
 const ASKED_OF_ANY_RELEASE: ReadonlySet<string> = new Set(['quit_editor', 'restart_editor']);
 
-/** The editor turned a tool away unrun because it was scanning or importing its files. */
+/** The editor turned a tool away unrun because it was busy with [param doing]. */
 class EditorBusy extends Error {
-  constructor(toolName: string) {
-    super(`The editor was scanning or importing its files, so ${toolName} was not run.`);
+  readonly doing: string;
+  readonly progress: string;
+
+  constructor(toolName: string, doing: string, progress: string) {
+    super(`The editor was ${doing}, so ${toolName} was not run.`);
+    this.doing = doing;
+    this.progress = progress;
   }
 }
 
 /**
- * How long a tool the editor turns away while it scans or imports is asked for again. The scan wait
- * a game start is given, since it is the same scan: a few seconds covers a few hundred scripts, and
- * what runs longer is an import of large assets. GDHARNESS_SCAN_WAIT_MS sets another.
+ * How long a tool the editor turns away is asked for again after the editor last moved on with what
+ * it is busy with. The scan wait a game start is given, since it is the same scan: a few seconds
+ * covers a few hundred scripts, and what runs longer is an import of large assets. A task that keeps
+ * stepping is waited for up to ten times as long, since a hidden editor registered forty new classes
+ * over more than thirty seconds. GDHARNESS_SCAN_WAIT_MS sets another.
  */
 function busyWaitMs(): number {
   const override = Number.parseInt(envValue('GDHARNESS_SCAN_WAIT_MS') ?? '', 10);
@@ -705,9 +717,9 @@ export class GodotBridge extends EventEmitter {
   }
 
   /**
-   * The tool, asked again for as long as the editor turns it away while it scans or imports. A
-   * turned-away call did nothing, so asking again cannot run it twice, and one given up on cannot
-   * run later.
+   * The tool, asked again for as long as the editor turns it away and keeps moving on with what it
+   * is busy with. A turned-away call did nothing, so asking again cannot run it twice, and one given
+   * up on cannot run later.
    */
   private async invokeUntilTaken(
     toolName: string,
@@ -716,7 +728,12 @@ export class GodotBridge extends EventEmitter {
     resourceKey?: string,
   ): Promise<unknown> {
     const waitMs = busyWaitMs();
-    const giveUpAt = Date.now() + waitMs;
+    const began = Date.now();
+    let stillAt = began;
+    let lastProgress: string | null = null;
+    // A wait can run minutes, so the client hears what it is waiting on, not only that the call goes on.
+    const progress = callProgress();
+    let toldDoing: string | null = null;
     for (;;) {
       try {
         return await this.invokeToolDirect(toolName, args, counted, resourceKey);
@@ -724,9 +741,21 @@ export class GodotBridge extends EventEmitter {
         if (!(error instanceof EditorBusy)) {
           throw error;
         }
-        if (Date.now() >= giveUpAt) {
+        const now = Date.now();
+        if (progress !== undefined && error.doing !== toldDoing) {
+          toldDoing = error.doing;
+          progress((now - began) / 1000, `Waiting for the editor, which is ${error.doing}.`);
+        }
+        if (error.progress !== '' && error.progress !== lastProgress) {
+          lastProgress = error.progress;
+          stillAt = now;
+        }
+        const unchanged = `The editor was ${error.doing} and had not moved on in ${Math.round(waitMs / 1000)} s`;
+        const tooLong = `The editor was ${error.doing} for all of ${Math.round((now - began) / 1000)} s`;
+        const said = now - stillAt >= waitMs ? unchanged : now - began >= waitMs * 10 ? tooLong : null;
+        if (said !== null) {
           throw new Error(
-            `The editor was scanning or importing its files for all of ${Math.round(waitMs / 1000)} s, so ${toolName} was not run and nothing it would change was changed. editor_rescan says when the scan is over.`,
+            `${said}, so ${toolName} was not run and nothing it would change was changed. Ask again once the editor is done.`,
             { cause: error },
           );
         }
@@ -871,7 +900,9 @@ export class GodotBridge extends EventEmitter {
         if (message.success) {
           pending.resolve(message.result);
         } else if (message.busy === true) {
-          pending.reject(new EditorBusy(pending.toolName));
+          pending.reject(
+            new EditorBusy(pending.toolName, message.busyWith ?? 'busy', message.progress ?? ''),
+          );
         } else {
           pending.reject(new Error(message.error ?? `Tool ${pending.toolName} failed`));
         }
@@ -1240,7 +1271,9 @@ export class GodotBridge extends EventEmitter {
       typeof message['id'] === 'string' &&
       typeof message['success'] === 'boolean' &&
       (message['error'] === undefined || typeof message['error'] === 'string') &&
-      (message['busy'] === undefined || typeof message['busy'] === 'boolean')
+      (message['busy'] === undefined || typeof message['busy'] === 'boolean') &&
+      (message['busyWith'] === undefined || typeof message['busyWith'] === 'string') &&
+      (message['progress'] === undefined || typeof message['progress'] === 'string')
     );
   }
 

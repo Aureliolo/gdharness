@@ -573,15 +573,17 @@ func _handle_message(json_string: String) -> void:
 
 ## Says [param tool_name] was not run because the editor is scanning or importing, for the server to
 ## ask again once that is over.
-func send_busy(request_id: String, tool_name: String) -> void:
+## [param doing] is what the editor is busy with, and [param mark] changes as it gets on with it.
+func send_busy(request_id: String, tool_name: String, doing: String, mark: String) -> void:
 	_send_message(
 		{
 			"type": "tool_result",
 			"id": request_id,
 			"success": false,
 			"busy": true,
-			"error":
-			"The editor is scanning or importing its files, so %s was not run." % tool_name,
+			"busyWith": doing,
+			"progress": mark,
+			"error": "The editor is %s, so %s was not run." % [doing, tool_name],
 		}
 	)
 

@@ -502,6 +502,43 @@ const HOOKS_GD = [
   '\t\t\tvar scene_file: GDScript = load("res://addons/gdharness_editor/scene_file.gd")',
   '\t\t\tvar due: bool = scene_file.get("scan_due")',
   '\t\t\treturn {"due": due}',
+  // The progress dialog shown as a task shows it, with a task's title and step as its labels, then
+  // a scan asked for the way a write asks.
+  '\t\t"task_open":',
+  '\t\t\tvar scene_file: GDScript = load("res://addons/gdharness_editor/scene_file.gd")',
+  '\t\t\tvar dialog: Node = scene_file.call("_found_progress", EditorInterface.get_base_control().get_tree().root)',
+  '\t\t\tif dialog != null:',
+  '\t\t\t\tvar task: VBoxContainer = VBoxContainer.new()',
+  '\t\t\t\ttask.name = "GdhProbeTask"',
+  '\t\t\t\tfor said: String in ["Probing the editor...", "step one"]:',
+  '\t\t\t\t\tvar label: Label = Label.new()',
+  '\t\t\t\t\tlabel.text = said',
+  '\t\t\t\t\ttask.add_child(label)',
+  '\t\t\t\tdialog.add_child(task)',
+  '\t\t\t\tdialog.set("visible", true)',
+  '\t\t\tvar _asked: Variant = scene_file.call("scan_later")',
+  '\t\t\tvar plugin: Node = EditorInterface.get_base_control().get_tree().root.find_child("GdharnessBridgeClient", true, false).get_parent()',
+  '\t\t\treturn {',
+  '\t\t\t\t"found": dialog != null,',
+  '\t\t\t\t"inATask": scene_file.call("in_a_task"),',
+  '\t\t\t\t"addNode": plugin.call("turned_away", "add_node"),',
+  '\t\t\t\t"scanStatus": plugin.call("turned_away", "scan_status"),',
+  '\t\t\t\t"busyWith": plugin.call("busy_with"),',
+  '\t\t\t}',
+  '\t\t"task_state":',
+  '\t\t\tvar scene_file: GDScript = load("res://addons/gdharness_editor/scene_file.gd")',
+  '\t\t\tvar filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()',
+  '\t\t\tvar due: bool = scene_file.get("scan_due")',
+  '\t\t\treturn {"due": due, "scanning": filesystem.is_scanning(), "importing": filesystem.is_importing()}',
+  '\t\t"task_close":',
+  '\t\t\tvar scene_file: GDScript = load("res://addons/gdharness_editor/scene_file.gd")',
+  '\t\t\tvar dialog: Node = scene_file.call("_found_progress", EditorInterface.get_base_control().get_tree().root)',
+  '\t\t\tif dialog != null:',
+  '\t\t\t\tdialog.set("visible", false)',
+  '\t\t\t\tvar task: Node = dialog.get_node_or_null("GdhProbeTask")',
+  '\t\t\t\tif task != null:',
+  '\t\t\t\t\ttask.free()',
+  '\t\t\treturn {"inATask": scene_file.call("in_a_task")}',
   '\treturn _report(path)',
   '',
   '',
@@ -3006,6 +3043,73 @@ async function testAWriteWaitsForTheEditorsScan({ call, project }: Editor): Prom
     'Picture',
     `a write asked for beside a scan is made: ${JSON.stringify(added)}`,
   );
+}
+
+/**
+ * A scan a write asks for waits out a task of the editor's progress dialog.
+ *
+ * Each step of such a task runs a frame of the editor from inside itself. A scan's end registers
+ * the classes it found in one, after the scan has stopped reporting itself. A scan started from
+ * that frame ran beside the end of the one before: on CI the editor dropped its connection, and
+ * locally it stayed scanning for thirty seconds. The hook shows the dialog as a task does and asks
+ * for a scan as a write does.
+ */
+async function testAScanWaitsOutAProgressTask({ project }: Editor): Promise<void> {
+  const state = async (): Promise<unknown> => await hook(project, { op: 'task_state' });
+  let before: unknown = null;
+  for (let waited = 0; waited < 30_000; waited += 250) {
+    before = await state();
+    if (
+      [get(before, 'due'), get(before, 'scanning'), get(before, 'importing')].every((one) => one === false)
+    ) {
+      break;
+    }
+    await delay(250);
+  }
+  assert.deepEqual(
+    [get(before, 'due'), get(before, 'scanning'), get(before, 'importing')],
+    [false, false, false],
+    `the editor settled before the task: ${JSON.stringify(before)}`,
+  );
+  let held: unknown = null;
+  try {
+    const opened = await hook(project, { op: 'task_open' });
+    assert.deepEqual(
+      [get(opened, 'found'), get(opened, 'inATask')],
+      [true, true],
+      `the hook found the dialog and the addon reads it as a task: ${JSON.stringify(opened)}`,
+    );
+    assert.deepEqual(
+      [get(opened, 'addNode'), get(opened, 'scanStatus')],
+      [true, false],
+      `during the task a call that saves is turned away and a status read is not: ${JSON.stringify(opened)}`,
+    );
+    assert.deepEqual(
+      get(opened, 'busyWith'),
+      ['running its task "Probing the editor"', 'Probing the editor...\nstep one'],
+      `the busy answer names the task, with a mark holding its step: ${JSON.stringify(opened)}`,
+    );
+    // Long enough for a scan due at the end of the frame to have started many frames over.
+    await delay(1500);
+    held = await state();
+  } finally {
+    const closed = await hook(project, { op: 'task_close' });
+    assert.equal(get(closed, 'inATask'), false, `the dialog was put away: ${JSON.stringify(closed)}`);
+  }
+  assert.deepEqual(
+    [get(held, 'due'), get(held, 'scanning'), get(held, 'importing')],
+    [true, false, false],
+    `the scan waits while the task is open, with nothing else holding it: ${JSON.stringify(held)}`,
+  );
+  let after: unknown = null;
+  for (let waited = 0; waited < 10_000; waited += 100) {
+    after = await state();
+    if (get(after, 'due') === false) {
+      break;
+    }
+    await delay(100);
+  }
+  assert.equal(get(after, 'due'), false, `and starts once the task is over: ${JSON.stringify(after)}`);
 }
 
 /**
@@ -7734,6 +7838,7 @@ async function main(): Promise<void> {
     ['testAnEditInTheEditorIsKept', testAnEditInTheEditorIsKept],
     ['testASetIsReadBack', testASetIsReadBack],
     ['testAWriteWaitsForTheEditorsScan', testAWriteWaitsForTheEditorsScan],
+    ['testAScanWaitsOutAProgressTask', testAScanWaitsOutAProgressTask],
     ['testSignalsAreTheFilesOwn', testSignalsAreTheFilesOwn],
     ['testAnimationEditsLandWhereKept', testAnimationEditsLandWhereKept],
     ['testTilesDrawWhatTheyName', testTilesDrawWhatTheyName],

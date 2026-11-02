@@ -928,6 +928,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       '- previousRunCut: a run a client cut off, kept in the project and carried by the next project_test there.',
       "- classes: the class rebuild's answer. The classes each addon declares are counted under addedInAddons and changedInAddons rather than named. A class the rebuild puts back that the cache had after the last rebuild is named under classes.lostSinceLastRebuild, which is the editor writing its shorter list over the file on every save until restarted.",
       '- uidsMissing: each suite the run ran with no .uid beside it, with uidsNote.',
+      "- engineNote: the engine the run used and its version, when it was not this server's. A project other than the server's own runs the engine its harness config names under GODOT_PATH.",
       "- savesNote: on macOS, that the run wrote to the player's own user://.",
       '- windowed and windowNote: a suite needs a window when it declares const GDHARNESS_NEEDS_WINDOW: bool = true, or calls scene_runner and declares nothing. A run holding one has a window, at the size project.godot gives its viewport and with no sound, and windowed is true. windowNote names those suites and any saying it runs headless that shared the window. On a machine with no display such a run is headless, windowed is false, and windowNote says so.',
       `- ${IMPORTED_FIRST}`,

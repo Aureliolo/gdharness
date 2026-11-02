@@ -24,7 +24,7 @@ import {
 } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { availableParallelism, homedir, tmpdir } from 'node:os';
-import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
@@ -27514,6 +27514,122 @@ async function testARunImportsWhatChangedFirst(): Promise<void> {
     });
   } finally {
     sweep(project);
+  }
+}
+
+/**
+ * A project other than the server's own runs the engine its own harness config names, and the
+ * answer names that engine.
+ *
+ * Issue #1425: a server configured for one checkout of a game ran `project_test` on a second
+ * checkout pinned to an older engine, and its suites ran on the server's newer engine with nothing
+ * naming it. Here the second project's config names a link to the same Godot under another name,
+ * and its suite asserts the executable it runs in. A third names an empty file, so an operation
+ * that ran on the server's engine would succeed where the project's engine cannot start. The
+ * server's own project names that empty file too, and is still run on the server's engine.
+ */
+async function testAnotherCheckoutRunsTheEngineItsConfigNames(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('per-checkout engine regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-checkout-engine-'));
+  try {
+    const project = (name: string, engine: string): string => {
+      const path = join(root, name);
+      mkdirSync(join(path, 'engine'), { recursive: true });
+      writeFileSync(
+        join(path, 'project.godot'),
+        `; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="${name}"\n`,
+      );
+      writeFileSync(
+        join(path, '.mcp.json'),
+        JSON.stringify({
+          mcpServers: { gdharness: { command: 'npx', env: { GODOT_PATH: `engine/${engine}` } } },
+        }),
+      );
+      return path;
+    };
+    const empty = `empty${extname(godotPath)}`;
+    const own = project('own', empty);
+    writeFileSync(join(own, 'engine', empty), '');
+    const unstartable = project('unstartable', empty);
+    writeFileSync(join(unstartable, 'engine', empty), '');
+    const pinnedName = `pinned-${basename(godotPath)}`;
+    const pinned = project('pinned', pinnedName);
+    const pinnedEngine = join(pinned, 'engine', pinnedName);
+    try {
+      linkSync(godotPath, pinnedEngine);
+    } catch {
+      cpSync(godotPath, pinnedEngine);
+    }
+    cpSync(gdunit, join(pinned, 'addons', 'gdUnit4'), { recursive: true });
+    mkdirSync(join(pinned, 'test'));
+    writeFileSync(
+      join(pinned, 'test', 'engine_test.gd'),
+      `extends GdUnitTestSuite\n\n\nfunc test_the_pinned_engine_runs() -> void:\n\tassert_str(OS.get_executable_path().get_file()).is_equal("${pinnedName}")\n`,
+    );
+
+    await withStdioServer(
+      async (_call, request) => {
+        const answer = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+          const response = await request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+          const blocks = asArray(get(response, 'result', 'content')).map((block) =>
+            String(get(block, 'text')),
+          );
+          assert.notEqual(get(response, 'result', 'isError'), true, `${name} refused: ${blocks.join('\n')}`);
+          return JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+        };
+
+        const ownInfo = await answer('project_info', { projectPath: own, include: ['classes'] });
+        assert.equal(
+          get(ownInfo, 'classes', 'error'),
+          undefined,
+          `the own project ran: ${JSON.stringify(ownInfo)}`,
+        );
+        assert.equal(
+          get(ownInfo, 'engineNote'),
+          undefined,
+          `on the server's engine: ${JSON.stringify(ownInfo)}`,
+        );
+
+        const refused = await answer('project_info', { projectPath: unstartable, include: ['classes'] });
+        assert.equal(
+          typeof get(refused, 'classes', 'error'),
+          'string',
+          `the section ran on the empty file and failed: ${JSON.stringify(refused)}`,
+        );
+        const said = text(get(refused, 'engineNote'));
+        assert.ok(
+          said.startsWith(
+            `This ran the engine at ${join(unstartable, 'engine', empty)}, which the harness config of ${unstartable} names, rather than this server's engine at `,
+          ),
+          said,
+        );
+        assert.equal(get(refused, 'classes', 'engineNote'), undefined, 'named once, not in the section');
+
+        const tested = await answer('project_test', { projectPath: pinned, path: 'res://test' });
+        assert.equal(
+          get(tested, 'passed'),
+          true,
+          `the suite ran in the pinned engine: ${JSON.stringify(tested)}`,
+        );
+        assert.match(
+          text(get(tested, 'engineNote')),
+          /^This ran Godot 4\.\S+ at .+, which the harness config of .+ names, rather than this server's engine at .+\.$/,
+          JSON.stringify(tested),
+        );
+        assert.ok(text(get(tested, 'engineNote')).includes(pinnedEngine), JSON.stringify(tested));
+      },
+      { GDHARNESS_PROJECT: own, GDHARNESS_BRIDGE_PORT: String(await reservePort()) },
+    );
+  } finally {
+    sweep(root);
   }
 }
 
@@ -59190,8 +59306,10 @@ async function testAReadAskedOfTheEditorIsNotAnsweredFromDisk(): Promise<void> {
 }
 
 /**
- * A tool the editor turns away because it is scanning or importing is asked for again until the
- * editor takes it, and the caller is told when the editor stays busy for the whole wait.
+ * A tool the editor turns away because it is busy is asked for again until the editor takes it.
+ * The wait runs from the last time the editor moved on, up to ten times the wait, and the caller is
+ * told what the editor was doing when it gives up. A hidden editor registering forty new classes
+ * took over thirty seconds, stepping all the while, and calls were refused at thirty.
  *
  * A save during a scan updates the file list the scan's thread is writing out, so the addon turns
  * away every call that could save until the scan is over. The fixture editor turns calls away as
@@ -59218,6 +59336,10 @@ async function testAToolWaitsOutTheEditorsScan(): Promise<void> {
     },
   });
   let busyFor = 0;
+  // Busy until then however many times it is asked, with a mark that moves on each time when moving.
+  let busyUntil = 0;
+  let moving = false;
+  let step = 0;
   const told: string[] = [];
   let editor: WebSocket | null = null;
   try {
@@ -59240,16 +59362,21 @@ async function testAToolWaitsOutTheEditorsScan(): Promise<void> {
       if (tool === 'scan_status') {
         result = { scanning: false, importing: false, pending: false };
       } else if (tool === 'files_moved') {
-        told.push(busyFor > 0 ? 'busy' : 'done');
-        if (busyFor > 0) {
+        const busy = busyFor > 0 || Date.now() < busyUntil;
+        told.push(busy ? 'busy' : 'done');
+        if (busy) {
           busyFor -= 1;
+          step += moving ? 1 : 0;
           socket.send(
             JSON.stringify({
               type: 'tool_result',
               id: message['id'],
               success: false,
               busy: true,
-              error: 'The editor is scanning or importing its files, so files_moved was not run.',
+              busyWith: 'running its task "Registering global classes"',
+              progress: `Registering global classes...\nGdhMany${String(step)}`,
+              error:
+                'The editor is running its task "Registering global classes", so files_moved was not run.',
             }),
           );
           return;
@@ -59266,42 +59393,86 @@ async function testAToolWaitsOutTheEditorsScan(): Promise<void> {
       knows = get(parseTextContent(status), 'editor', 'connected') === true;
     }
     assert.ok(knows, 'the fixture editor should have connected, or this proves nothing');
-    const move = async (from: string, to: string): Promise<unknown> =>
+    const move = async (from: string, to: string, progressToken?: string): Promise<unknown> =>
       parseTextContent(
         await server.request(
           'tools/call',
           {
             name: 'resource_edit',
             arguments: { op: 'move', projectPath: project, resourcePath: from, newPath: to },
+            ...(progressToken === undefined ? {} : { _meta: { progressToken } }),
           },
           60_000,
         ),
       );
 
     busyFor = 1;
-    const waited = await move('res://hero.tscn', 'res://actors/hero.tscn');
+    const waited = await move('res://hero.tscn', 'res://actors/hero.tscn', 'moving');
     assert.deepEqual(
       told,
       ['busy', 'done'],
       `the editor busy once is asked again: ${JSON.stringify(waited)}`,
     );
+    const heard = server.notifications
+      .filter((message) => message.method === 'notifications/progress')
+      .map((message) => (isRecord(message.params) ? message.params : {}))
+      .filter((params) => params['progressToken'] === 'moving')
+      .map((params) => text(params['message']));
+    assert.deepEqual(
+      heard,
+      ['Waiting for the editor, which is running its task "Registering global classes".'],
+      'a call waiting on the editor is told what the editor is doing',
+    );
     assert.deepEqual(get(waited, 'editor', 'reloadedScenes'), ['res://stage.tscn'], JSON.stringify(waited));
     assert.equal(get(waited, 'ok'), true, JSON.stringify(waited));
 
+    // A task that keeps stepping for twice the wait is waited for.
     told.length = 0;
+    busyFor = 0;
+    moving = true;
+    busyUntil = Date.now() + 3000;
+    const stepped = await move('res://actors/hero.tscn', 'res://hero.tscn');
+    assert.equal(
+      get(stepped, 'ok'),
+      true,
+      `a task moving on past the wait is waited for: ${JSON.stringify(stepped)}`,
+    );
+    assert.equal(told.at(-1), 'done', told.join(', '));
+
+    told.length = 0;
+    moving = false;
+    busyUntil = 0;
     busyFor = Number.POSITIVE_INFINITY;
-    const gaveUp = await move('res://actors/hero.tscn', 'res://hero.tscn');
+    const gaveUp = await move('res://hero.tscn', 'res://actors/hero.tscn');
     assert.ok(
       told.length >= 2 && told.every((one) => one === 'busy'),
       `asked until the wait ran out: ${told.join(', ')}`,
     );
     assert.match(
       text(get(gaveUp, 'note')),
-      /was scanning or importing its files for all of 2 s, so files_moved was not run and nothing it would change was changed/,
+      /The editor was running its task "Registering global classes" and had not moved on in 2 s, so files_moved was not run and nothing it would change was changed\. Ask again once the editor is done\./,
       JSON.stringify(gaveUp),
     );
     assert.equal(get(gaveUp, 'ok'), false, 'an editor left on the old paths is not a move that settled');
-    assert.ok(existsSync(join(project, 'hero.tscn')), 'the move itself is made whatever the editor says');
+    assert.ok(
+      existsSync(join(project, 'actors', 'hero.tscn')),
+      'the move itself is made whatever the editor says',
+    );
+
+    // One that keeps stepping is waited for ten times the wait and no longer.
+    told.length = 0;
+    moving = true;
+    const ceiling = Date.now();
+    const tooLong = await move('res://actors/hero.tscn', 'res://hero.tscn');
+    assert.match(
+      text(get(tooLong, 'note')),
+      /The editor was running its task "Registering global classes" for all of 15 s, so files_moved was not run/,
+      JSON.stringify(tooLong),
+    );
+    assert.ok(
+      Date.now() - ceiling >= 15_000,
+      `and waited out the ten times: ${String(Date.now() - ceiling)} ms`,
+    );
   } finally {
     editor?.terminate();
     await server.stop();
@@ -72549,6 +72720,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testAReimportReimportsThroughTheEngine,
   testARunImportsWhatChangedFirst,
+  testAnotherCheckoutRunsTheEngineItsConfigNames,
   testTheImportCheckKnowsWhatStatusImports,
   testEachSettingsWriteNamesItsSetting,
   testASettingsWriteIsTakenUpByTheEditor,
