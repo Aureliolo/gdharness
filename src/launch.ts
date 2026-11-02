@@ -283,9 +283,15 @@ export function editorArguments(
   hidden: boolean,
   silent: boolean,
   platform: NodeJS.Platform = process.platform,
+  until: number | null = null,
 ): string[] {
   const headless = hidden && platform !== 'win32';
   const windowed = hidden && !headless;
+  // Godot passes over what follows `--`, so these mark the editor where a restart and the addon read them.
+  const marks = [
+    ...(windowed ? [HIDDEN_EDITOR_MARK] : []),
+    ...(until === null ? [] : [`${UNTIL_MARK}${String(until)}`]),
+  ];
   return [
     '-e',
     ...(headless ? ['--headless'] : []),
@@ -302,13 +308,18 @@ export function editorArguments(
     String(ports.dap),
     '--log-file',
     logFile,
-    // Godot passes over what follows `--`, so this marks the editor hidden where a restart reads it.
-    ...(windowed ? ['--', HIDDEN_EDITOR_MARK] : []),
+    ...(marks.length > 0 ? ['--', ...marks] : []),
   ];
 }
 
 /** What a hidden editor with a window carries on its command line, after `--`. */
 const HIDDEN_EDITOR_MARK = '--gdharness-hidden';
+
+/**
+ * What an editor that saves and quits once a process has gone carries after `--`, with that pid
+ * after it. Kept in step with `UNTIL_MARK` in the editor addon's plugin.gd.
+ */
+const UNTIL_MARK = '--gdharness-until=';
 
 /**
  * Whether an editor was started hidden and silent, read off the command line the operating system
@@ -319,11 +330,16 @@ const HIDDEN_EDITOR_MARK = '--gdharness-hidden';
  * `--audio-driver` with the word after it. A hidden editor is silent whatever it was given, which is
  * what one brought back visible keeps.
  */
-export function startedAs(commandLine: string): { hidden: boolean; silent: boolean } {
+export function startedAs(commandLine: string): { hidden: boolean; silent: boolean; until: number | null } {
   const words = commandLineWords(commandLine);
   const hidden = words.includes('--headless') || words.includes(HIDDEN_EDITOR_MARK);
   const driver = words.indexOf('--audio-driver');
-  return { hidden, silent: hidden || (driver >= 0 && words[driver + 1] === 'Dummy') };
+  const held = Number(words.find((word) => word.startsWith(UNTIL_MARK))?.slice(UNTIL_MARK.length));
+  return {
+    hidden,
+    silent: hidden || (driver >= 0 && words[driver + 1] === 'Dummy'),
+    until: Number.isInteger(held) && held > 0 ? held : null,
+  };
 }
 
 /**

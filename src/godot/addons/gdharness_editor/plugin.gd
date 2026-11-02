@@ -26,11 +26,21 @@ const ANSWERED_DURING_A_TASK: Array[String] = [
 	"stop_playing",
 	"profile_read",
 ]
+## What an editor opened to quit once a process has gone carries after `--`, with that pid after it.
+## Kept in step with `UNTIL_MARK` in src/launch.ts.
+const UNTIL_MARK: String = "--gdharness-until="
+## Where the holder of such an editor asks it to save and quit, a file named for its pid. Kept in
+## step with `QUITS_FOLDER` in src/editor-open.ts.
+const QUITS_FOLDER: String = "res://.godot/gdharness-editor-quits/"
+## How often such an editor looks for the request, in seconds.
+const QUIT_LOOK_S: float = 1.0
 
 var _client: GdhBridgeClient
 var _tool_executor: GdhToolExecutor
 var _status_label: Label
 var _release_export: GdhReleaseExport
+var _quit_look: Timer
+var _loaded_at: int = 0
 
 
 func _enter_tree() -> void:
@@ -52,6 +62,7 @@ func _enter_tree() -> void:
 
 	_setup_status_indicator()
 	_client.connect_to_server()
+	_look_for_a_quit_request()
 
 
 func _exit_tree() -> void:
@@ -78,6 +89,41 @@ func _exit_tree() -> void:
 		remove_control_from_container(CONTAINER_TOOLBAR, _status_label)
 		_status_label.queue_free()
 		_status_label = null
+
+
+## Looks for its holder's request once a second, in an editor opened to quit once a process has
+## gone. Godot cannot watch that process itself, since `OS.is_process_running` answers false for any
+## pid it did not start, so a gdharness holder outside the editor watches it and writes the request.
+func _look_for_a_quit_request() -> void:
+	var held: bool = false
+	for arg: String in OS.get_cmdline_user_args():
+		held = held or arg.begins_with(UNTIL_MARK)
+	if not held:
+		return
+	_loaded_at = int(Time.get_unix_time_from_system())
+	_quit_look = Timer.new()
+	_quit_look.wait_time = QUIT_LOOK_S
+	_quit_look.autostart = true
+	_listen(_quit_look.timeout, _on_quit_look)
+	add_child(_quit_look)
+
+
+## Saves and quits on a request written since this addon loaded, as quit_editor does. One older
+## than that was written for an earlier process with this pid. Not while the editor scans, imports
+## or runs a task, which every save waits out.
+func _on_quit_look() -> void:
+	var request: String = ProjectSettings.globalize_path(QUITS_FOLDER + str(OS.get_process_id()))
+	if not FileAccess.file_exists(request) or FileAccess.get_modified_time(request) < _loaded_at:
+		return
+	if turned_away("quit_editor"):
+		return
+	_quit_look.stop()
+	var answer: Dictionary = await _tool_executor.execute_tool("quit_editor", {})
+	if answer.get("ok", false) != true:
+		push_warning(
+			"gdharness: the process holding this editor has gone, and it stays open: %s"
+			% str(answer.get("error", ""))
+		)
 
 
 # A failed connect is a mistake in this plugin rather than anything the editor did, so it goes to

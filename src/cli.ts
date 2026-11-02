@@ -7,7 +7,9 @@
 
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { serverServing } from './bridge-announce.js';
+import { editorOpenOptionsOf, holdTheEditors, openTheEditor } from './editor-open.js';
 import { EngineUsageError } from './engine-launch.js';
 import { nameSlotTaker, sayWaitsTo } from './engine-slots.js';
 import { letWindowsReportCrashes } from './error-mode.js';
@@ -215,6 +217,7 @@ const COMMANDS = [
   'classes',
   'test',
   'lsp',
+  'editor',
   'version',
   'help',
 ] as const;
@@ -791,6 +794,42 @@ async function classes(): Promise<void> {
   }
 }
 
+/**
+ * `gdharness editor open`: the project's editor opened as editor_launch open opens it, unless one
+ * is running. Exit 1 when it could not be.
+ */
+async function editorOpen(): Promise<void> {
+  // The holder an open starts, which no person runs: `editor hold PROJECT PID STARTED`.
+  if (args[1] === 'hold') {
+    const started = Number(args[4]);
+    await holdTheEditors(args[2] ?? '', Number(args[3]), started > 0 ? started : null);
+    return;
+  }
+  const options = editorOpenOptionsOf(args.slice(1), process.cwd());
+  const outcome = await openTheEditor(
+    options,
+    (await engine(options.projectPath)).godotPath,
+    fileURLToPath(import.meta.url),
+  );
+  if ('refused' in outcome) {
+    throw new Refusal(outcome.refused);
+  }
+  if ('running' in outcome) {
+    console.log(
+      `The editor of ${options.projectPath} is already running as pid ${String(outcome.running)}. Nothing was opened.`,
+    );
+    return;
+  }
+  const until = options.start.until;
+  const held =
+    until === null
+      ? ''
+      : outcome.unheld === null
+        ? ` It saves and quits once pid ${String(until)} has gone.`
+        : ` Nothing will close it when pid ${String(until)} goes: ${outcome.unheld}`;
+  console.log(`Opened the editor of ${options.projectPath} as pid ${String(outcome.opened)}.${held}`);
+}
+
 /** Every harness, its flag and its file, because there are too many to list in the help. */
 function printHarnesses(): void {
   const width = Math.max(...HARNESSES.map((harness) => harness.name.length));
@@ -876,6 +915,10 @@ Usage:
                                      port named, else GDHARNESS_LSP_PORT, else the one each
                                      editor of the project records, else 6005. Waits S seconds
                                      (20) for one serving this project. Exit 1 when none does.
+  gdharness editor open [project] [--hidden] [--silent] [--until PID]
+                                     Open the project's editor as editor_launch open does, unless
+                                     one is running. --until PID: the editor saves and quits once
+                                     that process has gone. Exit 1 when it could not be opened.
   gdharness version                  Show the installed version
   gdharness help                     Show this help
 
@@ -950,6 +993,10 @@ async function main(): Promise<void> {
   if (command === 'lsp') {
     // Exited rather than returned: the standard input it piped holds the process open.
     process.exit(await runLspBridge(lspOptionsOf(args.slice(1), process.cwd())));
+  }
+  if (command === 'editor') {
+    await editorOpen();
+    return;
   }
   checkFlags();
   switch (command) {
