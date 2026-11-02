@@ -5,7 +5,7 @@
 [project]
 name = "gdharness-checks"
 version = "0"
-requires-python = "==3.15.1"
+requires-python = "==3.15.2"
 dependencies = []
 
 [dependency-groups]
