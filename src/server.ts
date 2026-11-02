@@ -148,6 +148,7 @@ import {
   theEditorHasComeBack,
 } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
+import { recordedEnginePath } from './harnesses.js';
 import {
   engineExtras,
   type HeadlessOutcome,
@@ -2094,6 +2095,11 @@ function scanWaitIn(payload: OperationParams): { waitedForEditorScanMs?: number;
   };
 }
 
+/** [param outcome] naming the engine that ran it, when [param note] says it was not the server's. */
+function withEngineNote<T extends { readonly engineNote?: string }>(outcome: T, note: string | null): T {
+  return note === null ? outcome : { ...outcome, engineNote: note };
+}
+
 /** [param outcome] carrying what was waited for before it, in its answer or its refusal. */
 function withScanWait(outcome: HeadlessOutcome, scanned: ScanWait): HeadlessOutcome {
   if (scanned.waitedMs === 0) {
@@ -2227,6 +2233,7 @@ export function exportAnswer(
   docCacheNote: string | null = null,
   bytes: number | null = null,
   imports: ReturnType<typeof importedFirstAnswer> = {},
+  engineNote: string | null = null,
 ): ToolResponse {
   const { log } = ending;
   const written = after !== null && after !== before;
@@ -2251,6 +2258,7 @@ export function exportAnswer(
           extensionNote: `The export could not load ${notCopied.join(' and ')}: on Windows an engine running as the editor, which an export is, loads a GDExtension from a ~ copy beside the library, and another engine on this project held that copy: it could not be moved aside before the export, or another engine made a new one in between. Export again once that engine has loaded or exited.`,
         }),
     ...(docCacheNote === null ? {} : { docCacheNote }),
+    ...(engineNote === null ? {} : { engineNote }),
     ...foldedEntriesAnswer(log),
   };
   if (verdict.exported) {
@@ -3917,6 +3925,9 @@ function ownArguments(params: unknown): OperationParams {
 }
 
 type Checked<T> = { ok: true; value: T } | { ok: false; response: ToolResponse };
+
+/** The engine a call runs, and what the answer says of it when it is not this server's. */
+type EngineChoice = { ok: true; value: string; note: string | null } | { ok: false; response: ToolResponse };
 
 /** What a run was asked to carry: where its saves go, and any variables of its own. */
 interface RunEnvironment {
@@ -5773,14 +5784,33 @@ class GodotServer {
   // What every engine-backed tool checks first
   // -------------------------------------------------------------------------------------------
 
-  /** The engine, or the refusal to send when there is none. */
-  private async engine(): Promise<Checked<string>> {
+  /**
+   * The engine for [param projectPath], or the refusal to send when there is none.
+   *
+   * A project other than this server's own runs the engine its own harness config names, when that
+   * names one that exists. A second checkout of a game, pinned to an older engine, ran its suites on
+   * this server's newer one and printed errors only the newer engine has, with nothing naming it.
+   * The note names the engine whenever it is not this server's.
+   */
+  private async engine(projectPath?: string): Promise<EngineChoice> {
     const located = await this.locator.find();
+    const theirs =
+      projectPath === undefined || (this.ownProject !== null && isSameDirectory(projectPath, this.ownProject))
+        ? null
+        : recordedEnginePath(projectPath);
+    if (theirs !== null && !(located.ok && isSameDirectory(theirs, located.path))) {
+      const version = await this.versionOf(theirs);
+      return {
+        ok: true,
+        value: theirs,
+        note: `This ran ${version === null ? 'the engine' : `Godot ${version}`} at ${theirs}, which the harness config of ${projectPath} names, rather than this server's ${located.ok ? `engine at ${located.path}` : 'GODOT_PATH, which names none'}.`,
+      };
+    }
     if (!located.ok) {
       const refusal = GodotLocator.refusal(located);
       return { ok: false, response: this.createErrorResponse(refusal.message, [...refusal.advice]) };
     }
-    return { ok: true, value: located.path };
+    return { ok: true, value: located.path, note: null };
   }
 
   /** The project the call names, checked to be one. */
@@ -6262,11 +6292,11 @@ class GodotServer {
     if (!project.ok) {
       return project.response;
     }
-    const engine = await this.engine();
+    const projectPath = project.value.path;
+    const engine = await this.engine(projectPath);
     if (!engine.ok) {
       return engine.response;
     }
-    const projectPath = project.value.path;
 
     // The import pass is an engine on the project that writes the class cache itself, so it waits
     // for the open editor's scan the way every other engine started here does.
@@ -6275,7 +6305,7 @@ class GodotServer {
     const cachedBefore = pathsInUidCache(projectPath);
     const imported = await runImport(engine.value, projectPath);
     if (!imported.ok) {
-      return this.answer(withScanWait(imported, scanned));
+      return this.answer(withScanWait(withEngineNote(imported, engine.note), scanned));
     }
     const after = scriptsWithoutUid(projectPath);
     const given = before.filter((script) => !after.includes(script));
@@ -6293,6 +6323,7 @@ class GodotServer {
           ok: true,
           messages: imported.messages,
           ...(imported.messagesOmitted === undefined ? {} : { messagesOmitted: imported.messagesOmitted }),
+          ...(engine.note === null ? {} : { engineNote: engine.note }),
           payload: {
             uidsCreated: given,
             ...(cached === null
@@ -6736,12 +6767,15 @@ class GodotServer {
         };
       }
     } else {
-      const engine = await this.engine();
+      const engine = await this.engine(projectPath);
       if (!engine.ok) {
         return { ok: false, response: engine.response };
       }
       const scanned = await this.untilTheEditorsScanIsWritten(projectPath);
-      const imported = await runImport(engine.value, projectPath, { forcing: targets });
+      const imported = withEngineNote(
+        await runImport(engine.value, projectPath, { forcing: targets }),
+        engine.note,
+      );
       if (!imported.ok) {
         return { ok: false, response: this.answer(withScanWait(imported, scanned)) };
       }
@@ -6864,7 +6898,7 @@ class GodotServer {
     params: OperationParams,
     projectPath: string,
   ): Promise<HeadlessOutcome> {
-    const engine = await this.engine();
+    const engine = await this.engine(projectPath);
     if (!engine.ok) {
       // The refusal as built, with its reason and advice, rather than a sentence of its own: this
       // and the uid refresh both used to answer "No Godot executable found" over a GODOT_PATH that
@@ -6886,7 +6920,7 @@ class GodotServer {
       params,
       projectPath,
     );
-    return withScanWait(outcome, scanned);
+    return withScanWait(withEngineNote(outcome, engine.note), scanned);
   }
 
   private answer(outcome: HeadlessOutcome): ToolResponse {
@@ -6935,7 +6969,7 @@ class GodotServer {
     if (!project.ok) {
       return project.response;
     }
-    const engine = await this.engine();
+    const engine = await this.engine(project.value.path);
     if (!engine.ok) {
       return engine.response;
     }
@@ -6947,8 +6981,15 @@ class GodotServer {
       name: typeof name === 'string' && name !== '' ? name : basename(project.value.path),
       path: project.value.path,
       mainScene: typeof mainScene === 'string' && mainScene !== '' ? mainScene : null,
-      godotVersion: await this.godotVersion(engine.value),
+      godotVersion:
+        engine.note === null ? await this.godotVersion(engine.value) : await this.versionOf(engine.value),
+      engineNote: engine.note ?? undefined,
       structure: projectStructure(project.value.path),
+    };
+    // Named once above rather than again in every section.
+    const sectionExtras = (outcome: HeadlessOutcome): Record<string, unknown> => {
+      const { engineNote: _named, ...rest } = outcome;
+      return engineExtras(rest);
     };
 
     const detailed = args['detail'] === 'full';
@@ -6985,13 +7026,13 @@ class GodotServer {
           ...outcome.payload,
           classes: counted.classes,
           ...(Object.keys(counted.inAddons).length > 0 ? { inAddons: counted.inAddons } : {}),
-          ...engineExtras(outcome),
+          ...sectionExtras(outcome),
         };
         continue;
       }
       info[section] = outcome.ok
-        ? { ...outcome.payload, ...engineExtras(outcome) }
-        : { error: outcome.message, ...engineExtras(outcome) };
+        ? { ...outcome.payload, ...sectionExtras(outcome) }
+        : { error: outcome.message, ...sectionExtras(outcome) };
     }
     return this.jsonTextResponse(info);
   }
@@ -7108,7 +7149,7 @@ class GodotServer {
     // The operation refuses a platform the exporters do not know and names the ones they do.
     let knownOptions: unknown[] = [];
     if (EXPORT_PLATFORMS.includes(platform)) {
-      const known = await this.exportOptions(platform);
+      const known = await this.exportOptions(project.value.path, platform);
       if (typeof known === 'string') {
         return this.createErrorResponse(known);
       }
@@ -7167,7 +7208,7 @@ class GodotServer {
     if (options !== undefined && options !== null && Object.keys(options).length > 0) {
       const platform = presetPlatform(project.value.path, preset);
       if (platform !== null) {
-        const known = await this.exportOptions(platform, {
+        const known = await this.exportOptions(project.value.path, platform, {
           presetsFile: join(project.value.path, 'export_presets.cfg'),
           preset,
           asked: options,
@@ -7215,16 +7256,18 @@ class GodotServer {
 
   /**
    * The options a preset of [param platform] lists, from an editor-mode engine on an empty project,
-   * or why they could not be read. With no [param standing], a new preset's, kept for the server's
-   * life since the list is the engine's and changes only with it. With it, the preset's as it would
+   * or why they could not be read. The engine is [param projectPath]'s, whose exporters are the
+   * ones its export runs. With no [param standing], a new preset's, kept for the server's life
+   * since the list is the engine's and changes only with it. With it, the preset's as it would
    * stand with its own options and the ones asked applied, since an exporter lists some options only
    * while others are on.
    */
   private async exportOptions(
+    projectPath: string,
     platform: string,
     standing?: { presetsFile: string; preset: string; asked: unknown },
   ): Promise<ExportOptions | string> {
-    const engine = await this.engine();
+    const engine = await this.engine(projectPath);
     if (!engine.ok) {
       return engine.response.content.map((block) => block.text).join(' ');
     }
@@ -7277,7 +7320,7 @@ class GodotServer {
         'project_export add_preset adds one',
       ]);
     }
-    const engine = await this.engine();
+    const engine = await this.engine(project.value.path);
     if (!engine.ok) {
       return engine.response;
     }
@@ -7386,6 +7429,7 @@ class GodotServer {
       docCacheNote,
       existsSync(output.absolutePath) ? statSync(output.absolutePath).size : null,
       importedFirstAnswer(imported),
+      engine.note,
     );
   }
 
@@ -7575,7 +7619,7 @@ class GodotServer {
     const needing = needs.needing.filter((path) => !leftOut.has(basename(path, '.gd')));
     const noDisplay = resolveHeadless(undefined, { platform: process.platform, variables: process.env });
     const windowed = needing.length > 0 && !noDisplay;
-    const engine = await this.engine();
+    const engine = await this.engine(project.value.path);
     if (!engine.ok) {
       return engine.response;
     }
@@ -8213,6 +8257,7 @@ class GodotServer {
       reason: one.reason,
     }));
     return this.jsonTextResponse({
+      engineNote: engine.note ?? undefined,
       // A report with no cases in it is a run where nothing ran, which exits 0 and was answered
       // passed beside a verdict saying no test cases were found.
       passed:
@@ -8411,10 +8456,18 @@ class GodotServer {
   }
 
   private async godotVersion(godotPath: string): Promise<string | null> {
+    const version = await this.versionOf(godotPath);
+    if (version !== null) {
+      this.lastGodotVersion = version;
+    }
+    return version;
+  }
+
+  /** What [param godotPath] says its version is, without taking it for this server's engine. */
+  private async versionOf(godotPath: string): Promise<string | null> {
     try {
       const { stdout } = await runHidden(godotPath, ['--version'], { timeout: 10000 });
-      this.lastGodotVersion = stdout.trim();
-      return this.lastGodotVersion;
+      return stdout.trim();
     } catch (error) {
       this.logDebug(`Godot did not answer --version: ${errorMessage(error)}`);
       return null;
@@ -10285,7 +10338,7 @@ class GodotServer {
     hidden: boolean,
     silent: boolean,
   ): Promise<ToolResponse> {
-    const engine = await this.engine();
+    const engine = await this.engine(projectPath);
     if (!engine.ok) {
       return engine.response;
     }
@@ -10346,7 +10399,12 @@ class GodotServer {
         [`editor_launch opens one on ${projectPath}`],
       );
     }
-    return this.jsonTextResponse({ restarting: true, pid: opened.pid, ...savedScenesOf(asked, 'saved') });
+    return this.jsonTextResponse({
+      restarting: true,
+      pid: opened.pid,
+      engineNote: engine.note ?? undefined,
+      ...savedScenesOf(asked, 'saved'),
+    });
   }
 
   /** Polls until the bridge is in the state asked for, or until the deadline passes. */
@@ -10399,7 +10457,7 @@ class GodotServer {
         ],
       );
     }
-    const engine = await this.engine();
+    const engine = await this.engine(project.value.path);
     if (!engine.ok) {
       return engine.response;
     }
@@ -10433,6 +10491,7 @@ class GodotServer {
       launched: true,
       pid: opened.pid,
       projectPath: project.value.path,
+      engineNote: engine.note ?? undefined,
       lspPort: ports.lsp,
       dapPort: ports.dap,
       arguments: opened.arguments,
@@ -10744,7 +10803,9 @@ class GodotServer {
     }
     // An exported build is its own engine, so it needs no Godot here to start.
     const engine =
-      exported?.ok === true ? { ok: true as const, value: exported.absolutePath } : await this.engine();
+      exported?.ok === true
+        ? { ok: true as const, value: exported.absolutePath, note: null }
+        : await this.engine(project.value.path);
     if (!engine.ok) {
       return engine.response;
     }
@@ -10959,6 +11020,7 @@ class GodotServer {
     return this.jsonTextResponse({
       started: true,
       through: 'gdharness',
+      engineNote: engine.note ?? undefined,
       alsoRunning: stranded.length === 0 ? undefined : stranded.map((one) => one.pid),
       pid: started.pid,
       executable: exported?.ok === true ? exported.relativePath : undefined,
@@ -15921,7 +15983,10 @@ class GodotServer {
     // already holding the rename and answers that nothing changed.
     const cacheBefore = asked.rebuildCache ? cachedEntries(projectPath) : null;
     if (asked.moved) {
-      const engine = await this.engine();
+      const engine = await this.engine(projectPath);
+      if (engine.ok && engine.note !== null) {
+        report['engineNote'] = engine.note;
+      }
       // The pass gives a uid file to every script that had none, anywhere in the project, and
       // those are files in the caller's tree that nothing asked for by name.
       const sidecarsBefore = new Set(projectFiles(projectPath, ['.uid', '.import']));

@@ -24,7 +24,7 @@ import {
 } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { availableParallelism, homedir, tmpdir } from 'node:os';
-import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
@@ -27514,6 +27514,122 @@ async function testARunImportsWhatChangedFirst(): Promise<void> {
     });
   } finally {
     sweep(project);
+  }
+}
+
+/**
+ * A project other than the server's own runs the engine its own harness config names, and the
+ * answer names that engine.
+ *
+ * Issue #1425: a server configured for one checkout of a game ran `project_test` on a second
+ * checkout pinned to an older engine, and its suites ran on the server's newer engine with nothing
+ * naming it. Here the second project's config names a link to the same Godot under another name,
+ * and its suite asserts the executable it runs in. A third names an empty file, so an operation
+ * that ran on the server's engine would succeed where the project's engine cannot start. The
+ * server's own project names that empty file too, and is still run on the server's engine.
+ */
+async function testAnotherCheckoutRunsTheEngineItsConfigNames(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('per-checkout engine regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-checkout-engine-'));
+  try {
+    const project = (name: string, engine: string): string => {
+      const path = join(root, name);
+      mkdirSync(join(path, 'engine'), { recursive: true });
+      writeFileSync(
+        join(path, 'project.godot'),
+        `; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="${name}"\n`,
+      );
+      writeFileSync(
+        join(path, '.mcp.json'),
+        JSON.stringify({
+          mcpServers: { gdharness: { command: 'npx', env: { GODOT_PATH: `engine/${engine}` } } },
+        }),
+      );
+      return path;
+    };
+    const empty = `empty${extname(godotPath)}`;
+    const own = project('own', empty);
+    writeFileSync(join(own, 'engine', empty), '');
+    const unstartable = project('unstartable', empty);
+    writeFileSync(join(unstartable, 'engine', empty), '');
+    const pinnedName = `pinned-${basename(godotPath)}`;
+    const pinned = project('pinned', pinnedName);
+    const pinnedEngine = join(pinned, 'engine', pinnedName);
+    try {
+      linkSync(godotPath, pinnedEngine);
+    } catch {
+      cpSync(godotPath, pinnedEngine);
+    }
+    cpSync(gdunit, join(pinned, 'addons', 'gdUnit4'), { recursive: true });
+    mkdirSync(join(pinned, 'test'));
+    writeFileSync(
+      join(pinned, 'test', 'engine_test.gd'),
+      `extends GdUnitTestSuite\n\n\nfunc test_the_pinned_engine_runs() -> void:\n\tassert_str(OS.get_executable_path().get_file()).is_equal("${pinnedName}")\n`,
+    );
+
+    await withStdioServer(
+      async (_call, request) => {
+        const answer = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+          const response = await request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+          const blocks = asArray(get(response, 'result', 'content')).map((block) =>
+            String(get(block, 'text')),
+          );
+          assert.notEqual(get(response, 'result', 'isError'), true, `${name} refused: ${blocks.join('\n')}`);
+          return JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+        };
+
+        const ownInfo = await answer('project_info', { projectPath: own, include: ['classes'] });
+        assert.equal(
+          get(ownInfo, 'classes', 'error'),
+          undefined,
+          `the own project ran: ${JSON.stringify(ownInfo)}`,
+        );
+        assert.equal(
+          get(ownInfo, 'engineNote'),
+          undefined,
+          `on the server's engine: ${JSON.stringify(ownInfo)}`,
+        );
+
+        const refused = await answer('project_info', { projectPath: unstartable, include: ['classes'] });
+        assert.equal(
+          typeof get(refused, 'classes', 'error'),
+          'string',
+          `the section ran on the empty file and failed: ${JSON.stringify(refused)}`,
+        );
+        const said = text(get(refused, 'engineNote'));
+        assert.ok(
+          said.startsWith(
+            `This ran the engine at ${join(unstartable, 'engine', empty)}, which the harness config of ${unstartable} names, rather than this server's engine at `,
+          ),
+          said,
+        );
+        assert.equal(get(refused, 'classes', 'engineNote'), undefined, 'named once, not in the section');
+
+        const tested = await answer('project_test', { projectPath: pinned, path: 'res://test' });
+        assert.equal(
+          get(tested, 'passed'),
+          true,
+          `the suite ran in the pinned engine: ${JSON.stringify(tested)}`,
+        );
+        assert.match(
+          text(get(tested, 'engineNote')),
+          /^This ran Godot 4\.\S+ at .+, which the harness config of .+ names, rather than this server's engine at .+\.$/,
+          JSON.stringify(tested),
+        );
+        assert.ok(text(get(tested, 'engineNote')).includes(pinnedEngine), JSON.stringify(tested));
+      },
+      { GDHARNESS_PROJECT: own, GDHARNESS_BRIDGE_PORT: String(await reservePort()) },
+    );
+  } finally {
+    sweep(root);
   }
 }
 
@@ -72549,6 +72665,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testAReimportReimportsThroughTheEngine,
   testARunImportsWhatChangedFirst,
+  testAnotherCheckoutRunsTheEngineItsConfigNames,
   testTheImportCheckKnowsWhatStatusImports,
   testEachSettingsWriteNamesItsSetting,
   testASettingsWriteIsTakenUpByTheEditor,

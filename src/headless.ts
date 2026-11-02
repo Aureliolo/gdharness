@@ -54,6 +54,8 @@ interface Reported {
   /** What the autoloads reported while an operation waited for them, which is not its own either. */
   readonly beforeOperationMessages?: readonly LogEntry[];
   readonly beforeOperationOmitted?: number;
+  /** Which engine ran, when it was not the server's own. */
+  readonly engineNote?: string;
 }
 
 export type HeadlessOutcome =
@@ -96,6 +98,7 @@ export function engineExtras(
     parts.filter((part) => part !== undefined).join(' ') || undefined;
   const ownNote = notes(notImportedNote(outcome.messages), leakIn(outcome.messages));
   return {
+    ...(outcome.engineNote === undefined ? {} : { engineNote: outcome.engineNote }),
     ...(outcome.messages.length > 0 ? { engine_messages: outcome.messages } : {}),
     ...(ownNote === undefined ? {} : { engine_messages_note: ownNote }),
     ...(before.length > 0
