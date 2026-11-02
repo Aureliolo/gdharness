@@ -276,6 +276,10 @@ upgrade them itself.
 | `classes`            | Rebuilds the class cache from disk                                 |
 | `runtime on` / `off` | Registers the runtime autoload, or takes it out again              |
 | `harnesses`          | Every harness, its flag and the file it reads                      |
+| `editor open`        | Opens the editor as `editor_launch open` does, unless one runs     |
+
+`editor open --until PID` opens an editor that saves and quits once that process has gone. A session
+passes its own pid, so its editor ends with it.
 
 Each of these except `harnesses` takes the project directory as its argument. It defaults to the one
 you are in. The directory must hold a `project.godot`. An unknown flag stops the command before it

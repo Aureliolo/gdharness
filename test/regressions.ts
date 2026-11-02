@@ -96,6 +96,7 @@ import {
   theConsoleWasNotCaptured,
   writeEditorLogNote,
 } from '../src/editor-log.js';
+import { editorQuitRequestPath, inTurnToOpen } from '../src/editor-open.js';
 import {
   countedBy,
   EngineUsageError,
@@ -5695,6 +5696,304 @@ async function testAnEditorStillArrivingIsNotOpenedBeside(): Promise<void> {
   }
 }
 
+/** A project with the editor addon enabled, a stand-in engine in it and a script that holds a pid. */
+function aProjectToOpen(prefix: string): { project: string; engine: string; hold: string } {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), prefix));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="Opened"\n\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+  );
+  mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+  const engine = join(project, `godot-standin${process.platform === 'win32' ? '.exe' : ''}`);
+  try {
+    linkSync(process.execPath, engine);
+  } catch {
+    cpSync(process.execPath, engine);
+  }
+  const hold = join(project, 'hold.js');
+  writeFileSync(hold, 'setTimeout(() => {}, 120000);\n');
+  return { project, engine, hold };
+}
+
+/** `gdharness editor` with [param args], its output and its exit code once it ends. */
+function editorCommand(
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+): { child: ChildProcess; ended: Promise<{ code: number | null; said: string }> } {
+  const child = spawnHidden(process.execPath, [join(process.cwd(), 'build', 'cli.js'), 'editor', ...args], {
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const said: string[] = [];
+  child.stdout.on('data', (chunk: Buffer) => said.push(String(chunk)));
+  child.stderr.on('data', (chunk: Buffer) => said.push(String(chunk)));
+  const ended = new Promise<{ code: number | null; said: string }>((settle) => {
+    child.once('exit', (code) => {
+      settle({ code, said: said.join('') });
+    });
+  });
+  return { child, ended };
+}
+
+/**
+ * Two opens of one project's editor at once make one editor, whether from `editor_launch open` or
+ * from `gdharness editor open`. Each takes the project's turn and looks for a running editor inside
+ * it, so the one waiting finds the editor the other started. The turn is held here while a stand-in
+ * editor starts, as the first open's launch would.
+ */
+async function testOpensOfOneEditorTakeTurns(): Promise<void> {
+  const { project, engine, hold } = aProjectToOpen('gdharness-open-turn-');
+  const env = { ...process.env, GODOT_PATH: engine };
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: engine },
+  });
+  const started: ChildProcess[] = [];
+  const anEditor = (): number => {
+    const child = spawnHidden(engine, [hold, '--path', project, '--editor'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+    started.push(child);
+    assert.ok(child.pid !== undefined, 'the stand-in editor starts');
+    return child.pid;
+  };
+  const endTheEditors = async (): Promise<void> => {
+    for (const child of started.splice(0)) {
+      child.kill();
+      for (let waited = 0; waited < 10_000 && child.pid !== undefined && alive(child.pid); waited += 100) {
+        await delay(100);
+      }
+    }
+  };
+  let sessionPid = 0;
+  try {
+    await server.initialize('regression-test');
+
+    const command = editorCommand(['open', project], env);
+    let first = 0;
+    await inTurnToOpen(project, async () => {
+      await delay(2000);
+      assert.equal(command.child.exitCode, null, 'the command waits while another open holds the turn');
+      first = anEditor();
+    });
+    const waited = await command.ended;
+    assert.equal(waited.code, 0, waited.said);
+    assert.match(
+      waited.said,
+      new RegExp(`already running as pid ${String(first)}\\. Nothing was opened\\.`),
+      `the command finds the editor the open before it started: ${waited.said}`,
+    );
+
+    await endTheEditors();
+    let second = 0;
+    const asked = await inTurnToOpen(project, async () => {
+      const call = server.request('tools/call', {
+        name: 'editor_launch',
+        arguments: { projectPath: project, op: 'open' },
+      });
+      await delay(2000);
+      second = anEditor();
+      return { call };
+    });
+    const refused = textOf(await asked.call) ?? '';
+    assert.match(
+      refused,
+      new RegExp(`An editor of this project is already running \\(pid ${String(second)}, `),
+      `editor_launch open finds the editor the open before it started: ${refused}`,
+    );
+
+    // With nothing running, the command opens one, and one held by a process starts its holder.
+    await endTheEditors();
+    const session = spawnHidden(process.execPath, [hold], { detached: true, stdio: 'ignore' });
+    sessionPid = session.pid ?? 0;
+    const opened = await editorCommand(['open', project, '--until', String(sessionPid)], env).ended;
+    assert.equal(opened.code, 0, opened.said);
+    assert.match(
+      opened.said,
+      new RegExp(
+        `^Opened the editor of .+ as pid \\d+\\. It saves and quits once pid ${String(sessionPid)} has gone\\.`,
+      ),
+      opened.said,
+    );
+    const holders = async (): Promise<number[]> => {
+      const tree = await processTree();
+      return [...(tree ?? [])]
+        .filter(
+          ([, listed]) =>
+            listed.command.includes(' editor hold ') && listed.command.includes(` ${String(sessionPid)} `),
+        )
+        .map(([pid]) => pid);
+    };
+    assert.equal((await holders()).length, 1, 'one holder waits on the session');
+    session.kill();
+    let left = await holders();
+    for (let looked = 0; looked < 15_000 && left.length > 0; looked += 250) {
+      await delay(250);
+      left = await holders();
+    }
+    assert.deepEqual(left, [], 'and ends once the session has, with no editor of it left to ask');
+  } finally {
+    await endTheEditors();
+    if (sessionPid !== 0 && alive(sessionPid)) {
+      process.kill(sessionPid);
+    }
+    await server.stop();
+    sweep(project);
+  }
+}
+
+/**
+ * The holder of a session's editor asks it to save and quit once the session has gone, and only
+ * then. It asks no editor another process holds, and takes its request away once the editor has
+ * gone, so a later process given that pid is not asked.
+ */
+async function testAHolderAsksOnlyTheEditorsItHolds(): Promise<void> {
+  const { project, engine, hold } = aProjectToOpen('gdharness-editor-hold-');
+  const children: ChildProcess[] = [];
+  const started = (command: string, args: readonly string[]): number => {
+    const child = spawnHidden(command, [...args], { detached: true, stdio: 'ignore' });
+    children.push(child);
+    assert.ok(child.pid !== undefined, `${command} starts`);
+    return child.pid;
+  };
+  try {
+    const session = started(process.execPath, [hold]);
+    const another = started(process.execPath, [hold]);
+    const editorOf = (pid: number): number =>
+      started(engine, [hold, '--path', project, '--editor', '--', `--gdharness-until=${String(pid)}`]);
+    const held = editorOf(session);
+    const elsewhere = editorOf(another);
+    const holder = editorCommand(['hold', project, String(session), '0'], process.env);
+    const said: string[] = [];
+    holder.child.stdout?.on('data', (chunk: Buffer) => said.push(String(chunk)));
+    for (let waited = 0; waited < 20_000 && !said.join('').includes('Holding the editors'); waited += 100) {
+      await delay(100);
+    }
+    assert.match(
+      said.join(''),
+      /^Holding the editors of .+ until pid \d+ has gone\.$/m,
+      'the holder sees the session running',
+    );
+    // Three looks of its own, each of which would ask if it took the session for gone.
+    await delay(3500);
+    assert.equal(holder.child.exitCode, null, 'the holder waits while the session runs');
+    assert.ok(!existsSync(editorQuitRequestPath(project, held)), 'and asks nothing of its editor');
+
+    process.kill(session);
+    for (
+      let waited = 0;
+      waited < 10_000 && !existsSync(editorQuitRequestPath(project, held));
+      waited += 100
+    ) {
+      await delay(100);
+    }
+    assert.ok(
+      existsSync(editorQuitRequestPath(project, held)),
+      "the session's editor is asked once it has gone",
+    );
+    assert.equal(
+      readFileSync(editorQuitRequestPath(project, held), 'utf8'),
+      `${String(session)}\n`,
+      "once the session has gone, the session's editor is asked to save and quit",
+    );
+    assert.ok(
+      !existsSync(editorQuitRequestPath(project, elsewhere)),
+      'an editor another process holds is not asked',
+    );
+
+    process.kill(held);
+    const ended = await Promise.race([holder.ended, delay(15_000).then(() => null)]);
+    assert.equal(ended?.code, 0, `the holder ends once the editor has gone: ${JSON.stringify(ended)}`);
+    assert.ok(!existsSync(editorQuitRequestPath(project, held)), 'taking its request away');
+  } finally {
+    for (const child of children) {
+      if (child.pid !== undefined && alive(child.pid)) {
+        child.kill();
+      }
+    }
+    sweep(project);
+  }
+}
+
+/**
+ * An editor opened to quit with a process saves and quits on its holder's request, and ignores a
+ * request older than its addon, which was written for an earlier process with its pid.
+ */
+async function testAHeldEditorQuitsOnARequestNewerThanItself(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('held editor regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-editor-'));
+  const home = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-editor-home-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Held"\n\n' +
+      '[editor_plugins]\n\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+  );
+  installAddons(project);
+  const own = { APPDATA: home, LOCALAPPDATA: home, XDG_CONFIG_HOME: home, XDG_DATA_HOME: home };
+  let editor: ChildProcess | null = null;
+  const printed: string[] = [];
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    editor = spawnHidden(
+      godotPath,
+      ['--editor', '--headless', '--path', project, '--', '--gdharness-until=1'],
+      {
+        env: { ...process.env, ...own, GDHARNESS_BRIDGE_PORT: String(await reservePort()) },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    editor.stdout?.on('data', (chunk: Buffer) => printed.push(String(chunk)));
+    editor.stderr?.on('data', (chunk: Buffer) => printed.push(String(chunk)));
+    const pid = editor.pid ?? 0;
+    const request = editorQuitRequestPath(project, pid);
+    mkdirSync(dirname(request), { recursive: true });
+    writeFileSync(request, '1\n');
+    const anHourAgo = new Date(Date.now() - 3_600_000);
+    utimesSync(request, anHourAgo, anHourAgo);
+    const record = join(project, '.godot', 'gdharness-editors', `${String(pid)}.json`);
+    for (let waited = 0; waited < 120_000 && !existsSync(record) && editor.exitCode === null; waited += 250) {
+      await delay(250);
+    }
+    assert.ok(existsSync(record), `the editor's addon loaded:\n${printed.join('').slice(-3000)}`);
+    await delay(3000);
+    assert.equal(
+      editor.exitCode,
+      null,
+      `a request older than the addon is not this editor's:\n${printed.join('').slice(-3000)}`,
+    );
+
+    writeFileSync(request, '1\n');
+    const child = editor;
+    const exited = await Promise.race([
+      new Promise<boolean>((settle) => {
+        child.once('exit', () => {
+          settle(true);
+        });
+      }),
+      delay(30_000).then(() => child.exitCode !== null),
+    ]);
+    assert.ok(
+      exited,
+      `the editor saves and quits on a request newer than itself:\n${printed.join('').slice(-3000)}`,
+    );
+  } finally {
+    if (editor?.exitCode === null && editor.pid !== undefined) {
+      await killTheTree(editor.pid);
+    }
+    sweep(project);
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
 /**
  * An editor this server opens makes no sound unless the call asks for it, and one it starts again
  * comes back hidden and silent as it was started unless the call says otherwise.
@@ -5737,6 +6036,8 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
     silent: boolean;
     visible: boolean;
     refused?: boolean;
+    /** The process the editor quits with, which comes back on the restarted one's command line. */
+    until?: number;
   }[] = [
     { how: 'opened visible', act: 'open', args: {}, silent: true, visible: true },
     { how: 'opened visible with sound', act: 'open', args: { silent: false }, silent: false, visible: true },
@@ -5824,6 +6125,15 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
       visible: true,
     },
     { how: 'started again unread', act: 'restart', was: null, args: {}, silent: false, visible: false },
+    {
+      how: 'started again hidden and silent, held by a process',
+      act: 'restart',
+      was: ['--headless', '--', '--gdharness-until=4242'],
+      args: { hidden: true, silent: true },
+      silent: hiddenSilent,
+      visible: false,
+      until: 4242,
+    },
   ];
   let ran = 0;
   for (const one of cases) {
@@ -6002,6 +6312,11 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
         argv.includes('--gdharness-hidden'),
         !one.visible && !hiddenHeadless,
         `${one.how}: on a desktop of its own ${String(!one.visible && !hiddenHeadless)}: ${argv.join(' ')}`,
+      );
+      assert.equal(
+        argv.includes(`--gdharness-until=${String(one.until ?? 4242)}`),
+        one.until !== undefined,
+        `${one.how}: held by ${String(one.until ?? 'nothing')}: ${argv.join(' ')}`,
       );
       ran += 1;
     } finally {
@@ -21574,12 +21889,43 @@ function testRunArgumentsLeaveTheLocalDebuggerOff(): void {
           .join(' '),
       ),
       startedAs('godot -e --path /p'),
+      startedAs(
+        editorArguments('/p', { lsp: 1, dap: 2 }, '/log', false, false, 'linux', 4242)
+          .map((word) => `"${word}"`)
+          .join(' '),
+      ),
     ],
     [
-      { hidden: true, silent: true },
-      { hidden: false, silent: false },
+      { hidden: true, silent: true, until: null },
+      { hidden: false, silent: false, until: null },
+      { hidden: false, silent: false, until: 4242 },
     ],
-    'and a restart reads it back as hidden',
+    'and a restart reads it back as hidden, and as held by the process it quits with',
+  );
+  // The process an editor quits with goes after `--` as well, where the engine reads nothing.
+  assert.deepEqual(
+    editorArguments(
+      '/p',
+      { lsp: 6005, dap: 6006 },
+      '/p/.godot/gdharness-editor.log',
+      true,
+      true,
+      'linux',
+      4242,
+    ),
+    ['-e', '--headless', ...opened, '--', '--gdharness-until=4242'],
+  );
+  assert.deepEqual(
+    editorArguments(
+      '/p',
+      { lsp: 6005, dap: 6006 },
+      '/p/.godot/gdharness-editor.log',
+      true,
+      true,
+      'win32',
+      4242,
+    ).slice(-3),
+    ['--', '--gdharness-hidden', '--gdharness-until=4242'],
   );
   // The scene as a res:// path and last: the engine reads it positionally, so text beginning
   // with a dash would otherwise be another option to it.
@@ -72541,6 +72887,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARestartLeftHalfDoneIsSaid,
   testAnEditorStillArrivingIsNotOpenedBeside,
   testAnEditorThisServerStartsIsSilentUnlessAsked,
+  testOpensOfOneEditorTakeTurns,
+  testAHolderAsksOnlyTheEditorsItHolds,
+  testAHeldEditorQuitsOnARequestNewerThanItself,
   testABridgeThatMovedSaysFromWhere,
   testASupersededServerStandsDown,
   testAPredecessorThatKeepsThePortIsNotWaitedOnForEver,
