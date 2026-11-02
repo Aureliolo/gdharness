@@ -1123,7 +1123,7 @@ func _settled(packed: PackedScene) -> Array:
 			var name: String = found[1]
 			var wanted: Variant = found[3] if found[2] else _unset_value(node, name)
 			var held: Variant = node.get(name)
-			node.set(name, wanted)
+			GdhHeadlessCheck.restore(node, name, wanted)
 			if GdhHeadlessCheck.kept_by_engine(node, name, wanted, held):
 				_engine_kept["%d:%s" % [node.get_instance_id(), name]] = true
 		for found: Array in moved:
@@ -1131,7 +1131,9 @@ func _settled(packed: PackedScene) -> Array:
 			var before: Dictionary = _before[node.get_instance_id()]
 			var restored: Dictionary = restored_by_write.get_or_add(node.get_instance_id(), {})
 			for name: String in found[1]:
-				node.set(name, before.get(name, GdhHeadlessCheck.default_of(node, name)))
+				GdhHeadlessCheck.restore(
+					node, name, before.get(name, GdhHeadlessCheck.default_of(node, name))
+				)
 				restored[name] = true
 		current = PackedScene.new()
 		var packing: Error = current.pack(root)

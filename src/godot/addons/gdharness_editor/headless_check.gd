@@ -66,6 +66,16 @@ static func through_script(object: Object, names: Dictionary) -> bool:
 	return false
 
 
+## Sets [param name] on [param object] back to [param value]. A metadata entry put back to nothing
+## is removed. Set to null through its property, Godot keeps the entry holding null, and the saver
+## writes a line that erases what the node's script sets each time the scene loads.
+static func restore(object: Object, name: String, value: Variant) -> void:
+	if value == null and name.begins_with("metadata/"):
+		object.remove_meta(name.trim_prefix("metadata/"))
+		return
+	object.set(name, value)
+
+
 ## Whether [param object] still holds [param held] for [param name] once set to [param wanted]
 ## because the engine derives it, as it keeps layout_mode at Container under a container: an engine
 ## property, so no script code ran for the set, and an editor saves the same.

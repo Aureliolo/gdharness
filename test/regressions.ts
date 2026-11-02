@@ -69903,6 +69903,272 @@ async function testAHeadlessWriteSavesWhatTheEditorWould(): Promise<void> {
 }
 
 /**
+ * A headless write of a node whose script sets its own properties as it is made saves what the
+ * editor would, and a scene saved that way can be written again.
+ *
+ * Reported downstream: an add of a script-class Container child or of a Control setting its anchors
+ * in _init was refused, though an add and a set wrote the same node. Metadata a script set was saved
+ * as null, which erases it on load and refused every later write. An instance under a Control was
+ * saved at layout mode 0 with its offsets at 0. A scene whose script did not compile was written,
+ * and a set naming a property at its default was refused.
+ */
+async function testAHeadlessWriteOfScriptedNodesSavesWhatTheEditorWould(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('headless scripted write regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-scripted-write-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-scripted-write-rt-'));
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="ScriptedWrite"\n',
+    'paper.gd':
+      'class_name Paper\nextends PanelContainer\n\n@export var pinned: bool = true\n@export var bound: bool = false\n\n\n' +
+      'func _init() -> void:\n\tadd_theme_stylebox_override("panel", StyleBoxFlat.new())\n',
+    'letter.tscn':
+      '[gd_scene format=3]\n\n[node name="Letter" type="Control"]\n\n' +
+      '[node name="Middle" type="CenterContainer" parent="."]\n',
+    'full_rect.gd':
+      'class_name FullRectButtons\nextends Control\n\n\nfunc _init() -> void:\n' +
+      '\tset_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)\n',
+    'holder.gd': 'extends Control\n',
+    'stage.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://holder.gd" id="1_holder"]\n\n' +
+      '[node name="Stage" type="Node2D"]\n\n[node name="Holder" type="Control" parent="."]\n' +
+      'script = ExtResource("1_holder")\n',
+    'tagged.gd':
+      'class_name Tagged\nextends Label\n\n\nfunc _init() -> void:\n\tset_meta("size_given", 12)\n',
+    'screen.tscn':
+      '[gd_scene format=3]\n\n[node name="Screen" type="Control"]\n\n' +
+      '[node name="Box" type="Control" parent="."]\n\n[node name="Other" type="Control" parent="."]\n',
+    'side.gd': 'extends Control\n',
+    'side.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://side.gd" id="1_side"]\n\n' +
+      '[node name="Side" type="Control"]\nlayout_mode = 3\nanchors_preset = 0\n' +
+      'offset_left = 670.0\noffset_top = 12.0\noffset_right = 670.0\noffset_bottom = 12.0\n' +
+      'script = ExtResource("1_side")\n',
+    'base_note.gd':
+      'class_name BaseNote\nextends Node\n\n@export var pinned: bool = true\n@export var bound: bool = false\n',
+    'note.gd': 'extends BaseNote\n\nvar helper: NoSuchHelper\n',
+    'fine_note.gd': 'extends BaseNote\n',
+    'note.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://note.gd" id="1_note"]\n\n' +
+      '[node name="Note" type="Node"]\nscript = ExtResource("1_note")\n',
+    'fine.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://fine_note.gd" id="1_fine"]\n\n' +
+      '[node name="Fine" type="Node"]\nscript = ExtResource("1_fine")\npinned = true\nbound = false\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
+  const node = async (args: Record<string, unknown>): Promise<{ said: string; error: boolean }> => {
+    const result = await server.request(
+      'tools/call',
+      { name: 'scene_node', arguments: { projectPath: project, ...args } },
+      240_000,
+    );
+    return { said: textOf(result) ?? '', error: get(result, 'result', 'isError') === true };
+  };
+  const written = async (args: Record<string, unknown>, what: string): Promise<string> => {
+    const { said, error } = await node(args);
+    assert.equal(error, false, `${what}: ${said}`);
+    return said;
+  };
+  const failures: string[] = [];
+  const check = async (what: string, body: () => Promise<void>): Promise<void> => {
+    try {
+      await body();
+    } catch (error) {
+      failures.push(`${what}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('scripted-write');
+
+    await check('a script-class Container child', async () => {
+      await written(
+        {
+          op: 'add',
+          scenePath: 'letter.tscn',
+          parentNodePath: 'Middle',
+          nodeType: 'Paper',
+          nodeName: 'Sheet',
+          properties: { pinned: false, bound: true },
+        },
+        'the add of a Paper under a CenterContainer',
+      );
+      assert.match(
+        fileOf('letter.tscn'),
+        /\[node name="Sheet" type="PanelContainer" parent="Middle"/,
+        fileOf('letter.tscn'),
+      );
+      assert.match(fileOf('letter.tscn'), /^pinned = false$/m, fileOf('letter.tscn'));
+      assert.match(fileOf('letter.tscn'), /^bound = true$/m, fileOf('letter.tscn'));
+      assert.doesNotMatch(fileOf('letter.tscn'), /theme_override_styles/, fileOf('letter.tscn'));
+    });
+
+    await check('a Control setting its anchors in _init', async () => {
+      await written(
+        {
+          op: 'add',
+          scenePath: 'stage.tscn',
+          parentNodePath: 'Holder',
+          nodeType: 'FullRectButtons',
+          nodeName: 'Buttons',
+        },
+        'the add of a FullRectButtons under a Control',
+      );
+      const after = fileOf('stage.tscn');
+      assert.match(after, /\[node name="Buttons" type="Control" parent="Holder"/, after);
+      await written(
+        { op: 'set', scenePath: 'stage.tscn', nodePath: 'Holder', properties: { visible: false } },
+        'a later write to the scene',
+      );
+      assert.match(fileOf('stage.tscn'), /\[node name="Buttons"/, fileOf('stage.tscn'));
+    });
+
+    await check('metadata a script sets', async () => {
+      await written(
+        {
+          op: 'add',
+          scenePath: 'screen.tscn',
+          parentNodePath: 'Box',
+          nodeType: 'Tagged',
+          nodeName: 'Naming',
+        },
+        'the add of a Tagged label',
+      );
+      await written(
+        { op: 'set', scenePath: 'screen.tscn', nodePath: 'Other', properties: { visible: false } },
+        'a write to a sibling',
+      );
+      assert.doesNotMatch(fileOf('screen.tscn'), /metadata\/size_given/, fileOf('screen.tscn'));
+      writeFileSync(
+        join(project, 'screen.tscn'),
+        fileOf('screen.tscn').replace(
+          /(\[node name="Naming"[^\n]*\n(?:[^\n[]+\n)*)/,
+          '$1metadata/size_given = null\n',
+        ),
+      );
+      assert.match(
+        fileOf('screen.tscn'),
+        /^metadata\/size_given = null$/m,
+        'the fixture writes the null line',
+      );
+      await written(
+        { op: 'delete', scenePath: 'screen.tscn', nodePath: 'Box/Naming' },
+        'a delete of the label whose file line erases what its script set',
+      );
+      assert.doesNotMatch(fileOf('screen.tscn'), /Naming/, fileOf('screen.tscn'));
+    });
+
+    await check('an instance under a Control', async () => {
+      await written(
+        {
+          op: 'add',
+          scenePath: 'screen.tscn',
+          parentNodePath: 'Box',
+          instancePath: 'res://side.tscn',
+          nodeName: 'Side',
+        },
+        'the add of the instance',
+      );
+      await written(
+        { op: 'set', scenePath: 'screen.tscn', nodePath: 'Other', properties: { visible: true } },
+        'a write to another node',
+      );
+      const loadsAt = async (when: string): Promise<void> => {
+        const { said } = await node({ op: 'get', scenePath: 'screen.tscn', nodePath: 'Box/Side' });
+        const read = JSON.parse(said) as unknown;
+        assert.deepEqual(
+          [get(read, 'properties', 'offset_left'), get(read, 'properties', 'offset_top')],
+          [670, 12],
+          `${when}, the instance loads where its own scene places it: ${fileOf('screen.tscn')}`,
+        );
+      };
+      assert.match(
+        fileOf('screen.tscn'),
+        /\[node name="Side" parent="Box"[^\n]*instance=/,
+        fileOf('screen.tscn'),
+      );
+      await loadsAt('once added');
+      await written(
+        { op: 'set', scenePath: 'screen.tscn', nodePath: 'Other', properties: { script: 'res://holder.gd' } },
+        "a script set on the instance's sibling",
+      );
+      await loadsAt("after a sibling's script");
+      await written(
+        { op: 'set', scenePath: 'screen.tscn', nodePath: 'Box/Side', editableChildren: true },
+        "the instance's children made editable",
+      );
+      await written(
+        { op: 'set', scenePath: 'screen.tscn', nodePath: 'Other', properties: { visible: false } },
+        'a write after that',
+      );
+      await loadsAt('after editable children');
+    });
+
+    await check('a scene whose script does not compile', async () => {
+      const before = fileOf('note.tscn');
+      const { said, error } = await node({
+        op: 'add',
+        scenePath: 'note.tscn',
+        parentNodePath: '.',
+        nodeType: 'Node',
+        nodeName: 'Child',
+      });
+      assert.equal(error, true, `refused: ${said}`);
+      assert.equal(fileOf('note.tscn'), before, 'and nothing written');
+    });
+
+    await check('a scene whose script needs a class missing from the class cache', async () => {
+      writeFileSync(join(project, 'late_helper.gd'), 'class_name LateHelper\nextends RefCounted\n');
+      writeFileSync(join(project, 'late_note.gd'), 'extends BaseNote\n\nvar helper: LateHelper\n');
+      const scene =
+        '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://late_note.gd" id="1_late"]\n\n' +
+        '[node name="Late" type="Node"]\nscript = ExtResource("1_late")\n';
+      writeFileSync(join(project, 'late.tscn'), scene);
+      const { said, error } = await node({
+        op: 'add',
+        scenePath: 'late.tscn',
+        parentNodePath: '.',
+        nodeType: 'Node',
+        nodeName: 'Child',
+      });
+      assert.equal(error, true, `refused: ${said}`);
+      assert.equal(fileOf('late.tscn'), scene, 'and nothing written');
+    });
+
+    await check('a set naming a property at its default', async () => {
+      await written(
+        { op: 'set', scenePath: 'fine.tscn', nodePath: '.', properties: { pinned: true, bound: false } },
+        'the set of the values the file holds',
+      );
+    });
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+  assert.deepEqual(failures, [], 'every case writes as the editor would');
+}
+
+/**
  * project_info's classes, with an addon's counted unless asked for. A model-driven probe on a game
  * carrying two large addons asked for them, got 686 classes in 88 thousand characters, which the
  * harness moved out of the conversation, and went back to searching the files. 19 were the game's.
@@ -71883,6 +72149,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPropertyHoldingANodeFollowsIt,
   testTheProjectsOwnClassesAreListedAndAnAddonsCounted,
   testAHeadlessWriteSavesWhatTheEditorWould,
+  testAHeadlessWriteOfScriptedNodesSavesWhatTheEditorWould,
   testTwoWritesToOneSceneAtOnceBothLand,
   testAWriteWaitsForAnotherProcesssTurn,
   testTheEditorsViewShowsWhatToolScriptsDrawThere,

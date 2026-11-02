@@ -6,6 +6,9 @@ extends RefCounted
 const GdhFileWalk = preload("../file_walk.gd")
 const GdhRead = preload("../reading.gd")
 const GdhSame = preload("../same_values.gd")
+## Control's layout modes, which the engine does not expose to scripts.
+const POSITION_MODE: int = 0
+const ANCHORS_MODE: int = 1
 
 
 ## The scene to instance for an add, or null for a node of a class, beside why neither can be made
@@ -195,6 +198,30 @@ static func unplaceable(parent: Node, node: Node, asked: Variant) -> String:
 			]
 		)
 	return ""
+
+
+## Whether [param node], an instance of [param packed] just added, would load at its parent's
+## top-left corner rather than where its own scene places it. A Control its scene stores as
+## uncontrolled takes position mode under a Control that is not a Container, so the file stores
+## layout_mode 0 and leaves out the offsets, which are the scene's own. Setting position mode moves
+## a Control to the corner, so the node loads there. Anchors mode with the same anchors places it
+## the same and leaves its offsets as they load.
+static func cornered(node: Node, packed: PackedScene) -> bool:
+	var control: Control = node as Control
+	if control == null or packed == null:
+		return false
+	if GdhRead.as_int(control.get("layout_mode")) != POSITION_MODE:
+		return false
+	if control.offset_left == 0.0 and control.offset_top == 0.0:
+		return false
+	var state: SceneState = packed.get_state()
+	while state != null:
+		for property: int in state.get_node_property_count(0):
+			if str(state.get_node_property_name(0, property)) == "layout_mode":
+				var stored: int = GdhRead.as_int(state.get_node_property_value(0, property))
+				return stored != POSITION_MODE and stored != ANCHORS_MODE
+		state = state.get_base_scene_state()
+	return false
 
 
 ## Moves [param node] to [param asked] among its siblings, when a place was asked for.
