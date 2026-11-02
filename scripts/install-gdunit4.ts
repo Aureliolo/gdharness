@@ -21,7 +21,7 @@ const REPOSITORY = 'godot-gdunit-labs/gdUnit4';
 // renovate: datasource=github-tags depName=godot-gdunit-labs/gdUnit4
 const VERSION = 'v6.2.3';
 const COMMIT = 'f2e4f8679ebd28e27ef523a4fb7b09e8337bfce9';
-const DIGEST = '58a391b0c85cbbcf7aeb09b718c8173793d45ab511950cd65eec0183aabf0e50';
+const DIGEST = '0c0da9141049a79314c43d404b73d25ef6277daface95964495b8a4e2243492b';
 
 async function main(): Promise<void> {
   const root = toolHome(`gdunit4-${COMMIT}`);
