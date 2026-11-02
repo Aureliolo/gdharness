@@ -266,7 +266,7 @@ jobs:
       - name: Node, for an npm new enough to publish
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: 24.22.1
+          node-version: 26.13.0
           registry-url: https://registry.npmjs.org
           # Nothing is installed here, only a prebuilt archive published, so a cache would carry
           # no benefit and would be a way into the one job that holds id-token.
@@ -550,8 +550,8 @@ jobs:
     # what every other line here is held to.
     env:
       # renovate: datasource=github-release-attachments depName=modelcontextprotocol/registry versioning=regex:^v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$
-      MCP_PUBLISHER_TAG: v1.8.4
-      MCP_PUBLISHER_SHA256: 5dc2fd415369c73551259f31cd33e2aacc9e0d1021e7f08fef1492d93b781628
+      MCP_PUBLISHER_TAG: v1.8.7
+      MCP_PUBLISHER_SHA256: 00b21004149a4ce66f0782508ae4a2bce67d1bea395a8da0bd8028159fb59579
 
     steps:
       - name: Checkout
