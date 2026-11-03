@@ -32757,6 +32757,179 @@ async function testACrashedRunIsNeverClean(): Promise<void> {
 }
 
 /**
+ * An instance is marked Load as Placeholder by scene_node add and set, as the editor's toggle marks
+ * it: the file holds `instance_placeholder`, the reads say so, and a game gets an
+ * InstancePlaceholder there that names the scene. Unmarked, it is an ordinary instance again. A
+ * write to a scene holding a placeholder keeps it. A placeholder without an instance, or on a node
+ * that is no instance this scene places, is refused.
+ */
+async function testAnInstanceIsMarkedAsAPlaceholder(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('placeholder regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-placeholder-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-placeholder-rt-'));
+  writeTree(project, {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Placeholder"\n',
+    'world.tscn':
+      '[gd_scene format=3]\n\n[node name="World" type="Node3D"]\n\n[node name="Sky" type="Node3D" parent="."]\n',
+    'main.tscn':
+      '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n\n[node name="Plain" type="Node" parent="."]\n',
+    'hub.gd': 'extends Node\n\n\nfunc gone() -> void:\n\tpass\n',
+    'held.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://hub.gd" id="1_hub"]\n\n' +
+      '[node name="Hub" type="Node"]\nscript = ExtResource("1_hub")\n\n' +
+      '[node name="World" parent="." instance_placeholder="res://world.tscn"]\nvisible = false\n\n' +
+      '[connection signal="tree_exited" from="World" to="." method="gone"]\n' +
+      '[connection signal="ready" from="." to="World" method="queue_free"]\n',
+    'probe.gd':
+      'extends SceneTree\n\n\nfunc _initialize() -> void:\n' +
+      '\tvar main: Node = (load("res://main.tscn") as PackedScene).instantiate()\n' +
+      '\tvar world: Node = main.get_node("World")\n' +
+      '\tvar named: String = (world as InstancePlaceholder).get_instance_path() if world is InstancePlaceholder else ""\n' +
+      '\tprint("probe class=%s path=%s" % [world.get_class(), named])\n\tmain.free()\n\tquit()\n',
+  });
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (tool: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      { name: tool, arguments: { projectPath: project, scenePath: 'main.tscn', ...args } },
+      240_000,
+    );
+  const node = async (args: Record<string, unknown>): Promise<unknown> => {
+    const answer = await call('scene_node', args);
+    assert.notEqual(
+      get(answer, 'result', 'isError'),
+      true,
+      `${String(args['op'])}: ${textOf(answer) ?? JSON.stringify(answer)}`,
+    );
+    return parseTextContent(answer);
+  };
+  const refusal = async (args: Record<string, unknown>): Promise<string> => {
+    const answer = await call('scene_node', args);
+    assert.equal(get(answer, 'result', 'isError'), true, textOf(answer) ?? JSON.stringify(answer));
+    return textOf(answer) ?? '';
+  };
+  const mainFile = (): string => readFileSync(join(project, 'main.tscn'), 'utf8');
+  const found = (entry: unknown, path: string): unknown => {
+    if (get(entry, 'path') === path) {
+      return entry;
+    }
+    const inside = typeof entry === 'object' && entry !== null ? Object.values(entry) : [];
+    return inside.map((one) => found(one, path)).find((one) => one !== undefined);
+  };
+  const played = (): string => {
+    const ran = spawnSyncHidden(godotPath, ['--headless', '--path', project, '-s', 'res://probe.gd'], {
+      encoding: 'utf8',
+      timeout: 120_000,
+    });
+    return /^probe .*$/m.exec(ran.stdout)?.[0] ?? `no probe line: ${ran.stdout}${ran.stderr}`;
+  };
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('regression-test');
+
+    assert.match(
+      await refusal({ op: 'add', nodeName: 'Lone', nodeType: 'Node', placeholder: true }),
+      /placeholder marks an instance of a scene, so add takes it with instancePath/,
+    );
+    assert.doesNotMatch(mainFile(), /Lone/, 'the refused add wrote nothing');
+
+    const added = await node({
+      op: 'add',
+      nodeName: 'World',
+      instancePath: 'res://world.tscn',
+      placeholder: true,
+    });
+    assert.deepEqual(
+      [get(added, 'instanceOf'), get(added, 'placeholder')],
+      ['res://world.tscn', true],
+      JSON.stringify(added),
+    );
+    assert.match(
+      mainFile(),
+      /\[node name="World" parent="\."(?: unique_id=\d+)? instance_placeholder="res:\/\/world\.tscn"\]/,
+      mainFile(),
+    );
+    const tree = parseTextContent(await call('scene_tree', {}));
+    assert.deepEqual(
+      ['type', 'instanceOf', 'placeholder'].map((key) => get(found(tree, 'World'), key)),
+      ['InstancePlaceholder', 'res://world.tscn', true],
+      JSON.stringify(tree),
+    );
+    const read = await node({ op: 'get', nodePath: 'World' });
+    assert.deepEqual(
+      [get(read, 'instanceOf'), get(read, 'placeholder')],
+      ['res://world.tscn', true],
+      JSON.stringify(read),
+    );
+    assert.equal(played(), 'probe class=InstancePlaceholder path=res://world.tscn');
+
+    const unmarked = await node({ op: 'set', nodePath: 'World', placeholder: false });
+    assert.equal(get(unmarked, 'placeholder'), false, JSON.stringify(unmarked));
+    assert.doesNotMatch(mainFile(), /instance_placeholder/, mainFile());
+    assert.match(
+      mainFile(),
+      /\[node name="World" parent="\."(?: unique_id=\d+)? instance=ExtResource\("[^"]+"\)\]/,
+      mainFile(),
+    );
+    assert.equal(get(await node({ op: 'get', nodePath: 'World' }), 'placeholder'), false);
+    assert.equal(played(), 'probe class=Node3D path=');
+
+    const marked = await node({ op: 'set', nodePath: 'World', placeholder: true });
+    assert.equal(get(marked, 'placeholder'), true, JSON.stringify(marked));
+    assert.match(mainFile(), /instance_placeholder="res:\/\/world\.tscn"/, mainFile());
+
+    // A write that never names the placeholder keeps it, with its values and its connections both
+    // ways. An engine with no editor opens it as an InstancePlaceholder, which packed back as a node
+    // of that class.
+    await node({
+      op: 'set',
+      scenePath: 'held.tscn',
+      nodePath: '.',
+      properties: { editor_description: 'kept' },
+    });
+    const held = readFileSync(join(project, 'held.tscn'), 'utf8');
+    for (const line of [
+      /\[node name="World" parent="\."(?: unique_id=\d+)? instance_placeholder="res:\/\/world\.tscn"\]\nvisible = false\n/,
+      /\[connection signal="tree_exited" from="World" to="\." method="gone"\]/,
+      /\[connection signal="ready" from="\." to="World" method="queue_free"\]/,
+      /editor_description = "kept"/,
+    ]) {
+      assert.match(held, line, held);
+    }
+    assert.doesNotMatch(held, /InstancePlaceholder/, held);
+
+    const before = mainFile();
+    for (const nodePath of ['Plain', '.']) {
+      assert.match(
+        await refusal({ op: 'set', nodePath, placeholder: true }),
+        /placeholder is a setting of an instance this scene places, and \S+ is not one\./,
+      );
+    }
+    assert.equal(mainFile(), before, 'the refused sets wrote nothing');
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * A wait answers once the game has printed a crash report, though its process lives on. Windows
  * holds a crashed engine while Windows Error Reporting reports it, once for over a minute, and the
  * wait sat out its budget. The game here prints a crash report and keeps running, which is that
@@ -69400,7 +69573,7 @@ async function testEditableChildrenAreOpenedAndClosedWithNoEditor(): Promise<voi
     }
     assert.equal(
       textOf(await call('scene_node', { op: 'set', scenePath: 'main.tscn', nodePath: 'Crate1' })),
-      'set takes properties, editableChildren, addGroups or removeGroups.',
+      'set takes properties, editableChildren, placeholder, addGroups or removeGroups.',
     );
 
     const shallow = get(
@@ -73630,6 +73803,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEngineFlagsReachTheEngine,
   testACrashedRunIsNeverClean,
   testAWaitAnswersOnceTheGameHasCrashed,
+  testAnInstanceIsMarkedAsAPlaceholder,
   testAPlayedRunWithNoReportGivesNoVerdict,
   testAPlayedGameHoldsAnEngineSlot,
   testAPlayedGameIsToldFromItsWorkers,

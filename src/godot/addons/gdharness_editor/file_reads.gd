@@ -186,6 +186,7 @@ static func _lay(
 			elif state.is_node_instance_placeholder(index):
 				nodes[path] = _made("InstancePlaceholder")
 				nodes[path]["instanceOf"] = state.get_node_instance_placeholder(index)
+				nodes[path]["placeholder"] = true
 			elif str(state.get_node_type(index)).is_empty():
 				# An entry for a node of an instance that no longer has it, which the engine skips
 				# too.
@@ -367,6 +368,8 @@ static func _entry(
 		data["instanceOf"] = node["instanceOf"]
 		if node.has("editableChildren"):
 			data["editableChildren"] = node["editableChildren"]
+		if node.has("placeholder"):
+			data["placeholder"] = true
 	# An inherited scene's file holds only what it changes, so the read says what it inherits and
 	# which nodes come from there, as the editor greys them.
 	if node.has("inherits"):
