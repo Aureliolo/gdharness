@@ -32962,9 +32962,10 @@ async function testAnInstanceIsMarkedAsAPlaceholder(): Promise<void> {
 
     const before = mainFile();
     for (const nodePath of ['Plain', '.']) {
-      assert.match(
+      // The whole answer is the refusal, with nothing the engine printed while reaching it.
+      assert.equal(
         await refusal({ op: 'set', nodePath, placeholder: true }),
-        /placeholder is a setting of an instance this scene places, and \S+ is not one\./,
+        `placeholder is a setting of an instance this scene places, and ${nodePath} is not one.`,
       );
     }
     assert.equal(mainFile(), before, 'the refused sets wrote nothing');
