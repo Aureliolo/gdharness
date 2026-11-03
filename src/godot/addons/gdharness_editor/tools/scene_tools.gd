@@ -1247,8 +1247,10 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		return scene.refuse(ungrouped)
 
 	var held: Dictionary = {}
+	var removed: Array[String] = _properties.metadata_removed.duplicate()
 	for key: Variant in properties:
-		held[str(key)] = _readable(node, _properties.read_at(node, str(key)))
+		if not removed.has(str(key)):
+			held[str(key)] = _readable(node, _properties.read_at(node, str(key)))
 	var new_path: String = scene.path_of(node)
 	var answer: Dictionary = { "ok": true, "nodePath": new_path, "properties": held }
 	_properties.note_write(answer, node)

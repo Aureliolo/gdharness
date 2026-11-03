@@ -69,6 +69,9 @@ var _outside_declared: Dictionary = {}
 # The node paths the last write_all wrote that name no node from the node written, by property, as
 # a sentence saying so.
 var _names_no_node: Dictionary = {}
+## The metadata entries the last write_all took off, by the property names given. Godot reads a null
+## set on a metadata entry as its removal, as the inspector's delete button does.
+var metadata_removed: Array[String] = []
 
 
 ## Turns what arrived over the wire into the Godot value a property wants.
@@ -204,6 +207,7 @@ func write_all(target: Object, properties: Dictionary) -> String:
 	_names_no_node = {}
 	moved_by_engine = {}
 	unheld = ""
+	metadata_removed = []
 	var named: Dictionary = {}
 	for key: Variant in properties:
 		named[str(key).get_slice(":", 0)] = true
@@ -238,6 +242,15 @@ func write_all(target: Object, properties: Dictionary) -> String:
 		var place: Array = GdhPropertyPaths.holder_of(target, property, home)
 		var holder: Object = place[0]
 		var name: String = place[1]
+		var entry: String = name.trim_prefix("metadata/")
+		if (
+			properties[key] == null
+			and name.begins_with("metadata/")
+			and holder.has_meta(entry)
+		):
+			holder.remove_meta(entry)
+			metadata_removed.append(property)
+			continue
 		var declared: Dictionary = declaration(holder, name)
 		if declared.is_empty():
 			var elsewhere: String = GdhPropertyPaths.held_elsewhere(holder, name, home)
@@ -329,7 +342,7 @@ func write_all(target: Object, properties: Dictionary) -> String:
 			)
 	for property: String in before:
 		var now: Variant = target.get(property)
-		if not GdhSame.same(now, before[property]):
+		if not metadata_removed.has(property) and not GdhSame.same(now, before[property]):
 			_also_changed[property] = [before[property], now]
 	if target is Node:
 		_names_no_node = GdhDeclared.naming_nothing(target as Node, given)
@@ -384,6 +397,8 @@ func _laid_out(control: Control, name: String) -> String:
 ## as a scene answer names one. Called before the scene is written, since the write frees the nodes
 ## these values can hold.
 func note_write(answer: Dictionary, relative_to: Node = null) -> void:
+	if not metadata_removed.is_empty():
+		answer["metadataRemoved"] = metadata_removed.duplicate()
 	if not _outside_declared.is_empty():
 		answer["outsideDeclared"] = _outside_declared.duplicate()
 	if not _names_no_node.is_empty():
