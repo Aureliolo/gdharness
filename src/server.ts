@@ -8176,7 +8176,7 @@ class GodotServer {
       ),
     ];
     // A suite that ran and passed can still leave a case it declares unrun, and gdUnit4 says nothing
-    // of it: a parameterised case whose signature spans lines was never run, and the run was
+    // of it: a parameterised case whose list of rows is empty is never run, and the run was
     // answered passed. Read off the console, as gdharness test judges it.
     const casesNotRun =
       selection.value === null

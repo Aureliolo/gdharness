@@ -59225,7 +59225,7 @@ async function testATestRunTakesTheCasesNamed(): Promise<void> {
 /**
  * A suite gdUnit4 runs and passes can leave out a case it declares, or skip every row of one, and say
  * nothing that fails the run. Both were answered passed. The two shapes are those gdUnit4 was seen to
- * do it with: a parameterised case whose signature spans lines, and rows a function returns. A case
+ * do it with: a parameterised case whose list of rows is empty, and rows a function returns with too few values. A case
  * it cannot run as declared is skipped the same way, and run alone it was the whole run, exit 0 and
  * answered passed.
  */
@@ -59259,8 +59259,12 @@ async function testACaseGdUnitLeavesUnrunIsNoPass(): Promise<void> {
       `extends GdUnitTestSuite\n\n${screens}\n\nfunc test_fit(\n\tscreen: Vector2, _test_parameters: Array = SCREENS\n) -> void:\n${fits}${plain}`,
     );
     writeFileSync(
+      join(project, 'test', 'empty_test.gd'),
+      `extends GdUnitTestSuite\n\nconst NONE: Array = []\n\n\nfunc test_fit(screen: Vector2, _test_parameters: Array = NONE) -> void:\n${fits}${plain}`,
+    );
+    writeFileSync(
       join(project, 'test', 'returned_test.gd'),
-      'extends GdUnitTestSuite\n\nconst PAIRS: Array = [[1, 2], [3, 4]]\n\n\nfunc pairs() -> Array:\n\treturn PAIRS\n\n\n' +
+      'extends GdUnitTestSuite\n\nconst PAIRS: Array = [[1], [3]]\n\n\nfunc pairs() -> Array:\n\treturn PAIRS\n\n\n' +
         `func test_pair(a: int, b: int, _test_parameters: Array = pairs()) -> void:\n\tassert_int(a + 1).is_equal(b)\n${plain}`,
     );
     // A parameter nothing fills and a fuzzer after a setting, which gdUnit4 cannot run, beside a case
@@ -59287,27 +59291,25 @@ async function testACaseGdUnitLeavesUnrunIsNoPass(): Promise<void> {
       const read = (answer: unknown): unknown[] =>
         ['passed', 'tests', 'testsNotRun', 'rowsMismatched'].map((key) => get(answer, key));
 
-      // The same case on one line runs every row, and is a pass.
+      // A case runs every row on one line or spread over several, and is a pass.
       const oneLine = await run({ path: 'res://test/one_line_test.gd' });
       assert.deepEqual(read(oneLine.answer), [true, 3, undefined, undefined], oneLine.text);
-
       const spanning = await run({ path: 'res://test/spanning_test.gd' });
-      assert.deepEqual(
-        read(spanning.answer),
-        [false, 1, ['spanning_test:test_fit'], undefined],
-        spanning.text,
-      );
-      assert.equal(get(spanning.answer, 'verdict'), 'not run: spanning_test:test_fit', spanning.text);
+      assert.deepEqual(read(spanning.answer), [true, 3, undefined, undefined], spanning.text);
+
+      const empty = await run({ path: 'res://test/empty_test.gd' });
+      assert.deepEqual(read(empty.answer), [false, 1, ['empty_test:test_fit'], undefined], empty.text);
+      assert.equal(get(empty.answer, 'verdict'), 'not run: empty_test:test_fit', empty.text);
       assert.match(
-        text(get(spanning.answer, 'note')),
-        /spanning_test:test_fit is a case of a suite that ran and passed, and gdUnit4 never ran it and said nothing of it, so the run is not called passed/,
-        spanning.text,
+        text(get(empty.answer, 'note')),
+        /empty_test:test_fit is a case of a suite that ran and passed, and gdUnit4 never ran it and said nothing of it, so the run is not called passed/,
+        empty.text,
       );
       // A case the run was told to leave out is answered under ignored, and not as unrun.
-      const leftOut = await run({ path: 'res://test/spanning_test.gd', ignore: ['spanning_test:test_fit'] });
+      const leftOut = await run({ path: 'res://test/empty_test.gd', ignore: ['empty_test:test_fit'] });
       assert.deepEqual(
         [...read(leftOut.answer), get(leftOut.answer, 'ignored')],
-        [true, 1, undefined, undefined, ['spanning_test:test_fit']],
+        [true, 1, undefined, undefined, ['empty_test:test_fit']],
         leftOut.text,
       );
 
