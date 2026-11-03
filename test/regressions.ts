@@ -49031,9 +49031,11 @@ function testAFileGoneBetweenTheListingAndTheReadIsPassedOver(): void {
     assert.equal(bytesOf(join(project, 'gone.gd')), null);
     assert.equal(listedContentOf(join(project, 'gone.gd')), null);
     assert.deepEqual(entriesOf(join(project, 'gone')), []);
-    assert.throws(() => entriesOf(join(project, 'a.gd')), /ENOTDIR/);
-    // Not EISDIR: Bun reads a directory without throwing on Linux and macOS.
-    assert.throws(() => bytesOf(join(project, 'a\0.gd')), { code: 'ERR_INVALID_ARG_VALUE' });
+    // A failure both runtimes throw on every platform. Bun on Linux and macOS lists a file as a
+    // directory without ENOTDIR.
+    const unreadable = join(project, 'a\0.gd');
+    assert.throws(() => entriesOf(unreadable), { code: 'ERR_INVALID_ARG_VALUE' });
+    assert.throws(() => bytesOf(unreadable), { code: 'ERR_INVALID_ARG_VALUE' });
 
     const copies = ['~lib.dll', '~LIB.DLL', '~lib_0.pdb', '~lib_12.pdb', '~lib.dll.aside-40-1700000000000'];
     const kept = ['lib.dll', '~notes.txt', '~lib_x.pdb', '~lib.pdb', '~other.dll', 'lib_0.pdb'];
