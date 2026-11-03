@@ -32783,8 +32783,10 @@ async function testAnInstanceIsMarkedAsAPlaceholder(): Promise<void> {
     'hub.gd': 'extends Node\n\n\nfunc gone() -> void:\n\tpass\n',
     'held.tscn':
       '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://hub.gd" id="1_hub"]\n\n' +
-      '[node name="Hub" type="Node"]\nscript = ExtResource("1_hub")\n\n' +
-      '[node name="World" parent="." instance_placeholder="res://world.tscn"]\nvisible = false\n\n' +
+      '[node name="Hub" type="Node" unique_id=4141]\nscript = ExtResource("1_hub")\n\n' +
+      '[node name="World" parent="." unique_id=4242 instance_placeholder="res://world.tscn"]\nvisible = false\n\n' +
+      '[node name="Rooms" type="Node" parent="." unique_id=4343]\n\n' +
+      '[node name="Annex" parent="Rooms" unique_id=4444 instance_placeholder="res://world.tscn"]\n\n' +
       '[connection signal="tree_exited" from="World" to="." method="gone"]\n' +
       '[connection signal="ready" from="." to="World" method="queue_free"]\n',
     'probe.gd':
@@ -32865,6 +32867,11 @@ async function testAnInstanceIsMarkedAsAPlaceholder(): Promise<void> {
       /\[node name="World" parent="\."(?: unique_id=\d+)? instance_placeholder="res:\/\/world\.tscn"\]/,
       mainFile(),
     );
+    // The id an inheriting scene finds the node by stays through every write after.
+    const worldId = (): string | undefined =>
+      /\[node name="World" parent="\." unique_id=(\d+)/.exec(mainFile())?.[1];
+    const firstId = worldId();
+    assert.ok(firstId !== undefined, mainFile());
     const tree = parseTextContent(await call('scene_tree', {}));
     assert.deepEqual(
       ['type', 'instanceOf', 'placeholder'].map((key) => get(found(tree, 'World'), key)),
@@ -32889,6 +32896,7 @@ async function testAnInstanceIsMarkedAsAPlaceholder(): Promise<void> {
     );
     assert.equal(get(await node({ op: 'get', nodePath: 'World' }), 'placeholder'), false);
     assert.equal(played(), 'probe class=Node3D path=');
+    assert.equal(worldId(), firstId, mainFile());
 
     const marked = await node({ op: 'set', nodePath: 'World', placeholder: true });
     assert.equal(get(marked, 'placeholder'), true, JSON.stringify(marked));
@@ -32928,9 +32936,11 @@ async function testAnInstanceIsMarkedAsAPlaceholder(): Promise<void> {
     assert.equal(get(exchanged, 'placeholder'), true, JSON.stringify(exchanged));
     assert.doesNotMatch(mainFile(), /\[editable/, mainFile());
     assert.match(mainFile(), /instance_placeholder="res:\/\/world\.tscn"/, mainFile());
+    await node({ op: 'set', nodePath: 'Plain', properties: { editor_description: 'beside' } });
+    assert.equal(worldId(), firstId, mainFile());
 
-    // A write that never names the placeholder keeps it, with its values and its connections both
-    // ways. An engine with no editor opens it as an InstancePlaceholder, which packed back as a node
+    // A write that never names the placeholder keeps it, with its values, its id and its connections
+    // both ways, below the root and deeper. An engine with no editor opens it as an InstancePlaceholder, which packed back as a node
     // of that class.
     await node({
       op: 'set',
@@ -32940,7 +32950,8 @@ async function testAnInstanceIsMarkedAsAPlaceholder(): Promise<void> {
     });
     const held = readFileSync(join(project, 'held.tscn'), 'utf8');
     for (const line of [
-      /\[node name="World" parent="\."(?: unique_id=\d+)? instance_placeholder="res:\/\/world\.tscn"\]\nvisible = false\n/,
+      /\[node name="World" parent="\." unique_id=4242 instance_placeholder="res:\/\/world\.tscn"\]\nvisible = false\n/,
+      /\[node name="Annex" parent="Rooms" unique_id=4444 instance_placeholder="res:\/\/world\.tscn"\]/,
       /\[connection signal="tree_exited" from="World" to="\." method="gone"\]/,
       /\[connection signal="ready" from="\." to="World" method="queue_free"\]/,
       /editor_description = "kept"/,
