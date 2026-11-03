@@ -79,6 +79,10 @@ var _copied_from: Dictionary = {}
 var _reached: Dictionary = {}
 ## The file as it was opened, to compare its embedded resources with what the write saves.
 var _text: String = ""
+## The unique_id each placeholder put back as its instance had in the file, by the instance's object
+## id. Scripts cannot set one, the engine gives the instance a new one as it packs it, and a scene
+## inheriting this one finds a moved node by it.
+var _held_ids: Dictionary = {}
 ## The engine properties a put back did not take on a node, as "id:name": the engine derives them
 ## from where the node is, as it keeps layout_mode at Container under a container, and stores the
 ## same from an editor.
@@ -155,6 +159,8 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 func _unhold_placeholders() -> void:
 	var held: Array[InstancePlaceholder] = []
 	_placeholders_under(root, held)
+	var as_text: bool = path.ends_with(".tscn") and not held.is_empty()
+	var text: String = FileAccess.get_file_as_string(path) if as_text else ""
 	for one: InstancePlaceholder in held:
 		var packed: PackedScene = (
 			ResourceLoader.load(one.get_instance_path(), "PackedScene") as PackedScene
@@ -168,13 +174,76 @@ func _unhold_placeholders() -> void:
 		var values: Dictionary = one.get_stored_values()
 		for key: Variant in values:
 			instance.set(str(key), values[key])
+		var filed_id: String = _filed_id(text, _header_of(root.get_path_to(one)))
 		# replace_by moves the place and the groups.
 		one.replace_by(instance, true)
 		instance.owner = root
 		instance.scene_file_path = one.get_instance_path()
 		instance.set_scene_instance_load_placeholder(true)
+		if not filed_id.is_empty():
+			_held_ids[instance.get_instance_id()] = filed_id
 		_repointed(root, one, instance)
 		one.free()
+
+
+## How a text scene opens the entry of the node at [param at], a path from the root.
+static func _header_of(at: NodePath) -> String:
+	var named: String = str(at.get_name(at.get_name_count() - 1))
+	var parent: String = "." if at.get_name_count() == 1 else str(at).get_base_dir()
+	return '[node name="%s" parent="%s"' % [named.c_escape(), parent.c_escape()]
+
+
+## The unique_id [param text] gives the node whose entry opens with [param header], or "".
+static func _filed_id(text: String, header: String) -> String:
+	var id: RegEx = RegEx.create_from_string(" unique_id=(\\d+)")
+	for line: String in text.split("\n"):
+		if line.begins_with(header + " ") or line.begins_with(header + "]"):
+			var found: RegExMatch = id.search(line)
+			return "" if found == null else found.get_string(1)
+	return ""
+
+
+## The unique_id to write back on each placeholder put back as its instance, by its entry's header,
+## for those still in the scene.
+func _ids_to_keep() -> Dictionary:
+	var keep: Dictionary = {}
+	for key: Variant in _held_ids:
+		var node: Node = instance_from_id(GdhRead.as_int(key)) as Node
+		if node != null and root.is_ancestor_of(node):
+			keep[_header_of(root.get_path_to(node))] = _held_ids[key]
+	return keep
+
+
+## Saves [param packed] at [param file_path] as [method save_packed] does, with the unique_ids in
+## [param keep].
+static func _saved_keeping_ids(packed: PackedScene, file_path: String, keep: Dictionary) -> Error:
+	var saving: Error = GdhSceneUids.save_keeping_uid(packed, file_path)
+	return saving if saving != OK else _keep_ids(file_path, keep)
+
+
+## Writes back on the text scene at [param file_path] the unique_id of each entry in [param keep],
+## by its header.
+static func _keep_ids(file_path: String, keep: Dictionary) -> Error:
+	if keep.is_empty():
+		return OK
+	var lines: PackedStringArray = FileAccess.get_file_as_string(file_path).split("\n")
+	var id: RegEx = RegEx.create_from_string(" unique_id=\\d+")
+	var changed: bool = false
+	for index: int in lines.size():
+		for header: Variant in keep:
+			var opening: String = str(header)
+			if lines[index].begins_with(opening + " ") or lines[index].begins_with(opening + "]"):
+				lines[index] = id.sub(lines[index], " unique_id=" + str(keep[header]))
+				changed = true
+	if not changed:
+		return OK
+	var file: FileAccess = FileAccess.open(file_path, FileAccess.WRITE)
+	if file == null:
+		return FileAccess.get_open_error()
+	if not file.store_string("\n".join(lines)):
+		return ERR_FILE_CANT_WRITE
+	file.close()
+	return OK
 
 
 ## Every InstancePlaceholder below [param top] that this scene places, into [param into].
@@ -1077,6 +1146,7 @@ func _write(check: Callable) -> Dictionary:
 		if not missing.is_empty():
 			return refuse("Nothing was written: " + missing)
 	var also: Array[Dictionary] = _also_saved(packed.get_state())
+	var keep: Dictionary = _ids_to_keep() if headless and path.ends_with(".tscn") else {}
 	close()
 	var previous: Variant = null
 	if FileAccess.file_exists(path):
@@ -1088,12 +1158,18 @@ func _write(check: Callable) -> Dictionary:
 		values.append_array(_stored_at(state, index).values())
 	var carried: Dictionary = GdhHeadlessCheck.embedded_in(values, {})
 	var written: Dictionary = save_packed(packed, path)
+	if written.is_empty():
+		var ids_kept: Error = _keep_ids(path, keep)
+		if ids_kept != OK:
+			written = {
+				"ok": false, "error": "Failed to save %s: %s" % [path, error_string(ids_kept)],
+			}
 	if not written.is_empty() or not headless or not path.ends_with(".tscn"):
 		if written.is_empty():
 			also_saved.append_array(also)
 		return written
 	var just_saved: GdhHeadlessCheck.GdhSaved = GdhHeadlessCheck.GdhSaved.new(
-		path, _text, func() -> Error: return GdhSceneUids.save_keeping_uid(packed, path)
+		path, _text, func() -> Error: return _saved_keeping_ids(packed, path, keep)
 	)
 	var unkept: String = GdhHeadlessCheck.settle_saved(
 		just_saved,
