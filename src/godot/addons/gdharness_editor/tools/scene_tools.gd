@@ -1191,7 +1191,9 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 				+ "since a placeholder loads without its children."
 			)
 		)
-	if wants_placeholder and editable == null and scene.root.is_editable_instance(node):
+	# The engine asks the root whether it is an editable instance of itself only with an error.
+	var children_open: bool = node != scene.root and scene.root.is_editable_instance(node)
+	if wants_placeholder and editable == null and children_open:
 		return scene.refuse(
 			(
 				(
