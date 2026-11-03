@@ -357,6 +357,7 @@ import {
   aboveTheRunner,
   autoloadNotCompiledNote,
   beganBy,
+  CRASH_EXIT_GRACE_MS,
   captureDestinationRefusal,
   captureDetail,
   endedPreviousRun,
@@ -32700,7 +32701,27 @@ async function testACrashedRunIsNeverClean(): Promise<void> {
           await call('editor_run', { op: 'wait', timeoutMs: 60_000 }, ENGINE_CALL_TIMEOUT_MS),
         );
         const read = JSON.stringify(waited);
-        assert.equal(get(waited, 'running'), false, read);
+        // Ended, or still held by the system reporting the crash, which the wait says rather than
+        // sitting out its budget. Windows Error Reporting once held one for over a minute.
+        const heldAfterTheCrash = text(get(waited, 'note')).includes(
+          'because the game crashed and printed its crash report',
+        );
+        if (get(waited, 'running') !== false && !heldAfterTheCrash) {
+          // Naming what is attached to the engine tells the platform holding it from gdharness.
+          const pid = asNumber(get(waited, 'pid'));
+          const tree = await processTree();
+          const attached =
+            tree === undefined
+              ? 'a process table the platform would not list'
+              : [...tree]
+                  .filter(
+                    ([, listed]) =>
+                      listed.parent === pid || new RegExp(`-p ${String(pid)}\\b`).test(listed.command),
+                  )
+                  .map(([one, listed]) => `${String(one)} ${listed.command}`)
+                  .join('; ') || 'nothing attached';
+          assert.fail(`the crashed engine ${String(pid)} still runs, with ${attached}: ${read}`);
+        }
         assert.equal(get(waited, 'clean'), false, `a crashed run is not clean: ${read}`);
         assert.ok(asNumber(get(waited, 'errors')) >= 1, read);
         const waitCrash = theCrash(waited);
@@ -32723,6 +32744,81 @@ async function testACrashedRunIsNeverClean(): Promise<void> {
           .slice(0, cut)
           .reduce((sum: number, entry) => sum + asNumber(get(entry, 'times') ?? 1), 0);
         assert.equal(get(checked, 'printedLinesNotShown'), before, said);
+        if (heldAfterTheCrash) {
+          await call('editor_run', { op: 'stop' }, ENGINE_CALL_TIMEOUT_MS);
+        }
+      },
+      { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDir },
+    );
+  } finally {
+    sweep(projectDir);
+    sweep(runtimeDir);
+  }
+}
+
+/**
+ * A wait answers once the game has printed a crash report, though its process lives on. Windows
+ * holds a crashed engine while Windows Error Reporting reports it, once for over a minute, and the
+ * wait sat out its budget. The game here prints a crash report and keeps running, which is that
+ * held process as far as anything reading it can tell.
+ */
+async function testAWaitAnswersOnceTheGameHasCrashed(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('crashed wait regression skipped (Godot not found)');
+    return;
+  }
+  const projectDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-crashed-wait-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-crashed-wait-rt-'));
+  try {
+    writeTree(projectDir, {
+      'project.godot':
+        'config_version=5\n\n[application]\nconfig/name="CrashedWait"\nrun/main_scene="res://main.tscn"\n',
+      'main.gd':
+        'extends Node\n\n\nfunc _ready() -> void:\n\tprinterr("CrashHandlerException: Program crashed with signal 4")\n' +
+        '\tprinterr("Dumping the backtrace.")\n\tprint("held")\n',
+      'main.tscn':
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    });
+    await withStdioServer(
+      async (call) => {
+        const started: unknown = JSON.parse(
+          await call(
+            'editor_run',
+            { projectPath: projectDir, op: 'start', headless: true, runtimeWaitMs: 0 },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        assert.equal(get(started, 'started'), true, JSON.stringify(started));
+        const began = Date.now();
+        const waited: unknown = JSON.parse(
+          await call('editor_run', { op: 'wait', timeoutMs: 60_000 }, ENGINE_CALL_TIMEOUT_MS),
+        );
+        const tookMs = Date.now() - began;
+        const read = JSON.stringify(waited);
+        assert.equal(get(waited, 'running'), true, read);
+        assert.match(
+          text(get(waited, 'note')),
+          /^The wait answered after \d+ms because the game crashed and printed its crash report, under entries\. Its process has not ended yet/,
+          read,
+        );
+        assert.ok(
+          tookMs >= CRASH_EXIT_GRACE_MS && tookMs < CRASH_EXIT_GRACE_MS + 15_000,
+          `the wait answered after ${String(tookMs)}ms, its grace and not its budget: ${read}`,
+        );
+        assert.ok(
+          asArray(get(waited, 'entries')).some(
+            (entry) =>
+              get(entry, 'severity') === 'error' && text(get(entry, 'text')).includes('Program crashed'),
+          ),
+          read,
+        );
+        const stopped: unknown = JSON.parse(await call('editor_run', { op: 'stop' }, ENGINE_CALL_TIMEOUT_MS));
+        assert.equal(get(stopped, 'stopped'), true, JSON.stringify(stopped));
       },
       { GODOT_PATH: godotPath, GDHARNESS_RUNTIME_DIR: runtimeDir },
     );
@@ -73533,6 +73629,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHeadlessGameGivenAFixedRateRacesTheClock,
   testEngineFlagsReachTheEngine,
   testACrashedRunIsNeverClean,
+  testAWaitAnswersOnceTheGameHasCrashed,
   testAPlayedRunWithNoReportGivesNoVerdict,
   testAPlayedGameHoldsAnEngineSlot,
   testAPlayedGameIsToldFromItsWorkers,
