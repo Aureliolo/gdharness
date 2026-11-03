@@ -263,9 +263,15 @@ func add_node(args: Dictionary) -> Dictionary:
 	var parent_node_path: String = str(args.get("parentNodePath", "."))
 	var properties: Dictionary = _parse_properties_arg(args.get("properties", {}))
 	var adding: Array = GdhGroups.asked(args, "addGroups")
+	var placeholder: bool = GdhRead.as_bool(args.get("placeholder", false))
 
 	if node_name.is_empty():
 		return { "ok": false, "error": "Missing nodeName" }
+	if placeholder and instance_path.is_empty():
+		return {
+			"ok": false,
+			"error": "placeholder marks an instance of a scene, so add takes it with instancePath.",
+		}
 	var class_script: Script = null
 	if not node_type.is_empty() and not ClassDB.class_exists(node_type):
 		var declared: Dictionary = GdhSceneFile.script_class(node_type, "Node")
@@ -312,6 +318,8 @@ func add_node(args: Dictionary) -> Dictionary:
 	parent.add_child(new_node)
 	GdhPlacing.place(new_node, place)
 	GdhPlacing.own(new_node, root)
+	if placeholder:
+		new_node.set_scene_instance_load_placeholder(true)
 	if class_script != null:
 		scene.asked(new_node, ["script"])
 		new_node.set_script(class_script)
@@ -357,6 +365,8 @@ func add_node(args: Dictionary) -> Dictionary:
 			)
 			if unkept.is_empty() and saved.get_node_or_null(new_path) != null:
 				unkept = GdhGroups.unkept(saved.get_node(new_path), adding, [])
+			if unkept.is_empty() and placeholder:
+				unkept = _placeholder_unkept(saved, new_path, true)
 			return unkept
 	)
 	if not written.is_empty():
@@ -366,7 +376,23 @@ func add_node(args: Dictionary) -> Dictionary:
 	_note_loads_as(answer, scene, new_path)
 	if packed != null:
 		answer["instanceOf"] = instance_path
+		answer["placeholder"] = placeholder
 	return answer
+
+
+## Why the node at [param at] in [param saved], the scene as written, would not load with
+## placeholder [param wanted], or "" when it would.
+static func _placeholder_unkept(saved: Node, at: String, wanted: bool) -> String:
+	var node: Node = saved.get_node_or_null(at)
+	if node == null or _placeholder_of(node) == wanted:
+		return ""
+	return "%s would load with placeholder %s." % [at, not wanted]
+
+
+## Whether [param node] is an instance saved as a placeholder. An engine with no editor opens one as
+## an InstancePlaceholder even in an edit state, and an editor opens the instance itself, marked.
+static func _placeholder_of(node: Node) -> bool:
+	return node is InstancePlaceholder or node.get_scene_instance_load_placeholder()
 
 
 func delete_node(args: Dictionary) -> Dictionary:
@@ -1119,10 +1145,18 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var editable: Variant = args.get("editableChildren")
 	var adding: Array = GdhGroups.asked(args, "addGroups")
 	var removing: Array = GdhGroups.asked(args, "removeGroups")
-	if properties.is_empty() and editable == null and adding.is_empty() and removing.is_empty():
+	var placeholder: Variant = args.get("placeholder")
+	if (
+		properties.is_empty()
+		and editable == null
+		and placeholder == null
+		and adding.is_empty()
+		and removing.is_empty()
+	):
 		return {
 			"ok": false,
-			"error": "set takes properties, editableChildren, addGroups or removeGroups.",
+			"error":
+			"set takes properties, editableChildren, placeholder, addGroups or removeGroups.",
 		}
 
 	var opened: Array = _open(scene_path, true)
@@ -1154,6 +1188,16 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 			return scene.refuse(not_an_instance)
 		if not GdhRead.as_bool(editable):
 			dropped = scene.held_under(scene.path_of(node))
+	if placeholder != null:
+		# The editor offers Load as Placeholder only on an instance this scene places itself.
+		if node == scene.root or node.owner != scene.root or node.scene_file_path.is_empty():
+			return scene.refuse(
+				(
+					"placeholder is a setting of an instance this scene places, and %s is not one."
+					% scene.path_of(node)
+				)
+			)
+		node.set_scene_instance_load_placeholder(GdhRead.as_bool(placeholder))
 
 	var old_path: String = scene.path_of(node)
 	scene.asked(node, properties.keys())
@@ -1219,6 +1263,8 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 						"%s would load with editableChildren %s."
 						% [new_path, not GdhRead.as_bool(editable)]
 					)
+			if unkept.is_empty() and placeholder != null:
+				unkept = _placeholder_unkept(saved, new_path, GdhRead.as_bool(placeholder))
 			return unkept
 	)
 	if not written.is_empty():
@@ -1227,6 +1273,8 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 
 	if editable != null:
 		answer["editableChildren"] = GdhRead.as_bool(editable)
+	if placeholder != null:
+		answer["placeholder"] = GdhRead.as_bool(placeholder)
 	if not dropped.is_empty():
 		answer["droppedValues"] = dropped["values"]
 		answer["droppedNodes"] = dropped["nodes"]
@@ -1404,6 +1452,7 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 	if node != scene.root and node.owner != null and not node.scene_file_path.is_empty():
 		answer["instanceOf"] = node.scene_file_path
 		answer["editableChildren"] = scene.root.is_editable_instance(node)
+		answer["placeholder"] = node.get_scene_instance_load_placeholder()
 	scene.close()
 	# Only an editor holds anything unsaved. A headless engine answering false would say it looked.
 	if Engine.is_editor_hint():

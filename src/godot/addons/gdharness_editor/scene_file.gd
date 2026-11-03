@@ -124,6 +124,8 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 		return { "ok": false, "error": "Failed to load %s as a scene" % path }
 	if root == null:
 		return { "ok": false, "error": "Failed to instantiate " + path }
+	if not Engine.is_editor_hint():
+		_unhold_placeholders()
 	_state = packed.get_state()
 	_base_paths = makers(_state)
 	if for_writing:
@@ -143,6 +145,68 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 		if not unsettled.is_empty():
 			return refuse(("Nothing was written: " if for_writing else "Not read: ") + unsettled)
 	return {}
+
+
+## Puts back each placeholder this scene places as the instance itself, marked, as an editor opens
+## it. An engine with no editor opens one as an InstancePlaceholder even in an edit state, and the
+## scene then packs it as a node of that class with every value it holds, so a save lost the mark.
+## The instance takes the placeholder's place, values, groups, connections and the node values
+## naming it. One whose scene does not instance stays as it was.
+func _unhold_placeholders() -> void:
+	var held: Array[InstancePlaceholder] = []
+	_placeholders_under(root, held)
+	for one: InstancePlaceholder in held:
+		var packed: PackedScene = (
+			ResourceLoader.load(one.get_instance_path(), "PackedScene") as PackedScene
+		)
+		var instance: Node = (
+			packed.instantiate(PackedScene.GEN_EDIT_STATE_INSTANCE) if packed != null else null
+		)
+		if instance == null:
+			continue
+		instance.name = one.name
+		var values: Dictionary = one.get_stored_values()
+		for key: Variant in values:
+			instance.set(str(key), values[key])
+		# replace_by moves the place and the groups.
+		one.replace_by(instance, true)
+		instance.owner = root
+		instance.scene_file_path = one.get_instance_path()
+		instance.set_scene_instance_load_placeholder(true)
+		_repointed(root, one, instance)
+		one.free()
+
+
+## Every InstancePlaceholder below [param top] that this scene places, into [param into].
+func _placeholders_under(top: Node, into: Array[InstancePlaceholder]) -> void:
+	for child: Node in top.get_children():
+		if child is InstancePlaceholder and child.owner == root:
+			into.append(child as InstancePlaceholder)
+		else:
+			_placeholders_under(child, into)
+
+
+## Points every value of a node of this scene that holds [param was], alone or in an array, at
+## [param now].
+func _repointed(top: Node, was: Node, now: Node) -> void:
+	if top.owner == root or top == root:
+		for declared: Dictionary in top.get_property_list():
+			if not GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
+				continue
+			var named: String = str(declared["name"])
+			var value: Variant = top.get(named)
+			if value is Object and value == was:
+				top.set(named, now)
+			elif value is Array:
+				var listed: Array = value
+				if listed.has(was):
+					var swapped: Array = listed.duplicate()
+					for index: int in swapped.size():
+						if swapped[index] == was:
+							swapped[index] = now
+					top.set(named, swapped)
+	for child: Node in top.get_children():
+		_repointed(child, was, now)
 
 
 ## Why a write to the scene at [param scene_path], whose text is [param text], is refused, or "":

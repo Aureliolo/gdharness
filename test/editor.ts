@@ -2244,6 +2244,26 @@ async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor)
     const closed = fileText(project, 'kin/host.tscn');
     assert.doesNotMatch(closed, /\[editable|parent="Crate1"/, `closing them drops what was kept: ${closed}`);
 
+    // An editor opens a placeholder as the instance itself, marked, where an engine alone opens an
+    // InstancePlaceholder.
+    const marked = await call('scene_node', { ...host, op: 'set', nodePath: 'Crate1', placeholder: true });
+    assert.equal(get(marked, 'placeholder'), true, text(marked));
+    const held = fileText(project, 'kin/host.tscn');
+    assert.match(
+      held,
+      /\[node name="Crate1" parent="\."[^\]]* instance_placeholder="res:\/\/kin\/crate\.tscn"\]/,
+      held,
+    );
+    const markedRead = await call('scene_node', { ...host, op: 'get', nodePath: 'Crate1' });
+    assert.deepEqual(
+      [get(markedRead, 'instanceOf'), get(markedRead, 'placeholder')],
+      ['res://kin/crate.tscn', true],
+      text(markedRead),
+    );
+    await call('scene_node', { ...host, op: 'set', nodePath: 'Crate1', placeholder: false });
+    const unheld = fileText(project, 'kin/host.tscn');
+    assert.doesNotMatch(unheld, /instance_placeholder/, unheld);
+
     // A scene copied whole carries the uid in its header, and the editor reads a reference's uid from
     // the file it names, so each base is named by a uid only where the editor's cache gives it that one.
     writeFileSync(
