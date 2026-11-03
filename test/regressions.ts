@@ -32763,6 +32763,78 @@ async function testACrashedRunIsNeverClean(): Promise<void> {
  * write to a scene holding a placeholder keeps it. A placeholder without an instance, or on a node
  * that is no instance this scene places, is refused.
  */
+/**
+ * null for a metadata key takes the entry off a node or a resource, as Godot's set_meta(name, null)
+ * does, and the answer names it. A typed entry refused the null as a value it could not hold, so a
+ * stale entry could only be overwritten with an empty one.
+ */
+async function testANullTakesAMetadataEntryOff(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('metadata removal regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-meta-off-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-meta-off-rt-'));
+  writeTree(project, {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="MetaOff"\n',
+    'widget.tscn':
+      '[gd_scene format=3]\n\n[node name="Widget" type="Node2D"]\nmetadata/_stale = []\nmetadata/kept = 3\n',
+    'stats.tres':
+      '[gd_resource type="Resource" format=3]\n\n[resource]\nmetadata/old = "x"\nmetadata/kept = 4\n',
+  });
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (tool: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name: tool, arguments: { projectPath: project, ...args } }, 240_000);
+  const answered = async (tool: string, args: Record<string, unknown>): Promise<unknown> => {
+    const answer = await call(tool, args);
+    assert.notEqual(get(answer, 'result', 'isError'), true, textOf(answer) ?? JSON.stringify(answer));
+    return parseTextContent(answer);
+  };
+  const file = (name: string): string => readFileSync(join(project, name), 'utf8');
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('regression-test');
+
+    const set = await answered('scene_node', {
+      op: 'set',
+      scenePath: 'widget.tscn',
+      nodePath: '.',
+      properties: { 'metadata/_stale': null, 'metadata/kept': 5 },
+    });
+    assert.deepEqual(get(set, 'metadataRemoved'), ['metadata/_stale'], JSON.stringify(set));
+    assert.deepEqual(get(set, 'properties'), { 'metadata/kept': 5 }, JSON.stringify(set));
+    assert.equal(get(set, 'alsoChanged'), undefined, JSON.stringify(set));
+    assert.doesNotMatch(file('widget.tscn'), /_stale/, file('widget.tscn'));
+    assert.match(file('widget.tscn'), /metadata\/kept = 5\n/, file('widget.tscn'));
+
+    const modified = await answered('resource_edit', {
+      op: 'modify',
+      resourcePath: 'res://stats.tres',
+      properties: { 'metadata/old': null },
+    });
+    assert.deepEqual(get(modified, 'metadataRemoved'), ['metadata/old'], JSON.stringify(modified));
+    assert.doesNotMatch(file('stats.tres'), /metadata\/old/, file('stats.tres'));
+    assert.match(file('stats.tres'), /metadata\/kept = 4\n/, file('stats.tres'));
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
 async function testAnInstanceIsMarkedAsAPlaceholder(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -73851,6 +73923,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACrashedRunIsNeverClean,
   testAWaitAnswersOnceTheGameHasCrashed,
   testAnInstanceIsMarkedAsAPlaceholder,
+  testANullTakesAMetadataEntryOff,
   testAPlayedRunWithNoReportGivesNoVerdict,
   testAPlayedGameHoldsAnEngineSlot,
   testAPlayedGameIsToldFromItsWorkers,

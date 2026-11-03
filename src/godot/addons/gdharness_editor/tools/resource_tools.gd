@@ -338,7 +338,10 @@ func modify_resource(args: Dictionary) -> Dictionary:
 	)
 	if not also.is_empty():
 		answer["alsoSaved"] = also
-	answer["properties"] = _held(resource, properties.keys())
+	var kept: Array = properties.keys().filter(
+		func(key: Variant) -> bool: return not _properties.metadata_removed.has(str(key))
+	)
+	answer["properties"] = _held(resource, kept)
 	return answer
 
 
