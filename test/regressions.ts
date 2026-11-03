@@ -48566,7 +48566,7 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
  * gdharness cannot read is refused and names the suite, where reading it as undeclared would deal
  * the suite to the wrong engine without a word.
  */
-async function testASuiteDeclarationCanNameAClassConstant(): Promise<void> {
+function testASuiteDeclarationCanNameAClassConstant(): void {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-declared-'));
   const suite = (head: string, extendsAs = 'GdUnitTestSuite'): string =>
     `extends ${extendsAs}\n${head}\n\nfunc test_one() -> void:\n\tpass\n`;
@@ -48682,7 +48682,7 @@ async function testAHiddenEditorStartsOnAnEmptyScriptReference(): Promise<void> 
       timeout: 120_000,
     });
     assert.match(
-      `${read.stdout}`,
+      read.stdout,
       /^classes=\[\]$/m,
       `the engine reads it as an empty reference: ${read.stdout}${read.stderr}`,
     );
@@ -49032,7 +49032,8 @@ function testAFileGoneBetweenTheListingAndTheReadIsPassedOver(): void {
     assert.equal(listedContentOf(join(project, 'gone.gd')), null);
     assert.deepEqual(entriesOf(join(project, 'gone')), []);
     assert.throws(() => entriesOf(join(project, 'a.gd')), /ENOTDIR/);
-    assert.throws(() => bytesOf(project), /EISDIR/);
+    // Not EISDIR: Bun reads a directory without throwing on Linux and macOS.
+    assert.throws(() => bytesOf(join(project, 'a\0.gd')), { code: 'ERR_INVALID_ARG_VALUE' });
 
     const copies = ['~lib.dll', '~LIB.DLL', '~lib_0.pdb', '~lib_12.pdb', '~lib.dll.aside-40-1700000000000'];
     const kept = ['lib.dll', '~notes.txt', '~lib_x.pdb', '~lib.pdb', '~other.dll', 'lib_0.pdb'];
@@ -53342,7 +53343,11 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
         assert.equal(await readyPid(ready, what), pid, `${what}: the engine is the process launched`);
         assertReportable(pid, what);
         if (kept) {
-          await assertStartedBy(pid, runtimeName === 'Bun' ? /keeper\.js"? keep/ : /powershell/i, what);
+          await assertStartedBy(
+            pid,
+            runtimeName === 'Bun' ? /keeper\.js"? keep/ : /gdharness-desktop-[0-9a-f]{16}\.exe/i,
+            what,
+          );
         }
       }
 
@@ -53384,7 +53389,7 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
       assertReportable(pid, what);
       // Every engine of a test run is on the hidden desktop, so it goes through the helper under
       // either runtime, which is what makes its error mode the helper's to set.
-      await assertStartedBy(pid, /powershell/i, what);
+      await assertStartedBy(pid, /gdharness-desktop-[0-9a-f]{16}\.exe/i, what);
       writeFileSync(read, '');
       const { code } = await exited;
       assert.equal(code, 0, `${what}: the suite was let go and passed: ${printed}`);
@@ -57642,7 +57647,7 @@ function testEveryToolNamedInProseIsATool(): void {
   // gdUnit4 setting a test run obeys on script errors, and the signal and the messages the engine's
   // debugger speaks in, which the keeper's debugger reads, a key the editor writes in
   // export_presets.cfg, the directory a self-contained editor keeps its data in, the file the
-  // editor caches its class reference in, the name every resource stores, and the gdUnit4 call a
+  // editor caches its class and script references in, the name every resource stores, and the gdUnit4 call a
   // suite that drives a scene makes, which is what puts it in the windowed engine, and the project
   // setting that turns that guess off, and the engine setting naming a file laid over the project's
   // settings, which a write keeps out of project.godot. Named one by one rather than matched by a
@@ -57674,6 +57679,7 @@ function testEveryToolNamedInProseIsATool(): void {
     'script_export_mode',
     'editor_data',
     'editor_doc_cache',
+    'editor_script_doc_cache',
     'resource_name',
     'editor_servers',
     'scene_runner',
