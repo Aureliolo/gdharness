@@ -2977,6 +2977,13 @@ const WAIT_FOR_RUN_MS = 600_000;
 const RUN_POLL_MS = 250;
 const HOLD_ASKED_EVERY_MS = 1000;
 
+/**
+ * How long a wait gives a crashed engine to exit after its crash report is in. Windows holds the
+ * process while Windows Error Reporting reports the crash. That takes a few seconds, and once took
+ * over a minute on a CI runner. Nothing more comes from the game meanwhile.
+ */
+export const CRASH_EXIT_GRACE_MS = 10_000;
+
 /** What to tell a caller whose file, scene, script or resource path landed outside the project. */
 const PATH_SOLUTIONS = [
   'Give the path relative to the project, such as "scenes/main.tscn" or "res://scenes/main.tscn"',
@@ -13264,6 +13271,8 @@ class GodotServer {
     const cancelled = callSignal();
     let held = false;
     let holdAsked = 0;
+    let crashedAt: number | undefined;
+    let crashed = false;
     // The caller's cancellation aborts the signal while the loop awaits.
     // oxlint-disable-next-line eslint/no-unmodified-loop-condition
     while (cancelled?.aborted !== true && (await this.runStillGoing(run)) && Date.now() < until) {
@@ -13278,15 +13287,21 @@ class GodotServer {
           held = true;
           break;
         }
+        crashedAt ??= run.log.crashReport() === undefined ? undefined : Date.now();
+      }
+      if (crashedAt !== undefined && Date.now() - crashedAt >= CRASH_EXIT_GRACE_MS) {
+        crashed = true;
+        break;
       }
       await delay(RUN_POLL_MS);
     }
     if (!(await this.runStillGoing(run))) {
       return await this.handleGetDebugOutput(args);
     }
+    const after = Date.now() - began;
     return await this.handleGetDebugOutput(
       args,
-      held ? { heldAfterMs: Date.now() - began } : { ranOutMs: budgetMs },
+      held ? { heldAfterMs: after } : crashed ? { crashedAfterMs: after } : { ranOutMs: budgetMs },
     );
   }
 
@@ -13586,7 +13601,10 @@ class GodotServer {
   /** editor_output: the log as entries, filtered the way the caller asked. */
   private async handleGetDebugOutput(
     args: OperationParams,
-    waited?: { readonly ranOutMs: number } | { readonly heldAfterMs: number },
+    waited?:
+      | { readonly ranOutMs: number }
+      | { readonly heldAfterMs: number }
+      | { readonly crashedAfterMs: number },
   ): Promise<ToolResponse> {
     if (readString(args, 'op') === 'editor') {
       return await this.handleEditorConsole(args);
@@ -13673,6 +13691,11 @@ class GodotServer {
     if (waited !== undefined && 'heldAfterMs' in waited) {
       notes.push(
         `The wait answered after ${waited.heldAfterMs}ms because the game is held by its debugger, where heldAt says, and a held game does not end: debug_control continue lets it go, and editor_run wait then waits on.`,
+      );
+    }
+    if (waited !== undefined && 'crashedAfterMs' in waited) {
+      notes.push(
+        `The wait answered after ${waited.crashedAfterMs}ms because the game crashed and printed its crash report, under entries. Its process has not ended yet, since the system can hold a crashed process while it reports the crash, as Windows Error Reporting does. Nothing more will come from the game. editor_run stop ends it now.`,
       );
     }
     // Which of the two silences this is. A run gdharness ended and a run that stopped being there
