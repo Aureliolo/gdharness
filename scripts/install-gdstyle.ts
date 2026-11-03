@@ -19,24 +19,24 @@ import { download, extract } from './install-godot.js';
 
 const REPOSITORY = 'atelico/gdstyle';
 // renovate: datasource=github-releases depName=atelico/gdstyle
-export const GDSTYLE_VERSION = 'v0.5.0';
+export const GDSTYLE_VERSION = 'v0.6.0';
 
 const ASSETS: Record<string, { asset: string; digest: string }> = {
   'win32-x64': {
     asset: 'gdstyle-x86_64-pc-windows-msvc.zip',
-    digest: '6b7410466fbd6ba6c7b63caf3868607314f7ab90e33b194899f37990df3ba18c',
+    digest: '9f270d5cf9e967a85c321792c8e15e297b435d528b37dc6e6bb7c8509a02faa6',
   },
   'linux-x64': {
     asset: 'gdstyle-x86_64-unknown-linux-gnu.tar.gz',
-    digest: '1322ca08a395b00932d17ff59c9ee634d5b01c6d623c7771865c80689b591936',
+    digest: '05504702d5fc8912799ee5fdca20e98d2f838ed72e28933fce5b855e9e87690e',
   },
   'darwin-x64': {
     asset: 'gdstyle-x86_64-apple-darwin.tar.gz',
-    digest: '9836a6ff9030c60307baeb6b358b548b8b0b57d43c9ef75d2b45cc3908c5c5de',
+    digest: '8cf31191228d524cd5c2c45ed3821ea92ac766433b4522f9dcd82b4102f32ff0',
   },
   'darwin-arm64': {
     asset: 'gdstyle-aarch64-apple-darwin.tar.gz',
-    digest: '1dd6c25f4e9f5b48f660ee4316da38644911bc6b64db70b3085fcadaa5578266',
+    digest: '49ac37392275b1e8c312ad836408bf7445f2de82cc3ffdd7668de919b3ca261e',
   },
 };
 
