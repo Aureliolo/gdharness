@@ -35,18 +35,24 @@ export class CompiledHelper {
   private readonly file: string;
   private readonly source: string;
   private readonly digest: string;
+  private readonly program: boolean;
 
-  /** [param named] is how a failure names it, [param file] the start of its assembly's name. */
-  constructor(named: string, file: string, source: string) {
+  /**
+   * [param named] is how a failure names it, [param file] the start of its assembly's name. With
+   * [param program], it is compiled as a console program, run as itself, rather than a library a
+   * Windows PowerShell loads.
+   */
+  constructor(named: string, file: string, source: string, program = false) {
     this.named = named;
     this.file = file;
     this.source = source;
+    this.program = program;
     this.digest = createHash('sha256').update(source).digest('hex').slice(0, 16);
   }
 
   /** Where the compiled assembly is kept, named after its source, so a changed source compiles anew. */
   assembly(directory = tmpdir()): string {
-    return join(directory, `${this.file}-${this.digest}.dll`);
+    return join(directory, `${this.file}-${this.digest}.${this.program ? 'exe' : 'dll'}`);
   }
 
   /**
@@ -112,8 +118,9 @@ export class CompiledHelper {
     const script = [
       "$ErrorActionPreference = 'Stop'",
       'try {',
-      `  $partial = ${literal(assembly)} + '.' + $PID`,
-      `  Add-Type -TypeDefinition ([IO.File]::ReadAllText(${literal(source)}, [Text.Encoding]::UTF8)) -OutputAssembly $partial`,
+      // The extension kept last, since the compiler names a console program by its output path.
+      `  $partial = ${literal(assembly.slice(0, -4))} + '.' + $PID + ${literal(assembly.slice(-4))}`,
+      `  Add-Type -TypeDefinition ([IO.File]::ReadAllText(${literal(source)}, [Text.Encoding]::UTF8)) -OutputAssembly $partial${this.program ? ' -OutputType ConsoleApplication' : ''}`,
       `  Move-Item -LiteralPath $partial -Destination ${literal(assembly)}`,
       '} catch {',
       '  [Console]::Error.WriteLine($_.Exception.Message)',

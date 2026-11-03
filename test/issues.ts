@@ -8,7 +8,9 @@
  */
 
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import { join, sep } from 'node:path';
 import process from 'node:process';
 import pkg from '../package.json' with { type: 'json' };
 import { Refusal } from '../src/errors.js';
@@ -18,6 +20,7 @@ import {
   defectSignature,
   ENHANCEMENT_URL,
   feedbackNotice,
+  withoutMachinePaths,
 } from '../src/issues.js';
 import { portFromEnv } from '../src/ports.js';
 import { spawnSyncHidden } from '../src/spawn.js';
@@ -119,6 +122,49 @@ assert.match(
   /^Defect [0-9a-f]{8}: editor_scene op=open$/,
   'the title should name the signature and the call',
 );
+
+// A report goes into a public tracker, so the folders above the project are written as <project>
+// and the home folder as ~, while the files inside it stay named.
+const machine = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-report-'));
+try {
+  const project = join(machine, 'checkout', 'secret-game');
+  mkdirSync(project, { recursive: true });
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  const gone = join(project, 'addons', 'x', '~lib.dll');
+  const said = `ENOENT: no such file or directory, stat '${gone}'`;
+  const filed = defectReport('gdharness test', new Error(said));
+  const inside = `'<project>${sep}addons${sep}x${sep}~lib.dll'`;
+  assert.ok(filed.includes(inside), `the report names the file inside the project: ${filed}`);
+  assert.ok(!filed.includes(machine) && !filed.includes('secret-game'), 'and not the folders above it');
+  const filedBody = new URL(/(https:\/\/github\.com\/\S+)/.exec(filed)?.[1] ?? 'about:blank').searchParams;
+  assert.ok((filedBody.get('body') ?? '').includes(inside), 'and so does the link');
+  assert.ok(!(filedBody.get('body') ?? '').includes(machine), 'without the folders above it');
+  assert.equal(
+    filedBody.get('title'),
+    `Defect ${defectSignature('gdharness test', said)}: gdharness test`,
+    'the signature is the one the unwritten message gives',
+  );
+
+  const cached = join(homedir(), '.cache', 'thing.json');
+  assert.equal(
+    withoutMachinePaths(`read ${cached}`),
+    `read ~${sep}.cache${sep}thing.json`,
+    'the home folder',
+  );
+  const outside = join(machine, 'elsewhere', 'notes.txt');
+  assert.ok(
+    !withoutMachinePaths(outside).startsWith('<project>') &&
+      withoutMachinePaths(outside).endsWith('notes.txt'),
+    'a path in no project keeps its file',
+  );
+  assert.equal(
+    withoutMachinePaths('3/4 of addons/x.gd'),
+    '3/4 of addons/x.gd',
+    'and text with no absolute path',
+  );
+} finally {
+  rmSync(machine, { recursive: true, force: true });
+}
 
 // The signature is a dedupe aid: the same defect from two machines has to arrive as one. Paths
 // and numbers are what differ between those machines, so they are what it must not see.

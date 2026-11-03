@@ -58,6 +58,7 @@ import {
   declaredClasses,
   declaredClassLines,
   declaresMember,
+  eachScript,
   externalMemberIn,
   type FailedReload,
   failedReloadNote,
@@ -85,7 +86,12 @@ import {
   windowsCommandLine,
 } from '../src/desktop.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
-import { docCacheCrash, editorCacheDirectory } from '../src/doc-cache.js';
+import {
+  docCacheCrash,
+  editorCacheDirectory,
+  placeEmptyScriptDocs,
+  scriptDocCachePath,
+} from '../src/doc-cache.js';
 import {
   bursts,
   clearEditorLog,
@@ -153,6 +159,7 @@ import {
   WAITING_FOLDER,
 } from '../src/engine-slots.js';
 import { crowded, nowSeconds, processorSecondsOf, type Sample, Spent, STARVED } from '../src/engine-spent.js';
+import { Refusal } from '../src/errors.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
 import { answersTo, foldedRepeats, forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
@@ -211,8 +218,9 @@ import {
   startedAs,
   userDataIn,
 } from '../src/launch.js';
-import { freeLibraryCopies, seedExtensionList } from '../src/library-copies.js';
+import { freeLibraryCopies, isLibraryCopy, seedExtensionList } from '../src/library-copies.js';
 import { callsInFlight, LIFECYCLE_LOG_LIMIT, writeLifecycle } from '../src/lifecycle-log.js';
+import { bytesOf, entriesOf, contentOf as listedContentOf, statOf } from '../src/listed-reads.js';
 import { LOG_LIMIT_BYTES, prependTo, readLog } from '../src/log-read.js';
 import {
   DEFAULT_LSP_PORT,
@@ -430,7 +438,7 @@ import {
 } from '../src/spawn.js';
 import { type ArmPlayed, armsPlayed, shareFaults, shareOf } from '../src/spread-run.js';
 import { followSuccessor, RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
-import { EVERY_FILE, reachedBySuite, SuiteInputs } from '../src/suite-inputs.js';
+import { EVERY_FILE, reachedBySuite, SuiteInputs, walkSeen } from '../src/suite-inputs.js';
 import {
   COMPILED_SAID,
   exitNamed,
@@ -9011,7 +9019,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 156;
+const READ_IN_WORDS = 157;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -13522,34 +13530,22 @@ async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
       assert.ok(screens(control.said)?.match(/^monitors=[1-9]/), control.said);
       assert.equal(screens(hidden.said), screens(control.said), `${hidden.said}\n${control.said}`);
     }
-    // The helper's script calls no cmdlet, so Windows PowerShell prepares no modules as it starts
-    // one, and writes no account of that among what the run printed.
-    const helperScript = Buffer.from(
-      throughHelper({ directory: scratch }, 'godot.exe', [], {
-        spec: join(scratch, 'spec'),
-        pid: join(scratch, 'pid'),
-        error: join(scratch, 'error'),
-        stop: join(scratch, 'stop'),
-        step: join(scratch, 'step'),
-      }).args.at(-1) ?? '',
-      'base64',
-    ).toString('utf16le');
-    assert.match(helperScript, /\[GdharnessDesktop\]::RunSpec\(/, helperScript);
-    const ran = spawnSyncHidden(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-EncodedCommand',
-        Buffer.from(helperScript.replace(/\[GdharnessDesktop\]::RunSpec\([^)]*\)/, '0'), 'utf16le').toString(
-          'base64',
-        ),
-      ],
-      { encoding: 'utf8' },
-    );
-    assert.equal(ran.status, 0, `${ran.stdout}${ran.stderr}`);
-    assert.equal(readFileSync(join(scratch, 'step'), 'utf8'), 'loading its assembly', 'the script ran');
-    assert.doesNotMatch(`${ran.stdout}${ran.stderr}`, /Preparing modules/, `${ran.stdout}${ran.stderr}`);
+    // The helper runs as a program of its own, so no Windows PowerShell starts for an engine. One
+    // handed a spec that is not there says why in its error file and exits 1.
+    const files = {
+      spec: join(scratch, 'spec'),
+      pid: join(scratch, 'pid'),
+      error: join(scratch, 'error'),
+      stop: join(scratch, 'stop'),
+      step: join(scratch, 'step'),
+    };
+    const wrapper = throughHelper({ directory: scratch }, 'godot.exe', [], files);
+    assert.deepEqual(wrapper, { command: helperAssembly(), args: [files.spec, files.error, files.step] });
+    rmSync(files.spec);
+    const ran = spawnSyncHidden(wrapper.command, wrapper.args, { encoding: 'utf8' });
+    assert.equal(ran.status, 1, `${ran.stdout}${ran.stderr}`);
+    assert.equal(readFileSync(files.step, 'utf8'), 'reading its spec', 'the helper ran');
+    assert.match(readFileSync(files.error, 'utf8'), /spec/, 'and said why it stopped');
   } finally {
     sweep(scratch);
   }
@@ -19295,11 +19291,7 @@ async function testARelativeEnginePathIsMadeWhole(): Promise<void> {
     writeFileSync(written, 'Exception calling "Run": CreateProcessW godot.exe\r\n');
     assert.equal(helperFailure(written), 'Exception calling "Run": CreateProcessW godot.exe');
     const step = join(scratch, 'step');
-    assert.equal(
-      helperStep(step),
-      'Windows PowerShell had not begun running the helper',
-      'no step is no start',
-    );
+    assert.equal(helperStep(step), 'the helper had not begun', 'no step is no start');
     writeFileSync(step, 'creating the gdharness desktop');
     assert.equal(helperStep(step), 'the helper was creating the gdharness desktop');
   } finally {
@@ -28488,7 +28480,7 @@ async function testAnAbandonedScratchDirectoryIsSweptAndNothingElse(): Promise<v
     for (const path of [abandoned, ...kept]) {
       mkdirSync(join(path, 'Godot'), { recursive: true });
     }
-    const library = join(parent, 'gdharness-desktop-1c0454b3e7c20635.dll');
+    const library = join(parent, 'gdharness-desktop-1c0454b3e7c20635.exe');
     writeFileSync(library, 'x');
 
     sweepAbandonedScratch(parent);
@@ -48569,6 +48561,163 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
 }
 
 /**
+ * A suite's GDHARNESS_NEEDS_WINDOW or GDHARNESS_TOGETHER can name a constant of a class the project
+ * declares, so games sharing one suite each keep the value in a class of their own. A declaration
+ * gdharness cannot read is refused and names the suite, where reading it as undeclared would deal
+ * the suite to the wrong engine without a word.
+ */
+async function testASuiteDeclarationCanNameAClassConstant(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-declared-'));
+  const suite = (head: string, extendsAs = 'GdUnitTestSuite'): string =>
+    `extends ${extendsAs}\n${head}\n\nfunc test_one() -> void:\n\tpass\n`;
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'addons/gdUnit4/src/GdUnitTestSuite.gd': 'class_name GdUnitTestSuite\nextends Node\n',
+      'tests/game_fixture.gd':
+        'class_name GameFixture\nextends RefCounted\n\nconst NEEDS_WINDOW: bool = true\nconst KEPT := true\n' +
+        'const QUIET: bool = false  # this game runs headless\nconst LOOSE: bool = NEEDS_WINDOW\n',
+      'tests/main_test.gd': suite(
+        'const GDHARNESS_NEEDS_WINDOW: bool = GameFixture.NEEDS_WINDOW\nconst GDHARNESS_TOGETHER := GameFixture.KEPT',
+      ),
+      'tests/quiet_test.gd': suite('const GDHARNESS_NEEDS_WINDOW: bool = GameFixture.QUIET  # per game'),
+      'tests/child_test.gd': suite('', '"res://tests/main_test.gd"'),
+      'refused/unknown_test.gd': suite('const GDHARNESS_NEEDS_WINDOW: bool = MissingFixture.NEEDS_WINDOW'),
+      'refused/inherits_test.gd': suite('', '"res://refused/unknown_test.gd"'),
+      'refused/absent_test.gd': suite('const GDHARNESS_NEEDS_WINDOW: bool = GameFixture.ABSENT'),
+      'refused/loose_test.gd': suite('const GDHARNESS_TOGETHER: bool = GameFixture.LOOSE'),
+      'refused/expression_test.gd': suite('const GDHARNESS_NEEDS_WINDOW: bool = not false'),
+    });
+    const scripts = new ProjectScripts(project);
+    assert.deepEqual(
+      scripts.suitesUnder(['res://tests']).map((one) => [one.path, one.windowed, one.headless, one.together]),
+      [
+        ['res://tests/child_test.gd', true, false, true],
+        ['res://tests/main_test.gd', true, false, true],
+        ['res://tests/quiet_test.gd', false, true, false],
+      ],
+      'a constant of a class is read as its literal, in the suite and through what it extends',
+    );
+    const refusals: [string, string][] = [
+      [
+        'res://refused/unknown_test.gd',
+        'res://refused/unknown_test.gd declares GDHARNESS_NEEDS_WINDOW as MissingFixture.NEEDS_WINDOW, and no script in the project declares class_name MissingFixture.',
+      ],
+      [
+        'res://refused/inherits_test.gd',
+        'res://refused/unknown_test.gd, which res://refused/inherits_test.gd extends, declares GDHARNESS_NEEDS_WINDOW as MissingFixture.NEEDS_WINDOW, and no script in the project declares class_name MissingFixture.',
+      ],
+      [
+        'res://refused/absent_test.gd',
+        'res://refused/absent_test.gd declares GDHARNESS_NEEDS_WINDOW as GameFixture.ABSENT, and res://tests/game_fixture.gd declares no ABSENT as true or false.',
+      ],
+      [
+        'res://refused/loose_test.gd',
+        'res://refused/loose_test.gd declares GDHARNESS_TOGETHER as GameFixture.LOOSE, and res://tests/game_fixture.gd declares no LOOSE as true or false, but as NEEDS_WINDOW.',
+      ],
+      [
+        'res://refused/expression_test.gd',
+        'res://refused/expression_test.gd declares GDHARNESS_NEEDS_WINDOW as not false, which gdharness cannot read before the run. Declare it as true or false, or as <ClassName>.<CONSTANT> naming a constant declared true or false.',
+      ],
+    ];
+    for (const [path, message] of refusals) {
+      assert.throws(
+        () => scripts.suite(path),
+        (error: unknown) => error instanceof Refusal && error.message === message,
+        `${path} is refused with: ${message}`,
+      );
+    }
+    assert.throws(
+      () => scripts.suitesUnder(['res://refused']),
+      Refusal,
+      'and a search meeting one is refused',
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A hidden editor starts on an empty script reference cache, made once per engine by that engine.
+ *
+ * With no cache the editor walks its file list on a thread, and a scan ending during the walk frees
+ * the list under it, which crashed the editor. The cache made is read back by the engine as the
+ * empty reference, a project's own cache is left alone, and a second project reuses the one made.
+ */
+async function testAHiddenEditorStartsOnAnEmptyScriptReference(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('script reference cache regression skipped (Godot not found)');
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-script-docs-'));
+  const kept = join(root, 'kept');
+  const first = join(root, 'first');
+  const second = join(root, 'second');
+  try {
+    for (const project of [first, second]) {
+      writeTree(project, { 'project.godot': 'config_version=5\n' });
+    }
+    assert.equal(await placeEmptyScriptDocs(godotPath, first, kept), null);
+    const placed = scriptDocCachePath(first);
+    const made = readdirSync(kept);
+    assert.deepEqual(made.length, 1, `one cache made for the engine: ${made.join(', ')}`);
+    assert.deepEqual(
+      readFileSync(placed),
+      readFileSync(join(kept, made[0] ?? '')),
+      'and copied into the project',
+    );
+
+    writeFileSync(
+      join(first, 'read.gd'),
+      'extends SceneTree\n\n\nfunc _initialize() -> void:\n' +
+        '\tvar cache: Resource = load("res://.godot/editor/editor_script_doc_cache.res")\n' +
+        '\tprint("classes=", cache.get_meta("classes", null))\n\tquit()\n',
+    );
+    const read = spawnSyncHidden(godotPath, ['--headless', '--path', first, '-s', 'res://read.gd'], {
+      encoding: 'utf8',
+      timeout: 120_000,
+    });
+    assert.match(
+      `${read.stdout}`,
+      /^classes=\[\]$/m,
+      `the engine reads it as an empty reference: ${read.stdout}${read.stderr}`,
+    );
+
+    // A project's own cache, which a clean quit wrote, is the editor's to read.
+    writeFileSync(placed, 'its own');
+    assert.equal(await placeEmptyScriptDocs(godotPath, first, kept), null);
+    assert.equal(readFileSync(placed, 'utf8'), 'its own', "a project's own cache is left alone");
+
+    const old = new Date(Date.now() - 3_600_000);
+    utimesSync(join(kept, made[0] ?? ''), old, old);
+    assert.equal(await placeEmptyScriptDocs(godotPath, second, kept), null);
+    assert.equal(
+      statSync(join(kept, made[0] ?? '')).mtimeMs,
+      old.getTime(),
+      'a second project reuses the cache made for the engine',
+    );
+    assert.ok(existsSync(scriptDocCachePath(second)), 'and gets it too');
+
+    assert.equal(
+      await placeEmptyScriptDocs(join(root, 'no-engine.exe'), second, kept),
+      null,
+      'a project holding a cache needs no engine',
+    );
+    rmSync(scriptDocCachePath(second));
+    assert.equal(
+      await placeEmptyScriptDocs(join(root, 'no-engine.exe'), second, kept),
+      `the engine at ${join(root, 'no-engine.exe')} is not there`,
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
  * A suite's inputs are what its engine recorded, followed along what compiles with a script and what
  * a resource names, and its print moves with those and nothing else. A file read or a folder listed
  * by a literal or constant path is an input. One read by a path worked out at run time makes every
@@ -48840,6 +48989,67 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
     );
   } finally {
     sweep(project);
+  }
+}
+
+/**
+ * A walk over a project passes over a file or folder removed after it was listed, as an engine on
+ * Windows removes the copy of a library it loads, and a suite's print leaves such copies out.
+ */
+function testAFileGoneBetweenTheListingAndTheReadIsPassedOver(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gone-'));
+  const tree = { 'a.gd': 'a', 'b.gd': 'b', 'c.gd': 'c', 'd/e.gd': 'e' };
+  // The first file read takes every other entry away, whichever order the listing came in.
+  const takeTheRest = (kept: string): void => {
+    for (const name of ['a.gd', 'b.gd', 'c.gd', 'd'].filter((one) => one !== kept)) {
+      rmSync(join(project, name), { recursive: true });
+    }
+  };
+  try {
+    writeTree(project, tree);
+    const walked: string[] = [];
+    walkSeen(project, (under, bytes) => {
+      if (walked.length === 0) {
+        takeTheRest(under);
+      }
+      walked.push(`${under}=${bytes.toString('utf8')}`);
+    });
+    assert.deepEqual(walked, ['a.gd=a'], 'the walk a suite print reads');
+
+    writeTree(project, tree);
+    const scripts: string[] = [];
+    eachScript(project, (script, source) => {
+      if (scripts.length === 0) {
+        takeTheRest(script.slice('res://'.length));
+      }
+      scripts.push(`${script}=${source}`);
+    });
+    assert.equal(scripts.length, 1, `the walk over every script: ${JSON.stringify(scripts)}`);
+
+    // Gone is the one failure passed over.
+    assert.equal(statOf(join(project, 'gone.gd')), undefined);
+    assert.equal(bytesOf(join(project, 'gone.gd')), null);
+    assert.equal(listedContentOf(join(project, 'gone.gd')), null);
+    assert.deepEqual(entriesOf(join(project, 'gone')), []);
+    assert.throws(() => entriesOf(join(project, 'a.gd')), /ENOTDIR/);
+    assert.throws(() => bytesOf(project), /EISDIR/);
+
+    const copies = ['~lib.dll', '~LIB.DLL', '~lib_0.pdb', '~lib_12.pdb', '~lib.dll.aside-40-1700000000000'];
+    const kept = ['lib.dll', '~notes.txt', '~lib_x.pdb', '~lib.pdb', '~other.dll', 'lib_0.pdb'];
+    assert.deepEqual(
+      [...copies, ...kept].filter((name) => isLibraryCopy(name, ['lib.dll', 'notes.txt'])),
+      copies,
+    );
+
+    writeTree(project, { 'project.godot': 'config_version=5\n', 'bin/lib.dll': 'dll', 'bin/notes.txt': 'n' });
+    const print = (): string => new SuiteInputs(new ProjectScripts(project), ['1']).printOf([EVERY_FILE]);
+    const before = print();
+    writeTree(project, { 'bin/~lib.dll': 'dll', 'bin/~lib_0.pdb': 'pdb' });
+    assert.equal(print(), before, "an engine's copies of a library are no input");
+    writeTree(project, { 'bin/~notes.txt': 'n' });
+    assert.notEqual(print(), before, 'a file of the project whose name starts with ~ is one');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
   }
 }
 
@@ -70130,6 +70340,9 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
   const project = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-editor-view-')));
   const home = join(project, 'home');
   mkdirSync(home);
+  // Kept out of the editor's scans, which would otherwise import the editor's own settings and
+  // caches as it writes them, for seconds at a time.
+  writeFileSync(join(home, '.gdignore'), '');
   const saved = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-view-out-'));
   installAddons(project);
   writeFileSync(
@@ -70302,6 +70515,9 @@ async function testACallWaitsOutTheEditorsProgressTask(): Promise<void> {
   const project = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-editor-task-')));
   const home = join(project, 'home');
   mkdirSync(home);
+  // Kept out of the editor's scans, which would otherwise import the editor's own settings and
+  // caches as it writes them, for seconds at a time.
+  writeFileSync(join(home, '.gdignore'), '');
   installAddons(project);
   writeFileSync(
     join(project, 'project.godot'),
@@ -70343,6 +70559,13 @@ async function testACallWaitsOutTheEditorsProgressTask(): Promise<void> {
       connected = get(parseTextContent(await call('editor_status', {})), 'editor', 'connected') === true;
     }
     assert.ok(connected, 'the hidden editor connected');
+    // Started on an empty script reference cache, made for this engine: without one the editor walks
+    // its file list on a thread while the scans below free it, and crashed.
+    const made = join(home, 'gdharness', 'script-docs');
+    assert.ok(
+      existsSync(made) && readdirSync(made).some((name) => /^[0-9a-f]{16}\.res$/.test(name)),
+      `the hidden editor's empty script reference cache was made: ${existsSync(made) ? readdirSync(made).join(', ') : 'no folder'}`,
+    );
 
     const classes = 40;
     mkdirSync(join(project, 'many'));
@@ -70382,7 +70605,15 @@ async function testACallWaitsOutTheEditorsProgressTask(): Promise<void> {
       /Task '\w+' already exists|Do not use progress dialog/,
       `no call ran inside the editor's task: ${log.slice(0, 3000)}`,
     );
-    assert.deepEqual(refused, [], 'every add was answered');
+    const bridgeSaid = server.stderr
+      .split('\n')
+      .filter((line) => line.includes('GodotBridge'))
+      .join('\n');
+    assert.deepEqual(
+      refused,
+      [],
+      `every add was answered. The editor's log ends: ${log.slice(-4000)}\nThe bridge said: ${bridgeSaid.slice(-4000)}`,
+    );
     let idle = false;
     for (let waited = 0; waited < 120_000 && !idle; waited += 500) {
       const scan = get(parseTextContent(await call('editor_status', {})), 'editor', 'scan');
@@ -73585,7 +73816,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineOnASlotLendsItToWhatItStarts,
   testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded,
   testSuitesAreFoundAndDealtByWhatTheyCost,
+  testASuiteDeclarationCanNameAClassConstant,
+  testAHiddenEditorStartsOnAnEmptyScriptReference,
   testASuitesInputsAreWhatItsEngineLoaded,
+  testAFileGoneBetweenTheListingAndTheReadIsPassedOver,
   testTheCompileCheckAndUnattributedFaultsAreJudged,
   testTheTestCommandReadsItsOwnOptions,
   testTheLspCommandFindsTheEditorsPort,

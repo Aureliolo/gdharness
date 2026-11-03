@@ -15,10 +15,12 @@
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, type Stats, statSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { classesNamedIn } from './class-cache.js';
 import { regionsOf } from './gdscript-source.js';
+import { isLibraryCopy } from './library-copies.js';
+import { bytesOf, contentOf, entriesOf, statOf } from './listed-reads.js';
 import { isRecord } from './records.js';
 import type { ProjectScripts } from './suite-plan.js';
 
@@ -243,9 +245,9 @@ export class SuiteInputs {
   private everyFile(): Read {
     const hash = createHash('sha256');
     let modified = 0;
-    walkSeen(this.scripts.projectPath, (file, under, stat) => {
-      hash.update(`${under}\n`).update(readFileSync(file));
-      modified = Math.max(modified, stat.mtimeMs);
+    walkSeen(this.scripts.projectPath, (under, bytes, at) => {
+      hash.update(`${under}\n`).update(bytes);
+      modified = Math.max(modified, at);
     });
     return { digest: hash.digest('hex'), follows: [], also: [], modified };
   }
@@ -260,9 +262,9 @@ export class SuiteInputs {
     let modified = 0;
     const directory = join(this.scripts.projectPath, root.slice('res://'.length));
     if (existsSync(directory)) {
-      walkSeen(directory, (file, under, stat) => {
-        hash.update(`${under}\n`).update(readFileSync(file));
-        modified = Math.max(modified, stat.mtimeMs);
+      walkSeen(directory, (under, bytes, at) => {
+        hash.update(`${under}\n`).update(bytes);
+        modified = Math.max(modified, at);
       });
     }
     return { digest: hash.digest('hex'), follows: [], also: [], modified };
@@ -270,17 +272,22 @@ export class SuiteInputs {
 
   private readAnew(path: string): Read {
     const file = join(this.scripts.projectPath, path.slice('res://'.length));
-    if (!existsSync(file)) {
-      return { digest: 'missing', follows: [], also: [], modified: 0 };
+    const missing: Read = { digest: 'missing', follows: [], also: [], modified: 0 };
+    const stat = statOf(file);
+    if (stat === undefined) {
+      return missing;
     }
-    const stat = statSync(file);
     if (stat.isDirectory()) {
-      const inside = readdirSync(file)
+      const inside = entriesOf(file)
+        .map((entry) => entry.name)
         .filter((name) => !name.startsWith('.'))
         .toSorted();
       return { digest: inside.join('\n'), follows: [], also: [], modified: stat.mtimeMs };
     }
-    const bytes = readFileSync(file);
+    const bytes = bytesOf(file);
+    if (bytes === null) {
+      return missing;
+    }
     const digest = createHash('sha256').update(bytes).digest('hex');
     // The import settings and uid beside a file decide what loading it gives, and a move shows there.
     const also = [`${path}.import`, `${path}.uid`].filter((beside) =>
@@ -290,7 +297,7 @@ export class SuiteInputs {
     if (TEXT_RESOURCE.test(path)) {
       for (const [named] of bytes.toString('latin1').matchAll(RES_LITERAL)) {
         const target = join(this.scripts.projectPath, named.slice('res://'.length));
-        (existsSync(target) && statSync(target).isDirectory() ? also : follows).push(named);
+        (statOf(target)?.isDirectory() === true ? also : follows).push(named);
       }
     } else if (path.endsWith('.gd')) {
       const reaches = this.scriptReaches(path);
@@ -524,23 +531,28 @@ function joinedString(expression: string, named: (name: string) => string | unde
 
 /**
  * Calls [param seen] with each file under [param root] that Godot's file system sees, its path from
- * the root with forward slashes, and its stat: no hidden folder, and no folder holding a `.gdignore`.
+ * the root with forward slashes, its bytes and when it was modified: no hidden folder, no folder
+ * holding a `.gdignore`, and none of the copies an engine makes of a library it loads. A file gone
+ * between the listing and the read is passed over.
  */
-function walkSeen(root: string, seen: (file: string, under: string, stat: Stats) => void): void {
+export function walkSeen(root: string, seen: (under: string, bytes: Buffer, modified: number) => void): void {
   const walk = (directory: string, under: string): void => {
     if (existsSync(join(directory, '.gdignore'))) {
       return;
     }
-    for (const entry of readdirSync(directory, { withFileTypes: true }).toSorted((a, b) =>
-      a.name.localeCompare(b.name),
-    )) {
+    const entries = entriesOf(directory).toSorted((a, b) => a.name.localeCompare(b.name));
+    const names = entries.map((entry) => entry.name);
+    for (const entry of entries) {
       const file = join(directory, entry.name);
       if (entry.isDirectory()) {
         if (!entry.name.startsWith('.')) {
           walk(file, `${under}${entry.name}/`);
         }
-      } else if (entry.isFile()) {
-        seen(file, `${under}${entry.name}`, statSync(file));
+      } else if (entry.isFile() && !isLibraryCopy(entry.name, names)) {
+        const content = contentOf(file);
+        if (content !== null) {
+          seen(`${under}${entry.name}`, content.bytes, content.modified);
+        }
       }
     }
   };
@@ -549,11 +561,8 @@ function walkSeen(root: string, seen: (file: string, under: string, stat: Stats)
 
 /** The extensions the engine loads into every run of [param projectPath]. */
 function extensionsOf(projectPath: string): string[] {
-  const list = join(projectPath, '.godot', 'extension_list.cfg');
-  return existsSync(list)
-    ? readFileSync(list, 'utf8')
-        .split('\n')
-        .map((line) => line.trim())
-        .filter((line) => line.startsWith('res://'))
-    : [];
+  return (bytesOf(join(projectPath, '.godot', 'extension_list.cfg'))?.toString('utf8') ?? '')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith('res://'));
 }

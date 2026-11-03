@@ -1193,6 +1193,9 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
   const project = createProject();
   const home = join(project, 'home');
   mkdirSync(home);
+  // Kept out of the editor's scans, which would otherwise import the editor's own settings and
+  // caches as it writes them, for seconds at a time.
+  writeFileSync(join(home, '.gdignore'), '');
 
   const bridgePort = await reservePort();
   const lspPort = await reservePort();

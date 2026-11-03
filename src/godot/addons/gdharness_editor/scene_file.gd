@@ -1149,29 +1149,29 @@ static func scan_later() -> void:
 	_start_scan.call_deferred()
 
 
-## [method EditorFileSystem.scan] does nothing, and says nothing, while the thread of the scan
-## before it is still to be joined, which is a frame or two after that scan stops reporting itself,
-## so a scan that leaves the editor not scanning is asked for once more once that is over. Asked of
-## a scan that ended within the call, the second costs one more scan.
-##
 ## It waits out a task of the progress dialog too, whose every step runs a frame of the editor from
-## inside itself. A scan's end registers the classes it found in such a task, after the scan has
-## stopped reporting itself and its thread has been joined (4.7.2's
+## inside itself. A scan's end registers the classes it found in such a task (4.7.2's
 ## [code]EditorFileSystem::_notification[/code]). A scan started from that frame ran beside the end
 ## of the one before, which crashed the editor or left it scanning.
 static func _start_scan() -> void:
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
 	var tree: SceneTree = Engine.get_main_loop()
-	while filesystem.is_scanning() or filesystem.is_importing() or in_a_task():
+	while scan_unfinished(filesystem) or filesystem.is_importing() or in_a_task():
 		await tree.process_frame
 	filesystem.scan()
-	if not filesystem.is_scanning():
-		await tree.process_frame
-		await tree.process_frame
-		while in_a_task():
-			await tree.process_frame
-		filesystem.scan()
 	scan_due = false
+
+
+## Whether the editor scans its files, counting the frames after a scan stops reporting itself and
+## before the editor handles its end. That end swaps in the new file list and registers the classes
+## the scan found, from a frame of the editor. A save in those frames registered the classes as
+## well,
+## inside its own task, and the editor crashed or logged "Task 'update_scripts_classes' already
+## exists". [method EditorFileSystem.scan] also does nothing then, without a word. The editor
+## processes from the start of a scan until it has handled the end (4.7.2's
+## [code]EditorFileSystem::scan[/code] and [code]_notification[/code]).
+static func scan_unfinished(filesystem: EditorFileSystem) -> bool:
+	return filesystem.is_scanning() or filesystem.is_processing()
 
 
 ## Whether the editor's progress dialog is showing, which it does for as long as a task is open.

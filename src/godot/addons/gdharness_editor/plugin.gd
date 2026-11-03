@@ -175,7 +175,7 @@ func turned_away(tool_name: String) -> bool:
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
 	return (
 		not ANSWERED_WHILE_SCANNING.has(tool_name)
-		and (filesystem.is_scanning() or filesystem.is_importing())
+		and (GdhSceneFile.scan_unfinished(filesystem) or filesystem.is_importing())
 	)
 
 

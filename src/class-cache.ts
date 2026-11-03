@@ -10,9 +10,10 @@
  * Read from files, never from an engine, because this is asked before every run.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { codeOf, shapeOf } from './gdscript-source.js';
+import { bytesOf, entriesOf } from './listed-reads.js';
 import { isRecord } from './records.js';
 import { readWhole } from './whole-file.js';
 
@@ -141,7 +142,7 @@ export function eachScript(projectPath: string, each: (script: string, source: s
     if (existsSync(join(directory, '.gdignore'))) {
       return;
     }
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    for (const entry of entriesOf(directory)) {
       if (entry.name.startsWith('.')) {
         continue;
       }
@@ -149,7 +150,10 @@ export function eachScript(projectPath: string, each: (script: string, source: s
       if (entry.isDirectory()) {
         visit(path, `${prefix}${entry.name}/`);
       } else if (entry.isFile() && entry.name.endsWith('.gd')) {
-        each(`res://${prefix}${entry.name}`, readFileSync(path, 'utf8'));
+        const source = bytesOf(path);
+        if (source !== null) {
+          each(`res://${prefix}${entry.name}`, source.toString('utf8'));
+        }
       }
     }
   };
