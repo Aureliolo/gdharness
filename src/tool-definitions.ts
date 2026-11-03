@@ -1027,7 +1027,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Scene tree',
     effect: 'read',
     description:
-      'The nodes of a scene file: names, classes and hierarchy, with properties when asked. type is the engine class, and a node whose script declares a class_name names it under scriptClass, as scene_node get does. A node that instances another scene names that file under instanceOf, and the nodes listed under it come from that file rather than this one. Its editableChildren says whether this scene, or a scene it inherits, keeps values of its own for them (scene_node set editableChildren). The root of a scene inheriting another names the scene it inherits under inherits, and every node that scene or one further down makes names its file under inheritedFrom. This file holds only the values it changes on them. A node in any group answers groups, sorted, from this file and every scene it comes from. Needs no editor: one serving the project answers and says whether it holds unsaved changes to the scene, and with none a headless engine reads the file without making its nodes, so no script of theirs runs (autoloads still start once it has answered, as in every headless call). For the nodes of a game that is running, runtime_inspect tree.',
+      'The nodes of a scene file: names, classes and hierarchy, with properties when asked. type is the engine class, and a node whose script declares a class_name names it under scriptClass, as scene_node get does. A node that instances another scene names that file under instanceOf, and the nodes listed under it come from that file rather than this one. Its editableChildren says whether this scene, or a scene it inherits, keeps values of its own for them (scene_node set editableChildren). One saved as a placeholder answers placeholder true, with InstancePlaceholder as its type, as a game loads it (scene_node set placeholder). The root of a scene inheriting another names the scene it inherits under inherits, and every node that scene or one further down makes names its file under inheritedFrom. This file holds only the values it changes on them. A node in any group answers groups, sorted, from this file and every scene it comes from. Needs no editor: one serving the project answers and says whether it holds unsaved changes to the scene, and with none a headless engine reads the file without making its nodes, so no script of theirs runs (autoloads still start once it has answered, as in every headless call). For the nodes of a game that is running, runtime_inspect tree.',
     parameters: {
       projectPath: PROJECT_PATH,
       scenePath: SCENE_PATH,
@@ -1104,6 +1104,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           "set: on an instance of another scene, whether its children are editable here, as the editor's Editable Children makes them. True lets scene_node set give the nodes inside that instance values of this scene's own, which no other instance shares. An instance nested inside another takes it once the one around it has editable children. False drops every value this scene keeps for them, and every node it added below one of them. The answer names the nodes whose values went under droppedValues (they stay, with the instance's own values) and the added nodes that went under droppedNodes. A node added straight under the instance stays. The answer says editableChildren as the file now holds it.",
       },
+      placeholder: {
+        type: 'boolean',
+        ops: ['add', 'set'],
+        description:
+          "add, with instancePath, or set, on an instance this scene places: whether it is saved as the editor's Load as Placeholder saves it, as `instance_placeholder` in the file. A game then gets an InstancePlaceholder there and loads the scene itself, while the editor still shows it. The answer says placeholder as the file now holds it.",
+      },
       addGroups: {
         type: 'array',
         items: { type: 'string' },
@@ -1165,13 +1171,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       get: {
         effect: 'read',
         summary:
-          "read a node's class, path, properties and where its values come from, and a TileMapLayer's or TileMap's cells as set_tilemap_cells takes them, the first 1000 with cellCount for all. An instance of another scene also answers instanceOf and editableChildren, as scene_tree does",
+          "read a node's class, path, properties and where its values come from, and a TileMapLayer's or TileMap's cells as set_tilemap_cells takes them, the first 1000 with cellCount for all. An instance of another scene also answers instanceOf, editableChildren and placeholder",
         requires: ['nodePath'],
       },
       set: {
         effect: 'destructive',
         summary:
-          'set properties on a node, make the children of an instance editable, or put it in groups or take it out of them, or any of them together',
+          'set properties on a node, make the children of an instance editable or the instance a placeholder, or put it in groups or take it out of them, or any of them together',
         requires: ['nodePath'],
       },
       duplicate: {
