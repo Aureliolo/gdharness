@@ -32757,16 +32757,9 @@ async function testACrashedRunIsNeverClean(): Promise<void> {
 }
 
 /**
- * An instance is marked Load as Placeholder by scene_node add and set, as the editor's toggle marks
- * it: the file holds `instance_placeholder`, the reads say so, and a game gets an
- * InstancePlaceholder there that names the scene. Unmarked, it is an ordinary instance again. A
- * write to a scene holding a placeholder keeps it. A placeholder without an instance, or on a node
- * that is no instance this scene places, is refused.
- */
-/**
- * null for a metadata key takes the entry off a node or a resource, as Godot's set_meta(name, null)
- * does, and the answer names it. A typed entry refused the null as a value it could not hold, so a
- * stale entry could only be overwritten with an empty one.
+ * A metadata key adds the entry when there is none, and null takes it off, on a node or a resource,
+ * as the inspector's Add Metadata and delete button do. The answer names what was taken off. A null
+ * for an entry that is not there, or a name no entry can have, is refused with nothing written.
  */
 async function testANullTakesAMetadataEntryOff(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -32828,6 +32821,67 @@ async function testANullTakesAMetadataEntryOff(): Promise<void> {
     assert.deepEqual(get(modified, 'metadataRemoved'), ['metadata/old'], JSON.stringify(modified));
     assert.doesNotMatch(file('stats.tres'), /metadata\/old/, file('stats.tres'));
     assert.match(file('stats.tres'), /metadata\/kept = 4\n/, file('stats.tres'));
+
+    const added = await answered('scene_node', {
+      op: 'set',
+      scenePath: 'widget.tscn',
+      nodePath: '.',
+      properties: {
+        'metadata/count': 2,
+        'metadata/tags': ['a', 'b'],
+        'metadata/at': { _type: 'Vector2', x: 1, y: 2 },
+      },
+    });
+    assert.deepEqual(
+      get(added, 'properties'),
+      { 'metadata/count': 2, 'metadata/tags': ['a', 'b'], 'metadata/at': { _type: 'Vector2', x: 1, y: 2 } },
+      JSON.stringify(added),
+    );
+    assert.equal(get(added, 'metadataRemoved'), undefined, JSON.stringify(added));
+    assert.equal(get(added, 'alsoChanged'), undefined, JSON.stringify(added));
+    assert.match(file('widget.tscn'), /metadata\/count = 2\n/, file('widget.tscn'));
+    assert.match(file('widget.tscn'), /metadata\/tags = \["a", "b"\]\n/, file('widget.tscn'));
+    assert.match(file('widget.tscn'), /metadata\/at = Vector2\(1, 2\)\n/, file('widget.tscn'));
+    const read = await answered('scene_node', { op: 'get', scenePath: 'widget.tscn', nodePath: '.' });
+    assert.equal(get(read, 'properties', 'metadata/count'), 2, JSON.stringify(read));
+
+    const made = await answered('resource_edit', {
+      op: 'modify',
+      resourcePath: 'res://stats.tres',
+      properties: { 'metadata/fresh': 'y' },
+    });
+    assert.deepEqual(get(made, 'properties'), { 'metadata/fresh': 'y' }, JSON.stringify(made));
+    assert.match(file('stats.tres'), /metadata\/fresh = "y"\n/, file('stats.tres'));
+    await answered('resource_edit', {
+      op: 'create',
+      resourcePath: 'made.tres',
+      resourceType: 'Resource',
+      properties: { 'metadata/a': 1, 'metadata/b': 'two' },
+    });
+    assert.match(file('made.tres'), /metadata\/a = 1\nmetadata\/b = "two"\n/, file('made.tres'));
+
+    const before = file('widget.tscn');
+    const absent = await call('scene_node', {
+      op: 'set',
+      scenePath: 'widget.tscn',
+      nodePath: '.',
+      properties: { 'metadata/kept': 9, 'metadata/absent': null },
+    });
+    assert.equal(
+      textOf(absent),
+      'Node2D has no metadata entry absent, so there is nothing to remove. None of the 2 properties given was written.',
+    );
+    const unnamed = await call('scene_node', {
+      op: 'set',
+      scenePath: 'widget.tscn',
+      nodePath: '.',
+      properties: { 'metadata/2nd': 1 },
+    });
+    assert.equal(
+      textOf(unnamed),
+      'metadata/2nd is not a name a metadata entry can have: letters, digits and underscores, not starting with a digit.',
+    );
+    assert.equal(file('widget.tscn'), before);
   } finally {
     await server.stop();
     sweep(project);
@@ -32835,6 +32889,13 @@ async function testANullTakesAMetadataEntryOff(): Promise<void> {
   }
 }
 
+/**
+ * An instance is marked Load as Placeholder by scene_node add and set, as the editor's toggle marks
+ * it: the file holds `instance_placeholder`, the reads say so, and a game gets an
+ * InstancePlaceholder there that names the scene. Unmarked, it is an ordinary instance again. A
+ * write to a scene holding a placeholder keeps it. A placeholder without an instance, or on a node
+ * that is no instance this scene places, is refused.
+ */
 async function testAnInstanceIsMarkedAsAPlaceholder(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {

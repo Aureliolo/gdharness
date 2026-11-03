@@ -243,14 +243,38 @@ func write_all(target: Object, properties: Dictionary) -> String:
 		var holder: Object = place[0]
 		var name: String = place[1]
 		var entry: String = name.trim_prefix("metadata/")
-		if (
-			properties[key] == null
-			and name.begins_with("metadata/")
-			and holder.has_meta(entry)
-		):
-			holder.remove_meta(entry)
-			metadata_removed.append(property)
-			continue
+		if name.begins_with("metadata/") and "/" not in entry and ":" not in entry:
+			if properties[key] == null:
+				if not holder.has_meta(entry):
+					return (
+						(
+							"%s has no metadata entry %s, so there is nothing to remove."
+							% [GdhPropertyPaths.class_called(holder), entry]
+						)
+						+ unwritten
+					)
+				holder.remove_meta(entry)
+				metadata_removed.append(property)
+				continue
+			# A new entry is made as the inspector's Add Metadata makes it, then written as any
+			# other. JSON has one kind of number, so a whole one makes an int, as `2` does in
+			# GDScript.
+			if not holder.has_meta(entry):
+				if not entry.is_valid_ascii_identifier():
+					return (
+						(
+							"metadata/%s is not a name a metadata entry can have: letters, digits "
+							+ "and underscores, not starting with a digit."
+						)
+						% entry
+						+ unwritten
+					)
+				var first: Variant = parse(properties[key])
+				if first is float:
+					var number: float = first
+					if number == roundf(number) and absf(number) < 2.0 ** 53:
+						first = int(number)
+				holder.set_meta(entry, first)
 		var declared: Dictionary = declaration(holder, name)
 		if declared.is_empty():
 			var elsewhere: String = GdhPropertyPaths.held_elsewhere(holder, name, home)
