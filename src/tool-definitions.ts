@@ -1108,7 +1108,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'boolean',
         ops: ['add', 'set'],
         description:
-          "add, with instancePath, or set, on an instance this scene places: whether it is saved as the editor's Load as Placeholder saves it, as `instance_placeholder` in the file. A game then gets an InstancePlaceholder there and loads the scene itself, while the editor still shows it. The answer says placeholder as the file now holds it.",
+          "add, with instancePath, or set, on an instance this scene places: whether it is saved as the editor's Load as Placeholder saves it, as `instance_placeholder` in the file. A game then gets an InstancePlaceholder there and loads the scene itself, while the editor still shows it. A placeholder loads without its children, so it never has editableChildren too. Passing editableChildren false with placeholder true drops the children's saved values. The answer says placeholder as the file now holds it.",
       },
       addGroups: {
         type: 'array',

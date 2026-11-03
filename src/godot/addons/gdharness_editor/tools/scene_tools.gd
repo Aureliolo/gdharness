@@ -1181,6 +1181,37 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	if not foreign.is_empty():
 		return scene.refuse(foreign)
 
+	# A placeholder loads without its children, so the editor never keeps both settings on.
+	var wants_placeholder: bool = placeholder != null and GdhRead.as_bool(placeholder)
+	var wants_editable: bool = editable != null and GdhRead.as_bool(editable)
+	if wants_placeholder and wants_editable:
+		return scene.refuse(
+			(
+				"placeholder and editableChildren cannot both be true, "
+				+ "since a placeholder loads without its children."
+			)
+		)
+	if wants_placeholder and editable == null and scene.root.is_editable_instance(node):
+		return scene.refuse(
+			(
+				(
+					"%s has editable children, which a placeholder cannot keep. Pass "
+					+ "editableChildren false with placeholder true to drop their saved values."
+				)
+				% scene.path_of(node)
+			)
+		)
+	if wants_editable and placeholder == null and node.get_scene_instance_load_placeholder():
+		return scene.refuse(
+			(
+				(
+					"%s is a placeholder, which loads without its children. "
+					+ "Pass placeholder false with editableChildren true."
+				)
+				% scene.path_of(node)
+			)
+		)
+
 	var dropped: Dictionary = {}
 	if editable != null:
 		var not_an_instance: String = GdhKin.set_editable(scene, node, GdhRead.as_bool(editable))
