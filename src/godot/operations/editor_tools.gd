@@ -23,6 +23,7 @@ const SCENE_COMMANDS: Array[String] = [
 	"set_node_properties",
 	"duplicate_node",
 	"reparent_node",
+	"save_branch",
 	"delete_node",
 	"bake_navigation",
 ]

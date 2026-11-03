@@ -9,6 +9,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
 import { DEFAULT_DAP_PORT } from './dap_client.js';
 import { HIDDEN_DESKTOP } from './desktop.js';
+import { placeEmptyScriptDocs } from './doc-cache.js';
 import { clearEditorLog, editorLogPath, writeEditorLogNote } from './editor-log.js';
 import { EngineUsageError } from './engine-launch.js';
 import { type EditorPorts, editorArguments, envValue, OPENED_BY_A_SERVER, startedAs } from './launch.js';
@@ -132,6 +133,14 @@ export async function openEditorProcess(
   clearEditorLog(projectPath);
   // An editor being restarted may not have let its library copies go yet.
   freeLibraryCopies(projectPath);
+  if (start.hidden) {
+    const unplaced = await placeEmptyScriptDocs(engine, projectPath);
+    if (unplaced !== null) {
+      console.error(
+        `[SERVER] The hidden editor starts without an empty script reference cache: ${unplaced}.`,
+      );
+    }
+  }
   const args = editorArguments(
     projectPath,
     ports,

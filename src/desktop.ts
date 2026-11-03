@@ -142,6 +142,18 @@ public static class GdharnessDesktop {
     }
   }
 
+  // The spec, the error file and the step file, by path. What stops it before the pid is written
+  // goes to the error file, since its own streams are the ones the process inherits.
+  public static int Main(string[] args) {
+    try {
+      Step(args[2], "reading its spec");
+      return RunSpec(args[0]);
+    } catch (Exception e) {
+      File.WriteAllText(args[1], e.Message);
+      return 1;
+    }
+  }
+
   // Starts the command line, both of its streams on this process's output, writes its pid, and
   // waits for it: the answer is its exit code. On the named desktop when there is one, whose handle
   // is held until then, since a desktop goes when the last handle to it does, and on this process's
@@ -150,10 +162,8 @@ public static class GdharnessDesktop {
   // and the foreground is held while it starts, since Godot also asks for it outright. The process
   // is ended through the handle held here once stopFile appears, which is how a keeper ends a game
   // it did not start itself: a handle names one process, where a pid can name the next one too. The
-  // process starts in directory rather than in this one's, which is a temporary directory: Windows
-  // PowerShell saves its module cache relative to where it runs when the profile does not resolve.
-  // The spec is one field a line, each base64 of its UTF-8, read with no PowerShell cmdlet: a cmdlet
-  // has PowerShell prepare its modules first, on every start.
+  // process starts in directory rather than in this one's, which is a temporary directory. The spec
+  // is one field a line, each base64 of its UTF-8.
   public static int RunSpec(string specFile) {
     string[] lines = File.ReadAllLines(specFile);
     Func<int, string> field = delegate(int index) { return Encoding.UTF8.GetString(Convert.FromBase64String(lines[index])); };
@@ -213,8 +223,8 @@ public static class GdharnessDesktop {
     Started started;
     // Inherited by what it starts: without SEM_NOGPFAULTERRORBOX, Windows Error Reporting runs when
     // the target crashes and writes its dump, and with the other two no hard-error box can open.
-    // Set outright rather than cleared from this process's own: Windows PowerShell changes the mode
-    // it inherited as it starts, and was seen reading 0x1 here, without the open-file bit.
+    // Set outright rather than cleared from this process's own, which is whatever started it chose:
+    // a Windows PowerShell host was seen reading 0x1 here, without the open-file bit.
     SetErrorMode(FailCriticalErrors | NoOpenFileErrorBox);
     if (noActivate) {
       LockSetForegroundWindow(LockForeground);
@@ -263,7 +273,7 @@ public static class GdharnessDesktop {
 }
 `;
 
-const HELPER = new CompiledHelper('desktop helper', 'gdharness-desktop', SOURCE);
+const HELPER = new CompiledHelper('desktop helper', 'gdharness-desktop', SOURCE, true);
 
 /** Where the compiled desktop helper is kept, named after its source. */
 export function helperAssembly(directory = tmpdir()): string {
@@ -341,28 +351,24 @@ export function helperStep(stepFile: string): string {
   } catch {
     // Never written: the helper's script had not begun.
   }
-  return step === null || step === ''
-    ? 'Windows PowerShell had not begun running the helper'
-    : `the helper was ${step}`;
+  return step === null || step === '' ? 'the helper had not begun' : `the helper was ${step}`;
 }
 
 /**
- * The Windows PowerShell invocation that starts [param command] on [param how]'s desktop, or on the
- * one in use when it names none, shown without activation when it says so. It writes its pid to
- * the pid file, waits for it and exits with its code, and ends it first if the stop file appears.
- * What stops it before the pid is written goes to the error file, since its own streams are the
- * ones the process inherits. The process starts in [param how]'s directory, which the helper is not run in.
+ * The helper invocation that starts [param command] on [param how]'s desktop, or on the one in use
+ * when it names none, shown without activation when it says so. It writes its pid to the pid file,
+ * waits for it and exits with its code, and ends it first if the stop file appears. What stops it
+ * before the pid is written goes to the error file, since its own streams are the ones the process
+ * inherits. The process starts in [param how]'s directory, which the helper is not run in.
  *
  * The spec goes in a file rather than on the command line. A long command line in base64 of the JSON
  * inside base64 of the script passed Windows' limit of 32767 characters on a command line: a keeper
  * starting a long command on a desktop of its own failed with ENAMETOOLONG before anything started.
  *
- * [param assembly] is the compiled helper, which {@link ensureHelperCompiled} makes first: loading
- * it is all this does, so the start's own time is spent on the start.
- *
- * The script calls no cmdlet. ConvertFrom-Json and Add-Type had Windows PowerShell prepare its
- * modules on every start, measured at 60 to 200 ms on a machine with few of them, and a start on a
- * Windows CI runner, whose module path is large, waited a minute for a pid that never came.
+ * [param assembly] is the compiled helper, which {@link ensureHelperCompiled} makes first, and is
+ * run as itself. A Windows PowerShell that loaded it for every engine cost each start an
+ * interpreter and an antimalware scan of its script, which no path exclusion skips: thirty of them
+ * alive at once kept Defender at about two cores.
  */
 export function throughHelper(
   how: {
@@ -394,28 +400,5 @@ export function throughHelper(
     fields.map((field) => Buffer.from(field, 'utf8').toString('base64')).join('\n'),
     'utf8',
   );
-  const literal = (path: string): string => `'${path.replaceAll("'", "''")}'`;
-  const script = [
-    "$ErrorActionPreference = 'Stop'",
-    'try {',
-    `  [IO.File]::WriteAllText(${literal(files.step)}, 'loading its assembly')`,
-    `  $null = [Reflection.Assembly]::LoadFrom(${literal(assembly)})`,
-    `  $code = [GdharnessDesktop]::RunSpec(${literal(files.spec)})`,
-    '} catch {',
-    `  [IO.File]::WriteAllText(${literal(files.error)}, $_.Exception.Message)`,
-    '  exit 1',
-    '}',
-    'exit $code',
-  ].join('\n');
-  return {
-    command: 'powershell.exe',
-    args: [
-      '-NoProfile',
-      '-NonInteractive',
-      '-ExecutionPolicy',
-      'Bypass',
-      '-EncodedCommand',
-      Buffer.from(script, 'utf16le').toString('base64'),
-    ],
-  };
+  return { command: assembly, args: [files.spec, files.error, files.step] };
 }

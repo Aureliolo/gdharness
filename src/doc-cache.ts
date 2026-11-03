@@ -1,6 +1,6 @@
 /**
  * The editor's class reference cache, and the crash a stale one causes as an import or an export
- * exits.
+ * exits. Also the project's script reference cache, whose absence crashes a hidden editor.
  *
  * Godot keeps the class reference in `editor_doc_cache-<major>.<minor>.res` in the editor's cache
  * directory, keyed on the exact build, so 4.7.1 and 4.7.2 share the file and each finds the other's
@@ -12,11 +12,22 @@
  * fresh cache first, so the next run is clean. A missing cache is rebuilt at once and never crashes.
  */
 
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import process from 'node:process';
-import { type EngineRun, howItEnded } from './engine-run.js';
+import { cacheHome } from './cache-home.js';
+import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
+import { discard, scratchDirectory } from './scratch.js';
 
 const CACHE_FILE = /^editor_doc_cache-\d+\.\d+\.res$/;
 
@@ -51,6 +62,84 @@ export function editorCacheDirectory(
   }
   const xdg = env['XDG_CACHE_HOME'];
   return join(xdg !== undefined && isAbsolute(xdg) ? xdg : join(home, '.cache'), 'godot');
+}
+
+/** The cache of the project's own script reference, which an editor reads as it starts. */
+export function scriptDocCachePath(projectPath: string): string {
+  return join(projectPath, '.godot', 'editor', 'editor_script_doc_cache.res');
+}
+
+/** Saves an empty script reference cache at the path given after `--`. */
+const EMPTY_SCRIPT_DOCS = [
+  'extends SceneTree',
+  '',
+  '',
+  'func _initialize() -> void:',
+  '\tvar cache: Resource = Resource.new()',
+  '\tcache.set_meta("classes", [])',
+  '\tvar saved: Error = ResourceSaver.save(cache, OS.get_cmdline_user_args()[0], ResourceSaver.FLAG_COMPRESS)',
+  '\tquit(0 if saved == OK else 1)',
+  '',
+].join('\n');
+
+/**
+ * Puts an empty script reference cache in [param projectPath] for an editor about to start hidden,
+ * unless the project has one. Answers null, or why it could not.
+ *
+ * An editor that finds no cache builds the reference on a thread, which walks the editor's file
+ * list and loads every script in it. A scan ending meanwhile frees that list, and the walk crashed
+ * the editor (4.7.2's `EditorHelp::_reload_scripts_documentation`, the same on master). The editor
+ * deletes the cache once it has read it and writes it again only as it quits cleanly, so every
+ * editor ended otherwise left the next one to walk. A hidden editor shows no reference, so it reads
+ * an empty one and walks nothing. The empty cache is made once per engine, by that engine, in
+ * [param kept], since the file's format is the engine's own.
+ */
+export async function placeEmptyScriptDocs(
+  godotPath: string,
+  projectPath: string,
+  kept: string = join(cacheHome(), 'script-docs'),
+): Promise<string | null> {
+  const target = scriptDocCachePath(projectPath);
+  if (existsSync(target)) {
+    return null;
+  }
+  let engine: { size: number; mtimeMs: number };
+  try {
+    engine = statSync(godotPath);
+  } catch {
+    return `the engine at ${godotPath} is not there`;
+  }
+  const digest = createHash('sha256')
+    .update(`${godotPath}\0${String(engine.size)}\0${String(engine.mtimeMs)}`)
+    .digest('hex')
+    .slice(0, 16);
+  const made = join(kept, `${digest}.res`);
+  if (!existsSync(made)) {
+    const scratch = scratchDirectory('script-docs');
+    try {
+      writeFileSync(join(scratch, 'project.godot'), 'config_version=5\n');
+      writeFileSync(join(scratch, 'empty.gd'), EMPTY_SCRIPT_DOCS);
+      mkdirSync(kept, { recursive: true });
+      // Beside it and moved into place, since another server can be making the same one.
+      const partial = `${made.slice(0, -4)}.${String(process.pid)}.res`;
+      const ran = await runEngine(
+        godotPath,
+        ['--headless', '--path', scratch, '-s', 'res://empty.gd', '--', partial],
+        {
+          timeout: { ms: 120_000, said: 'it ran for two minutes' },
+        },
+      );
+      if (!existsSync(partial)) {
+        return `the engine did not save an empty script reference cache (${howItEnded(ran)})`;
+      }
+      renameSync(partial, made);
+    } finally {
+      discard(scratch);
+    }
+  }
+  mkdirSync(dirname(target), { recursive: true });
+  copyFileSync(made, target);
+  return null;
 }
 
 /** When each class reference cache in [param directory] was last written, by path. */

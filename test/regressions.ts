@@ -58,6 +58,7 @@ import {
   declaredClasses,
   declaredClassLines,
   declaresMember,
+  eachScript,
   externalMemberIn,
   type FailedReload,
   failedReloadNote,
@@ -85,7 +86,12 @@ import {
   windowsCommandLine,
 } from '../src/desktop.js';
 import { dictionary, emptyRecord } from '../src/dictionary.js';
-import { docCacheCrash, editorCacheDirectory } from '../src/doc-cache.js';
+import {
+  docCacheCrash,
+  editorCacheDirectory,
+  placeEmptyScriptDocs,
+  scriptDocCachePath,
+} from '../src/doc-cache.js';
 import {
   bursts,
   clearEditorLog,
@@ -153,6 +159,7 @@ import {
   WAITING_FOLDER,
 } from '../src/engine-slots.js';
 import { crowded, nowSeconds, processorSecondsOf, type Sample, Spent, STARVED } from '../src/engine-spent.js';
+import { Refusal } from '../src/errors.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
 import { answersTo, foldedRepeats, forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
@@ -211,8 +218,9 @@ import {
   startedAs,
   userDataIn,
 } from '../src/launch.js';
-import { freeLibraryCopies, seedExtensionList } from '../src/library-copies.js';
+import { freeLibraryCopies, isLibraryCopy, seedExtensionList } from '../src/library-copies.js';
 import { callsInFlight, LIFECYCLE_LOG_LIMIT, writeLifecycle } from '../src/lifecycle-log.js';
+import { bytesOf, entriesOf, contentOf as listedContentOf, statOf } from '../src/listed-reads.js';
 import { LOG_LIMIT_BYTES, prependTo, readLog } from '../src/log-read.js';
 import {
   DEFAULT_LSP_PORT,
@@ -430,7 +438,7 @@ import {
 } from '../src/spawn.js';
 import { type ArmPlayed, armsPlayed, shareFaults, shareOf } from '../src/spread-run.js';
 import { followSuccessor, RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
-import { EVERY_FILE, reachedBySuite, SuiteInputs } from '../src/suite-inputs.js';
+import { EVERY_FILE, reachedBySuite, SuiteInputs, walkSeen } from '../src/suite-inputs.js';
 import {
   COMPILED_SAID,
   exitNamed,
@@ -9011,7 +9019,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 156;
+const READ_IN_WORDS = 157;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -11827,6 +11835,43 @@ function testAWallOfOneMessageCollapsesToItsShape(): void {
 }
 
 /**
+ * The editor's console leaves out the error Godot prints about a ViewportTexture's path as the
+ * addon loads a scene, and keeps the same error raised from a game's own script. The block is the
+ * engine's own, from an editor on 4.7.2.
+ */
+function testTheEditorsConsoleLeavesOutTheLookElsewhere(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-console-elsewhere-'));
+  const block = (frame: string): string =>
+    "ERROR: Path to node is invalid: 'Ground'.\n" +
+    '   at: _setup_local_to_scene (scene/main/viewport.cpp:216)\n' +
+    '   GDScript backtrace (most recent call first):\n' +
+    `       [0] open (${frame}:115)\n` +
+    '       [1] _open (res://addons/gdharness_editor/tools/scene_tools.gd:33)\n';
+  try {
+    writeEditorLogNote(project, 4242);
+    writeFileSync(
+      editorLogPath(project),
+      `Godot Engine v4.7.2.stable.official\n${block('res://addons/gdharness_editor/scene_file.gd')}` +
+        `${block('res://game/loader.gd')}ERROR: Parse Error: something\n` +
+        block('res://addons/gdharness_editor/scene_file.gd').replaceAll('\n', '\r\n'),
+    );
+    const read = editorConsole(project, 4242, true);
+    assert.ok(!('kind' in read), JSON.stringify(read));
+    if (!('kind' in read)) {
+      const errors = read.log.everything().filter((entry) => entry.severity === 'error');
+      assert.deepEqual(
+        errors.map((entry) => entry.text.split('\n')[0]),
+        ["Path to node is invalid: 'Ground'.", 'Parse Error: something'],
+        `the game's own error and the other stay, the addon's two go: ${JSON.stringify(errors)}`,
+      );
+      assert.match(JSON.stringify(errors[0]), /res:\/\/game\/loader\.gd/, "the one kept is the game's");
+    }
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * There is no console to read, said three different ways.
  *
  * An empty answer is the one thing this must never give, because an editor that printed nothing
@@ -13485,34 +13530,22 @@ async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
       assert.ok(screens(control.said)?.match(/^monitors=[1-9]/), control.said);
       assert.equal(screens(hidden.said), screens(control.said), `${hidden.said}\n${control.said}`);
     }
-    // The helper's script calls no cmdlet, so Windows PowerShell prepares no modules as it starts
-    // one, and writes no account of that among what the run printed.
-    const helperScript = Buffer.from(
-      throughHelper({ directory: scratch }, 'godot.exe', [], {
-        spec: join(scratch, 'spec'),
-        pid: join(scratch, 'pid'),
-        error: join(scratch, 'error'),
-        stop: join(scratch, 'stop'),
-        step: join(scratch, 'step'),
-      }).args.at(-1) ?? '',
-      'base64',
-    ).toString('utf16le');
-    assert.match(helperScript, /\[GdharnessDesktop\]::RunSpec\(/, helperScript);
-    const ran = spawnSyncHidden(
-      'powershell.exe',
-      [
-        '-NoProfile',
-        '-NonInteractive',
-        '-EncodedCommand',
-        Buffer.from(helperScript.replace(/\[GdharnessDesktop\]::RunSpec\([^)]*\)/, '0'), 'utf16le').toString(
-          'base64',
-        ),
-      ],
-      { encoding: 'utf8' },
-    );
-    assert.equal(ran.status, 0, `${ran.stdout}${ran.stderr}`);
-    assert.equal(readFileSync(join(scratch, 'step'), 'utf8'), 'loading its assembly', 'the script ran');
-    assert.doesNotMatch(`${ran.stdout}${ran.stderr}`, /Preparing modules/, `${ran.stdout}${ran.stderr}`);
+    // The helper runs as a program of its own, so no Windows PowerShell starts for an engine. One
+    // handed a spec that is not there says why in its error file and exits 1.
+    const files = {
+      spec: join(scratch, 'spec'),
+      pid: join(scratch, 'pid'),
+      error: join(scratch, 'error'),
+      stop: join(scratch, 'stop'),
+      step: join(scratch, 'step'),
+    };
+    const wrapper = throughHelper({ directory: scratch }, 'godot.exe', [], files);
+    assert.deepEqual(wrapper, { command: helperAssembly(), args: [files.spec, files.error, files.step] });
+    rmSync(files.spec);
+    const ran = spawnSyncHidden(wrapper.command, wrapper.args, { encoding: 'utf8' });
+    assert.equal(ran.status, 1, `${ran.stdout}${ran.stderr}`);
+    assert.equal(readFileSync(files.step, 'utf8'), 'reading its spec', 'the helper ran');
+    assert.match(readFileSync(files.error, 'utf8'), /spec/, 'and said why it stopped');
   } finally {
     sweep(scratch);
   }
@@ -19258,11 +19291,7 @@ async function testARelativeEnginePathIsMadeWhole(): Promise<void> {
     writeFileSync(written, 'Exception calling "Run": CreateProcessW godot.exe\r\n');
     assert.equal(helperFailure(written), 'Exception calling "Run": CreateProcessW godot.exe');
     const step = join(scratch, 'step');
-    assert.equal(
-      helperStep(step),
-      'Windows PowerShell had not begun running the helper',
-      'no step is no start',
-    );
+    assert.equal(helperStep(step), 'the helper had not begun', 'no step is no start');
     writeFileSync(step, 'creating the gdharness desktop');
     assert.equal(helperStep(step), 'the helper was creating the gdharness desktop');
   } finally {
@@ -28451,7 +28480,7 @@ async function testAnAbandonedScratchDirectoryIsSweptAndNothingElse(): Promise<v
     for (const path of [abandoned, ...kept]) {
       mkdirSync(join(path, 'Godot'), { recursive: true });
     }
-    const library = join(parent, 'gdharness-desktop-1c0454b3e7c20635.dll');
+    const library = join(parent, 'gdharness-desktop-1c0454b3e7c20635.exe');
     writeFileSync(library, 'x');
 
     sweepAbandonedScratch(parent);
@@ -48532,6 +48561,163 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
 }
 
 /**
+ * A suite's GDHARNESS_NEEDS_WINDOW or GDHARNESS_TOGETHER can name a constant of a class the project
+ * declares, so games sharing one suite each keep the value in a class of their own. A declaration
+ * gdharness cannot read is refused and names the suite, where reading it as undeclared would deal
+ * the suite to the wrong engine without a word.
+ */
+function testASuiteDeclarationCanNameAClassConstant(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-declared-'));
+  const suite = (head: string, extendsAs = 'GdUnitTestSuite'): string =>
+    `extends ${extendsAs}\n${head}\n\nfunc test_one() -> void:\n\tpass\n`;
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'addons/gdUnit4/src/GdUnitTestSuite.gd': 'class_name GdUnitTestSuite\nextends Node\n',
+      'tests/game_fixture.gd':
+        'class_name GameFixture\nextends RefCounted\n\nconst NEEDS_WINDOW: bool = true\nconst KEPT := true\n' +
+        'const QUIET: bool = false  # this game runs headless\nconst LOOSE: bool = NEEDS_WINDOW\n',
+      'tests/main_test.gd': suite(
+        'const GDHARNESS_NEEDS_WINDOW: bool = GameFixture.NEEDS_WINDOW\nconst GDHARNESS_TOGETHER := GameFixture.KEPT',
+      ),
+      'tests/quiet_test.gd': suite('const GDHARNESS_NEEDS_WINDOW: bool = GameFixture.QUIET  # per game'),
+      'tests/child_test.gd': suite('', '"res://tests/main_test.gd"'),
+      'refused/unknown_test.gd': suite('const GDHARNESS_NEEDS_WINDOW: bool = MissingFixture.NEEDS_WINDOW'),
+      'refused/inherits_test.gd': suite('', '"res://refused/unknown_test.gd"'),
+      'refused/absent_test.gd': suite('const GDHARNESS_NEEDS_WINDOW: bool = GameFixture.ABSENT'),
+      'refused/loose_test.gd': suite('const GDHARNESS_TOGETHER: bool = GameFixture.LOOSE'),
+      'refused/expression_test.gd': suite('const GDHARNESS_NEEDS_WINDOW: bool = not false'),
+    });
+    const scripts = new ProjectScripts(project);
+    assert.deepEqual(
+      scripts.suitesUnder(['res://tests']).map((one) => [one.path, one.windowed, one.headless, one.together]),
+      [
+        ['res://tests/child_test.gd', true, false, true],
+        ['res://tests/main_test.gd', true, false, true],
+        ['res://tests/quiet_test.gd', false, true, false],
+      ],
+      'a constant of a class is read as its literal, in the suite and through what it extends',
+    );
+    const refusals: [string, string][] = [
+      [
+        'res://refused/unknown_test.gd',
+        'res://refused/unknown_test.gd declares GDHARNESS_NEEDS_WINDOW as MissingFixture.NEEDS_WINDOW, and no script in the project declares class_name MissingFixture.',
+      ],
+      [
+        'res://refused/inherits_test.gd',
+        'res://refused/unknown_test.gd, which res://refused/inherits_test.gd extends, declares GDHARNESS_NEEDS_WINDOW as MissingFixture.NEEDS_WINDOW, and no script in the project declares class_name MissingFixture.',
+      ],
+      [
+        'res://refused/absent_test.gd',
+        'res://refused/absent_test.gd declares GDHARNESS_NEEDS_WINDOW as GameFixture.ABSENT, and res://tests/game_fixture.gd declares no ABSENT as true or false.',
+      ],
+      [
+        'res://refused/loose_test.gd',
+        'res://refused/loose_test.gd declares GDHARNESS_TOGETHER as GameFixture.LOOSE, and res://tests/game_fixture.gd declares no LOOSE as true or false, but as NEEDS_WINDOW.',
+      ],
+      [
+        'res://refused/expression_test.gd',
+        'res://refused/expression_test.gd declares GDHARNESS_NEEDS_WINDOW as not false, which gdharness cannot read before the run. Declare it as true or false, or as <ClassName>.<CONSTANT> naming a constant declared true or false.',
+      ],
+    ];
+    for (const [path, message] of refusals) {
+      assert.throws(
+        () => scripts.suite(path),
+        (error: unknown) => error instanceof Refusal && error.message === message,
+        `${path} is refused with: ${message}`,
+      );
+    }
+    assert.throws(
+      () => scripts.suitesUnder(['res://refused']),
+      Refusal,
+      'and a search meeting one is refused',
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A hidden editor starts on an empty script reference cache, made once per engine by that engine.
+ *
+ * With no cache the editor walks its file list on a thread, and a scan ending during the walk frees
+ * the list under it, which crashed the editor. The cache made is read back by the engine as the
+ * empty reference, a project's own cache is left alone, and a second project reuses the one made.
+ */
+async function testAHiddenEditorStartsOnAnEmptyScriptReference(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('script reference cache regression skipped (Godot not found)');
+    return;
+  }
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-script-docs-'));
+  const kept = join(root, 'kept');
+  const first = join(root, 'first');
+  const second = join(root, 'second');
+  try {
+    for (const project of [first, second]) {
+      writeTree(project, { 'project.godot': 'config_version=5\n' });
+    }
+    assert.equal(await placeEmptyScriptDocs(godotPath, first, kept), null);
+    const placed = scriptDocCachePath(first);
+    const made = readdirSync(kept);
+    assert.deepEqual(made.length, 1, `one cache made for the engine: ${made.join(', ')}`);
+    assert.deepEqual(
+      readFileSync(placed),
+      readFileSync(join(kept, made[0] ?? '')),
+      'and copied into the project',
+    );
+
+    writeFileSync(
+      join(first, 'read.gd'),
+      'extends SceneTree\n\n\nfunc _initialize() -> void:\n' +
+        '\tvar cache: Resource = load("res://.godot/editor/editor_script_doc_cache.res")\n' +
+        '\tprint("classes=", cache.get_meta("classes", null))\n\tquit()\n',
+    );
+    const read = spawnSyncHidden(godotPath, ['--headless', '--path', first, '-s', 'res://read.gd'], {
+      encoding: 'utf8',
+      timeout: 120_000,
+    });
+    assert.match(
+      read.stdout,
+      /^classes=\[\]$/m,
+      `the engine reads it as an empty reference: ${read.stdout}${read.stderr}`,
+    );
+
+    // A project's own cache, which a clean quit wrote, is the editor's to read.
+    writeFileSync(placed, 'its own');
+    assert.equal(await placeEmptyScriptDocs(godotPath, first, kept), null);
+    assert.equal(readFileSync(placed, 'utf8'), 'its own', "a project's own cache is left alone");
+
+    const old = new Date(Date.now() - 3_600_000);
+    utimesSync(join(kept, made[0] ?? ''), old, old);
+    assert.equal(await placeEmptyScriptDocs(godotPath, second, kept), null);
+    assert.equal(
+      statSync(join(kept, made[0] ?? '')).mtimeMs,
+      old.getTime(),
+      'a second project reuses the cache made for the engine',
+    );
+    assert.ok(existsSync(scriptDocCachePath(second)), 'and gets it too');
+
+    assert.equal(
+      await placeEmptyScriptDocs(join(root, 'no-engine.exe'), second, kept),
+      null,
+      'a project holding a cache needs no engine',
+    );
+    rmSync(scriptDocCachePath(second));
+    assert.equal(
+      await placeEmptyScriptDocs(join(root, 'no-engine.exe'), second, kept),
+      `the engine at ${join(root, 'no-engine.exe')} is not there`,
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
  * A suite's inputs are what its engine recorded, followed along what compiles with a script and what
  * a resource names, and its print moves with those and nothing else. A file read or a folder listed
  * by a literal or constant path is an input. One read by a path worked out at run time makes every
@@ -48803,6 +48989,70 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
     );
   } finally {
     sweep(project);
+  }
+}
+
+/**
+ * A walk over a project passes over a file or folder removed after it was listed, as an engine on
+ * Windows removes the copy of a library it loads, and a suite's print leaves such copies out.
+ */
+function testAFileGoneBetweenTheListingAndTheReadIsPassedOver(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gone-'));
+  const tree = { 'a.gd': 'a', 'b.gd': 'b', 'c.gd': 'c', 'd/e.gd': 'e' };
+  // The first file read takes every other entry away, whichever order the listing came in.
+  const takeTheRest = (kept: string): void => {
+    for (const name of ['a.gd', 'b.gd', 'c.gd', 'd'].filter((one) => one !== kept)) {
+      rmSync(join(project, name), { recursive: true });
+    }
+  };
+  try {
+    writeTree(project, tree);
+    const walked: string[] = [];
+    walkSeen(project, (under, bytes) => {
+      if (walked.length === 0) {
+        takeTheRest(under);
+      }
+      walked.push(`${under}=${bytes.toString('utf8')}`);
+    });
+    assert.deepEqual(walked, ['a.gd=a'], 'the walk a suite print reads');
+
+    writeTree(project, tree);
+    const scripts: string[] = [];
+    eachScript(project, (script, source) => {
+      if (scripts.length === 0) {
+        takeTheRest(script.slice('res://'.length));
+      }
+      scripts.push(`${script}=${source}`);
+    });
+    assert.equal(scripts.length, 1, `the walk over every script: ${JSON.stringify(scripts)}`);
+
+    // Gone is the one failure passed over.
+    assert.equal(statOf(join(project, 'gone.gd')), undefined);
+    assert.equal(bytesOf(join(project, 'gone.gd')), null);
+    assert.equal(listedContentOf(join(project, 'gone.gd')), null);
+    assert.deepEqual(entriesOf(join(project, 'gone')), []);
+    // A failure both runtimes throw on every platform. Bun on Linux and macOS lists a file as a
+    // directory without ENOTDIR.
+    const unreadable = join(project, 'a\0.gd');
+    assert.throws(() => entriesOf(unreadable), { code: 'ERR_INVALID_ARG_VALUE' });
+    assert.throws(() => bytesOf(unreadable), { code: 'ERR_INVALID_ARG_VALUE' });
+
+    const copies = ['~lib.dll', '~LIB.DLL', '~lib_0.pdb', '~lib_12.pdb', '~lib.dll.aside-40-1700000000000'];
+    const kept = ['lib.dll', '~notes.txt', '~lib_x.pdb', '~lib.pdb', '~other.dll', 'lib_0.pdb'];
+    assert.deepEqual(
+      [...copies, ...kept].filter((name) => isLibraryCopy(name, ['lib.dll', 'notes.txt'])),
+      copies,
+    );
+
+    writeTree(project, { 'project.godot': 'config_version=5\n', 'bin/lib.dll': 'dll', 'bin/notes.txt': 'n' });
+    const print = (): string => new SuiteInputs(new ProjectScripts(project), ['1']).printOf([EVERY_FILE]);
+    const before = print();
+    writeTree(project, { 'bin/~lib.dll': 'dll', 'bin/~lib_0.pdb': 'pdb' });
+    assert.equal(print(), before, "an engine's copies of a library are no input");
+    writeTree(project, { 'bin/~notes.txt': 'n' });
+    assert.notEqual(print(), before, 'a file of the project whose name starts with ~ is one');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
   }
 }
 
@@ -53095,7 +53345,11 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
         assert.equal(await readyPid(ready, what), pid, `${what}: the engine is the process launched`);
         assertReportable(pid, what);
         if (kept) {
-          await assertStartedBy(pid, runtimeName === 'Bun' ? /keeper\.js"? keep/ : /powershell/i, what);
+          await assertStartedBy(
+            pid,
+            runtimeName === 'Bun' ? /keeper\.js"? keep/ : /gdharness-desktop-[0-9a-f]{16}\.exe/i,
+            what,
+          );
         }
       }
 
@@ -53137,7 +53391,7 @@ async function testAnEngineGdharnessStartsCanHaveItsCrashReported(): Promise<voi
       assertReportable(pid, what);
       // Every engine of a test run is on the hidden desktop, so it goes through the helper under
       // either runtime, which is what makes its error mode the helper's to set.
-      await assertStartedBy(pid, /powershell/i, what);
+      await assertStartedBy(pid, /gdharness-desktop-[0-9a-f]{16}\.exe/i, what);
       writeFileSync(read, '');
       const { code } = await exited;
       assert.equal(code, 0, `${what}: the suite was let go and passed: ${printed}`);
@@ -57395,7 +57649,7 @@ function testEveryToolNamedInProseIsATool(): void {
   // gdUnit4 setting a test run obeys on script errors, and the signal and the messages the engine's
   // debugger speaks in, which the keeper's debugger reads, a key the editor writes in
   // export_presets.cfg, the directory a self-contained editor keeps its data in, the file the
-  // editor caches its class reference in, the name every resource stores, and the gdUnit4 call a
+  // editor caches its class and script references in, the name every resource stores, and the gdUnit4 call a
   // suite that drives a scene makes, which is what puts it in the windowed engine, and the project
   // setting that turns that guess off, and the engine setting naming a file laid over the project's
   // settings, which a write keeps out of project.godot. Named one by one rather than matched by a
@@ -57427,6 +57681,7 @@ function testEveryToolNamedInProseIsATool(): void {
     'script_export_mode',
     'editor_data',
     'editor_doc_cache',
+    'editor_script_doc_cache',
     'resource_name',
     'editor_servers',
     'scene_runner',
@@ -70095,6 +70350,9 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
   const project = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-editor-view-')));
   const home = join(project, 'home');
   mkdirSync(home);
+  // Kept out of the editor's scans, which would otherwise import the editor's own settings and
+  // caches as it writes them, for seconds at a time.
+  writeFileSync(join(home, '.gdignore'), '');
   const saved = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-view-out-'));
   installAddons(project);
   writeFileSync(
@@ -70267,6 +70525,9 @@ async function testACallWaitsOutTheEditorsProgressTask(): Promise<void> {
   const project = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-editor-task-')));
   const home = join(project, 'home');
   mkdirSync(home);
+  // Kept out of the editor's scans, which would otherwise import the editor's own settings and
+  // caches as it writes them, for seconds at a time.
+  writeFileSync(join(home, '.gdignore'), '');
   installAddons(project);
   writeFileSync(
     join(project, 'project.godot'),
@@ -70308,6 +70569,13 @@ async function testACallWaitsOutTheEditorsProgressTask(): Promise<void> {
       connected = get(parseTextContent(await call('editor_status', {})), 'editor', 'connected') === true;
     }
     assert.ok(connected, 'the hidden editor connected');
+    // Started on an empty script reference cache, made for this engine: without one the editor walks
+    // its file list on a thread while the scans below free it, and crashed.
+    const made = join(home, 'gdharness', 'script-docs');
+    assert.ok(
+      existsSync(made) && readdirSync(made).some((name) => /^[0-9a-f]{16}\.res$/.test(name)),
+      `the hidden editor's empty script reference cache was made: ${existsSync(made) ? readdirSync(made).join(', ') : 'no folder'}`,
+    );
 
     const classes = 40;
     mkdirSync(join(project, 'many'));
@@ -70347,7 +70615,15 @@ async function testACallWaitsOutTheEditorsProgressTask(): Promise<void> {
       /Task '\w+' already exists|Do not use progress dialog/,
       `no call ran inside the editor's task: ${log.slice(0, 3000)}`,
     );
-    assert.deepEqual(refused, [], 'every add was answered');
+    const bridgeSaid = server.stderr
+      .split('\n')
+      .filter((line) => line.includes('GodotBridge'))
+      .join('\n');
+    assert.deepEqual(
+      refused,
+      [],
+      `every add was answered. The editor's log ends: ${log.slice(-4000)}\nThe bridge said: ${bridgeSaid.slice(-4000)}`,
+    );
     let idle = false;
     for (let waited = 0; waited < 120_000 && !idle; waited += 500) {
       const scan = get(parseTextContent(await call('editor_status', {})), 'editor', 'scan');
@@ -72008,6 +72284,340 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
  * - an image written since the import is named as not yet imported, with the call that imports
  *   it, which this then makes and follows.
  */
+/**
+ * scene_node save_branch with no editor: the branch, painted cells and all, becomes a scene of its
+ * own, and the scene it came from instances that scene in its place and keeps what it named there.
+ */
+async function testABranchIsSavedAsItsOwnSceneWithNoEditor(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('save_branch without an editor regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-branch-engine-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-branch-engine-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Branch"\n',
+  );
+  writeFileSync(
+    join(project, 'tiles.png'),
+    pixelPng(8, 8, () => [200, 40, 40, 255]),
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    // A tool script, so a headless write does not put back what the call changed on the root.
+    '@tool\nextends Node2D\n\n@export var tiles_path: NodePath\n@export var sprite: Sprite2D\n\n\n' +
+      'func hit() -> void:\n\tpass\n\n\nfunc tiles() -> Node:\n\treturn %Tiles\n',
+  );
+  writeFileSync(
+    join(project, 'hand.gd'),
+    'extends Node2D\n\n@export var target: NodePath\n@export var player: Node2D\n\n\n' +
+      'func poke() -> void:\n\tpass\n\n\nfunc far() -> Node:\n\treturn %After\n',
+  );
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 240_000);
+  const host = { scenePath: 'res://main.tscn' };
+  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
+  const idOf = (scene: string, header: RegExp): string => {
+    const line = scene.split('\n').find((one) => header.test(one)) ?? '';
+    return / unique_id=(\d+)/.exec(line)?.[1] ?? `no unique_id on ${line}`;
+  };
+  const nodeBody = (scene: string, name: string): string => {
+    const found = new RegExp(`\\[node name="${name}"[^\\n]*\\n([\\s\\S]*?)(?=\\r?\\n\\[|$)`).exec(scene);
+    assert.ok(found, `the scene has no node ${name}:\n${scene}`);
+    return (found[1] ?? '').trim();
+  };
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('branch-engine');
+    await call('resource_edit', {
+      op: 'create_tileset',
+      resourcePath: 'res://set.tres',
+      sources: [{ texture: 'res://tiles.png', tileSize: { x: 4, y: 4 } }],
+    });
+    writeFileSync(
+      join(project, 'leaf.tscn'),
+      '[gd_scene format=3]\n\n[node name="Leaf" type="Node2D"]\n\n[node name="Inner" type="Node2D" parent="."]\n',
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=8 format=3]\n\n' +
+        '[ext_resource type="Script" path="res://main.gd" id="1"]\n' +
+        '[ext_resource type="Script" path="res://hand.gd" id="2"]\n' +
+        '[ext_resource type="TileSet" path="res://set.tres" id="3"]\n' +
+        '[ext_resource type="PackedScene" path="res://leaf.tscn" id="5"]\n\n' +
+        '[sub_resource type="CanvasItemMaterial" id="4"]\nblend_mode = 1\n\n' +
+        '[sub_resource type="Animation" id="6"]\nresource_name = &"flash"\ntracks/0/type = "value"\n' +
+        'tracks/0/imported = false\ntracks/0/enabled = true\ntracks/0/path = NodePath("%Tiles:modulate")\n' +
+        'tracks/0/interp = 1\ntracks/0/loop_wrap = true\n' +
+        'tracks/0/keys = {"times": PackedFloat32Array(0), "transitions": PackedFloat32Array(1), "update": 0, "values": [Color(1, 1, 1, 1)]}\n\n' +
+        '[sub_resource type="AnimationLibrary" id="7"]\n_data = {&"flash": SubResource("6")}\n\n' +
+        '[node name="Main" type="Node2D" node_paths=PackedStringArray("sprite")]\nscript = ExtResource("1")\n' +
+        'tiles_path = NodePath("%Tiles")\n' +
+        'sprite = NodePath("Branch/Sprite")\n\n' +
+        '[node name="Before" type="Node2D" parent="."]\n\n' +
+        '[node name="Branch" type="Node2D" parent="." groups=["props"]]\nunique_name_in_owner = true\n' +
+        'position = Vector2(30, 40)\nrotation = 0.5\nscale = Vector2(2, 2)\n\n' +
+        '[node name="Tiles" type="TileMapLayer" parent="Branch"]\nunique_name_in_owner = true\n' +
+        'tile_set = ExtResource("3")\n\n' +
+        '[node name="Sprite" type="Sprite2D" parent="Branch"]\nmaterial = SubResource("4")\n\n' +
+        '[node name="Hand" type="Node2D" parent="Branch" node_paths=PackedStringArray("player")]\n' +
+        'script = ExtResource("2")\n' +
+        'target = NodePath("../Sprite")\nplayer = NodePath("../../Before")\n\n' +
+        '[node name="Arm" type="Node2D" parent="Branch"]\nscript = ExtResource("2")\ntarget = NodePath("../Tiles")\n\n' +
+        '[node name="Leaf" parent="Branch" instance=ExtResource("5")]\n\n' +
+        '[node name="Inner" parent="Branch/Leaf"]\nposition = Vector2(5, 6)\n\n' +
+        '[node name="After" type="Node2D" parent="."]\nunique_name_in_owner = true\n\n' +
+        '[node name="Player" type="AnimationPlayer" parent="."]\nlibraries = {&"": SubResource("7")}\n\n' +
+        '[connection signal="visibility_changed" from="Branch/Sprite" to="Branch/Hand" method="poke"]\n' +
+        '[connection signal="visibility_changed" from="Branch/Sprite" to="Branch/Hand" method="gone" binds= [1]]\n' +
+        '[connection signal="visibility_changed" from="Before" to="Branch/Sprite" method="gone" binds= [2]]\n' +
+        '[connection signal="visibility_changed" from="Branch" to="." method="hit"]\n' +
+        '[connection signal="visibility_changed" from="Before" to="Branch/Hand" method="poke"]\n' +
+        '[connection signal="visibility_changed" from="Branch/Hand" to="." method="hit"]\n\n' +
+        '[editable path="Branch/Leaf"]\n',
+    );
+    // A scene inheriting this one and one instancing it, each keeping a value inside the branch.
+    writeFileSync(
+      join(project, 'heir.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://main.tscn" id="1"]\n\n' +
+        '[node name="Main" instance=ExtResource("1")]\n\n' +
+        '[node name="Sprite" parent="Branch"]\nmodulate = Color(1, 0, 0, 1)\n',
+    );
+    writeFileSync(
+      join(project, 'outer.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://main.tscn" id="1"]\n\n' +
+        '[node name="Outer" type="Node2D"]\n\n[node name="Main" parent="." instance=ExtResource("1")]\n\n' +
+        '[node name="Sprite" parent="Main/Branch"]\nmodulate = Color(0, 1, 0, 1)\n\n[editable path="Main"]\n',
+    );
+    const painted = await call('scene_node', {
+      ...host,
+      op: 'set_tilemap_cells',
+      nodePath: 'Branch/Tiles',
+      cells: [
+        { coords: { x: 0, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
+        { coords: { x: 3, y: -2 }, sourceId: 0, atlasCoords: { x: 1, y: 1 } },
+        { coords: { x: -5, y: 7 }, sourceId: 0, atlasCoords: { x: 1, y: 0 } },
+      ],
+    });
+    assert.equal(get(parseTextContent(painted), 'placed'), 3, textOf(painted) ?? '');
+    const tilesOf = async (scene: Record<string, unknown>, nodePath: string): Promise<unknown> => {
+      const read = parseTextContent(await call('scene_node', { ...scene, op: 'get', nodePath }));
+      return { count: get(read, 'cellCount'), cells: get(read, 'cells') };
+    };
+    const cells = await tilesOf(host, 'Branch/Tiles');
+    assert.equal(get(cells, 'count'), 3, JSON.stringify(cells));
+    const branchId = idOf(fileOf('main.tscn'), /^\[node name="Branch"/);
+    assert.match(branchId, /^\d+$/, fileOf('main.tscn'));
+
+    const saved = parseTextContent(
+      await call('scene_node', {
+        ...host,
+        op: 'save_branch',
+        nodePath: 'Branch',
+        newScenePath: 'parts/branch',
+      }),
+    );
+    assert.deepEqual(
+      [get(saved, 'nodePath'), get(saved, 'newScenePath'), get(saved, 'index')],
+      ['Branch', 'res://parts/branch.tscn', 1],
+      JSON.stringify(saved),
+    );
+    assert.deepEqual(
+      get(saved, 'retargeted'),
+      [
+        {
+          scenePath: 'res://main.tscn',
+          nodePath: '.',
+          property: 'tiles_path',
+          from: '%Tiles',
+          to: 'Branch/Tiles',
+        },
+        {
+          scenePath: 'res://main.tscn',
+          nodePath: 'Player',
+          animation: 'flash',
+          track: 0,
+          from: '%Tiles:modulate',
+          to: 'Branch/Tiles:modulate',
+        },
+      ],
+      JSON.stringify(saved),
+    );
+    assert.deepEqual(
+      get(saved, 'scriptsNaming'),
+      [
+        {
+          scenePath: 'res://main.tscn',
+          nodePath: '.',
+          script: 'res://main.gd',
+          line: 13,
+          from: '%Tiles',
+          to: 'Branch/Tiles',
+        },
+        // A unique node outside the branch, which the new scene's own nodes cannot reach by name.
+        {
+          scenePath: 'res://parts/branch.tscn',
+          nodePath: 'Hand',
+          script: 'res://hand.gd',
+          line: 12,
+          from: '%After',
+        },
+        {
+          scenePath: 'res://parts/branch.tscn',
+          nodePath: 'Arm',
+          script: 'res://hand.gd',
+          line: 12,
+          from: '%After',
+        },
+      ],
+      JSON.stringify(saved),
+    );
+    assert.deepEqual(get(saved, 'followed'), ['res://heir.tscn', 'res://outer.tscn'], JSON.stringify(saved));
+    assert.deepEqual(
+      get(saved, 'namesOutside'),
+      [{ nodePath: 'Hand', property: 'player', names: 'Before', cleared: true }],
+      JSON.stringify(saved),
+    );
+
+    // The original instances the new scene where the branch was, as the same node.
+    const tree = parseTextContent(await call('scene_tree', host));
+    assert.deepEqual(
+      asArray(get(tree, 'tree', 'children')).map((child) => [get(child, 'name'), get(child, 'instanceOf')]),
+      [
+        ['Before', undefined],
+        ['Branch', 'res://parts/branch.tscn'],
+        ['After', undefined],
+        ['Player', undefined],
+      ],
+      JSON.stringify(tree),
+    );
+    const written = fileOf('main.tscn');
+    assert.ok(written.includes('tracks/0/path = NodePath("Branch/Tiles:modulate")'), written);
+    assert.equal(idOf(written, /^\[node name="Branch"/), branchId, written);
+    const entry = nodeBody(written, 'Branch');
+    // Rotation and scale stay in the new scene, which keeps them as the branch had them.
+    assert.deepEqual(
+      entry.split('\n'),
+      ['unique_name_in_owner = true', 'position = Vector2(30, 40)'],
+      written,
+    );
+    for (const line of [
+      '[connection signal="visibility_changed" from="Branch" to="." method="hit"]',
+      '[connection signal="visibility_changed" from="Before" to="Branch/Hand" method="poke"]',
+      '[connection signal="visibility_changed" from="Before" to="Branch/Sprite" method="gone" binds= [2]]',
+    ]) {
+      assert.ok(written.includes(line), `the scene keeps ${line}: ${written}\n${JSON.stringify(saved)}`);
+    }
+    assert.ok(!written.includes('Leaf'), `the instance inside the branch went with it: ${written}`);
+    // A connection out of the branch from below its top is either in the file or named as lost.
+    const outOf = {
+      sourceNodePath: 'Branch/Hand',
+      signalName: 'visibility_changed',
+      targetNodePath: '.',
+      methodName: 'hit',
+    };
+    const lost = asArray(get(saved, 'connectionsLost') ?? []);
+    assert.notEqual(
+      lost.some((one) => JSON.stringify(one) === JSON.stringify(outOf)),
+      written.includes('[connection signal="visibility_changed" from="Branch/Hand" to="." method="hit"]'),
+      `${JSON.stringify(lost)}\n${written}`,
+    );
+    assert.ok(!written.includes('Branch/Sprite" to'), `the branch's own connection went with it: ${written}`);
+    assert.ok(!written.includes('[node name="Tiles"'), `the branch's nodes went with it: ${written}`);
+
+    // The paths that named nodes of the branch still name them.
+    const root = parseTextContent(await call('scene_node', { ...host, op: 'get', nodePath: '.' }));
+    assert.deepEqual(
+      [get(root, 'properties', 'tiles_path'), get(root, 'properties', 'sprite')],
+      [
+        { _type: 'NodePath', path: 'Branch/Tiles' },
+        { _type: 'NodePath', path: 'Branch/Sprite' },
+      ],
+      JSON.stringify(root),
+    );
+    assert.deepEqual(await tilesOf(host, 'Branch/Tiles'), cells, 'the instance has the cells');
+
+    // The new scene holds the branch as it was, its root back at the origin.
+    const part = { scenePath: 'res://parts/branch.tscn' };
+    assert.deepEqual(await tilesOf(part, 'Tiles'), cells, 'the new scene has the cells');
+    const made = fileOf('parts/branch.tscn');
+    const top = nodeBody(made, 'Branch');
+    assert.ok(!top.includes('position') && !top.includes('unique_name_in_owner'), made);
+    assert.match(made, /^\[node name="Branch" type="Node2D" unique_id=\d+ groups=\["props"\]\]$/m, made);
+    for (const line of [
+      'rotation = 0.5',
+      'scale = Vector2(2, 2)',
+      'blend_mode = 1',
+      'target = NodePath("../Sprite")',
+      '[connection signal="visibility_changed" from="Sprite" to="Hand" method="poke"]',
+      '[connection signal="visibility_changed" from="Sprite" to="Hand" method="gone" binds= [1]]',
+      '[editable path="Leaf"]',
+    ]) {
+      assert.ok(made.includes(line), `the new scene holds ${line}: ${made}`);
+    }
+    assert.equal(nodeBody(made, 'Inner'), 'position = Vector2(5, 6)', made);
+    assert.ok(nodeBody(made, 'Tiles').includes('unique_name_in_owner = true'), made);
+    assert.ok(!nodeBody(made, 'Hand').includes('player'), `the node outside is cleared: ${made}`);
+    assert.match(
+      nodeBody(made, 'Arm'),
+      /^script = ExtResource\("[^"]+"\)\ntarget = NodePath\("\.\.\/Tiles"\)$/,
+      made,
+    );
+
+    // The scenes keeping a value inside the branch keep it through their next write.
+    for (const [file, scene, nodePath, colour] of [
+      ['heir.tscn', 'res://heir.tscn', 'Before', 'Color(1, 0, 0, 1)'],
+      ['outer.tscn', 'res://outer.tscn', '.', 'Color(0, 1, 0, 1)'],
+    ] as const) {
+      const set = await call('scene_node', {
+        scenePath: scene,
+        op: 'set',
+        nodePath,
+        properties: { position: { x: 1, y: 2 } },
+      });
+      assert.equal(get(parseTextContent(set), 'ok') ?? true, true, textOf(set) ?? '');
+      assert.equal(nodeBody(fileOf(file), 'Sprite'), `modulate = ${colour}`, fileOf(file));
+    }
+
+    for (const [args, said] of [
+      [{ nodePath: '.', newScenePath: 'res://whole.tscn' }, /The root is the whole scene/],
+      [{ nodePath: 'Before', newScenePath: 'res://parts/branch.tscn' }, /already exists/],
+      [{ nodePath: 'Before', newScenePath: 'res://main.tscn' }, /the scene the branch is in/],
+      [
+        { nodePath: 'Branch', newScenePath: 'res://again.tscn' },
+        /is an instance of res:\/\/parts\/branch\.tscn/,
+      ],
+      [
+        { nodePath: 'Branch/Tiles', newScenePath: 'res://again.tscn' },
+        /inside the scene instanced at Branch/,
+      ],
+    ] as const) {
+      const refused = await call('scene_node', { ...host, op: 'save_branch', ...args });
+      assert.match(textOf(refused) ?? '', said, JSON.stringify(args));
+    }
+    assert.ok(!existsSync(join(project, 'again.tscn')) && !existsSync(join(project, 'whole.tscn')));
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
 async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -72830,6 +73440,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStateMachineWrittenWithNoEditorRunsAsWritten,
   testANodeKeepsItsGroupsAndItsPlace,
   testAThemeAndATilesetWithNoEditor,
+  testABranchIsSavedAsItsOwnSceneWithNoEditor,
   testAControlIsLaidOutAsTheEditorLaysItOut,
   testAProjectsFilesAndLayersAreNamedWithNoEditor,
   testANavigationRegionIsBakedWithNoEditor,
@@ -73111,6 +73722,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameTooNewToTalkToIsStillAGame,
   testAWallOfOneMessageCollapsesToItsShape,
   testAnUncapturedConsoleSaysWhichEditorItIs,
+  testTheEditorsConsoleLeavesOutTheLookElsewhere,
   testAnEditorsProgressIsOneLinePerTask,
   testAnEditorWritesItsConsoleWhereTheServerLooks,
   testAUidCacheNamingAFileGoneIsMended,
@@ -73214,7 +73826,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineOnASlotLendsItToWhatItStarts,
   testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded,
   testSuitesAreFoundAndDealtByWhatTheyCost,
+  testASuiteDeclarationCanNameAClassConstant,
+  testAHiddenEditorStartsOnAnEmptyScriptReference,
   testASuitesInputsAreWhatItsEngineLoaded,
+  testAFileGoneBetweenTheListingAndTheReadIsPassedOver,
   testTheCompileCheckAndUnattributedFaultsAreJudged,
   testTheTestCommandReadsItsOwnOptions,
   testTheLspCommandFindsTheEditorsPort,

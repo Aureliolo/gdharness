@@ -180,19 +180,7 @@ static func follow(
 ) -> Dictionary:
 	var texts: Dictionary = {}
 	_read_scenes("res://", texts)
-	var kin: Array[String] = [changed]
-	var grew: bool = true
-	while grew:
-		grew = false
-		for scene_path: String in texts:
-			if kin.has(scene_path):
-				continue
-			var text: String = texts[scene_path]
-			for one: String in kin:
-				if text.contains(' path="%s"' % one):
-					kin.append(scene_path)
-					grew = true
-					break
+	var kin: Array[String] = _kin_of(changed, texts)
 	var followed: Array[String] = []
 	var not_followed: Array[Dictionary] = []
 	for scene_path: String in kin:
@@ -245,6 +233,92 @@ static func follow(
 	if not not_followed.is_empty():
 		answer["notFollowed"] = not_followed
 	return answer
+
+
+## Marks the instance a branch at [param at] in [param changed] became editable in every other
+## .tscn that instances or inherits [param changed] at any depth, wherever that scene keeps values
+## on a node inside it or adds one below it. Those still load, and the next save of that scene
+## dropped them, since the packer skips every node under an instance whose children are not
+## editable. Answers followed, the scenes marked, and notFollowed, each left with why, each only
+## when it names any.
+static func enclose(changed: String, at: String) -> Dictionary:
+	var texts: Dictionary = {}
+	_read_scenes("res://", texts)
+	var followed: Array[String] = []
+	var not_followed: Array[Dictionary] = []
+	for scene_path: String in _kin_of(changed, texts):
+		if scene_path == changed:
+			continue
+		var moves: Dictionary = {}
+		if _inherits(scene_path, changed, texts):
+			moves[at] = at
+		var read: Dictionary = GdhFileReads.scene_tree(scene_path, -1, false, false)
+		if not read.get("ok", false):
+			not_followed.append({ "scenePath": scene_path, "reason": str(read.get("error", "")) })
+			continue
+		var tree: Dictionary = read["tree"]
+		_instances_of(tree, changed, at, at, moves)
+		var text: String = texts[scene_path]
+		var marks: PackedStringArray = []
+		for path: String in moves:
+			var mark: String = '[editable path="%s"]' % path
+			if not text.contains(mark) and _holds_below(text, path):
+				var _marked: bool = marks.append(mark)
+		if marks.is_empty():
+			continue
+		var unsaved: String = GdhSceneFile.unsaved_in_editor(scene_path)
+		if not unsaved.is_empty():
+			not_followed.append({ "scenePath": scene_path, "reason": unsaved })
+			continue
+		var file: FileAccess = FileAccess.open(scene_path, FileAccess.WRITE)
+		if (file == null
+				or not file.store_string(text.rstrip("\n") + "\n\n" + "\n".join(marks) + "\n")):
+			not_followed.append(
+				{ "scenePath": scene_path, "reason": error_string(FileAccess.get_open_error()) }
+			)
+			continue
+		file.close()
+		GdhSceneFile.refresh(scene_path)
+		followed.append(scene_path)
+	var answer: Dictionary = {}
+	if not followed.is_empty():
+		answer["followed"] = followed
+	if not not_followed.is_empty():
+		answer["notFollowed"] = not_followed
+	return answer
+
+
+## Whether [param text], a scene's file, has a node entry below [param path], one setting values on
+## a node there or adding one.
+static func _holds_below(text: String, path: String) -> bool:
+	for line: String in text.split("\n"):
+		if not line.begins_with("[node "):
+			continue
+		var parent: String = _attribute(line, "parent")
+		if parent.is_empty():
+			continue
+		var full: String = _under(parent, _attribute(line, "name"))
+		if full.begins_with(path + "/"):
+			return true
+	return false
+
+
+## [param changed] and every scene in [param texts] that instances or inherits it at any depth.
+static func _kin_of(changed: String, texts: Dictionary) -> Array[String]:
+	var kin: Array[String] = [changed]
+	var grew: bool = true
+	while grew:
+		grew = false
+		for scene_path: String in texts:
+			if kin.has(scene_path):
+				continue
+			var text: String = texts[scene_path]
+			for one: String in kin:
+				if text.contains(' path="%s"' % one):
+					kin.append(scene_path)
+					grew = true
+					break
+	return kin
 
 
 ## The text of every .tscn under [param directory] into [param texts], keyed by res:// path, leaving

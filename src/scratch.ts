@@ -51,6 +51,7 @@ export type ScratchKind =
   | 'import'
   | 'params'
   | 'runtime-screenshot'
+  | 'script-docs'
   | 'tests';
 
 const KINDS: readonly ScratchKind[] = [
@@ -61,6 +62,7 @@ const KINDS: readonly ScratchKind[] = [
   'import',
   'params',
   'runtime-screenshot',
+  'script-docs',
   'tests',
 ];
 

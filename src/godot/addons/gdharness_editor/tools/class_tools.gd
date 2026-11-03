@@ -21,6 +21,8 @@ extends Node
 ## A file the scan skipped is either missing from the tree or recorded with no class name against
 ## it, and both come back as a class the editor does not have, which is the whole of the question.
 
+const GdhSceneFile = preload("../scene_file.gd")
+
 var _editor_plugin: EditorPlugin = null
 
 
@@ -282,7 +284,7 @@ func global_classes(_args: Dictionary) -> Dictionary:
 	return {
 		"ok": true,
 		"classes": names,
-		"scanning": filesystem.is_scanning(),
+		"scanning": GdhSceneFile.scan_unfinished(filesystem),
 		"importing": filesystem.is_importing(),
 	}
 
