@@ -211,6 +211,7 @@ import {
 } from './launch.js';
 import { freeLibraryCopies } from './library-copies.js';
 import { type CallInFlight, callsInFlight, lifecycleLogPath, writeLifecycle } from './lifecycle-log.js';
+import { statOf } from './listed-reads.js';
 import {
   DEFAULT_LSP_PORT,
   GodotLSPClient,
@@ -2309,8 +2310,9 @@ function filesIn(folder: string): Map<string, number> {
   const found = new Map<string, number>();
   try {
     for (const entry of readdirSync(folder, { withFileTypes: true })) {
-      if (entry.isFile()) {
-        found.set(entry.name, statSync(join(folder, entry.name)).mtimeMs);
+      const stat = entry.isFile() ? statOf(join(folder, entry.name)) : undefined;
+      if (stat !== undefined) {
+        found.set(entry.name, stat.mtimeMs);
       }
     }
   } catch {
@@ -3028,6 +3030,7 @@ export const PROJECT_FILE_ARGUMENTS = [
   'resourcePath',
   'newPath',
   'newScriptPath',
+  'newScenePath',
   'path',
   'script',
 ];
@@ -5223,6 +5226,8 @@ class GodotServer {
             return await editorOrEngine('duplicate_node', 'writes');
           case 'reparent':
             return await editorOrEngine('reparent_node', 'writes');
+          case 'save_branch':
+            return await editorOrEngine('save_branch', 'writes');
           case 'delete':
             return await editorOrEngine('delete_node', 'writes');
           case 'bake_navigation':

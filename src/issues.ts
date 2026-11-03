@@ -16,6 +16,9 @@
  */
 
 import { createHash } from 'node:crypto';
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import process from 'node:process';
 import { errorMessage } from './errors.js';
 import { SERVER_VERSION } from './server-version.js';
@@ -77,20 +80,57 @@ export function defectSignature(where: string, message: string): string {
   return createHash('sha256').update(normalised).digest('hex').slice(0, 8);
 }
 
+/** An absolute path in an error message, up to the space or quote that ends it. */
+const ABSOLUTE_PATH = /(?:[A-Za-z]:[\\/]|(?<=^|[\s'"(=])\/)[^\s'"`]*/gu;
+
+/**
+ * [param message] with each absolute path's folders up to its project written as `<project>`, and
+ * the home folder as `~`. A report goes into a public tracker, where the files it names help and
+ * the folders above them only show the machine's layout and the project's name.
+ */
+export function withoutMachinePaths(message: string): string {
+  const home = homedir();
+  const fold = (text: string): string => (process.platform === 'win32' ? text.toLowerCase() : text);
+  return message.replaceAll(ABSOLUTE_PATH, (path) => {
+    const project = projectAbove(path);
+    if (project !== null) {
+      return `<project>${path.slice(project.length)}`;
+    }
+    return home !== '' && fold(path).startsWith(fold(home)) ? `~${path.slice(home.length)}` : path;
+  });
+}
+
+/** The folder holding a `project.godot` at or above [param path], or null when none does. */
+function projectAbove(path: string): string | null {
+  for (let at = dirname(path); ; at = dirname(at)) {
+    if (existsSync(join(at, 'project.godot'))) {
+      return at;
+    }
+    if (dirname(at) === at) {
+      return null;
+    }
+  }
+}
+
 /** What the report says about the machine, in the order the issue template asks for it. */
-function facts(where: string, message: string, godotVersion?: string): readonly (readonly string[])[] {
+function facts(
+  where: string,
+  message: string,
+  signature: string,
+  godotVersion?: string,
+): readonly (readonly string[])[] {
   return [
     ['Where', where],
     ['Error', message],
     ['Version', `gdharness ${SERVER_VERSION}`],
     ['Runtime', `${runtime()}, ${process.platform} ${process.arch}`],
     ['Godot', godotVersion ?? 'not known at the point this failed'],
-    ['Signature', defectSignature(where, message)],
+    ['Signature', signature],
   ];
 }
 
 /** The issue body, already answering every question the bug template asks that a machine can. */
-function filledTemplate(where: string, message: string, godotVersion?: string): string {
+function filledTemplate(where: string, message: string, signature: string, godotVersion?: string): string {
   return [
     `**gdharness version**: ${SERVER_VERSION}`,
     `**Godot version**: ${godotVersion ?? ''}`,
@@ -114,7 +154,7 @@ function filledTemplate(where: string, message: string, godotVersion?: string): 
     message,
     '```',
     '',
-    `Signature: \`${defectSignature(where, message)}\``,
+    `Signature: \`${signature}\``,
     '',
     'If the real cause turned out to be the project, the environment or the call, say so here.',
     'gdharness should have refused with what would have worked.',
@@ -175,12 +215,14 @@ export interface DefectContext {
  */
 export function defectReport(where: string, error: unknown, context: DefectContext = {}): string {
   const { godotVersion, seenBefore = 0 } = context;
-  const message = errorMessage(error);
-  const title = `Defect ${defectSignature(where, message)}: ${where}`;
+  const signature = defectSignature(where, errorMessage(error));
+  const message = withoutMachinePaths(errorMessage(error));
+  const title = `Defect ${signature}: ${where}`;
   const url =
     `${NEW_ISSUE}?template=bug_report.md&title=${encodeURIComponent(title)}` +
-    `&body=${encodeURIComponent(filledTemplate(where, message, godotVersion))}`;
-  const width = Math.max(...facts(where, message, godotVersion).map(([label]) => (label ?? '').length));
+    `&body=${encodeURIComponent(filledTemplate(where, message, signature, godotVersion))}`;
+  const shown = facts(where, message, signature, godotVersion);
+  const width = Math.max(...shown.map(([label]) => (label ?? '').length));
 
   return [
     'gdharness failed in a way it does not handle. That is a gdharness defect, whatever caused it.',
@@ -197,9 +239,7 @@ export function defectReport(where: string, error: unknown, context: DefectConte
           'Sending the call again will not change it.',
         ]),
     '',
-    ...facts(where, message, godotVersion).map(
-      ([label, value]) => `  ${(label ?? '').padEnd(width)}  ${value ?? ''}`,
-    ),
+    ...shown.map(([label, value]) => `  ${(label ?? '').padEnd(width)}  ${value ?? ''}`),
     '',
     'Do not open an issue on your own initiative. Tell the person whose machine this is what',
     'broke, and ask whether you may report it to gdharness on their behalf. What the report',

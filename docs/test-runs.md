@@ -403,6 +403,10 @@ declares nothing, which is a guess. A suite that uses the scene runner only to s
 read it declares `const GDHARNESS_NEEDS_WINDOW: bool = false` and runs headless. The declaration
 counts from the suite or any script it extends.
 
+Either declaration can name a constant of a class the project declares, such as
+`const GDHARNESS_NEEDS_WINDOW: bool = GameFixture.NEEDS_WINDOW`. That constant must itself be `true`
+or `false`. A declaration gdharness cannot read refuses the run and names the suite.
+
 A project whose scene runner suites pass headless turns the guess off for every suite. It sets
 `gdharness/tests/scene_runner_needs_window=false` in `project.godot`. Then only a suite declaring
 `true` gets a window.

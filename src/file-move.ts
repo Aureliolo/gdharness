@@ -11,16 +11,9 @@
  * rewrite, so it is answered instead. It still finds a file that has a UID.
  */
 
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  renameSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, extname, join, relative } from 'node:path';
+import { bytesOf, entriesOf } from './listed-reads.js';
 import { ignoredTexts, projectTexts, VERSION_MARKER } from './project-scan.js';
 import {
   ClassGraph,
@@ -74,7 +67,7 @@ export type MoveOutcome =
 
 /** Every file under [param directory]. */
 function filesUnder(directory: string): string[] {
-  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+  return entriesOf(directory).flatMap((entry) => {
     const path = join(directory, entry.name);
     return entry.isDirectory() ? filesUnder(path) : [path];
   });
@@ -127,7 +120,7 @@ function binaryResources(projectPath: string): string[] {
     if (existsSync(join(directory, '.gdignore'))) {
       return;
     }
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    for (const entry of entriesOf(directory)) {
       if (entry.name.startsWith('.')) {
         continue;
       }
@@ -254,8 +247,8 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
   plan = mentionIgnored(plan, ignoredTexts(projectPath), null, [from]);
   const binaries: Mention[] = [];
   for (const path of binaryResources(projectPath)) {
-    const bytes = readFileSync(join(projectPath, path.slice('res://'.length)));
-    const names = [...moves.keys()].find((moving) => bytes.includes(moving));
+    const bytes = bytesOf(join(projectPath, path.slice('res://'.length)));
+    const names = bytes === null ? undefined : [...moves.keys()].find((moving) => bytes.includes(moving));
     if (names !== undefined) {
       binaries.push({
         file: path,

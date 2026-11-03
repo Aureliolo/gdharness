@@ -118,6 +118,7 @@ func _init_tools() -> void:
 		"delete_node": [_scene_tools, "delete_node"],
 		"duplicate_node": [_scene_tools, "duplicate_node"],
 		"reparent_node": [_scene_tools, "reparent_node"],
+		"save_branch": [_scene_tools, "save_branch"],
 		"set_node_properties": [_scene_tools, "set_node_properties"],
 		"get_node_properties": [_scene_tools, "get_node_properties"],
 		"bake_navigation": [_scene_tools, "bake_navigation"],

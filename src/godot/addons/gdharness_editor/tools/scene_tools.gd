@@ -15,6 +15,7 @@ const GdhPropertyValues = preload("../property_values.gd")
 const GdhSame = preload("../same_values.gd")
 const GdhSceneFile = preload("../scene_file.gd")
 const GdhSceneSharing = preload("scene_sharing.gd")
+const GdhScriptPaths = preload("script_paths.gd")
 const GdhSerialisation = preload("../serialisation.gd")
 const GdhTilesetTools = preload("tileset_tools.gd")
 
@@ -126,10 +127,11 @@ func _inherited(args: Dictionary) -> Dictionary:
 	)
 
 
-## The res:// path a create in [param args] writes, given .tscn when it has no extension, or "".
-func _new_scene_path(args: Dictionary) -> String:
+## The res:// path [param args] give under [param argument] for a new scene, given .tscn when it
+## has no extension, or "".
+func _new_scene_path(args: Dictionary, argument: String = "scenePath") -> String:
 	var scene_path: String = GdhSceneFile.res_path(
-		str(args.get("projectPath", "")), str(args.get("scenePath", ""))
+		str(args.get("projectPath", "")), str(args.get(argument, ""))
 	)
 	if scene_path == "res://":
 		return ""
@@ -666,6 +668,449 @@ func reparent_node(args: Dictionary) -> Dictionary:
 	return answer
 
 
+## Saves the branch at nodePath as a scene of its own at newScenePath and puts an instance of that
+## scene where the branch was, as the editor's Save Branch as Scene does. The new file holds the
+## branch's nodes, values, resources, groups and the connections among them, with its root's
+## position reset as the editor resets it. The instance keeps the branch's name, place, position,
+## rotation and scale. The rest of the scene keeps what it named in the branch: the connections to
+## its nodes, the properties holding them and the %unique paths, which no longer reach a node
+## unique only in the new scene.
+func save_branch(args: Dictionary) -> Dictionary:
+	var project_path: String = str(args.get("projectPath", ""))
+	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var node_path: String = str(args.get("nodePath", ""))
+	var branch_path: String = _new_scene_path(args, "newScenePath")
+	if node_path.is_empty() or node_path == ".":
+		return {
+			"ok": false,
+			"error":
+			"The root is the whole scene, which scene_create save_as copies to a new file.",
+		}
+	if branch_path.is_empty():
+		return { "ok": false, "error": "Missing newScenePath" }
+	if branch_path == scene_path:
+		return {
+			"ok": false, "error": "newScenePath is %s, the scene the branch is in." % scene_path,
+		}
+	if FileAccess.file_exists(branch_path):
+		return {
+			"ok": false,
+			"error": "%s already exists, and save_branch writes a new scene only." % branch_path,
+		}
+
+	var opened: Array = _open(scene_path, true)
+	var scene: GdhSceneFile = opened[0]
+	var refused: Dictionary = opened[1]
+	if not refused.is_empty():
+		return refused
+	var root: Node = scene.root
+	var top: Node = GdhSceneFile.node_at(root, node_path)
+	if top == null:
+		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
+	var fixed: String = scene.fixed(top)
+	if not fixed.is_empty():
+		return scene.refuse(fixed)
+	if not top.scene_file_path.is_empty():
+		return scene.refuse(
+			"%s is an instance of %s, its scene already." % [node_path, top.scene_file_path]
+		)
+
+	var at: String = scene.path_of(top)
+	var top_name: StringName = top.name
+	var parent: Node = top.get_parent()
+	var index: int = top.get_index()
+	var unique: bool = top.unique_name_in_owner
+	var placed_at: Dictionary = {}
+	if top is Node2D or top is Node3D:
+		for property: String in ["position", "rotation", "scale"]:
+			placed_at[property] = top.get(property)
+	var outside: Array[Node] = [root]
+	var inside: Array[Node] = [top]
+	for node: Node in root.find_children("*", "", true, false):
+		if node.owner == root and node != top:
+			if top.is_ancestor_of(node):
+				inside.append(node)
+			else:
+				outside.append(node)
+
+	var answer: Dictionary = { "ok": true, "nodePath": at, "newScenePath": branch_path }
+	var enclosed: Dictionary = {}
+	for node: Node in inside:
+		if node != top and node.unique_name_in_owner:
+			enclosed[str(node.name)] = scene.path_of(node)
+	var held: Array[Array] = _holding_the_branch(outside, top)
+	var crossing: Array[Array] = _crossing(outside, inside, top)
+	_named_outside(scene, inside, top, answer)
+	var scripts_out: Array[Dictionary] = _scripts_naming_outside(inside, top, branch_path)
+
+	var split: Array = scene.split_off(top, branch_path)
+	var branch: GdhSceneFile = split[0]
+	var crossing_unmade: Array[Dictionary] = split[1]
+	var editable: Array[Node] = []
+	for node: Node in inside:
+		if node != top and not node.scene_file_path.is_empty() and root.is_editable_instance(node):
+			editable.append(node)
+	var below: Array[String] = []
+	for node: Node in inside:
+		below.append(str(top.get_path_to(node)))
+	branch.asked(top, ["unique_name_in_owner"] + placed_at.keys())
+	parent.remove_child(top)
+	top.unique_name_in_owner = false
+	top.owner = null
+	for node: Node in inside:
+		if node != top:
+			node.owner = top
+	for node: Node in editable:
+		top.set_editable_instance(node, true)
+	if top is Node2D:
+		(top as Node2D).position = Vector2.ZERO
+	elif top is Node3D:
+		(top as Node3D).position = Vector3.ZERO
+	var written: Dictionary = branch.write(
+		func(saved: Node) -> String:
+			for one: String in below:
+				if saved.get_node_or_null(one) == null:
+					return "%s would not be in %s when it loads." % [one, branch_path]
+			return ""
+	)
+	if not written.is_empty():
+		scene.close()
+		return written
+
+	var packed: PackedScene = ResourceLoader.load(branch_path, "PackedScene") as PackedScene
+	var instance: Node = (
+		packed.instantiate(PackedScene.GEN_EDIT_STATE_INSTANCE) if packed != null else null
+	)
+	if instance == null:
+		return _unwritten(scene, branch_path, "%s did not instance once written." % branch_path)
+	instance.name = top_name
+	parent.add_child(instance)
+	parent.move_child(instance, index)
+	instance.owner = root
+	# Before the scene is next packed, which reads the path to every node a property holds.
+	for one: Array in held:
+		var holder: Node = one[0]
+		var holding: String = one[1]
+		scene.asked(holder, [holding])
+		holder.set(holding, _unmarked(one[2], instance))
+	var unsettled: String = scene.settle()
+	if not unsettled.is_empty():
+		return _unwritten(scene, branch_path, unsettled)
+	scene.asked(instance, ["unique_name_in_owner"] + placed_at.keys())
+	instance.unique_name_in_owner = unique
+	for property: String in placed_at:
+		instance.set(property, placed_at[property])
+	scene.rejoin_unmade(crossing_unmade, instance)
+	var lost: Array[Dictionary] = _rejoined(scene, crossing, instance)
+	if not lost.is_empty():
+		answer["connectionsLost"] = lost
+	var carried: GdhPaths = GdhPaths.new()
+	var _rewritten: int = carried.carry_enclosed(scene, enclosed)
+
+	written = scene.write(
+		func(saved: Node) -> String:
+			var copy: Node = saved.get_node_or_null(at)
+			if copy == null or copy.scene_file_path != branch_path:
+				return "%s would not load as an instance of %s." % [at, branch_path]
+			if copy.get_index() != index:
+				return "%s would load at index %d, not %d." % [at, copy.get_index(), index]
+			return ""
+	)
+	if not written.is_empty():
+		carried.put_back(scene_path)
+		return _unwritten(null, branch_path, str(written.get("error", "")))
+	answer["index"] = index
+	answer.merge(carried.answer())
+	answer.merge(GdhKin.enclose(scene_path, at))
+	if not scripts_out.is_empty():
+		var naming: Array = answer.get_or_add("scriptsNaming", [])
+		naming.append_array(scripts_out)
+	return answer
+
+
+## Removes the scene [method save_branch] wrote at [param branch_path] and answers [param why] as
+## its refusal. [param scene] is closed when it is still open.
+static func _unwritten(scene: GdhSceneFile, branch_path: String, why: String) -> Dictionary:
+	if scene != null:
+		scene.close()
+	var _removed: Error = DirAccess.remove_absolute(branch_path)
+	if Engine.is_editor_hint():
+		GdhSceneFile.scan_later()
+	return { "ok": false, "error": why }
+
+
+## Each property of the nodes [param outside] the branch at [param top] that holds a node of it, as
+## [holder, property, the value with each such node marked by its path from [param top]], for
+## [method _unmarked] to give the instance's node at that path.
+static func _holding_the_branch(outside: Array[Node], top: Node) -> Array[Array]:
+	var held: Array[Array] = []
+	for node: Node in outside:
+		for property: Dictionary in node.get_property_list():
+			if not GdhRead.as_int(property.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
+				continue
+			var called: String = str(property["name"])
+			var marked: Array = _marked(node.get(called), top)
+			if marked[0]:
+				held.append([node, called, marked[1]])
+	return held
+
+
+## [param value] with each node of the branch at [param top] in it as a [GdhBranchMark], as
+## [whether it held one, the value].
+static func _marked(value: Variant, top: Node) -> Array:
+	if typeof(value) == TYPE_OBJECT and is_instance_valid(value) and value is Node:
+		var node: Node = value
+		if node == top or top.is_ancestor_of(node):
+			return [true, GdhBranchMark.new(top.get_path_to(node))]
+	elif value is Array:
+		var items: Array = value
+		var changed: bool = false
+		var copy: Array = items.duplicate()
+		for at: int in items.size():
+			var one: Array = _marked(items[at], top)
+			if one[0]:
+				copy[at] = one[1]
+				changed = true
+		return [changed, copy if changed else value]
+	elif value is Dictionary:
+		var pairs: Dictionary = value
+		var changed: bool = false
+		var copy: Dictionary = pairs.duplicate()
+		for key: Variant in pairs:
+			var one: Array = _marked(pairs[key], top)
+			if one[0]:
+				copy[key] = one[1]
+				changed = true
+		return [changed, copy if changed else value]
+	return [false, value]
+
+
+## [param value] with each [GdhBranchMark] in it as the node at its path below [param instance].
+static func _unmarked(value: Variant, instance: Node) -> Variant:
+	if value is GdhBranchMark:
+		var mark: GdhBranchMark = value
+		return instance.get_node_or_null(mark.below)
+	if value is Array:
+		var items: Array = value
+		return items.map(func(item: Variant) -> Variant: return _unmarked(item, instance))
+	if value is Dictionary:
+		var pairs: Dictionary = value
+		var copy: Dictionary = pairs.duplicate()
+		for key: Variant in pairs:
+			copy[key] = _unmarked(pairs[key], instance)
+		return copy
+	return value
+
+
+## Each node path and node the nodes [param inside] the branch at [param top] hold that reaches a
+## node outside it, answered under namesOutside as {nodePath, property, path, names} with nodePath
+## the holder's path in the new scene and names the node's path here. A path is kept, and names
+## that node only where the new scene is instanced as here. A node is cleared, with cleared: true,
+## since the new scene's file can only save it as a path within itself.
+func _named_outside(
+	scene: GdhSceneFile, inside: Array[Node], top: Node, answer: Dictionary
+) -> void:
+	var named: Array[Dictionary] = []
+	for node: Node in inside:
+		for property: Dictionary in node.get_property_list():
+			if not GdhRead.as_int(property.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
+				continue
+			var called: String = str(property["name"])
+			if GdhHeadlessCheck.at_default(node, called):
+				continue
+			var record: Dictionary = {
+				"nodePath": str(top.get_path_to(node)), "property": called,
+			}
+			var kept: Array = _outside_of(node.get(called), node, top, scene, record, named)
+			if kept[0]:
+				scene.asked(node, [called])
+				node.set(called, kept[1])
+	if not named.is_empty():
+		answer["namesOutside"] = named
+
+
+## [param value], held by [param holder] in the branch at [param top], with each node outside the
+## branch in it cleared, each such node and each path reaching one recorded from [param record] in
+## [param named], as [whether a node was cleared, the value].
+static func _outside_of(
+	value: Variant,
+	holder: Node,
+	top: Node,
+	scene: GdhSceneFile,
+	record: Dictionary,
+	named: Array[Dictionary]
+) -> Array:
+	if value is NodePath:
+		var path: NodePath = value
+		var target: Node = (
+			holder.get_node_or_null(NodePath(path.get_concatenated_names()))
+			if path.get_name_count() > 0
+			else null
+		)
+		if target != null and target != top and not top.is_ancestor_of(target):
+			var entry: Dictionary = record.duplicate()
+			entry["path"] = str(path)
+			entry["names"] = scene.path_of(target)
+			named.append(entry)
+		return [false, value]
+	if typeof(value) == TYPE_OBJECT and is_instance_valid(value) and value is Node:
+		var node: Node = value
+		if node == top or top.is_ancestor_of(node):
+			return [false, value]
+		var entry: Dictionary = record.duplicate()
+		entry["names"] = scene.path_of(node)
+		entry["cleared"] = true
+		named.append(entry)
+		return [true, null]
+	if value is Array:
+		var items: Array = value
+		var changed: bool = false
+		var copy: Array = items.duplicate()
+		for at: int in items.size():
+			var one: Array = _outside_of(items[at], holder, top, scene, record, named)
+			if one[0]:
+				copy[at] = one[1]
+				changed = true
+		return [changed, copy if changed else value]
+	if value is Dictionary:
+		var pairs: Dictionary = value
+		var changed: bool = false
+		var copy: Dictionary = pairs.duplicate()
+		for key: Variant in pairs:
+			var one: Array = _outside_of(pairs[key], holder, top, scene, record, named)
+			if one[0]:
+				copy[key] = one[1]
+				changed = true
+		return [changed, copy if changed else value]
+	return [false, value]
+
+
+## The persistent connections between a node [param outside] the branch at [param top] and one
+## [param inside] it, each taken off its source and answered as [source, signal, callable, flags,
+## the source's path from [param top] or "", the target's path from [param top] or ""]. The source
+## is given only when it is outside, since a node of the branch is freed with it.
+static func _crossing(outside: Array[Node], inside: Array[Node], top: Node) -> Array[Array]:
+	var crossing: Array[Array] = []
+	for from_inside: bool in [false, true]:
+		var sources: Array[Node] = inside if from_inside else outside
+		for source: Node in sources:
+			for info: Dictionary in source.get_signal_list():
+				var signal_name: String = str(info.get("name", ""))
+				for conn: Dictionary in source.get_signal_connection_list(signal_name):
+					var flags: int = GdhRead.as_int(conn.get("flags", 0))
+					var callable: Callable = conn.get("callable", Callable())
+					var target: Node = callable.get_object() as Node
+					if not flags & Object.CONNECT_PERSIST or target == null:
+						continue
+					if (target == top or top.is_ancestor_of(target)) == from_inside:
+						continue
+					crossing.append(
+						[
+							null if from_inside else source,
+							signal_name,
+							callable,
+							flags,
+							str(top.get_path_to(source)) if from_inside else "",
+							"" if from_inside else str(top.get_path_to(target)),
+						]
+					)
+					source.disconnect(signal_name, callable)
+	return crossing
+
+
+## Makes each of [param crossing], from [method _crossing], again between the node outside and the
+## node at its path below [param instance]. Answers each that the scene's file would not hold, as
+## {sourceNodePath, signalName, targetNodePath, methodName}: one from a node inside an instance is
+## saved only once the instance's children are editable.
+func _rejoined(scene: GdhSceneFile, crossing: Array[Array], instance: Node) -> Array[Dictionary]:
+	var made: Array[Array] = []
+	for one: Array in crossing:
+		var callable: Callable = one[2]
+		var source: Node = one[0]
+		if not str(one[4]).is_empty():
+			source = instance.get_node_or_null(NodePath(str(one[4])))
+		# The node of the branch a callable aims at has been freed with the branch.
+		var target: Object = (
+			instance.get_node_or_null(NodePath(str(one[5])))
+			if not str(one[5]).is_empty()
+			else callable.get_object()
+		)
+		if source == null or target == null:
+			continue
+		var aimed: Callable = GdhPlacing.aimed(callable, target)
+		if source.connect(str(one[1]), aimed, GdhRead.as_int(one[3])) == OK:
+			made.append([source, str(one[1]), aimed, target])
+	var lost: Array[Dictionary] = []
+	if made.is_empty():
+		return lost
+	var probe: PackedScene = PackedScene.new()
+	if probe.pack(scene.root) != OK:
+		return lost
+	var state: SceneState = probe.get_state()
+	var saved: Dictionary = {}
+	for at: int in state.get_connection_count():
+		var key: String = "%s|%s|%s|%s" % [
+			str(state.get_connection_source(at)).trim_prefix("./"),
+			state.get_connection_signal(at),
+			str(state.get_connection_target(at)).trim_prefix("./"),
+			state.get_connection_method(at),
+		]
+		saved[key] = true
+	for one: Array in made:
+		var source: Node = one[0]
+		var aimed: Callable = one[2]
+		var target: Node = one[3]
+		var held: Dictionary = {
+			"sourceNodePath": scene.path_of(source),
+			"signalName": one[1],
+			"targetNodePath": scene.path_of(target),
+			"methodName": str(aimed.get_method()),
+		}
+		var key: String = "%s|%s|%s|%s" % held.values()
+		if not saved.has(key):
+			source.disconnect(str(one[1]), aimed)
+			lost.append(held)
+	return lost
+
+
+## Each line of a script on a node [param inside] the branch at [param top] that names a node
+## outside it through a %unique node, which is not unique in the new scene at [param branch_path],
+## as scriptsNaming gives it with no to: {scenePath, nodePath, script, line, from}, nodePath the
+## node's path in the new scene.
+static func _scripts_naming_outside(
+	inside: Array[Node], top: Node, branch_path: String
+) -> Array[Dictionary]:
+	var found: Array[Dictionary] = []
+	var seen: Dictionary = {}
+	for node: Node in inside:
+		var script: Script = node.get_script()
+		while script is GDScript:
+			var file: String = script.resource_path
+			var source: String = (script as GDScript).source_code
+			if source.is_empty() and FileAccess.file_exists(file):
+				source = FileAccess.get_file_as_string(file)
+			for named: Dictionary in GdhScriptPaths.named(source):
+				var path: String = named["path"]
+				if not path.begins_with("%"):
+					continue
+				var through: Node = node.get_node_or_null(NodePath(path.get_slice("/", 0)))
+				if through == null or through == top or top.is_ancestor_of(through):
+					continue
+				var record: Dictionary = {
+					"scenePath": branch_path,
+					"nodePath": str(top.get_path_to(node)),
+					"script": file,
+					"line": named["line"],
+					"from": path,
+				}
+				var key: String = "%s:%d:%s:%s" % [file, named["line"], path, record["nodePath"]]
+				if not seen.has(key):
+					seen[key] = true
+					found.append(record)
+			script = script.get_base_script()
+	return found
+
+
 func set_node_properties(args: Dictionary) -> Dictionary:
 	var project_path: String = str(args.get("projectPath", ""))
 	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
@@ -1070,3 +1515,12 @@ func _save_open_scene(scene_path: String) -> Dictionary:
 		"from": "editor",
 		"unsavedInEditor": GdhSceneFile.unsaved(scene_path),
 	}
+
+
+## A node of a branch being saved as its own scene, held by a property outside it, by its path from
+## the branch's top, until the instance replacing the branch gives the node at that path.
+class GdhBranchMark:
+	var below: NodePath
+
+	func _init(at: NodePath) -> void:
+		below = at

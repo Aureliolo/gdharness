@@ -55,7 +55,7 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 	# Not over a scan or an import the editor is already running: a scan asked for then starts a
 	# second reimport over the first, and the editor logs "Task 'reimport' already exists" and two
 	# conditions from its progress dialog. Declined and said, so the caller waits and asks again.
-	var busy: bool = filesystem.is_scanning() or filesystem.is_importing()
+	var busy: bool = GdhSceneFile.scan_unfinished(filesystem) or filesystem.is_importing()
 	var started: bool = false
 	var completed_before: int = _scans_completed
 	var uids: Dictionary = { "reread": [], "duplicated": [] }
@@ -71,13 +71,9 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 			for path: Variant in paths:
 				filesystem.update_file(str(path))
 		filesystem.scan()
-		# Whether the scan ran, read off the editor rather than assumed. `scan()` returns without
-		# a word while the thread of the scan before is still to be joined, which is a frame or
-		# more after that scan stops reporting itself, and that scan then signals as it is joined.
-		# Taken as started, the answer came from a scan begun before the files were written:
-		# downstream, a rescan after 698 files were rewritten answered finished in 1.5s and the
-		# one changed file stayed on its old import. A threaded scan reports itself from inside
-		# the call, and one run on this thread has finished and signalled before it returns.
+		# Whether the scan ran, read off the editor rather than assumed. A threaded scan reports
+		# itself from inside the call, and one run on this thread has finished and signalled before
+		# it returns.
 		started = filesystem.is_scanning() or _scans_completed != completed_before
 
 	# Importing is reported separately from scanning, and a class is not registered until
@@ -87,7 +83,7 @@ func rescan_filesystem(args: Dictionary) -> Dictionary:
 	return {
 		"ok": true,
 		"started": started,
-		"scanning": filesystem.is_scanning(),
+		"scanning": GdhSceneFile.scan_unfinished(filesystem),
 		"importing": filesystem.is_importing(),
 		"scansCompletedBefore": completed_before,
 		"scansCompleted": _scans_completed,
@@ -179,7 +175,7 @@ func scan_status(_args: Dictionary) -> Dictionary:
 		"openScenes": open,
 		"editedScene": "" if shown == null else shown.scene_file_path,
 		"unsavedScenes": unsaved,
-		"scanning": filesystem.is_scanning(),
+		"scanning": GdhSceneFile.scan_unfinished(filesystem),
 		"importing": filesystem.is_importing(),
 		"pending": GdhSceneFile.scan_due,
 		"sinceScanFinishedMs":
@@ -210,13 +206,13 @@ func reimport_files(args: Dictionary) -> Dictionary:
 	if paths.is_empty():
 		return { "ok": false, "error": "reimport_files needs paths" }
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
-	var busy: bool = filesystem.is_scanning() or filesystem.is_importing()
+	var busy: bool = GdhSceneFile.scan_unfinished(filesystem) or filesystem.is_importing()
 	if not busy:
 		_reimport.call_deferred(PackedStringArray(paths))
 	return {
 		"ok": true,
 		"started": not busy,
-		"scanning": filesystem.is_scanning(),
+		"scanning": GdhSceneFile.scan_unfinished(filesystem),
 		"importing": filesystem.is_importing(),
 		"reimportsCompletedBefore": _reimports_completed,
 	}
@@ -290,7 +286,7 @@ func files_moved(args: Dictionary) -> Dictionary:
 func _reimport(paths: PackedStringArray) -> void:
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
 	# A scan can begin between the answer and this frame, and its import would refuse this one.
-	while filesystem.is_scanning() or filesystem.is_importing():
+	while GdhSceneFile.scan_unfinished(filesystem) or filesystem.is_importing():
 		await get_tree().process_frame
 	filesystem.reimport_files(paths)
 	_reimports_completed += 1

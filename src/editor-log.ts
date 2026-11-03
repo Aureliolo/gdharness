@@ -183,9 +183,27 @@ export function editorConsole(
   }
   const log = new GameLog();
   const { text, of } = theFirstOf(path);
-  log.append('transcript', foldProgress(text));
+  log.append('transcript', foldProgress(withoutLooksElsewhere(text)));
   log.finish();
   return { log, path, ...(of === undefined ? {} : { readBytes: text.length, of }) };
+}
+
+/**
+ * The error Godot prints when the addon loads a scene holding a ViewportTexture, with its location
+ * and backtrace. Loading sets the texture's viewport path before the texture has a scene of its
+ * own. In the editor, Godot then looks the path up in the scene open in the current tab, and fails.
+ * The editor's own open switches to an empty tab first, which the addon cannot do without changing
+ * the user's tabs. The write is right either way.
+ *
+ * Matched by the engine function and an addon frame on top, so the same error raised from a game's
+ * own script stays.
+ */
+const LOOKED_ELSEWHERE =
+  /^ERROR: Path to node is invalid: '[^'\n]*'\.\r?\n[ \t]+at: _setup_local_to_scene \([^\n]*\)\r?\n[ \t]+GDScript backtrace \(most recent call first\):\r?\n[ \t]+\[0\] \w+ \(res:\/\/addons\/gdharness_editor\/[^\n]*\)\r?\n(?:[ \t]+\[\d+\] [^\n]*\r?\n)*/gm;
+
+/** [param text] without the errors the addon's own scene loads made Godot print about another scene. */
+export function withoutLooksElsewhere(text: string): string {
+  return text.replace(LOOKED_ELSEWHERE, '');
 }
 
 /** A step of a task a headless editor reports progress on, as `[  16% ] task | label`. */

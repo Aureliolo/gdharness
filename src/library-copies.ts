@@ -78,6 +78,34 @@ export function freeLibraryCopies(
 }
 
 /**
+ * Whether [param name], in a folder holding [param siblings], is a file an engine on Windows makes
+ * for itself beside a library it loads. Those are the copy, `~` and the library's name, and the
+ * copy's symbols, `~`, the library's base name, `_`, a number and `.pdb`. A copy set aside here or
+ * left by a failed copy is named after the copy with more after it. They come and go with every
+ * engine start and are none of the project's files.
+ */
+export function isLibraryCopy(name: string, siblings: Iterable<string>): boolean {
+  if (!name.startsWith('~')) {
+    return false;
+  }
+  const rest = name.slice(1).toLowerCase();
+  for (const sibling of siblings) {
+    const library = sibling.toLowerCase();
+    if (!library.endsWith('.dll')) {
+      continue;
+    }
+    const base = library.slice(0, -'.dll'.length);
+    if (
+      rest.startsWith(library) ||
+      (rest.startsWith(`${base}_`) && rest.endsWith('.pdb') && /^\d+$/.test(rest.slice(base.length + 1, -4)))
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Writes `.godot/extension_list.cfg` for a project that has none, naming every `.gdextension`
  * manifest in it, and answers the `res://` paths written, or null when the list was there already.
  *

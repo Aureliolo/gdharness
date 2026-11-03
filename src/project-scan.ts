@@ -3,9 +3,10 @@
  * kinds of file it holds, and where a piece of text occurs.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { basename, extname, join, relative, sep } from 'node:path';
 import { errorMessage } from './errors.js';
+import { bytesOf, entriesOf } from './listed-reads.js';
 import { uidCacheEntries } from './uid-cache.js';
 
 /** Directories that are never part of a project's own files, and are not spelled with a dot. */
@@ -99,7 +100,7 @@ export function projectStructure(projectPath: string): ProjectStructure {
     if (steppedOver(directory)) {
       return;
     }
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    for (const entry of entriesOf(directory)) {
       if (skipped(entry.name)) {
         continue;
       }
@@ -177,7 +178,7 @@ export function steppedOverIn(directory: string): SteppedOver[] {
   }
   const found: SteppedOver[] = [];
   const visit = (at: string, prefix: string): void => {
-    for (const entry of readdirSync(at, { withFileTypes: true })) {
+    for (const entry of entriesOf(at)) {
       if (!entry.isDirectory() || skipped(entry.name)) {
         continue;
       }
@@ -199,7 +200,7 @@ export function steppedOverIn(directory: string): SteppedOver[] {
 function filesBelow(root: string, extensions: readonly string[]): string[] {
   const found: string[] = [];
   const visit = (directory: string, prefix: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    for (const entry of entriesOf(directory)) {
       if (skipped(entry.name)) {
         continue;
       }
@@ -235,7 +236,7 @@ export function scriptsWithoutUid(projectPath: string): string[] {
     if (steppedOver(directory)) {
       return;
     }
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    for (const entry of entriesOf(directory)) {
       if (skipped(entry.name)) {
         continue;
       }
@@ -379,7 +380,7 @@ export function projectTexts(projectPath: string): ProjectText[] {
     if (steppedOver(directory)) {
       return;
     }
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    for (const entry of entriesOf(directory)) {
       if (skipped(entry.name)) {
         continue;
       }
@@ -393,8 +394,8 @@ export function projectTexts(projectPath: string): ProjectText[] {
       if (!entry.isFile() || BINARY_EXTENSIONS.has(extension)) {
         continue;
       }
-      const bytes = readFileSync(absolute);
-      if (!isBinary(bytes)) {
+      const bytes = bytesOf(absolute);
+      if (bytes !== null && !isBinary(bytes)) {
         found.push({ path: `res://${spelled}`, absolute, text: bytes.toString('utf8') });
       }
     }
@@ -415,7 +416,7 @@ export function ignoredTexts(projectPath: string): ProjectText[] {
       return;
     }
     const under = ignored || gdignored(directory);
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    for (const entry of entriesOf(directory)) {
       if (skipped(entry.name)) {
         continue;
       }
@@ -429,8 +430,8 @@ export function ignoredTexts(projectPath: string): ProjectText[] {
       if (!under || !entry.isFile() || BINARY_EXTENSIONS.has(extension) || entry.name === '.gdignore') {
         continue;
       }
-      const bytes = readFileSync(absolute);
-      if (!isBinary(bytes)) {
+      const bytes = bytesOf(absolute);
+      if (bytes !== null && !isBinary(bytes)) {
         found.push({ path: `res://${spelled}`, absolute, text: bytes.toString('utf8') });
       }
     }
@@ -506,11 +507,11 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
     if (extensions !== null && !extensions.has(extension)) {
       return;
     }
-    const bytes = readFileSync(entryPath);
+    const bytes = bytesOf(entryPath);
     // Every text file by default, told by its content rather than a list of extensions: the list
     // left out project.godot and C#, so an autoload registered only in project.godot was answered
     // as used nowhere.
-    if (extensions === null && isBinary(bytes)) {
+    if (bytes === null || (extensions === null && isBinary(bytes))) {
       return;
     }
 
@@ -548,7 +549,7 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
       }
       return;
     }
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    for (const entry of entriesOf(directory)) {
       if (skipped(entry.name)) {
         continue;
       }

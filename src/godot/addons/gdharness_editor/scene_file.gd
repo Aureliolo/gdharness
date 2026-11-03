@@ -30,6 +30,7 @@ const PUTTING_BACK_PASSES: int = 4
 const GdhRead = preload("reading.gd")
 const GdhSame = preload("same_values.gd")
 const GdhSerialisation = preload("serialisation.gd")
+const GdhSceneFile = preload("scene_file.gd")
 const GdhSceneUids = preload("scene_uids.gd")
 
 ## Whether a scan asked for through [method scan_later] is still to start, which a caller waiting
@@ -429,6 +430,64 @@ func copied(copies: Dictionary) -> void:
 		var original: Node = source
 		var copy: Node = copies[source]
 		_copied_from[copy.get_instance_id()] = original.get_instance_id()
+
+
+## A scene to write at [param branch_path] whose root is [param top], a node of this one about to be
+## taken out of it, keeping what this file stores on each node of [param top] and what the tool
+## asked of them. A connection the engine could not make goes with it when both its ends are in
+## [param top]. One with a single end there is taken out of this scene's and answered, that end
+## given as its path from [param top] under sourceBelow or targetBelow, for [method rejoin_unmade].
+## Answers [scene, those connections].
+func split_off(top: Node, branch_path: String) -> Array:
+	var branch: GdhSceneFile = GdhSceneFile.new()
+	branch.root = top
+	branch.path = branch_path
+	branch._text = _text
+	branch._reached = _reached.duplicate()
+	var nodes: Array[Node] = [top]
+	nodes.append_array(top.find_children("*", "", true, false))
+	for node: Node in nodes:
+		var id: int = node.get_instance_id()
+		if _filed.has(id):
+			branch._filed[id] = _filed[id]
+		if _asked.has(id):
+			branch._asked[id] = _asked[id]
+		if _before.has(id):
+			branch._before[id] = _before[id]
+	var crossing: Array[Dictionary] = []
+	var still: Array[Dictionary] = []
+	for held: Dictionary in _unmade:
+		var source_in: bool = _within(held["source"], top)
+		var target_in: bool = _within(held["target"], top)
+		if source_in and target_in:
+			branch._unmade.append(held)
+			continue
+		if not source_in and not target_in:
+			still.append(held)
+			continue
+		var end: String = "source" if source_in else "target"
+		var below: Node = held[end]
+		held[end + "Below"] = str(top.get_path_to(below))
+		crossing.append(held)
+	_unmade = still
+	return [branch, crossing]
+
+
+## Puts back each of [param crossing], from [method split_off], among the connections a write keeps,
+## its end below the branch now on the node at that path below [param instance].
+func rejoin_unmade(crossing: Array[Dictionary], instance: Node) -> void:
+	for held: Dictionary in crossing:
+		for end: String in ["source", "target"]:
+			if held.has(end + "Below"):
+				held[end] = instance.get_node_or_null(NodePath(str(held[end + "Below"])))
+		_unmade.append(held)
+
+
+static func _within(held: Variant, top: Node) -> bool:
+	if not is_instance_valid(held) or not held is Node:
+		return false
+	var node: Node = held
+	return node == top or top.is_ancestor_of(node)
 
 
 ## Why [param scene_path] cannot be written while the editor has it open, or "".
@@ -1090,29 +1149,29 @@ static func scan_later() -> void:
 	_start_scan.call_deferred()
 
 
-## [method EditorFileSystem.scan] does nothing, and says nothing, while the thread of the scan
-## before it is still to be joined, which is a frame or two after that scan stops reporting itself,
-## so a scan that leaves the editor not scanning is asked for once more once that is over. Asked of
-## a scan that ended within the call, the second costs one more scan.
-##
 ## It waits out a task of the progress dialog too, whose every step runs a frame of the editor from
-## inside itself. A scan's end registers the classes it found in such a task, after the scan has
-## stopped reporting itself and its thread has been joined (4.7.2's
+## inside itself. A scan's end registers the classes it found in such a task (4.7.2's
 ## [code]EditorFileSystem::_notification[/code]). A scan started from that frame ran beside the end
 ## of the one before, which crashed the editor or left it scanning.
 static func _start_scan() -> void:
 	var filesystem: EditorFileSystem = EditorInterface.get_resource_filesystem()
 	var tree: SceneTree = Engine.get_main_loop()
-	while filesystem.is_scanning() or filesystem.is_importing() or in_a_task():
+	while scan_unfinished(filesystem) or filesystem.is_importing() or in_a_task():
 		await tree.process_frame
 	filesystem.scan()
-	if not filesystem.is_scanning():
-		await tree.process_frame
-		await tree.process_frame
-		while in_a_task():
-			await tree.process_frame
-		filesystem.scan()
 	scan_due = false
+
+
+## Whether the editor scans its files, counting the frames after a scan stops reporting itself and
+## before the editor handles its end. That end swaps in the new file list and registers the classes
+## the scan found, from a frame of the editor. A save in those frames registered the classes as
+## well,
+## inside its own task, and the editor crashed or logged "Task 'update_scripts_classes' already
+## exists". [method EditorFileSystem.scan] also does nothing then, without a word. The editor
+## processes from the start of a scan until it has handled the end (4.7.2's
+## [code]EditorFileSystem::scan[/code] and [code]_notification[/code]).
+static func scan_unfinished(filesystem: EditorFileSystem) -> bool:
+	return filesystem.is_scanning() or filesystem.is_processing()
 
 
 ## Whether the editor's progress dialog is showing, which it does for as long as a task is open.

@@ -10,6 +10,7 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, posix } from 'node:path';
 import { declaredClassOf, eachScript } from './class-cache.js';
+import { Refusal } from './errors.js';
 import { codeOf, shapeOf } from './gdscript-source.js';
 import { isRecord } from './records.js';
 import { parseProjectGodot } from './resources.js';
@@ -21,9 +22,14 @@ const SUITE_BASE = 'GdUnitTestSuite';
 /** What a case's function is called, as gdUnit4 finds them: `get_script_method_list` and the prefix. */
 const CASE_PREFIX = 'test_';
 /** A suite saying whether it needs a real window, as a constant so the runner can read it too. */
-const NEEDS_WINDOW = /^const\s+GDHARNESS_NEEDS_WINDOW\b[^=\n]*=\s*(true|false)\b/m;
+const NEEDS_WINDOW = 'GDHARNESS_NEEDS_WINDOW';
 /** A suite saying its cases share work, such as a memoised setup, and belong in one engine. */
-const TOGETHER = /^const\s+GDHARNESS_TOGETHER\b[^=\n]*=\s*(true|false)\b/m;
+const TOGETHER = 'GDHARNESS_TOGETHER';
+
+/** The value a script gives the constant [param name], as written, or undefined when it declares none. */
+function constantIn(code: string, name: string): string | undefined {
+  return new RegExp(`^const\\s+${name}\\b[^=\\n]*=([^\\n]*)$`, 'm').exec(code)?.[1]?.trim();
+}
 /** Where suites are looked for when none are named, by gdharness test and project_test alike. */
 export const TEST_DIRECTORIES = ['tests', 'test'];
 
@@ -158,6 +164,41 @@ export class ProjectScripts {
     return declaring === undefined ? { name } : { path: declaring };
   }
 
+  /**
+   * What [param at], a script in the chain of the suite [param suite], declares the constant
+   * [param name] as, or undefined when it declares none. A literal true or false, or a constant of a
+   * class the project declares that is itself a literal, since games share one suite and keep their
+   * own values in a class of their own. Anything else is refused rather than read as undeclared,
+   * which would run the suite in the wrong engine without a word.
+   */
+  private declared(suite: string, at: string, code: string, name: string): boolean | undefined {
+    const value = constantIn(code, name);
+    if (value === undefined || value === 'true' || value === 'false') {
+      return value === undefined ? undefined : value === 'true';
+    }
+    const where = at === suite ? suite : `${at}, which ${suite} extends,`;
+    const named = /^([A-Za-z_]\w*)\.([A-Za-z_]\w*)$/.exec(value);
+    if (named === null) {
+      throw new Refusal(
+        `${where} declares ${name} as ${value}, which gdharness cannot read before the run. Declare it as true or false, or as <ClassName>.<CONSTANT> naming a constant declared true or false.`,
+      );
+    }
+    const [, className = '', constant = ''] = named;
+    const declaring = this.classes.get(className);
+    if (declaring === undefined) {
+      throw new Refusal(
+        `${where} declares ${name} as ${value}, and no script in the project declares class_name ${className}.`,
+      );
+    }
+    const held = constantIn(this.script(declaring)?.code ?? '', constant);
+    if (held !== 'true' && held !== 'false') {
+      throw new Refusal(
+        `${where} declares ${name} as ${value}, and ${declaring} declares no ${constant} as true or false${held === undefined ? '' : `, but as ${held}`}.`,
+      );
+    }
+    return held === 'true';
+  }
+
   /** [param path] as a suite, or null when it does not extend gdUnit4's or declares no case. */
   suite(path: string): DeclaredSuite | null {
     const cases = new Set<string>();
@@ -177,10 +218,8 @@ export class ProjectScripts {
       for (const func of read.funcs.filter((name) => name.startsWith(CASE_PREFIX))) {
         cases.add(func);
       }
-      const declared = NEEDS_WINDOW.exec(read.code)?.[1];
-      said ??= declared === undefined ? undefined : declared === 'true';
-      const kept = TOGETHER.exec(read.code)?.[1];
-      together ??= kept === undefined ? undefined : kept === 'true';
+      said ??= this.declared(path, at, read.code, NEEDS_WINDOW);
+      together ??= this.declared(path, at, read.code, TOGETHER);
       guessed ||= this.guessWindow && SCENE_RUNNER.test(read.code);
       const base = this.base(at);
       if (base === null) {
