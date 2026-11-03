@@ -32894,6 +32894,41 @@ async function testAnInstanceIsMarkedAsAPlaceholder(): Promise<void> {
     assert.equal(get(marked, 'placeholder'), true, JSON.stringify(marked));
     assert.match(mainFile(), /instance_placeholder="res:\/\/world\.tscn"/, mainFile());
 
+    // A placeholder loads without its children, so the two settings are only ever exchanged.
+    const placeholderOnly = mainFile();
+    assert.match(
+      await refusal({ op: 'set', nodePath: 'World', editableChildren: true }),
+      /World is a placeholder, which loads without its children\. Pass placeholder false with editableChildren true\./,
+    );
+    assert.equal(mainFile(), placeholderOnly, 'the refused editableChildren wrote nothing');
+    const opened = await node({ op: 'set', nodePath: 'World', editableChildren: true, placeholder: false });
+    assert.deepEqual(
+      [get(opened, 'editableChildren'), get(opened, 'placeholder')],
+      [true, false],
+      JSON.stringify(opened),
+    );
+    assert.match(mainFile(), /\n\[editable path="World"\]\n/, mainFile());
+    assert.doesNotMatch(mainFile(), /instance_placeholder/, mainFile());
+    const editableOnly = mainFile();
+    assert.match(
+      await refusal({ op: 'set', nodePath: 'World', placeholder: true }),
+      /World has editable children, which a placeholder cannot keep\. Pass editableChildren false with placeholder true/,
+    );
+    assert.match(
+      await refusal({ op: 'set', nodePath: 'World', placeholder: true, editableChildren: true }),
+      /placeholder and editableChildren cannot both be true/,
+    );
+    assert.equal(mainFile(), editableOnly, 'the refused placeholders wrote nothing');
+    const exchanged = await node({
+      op: 'set',
+      nodePath: 'World',
+      placeholder: true,
+      editableChildren: false,
+    });
+    assert.equal(get(exchanged, 'placeholder'), true, JSON.stringify(exchanged));
+    assert.doesNotMatch(mainFile(), /\[editable/, mainFile());
+    assert.match(mainFile(), /instance_placeholder="res:\/\/world\.tscn"/, mainFile());
+
     // A write that never names the placeholder keeps it, with its values and its connections both
     // ways. An engine with no editor opens it as an InstancePlaceholder, which packed back as a node
     // of that class.
