@@ -9,7 +9,8 @@
 import { callSignal } from './call-signal.js';
 import { inASlot, nameSlotEngineOf, onTheSlot } from './engine-slots.js';
 import { GameLog } from './game-log.js';
-import { belowNormal, spawnHidden } from './spawn.js';
+import { belowNormal } from './priority.js';
+import { spawnHidden } from './spawn.js';
 import { holdExit } from './whole-exit.js';
 
 export interface EngineRun {

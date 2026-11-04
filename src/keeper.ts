@@ -37,6 +37,7 @@ import {
   sendSpec,
   withChanges,
 } from './outside.js';
+import { belowNormal } from './priority.js';
 import { startTimesOf } from './process-children.js';
 import { type RestartedFrom, type RunRecord, recordRunEnded, writeRunRecord } from './run-record.js';
 import { discard, scratchDirectory } from './scratch.js';
@@ -48,7 +49,7 @@ import {
   withEngineArguments,
   writeProfileFile,
 } from './script-profile.js';
-import { belowNormal, type ChildProcess, spawnHidden, spawnShown } from './spawn.js';
+import { type ChildProcess, spawnHidden, spawnShown } from './spawn.js';
 import { followSuccessor } from './successor.js';
 import { holdExit, prepareWholeExits, type WholeExit } from './whole-exit.js';
 

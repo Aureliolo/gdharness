@@ -515,7 +515,7 @@ import { containedEngine } from './support/contained-engine.js';
 import { endEnginesUnder } from './support/engines.js';
 import { greeting } from './support/greeting.js';
 import { HIDDEN_SPAWN_PRELUDE } from './support/hidden-spawn.js';
-import { asArray, asNumber, asObject, asString, get, text } from './support/json.js';
+import { asArray, asNumber, asObject, asString, get, plainFloats, text } from './support/json.js';
 import {
   contentOf,
   isFeedbackBlock,
@@ -18476,7 +18476,7 @@ async function testAPointerAimsInsideANamedNode(): Promise<void> {
       return parseTextContent(response) ?? textOf(response);
     };
     const record = async (nodePath: string): Promise<{ presses: unknown[]; motions: unknown[] }> => {
-      const read = await call('runtime_invoke', { op: 'call', nodePath, method: 'record' });
+      const read = plainFloats(await call('runtime_invoke', { op: 'call', nodePath, method: 'record' }));
       return {
         presses: asArray(get(read, 'result', 'presses'), `presses recorded on ${nodePath}`),
         motions: asArray(get(read, 'result', 'motions'), `motions recorded on ${nodePath}`),
@@ -18795,7 +18795,7 @@ async function testATouchReachesTheGameAsAFinger(): Promise<void> {
     type Seen = { touches: unknown[]; drags: number[][]; buttons: unknown[]; motions: unknown[] };
     const record = async (): Promise<Seen> => {
       const seen = get(
-        await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'record' }),
+        plainFloats(await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'record' })),
         'result',
       );
       const listed = (key: string): unknown[] => asArray(get(seen, key), `${key} recorded`);
@@ -18926,7 +18926,10 @@ async function testATouchReachesTheGameAsAFinger(): Promise<void> {
     assert.deepEqual(get(aimed, 'position'), [50, 30], `in the window's pixels: ${aimedShown}`);
     // The pad was also given the earlier touches that landed on it. These are the aimed one's.
     const padTouches = asArray(
-      get(await call('runtime_invoke', { op: 'call', nodePath: pad, method: 'record' }), 'result'),
+      get(
+        plainFloats(await call('runtime_invoke', { op: 'call', nodePath: pad, method: 'record' })),
+        'result',
+      ),
       "the pad's touches",
     );
     assert.deepEqual(
@@ -34763,8 +34766,11 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
     console.log('injected motion regression skipped (Godot not found)');
     return;
   }
-  const headless = resolveHeadless(undefined, { platform: process.platform, variables: process.env });
-  console.log(`injected motion regression runs ${headless ? 'headless: no display here' : 'windowed'}`);
+  // Windows plays a windowed run on the server's hidden desktop, so only a desktop elsewhere needs
+  // the leave to open a window.
+  const windowRefused = process.platform === 'win32' ? null : windowedRunRefused();
+  const headless = windowRefused !== null;
+  console.log(`injected motion regression runs ${headless ? `headless: ${windowRefused}` : 'windowed'}`);
   await withAPlayingEditor(
     ({ adapter }) =>
       (tool) =>
@@ -34830,7 +34836,9 @@ async function testAnInjectedMotionCarriesHowFarThePointerMoved(): Promise<void>
             await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
           );
         const read = async (property: string): Promise<unknown> =>
-          get(await call('runtime_inspect', { op: 'property', nodePath: '/root/Main', property }), 'value');
+          plainFloats(
+            get(await call('runtime_inspect', { op: 'property', nodePath: '/root/Main', property }), 'value'),
+          );
         // The last motion the game saw at a point, which is the injected one: named by position
         // rather than taken as the latest, since a real pointer resting inside a new window is a
         // motion of its own on a desk and on the Windows runner, and it lands nowhere named here.
@@ -66569,7 +66577,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     const scaled = await rewire('visibility_changed', 'scale_by', { binds: [2] });
     assert.deepEqual(
       [get(scaled, 'binds'), get(scaled, 'argumentsFit')],
-      [[2], true],
+      [[{ _type: 'float', value: 2 }], true],
       JSON.stringify(scaled),
     );
     assert.equal(
