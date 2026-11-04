@@ -730,8 +730,8 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
       [...printed.suites.values()].some((suite) => suite.cases.some((ran) => ran.verdict === 'FAILED'))) ||
     (end.code === GDUNIT_ORPHANS && printed.orphansLeft.length > 0);
   // A crash is read from the report the engine's crash handler printed, since the code a crashed
-  // engine exits with says nothing reliable: a windowed one on Windows exited 5, which read as a
-  // quit(5) in the game's code.
+  // engine exits with can reach this cut short: Bun on Windows tells only its low byte, so an
+  // access violation read as an exit of 5 wherever no helper wrote the code whole.
   const crashed = crashIn(printed.lines);
   if (end.ended !== null) {
     faults.push(end.ended);

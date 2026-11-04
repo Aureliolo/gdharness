@@ -80,6 +80,7 @@ import {
   ensureHelperCompiled,
   HIDDEN_DESKTOP,
   helperAssembly,
+  helperExit,
   helperFailure,
   helperStep,
   throughHelper,
@@ -490,6 +491,7 @@ import {
   silenceWhile,
   testOptionsOf,
 } from '../src/suite-run.js';
+import { listenerAmong } from '../src/tcp-listeners.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -503,6 +505,7 @@ import {
 import { argumentShape, headlessSection, namedType, renderToolsMarkdown } from '../src/tool-reference.js';
 import { encodedUidCache, mendUidCache, type UidEntry, uidCacheEntries } from '../src/uid-cache.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
+import { holdExit, prepareWholeExits } from '../src/whole-exit.js';
 import { writeWhole } from '../src/whole-file.js';
 import { askWindows } from '../src/windows-ask.js';
 import { inTurnFor, writeLockOf } from '../src/write-turns.js';
@@ -13539,6 +13542,7 @@ async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
       error: join(scratch, 'error'),
       stop: join(scratch, 'stop'),
       step: join(scratch, 'step'),
+      exit: join(scratch, 'exit'),
     };
     const wrapper = throughHelper({ directory: scratch }, 'godot.exe', [], files);
     assert.deepEqual(wrapper, { command: helperAssembly(), args: [files.spec, files.error, files.step] });
@@ -15078,6 +15082,7 @@ function testAUidCacheNamingAFileGoneIsMended(): void {
             error: join(project, 'error'),
             stop: join(project, 'stop'),
             step: join(project, 'step'),
+            exit: join(project, 'exit'),
           }),
       ],
     ];
@@ -28539,6 +28544,17 @@ async function testWhoIsHoldingAPortIsAskable(): Promise<void> {
   assert.equal(listeningPidInNetstat(table, 135), 1234);
   assert.equal(listeningPidInNetstat(table, 6007), null, 'a port nobody listens on names nobody');
   assert.equal(listeningPidInNetstat(table, 600), null, 'and a port that is a prefix of one is not it');
+  // A Windows 11 preview build gives some listeners the state 0, which netstat leaves out.
+  const rows = [
+    { state: 5, localPort: 6006, remotePort: 51000, pid: 4321 },
+    { state: 0, localPort: 6006, remotePort: 0, pid: 4321 },
+    { state: 0, localPort: 7007, remotePort: 52000, pid: 9999 },
+    { state: 2, localPort: 8008, remotePort: 0, pid: 1234 },
+    { state: 0, localPort: 8008, remotePort: 0, pid: 5678 },
+  ];
+  assert.equal(listenerAmong(rows, 6006), 4321, 'a row with no state and no remote end is the listener');
+  assert.equal(listenerAmong(rows, 7007), null, 'one with a remote end is a connection');
+  assert.equal(listenerAmong(rows, 8008), 1234, 'and a row in the listening state comes first');
 
   const port = await reservePort();
   assert.equal(await listeningPid(port), null, 'a port nobody is listening on has no holder to name');
@@ -28555,11 +28571,11 @@ async function testWhoIsHoldingAPortIsAskable(): Promise<void> {
     const holder = await listeningPid(port);
     const took = Date.now() - askedAt;
     // Null is allowed: a platform that will not say is a case this has to have, and reading it as
-    // "somebody else" would refuse every working setup on that platform. Windows says, through
-    // netstat, and the time it takes is printed, since the ask sits on the first play through each
-    // adapter connection: PowerShell's answer took a second here and nine on a runner.
+    // "somebody else" would refuse every working setup on that platform. Windows says, through its
+    // TCP table or netstat, and the time it takes is printed, since the ask sits on the first play
+    // through each adapter connection: PowerShell's answer took a second here and nine on a runner.
     if (process.platform === 'win32') {
-      assert.equal(holder, process.pid, `Windows names the holder of a port, through netstat: ${holder}`);
+      assert.equal(holder, process.pid, `Windows names the holder of a port: ${holder}`);
     } else if (holder !== null) {
       assert.equal(holder, process.pid, 'and the holder of one this process took is this process');
     } else {
@@ -52190,6 +52206,7 @@ async function testAnEngineIsHeldToTheProcessorsAsked(): Promise<void> {
         error: join(scratch, `${name}.error`),
         stop: join(scratch, `${name}.stop`),
         step: join(scratch, `${name}.step`),
+        exit: join(scratch, `${name}.exit`),
       };
       // Written once the process runs, which a start left suspended never reaches.
       const ran = join(scratch, `${name}.ran`);
@@ -52429,6 +52446,81 @@ async function testARunawayEngineLogIsCutAndEnded(): Promise<void> {
   } finally {
     sweep(scratch);
   }
+}
+
+/**
+ * An engine that crashes is told by its whole exit code, run under Bun too. Bun hands a parent on
+ * Windows only the low byte of a child's code, so two game engines that died on an access
+ * violation at exit, 0xC0000005, were reported as exiting 5, "most likely a quit(5) in the
+ * project's code". The helper writes the whole code beside the run, and a code it did not write,
+ * or one whose low byte differs from the one told, leaves the told code standing.
+ */
+async function testAnEngineCrashIsToldByItsWholeExitCode(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-whole-exit-'));
+  try {
+    const written = join(scratch, 'written');
+    writeFileSync(written, '3221225477');
+    assert.equal(helperExit(written, 5), 0xc0000005, 'the low byte Bun tells is made whole');
+    assert.equal(helperExit(written, 0xc0000005), 0xc0000005, 'the whole code Node tells stands');
+    assert.equal(helperExit(written, 3), 3, 'a code with another low byte is not the one written');
+    assert.equal(helperExit(written, null), null, 'nor is an end without a code');
+    assert.equal(helperExit(join(scratch, 'none'), 5), 5, 'a code never written leaves the told one');
+    writeFileSync(written, 'not a code');
+    assert.equal(helperExit(written, 5), 5, 'and so does a file holding no code');
+    if (process.platform !== 'win32') {
+      console.log('whole exit code regression: the helper and the cut code are Windows-only');
+      return;
+    }
+    // A stand-in engine that exits as an access violation does, without crashing anything.
+    const directory = join(scratch, 'engine');
+    mkdirSync(directory);
+    const launch = {
+      godotPath: join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe'),
+      projectPath: scratch,
+      deadlineSeconds: 120,
+      running: new Set<() => void>(),
+      cores: null,
+    };
+    const end = await watchedEngine(
+      launch,
+      join(scratch, '1.lock'),
+      ['/d', '/c', 'exit', '-1073741819'],
+      directory,
+      join(directory, 'engine.log'),
+      60,
+    );
+    assert.equal(end.ended, null, JSON.stringify(end));
+    assert.equal(end.code, 0xc0000005, `the engine's whole code: ${JSON.stringify(end)}`);
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * An engine started without the desktop helper is told by its whole exit code as well. The server's
+ * headless test runs start the engine directly, as do exports and the headless operations through
+ * `runEngine`. Under Bun on Windows each reported an access violation as an exit of 5.
+ */
+async function testAnEngineStartedDirectlyIsToldByItsWholeExitCode(): Promise<void> {
+  await prepareWholeExits();
+  if (process.platform !== 'win32') {
+    const child = spawnHidden(process.execPath, ['-e', 'process.exit(4)'], { stdio: 'ignore' });
+    const whole = holdExit(child.pid);
+    assert.equal(whole((await exitOf(child)).code), 4, 'elsewhere the code told stands');
+    return;
+  }
+  const cmd = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe');
+  const crashing = ['/d', '/c', 'exit', '-1073741819'];
+  // As the server's spawnHeld starts an engine with no desktop of its own.
+  const child = spawnHidden(cmd, crashing, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const whole = holdExit(child.pid);
+  const told = (await exitOf(child)).code;
+  assert.equal(whole(told), 0xc0000005, `a direct start's whole code, told ${String(told)}`);
+  assert.equal(whole(told), told, 'and asked again, the code told, since the handle is gone');
+  const ran = await runEngine(cmd, crashing);
+  assert.equal(ran.failure, null, howItEnded(ran));
+  assert.equal(ran.exitCode, 0xc0000005, howItEnded(ran));
+  assert.match(howItEnded(ran), /0xC0000005, an access violation/);
 }
 
 /**
@@ -74301,6 +74393,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFreshCloneHasItsExtensionsListed,
   testAnEngineIsHeldToTheProcessorsAsked,
   testAnEngineWritesItsLogThroughAPipeOnWindows,
+  testAnEngineCrashIsToldByItsWholeExitCode,
+  testAnEngineStartedDirectlyIsToldByItsWholeExitCode,
   testARunawayEngineLogIsCutAndEnded,
   testProjectTestJudgesItsRunAsTheGateDoes,
   testAnEngineGdharnessStartsCanHaveItsCrashReported,

@@ -27,6 +27,7 @@ import {
   DESKTOP_VARIABLE,
   ensureHelperCompiled,
   HIDDEN_DESKTOP,
+  helperExit,
   helperFailure,
   helperStep,
   throughHelper,
@@ -375,6 +376,7 @@ export async function watchedEngine(
     readonly how: string;
     readonly pid: string;
     readonly step: string;
+    readonly exit: string;
   } | null = null;
   try {
     // On Windows every engine on a desktop of its own, headless too: an engine that fails to start
@@ -388,7 +390,13 @@ export async function watchedEngine(
       }
       const stopFile = join(directory, 'stop');
       const error = join(directory, 'error');
-      helper = { error, how: where, pid: join(directory, 'pid'), step: join(directory, 'step') };
+      helper = {
+        error,
+        how: where,
+        pid: join(directory, 'pid'),
+        step: join(directory, 'step'),
+        exit: join(directory, 'exit'),
+      };
       const how = {
         desktop: HIDDEN_DESKTOP,
         directory: launch.projectPath,
@@ -400,6 +408,7 @@ export async function watchedEngine(
         error,
         stop: stopFile,
         step: helper.step,
+        exit: helper.exit,
       });
       // A pipe, copied into the log here: an engine on Windows spends 1.5 to 4 ms on every line it
       // writes to a file and 0.04 ms on one written to a pipe, and gdUnit4 prints a dozen a case. The
@@ -564,7 +573,9 @@ export async function watchedEngine(
       watching(pid, false);
     }
   }
-  const { code, signal } = await exited;
+  const told = await exited;
+  const code = helper === null ? told.code : helperExit(helper.exit, told.code);
+  const { signal } = told;
   // Read as soon as it is known, while the machine is still as the engine left it.
   const freeBytes = code !== null && code >>> 0 >= WINDOWS_EXCEPTION ? freemem() : undefined;
   if (copied !== null) {

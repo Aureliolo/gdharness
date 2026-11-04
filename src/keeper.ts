@@ -20,6 +20,7 @@ import { exitOf } from './alive.js';
 import {
   DESKTOP_VARIABLE,
   ensureHelperCompiled,
+  helperExit,
   helperFailure,
   helperStep,
   throughHelper,
@@ -49,6 +50,7 @@ import {
 } from './script-profile.js';
 import { type ChildProcess, spawnHidden, spawnShown } from './spawn.js';
 import { followSuccessor } from './successor.js';
+import { holdExit, prepareWholeExits, type WholeExit } from './whole-exit.js';
 
 /**
  * The target started detached, so it is in no job object and no process group of this process.
@@ -66,7 +68,7 @@ async function startDirectly(
   detached = true,
   errors: number | 'ignore' = output,
   directory: string = process.cwd(),
-): Promise<{ child: ChildProcess; pid: number } | { error: string }> {
+): Promise<{ child: ChildProcess; pid: number; whole: WholeExit } | { error: string }> {
   return await new Promise((resolve) => {
     const child = (hidden ? spawnHidden : spawnShown)(spec.command, spec.args, {
       stdio: ['ignore', output, errors],
@@ -74,6 +76,7 @@ async function startDirectly(
       env: withChanges(process.env, spec.envChanges),
       cwd: directory,
     });
+    const whole = holdExit(child.pid);
     child.once('error', (error: Error) => {
       resolve({ error: error.message });
     });
@@ -81,7 +84,7 @@ async function startDirectly(
       resolve(
         child.pid === undefined
           ? { error: 'the operating system gave it no pid' }
-          : { child, pid: child.pid },
+          : { child, pid: child.pid, whole },
       );
     });
   });
@@ -104,7 +107,8 @@ async function startThroughHelper(
   spec: SentSpec,
   output: number | 'ignore',
   stopFile: string,
-): Promise<{ child: ChildProcess; pid: number } | { error: string }> {
+  exitFile: string,
+): Promise<{ child: ChildProcess; pid: number; whole: WholeExit } | { error: string }> {
   const scratch = scratchDirectory('desktop');
   const pidFile = join(scratch, 'pid');
   const errorFile = join(scratch, 'error');
@@ -128,6 +132,7 @@ async function startThroughHelper(
       error: errorFile,
       stop: stopFile,
       step: stepFile,
+      exit: exitFile,
     });
     // The helper's environment is what it starts inherits, since the start names no other.
     const envChanges =
@@ -153,7 +158,7 @@ async function startThroughHelper(
     for (let waited = 0; waited < DESKTOP_START_MS; waited += 50) {
       const pid = existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8').trim()) : Number.NaN;
       if (Number.isInteger(pid) && pid > 0) {
-        return { child: started.child, pid };
+        return { child: started.child, pid, whole: started.whole };
       }
       if (exited.now) {
         const why = helperFailure(errorFile) ?? 'it exited saying nothing';
@@ -246,15 +251,17 @@ const DESKTOP_START_MS = 60_000;
  * Through the helper where Windows is asked for a desktop or a start without activation, which Node
  * cannot name when it starts a process, and directly otherwise. [param stopFile] is where a helper
  * is told to end what it started, and is empty for a start nothing will be asked to end.
+ * [param exitFile] is where the helper writes the whole exit code, and is empty for none.
  */
 async function startDetached(
   spec: SentSpec,
   output: number | 'ignore',
   hidden: boolean,
   stopFile = '',
-): Promise<{ child: ChildProcess; pid: number } | { error: string }> {
+  exitFile = '',
+): Promise<{ child: ChildProcess; pid: number; whole: WholeExit } | { error: string }> {
   return throughTheHelper(spec)
-    ? await startThroughHelper(spec, output, stopFile)
+    ? await startThroughHelper(spec, output, stopFile, exitFile)
     : await startDirectly(spec, output, hidden);
 }
 
@@ -362,13 +369,14 @@ async function keep(): Promise<void> {
   const own =
     run !== undefined && throughTheHelper(spec) ? mkdtempSync(join(tmpdir(), 'gdharness-stop-')) : null;
   const stopFile = own === null ? '' : join(own, 'stop');
+  const exitFile = own === null ? '' : join(own, 'exit');
   let started: Awaited<ReturnType<typeof startDetached>>;
   // Read beside the start rather than after it: on Windows it is a query of its own.
   const keeperStarted = run?.slot === undefined ? undefined : ownStart();
   // Before the game exists, so anything listed as started after it can be the game's own.
   const spawnedAt = Date.now();
   try {
-    started = await startDetached(toStart, transcript, run === undefined, stopFile);
+    started = await startDetached(toStart, transcript, run === undefined, stopFile, exitFile);
   } finally {
     // The game holds its own copy from here on.
     if (transcript !== 'ignore') {
@@ -380,7 +388,7 @@ async function keep(): Promise<void> {
     process.stdout.write(`error ${started.error}\n`);
     process.exit(1);
   }
-  const { child, pid } = started;
+  const { child, pid, whole } = started;
   const record =
     run === undefined
       ? null
@@ -450,7 +458,9 @@ async function keep(): Promise<void> {
       ...(gameStarted === undefined ? {} : { engine: { pid, started: gameStarted } }),
     });
   }
-  let { code, signal } = await exited;
+  const told = await exited;
+  let code = exitFile === '' ? whole(told.code) : helperExit(exitFile, whole(told.code));
+  let { signal } = told;
   let exitedAt = Date.now();
   let note: RunRecord | null =
     record === null ? null : listening === null ? record : { ...record, keeper: listening.address };
@@ -567,6 +577,7 @@ function restartSaid(notes: string | null, pid: number): boolean | null {
 }
 
 await letWindowsReportCrashes();
+await prepareWholeExits();
 const mode = process.argv[2];
 if (mode === 'launch') {
   await launch();

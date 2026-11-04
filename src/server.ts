@@ -101,6 +101,7 @@ import {
   ensureHelperCompiled,
   type HelperFiles,
   HIDDEN_DESKTOP,
+  helperExit,
   helperFailure,
   helperStep,
   throughHelper,
@@ -412,6 +413,7 @@ import {
 } from './tool-definitions.js';
 import { argumentShape } from './tool-reference.js';
 import { isNewer, UpdateCheck } from './update-check.js';
+import { holdExit } from './whole-exit.js';
 import { inTurnFor } from './write-turns.js';
 
 /**
@@ -7701,6 +7703,7 @@ class GodotServer {
       error: join(userData, 'error'),
       stop: join(userData, 'stop'),
       step: join(userData, 'step'),
+      exit: join(userData, 'exit'),
     };
     const onDesktop = windowed && process.platform === 'win32';
     // On a desktop of its own on Windows, where its window neither shows nor takes the keyboard.
@@ -11935,6 +11938,7 @@ class GodotServer {
             stdio: ['ignore', 'pipe', 'pipe'],
             env: { ...(env ?? process.env), [DESKTOP_VARIABLE]: HIDDEN_DESKTOP },
           });
+    const whole = holdExit(child.pid);
     const stop = (): void => {
       if (onDesktop === undefined) {
         child.kill();
@@ -11985,7 +11989,8 @@ class GodotServer {
     });
     child.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
       this.logDebug(`Godot process exited with code ${code ?? 'none'}, signal ${signal ?? 'none'}`);
-      started.exitCode = code;
+      started.exitCode =
+        onDesktop === undefined ? whole(code) : helperExit(onDesktop.files.exit, whole(code));
       started.exitSignal = code === null ? signal : null;
       started.endedAt = Date.now();
     });
