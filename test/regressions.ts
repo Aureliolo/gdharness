@@ -80,6 +80,7 @@ import {
   ensureHelperCompiled,
   HIDDEN_DESKTOP,
   helperAssembly,
+  helperExit,
   helperFailure,
   helperStep,
   throughHelper,
@@ -13539,6 +13540,7 @@ async function testARunOnItsOwnDesktopIsThere(): Promise<void> {
       error: join(scratch, 'error'),
       stop: join(scratch, 'stop'),
       step: join(scratch, 'step'),
+      exit: join(scratch, 'exit'),
     };
     const wrapper = throughHelper({ directory: scratch }, 'godot.exe', [], files);
     assert.deepEqual(wrapper, { command: helperAssembly(), args: [files.spec, files.error, files.step] });
@@ -15078,6 +15080,7 @@ function testAUidCacheNamingAFileGoneIsMended(): void {
             error: join(project, 'error'),
             stop: join(project, 'stop'),
             step: join(project, 'step'),
+            exit: join(project, 'exit'),
           }),
       ],
     ];
@@ -52190,6 +52193,7 @@ async function testAnEngineIsHeldToTheProcessorsAsked(): Promise<void> {
         error: join(scratch, `${name}.error`),
         stop: join(scratch, `${name}.stop`),
         step: join(scratch, `${name}.step`),
+        exit: join(scratch, `${name}.exit`),
       };
       // Written once the process runs, which a start left suspended never reaches.
       const ran = join(scratch, `${name}.ran`);
@@ -52426,6 +52430,54 @@ async function testARunawayEngineLogIsCutAndEnded(): Promise<void> {
       `an engine that exited is not ended for the stretch it exited in: ${JSON.stringify(finishedWithin)}`,
     );
     assert.ok(looks > 1, 'and the sample landed after it had started');
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * An engine that crashes is told by its whole exit code, run under Bun too. Bun hands a parent on
+ * Windows only the low byte of a child's code, so two game engines that died on an access
+ * violation at exit, 0xC0000005, were reported as exiting 5, "most likely a quit(5) in the
+ * project's code". The helper writes the whole code beside the run, and a code it did not write,
+ * or one whose low byte differs from the one told, leaves the told code standing.
+ */
+async function testAnEngineCrashIsToldByItsWholeExitCode(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-whole-exit-'));
+  try {
+    const written = join(scratch, 'written');
+    writeFileSync(written, '3221225477');
+    assert.equal(helperExit(written, 5), 0xc0000005, 'the low byte Bun tells is made whole');
+    assert.equal(helperExit(written, 0xc0000005), 0xc0000005, 'the whole code Node tells stands');
+    assert.equal(helperExit(written, 3), 3, 'a code with another low byte is not the one written');
+    assert.equal(helperExit(written, null), null, 'nor is an end without a code');
+    assert.equal(helperExit(join(scratch, 'none'), 5), 5, 'a code never written leaves the told one');
+    writeFileSync(written, 'not a code');
+    assert.equal(helperExit(written, 5), 5, 'and so does a file holding no code');
+    if (process.platform !== 'win32') {
+      console.log('whole exit code regression: the helper and the cut code are Windows-only');
+      return;
+    }
+    // A stand-in engine that exits as an access violation does, without crashing anything.
+    const directory = join(scratch, 'engine');
+    mkdirSync(directory);
+    const launch = {
+      godotPath: join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe'),
+      projectPath: scratch,
+      deadlineSeconds: 120,
+      running: new Set<() => void>(),
+      cores: null,
+    };
+    const end = await watchedEngine(
+      launch,
+      join(scratch, '1.lock'),
+      ['/d', '/c', 'exit', '-1073741819'],
+      directory,
+      join(directory, 'engine.log'),
+      60,
+    );
+    assert.equal(end.ended, null, JSON.stringify(end));
+    assert.equal(end.code, 0xc0000005, `the engine's whole code: ${JSON.stringify(end)}`);
   } finally {
     sweep(scratch);
   }
@@ -74301,6 +74353,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFreshCloneHasItsExtensionsListed,
   testAnEngineIsHeldToTheProcessorsAsked,
   testAnEngineWritesItsLogThroughAPipeOnWindows,
+  testAnEngineCrashIsToldByItsWholeExitCode,
   testARunawayEngineLogIsCutAndEnded,
   testProjectTestJudgesItsRunAsTheGateDoes,
   testAnEngineGdharnessStartsCanHaveItsCrashReported,

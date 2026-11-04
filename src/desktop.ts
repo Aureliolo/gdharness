@@ -155,7 +155,8 @@ public static class GdharnessDesktop {
   }
 
   // Starts the command line, both of its streams on this process's output, writes its pid, and
-  // waits for it: the answer is its exit code. On the named desktop when there is one, whose handle
+  // waits for it: the answer is its exit code, also written whole to exitFile, since Bun hands a
+  // parent on Windows only the low byte of a code. On the named desktop when there is one, whose handle
   // is held until then, since a desktop goes when the last handle to it does, and on this process's
   // own otherwise. With noActivate its first window is shown without being activated, which is
   // what a program's first ShowWindow does whatever it asks for when the start names a show state,
@@ -168,7 +169,8 @@ public static class GdharnessDesktop {
     string[] lines = File.ReadAllLines(specFile);
     Func<int, string> field = delegate(int index) { return Encoding.UTF8.GetString(Convert.FromBase64String(lines[index])); };
     string affinity = lines.Length > 7 ? field(7) : "";
-    return Run(field(0), field(1), field(2), field(3) == "1", field(4), field(5), field(6), affinity.Length == 0 ? 0UL : ulong.Parse(affinity));
+    string exitFile = lines.Length > 8 ? field(8) : "";
+    return Run(field(0), field(1), field(2), field(3) == "1", field(4), field(5), field(6), affinity.Length == 0 ? 0UL : ulong.Parse(affinity), exitFile);
   }
 
   static void Step(string stepFile, string step) {
@@ -179,7 +181,7 @@ public static class GdharnessDesktop {
 
   // With an affinity, the process starts suspended and is held to those processors before its
   // first thread runs, so every thread it starts afterwards is held to them as well.
-  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory, string stepFile, ulong affinity) {
+  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory, string stepFile, ulong affinity, string exitFile) {
     StartupInfo startup = new StartupInfo();
     startup.cb = Marshal.SizeOf(typeof(StartupInfo));
     if (desktop.Length > 0) {
@@ -268,6 +270,15 @@ public static class GdharnessDesktop {
     GetExitCodeProcess(started.process, out code);
     CloseHandle(started.thread);
     CloseHandle(started.process);
+    if (exitFile.Length > 0) {
+      // A file that cannot be written leaves the parent the code this exits with, which says less
+      // but still says it.
+      try {
+        File.WriteAllText(exitFile, code.ToString());
+      } catch (IOException) {
+      } catch (UnauthorizedAccessException) {
+      }
+    }
     return unchecked((int)code);
   }
 }
@@ -337,6 +348,32 @@ export interface HelperFiles {
   readonly stop: string;
   /** The step the helper last reached, which a start that waited in vain reads with `helperStep`. */
   readonly step: string;
+  /** The process's exit code as the helper read it, whole, which `helperExit` reads. */
+  readonly exit: string;
+}
+
+/**
+ * The exit code of the process the helper behind [param exitFile] started, where the helper's own
+ * exit, [param told], says only part of it. Bun on Windows hands a parent the low byte of a child's
+ * code alone, so an engine's access violation, 0xC0000005, read as an exit of 5 and was named a
+ * quit(5) in the game's code. The code written there stands when its low byte is the one told, and
+ * [param told] otherwise, such as when the helper itself failed or was ended before writing it.
+ */
+export function helperExit(exitFile: string, told: number | null): number | null {
+  if (told === null) {
+    return null;
+  }
+  let written: number;
+  try {
+    written = Number(readFileSync(exitFile, 'utf8').trim());
+  } catch {
+    return told;
+  }
+  if (!Number.isInteger(written) || written < 0 || written > 0xffffffff) {
+    return told;
+  }
+  // Node hands the whole code and Bun its low byte, so only the low bytes are compared.
+  return (written & 0xff) === (told & 0xff) ? written : told;
 }
 
 /**
@@ -394,6 +431,7 @@ export function throughHelper(
     how.directory,
     files.step,
     how.affinity === undefined ? '' : how.affinity.toString(),
+    files.exit,
   ];
   writeFileSync(
     files.spec,
