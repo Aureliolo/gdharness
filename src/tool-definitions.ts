@@ -2147,7 +2147,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       info: {
         effect: 'read',
-        summary: 'methods, properties, signals and enums of one class, or one member of it by name',
+        summary:
+          'methods, properties, signals and enums of one class, or one member of it by name. Each property of a class that can be made carries default, the value a new one holds',
         requires: ['className'],
       },
       inheritance: {
