@@ -50,6 +50,7 @@ import {
 } from './script-profile.js';
 import { type ChildProcess, spawnHidden, spawnShown } from './spawn.js';
 import { followSuccessor } from './successor.js';
+import { holdExit, prepareWholeExits, type WholeExit } from './whole-exit.js';
 
 /**
  * The target started detached, so it is in no job object and no process group of this process.
@@ -67,7 +68,7 @@ async function startDirectly(
   detached = true,
   errors: number | 'ignore' = output,
   directory: string = process.cwd(),
-): Promise<{ child: ChildProcess; pid: number } | { error: string }> {
+): Promise<{ child: ChildProcess; pid: number; whole: WholeExit } | { error: string }> {
   return await new Promise((resolve) => {
     const child = (hidden ? spawnHidden : spawnShown)(spec.command, spec.args, {
       stdio: ['ignore', output, errors],
@@ -75,6 +76,7 @@ async function startDirectly(
       env: withChanges(process.env, spec.envChanges),
       cwd: directory,
     });
+    const whole = holdExit(child.pid);
     child.once('error', (error: Error) => {
       resolve({ error: error.message });
     });
@@ -82,7 +84,7 @@ async function startDirectly(
       resolve(
         child.pid === undefined
           ? { error: 'the operating system gave it no pid' }
-          : { child, pid: child.pid },
+          : { child, pid: child.pid, whole },
       );
     });
   });
@@ -106,7 +108,7 @@ async function startThroughHelper(
   output: number | 'ignore',
   stopFile: string,
   exitFile: string,
-): Promise<{ child: ChildProcess; pid: number } | { error: string }> {
+): Promise<{ child: ChildProcess; pid: number; whole: WholeExit } | { error: string }> {
   const scratch = scratchDirectory('desktop');
   const pidFile = join(scratch, 'pid');
   const errorFile = join(scratch, 'error');
@@ -156,7 +158,7 @@ async function startThroughHelper(
     for (let waited = 0; waited < DESKTOP_START_MS; waited += 50) {
       const pid = existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8').trim()) : Number.NaN;
       if (Number.isInteger(pid) && pid > 0) {
-        return { child: started.child, pid };
+        return { child: started.child, pid, whole: started.whole };
       }
       if (exited.now) {
         const why = helperFailure(errorFile) ?? 'it exited saying nothing';
@@ -257,7 +259,7 @@ async function startDetached(
   hidden: boolean,
   stopFile = '',
   exitFile = '',
-): Promise<{ child: ChildProcess; pid: number } | { error: string }> {
+): Promise<{ child: ChildProcess; pid: number; whole: WholeExit } | { error: string }> {
   return throughTheHelper(spec)
     ? await startThroughHelper(spec, output, stopFile, exitFile)
     : await startDirectly(spec, output, hidden);
@@ -386,7 +388,7 @@ async function keep(): Promise<void> {
     process.stdout.write(`error ${started.error}\n`);
     process.exit(1);
   }
-  const { child, pid } = started;
+  const { child, pid, whole } = started;
   const record =
     run === undefined
       ? null
@@ -457,7 +459,7 @@ async function keep(): Promise<void> {
     });
   }
   const told = await exited;
-  let code = exitFile === '' ? told.code : helperExit(exitFile, told.code);
+  let code = exitFile === '' ? whole(told.code) : helperExit(exitFile, whole(told.code));
   let { signal } = told;
   let exitedAt = Date.now();
   let note: RunRecord | null =
@@ -575,6 +577,7 @@ function restartSaid(notes: string | null, pid: number): boolean | null {
 }
 
 await letWindowsReportCrashes();
+await prepareWholeExits();
 const mode = process.argv[2];
 if (mode === 'launch') {
   await launch();

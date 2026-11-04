@@ -504,6 +504,7 @@ import {
 import { argumentShape, headlessSection, namedType, renderToolsMarkdown } from '../src/tool-reference.js';
 import { encodedUidCache, mendUidCache, type UidEntry, uidCacheEntries } from '../src/uid-cache.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
+import { holdExit, prepareWholeExits } from '../src/whole-exit.js';
 import { writeWhole } from '../src/whole-file.js';
 import { askWindows } from '../src/windows-ask.js';
 import { inTurnFor, writeLockOf } from '../src/write-turns.js';
@@ -52484,6 +52485,33 @@ async function testAnEngineCrashIsToldByItsWholeExitCode(): Promise<void> {
 }
 
 /**
+ * An engine started without the desktop helper is told by its whole exit code as well. The server's
+ * headless test runs start the engine directly, as do exports and the headless operations through
+ * `runEngine`. Under Bun on Windows each reported an access violation as an exit of 5.
+ */
+async function testAnEngineStartedDirectlyIsToldByItsWholeExitCode(): Promise<void> {
+  await prepareWholeExits();
+  if (process.platform !== 'win32') {
+    const child = spawnHidden(process.execPath, ['-e', 'process.exit(4)'], { stdio: 'ignore' });
+    const whole = holdExit(child.pid);
+    assert.equal(whole((await exitOf(child)).code), 4, 'elsewhere the code told stands');
+    return;
+  }
+  const cmd = join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe');
+  const crashing = ['/d', '/c', 'exit', '-1073741819'];
+  // As the server's spawnHeld starts an engine with no desktop of its own.
+  const child = spawnHidden(cmd, crashing, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const whole = holdExit(child.pid);
+  const told = (await exitOf(child)).code;
+  assert.equal(whole(told), 0xc0000005, `a direct start's whole code, told ${String(told)}`);
+  assert.equal(whole(told), told, 'and asked again, the code told, since the handle is gone');
+  const ran = await runEngine(cmd, crashing);
+  assert.equal(ran.failure, null, howItEnded(ran));
+  assert.equal(ran.exitCode, 0xc0000005, howItEnded(ran));
+  assert.match(howItEnded(ran), /0xC0000005, an access violation/);
+}
+
+/**
  * An engine started for a run writes to a pipe on Windows, copied into its log, and to the log file
  * itself elsewhere. The stream is the property the cost depends on: an engine on Windows spent 1.5
  * to 4 ms on each line written to a file and 0.04 ms on one written to a pipe. Either way the log
@@ -74354,6 +74382,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineIsHeldToTheProcessorsAsked,
   testAnEngineWritesItsLogThroughAPipeOnWindows,
   testAnEngineCrashIsToldByItsWholeExitCode,
+  testAnEngineStartedDirectlyIsToldByItsWholeExitCode,
   testARunawayEngineLogIsCutAndEnded,
   testProjectTestJudgesItsRunAsTheGateDoes,
   testAnEngineGdharnessStartsCanHaveItsCrashReported,

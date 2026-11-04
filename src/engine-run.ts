@@ -10,6 +10,7 @@ import { callSignal } from './call-signal.js';
 import { inASlot, nameSlotEngineOf, onTheSlot } from './engine-slots.js';
 import { GameLog } from './game-log.js';
 import { spawnHidden } from './spawn.js';
+import { holdExit } from './whole-exit.js';
 
 export interface EngineRun {
   /** Both streams, finished. */
@@ -65,6 +66,7 @@ function runStarted(
       env: onTheSlot(process.env, lock),
       ...(signal === undefined ? {} : { signal }),
     });
+    const whole = holdExit(child.pid);
     // The lock names this process, and what the engine starts runs on its slot only when it names
     // the engine too.
     if (child.pid !== undefined) {
@@ -93,7 +95,7 @@ function runStarted(
       log.finish();
       // A process that never started has a libuv error number where its exit code would be.
       const started = child.pid !== undefined;
-      resolve({ log, exitCode: started ? code : null, exitSignal: closedBy, failure });
+      resolve({ log, exitCode: started ? whole(code) : null, exitSignal: closedBy, failure });
     });
   });
 }
