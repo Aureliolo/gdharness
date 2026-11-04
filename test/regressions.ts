@@ -58962,7 +58962,9 @@ async function testAWriteSaysWhatElseItChanged(): Promise<void> {
  *
  * And a resource built into
  * a file reads by its script's class, a create names the script it attached, and the engine's report
- * of a script it never frees is not put down to the autoloads.
+ * of a script it never frees is not put down to the autoloads. A value the file keeps that the
+ * script changes as the file loads is written and answered under loadsAs (probe 396), and one left
+ * out at its default under notStored.
  */
 async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> {
   const engine = resolveGodotPath();
@@ -58993,6 +58995,12 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
     'class_name Stats\nextends Resource\n\n@export var health: int = 10:\n\tset(value):\n\t\thealth = value\n' +
       '\t\tlabel = "hp %d" % value\n\n@export var label: String = ""\n@export var tags: Array[String] = []\n\n\n' +
       'func _init() -> void:\n\ttags = ["base"]\n',
+  );
+  // Saved after marks, level's setter adds to marks as the file loads.
+  writeFileSync(
+    join(project, 'rolls.gd'),
+    'class_name Rolls\nextends Resource\n\n@export var marks: Array = [3, 3.0]\n' +
+      '@export var level: int = 0:\n\tset(value):\n\t\tlevel = value\n\t\tmarks.append(float(value))\n',
   );
   const server = new ServerProcess({
     env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
@@ -59099,6 +59107,57 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
       { health: 9 },
       `a read gives what the file sets: ${JSON.stringify(grunt)}`,
     );
+
+    // A value given at its default is left out of the file, and the answer says so.
+    const float = (value: number): unknown => ({ _type: 'float', value });
+    const rolled = await answered({
+      op: 'create',
+      resourcePath: 'res://rolls.tres',
+      resourceType: 'Rolls',
+      properties: { marks: [3, float(3)] },
+    });
+    assert.deepEqual(
+      [get(rolled, 'notStored'), get(rolled, 'notStoredNote'), get(rolled, 'loadsAs')],
+      [['marks'], 'marks now holds the default, so the file does not store it.', undefined],
+      JSON.stringify(rolled),
+    );
+    assert.doesNotMatch(readFileSync(join(project, 'rolls.tres'), 'utf8'), /marks/);
+    await answered({ op: 'modify', resourcePath: 'res://rolls.tres', properties: { level: 4 } });
+    // The file keeps marks as given, and level's setter, run after it, adds to it as the file loads.
+    const loadsAs = await answered({
+      op: 'modify',
+      resourcePath: 'res://rolls.tres',
+      properties: { marks: [5, float(5)] },
+    });
+    assert.deepEqual(
+      [
+        get(loadsAs, 'properties'),
+        get(loadsAs, 'loadsAs'),
+        get(loadsAs, 'loadsAsNote'),
+        get(loadsAs, 'notStored'),
+      ],
+      [
+        { marks: [5, float(5)] },
+        { marks: [5, float(5), float(4)] },
+        "The file gives marks the value asked for, which the editor shows. res://rolls.tres's script is not a tool, so in the game it runs as the file loads and changes it to what loadsAs gives.",
+        undefined,
+      ],
+      JSON.stringify(loadsAs),
+    );
+    assert.match(readFileSync(join(project, 'rolls.tres'), 'utf8'), /^marks = \[5, 5\.0\]$/m);
+    // At its default, marks is left out, and the setter still adds to it as the file loads.
+    const both = await answered({
+      op: 'modify',
+      resourcePath: 'res://rolls.tres',
+      properties: { marks: [3, float(3)] },
+    });
+    assert.deepEqual(
+      [get(both, 'notStored'), get(both, 'loadsAs')],
+      [['marks'], { marks: [3, float(3), float(4)] }],
+      JSON.stringify(both),
+    );
+    assert.doesNotMatch(readFileSync(join(project, 'rolls.tres'), 'utf8'), /marks/);
+
     writeFileSync(
       join(project, 'camp.tres'),
       '[gd_resource type="Resource" format=3]\n\n[ext_resource type="Script" path="res://stats.gd" id="1_stats"]\n\n' +
