@@ -380,7 +380,8 @@ func _check_exact_ints() -> void:
 	var refused: Array = [
 		{ "_type": "int", "value": "lots" },
 		{ "_type": "int", "value": "007" },
-		{ "_type": "int", "value": 5 },
+		{ "_type": "int", "value": 2.5 },
+		{ "_type": "int", "value": float(EXACT) * 4 },
 		{ "_type": "RID", "id": 1.5 },
 		{ "_type": "RID", "id": float(EXACT) * 4 },
 	]
@@ -388,6 +389,15 @@ func _check_exact_ints() -> void:
 		var built: Variant = values.deserialize_value(tag)
 		if not built is Dictionary:
 			_fail("%s was built into %s" % [JSON.stringify(tag), var_to_str(built)])
+
+	# A whole number in an int tag the caller wrote is that int. Untagged, the same fields are not
+	# read as one: {"value": 5} meant for some other shape is not 5.
+	var tagged_int: Variant = values.deserialize_value({ "_type": "int", "value": 5 })
+	if not tagged_int is int or tagged_int != 5:
+		_fail("an int tag holding 5 came back %s" % var_to_str(tagged_int))
+	var untagged: Variant = values.fitted({ "value": 5 }, TYPE_INT)
+	if untagged is int:
+		_fail('{"value": 5} fitted to an int was read as %d' % untagged)
 
 	# Digits handed to an int are read as digits, and a number that large is refused by name.
 	var digits: Variant = values.fitted(str((1 << 62) + 1), TYPE_INT)

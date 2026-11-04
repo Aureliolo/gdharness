@@ -32864,6 +32864,33 @@ async function testANullTakesAMetadataEntryOff(): Promise<void> {
     assert.match(file('widget.tscn'), /metadata\/at = Vector2\(1, 2\)\n/, file('widget.tscn'));
     const read = await answered('scene_node', { op: 'get', scenePath: 'widget.tscn', nodePath: '.' });
     assert.equal(get(read, 'properties', 'metadata/count'), 2, JSON.stringify(read));
+    // A tag says the type of a new entry, which has none to fit to: an int tag holding a number
+    // saved a dictionary holding the tag (probe 401).
+    const tagged = await answered('scene_node', {
+      op: 'set',
+      scenePath: 'widget.tscn',
+      nodePath: '.',
+      properties: {
+        'metadata/whole': { _type: 'int', value: 6 },
+        'metadata/ratio': { _type: 'float', value: 2 },
+      },
+    });
+    assert.deepEqual(
+      get(tagged, 'properties'),
+      { 'metadata/whole': 6, 'metadata/ratio': 2 },
+      JSON.stringify(tagged),
+    );
+    assert.match(file('widget.tscn'), /metadata\/whole = 6\n/, file('widget.tscn'));
+    assert.match(file('widget.tscn'), /metadata\/ratio = 2\.0\n/, file('widget.tscn'));
+    // Untagged, the same field is no int: {"value": 7} meant for some other shape is not 7.
+    const shaped = await call('scene_node', {
+      op: 'set',
+      scenePath: 'widget.tscn',
+      nodePath: '.',
+      properties: { 'metadata/kept': { value: 7 } },
+    });
+    assert.equal(get(shaped, 'result', 'isError'), true, textOf(shaped) ?? JSON.stringify(shaped));
+    assert.match(file('widget.tscn'), /metadata\/kept = 5\n/, file('widget.tscn'));
 
     const made = await answered('resource_edit', {
       op: 'modify',
