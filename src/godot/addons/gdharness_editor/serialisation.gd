@@ -614,23 +614,26 @@ func _serialize_dictionary(value: Dictionary) -> Dictionary:
 	if not texts:
 		var entries: Array = []
 		for key: Variant in value:
-			entries.append([_member(key, keys_typed), _member(value[key], values_typed)])
+			entries.append(
+				[serialize_member(key, keys_typed), serialize_member(value[key], values_typed)]
+			)
 		return { "_type": "Dictionary", "entries": entries }
 	var serialised: Dictionary = {}
 	for key: Variant in value:
-		serialised[str(key)] = _member(value[key], values_typed)
+		serialised[str(key)] = serialize_member(value[key], values_typed)
 	return serialised
 
 
 func _serialize_array(value: Array) -> Array:
 	var typed: bool = value.is_typed()
-	return value.map(func(item: Variant) -> Variant: return _member(item, typed))
+	return value.map(func(item: Variant) -> Variant: return serialize_member(item, typed))
 
 
-# A member of a list or map that declares no type. JSON writes 7 and 7.0 alike, and there the
-# member's own type is all that says which it is, so a whole float crosses tagged and a bare whole
-# number is an int, as GDScript reads the literal.
-func _member(value: Variant, typed: bool) -> Variant:
+## [param value], a member of a list or map whose type [param typed] says it declares or not. JSON
+## writes 7 and 7.0 alike, and in a list or map that declares no type the member's own type is all
+## that says which it is, so a whole float crosses tagged and a bare whole number is an int, as
+## GDScript reads the literal. A caller walking a list itself answers each member through this.
+func serialize_member(value: Variant, typed: bool) -> Variant:
 	if not typed and value is float:
 		var number: float = value
 		if is_finite(number) and number == floorf(number) and absf(number) < EXACT:

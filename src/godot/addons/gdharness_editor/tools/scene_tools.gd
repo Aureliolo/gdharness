@@ -99,7 +99,15 @@ func _readable(node: Node, value: Variant) -> Variant:
 		return _values.serialize_value(node.get_path_to(target))
 	if value is Array:
 		var items: Array = value
-		return items.map(func(item: Variant) -> Variant: return _readable(node, item))
+		var typed: bool = items.is_typed()
+		return items.map(
+			func(item: Variant) -> Variant:
+				return (
+					_readable(node, item)
+					if item is Node or item is Array
+					else _values.serialize_member(item, typed)
+				)
+		)
 	return _values.serialize_value(value)
 
 
