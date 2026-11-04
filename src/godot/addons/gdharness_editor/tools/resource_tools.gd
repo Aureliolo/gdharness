@@ -102,8 +102,12 @@ func _load_theme(theme_path: String) -> Theme:
 ## as it was, [param previous], or removed when there was none.
 ##
 ## Read back because a property can be set and still not be saved: one without storage, a
-## script variable that is not exported. Both were answered as changed.
-func _save_checked(resource: Resource, path: String, names: Array, previous: Variant) -> String:
+## script variable that is not exported. Both were answered as changed. A value the file gives as
+## asked and the resource's script changes as it loads goes under loadsAs in [param answer], and one
+## the file leaves out at its default under notStored.
+func _save_checked(
+	resource: Resource, path: String, names: Array, previous: Variant, answer: Dictionary
+) -> String:
 	var carried: Dictionary = GdhHeadlessCheck.embedded_in(
 		GdhHeadlessCheck.stored(resource).values(), {}
 	)
@@ -116,6 +120,12 @@ func _save_checked(resource: Resource, path: String, names: Array, previous: Var
 	if not unkept.is_empty():
 		return "Nothing was written: " + unkept + GdhHeadlessCheck.put_back(path, previous)
 	var loaded: Resource = ResourceLoader.load(path, "", ResourceLoader.CACHE_MODE_IGNORE)
+	var saved: Dictionary = (
+		GdhHeadlessCheck.main_entries(FileAccess.get_file_as_string(path))
+		if path.ends_with(".tres")
+		else {}
+	)
+	var loads_as: Dictionary = {}
 	var lost: String = ""
 	if loaded == null:
 		lost = "%s did not load back after it was saved." % path
@@ -123,19 +133,93 @@ func _save_checked(resource: Resource, path: String, names: Array, previous: Var
 		for key: Variant in names:
 			var property: String = str(key)
 			var read: Variant = _properties.read_at(loaded, property)
-			if not GdhSame.same(read, _properties.read_at(resource, property)):
-				lost = (
-					(
-						"%s.%s would load from the file as %s: it is not a property the file "
-						+ "keeps, so nothing was changed."
-					)
-					% [path, property, _properties.shown(read)]
+			var given: Variant = _properties.read_at(resource, property)
+			if GdhSame.same(read, given):
+				continue
+			# The file holds it, and the resource's own script set it again as the file loaded, as
+			# it will wherever the file loads. An editor saves the same.
+			if resource.get_script() != null and _file_gives(resource, saved, property, given):
+				loads_as[property] = _values.serialize_value(read)
+				continue
+			lost = (
+				(
+					"%s.%s would load from the file as %s: it is not a property the file keeps, "
+					+ "so nothing was changed."
 				)
-				break
-	if lost.is_empty():
-		_written(path)
-		return ""
-	return lost + GdhHeadlessCheck.put_back(path, previous)
+				% [path, property, _properties.shown(read)]
+			)
+			break
+	if not lost.is_empty():
+		return lost + GdhHeadlessCheck.put_back(path, previous)
+	_written(path)
+	_note_loads_as(answer, resource, path, loads_as)
+	if path.ends_with(".tres"):
+		_note_not_stored(answer, resource, names, saved)
+	return ""
+
+
+## Whether [param entries], the lines of [param resource]'s section by name, give [param property]
+## [param value]: as a line, or by leaving out a property that holds its default. A value naming a
+## resource of the file is left unmatched, since its text reads as nothing.
+static func _file_gives(
+	resource: Resource, entries: Dictionary, property: String, value: Variant
+) -> bool:
+	if not entries.has(property):
+		return GdhSame.same(value, GdhHeadlessCheck.default_of(resource, property))
+	if "Resource(" in str(entries[property]):
+		return false
+	return GdhSame.same(str_to_var(str(entries[property])), value)
+
+
+## Puts under loadsAs in [param answer] each value given that the file at [param path] holds and
+## the script of [param resource] changes as the file loads, as [param loads_as] gives it.
+static func _note_loads_as(
+	answer: Dictionary, resource: Resource, path: String, loads_as: Dictionary
+) -> void:
+	if loads_as.is_empty():
+		return
+	answer["loadsAs"] = loads_as
+	var names: String = ", ".join(loads_as.keys())
+	var pronoun: String = "it" if loads_as.size() == 1 else "them"
+	if GdhHeadlessCheck.untooled(resource.get_script()):
+		answer["loadsAsNote"] = (
+			(
+				"The file gives %s the value asked for, which the editor shows. %s's script is not "
+				+ "a tool, so in the game it runs as the file loads and changes %s to what loadsAs "
+				+ "gives."
+			)
+			% [names, path, pronoun]
+		)
+	else:
+		answer["loadsAsNote"] = (
+			(
+				"The file gives %s the value asked for. %s's script runs as the file loads, in the "
+				+ "editor and in the game, and changes %s to what loadsAs gives."
+			)
+			% [names, path, pronoun]
+		)
+
+
+## Notes under notStored in [param answer] each of [param names] that is a stored property of
+## [param resource] and that [param saved], the saved file's main section, does not set: it holds
+## its default, so the saver leaves it out, as the editor does, and it follows that default.
+static func _note_not_stored(
+	answer: Dictionary, resource: Resource, names: Array, saved: Dictionary
+) -> void:
+	var stored: Dictionary = GdhHeadlessCheck.stored(resource)
+	var left: Array[String] = []
+	for key: Variant in names:
+		var property: String = str(key)
+		if stored.has(property) and not saved.has(property):
+			left.append(property)
+	if left.is_empty():
+		return
+	answer["notStored"] = left
+	var verb: String = "holds" if left.size() == 1 else "hold"
+	var pronoun: String = "it" if left.size() == 1 else "them"
+	answer["notStoredNote"] = (
+		"%s now %s the default, so the file does not store %s." % [", ".join(left), verb, pronoun]
+	)
 
 
 ## Outside the editor, puts back in the file just saved at [param path] what a script that is not a
@@ -269,7 +353,7 @@ func create_resource(args: Dictionary) -> Dictionary:
 		if not attached.get_global_name().is_empty():
 			answer["scriptClass"] = str(attached.get_global_name())
 	_properties.note_write(answer)
-	var failed: String = _save_checked(resource, res_path, properties.keys(), null)
+	var failed: String = _save_checked(resource, res_path, properties.keys(), null, answer)
 	if not failed.is_empty():
 		return { "ok": false, "error": failed }
 	_note_put_back(answer, resource, res_path)
@@ -329,7 +413,7 @@ func modify_resource(args: Dictionary) -> Dictionary:
 	var answer: Dictionary = { "ok": true, "resourcePath": res_path }
 	_properties.note_write(answer)
 	var previous: PackedByteArray = FileAccess.get_file_as_bytes(res_path)
-	var failed: String = _save_checked(resource, res_path, properties.keys(), previous)
+	var failed: String = _save_checked(resource, res_path, properties.keys(), previous, answer)
 	if not failed.is_empty():
 		return { "ok": false, "error": failed }
 	_note_put_back(answer, resource, res_path)
