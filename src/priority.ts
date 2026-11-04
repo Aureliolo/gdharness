@@ -1,5 +1,5 @@
-import type { ChildProcess } from 'node:child_process';
 import { constants, setPriority } from 'node:os';
+import type { ChildProcess } from './spawn.js';
 
 /**
  * Puts [param child], an engine this server started, below normal priority. On a machine running
