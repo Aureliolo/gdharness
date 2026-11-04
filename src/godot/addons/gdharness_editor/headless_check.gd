@@ -293,8 +293,8 @@ static func entries(lines: PackedStringArray) -> Dictionary:
 ## out [param asked], as [name, whether before sets it, the text before gives it, the text after
 ## gives it or null].
 static func main_changes(before: String, after: String, asked: Dictionary) -> Array[Array]:
-	var was: Dictionary = _main_entries(before)
-	var now: Dictionary = _main_entries(after)
+	var was: Dictionary = main_entries(before)
+	var now: Dictionary = main_entries(after)
 	var all: Dictionary = was.duplicate()
 	all.merge(now)
 	var changed: Array[Array] = []
@@ -321,7 +321,9 @@ static func reads_the_same(was: Variant, now: Variant, default: Variant) -> bool
 	return GdhSame.same(values[0], values[1])
 
 
-static func _main_entries(text: String) -> Dictionary:
+## Each property the main resource of the file text [param text] sets, by name, to the text of its
+## value.
+static func main_entries(text: String) -> Dictionary:
 	var main: Dictionary = sections(text).get("resource", {})
 	return entries_of(main)
 
