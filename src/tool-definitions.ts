@@ -2809,7 +2809,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       pause: {
         effect: 'additive',
         summary:
-          "stop a game this server started where it is, answering with the stack. The game takes it between frames, and in a script every 2048 lines it runs, so a loop that sleeps between few lines can take seconds. The call waits thirty, and past that answers paused false with the request still standing. Stopped between frames, where no script runs, the game is stepped on to the next line of script it runs, and stopped in gdharness's runtime addon, an autoload whose _process runs first in every frame, on to the next line of the game's own script, for up to five seconds. One whose stack is still the addon's after them says so in a note",
+          "stop a game this server started where it is, answering with the stack. The game takes it between frames, and in a script every 2048 lines it runs, so a loop that sleeps between few lines can take seconds. The call waits thirty, and past that answers paused false with the request still standing. Stopped between frames, where no script runs, the game is stepped on to the next line of script it runs, and stopped in gdharness's runtime addon, an autoload whose _process runs first in every frame, on to the next line of the game's own script, for up to five seconds. One whose stack is still the addon's after them says so in a note. A pause that reaches a game a breakpoint has just stopped makes the engine print an error, which the run's output keeps as info with raisedBy debug_control pause",
         requires: [],
       },
       continue: { effect: 'additive', summary: 'resume after a breakpoint', requires: [] },
@@ -2822,7 +2822,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       step_out: {
         effect: 'additive',
         summary:
-          "run to the end of the current function and stop at the next line run at its caller's depth: in its caller, or, when the call was the last thing its caller did, wherever script runs next, such as the caller's next call. Only for a game this server started",
+          "run to the end of the current function and stop at the next line run at its caller's depth: in its caller, or, when the call was the last thing its caller did, wherever script runs next, such as the caller's next call. A function the engine called, such as _process, is stepped through to its end and stops at the next line of script the game runs, which can be the same function on another node. Only for a game this server started",
         requires: [],
       },
     },
@@ -2843,7 +2843,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['evaluate'],
         description:
-          "evaluate: a GDScript expression, as Godot's Expression class parses it: members of self by name, locals, autoloads and global classes, operators, indexing and calls, such as wave.spawned[0] or Ledger.entries.size(). An expression that does not parse, or fails as it runs, comes to null with failed saying why, as the engine words it, and a null with no failed is the value. For a game the editor plays, the reason reaches only the editor's Debugger panel, so a null there carries a note saying it may be either. The game reports what an expression raises while it is held inside a runtime_invoke call as raised by that call, and the call's answer says so under errorsNote.",
+          "evaluate: a GDScript expression, as Godot's Expression class parses it: members of self by name, locals, autoloads and global classes, operators, indexing and calls, such as wave.spawned[0] or Ledger.entries.size(). An expression that does not parse, or fails as it runs, comes to null with failed saying why, as the engine words it, and a null with no failed is the value. The error the engine prints for it is in the run's output as info with raisedBy debug_state evaluate, and does not count among the run's errors. For a game the editor plays, the reason reaches only the editor's Debugger panel, so a null there carries a note saying it may be either. The game reports what an expression raises while it is held inside a runtime_invoke call as raised by that call, and the call's answer says so under errorsNote.",
       },
     },
     requires: [],

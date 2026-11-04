@@ -35,6 +35,38 @@ export interface LogEntry {
   readonly text: string;
   /** The indented lines the engine printed under the headline, if any. */
   readonly detail: readonly string[];
+  /** The call that made the engine print an error the game did not raise, kept as info. */
+  readonly raisedBy?: RaisedBy;
+}
+
+/**
+ * The calls that make the engine print an error the game did not raise, with the engine file it
+ * names: an expression a caller evaluated in the held game, and a pause that reached a game already
+ * held at a breakpoint. The engine prints either as the game's, so the run read as unclean.
+ */
+export const RAISED_FROM = {
+  'debug_state evaluate': 'core/math/expression.cpp',
+  'debug_control pause': 'core/debugger/remote_debugger.cpp',
+} as const;
+export type RaisedBy = keyof typeof RAISED_FROM;
+
+/** What the engine prints when a pause reaches a game already held. */
+export const ALREADY_HELD = 'Got break when already broke!';
+
+const RAISED_MARK = /^gdharness: (.+?) raised: (.*)$/;
+
+/**
+ * The line the keeper writes into a run's transcript for such an error. In the transcript rather
+ * than in a server's memory, so a server that takes the run over reads it too.
+ */
+export function raisedMark(by: RaisedBy, text: string): string {
+  return `gdharness: ${by} raised: ${text}\n`;
+}
+
+const RAISERS: readonly RaisedBy[] = ['debug_state evaluate', 'debug_control pause'];
+
+function raisedBy(named: string): RaisedBy | null {
+  return RAISERS.find((by) => by === named) ?? null;
 }
 
 const HEADLINE = /^(USER )?(SCRIPT ERROR|SHADER ERROR|ERROR|WARNING):\s?(.*)$/;
@@ -111,7 +143,13 @@ export function forAnswer(entries: readonly LogEntry[]): readonly ReportedEntry[
 
 function reported(entry: LogEntry): ReportedEntry {
   return entry.detail.length === 0
-    ? { index: entry.index, severity: entry.severity, source: entry.source, text: entry.text }
+    ? {
+        index: entry.index,
+        severity: entry.severity,
+        source: entry.source,
+        text: entry.text,
+        ...(entry.raisedBy === undefined ? {} : { raisedBy: entry.raisedBy }),
+      }
     : { ...entry, ...scriptRaising(entry.detail), detail: framesCollapsed(entry.detail) };
 }
 
@@ -331,6 +369,8 @@ export class GameLog {
    * print the same `ERROR` headline and only a script error says the code under test faulted.
    */
   private readonly byScript = new Set<number>();
+  /** The errors a debugger call raised that were marked before the engine's line reached here. */
+  private readonly awaitedRaised: { readonly by: RaisedBy; readonly text: string }[] = [];
 
   append(source: Stream, chunk: Buffer | string): void {
     const decoded = typeof chunk === 'string' ? chunk : this.decoders[source].write(chunk);
@@ -356,6 +396,12 @@ export class GameLog {
     // Colour codes are for a terminal. A caller reading entries wants the words.
     const line = raw.replace(COLOUR_CODE, '');
     if (line.trim() === '') {
+      return;
+    }
+    const mark = RAISED_MARK.exec(line);
+    const by = mark === null ? null : raisedBy(mark[1] ?? '');
+    if (by !== null) {
+      this.raisedByCall(by, mark?.[2] ?? '');
       return;
     }
     const report = this.crashed[source];
@@ -385,12 +431,16 @@ export class GameLog {
       return;
     }
     const detail: string[] = [];
+    const awaited =
+      headline?.severity === 'error' ? this.awaitedRaised.findIndex((one) => one.text === headline.text) : -1;
+    const marked = awaited === -1 ? undefined : this.awaitedRaised.splice(awaited, 1)[0];
     const entry: LogEntry = {
       index: this.entries.length,
-      severity: headline?.severity ?? 'info',
+      severity: marked === undefined ? (headline?.severity ?? 'info') : 'info',
       source,
       text: headline?.text ?? line,
       detail,
+      ...(marked === undefined ? {} : { raisedBy: marked.by }),
     };
     this.entries.push(entry);
     if (headline?.byScript === true) {
@@ -404,6 +454,26 @@ export class GameLog {
     this.lastHeadline[source] = headline
       ? { detail, continues: source === 'stderr' && headline.text.endsWith(':') }
       : null;
+  }
+
+  /**
+   * Takes the error with [param text] that the call [param by] raised out of the game's errors, as
+   * info. The engine prints it before it tells the debugger, which writes the mark, so it is looked
+   * for among the entries first, newest first, and otherwise awaited.
+   */
+  private raisedByCall(by: RaisedBy, text: string): void {
+    for (let at = this.entries.length - 1; at >= 0; at -= 1) {
+      const entry = this.entries[at];
+      if (
+        entry?.severity === 'error' &&
+        entry.text === text &&
+        entry.detail.some((line) => line.includes(RAISED_FROM[by]))
+      ) {
+        this.entries[at] = { ...entry, severity: 'info', raisedBy: by };
+        return;
+      }
+    }
+    this.awaitedRaised.push({ by, text });
   }
 
   /** Whether the engine headed [param entry] `SCRIPT ERROR`, for an entry of this log or a copy. */
