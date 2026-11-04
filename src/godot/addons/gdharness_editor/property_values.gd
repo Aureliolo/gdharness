@@ -444,7 +444,15 @@ func _readable(value: Variant, relative_to: Node) -> Variant:
 		return _values.serialize_value(relative_to.get_path_to(target))
 	if value is Array:
 		var items: Array = value
-		return items.map(func(item: Variant) -> Variant: return _readable(item, relative_to))
+		var typed: bool = items.is_typed()
+		return items.map(
+			func(item: Variant) -> Variant:
+				return (
+					_readable(item, relative_to)
+					if item is Node or item is Array
+					else _values.serialize_member(item, typed)
+				)
+		)
 	return _values.serialize_value(value)
 
 

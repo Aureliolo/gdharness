@@ -20,6 +20,8 @@ import { download, extract } from './install-godot.js';
 const REPOSITORY = 'godot-gdunit-labs/gdUnit4';
 // renovate: datasource=github-tags depName=godot-gdunit-labs/gdUnit4
 const VERSION = 'v6.2.3';
+// Below master, whose session finds a case by id itself: the games run a gdUnit4 that lists them, the
+// one the runner's indexed session and its session check are for.
 const COMMIT = 'f2e4f8679ebd28e27ef523a4fb7b09e8337bfce9';
 const DIGEST = '0c0da9141049a79314c43d404b73d25ef6277daface95964495b8a4e2243492b';
 

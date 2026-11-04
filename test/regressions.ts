@@ -32929,12 +32929,13 @@ async function testAWholeNumberInAnUntypedDictionaryKeepsItsType(): Promise<void
     'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="UntypedNumbers"\n',
     'sample.gd':
       'extends Node\n\n@export var sample: Dictionary = {}\n@export var copy: Dictionary = {}\n' +
-      '@export var counts: Array[int] = []\n@export var ratios: Array[float] = []\n',
+      '@export var counts: Array[int] = []\n@export var ratios: Array[float] = []\n' +
+      '@export var marks: Array = []\n',
     'sample.tscn':
       '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://sample.gd" id="1_s"]\n\n' +
       '[node name="Sample" type="Node"]\nscript = ExtResource("1_s")\n' +
       'sample = {\n"lines": 7,\n"ratio": 7.0,\n"rows": [["186", false, 1, 2.0]]\n}\n' +
-      'counts = Array[int]([1, 2])\nratios = Array[float]([1.0, 2.5])\n',
+      'counts = Array[int]([1, 2])\nratios = Array[float]([1.0, 2.5])\nmarks = [3, 3.0, 2.5, [4.0]]\n',
   });
   const server = new ServerProcess({
     env: {
@@ -32973,13 +32974,21 @@ async function testAWholeNumberInAnUntypedDictionaryKeepsItsType(): Promise<void
     );
     assert.deepEqual(get(read, 'properties', 'counts'), [1, 2], JSON.stringify(read));
     assert.deepEqual(get(read, 'properties', 'ratios'), [1, 2.5], JSON.stringify(read));
+    // A list property itself, not one inside a map, read item by item for the node paths it holds.
+    const marks = get(read, 'properties', 'marks');
+    assert.deepEqual(
+      marks,
+      [3, { _type: 'float', value: 3 }, 2.5, [{ _type: 'float', value: 4 }]],
+      JSON.stringify(read),
+    );
 
     await answered('scene_node', {
       op: 'set',
       scenePath: 'sample.tscn',
       nodePath: '.',
-      properties: { copy: sample },
+      properties: { copy: sample, marks },
     });
+    assert.match(file(), /^marks = \[3, 3\.0, 2\.5, \[4\.0\]\]$/m, file());
     const saved = file();
     const copied = /^copy = \{\n([^}]*)\}\n/m.exec(saved)?.[1];
     assert.equal(copied, '"lines": 7,\n"ratio": 7.0,\n"rows": [["186", false, 1, 2.0]]\n', saved);
@@ -58729,8 +58738,9 @@ async function testAWriteSaysWhatElseItChanged(): Promise<void> {
   // is the list read after it unless it was copied.
   writeFileSync(
     join(project, 'tally.gd'),
-    '@tool\nextends Resource\n\n@export var seen: Array[int] = []\n@export var level: int = 0:\n' +
-      '\tset(value):\n\t\tlevel = value\n\t\tseen.append(value)\n',
+    '@tool\nextends Resource\n\n@export var seen: Array[int] = []\n@export var marks: Array = []\n' +
+      '@export var level: int = 0:\n' +
+      '\tset(value):\n\t\tlevel = value\n\t\tseen.append(value)\n\t\tmarks.append(float(value))\n',
   );
   writeFileSync(
     join(project, 'tally.tres'),
@@ -58790,7 +58800,7 @@ async function testAWriteSaysWhatElseItChanged(): Promise<void> {
     });
     assert.deepEqual(
       get(counted, 'alsoChanged'),
-      { seen: { was: [], now: [3] } },
+      { seen: { was: [], now: [3] }, marks: { was: [], now: [{ _type: 'float', value: 3 }] } },
       `a list a setter adds to is named with what it held: ${JSON.stringify(counted)}`,
     );
 
@@ -66170,7 +66180,8 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       '[node name="Loop" type="Node"]\nmetadata/loop = SubResource("Resource_loop")\n',
     'wired.gd':
       'extends Node2D\n\nsignal died(points: int)\n\n\nfunc take(amount: int) -> void:\n\tprint(amount)\n\n\n' +
-      'func take_node(node: Node2D) -> void:\n\tprint(node)\n\n\nfunc scale_by(factor: float) -> void:\n\tprint(factor)\n',
+      'func take_node(node: Node2D) -> void:\n\tprint(node)\n\n\nfunc scale_by(factor: float) -> void:\n\tprint(factor)\n\n\n' +
+      'func keep(first: Variant, second: Variant) -> void:\n\tprint(first, second)\n',
     // One connection with an argument bound and one with an argument unbound, which fit only once
     // the bound one is added and the unbound one dropped.
     'wires.tscn':
@@ -66583,6 +66594,18 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     assert.equal(
       lineOf('visibility_changed', 'scale_by'),
       '[connection signal="visibility_changed" from="Emitter" to="Taker" method="scale_by" binds= [2.0]]',
+    );
+    // A parameter that declares no type takes a bare whole number as an int and a tagged one as the
+    // float the tag names, which is how a read of the binds answers it.
+    const untyped = await rewire('renamed', 'keep', { binds: [{ _type: 'float', value: 2 }, 3] });
+    assert.deepEqual(
+      [get(untyped, 'binds'), get(untyped, 'argumentsFit')],
+      [[{ _type: 'float', value: 2 }, 3], true],
+      JSON.stringify(untyped),
+    );
+    assert.equal(
+      lineOf('renamed', 'keep'),
+      '[connection signal="renamed" from="Emitter" to="Taker" method="keep" binds= [2.0, 3]]',
     );
     // The engine makes a connection that binds or unbinds arguments only to a method its target
     // has, so a connect aimed elsewhere is refused. One a file holds already is loaded without and
