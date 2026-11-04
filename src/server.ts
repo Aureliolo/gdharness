@@ -16321,12 +16321,12 @@ class GodotServer {
    * session says this of its game before a call goes, and a kept game said nothing: a call that met
    * a breakpoint waited out the whole runtime timeout, then said only that the game might be held.
    */
-  private async keptHoldOn(endpoint: RuntimeEndpoint): Promise<string | null> {
+  private async keptHoldOn(endpoint: RuntimeEndpoint): Promise<StoppedAt | null> {
     const kept = this.keptRun();
     if (kept === null || this.announcedPidOf(kept) !== endpoint.pid) {
       return null;
     }
-    return (await this.keptHold(kept.keeper))?.description ?? null;
+    return await this.keptHold(kept.keeper);
   }
 
   /**
@@ -16610,7 +16610,7 @@ class GodotServer {
     const keptHeld = await this.keptHoldOn(choice.endpoint);
     if (keptHeld !== null) {
       return this.createErrorResponse(
-        `The game (pid ${choice.endpoint.pid}) is ${keptHeld}, and answers no runtime call while it is.`,
+        `The game (pid ${choice.endpoint.pid}) is ${keptHeld.description}, and answers no runtime call while it is.`,
         [
           'debug_control continue lets it go, after which this call answers',
           'debug_state stack reads where it is held, and debug_state variables what it is holding there',
@@ -16696,7 +16696,7 @@ class GodotServer {
           note:
             heldSince === null
               ? `${reply.message} ${longerWaitNote(asked.tool, asked.op, timeoutMs)}`
-              : `The game is ${heldSince}, so it answers once it goes on: debug_control continue lets it go, and runtime_invoke op result with requestId ${reply.requestId} then answers with what the call returned.`,
+              : `The game is ${heldSince.description}, so it answers once it goes on: debug_control continue lets it go, and runtime_invoke op result with requestId ${reply.requestId} then answers with what the call returned.`,
           ...answeredBy,
           ...alongside(),
         });
