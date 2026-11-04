@@ -1005,8 +1005,16 @@ func _parse_entries(value: Dictionary, elements: Array) -> Dictionary:
 		value_type = GdhRead.as_int(elements[1], TYPE_NIL)
 	var entries: Dictionary = {}
 	for key: Variant in value:
-		entries[_values.fitted(key, key_type)] = parse(value[key], value_type)
+		entries[_values.fitted(key, key_type)] = _parse_member(value[key], value_type)
 	return _typed_dictionary(entries, key_type, value_type)
+
+
+## One member of a list or map, read as [param type]. A bare number where no type is declared is
+## the int or float GDScript reads it as, so 7 is saved as 7 rather than JSON's 7.0.
+func _parse_member(item: Variant, type: int) -> Variant:
+	if type == TYPE_NIL and item is float:
+		return _values.untyped_member(item)
+	return parse(item, type)
 
 
 ## [param entries] as the typed dictionary a property declares, so the file holds the type the
@@ -1078,7 +1086,9 @@ func _parse_array(value: Array, expected_type: int, elements: Array) -> Variant:
 	var element_type: int = TYPE_NIL
 	if expected_type == TYPE_ARRAY and not elements.is_empty():
 		element_type = GdhRead.as_int(elements[0], TYPE_NIL)
-	var items: Array = value.map(func(item: Variant) -> Variant: return parse(item, element_type))
+	var items: Array = value.map(
+		func(item: Variant) -> Variant: return _parse_member(item, element_type)
+	)
 	if element_type == TYPE_NIL or element_type == TYPE_OBJECT:
 		return items
 	if not items.all(

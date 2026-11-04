@@ -1350,6 +1350,13 @@ them. One arriving as a bare number for an int is refused, since it may already 
 one sent. An RID is answered as its id and built back from it. So a viewport's RID read off one call
 is an argument to the next.
 
+### Whole numbers in untyped containers
+
+JSON writes 7 and 7.0 alike. A typed property or element says which one it wants, but an untyped
+Array or Dictionary does not. There, a whole float is answered as `{"_type": "float", "value": 7}`,
+and a bare whole number written there becomes an int, as the GDScript literal does. A read written
+back then saves the same types.
+
 ### Dictionary keys
 
 JSON keys are text. So a dictionary keyed by anything else is answered as its entries,

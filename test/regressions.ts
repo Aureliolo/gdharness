@@ -32906,6 +32906,96 @@ async function testANullTakesAMetadataEntryOff(): Promise<void> {
 }
 
 /**
+ * A whole number inside a list or map that declares no type keeps whether it is an int or a float
+ * through a read and a write. The read answers a whole float there tagged, so a bare whole number is
+ * an int, and the answer written back saves what was read. Typed lists answer bare numbers.
+ */
+async function testAWholeNumberInAnUntypedDictionaryKeepsItsType(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('untyped numbers regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-untyped-numbers-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-untyped-numbers-rt-'));
+  writeTree(project, {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="UntypedNumbers"\n',
+    'sample.gd':
+      'extends Node\n\n@export var sample: Dictionary = {}\n@export var copy: Dictionary = {}\n' +
+      '@export var counts: Array[int] = []\n@export var ratios: Array[float] = []\n',
+    'sample.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://sample.gd" id="1_s"]\n\n' +
+      '[node name="Sample" type="Node"]\nscript = ExtResource("1_s")\n' +
+      'sample = {\n"lines": 7,\n"ratio": 7.0,\n"rows": [["186", false, 1, 2.0]]\n}\n' +
+      'counts = Array[int]([1, 2])\nratios = Array[float]([1.0, 2.5])\n',
+  });
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const answered = async (tool: string, args: Record<string, unknown>): Promise<unknown> => {
+    const answer = await server.request(
+      'tools/call',
+      { name: tool, arguments: { projectPath: project, ...args } },
+      240_000,
+    );
+    assert.notEqual(get(answer, 'result', 'isError'), true, textOf(answer) ?? JSON.stringify(answer));
+    return parseTextContent(answer);
+  };
+  const file = (): string => readFileSync(join(project, 'sample.tscn'), 'utf8');
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('regression-test');
+
+    const read = await answered('scene_node', { op: 'get', scenePath: 'sample.tscn', nodePath: '.' });
+    const sample = get(read, 'properties', 'sample');
+    assert.deepEqual(
+      sample,
+      {
+        lines: 7,
+        ratio: { _type: 'float', value: 7 },
+        rows: [['186', false, 1, { _type: 'float', value: 2 }]],
+      },
+      JSON.stringify(read),
+    );
+    assert.deepEqual(get(read, 'properties', 'counts'), [1, 2], JSON.stringify(read));
+    assert.deepEqual(get(read, 'properties', 'ratios'), [1, 2.5], JSON.stringify(read));
+
+    await answered('scene_node', {
+      op: 'set',
+      scenePath: 'sample.tscn',
+      nodePath: '.',
+      properties: { copy: sample },
+    });
+    const saved = file();
+    const copied = /^copy = \{\n([^}]*)\}\n/m.exec(saved)?.[1];
+    assert.equal(copied, '"lines": 7,\n"ratio": 7.0,\n"rows": [["186", false, 1, 2.0]]\n', saved);
+
+    await answered('scene_node', {
+      op: 'set',
+      scenePath: 'sample.tscn',
+      nodePath: '.',
+      properties: { copy: { n: 3, half: 0.5, list: [4, { _type: 'float', value: 4 }] } },
+    });
+    const bare = (/^copy = \{\n([^}]*)\}\n/m.exec(file())?.[1] ?? '').split(/,?\n/).filter(Boolean);
+    assert.deepEqual(bare.toSorted(), ['"half": 0.5', '"list": [4, 4.0]', '"n": 3'], file());
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * An instance is marked Load as Placeholder by scene_node add and set, as the editor's toggle marks
  * it: the file holds `instance_placeholder`, the reads say so, and a game gets an
  * InstancePlaceholder there that names the scene. Unmarked, it is an ordinary instance again. A
@@ -74077,6 +74167,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWaitAnswersOnceTheGameHasCrashed,
   testAnInstanceIsMarkedAsAPlaceholder,
   testANullTakesAMetadataEntryOff,
+  testAWholeNumberInAnUntypedDictionaryKeepsItsType,
   testAPlayedRunWithNoReportGivesNoVerdict,
   testAPlayedGameHoldsAnEngineSlot,
   testAPlayedGameIsToldFromItsWorkers,
