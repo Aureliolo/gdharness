@@ -9,6 +9,7 @@
 import { callSignal } from './call-signal.js';
 import { inASlot, nameSlotEngineOf, onTheSlot } from './engine-slots.js';
 import { GameLog } from './game-log.js';
+import { belowNormal } from './priority.js';
 import { spawnHidden } from './spawn.js';
 import { holdExit } from './whole-exit.js';
 
@@ -66,6 +67,7 @@ function runStarted(
       env: onTheSlot(process.env, lock),
       ...(signal === undefined ? {} : { signal }),
     });
+    belowNormal(child);
     const whole = holdExit(child.pid);
     // The lock names this process, and what the engine starts runs on its slot only when it names
     // the engine too.

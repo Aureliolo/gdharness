@@ -206,7 +206,7 @@ func deserialize_value(value: Variant) -> Variant:
 		var items: Array = value
 		var rebuilt: Array = []
 		for item: Variant in items:
-			rebuilt.append(deserialize_value(item))
+			rebuilt.append(untyped_member(item))
 		return rebuilt
 	if not value is Dictionary:
 		return value
@@ -215,7 +215,7 @@ func deserialize_value(value: Variant) -> Variant:
 	if not fields.has("_type"):
 		var mapped: Dictionary = {}
 		for key: Variant in fields:
-			mapped[key] = deserialize_value(fields[key])
+			mapped[key] = untyped_member(fields[key])
 		return mapped
 
 	# Each component read as the type the constructor wants before it is handed over. These come
@@ -228,7 +228,11 @@ func deserialize_value(value: Variant) -> Variant:
 	var builder: String = BUILDERS.get(tag, "")
 	if builder.is_empty() or not GdhShapes.buildable(fields, tag):
 		return fields
-	if tag == "float" and str(fields["value"]) not in ["inf", "-inf", "nan"]:
+	if (
+		tag == "float"
+		and not (fields["value"] is float or fields["value"] is int)
+		and str(fields["value"]) not in ["inf", "-inf", "nan"]
+	):
 		return fields
 	if tag == "Dictionary" and not pairs(fields["entries"]):
 		return fields
@@ -605,19 +609,43 @@ func _serialize_dictionary(value: Dictionary) -> Dictionary:
 	var texts: bool = value.keys().all(
 		func(key: Variant) -> bool: return key is String or key is StringName
 	)
+	var keys_typed: bool = value.is_typed_key()
+	var values_typed: bool = value.is_typed_value()
 	if not texts:
 		var entries: Array = []
 		for key: Variant in value:
-			entries.append([serialize_value(key), serialize_value(value[key])])
+			entries.append([_member(key, keys_typed), _member(value[key], values_typed)])
 		return { "_type": "Dictionary", "entries": entries }
 	var serialised: Dictionary = {}
 	for key: Variant in value:
-		serialised[str(key)] = serialize_value(value[key])
+		serialised[str(key)] = _member(value[key], values_typed)
 	return serialised
 
 
 func _serialize_array(value: Array) -> Array:
-	return value.map(serialize_value)
+	var typed: bool = value.is_typed()
+	return value.map(func(item: Variant) -> Variant: return _member(item, typed))
+
+
+# A member of a list or map that declares no type. JSON writes 7 and 7.0 alike, and there the
+# member's own type is all that says which it is, so a whole float crosses tagged and a bare whole
+# number is an int, as GDScript reads the literal.
+func _member(value: Variant, typed: bool) -> Variant:
+	if not typed and value is float:
+		var number: float = value
+		if is_finite(number) and number == floorf(number) and absf(number) < EXACT:
+			return { "_type": "float", "value": number }
+	return serialize_value(value)
+
+
+## [param item] of a list or map that declares no type, rebuilt: a bare whole number is the int
+## GDScript reads the literal as, and a whole float arrives tagged.
+func untyped_member(item: Variant) -> Variant:
+	if item is float:
+		var number: float = item
+		if is_finite(number) and number == floorf(number) and absf(number) < EXACT:
+			return int(number)
+	return deserialize_value(item)
 
 
 # Base64 rather than a list of numbers. A byte array is a texture, a sound or a save file often
@@ -959,12 +987,7 @@ func _build_dictionary(fields: Dictionary) -> Dictionary:
 	var entries: Array = fields["entries"]
 	for entry: Variant in entries:
 		var pair: Array = entry
-		var key: Variant = deserialize_value(pair[0])
-		if key is float:
-			var number: float = key
-			if is_finite(number) and number == floorf(number):
-				key = int(number)
-		built[key] = deserialize_value(pair[1])
+		built[untyped_member(pair[0])] = untyped_member(pair[1])
 	return built
 
 
