@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { serverServing } from './bridge-announce.js';
 import { editorOpenOptionsOf, holdTheEditors, openTheEditor } from './editor-open.js';
 import { EngineUsageError } from './engine-launch.js';
-import { nameSlotTaker, sayWaitsTo } from './engine-slots.js';
+import { inOneSlot, nameSlotTaker, sayWaitsTo } from './engine-slots.js';
 import { letWindowsReportCrashes } from './error-mode.js';
 import { Refusal } from './errors.js';
 import { GodotLocator } from './godot-path.js';
@@ -391,25 +391,28 @@ async function setup(): Promise<void> {
   // The runtime addon is per-project like everything else setup installs, so it is not something
   // to opt into: without it a third of the tools have nothing to talk to.
   const withRuntime = !args.includes('--no-runtime');
-  const godot = await engine(projectPath);
-
-  for (const addon of installAddons(projectPath)) {
-    console.log(`${addon.replaced ? 'replaced' : 'installed'} ${addon.path}`);
-  }
-  const enabled = await enablePlugins(godot, projectPath, EDITOR_PLUGINS);
-  for (const [index, outcome] of enabled.entries()) {
-    const name = EDITOR_PLUGINS[index] ?? '';
-    said(outcome, `enabling ${name}`);
-    console.log(`${name}: ${outcome.ok ? String(outcome.payload['action']) : 'failed'}`);
-  }
-  if (withRuntime) {
-    await registerRuntime(godot, projectPath);
-  }
-  const refreshed = await runOperation(godot, 'refresh_class_cache', {}, projectPath);
-  said(refreshed, 'rebuilding the class list');
-  if (refreshed.ok) {
-    console.log(`class list rebuilt: ${String(refreshed.payload['classes'])} classes`);
-  }
+  // The engine steps share one slot, and the harness question below holds none while it waits.
+  const godot = await inOneSlot(async () => {
+    const found = await engine(projectPath);
+    for (const addon of installAddons(projectPath)) {
+      console.log(`${addon.replaced ? 'replaced' : 'installed'} ${addon.path}`);
+    }
+    const enabled = await enablePlugins(found, projectPath, EDITOR_PLUGINS);
+    for (const [index, outcome] of enabled.entries()) {
+      const name = EDITOR_PLUGINS[index] ?? '';
+      said(outcome, `enabling ${name}`);
+      console.log(`${name}: ${outcome.ok ? String(outcome.payload['action']) : 'failed'}`);
+    }
+    if (withRuntime) {
+      await registerRuntime(found, projectPath);
+    }
+    const refreshed = await runOperation(found, 'refresh_class_cache', {}, projectPath);
+    said(refreshed, 'rebuilding the class list');
+    if (refreshed.ok) {
+      console.log(`class list rebuilt: ${String(refreshed.payload['classes'])} classes`);
+    }
+    return found;
+  });
 
   if (!args.includes('--no-connect')) {
     // The version is the running one, so the config pins the server that installed these addons.
@@ -1015,16 +1018,16 @@ async function main(): Promise<void> {
       doctorReport(projectArgument(1));
       return;
     case 'runtime':
-      await runtime();
+      await inOneSlot(runtime);
       return;
     case 'classes':
       await classes();
       return;
     case 'upgrade':
-      await upgrade();
+      await inOneSlot(upgrade);
       return;
     case 'uninstall':
-      await uninstall();
+      await inOneSlot(uninstall);
       return;
     case 'harnesses':
       printHarnesses();

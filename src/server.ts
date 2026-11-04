@@ -365,7 +365,7 @@ import {
 } from './setup.js';
 // No shell, so nothing to quote and no way to escape out of quoting: every argument below is an
 // array element, so a path full of backslashes, spaces or quotes is just a path.
-import { runHidden, spawnHidden } from './spawn.js';
+import { belowNormal, runHidden, spawnHidden } from './spawn.js';
 import {
   declaringAdvice,
   failedOnPushErrors,
@@ -11938,6 +11938,7 @@ class GodotServer {
             stdio: ['ignore', 'pipe', 'pipe'],
             env: { ...(env ?? process.env), [DESKTOP_VARIABLE]: HIDDEN_DESKTOP },
           });
+    belowNormal(child);
     const whole = holdExit(child.pid);
     const stop = (): void => {
       if (onDesktop === undefined) {

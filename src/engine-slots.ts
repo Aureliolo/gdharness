@@ -40,6 +40,7 @@
  * scheme is written out in docs/test-runs.md for them, and a change here is a change there.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   closeSync,
   existsSync,
@@ -1483,14 +1484,38 @@ export interface CallSlot {
   readonly leave: () => void;
 }
 
+/** The lock a command of several engine steps holds for all of them, inside {@link inOneSlot}. */
+const keptForSteps = new AsyncLocalStorage<string>();
+
 /**
  * Runs [param body] holding one of the machine's slots for the call, handing it the slot's lock,
- * and gives it back after.
+ * and gives it back after. Inside {@link inOneSlot} it uses the slot held there.
  */
 export async function inASlot<T>(body: (lock: string) => Promise<T>): Promise<T> {
+  const kept = keptForSteps.getStore();
+  if (kept !== undefined) {
+    return await body(kept);
+  }
   const held = await slotForCall();
   try {
     return await body(held.lock);
+  } finally {
+    held.release();
+  }
+}
+
+/**
+ * Runs [param body], a command whose engines run one after another, holding one slot for all of
+ * them. Each engine taking its own slot queued again on a busy machine: one `gdharness setup` waited
+ * 122, 933 and 335 seconds for its three, 24 minutes in all.
+ */
+export async function inOneSlot<T>(body: () => Promise<T>): Promise<T> {
+  if (keptForSteps.getStore() !== undefined) {
+    return await body();
+  }
+  const held = await slotForCall();
+  try {
+    return await keptForSteps.run(held.lock, body);
   } finally {
     held.release();
   }

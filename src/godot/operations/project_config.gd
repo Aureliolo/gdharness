@@ -127,6 +127,13 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 		var held: Dictionary = final_value
 		if held.has("_type"):
 			return _log.failure(_unbuilt(setting_path, held))
+	# A typed list or map is written back with its type, since a script reading the setting into a
+	# typed variable fails on an untyped one: gdUnit4's session hooks failed every test run.
+	if had_value:
+		var typed: Array = _typed_like(old_value, final_value, setting_path)
+		if not typed[0]:
+			return _log.failure(str(typed[1]))
+		final_value = typed[1]
 
 	var answer: Dictionary = {
 		"setting_path": setting_path,
@@ -359,6 +366,86 @@ func _wanted_type(setting_path: String, current: Variant) -> int:
 # happened to produce.
 func _converts_faithfully(value: Variant, to: int) -> bool:
 	return type_convert(type_convert(value, to), typeof(value)) == value
+
+
+## [param given] typed as [param current] is, when that is a typed Dictionary or Array, as
+## [ok, value], or [false, why] naming the type when a member does not fit it.
+func _typed_like(current: Variant, given: Variant, setting_path: String) -> Array:
+	if current is Dictionary and given is Dictionary:
+		var held: Dictionary = current
+		if not held.is_typed():
+			return [true, given]
+		var entries: Dictionary = given
+		var key_type: int = held.get_typed_key_builtin()
+		var value_type: int = held.get_typed_value_builtin()
+		var typed: Dictionary = Dictionary(
+			{},
+			key_type,
+			held.get_typed_key_class_name(),
+			held.get_typed_key_script(),
+			value_type,
+			held.get_typed_value_class_name(),
+			held.get_typed_value_script()
+		)
+		var name: String = "Dictionary[%s, %s]" % [
+			_element_name(key_type, held.get_typed_key_class_name()),
+			_element_name(value_type, held.get_typed_value_class_name()),
+		]
+		for key: Variant in entries:
+			var fitted_key: Array = _fit_member(key, key_type)
+			var fitted_value: Array = _fit_member(entries[key], value_type)
+			if not fitted_key[0] or not fitted_value[0]:
+				var misfit: Variant = key if not fitted_key[0] else entries[key]
+				return [false, _misfit(setting_path, name, misfit)]
+			typed[fitted_key[1]] = fitted_value[1]
+		return [true, typed]
+	if current is Array and given is Array:
+		var held_list: Array = current
+		if not held_list.is_typed():
+			return [true, given]
+		var element: int = held_list.get_typed_builtin()
+		var list_name: String = (
+			"Array[%s]" % _element_name(element, held_list.get_typed_class_name())
+		)
+		var typed_list: Array = Array(
+			[], element, held_list.get_typed_class_name(), held_list.get_typed_script()
+		)
+		for item: Variant in given:
+			var fitted_item: Array = _fit_member(item, element)
+			if not fitted_item[0]:
+				return [false, _misfit(setting_path, list_name, item)]
+			typed_list.append(fitted_item[1])
+		return [true, typed_list]
+	return [true, given]
+
+
+## [param value] as a member of the built-in [param type], as [ok, value]. An object type takes no
+## value from the wire, since nothing names which object.
+func _fit_member(value: Variant, type: int) -> Array:
+	if type == TYPE_NIL or typeof(value) == type:
+		return [true, value]
+	if type == TYPE_OBJECT or not GdhSerialisation.acceptable(value, type):
+		return [false, null]
+	if not _converts_faithfully(value, type):
+		return [false, null]
+	return [true, type_convert(value, type)]
+
+
+static func _element_name(type: int, class_named: StringName) -> String:
+	if not class_named.is_empty():
+		return str(class_named)
+	return "Variant" if type == TYPE_NIL else type_string(type)
+
+
+static func _misfit(setting_path: String, typed_name: String, value: Variant) -> String:
+	return (
+		"%s holds a %s, and %s does not fit it, so nothing was written."
+		% [setting_path, typed_name, JSON.stringify(_shown(value))]
+	)
+
+
+static func _shown(value: Variant) -> Variant:
+	return str(value) if value is Object else value
 
 
 # Why [param value] cannot be written to a setting declared as [param wanted], in the words the

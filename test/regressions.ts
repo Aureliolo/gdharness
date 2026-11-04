@@ -23,7 +23,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
-import { availableParallelism, homedir, tmpdir } from 'node:os';
+import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
@@ -132,6 +132,7 @@ import {
   gamesKeptOf,
   holderOf,
   inheritsSlot,
+  inOneSlot,
   keptSlotsOf,
   lockIsFree,
   machineSlots,
@@ -32996,6 +32997,76 @@ async function testAWholeNumberInAnUntypedDictionaryKeepsItsType(): Promise<void
 }
 
 /**
+ * project_settings set writes a typed Dictionary or Array setting back with its type, since a
+ * script reading it into a typed variable fails on an untyped one. A member that does not fit the
+ * type is refused, naming it, with nothing written.
+ */
+async function testATypedSettingKeepsItsType(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('typed setting regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-typed-setting-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-typed-setting-rt-'));
+  writeTree(project, {
+    'project.godot':
+      'config_version=5\n\n[application]\n\nconfig/name="TypedSetting"\n\n[gdunit4]\n\n' +
+      'hooks/session_hooks=Dictionary[String, bool]({\n"res://a.gd": true\n})\n' +
+      'hooks/order=Array[int]([1, 2])\n',
+  });
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      { name: 'project_settings', arguments: { projectPath: project, op: 'set', ...args } },
+      240_000,
+    );
+  const settings = (): string => readFileSync(join(project, 'project.godot'), 'utf8');
+  try {
+    await server.initialize('regression-test');
+
+    const hooks = await call({
+      setting: 'gdunit4/hooks/session_hooks',
+      value: { 'res://a.gd': true, 'res://b.gd': true },
+    });
+    assert.notEqual(get(hooks, 'result', 'isError'), true, textOf(hooks) ?? JSON.stringify(hooks));
+    assert.match(
+      settings(),
+      /^hooks\/session_hooks=Dictionary\[String, bool\]\(\{\n"res:\/\/a\.gd": true,\n"res:\/\/b\.gd": true\n\}\)$/m,
+      settings(),
+    );
+
+    const order = await call({ setting: 'gdunit4/hooks/order', value: [3, 4] });
+    assert.notEqual(get(order, 'result', 'isError'), true, textOf(order) ?? JSON.stringify(order));
+    assert.match(settings(), /^hooks\/order=Array\[int\]\(\[3, 4\]\)$/m, settings());
+
+    const before = settings();
+    const misfit = await call({ setting: 'gdunit4/hooks/session_hooks', value: { 'res://c.gd': 'yes' } });
+    assert.equal(
+      textOf(misfit),
+      'gdunit4/hooks/session_hooks holds a Dictionary[String, bool], and "yes" does not fit it, so nothing was written.',
+    );
+    assert.equal(settings(), before);
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * An instance is marked Load as Placeholder by scene_node add and set, as the editor's toggle marks
  * it: the file holds `instance_placeholder`, the reads say so, and a game gets an
  * InstancePlaceholder there that names the scene. Unmarked, it is an ordinary instance again. A
@@ -52584,6 +52655,76 @@ async function testAnEngineCrashIsToldByItsWholeExitCode(): Promise<void> {
   } finally {
     sweep(scratch);
   }
+}
+
+/**
+ * Every engine runs below normal priority, through the desktop helper and started directly. At
+ * normal priority on a machine running every core, engines starved other work kept below normal,
+ * and a test there made no progress in 300 seconds. A stand-in engine prints its own priority.
+ */
+async function testAnEngineRunsBelowNormalPriority(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-below-normal-'));
+  try {
+    // Read after a pause, so a start that lowers the engine just after creating it is not missed.
+    const own = [
+      '-e',
+      'setTimeout(() => { console.log("priority " + require("node:os").getPriority()); }, 500)',
+    ];
+    const below = `priority ${String(constants.priority.PRIORITY_BELOW_NORMAL)}`;
+    const ran = await runEngine(process.execPath, own);
+    assert.equal(ran.failure, null, howItEnded(ran));
+    const printed = ran.log
+      .everything()
+      .map((entry) => entry.text)
+      .join('\n');
+    assert.match(printed, new RegExp(`^${below}$`, 'm'), `a direct start: ${printed}`);
+
+    const directory = join(scratch, 'engine');
+    mkdirSync(directory);
+    const log = join(directory, 'engine.log');
+    const launch = {
+      godotPath: process.execPath,
+      projectPath: scratch,
+      deadlineSeconds: 120,
+      running: new Set<() => void>(),
+      cores: null,
+    };
+    const end = await watchedEngine(launch, join(scratch, '1.lock'), own, directory, log, 60);
+    assert.equal(end.ended, null, JSON.stringify(end));
+    assert.match(readFileSync(log, 'utf8'), new RegExp(`^${below}$`, 'm'), readFileSync(log, 'utf8'));
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
+ * A command whose engines run one after another holds one slot for all of them. Each engine took a
+ * slot of its own, so on a busy machine one `gdharness setup` queued three times, 24 minutes in all.
+ * Two stand-in engines print the slot they were handed, and the slot stays held between them.
+ */
+async function testACommandOfSeveralEnginesHoldsOneSlot(): Promise<void> {
+  const own = ['-e', 'console.log("slot " + process.env.GODOT_ENGINE_HELD)'];
+  const slotOf = (ran: Awaited<ReturnType<typeof runEngine>>): string | undefined =>
+    /^slot (.+)$/m.exec(
+      ran.log
+        .everything()
+        .map((entry) => entry.text)
+        .join('\n'),
+    )?.[1];
+  const heldBy = (lock: string | undefined): number | undefined =>
+    lock === undefined || !existsSync(lock) ? undefined : holderOf(readFileSync(lock, 'utf8'))?.pid;
+  let between: number | undefined;
+  const [first, second] = await inOneSlot(async () => {
+    const one = await runEngine(process.execPath, own);
+    between = heldBy(slotOf(one));
+    const two = await runEngine(process.execPath, own);
+    return [one, two];
+  });
+  const lock = slotOf(first);
+  assert.notEqual(lock, undefined, howItEnded(first));
+  assert.equal(slotOf(second), lock, 'the second engine is handed the same slot');
+  assert.equal(between, process.pid, 'and this process holds the slot between the engines');
+  assert.notEqual(heldBy(lock), process.pid, 'and is given back once the command is done');
 }
 
 /**
@@ -74168,6 +74309,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnInstanceIsMarkedAsAPlaceholder,
   testANullTakesAMetadataEntryOff,
   testAWholeNumberInAnUntypedDictionaryKeepsItsType,
+  testATypedSettingKeepsItsType,
   testAPlayedRunWithNoReportGivesNoVerdict,
   testAPlayedGameHoldsAnEngineSlot,
   testAPlayedGameIsToldFromItsWorkers,
@@ -74486,6 +74628,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineWritesItsLogThroughAPipeOnWindows,
   testAnEngineCrashIsToldByItsWholeExitCode,
   testAnEngineStartedDirectlyIsToldByItsWholeExitCode,
+  testAnEngineRunsBelowNormalPriority,
+  testACommandOfSeveralEnginesHoldsOneSlot,
   testARunawayEngineLogIsCutAndEnded,
   testProjectTestJudgesItsRunAsTheGateDoes,
   testAnEngineGdharnessStartsCanHaveItsCrashReported,

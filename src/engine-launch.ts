@@ -38,7 +38,7 @@ import { Refusal } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
 import { LOG_LIMIT_BYTES, readLog } from './log-read.js';
 import { askProcessTable } from './process-table.js';
-import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
+import { belowNormal, type ChildProcess, runHidden, spawnHidden } from './spawn.js';
 import { type EngineEnd, type RunPrinted, readRun } from './suite-judge.js';
 
 /** A command line `test` or `spread` cannot act on, which the CLI answers with exit code 2. */
@@ -431,6 +431,7 @@ export async function watchedEngine(
         cwd: launch.projectPath,
         detached: true,
       });
+      belowNormal(child);
       stop = () => {
         endTree(child);
       };

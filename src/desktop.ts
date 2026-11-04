@@ -51,6 +51,8 @@ public static class GdharnessDesktop {
   const short ShowNoActivate = 4;
   // No console at all, rather than a hidden one: a console's host would sit on the desktop too.
   const uint DetachedProcess = 0x00000008;
+  // Every engine runs below normal, so a machine running every core leaves other work its share.
+  const uint BelowNormalPriorityClass = 0x00004000;
   const uint Infinite = 0xFFFFFFFF;
 
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -233,7 +235,7 @@ public static class GdharnessDesktop {
     }
     try {
     Step(stepFile, "starting the process");
-    uint creation = DetachedProcess | (affinity == 0 ? 0u : CreateSuspended);
+    uint creation = DetachedProcess | BelowNormalPriorityClass | (affinity == 0 ? 0u : CreateSuspended);
     if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, creation, IntPtr.Zero, directory, ref startup, out started)) {
       throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW " + commandLine);
     }

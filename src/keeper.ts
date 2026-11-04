@@ -48,7 +48,7 @@ import {
   withEngineArguments,
   writeProfileFile,
 } from './script-profile.js';
-import { type ChildProcess, spawnHidden, spawnShown } from './spawn.js';
+import { belowNormal, type ChildProcess, spawnHidden, spawnShown } from './spawn.js';
 import { followSuccessor } from './successor.js';
 import { holdExit, prepareWholeExits, type WholeExit } from './whole-exit.js';
 
@@ -76,6 +76,7 @@ async function startDirectly(
       env: withChanges(process.env, spec.envChanges),
       cwd: directory,
     });
+    belowNormal(child);
     const whole = holdExit(child.pid);
     child.once('error', (error: Error) => {
       resolve({ error: error.message });
