@@ -36746,10 +36746,15 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       timeoutMs: 2_000,
     });
     assert.equal(get(asked.answer, 'pending'), true, `the held call is pending: ${asked.said}`);
-    // The debugger holding it is this server's keeper, so where it is held is known, not guessed.
-    assert.equal(
+    // The debugger holding it is this server's keeper, so where it is held is known, not guessed,
+    // and said in the shape editor_output gives heldAt in.
+    assert.deepEqual(
       get(asked.answer, 'heldAt'),
-      'held by its debugger at res://main.gd:11 in add (Breakpoint)',
+      {
+        reason: 'breakpoint',
+        description: 'held by its debugger at res://main.gd:11 in add (Breakpoint)',
+        text: '',
+      },
       asked.said,
     );
     assert.match(
