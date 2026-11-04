@@ -32,6 +32,7 @@ import { askProcessTable } from './process-table.js';
 import { isRecord } from './records.js';
 import { runtimeDirectories, runtimeDirectory, STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
 import { runHidden } from './spawn.js';
+import { tableListener } from './tcp-listeners.js';
 import { writeWhole } from './whole-file.js';
 
 /** What a run leaves behind so another server can find it. */
@@ -551,6 +552,8 @@ export async function runningAs(pid: number): Promise<RunningAs | null> {
  * and must not be treated as one. Every caller here already has that distinction: not knowing is
  * never grounds to refuse.
  *
+ * Read from Windows' TCP table first where this runs on Bun ({@link tableListener}), since netstat
+ * leaves out a listener a Windows 11 preview build gives no state.
  * Asked of `netstat` on Windows rather than of PowerShell's Get-NetTCPConnection, which loads a
  * module before it answers: a second on this machine and nine on a loaded runner. netstat answers
  * in tens of milliseconds and is on every Windows. Asked without holding the server all the same,
@@ -560,6 +563,10 @@ export async function runningAs(pid: number): Promise<RunningAs | null> {
 export async function listeningPid(port: number): Promise<number | null> {
   try {
     if (process.platform === 'win32') {
+      const listed = await tableListener(port);
+      if (listed !== null) {
+        return listed;
+      }
       const { stdout } = await runHidden('netstat', ['-ano'], { timeout: 15_000 });
       return listeningPidInNetstat(stdout, port);
     }

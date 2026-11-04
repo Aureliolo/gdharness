@@ -491,6 +491,7 @@ import {
   silenceWhile,
   testOptionsOf,
 } from '../src/suite-run.js';
+import { listenerAmong } from '../src/tcp-listeners.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -28543,6 +28544,17 @@ async function testWhoIsHoldingAPortIsAskable(): Promise<void> {
   assert.equal(listeningPidInNetstat(table, 135), 1234);
   assert.equal(listeningPidInNetstat(table, 6007), null, 'a port nobody listens on names nobody');
   assert.equal(listeningPidInNetstat(table, 600), null, 'and a port that is a prefix of one is not it');
+  // A Windows 11 preview build gives some listeners the state 0, which netstat leaves out.
+  const rows = [
+    { state: 5, localPort: 6006, remotePort: 51000, pid: 4321 },
+    { state: 0, localPort: 6006, remotePort: 0, pid: 4321 },
+    { state: 0, localPort: 7007, remotePort: 52000, pid: 9999 },
+    { state: 2, localPort: 8008, remotePort: 0, pid: 1234 },
+    { state: 0, localPort: 8008, remotePort: 0, pid: 5678 },
+  ];
+  assert.equal(listenerAmong(rows, 6006), 4321, 'a row with no state and no remote end is the listener');
+  assert.equal(listenerAmong(rows, 7007), null, 'one with a remote end is a connection');
+  assert.equal(listenerAmong(rows, 8008), 1234, 'and a row in the listening state comes first');
 
   const port = await reservePort();
   assert.equal(await listeningPid(port), null, 'a port nobody is listening on has no holder to name');
@@ -28559,11 +28571,11 @@ async function testWhoIsHoldingAPortIsAskable(): Promise<void> {
     const holder = await listeningPid(port);
     const took = Date.now() - askedAt;
     // Null is allowed: a platform that will not say is a case this has to have, and reading it as
-    // "somebody else" would refuse every working setup on that platform. Windows says, through
-    // netstat, and the time it takes is printed, since the ask sits on the first play through each
-    // adapter connection: PowerShell's answer took a second here and nine on a runner.
+    // "somebody else" would refuse every working setup on that platform. Windows says, through its
+    // TCP table or netstat, and the time it takes is printed, since the ask sits on the first play
+    // through each adapter connection: PowerShell's answer took a second here and nine on a runner.
     if (process.platform === 'win32') {
-      assert.equal(holder, process.pid, `Windows names the holder of a port, through netstat: ${holder}`);
+      assert.equal(holder, process.pid, `Windows names the holder of a port: ${holder}`);
     } else if (holder !== null) {
       assert.equal(holder, process.pid, 'and the holder of one this process took is this process');
     } else {
