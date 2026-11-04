@@ -204,7 +204,8 @@ func _bound_values(
 		if passed + at < parameters.size():
 			var parameter: Dictionary = parameters[passed + at]
 			declared = GdhRead.as_int(parameter.get("type", TYPE_NIL))
-		if value is float and declared != TYPE_FLOAT:
+		# Only a bare number: a tagged float says it is one, as a read of the binds answers it.
+		if given[at] is float and value is float and declared != TYPE_FLOAT:
 			var number: float = value
 			if (is_finite(number)
 					and number == floorf(number)
