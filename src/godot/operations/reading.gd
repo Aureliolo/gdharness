@@ -75,7 +75,10 @@ static func as_float(value: Variant, fallback: float = 0.0) -> float:
 	if value is Dictionary:
 		var tagged: Dictionary = value
 		if str(tagged.get("_type", "")) == "float":
-			return non_finite(str(tagged.get("value", "")), fallback)
+			var carried: Variant = tagged.get("value", "")
+			if carried is float or carried is int:
+				return as_float(carried)
+			return non_finite(str(carried), fallback)
 	return fallback
 
 

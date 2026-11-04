@@ -23,6 +23,21 @@ export function get(value: unknown, ...path: (string | number)[]): unknown {
   return current;
 }
 
+/**
+ * Answers `value` with each whole float tag, `{"_type": "float", "value": 7}`, read as the bare
+ * number. A game's own record of where input landed holds floats in untyped arrays, which the wire
+ * tags, and a case about where input landed asserts the point rather than the tag.
+ */
+export function plainFloats(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(plainFloats);
+  if (!isRecord(value)) return value;
+  const carried = value['value'];
+  if (value['_type'] === 'float' && typeof carried === 'number' && Object.keys(value).length === 2) {
+    return carried;
+  }
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, plainFloats(item)]));
+}
+
 export function asObject(value: unknown, what = 'value'): Record<string, unknown> {
   assert.ok(isRecord(value) && !Array.isArray(value), `${what} should be an object`);
   return value;

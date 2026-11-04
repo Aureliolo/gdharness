@@ -37,6 +37,7 @@ import { nowSeconds, type Past, type Sample, Spent, STARVED, sampled, watching }
 import { Refusal } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
 import { LOG_LIMIT_BYTES, readLog } from './log-read.js';
+import { belowNormal } from './priority.js';
 import { askProcessTable } from './process-table.js';
 import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
 import { type EngineEnd, type RunPrinted, readRun } from './suite-judge.js';
@@ -431,6 +432,7 @@ export async function watchedEngine(
         cwd: launch.projectPath,
         detached: true,
       });
+      belowNormal(child);
       stop = () => {
         endTree(child);
       };
