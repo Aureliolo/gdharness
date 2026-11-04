@@ -65,6 +65,7 @@ import { everySkillDirectory, removeSkill, skillDirectories, writeSkill } from '
 import { runSpreadCommand, spreadOptionsOf } from './spread-run.js';
 import { runTestCommand, testOptionsOf } from './suite-run.js';
 import { getLocalVersion } from './version.js';
+import { prepareWholeExits } from './whole-exit.js';
 
 const args = process.argv.slice(2);
 const command = args[0];
@@ -966,6 +967,7 @@ async function spread(): Promise<void> {
 
 async function main(): Promise<void> {
   await letWindowsReportCrashes();
+  await prepareWholeExits();
   if (command !== undefined) {
     // Standard error, because the LSP bridge's standard output is its protocol.
     sayWaitsTo((line) => {
