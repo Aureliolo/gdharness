@@ -20,8 +20,8 @@ import { download, extract } from './install-godot.js';
 const REPOSITORY = 'godot-gdunit-labs/gdUnit4';
 // renovate: datasource=github-tags depName=godot-gdunit-labs/gdUnit4
 const VERSION = 'v6.2.3';
-const COMMIT = 'f2e4f8679ebd28e27ef523a4fb7b09e8337bfce9';
-const DIGEST = '0c0da9141049a79314c43d404b73d25ef6277daface95964495b8a4e2243492b';
+const COMMIT = '44126fd2693bdd21659134e78ad025efee432d02';
+const DIGEST = '2ac85e881ab503477f985646a364b555fb29ed4ed1e4fe8c106b069ba30df552';
 
 async function main(): Promise<void> {
   const root = toolHome(`gdunit4-${COMMIT}`);
