@@ -1435,12 +1435,16 @@ function testOperations(godotPath: string, projectDir: string): void {
   const name = operation('get_project_setting', { setting: 'application/config/name' });
   assert.equal(get(name, 'exists'), true);
   assert.equal(get(name, 'value'), 'GdharnessEngineFixture');
-  assert.equal(get(name, 'at_default'), false, 'a name the project set is not at the default');
+  assert.deepEqual(
+    [get(name, 'at_default'), get(name, 'default_value')],
+    [false, ''],
+    `a name the project set is not at the default, which it names: ${JSON.stringify(name)}`,
+  );
   // Registered by the engine, so it exists whether or not project.godot says anything of it.
   const width = operation('get_project_setting', { setting: 'display/window/size/viewport_width' });
   assert.deepEqual(
-    [get(width, 'exists'), get(width, 'at_default')],
-    [true, true],
+    [get(width, 'exists'), get(width, 'at_default'), get(width, 'default_value')],
+    [true, true, undefined],
     `a setting the project never set exists, at its default: ${JSON.stringify(width)}`,
   );
 

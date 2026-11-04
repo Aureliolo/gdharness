@@ -30,6 +30,9 @@ static func one(setting_path: String, values: GdhSerialisation) -> Dictionary:
 		var default_value: Variant = ProjectSettings.property_get_revert(setting_path)
 		if default_value != null:
 			result["at_default"] = value == default_value
+			# Otherwise only an unset said what the default was, and an unset changes the file.
+			if value != default_value:
+				result["default_value"] = values.serialize_value(default_value)
 	else:
 		result["value"] = null
 		result["message"] = "Setting does not exist"
