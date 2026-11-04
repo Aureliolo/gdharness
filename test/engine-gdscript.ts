@@ -897,6 +897,14 @@ function testOperations(godotPath: string, projectDir: string): void {
       [true, base, null],
       `the ${template} template should parse under every warning, on ${base}: ${JSON.stringify(made)}`,
     );
+    // The game's own class docs show the comment, where no gdharness tool belongs.
+    const written = readFileSync(join(projectDir, 'made', `${template}_template.gd`), 'utf8');
+    assert.match(written, /^extends /m, `the ${template} template was written`);
+    assert.doesNotMatch(
+      written,
+      new RegExp(`\\b(${TOOL_SPECS.map((spec) => spec.name).join('|')})\\b`),
+      `the ${template} template names no gdharness tool`,
+    );
   }
   // Its doc comment straight below the header, where Godot reads it as the class's.
   assert.match(
