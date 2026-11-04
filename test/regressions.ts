@@ -26852,6 +26852,10 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         'func greet(who: String, times: int = 1) -> void:',
         '\tprint(who, times)',
         '',
+        // Numbered on from each whole number given, in any of its spellings, and not from one the
+        // file gives as an expression.
+        'enum Grade { POOR, FAIR = 0x3, FINE, ODD = Mode.SLOW * 2, LATER, LOW = -1, NEXT, BIG = 1_000, BITS = 0b11 }',
+        '',
       ].join('\n'),
     );
     // A file mid-edit, which is the state an agent is most likely to ask about. Joining lines until
@@ -27145,10 +27149,19 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         asArray(get(wrapped, 'enums')).map((each) => [
           get(each, 'name'),
           get(each, 'values'),
+          get(each, 'numbers'),
           get(each, 'line'),
         ]),
         // The line is where the declaration starts, not where its closing brace is.
-        [['Mode', ['FAST', 'SLOW'], 3]],
+        [
+          ['Mode', ['FAST', 'SLOW'], { FAST: 0, SLOW: 1 }, 3],
+          [
+            'Grade',
+            ['POOR', 'FAIR', 'FINE', 'ODD', 'LATER', 'LOW', 'NEXT', 'BIG', 'BITS'],
+            { POOR: 0, FAIR: 3, FINE: 4, LOW: -1, NEXT: 0, BIG: 1000, BITS: 3 },
+            30,
+          ],
+        ],
         `a wrapped enum has the members it declares: ${JSON.stringify(wrapped)}`,
       );
       assert.deepEqual(

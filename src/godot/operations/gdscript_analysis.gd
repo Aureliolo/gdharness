@@ -571,6 +571,11 @@ func _parse_enum(line: String, line_num: int) -> Dictionary:
 	var enum_text: String = line.substr(5).strip_edges()
 	var enum_name: String = ""
 	var values: Array[String] = []
+	# The engine numbers a member one past the one before it, from 0, unless it is given a value.
+	# One given an expression has a number the file alone does not settle, and so do those after it
+	# until the next whole number.
+	var numbers: Dictionary[String, int] = {}
+	var next: Variant = 0
 
 	if "{" in enum_text:
 		var parts: PackedStringArray = enum_text.split("{")
@@ -580,12 +585,40 @@ func _parse_enum(line: String, line_num: int) -> Dictionary:
 			if not values_text.is_empty():
 				for v: String in values_text.split(","):
 					var val: String = v.strip_edges()
-					if not val.is_empty():
-						values.append(val)
+					if val.is_empty():
+						continue
+					var member: String = val.get_slice("=", 0).strip_edges()
+					values.append(member)
+					if "=" in val:
+						next = _whole_number(val.substr(val.find("=") + 1).strip_edges())
+					if next is int:
+						numbers[member] = next
+						next = GdhRead.as_int(next) + 1
 	else:
 		enum_name = enum_text
 
-	return { "name": enum_name, "values": values, "line": line_num }
+	return { "name": enum_name, "values": values, "numbers": numbers, "line": line_num }
+
+
+## The whole number [param text] writes, as GDScript reads one, or null for anything else.
+static func _whole_number(text: String) -> Variant:
+	var plain: String = text.replace("_", "")
+	var negative: bool = plain.begins_with("-")
+	var digits: String = plain.trim_prefix("-")
+	var value: Variant = null
+	if digits.is_valid_int():
+		value = digits.to_int()
+	elif digits.begins_with("0x") and digits.is_valid_hex_number(true):
+		value = digits.hex_to_int()
+	elif (
+		digits.length() > 2
+		and digits.begins_with("0b")
+		and digits.substr(2).replace("0", "").replace("1", "").is_empty()
+	):
+		value = digits.bin_to_int()
+	if value == null:
+		return null
+	return -GdhRead.as_int(value) if negative else value
 
 
 func _parse_variable(line: String, line_num: int) -> Dictionary:
