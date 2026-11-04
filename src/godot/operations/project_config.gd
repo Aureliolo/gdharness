@@ -1,6 +1,7 @@
 extends RefCounted
 
 const GdhFileWalk = preload("file_walk.gd")
+const GdhGdscriptAuthoring = preload("gdscript_authoring.gd")
 const GdhRead = preload("reading.gd")
 const GdhLog = preload("logger.gd")
 const GdhProjectFile = preload("project_file.gd")
@@ -596,11 +597,13 @@ static func _not_an_autoload(path: String) -> String:
 
 
 ## Why [param name] cannot name an autoload, or empty when it can. The editor's Autoload tab refuses
-## the same names: an autoload named after an engine class or a built-in type takes that name in
-## every script, so an autoload called Input made every Input.is_action_pressed call the autoload.
+## the same names, and a global constant's too, which no script can list: an autoload named after
+## an engine class or a built-in type takes that name in every script, so an autoload called Input
+## made every Input.is_action_pressed call the autoload.
 static func _autoload_name_refusal(name: String) -> String:
 	var reason: String = ""
-	if not name.is_valid_ascii_identifier():
+	var declaring: String = str(GdhGdscriptAuthoring.declared_classes().get(name, ""))
+	if not name.is_valid_unicode_identifier():
 		reason = "it is not an identifier, which a script could name"
 	elif name in GDSCRIPT_KEYWORDS:
 		reason = "it is a GDScript keyword"
@@ -609,6 +612,8 @@ static func _autoload_name_refusal(name: String) -> String:
 			"it is the engine class %s, and every script naming %s would reach the autoload instead"
 			% [name, name]
 		)
+	elif not declaring.is_empty():
+		reason = "%s declares it as its class_name" % declaring
 	else:
 		for type: int in TYPE_MAX:
 			if type_string(type) == name:

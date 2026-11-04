@@ -1735,6 +1735,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     ['Vector2', 'it is the built-in type Vector2'],
     ['match', 'it is a GDScript keyword'],
     ['2nd', 'it is not an identifier, which a script could name'],
+    ['FixtureHero', 'res://made/hero.gd declares it as its class_name'],
   ].map(([clash, reason]) => {
     const rejected = runRefusedOperation(godotPath, projectDir, 'add_autoload', {
       name: clash,
@@ -1751,6 +1752,10 @@ function testOperations(godotPath: string, projectDir: string): void {
     `each name is refused with its reason: ${JSON.stringify(clashes)}`,
   );
   assert.equal(readFileSync(projectFile, 'utf8'), beforeClash, 'and nothing was written for any of them');
+  // Any identifier the editor takes, which is one in Unicode.
+  operation('add_autoload', { name: 'Mönch', path: 'made/hero.gd' });
+  assert.ok(named(get(operation('list_autoloads', {}), 'autoloads'), 'Mönch'), 'a Unicode name is taken');
+  assert.equal(get(operation('remove_autoload', { name: 'Mönch' }), 'removed'), true);
   assert.equal(get(operation('remove_autoload', { name: 'Hero' }), 'removed'), true);
   assert.equal(
     readFileSync(projectFile, 'utf8'),

@@ -338,7 +338,7 @@ static func _reasons(raised: Array[Dictionary], path: String) -> String:
 # does a base no class answers to. Both were written and answered as made. Classes are read off the
 # scripts as well as the class list, which a fresh clone has not written yet.
 static func _header_refusal(named: String, base: String) -> String:
-	var declared: Dictionary = _declared_classes()
+	var declared: Dictionary = declared_classes()
 	if not named.is_empty():
 		if ClassDB.class_exists(named):
 			return (
@@ -400,15 +400,15 @@ static func _engine_class_of(base: String, script_path: String) -> String:
 		if not path.begins_with("res://") and not path.begins_with("uid://"):
 			path = script_path.get_base_dir().path_join(path)
 	else:
-		path = str(_declared_classes().get(base, ""))
+		path = str(declared_classes().get(base, ""))
 	if path.is_empty() or not ResourceLoader.exists(path):
 		return ""
 	var script: Script = ResourceLoader.load(path, "Script") as Script
 	return "" if script == null else str(script.get_instance_base_type())
 
 
-# The class_name each script of the project declares, by name, with its path.
-static func _declared_classes() -> Dictionary:
+## The class_name each script of the project declares, by name, with its path.
+static func declared_classes() -> Dictionary:
 	var declared: Dictionary = {}
 	for entry: Dictionary in ProjectSettings.get_global_class_list():
 		var path: String = str(entry.get("path", ""))
