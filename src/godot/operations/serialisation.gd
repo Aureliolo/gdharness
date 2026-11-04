@@ -236,9 +236,7 @@ func deserialize_value(value: Variant) -> Variant:
 		return fields
 	if tag == "Dictionary" and not pairs(fields["entries"]):
 		return fields
-	# Digits only: the tag is there to carry what a number cannot, and {"value": 5} meant for some
-	# other shape is not to be read as 5.
-	if tag == "int" and not (fields["value"] is String and _exact_int(fields["value"]) != null):
+	if tag == "int" and _exact_int(fields["value"]) == null:
 		return fields
 	if tag == "RID" and _exact_int(fields["id"]) == null:
 		return fields
@@ -297,6 +295,14 @@ static func components_of(value: Variant) -> PackedStringArray:
 		TYPE_PROJECTION:
 			return PackedStringArray(["x", "y", "z", "w"])
 	return PackedStringArray()
+
+
+## Whether [param fields], untagged, may be read as a value of [param type] by the fields its tag
+## carries. An int is read so only from its digits: the tag is there to carry what a number cannot,
+## and {"value": 5} meant for some other shape is not to be read as 5. A caller who tags it says
+## what it is, so the tag takes a whole number as well.
+static func untagged_reads_as(fields: Dictionary, type: int) -> bool:
+	return type != TYPE_INT or fields.get("value") is String
 
 
 ## Whether [param entries] is a list of [key, value] pairs, as a Dictionary tag carries them.
@@ -386,7 +392,7 @@ func fitted(value: Variant, type: int) -> Variant:
 
 	if value is Dictionary and type != TYPE_DICTIONARY:
 		var fields: Dictionary = value
-		if not fields.has("_type"):
+		if not fields.has("_type") and untagged_reads_as(fields, type):
 			var tagged: Dictionary = fields.duplicate()
 			tagged["_type"] = type_string(type)
 			var built: Variant = deserialize_value(tagged)

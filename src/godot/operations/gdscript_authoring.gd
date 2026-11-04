@@ -870,8 +870,7 @@ static func _indentation(line: String) -> String:
 func _script_template(template_name: String) -> String:
 	match template_name:
 		"singleton":
-			return """## One instance for the whole game, which the project makes at start once
-## project_settings add_autoload names it, and every script reaches by that name.
+			return """## One instance for the whole game, made at start as an autoload.
 
 
 func _ready() -> void:
@@ -962,8 +961,7 @@ func disable() -> void:
 \tset_physics_process(false)
 """
 		"resource":
-			# gdstyle:ignore=format/max-line-length
-			return """## Data kept in a .tres file, which resource_edit create makes and the game loads.
+			return """## Data kept in a .tres file that the game loads.
 
 @export var id: String = ""
 @export var display_name: String = ""

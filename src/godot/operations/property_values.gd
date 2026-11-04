@@ -994,7 +994,7 @@ func _parse_shaped_dictionary(value: Dictionary, expected_type: int, elements: A
 	if expected_type == TYPE_NIL or expected_type == TYPE_DICTIONARY:
 		return _parse_entries(value, elements)
 	var tag: String = type_string(expected_type)
-	if GdhShapes.REQUIRED.has(tag):
+	if GdhShapes.REQUIRED.has(tag) and GdhSerialisation.untagged_reads_as(value, expected_type):
 		var tagged: Dictionary = value.duplicate()
 		tagged["_type"] = tag
 		var built: Variant = _values.deserialize_value(tagged)
