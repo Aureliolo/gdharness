@@ -79,6 +79,11 @@ func connect_signal(args: Dictionary) -> Dictionary:
 	if not before.is_empty():
 		binds = before["binds"]
 		unbinds = before["unbinds"]
+		# Kept as the binds are when the call gives none. Read as 0, a connect changing only the
+		# binds took one_shot and deferred off the connection it replaced.
+		if not args.has("flags"):
+			var held_flags: int = before["flags"]
+			flags = (held_flags & GIVEN_FLAGS) | Object.CONNECT_PERSIST
 	if args.has("unbinds"):
 		unbinds = GdhRead.as_int(args["unbinds"])
 	if args.has("binds"):
