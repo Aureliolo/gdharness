@@ -164,7 +164,15 @@ import { crowded, nowSeconds, processorSecondsOf, type Sample, Spent, STARVED } 
 import { Refusal } from '../src/errors.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
-import { answersTo, foldedRepeats, forAnswer, GameLog, type LogEntry } from '../src/game-log.js';
+import {
+  ALREADY_HELD,
+  answersTo,
+  foldedRepeats,
+  forAnswer,
+  GameLog,
+  type LogEntry,
+  raisedMark,
+} from '../src/game-log.js';
 import {
   callSitesOf,
   enclosingFunction,
@@ -940,6 +948,112 @@ async function testAOneShotRunOfAnotherProjectIsTurnedAwayQuietly(): Promise<voi
       }
     }
   }
+}
+
+/**
+ * The debugger names the errors its own calls made the engine print: a pause reaching a game already
+ * held, at any time, and an Expression error only while it evaluates, since the game's own
+ * expressions raise the same one.
+ */
+async function testTheDebuggerNamesTheErrorsItsCallsRaise(): Promise<void> {
+  const told: string[][] = [];
+  let accepted: () => void = () => undefined;
+  const taken = new Promise<void>((settle) => {
+    accepted = settle;
+  });
+  const peer = await GameDebugger.open(
+    [],
+    [
+      {
+        connected: () => {
+          accepted();
+        },
+        message: () => undefined,
+      },
+    ],
+    (by, said) => {
+      told.push([by, said]);
+    },
+  );
+  const game = createConnection({ host: '127.0.0.1', port: peer.port });
+  try {
+    await taken;
+    const error = (file: string, said: string): void => {
+      game.write(
+        framedCommand('error', [0, 0, 0, 0, file, 'f', 1, 'Condition is true.', said, false, 0, []]),
+      );
+    };
+    error('core/math/expression.cpp', "Invalid named index 'gone' for base type Object");
+    error('core/debugger/remote_debugger.cpp', ALREADY_HELD);
+    const until = Date.now() + 5_000;
+    while (told.length === 0 && Date.now() < until) {
+      await delay(20);
+    }
+    await delay(200);
+    assert.deepEqual(told, [['debug_control pause', ALREADY_HELD]]);
+  } finally {
+    game.destroy();
+    peer.close();
+  }
+}
+
+/**
+ * An error the debugger's own call raised is the caller's, in whichever order its line and the
+ * keeper's mark of it reach the transcript, and the game's own failing expression stays its error.
+ */
+function testAnEvaluatesErrorIsNotTheGames(): void {
+  const raised = "Invalid named index 'gone' for base type Object";
+  const printed = [
+    `ERROR: ${raised}`,
+    '   at: execute (core/math/expression.cpp:1504)',
+    '   GDScript backtrace (most recent call first):',
+    '       [0] _process (res://main.gd:7)',
+  ];
+  const marked = raisedMark('debug_state evaluate', raised).trimEnd();
+  const broke = [`ERROR: ${ALREADY_HELD}`, '   at: debug (core/debugger/remote_debugger.cpp:480)'];
+  const brokeMarked = raisedMark('debug_control pause', ALREADY_HELD).trimEnd();
+  for (const [order, lines] of [
+    ['printed first', [...printed, marked, ...broke, brokeMarked]],
+    ['marked first', [marked, ...printed, brokeMarked, ...broke]],
+  ] as const) {
+    const log = new GameLog();
+    log.append('transcript', `${lines.join('\n')}\n`);
+    assert.deepEqual(
+      forAnswer(log.all).map((entry) => [entry.severity, entry.text, entry.raisedBy]),
+      [
+        ['info', raised, 'debug_state evaluate'],
+        ['info', ALREADY_HELD, 'debug_control pause'],
+      ],
+      `${order}: each error is info, and a mark is no entry of its own`,
+    );
+    assert.equal(log.count('error'), 0, order);
+  }
+  // A line that only looks like a mark, naming no such call, is what the game printed.
+  const lookalike = new GameLog();
+  lookalike.append('transcript', `gdharness: runtime_invoke raised: ${raised}\n`);
+  assert.deepEqual(
+    lookalike.all.map((entry) => [entry.severity, entry.text]),
+    [['info', `gdharness: runtime_invoke raised: ${raised}`]],
+  );
+
+  // The game's own expression, failing the same way with no mark, and a mark for one whose line
+  // never names the Expression class, leave both errors standing.
+  const own = new GameLog();
+  own.append(
+    'transcript',
+    `${[...printed, `ERROR: ${raised}`, '   at: other (core/object/object.cpp:12)', marked].join('\n')}\n`,
+  );
+  assert.deepEqual(
+    forAnswer(own.all).map((entry) => [entry.severity, entry.raisedBy]),
+    [
+      ['info', 'debug_state evaluate'],
+      ['error', undefined],
+    ],
+    'the mark takes the error the Expression class raised, the newest first, and no other',
+  );
+  const unmarked = new GameLog();
+  unmarked.append('transcript', `${printed.join('\n')}\n`);
+  assert.equal(unmarked.count('error'), 1, 'an expression the game itself ran is its error');
 }
 
 /**
@@ -26738,6 +26852,10 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         'func greet(who: String, times: int = 1) -> void:',
         '\tprint(who, times)',
         '',
+        // Numbered on from each whole number given, in any of its spellings, and not from one the
+        // file gives as an expression.
+        'enum Grade { POOR, FAIR = 0x3, FINE, ODD = Mode.SLOW * 2, LATER, LOW = -1, NEXT, BIG = 1_000, BITS = 0b11 }',
+        '',
       ].join('\n'),
     );
     // A file mid-edit, which is the state an agent is most likely to ask about. Joining lines until
@@ -27031,10 +27149,19 @@ async function testAStructureReadDescribesTheScriptItRead(): Promise<void> {
         asArray(get(wrapped, 'enums')).map((each) => [
           get(each, 'name'),
           get(each, 'values'),
+          get(each, 'numbers'),
           get(each, 'line'),
         ]),
         // The line is where the declaration starts, not where its closing brace is.
-        [['Mode', ['FAST', 'SLOW'], 3]],
+        [
+          ['Mode', ['FAST', 'SLOW'], { FAST: 0, SLOW: 1 }, 3],
+          [
+            'Grade',
+            ['POOR', 'FAIR', 'FINE', 'ODD', 'LATER', 'LOW', 'NEXT', 'BIG', 'BITS'],
+            { POOR: 0, FAIR: 3, FINE: 4, LOW: -1, NEXT: 0, BIG: 1000, BITS: 3 },
+            30,
+          ],
+        ],
         `a wrapped enum has the members it declares: ${JSON.stringify(wrapped)}`,
       );
       assert.deepEqual(
@@ -37030,6 +37157,163 @@ async function testAGameHeldInACallHasTheCall(): Promise<void> {
       );
     }
     await call('debug_control', { op: 'continue' });
+  } finally {
+    if (started) {
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    }
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * A step out of a function the engine called stops at the next line of script, and an expression's
+ * failure is not counted as the game's error.
+ *
+ * The engine's own step out stops at the first line run below the function's depth. _process
+ * returns to depth 0 and every function after it is entered a level below that, so a step out of
+ * one ran the game on for good. Two nodes share the script, so the next line is the same function
+ * in another call. And the engine printed a mistyped evaluate's error as the game's, so the run
+ * read as unclean. Found by probe 407.
+ */
+async function testAStepOutOfWhatTheEngineCalledStops(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('step out regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-step-out-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-step-out-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Step out"\n' +
+      'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+      'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+  );
+  // Line 7 is the breakpoint, line 8 the last line of _process, and line 12 a real error.
+  writeFileSync(
+    join(project, 'walker.gd'),
+    [
+      'extends Node',
+      '',
+      'var steps: int = 0',
+      '',
+      '',
+      'func _process(_delta: float) -> void:',
+      '\tsteps += 1',
+      '\tsteps += 2',
+      '',
+      '',
+      'func fail() -> void:',
+      '\tpush_error("walker failed")',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://walker.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\n\n' +
+      '[node name="First" type="Node" parent="."]\nscript = ExtResource("1")\n\n' +
+      '[node name="Second" type="Node" parent="."]\nscript = ExtResource("1")\n',
+  );
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const call = async (
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ said: string; answer: unknown }> => {
+    const answered = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+    const said = textOf(answered) ?? JSON.stringify(answered);
+    return { said, answer: get(answered, 'result', 'isError') === true ? null : parseTextContent(answered) };
+  };
+  const named = async (): Promise<unknown> =>
+    get((await call('debug_state', { op: 'evaluate', expression: 'name' })).answer, 'value');
+  let started = false;
+  try {
+    await server.initialize('regression-test');
+    const start = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    started = get(start.answer, 'started') === true;
+    assert.ok(started, start.said);
+
+    await call('debug_breakpoint', { projectPath: project, op: 'set', scriptPath: 'walker.gd', line: 7 });
+    // The pause lands in whichever node's _process runs first after it is taken.
+    const paused = await call('debug_control', { op: 'pause' });
+    const first = await named();
+    assert.deepEqual(
+      [get(paused.answer, 'stack', 0, 'script'), get(paused.answer, 'stack', 0, 'line')],
+      ['res://walker.gd', 7],
+      paused.said,
+    );
+    assert.ok(first === 'First' || first === 'Second', `held in one of the two: ${String(first)}`);
+    await call('debug_breakpoint', { projectPath: project, op: 'remove', scriptPath: 'walker.gd', line: 7 });
+
+    // First's _process returns, and Second's is the next script the frame runs. Second's returns,
+    // and the runtime addon's _process, which the step goes on through, comes before First's in
+    // the next frame.
+    const other = first === 'First' ? 'Second' : 'First';
+    for (const next of [other, first, other]) {
+      const out = await call('debug_control', { op: 'step_out' });
+      assert.deepEqual(
+        [
+          get(out.answer, 'heldAgain'),
+          Array.isArray(get(out.answer, 'stack')) ? asArray(get(out.answer, 'stack')).length : null,
+          get(out.answer, 'stack', 0, 'script'),
+          get(out.answer, 'stack', 0, 'line'),
+          get(out.answer, 'note'),
+          await named(),
+        ],
+        [true, 1, 'res://walker.gd', 7, undefined, next],
+        `a step out of _process stops in ${next}'s: ${out.said}`,
+      );
+    }
+
+    const mistyped = await call('debug_state', { op: 'evaluate', expression: 'no_such_member' });
+    assert.deepEqual(
+      [get(mistyped.answer, 'failed'), get(mistyped.answer, 'raised')],
+      ["Invalid named index 'no_such_member' for base type Object", undefined],
+      mistyped.said,
+    );
+    await call('debug_control', { op: 'continue' });
+    const failed = await call('runtime_invoke', { op: 'call', nodePath: '/root/Main/First', method: 'fail' });
+    assert.deepEqual(get(failed.answer, 'errors'), ['walker failed'], failed.said);
+
+    const printed = await call('editor_output', { projectPath: project, severity: 'info' });
+    const raised = asArray(get(printed.answer, 'entries')).filter(
+      (entry) => get(entry, 'text') === "Invalid named index 'no_such_member' for base type Object",
+    );
+    assert.deepEqual(
+      raised.map((entry) => [get(entry, 'severity'), get(entry, 'raisedBy')]),
+      [['info', 'debug_state evaluate']],
+      printed.said,
+    );
+
+    const stopped = await call('editor_run', { op: 'stop' });
+    started = false;
+    assert.deepEqual(
+      [
+        get(stopped.answer, 'errors'),
+        get(stopped.answer, 'clean'),
+        asArray(get(stopped.answer, 'entries')).map((entry) => get(entry, 'text')),
+      ],
+      [1, false, ['walker failed']],
+      `the game's own error counts and the expression's does not: ${stopped.said}`,
+    );
   } finally {
     if (started) {
       await server.request(
@@ -74414,6 +74698,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testOneServerOneProjectRegression,
   testAOneShotRunOfAnotherProjectIsTurnedAwayQuietly,
   testEngineEntriesFoldAndScriptErrorsAreKnown,
+  testAnEvaluatesErrorIsNotTheGames,
+  testTheDebuggerNamesTheErrorsItsCallsRaise,
   testTheProfilerReadsWhatTheEngineSends,
   testSceneToolsVectorRegression,
   testAReleaseExportLeavesGdharnessOut,
@@ -74527,6 +74813,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartHeldBeforeItsRuntimeSaysWhere,
   testAGameThisServerStartedIsDebugged,
   testAGameHeldInACallHasTheCall,
+  testAStepOutOfWhatTheEngineCalledStops,
   testInputThatReachesNothingSaysWhatWould,
   testABreakpointOnADeletedScriptIsTakenOff,
   testARunningGamesEnumIsSetByName,

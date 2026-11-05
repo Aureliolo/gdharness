@@ -16,6 +16,7 @@
 import { readFileSync } from 'node:fs';
 import { createServer, type Server, type Socket } from 'node:net';
 import { join } from 'node:path';
+import { ALREADY_HELD, RAISED_FROM, type RaisedBy } from './game-log.js';
 import {
   type DebuggerMessage,
   DebuggerStream,
@@ -266,6 +267,10 @@ export class GameDebugger {
   private outputDropped = 0;
   /** Why the expressions evaluated since the last evaluate began failed, as the engine said it. */
   private readonly expressionErrors: string[] = [];
+  /** Whether an expression a caller asked for is being worked out, so what it raises is theirs. */
+  private evaluating = false;
+  /** Told each error the engine prints for what this debugger asked rather than for the game. */
+  private readonly raised: (by: RaisedBy, text: string) => void;
   /** Requests answered one at a time: each reads the replies to the commands it sent. */
   private queue: Promise<unknown> = Promise.resolve();
   private readonly server: Server;
@@ -280,12 +285,14 @@ export class GameDebugger {
     port: number,
     breakpoints: readonly string[],
     observers: readonly DebugObserver[],
+    raised: (by: RaisedBy, text: string) => void,
   ) {
     this.server = server;
     this.port = port;
     this.breakpoints = breakpoints;
     this.breakpointLines = new Set(breakpoints);
     this.observers = observers;
+    this.raised = raised;
   }
 
   /**
@@ -296,6 +303,7 @@ export class GameDebugger {
   static async open(
     breakpoints: readonly string[],
     observers: readonly DebugObserver[] = [],
+    raised: (by: RaisedBy, text: string) => void = () => undefined,
   ): Promise<GameDebugger> {
     const server = createServer();
     await new Promise<void>((resolve, reject) => {
@@ -309,7 +317,7 @@ export class GameDebugger {
       server.close();
       throw new Error('the debugger has no port');
     }
-    const peer = new GameDebugger(server, address.port, breakpoints, observers);
+    const peer = new GameDebugger(server, address.port, breakpoints, observers, raised);
     server.on('connection', (socket) => {
       peer.accept(socket);
     });
@@ -425,11 +433,18 @@ export class GameDebugger {
       // An expression that does not parse or fails as it runs comes back as null, and the engine
       // says why in an error raised from its Expression class, sent after the null.
       const [, , , , file, , , error, described] = received.data;
-      if (file === 'core/math/expression.cpp' && this.expressionErrors.length < 10) {
-        const why = typeof described === 'string' && described !== '' ? described : error;
-        if (typeof why === 'string') {
+      const why = typeof described === 'string' && described !== '' ? described : error;
+      if (file === RAISED_FROM['debug_state evaluate'] && typeof why === 'string') {
+        if (this.expressionErrors.length < 10) {
           this.expressionErrors.push(why);
         }
+        if (this.evaluating) {
+          this.raised('debug_state evaluate', why);
+        }
+      } else if (file === RAISED_FROM['debug_control pause'] && why === ALREADY_HELD) {
+        // A pause sent as the game stopped on a breakpoint reaches it held, and only a debugger
+        // sends one, so the error is this one's.
+        this.raised('debug_control pause', why);
       }
     }
     const at = this.waiters.findIndex((waiter) => waiter.wanted(received));
@@ -750,12 +765,26 @@ export class GameDebugger {
         ? { refused: `The game did not say it had gone on within ${READ_MS / 1000}s.` }
         : { continued: true };
     }
-    this.forget('debug_enter');
-    // Over and out count lines only at the depth they start from, which held where no script runs
-    // is none, so either would let the game run on for good. A step into stops at its next line.
-    this.send(held.hasStack ? how : 'step', [], held.thread);
-    const entered = await this.next(GameDebugger.named('debug_enter'), STEP_MS);
-    if (entered === null) {
+    const out = how === 'out' && held.hasStack ? await this.outOfAnEngineCall(held.thread) : 'called';
+    if (out === 'inside') {
+      this.stoppedBy('Stepped');
+      return {
+        stepped: true,
+        heldAgain: true,
+        held: this.heldState(),
+        stack: (await this.stack()) ?? [],
+        note: `The function the engine called was stepped through for ${STEP_MS / 1000}s without returning, so the step out stopped inside it. debug_control step_out goes on from here.`,
+      };
+    }
+    let entered = out === 'stepped';
+    if (out === 'called') {
+      this.forget('debug_enter');
+      // Over and out count lines only at the depth they start from, which held where no script runs
+      // is none, so either would let the game run on for good. A step into stops at its next line.
+      this.send(held.hasStack ? how : 'step', [], held.thread);
+      entered = (await this.next(GameDebugger.named('debug_enter'), STEP_MS)) !== null;
+    }
+    if (!entered) {
       return {
         stepped: true,
         heldAgain: false,
@@ -791,6 +820,67 @@ export class GameDebugger {
             note: `The step went on through gdharness's runtime addon, whose _process runs first in every frame, for ${STEP_MS / 1000}s without the game running a line of its own script, and is held in the addon. debug_control continue lets the game go, and a breakpoint in its script stops it there.`,
           }),
     };
+  }
+
+  /**
+   * Steps the held game out of a function the engine called, such as a _process, or answers `called`
+   * when a script called the one it is held in. `stepped` once it stops outside that call, `inside`
+   * when the steps ran out of time first, and `lost` when it did not stop again.
+   *
+   * The engine's own step out stops at the first line run at a depth below the function's. A
+   * function the engine called returns to depth 0, and every function the engine calls after it is
+   * entered a level below that, so the game ran on for good. Stepped over line by line instead,
+   * until the stop is in another function or in another call of this one: another instance, or a
+   * later process or physics frame, which the frame's instance tells when asked.
+   */
+  private async outOfAnEngineCall(thread: number): Promise<'called' | 'stepped' | 'inside' | 'lost'> {
+    const frames = await this.stack();
+    const start = frames?.[0];
+    if (frames === null || start === undefined || frames.length > 1) {
+      return 'called';
+    }
+    const read = await this.variables(0);
+    const members = Array.isArray(read['scopes'])
+      ? (read['scopes'] as readonly DebugScope[]).find((scope) => scope.name === 'Members')
+      : undefined;
+    // A static function has no instance to ask, and the engine lets the game go rather than evaluate
+    // in it, so each call of one reads as the same call.
+    const asked = members?.variables.some((variable) => variable.name === 'self') === true;
+    const began = asked ? await this.whichCall(thread) : null;
+    const until = Date.now() + STEP_MS;
+    for (;;) {
+      this.forget('debug_enter');
+      this.send('next', [], thread);
+      if ((await this.next(GameDebugger.named('debug_enter'), Math.max(1, until - Date.now()))) === null) {
+        return 'lost';
+      }
+      const now = await this.stack();
+      const top = now?.[0];
+      if (now === null || top === undefined) {
+        return 'lost';
+      }
+      if (now.length > 1 || top.script !== start.script || top.name !== start.name) {
+        return 'stepped';
+      }
+      if (asked && (await this.whichCall(thread)) !== began) {
+        return 'stepped';
+      }
+      if (Date.now() >= until) {
+        return 'inside';
+      }
+    }
+  }
+
+  /** Which call the held frame is in, as its instance and the engine's frame counts say. */
+  private async whichCall(thread: number): Promise<string | null> {
+    this.forget('evaluation_return');
+    this.send(
+      'evaluate',
+      ['[get_instance_id(), Engine.get_process_frames(), Engine.get_physics_frames()]', 0],
+      thread,
+    );
+    const answered = await this.next(GameDebugger.named('evaluation_return'), EVALUATE_MS);
+    return answered !== null && 'data' in answered ? JSON.stringify(answered.data[3] ?? null) : null;
   }
 
   private async variables(frame: number): Promise<DebugAnswer> {
@@ -869,7 +959,16 @@ export class GameDebugger {
     }
     this.forget('evaluation_return');
     this.expressionErrors.length = 0;
-    this.send('evaluate', [expression, frame], held.thread);
+    this.evaluating = true;
+    try {
+      return await this.evaluated(frame, expression, held.thread);
+    } finally {
+      this.evaluating = false;
+    }
+  }
+
+  private async evaluated(frame: number, expression: string, thread: number): Promise<DebugAnswer> {
+    this.send('evaluate', [expression, frame], thread);
     const answered = await this.next(GameDebugger.named('evaluation_return'), EVALUATE_MS);
     if (answered === null || !('data' in answered)) {
       return {
