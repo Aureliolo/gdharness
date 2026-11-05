@@ -120,6 +120,7 @@ import {
   type EditorOpened,
   type EditorStart,
   editorAddonMissing,
+  editorAddonOfAnotherRelease,
   editorRestartTimeoutMs,
   inTurnToOpen,
   openEditorProcess,
@@ -10533,6 +10534,13 @@ class GodotServer {
       return this.createErrorResponse(
         `${missing.why}, so an editor opened on it would never reach this server.`,
         missing.remedies,
+      );
+    }
+    const another = editorAddonOfAnotherRelease(projectPath);
+    if (another !== null) {
+      return this.createErrorResponse(
+        `${another.why}, so an editor opened on it would be asked nothing but to quit.`,
+        another.remedies,
       );
     }
     const owed = restartOwed(projectPath);

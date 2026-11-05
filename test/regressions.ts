@@ -8795,6 +8795,75 @@ async function testANoEditorRefusalSaysWhetherOneCanConnect(): Promise<void> {
 }
 
 /**
+ * editor_launch open refuses a project whose editor addon on disk is another release's.
+ *
+ * Found by a probe session: the open answered launched, the editor imported the project, and only
+ * once it had connected did editor_status say this server asked it nothing but to quit.
+ */
+async function testAnOpenRefusesAnotherReleasesAddon(): Promise<void> {
+  const projectPath = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-addon-'));
+  const announced = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-addon-runtimes-'));
+  const addon = join(projectPath, 'addons', 'gdharness_editor');
+  try {
+    writeFileSync(
+      join(projectPath, 'project.godot'),
+      'config_version=5\n\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+    );
+    mkdirSync(addon, { recursive: true });
+    const mark = (version: string, digest: string): void => {
+      writeFileSync(join(addon, VERSION_MARKER), `${version}\n`);
+      writeFileSync(join(addon, '.gdharness-digest'), `${digest}\n`);
+    };
+    // An engine that is not there, so an open the check lets through ends at the engine and never
+    // starts a Godot.
+    const engine = join(projectPath, 'no-godot.exe');
+    await withStdioServer(
+      async (call) => {
+        const open = async (): Promise<string> =>
+          await call('editor_launch', { op: 'open', projectPath, hidden: true });
+
+        mark('0.0.1', '0'.repeat(64));
+        const older = await open();
+        assert.ok(
+          older.startsWith(
+            `${projectPath} holds the 0.0.1 editor addon while this server ships ${SERVER_VERSION}, so an editor opened on it would be asked nothing but to quit.`,
+          ),
+          older,
+        );
+        assert.ok(
+          older.includes(`Run  npx -y gdharness@${SERVER_VERSION} upgrade "${projectPath}"  in a shell`),
+          older,
+        );
+
+        mark('99.0.0', '0'.repeat(64));
+        const newer = await open();
+        assert.match(newer, /holds the 99\.0\.0 editor addon while this server ships /, newer);
+        assert.ok(newer.includes('reconnect it in your harness so it spawns 99.0.0'), newer);
+        assert.doesNotMatch(newer, /upgrade/, newer);
+
+        mark(SERVER_VERSION, '0'.repeat(64));
+        const rebuilt = await open();
+        assert.match(
+          rebuilt,
+          /holds a different build of the editor addon from the one this \S+ server ships/,
+          rebuilt,
+        );
+
+        // This server's own addon gets past the check, as far as the missing engine.
+        mark(SERVER_VERSION, shippedEditorDigest());
+        const own = await open();
+        assert.doesNotMatch(own, /asked nothing but to quit/, own);
+        assert.ok(own.includes(engine), `refused at the engine instead: ${own}`);
+      },
+      { GDHARNESS_RUNTIME_DIR: announced, GODOT_PATH: engine },
+    );
+  } finally {
+    sweep(projectPath);
+    sweep(announced);
+  }
+}
+
+/**
  * editor_status says no editor can connect to a server whose project has no editor addon.
  *
  * A probe session asked editor_status on a project never set up and was told mayYetConnect true,
@@ -75127,6 +75196,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testArgumentsOfTheWrongTypeAreRefused,
   testAnArgumentMeantForAnotherOpIsRefused,
   testANoEditorRefusalSaysWhetherOneCanConnect,
+  testAnOpenRefusesAnotherReleasesAddon,
   testEditorStatusOnAProjectWithNoAddonIsFinal,
   testEveryArgumentNamesOpsItsToolHas,
   testAnArgumentScopedInWordsIsScopedInItsSchema,
