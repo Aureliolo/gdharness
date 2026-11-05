@@ -369,9 +369,9 @@ async function keep(): Promise<void> {
       : await GameDebugger.open(
           run.breakpoints ?? [],
           profiled === null ? [] : [profiled.observer],
-          (by, text) => {
+          (by, text, file) => {
             try {
-              appendFileSync(run.transcript, raisedMark(by, text));
+              appendFileSync(run.transcript, raisedMark(by, text, file));
             } catch {
               // The run's errors then count this one too, as the engine printed it.
             }

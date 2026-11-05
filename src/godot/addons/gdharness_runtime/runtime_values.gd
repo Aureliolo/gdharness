@@ -497,6 +497,35 @@ func parameter_enum(object: Object, method: String, index: int) -> Dictionary:
 	return {}
 
 
+## The name of [param value] in the enum [param method] declares it returns, or "" when it declares
+## none or [param value] is none of its values. Error, the one global enum a method returns, has no
+## class to read its names from, so it is named as error_string words it, "Method not found" for 37.
+func returned_enum_name(object: Object, method: String, value: Variant) -> String:
+	if not value is int:
+		return ""
+	var number: int = value
+	for entry: Dictionary in methods_of(object):
+		if entry.get("name", "") != method:
+			continue
+		var returned: Dictionary = entry.get("return", {})
+		if GdhRead.as_int(returned.get("usage", 0)) & PROPERTY_USAGE_CLASS_IS_ENUM == 0:
+			return ""
+		var qualified: String = str(returned.get("class_name", ""))
+		if qualified == "Error":
+			return error_string(number)
+		var values: Dictionary = GdhDeclared.enum_declared_as(qualified)
+		if values.is_empty():
+			values = _enum_along(
+				object if object is Script else object.get_script(),
+				qualified.get_slice(".", qualified.get_slice_count(".") - 1)
+			)
+		for named: Variant in values:
+			if values[named] == number:
+				return str(named)
+		return ""
+	return ""
+
+
 ## The enum [param named] declared by [param script] or a script it extends, or {}. A script built
 ## in a scene or made at run time names its enums by an id nothing loads, gdscript://-92233….gd.Mood
 ## measured on 4.7.2, and a method of the object called declares its enums along this chain.

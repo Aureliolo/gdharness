@@ -674,6 +674,10 @@ func call_method(params: Dictionary) -> Dictionary:
 		"result": _values.serialize(result),
 		"elapsed_usec": elapsed,
 	}
+	# emit_signal answered 37 with nothing saying it is Error's ERR_METHOD_NOT_FOUND.
+	var named_result: String = _values.returned_enum_name(holder, named, result)
+	if not named_result.is_empty():
+		answer["result_named"] = named_result
 	if awaited:
 		answer["awaited"] = true
 	if not outside.is_empty():

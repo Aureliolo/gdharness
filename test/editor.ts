@@ -6518,12 +6518,22 @@ async function testDebugging({ call, refusal, attempt, play, project }: Editor):
   const total = named.find((variable) => text(get(variable, 'name')) === 'total');
   assert.ok(total, `total should be in scope at the breakpoint; saw ${JSON.stringify(named)}`);
   assert.match(text(get(total, 'value')), /\b4\b/, 'and should read as the 4 the line above worked out');
-  // However the adapter words a null, a failed expression is not passed off as one.
+  // However the adapter words a null, a failed expression is not passed off as one. The game's
+  // report has the engine's reason, and the error is the evaluate's, not the run's.
   const unnamed = await call('debug_state', { op: 'evaluate', expression: 'no_such_name' });
-  assert.match(
-    text(get(unnamed, 'note')),
-    /^null is also what an expression comes to when it does not parse or fails as it runs/,
+  assert.deepEqual(
+    [get(unnamed, 'failed'), get(unnamed, 'note')],
+    ["Invalid named index 'no_such_name' for base type Object", undefined],
     JSON.stringify(unnamed),
+  );
+  const reported = await call('editor_output', {});
+  assert.ok(
+    asArray(get(reported, 'entries'), 'entries').some(
+      (entry) =>
+        get(entry, 'raisedBy') === 'debug_state evaluate' &&
+        text(get(entry, 'text')).includes('no_such_name'),
+    ) && get(reported, 'errors') === 0,
+    `the expression's error is the evaluate's: ${JSON.stringify(reported)}`,
   );
 
   // One line, run. The game is held either way, so what says the step happened is where it is
@@ -7978,6 +7988,99 @@ async function testEditorRestart({ call, refusal, project }: Editor): Promise<vo
   );
 }
 
+/**
+ * An evaluate in a project with a global class that does not parse answers, names the class, and
+ * leaves the game held where the debugger can still reach it.
+ *
+ * Measured on 4.7.2 before the fix: the evaluate loaded the class, the game broke on its parse error
+ * inside the evaluate, and the editor asked that break for no stack. The evaluate went unanswered for
+ * its whole minute, every debug call after it timed out, and editor_output called the run clean.
+ */
+async function testAnEvaluateNamesAGlobalClassThatDoesNotParse({
+  call,
+  refusal,
+  attempt,
+  play,
+  project,
+}: Editor): Promise<void> {
+  const peek = { projectPath: project, scriptPath: 'res://peek.gd' };
+  const files = ['shattered.gd', 'peek.gd', 'peek.tscn'];
+  writeFileSync(
+    join(project, 'shattered.gd'),
+    'class_name Shattered\nextends Node\n\n\nfunc _ready() -> void:\n\tvar missing: int = undefined_name + 1\n\tprint(missing)\n',
+  );
+  // Held on line 6, then a null call on line 7 that breaks the game while error breaks are on.
+  writeFileSync(
+    join(project, 'peek.gd'),
+    'extends Node\n\n\nfunc _ready() -> void:\n\tvar seen: int = 1\n\tvar nothing: Object = null\n\tnothing.call("go", seen)\n',
+  );
+  writeFileSync(
+    join(project, 'peek.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://peek.gd" id="1"]\n\n' +
+      '[node name="Peek" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  await call('editor_rescan', { projectPath: project });
+  const unreadable =
+    /so loaded res:\/\/shattered\.gd, which does not parse\. Until the game next stops, the engine answers every frame's variables with none/;
+  try {
+    await call('debug_breakpoint', { ...peek, op: 'set', line: 6 });
+    await play({ scene: 'res://peek.tscn' });
+    await stackWithin(attempt, 'the game should stop at the breakpoint', (stack) => stack.length > 0);
+
+    const evaluated = await call('debug_state', { op: 'evaluate', expression: 'seen' });
+    assert.equal(get(evaluated, 'value'), '1', JSON.stringify(evaluated));
+    assert.match(text(get(evaluated, 'note')), unreadable, JSON.stringify(evaluated));
+    // The adapter keeps the stack it was sent at the stop, so it still reads true.
+    const stack = asArray(await call('debug_state', { op: 'stack' }), 'stackFrames');
+    assert.equal(get(stack[0], 'line'), 6, JSON.stringify(stack));
+    for (const args of [{ op: 'variables' }, { op: 'evaluate', expression: 'seen' }]) {
+      assert.match(await refusal('debug_state', args), unreadable, `${args.op} is refused with the reason`);
+    }
+
+    // The next stop reads the frames afresh, as the refusal says, and the class is not loaded again.
+    const over = await call('debug_control', { op: 'step_over' });
+    assert.equal(get(over, 'heldAgain'), true, JSON.stringify(over));
+    const again = await call('debug_state', { op: 'evaluate', expression: 'seen' });
+    assert.deepEqual([get(again, 'value'), get(again, 'note')], ['1', undefined], JSON.stringify(again));
+
+    // The editor's own setting is back, so the null call breaks the game.
+    await call('debug_control', { op: 'continue' });
+    const broke = Date.now() + GAME_STOP_TIMEOUT_MS;
+    let output = await call('editor_output', {});
+    while (get(output, 'heldAt', 'reason') !== 'exception' && Date.now() < broke) {
+      await delay(500);
+      output = await call('editor_output', {});
+    }
+    assert.equal(
+      get(output, 'heldAt', 'reason'),
+      'exception',
+      `the null call broke the game: ${JSON.stringify(output)}`,
+    );
+    const entries = asArray(get(output, 'entries'), 'entries');
+    const errors = entries.filter((entry) => get(entry, 'severity') === 'error');
+    assert.ok(
+      errors.length === 1 && /null/i.test(text(get(errors[0], 'text'))),
+      `the null call is the run's one error: ${JSON.stringify(output)}`,
+    );
+    assert.ok(
+      entries.some(
+        (entry) =>
+          get(entry, 'severity') === 'info' &&
+          get(entry, 'raisedBy') === 'debug_state evaluate' &&
+          text(get(entry, 'text')).startsWith('Parse Error: Identifier "undefined_name"'),
+      ),
+      `the parse error is the evaluate's: ${JSON.stringify(output)}`,
+    );
+  } finally {
+    await attempt('debug_breakpoint', { ...peek, op: 'remove', line: 6 });
+    await attempt('editor_run', { projectPath: project, op: 'stop' });
+    for (const file of files) {
+      rmSync(join(project, file), { force: true });
+    }
+    await call('editor_rescan', { projectPath: project });
+  }
+}
+
 async function main(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -8062,6 +8165,7 @@ async function main(): Promise<void> {
     ['testABreakpointHoldsForEveryPlay', testABreakpointHoldsForEveryPlay],
     ['testAnAdapterIsBoundAgainInPlace', testAnAdapterIsBoundAgainInPlace],
     ['testEditorRestart', testEditorRestart],
+    ['testAnEvaluateNamesAGlobalClassThatDoesNotParse', testAnEvaluateNamesAGlobalClassThatDoesNotParse],
   ];
 
   // Cases that bring up their own editor and server, because they end one. Kept out of the shared
