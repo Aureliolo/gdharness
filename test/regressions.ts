@@ -68257,6 +68257,18 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       textOf(await call('scene_create', { op: 'create', scenePath: 'typo.tscn', rootNodeType: 'Node2DD' })),
       "rootNodeType must be a node class or a class_name in the project's class list, and Node2DD is neither. The nearest are Node2D, Node, Node3D.",
     );
+    // Offered from the classes the editor's Create Node dialog lists, which holds none of the
+    // editor's own nodes: Resource was offered EditorResourcePreview and EditorResourcePicker.
+    const resourceRoot =
+      textOf(
+        await call('scene_create', { op: 'create', scenePath: 'resource.tscn', rootNodeType: 'Resource' }),
+      ) ?? '';
+    assert.match(
+      resourceRoot,
+      /^rootNodeType must be a node class, and Resource is not one\. The nearest (is|are) [^.]*\bResourcePreloader\b[^.]*\.$/,
+      resourceRoot,
+    );
+    assert.doesNotMatch(resourceRoot, /Editor/, resourceRoot);
     // A folder the path names is made, and said to be.
     const mapped = await written('scene_create', {
       op: 'create',

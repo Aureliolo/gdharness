@@ -995,7 +995,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['create'],
         description:
-          'create: the root node class, an engine class or a class_name a project script declares, which the root is made as with that script attached. Default Node. The answer names the root as scene_node get does: rootNodeType its engine class, with scriptClass for a class_name. With no editor open, a class_name the class cache does not list yet is put in it first, and classCacheRebuilt says so.',
+          'create: the root node class, an engine node class or a class_name a project script declares, which the root is made as with that script attached. Default Node. The answer names the root as scene_node get does: rootNodeType its engine class, with scriptClass for a class_name. With no editor open, a class_name the class cache does not list yet is put in it first, and classCacheRebuilt says so.',
       },
       rootNodeName: {
         type: 'string',
