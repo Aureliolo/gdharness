@@ -1643,13 +1643,15 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       colorName: {
         type: 'string',
         ops: ['set_theme_color'],
-        description: 'set_theme_color: such as "font_color".',
+        description:
+          'set_theme_color: such as "font_color". A name the engine\'s theme gives the class no colour by is set, with a note naming the nearest it has.',
       },
       color: { ...COLOUR, ops: ['set_theme_color'] },
       fontSizeName: {
         type: 'string',
         ops: ['set_theme_font_size'],
-        description: 'set_theme_font_size: such as "font_size".',
+        description:
+          'set_theme_font_size: such as "font_size". A name the engine\'s theme gives the class no font size by is set, with a note naming the nearest it has.',
       },
       size: {
         type: 'number',

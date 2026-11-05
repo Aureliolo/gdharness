@@ -75002,6 +75002,35 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
       JSON.stringify(variation),
     );
     assert.match(fileOf('theme.tres'), /\nButon\/colors\/font_color = Color\(1, 0, 0, 1\)\n/);
+    // Any name is an item, so one a class never reads is written and answered as set.
+    const misspelt = parseTextContent(
+      await call('resource_edit', {
+        ...theme,
+        op: 'set_theme_color',
+        controlType: 'Button',
+        colorName: 'font_colour',
+        color: { r: 0, g: 0, b: 1, a: 1 },
+      }),
+    );
+    assert.match(
+      text(get(misspelt, 'note')),
+      /^The engine's theme gives Button no colour font_colour, so only a script asking for it by name reads it\. The nearest it has (?:is|are) font_color(?:, [a-z_]+)*\. remove_theme_item with item colors\/font_colour takes it out\.$/,
+      JSON.stringify(misspelt),
+    );
+    const oddSize = parseTextContent(
+      await call('resource_edit', {
+        ...theme,
+        op: 'set_theme_font_size',
+        controlType: 'Button',
+        fontSizeName: 'font_sise',
+        size: 20,
+      }),
+    );
+    assert.match(
+      text(get(oddSize, 'note')),
+      /^The engine's theme gives Button no font size font_sise, so only a script asking for it by name reads it\. The nearest it has is font_size\. remove_theme_item with item font_sizes\/font_sise takes it out\.$/,
+      JSON.stringify(oddSize),
+    );
     // A colour as its html code, as scene_node takes one, and a word that is neither form.
     const coded = parseTextContent(
       await call('resource_edit', {
