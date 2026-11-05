@@ -379,7 +379,10 @@ const INPUT_EVENTS: JsonSchema = {
     type: 'object',
     properties: {
       type: { type: 'string', enum: ['key', 'mouse_button', 'joypad_button', 'joypad_axis'] },
-      keycode: { type: 'string', description: 'Keys: the key name, such as "Space" or "W".' },
+      keycode: {
+        type: 'string',
+        description: 'Keys: the key name, such as "Space", "W" or "Menu", as the Input Map names keys.',
+      },
       button: {
         type: 'number',
         description:

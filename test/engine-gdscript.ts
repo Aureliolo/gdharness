@@ -2539,7 +2539,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   });
   assert.deepEqual(
     [get(physical, 'deadzone'), get(physical, 'old_deadzone'), get(physical, 'events', 0)],
-    [0.2, 0.2, { class_name: 'InputEventKey', physical_keycode: 87 }],
+    [0.2, 0.2, { class_name: 'InputEventKey', text: 'W - Physical', physical_keycode: 87 }],
     JSON.stringify(physical),
   );
   const boundEverywhere = readFileSync(projectFile, 'utf8');
@@ -2585,7 +2585,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   });
   assert.match(
     unkeyed.stderr,
-    /Unknown key: Spacebarr\. The nearest key names are [^.]*\bSpace\b[^.]*\. A key is named by its letter, its digit, F1 to F12, or one of: Space, Escape, Tab, [^.]*, Equal\./,
+    /Unknown key: Spacebarr\. The nearest key names are [^.]*\bSpace\b[^.]*\. A key is named by its letter, its digit, F1 to F35, one of: Space, Escape, Tab, [^.]*, Equal, or as the engine names it in the Input Map, such as Menu or QuoteLeft\./,
     unkeyed.stderr,
   );
   const lone = runRefusedOperation(godotPath, projectDir, 'add_input_action', {
@@ -2602,6 +2602,16 @@ function testOperations(godotPath: string, projectDir: string): void {
     events: [{ type: 'key', keycode: 'Qwxz' }],
   });
   assert.match(farOff.stderr, /Unknown key: Qwxz\. A key is named by its letter/, farOff.stderr);
+  // The engine reads a chord as one name, which is a key and its modifiers rather than a key.
+  const chorded = runRefusedOperation(godotPath, projectDir, 'add_input_action', {
+    action_name: 'fixture_dash',
+    events: [{ type: 'key', keycode: 'Ctrl+QuoteLeft' }],
+  });
+  assert.match(
+    chorded.stderr,
+    /Unknown key: Ctrl\+QuoteLeft\.[^.]* A key held with Ctrl, Alt or Shift is bound with the event's ctrl, alt or shift\. A key is named by/,
+    chorded.stderr,
+  );
   // A field an event needs was given a default, a left click or axis 0 pushed right, and a number the
   // engine has no button or direction for was written as bound.
   const unbound: [Record<string, unknown>, RegExp][] = [
@@ -2648,14 +2658,51 @@ function testOperations(godotPath: string, projectDir: string): void {
     ],
   });
   assert.deepEqual(
-    get(aimed, 'events'),
+    asArray(get(aimed, 'events')).map((event) => [
+      get(event, 'class_name'),
+      get(event, 'axis') ?? get(event, 'button_index'),
+      get(event, 'axis_value'),
+    ]),
     [
-      { class_name: 'InputEventJoypadMotion', axis: 2, axis_value: -1 },
-      { class_name: 'InputEventMouseButton', button_index: 9 },
-      { class_name: 'InputEventJoypadButton', button_index: 127 },
+      ['InputEventJoypadMotion', 2, -1],
+      ['InputEventMouseButton', 9, undefined],
+      ['InputEventJoypadButton', 127, undefined],
     ],
     JSON.stringify(aimed),
   );
+  // Keys the table leaves out reach the engine's own names, as its default ui_menu binds Menu. An
+  // added event answers as the action list gives it.
+  const engineNamed = operation('add_input_action', {
+    action_name: 'fixture_menu',
+    events: [
+      { type: 'key', keycode: 'Menu' },
+      { type: 'key', keycode: 'quoteleft' },
+      { type: 'key', keycode: 'F13', shift: true },
+    ],
+  });
+  assert.deepEqual(
+    get(engineNamed, 'events'),
+    [
+      { class_name: 'InputEventKey', text: 'Menu', keycode: 4194370 },
+      { class_name: 'InputEventKey', text: 'QuoteLeft', keycode: 96 },
+      { class_name: 'InputEventKey', text: 'Shift+F13', keycode: 4194344, shift_pressed: true },
+    ],
+    JSON.stringify(engineNamed),
+  );
+  const listedAfter = asArray(get(operation('list_input_actions', {}), 'actions'));
+  for (const [addAnswer, actionName] of [
+    [aimed, 'fixture_aim'],
+    [engineNamed, 'fixture_menu'],
+  ] as const) {
+    assert.deepEqual(
+      get(addAnswer, 'events'),
+      get(
+        listedAfter.find((entry) => get(entry, 'name') === actionName),
+        'events',
+      ),
+      JSON.stringify(listedAfter),
+    );
+  }
   writeFileSync(projectFile, beforeUi);
 
   // Audio buses live in the AudioServer and only survive the run if the layout is saved. Before any
