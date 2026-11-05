@@ -12,7 +12,16 @@
  * Both are handed their spec down stdin, never on the command line: see `SentSpec`.
  */
 
-import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  closeSync,
+  existsSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -28,6 +37,7 @@ import {
 import { giveBackSlot, handSlot, nameSlotEngine, ownStart } from './engine-slots.js';
 import { crashesReported, letWindowsReportCrashes } from './error-mode.js';
 import { GameDebugger } from './game-debugger.js';
+import { raisedMark } from './game-log.js';
 import { type KeeperListening, listenForTheServer } from './keeper-channel.js';
 import {
   KEEPER_SCRIPT,
@@ -356,7 +366,17 @@ async function keep(): Promise<void> {
   const debuggerPeer =
     run === undefined || run.debugged === false
       ? null
-      : await GameDebugger.open(run.breakpoints ?? [], profiled === null ? [] : [profiled.observer]);
+      : await GameDebugger.open(
+          run.breakpoints ?? [],
+          profiled === null ? [] : [profiled.observer],
+          (by, text) => {
+            try {
+              appendFileSync(run.transcript, raisedMark(by, text));
+            } catch {
+              // The run's errors then count this one too, as the engine printed it.
+            }
+          },
+        );
   const exitNotes = run === undefined ? null : mkdtempSync(join(tmpdir(), 'gdharness-exit-'));
   const noted =
     exitNotes === null

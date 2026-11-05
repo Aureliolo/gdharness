@@ -150,7 +150,7 @@ func query_class_info(params: Dictionary) -> Dictionary:
 		return _member_of(class_name_str, member)
 
 	var methods: Array[Dictionary] = _methods_of(class_name_str)
-	var properties: Array[Dictionary] = _properties_of(class_name_str)
+	var properties: Array[Dictionary] = _properties_of(class_name_str, class_name_str)
 	var signals: Array[Dictionary] = _signals_of(class_name_str)
 
 	var enums: Dictionary = {}
@@ -403,7 +403,7 @@ func _member_of(class_name_str: String, member: String) -> Dictionary:
 		for m: Dictionary in _methods_of(current):
 			if m["name"] == member:
 				found.append({ "kind": "method", "declared_in": current, "member": m })
-		for p: Dictionary in _properties_of(current):
+		for p: Dictionary in _properties_of(current, class_name_str):
 			if p["name"] == member:
 				found.append({ "kind": "property", "declared_in": current, "member": p })
 		for s: Dictionary in _signals_of(current):
@@ -624,8 +624,12 @@ static func _type_name(info: Dictionary, nil_name: String) -> String:
 	return type_string(type)
 
 
-func _properties_of(class_name_str: String) -> Array[Dictionary]:
+## The properties [param class_name_str] declares, each with the value a new [param defaults_of]
+## holds when that class can be made: a subclass can start a property its ancestor declares at
+## another value, as Button does focus_mode.
+func _properties_of(class_name_str: String, defaults_of: String = "") -> Array[Dictionary]:
 	var properties: Array[Dictionary] = []
+	var made: bool = not defaults_of.is_empty() and ClassDB.can_instantiate(defaults_of)
 
 	for p: Dictionary in ClassDB.class_get_property_list(class_name_str, true):
 		# A category, group or subgroup is an editor heading rather than a property.
@@ -636,17 +640,20 @@ func _properties_of(class_name_str: String) -> Array[Dictionary]:
 			or usage & PROPERTY_USAGE_SUBGROUP
 		):
 			continue
-		properties.append(
-			{
-				"name": p.get("name", ""),
-				"type": p.get("type", 0),
-				"type_name": _type_name(p, "Variant"),
-				"class_name": p.get("class_name", ""),
-				"hint": p.get("hint", 0),
-				"hint_string": p.get("hint_string", ""),
-				"usage": usage,
-			}
-		)
+		var described: Dictionary = {
+			"name": p.get("name", ""),
+			"type": p.get("type", 0),
+			"type_name": _type_name(p, "Variant"),
+			"class_name": p.get("class_name", ""),
+			"hint": p.get("hint", 0),
+			"hint_string": p.get("hint_string", ""),
+			"usage": usage,
+		}
+		if made:
+			described["default"] = _values.serialize_value(
+				ClassDB.class_get_property_default_value(defaults_of, str(described["name"]))
+			)
+		properties.append(described)
 
 	return properties
 
