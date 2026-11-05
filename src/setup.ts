@@ -332,7 +332,16 @@ export function installAddons(
  * nothing anywhere saying so.
  */
 export function installedAddonVersion(projectPath: string): string | null {
-  const marker = join(projectPath, 'addons', ADDONS[0], VERSION_MARKER);
+  return versionMarker(projectPath, ADDONS[0]);
+}
+
+/** What the installed runtime addon says it is, or null when it does not say. */
+export function installedRuntimeVersion(projectPath: string): string | null {
+  return versionMarker(projectPath, RUNTIME_ADDON);
+}
+
+function versionMarker(projectPath: string, addon: string): string | null {
+  const marker = join(projectPath, 'addons', addon, VERSION_MARKER);
   if (!existsSync(marker)) {
     return null;
   }

@@ -9066,6 +9066,68 @@ async function testAnOpenRefusesAnotherReleasesAddon(): Promise<void> {
 }
 
 /**
+ * editor_run start refuses a project whose runtime addon on disk is another release's, before it
+ * ends or starts anything.
+ *
+ * Found by a probe session: the game started, announced after the start's wait, and every runtime
+ * call was then refused, with nothing in the start's answer saying why.
+ */
+async function testAStartRefusesAnotherReleasesRuntimeAddon(): Promise<void> {
+  const projectPath = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-runtime-'));
+  const announced = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-runtime-runtimes-'));
+  const addon = join(projectPath, 'addons', 'gdharness_runtime');
+  try {
+    writeFileSync(
+      join(projectPath, 'project.godot'),
+      'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(join(projectPath, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    mkdirSync(addon, { recursive: true });
+    const mark = (version: string, digest: string): void => {
+      writeFileSync(join(addon, VERSION_MARKER), `${version}\n`);
+      writeFileSync(join(addon, '.gdharness-digest'), `${digest}\n`);
+    };
+    // An engine that is not there, so a start the check lets through ends at the engine.
+    const engine = join(projectPath, 'no-godot.exe');
+    await withStdioServer(
+      async (call) => {
+        const start = async (): Promise<string> =>
+          await call('editor_run', { op: 'start', projectPath, headless: true });
+
+        mark('0.0.1', '0'.repeat(64));
+        const older = await start();
+        assert.ok(
+          older.startsWith(
+            `${projectPath} holds the 0.0.1 runtime addon while this server ships ${SERVER_VERSION}, so a game started on it would be asked nothing.`,
+          ),
+          older,
+        );
+        assert.ok(
+          older.includes(
+            `upgrade "${projectPath}"  in a shell, which installs this server's addons, then start again`,
+          ),
+          older,
+        );
+
+        mark('99.0.0', '0'.repeat(64));
+        const newer = await start();
+        assert.ok(newer.includes('reconnect it in your harness so it spawns 99.0.0'), newer);
+
+        // This server's own addon gets past the check, as far as the missing engine.
+        mark(SERVER_VERSION, shippedRuntimeDigest());
+        const own = await start();
+        assert.doesNotMatch(own, /would be asked nothing/, own);
+        assert.ok(own.includes(engine), `refused at the engine instead: ${own}`);
+      },
+      { GDHARNESS_RUNTIME_DIR: announced, GODOT_PATH: engine },
+    );
+  } finally {
+    sweep(projectPath);
+    sweep(announced);
+  }
+}
+
+/**
  * editor_status says no editor can connect to a server whose project has no editor addon.
  *
  * A probe session asked editor_status on a project never set up and was told mayYetConnect true,
@@ -75995,6 +76057,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnArgumentMeantForAnotherOpIsRefused,
   testANoEditorRefusalSaysWhetherOneCanConnect,
   testAnOpenRefusesAnotherReleasesAddon,
+  testAStartRefusesAnotherReleasesRuntimeAddon,
   testABreakpointLineIsOneTheEngineMarks,
   testAnEvaluateNamesAGlobalClassThatDoesNotParse,
   testEditorStatusOnAProjectWithNoAddonIsFinal,

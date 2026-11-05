@@ -126,6 +126,7 @@ import {
   openEditorProcess,
   portsForAnEditor,
   restartUnderway,
+  runtimeAddonOfAnotherRelease,
 } from './editor-open.js';
 import {
   EXIT_LEAK,
@@ -10846,6 +10847,16 @@ class GodotServer {
         'Pass scene to run one scene',
         'Choose the main scene with project_settings set_main_scene',
       ]);
+    }
+    // Before anything ends or starts, so a refused start leaves the run that was going alone. A
+    // check only boots the game and reads what it printed, so it asks the runtime nothing.
+    const anotherRuntime =
+      exported === null && op !== 'check' ? runtimeAddonOfAnotherRelease(project.value.path) : null;
+    if (anotherRuntime !== null) {
+      return this.createErrorResponse(
+        `${anotherRuntime.why}, so a game started on it would be asked nothing.`,
+        anotherRuntime.remedies,
+      );
     }
     // An exported build is its own engine, so it needs no Godot here to start.
     const engine =
