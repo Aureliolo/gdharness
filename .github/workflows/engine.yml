@@ -14,7 +14,7 @@ on:
         type: string
         required: true
       regression-parts:
-        description: The regression parts as a JSON list of k/n, such as ["1/3", "2/3", "3/3"].
+        description: The regression parts as a JSON list of k/n, such as ["1/5", "2/5", "3/5", "4/5", "5/5"].
         type: string
         required: true
       engine-fixtures-with-editor-fixtures:

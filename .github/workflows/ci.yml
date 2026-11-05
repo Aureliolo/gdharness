@@ -185,7 +185,9 @@ jobs:
     with:
       # renovate: datasource=github-runners depName=ubuntu
       runner: ubuntu-24.04
-      regression-parts: '["1/3", "2/3", "3/3"]'
+      # Five, as on the other platforms: three parts ran 915 to 1053 of the 1200 seconds a part's
+      # run is given, so one test that ran long took the rest of its part down with it.
+      regression-parts: '["1/5", "2/5", "3/5", "4/5", "5/5"]'
 
   engine-windows-parts:
     name: engine windows

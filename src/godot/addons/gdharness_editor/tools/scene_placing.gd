@@ -63,8 +63,12 @@ static func not_a_node_class(argument: String, given: String) -> String:
 			"%s must be a node class or a class_name in the project's class list, and %s is neither"
 			% [argument, given]
 		)
-	var classes: PackedStringArray = ClassDB.get_inheriters_from_class("Node")
-	var _added: bool = classes.append("Node")
+	# The classes the editor's Create Node dialog offers, which leaves out the editor's own nodes
+	# and any it cannot make: a game scene holding an editor node fails to load once exported.
+	var classes: PackedStringArray = ["Node"]
+	for inheriter: String in ClassDB.get_inheriters_from_class("Node"):
+		if not inheriter.begins_with("Editor") and ClassDB.can_instantiate(inheriter):
+			var _added: bool = classes.append(inheriter)
 	var close: PackedStringArray = GdhRead.nearest(given, classes)
 	if close.is_empty():
 		return said + "."

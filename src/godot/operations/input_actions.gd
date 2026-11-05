@@ -276,16 +276,23 @@ func add_input_action(params: Dictionary) -> Dictionary:
 	if action.is_empty():
 		return {}
 
-	# An action that exists is rebound, which is how one of the engine's ui_ actions is changed, so
-	# what it held is answered rather than lost without a word.
+	# Read from the events as built, so an event answers in the same shape wherever it is listed.
+	var built_events: Array[Dictionary] = []
+	var made: Array = action.get("events", [])
+	for event: Variant in made:
+		if event is InputEvent:
+			var made_event: InputEvent = event
+			built_events.append(_shaped(made_event))
 	var answer: Dictionary = {
 		"action_name": action_name,
 		"events_count": events_config.size(),
 		"deadzone": deadzone,
-		"events": events_config,
+		"events": built_events,
 		"was_new": not ProjectSettings.has_setting(setting),
 		"saved": true,
 	}
+	# An action that exists is rebound, which is how one of the engine's ui_ actions is changed, so
+	# what it held is answered rather than lost without a word.
 	if not answer["was_new"]:
 		var old_events: Array[Dictionary] = []
 		var listed: Variant = old.get("events", [])
@@ -576,15 +583,29 @@ static func _unknown_key(key_name: String) -> String:
 		said += " The nearest key name is %s." % nearest[0]
 	elif not nearest.is_empty():
 		said += " The nearest key names are %s." % ", ".join(nearest)
+	if "+" in key_name:
+		said += " A key held with Ctrl, Alt or Shift is bound with the event's ctrl, alt or shift."
 	return (
 		said
-		+ " A key is named by its letter, its digit, F1 to F12, or one of: %s." % ", ".join(named)
+		+ (
+			(
+				" A key is named by its letter, its digit, F1 to F35, one of: %s, or as the "
+				+ "engine names it in the Input Map, such as Menu or QuoteLeft."
+			)
+			% ", ".join(named)
+		)
 	)
 
 
+## The key [param key_name] names, by the names above or as the engine spells keys in its Input
+## Map, or KEY_NONE. The engine's own defaults bind keys the names above leave out, such as Menu
+## for ui_menu. A name with a modifier in it is not one key, and modifiers are fields of their own.
 func _keycode_value(key_name: String) -> int:
 	var wanted: String = key_name.to_lower()
 	for name: String in KEY_NAMES:
 		if name.to_lower() == wanted:
 			return KEY_NAMES[name]
-	return KEY_NONE
+	var spelled: int = OS.find_keycode_from_string(key_name)
+	if spelled & ~KEY_CODE_MASK:
+		return KEY_NONE
+	return spelled

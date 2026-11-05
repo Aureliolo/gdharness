@@ -7485,12 +7485,17 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
   // on POSIX the first read once armed is held until a later one ends. Windows lists through its
   // own query, which is slow enough there that the race is met within the tries.
   const held = process.platform === 'win32' ? null : join(project, 'ps-held');
+  const shimCalls = (): string => {
+    const calls = held === null ? '' : join(held, 'calls');
+    return calls !== '' && existsSync(calls) ? readFileSync(calls, 'utf8') : '(none)';
+  };
   if (held !== null) {
     mkdirSync(held);
     writeTree(held, {
       ps: [
         '#!/bin/sh',
         `held='${held}'`,
+        'echo "$$ armed=$([ -f "$held/armed" ] && echo yes || echo no) $*" >> "$held/calls"',
         'if [ -f "$held/armed" ] && mkdir "$held/first" 2>/dev/null; then',
         '  until [ -f "$held/released" ]; do sleep 0.01; done',
         '  sleep 0.2',
@@ -7531,7 +7536,9 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
   let attempts = 0;
   try {
     await server.initialize('regression-test');
-    for (; attempts < 20 && met === 0; attempts += 1) {
+    // One try where the first read is held, since a held read meets the state on its first try or
+    // says why it did not. Twenty tries of a hold that never took ran past a part's whole budget.
+    for (; attempts < (held === null ? 20 : 1) && met === 0; attempts += 1) {
       const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
       await new Promise<void>((settle, reject) => {
         socket.once('open', () => {
@@ -7567,16 +7574,25 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
         writeFileSync(join(held, 'armed'), '');
       }
       const asking = server.request('tools/call', { name: 'editor_status', arguments: {} });
+      const askedAt = Date.now();
+      let holding = false;
       if (held !== null) {
         const first = join(held, 'first');
         for (let waited = 0; !existsSync(first) && waited < 10_000; waited += 10) {
           await delay(10);
         }
+        holding = existsSync(first);
       }
+      const greetedAfter = Date.now() - askedAt;
       socket.send(JSON.stringify(greeting(project, { lsp_port: lspPort, dap_port: dapPort })));
-      const editor = get(parseTextContent(await asking), 'editor');
+      const answer = parseTextContent(await asking);
+      const editor = get(answer, 'editor');
       if (held !== null) {
         rmSync(join(held, 'armed'));
+        assert.ok(
+          holding,
+          `the status call ran no ps in ${String(greetedAfter)} ms, so the hold never took. The shim was called as:\n${shimCalls()}\nThe call answered: ${JSON.stringify(answer)}\n${server.stderr}`,
+        );
       }
       if (marked() > before) {
         met += 1;
@@ -7606,7 +7622,10 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
     }
     // The state is a race between the greeting and the process table, so it is tried until met. A
     // platform that never meets it in twenty tries says so rather than passing on the attempts.
-    assert.ok(met > 0, `the editor never connected during a status call in ${String(attempts)} tries`);
+    assert.ok(
+      met > 0,
+      `the editor never connected during a status call in ${String(attempts)} tries. The shim was called as:\n${shimCalls()}\n${server.stderr}`,
+    );
     if (held !== null) {
       assert.equal(attempts, 1, 'with the first read held, the first try meets the state');
     }
@@ -30807,6 +30826,7 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
       },
       `each change is answered with what it held before, the defaults among them: ${JSON.stringify(options)}`,
     );
+    assert.equal(get(options, 'saved'), true, `a write says it saved: ${JSON.stringify(options)}`);
     assert.match(file(), /\[preset\.0\.options\][^[]*binary_format\/embed_pck=true/, file());
     assert.match(file(), /\[preset\.0\.options\][^[]*binary_format\/architecture="arm64"/, file());
 
@@ -60692,6 +60712,7 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#3366ff"/></svg>\n',
   );
   writeFileSync(join(project, 'speaker.tscn'), '[gd_scene format=3]\n\n[node name="Speaker" type="Node"]\n');
+  writeFileSync(join(project, 'broken.gd'), 'extends Node\n\nfunc _ready() -> void:\n\tvar x: int = (1 +\n');
   writeFileSync(
     join(project, 'default_bus_layout.tres'),
     '[gd_resource type="AudioBusLayout" format=3]\n\n[resource]\nbus/1/name = &"Music"\nbus/1/solo = false\n' +
@@ -60763,6 +60784,23 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       textOf(await speaker('Drums')) ?? '',
       /and "Drums" is none of them, so it would play on Master\. The buses are Master, Music\. project_info/,
     );
+    // A script that does not compile is attached as nothing, and was refused as a value the engine
+    // changed.
+    const speakerFile = readFileSync(join(project, 'speaker.tscn'), 'utf8');
+    const broken = await request('scene_node', {
+      op: 'add',
+      scenePath: 'res://speaker.tscn',
+      parentNodePath: '.',
+      nodeType: 'Node',
+      nodeName: 'Broken',
+      properties: { script: 'res://broken.gd' },
+    });
+    assert.equal(get(broken, 'result', 'isError'), true, textOf(broken) ?? '');
+    assert.match(
+      textOf(broken) ?? '',
+      /res:\/\/broken\.gd does not compile, or a script it uses does not, so it cannot be given to script\. script_diagnostics names its errors\./,
+    );
+    assert.equal(readFileSync(join(project, 'speaker.tscn'), 'utf8'), speakerFile, 'and nothing was written');
 
     // A property the resource lacks is refused with the ones it has nearest it, alone, beside
     // another, and as the start of a path. When none is near, it is refused with its script's own,
@@ -68238,6 +68276,18 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       textOf(await call('scene_create', { op: 'create', scenePath: 'typo.tscn', rootNodeType: 'Node2DD' })),
       "rootNodeType must be a node class or a class_name in the project's class list, and Node2DD is neither. The nearest are Node2D, Node, Node3D.",
     );
+    // Offered from the classes the editor's Create Node dialog lists, which holds none of the
+    // editor's own nodes: Resource was offered EditorResourcePreview and EditorResourcePicker.
+    const resourceRoot =
+      textOf(
+        await call('scene_create', { op: 'create', scenePath: 'resource.tscn', rootNodeType: 'Resource' }),
+      ) ?? '';
+    assert.match(
+      resourceRoot,
+      /^rootNodeType must be a node class, and Resource is not one\. The nearest (is|are) [^.]*\bResourcePreloader\b[^.]*\.$/,
+      resourceRoot,
+    );
+    assert.doesNotMatch(resourceRoot, /Editor/, resourceRoot);
     // A folder the path names is made, and said to be.
     const mapped = await written('scene_create', {
       op: 'create',

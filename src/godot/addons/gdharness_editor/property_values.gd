@@ -861,7 +861,40 @@ func _resource_at(path: String, property: String) -> Array:
 				"No resource at %s for %s" % [path, property], path
 			),
 		]
-	return [true, load(path)]
+	var loaded: Resource = load(path)
+	# A script that does not compile loads, and the engine then attaches nothing, so the refusal
+	# blamed the engine for changing the value. The editor attaches it as a placeholder, and there
+	# no script but a tool can be instantiated.
+	var script: Script = loaded as Script
+	if script != null and script.is_abstract():
+		return [false, "%s is abstract, so it cannot be given to %s." % [path, property]]
+	if (
+		script != null
+		and not script.can_instantiate()
+		and (not Engine.is_editor_hint() or script.is_tool())
+	):
+		return [
+			false,
+			(
+				(
+					"%s does not compile, or a script it uses does not, so it cannot be given to "
+					+ "%s. script_diagnostics names its errors."
+				)
+				% [path, property]
+			),
+		]
+	if loaded == null:
+		return [
+			false,
+			(
+				(
+					"%s does not load, so it cannot be given to %s. "
+					+ "engine_messages holds the engine's reason."
+				)
+				% [path, property]
+			),
+		]
+	return [true, loaded]
 
 
 ## The entry [param target] declares for [param property], or {} when it declares none. Headings
