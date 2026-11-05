@@ -60712,6 +60712,7 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     '<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#3366ff"/></svg>\n',
   );
   writeFileSync(join(project, 'speaker.tscn'), '[gd_scene format=3]\n\n[node name="Speaker" type="Node"]\n');
+  writeFileSync(join(project, 'broken.gd'), 'extends Node\n\nfunc _ready() -> void:\n\tvar x: int = (1 +\n');
   writeFileSync(
     join(project, 'default_bus_layout.tres'),
     '[gd_resource type="AudioBusLayout" format=3]\n\n[resource]\nbus/1/name = &"Music"\nbus/1/solo = false\n' +
@@ -60783,6 +60784,23 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       textOf(await speaker('Drums')) ?? '',
       /and "Drums" is none of them, so it would play on Master\. The buses are Master, Music\. project_info/,
     );
+    // A script that does not compile is attached as nothing, and was refused as a value the engine
+    // changed.
+    const speakerFile = readFileSync(join(project, 'speaker.tscn'), 'utf8');
+    const broken = await request('scene_node', {
+      op: 'add',
+      scenePath: 'res://speaker.tscn',
+      parentNodePath: '.',
+      nodeType: 'Node',
+      nodeName: 'Broken',
+      properties: { script: 'res://broken.gd' },
+    });
+    assert.equal(get(broken, 'result', 'isError'), true, textOf(broken) ?? '');
+    assert.match(
+      textOf(broken) ?? '',
+      /res:\/\/broken\.gd does not compile, or a script it uses does not, so it cannot be given to script\. script_diagnostics names its errors\./,
+    );
+    assert.equal(readFileSync(join(project, 'speaker.tscn'), 'utf8'), speakerFile, 'and nothing was written');
 
     // A property the resource lacks is refused with the ones it has nearest it, alone, beside
     // another, and as the start of a path. When none is near, it is refused with its script's own,
