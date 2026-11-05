@@ -24,6 +24,10 @@ const MOUSE_NAMES: String = (
 const AXIS_NAMES: String = (
 	"0 and 1 the left stick across and down, 2 and 3 the right stick," + " 4 and 5 the triggers"
 )
+## The modifiers a chord such as Ctrl+A is written with, by the key event field each is.
+const MODIFIERS: Dictionary[String, String] = {
+	"ctrl": "ctrl", "control": "ctrl", "alt": "alt", "shift": "shift",
+}
 # The key names a caller may write, and what the engine calls them.
 const KEY_NAMES: Dictionary = {
 	"A": KEY_A,
@@ -493,7 +497,8 @@ func _event_config(fields: Dictionary) -> Variant:
 				return "A key event needs keycode"
 			var key_value: int = _keycode_value(keycode)
 			if key_value == KEY_NONE:
-				return _unknown_key(keycode)
+				var chord: String = _chord_fix(keycode)
+				return chord if not chord.is_empty() else _unknown_key(keycode)
 			var event_config: Dictionary = { "class_name": "InputEventKey" }
 			var physical: bool = GdhRead.as_bool(fields.get("physical", false))
 			event_config["physical_keycode" if physical else "keycode"] = key_value
@@ -597,15 +602,40 @@ static func _unknown_key(key_name: String) -> String:
 	)
 
 
+## How [param key_name], a key with modifiers such as Ctrl+A, is bound: the key alone, each modifier
+## a field of the event. "" when a part is no modifier or the last is no key. The nearest name to
+## Ctrl+A is Ctrl, which a refusal offering it as a key sent a caller to bind.
+func _chord_fix(key_name: String) -> String:
+	if "+" not in key_name:
+		return ""
+	var parts: PackedStringArray = key_name.split("+")
+	var key: String = parts[parts.size() - 1].strip_edges()
+	if key.is_empty() or _keycode_value(key) == KEY_NONE:
+		return ""
+	var fields: PackedStringArray = []
+	for part: String in parts.slice(0, parts.size() - 1):
+		var modifier: String = str(MODIFIERS.get(part.strip_edges().to_lower(), ""))
+		if modifier.is_empty():
+			return ""
+		if not fields.has(modifier + " true"):
+			var _added: bool = fields.append(modifier + " true")
+	return (
+		"%s is a key held with modifiers, which are fields of the event: give keycode %s with %s."
+		% [key_name, key, " and ".join(fields)]
+	)
+
+
 ## The key [param key_name] names, by the names above or as the engine spells keys in its Input
 ## Map, or KEY_NONE. The engine's own defaults bind keys the names above leave out, such as Menu
 ## for ui_menu. A name with a modifier in it is not one key, and modifiers are fields of their own.
+## The engine drops each part before a + that it does not read as a modifier, so Meta+A and A+B
+## were bound as A and B: a key is taken only when the engine spells it back as given.
 func _keycode_value(key_name: String) -> int:
 	var wanted: String = key_name.to_lower()
 	for name: String in KEY_NAMES:
 		if name.to_lower() == wanted:
 			return KEY_NAMES[name]
 	var spelled: int = OS.find_keycode_from_string(key_name)
-	if spelled & ~KEY_CODE_MASK:
+	if spelled & ~KEY_CODE_MASK or OS.get_keycode_string(spelled).to_lower() != wanted:
 		return KEY_NONE
 	return spelled
