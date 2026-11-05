@@ -91,6 +91,11 @@ func _check_for_changes() -> void:
 	var scripts_to_reload: Array[String] = []
 	for path: String in _watched_files.keys():
 		var last: GdhSeen = _watched_files[path]
+		# A file gone is a move or a delete, with nothing to read again. Read as a change, a scene
+		# moved away mid-move was reloaded from the path it had left, which closed its tab.
+		if not FileAccess.file_exists(ProjectSettings.globalize_path(path)):
+			var _dropped: bool = _watched_files.erase(path)
+			continue
 		var current_time: int = _get_modified_time(path)
 		if current_time == last.time and now - current_time >= SAME_SECOND_SECONDS:
 			continue

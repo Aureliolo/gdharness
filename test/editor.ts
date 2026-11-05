@@ -4080,7 +4080,7 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
   };
   assert.match(
     await refusal('resource_edit', { ...resource, script: 'res://nothing.gd' }),
-    /^No script at res:\/\/nothing\.gd\./,
+    /: No script at res:\/\/nothing\.gd\. /,
   );
   await call('resource_edit', resource);
   assert.match(await refusal('resource_edit', resource), /res:\/\/once\.tres already exists/);
@@ -5634,6 +5634,46 @@ async function testAutoReloadMissesNoWrite({ project, printed }: Editor): Promis
     assert.equal(reloads(), already + 2, 'each write reloaded once');
   } finally {
     writeFileSync(script, before);
+  }
+}
+
+/**
+ * auto_reload leaves the tab of a scene whose file has gone.
+ *
+ * A file gone read as one changed, so a scene moved away mid-move was reloaded from the path it had
+ * left, and the editor closed its tab: the move then had no tab to name for the new path, on a
+ * macOS runner. Deleted here from outside, which is the state that poll met.
+ */
+async function testAutoReloadLeavesAGoneScene({ call, project, printed }: Editor): Promise<void> {
+  const path = 'res://leaving.tscn';
+  const file = join(project, 'leaving.tscn');
+  const scene = '[gd_scene format=3]\n\n[node name="Leaving" type="Node2D"]\n';
+  writeFileSync(file, scene);
+  await call('editor_rescan', { projectPath: project });
+  try {
+    const opened = await hook(project, { op: 'open', path });
+    assert.ok(asArray(get(opened, 'open')).includes(path), `the scene is open: ${JSON.stringify(opened)}`);
+    // Watched: a change to it is reloaded.
+    writeFileSync(file, `${scene}\n[node name="Changed" type="Node" parent="."]\n`);
+    for (let waited = 0; !printed().includes(`reloading: ${path}`) && waited < 5000; waited += 100) {
+      await delay(100);
+    }
+    assert.ok(printed().includes(`reloading: ${path}`), `the scene is watched:\n${printed().slice(-2000)}`);
+    const reloads = printed().split(`reloading: ${path}`).length;
+    // Retried: on Windows the editor can still hold the file open from that reload.
+    rmSync(file, { maxRetries: 20, retryDelay: 100 });
+    // Three polls, so a reload of the path would have shown.
+    await delay(3000);
+    assert.equal(
+      printed().split(`reloading: ${path}`).length,
+      reloads,
+      `the gone scene is not reloaded:\n${printed().slice(-2000)}`,
+    );
+    const tabs = await hook(project, { op: 'report', path });
+    assert.ok(asArray(get(tabs, 'open')).includes(path), `and its tab stays: ${JSON.stringify(tabs)}`);
+  } finally {
+    // Back under the tab, which later cases would otherwise meet naming nothing.
+    writeFileSync(file, scene);
   }
 }
 
@@ -8153,6 +8193,7 @@ async function main(): Promise<void> {
     ['testARenameFollowsTheEngine', testARenameFollowsTheEngine],
     ['testAutoReloadMissesNoWrite', testAutoReloadMissesNoWrite],
     ['testAutoReloadKeepsUnsavedEdits', testAutoReloadKeepsUnsavedEdits],
+    ['testAutoReloadLeavesAGoneScene', testAutoReloadLeavesAGoneScene],
     ['testAPlayedRunsConsoleArrivesOnItsOwn', testAPlayedRunsConsoleArrivesOnItsOwn],
     ['testDebugging', testDebugging],
     ['testRuntime', testRuntime],
