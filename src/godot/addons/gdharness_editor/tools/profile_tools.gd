@@ -8,6 +8,9 @@ extends Node
 ## .cpp at 4.7.2), so a plugin's capture never sees them. The one place they pass through is the
 ## `debug_data` signal every ScriptEditorDebugger emits for every message, on a node Godot does not
 ## expose to scripts: found by its class in the editor's tree and connected to by name.
+##
+## The same session also holds a game's error breaks off for the length of one evaluate. See
+## [method error_breaks].
 
 const GdhRead = preload("../reading.gd")
 ## The most functions a frame may carry when the server does not say. The engine names a function
@@ -15,6 +18,8 @@ const GdhRead = preload("../reading.gd")
 ## the server keeps this below the queue the project sets. This is that for the engine's default.
 const FRAME_FUNCTIONS: int = 1536
 const DEBUGGER_CLASS: String = "ScriptEditorDebugger"
+## The tooltip of the debugger's button that switches error breaks, as Godot 4.7 words it.
+const IGNORE_ERROR_BREAKS: String = "Ignore Error Breaks"
 ## What a quitting game sends after its profile's totals, and the answer it waits for. Kept in step
 ## with the runtime addon's runtime_autoload.gd.
 const PROFILE_CAPTURE: String = "gdharness"
@@ -111,6 +116,44 @@ func profile_read(_args: Dictionary) -> Dictionary:
 		"totalCapped": _total_capped,
 		"coveredMs": _last_frame_msec - _started_msec if _last_frame_msec >= 0 else 0,
 		"functions": functions,
+	}
+
+
+## Holds the played game's error breaks off with [code]ignore[/code], and otherwise hands them back
+## to the editor's own "Ignore Error Breaks" button.
+##
+## An evaluate loads the script of every global class, and one that does not parse breaks the held
+## game on its parse error inside the evaluate, before the engine prints it. The editor then asks
+## that break for nothing, so its adapter waits on a stack that never comes, the evaluate is never
+## answered and the game stays held where nothing can reach it. The message is the one the button
+## sends. The button's state is not readable from a script, so it is given back by pressing the
+## button twice, which sends the game whatever it was.
+func error_breaks(args: Dictionary) -> Dictionary:
+	var active: int = _active_session()
+	if active < 0:
+		return { "ok": true, "session": -1 }
+	if GdhRead.as_bool(args.get("ignore", false)):
+		_sessions.get_session(active).send_message("set_ignore_error_breaks", [true])
+		return { "ok": true, "session": active }
+	var tabs: Array[Node] = EditorInterface.get_base_control().find_children(
+		"*", DEBUGGER_CLASS, true, false
+	)
+	if active < tabs.size():
+		for found: Node in tabs[active].find_children("*", "Button", true, false):
+			var button: Button = found as Button
+			if button.tooltip_text == IGNORE_ERROR_BREAKS:
+				button.pressed.emit()
+				button.pressed.emit()
+				return { "ok": true, "session": active }
+	_sessions.get_session(active).send_message("set_ignore_error_breaks", [false])
+	return {
+		"ok": true,
+		"session": active,
+		"note":
+		(
+			"This editor's debugger has no %s button, so the game breaks on errors again whatever "
+			+ "the editor is set to."
+		) % IGNORE_ERROR_BREAKS,
 	}
 
 

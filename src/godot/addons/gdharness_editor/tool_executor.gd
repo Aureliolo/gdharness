@@ -156,6 +156,7 @@ func _init_tools() -> void:
 		# The script profiler on a game the editor plays
 		"profile_start": [_profile_tools, "profile_start"],
 		"profile_read": [_profile_tools, "profile_read"],
+		"error_breaks": [_profile_tools, "error_breaks"],
 		"capture_editor_view": [_view_tools, "capture_editor_view"],
 		# Animation tools
 		"read_animations": [_animation_tools, "read_animations"],

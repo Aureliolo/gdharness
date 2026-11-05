@@ -64,12 +64,23 @@ export const ALREADY_HELD = 'Got break when already broke!';
 const RAISED_MARK = /^gdharness: (.+?) raised from (.+?): (.*)$/;
 
 /**
- * The line the keeper writes into a run's transcript for an error the call [param by] raised, with
+ * The line written into a run's transcript for an error the call [param by] raised, with
  * the file the engine named for it. In the transcript rather than in a server's memory, so a server
  * that takes the run over reads it too.
  */
 export function raisedMark(by: RaisedBy, text: string, file: string): string {
   return `gdharness: ${by} raised from ${file}: ${text}\n`;
+}
+
+const REPORTED_ERROR =
+  /^(?:USER )?(?:SCRIPT ERROR|SHADER ERROR|ERROR): (.*)\r?\n {3}at: .* \((.+):\d+\)\r?$/gm;
+
+/**
+ * The errors in [param text], a stretch of the report the runtime addon writes for a game the
+ * editor plays, each with the file the engine named for it.
+ */
+export function errorsInReport(text: string): { text: string; file: string }[] {
+  return [...text.matchAll(REPORTED_ERROR)].map((found) => ({ text: found[1] ?? '', file: found[2] ?? '' }));
 }
 
 function raisedBy(named: string): RaisedBy | null {
