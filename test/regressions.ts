@@ -176,6 +176,7 @@ import {
 import {
   callSitesOf,
   enclosingFunction,
+  neverStopsOn,
   occurrencesOf,
   regionsOf,
   shapeOf as scriptShapeOf,
@@ -8792,6 +8793,130 @@ async function testANoEditorRefusalSaysWhetherOneCanConnect(): Promise<void> {
     sweep(projectPath);
     sweep(announced);
   }
+}
+
+/**
+ * A breakpoint line is one Godot's compiler marks: a statement's first line, a match branch, or a
+ * member variable with a type or a value.
+ *
+ * Found by a probe session: a set on a func line was answered set, and the game ran through the
+ * function without stopping, as the engine stops only on marked lines.
+ */
+function testABreakpointLineIsOneTheEngineMarks(): void {
+  const source = [
+    '@tool',
+    'extends Node',
+    'class_name Probe',
+    'signal went(n: int)',
+    'enum Mood { CALM, CROSS }',
+    'const LIMIT := 3',
+    'var bare',
+    'var typed: int',
+    'var valued = 4',
+    '@export var shown: int = 2',
+    '@onready var later = $A',
+    '',
+    'func walk(a: int,',
+    '\t\tb: int) -> int:',
+    '\tvar total := a + \\',
+    '\t\tb',
+    '\tif total > LIMIT:',
+    '\t\treturn total',
+    '\telif total < 0:',
+    '\t\treturn 0',
+    '\telse:',
+    '\t\tpass',
+    '\tvar f := func(x: int) -> int:',
+    '\t\treturn x * 2',
+    '\tcall_deferred("x", func():',
+    '\t\tprint(1)',
+    '\t)',
+    '\tvar list := [',
+    '\t\t1,',
+    '\t\t2,',
+    '\t]',
+    '\tmatch total:',
+    '\t\t1:',
+    '\t\t\treturn 1',
+    '\tconst LOCAL := 2',
+    '\tvar local',
+    '\treturn f.call(total) + LOCAL + list.size()',
+    '',
+    'func one() -> void: pass',
+    '',
+    'class Inner:',
+    '\tvar inner_bare',
+    '\tvar inner_typed: int',
+    '\tfunc go() -> void:',
+    '\t\tvar stays',
+    '\t\tpass',
+    '',
+    'var prop: int:',
+    '\tget:',
+    '\t\tvar inside',
+    '\t\treturn 1',
+    '\tset(value):',
+    '\t\tset_meta("p", value)',
+  ].join('\n');
+  const read = (line: number): string => {
+    const never = neverStopsOn(source, line);
+    return never === null ? 'stops' : never.kind === 'continuation' ? `continues ${never.of}` : never.kind;
+  };
+  const never = (kind: string, ...lines: number[]): Array<[number, string]> =>
+    lines.map((line) => [line, kind]);
+  const expected = new Map<number, string>([
+    ...never('declaration', 1, 2, 3, 4, 5, 6, 7, 13, 41, 42, 44, 49, 52),
+    [14, 'continues 13'],
+    [16, 'continues 15'],
+    [21, 'else'],
+    [27, 'continues 25'],
+    ...never('continues 28', 29, 30, 31),
+    ...never(
+      'stops',
+      8,
+      9,
+      10,
+      11,
+      15,
+      17,
+      18,
+      19,
+      20,
+      22,
+      23,
+      24,
+      25,
+      26,
+      28,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      39,
+      43,
+      45,
+      46,
+      48,
+      50,
+      51,
+      53,
+    ),
+  ]);
+  const lines = source.split('\n').length;
+  assert.deepEqual(
+    [...expected.keys()].toSorted((a, b) => a - b),
+    Array.from({ length: lines }, (_, at) => at + 1).filter((line) => source.split('\n')[line - 1] !== ''),
+    'every line holding code is read',
+  );
+  for (const [line, kind] of expected) {
+    assert.equal(read(line), kind, `line ${line}: ${source.split('\n')[line - 1]}`);
+  }
+  // The class's own line is marked for a call of _static_init.
+  const initialised = 'extends Node\n\n\nstatic func _static_init() -> void:\n\tpass\n';
+  assert.equal(neverStopsOn(initialised, 1), null, 'extends with a _static_init');
+  assert.equal(neverStopsOn(initialised, 4)?.kind, 'declaration', 'and its header still never stops');
 }
 
 /**
@@ -36553,7 +36678,7 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
     // A comment or a blank line has nothing the engine stops on, and was answered verified.
     for (const [line, next] of [
       [2, 3],
-      [4, 6],
+      [4, 7],
     ]) {
       const empty = await call('debug_breakpoint', {
         projectPath: project,
@@ -36563,7 +36688,24 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
       });
       assert.equal(
         empty.said,
-        `res://main.gd line ${line} holds no code, so nothing stops there. The next line holding code is ${next}.`,
+        `res://main.gd line ${line} holds no code, so nothing stops there. The next line it stops on is ${next}.`,
+      );
+    }
+    // Nor does the engine stop on a declaration: the func line was answered set, and the game ran
+    // through the function.
+    for (const [line, next] of [
+      [1, 3],
+      [6, 7],
+    ]) {
+      const declared = await call('debug_breakpoint', {
+        projectPath: project,
+        op: 'set',
+        scriptPath: 'main.gd',
+        line,
+      });
+      assert.equal(
+        declared.said,
+        `res://main.gd line ${line} declares rather than runs, and the engine stops only on statements and on member variables with a type or a value, so nothing stops there. The next line it stops on is ${next}.`,
       );
     }
     const nowhere = await call('debug_breakpoint', {
@@ -36611,14 +36753,20 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
       `a second remove is not a second success: ${again.said}`,
     );
     // A script deleted since its breakpoint was set can still have the breakpoint taken off.
-    writeFileSync(join(project, 'gone.gd'), 'extends Node\n');
-    await call('debug_breakpoint', { projectPath: project, op: 'set', scriptPath: 'gone.gd', line: 1 });
+    writeFileSync(join(project, 'gone.gd'), 'extends Node\nvar kept: int = 0\n');
+    const toGo = await call('debug_breakpoint', {
+      projectPath: project,
+      op: 'set',
+      scriptPath: 'gone.gd',
+      line: 2,
+    });
+    assert.deepEqual(get(toGo.answer, 'held'), [{ scriptPath: 'res://gone.gd', lines: [2] }], toGo.said);
     rmSync(join(project, 'gone.gd'));
     const deleted = await call('debug_breakpoint', {
       projectPath: project,
       op: 'remove',
       scriptPath: 'gone.gd',
-      line: 1,
+      line: 2,
     });
     assert.deepEqual([get(deleted.answer, 'removed'), get(deleted.answer, 'held')], [true, []], deleted.said);
     assert.equal(
@@ -37413,7 +37561,7 @@ async function testABreakpointOnADeletedScriptIsTakenOff(): Promise<void> {
   const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-gone-breakpoint-rt-'));
   symlinkSync(project, linked, 'junction');
   writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\nconfig/name="Gone"\n');
-  writeFileSync(join(project, 'gone.gd'), 'extends Node\n\n\nfunc _ready() -> void:\n\tpass\n');
+  writeFileSync(join(project, 'gone.gd'), 'var first: int = 0\n\n\nvar second: int = 1\n');
   const serve = (): ServerProcess =>
     new ServerProcess({ env: { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: linked } });
   const breakpoint = async (server: ServerProcess, op: string, line?: number): Promise<unknown> =>
@@ -75197,6 +75345,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnArgumentMeantForAnotherOpIsRefused,
   testANoEditorRefusalSaysWhetherOneCanConnect,
   testAnOpenRefusesAnotherReleasesAddon,
+  testABreakpointLineIsOneTheEngineMarks,
   testEditorStatusOnAProjectWithNoAddonIsFinal,
   testEveryArgumentNamesOpsItsToolHas,
   testAnArgumentScopedInWordsIsScopedInItsSchema,
