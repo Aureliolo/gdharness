@@ -898,6 +898,13 @@ static func _theme_item(property: String) -> Dictionary:
 
 ## [param value] as a caller would write it, for a refusal to quote.
 func shown(value: Variant) -> String:
+	# A whole number crosses the wire as a float, so a refusal quoted the caller's 5 as 5.0.
+	if value is float:
+		var number: float = value
+		if (is_finite(number)
+				and number == floorf(number)
+				and absf(number) < 9_007_199_254_740_992.0):
+			return str(int(number))
 	return JSON.stringify(_values.serialize_value(value), "", false)
 
 
