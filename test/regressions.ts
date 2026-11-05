@@ -9066,6 +9066,68 @@ async function testAnOpenRefusesAnotherReleasesAddon(): Promise<void> {
 }
 
 /**
+ * editor_run start refuses a project whose runtime addon on disk is another release's, before it
+ * ends or starts anything.
+ *
+ * Found by a probe session: the game started, announced after the start's wait, and every runtime
+ * call was then refused, with nothing in the start's answer saying why.
+ */
+async function testAStartRefusesAnotherReleasesRuntimeAddon(): Promise<void> {
+  const projectPath = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-runtime-'));
+  const announced = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-runtime-runtimes-'));
+  const addon = join(projectPath, 'addons', 'gdharness_runtime');
+  try {
+    writeFileSync(
+      join(projectPath, 'project.godot'),
+      'config_version=5\n\n[application]\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(join(projectPath, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
+    mkdirSync(addon, { recursive: true });
+    const mark = (version: string, digest: string): void => {
+      writeFileSync(join(addon, VERSION_MARKER), `${version}\n`);
+      writeFileSync(join(addon, '.gdharness-digest'), `${digest}\n`);
+    };
+    // An engine that is not there, so a start the check lets through ends at the engine.
+    const engine = join(projectPath, 'no-godot.exe');
+    await withStdioServer(
+      async (call) => {
+        const start = async (): Promise<string> =>
+          await call('editor_run', { op: 'start', projectPath, headless: true });
+
+        mark('0.0.1', '0'.repeat(64));
+        const older = await start();
+        assert.ok(
+          older.startsWith(
+            `${projectPath} holds the 0.0.1 runtime addon while this server ships ${SERVER_VERSION}, so a game started on it would be asked nothing.`,
+          ),
+          older,
+        );
+        assert.ok(
+          older.includes(
+            `upgrade "${projectPath}"  in a shell, which installs this server's addons, then start again`,
+          ),
+          older,
+        );
+
+        mark('99.0.0', '0'.repeat(64));
+        const newer = await start();
+        assert.ok(newer.includes('reconnect it in your harness so it spawns 99.0.0'), newer);
+
+        // This server's own addon gets past the check, as far as the missing engine.
+        mark(SERVER_VERSION, shippedRuntimeDigest());
+        const own = await start();
+        assert.doesNotMatch(own, /would be asked nothing/, own);
+        assert.ok(own.includes(engine), `refused at the engine instead: ${own}`);
+      },
+      { GDHARNESS_RUNTIME_DIR: announced, GODOT_PATH: engine },
+    );
+  } finally {
+    sweep(projectPath);
+    sweep(announced);
+  }
+}
+
+/**
  * editor_status says no editor can connect to a server whose project has no editor addon.
  *
  * A probe session asked editor_status on a project never set up and was told mayYetConnect true,
@@ -24215,15 +24277,15 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
     );
     assert.deepEqual(scriptsToDiagnose(project, 'res://scripts'), {
       ok: true,
-      value: ['scripts/a.gd', 'scripts/quiet.gd', 'scripts/sub/b.gd'],
+      value: ['res://scripts/a.gd', 'res://scripts/quiet.gd', 'res://scripts/sub/b.gd'],
     });
     // The project itself is a folder too, which is how a caller asks for every script in it.
     const everyScript = [
-      'addons/theirs/thing.gd',
-      'scripts/a.gd',
-      'scripts/quiet.gd',
-      'scripts/sub/b.gd',
-      'ui/shop.gd',
+      'res://addons/theirs/thing.gd',
+      'res://scripts/a.gd',
+      'res://scripts/quiet.gd',
+      'res://scripts/sub/b.gd',
+      'res://ui/shop.gd',
     ];
     for (const root of ['res://', '.', ['res://']]) {
       assert.deepEqual(
@@ -24236,13 +24298,16 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
       scriptsToDiagnose(project, 'addons/gdharness_editor'),
       {
         ok: true,
-        value: ['addons/gdharness_editor/plugin.gd', 'addons/gdharness_editor/tools/scene_tools.gd'],
+        value: [
+          'res://addons/gdharness_editor/plugin.gd',
+          'res://addons/gdharness_editor/tools/scene_tools.gd',
+        ],
       },
       'an installed addon named is read',
     );
     assert.deepEqual(scriptsToDiagnose(project, ['ui', 'scripts/sub', 'ui/shop.gd', 'scripts/gone.gd']), {
       ok: true,
-      value: ['ui/shop.gd', 'scripts/sub/b.gd', 'scripts/gone.gd'],
+      value: ['res://ui/shop.gd', 'res://scripts/sub/b.gd', 'res://scripts/gone.gd'],
     });
     for (const [given, reason] of [
       [[], /^scriptPath is an empty list/],
@@ -24312,8 +24377,8 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
               errors: 0,
               scripts: [],
               nothingReported: 302,
-              first: 'many/s000.gd',
-              last: 'ui/shop.gd',
+              first: 'res://many/s000.gd',
+              last: 'res://ui/shop.gd',
             },
             JSON.stringify(folder).slice(0, 600),
           );
@@ -24387,7 +24452,12 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
               errors: 2,
               warnings: 0,
               scriptsNotRead: 2,
-              paths: ['scripts/a.gd', 'scripts/quiet.gd', 'scripts/sub/b.gd', 'scripts/gone.gd'],
+              paths: [
+                'res://scripts/a.gd',
+                'res://scripts/quiet.gd',
+                'res://scripts/sub/b.gd',
+                'res://scripts/gone.gd',
+              ],
               nothingReported: [],
             },
             said,
@@ -24409,10 +24479,10 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
               .filter((message) => message.method === 'notifications/progress')
               .map((message) => get(message.params, 'message')),
             [
-              '1 of 4: scripts/a.gd',
-              '2 of 4: scripts/quiet.gd',
-              '3 of 4: scripts/sub/b.gd',
-              '4 of 4: scripts/gone.gd',
+              '1 of 4: res://scripts/a.gd',
+              '2 of 4: res://scripts/quiet.gd',
+              '3 of 4: res://scripts/sub/b.gd',
+              '4 of 4: res://scripts/gone.gd',
             ],
             'told as each script is asked about',
           );
@@ -24691,7 +24761,14 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         get(all, 'nothingReported'),
         get(all, 'checkedBy'),
       ],
-      [false, 5, 3, 0, ['checked/fine.gd', 'checked/holder.gd', 'checked/stash.gd'], 'engine'],
+      [
+        false,
+        5,
+        3,
+        0,
+        ['res://checked/fine.gd', 'res://checked/holder.gd', 'res://checked/stash.gd'],
+        'engine',
+      ],
       `a folder compiled whole, an engine past each failure, the clean scripts named apart: ${said}`,
     );
     const entryFor = (scriptPath: string): unknown =>
@@ -24729,7 +24806,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
               get(both, 'checkedBy'),
               get(both, 'checkedByLanguageServer'),
             ],
-            [2, ['checked/fine.gd'], 2, 'language server, then engine', 1],
+            [2, ['res://checked/fine.gd'], 2, 'language server, then engine', 1],
             textOf(mixed) ?? JSON.stringify(mixed),
           );
         } finally {
@@ -24744,7 +24821,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       GODOT_SYMBOLS,
       1,
     );
-    const dependent = entryFor('checked/dependent.gd');
+    const dependent = entryFor('res://checked/dependent.gd');
     assert.deepEqual(
       [get(dependent, 'diagnostics'), get(dependent, 'dependenciesWithErrors')],
       [
@@ -24789,7 +24866,10 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       `the same answer, with the cache not written again: ${JSON.stringify(again)}`,
     );
     assert.deepEqual(
-      [get(dependent, 'typesMissingFromTheClassCache'), get(entryFor('checked/broken.gd'), 'staleAnalysis')],
+      [
+        get(dependent, 'typesMissingFromTheClassCache'),
+        get(entryFor('res://checked/broken.gd'), 'staleAnalysis'),
+      ],
       [undefined, undefined],
       said,
     );
@@ -36221,17 +36301,16 @@ async function aSubViewportCaptureIsDrawnNow(lowProcessor: boolean): Promise<voi
 }
 
 /**
- * A start whose game came up on a runtime addon other than this server's says so in its answer.
+ * A start on a project holding a runtime addon other than this server's is refused, naming the
+ * upgrade, and once the upgrade's addon is in place the game starts and says nothing of the kind.
  *
- * No runtime_* call is sent to such a game, and the start answered `listening: true` and nothing
- * else, so a caller learned it from the refusal of the first call they made. The project here holds
- * the runtime addon of this release with one script changed and markers naming that build, which is
- * a different build of the same version, as a project set up before a rebuild has. A game reads
- * what it runs from the markers, so a changed script without them is a copy that cannot say, which
- * is not called stale. Then the shipped addon and its markers are put back, which is what the
- * note's upgrade does, and the next start says nothing of the kind.
+ * No runtime_* call is sent to such a game. Started anyway, the answer said so only when the game
+ * announced inside the start's wait, so a caller learned it from the refusal of the first call they
+ * made. The project here holds the runtime addon of this release with one script changed and markers
+ * naming that build, which is a different build of the same version, as a project set up before a
+ * rebuild has. A changed script without markers is a copy that cannot say, which is not called stale.
  */
-async function testAStartSaysItsGameIsOnAnotherBuild(): Promise<void> {
+async function testAStartRefusesAnotherBuildOfItsRuntimeAddon(): Promise<void> {
   const engine = resolveGodotPath();
   if (!engine) {
     if (process.env['GDHARNESS_REQUIRE_GODOT']) {
@@ -36277,31 +36356,27 @@ async function testAStartSaysItsGameIsOnAnotherBuild(): Promise<void> {
   };
   try {
     await server.initialize('regression-test');
-    const behind = await start();
-    try {
-      const said = JSON.stringify(behind);
-      assert.deepEqual(
-        [get(behind, 'runtime', 'listening'), get(behind, 'runtime', 'addonIsStale')],
-        [true, true],
-        `the game listens and the start says it is asked nothing: ${said}`,
-      );
-      assert.match(
-        text(get(behind, 'runtime', 'staleNote')),
-        new RegExp(
-          `is running a different build of the ${SERVER_VERSION.replaceAll('.', '\\.')} runtime addon from the one this server ships, so this server asks it nothing`,
+    const behind =
+      textOf(
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { projectPath: project, op: 'start', headless: true } },
+          ENGINE_CALL_TIMEOUT_MS,
         ),
-        said,
-      );
-      // The project as the game announced it, which Godot spells with forward slashes and macOS
-      // with the /private its temporary directory links to.
-      const upgraded = new RegExp(
-        `run {2}npx -y gdharness@${SERVER_VERSION.replaceAll('.', '\\.')} upgrade "([^"]+)" {2}in a shell`,
-      ).exec(text(get(behind, 'runtime', 'staleNote')));
-      assert.ok(upgraded, `and names the upgrade, since the project's own addon is the other build: ${said}`);
-      assert.equal(realpathSync(upgraded[1] ?? ''), realpathSync(project), `of this project: ${said}`);
-    } finally {
-      await stop();
-    }
+      ) ?? '';
+    assert.match(
+      behind,
+      new RegExp(
+        `holds a different build of the runtime addon from the one this ${SERVER_VERSION.replaceAll('.', '\\.')} server ships, so a game started on it would be asked nothing\\.`,
+      ),
+      behind,
+    );
+    const upgraded = new RegExp(
+      `Run {2}npx -y gdharness@${SERVER_VERSION.replaceAll('.', '\\.')} upgrade "([^"]+)" {2}in a shell`,
+    ).exec(behind);
+    assert.ok(upgraded, `and names the upgrade, since the project's own addon is the other build: ${behind}`);
+    assert.equal(realpathSync(upgraded[1] ?? ''), realpathSync(project), `of this project: ${behind}`);
+    assert.deepEqual(discoverRuntimes([runtimeDir]), [], 'and started no game');
 
     writeFileSync(autoload, shipped);
     writeFileSync(join(addon, '.gdharness-digest'), `${shippedRuntimeDigest()}\n`);
@@ -40154,7 +40229,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           'var names: PackedStringArray = PackedStringArray(["Ada", "Bram"])\n' +
           'var sign: String = "in\\u00a02"\n' +
           'var art: Texture2D = null\nvar kept: Texture2D = preload("res://shine.tres")\n' +
-          'var aim: Vector2 = Vector2.ZERO\n' +
+          'var aim: Vector2 = Vector2.ZERO\nvar sky: Sky = Sky.new()\n' +
           'var locked: int = 5:\n\tset(value):\n\t\tpass\n\n\n' +
           'func _ready() -> void:\n' +
           '\tfor index: int in 4:\n\t\tvar piece: Part = Part.new()\n' +
@@ -40187,6 +40262,19 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       writeFileSync(
         join(project, 'shine.tres'),
         '[gd_resource type="GradientTexture1D" format=3]\n\n[resource]\nwidth = 16\n',
+      );
+      // Sky.sky_material's hint lists four material classes, and any of them is a sky's material.
+      writeFileSync(
+        join(project, 'panorama.tres'),
+        '[gd_resource type="PanoramaSkyMaterial" format=3]\n\n[resource]\n',
+      );
+      writeFileSync(
+        join(project, 'shaded.tres'),
+        '[gd_resource type="ShaderMaterial" format=3]\n\n[resource]\n',
+      );
+      writeFileSync(
+        join(project, 'plain.tres'),
+        '[gd_resource type="StandardMaterial3D" format=3]\n\n[resource]\n',
       );
       // A game run straight off the files knows a script class only once the project has been
       // imported, which is what writes the list of global classes an editor would have. Run without
@@ -40509,6 +40597,17 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         (await invoke('art_is_kept', [])).result,
         true,
         'the refused resources left the texture as it was',
+      );
+
+      for (const material of ['res://panorama.tres', 'res://shaded.tres']) {
+        const listed = await set('sky:sky_material', material);
+        assert.ok(listed.written, `a hint listing several classes takes each of them: ${listed.said}`);
+      }
+      const plain = await set('sky:sky_material', 'res://plain.tres');
+      assert.equal(plain.written, false, `a class the hint does not list is refused: ${plain.said}`);
+      assert.match(
+        plain.said,
+        /holds an object: res:\/\/plain\.tres is StandardMaterial3D, not one of PanoramaSkyMaterial, ProceduralSkyMaterial, PhysicalSkyMaterial, ShaderMaterial$/,
       );
 
       // A JSON number arrives as a float whether or not it has a fraction, so a refusal calling it
@@ -71701,6 +71800,124 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
  * named and left. A delete names what is left pointing at nothing. Each scene is then loaded by an
  * engine, which lists every path that names no node.
  */
+/**
+ * A delete drops what a scene instancing this one kept for the node or below it: values, a node it
+ * added, a connection and an editable mark. The engine skips each with a warning on every load.
+ *
+ * Found by a probe: a value an outer scene set on a button inside a deleted container stayed, and
+ * the outer scene printed three warnings each time it loaded. What it keeps beside the node stays.
+ */
+async function testADeleteDropsWhatOtherScenesKeptBelowIt(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('delete across scenes regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-delete-kin-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-delete-kin-rt-'));
+  const kept =
+    '[node name="Keep" parent="Hall"]\ntext = "Kept"\n\n' +
+    '[connection signal="pressed" from="Hall/Keep" to="." method="on_pressed"]\n';
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="DeleteKin"\n',
+    'outer.gd': 'extends Node2D\n\n\nfunc on_pressed() -> void:\n\tpass\n',
+    'inner.tscn':
+      '[gd_scene format=3]\n\n[node name="Inner" type="Node"]\n\n[node name="Leaf" type="Label" parent="."]\n',
+    'hall.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://inner.tscn" id="1_inner"]\n\n' +
+      '[node name="Hall" type="Control"]\n\n[node name="List" type="VBoxContainer" parent="."]\n\n' +
+      '[node name="Middle" type="Button" parent="List"]\ntext = "Two"\n\n' +
+      '[node name="Inner" parent="List" instance=ExtResource("1_inner")]\n\n' +
+      '[node name="Keep" type="Button" parent="."]\n',
+    'outer.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://hall.tscn" id="1_hall"]\n' +
+      '[ext_resource type="Script" path="res://outer.gd" id="2_outer"]\n\n' +
+      '[node name="Outer" type="Node2D"]\nscript = ExtResource("2_outer")\n\n' +
+      '[node name="Hall" parent="." instance=ExtResource("1_hall")]\n\n' +
+      '[node name="Middle" parent="Hall/List"]\ntext = "Changed"\n\n' +
+      '[node name="Leaf" parent="Hall/List/Inner"]\ntext = "Leaf"\n\n' +
+      '[node name="Extra" type="Node" parent="Hall/List"]\n\n' +
+      kept +
+      '[connection signal="pressed" from="Hall/List/Middle" to="." method="on_pressed"]\n\n' +
+      '[editable path="Hall"]\n[editable path="Hall/List/Inner"]\n',
+    'check.gd':
+      'extends SceneTree\n\n\nfunc _initialize() -> void:\n' +
+      '\tvar made: Node = (load("res://outer.tscn") as PackedScene).instantiate()\n' +
+      '\tprint("checked %d" % made.get_node("Hall").get_child_count())\n\tmade.free()\n\tquit(0)\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const loads = async (): Promise<string[]> => {
+    const ran = await runEngine(godotPath, ['--headless', '--path', project, '-s', 'res://check.gd']);
+    const said = ran.log.all.map((entry) => entry.text);
+    assert.ok(
+      said.some((line) => line.startsWith('checked ')),
+      `the check ran: ${said.join(' | ')}`,
+    );
+    return said.filter((line) => /vanished|recovery process/.test(line));
+  };
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    assert.deepEqual(await loads(), [], 'the fixture loads clean before the delete');
+    await server.initialize('delete-kin');
+    const deleted = parseTextContent(
+      await server.request(
+        'tools/call',
+        {
+          name: 'scene_node',
+          arguments: { projectPath: project, op: 'delete', scenePath: 'hall.tscn', nodePath: 'List' },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    const said = JSON.stringify(deleted);
+    const at = 'res://outer.tscn';
+    assert.deepEqual(
+      [get(deleted, 'deletedNodePath'), get(deleted, 'followed'), get(deleted, 'dropped')],
+      [
+        'List',
+        [at],
+        [
+          { nodePath: 'Hall/List/Middle', entry: 'values', scenePath: at },
+          { nodePath: 'Hall/List/Inner/Leaf', entry: 'values', scenePath: at },
+          { nodePath: 'Hall/List/Extra', entry: 'node', scenePath: at },
+          {
+            nodePath: 'Hall/List/Middle',
+            entry: 'connection',
+            signal: 'pressed',
+            method: 'on_pressed',
+            scenePath: at,
+          },
+          { nodePath: 'Hall/List/Inner', entry: 'editable', scenePath: at },
+        ],
+      ],
+      said,
+    );
+    const outer = readFileSync(join(project, 'outer.tscn'), 'utf8');
+    assert.ok(outer.includes(kept), `what outer.tscn keeps beside List stays: ${outer}`);
+    assert.ok(outer.includes('[editable path="Hall"]'), `and so does the mark on the instance: ${outer}`);
+    assert.doesNotMatch(outer, /Hall\/List/, outer);
+    assert.deepEqual(await loads(), [], 'and it loads with nothing the delete took');
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
 async function testAMovedNodeKeepsThePathsNamingIt(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -71978,7 +72195,7 @@ async function testAMovedNodeKeepsThePathsNamingIt(): Promise<void> {
     assert.ok(fileOf('well.tscn').includes('metadata/unique = NodePath("%Pail/Rope")'), fileOf('well.tscn'));
     assert.deepEqual(await unresolved(), lostInSquare, 'after the reparent');
 
-    // A delete changes nothing else and names every path left pointing at nothing.
+    // A delete names every path left pointing at nothing and drops what another scene kept below it.
     const square = fileOf('square.tscn');
     const plaza = fileOf('plaza.tscn');
     const deleted = await call('scene_node', { op: 'delete', scenePath: 'well.tscn', nodePath: 'Post/Pail' });
@@ -72002,9 +72219,28 @@ async function testAMovedNodeKeepsThePathsNamingIt(): Promise<void> {
       JSON.stringify(deleted),
     );
     assert.equal(get(deleted, 'retargeted'), undefined, JSON.stringify(deleted));
-    assert.equal(get(deleted, 'followed'), undefined, JSON.stringify(deleted));
-    assert.equal(fileOf('square.tscn'), square, 'a delete rewrites no other scene');
-    assert.equal(fileOf('plaza.tscn'), plaza, 'a delete rewrites no other scene');
+    // The node square.tscn added under Pail goes with it, since the engine skips it with a warning
+    // on every load. Every other entry square.tscn keeps stays as it was.
+    const bell = /\[node name="Bell"[^\n]*\]\n[^\n]*\n\n/;
+    assert.match(square, bell, 'square.tscn adds Bell under Pail before the delete');
+    assert.deepEqual(
+      [get(deleted, 'followed'), get(deleted, 'dropped'), fileOf('square.tscn')],
+      [
+        ['res://square.tscn'],
+        [{ nodePath: 'Well1/Post/Pail/Bell', entry: 'node', scenePath: 'res://square.tscn' }],
+        square.replace(bell, ''),
+      ],
+      JSON.stringify(deleted),
+    );
+    assert.equal(fileOf('plaza.tscn'), plaza, 'a scene keeping nothing below the node is not rewritten');
+    const loaded = await runEngine(godotPath, ['--headless', '--path', project, '-s', 'res://check.gd']);
+    const loadSaid = loaded.log.all.map((entry) => entry.text);
+    assert.ok(loadSaid.includes('checked'), `the check ran: ${loadSaid.join(' | ')}`);
+    assert.deepEqual(
+      loadSaid.filter((line) => /vanished|recovery process/.test(line)),
+      [],
+      'and every scene loads with nothing the delete took',
+    );
     assert.ok(
       fileOf('well.tscn').includes('tracks/0/path = NodePath("Post/Pail:rotation")'),
       fileOf('well.tscn'),
@@ -75469,6 +75705,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnInheritedSceneFindsItsBaseAsTheEngineDoes,
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,
   testAMovedNodeKeepsThePathsNamingIt,
+  testADeleteDropsWhatOtherScenesKeptBelowIt,
   testAPropertyHoldingANodeFollowsIt,
   testTheProjectsOwnClassesAreListedAndAnAddonsCounted,
   testAHeadlessWriteSavesWhatTheEditorWould,
@@ -75645,7 +75882,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACaptureOfOneNodeIsThatNodeAtItsOwnPixels,
   testAOneShotEngineRunIsNotTheEditor,
   testASubViewportCaptureIsDrawnNow,
-  testAStartSaysItsGameIsOnAnotherBuild,
+  testAStartRefusesAnotherBuildOfItsRuntimeAddon,
   testAScreenshotHoldsTheGamesOwnWindows,
   testTheRendererIsChosenAndItsMemoryRead,
   testAGameOnTheHiddenDesktopIsNotHeldToARefresh,
@@ -75971,6 +76208,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnArgumentMeantForAnotherOpIsRefused,
   testANoEditorRefusalSaysWhetherOneCanConnect,
   testAnOpenRefusesAnotherReleasesAddon,
+  testAStartRefusesAnotherReleasesRuntimeAddon,
   testABreakpointLineIsOneTheEngineMarks,
   testAnEvaluateNamesAGlobalClassThatDoesNotParse,
   testEditorStatusOnAProjectWithNoAddonIsFinal,

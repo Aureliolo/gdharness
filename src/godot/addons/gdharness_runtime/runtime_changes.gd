@@ -970,9 +970,20 @@ func _object_named(
 		return {
 			"message": "%s is %s, not %s" % [str(given), GdhValues.class_of(instance), wanted],
 		}
-	if script == null and not declared.is_empty() and not GdhValues.is_a(instance, declared):
+	if script == null and not declared.replace(",", "").strip_edges().is_empty():
+		# A resource hint lists every class it takes, as Sky.sky_material lists four materials, and
+		# the inspector takes each of them.
+		var allowed: PackedStringArray = declared.split(",", false)
+		for index: int in allowed.size():
+			allowed[index] = allowed[index].strip_edges()
+		for name: String in allowed:
+			if GdhValues.is_a(instance, name):
+				return found
+		var wanted: String = (
+			"a %s" % allowed[0] if allowed.size() == 1 else "one of %s" % ", ".join(allowed)
+		)
 		return {
-			"message": "%s is %s, not a %s" % [str(given), GdhValues.class_of(instance), declared],
+			"message": "%s is %s, not %s" % [str(given), GdhValues.class_of(instance), wanted],
 		}
 	return found
 

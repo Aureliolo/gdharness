@@ -60,6 +60,9 @@ func _initialize() -> void:
 ## second, so the peer read below is always the connection that matters.
 func _take_the_connection() -> void:
 	var waiting: TCPServer = _second if _on_second else _first
+	# The client checks that the port answers before it dials, and that check never speaks.
+	if _peer != null and _peer.get_ready_state() == WebSocketPeer.STATE_CLOSED:
+		_peer = null
 	if _peer != null or not waiting.is_connection_available():
 		return
 	_peer = WebSocketPeer.new()

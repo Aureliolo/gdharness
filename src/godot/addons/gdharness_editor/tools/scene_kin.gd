@@ -172,9 +172,10 @@ static func set_editable(scene: GdhSceneFile, node: Node, editable: bool) -> Str
 ## a moved node's entries by its unique_id, but an editable instance only by its path, so a scene
 ## saved after the move lost the values it kept below one. The node paths each holds are carried
 ## into [param carried], which holds those of [param changed] already. With [param new_path] "",
-## for a node deleted, they are only named. Answers followed, the scenes rewritten, and
-## notFollowed, each one left as it was with why, each only when it names any, with what
-## [param carried] gives.
+## for a node deleted, the node paths are only named, and the entries are dropped as
+## [method _without_vanished] says. Answers followed, the scenes rewritten, notFollowed, each one
+## left as it was with why, and dropped, each only when it names any, with what [param carried]
+## gives.
 static func follow(
 	changed: String, old_path: String, new_path: String, carried: GdhPaths
 ) -> Dictionary:
@@ -183,6 +184,7 @@ static func follow(
 	var kin: Array[String] = _kin_of(changed, texts)
 	var followed: Array[String] = []
 	var not_followed: Array[Dictionary] = []
+	var dropped: Array[Dictionary] = []
 	for scene_path: String in kin:
 		if scene_path == changed:
 			continue
@@ -200,6 +202,9 @@ static func follow(
 		var rewritten: String = text
 		if not new_path.is_empty():
 			rewritten = _rewritten(text, moves, old_path.get_base_dir() != new_path.get_base_dir())
+		var vanished: Array[Dictionary] = []
+		if new_path.is_empty() and not moves.is_empty():
+			rewritten = _without_vanished(text, moves, scene_path, vanished)
 		if rewritten != text:
 			if not unsaved.is_empty():
 				not_followed.append({ "scenePath": scene_path, "reason": unsaved })
@@ -213,6 +218,7 @@ static func follow(
 			file.close()
 			GdhSceneFile.refresh(scene_path)
 			followed.append(scene_path)
+			dropped.append_array(vanished)
 		var holds_paths: bool = text.contains("NodePath(")
 		# A script is only read, for the lines naming the node, so it does not need the file
 		# written.
@@ -232,7 +238,74 @@ static func follow(
 		answer["followed"] = followed
 	if not not_followed.is_empty():
 		answer["notFollowed"] = not_followed
+	if not dropped.is_empty():
+		answer["dropped"] = dropped
 	return answer
+
+
+## [param text] without the entries it kept for a node a delete took, or one below it, which
+## [param moves] maps to "": the values it set there, a node it added there, its connections from
+## or to one, and its mark making one editable. The engine skips each as it loads, with a warning
+## on every load, and the editor's next save leaves it out. Each goes into [param dropped], as
+## {scenePath, nodePath, entry}, with the signal and method of a connection.
+static func _without_vanished(
+	text: String, moves: Dictionary, scene_path: String, dropped: Array[Dictionary]
+) -> String:
+	var lines: PackedStringArray = text.split("\n")
+	var kept: PackedStringArray = []
+	var dropping: bool = false
+	for at: int in lines.size():
+		var line: String = lines[at]
+		# The saver writes connections and editable marks one to a line with nothing between them,
+		# and starts any other entry after an empty line, which a value running over several lines
+		# does not.
+		var one_line: bool = line.begins_with("[connection ") or line.begins_with("[editable ")
+		if one_line or (line.begins_with("[") and (at == 0 or lines[at - 1].is_empty())):
+			var record: Dictionary = _vanished(line, moves)
+			dropping = not record.is_empty()
+			if dropping:
+				record["scenePath"] = scene_path
+				dropped.append(record)
+				# A node entry's values run on to its empty line, which goes with them.
+				dropping = line.begins_with("[node ")
+				continue
+		elif dropping:
+			if line.is_empty():
+				dropping = false
+			continue
+		var _kept: bool = kept.push_back(line)
+	return "\n".join(kept)
+
+
+## The record of what [param line], an entry's first line, kept for a node [param moves] took, or
+## an empty one when it names none.
+static func _vanished(line: String, moves: Dictionary) -> Dictionary:
+	if line.begins_with("[node ") and line.contains(' parent="'):
+		var whole: String = _under(_attribute(line, "parent"), _attribute(line, "name"))
+		if not _gone(whole, moves):
+			return {}
+		var made: bool = line.contains(" type=") or line.contains(" instance=")
+		return { "nodePath": whole, "entry": "node" if made else "values" }
+	if line.begins_with("[editable "):
+		var path: String = _attribute(line, "path")
+		return { "nodePath": path, "entry": "editable" } if _gone(path, moves) else {}
+	if line.begins_with("[connection "):
+		for end: String in ["from", "to"]:
+			var path: String = _attribute(line, end)
+			if _gone(path, moves):
+				return {
+					"nodePath": path,
+					"entry": "connection",
+					"signal": _attribute(line, "signal"),
+					"method": _attribute(line, "method"),
+				}
+	return {}
+
+
+## Whether [param path], a path from the root in the text's own spelling, is a node [param moves]
+## deleted, or one below it.
+static func _gone(path: String, moves: Dictionary) -> bool:
+	return not path.is_empty() and GdhPaths.moved(path, moves).is_empty()
 
 
 ## Marks the instance a branch at [param at] in [param changed] became editable in every other

@@ -69,6 +69,9 @@ const CONNECT_TIMEOUT: float = 10.0
 ## rather than waited for. A harness reconnect leaves the server it replaced running and holding
 ## the old port, and an editor with no reason to look elsewhere stayed on it for the session.
 const FOLLOW_INTERVAL: float = 5.0
+## How many polls in a row the door has to stay connected before the WebSocket dials.
+## See [member _door].
+const DOOR_POLLS: int = 2
 
 var socket: WebSocketPeer = WebSocketPeer.new()
 var server_url: String = DEFAULT_URL
@@ -96,6 +99,13 @@ var _tried_announced: bool = false
 ## once rather than every few seconds for the rest of the session.
 var _told_about_url: String = ""
 var _connecting_for: float = 0.0
+## A plain socket sent ahead of the WebSocket, to learn whether anything listens. Measured on
+## macOS 26.7: a refused connect asked again answers EISCONN, which the engine reads as connected.
+## The WebSocket then sets TCP no delay on the dead socket and prints a warning for every refused
+## attempt, into the editor's output and every answer that reads it. A plain socket sets nothing,
+## and a refused one falls back to unconnected at its next poll, which a listening port does not.
+var _door: StreamPeerTCP = null
+var _door_held: int = 0
 ## Whether this editor was started by another editor, which is Godot's own restart and the project
 ## manager opening a project: the new editor is the old one's child and has its environment, with
 ## the variable this addon sets as it loads still naming the old one. Its arguments are gone, since
@@ -133,6 +143,10 @@ func _exit_tree() -> void:
 
 func _process(_delta: float) -> void:
 	if not _initialized:
+		return
+
+	if _door != null:
+		_knock(_delta)
 		return
 
 	if socket.get_ready_state() == WebSocketPeer.STATE_CLOSED:
@@ -317,6 +331,7 @@ func announced_url() -> String:
 
 func disconnect_from_server() -> void:
 	_should_reconnect = false
+	_shut_the_door()
 	if _reconnect_timer:
 		_reconnect_timer.stop()
 	if socket.get_ready_state() == WebSocketPeer.STATE_OPEN:
@@ -329,10 +344,57 @@ func _attempt_connection() -> void:
 		socket.close()
 
 	_connecting_for = 0.0
+	_shut_the_door()
+	var address: RegEx = RegEx.create_from_string("^wss?://([^/:]+):(\\d+)")
+	var found: RegExMatch = address.search(server_url)
+	if found == null:
+		_dial()
+		return
+	_door = StreamPeerTCP.new()
+	_door_held = 0
+	if _door.connect_to_host(found.get_string(1), int(found.get_string(2))) != OK:
+		_door = null
+		_refused()
+
+
+## Follows the door's knock: dials once it has held, asks again later once it is refused.
+func _knock(delta: float) -> void:
+	var _polled: Error = _door.poll()
+	match _door.get_status():
+		StreamPeerTCP.STATUS_CONNECTING:
+			_connecting_for += delta
+			if _connecting_for >= CONNECT_TIMEOUT:
+				_shut_the_door()
+				_give_up_on_this_address()
+		StreamPeerTCP.STATUS_CONNECTED:
+			_door_held += 1
+			if _door_held >= DOOR_POLLS:
+				_shut_the_door()
+				_dial()
+		_:
+			_door = null
+			_refused()
+
+
+func _shut_the_door() -> void:
+	if _door != null:
+		_door.disconnect_from_host()
+		_door = null
+
+
+func _dial() -> void:
+	_connecting_for = 0.0
 	var err: Error = socket.connect_to_url(server_url)
 	if err != OK:
 		push_error("[gdharness] Failed to connect to %s: %s" % [server_url, error_string(err)])
 		_schedule_reconnect()
+
+
+## What a refusal leaves behind: the announced address set aside for the fallback, and another try.
+func _refused() -> void:
+	if _tried_announced:
+		_refused_url = server_url
+	_schedule_reconnect()
 
 
 func _handle_connect() -> void:

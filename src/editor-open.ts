@@ -25,7 +25,10 @@ import {
   inspectProject,
   installedAddonVersion,
   installedEditorDigest,
+  installedRuntimeDigest,
+  installedRuntimeVersion,
   shippedEditorDigest,
+  shippedRuntimeDigest,
 } from './setup.js';
 import { isNewer } from './update-check.js';
 import { inTurnFor } from './write-turns.js';
@@ -84,22 +87,49 @@ export function editorAddonMissing(projectPath: string): { why: string; remedies
  * only then did editor_status say every call was refused until an upgrade.
  */
 export function editorAddonOfAnotherRelease(projectPath: string): { why: string; remedies: string[] } | null {
-  const onDisk = installedEditorDigest(projectPath);
-  if (onDisk === null || onDisk === shippedEditorDigest()) {
+  return addonOfAnotherRelease(projectPath, 'editor', {
+    onDisk: installedEditorDigest(projectPath),
+    shipped: shippedEditorDigest(),
+    version: installedAddonVersion(projectPath),
+  });
+}
+
+/**
+ * Why a game started on [param projectPath] would be asked nothing, read off the digest its runtime
+ * addon was installed with, or null when that is this server's or unmarked. Started anyway, the
+ * game ran and every runtime call was refused, and the start said so only when the game announced
+ * inside its wait.
+ */
+export function runtimeAddonOfAnotherRelease(
+  projectPath: string,
+): { why: string; remedies: string[] } | null {
+  return addonOfAnotherRelease(projectPath, 'runtime', {
+    onDisk: installedRuntimeDigest(projectPath),
+    shipped: shippedRuntimeDigest(),
+    version: installedRuntimeVersion(projectPath),
+  });
+}
+
+function addonOfAnotherRelease(
+  projectPath: string,
+  which: 'editor' | 'runtime',
+  marked: { readonly onDisk: string | null; readonly shipped: string; readonly version: string | null },
+): { why: string; remedies: string[] } | null {
+  const { onDisk, shipped, version } = marked;
+  if (onDisk === null || onDisk === shipped) {
     return null;
   }
-  const version = installedAddonVersion(projectPath);
   const addon =
     version === null || version === SERVER_VERSION
-      ? `a different build of the editor addon from the one this ${SERVER_VERSION} server ships`
-      : `the ${version} editor addon while this server ships ${SERVER_VERSION}`;
+      ? `a different build of the ${which} addon from the one this ${SERVER_VERSION} server ships`
+      : `the ${version} ${which} addon while this server ships ${SERVER_VERSION}`;
   return {
     why: `${projectPath} holds ${addon}`,
     remedies:
       version !== null && isNewer(version, SERVER_VERSION)
         ? [`This server is the older half: reconnect it in your harness so it spawns ${version}`]
         : [
-            `Run  ${gdharnessCommand(SERVER_VERSION, `upgrade "${projectPath}"`)}  in a shell, which installs this server's addons, then open again`,
+            `Run  ${gdharnessCommand(SERVER_VERSION, `upgrade "${projectPath}"`)}  in a shell, which installs this server's addons, then ${which === 'editor' ? 'open' : 'start'} again`,
           ],
   };
 }
