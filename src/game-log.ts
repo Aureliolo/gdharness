@@ -40,30 +40,37 @@ export interface LogEntry {
 }
 
 /**
- * The calls that make the engine print an error the game did not raise, with the engine file it
- * names: an expression a caller evaluated in the held game, and a pause that reached a game already
- * held at a breakpoint. The engine prints either as the game's, so the run read as unclean.
+ * The engine files whose errors a debugger call can be told apart by: an expression that does not
+ * work out names the Expression class, and a pause that reached a game already held at a breakpoint
+ * the remote debugger.
  */
 export const RAISED_FROM = {
   'debug_state evaluate': 'core/math/expression.cpp',
   'debug_control pause': 'core/debugger/remote_debugger.cpp',
 } as const;
-export type RaisedBy = keyof typeof RAISED_FROM;
+
+/**
+ * The calls that make the engine print an error the game did not raise. Besides the two above, an
+ * evaluate loads the script of every global class first, and one that does not parse prints its
+ * errors then, as does the evaluate a step out asks of a function the engine called. The engine
+ * prints each as the game's, so the run read as unclean.
+ */
+const RAISERS = ['debug_state evaluate', 'debug_control pause', 'debug_control step_out'] as const;
+export type RaisedBy = (typeof RAISERS)[number];
 
 /** What the engine prints when a pause reaches a game already held. */
 export const ALREADY_HELD = 'Got break when already broke!';
 
-const RAISED_MARK = /^gdharness: (.+?) raised: (.*)$/;
+const RAISED_MARK = /^gdharness: (.+?) raised from (.+?): (.*)$/;
 
 /**
- * The line the keeper writes into a run's transcript for such an error. In the transcript rather
- * than in a server's memory, so a server that takes the run over reads it too.
+ * The line the keeper writes into a run's transcript for an error the call [param by] raised, with
+ * the file the engine named for it. In the transcript rather than in a server's memory, so a server
+ * that takes the run over reads it too.
  */
-export function raisedMark(by: RaisedBy, text: string): string {
-  return `gdharness: ${by} raised: ${text}\n`;
+export function raisedMark(by: RaisedBy, text: string, file: string): string {
+  return `gdharness: ${by} raised from ${file}: ${text}\n`;
 }
-
-const RAISERS: readonly RaisedBy[] = ['debug_state evaluate', 'debug_control pause'];
 
 function raisedBy(named: string): RaisedBy | null {
   return RAISERS.find((by) => by === named) ?? null;
@@ -401,7 +408,7 @@ export class GameLog {
     const mark = RAISED_MARK.exec(line);
     const by = mark === null ? null : raisedBy(mark[1] ?? '');
     if (by !== null) {
-      this.raisedByCall(by, mark?.[2] ?? '');
+      this.raisedByCall(by, mark?.[3] ?? '', mark?.[2] ?? '');
       return;
     }
     const report = this.crashed[source];
@@ -461,13 +468,13 @@ export class GameLog {
    * info. The engine prints it before it tells the debugger, which writes the mark, so it is looked
    * for among the entries first, newest first, and otherwise awaited.
    */
-  private raisedByCall(by: RaisedBy, text: string): void {
+  private raisedByCall(by: RaisedBy, text: string, file: string): void {
     for (let at = this.entries.length - 1; at >= 0; at -= 1) {
       const entry = this.entries[at];
       if (
         entry?.severity === 'error' &&
         entry.text === text &&
-        entry.detail.some((line) => line.includes(RAISED_FROM[by]))
+        entry.detail.some((line) => line.includes(file))
       ) {
         this.entries[at] = { ...entry, severity: 'info', raisedBy: by };
         return;

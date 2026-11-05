@@ -1010,12 +1010,25 @@ function testAnEvaluatesErrorIsNotTheGames(): void {
     '   GDScript backtrace (most recent call first):',
     '       [0] _process (res://main.gd:7)',
   ];
-  const marked = raisedMark('debug_state evaluate', raised).trimEnd();
+  const marked = raisedMark('debug_state evaluate', raised, 'core/math/expression.cpp').trimEnd();
   const broke = [`ERROR: ${ALREADY_HELD}`, '   at: debug (core/debugger/remote_debugger.cpp:480)'];
-  const brokeMarked = raisedMark('debug_control pause', ALREADY_HELD).trimEnd();
+  const brokeMarked = raisedMark(
+    'debug_control pause',
+    ALREADY_HELD,
+    'core/debugger/remote_debugger.cpp',
+  ).trimEnd();
+  // An evaluate loads every global class first, and one that does not parse prints its errors then.
+  const unparsed = 'Parse Error: Identifier "undefined_name" not declared in the current scope.';
+  const loaded = [
+    `SCRIPT ERROR: ${unparsed}`,
+    '   at: GDScript::reload (res://broken.gd:6)',
+    '   GDScript backtrace (most recent call first):',
+    '       [0] look (res://main.gd:13)',
+  ];
+  const loadedMarked = raisedMark('debug_state evaluate', unparsed, 'res://broken.gd').trimEnd();
   for (const [order, lines] of [
-    ['printed first', [...printed, marked, ...broke, brokeMarked]],
-    ['marked first', [marked, ...printed, brokeMarked, ...broke]],
+    ['printed first', [...printed, marked, ...broke, brokeMarked, ...loaded, loadedMarked]],
+    ['marked first', [marked, ...printed, brokeMarked, ...broke, loadedMarked, ...loaded]],
   ] as const) {
     const log = new GameLog();
     log.append('transcript', `${lines.join('\n')}\n`);
@@ -1024,6 +1037,7 @@ function testAnEvaluatesErrorIsNotTheGames(): void {
       [
         ['info', raised, 'debug_state evaluate'],
         ['info', ALREADY_HELD, 'debug_control pause'],
+        ['info', unparsed, 'debug_state evaluate'],
       ],
       `${order}: each error is info, and a mark is no entry of its own`,
     );
@@ -1031,10 +1045,10 @@ function testAnEvaluatesErrorIsNotTheGames(): void {
   }
   // A line that only looks like a mark, naming no such call, is what the game printed.
   const lookalike = new GameLog();
-  lookalike.append('transcript', `gdharness: runtime_invoke raised: ${raised}\n`);
+  lookalike.append('transcript', `gdharness: runtime_invoke raised from x.cpp: ${raised}\n`);
   assert.deepEqual(
     lookalike.all.map((entry) => [entry.severity, entry.text]),
-    [['info', `gdharness: runtime_invoke raised: ${raised}`]],
+    [['info', `gdharness: runtime_invoke raised from x.cpp: ${raised}`]],
   );
 
   // The game's own expression, failing the same way with no mark, and a mark for one whose line
@@ -36954,6 +36968,164 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
     assert.match(printed.said, /waiting for res:\/\/never\.tres/, printed.said);
   } finally {
     if (started) {
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    }
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * An evaluate in a project with a global class that does not parse names the class, and says the
+ * held game's stack cannot be read until it next stops.
+ *
+ * Found by a probe session: the engine loads every global class for an evaluate, and the parse error
+ * of the broken one was reported as the stack from then on. The next evaluate was refused for a
+ * static function, and the errors the load printed made the run unclean.
+ */
+async function testAnEvaluateNamesAGlobalClassThatDoesNotParse(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('unparsed global class regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-unparsed-class-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-unparsed-class-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="Unparsed"\nrun/main_scene="res://main.tscn"\n',
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    [
+      'extends Node',
+      '',
+      'var count: int = 0',
+      '',
+      '',
+      'func _process(_delta: float) -> void:',
+      '\tcount += 1',
+      '\tif count == 3:',
+      '\t\tlook("at 3")',
+      '',
+      '',
+      'func look(text: String) -> void:',
+      '\tprint(text, count)',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(project, 'broken.gd'),
+    'class_name Broken\nextends Node\n\n\nfunc _ready() -> void:\n\tvar missing: int = undefined_name + 1\n\tprint(missing)\n',
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  // The class list a game reads its global classes from, as an editor scan writes it.
+  mkdirSync(join(project, '.godot'));
+  writeFileSync(
+    join(project, '.godot', 'global_script_class_cache.cfg'),
+    'list=[{\n"base": &"Node",\n"class": &"Broken",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n' +
+      '"language": &"GDScript",\n"path": "res://broken.gd"\n}]\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const call = async (
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ said: string; answer: unknown }> => {
+    const answered = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+    const said = textOf(answered) ?? JSON.stringify(answered);
+    return { said, answer: get(answered, 'result', 'isError') === true ? null : parseTextContent(answered) };
+  };
+  const unreadable =
+    /so loaded res:\/\/broken\.gd, which does not parse\. Since then the engine reports that parse error as this held game's stack/;
+  // Only a run's first load of the class fails this way: the engine keeps the script it could not
+  // load, so each case starts a game of its own.
+  const heldOn = async (line: number): Promise<void> => {
+    await call('debug_breakpoint', { projectPath: project, op: 'set', scriptPath: 'main.gd', line });
+    const start = await call('editor_run', { projectPath: project, op: 'start', headless: true });
+    game.started = get(start.answer, 'started') === true;
+    assert.equal(game.started, true, start.said);
+    const waited = await call('editor_run', { projectPath: project, op: 'wait', timeoutMs: 20_000 });
+    assert.match(
+      text(get(waited.answer, 'heldAt', 'description')),
+      new RegExp(`main\\.gd:${line} `),
+      waited.said,
+    );
+    await call('debug_breakpoint', { projectPath: project, op: 'remove', scriptPath: 'main.gd', line });
+  };
+  const raisedIn = async (by: string): Promise<void> => {
+    await call('debug_control', { op: 'continue' });
+    const output = await call('editor_output', { projectPath: project, op: 'run' });
+    assert.equal(get(output.answer, 'errors'), 0, output.said);
+    assert.ok(
+      asArray(get(output.answer, 'entries')).some(
+        (entry) =>
+          get(entry, 'severity') === 'info' &&
+          get(entry, 'raisedBy') === by &&
+          text(get(entry, 'text')).startsWith('Parse Error: Identifier "undefined_name"'),
+      ),
+      `the parse error is ${by}'s: ${output.said}`,
+    );
+    await call('editor_run', { op: 'stop' });
+    game.started = false;
+  };
+  // An object, since the cases set it from inside the helpers above.
+  const game = { started: false };
+  try {
+    await server.initialize('regression-test');
+
+    // A step out of a function the engine called tells its calls apart with an evaluate, which breaks
+    // the stack the same way, and still lands on a line whose stack reads true.
+    await heldOn(7);
+    const out = await call('debug_control', { op: 'step_out' });
+    assert.equal(get(out.answer, 'heldAgain'), true, out.said);
+    const outStack = await call('debug_state', { op: 'stack' });
+    assert.equal(get(outStack.answer, 'stack', 0, 'script'), 'res://main.gd', outStack.said);
+    await raisedIn('debug_control step_out');
+
+    await heldOn(13);
+
+    // The evaluate itself is answered from the frame, and says what it did to the stack.
+    const evaluated = await call('debug_state', { op: 'evaluate', expression: 'text' });
+    assert.deepEqual(
+      [get(evaluated.answer, 'value'), get(evaluated.answer, 'type')],
+      ['at 3', 'String'],
+      evaluated.said,
+    );
+    assert.match(text(get(evaluated.answer, 'note')), unreadable, evaluated.said);
+    for (const [op, args] of [
+      ['stack', {}],
+      ['variables', {}],
+      ['evaluate', { expression: 'count' }],
+    ] as const) {
+      const read = await call('debug_state', { op, ...args });
+      assert.equal(read.answer, null, `${op} is refused: ${read.said}`);
+      assert.match(read.said, unreadable, `${op} names why: ${read.said}`);
+    }
+
+    // The next stop reads the stack afresh, as the refusal says.
+    const stepped = await call('debug_control', { op: 'step_over' });
+    assert.equal(get(stepped.answer, 'heldAgain'), true, stepped.said);
+    const after = await call('debug_state', { op: 'stack' });
+    assert.equal(get(after.answer, 'stack', 0, 'script'), 'res://main.gd', after.said);
+    // The engine keeps the script it could not load, so a later evaluate leaves the stack alone.
+    const again = await call('debug_state', { op: 'evaluate', expression: 'count' });
+    assert.deepEqual([get(again.answer, 'value'), get(again.answer, 'note')], ['3', undefined], again.said);
+    await raisedIn('debug_state evaluate');
+  } finally {
+    if (game.started) {
       await server.request(
         'tools/call',
         { name: 'editor_run', arguments: { op: 'stop' } },
@@ -75346,6 +75518,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testANoEditorRefusalSaysWhetherOneCanConnect,
   testAnOpenRefusesAnotherReleasesAddon,
   testABreakpointLineIsOneTheEngineMarks,
+  testAnEvaluateNamesAGlobalClassThatDoesNotParse,
   testEditorStatusOnAProjectWithNoAddonIsFinal,
   testEveryArgumentNamesOpsItsToolHas,
   testAnArgumentScopedInWordsIsScopedInItsSchema,
