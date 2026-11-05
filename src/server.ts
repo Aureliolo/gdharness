@@ -2621,6 +2621,9 @@ const TEST_HEARTBEAT_MS = 20_000;
  */
 const DEPENDED_FAILED = 'Failed to compile depended scripts';
 
+/** The headless operation that rebuilds the class cache from the declarations on disk. */
+const REFRESH_CLASS_CACHE = 'refresh_class_cache';
+
 /**
  * [param errors] as the answer holds them: every error of a script's own in full, and the scripts
  * that failed only because one they depend on did as their paths alone.
@@ -3989,6 +3992,8 @@ class GodotServer {
   private readonly operationsScript = join(__dirname, 'godot', 'operations', 'godot_operations.gd');
   /** The options of each platform's presets, by engine and platform, read once in an editor. */
   private readonly exportOptionsRead = new Map<string, ExportOptions>();
+  /** By project, the stale classes the last class cache rebuild left out, one per line. */
+  private readonly unlistedClasses = new Map<string, string>();
   /** The pending calls answered while the kept game was held, whose timing counts the hold. */
   private readonly heldWhilePending = new Set<number>();
   // The game hands the errors an evaluate raises to whatever call it is held inside.
@@ -5201,7 +5206,7 @@ class GodotServer {
         const projectClasses = Object.fromEntries(declaredClassLines(project.value.path));
         return await this.headless(headless, { ...answerable, projectClasses });
       }
-      if (headless !== 'refresh_class_cache') {
+      if (headless !== REFRESH_CLASS_CACHE) {
         return await this.headless(headless, answerable);
       }
       const project = this.project(answerable);
@@ -6051,15 +6056,36 @@ class GodotServer {
    * and starts no engine.
    */
   private async refreshStaleClasses(projectPath: string): Promise<Checked<readonly string[]>> {
+    const rebuilt = await this.rebuildStaleClasses(projectPath);
+    return rebuilt.ok
+      ? { ok: true, value: rebuilt.listed }
+      : { ok: false, response: this.answer(rebuilt.outcome) };
+  }
+
+  /**
+   * The class cache rebuilt when the declarations on disk name a class it lacks, with the classes
+   * the rebuild then listed. A rebuild leaves some out, such as a script extending itself, and
+   * those are not rebuilt for again until the set changes, so a list no rebuild completes costs one
+   * engine rather than one before every call.
+   */
+  private async rebuildStaleClasses(
+    projectPath: string,
+  ): Promise<{ ok: true; listed: string[] } | { ok: false; outcome: HeadlessOutcome }> {
     const stale = staleClassNames(projectPath);
-    if (stale.length === 0) {
-      return { ok: true, value: [] };
+    if (stale.length === 0 || stale.join('\n') === this.unlistedClasses.get(projectPath)) {
+      return { ok: true, listed: [] };
     }
-    const refreshed = await this.operation('refresh_class_cache', {}, projectPath);
-    if (!refreshed.ok) {
-      return { ok: false, response: this.answer(refreshed) };
+    const outcome = await this.operation(REFRESH_CLASS_CACHE, {}, projectPath);
+    if (!outcome.ok) {
+      return { ok: false, outcome };
     }
-    return { ok: true, value: stale };
+    const left = staleClassNames(projectPath);
+    if (left.length === 0) {
+      this.unlistedClasses.delete(projectPath);
+    } else {
+      this.unlistedClasses.set(projectPath, left.join('\n'));
+    }
+    return { ok: true, listed: stale.filter((name) => !left.includes(name)) };
   }
 
   /**
@@ -6932,6 +6958,16 @@ class GodotServer {
     // from the cache as it starts, so one started while the editor rewrites it fails on correct
     // scripts. A class cache rebuilt here would also be written over by the editor's list.
     const scanned = await this.untilTheEditorsScanIsWritten(projectPath);
+    // The engine resolves a class_name from the cache as it starts, so a script written since by
+    // anything but script_edit read as a missing base class, and its users' calls as members
+    // missing on a Variant, until somebody called project_import refresh_classes.
+    const rebuilt =
+      operation === REFRESH_CLASS_CACHE
+        ? { ok: true as const, listed: [] }
+        : await this.rebuildStaleClasses(projectPath);
+    if (!rebuilt.ok) {
+      return rebuilt.outcome;
+    }
     this.logDebug(`Running ${operation} in ${projectPath}: ${JSON.stringify(params)}`);
     const outcome = await runOperation(
       { godotPath: engine.value, script: this.operationsScript, debug: DEBUG_MODE },
@@ -6939,7 +6975,11 @@ class GodotServer {
       params,
       projectPath,
     );
-    return withScanWait(withEngineNote(outcome, engine.note), scanned);
+    const told: HeadlessOutcome =
+      outcome.ok && rebuilt.listed.length > 0
+        ? { ...outcome, payload: { ...outcome.payload, classesRebuiltFirst: rebuilt.listed } }
+        : outcome;
+    return withScanWait(withEngineNote(told, engine.note), scanned);
   }
 
   private answer(outcome: HeadlessOutcome): ToolResponse {
@@ -7078,6 +7118,7 @@ class GodotServer {
     );
     return {
       checked: checked.payload.checked.length,
+      ...nonEmpty({ classesRebuiltFirst: checked.classesRebuiltFirst }),
       failures: failures.map((failure, at) => {
         const types = uncached[at] ?? [];
         return types.length === 0
@@ -8559,6 +8600,7 @@ class GodotServer {
           : this.jsonTextResponse({
               ...checked.answers[0],
               ...engineChecked(one.noLanguageServer.reason),
+              ...nonEmpty({ classesRebuiltFirst: checked.classesRebuiltFirst }),
               ...ignored,
             });
       }
@@ -8580,6 +8622,7 @@ class GodotServer {
     let engineWarned: number | null = 0;
     let unread = 0;
     let byEngine: string | null = null;
+    let rebuilt: string[] = [];
     // How many the language server answered before it stopped answering, if it did, so a check
     // that went on in the engine does not call every script the engine's.
     let byServer = 0;
@@ -8603,6 +8646,7 @@ class GodotServer {
         if ('refusal' in checked) {
           return checked.refusal;
         }
+        rebuilt = checked.classesRebuiltFirst;
         for (const answer of checked.answers) {
           errors += Number(answer['errors']);
           engineWarned =
@@ -8645,6 +8689,7 @@ class GodotServer {
       scripts: reported,
       nothingReported,
       ...(byEngine === null ? { checkedBy: 'language server' } : engineChecked(byEngine)),
+      ...nonEmpty({ classesRebuiltFirst: rebuilt }),
       ...(byEngine !== null && byServer > 0
         ? { checkedBy: 'language server, then engine', checkedByLanguageServer: byServer }
         : {}),
@@ -8682,10 +8727,12 @@ class GodotServer {
         ok: true;
         payload: { checked: string[]; failed: string[]; scripts: unknown[] };
         extras: OperationParams;
+        classesRebuiltFirst: string[];
       }
     | { ok: false; message: string }
   > {
     const payload = { checked: [] as string[], failed: [] as string[], scripts: [] as unknown[] };
+    const rebuilt: string[] = [];
     const messages: LogEntry[] = [];
     let left = [...paths];
     while (left.length > 0) {
@@ -8701,10 +8748,11 @@ class GodotServer {
       payload.checked.push(...checked);
       payload.failed.push(...(readArray(ran.payload, 'failed') ?? []).map(String));
       payload.scripts.push(...(readArray(ran.payload, 'scripts') ?? []));
+      rebuilt.push(...(readStringArray(ran.payload, 'classesRebuiltFirst') ?? []));
       messages.push(...ran.messages);
       left = left.slice(checked.length);
     }
-    return { ok: true, payload, extras: engineExtras({ messages }) };
+    return { ok: true, payload, extras: engineExtras({ messages }), classesRebuiltFirst: rebuilt };
   }
 
   /**
@@ -8747,7 +8795,7 @@ class GodotServer {
     projectPath: string,
     scripts: readonly string[],
     why: Unanswered,
-  ): Promise<{ answers: OperationParams[] } | { refusal: ToolResponse }> {
+  ): Promise<{ answers: OperationParams[]; classesRebuiltFirst: string[] } | { refusal: ToolResponse }> {
     const resPaths = scripts.map((script) => {
       const contained = resolveWithinProject(projectPath, script);
       return contained.ok ? `res://${contained.relativePath}` : script;
@@ -8776,6 +8824,7 @@ class GodotServer {
       errorsOf.map((errors) => errors.map((entry) => String(asParams(entry)['message']))),
     );
     return {
+      classesRebuiltFirst: checked.classesRebuiltFirst,
       answers: scripts.map((scriptPath, at) => {
         const failure = failures.get(resPaths[at] ?? '');
         const errors = (errorsOf[at] ?? []).map((entry) => {
@@ -15231,7 +15280,7 @@ class GodotServer {
     const before = cachedClasses(projectPath);
     const writtenBefore = cacheWrittenAt(projectPath);
     const noted = readClassNote(projectPath);
-    const rebuilt = await this.operation('refresh_class_cache', {}, projectPath);
+    const rebuilt = await this.operation(REFRESH_CLASS_CACHE, {}, projectPath);
     if (!rebuilt.ok) {
       return rebuilt;
     }
@@ -15345,18 +15394,7 @@ class GodotServer {
       return contained.response;
     }
     const { op: _op, projectPath: _projectPath, ...params } = contained.value;
-    // The script is loaded against the class list, and its extends checked against the files, so
-    // against a list missing a class declared since, a script extending that class reads as one
-    // that does not parse, for a fault that is the list's.
-    const stale = await this.refreshStaleClasses(project.value.path);
-    if (!stale.ok) {
-      return stale.response;
-    }
-    const loaded = await this.operation('create_script', params, project.value.path);
-    const created: HeadlessOutcome =
-      loaded.ok && stale.value.length > 0
-        ? { ...loaded, payload: { ...loaded.payload, classesRebuiltFirst: stale.value } }
-        : loaded;
+    const created = await this.operation('create_script', params, project.value.path);
     const declared = created.ok ? (readString(created.payload, 'class_name') ?? '') : '';
     if (!created.ok || declared === '') {
       return this.answer(created);
@@ -15438,34 +15476,7 @@ class GodotServer {
    */
   private async handleModifyScript(args: OperationParams): Promise<ToolResponse> {
     const project = this.project(args);
-    // The additions are loaded against the class list, so one naming a class the list does not
-    // hold yet is refused as a script that would not parse, with nothing written.
-    const stale = project.ok ? await this.refreshStaleClasses(project.value.path) : null;
-    if (stale !== null && !stale.ok) {
-      return stale.response;
-    }
-    const loaded = await this.headless('modify_script', args);
-    const first = loaded.content[0];
-    const written: ToolResponse =
-      stale === null ||
-      stale.value.length === 0 ||
-      loaded.isError === true ||
-      first?.type !== 'text' ||
-      !first.text.trimStart().startsWith('{')
-        ? loaded
-        : {
-            ...loaded,
-            content: [
-              {
-                ...first,
-                text: answerJson({
-                  ...asParams(JSON.parse(first.text)),
-                  classesRebuiltFirst: stale.value,
-                }),
-              },
-              ...loaded.content.slice(1),
-            ],
-          };
+    const written = await this.headless('modify_script', args);
     const scriptPath = readNonEmptyString(args, 'scriptPath');
     if (
       written.isError === true ||

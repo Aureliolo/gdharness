@@ -24598,6 +24598,9 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       `each error at its line: ${shown}`,
     );
     assert.equal(get(answered, 'checkedBy'), 'engine', shown);
+    // The class the cache lacks is put in it before the engine compiles anything, so what uses it
+    // compiles, and the answer names it.
+    assert.deepEqual(get(answered, 'classesRebuiltFirst'), ['FixtureStash'], shown);
     assert.match(text(get(answered, 'languageServer')), /^Godot LSP is unavailable on port \d+/, shown);
     assert.match(
       text(get(answered, 'note')),
@@ -24678,7 +24681,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         get(all, 'nothingReported'),
         get(all, 'checkedBy'),
       ],
-      [false, 5, 4, 0, ['checked/fine.gd', 'checked/stash.gd'], 'engine'],
+      [false, 5, 3, 0, ['checked/fine.gd', 'checked/holder.gd', 'checked/stash.gd'], 'engine'],
       `a folder compiled whole, an engine past each failure, the clean scripts named apart: ${said}`,
     );
     const entryFor = (scriptPath: string): unknown =>
@@ -24740,18 +24743,40 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       ],
       `a script failing for what it loads says which, without a line of its own: ${said}`,
     );
-    // A class the project declares and the cache lacks is named as the cache's fault, and a script
+    assert.equal(
+      get(all, 'classesRebuiltFirst'),
+      undefined,
+      `a cache already current is left alone: ${said}`,
+    );
+    // A class the rebuild cannot list, a script extending itself, is named as the cache's fault for
+    // the script using it, and the cache is not rebuilt for it again on the next call. A script
     // failing for anything else is told nothing of the cache.
-    const holder = entryFor('checked/holder.gd');
+    mkdirSync(join(project, 'looped'));
+    writeFileSync(
+      join(project, 'looped', 'loop.gd'),
+      'class_name FixtureLoop\nextends "res://looped/loop.gd"\n',
+    );
+    writeFileSync(join(project, 'looped', 'holder.gd'), 'extends Node\n\nvar held: FixtureLoop\n');
+    const classCache = join(project, '.godot', 'global_script_class_cache.cfg');
+    const looped = parseTextContent(await diagnose('looped/holder.gd'));
+    const rebuiltAt = statSync(classCache).mtimeMs;
+    const again = parseTextContent(await diagnose('looped/holder.gd'));
+    const againAt = statSync(classCache).mtimeMs;
+    rmSync(join(project, 'looped'), { recursive: true });
     assert.deepEqual(
-      get(holder, 'typesMissingFromTheClassCache'),
-      [{ type: 'FixtureStash', declaredIn: 'res://checked/stash.gd' }],
-      said,
+      [get(looped, 'typesMissingFromTheClassCache'), get(looped, 'classesRebuiltFirst')],
+      [[{ type: 'FixtureLoop', declaredIn: 'res://looped/loop.gd' }], undefined],
+      JSON.stringify(looped),
     );
     assert.match(
-      text(get(holder, 'staleAnalysis')),
-      /^FixtureStash \(res:\/\/checked\/stash\.gd\) is declared in this project, but the engine that compiled these scripts resolves a class name from \.godot\/global_script_class_cache\.cfg, which has not been written yet, .* project_import refresh_classes writes the cache from the declarations on disk\./,
-      said,
+      text(get(looped, 'staleAnalysis')),
+      /^FixtureLoop \(res:\/\/looped\/loop\.gd\) is declared in this project and missing from \.godot\/global_script_class_cache\.cfg, .* The cache was rebuilt from the declarations on disk before these scripts were compiled, and the rebuild could not list it\. project_import refresh_classes names why under skipped\.$/,
+      JSON.stringify(looped),
+    );
+    assert.deepEqual(
+      [get(again, 'typesMissingFromTheClassCache'), againAt],
+      [get(looped, 'typesMissingFromTheClassCache'), rebuiltAt],
+      `the same answer, with the cache not written again: ${JSON.stringify(again)}`,
     );
     assert.deepEqual(
       [get(dependent, 'typesMissingFromTheClassCache'), get(entryFor('checked/broken.gd'), 'staleAnalysis')],
@@ -24863,8 +24888,9 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         get(scriptsCheck, 'compiled'),
         asArray(get(scriptsCheck, 'details')).length,
       ],
-      // Six scripts, three of which fail: compiled counts the three that compiled.
-      [false, 3, 3],
+      // Six scripts, two of which fail: compiled counts the four that compiled, the one using the
+      // class the cache was rebuilt for among them.
+      [false, 4, 2],
       `the scripts that compiled, each failure a detail: ${shownInfo}`,
     );
     assert.ok(
@@ -24872,14 +24898,6 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         'res://checked/broken.gd does not compile: line 5, Parse Error: Function "rage()" not found in base self. (and 1 more)',
       ),
       shownInfo,
-    );
-    assert.ok(
-      asArray(get(scriptsCheck, 'details')).some((detail) =>
-        /^res:\/\/checked\/holder\.gd does not compile: line 3, .*FixtureStash.* FixtureStash \(res:\/\/checked\/stash\.gd\) is declared in this project, but /.test(
-          String(detail),
-        ),
-      ),
-      `a failure for the cache says so where it is listed: ${shownInfo}`,
     );
     assert.deepEqual(
       get(judged, 'health', 'checks', 'references', 'details'),
@@ -24898,7 +24916,6 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         'main_scene',
         'compiles',
         'compiles',
-        'compiles',
         'references',
         'references',
         'references',
@@ -24909,13 +24926,12 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     );
     assert.equal(get(judged, 'validation', 'valid'), false, shownInfo);
 
-    // Once a cache exists and lacks the class, the note says the cache is behind the files.
-    mkdirSync(join(project, '.godot'), { recursive: true });
+    // A cache emptied since, as a branch switch can leave it, is rebuilt the same way.
     writeFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'list=[]\n');
     const behind = parseTextContent(await diagnose('checked/holder.gd'));
-    assert.match(
-      text(get(behind, 'staleAnalysis')),
-      /^FixtureStash \(res:\/\/checked\/stash\.gd\) is declared in this project and missing from \.godot\/global_script_class_cache\.cfg, which is where the engine that compiled these scripts resolves a class name from, so the error is the cache being behind the files/,
+    assert.deepEqual(
+      [get(behind, 'clean'), get(behind, 'classesRebuiltFirst')],
+      [true, ['FixtureStash']],
       JSON.stringify(behind),
     );
   } finally {
