@@ -67842,12 +67842,13 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     const bare = await rewire('visibility_changed', 'take', { binds: [] });
     assert.deepEqual(
       [get(bare, 'binds'), get(bare, 'bindsBefore'), get(bare, 'argumentsFit'), get(bare, 'flagNames')],
-      [undefined, [5], false, ['persist']],
-      `binds [] takes them off, and the method then misses its argument: ${JSON.stringify(bare)}`,
+      [undefined, [5], false, ['persist', 'one_shot']],
+      `binds [] takes them off, the method then misses its argument, and the flags stay: ${JSON.stringify(bare)}`,
     );
+    assert.equal(get(bare, 'flagsBefore'), undefined, JSON.stringify(bare));
     assert.equal(
       lineOf('visibility_changed', 'take'),
-      '[connection signal="visibility_changed" from="Emitter" to="Taker" method="take"]',
+      '[connection signal="visibility_changed" from="Emitter" to="Taker" method="take" flags=6]',
     );
     const placed = await rewire('visibility_changed', 'take', { binds: [{ _type: 'int', value: '7' }] });
     assert.deepEqual(
@@ -67857,7 +67858,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     );
     assert.equal(
       lineOf('visibility_changed', 'take'),
-      '[connection signal="visibility_changed" from="Emitter" to="Taker" method="take" binds= [7]]',
+      '[connection signal="visibility_changed" from="Emitter" to="Taker" method="take" flags=6 binds= [7]]',
     );
     const unbound = await rewire('child_entered_tree', 'queue_free', { unbinds: 0 });
     assert.deepEqual(
@@ -68089,7 +68090,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     ).find((one) => get(one, 'methodName') === 'take' && get(one, 'signalName') === 'visibility_changed');
     assert.deepEqual(
       [get(nested, 'flagNames'), get(nested, 'editable'), get(nested, 'binds')],
-      [['persist', 'inherited'], false, [7]],
+      [['persist', 'one_shot', 'inherited'], false, [7]],
       JSON.stringify(nested),
     );
     // One an instanced scene makes on its own root sits on a node the scene holding it owns, so the
