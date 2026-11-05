@@ -40154,7 +40154,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           'var names: PackedStringArray = PackedStringArray(["Ada", "Bram"])\n' +
           'var sign: String = "in\\u00a02"\n' +
           'var art: Texture2D = null\nvar kept: Texture2D = preload("res://shine.tres")\n' +
-          'var aim: Vector2 = Vector2.ZERO\n' +
+          'var aim: Vector2 = Vector2.ZERO\nvar sky: Sky = Sky.new()\n' +
           'var locked: int = 5:\n\tset(value):\n\t\tpass\n\n\n' +
           'func _ready() -> void:\n' +
           '\tfor index: int in 4:\n\t\tvar piece: Part = Part.new()\n' +
@@ -40187,6 +40187,19 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       writeFileSync(
         join(project, 'shine.tres'),
         '[gd_resource type="GradientTexture1D" format=3]\n\n[resource]\nwidth = 16\n',
+      );
+      // Sky.sky_material's hint lists four material classes, and any of them is a sky's material.
+      writeFileSync(
+        join(project, 'panorama.tres'),
+        '[gd_resource type="PanoramaSkyMaterial" format=3]\n\n[resource]\n',
+      );
+      writeFileSync(
+        join(project, 'shaded.tres'),
+        '[gd_resource type="ShaderMaterial" format=3]\n\n[resource]\n',
+      );
+      writeFileSync(
+        join(project, 'plain.tres'),
+        '[gd_resource type="StandardMaterial3D" format=3]\n\n[resource]\n',
       );
       // A game run straight off the files knows a script class only once the project has been
       // imported, which is what writes the list of global classes an editor would have. Run without
@@ -40509,6 +40522,17 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         (await invoke('art_is_kept', [])).result,
         true,
         'the refused resources left the texture as it was',
+      );
+
+      for (const material of ['res://panorama.tres', 'res://shaded.tres']) {
+        const listed = await set('sky:sky_material', material);
+        assert.ok(listed.written, `a hint listing several classes takes each of them: ${listed.said}`);
+      }
+      const plain = await set('sky:sky_material', 'res://plain.tres');
+      assert.equal(plain.written, false, `a class the hint does not list is refused: ${plain.said}`);
+      assert.match(
+        plain.said,
+        /holds an object: res:\/\/plain\.tres is StandardMaterial3D, not one of PanoramaSkyMaterial, ProceduralSkyMaterial, PhysicalSkyMaterial, ShaderMaterial$/,
       );
 
       // A JSON number arrives as a float whether or not it has a fraction, so a refusal calling it
