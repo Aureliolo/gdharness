@@ -36283,17 +36283,16 @@ async function aSubViewportCaptureIsDrawnNow(lowProcessor: boolean): Promise<voi
 }
 
 /**
- * A start whose game came up on a runtime addon other than this server's says so in its answer.
+ * A start on a project holding a runtime addon other than this server's is refused, naming the
+ * upgrade, and once the upgrade's addon is in place the game starts and says nothing of the kind.
  *
- * No runtime_* call is sent to such a game, and the start answered `listening: true` and nothing
- * else, so a caller learned it from the refusal of the first call they made. The project here holds
- * the runtime addon of this release with one script changed and markers naming that build, which is
- * a different build of the same version, as a project set up before a rebuild has. A game reads
- * what it runs from the markers, so a changed script without them is a copy that cannot say, which
- * is not called stale. Then the shipped addon and its markers are put back, which is what the
- * note's upgrade does, and the next start says nothing of the kind.
+ * No runtime_* call is sent to such a game. Started anyway, the answer said so only when the game
+ * announced inside the start's wait, so a caller learned it from the refusal of the first call they
+ * made. The project here holds the runtime addon of this release with one script changed and markers
+ * naming that build, which is a different build of the same version, as a project set up before a
+ * rebuild has. A changed script without markers is a copy that cannot say, which is not called stale.
  */
-async function testAStartSaysItsGameIsOnAnotherBuild(): Promise<void> {
+async function testAStartRefusesAnotherBuildOfItsRuntimeAddon(): Promise<void> {
   const engine = resolveGodotPath();
   if (!engine) {
     if (process.env['GDHARNESS_REQUIRE_GODOT']) {
@@ -36339,31 +36338,27 @@ async function testAStartSaysItsGameIsOnAnotherBuild(): Promise<void> {
   };
   try {
     await server.initialize('regression-test');
-    const behind = await start();
-    try {
-      const said = JSON.stringify(behind);
-      assert.deepEqual(
-        [get(behind, 'runtime', 'listening'), get(behind, 'runtime', 'addonIsStale')],
-        [true, true],
-        `the game listens and the start says it is asked nothing: ${said}`,
-      );
-      assert.match(
-        text(get(behind, 'runtime', 'staleNote')),
-        new RegExp(
-          `is running a different build of the ${SERVER_VERSION.replaceAll('.', '\\.')} runtime addon from the one this server ships, so this server asks it nothing`,
+    const behind =
+      textOf(
+        await server.request(
+          'tools/call',
+          { name: 'editor_run', arguments: { projectPath: project, op: 'start', headless: true } },
+          ENGINE_CALL_TIMEOUT_MS,
         ),
-        said,
-      );
-      // The project as the game announced it, which Godot spells with forward slashes and macOS
-      // with the /private its temporary directory links to.
-      const upgraded = new RegExp(
-        `run {2}npx -y gdharness@${SERVER_VERSION.replaceAll('.', '\\.')} upgrade "([^"]+)" {2}in a shell`,
-      ).exec(text(get(behind, 'runtime', 'staleNote')));
-      assert.ok(upgraded, `and names the upgrade, since the project's own addon is the other build: ${said}`);
-      assert.equal(realpathSync(upgraded[1] ?? ''), realpathSync(project), `of this project: ${said}`);
-    } finally {
-      await stop();
-    }
+      ) ?? '';
+    assert.match(
+      behind,
+      new RegExp(
+        `holds a different build of the runtime addon from the one this ${SERVER_VERSION.replaceAll('.', '\\.')} server ships, so a game started on it would be asked nothing\\.`,
+      ),
+      behind,
+    );
+    const upgraded = new RegExp(
+      `Run {2}npx -y gdharness@${SERVER_VERSION.replaceAll('.', '\\.')} upgrade "([^"]+)" {2}in a shell`,
+    ).exec(behind);
+    assert.ok(upgraded, `and names the upgrade, since the project's own addon is the other build: ${behind}`);
+    assert.equal(realpathSync(upgraded[1] ?? ''), realpathSync(project), `of this project: ${behind}`);
+    assert.deepEqual(discoverRuntimes([runtimeDir]), [], 'and started no game');
 
     writeFileSync(autoload, shipped);
     writeFileSync(join(addon, '.gdharness-digest'), `${shippedRuntimeDigest()}\n`);
@@ -75731,7 +75726,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACaptureOfOneNodeIsThatNodeAtItsOwnPixels,
   testAOneShotEngineRunIsNotTheEditor,
   testASubViewportCaptureIsDrawnNow,
-  testAStartSaysItsGameIsOnAnotherBuild,
+  testAStartRefusesAnotherBuildOfItsRuntimeAddon,
   testAScreenshotHoldsTheGamesOwnWindows,
   testTheRendererIsChosenAndItsMemoryRead,
   testAGameOnTheHiddenDesktopIsNotHeldToARefresh,
