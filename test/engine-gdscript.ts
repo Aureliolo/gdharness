@@ -2602,16 +2602,31 @@ function testOperations(godotPath: string, projectDir: string): void {
     events: [{ type: 'key', keycode: 'Qwxz' }],
   });
   assert.match(farOff.stderr, /Unknown key: Qwxz\. A key is named by its letter/, farOff.stderr);
-  // The engine reads a chord as one name, which is a key and its modifiers rather than a key.
+  // The engine reads a chord as one name, which is a key and its modifiers rather than a key. Its
+  // nearest name is the modifier, so the refusal gives the fields instead.
   const chorded = runRefusedOperation(godotPath, projectDir, 'add_input_action', {
     action_name: 'fixture_dash',
-    events: [{ type: 'key', keycode: 'Ctrl+QuoteLeft' }],
+    events: [{ type: 'key', keycode: 'Ctrl+Shift+QuoteLeft' }],
   });
   assert.match(
     chorded.stderr,
-    /Unknown key: Ctrl\+QuoteLeft\.[^.]* A key held with Ctrl, Alt or Shift is bound with the event's ctrl, alt or shift\. A key is named by/,
+    /Ctrl\+Shift\+QuoteLeft is a key held with modifiers, which are fields of the event: give keycode QuoteLeft with ctrl true and shift true\./,
     chorded.stderr,
   );
+  // The engine drops a part before a + that it reads as no modifier, and answers the key after it.
+  for (const keycode of ['Meta+A', 'A+B']) {
+    const unchorded = runRefusedOperation(godotPath, projectDir, 'add_input_action', {
+      action_name: 'fixture_dash',
+      events: [{ type: 'key', keycode }],
+    });
+    assert.match(
+      unchorded.stderr,
+      new RegExp(
+        `Unknown key: ${keycode.replace('+', '\\+')}\\.[^.]* A key held with Ctrl, Alt or Shift is bound with the event's ctrl, alt or shift\\. A key is named by`,
+      ),
+      unchorded.stderr,
+    );
+  }
   // A field an event needs was given a default, a left click or axis 0 pushed right, and a number the
   // engine has no button or direction for was written as bound.
   const unbound: [Record<string, unknown>, RegExp][] = [
