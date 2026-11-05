@@ -71800,6 +71800,124 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
  * named and left. A delete names what is left pointing at nothing. Each scene is then loaded by an
  * engine, which lists every path that names no node.
  */
+/**
+ * A delete drops what a scene instancing this one kept for the node or below it: values, a node it
+ * added, a connection and an editable mark. The engine skips each with a warning on every load.
+ *
+ * Found by a probe: a value an outer scene set on a button inside a deleted container stayed, and
+ * the outer scene printed three warnings each time it loaded. What it keeps beside the node stays.
+ */
+async function testADeleteDropsWhatOtherScenesKeptBelowIt(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('delete across scenes regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-delete-kin-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-delete-kin-rt-'));
+  const kept =
+    '[node name="Keep" parent="Hall"]\ntext = "Kept"\n\n' +
+    '[connection signal="pressed" from="Hall/Keep" to="." method="on_pressed"]\n';
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="DeleteKin"\n',
+    'outer.gd': 'extends Node2D\n\n\nfunc on_pressed() -> void:\n\tpass\n',
+    'inner.tscn':
+      '[gd_scene format=3]\n\n[node name="Inner" type="Node"]\n\n[node name="Leaf" type="Label" parent="."]\n',
+    'hall.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://inner.tscn" id="1_inner"]\n\n' +
+      '[node name="Hall" type="Control"]\n\n[node name="List" type="VBoxContainer" parent="."]\n\n' +
+      '[node name="Middle" type="Button" parent="List"]\ntext = "Two"\n\n' +
+      '[node name="Inner" parent="List" instance=ExtResource("1_inner")]\n\n' +
+      '[node name="Keep" type="Button" parent="."]\n',
+    'outer.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://hall.tscn" id="1_hall"]\n' +
+      '[ext_resource type="Script" path="res://outer.gd" id="2_outer"]\n\n' +
+      '[node name="Outer" type="Node2D"]\nscript = ExtResource("2_outer")\n\n' +
+      '[node name="Hall" parent="." instance=ExtResource("1_hall")]\n\n' +
+      '[node name="Middle" parent="Hall/List"]\ntext = "Changed"\n\n' +
+      '[node name="Leaf" parent="Hall/List/Inner"]\ntext = "Leaf"\n\n' +
+      '[node name="Extra" type="Node" parent="Hall/List"]\n\n' +
+      kept +
+      '[connection signal="pressed" from="Hall/List/Middle" to="." method="on_pressed"]\n\n' +
+      '[editable path="Hall"]\n[editable path="Hall/List/Inner"]\n',
+    'check.gd':
+      'extends SceneTree\n\n\nfunc _initialize() -> void:\n' +
+      '\tvar made: Node = (load("res://outer.tscn") as PackedScene).instantiate()\n' +
+      '\tprint("checked %d" % made.get_node("Hall").get_child_count())\n\tmade.free()\n\tquit(0)\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const loads = async (): Promise<string[]> => {
+    const ran = await runEngine(godotPath, ['--headless', '--path', project, '-s', 'res://check.gd']);
+    const said = ran.log.all.map((entry) => entry.text);
+    assert.ok(
+      said.some((line) => line.startsWith('checked ')),
+      `the check ran: ${said.join(' | ')}`,
+    );
+    return said.filter((line) => /vanished|recovery process/.test(line));
+  };
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    assert.deepEqual(await loads(), [], 'the fixture loads clean before the delete');
+    await server.initialize('delete-kin');
+    const deleted = parseTextContent(
+      await server.request(
+        'tools/call',
+        {
+          name: 'scene_node',
+          arguments: { projectPath: project, op: 'delete', scenePath: 'hall.tscn', nodePath: 'List' },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    const said = JSON.stringify(deleted);
+    const at = 'res://outer.tscn';
+    assert.deepEqual(
+      [get(deleted, 'deletedNodePath'), get(deleted, 'followed'), get(deleted, 'dropped')],
+      [
+        'List',
+        [at],
+        [
+          { nodePath: 'Hall/List/Middle', entry: 'values', scenePath: at },
+          { nodePath: 'Hall/List/Inner/Leaf', entry: 'values', scenePath: at },
+          { nodePath: 'Hall/List/Extra', entry: 'node', scenePath: at },
+          {
+            nodePath: 'Hall/List/Middle',
+            entry: 'connection',
+            signal: 'pressed',
+            method: 'on_pressed',
+            scenePath: at,
+          },
+          { nodePath: 'Hall/List/Inner', entry: 'editable', scenePath: at },
+        ],
+      ],
+      said,
+    );
+    const outer = readFileSync(join(project, 'outer.tscn'), 'utf8');
+    assert.ok(outer.includes(kept), `what outer.tscn keeps beside List stays: ${outer}`);
+    assert.ok(outer.includes('[editable path="Hall"]'), `and so does the mark on the instance: ${outer}`);
+    assert.doesNotMatch(outer, /Hall\/List/, outer);
+    assert.deepEqual(await loads(), [], 'and it loads with nothing the delete took');
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
 async function testAMovedNodeKeepsThePathsNamingIt(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -72077,7 +72195,7 @@ async function testAMovedNodeKeepsThePathsNamingIt(): Promise<void> {
     assert.ok(fileOf('well.tscn').includes('metadata/unique = NodePath("%Pail/Rope")'), fileOf('well.tscn'));
     assert.deepEqual(await unresolved(), lostInSquare, 'after the reparent');
 
-    // A delete changes nothing else and names every path left pointing at nothing.
+    // A delete names every path left pointing at nothing and drops what another scene kept below it.
     const square = fileOf('square.tscn');
     const plaza = fileOf('plaza.tscn');
     const deleted = await call('scene_node', { op: 'delete', scenePath: 'well.tscn', nodePath: 'Post/Pail' });
@@ -72101,9 +72219,28 @@ async function testAMovedNodeKeepsThePathsNamingIt(): Promise<void> {
       JSON.stringify(deleted),
     );
     assert.equal(get(deleted, 'retargeted'), undefined, JSON.stringify(deleted));
-    assert.equal(get(deleted, 'followed'), undefined, JSON.stringify(deleted));
-    assert.equal(fileOf('square.tscn'), square, 'a delete rewrites no other scene');
-    assert.equal(fileOf('plaza.tscn'), plaza, 'a delete rewrites no other scene');
+    // The node square.tscn added under Pail goes with it, since the engine skips it with a warning
+    // on every load. Every other entry square.tscn keeps stays as it was.
+    const bell = /\[node name="Bell"[^\n]*\]\n[^\n]*\n\n/;
+    assert.match(square, bell, 'square.tscn adds Bell under Pail before the delete');
+    assert.deepEqual(
+      [get(deleted, 'followed'), get(deleted, 'dropped'), fileOf('square.tscn')],
+      [
+        ['res://square.tscn'],
+        [{ nodePath: 'Well1/Post/Pail/Bell', entry: 'node', scenePath: 'res://square.tscn' }],
+        square.replace(bell, ''),
+      ],
+      JSON.stringify(deleted),
+    );
+    assert.equal(fileOf('plaza.tscn'), plaza, 'a scene keeping nothing below the node is not rewritten');
+    const loaded = await runEngine(godotPath, ['--headless', '--path', project, '-s', 'res://check.gd']);
+    const loadSaid = loaded.log.all.map((entry) => entry.text);
+    assert.ok(loadSaid.includes('checked'), `the check ran: ${loadSaid.join(' | ')}`);
+    assert.deepEqual(
+      loadSaid.filter((line) => /vanished|recovery process/.test(line)),
+      [],
+      'and every scene loads with nothing the delete took',
+    );
     assert.ok(
       fileOf('well.tscn').includes('tracks/0/path = NodePath("Post/Pail:rotation")'),
       fileOf('well.tscn'),
@@ -75568,6 +75705,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnInheritedSceneFindsItsBaseAsTheEngineDoes,
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,
   testAMovedNodeKeepsThePathsNamingIt,
+  testADeleteDropsWhatOtherScenesKeptBelowIt,
   testAPropertyHoldingANodeFollowsIt,
   testTheProjectsOwnClassesAreListedAndAnAddonsCounted,
   testAHeadlessWriteSavesWhatTheEditorWould,
