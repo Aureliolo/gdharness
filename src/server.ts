@@ -7112,12 +7112,26 @@ class GodotServer {
       return this.createErrorResponse(place.reason);
     }
     if (place !== null && !existsSync(place.absolutePath)) {
-      const folders = readdirSync(project.value.path, { withFileTypes: true })
+      // The folders inside the deepest part of the path that is a folder, since a typo under game/
+      // answered with the project's top-level folders named nothing near it.
+      const parts = place.relativePath.split('/').filter((part) => part !== '');
+      let kept = parts.length - 1;
+      while (
+        kept > 0 &&
+        statSync(join(project.value.path, ...parts.slice(0, kept)), {
+          throwIfNoEntry: false,
+        })?.isDirectory() !== true
+      ) {
+        kept -= 1;
+      }
+      const within = parts.slice(0, kept).join('/');
+      const folders = readdirSync(join(project.value.path, within), { withFileTypes: true })
         .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
         .map((entry) => entry.name)
         .toSorted();
+      const listed = within === '' ? "The project's folders are" : `The folders in res://${within}/ are`;
       return this.createErrorResponse(
-        `There is nothing at res://${place.relativePath} to search.${folders.length === 0 ? '' : ` The project's folders are ${folders.join(', ')}.`}`,
+        `There is nothing at res://${place.relativePath} to search.${folders.length === 0 ? '' : ` ${listed} ${folders.join(', ')}.`}`,
       );
     }
     // The walk steps over links, but the place asked for is opened through them, so a link inside

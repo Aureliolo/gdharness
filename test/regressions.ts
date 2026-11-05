@@ -44287,6 +44287,7 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
   symlinkSync(outside, join(ours, 'vendor'), 'junction');
   mkdirSync(join(ours, 'scripts'));
   writeFileSync(join(ours, 'scripts', 'hero.gd'), 'extends Node # hero\n');
+  mkdirSync(join(ours, 'scripts', 'foes'));
   const read = async (request: RawRequest, uri: string): Promise<string> => {
     const answer = await request('resources/read', { uri });
     return answer.error?.message ?? text(get(answer.result, 'contents', 0, 'text'));
@@ -44319,6 +44320,21 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
         assert.equal(
           await call('project_search', { projectPath: ours, query: 'extends', path: 'res://nowhere' }),
           "There is nothing at res://nowhere to search. The project's folders are scripts.",
+        );
+        // A path missing under a folder names the folders there, past a file in the way as well.
+        const searchedAt = async (path: string): Promise<unknown> =>
+          await call('project_search', { projectPath: ours, query: 'extends', path });
+        assert.deepEqual(
+          [
+            await searchedAt('res://scripts/fose'),
+            await searchedAt('res://scripts/hero.gd/deeper'),
+            await searchedAt('res://scripts/foes/a/b'),
+          ],
+          [
+            'There is nothing at res://scripts/fose to search. The folders in res://scripts/ are foes.',
+            'There is nothing at res://scripts/hero.gd/deeper to search. The folders in res://scripts/ are foes.',
+            'There is nothing at res://scripts/foes/a/b to search.',
+          ],
         );
         // A query spanning two lines matches nothing a line-by-line search reads, and a limit of no
         // lines or part of one was taken as no limit and as the line after it.
