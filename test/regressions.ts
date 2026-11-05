@@ -72870,13 +72870,16 @@ async function testAHeadlessWriteOfScriptedNodesSavesWhatTheEditorWould(): Promi
       assert.equal(fileOf('note.tscn'), before, 'and nothing written');
     });
 
+    // A class declared since the class cache was written is put in it before the engine loads the
+    // scene, so a script needing it, or loading one that does, compiles and the write lands.
     await check('a scene whose script needs a class missing from the class cache', async () => {
       writeFileSync(join(project, 'late_helper.gd'), 'class_name LateHelper\nextends RefCounted\n');
       writeFileSync(join(project, 'late_note.gd'), 'extends BaseNote\n\nvar helper: LateHelper\n');
-      const scene =
+      writeFileSync(
+        join(project, 'late.tscn'),
         '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://late_note.gd" id="1_late"]\n\n' +
-        '[node name="Late" type="Node"]\nscript = ExtResource("1_late")\n';
-      writeFileSync(join(project, 'late.tscn'), scene);
+          '[node name="Late" type="Node"]\nscript = ExtResource("1_late")\n',
+      );
       const { said, error } = await node({
         op: 'add',
         scenePath: 'late.tscn',
@@ -72884,8 +72887,16 @@ async function testAHeadlessWriteOfScriptedNodesSavesWhatTheEditorWould(): Promi
         nodeType: 'Node',
         nodeName: 'Child',
       });
-      assert.equal(error, true, `refused: ${said}`);
-      assert.equal(fileOf('late.tscn'), scene, 'and nothing written');
+      assert.deepEqual(
+        [error, get(JSON.parse(said) as unknown, 'classesRebuiltFirst')],
+        [false, ['LateHelper']],
+        said,
+      );
+      assert.match(
+        fileOf('late.tscn'),
+        /\[node name="Child" type="Node" parent="\."/,
+        `and the node written: ${fileOf('late.tscn')}`,
+      );
     });
 
     await check("a script the scene's script loads that needs a class missing from the cache", async () => {
@@ -72906,10 +72917,11 @@ async function testAHeadlessWriteOfScriptedNodesSavesWhatTheEditorWould(): Promi
         join(project, 'deep_note.gd'),
         'extends BaseNote\n\nconst SWATCH: PackedScene = preload("res://swatch.tscn")\n',
       );
-      const scene =
+      writeFileSync(
+        join(project, 'deep.tscn'),
         '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://deep_note.gd" id="1_deep"]\n\n' +
-        '[node name="Deep" type="Node"]\nscript = ExtResource("1_deep")\n';
-      writeFileSync(join(project, 'deep.tscn'), scene);
+          '[node name="Deep" type="Node"]\nscript = ExtResource("1_deep")\n',
+      );
       const { said, error } = await node({
         op: 'add',
         scenePath: 'deep.tscn',
@@ -72917,14 +72929,16 @@ async function testAHeadlessWriteOfScriptedNodesSavesWhatTheEditorWould(): Promi
         nodeType: 'Node',
         nodeName: 'Child',
       });
-      assert.equal(error, true, `refused: ${said}`);
-      assert.match(
-        said,
-        /^Nothing was written: res:\/\/swatch\.gd does not compile in a headless engine \(line 5: /,
+      assert.deepEqual(
+        [error, get(JSON.parse(said) as unknown, 'classesRebuiltFirst')],
+        [false, ['LateFill']],
         said,
       );
-      assert.match(said, /project_import refresh_classes/, said);
-      assert.equal(fileOf('deep.tscn'), scene, 'and nothing written');
+      assert.match(
+        fileOf('deep.tscn'),
+        /\[node name="Child" type="Node" parent="\."/,
+        `and the node written: ${fileOf('deep.tscn')}`,
+      );
     });
 
     await check('a set naming a property at its default', async () => {
