@@ -28931,7 +28931,9 @@ async function testAClassCacheHeldShutIsReadOnceLetGo(): Promise<void> {
             [
               '-NoProfile',
               '-Command',
-              `$f = [System.IO.File]::Open('${cache}', 'Open', 'Read', 'None'); [Console]::Out.WriteLine('holding'); $until = (Get-Date).AddSeconds(30); while (-not (Test-Path '${letGo}') -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 10 }; $f.Close()`,
+              // .NET calls rather than cmdlets: a cmdlet's first use loads its module, which took 200 ms
+              // here and past the reader's one second on a CI runner, after the let-go.
+              `$f = [System.IO.File]::Open('${cache}', 'Open', 'Read', 'None'); $until = [DateTime]::UtcNow.AddSeconds(30); [Console]::Out.WriteLine('holding'); while (-not [System.IO.File]::Exists('${letGo}') -and [DateTime]::UtcNow -lt $until) { [System.Threading.Thread]::Sleep(10) }; $f.Close()`,
             ],
             { stdio: ['ignore', 'pipe', 'ignore'] },
           )
@@ -49201,7 +49203,9 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
           '-NoProfile',
           '-NonInteractive',
           '-Command',
-          `$f = [IO.File]::Open('${lock.replaceAll("'", "''")}', 'Open', 'Read', 'ReadWrite'); 'held'; Start-Sleep -Milliseconds 300; $f.Close()`,
+          // A .NET sleep: Start-Sleep's first use loads its module, which lengthens the hold past the
+          // second a removal waits on a slow runner.
+          `$f = [IO.File]::Open('${lock.replaceAll("'", "''")}', 'Open', 'Read', 'ReadWrite'); 'held'; [System.Threading.Thread]::Sleep(300); $f.Close()`,
         ],
         { stdio: ['ignore', 'pipe', 'ignore'] },
       );
