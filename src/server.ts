@@ -2615,7 +2615,10 @@ const TEST_TIMEOUT_MS = 600_000;
 /** The longest a test run goes without a progress notification while no suite finishes. */
 const TEST_HEARTBEAT_MS = 20_000;
 
-/** What the engine says of a script that failed only because one it depends on did. */
+/**
+ * What the engine says of a script that failed only because one it depends on did. Kept in step with
+ * `DEPENDED_FAILED` in src/godot/operations/script_check.gd.
+ */
 const DEPENDED_FAILED = 'Failed to compile depended scripts';
 
 /**

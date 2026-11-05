@@ -26787,6 +26787,50 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         [false, undefined],
         `and one that is wrong besides still does not: ${JSON.stringify(broken)}`,
       );
+      // The engine hands back a script whose dependency does not compile as instantiable, raising
+      // only "Failed to compile depended scripts" at it, and on a second load in the same engine
+      // nothing at all, which is how modify loads a script.
+      writeFileSync(
+        join(project, 'made', 'cracked.gd'),
+        'class_name Cracked\nextends Node2D\n\n\nfunc broken() -> void:\n\tnowhere()\n',
+      );
+      const holding = await call('script_edit', {
+        projectPath: project,
+        op: 'create',
+        scriptPath: 'res://made/holding.gd',
+        content: 'extends Node\n\nvar held: Cracked = null\n',
+      });
+      const widened = await call('script_edit', {
+        projectPath: project,
+        op: 'modify',
+        scriptPath: 'res://made/holding.gd',
+        modifications: [{ type: 'add_variable', name: 'pace', varType: 'float', defaultValue: '1.0' }],
+      });
+      assert.deepEqual(
+        [holding, widened].map((answer) => [get(answer, 'parses'), get(answer, 'dependencies_with_errors')]),
+        [
+          [false, ['res://made/cracked.gd']],
+          [false, ['res://made/cracked.gd']],
+        ],
+        `a script whose dependency fails does not parse: ${JSON.stringify([holding, widened])}`,
+      );
+      assert.match(readFileSync(join(project, 'made', 'holding.gd'), 'utf8'), /^var pace: float = 1\.0$/m);
+      writeFileSync(join(project, 'made', 'cracked.gd'), 'class_name Cracked\nextends Node2D\n');
+      const whole = await call('script_edit', {
+        projectPath: project,
+        op: 'modify',
+        scriptPath: 'res://made/holding.gd',
+        modifications: [{ type: 'add_variable', name: 'lives', varType: 'int', defaultValue: '3' }],
+      });
+      assert.deepEqual(
+        [get(whole, 'parses'), get(whole, 'dependencies_with_errors')],
+        [true, undefined],
+        `and parses once the dependency compiles: ${JSON.stringify(whole)}`,
+      );
+      for (const made of ['cracked', 'holding']) {
+        rmSync(join(project, 'made', `${made}.gd`), { force: true });
+        rmSync(join(project, 'made', `${made}.gd.uid`), { force: true });
+      }
 
       // An export hint can only mean an export, so given alone it still writes one.
       const hinted = await call('script_edit', {
