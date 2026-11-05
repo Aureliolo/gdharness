@@ -587,6 +587,7 @@ func set_export_preset(params: Dictionary) -> Dictionary:
 	var saving: Error = config.save(PRESETS_FILE)
 	if saving != OK:
 		return _log.failure("Failed to save export_presets.cfg: " + error_string(saving))
+	answer["saved"] = true
 	# Written as given, since the file can come after the preset names it. Said, since an export can
 	# fail on it until it does. A secret's path is a secret too, so only its option is named.
 	if not missing.is_empty():

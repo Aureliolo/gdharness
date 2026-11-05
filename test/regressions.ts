@@ -30826,6 +30826,7 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
       },
       `each change is answered with what it held before, the defaults among them: ${JSON.stringify(options)}`,
     );
+    assert.equal(get(options, 'saved'), true, `a write says it saved: ${JSON.stringify(options)}`);
     assert.match(file(), /\[preset\.0\.options\][^[]*binary_format\/embed_pck=true/, file());
     assert.match(file(), /\[preset\.0\.options\][^[]*binary_format\/architecture="arm64"/, file());
 
