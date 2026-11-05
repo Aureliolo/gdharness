@@ -37111,6 +37111,9 @@ async function testAnEvaluateNamesAGlobalClassThatDoesNotParse(): Promise<void> 
       'func look(text: String) -> void:',
       '\tprint(text, count)',
       '',
+      '',
+      'const LIMIT: int = 7',
+      '',
     ].join('\n'),
   );
   writeFileSync(
@@ -37215,6 +37218,15 @@ async function testAnEvaluateNamesAGlobalClassThatDoesNotParse(): Promise<void> 
     // The engine keeps the script it could not load, so a later evaluate leaves the stack alone.
     const again = await call('debug_state', { op: 'evaluate', expression: 'count' });
     assert.deepEqual([get(again.answer, 'value'), get(again.answer, 'note')], ['3', undefined], again.said);
+    // The engine lists a script's variables as its members and not its constants, which an evaluate
+    // reads by name, as the tool's reference says.
+    const read = await call('debug_state', { op: 'variables' });
+    const members = asArray(get(asArray(get(read.answer, 'scopes'))[1], 'variables')).map((one) =>
+      get(one, 'name'),
+    );
+    assert.ok(members.includes('count') && !members.includes('LIMIT'), read.said);
+    const limit = await call('debug_state', { op: 'evaluate', expression: 'LIMIT' });
+    assert.equal(get(limit.answer, 'value'), '7', limit.said);
     await raisedIn('debug_state evaluate');
   } finally {
     if (game.started) {
