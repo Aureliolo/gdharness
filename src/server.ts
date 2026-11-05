@@ -142,10 +142,13 @@ import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
 import { type DebugRequest, EVALUATE_MS, PAUSE_MS, READ_MS, STEP_MS } from './game-debugger.js';
 import {
   answersTo,
+  errorsInReport,
   type FoldedEntry,
   foldedRepeats,
   GameLog,
   type LogEntry,
+  RAISED_FROM,
+  raisedMark,
   type Severity,
 } from './game-log.js';
 import { codeOf, isIdentifier, neverStopsOn } from './gdscript-source.js';
@@ -515,6 +518,26 @@ function pictureToSend(
 
 function kilobytes(bytes: number): string {
   return `${String(Math.max(1, Math.round(bytes / 1024)))} KB`;
+}
+
+/** The text of [param path] from byte [param from] to byte [param to], or nothing when it cannot be read. */
+function bytesBetween(path: string, from: number, to: number): string {
+  if (to <= from) {
+    return '';
+  }
+  let handle: number;
+  try {
+    handle = openSync(path, 'r');
+  } catch {
+    return '';
+  }
+  try {
+    const buffer = Buffer.alloc(to - from);
+    const read = readSync(handle, buffer, 0, buffer.length, from);
+    return buffer.subarray(0, read).toString('utf8');
+  } finally {
+    closeSync(handle);
+  }
 }
 
 /**
@@ -5759,6 +5782,9 @@ class GodotServer {
         const held = await this.debuggedGame(tool === 'debug_control' ? 'move' : 'read');
         if (!held.ok) {
           return held.response;
+        }
+        if (tool === 'debug_state' && op === 'evaluate') {
+          return await this.evaluateInAPlayedGame(played?.throughEditor === true ? played : null, args);
         }
         return tool === 'debug_control'
           ? await this.handleDAP(`dap_${op}`, args)
@@ -11546,6 +11572,101 @@ class GodotServer {
     } finally {
       closeSync(handle);
     }
+  }
+
+  /**
+   * An evaluate of the game the editor plays, [param game] when this server started it, with the
+   * game's error breaks held off while it runs.
+   *
+   * An evaluate loads the script of every global class (core/debugger/remote_debugger.cpp). One
+   * that does not parse breaks the held game on its parse error before the engine prints it
+   * (modules/gdscript/gdscript.cpp, reload). The editor asks that break for no stack, so the
+   * adapter waits on one for good. Measured against a real editor: the evaluate went unanswered,
+   * every debug call after it timed out, and the game stayed held where nothing could let it go.
+   *
+   * Held off, the error is printed into the game's report instead. Each error the evaluate raised
+   * is marked as its own, so the run stays clean. A script among them that does not parse leaves
+   * the frames unreadable until the next stop, as [method GodotDAPClient.markUnreadable] says.
+   */
+  private async evaluateInAPlayedGame(game: GodotProcess | null, args: unknown): Promise<ToolResponse> {
+    if (game !== null) {
+      this.drainErrorReport(game);
+    }
+    const from = game?.errorReportOffset ?? 0;
+    const held = await this.handleViaBridge('error_breaks', { ignore: true });
+    let answer: ToolResponse;
+    let back: ToolResponse | null = null;
+    try {
+      answer = await this.handleDAP('dap_evaluate', args);
+    } finally {
+      if (held.isError !== true) {
+        back = await this.handleViaBridge('error_breaks', {});
+      }
+    }
+    const raised = game === null ? [] : this.raisedByAnEvaluate(game, from);
+    if (answer.isError === true) {
+      return answer;
+    }
+    const notes: string[] = [];
+    const evaluated = asParams(JSON.parse(answer.content[0]?.text ?? '{}'));
+    const failed = raised
+      .filter((error) => error.file === RAISED_FROM['debug_state evaluate'])
+      .map((error) => error.text)
+      .join(' ');
+    // The adapter's note says a null may be a failure nobody can tell apart, and the report tells it.
+    const unsure = readString(evaluated, 'note');
+    if (unsure !== undefined && failed === '') {
+      notes.push(unsure);
+    }
+    const scripts = [
+      ...new Set(raised.map((error) => error.file).filter((file) => file.startsWith('res://'))),
+    ];
+    if (scripts.length > 0) {
+      const unparsed = `An evaluate loads the script of every global class in the project first, and so loaded ${scripts.join(' and ')}, which ${scripts.length === 1 ? 'does' : 'do'} not parse. Until the game next stops, the engine answers every frame's variables with none and lets the game go on rather than answer an evaluate, so neither is asked: debug_control step_over stops it at the next line, where both read true again. script_diagnostics on the script gives its errors, and once it parses an evaluate leaves the frames alone.`;
+      this.dap().markUnreadable(unparsed);
+      notes.push(unparsed);
+    }
+    const restored =
+      back === null || back.isError === true
+        ? undefined
+        : readString(asParams(JSON.parse(back.content[0]?.text ?? '{}')), 'note');
+    if (restored !== undefined) {
+      notes.push(restored);
+    }
+    const { note: _replaced, ...rest } = evaluated;
+    return {
+      content: [
+        {
+          type: 'text',
+          text: answerJson({
+            ...rest,
+            ...(failed === '' ? {} : { failed }),
+            ...(notes.length === 0 ? {} : { note: notes.join(' ') }),
+          }),
+        },
+      ],
+    };
+  }
+
+  /**
+   * The errors [param game] reported since byte [param from] of its report, each marked as raised by
+   * an evaluate, so the run stays clean. None for a game with no report.
+   */
+  private raisedByAnEvaluate(game: GodotProcess, from: number): { text: string; file: string }[] {
+    if (typeof game.errorReport !== 'string') {
+      return [];
+    }
+    this.drainErrorReport(game);
+    const raised = errorsInReport(bytesBetween(game.errorReport, from, game.errorReportOffset ?? from));
+    for (const error of raised) {
+      const mark = raisedMark('debug_state evaluate', error.text, error.file);
+      if (game.transcript !== null) {
+        appendFileSync(game.transcript, mark);
+      } else {
+        game.log.append('stderr', mark);
+      }
+    }
+    return raised;
   }
 
   /**

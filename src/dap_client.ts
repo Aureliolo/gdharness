@@ -186,6 +186,8 @@ export class GodotDAPClient {
   private holdKnown = false;
   /** How many stops this connection has been told of, so a step can wait for the one it causes. */
   private stops = 0;
+  /** Why the frames of the stop numbered `stop` cannot be read. See [markUnreadable]. */
+  private unreadable: { stop: number; why: string } | null = null;
   /** The breakpoints set through this side, by [fileKey]: sent again before every play and kept. */
   private breakpoints = new Map<string, Set<number>>();
   /** How each file is named when it is sent or answered: the spelling this side gave, or else the adapter's. */
@@ -945,6 +947,7 @@ export class GodotDAPClient {
    * polled after that, never the scopes again.
    */
   async getScopes(frameId?: number): Promise<{ name: string; variables: DAPArrayItem[] | null }[]> {
+    this.refuseUnreadable();
     await this.attach();
     const frames = await this.getStackTrace();
     const stackFrame = frameId === undefined ? frames[0] : frames.find((each) => each['id'] === frameId);
@@ -1038,6 +1041,24 @@ export class GodotDAPClient {
     throw new ReadRefusal(
       `What ${expression} comes to did not arrive from the game within ${this.evaluatePatienceMs / 1000}s. It comes from the game through the editor, and the first expression a game evaluates loads the script of every global class in the project first, static initialisers included, so one of those may still be running: ask again`,
     );
+  }
+
+  /**
+   * Refuses every read of a frame's variables, and every evaluate, with [param why] until the game
+   * next stops or is let go.
+   *
+   * After an evaluate has loaded a global class that does not parse, the engine answers a frame's
+   * variables with none and leaves its debug loop for an evaluate, so the game goes on. The
+   * adapter keeps the stack it was sent at the stop, so the stack still reads true.
+   */
+  markUnreadable(why: string): void {
+    this.unreadable = { stop: this.stops, why };
+  }
+
+  private refuseUnreadable(): void {
+    if (this.unreadable !== null && this.unreadable.stop === this.stops && this.halt !== null) {
+      throw new ReadRefusal(this.unreadable.why);
+    }
   }
 
   isConnected(): boolean {

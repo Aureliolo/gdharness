@@ -18,12 +18,14 @@ import { createServer, type Server, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { ALREADY_HELD, RAISED_FROM, type RaisedBy } from './game-log.js';
 import {
+  containerTypeOf,
   type DebuggerMessage,
   DebuggerStream,
   framedCommand,
   type GodotValue,
   MAIN_THREAD,
   type SentValue,
+  TYPE_NAMES,
 } from './godot-variant.js';
 import { shippedAddonsDirectory } from './setup.js';
 
@@ -136,49 +138,6 @@ const INBOX_KEPT = 10_000;
 /** How many lines of what the game printed are kept for `output`. */
 const OUTPUT_KEPT = 1000;
 
-/** The engine's `Variant::Type` names as GDScript spells them, by number. */
-const TYPE_NAMES: readonly string[] = [
-  'Nil',
-  'bool',
-  'int',
-  'float',
-  'String',
-  'Vector2',
-  'Vector2i',
-  'Rect2',
-  'Rect2i',
-  'Vector3',
-  'Vector3i',
-  'Transform2D',
-  'Vector4',
-  'Vector4i',
-  'Plane',
-  'Quaternion',
-  'AABB',
-  'Basis',
-  'Transform3D',
-  'Projection',
-  'Color',
-  'StringName',
-  'NodePath',
-  'RID',
-  'Object',
-  'Callable',
-  'Signal',
-  'Dictionary',
-  'Array',
-  'PackedByteArray',
-  'PackedInt32Array',
-  'PackedInt64Array',
-  'PackedFloat32Array',
-  'PackedFloat64Array',
-  'PackedStringArray',
-  'PackedVector2Array',
-  'PackedVector3Array',
-  'PackedColorArray',
-  'PackedVector4Array',
-];
-
 /** The scopes `stack_frame_var` numbers, in the engine's order. */
 const SCOPES: readonly DebugScope['name'][] = ['Locals', 'Members', 'Globals'];
 
@@ -190,44 +149,79 @@ function isList(value: GodotValue): value is readonly GodotValue[] {
   return Array.isArray(value);
 }
 
-/** [param value] as text, the way a reader of a variables answer wants it. */
-export function shownValue(value: GodotValue, typeHint = ''): string {
+/** A float as GDScript prints one: a whole one with `.0`, so it is not read as an int. */
+function shownFloat(float: number): string {
+  if (Number.isNaN(float)) {
+    return 'nan';
+  }
+  if (!Number.isFinite(float)) {
+    return float > 0 ? 'inf' : '-inf';
+  }
+  return Number.isInteger(float) ? `${String(float)}.0` : String(float);
+}
+
+/**
+ * [param value] as text, the way a reader of a variables answer wants it.
+ *
+ * Inside an array or a dictionary, text is quoted as the engine prints it, a String as `"a"`, a
+ * StringName as `&"a"` and a NodePath as `^"a/b"`. Bare, the key `"4"` read as the key `4`, and
+ * `["1"]` as `[1]`. A value on its own is its text, since its type is beside it.
+ */
+export function shownValue(value: GodotValue, typeHint = '', inside = false): string {
   if (value === null) {
     return 'null';
   }
   if (typeof value === 'string') {
-    return value;
+    return inside ? JSON.stringify(value) : value;
   }
   if (typeof value === 'number' || typeof value === 'boolean') {
     return String(value);
   }
   if (isList(value)) {
-    const shown = value.slice(0, ELEMENTS_SHOWN).map((each) => shownValue(each));
+    const shown = value.slice(0, ELEMENTS_SHOWN).map((each) => shownValue(each, '', true));
     const more = value.length - shown.length;
     return `[${shown.join(', ')}${more > 0 ? `, and ${more} more` : ''}]`;
   }
   if (value.kind === 'dictionary' && 'entries' in value) {
     const shown = value.entries
       .slice(0, ELEMENTS_SHOWN)
-      .map(([key, each]) => `${shownValue(key)}: ${shownValue(each)}`);
+      .map(([key, each]) => `${shownValue(key, '', true)}: ${shownValue(each, '', true)}`);
     const more = value.entries.length - shown.length;
     return `{${shown.join(', ')}${more > 0 ? `, and ${more} more` : ''}}`;
   }
   if (!('values' in value)) {
     return value.kind;
   }
-  if (value.kind === 'Object') {
-    return `<${typeHint === '' ? 'Object' : typeHint}#${String(value.values[0])}>`;
+  const [first] = value.values;
+  switch (value.kind) {
+    case 'Object':
+      return `<${typeHint === '' ? 'Object' : typeHint}#${String(first)}>`;
+    case 'float':
+      return shownFloat(Number(first));
+    case 'StringName':
+      return inside ? `&${JSON.stringify(String(first))}` : String(first);
+    case 'NodePath':
+      return inside ? `^${JSON.stringify(String(first))}` : String(first);
+    default:
+      return `${value.kind}(${value.values.join(', ')})`;
   }
-  return `${value.kind}(${value.values.join(', ')})`;
 }
 
-/** The type of a value the game sent: its class when it named one, else its Variant type. */
-function typeNamed(type: GodotValue | undefined, hint: GodotValue | undefined): string {
+/**
+ * The type of a value the game sent: its class when it named one, the type an array or dictionary
+ * was declared with, else its Variant type.
+ */
+function typeNamed(
+  type: GodotValue | undefined,
+  hint: GodotValue | undefined,
+  value: GodotValue = null,
+): string {
   if (typeof hint === 'string' && hint !== '') {
     return hint;
   }
-  return typeof type === 'number' ? (TYPE_NAMES[type] ?? String(type)) : 'Variant';
+  return (
+    containerTypeOf(value) ?? (typeof type === 'number' ? (TYPE_NAMES[type] ?? String(type)) : 'Variant')
+  );
 }
 
 /** A held game's stack from a `stack_dump`: its size, then file, line and function per frame. */
@@ -267,10 +261,20 @@ export class GameDebugger {
   private outputDropped = 0;
   /** Why the expressions evaluated since the last evaluate began failed, as the engine said it. */
   private readonly expressionErrors: string[] = [];
-  /** Whether an expression a caller asked for is being worked out, so what it raises is theirs. */
-  private evaluating = false;
+  /**
+   * The call an expression is being worked out for, so what it raises is that call's: the game is
+   * held and runs nothing of its own meanwhile.
+   */
+  private evaluating: RaisedBy | null = null;
+  /** The scripts the errors raised during the evaluate under way name, for a load that failed. */
+  private readonly loadedScripts = new Set<string>();
+  /**
+   * Why the held game's stack reads untrue, from an evaluate that loaded a global class that does not
+   * parse until the game stops again, or null.
+   */
+  private unreadable: string | null = null;
   /** Told each error the engine prints for what this debugger asked rather than for the game. */
-  private readonly raised: (by: RaisedBy, text: string) => void;
+  private readonly raised: (by: RaisedBy, text: string, file: string) => void;
   /** Requests answered one at a time: each reads the replies to the commands it sent. */
   private queue: Promise<unknown> = Promise.resolve();
   private readonly server: Server;
@@ -285,7 +289,7 @@ export class GameDebugger {
     port: number,
     breakpoints: readonly string[],
     observers: readonly DebugObserver[],
-    raised: (by: RaisedBy, text: string) => void,
+    raised: (by: RaisedBy, text: string, file: string) => void,
   ) {
     this.server = server;
     this.port = port;
@@ -303,7 +307,7 @@ export class GameDebugger {
   static async open(
     breakpoints: readonly string[],
     observers: readonly DebugObserver[] = [],
-    raised: (by: RaisedBy, text: string) => void = () => undefined,
+    raised: (by: RaisedBy, text: string, file: string) => void = () => undefined,
   ): Promise<GameDebugger> {
     const server = createServer();
     await new Promise<void>((resolve, reject) => {
@@ -413,8 +417,10 @@ export class GameDebugger {
         reason: typeof reason === 'string' ? reason : '',
         hasStack: hasStack === true,
       };
+      this.unreadable = null;
     } else if (received.message === 'debug_exit' && this.held?.thread === received.thread) {
       this.held = null;
+      this.unreadable = null;
     } else if (received.message === 'output') {
       const [strings] = received.data;
       if (Array.isArray(strings)) {
@@ -434,17 +440,20 @@ export class GameDebugger {
       // says why in an error raised from its Expression class, sent after the null.
       const [, , , , file, , , error, described] = received.data;
       const why = typeof described === 'string' && described !== '' ? described : error;
+      if (this.evaluating !== null && typeof why === 'string' && typeof file === 'string') {
+        this.raised(this.evaluating, why, file);
+        if (file.startsWith('res://')) {
+          this.loadedScripts.add(file);
+        }
+      }
       if (file === RAISED_FROM['debug_state evaluate'] && typeof why === 'string') {
         if (this.expressionErrors.length < 10) {
           this.expressionErrors.push(why);
         }
-        if (this.evaluating) {
-          this.raised('debug_state evaluate', why);
-        }
       } else if (file === RAISED_FROM['debug_control pause'] && why === ALREADY_HELD) {
         // A pause sent as the game stopped on a breakpoint reaches it held, and only a debugger
         // sends one, so the error is this one's.
-        this.raised('debug_control pause', why);
+        this.raised('debug_control pause', why, file);
       }
     }
     const at = this.waiters.findIndex((waiter) => waiter.wanted(received));
@@ -550,6 +559,9 @@ export class GameDebugger {
       case 'resume':
         return await this.resume(request.how);
       case 'stack': {
+        if (this.held !== null && this.unreadable !== null) {
+          return { refused: this.unreadable };
+        }
         const frames = await this.stack();
         if (frames === null) {
           return this.notHeld('stack to read');
@@ -846,6 +858,9 @@ export class GameDebugger {
     // A static function has no instance to ask, and the engine lets the game go rather than evaluate
     // in it, so each call of one reads as the same call.
     const asked = members?.variables.some((variable) => variable.name === 'self') === true;
+    // Where a global class does not parse, the first evaluate of a run leaves the stack unreadable
+    // until the next stop, which the first step below is, and the engine keeps the script it could
+    // not load, so no later one does.
     const began = asked ? await this.whichCall(thread) : null;
     const until = Date.now() + STEP_MS;
     for (;;) {
@@ -874,19 +889,29 @@ export class GameDebugger {
   /** Which call the held frame is in, as its instance and the engine's frame counts say. */
   private async whichCall(thread: number): Promise<string | null> {
     this.forget('evaluation_return');
-    this.send(
-      'evaluate',
-      ['[get_instance_id(), Engine.get_process_frames(), Engine.get_physics_frames()]', 0],
-      thread,
-    );
-    const answered = await this.next(GameDebugger.named('evaluation_return'), EVALUATE_MS);
-    return answered !== null && 'data' in answered ? JSON.stringify(answered.data[3] ?? null) : null;
+    this.loadedScripts.clear();
+    this.evaluating = 'debug_control step_out';
+    try {
+      this.send(
+        'evaluate',
+        ['[get_instance_id(), Engine.get_process_frames(), Engine.get_physics_frames()]', 0],
+        thread,
+      );
+      const answered = await this.next(GameDebugger.named('evaluation_return'), EVALUATE_MS);
+      await this.afterTheGlobalClasses();
+      return answered !== null && 'data' in answered ? JSON.stringify(answered.data[3] ?? null) : null;
+    } finally {
+      this.evaluating = null;
+    }
   }
 
   private async variables(frame: number): Promise<DebugAnswer> {
     const held = this.held;
     if (held === null) {
       return this.notHeld('frame whose variables could be read');
+    }
+    if (this.unreadable !== null) {
+      return { refused: this.unreadable };
     }
     const frames = await this.stack();
     if (frames === null) {
@@ -927,7 +952,7 @@ export class GameDebugger {
       scopes[typeof scope === 'number' ? scope : 0]?.variables.push({
         name: named,
         value: shownValue(value ?? null, typeof hint === 'string' ? hint : ''),
-        type: typeNamed(type, hint),
+        type: typeNamed(type, hint, value),
       });
     }
     return { held: this.heldState(), frame, scopes };
@@ -959,12 +984,44 @@ export class GameDebugger {
     }
     this.forget('evaluation_return');
     this.expressionErrors.length = 0;
-    this.evaluating = true;
+    this.loadedScripts.clear();
+    this.evaluating = 'debug_state evaluate';
     try {
-      return await this.evaluated(frame, expression, held.thread);
+      const answer = await this.evaluated(frame, expression, held.thread);
+      const unparsed = await this.afterTheGlobalClasses();
+      if (unparsed === null) {
+        return answer;
+      }
+      const said = answer['note'];
+      return { ...answer, note: typeof said === 'string' ? `${said} ${unparsed}` : unparsed };
     } finally {
-      this.evaluating = false;
+      this.evaluating = null;
     }
+  }
+
+  /**
+   * Why the held game's stack now reads untrue, or null when it reads as before. Read after every
+   * evaluate, which also takes in the errors the evaluate raised: the game sends them before it
+   * answers anything asked after them.
+   *
+   * An evaluate loads the script of every global class first (core/debugger/remote_debugger.cpp).
+   * One that does not parse leaves GDScript reporting its parse error as the stack, one frame with
+   * no script, and no locals for any frame, until the game next stops: the engine clears the error's
+   * file there and not its line (modules/gdscript/gdscript_editor.cpp, debug_break_parse). Asked on,
+   * the variables read none and an evaluate was refused for a static function.
+   */
+  private async afterTheGlobalClasses(): Promise<string | null> {
+    const frames = await this.stack();
+    if (frames?.length !== 1 || frames[0]?.script !== '') {
+      return null;
+    }
+    const scripts = [...this.loadedScripts];
+    const which =
+      scripts.length === 0
+        ? 'a global class whose script does not parse'
+        : `${scripts.join(' and ')}, which ${scripts.length === 1 ? 'does' : 'do'} not parse`;
+    this.unreadable = `An evaluate loads the script of every global class in the project first, and so loaded ${which}. Since then the engine reports that parse error as this held game's stack, with no variables in any frame, until the game next stops: debug_control step_over stops it at the next line, where the stack reads true again. script_diagnostics on the script gives its errors, and once it parses an evaluate leaves the stack alone.`;
+    return this.unreadable;
   }
 
   private async evaluated(frame: number, expression: string, thread: number): Promise<DebugAnswer> {
@@ -981,7 +1038,7 @@ export class GameDebugger {
       frame,
       expression,
       value: shownValue(value ?? null, typeof hint === 'string' ? hint : ''),
-      type: typeNamed(type, hint),
+      type: typeNamed(type, hint, value),
     };
     if (value !== null && value !== undefined) {
       return answer;

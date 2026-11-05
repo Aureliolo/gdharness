@@ -145,15 +145,83 @@ class Reader {
 
 const MAX_DEPTH = 1024;
 
-function containerType(reader: Reader, kind: number): void {
-  if (kind === 1) {
-    reader.u32();
-  } else if (kind === 2 || kind === 3) {
-    reader.string();
-  }
+/** The engine's `Variant::Type` names as GDScript spells them, by number. */
+export const TYPE_NAMES: readonly string[] = [
+  'Nil',
+  'bool',
+  'int',
+  'float',
+  'String',
+  'Vector2',
+  'Vector2i',
+  'Rect2',
+  'Rect2i',
+  'Vector3',
+  'Vector3i',
+  'Transform2D',
+  'Vector4',
+  'Vector4i',
+  'Plane',
+  'Quaternion',
+  'AABB',
+  'Basis',
+  'Transform3D',
+  'Projection',
+  'Color',
+  'StringName',
+  'NodePath',
+  'RID',
+  'Object',
+  'Callable',
+  'Signal',
+  'Dictionary',
+  'Array',
+  'PackedByteArray',
+  'PackedInt32Array',
+  'PackedInt64Array',
+  'PackedFloat32Array',
+  'PackedFloat64Array',
+  'PackedStringArray',
+  'PackedVector2Array',
+  'PackedVector3Array',
+  'PackedColorArray',
+  'PackedVector4Array',
+];
+
+/** The declared type of each typed array and dictionary decoded, such as `Array[String]`. */
+const CONTAINER_TYPES = new WeakMap<object, string>();
+
+/** The type [param value] was declared with, when it is a typed array or dictionary. */
+export function containerTypeOf(value: GodotValue): string | undefined {
+  return value !== null && typeof value === 'object' ? CONTAINER_TYPES.get(value) : undefined;
 }
 
-function decodeValue(reader: Reader, depth: number): GodotValue {
+/**
+ * The element type a container's header names, or null for none. The debugger sends objects as
+ * ids, so an element of any class is named as the class of the id (core/io/marshalls.cpp).
+ */
+function containerType(reader: Reader, kind: number): string | null {
+  if (kind === 1) {
+    const type = reader.u32();
+    return TYPE_NAMES[type] ?? String(type);
+  }
+  if (kind === 2 || kind === 3) {
+    const named = reader.string();
+    return named === 'EncodedObjectAsID' ? 'Object' : named;
+  }
+  return null;
+}
+
+/**
+ * Whether to keep what a value's text needs and a number or a string loses: a float that is whole,
+ * a StringName as against a String. Only for a game's own values, which are shown, never for the
+ * numbers a message carries.
+ */
+interface Decoding {
+  readonly faithful: boolean;
+}
+
+function decodeValue(reader: Reader, depth: number, how: Decoding = { faithful: false }): GodotValue {
   if (depth > MAX_DEPTH) {
     throw new RangeError('a value nests deeper than the engine allows');
   }
@@ -184,11 +252,16 @@ function decodeValue(reader: Reader, depth: number): GodotValue {
       return reader.u32() !== 0;
     case INT:
       return wide ? reader.i64() : reader.i32();
-    case FLOAT:
-      return wide ? reader.f64() : reader.f32();
+    case FLOAT: {
+      const float = wide ? reader.f64() : reader.f32();
+      return how.faithful ? { kind: 'float', values: [float] } : float;
+    }
     case STRING:
-    case 21:
       return reader.string();
+    case 21: {
+      const name = reader.string();
+      return how.faithful ? { kind: 'StringName', values: [name] } : name;
+    }
     case 20:
       return { kind: 'Color', values: [reader.f32(), reader.f32(), reader.f32(), reader.f32()] };
     case 22: {
@@ -202,7 +275,11 @@ function decodeValue(reader: Reader, depth: number): GodotValue {
       if ((flags & 2) !== 0) {
         subnames += 1;
       }
-      return { kind: 'NodePath', values: Array.from({ length: names + subnames }, () => reader.string()) };
+      const named = Array.from({ length: names }, () => reader.string());
+      const sub = Array.from({ length: subnames }, () => reader.string());
+      // As NodePath's own text: absolute with a leading slash, then the names, then each subname.
+      const path = `${(flags & 1) !== 0 ? '/' : ''}${named.join('/')}${sub.map((one) => `:${one}`).join('')}`;
+      return { kind: 'NodePath', values: [path] };
     }
     case 23:
       return { kind: 'RID', values: [reader.u64()] };
@@ -217,20 +294,28 @@ function decodeValue(reader: Reader, depth: number): GodotValue {
     case 26:
       return { kind: 'Signal', values: [reader.string(), reader.u64()] };
     case 27: {
-      containerType(reader, (header >> 16) & 0b11);
-      containerType(reader, (header >> 18) & 0b11);
+      const keys = containerType(reader, (header >> 16) & 0b11);
+      const values = containerType(reader, (header >> 18) & 0b11);
       const count = reader.u32() & 0x7fffffff;
       const entries: [GodotValue, GodotValue][] = [];
       for (let index = 0; index < count; index += 1) {
-        const key = decodeValue(reader, depth + 1);
-        entries.push([key, decodeValue(reader, depth + 1)]);
+        const key = decodeValue(reader, depth + 1, how);
+        entries.push([key, decodeValue(reader, depth + 1, how)]);
       }
-      return { kind: 'dictionary', entries };
+      const dictionary: GodotDictionary = { kind: 'dictionary', entries };
+      if (keys !== null || values !== null) {
+        CONTAINER_TYPES.set(dictionary, `Dictionary[${keys ?? 'Variant'}, ${values ?? 'Variant'}]`);
+      }
+      return dictionary;
     }
     case ARRAY: {
-      containerType(reader, (header >> 16) & 0b11);
+      const element = containerType(reader, (header >> 16) & 0b11);
       const count = reader.u32() & 0x7fffffff;
-      return Array.from({ length: count }, () => decodeValue(reader, depth + 1));
+      const array = Array.from({ length: count }, () => decodeValue(reader, depth + 1, how));
+      if (element !== null) {
+        CONTAINER_TYPES.set(array, `Array[${element}]`);
+      }
+      return array;
     }
     case 29: {
       const count = reader.u32();
@@ -259,10 +344,13 @@ function decodeValue(reader: Reader, depth: number): GodotValue {
   }
 }
 
-/** The one value [param bytes] holds, which must be all of it. */
-export function decodeVariant(bytes: Uint8Array): GodotValue {
+/**
+ * The one value [param bytes] holds, which must be all of it. [param faithful] keeps each float and
+ * StringName as a value of its own kind, for a value that is to be shown.
+ */
+export function decodeVariant(bytes: Uint8Array, faithful = false): GodotValue {
   const reader = new Reader(new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength));
-  const value = decodeValue(reader, 0);
+  const value = decodeValue(reader, 0, { faithful });
   if (reader.remaining !== 0) {
     throw new RangeError(`${reader.remaining} bytes left over after the value`);
   }
@@ -371,6 +459,12 @@ export class DebuggerStream {
   }
 }
 
+/**
+ * The messages carrying a game's own value, which is shown as the engine shows it. Their other
+ * fields are a name, ints and a class name, which a faithful decoding leaves as they are.
+ */
+const SHOWN_VALUES: ReadonlySet<string> = new Set(['stack_frame_var', 'evaluation_return']);
+
 function readMessage(body: Uint8Array): DebuggerMessage {
   let value: GodotValue;
   try {
@@ -384,6 +478,13 @@ function readMessage(body: Uint8Array): DebuggerMessage {
   const [message, thread, data] = value as readonly GodotValue[];
   if (typeof message !== 'string' || typeof thread !== 'number' || !Array.isArray(data)) {
     return { unreadable: 'a message whose name, thread or data is the wrong type' };
+  }
+  const shown = SHOWN_VALUES.has(message) ? decodeVariant(body, true) : null;
+  if (Array.isArray(shown)) {
+    const [, , values] = shown as readonly GodotValue[];
+    if (Array.isArray(values)) {
+      return { message, thread, data: values as readonly GodotValue[] };
+    }
   }
   return { message, thread, data: data as readonly GodotValue[] };
 }

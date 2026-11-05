@@ -17,6 +17,7 @@ const ANSWERED_WHILE_SCANNING: Array[String] = [
 	"playing_status",
 	"stop_playing",
 	"profile_read",
+	"error_breaks",
 ]
 ## The tools answered inside a task of the editor's progress dialog, because none of them writes
 ## anything the editor's task could be in the middle of.
@@ -25,6 +26,7 @@ const ANSWERED_DURING_A_TASK: Array[String] = [
 	"playing_status",
 	"stop_playing",
 	"profile_read",
+	"error_breaks",
 ]
 ## What an editor opened to quit once a process has gone carries after `--`, with that pid after it.
 ## Kept in step with `UNTIL_MARK` in src/launch.ts.
