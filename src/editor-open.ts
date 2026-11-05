@@ -21,7 +21,13 @@ import { editorsOfProjectIn, processTree, startTimesOf } from './process-childre
 import { type RestartNote, restartOwed, restartSettled } from './restart-note.js';
 import { runtimeDirectory } from './runtime-client.js';
 import { gdharnessCommand, SERVER_VERSION } from './server-version.js';
-import { inspectProject } from './setup.js';
+import {
+  inspectProject,
+  installedAddonVersion,
+  installedEditorDigest,
+  shippedEditorDigest,
+} from './setup.js';
+import { isNewer } from './update-check.js';
 import { inTurnFor } from './write-turns.js';
 
 /**
@@ -67,6 +73,34 @@ export function editorAddonMissing(projectPath: string): { why: string; remedies
       : [
           `No gdharness tool installs the addon: run  ${gdharnessCommand(SERVER_VERSION, `setup "${projectPath}" --no-connect`)}  in a shell, which installs and enables the addons and writes no harness configuration`,
         ],
+  };
+}
+
+/**
+ * Why an editor opened on [param projectPath] would be asked nothing but to quit, read off the
+ * digest its editor addon was installed with, or null when that is this server's or unmarked.
+ *
+ * Opened anyway, the launch answered launched, the editor imported the project and connected, and
+ * only then did editor_status say every call was refused until an upgrade.
+ */
+export function editorAddonOfAnotherRelease(projectPath: string): { why: string; remedies: string[] } | null {
+  const onDisk = installedEditorDigest(projectPath);
+  if (onDisk === null || onDisk === shippedEditorDigest()) {
+    return null;
+  }
+  const version = installedAddonVersion(projectPath);
+  const addon =
+    version === null || version === SERVER_VERSION
+      ? `a different build of the editor addon from the one this ${SERVER_VERSION} server ships`
+      : `the ${version} editor addon while this server ships ${SERVER_VERSION}`;
+  return {
+    why: `${projectPath} holds ${addon}`,
+    remedies:
+      version !== null && isNewer(version, SERVER_VERSION)
+        ? [`This server is the older half: reconnect it in your harness so it spawns ${version}`]
+        : [
+            `Run  ${gdharnessCommand(SERVER_VERSION, `upgrade "${projectPath}"`)}  in a shell, which installs this server's addons, then open again`,
+          ],
   };
 }
 
