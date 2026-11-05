@@ -9788,6 +9788,32 @@ function testProjectGodotMultilineValues(): void {
   assert.equal(typeof get(unterminated, 's', 'broken'), 'string', 'an unterminated value should not hang');
 }
 
+/** A quoted value reads as Godot's VariantParser reads it, so a name saved with quotes keeps them. */
+function testProjectGodotStringEscapes(): void {
+  const escaped = parseProjectGodot(
+    [
+      '[application]',
+      String.raw`config/name="Probe \"Q\""`,
+      String.raw`a="C:\\games\\x"`,
+      String.raw`b="tab\there\nline\r\b\f"`,
+      String.raw`c="\u00e9 \U01F600 \ud83d\ude00 \q"`,
+      String.raw`d="\u00zz \U110000"`,
+      String.raw`e='kept \"'`,
+    ].join('\n'),
+  )['application'];
+  assert.deepEqual(
+    { ...escaped },
+    {
+      'config/name': 'Probe "Q"',
+      a: String.raw`C:\games\x`,
+      b: 'tab\there\nline\r\b\f',
+      c: 'é 😀 😀 q',
+      d: String.raw`\u00zz \U110000`,
+      e: String.raw`kept \"`,
+    },
+  );
+}
+
 /**
  * A path read as a location inside the project has to land inside it.
  *
@@ -24572,6 +24598,9 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       `each error at its line: ${shown}`,
     );
     assert.equal(get(answered, 'checkedBy'), 'engine', shown);
+    // The class the cache lacks is put in it before the engine compiles anything, so what uses it
+    // compiles, and the answer names it.
+    assert.deepEqual(get(answered, 'classesRebuiltFirst'), ['FixtureStash'], shown);
     assert.match(text(get(answered, 'languageServer')), /^Godot LSP is unavailable on port \d+/, shown);
     assert.match(
       text(get(answered, 'note')),
@@ -24652,7 +24681,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         get(all, 'nothingReported'),
         get(all, 'checkedBy'),
       ],
-      [false, 5, 4, 0, ['checked/fine.gd', 'checked/stash.gd'], 'engine'],
+      [false, 5, 3, 0, ['checked/fine.gd', 'checked/holder.gd', 'checked/stash.gd'], 'engine'],
       `a folder compiled whole, an engine past each failure, the clean scripts named apart: ${said}`,
     );
     const entryFor = (scriptPath: string): unknown =>
@@ -24714,18 +24743,40 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       ],
       `a script failing for what it loads says which, without a line of its own: ${said}`,
     );
-    // A class the project declares and the cache lacks is named as the cache's fault, and a script
+    assert.equal(
+      get(all, 'classesRebuiltFirst'),
+      undefined,
+      `a cache already current is left alone: ${said}`,
+    );
+    // A class the rebuild cannot list, a script extending itself, is named as the cache's fault for
+    // the script using it, and the cache is not rebuilt for it again on the next call. A script
     // failing for anything else is told nothing of the cache.
-    const holder = entryFor('checked/holder.gd');
+    mkdirSync(join(project, 'looped'));
+    writeFileSync(
+      join(project, 'looped', 'loop.gd'),
+      'class_name FixtureLoop\nextends "res://looped/loop.gd"\n',
+    );
+    writeFileSync(join(project, 'looped', 'holder.gd'), 'extends Node\n\nvar held: FixtureLoop\n');
+    const classCache = join(project, '.godot', 'global_script_class_cache.cfg');
+    const looped = parseTextContent(await diagnose('looped/holder.gd'));
+    const rebuiltAt = statSync(classCache).mtimeMs;
+    const again = parseTextContent(await diagnose('looped/holder.gd'));
+    const againAt = statSync(classCache).mtimeMs;
+    rmSync(join(project, 'looped'), { recursive: true });
     assert.deepEqual(
-      get(holder, 'typesMissingFromTheClassCache'),
-      [{ type: 'FixtureStash', declaredIn: 'res://checked/stash.gd' }],
-      said,
+      [get(looped, 'typesMissingFromTheClassCache'), get(looped, 'classesRebuiltFirst')],
+      [[{ type: 'FixtureLoop', declaredIn: 'res://looped/loop.gd' }], undefined],
+      JSON.stringify(looped),
     );
     assert.match(
-      text(get(holder, 'staleAnalysis')),
-      /^FixtureStash \(res:\/\/checked\/stash\.gd\) is declared in this project, but the engine that compiled these scripts resolves a class name from \.godot\/global_script_class_cache\.cfg, which has not been written yet, .* project_import refresh_classes writes the cache from the declarations on disk\./,
-      said,
+      text(get(looped, 'staleAnalysis')),
+      /^FixtureLoop \(res:\/\/looped\/loop\.gd\) is declared in this project and missing from \.godot\/global_script_class_cache\.cfg, .* The cache was rebuilt from the declarations on disk before these scripts were compiled, and the rebuild could not list it\. project_import refresh_classes names why under skipped\.$/,
+      JSON.stringify(looped),
+    );
+    assert.deepEqual(
+      [get(again, 'typesMissingFromTheClassCache'), againAt],
+      [get(looped, 'typesMissingFromTheClassCache'), rebuiltAt],
+      `the same answer, with the cache not written again: ${JSON.stringify(again)}`,
     );
     assert.deepEqual(
       [get(dependent, 'typesMissingFromTheClassCache'), get(entryFor('checked/broken.gd'), 'staleAnalysis')],
@@ -24837,8 +24888,9 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         get(scriptsCheck, 'compiled'),
         asArray(get(scriptsCheck, 'details')).length,
       ],
-      // Six scripts, three of which fail: compiled counts the three that compiled.
-      [false, 3, 3],
+      // Six scripts, two of which fail: compiled counts the four that compiled, the one using the
+      // class the cache was rebuilt for among them.
+      [false, 4, 2],
       `the scripts that compiled, each failure a detail: ${shownInfo}`,
     );
     assert.ok(
@@ -24846,14 +24898,6 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         'res://checked/broken.gd does not compile: line 5, Parse Error: Function "rage()" not found in base self. (and 1 more)',
       ),
       shownInfo,
-    );
-    assert.ok(
-      asArray(get(scriptsCheck, 'details')).some((detail) =>
-        /^res:\/\/checked\/holder\.gd does not compile: line 3, .*FixtureStash.* FixtureStash \(res:\/\/checked\/stash\.gd\) is declared in this project, but /.test(
-          String(detail),
-        ),
-      ),
-      `a failure for the cache says so where it is listed: ${shownInfo}`,
     );
     assert.deepEqual(
       get(judged, 'health', 'checks', 'references', 'details'),
@@ -24872,7 +24916,6 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         'main_scene',
         'compiles',
         'compiles',
-        'compiles',
         'references',
         'references',
         'references',
@@ -24883,13 +24926,12 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     );
     assert.equal(get(judged, 'validation', 'valid'), false, shownInfo);
 
-    // Once a cache exists and lacks the class, the note says the cache is behind the files.
-    mkdirSync(join(project, '.godot'), { recursive: true });
+    // A cache emptied since, as a branch switch can leave it, is rebuilt the same way.
     writeFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'list=[]\n');
     const behind = parseTextContent(await diagnose('checked/holder.gd'));
-    assert.match(
-      text(get(behind, 'staleAnalysis')),
-      /^FixtureStash \(res:\/\/checked\/stash\.gd\) is declared in this project and missing from \.godot\/global_script_class_cache\.cfg, which is where the engine that compiled these scripts resolves a class name from, so the error is the cache being behind the files/,
+    assert.deepEqual(
+      [get(behind, 'clean'), get(behind, 'classesRebuiltFirst')],
+      [true, ['FixtureStash']],
       JSON.stringify(behind),
     );
   } finally {
@@ -26787,6 +26829,50 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         [false, undefined],
         `and one that is wrong besides still does not: ${JSON.stringify(broken)}`,
       );
+      // The engine hands back a script whose dependency does not compile as instantiable, raising
+      // only "Failed to compile depended scripts" at it, and on a second load in the same engine
+      // nothing at all, which is how modify loads a script.
+      writeFileSync(
+        join(project, 'made', 'cracked.gd'),
+        'class_name Cracked\nextends Node2D\n\n\nfunc broken() -> void:\n\tnowhere()\n',
+      );
+      const holding = await call('script_edit', {
+        projectPath: project,
+        op: 'create',
+        scriptPath: 'res://made/holding.gd',
+        content: 'extends Node\n\nvar held: Cracked = null\n',
+      });
+      const widened = await call('script_edit', {
+        projectPath: project,
+        op: 'modify',
+        scriptPath: 'res://made/holding.gd',
+        modifications: [{ type: 'add_variable', name: 'pace', varType: 'float', defaultValue: '1.0' }],
+      });
+      assert.deepEqual(
+        [holding, widened].map((answer) => [get(answer, 'parses'), get(answer, 'dependencies_with_errors')]),
+        [
+          [false, ['res://made/cracked.gd']],
+          [false, ['res://made/cracked.gd']],
+        ],
+        `a script whose dependency fails does not parse: ${JSON.stringify([holding, widened])}`,
+      );
+      assert.match(readFileSync(join(project, 'made', 'holding.gd'), 'utf8'), /^var pace: float = 1\.0$/m);
+      writeFileSync(join(project, 'made', 'cracked.gd'), 'class_name Cracked\nextends Node2D\n');
+      const whole = await call('script_edit', {
+        projectPath: project,
+        op: 'modify',
+        scriptPath: 'res://made/holding.gd',
+        modifications: [{ type: 'add_variable', name: 'lives', varType: 'int', defaultValue: '3' }],
+      });
+      assert.deepEqual(
+        [get(whole, 'parses'), get(whole, 'dependencies_with_errors')],
+        [true, undefined],
+        `and parses once the dependency compiles: ${JSON.stringify(whole)}`,
+      );
+      for (const made of ['cracked', 'holding']) {
+        rmSync(join(project, 'made', `${made}.gd`), { force: true });
+        rmSync(join(project, 'made', `${made}.gd.uid`), { force: true });
+      }
 
       // An export hint can only mean an export, so given alone it still writes one.
       const hinted = await call('script_edit', {
@@ -44243,6 +44329,7 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
   symlinkSync(outside, join(ours, 'vendor'), 'junction');
   mkdirSync(join(ours, 'scripts'));
   writeFileSync(join(ours, 'scripts', 'hero.gd'), 'extends Node # hero\n');
+  mkdirSync(join(ours, 'scripts', 'foes'));
   const read = async (request: RawRequest, uri: string): Promise<string> => {
     const answer = await request('resources/read', { uri });
     return answer.error?.message ?? text(get(answer.result, 'contents', 0, 'text'));
@@ -44275,6 +44362,21 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
         assert.equal(
           await call('project_search', { projectPath: ours, query: 'extends', path: 'res://nowhere' }),
           "There is nothing at res://nowhere to search. The project's folders are scripts.",
+        );
+        // A path missing under a folder names the folders there, past a file in the way as well.
+        const searchedAt = async (path: string): Promise<unknown> =>
+          await call('project_search', { projectPath: ours, query: 'extends', path });
+        assert.deepEqual(
+          [
+            await searchedAt('res://scripts/fose'),
+            await searchedAt('res://scripts/hero.gd/deeper'),
+            await searchedAt('res://scripts/foes/a/b'),
+          ],
+          [
+            'There is nothing at res://scripts/fose to search. The folders in res://scripts/ are foes.',
+            'There is nothing at res://scripts/hero.gd/deeper to search. The folders in res://scripts/ are foes.',
+            'There is nothing at res://scripts/foes/a/b to search.',
+          ],
         );
         // A query spanning two lines matches nothing a line-by-line search reads, and a limit of no
         // lines or part of one was taken as no limit and as the line after it.
@@ -72768,13 +72870,16 @@ async function testAHeadlessWriteOfScriptedNodesSavesWhatTheEditorWould(): Promi
       assert.equal(fileOf('note.tscn'), before, 'and nothing written');
     });
 
+    // A class declared since the class cache was written is put in it before the engine loads the
+    // scene, so a script needing it, or loading one that does, compiles and the write lands.
     await check('a scene whose script needs a class missing from the class cache', async () => {
       writeFileSync(join(project, 'late_helper.gd'), 'class_name LateHelper\nextends RefCounted\n');
       writeFileSync(join(project, 'late_note.gd'), 'extends BaseNote\n\nvar helper: LateHelper\n');
-      const scene =
+      writeFileSync(
+        join(project, 'late.tscn'),
         '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://late_note.gd" id="1_late"]\n\n' +
-        '[node name="Late" type="Node"]\nscript = ExtResource("1_late")\n';
-      writeFileSync(join(project, 'late.tscn'), scene);
+          '[node name="Late" type="Node"]\nscript = ExtResource("1_late")\n',
+      );
       const { said, error } = await node({
         op: 'add',
         scenePath: 'late.tscn',
@@ -72782,8 +72887,16 @@ async function testAHeadlessWriteOfScriptedNodesSavesWhatTheEditorWould(): Promi
         nodeType: 'Node',
         nodeName: 'Child',
       });
-      assert.equal(error, true, `refused: ${said}`);
-      assert.equal(fileOf('late.tscn'), scene, 'and nothing written');
+      assert.deepEqual(
+        [error, get(JSON.parse(said) as unknown, 'classesRebuiltFirst')],
+        [false, ['LateHelper']],
+        said,
+      );
+      assert.match(
+        fileOf('late.tscn'),
+        /\[node name="Child" type="Node" parent="\."/,
+        `and the node written: ${fileOf('late.tscn')}`,
+      );
     });
 
     await check("a script the scene's script loads that needs a class missing from the cache", async () => {
@@ -72804,10 +72917,11 @@ async function testAHeadlessWriteOfScriptedNodesSavesWhatTheEditorWould(): Promi
         join(project, 'deep_note.gd'),
         'extends BaseNote\n\nconst SWATCH: PackedScene = preload("res://swatch.tscn")\n',
       );
-      const scene =
+      writeFileSync(
+        join(project, 'deep.tscn'),
         '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://deep_note.gd" id="1_deep"]\n\n' +
-        '[node name="Deep" type="Node"]\nscript = ExtResource("1_deep")\n';
-      writeFileSync(join(project, 'deep.tscn'), scene);
+          '[node name="Deep" type="Node"]\nscript = ExtResource("1_deep")\n',
+      );
       const { said, error } = await node({
         op: 'add',
         scenePath: 'deep.tscn',
@@ -72815,14 +72929,16 @@ async function testAHeadlessWriteOfScriptedNodesSavesWhatTheEditorWould(): Promi
         nodeType: 'Node',
         nodeName: 'Child',
       });
-      assert.equal(error, true, `refused: ${said}`);
-      assert.match(
-        said,
-        /^Nothing was written: res:\/\/swatch\.gd does not compile in a headless engine \(line 5: /,
+      assert.deepEqual(
+        [error, get(JSON.parse(said) as unknown, 'classesRebuiltFirst')],
+        [false, ['LateFill']],
         said,
       );
-      assert.match(said, /project_import refresh_classes/, said);
-      assert.equal(fileOf('deep.tscn'), scene, 'and nothing written');
+      assert.match(
+        fileOf('deep.tscn'),
+        /\[node name="Child" type="Node" parent="\."/,
+        `and the node written: ${fileOf('deep.tscn')}`,
+      );
     });
 
     await check('a set naming a property at its default', async () => {
@@ -75589,6 +75705,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheWrittenConfigNamesAProgramThatStarts,
 
   testProjectGodotMultilineValues,
+  testProjectGodotStringEscapes,
   testLettingGoOfTheAdapterSendsItNothing,
   testAVariablesReadSaysWhatItCouldNotRead,
   testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer,

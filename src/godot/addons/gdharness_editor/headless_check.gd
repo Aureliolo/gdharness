@@ -622,9 +622,8 @@ class GdhParseErrors:
 		return (
 			(
 				"%s does not compile in a headless engine (line %d: %s), and it loads with %s, "
-				+ "so the scene's scripts would not run as they do in the game. A class_name added "
-				+ "since the class cache was built is taken in by project_import refresh_classes. "
-				+ "Fix the script or refresh the classes, then ask again."
+				+ "so the scene's scripts would not run as they do in the game. Fix the script, "
+				+ "then ask again."
 			)
 			% [first["file"], first["line"], first["message"], scene_path]
 		)

@@ -20,6 +20,9 @@ const RELOAD: String = "GDScript::reload"
 ## What the engine puts on the end of a warning it raised as an error. Kept in step with
 ## `RAISED_WARNING` in src/server.ts.
 const RAISED: String = " (Warning treated as error.)"
+## What the engine raises at a script that failed only because one it depends on did. Kept in step
+## with `DEPENDED_FAILED` in src/server.ts.
+const DEPENDED_FAILED: String = "Failed to compile depended scripts"
 ## Where the project's warning levels are, each 0 to ignore, 1 to warn and 2 to raise as an error.
 const WARNING_LEVELS: String = "debug/gdscript/warnings/"
 const WARN: int = 1

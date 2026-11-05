@@ -217,12 +217,12 @@ the declaration and the cache can both be right while the editor stays blind to 
 under \`unseenByEditor\`, run \`editor_rescan\` again, which needs no change to the declaring
 script. \`editor_launch restart\` also fixes it.
 
-With no editor open, the headless engine that compiles for \`script_diagnostics\` and for
-\`project_info\`'s health and validation resolves class names only from that cache file. A
-project never opened, as a fresh clone is, has no such file, so every script typed by a project
-class fails there. \`script_diagnostics\` names the class under
-\`typesMissingFromTheClassCache\`, health and validation say so beside the failure, and
-\`project_import refresh_classes\` writes the cache from the declarations on disk.
+With no editor open, every headless engine resolves class names only from that cache file. A
+project never opened, as a fresh clone is, has no such file. So before a headless engine starts,
+the cache is rebuilt from the declarations on disk whenever it lacks one, and
+\`classesRebuiltFirst\` names those classes. A class the rebuild cannot list, such as a script
+extending itself, is named under \`typesMissingFromTheClassCache\` by \`script_diagnostics\`, and
+health and validation say so beside the failure.
 
 The scan writes \`.godot/global_script_class_cache.cfg\` from the list the editor is holding, so
 a class it cannot resolve would go out of that file with it. The answer names that loss under

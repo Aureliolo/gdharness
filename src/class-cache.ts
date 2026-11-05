@@ -1113,10 +1113,11 @@ export function uncachedForTheEngineNote(projectPath: string, types: readonly Un
   const state = cacheExists
     ? `missing from .godot/global_script_class_cache.cfg, which is where the engine that compiled these scripts resolves a class name from, so the error is the cache being behind the files rather than the script.`
     : `the engine that compiled these scripts resolves a class name from .godot/global_script_class_cache.cfg, which has not been written yet, as in a project no editor has opened, so the error is the missing cache rather than the script.`;
+  // Every compile here rebuilds the cache first, so a class still missing is one the rebuild left out.
   return (
     `${named} ${one ? 'is' : 'are'} declared in this project${cacheExists ? ' and' : ', but'} ${state} ` +
-    'project_import refresh_classes writes the cache from the declarations on disk. editor_run start ' +
-    'writes it before a game, and an editor opening the project writes it when it scans.'
+    `The cache was rebuilt from the declarations on disk before these scripts were compiled, and the rebuild could not list ${one ? 'it' : 'them'}. ` +
+    'project_import refresh_classes names why under skipped.'
   );
 }
 

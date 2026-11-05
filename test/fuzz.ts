@@ -262,10 +262,11 @@ const writtenValue: fc.Arbitrary<WrittenValue> = fc.oneof(
     .map((n) => ({ text: (n / 1000).toString(), value: n / 1000 })),
   fc.boolean().map((flag) => ({ text: String(flag), value: flag })),
   fc.constant({ text: 'null', value: null }),
+  // Escaped as Godot writes a setting, which escapes a backslash and a quote and nothing else.
   fc
     .string({ unit: 'grapheme', maxLength: 30 })
-    .filter((text) => !text.includes('"') && !text.includes('\\'))
-    .map((text) => ({ text: `"${text}"`, value: text })),
+    .filter((text) => !/[\r\n]/.test(text))
+    .map((text) => ({ text: `"${text.replaceAll('\\', '\\\\').replaceAll('"', '\\"')}"`, value: text })),
   fc
     .string({ unit: 'grapheme', maxLength: 30 })
     .filter((text) => !/["'\\{}[\]()]/.test(text))

@@ -108,10 +108,9 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 	# project is imported, so a script made here was missing from every check tracking the sidecars.
 	var uid: String = _uid_beside(full_script_path)
 
-	var written: Script = ResourceLoader.load(
-		full_script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE
-	)
-	var parses: bool = _parses(written)
+	var load_of: GdhWatchedLoad = GdhWatchedLoad.new(full_script_path)
+	var written: Script = load_of.loaded
+	var parses: bool = load_of.parses
 	var answer: Dictionary = {
 		"success": true,
 		"script_path": script_path,
@@ -123,6 +122,8 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 	}
 	if not uid.is_empty():
 		answer["uid"] = uid
+	if not load_of.others.is_empty():
+		answer["dependencies_with_errors"] = load_of.others
 	# Read off the file as the engine parsed it rather than off the arguments, which content leaves
 	# out. A script that does not parse tells the engine nothing, and its empty base and name were
 	# answered for a file whose header says otherwise, so those are read off the text instead.
@@ -217,11 +218,9 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 	# Loaded only to learn whether it parsed as it was. What the engine says of that file carries
 	# its old line numbers, and beside the errors of the file written it named lines that had moved.
 	printerr(GdhLog.ASIDE)
-	var before: Script = ResourceLoader.load(
-		full_script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE
-	)
+	var before: GdhWatchedLoad = GdhWatchedLoad.new(full_script_path)
 	printerr(GdhLog.RESUMED)
-	var parsed_before: bool = _parses(before)
+	var parsed_before: bool = before.parses
 
 	# All of them checked before any is made, so a call is made whole or not at all: one skipped for
 	# a missing name used to leave the rest written and the answer saying success over an empty
@@ -282,13 +281,14 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 	if not rewrote:
 		return _log.failure("Failed to write to script file: " + full_script_path)
 
-	var caught: GdhScriptCheck.GdhCaught = GdhScriptCheck.GdhCaught.new()
-	OS.add_logger(caught)
-	var made: Script = ResourceLoader.load(
-		full_script_path, "Script", ResourceLoader.CACHE_MODE_IGNORE
-	)
-	OS.remove_logger(caught)
-	var parses: bool = _parses(made)
+	var made: GdhWatchedLoad = GdhWatchedLoad.new(full_script_path)
+	# A dependency that failed stays failed in this engine, and an addition cannot mend it, but a
+	# second load compiles the script in silence and reads as one that parses.
+	var parses: bool = made.parses and not before.through_dependency
+	var dependencies: Array[String] = before.others.duplicate()
+	for path: String in made.others:
+		if not path in dependencies:
+			dependencies.append(path)
 	# The names checked above are the script's own, and a member the base class declares, or a body
 	# that does not compile, is found only by the engine. A script left broken by an addition breaks
 	# every scene that uses it, so it goes back as it was. One already broken is written, as the
@@ -305,19 +305,23 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 					% script_path
 				)
 			)
-		return _log.failure(
-			(
-				"Nothing was changed: %s parses now, and would not with these additions: %s"
-				% [script_path, _reasons(caught.raised, full_script_path)]
-			)
+		var refusal: String = (
+			"Nothing was changed: %s parses now, and would not with these additions: %s"
+			% [script_path, _reasons(made.raised, full_script_path)]
 		)
-	return {
+		if not made.others.is_empty():
+			refusal += " The engine raised errors in %s." % ", ".join(made.others)
+		return _log.failure(refusal)
+	var answer: Dictionary = {
 		"success": true,
 		"script_path": script_path,
 		"modifications_applied": modifications_applied,
 		"total_modifications": modifications_applied.size(),
 		"parses": parses,
 	}
+	if not dependencies.is_empty():
+		answer["dependencies_with_errors"] = dependencies
+	return answer
 
 
 # The engine's errors in [param raised] for [param path], each with its line, as one sentence part.
@@ -536,14 +540,6 @@ static func _insert(
 		if index >= at:
 			entry["index"] = index + new_lines.size()
 	return true
-
-
-# Whether the engine accepts [param script], parsed under this project's own warning settings: a
-# script that does not load is one the caller wants to hear about now, and the reason is on stderr,
-# which comes back with the answer. A script that fails to parse still loads, as one that cannot be
-# instantiated. An abstract one that parses can be, on 4.7.
-static func _parses(script: Script) -> bool:
-	return script != null and script.can_instantiate()
 
 
 # What [param script] extends: the base script by class name or path, or the native class.
@@ -975,3 +971,41 @@ func _init(p_id: String = "", p_name: String = "", p_desc: String = "") -> void:
 """
 		_:
 			return ""
+
+
+## A script loaded past the resource cache under this project's own warning settings, and whether
+## the engine accepts it. The reasons are on stderr, which comes back with the answer. A script that
+## fails to parse still loads, as one that cannot be instantiated, and an abstract one that parses
+## can be. One whose dependency did not compile is handed back as instantiable too, with "Failed to
+## compile depended scripts" raised at its own path, and only on its first load in an engine.
+class GdhWatchedLoad:
+	extends RefCounted
+
+	var loaded: Script
+	var parses: bool
+	## Everything the engine raised while the script loaded.
+	var raised: Array[Dictionary] = []
+	## The other scripts that raised errors meanwhile, which are the dependencies that failed.
+	var others: Array[String] = []
+	## Whether the script's own errors say only that a dependency failed.
+	var through_dependency: bool = false
+
+	func _init(path: String) -> void:
+		var caught: GdhScriptCheck.GdhCaught = GdhScriptCheck.GdhCaught.new()
+		OS.add_logger(caught)
+		loaded = ResourceLoader.load(path, "Script", ResourceLoader.CACHE_MODE_IGNORE)
+		OS.remove_logger(caught)
+		raised = caught.raised
+		var own: int = 0
+		var depended: int = 0
+		for error: Dictionary in raised:
+			var at: String = str(error["path"])
+			if at != path:
+				if not at in others:
+					others.append(at)
+				continue
+			own += 1
+			if str(error["message"]).contains(GdhScriptCheck.DEPENDED_FAILED):
+				depended += 1
+		through_dependency = depended > 0 and depended == own
+		parses = loaded != null and loaded.can_instantiate() and own == 0
