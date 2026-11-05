@@ -7485,12 +7485,17 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
   // on POSIX the first read once armed is held until a later one ends. Windows lists through its
   // own query, which is slow enough there that the race is met within the tries.
   const held = process.platform === 'win32' ? null : join(project, 'ps-held');
+  const shimCalls = (): string => {
+    const calls = held === null ? '' : join(held, 'calls');
+    return calls !== '' && existsSync(calls) ? readFileSync(calls, 'utf8') : '(none)';
+  };
   if (held !== null) {
     mkdirSync(held);
     writeTree(held, {
       ps: [
         '#!/bin/sh',
         `held='${held}'`,
+        'echo "$$ armed=$([ -f "$held/armed" ] && echo yes || echo no) $*" >> "$held/calls"',
         'if [ -f "$held/armed" ] && mkdir "$held/first" 2>/dev/null; then',
         '  until [ -f "$held/released" ]; do sleep 0.01; done',
         '  sleep 0.2',
@@ -7531,7 +7536,9 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
   let attempts = 0;
   try {
     await server.initialize('regression-test');
-    for (; attempts < 20 && met === 0; attempts += 1) {
+    // One try where the first read is held, since a held read meets the state on its first try or
+    // says why it did not. Twenty tries of a hold that never took ran past a part's whole budget.
+    for (; attempts < (held === null ? 20 : 1) && met === 0; attempts += 1) {
       const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
       await new Promise<void>((settle, reject) => {
         socket.once('open', () => {
@@ -7567,16 +7574,25 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
         writeFileSync(join(held, 'armed'), '');
       }
       const asking = server.request('tools/call', { name: 'editor_status', arguments: {} });
+      const askedAt = Date.now();
+      let holding = false;
       if (held !== null) {
         const first = join(held, 'first');
         for (let waited = 0; !existsSync(first) && waited < 10_000; waited += 10) {
           await delay(10);
         }
+        holding = existsSync(first);
       }
+      const greetedAfter = Date.now() - askedAt;
       socket.send(JSON.stringify(greeting(project, { lsp_port: lspPort, dap_port: dapPort })));
-      const editor = get(parseTextContent(await asking), 'editor');
+      const answer = parseTextContent(await asking);
+      const editor = get(answer, 'editor');
       if (held !== null) {
         rmSync(join(held, 'armed'));
+        assert.ok(
+          holding,
+          `the status call ran no ps in ${String(greetedAfter)} ms, so the hold never took. The shim was called as:\n${shimCalls()}\nThe call answered: ${JSON.stringify(answer)}\n${server.stderr}`,
+        );
       }
       if (marked() > before) {
         met += 1;
@@ -7606,7 +7622,10 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
     }
     // The state is a race between the greeting and the process table, so it is tried until met. A
     // platform that never meets it in twenty tries says so rather than passing on the attempts.
-    assert.ok(met > 0, `the editor never connected during a status call in ${String(attempts)} tries`);
+    assert.ok(
+      met > 0,
+      `the editor never connected during a status call in ${String(attempts)} tries. The shim was called as:\n${shimCalls()}\n${server.stderr}`,
+    );
     if (held !== null) {
       assert.equal(attempts, 1, 'with the first read held, the first try meets the state');
     }
