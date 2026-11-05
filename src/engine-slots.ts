@@ -390,7 +390,7 @@ const SEATED_SUFFIX = '.seated';
  * `kept` the kept ones, and `games` none, for a game while games hold as many kept slots as they may,
  * its numbers then those the games hold.
  */
-type SlotLimit = 'gate' | 'kept' | 'games';
+type SlotLimit = 'gate' | 'kept' | 'games' | 'starved';
 
 /** The slot numbers a take may try, in order, and what holds it to them when something does. */
 export interface SlotsDrawn {
@@ -398,6 +398,59 @@ export interface SlotsDrawn {
   readonly limit?: SlotLimit;
   /** Free ones of them the take leaves to takers waiting longer: see {@link SlotLine}. */
   readonly left?: readonly number[];
+  /** What a starved measurement's claim holds the take back for: see {@link STARVED_FILE}. */
+  readonly heldFor?: string;
+}
+
+/**
+ * The file in the slots folder a measurement that has waited two hours for its turn writes to claim
+ * the machine, as `{"pid", "started", "what", "starved"}`, `starved` in seconds. While a live claim
+ * stands, a taker outside a gate starts no engine, so the gates seated finish and the measurement
+ * runs. The queue that writes it reads it the same way.
+ */
+export const STARVED_FILE = 'starved.json';
+
+/** The claim a program inherits from the measurement that started it, as `pid:started`. */
+const STARVING_VARIABLE = 'GODOT_ENGINE_STARVING';
+
+/** A starved measurement's claim on the machine. */
+interface StarvedClaim extends SlotEngine {
+  readonly what: string;
+  readonly starvedSeconds: number;
+}
+
+/** The claim [param content] holds, or null for content that names no holder. */
+function starvedClaimOf(content: string): StarvedClaim | null {
+  const holder = holderOf(content);
+  const parsed: unknown = holder === null ? null : JSON.parse(content);
+  if (holder === null || typeof parsed !== 'object' || parsed === null) {
+    return null;
+  }
+  const { what, starved } = parsed as { what?: unknown; starved?: unknown };
+  return {
+    pid: holder.pid,
+    started: holder.started,
+    what: typeof what === 'string' && what !== '' ? what : 'a measurement',
+    starvedSeconds: typeof starved === 'number' && Number.isFinite(starved) ? starved : 0,
+  };
+}
+
+/** Whether [param claim] is this process's, or that of the measurement that started it. */
+export function claimIsOurs(
+  claim: StarvedClaim,
+  env: NodeJS.ProcessEnv = process.env,
+  pid = process.pid,
+): boolean {
+  return (
+    claim.pid === pid ||
+    nonEmpty(env[STARVING_VARIABLE]) === `${String(claim.pid)}:${claim.started.toFixed(0)}`
+  );
+}
+
+/** What [param claim] holds a take back for, in the words the queue uses. */
+export function starvedSaid(claim: StarvedClaim): string {
+  const hours = Number((claim.starvedSeconds / 3600).toPrecision(6));
+  return `held for ${claim.what}, a measurement starved ${String(hours)} h`;
 }
 
 /** What takes a slot, as its environment says: see {@link slotsDrawnOn}. */
@@ -800,6 +853,11 @@ export class EngineSlots {
       return inherited;
     }
     const taker = this.taker();
+    const claim = taker === 'other' ? await this.starvedOut() : null;
+    if (claim !== null) {
+      this.drawn = { numbers: [], limit: 'starved', heldFor: starvedSaid(claim) };
+      return null;
+    }
     const aged = taker === 'other' && !game && waitedMs >= ONE_OFF_AGED_MS;
     let queue: GateQueue | undefined;
     const queued = async (): Promise<GateQueue> => (queue ??= await this.gateQueue());
@@ -914,6 +972,25 @@ export class EngineSlots {
       inheritsSlot(tree, process.pid, holder, basename(process.execPath), engineStarted)
       ? lock
       : null;
+  }
+
+  /**
+   * The starved measurement's claim that holds this process's engines back, or null where none
+   * stands or the claim is ours. A claimer that has gone frees it here, as a slot's holder does.
+   */
+  private async starvedOut(): Promise<StarvedClaim | null> {
+    const path = join(this.directory, STARVED_FILE);
+    if (await this.cleared(path, false)) {
+      return null;
+    }
+    let content: string | null;
+    try {
+      content = readWhole(path);
+    } catch {
+      return null;
+    }
+    const claim = content === null ? null : starvedClaimOf(content);
+    return claim === null || claimIsOurs(claim) ? null : claim;
   }
 
   /**
@@ -1333,6 +1410,9 @@ export function slotWaitSaid(
   drawn: SlotsDrawn = { numbers: [] },
 ): string {
   const so = `Waiting${waitedMs >= 1000 ? ` ${String(Math.round(waitedMs / 1000))} s so far` : ''} for an engine`;
+  if (drawn.limit === 'starved') {
+    return `${so}: ${drawn.heldFor ?? 'held for a measurement'}. The engine starts once that measurement has run.`;
+  }
   const taking = drawn.limit === undefined ? count : drawn.numbers.length;
   const slots = `${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'is' : 'are'} in use`;
   const named = holdersNamed(taking, holders);
@@ -1390,6 +1470,9 @@ export function slotWaitedSaid(
   drawn: SlotsDrawn = { numbers: [] },
 ): string {
   const waited = `This call waited ${String(Math.round(waitedMs / 1000))} s for an engine slot in all.`;
+  if (drawn.limit === 'starved') {
+    return `${waited} When it first waited, it was ${drawn.heldFor ?? 'held for a measurement'}.`;
+  }
   const taking = drawn.limit === undefined ? count : drawn.numbers.length;
   const slots = `${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'was' : 'were'} in use`;
   const named = holdersNamed(taking, holders);

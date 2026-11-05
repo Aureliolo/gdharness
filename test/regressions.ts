@@ -127,6 +127,7 @@ import {
 } from '../src/engine-leaks.js';
 import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
 import {
+  claimIsOurs,
   EngineSlots,
   FolderChanges,
   gamesKeptOf,
@@ -149,6 +150,7 @@ import {
   SPARE_FILE,
   SPARE_STALE_MS,
   START_TOLERANCE_MS,
+  STARVED_FILE,
   slotEngineNamed,
   slotsClaimed,
   slotsDrawnOn,
@@ -157,6 +159,7 @@ import {
   slotWaiters,
   slotWaitSaid,
   spareSaid,
+  starvedSaid,
   UNWRITTEN_MS,
   WAITING_FOLDER,
 } from '../src/engine-slots.js';
@@ -28928,7 +28931,9 @@ async function testAClassCacheHeldShutIsReadOnceLetGo(): Promise<void> {
             [
               '-NoProfile',
               '-Command',
-              `$f = [System.IO.File]::Open('${cache}', 'Open', 'Read', 'None'); [Console]::Out.WriteLine('holding'); $until = (Get-Date).AddSeconds(30); while (-not (Test-Path '${letGo}') -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 10 }; $f.Close()`,
+              // .NET calls rather than cmdlets: a cmdlet's first use loads its module, which took 200 ms
+              // here and past the reader's one second on a CI runner, after the let-go.
+              `$f = [System.IO.File]::Open('${cache}', 'Open', 'Read', 'None'); $until = [DateTime]::UtcNow.AddSeconds(30); [Console]::Out.WriteLine('holding'); while (-not [System.IO.File]::Exists('${letGo}') -and [DateTime]::UtcNow -lt $until) { [System.Threading.Thread]::Sleep(10) }; $f.Close()`,
             ],
             { stdio: ['ignore', 'pipe', 'ignore'] },
           )
@@ -48547,6 +48552,90 @@ async function testAnEngineOnASlotLendsItToWhatItStarts(): Promise<void> {
   }
 }
 
+async function testAStarvedMeasurementHoldsSideEngines(): Promise<void> {
+  const holder = { pid: process.pid, started: await ownStart(), by: 'gdharness test of /p' };
+  const claimer = process.ppid;
+  const read = (await startTimesOf([claimer])).get(claimer);
+  assert.ok(read !== undefined, 'the fixture needs the start of a live process that is not this one');
+  // The queue writes the start in whole milliseconds.
+  const claimerStarted = Math.round(read);
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-starved-'));
+  const claimFile = join(directory, STARVED_FILE);
+  const claim = (pid: number, started: number, extra: object = {}): void => {
+    writeFileSync(claimFile, JSON.stringify({ pid, started, ...extra }));
+  };
+  const before = process.env['GODOT_ENGINE_STARVING'];
+  delete process.env['GODOT_ENGINE_STARVING'];
+  try {
+    claim(claimer, claimerStarted, { what: 'the bench of /p', starved: 7200 });
+    const outside = new EngineSlots(directory, 2, holder, undefined, () => 'other');
+    assert.equal(await outside.takeFree(), null, 'side work starts no engine while a live claim stands');
+    assert.equal(await outside.takeFree(true), null, 'nor does a game editor_run starts');
+    assert.equal(
+      slotWaitSaid(3000, 2, directory, outside.holders(), outside.drawn),
+      'Waiting 3 s so far for an engine: held for the bench of /p, a measurement starved 2 h. The engine starts once that measurement has run.',
+    );
+    assert.equal(
+      slotWaitedSaid(5000, 2, directory, outside.holders(), outside.drawn),
+      'This call waited 5 s for an engine slot in all. When it first waited, it was held for the bench of /p, a measurement starved 2 h.',
+    );
+    for (const taker of ['gate', 'tier', 'timing'] as const) {
+      const slots = new EngineSlots(directory, 2, holder, undefined, () => taker);
+      const lock = await slots.takeFree();
+      assert.ok(lock !== null, `a ${taker} taker is not held by the claim`);
+      slots.release(lock);
+    }
+
+    process.env['GODOT_ENGINE_STARVING'] = `${String(claimer)}:${String(claimerStarted)}`;
+    const inherited = await outside.takeFree();
+    assert.ok(inherited !== null, "a program the claimer started takes a slot under the claimer's claim");
+    outside.release(inherited);
+    process.env['GODOT_ENGINE_STARVING'] = `${String(claimer)}:${String(claimerStarted + 60_000)}`;
+    assert.equal(await outside.takeFree(), null, 'a token naming another start of that pid is not its claim');
+    delete process.env['GODOT_ENGINE_STARVING'];
+
+    claim(process.pid, holder.started, { what: 'this measurement', starved: 7200 });
+    const own = await outside.takeFree();
+    assert.ok(own !== null, "the claimer's own engines take slots");
+    outside.release(own);
+
+    claim(claimer, claimerStarted);
+    assert.equal(await outside.takeFree(), null, 'a claim without its details still holds');
+    assert.equal(outside.drawn.heldFor, 'held for a measurement, a measurement starved 0 h');
+    assert.equal(
+      starvedSaid({ pid: 1, started: 1, what: 'the bench of /p', starvedSeconds: 7500 }),
+      'held for the bench of /p, a measurement starved 2.08333 h',
+      'the hours as the queue prints them',
+    );
+    assert.equal(claimIsOurs({ pid: 1, started: 2, what: '', starvedSeconds: 0 }, {}, 1), true);
+    assert.equal(
+      claimIsOurs({ pid: 1, started: 2, what: '', starvedSeconds: 0 }, { GODOT_ENGINE_STARVING: '1:2' }, 3),
+      true,
+    );
+    assert.equal(
+      claimIsOurs({ pid: 1, started: 2, what: '', starvedSeconds: 0 }, { GODOT_ENGINE_STARVING: '1:3' }, 3),
+      false,
+    );
+
+    const ended: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['--eval', ''], {
+      encoding: 'utf8',
+    });
+    assert.ok(ended.pid > 0, 'the fixture needs a process that has gone');
+    claim(ended.pid, Date.now(), { what: 'a gone bench', starved: 7200 });
+    const freed = await outside.takeFree();
+    assert.ok(freed !== null, 'a claim whose claimer has gone holds nothing');
+    assert.equal(existsSync(claimFile), false, 'and is removed');
+    outside.release(freed);
+  } finally {
+    if (before === undefined) {
+      delete process.env['GODOT_ENGINE_STARVING'];
+    } else {
+      process.env['GODOT_ENGINE_STARVING'] = before;
+    }
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
   // A quarter of the slots, at least two, kept for engines outside a gate, and half of those at most
   // for the games editor_run started, never the last, which stays for short calls.
@@ -49114,7 +49203,9 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
           '-NoProfile',
           '-NonInteractive',
           '-Command',
-          `$f = [IO.File]::Open('${lock.replaceAll("'", "''")}', 'Open', 'Read', 'ReadWrite'); 'held'; Start-Sleep -Milliseconds 300; $f.Close()`,
+          // A .NET sleep: Start-Sleep's first use loads its module, which lengthens the hold past the
+          // second a removal waits on a slow runner.
+          `$f = [IO.File]::Open('${lock.replaceAll("'", "''")}', 'Open', 'Read', 'ReadWrite'); 'held'; [System.Threading.Thread]::Sleep(300); $f.Close()`,
         ],
         { stdio: ['ignore', 'pipe', 'ignore'] },
       );
@@ -75647,6 +75738,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testSuitePassesKeyAlikeInEveryCheckout,
   testTakersWaitTheirTurn,
   testAWaitForASlotKeepsAMarkUntilItEnds,
+  testAStarvedMeasurementHoldsSideEngines,
   testGatesInTheQueueKeepTheirSlots,
   testAnEngineOnASlotLendsItToWhatItStarts,
   testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded,

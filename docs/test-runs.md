@@ -724,6 +724,17 @@ set. Each kind of engine takes:
 - After two minutes of waiting, one that is not a game takes any slot, so gates never hold it back
   for good.
 
+### A starved measurement's claim
+
+A measurement that has waited two hours for its turn writes `<directory>/starved.json` as
+`{"pid", "started", "what", "starved"}`, `starved` in seconds. While it stands, an engine outside a
+gate takes no slot and waits, saying `held for <what>, a measurement starved <hours> h`. A gate's,
+a timing's and a tier's engines are not held.
+
+The claimer's own engines are not held either, nor those of a process that carries
+`GODOT_ENGINE_STARVING` as `<pid>:<started>` of the claim. A claim whose claimer has gone is removed
+by the rule a lock is freed by.
+
 ### Spare slots of the gates
 
 The queue writes `<directory>/spare.json` as `{"spare", "pid", "started", "written"}`, `written` in
