@@ -60504,7 +60504,7 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
     assert.doesNotMatch(intoCounts, /nearest/, 'and offers no name as a misspelling');
     assert.match(
       await stallRefusal({ items: [5] }),
-      /Shop\.items holds Item, and item 0 of the list given is 5\./,
+      /Shop\.items holds Item, and item 0 of the list given is 5\.(?!\d)/,
       'a whole number given is quoted as it was sent',
     );
     // An element kept in a file of its own is written there.
