@@ -84,6 +84,16 @@ static func unlisted(target: Object, name: String) -> String:
 		if listed is Array:
 			var items: Array = listed
 			return _unlisted_in(items, "%s.%s" % [class_called(target), head], name, at)
+		# A path names properties and list elements, never a dictionary's entries, and the nearest
+		# name a refusal would offer is the dictionary itself, which read as a misspelling.
+		if listed is Dictionary:
+			return (
+				(
+					"%s.%s is a dictionary, which a path does not reach into: give %s whole, with "
+					+ "every entry it keeps."
+				)
+				% [class_called(target), head, head]
+			)
 		at = name.find("/", at + 1)
 	return ""
 
