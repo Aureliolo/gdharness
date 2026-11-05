@@ -9788,6 +9788,32 @@ function testProjectGodotMultilineValues(): void {
   assert.equal(typeof get(unterminated, 's', 'broken'), 'string', 'an unterminated value should not hang');
 }
 
+/** A quoted value reads as Godot's VariantParser reads it, so a name saved with quotes keeps them. */
+function testProjectGodotStringEscapes(): void {
+  const escaped = parseProjectGodot(
+    [
+      '[application]',
+      String.raw`config/name="Probe \"Q\""`,
+      String.raw`a="C:\\games\\x"`,
+      String.raw`b="tab\there\nline\r\b\f"`,
+      String.raw`c="\u00e9 \U01F600 \ud83d\ude00 \q"`,
+      String.raw`d="\u00zz \U110000"`,
+      String.raw`e='kept \"'`,
+    ].join('\n'),
+  )['application'];
+  assert.deepEqual(
+    { ...escaped },
+    {
+      'config/name': 'Probe "Q"',
+      a: String.raw`C:\games\x`,
+      b: 'tab\there\nline\r\b\f',
+      c: 'é 😀 😀 q',
+      d: String.raw`\u00zz \U110000`,
+      e: String.raw`kept \"`,
+    },
+  );
+}
+
 /**
  * A path read as a location inside the project has to land inside it.
  *
@@ -75649,6 +75675,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheWrittenConfigNamesAProgramThatStarts,
 
   testProjectGodotMultilineValues,
+  testProjectGodotStringEscapes,
   testLettingGoOfTheAdapterSendsItNothing,
   testAVariablesReadSaysWhatItCouldNotRead,
   testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer,

@@ -346,14 +346,40 @@ function parseIniLikeValue(value: string): IniValue {
     return Number.isFinite(parsed) ? parsed : value;
   }
 
-  if (
-    value.length >= 2 &&
-    ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'")))
-  ) {
+  if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+    return godotStringText(value.slice(1, -1));
+  }
+
+  if (value.length >= 2 && value.startsWith("'") && value.endsWith("'")) {
     return value.slice(1, -1);
   }
 
   return value;
+}
+
+/** What Godot reads a value's escapes as, so a name saved as `Probe \"Q\"` reads as `Probe "Q"`. */
+const STRING_ESCAPES: Readonly<Record<string, string>> = {
+  b: '\b',
+  t: '\t',
+  n: '\n',
+  f: '\f',
+  r: '\r',
+};
+
+/**
+ * The text of a double-quoted value between its quotes, with its escapes read as Godot's
+ * VariantParser reads them. `\u` takes four hex digits and `\U` six, and any other escaped
+ * character stands for itself. A malformed `\u`, which the engine refuses the whole file over, is
+ * left as written, and so is a `\U` past the last code point, which no JavaScript string holds.
+ */
+function godotStringText(inner: string): string {
+  return inner.replace(/\\(u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{6}|[\s\S])/g, (whole, escaped: string) => {
+    if (escaped.length > 1) {
+      const point = Number.parseInt(escaped.slice(1), 16);
+      return point > 0x10_ffff ? whole : String.fromCodePoint(point);
+    }
+    return escaped === 'u' || escaped === 'U' ? whole : (STRING_ESCAPES[escaped] ?? escaped);
+  });
 }
 
 function readResourceText(
