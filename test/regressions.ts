@@ -194,6 +194,7 @@ import {
 } from '../src/godot-bridge.js';
 import { GodotLocator, type Located, VERSION_STARTS, versionStartOf } from '../src/godot-path.js';
 import {
+  containerTypeOf,
   DebuggerStream,
   decodeVariant,
   framedCommand,
@@ -1371,6 +1372,58 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     { kind: 'dictionary', entries: [[1, true]] },
     { kind: 'Vector2', values: [1, 2] },
   ]);
+
+  // A game's own value, decoded to be shown: an Array[String], a float that is whole, a StringName
+  // and a NodePath, each kept as what it is, and a Dictionary[StringName, Variant].
+  bytes.length = 0;
+  u32(28);
+  u32(5);
+  u32(28 | (1 << 16));
+  u32(4);
+  u32(2);
+  u32(4);
+  putString('ash');
+  u32(4);
+  putString('birch');
+  u32(3);
+  narrow.setFloat32(0, 1, true);
+  bytes.push(...new Uint8Array(narrow.buffer));
+  u32(21);
+  putString('sn');
+  u32(22);
+  u32(2 | 0x80000000);
+  u32(1);
+  u32(1);
+  putString('root');
+  putString('Body');
+  putString('position');
+  u32(27 | (1 << 16));
+  u32(21);
+  u32(1);
+  u32(21);
+  putString('hp');
+  u32(2);
+  u32(3);
+  const faithful = decodeVariant(Uint8Array.from(bytes), true);
+  assert.deepEqual(faithful, [
+    ['ash', 'birch'],
+    { kind: 'float', values: [1] },
+    { kind: 'StringName', values: ['sn'] },
+    { kind: 'NodePath', values: ['/root/Body:position'] },
+    { kind: 'dictionary', entries: [[{ kind: 'StringName', values: ['hp'] }, 3]] },
+  ]);
+  const isList = (value: GodotValue): value is readonly GodotValue[] => Array.isArray(value);
+  const decoded = isList(faithful) ? faithful : [];
+  assert.deepEqual(
+    [containerTypeOf(decoded[0] ?? null), containerTypeOf(decoded[4] ?? null)],
+    ['Array[String]', 'Dictionary[StringName, Variant]'],
+  );
+  const plain = decodeVariant(Uint8Array.from(bytes));
+  assert.deepEqual(
+    isList(plain) ? plain.slice(1, 3) : plain,
+    [1, 'sn'],
+    'and as plain numbers and strings when it is not to be shown',
+  );
 
   // The command decodes back to what the game checks: a String name, thread 1, then the data.
   const command = profilerOn(1536);
@@ -16878,7 +16931,29 @@ function testAKeptGamesStackAndValuesRead(): void {
         ['name', 'Ada'],
       ],
     }),
-    '{hp: 3, name: Ada}',
+    '{"hp": 3, "name": "Ada"}',
+  );
+  // Text inside a container is quoted as the engine prints it, so the key "4" is not the key 4, and
+  // a whole float keeps its .0. On its own a value is its text.
+  assert.equal(
+    shownValue({
+      kind: 'dictionary',
+      entries: [
+        ['4', { kind: 'float', values: [1] }],
+        [4, [{ kind: 'StringName', values: ['sn'] }, { kind: 'NodePath', values: ['a/b'] }, 'say "hi"']],
+      ],
+    }),
+    '{"4": 1.0, 4: [&"sn", ^"a/b", "say \\"hi\\""]}',
+  );
+  assert.deepEqual(
+    [
+      shownValue('Ada'),
+      shownValue({ kind: 'StringName', values: ['sn'] }),
+      shownValue({ kind: 'NodePath', values: ['a/b'] }),
+      shownValue({ kind: 'float', values: [2.5] }),
+      shownValue({ kind: 'float', values: [Number.POSITIVE_INFINITY] }),
+    ],
+    ['Ada', 'sn', 'a/b', '2.5', 'inf'],
   );
   assert.equal(
     shownValue(Array.from({ length: 25 }, (_, at) => at)),
@@ -36859,6 +36934,23 @@ async function testAGameThisServerStartedIsDebugged(): Promise<void> {
       locals.map((one) => [get(one, 'name'), get(one, 'value'), get(one, 'type')]),
       [['path', 'res://never.tres', 'String']],
       `the frame's locals with their values: ${scopes.said}`,
+    );
+    // Values inside a container are shown as the engine prints them, and a typed array by the type
+    // it was declared with: the engine sends both, and the text read the key "4" as the key 4.
+    const shown = await call('debug_state', {
+      op: 'evaluate',
+      expression: '[1.0, StringName("sn"), NodePath("a/b"), "4", {"4": 2, 4: 3}]',
+    });
+    assert.equal(get(shown.answer, 'value'), '[1.0, &"sn", ^"a/b", "4", {"4": 2, 4: 3}]', shown.said);
+    const typed = await call('debug_state', {
+      op: 'evaluate',
+      // 4 is TYPE_STRING, which an expression cannot name.
+      expression: 'Array(["ash"], 4, StringName(), null)',
+    });
+    assert.deepEqual(
+      [get(typed.answer, 'value'), get(typed.answer, 'type')],
+      ['["ash"]', 'Array[String]'],
+      typed.said,
     );
 
     const removed = await call('debug_breakpoint', {

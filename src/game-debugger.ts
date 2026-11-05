@@ -18,12 +18,14 @@ import { createServer, type Server, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { ALREADY_HELD, RAISED_FROM, type RaisedBy } from './game-log.js';
 import {
+  containerTypeOf,
   type DebuggerMessage,
   DebuggerStream,
   framedCommand,
   type GodotValue,
   MAIN_THREAD,
   type SentValue,
+  TYPE_NAMES,
 } from './godot-variant.js';
 import { shippedAddonsDirectory } from './setup.js';
 
@@ -136,49 +138,6 @@ const INBOX_KEPT = 10_000;
 /** How many lines of what the game printed are kept for `output`. */
 const OUTPUT_KEPT = 1000;
 
-/** The engine's `Variant::Type` names as GDScript spells them, by number. */
-const TYPE_NAMES: readonly string[] = [
-  'Nil',
-  'bool',
-  'int',
-  'float',
-  'String',
-  'Vector2',
-  'Vector2i',
-  'Rect2',
-  'Rect2i',
-  'Vector3',
-  'Vector3i',
-  'Transform2D',
-  'Vector4',
-  'Vector4i',
-  'Plane',
-  'Quaternion',
-  'AABB',
-  'Basis',
-  'Transform3D',
-  'Projection',
-  'Color',
-  'StringName',
-  'NodePath',
-  'RID',
-  'Object',
-  'Callable',
-  'Signal',
-  'Dictionary',
-  'Array',
-  'PackedByteArray',
-  'PackedInt32Array',
-  'PackedInt64Array',
-  'PackedFloat32Array',
-  'PackedFloat64Array',
-  'PackedStringArray',
-  'PackedVector2Array',
-  'PackedVector3Array',
-  'PackedColorArray',
-  'PackedVector4Array',
-];
-
 /** The scopes `stack_frame_var` numbers, in the engine's order. */
 const SCOPES: readonly DebugScope['name'][] = ['Locals', 'Members', 'Globals'];
 
@@ -190,44 +149,79 @@ function isList(value: GodotValue): value is readonly GodotValue[] {
   return Array.isArray(value);
 }
 
-/** [param value] as text, the way a reader of a variables answer wants it. */
-export function shownValue(value: GodotValue, typeHint = ''): string {
+/** A float as GDScript prints one: a whole one with `.0`, so it is not read as an int. */
+function shownFloat(float: number): string {
+  if (Number.isNaN(float)) {
+    return 'nan';
+  }
+  if (!Number.isFinite(float)) {
+    return float > 0 ? 'inf' : '-inf';
+  }
+  return Number.isInteger(float) ? `${String(float)}.0` : String(float);
+}
+
+/**
+ * [param value] as text, the way a reader of a variables answer wants it.
+ *
+ * Inside an array or a dictionary, text is quoted as the engine prints it, a String as `"a"`, a
+ * StringName as `&"a"` and a NodePath as `^"a/b"`. Bare, the key `"4"` read as the key `4`, and
+ * `["1"]` as `[1]`. A value on its own is its text, since its type is beside it.
+ */
+export function shownValue(value: GodotValue, typeHint = '', inside = false): string {
   if (value === null) {
     return 'null';
   }
   if (typeof value === 'string') {
-    return value;
+    return inside ? JSON.stringify(value) : value;
   }
   if (typeof value === 'number' || typeof value === 'boolean') {
     return String(value);
   }
   if (isList(value)) {
-    const shown = value.slice(0, ELEMENTS_SHOWN).map((each) => shownValue(each));
+    const shown = value.slice(0, ELEMENTS_SHOWN).map((each) => shownValue(each, '', true));
     const more = value.length - shown.length;
     return `[${shown.join(', ')}${more > 0 ? `, and ${more} more` : ''}]`;
   }
   if (value.kind === 'dictionary' && 'entries' in value) {
     const shown = value.entries
       .slice(0, ELEMENTS_SHOWN)
-      .map(([key, each]) => `${shownValue(key)}: ${shownValue(each)}`);
+      .map(([key, each]) => `${shownValue(key, '', true)}: ${shownValue(each, '', true)}`);
     const more = value.entries.length - shown.length;
     return `{${shown.join(', ')}${more > 0 ? `, and ${more} more` : ''}}`;
   }
   if (!('values' in value)) {
     return value.kind;
   }
-  if (value.kind === 'Object') {
-    return `<${typeHint === '' ? 'Object' : typeHint}#${String(value.values[0])}>`;
+  const [first] = value.values;
+  switch (value.kind) {
+    case 'Object':
+      return `<${typeHint === '' ? 'Object' : typeHint}#${String(first)}>`;
+    case 'float':
+      return shownFloat(Number(first));
+    case 'StringName':
+      return inside ? `&${JSON.stringify(String(first))}` : String(first);
+    case 'NodePath':
+      return inside ? `^${JSON.stringify(String(first))}` : String(first);
+    default:
+      return `${value.kind}(${value.values.join(', ')})`;
   }
-  return `${value.kind}(${value.values.join(', ')})`;
 }
 
-/** The type of a value the game sent: its class when it named one, else its Variant type. */
-function typeNamed(type: GodotValue | undefined, hint: GodotValue | undefined): string {
+/**
+ * The type of a value the game sent: its class when it named one, the type an array or dictionary
+ * was declared with, else its Variant type.
+ */
+function typeNamed(
+  type: GodotValue | undefined,
+  hint: GodotValue | undefined,
+  value: GodotValue = null,
+): string {
   if (typeof hint === 'string' && hint !== '') {
     return hint;
   }
-  return typeof type === 'number' ? (TYPE_NAMES[type] ?? String(type)) : 'Variant';
+  return (
+    containerTypeOf(value) ?? (typeof type === 'number' ? (TYPE_NAMES[type] ?? String(type)) : 'Variant')
+  );
 }
 
 /** A held game's stack from a `stack_dump`: its size, then file, line and function per frame. */
@@ -958,7 +952,7 @@ export class GameDebugger {
       scopes[typeof scope === 'number' ? scope : 0]?.variables.push({
         name: named,
         value: shownValue(value ?? null, typeof hint === 'string' ? hint : ''),
-        type: typeNamed(type, hint),
+        type: typeNamed(type, hint, value),
       });
     }
     return { held: this.heldState(), frame, scopes };
@@ -1044,7 +1038,7 @@ export class GameDebugger {
       frame,
       expression,
       value: shownValue(value ?? null, typeof hint === 'string' ? hint : ''),
-      type: typeNamed(type, hint),
+      type: typeNamed(type, hint, value),
     };
     if (value !== null && value !== undefined) {
       return answer;
