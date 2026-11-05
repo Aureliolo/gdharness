@@ -148,7 +148,7 @@ import {
   type LogEntry,
   type Severity,
 } from './game-log.js';
-import { codeOf, isIdentifier } from './gdscript-source.js';
+import { codeOf, isIdentifier, neverStopsOn } from './gdscript-source.js';
 import {
   AddonOfAnotherRelease,
   anEditorIsStillComing,
@@ -1669,25 +1669,43 @@ interface AfterWaiting {
 
 /**
  * The refusal for a breakpoint on [param line] of the script at [param absolutePath] when nothing
- * can stop there, or null: a line past the script's end, or one holding no code. Lines are counted
- * as an editor counts them, without one for the newline that ends the last. The engine stops only on
- * the lines its compiler marks, which a statement's are and a blank or comment line never is, and
- * neither the adapter nor a game refuses one: it was answered verified and never stopped anything.
+ * can stop there, or null: a line past the script's end, one holding no code, or one `neverStopsOn`
+ * reads as never marked. Lines are counted as an editor counts them, without one for the newline
+ * that ends the last. Neither the adapter nor a game refuses such a line: a breakpoint on a func
+ * line was answered verified and never stopped anything.
  */
 function lineNothingStopsOn(absolutePath: string, relativePath: string, line: number): string | null {
   const text = readFileSync(absolutePath, 'utf8');
-  const lines = text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0);
-  if (line > lines) {
-    return `res://${relativePath} has ${lines} line${lines === 1 ? '' : 's'}, so there is no line ${line} to stop on.`;
+  const count = text === '' ? 0 : text.split('\n').length - (text.endsWith('\n') ? 1 : 0);
+  if (line > count) {
+    return `res://${relativePath} has ${count} line${count === 1 ? '' : 's'}, so there is no line ${line} to stop on.`;
   }
-  const code = codeOf(text).split('\n');
-  if ((code[line - 1] ?? '').trim() !== '') {
+  const code = codeOf(text);
+  const lines = code.split('\n');
+  const stops = (at: number): boolean =>
+    (lines[at - 1] ?? '').trim() !== '' && neverStopsOn(text, at, code) === null;
+  if (stops(line)) {
     return null;
   }
-  const next = code.findIndex((each, at) => at >= line && each.trim() !== '');
-  return `res://${relativePath} line ${line} holds no code, so nothing stops there${
-    next === -1 ? ', and no line after it holds any' : `. The next line holding code is ${next + 1}`
-  }.`;
+  let next = line + 1;
+  while (next <= lines.length && !stops(next)) {
+    next += 1;
+  }
+  const after =
+    next > lines.length ? ', and no line after it is one' : `. The next line it stops on is ${next}`;
+  const at = `res://${relativePath} line ${line}`;
+  if ((lines[line - 1] ?? '').trim() === '') {
+    return `${at} holds no code, so nothing stops there${after}.`;
+  }
+  const never = neverStopsOn(text, line, code);
+  if (never?.kind === 'continuation' && stops(never.of)) {
+    return `${at} continues the statement that starts on line ${never.of}, and the engine stops only where a statement starts, so nothing stops there. A breakpoint on line ${never.of} stops before that statement runs.`;
+  }
+  const why =
+    never?.kind === 'else'
+      ? 'is an else, which the engine passes without stopping: it stops on the statements under it'
+      : 'declares rather than runs, and the engine stops only on statements and on member variables with a type or a value, so nothing stops there';
+  return `${at} ${why}${after}.`;
 }
 
 /** What the runtime addon prints once it is listening, which a run's output is read for. */

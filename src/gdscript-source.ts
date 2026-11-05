@@ -533,6 +533,138 @@ function afterHeader(text: string, from: number): number {
   return -1;
 }
 
+/** Why a line holding code is one the engine never stops on. */
+export type NoStop =
+  | { readonly kind: 'declaration' | 'else' }
+  | { readonly kind: 'continuation'; readonly of: number };
+
+/**
+ * Per zero-based line of [param lines], the zero-based line of the statement it continues, or null
+ * where it continues none: a line within brackets left open, or after a line ending in a
+ * backslash. A lambda written inside brackets has statements of its own on the lines after it, so
+ * from one onwards only a line opening with the closing bracket is a continuation.
+ */
+function continuationLines(lines: readonly string[]): Array<number | null> {
+  const inside: Array<number | null> = [];
+  let depth = 0;
+  let lambda = false;
+  let backslash = false;
+  let start = 0;
+  for (const [index, text] of lines.entries()) {
+    const continues = backslash || (depth > 0 && (!lambda || /^\s*[)\]}]/u.test(text)));
+    inside.push(continues ? start : null);
+    if (!backslash && depth === 0) {
+      start = index;
+    }
+    for (let at = 0; at < text.length; at += 1) {
+      const character = text[at];
+      if (character === '(' || character === '[' || character === '{') {
+        depth += 1;
+      } else if (character === ')' || character === ']' || character === '}') {
+        depth = Math.max(0, depth - 1);
+      }
+      if (
+        depth > 0 &&
+        character === 'f' &&
+        !/[\p{L}\p{N}_]/u.test(text[at - 1] ?? '') &&
+        LAMBDA_HEADER.exec(text.slice(at))?.index === 0
+      ) {
+        lambda = true;
+      }
+    }
+    if (depth === 0) {
+      lambda = false;
+    }
+    backslash = text.trimEnd().endsWith('\\');
+  }
+  return inside;
+}
+
+/**
+ * Whether zero-based [param index] of [param lines] is at a class's own level: not in the body of
+ * a function or a lambda. False wherever that cannot be told, since it only ever leads to a refusal.
+ */
+function atClassLevel(lines: readonly string[], index: number): boolean {
+  let indent = indentOf(lines[index] ?? '');
+  for (let at = index - 1; at >= 0 && indent > 0; at -= 1) {
+    const text = lines[at] ?? '';
+    if (text.trim() === '' || indentOf(text) >= indent) {
+      continue;
+    }
+    indent = indentOf(text);
+    // A property's get and set are function bodies too.
+    if (FUNC_LINE.test(text) || LAMBDA_HEADER.test(text) || /^[ \t]*(?:get|set)\s*[(:]/u.test(text)) {
+      return false;
+    }
+    if (new RegExp(`^[ \\t]*class\\s+${NAME}`, 'u').test(text)) {
+      return true;
+    }
+  }
+  return indent === 0;
+}
+
+const ANNOTATIONS_ONLY = new RegExp(`^${ANNOTATIONS}@?${NAME}?(?:\\([^)]*\\))?\\s*$`, 'u');
+
+/**
+ * Why the engine never stops on one-based [param line] of [param source], a line holding code, or
+ * null where it may.
+ *
+ * Godot's compiler marks the line each statement starts on, each match branch, and each member
+ * variable with a type or a value, and a breakpoint stops only on a marked line
+ * (modules/gdscript/gdscript_compiler.cpp). A function's header, an else, a declaration and the
+ * later lines of a statement are never marked. A line this cannot read for certain is null.
+ */
+export function neverStopsOn(source: string, line: number, code = codeOf(source)): NoStop | null {
+  const lines = code.split('\n');
+  const text = lines[line - 1];
+  if (text === undefined || text.trim() === '') {
+    return null;
+  }
+  const of = continuationLines(lines)[line - 1];
+  if (of !== null && of !== undefined) {
+    return { kind: 'continuation', of: of + 1 };
+  }
+  const trimmed = text.trim();
+  if (trimmed.startsWith('@') && ANNOTATIONS_ONLY.test(trimmed)) {
+    return { kind: 'declaration' };
+  }
+  const rest = trimmed.replace(new RegExp(`^${ANNOTATIONS}`, 'u'), '');
+  const word = /^(?:static\s+)?([a-z_]+)/u.exec(rest)?.[1] ?? '';
+  switch (word) {
+    case 'signal':
+    case 'enum':
+      return { kind: 'declaration' };
+    case 'extends':
+    case 'class_name':
+      // The class's own line is marked for a call of _static_init.
+      return /\b_static_init\b/u.test(code) ? null : { kind: 'declaration' };
+    case 'class':
+      return new RegExp(`^class\\s+${NAME}[^:]*:\\s*$`, 'u').test(rest) ? { kind: 'declaration' } : null;
+    case 'func': {
+      if (!new RegExp(`^(?:static\\s+)?func\\s+${NAME}`, 'u').test(rest)) {
+        return null;
+      }
+      const body = afterHeader(rest, 0);
+      return body === -1 || rest.slice(body).trim() === '' ? { kind: 'declaration' } : null;
+    }
+    case 'get':
+    case 'set':
+      // A property's get or set header, which no call ends with a colon alone on its line.
+      return /^(?:get|set\s*\([^)]*\))\s*:\s*$/u.test(rest) ? { kind: 'declaration' } : null;
+    case 'else':
+      return /^else\s*:\s*$/u.test(rest) ? { kind: 'else' } : null;
+    case 'const':
+      return atClassLevel(lines, line - 1) ? { kind: 'declaration' } : null;
+    case 'var':
+      return atClassLevel(lines, line - 1) &&
+        new RegExp(`^(?:static\\s+)?var\\s+${NAME}\\s*$`, 'u').test(rest)
+        ? { kind: 'declaration' }
+        : null;
+    default:
+      return null;
+  }
+}
+
 /**
  * Whether the function whose body's first statement is on one-based [param line] of [param code]
  * calls through `super` in its own body, not in a lambda written in it. [param code] is a script as
