@@ -85,6 +85,9 @@ func _open_the_door() -> bool:
 
 
 func _take_the_connection() -> void:
+	# The client checks that the port answers before it dials, and that check never speaks.
+	if _peer != null and _peer.get_ready_state() == WebSocketPeer.STATE_CLOSED:
+		_peer = null
 	if not _listening or _peer != null or not _server.is_connection_available():
 		return
 	_peer = WebSocketPeer.new()
