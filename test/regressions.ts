@@ -125,7 +125,14 @@ import {
   WALK_STOPPED_SENTENCE,
   walkStoppedPartWay,
 } from '../src/engine-leaks.js';
-import { type EngineRun, howItEnded, runEngine } from '../src/engine-run.js';
+import {
+  crashedAtStart,
+  ENGINE_STARTS,
+  type EngineRun,
+  howItEnded,
+  runEngine,
+  startedUntilItRuns,
+} from '../src/engine-run.js';
 import {
   claimIsOurs,
   EngineSlots,
@@ -31583,6 +31590,98 @@ async function testAnEngineRunSaysHowItEnded(): Promise<void> {
 }
 
 /**
+ * An engine that dies as it starts, with a Windows exception status before its banner, is started
+ * again, and nothing else is. Godot on a loaded Windows machine exits 0xC06D007F that way now and
+ * then, and a resource_edit failed on it with "no output at all".
+ */
+async function testAnEngineThatCrashesAsItStartsIsStartedAgain(): Promise<void> {
+  const printed = (line: string): GameLog => {
+    const log = new GameLog();
+    log.append('stdout', Buffer.from(`${line}\n`));
+    log.finish();
+    return log;
+  };
+  const silent = (): GameLog => {
+    const log = new GameLog();
+    log.finish();
+    return log;
+  };
+  const run = (
+    exitCode: number | null,
+    log: GameLog = silent(),
+    extra: Partial<EngineRun> = {},
+  ): EngineRun => ({
+    log,
+    exitCode,
+    exitSignal: null,
+    failure: null,
+    ...extra,
+  });
+  assert.deepEqual(
+    [
+      crashedAtStart(run(0xc06d007f)),
+      crashedAtStart(run(0xc0000005)),
+      crashedAtStart(run(0xc06d007f, printed('Godot Engine v4.7.2.stable.official'))),
+      crashedAtStart(run(0xc000013a)),
+      crashedAtStart(run(0xc0000135)),
+      crashedAtStart(run(1)),
+      crashedAtStart(run(0)),
+      crashedAtStart(run(0xc06d007f, silent(), { failure: 'it ran past its ten minutes' })),
+      crashedAtStart(run(null, silent(), { exitSignal: 'SIGTERM' })),
+    ],
+    [true, true, false, false, false, false, false, false, false],
+    'only an exception status before the banner, and not Ctrl+C, a missing library or an end this server made',
+  );
+
+  const sequence = async (
+    runs: readonly EngineRun[],
+    signal?: AbortSignal,
+  ): Promise<{ ran: EngineRun; starts: number; waits: number[] }> => {
+    let starts = 0;
+    const waits: number[] = [];
+    const ran = await startedUntilItRuns(
+      () => {
+        const next = runs[Math.min(starts, runs.length - 1)] ?? run(0);
+        starts += 1;
+        return Promise.resolve(next);
+      },
+      signal,
+      (ms) => {
+        waits.push(ms);
+        return Promise.resolve();
+      },
+    );
+    return { ran, starts, waits };
+  };
+  const answered = run(0, printed('Godot Engine v4.7.2.stable.official'));
+  const once = await sequence([run(0xc06d007f), answered]);
+  assert.deepEqual(
+    [once.starts, once.waits, once.ran.exitCode, once.ran.crashedStarts],
+    [2, [500], 0, 1],
+    'a start crash is started again, and the run says how many crashed',
+  );
+  const always = await sequence([run(0xc06d007f)]);
+  assert.deepEqual([always.starts, always.waits], [ENGINE_STARTS, [500, 1000]], 'up to its starts in all');
+  assert.equal(
+    howItEnded(always.ran),
+    'exit code 0xC06D007F, a Windows error status, and printed nothing on any of its 3 starts',
+  );
+  const failed = await sequence([run(1, printed('ERROR: no such scene'))]);
+  assert.deepEqual(
+    [failed.starts, failed.ran.crashedStarts],
+    [1, undefined],
+    'a run that printed is its answer',
+  );
+  const cancelled = new AbortController();
+  cancelled.abort();
+  assert.equal(
+    (await sequence([run(0xc06d007f)], cancelled.signal)).starts,
+    1,
+    'a cancelled call is not started again',
+  );
+}
+
+/**
  * An RID a call answers with is an argument the next call takes, and a whole number past 2^53 goes
  * both ways exactly.
  *
@@ -60020,7 +60119,7 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
   );
   writeFileSync(
     join(project, 'shop.gd'),
-    'class_name Shop\nextends Resource\n\n@export var items: Array[Item] = []\n',
+    'class_name Shop\nextends Resource\n\n@export var items: Array[Item] = []\n@export var counts: Dictionary[String, int] = {}\n',
   );
   writeFileSync(
     join(project, 'stats.gd'),
@@ -60396,6 +60495,17 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
     assert.match(
       await stallRefusal({ 'items/1': 'D' }),
       /items\/1 is an element of Shop\.items, which a path does not replace alone: give items a whole list, or write a property of the element, as items\/1\/<property>\./,
+    );
+    const intoCounts = await stallRefusal({ 'counts/keys': 2 });
+    assert.match(
+      intoCounts,
+      /Shop\.counts is a dictionary, which a path does not reach into: give counts whole, with every entry it keeps\./,
+    );
+    assert.doesNotMatch(intoCounts, /nearest/, 'and offers no name as a misspelling');
+    assert.match(
+      await stallRefusal({ items: [5] }),
+      /Shop\.items holds Item, and item 0 of the list given is 5\./,
+      'a whole number given is quoted as it was sent',
     );
     // An element kept in a file of its own is written there.
     await answered({
@@ -75496,6 +75606,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStoppedSpawnedRunGivesWayToAPlay,
   testAKilledRunHasNoExitCode,
   testAnEngineRunSaysHowItEnded,
+  testAnEngineThatCrashesAsItStartsIsStartedAgain,
   testAnOperationThatNeverAnswersIsEnded,
   testTheScanNoteNamesWhatStarted,
   testAnExportIsJudgedByTheFileItWrote,
