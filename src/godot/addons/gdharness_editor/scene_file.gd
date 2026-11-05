@@ -27,6 +27,7 @@ extends RefCounted
 const GdhHeadlessCheck = preload("headless_check.gd")
 ## How many times what scripts changed is put back before a write is refused for it.
 const PUTTING_BACK_PASSES: int = 4
+const GdhFileWalk = preload("file_walk.gd")
 const GdhRead = preload("reading.gd")
 const GdhSame = preload("same_values.gd")
 const GdhSerialisation = preload("serialisation.gd")
@@ -872,6 +873,17 @@ static func make_folder_for(file_path: String) -> String:
 		return ""
 	var made: Error = DirAccess.make_dir_recursive_absolute(folder)
 	return "" if made == OK else "Could not make the folder %s: %s" % [folder, error_string(made)]
+
+
+## The script at [param script_path], or why there is none as a String. A path nothing is at was
+## loaded all the same, and answered with the engine's own load errors and no word of the file.
+static func script_at(script_path: String) -> Variant:
+	if not ResourceLoader.exists(script_path):
+		return GdhFileWalk.new().with_nearest_files("No script at %s" % script_path, script_path)
+	var script: Script = load(script_path) as Script
+	if script == null:
+		return "No script loads from %s" % script_path
+	return script
 
 
 ## Why [param script], loaded from [param script_path], cannot be attached because the editor could

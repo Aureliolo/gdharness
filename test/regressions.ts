@@ -68288,6 +68288,15 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       resourceRoot,
     );
     assert.doesNotMatch(resourceRoot, /Editor/, resourceRoot);
+    // A script that is not there is refused as one, with no engine load errors beneath it.
+    const scriptless = await call('scene_create', {
+      op: 'create',
+      scenePath: 'scripted.tscn',
+      rootNodeType: 'Node2D',
+      script: 'res://mad.gd',
+    });
+    assert.match(textOf(scriptless) ?? '', /^No script at res:\/\/mad\.gd\./, JSON.stringify(scriptless));
+    assert.equal(asArray(get(scriptless, 'result', 'content')).length, 1, JSON.stringify(scriptless));
     // A folder the path names is made, and said to be.
     const mapped = await written('scene_create', {
       op: 'create',

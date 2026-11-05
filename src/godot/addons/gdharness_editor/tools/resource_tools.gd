@@ -313,9 +313,10 @@ func create_resource(args: Dictionary) -> Dictionary:
 	# one asked for.
 	if script_path != "":
 		var script_file: String = _ensure_res_path(script_path)
-		var script: Script = load(script_file) as Script
-		if script == null:
-			return { "ok": false, "error": "No script loads from " + script_file }
+		var found: Variant = GdhSceneFile.script_at(script_file)
+		if found is String:
+			return { "ok": false, "error": found }
+		var script: Script = found
 		var uncompiled: String = GdhSceneFile.uncompiled(script, script_file)
 		if not uncompiled.is_empty():
 			return { "ok": false, "error": uncompiled }

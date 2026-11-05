@@ -4080,7 +4080,7 @@ async function testACreateMakesWhatWasAsked({ call, refusal, project }: Editor):
   };
   assert.match(
     await refusal('resource_edit', { ...resource, script: 'res://nothing.gd' }),
-    /No script loads from res:\/\/nothing\.gd/,
+    /^No script at res:\/\/nothing\.gd\./,
   );
   await call('resource_edit', resource);
   assert.match(await refusal('resource_edit', resource), /res:\/\/once\.tres already exists/);
