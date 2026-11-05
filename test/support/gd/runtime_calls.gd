@@ -231,6 +231,8 @@ func _check_reading_calls_take_literal_arguments() -> void:
 		'set_name("Renamed")': "is not one the engine marks as only reading",
 		"get_tree_string()": "get_tree_string is not one the engine marks as only reading",
 		"/root/Column:get_theme_constant(separation)": "literal arguments only",
+		"/root/Column:get_theme_constant(Vector2i(0, 1))":
+		'runtime_invoke call takes arguments of any type, such as a Vector2i as {"x": 0, "y": 1}',
 		"/root/Column:get_theme_constant()": "takes 1 to 2 arguments and the path gives it 0",
 		"roster:size(1)": "calls size() on one with no arguments",
 	}

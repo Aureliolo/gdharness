@@ -703,7 +703,8 @@ static func _not_literals(named: String) -> String:
 	return (
 		(
 			"%s: a path gives a call literal arguments only, words in double quotes, numbers, "
-			+ "true, false or null"
+			+ "true, false or null. runtime_invoke call takes arguments of any type, such as "
+			+ 'a Vector2i as {"x": 0, "y": 1}'
 		)
 		% named
 	)
