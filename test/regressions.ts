@@ -39986,7 +39986,8 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
           'func slow(ms: int) -> String:\n\tOS.delay_msec(ms)\n\tcount += 1\n\treturn "done after %d" % ms\n\n\n' +
           'func later(ms: int) -> String:\n\tvar began: int = Time.get_ticks_usec()\n' +
           '\tawait get_tree().create_timer(ms / 1000.0).timeout\n' +
-          '\tlater_took = Time.get_ticks_usec() - began\n\tcount += 1\n\treturn "awaited %d" % ms\n',
+          '\tlater_took = Time.get_ticks_usec() - began\n\tcount += 1\n\treturn "awaited %d" % ms\n\n\n' +
+          'enum Mood { CALM, ANGRY }\n\n\nfunc mood() -> Mood:\n\treturn Mood.ANGRY\n',
       );
       writeFileSync(
         join(project, 'main.tscn'),
@@ -40044,6 +40045,35 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         };
       };
       const wearing = async (index: number): Promise<unknown> => (await invoke('mounted_is', [index])).result;
+
+      // A result a method declares as an enum is named as well: emit_signal answered 37 with nothing
+      // saying it is Error's "Method not found".
+      const namedResults: unknown[] = [];
+      for (const [method, args] of [
+        // The engine answers ERR_UNAVAILABLE for a signal nothing is connected to.
+        ['emit_signal', ['ready']],
+        ['get_process_mode', []],
+        ['mood', []],
+        ['total', [[1, 2]]],
+      ] as const) {
+        const response = await server.request(
+          'tools/call',
+          { name: 'runtime_invoke', arguments: { op: 'call', nodePath: '/root/Main', method, args } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const parsed = parseTextContent(response);
+        namedResults.push([get(parsed, 'result'), get(parsed, 'result_named')]);
+      }
+      assert.deepEqual(
+        namedResults,
+        [
+          [2, 'Unavailable'],
+          [0, 'PROCESS_MODE_INHERIT'],
+          [1, 'ANGRY'],
+          [3, undefined],
+        ],
+        JSON.stringify(namedResults),
+      );
 
       const mounted = await invoke('mount', ['items:2']);
       assert.equal(
