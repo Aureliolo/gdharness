@@ -24277,15 +24277,15 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
     );
     assert.deepEqual(scriptsToDiagnose(project, 'res://scripts'), {
       ok: true,
-      value: ['scripts/a.gd', 'scripts/quiet.gd', 'scripts/sub/b.gd'],
+      value: ['res://scripts/a.gd', 'res://scripts/quiet.gd', 'res://scripts/sub/b.gd'],
     });
     // The project itself is a folder too, which is how a caller asks for every script in it.
     const everyScript = [
-      'addons/theirs/thing.gd',
-      'scripts/a.gd',
-      'scripts/quiet.gd',
-      'scripts/sub/b.gd',
-      'ui/shop.gd',
+      'res://addons/theirs/thing.gd',
+      'res://scripts/a.gd',
+      'res://scripts/quiet.gd',
+      'res://scripts/sub/b.gd',
+      'res://ui/shop.gd',
     ];
     for (const root of ['res://', '.', ['res://']]) {
       assert.deepEqual(
@@ -24298,13 +24298,16 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
       scriptsToDiagnose(project, 'addons/gdharness_editor'),
       {
         ok: true,
-        value: ['addons/gdharness_editor/plugin.gd', 'addons/gdharness_editor/tools/scene_tools.gd'],
+        value: [
+          'res://addons/gdharness_editor/plugin.gd',
+          'res://addons/gdharness_editor/tools/scene_tools.gd',
+        ],
       },
       'an installed addon named is read',
     );
     assert.deepEqual(scriptsToDiagnose(project, ['ui', 'scripts/sub', 'ui/shop.gd', 'scripts/gone.gd']), {
       ok: true,
-      value: ['ui/shop.gd', 'scripts/sub/b.gd', 'scripts/gone.gd'],
+      value: ['res://ui/shop.gd', 'res://scripts/sub/b.gd', 'res://scripts/gone.gd'],
     });
     for (const [given, reason] of [
       [[], /^scriptPath is an empty list/],
@@ -24374,8 +24377,8 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
               errors: 0,
               scripts: [],
               nothingReported: 302,
-              first: 'many/s000.gd',
-              last: 'ui/shop.gd',
+              first: 'res://many/s000.gd',
+              last: 'res://ui/shop.gd',
             },
             JSON.stringify(folder).slice(0, 600),
           );
@@ -24449,7 +24452,12 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
               errors: 2,
               warnings: 0,
               scriptsNotRead: 2,
-              paths: ['scripts/a.gd', 'scripts/quiet.gd', 'scripts/sub/b.gd', 'scripts/gone.gd'],
+              paths: [
+                'res://scripts/a.gd',
+                'res://scripts/quiet.gd',
+                'res://scripts/sub/b.gd',
+                'res://scripts/gone.gd',
+              ],
               nothingReported: [],
             },
             said,
@@ -24471,10 +24479,10 @@ async function testDiagnosticsAnswerSeveralScripts(): Promise<void> {
               .filter((message) => message.method === 'notifications/progress')
               .map((message) => get(message.params, 'message')),
             [
-              '1 of 4: scripts/a.gd',
-              '2 of 4: scripts/quiet.gd',
-              '3 of 4: scripts/sub/b.gd',
-              '4 of 4: scripts/gone.gd',
+              '1 of 4: res://scripts/a.gd',
+              '2 of 4: res://scripts/quiet.gd',
+              '3 of 4: res://scripts/sub/b.gd',
+              '4 of 4: res://scripts/gone.gd',
             ],
             'told as each script is asked about',
           );
@@ -24753,7 +24761,14 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
         get(all, 'nothingReported'),
         get(all, 'checkedBy'),
       ],
-      [false, 5, 3, 0, ['checked/fine.gd', 'checked/holder.gd', 'checked/stash.gd'], 'engine'],
+      [
+        false,
+        5,
+        3,
+        0,
+        ['res://checked/fine.gd', 'res://checked/holder.gd', 'res://checked/stash.gd'],
+        'engine',
+      ],
       `a folder compiled whole, an engine past each failure, the clean scripts named apart: ${said}`,
     );
     const entryFor = (scriptPath: string): unknown =>
@@ -24791,7 +24806,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
               get(both, 'checkedBy'),
               get(both, 'checkedByLanguageServer'),
             ],
-            [2, ['checked/fine.gd'], 2, 'language server, then engine', 1],
+            [2, ['res://checked/fine.gd'], 2, 'language server, then engine', 1],
             textOf(mixed) ?? JSON.stringify(mixed),
           );
         } finally {
@@ -24806,7 +24821,7 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       GODOT_SYMBOLS,
       1,
     );
-    const dependent = entryFor('checked/dependent.gd');
+    const dependent = entryFor('res://checked/dependent.gd');
     assert.deepEqual(
       [get(dependent, 'diagnostics'), get(dependent, 'dependenciesWithErrors')],
       [
@@ -24851,7 +24866,10 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       `the same answer, with the cache not written again: ${JSON.stringify(again)}`,
     );
     assert.deepEqual(
-      [get(dependent, 'typesMissingFromTheClassCache'), get(entryFor('checked/broken.gd'), 'staleAnalysis')],
+      [
+        get(dependent, 'typesMissingFromTheClassCache'),
+        get(entryFor('res://checked/broken.gd'), 'staleAnalysis'),
+      ],
       [undefined, undefined],
       said,
     );

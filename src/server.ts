@@ -3770,8 +3770,8 @@ export function testPathsIn(
 }
 
 /**
- * The scripts a script_diagnostics call names, each as a path inside the project, or null for one
- * file named alone, which is answered in the single-script shape it always was.
+ * The scripts a script_diagnostics call names, each as its res:// path, or null for one file named
+ * alone, which is answered in the single-script shape it always was.
  *
  * Several are named as a list, a folder, or both: a change across seventeen scripts was one call
  * each, so four were asked about and thirteen waited for the unit tier, which says less about a
@@ -3816,11 +3816,11 @@ export function scriptsToDiagnose(
     }
     const fromRoot = location.relativePath.replace(/\/+$/, '');
     if (!isDirectory(location.absolutePath)) {
-      found.push(fromRoot);
+      found.push(`res://${fromRoot}`);
       continue;
     }
     const inside = folderFiles(location.absolutePath, ['.gd']).map((script) =>
-      fromRoot === '' ? script : `${fromRoot}/${script}`,
+      fromRoot === '' ? `res://${script}` : `res://${fromRoot}/${script}`,
     );
     if (inside.length === 0) {
       empty.push(noScriptUnder(entry, location.absolutePath, fromRoot));
