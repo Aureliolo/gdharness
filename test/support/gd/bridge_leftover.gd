@@ -38,6 +38,9 @@ func _process(_delta: float) -> bool:
 	while _stuck.is_connection_available():
 		_holding.append(_stuck.take_connection())
 
+	# The client checks that the port answers before it dials, and that check never speaks.
+	if _peer != null and _peer.get_ready_state() == WebSocketPeer.STATE_CLOSED:
+		_peer = null
 	if _peer == null and _configured.is_connection_available():
 		_peer = WebSocketPeer.new()
 		if _peer.accept_stream(_configured.take_connection()) != OK:
