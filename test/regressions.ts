@@ -447,6 +447,7 @@ import {
   shippedEditorDigest,
   shippedLoader,
   shippedRuntimeDigest,
+  worktreeAddonVersion,
   writeLoader,
 } from '../src/setup.js';
 import { skillFiles } from '../src/skill.js';
@@ -19916,6 +19917,17 @@ function testAWorktreeFindsItsMainCheckoutsEngine(): void {
     writeFileSync(join(root, 'main', 'game', 'project.godot'), 'config_version=5\n');
     writeFileSync(join(entry, 'commondir'), '../../../bare.git\n');
     assert.equal(mainCheckoutOf(worktree), null, 'a bare repository has no checkout');
+
+    // What an upgrade names a lagging worktree by. A worktree removed as the upgrade ran failed it
+    // with ENOENT on its project.godot, after the upgrade had finished its own project.
+    const addon = join(worktree, 'addons', 'gdharness_editor');
+    mkdirSync(addon, { recursive: true });
+    assert.equal(worktreeAddonVersion(worktree), null, 'an addon with no marker');
+    writeFileSync(join(addon, VERSION_MARKER), '1.2.3\n');
+    assert.equal(worktreeAddonVersion(worktree), '1.2.3', 'the marked version');
+    // Part way through its removal, as git takes the files out one by one.
+    rmSync(join(worktree, 'project.godot'));
+    assert.equal(worktreeAddonVersion(worktree), undefined, 'a worktree being removed reads as none');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

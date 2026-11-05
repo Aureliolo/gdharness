@@ -23,6 +23,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cachedClasses, staleAgainst } from './class-cache.js';
 import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headless.js';
+import { bytesOf, statOf } from './listed-reads.js';
 import { VERSION_MARKER } from './project-scan.js';
 import { parseProjectGodot } from './resources.js';
 import { SERVER_VERSION } from './server-version.js';
@@ -609,6 +610,27 @@ function enabledPlugins(settings: Record<string, Record<string, unknown>>): stri
   return [...raw.matchAll(/res:\/\/addons\/([^/"]+)\/plugin\.cfg/g)]
     .map((match) => match[1] ?? '')
     .filter(Boolean);
+}
+
+/**
+ * The version marked on the first gdharness addon installed in [param projectPath], null for one
+ * with no marker, or undefined when none is installed or the project has gone. Read for a git
+ * worktree just listed, which can be removed as the upgrade runs: reading its whole project failed
+ * an upgrade that had finished its own.
+ */
+export function worktreeAddonVersion(projectPath: string): string | null | undefined {
+  for (const name of ADDONS) {
+    const directory = join(projectPath, 'addons', name);
+    if (statOf(directory) === undefined) {
+      continue;
+    }
+    const marker = bytesOf(join(directory, VERSION_MARKER));
+    if (statOf(join(projectPath, 'project.godot')) === undefined) {
+      return undefined;
+    }
+    return marker === null ? null : marker.toString('utf8').trim();
+  }
+  return undefined;
 }
 
 /** What holds and what does not, read from the project directory alone. */
