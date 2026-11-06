@@ -416,6 +416,8 @@ static func settle_saved(
 		var after: String = FileAccess.get_file_as_string(path)
 		var by_id: Dictionary = embedded_in(values, {})
 		var embedded: Array[Array] = []
+		# The properties to take out of the save, by the section setting them.
+		var unwritten: Dictionary = {}
 		for found: Array in embedded_changes(before, after, reached_ids):
 			var holder: Resource = by_id.get(found[0])
 			if (
@@ -423,19 +425,27 @@ static func settle_saved(
 				or (holder != null and not is_same(holder, carried[found[0]]))
 			):
 				continue
-			if holder != null and _unchanged(holder, found.slice(1)):
+			var name: String = str(found[1])
+			if not found[2] and holder != null and left_out_by_editor(holder, name):
+				var in_section: Dictionary = unwritten.get_or_add("sub:" + str(found[0]), {})
+				in_section[name] = true
+			elif holder != null and _unchanged(holder, found.slice(1)):
 				continue
-			if found[2] or holder == null or not at_default(holder, str(found[1])):
+			elif found[2] or holder == null or not at_default(holder, name):
 				embedded.append(found)
 		var top: Array[Array] = []
 		if main != null:
 			for found: Array in main_changes(before, after, asked):
-				if _unchanged(main, found):
+				var name: String = str(found[0])
+				if not found[1] and left_out_by_editor(main, name):
+					var in_main: Dictionary = unwritten.get_or_add("resource", {})
+					in_main[name] = true
+				elif _unchanged(main, found):
 					continue
-				if found[1] or not at_default(main, str(found[0])):
+				elif found[1] or not at_default(main, name):
 					top.append(found)
 		if embedded.is_empty() and top.is_empty():
-			return ""
+			return _leave_out(path, after, unwritten)
 		if attempt == 1:
 			if not embedded.is_empty():
 				return unasked("The embedded resource " + str(embedded[0][0]), str(embedded[0][1]))
@@ -461,6 +471,54 @@ static func settle_saved(
 		var saving: Error = saved.resave.call()
 		if saving != OK:
 			return "Failed to save %s again: %s." % [path, error_string(saving)]
+	return ""
+
+
+## Whether an editor's save of [param object] leaves [param name] out where the file sets nothing,
+## and putting it back cannot: a property its script, which is not a tool, declares with no default
+## the engine reports. The editor runs a stand-in for such a script, holding only what the file
+## gives. A headless engine ran the initializer, such as a call to a function of the script, and
+## its save writes what that gave.
+static func left_out_by_editor(object: Object, name: String) -> bool:
+	var held: Variant = object.get_script()
+	if not untooled(held):
+		return false
+	var script: Script = held
+	if script.get_property_default_value(name) != null:
+		return false
+	for declared: Dictionary in script.get_script_property_list():
+		if str(declared.get("name", "")) == name:
+			return true
+	return false
+
+
+## Writes [param text], the file at [param path] as just saved, again without the lines that set
+## what [param names] gives for each section, by its key as [method sections] reads them. Answers
+## "" or why it could not.
+static func _leave_out(path: String, text: String, names: Dictionary) -> String:
+	if names.is_empty():
+		return ""
+	var kept: PackedStringArray = []
+	var in_section: Dictionary = {}
+	var leaving: bool = false
+	var at_start: RegEx = RegEx.create_from_string("^([^\\s=][^=]*?) = ")
+	for line: String in text.split("\n"):
+		if line.begins_with("["):
+			in_section = names.get(_section_key(line), {})
+			leaving = false
+		elif not in_section.is_empty():
+			var started: RegExMatch = at_start.search(line)
+			if started != null:
+				leaving = in_section.has(started.get_string(1))
+			elif line.is_empty():
+				leaving = false
+		if not leaving:
+			var _added: bool = kept.append(line)
+	var file: FileAccess = FileAccess.open(path, FileAccess.WRITE)
+	if file == null:
+		return "Failed to save %s again: %s." % [path, error_string(FileAccess.get_open_error())]
+	var _stored: bool = file.store_string("\n".join(kept))
+	file.close()
 	return ""
 
 

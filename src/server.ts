@@ -3976,7 +3976,7 @@ function unheldNote(changed: unknown): string {
     return '';
   }
   const unheld = Object.entries(changed)
-    .filter(([, change]) => isRecord(change) && change['was'] === null)
+    .filter(([, change]) => isRecord(change) && !('was' in change))
     .map(([name]) => name);
   if (unheld.length === 0) {
     return '';

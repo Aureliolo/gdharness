@@ -55,6 +55,15 @@ const VRAM_FORMATS: Array[String] = ["s3tc_bptc", "etc2_astc"]
 ## Options keyed by OpenType tags, by the importer that holds them. The engine keys them by the tag
 ## as an int, which a caller can also name, as "liga" for ligatures.
 const OPENTYPE_OPTIONS: Dictionary[String, Array] = { "font_data_dynamic": ["opentype_features"] }
+## Options holding resources, by the importer that holds them, as the importers declare them in
+## editor/import. A path given there is the resource it names. Written as text, the importer could
+## not convert it, printed an error and imported without it.
+const RESOURCE_OPTIONS: Dictionary[String, Array] = {
+	"font_data_dynamic": ["fallbacks"],
+	"font_data_bmfont": ["fallbacks"],
+	"font_data_image": ["fallbacks"],
+	"scene": ["nodes/root_script"],
+}
 const EDITOR_DIRECTORY: String = "res://.godot/editor"
 const EDITOR_CACHE_PREFIX: String = "filesystem_cache"
 
@@ -235,7 +244,14 @@ func set_import_options(params: Dictionary) -> Dictionary:
 			continue
 		var held: Variant = _held(config, name)
 		var given: Variant = _values.deserialize_value(options[key])
+		var holding_resources: Array = RESOURCE_OPTIONS.get(importer, [])
+		var loaded: Dictionary = _with_resources(options[key], name in holding_resources)
+		if loaded.has("refused"):
+			refused.append("%s names %s" % [name, loaded["refused"]])
+			continue
 		var value: Variant = _as_option(_values.fitted(options[key], typeof(held)), held)
+		if loaded["loaded"]:
+			value = loaded["value"]
 		if value is Dictionary:
 			var entries: Dictionary = value
 			var keyed: Dictionary = _keyed_as_option(name, entries, held, importer)
@@ -276,10 +292,11 @@ func set_import_options(params: Dictionary) -> Dictionary:
 			continue
 		config.set_value("params", name, value)
 		updated_keys.append(name)
-		changes[name] = {
-			"was": null if held == null else _values.serialize_value(held),
-			"now": _values.serialize_value(value),
-		}
+		var change: Dictionary = { "now": _values.serialize_value(value) }
+		# The file held none, as after a switch of importer, which a null would read as a value.
+		if held != null:
+			change["was"] = _values.serialize_value(held)
+		changes[name] = change
 		_log.debug("Set " + name + " = " + str(value))
 
 	var switched: bool = importer != was_importer
@@ -305,6 +322,40 @@ static func _held(config: ConfigFile, name: String) -> Variant:
 	if not config.has_section_key("params", name):
 		return null
 	return config.get_value("params", name)
+
+
+## [param given] with each resource it names loaded, as {value, loaded}, loaded saying whether it
+## named any, or {refused} naming one that does not load. A resource is named by
+## {"_type": "Resource", "path"} anywhere, and by its path where [param takes_paths], for an option
+## holding resources.
+static func _with_resources(given: Variant, takes_paths: bool) -> Dictionary:
+	if given is Array:
+		var items: Array = given
+		var built: Array = []
+		var any: bool = false
+		for item: Variant in items:
+			var one: Dictionary = _with_resources(item, takes_paths)
+			if one.has("refused"):
+				return one
+			built.append(one["value"])
+			var took: bool = one["loaded"]
+			any = any or took
+		return { "value": built, "loaded": any }
+	var path: String = ""
+	if given is Dictionary:
+		var fields: Dictionary = given
+		if str(fields.get("_type", "")) == "Resource" and fields.has("path"):
+			path = str(fields["path"])
+	elif takes_paths and given is String:
+		var text: String = given
+		if text.begins_with("res://") or text.begins_with("uid://"):
+			path = text
+	if path.is_empty():
+		return { "value": given, "loaded": false }
+	var resource: Resource = ResourceLoader.load(path) if ResourceLoader.exists(path) else null
+	if resource == null:
+		return { "refused": "%s, which does not load as a resource" % path }
+	return { "value": resource, "loaded": true }
 
 
 ## [param given] as the option holds it. Every JSON number arrives as a float, and an enum option

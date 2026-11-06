@@ -27,6 +27,15 @@ extends RefCounted
 const GdhHeadlessCheck = preload("headless_check.gd")
 ## How many times what scripts changed is put back before a write is refused for it.
 const PUTTING_BACK_PASSES: int = 4
+## The bits of a property's name in a scene bundle that index its names, below the flag the engine
+## marks a node path property with (packed_scene.h's FLAG_PROP_NAME_MASK).
+const PROPERTY_NAME_MASK: int = (1 << 30) - 1
+## The type of a node entry in a bundle for a node another file makes (TYPE_INSTANTIATED).
+const NODE_MADE_ELSEWHERE: int = 0x7fffffff
+## The bit that marks a node entry's parent or a connection's end as a path (FLAG_ID_IS_PATH).
+const NAMED_BY_PATH: int = 1 << 30
+## The scene bundle layout the constants above describe (PACKED_SCENE_VERSION).
+const BUNDLE_VERSION: int = 3
 const GdhFileWalk = preload("file_walk.gd")
 const GdhRead = preload("reading.gd")
 const GdhSame = preload("same_values.gd")
@@ -1139,6 +1148,9 @@ func _write(check: Callable) -> Dictionary:
 		if not str(settled[1]).is_empty():
 			return refuse("Nothing was written: " + str(settled[1]))
 		packed = settled[0]
+		var unleft: String = _leave_out_unsaved(packed)
+		if not unleft.is_empty():
+			return refuse("Nothing was written: " + unleft)
 		if not path.ends_with(".tscn") and _holds_scripted_embedded():
 			var binary: String = (
 				"Nothing was written: %s is a binary scene holding an embedded resource with a "
@@ -1463,7 +1475,7 @@ func _strays(state: SceneState) -> Array[Array]:
 			var held: bool = filed.has(name)
 			if held == stored.has(name) and (not held or GdhSame.same(stored[name], filed[name])):
 				continue
-			if not held and GdhHeadlessCheck.at_default(node, name):
+			if not held and (GdhHeadlessCheck.at_default(node, name) or _unsaved(node, name)):
 				continue
 			# Set in the file to what the node would have anyway, such as an instance naming the
 			# script its own scene gives it. The pack leaves it out, as the editor's does, and the
@@ -1474,6 +1486,119 @@ func _strays(state: SceneState) -> Array[Array]:
 				continue
 			stray.append([node, name, held, filed.get(name)])
 	return stray
+
+
+## Whether an editor's save would leave [param name] out of [param node]'s entry, which neither the
+## file nor the call sets, where putting it back cannot
+## ([method GdhHeadlessCheck.left_out_by_editor]). Left in, the line keeps the scene at what the
+## script gave, whatever it gives later. One with a default is put back instead, so that a read and
+## the answer give it as the file holds it.
+func _unsaved(node: Node, name: String) -> bool:
+	var id: int = node.get_instance_id()
+	var on: Dictionary = _asked.get(id, {})
+	var filed: Dictionary = _filed.get(id, _filed.get(_copied_from.get(id, 0), {}))
+	return (
+		not on.has(name)
+		and not filed.has(name)
+		and GdhHeadlessCheck.left_out_by_editor(node, name)
+	)
+
+
+## Takes out of [param packed] each property [method _unsaved] names. A script cannot remove one
+## from a scene's state, so it comes out of the bundle the state is built from: per node its parent,
+## owner, type, name and instance, the count of its properties, a name and a value for each, the
+## count of its groups, and the groups (packed_scene.cpp's get_bundled_scene).
+##
+## A node another file makes is written only for what it changes, so one left with nothing goes too,
+## as it would from the editor's pack. One that a later node or a connection names by its place
+## stays, with nothing in it. Answers why nothing can be left out, or "".
+func _leave_out_unsaved(packed: PackedScene) -> String:
+	var bundled: Dictionary = packed.get("_bundled")
+	var names: PackedStringArray = bundled["names"]
+	var nodes: PackedInt32Array = bundled["nodes"]
+	var state: SceneState = packed.get_state()
+	var entries: Array[PackedInt32Array] = []
+	var emptied: Dictionary[int, bool] = {}
+	var left_out: bool = false
+	var at: int = 0
+	for index: int in state.get_node_count():
+		var node: Node = _node_at(str(state.get_node_path(index)))
+		var entry: PackedInt32Array = nodes.slice(at, at + 5)
+		var listed: int = nodes[at + 5]
+		at += 6
+		var properties: PackedInt32Array = []
+		var count: int = 0
+		for _property: int in listed:
+			var name: String = names[nodes[at] & PROPERTY_NAME_MASK]
+			if node != null and _unsaved(node, name):
+				left_out = true
+			else:
+				properties.append_array(nodes.slice(at, at + 2))
+				count += 1
+			at += 2
+		var groups: int = nodes[at]
+		var _counted: bool = entry.append(count)
+		entry.append_array(properties)
+		entry.append_array(nodes.slice(at, at + 1 + groups))
+		at += 1 + groups
+		if index > 0 and listed > 0 and count == 0 and groups == 0:
+			if entry[2] == NODE_MADE_ELSEWHERE and entry[4] == -1:
+				emptied[index] = true
+		entries.append(entry)
+	if not left_out:
+		return ""
+	var version: int = GdhRead.as_int(bundled.get("version", 0))
+	if version != BUNDLE_VERSION:
+		return (
+			(
+				"a headless save of %s would write properties of a script that is not a tool, "
+				+ "which an editor's save leaves out. This engine packs scenes in version %d, and "
+				+ "gdharness takes them out only of version %d. "
+			)
+			% [path, version, BUNDLE_VERSION]
+		) + GdhHeadlessCheck.REMEDY
+	var conns: PackedInt32Array = bundled["conns"]
+	for entry: PackedInt32Array in entries:
+		var _parent: bool = emptied.erase(entry[0])
+		var _owner: bool = emptied.erase(entry[1])
+	at = 0
+	for _connection: int in GdhRead.as_int(bundled["conn_count"]):
+		var _from: bool = emptied.erase(conns[at])
+		var _to: bool = emptied.erase(conns[at + 1])
+		at += 7 + conns[at + 5]
+	var placed: Array[int] = []
+	var laid: PackedInt32Array = []
+	var ids: PackedInt32Array = bundled["node_ids"]
+	var laid_ids: PackedInt32Array = []
+	for index: int in entries.size():
+		placed.append(index - placed.count(-1) if not emptied.has(index) else -1)
+		if emptied.has(index):
+			continue
+		var entry: PackedInt32Array = entries[index]
+		entry[0] = _placed_at(placed, entry[0])
+		entry[1] = _placed_at(placed, entry[1])
+		laid.append_array(entry)
+		if index < ids.size():
+			var _id: bool = laid_ids.append(ids[index])
+	at = 0
+	for _connection: int in GdhRead.as_int(bundled["conn_count"]):
+		conns[at] = _placed_at(placed, conns[at])
+		conns[at + 1] = _placed_at(placed, conns[at + 1])
+		at += 7 + conns[at + 5]
+	bundled["nodes"] = laid
+	bundled["node_count"] = entries.size() - emptied.size()
+	bundled["node_ids"] = laid_ids
+	bundled["conns"] = conns
+	packed.set("_bundled", bundled)
+	return ""
+
+
+## Where the node a bundle names by its place [param named] sits once [param placed] has moved them,
+## a name by path or no node left as it is.
+static func _placed_at(placed: Array[int], named: int) -> int:
+	if named < 0 or named & NAMED_BY_PATH != 0 or named >= placed.size():
+		return named
+	return placed[named]
 
 
 func _stray_text(node: Node, name: String) -> String:

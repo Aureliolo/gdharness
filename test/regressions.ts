@@ -28932,6 +28932,57 @@ async function testAReimportReimportsThroughTheEngine(): Promise<void> {
         timeout: 120_000,
       });
       assert.match(loaded.stdout, /^Image$/m, `${loaded.stdout}\n${loaded.stderr}`);
+      // The switch cleared the options, so the file held none to have been anything.
+      const back = await call({
+        op: 'set_options',
+        resourcePath: 'good.png',
+        importer: 'texture',
+        options: { 'compress/mode': 1 },
+      });
+      assert.deepEqual(get(back, 'changed'), { 'compress/mode': { now: 1 } }, JSON.stringify(back));
+
+      // A font's fallbacks hold fonts. Written as the path given, the import could not convert it,
+      // printed an error and made a font with none, while the answer called the option updated.
+      writeFileSync(join(project, 'glyphs.png'), solidPng(200, 200, 200));
+      writeFileSync(join(project, 'plain.tres'), '[gd_resource type="SystemFont" format=3]\n\n[resource]\n');
+      await call({ op: 'reimport', resourcePath: 'glyphs.png' });
+      const glyphs = (): string => readFileSync(join(project, 'glyphs.png.import'), 'utf8');
+      const unloaded = await said({
+        op: 'set_options',
+        resourcePath: 'glyphs.png',
+        importer: 'font_data_image',
+        options: { fallbacks: ['res://gone.tres'] },
+      });
+      assert.match(
+        unloaded,
+        /fallbacks names res:\/\/gone\.tres, which does not load as a resource/,
+        unloaded,
+      );
+      for (const fallback of ['res://plain.tres', { _type: 'Resource', path: 'res://plain.tres' }]) {
+        await call({
+          op: 'set_options',
+          resourcePath: 'glyphs.png',
+          importer: 'font_data_image',
+          options: { fallbacks: [fallback] },
+        });
+        assert.match(glyphs(), /^fallbacks=\[Resource\("res:\/\/plain\.tres"\)\]$/m, glyphs());
+        await call({ op: 'set_options', resourcePath: 'glyphs.png', options: { fallbacks: [] } });
+      }
+      await call({
+        op: 'set_options',
+        resourcePath: 'glyphs.png',
+        options: { fallbacks: ['res://plain.tres'] },
+      });
+      writeFileSync(
+        join(project, 'falls.gd'),
+        'extends SceneTree\n\nfunc _init() -> void:\n\tvar font: Font = load("res://glyphs.png")\n' +
+          '\tprint(font.fallbacks[0].get_class())\n\tquit()\n',
+      );
+      const fell = spawnSyncHidden(godotPath, ['--headless', '--path', project, '-s', 'res://falls.gd'], {
+        encoding: 'utf8',
+        timeout: 120_000,
+      });
+      assert.match(fell.stdout, /^SystemFont$/m, `${fell.stdout}\n${fell.stderr}`);
 
       // A scene is loaded as it is and never imported. Asked for by name, it ran a pass and came
       // back as not reimported, which reads as its import failing.
@@ -54058,7 +54109,8 @@ async function testAnEngineRunsBelowNormalPriority(): Promise<void> {
 /**
  * A command whose engines run one after another holds one slot for all of them. Each engine took a
  * slot of its own, so on a busy machine one `gdharness setup` queued three times, 24 minutes in all.
- * Two stand-in engines print the slot they were handed, and the slot stays held between them.
+ * Two stand-in engines print the slot they were handed, and the slot stays held between them. It is
+ * taken at the first engine, since setup with no Godot to find waited 522 seconds for a slot first.
  */
 async function testACommandOfSeveralEnginesHoldsOneSlot(): Promise<void> {
   const own = ['-e', 'console.log("slot " + process.env.GODOT_ENGINE_HELD)'];
@@ -54071,13 +54123,22 @@ async function testACommandOfSeveralEnginesHoldsOneSlot(): Promise<void> {
     )?.[1];
   const heldBy = (lock: string | undefined): number | undefined =>
     lock === undefined || !existsSync(lock) ? undefined : holderOf(readFileSync(lock, 'utf8'))?.pid;
+  const alone = slotOf(await runEngine(process.execPath, own));
+  assert.notEqual(alone, undefined, 'an engine on its own is handed a slot');
+  const heldHere = (): string[] =>
+    readdirSync(dirname(alone ?? '')).filter(
+      (name) => name.endsWith('.lock') && heldBy(join(dirname(alone ?? ''), name)) === process.pid,
+    );
+  let before: string[] = [];
   let between: number | undefined;
   const [first, second] = await inOneSlot(async () => {
+    before = heldHere();
     const one = await runEngine(process.execPath, own);
     between = heldBy(slotOf(one));
     const two = await runEngine(process.execPath, own);
     return [one, two];
   });
+  assert.deepEqual(before, [], 'no slot is held before the first engine');
   const lock = slotOf(first);
   assert.notEqual(lock, undefined, howItEnded(first));
   assert.equal(slotOf(second), lock, 'the second engine is handed the same slot');
@@ -67571,11 +67632,13 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     'hero.gd':
       'class_name Hero\nextends Node2D\n\n@export var speed: float = 100.0:\n\tset(value):\n\t\tspeed = value\n\t\tmodulate = Color(1, 1, value / 200.0)\n\n\n' +
       'func _init() -> void:\n\tname = "RenamedByInit"\n\tspeed = 120.0\n\n\nfunc _ready() -> void:\n\tScore.total += 1\n',
-    // No default the engine can report, since it folds no constructor call, so every save writes it.
+    // No default the engine can report, since it folds no constructor call, so a headless pack writes
+    // it. The editor's runs a stand-in for the script holding no value for it, and writes none.
     'bag.gd': 'extends Node\n\n@export var items: PackedStringArray = PackedStringArray()\n',
+    // level has a default, so what _init sets it to is put back rather than left out of the save.
     'busy.gd':
-      'extends Node2D\n\n@export var size: int = 1:\n\tset(value):\n\t\tsize = value\n\t\tscale = Vector2(value, value)\n\n\n' +
-      'func _init() -> void:\n\tmodulate = Color(1, 0, 0)\n',
+      'extends Node2D\n\n@export var size: int = 1:\n\tset(value):\n\t\tsize = value\n\t\tscale = Vector2(value, value)\n' +
+      '@export var level: int = 1\n\n\nfunc _init() -> void:\n\tmodulate = Color(1, 0, 0)\n\tlevel = 9\n',
     'busy.tscn':
       '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://busy.gd" id="1_busy"]\n\n' +
       // A scale of its own, which the setter of size replaces on loading, so what an instance of it
@@ -67713,8 +67776,8 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     assert.deepEqual(sets('main.tscn', '[node name="Plain"'), ['position = Vector2(7, 8)']);
     assert.deepEqual(
       sets('main.tscn', '[node name="Bag"'),
-      ['script = ExtResource', 'items = PackedStringArray()'],
-      'a property every save writes at its default does not stop the write',
+      ['script = ExtResource'],
+      'a property with no default the engine reports is left out, as the editor leaves it out',
     );
     assert.deepEqual(
       sets('main.tscn', '[node name="Busy"'),
@@ -68487,10 +68550,9 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       script: 'res://stats.gd',
       properties: { max_hp: 30 },
     });
-    // tags is written at its default by every save, the editor's included, since the engine has no
-    // default for it to leave it out against.
-    const tags = 'tags = PackedStringArray()';
-    assert.deepEqual(sets('made.tres', '[resource]'), ['script = ExtResource', 'max_hp = 30', tags]);
+    // tags has no default the engine reports, so a headless save writes it, and is left out as the
+    // editor's stand-in for the script leaves it out.
+    assert.deepEqual(sets('made.tres', '[resource]'), ['script = ExtResource', 'max_hp = 30']);
     const modified = await written('resource_edit', {
       op: 'modify',
       resourcePath: 'stats.tres',
@@ -68501,7 +68563,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       { max_hp: 40 },
       `a modify says what it wrote: ${JSON.stringify(modified)}`,
     );
-    assert.deepEqual(sets('stats.tres', '[resource]'), ['script = ExtResource', 'max_hp = 40', tags]);
+    assert.deepEqual(sets('stats.tres', '[resource]'), ['script = ExtResource', 'max_hp = 40']);
     // Made by its class_name, as the editor's create dialog offers it.
     const made = await written('resource_edit', {
       op: 'create',
@@ -68519,7 +68581,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       { max_hp: 50 },
       `a create says what it wrote: ${JSON.stringify(made)}`,
     );
-    assert.deepEqual(sets('named.tres', '[resource]'), ['script = ExtResource', 'max_hp = 50', tags]);
+    assert.deepEqual(sets('named.tres', '[resource]'), ['script = ExtResource', 'max_hp = 50']);
     assert.match(
       fileOf('named.tres'),
       /\[ext_resource type="Script" uid="uid:\/\/[a-y0-8]+" path="res:\/\/stats\.gd"/,
@@ -68606,7 +68668,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     ]);
     assert.deepEqual(
       sets('pack.tres', '[sub_resource type="Resource"'),
-      ['script = ExtResource', 'max_hp = 20', tags],
+      ['script = ExtResource', 'max_hp = 20'],
       'an embedded resource of a resource file keeps what it held too',
     );
     // Reached by a slash path, the scripted resource built into the file keeps what was written to
@@ -68623,7 +68685,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     );
     assert.deepEqual(
       sets('pack.tres', '[sub_resource type="Resource"'),
-      ['script = ExtResource', 'max_hp = 20', 'hp = 7', tags, 'spot = Vector2(3, 0)'],
+      ['script = ExtResource', 'max_hp = 20', 'hp = 7', 'spot = Vector2(3, 0)'],
       fileOf('pack.tres'),
     );
 
@@ -68636,7 +68698,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     assert.deepEqual(sets('holder.tscn', '[node name="Other"'), ['position = Vector2(1, 2)']);
     assert.deepEqual(
       sets('holder.tscn', '[sub_resource type="Resource"'),
-      ['script = ExtResource', 'max_hp = 20', tags],
+      ['script = ExtResource', 'max_hp = 20'],
       'an embedded resource keeps what its file held',
     );
     const holderRead = parseTextContent(
@@ -68662,7 +68724,8 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     });
     assert.deepEqual(
       sets('holder.tscn', '[sub_resource type="Resource"'),
-      ['script = ExtResource', 'max_hp = 20', 'hp = 20', tags],
+      // Built by the call, it is written whole, as the engine holds it.
+      ['script = ExtResource', 'max_hp = 20', 'hp = 20', 'tags = PackedStringArray()'],
       'what a read gave of a scripted resource writes back as the resource it was',
     );
 
@@ -68736,7 +68799,6 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       'script = ExtResource',
       'max_hp = 40',
       'hp = 9007199254740993',
-      tags,
     ]);
     const rounded =
       textOf(
@@ -68842,6 +68904,173 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     assert.deepEqual(sets('main.tscn', '[node name="Plain"'), ['position = Vector2(9, 9)']);
   } finally {
     standIn?.kill();
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A headless write leaves out what an editor's save leaves out: a property a script that is not a
+ * tool initialises through a function, which the file does not set.
+ *
+ * The engine reports no default for it, so a headless pack writes what the initializer gave. That
+ * read as a change the scene's scripts had made, and every scene holding such a node was refused.
+ * The editor runs a stand-in for the script holding no value for it, and writes no line.
+ */
+async function testAHeadlessWriteLeavesOutWhatAnEditorWould(): Promise<void> {
+  const godotPath = process.env['GODOT_PATH'];
+  if (godotPath === undefined || !existsSync(godotPath)) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('headless leave-out regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-leave-out-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-leave-out-rt-'));
+  const delayed = '@export var delay: float = _delay()\n\n\nstatic func _delay() -> float:\n\treturn 0.5\n';
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="LeaveOut"\n',
+    'page.gd': 'extends Window\n\n@export var least: Vector2i = Vector2i.ZERO\n',
+    'tip.gd': `extends Control\n\n${delayed}`,
+    // A tool script runs in the editor, whose save writes what the initializer gave as it does here.
+    'tool_tip.gd': `@tool\nextends Control\n\n${delayed}`,
+    'page.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://page.gd" id="1_page"]\n' +
+      '[ext_resource type="Script" path="res://tip.gd" id="2_tip"]\n' +
+      '[ext_resource type="Script" path="res://tool_tip.gd" id="3_tool"]\n\n[node name="Page" type="Window"]\n' +
+      'script = ExtResource("1_page")\n\n[node name="Tip" type="Control" parent="."]\nlayout_mode = 3\n' +
+      'anchors_preset = 0\nscript = ExtResource("2_tip")\n\n[node name="ToolTip" type="Control" parent="."]\n' +
+      'layout_mode = 3\nanchors_preset = 0\nscript = ExtResource("3_tool")\n',
+    'page_child.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://page.tscn" id="1_page"]\n\n' +
+      '[node name="Page" instance=ExtResource("1_page")]\n',
+    // A connection from the tip, which names its entry by its place in the file.
+    'page_wired.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://page.tscn" id="1_page"]\n\n' +
+      '[node name="Page" instance=ExtResource("1_page")]\n\n' +
+      '[connection signal="resized" from="Tip" to="." method="hide"]\n',
+    'paced.gd': `extends Resource\n\n@export var hp: int = 1\n${delayed}`,
+    'paced.tres':
+      '[gd_resource type="Resource" format=3]\n\n[ext_resource type="Script" path="res://paced.gd" id="1_paced"]\n\n' +
+      '[resource]\nscript = ExtResource("1_paced")\nhp = 2\n',
+    'keeps.gd': 'extends Node\n\n@export var pace: Resource\n',
+    'keeps.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://keeps.gd" id="1_keeps"]\n' +
+      '[ext_resource type="Script" path="res://paced.gd" id="2_paced"]\n\n' +
+      '[sub_resource type="Resource" id="Resource_paced"]\nscript = ExtResource("2_paced")\nhp = 3\n\n' +
+      '[node name="Keeps" type="Node"]\nscript = ExtResource("1_keeps")\npace = SubResource("Resource_paced")\n\n' +
+      '[node name="Other" type="Node2D" parent="."]\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const written = async (name: string, args: Record<string, unknown>): Promise<void> => {
+    const answer = await server.request(
+      'tools/call',
+      { name, arguments: { projectPath: project, ...args } },
+      240_000,
+    );
+    assert.match(
+      text(get(parseTextContent(answer), 'writtenBy')),
+      /^a headless engine, since no editor serves this project$/,
+      `${name} ${String(args['op'])}: ${textOf(answer) ?? JSON.stringify(answer)}`,
+    );
+  };
+  const fileOf = (file: string): string => readFileSync(join(project, file), 'utf8');
+  const sets = (file: string, head: string): string[] => {
+    const whole = fileOf(file);
+    const start = whole.indexOf(head);
+    assert.ok(start >= 0, `${file} has ${head}:\n${whole}`);
+    const next = whole.indexOf('\n[', start + 1);
+    return whole
+      .slice(start, next === -1 ? undefined : next)
+      .split('\n')
+      .slice(1)
+      .filter((line) => line !== '')
+      .map((line) => line.replace(/(Ext|Sub)Resource\("[^"]+"\)/, '$1Resource'));
+  };
+  const least = (x: number, y: number): Record<string, unknown> => ({
+    least: { _type: 'Vector2i', x, y },
+  });
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('leave-out');
+
+    const child = { op: 'set', scenePath: 'page_child.tscn' };
+    await written('scene_node', { ...child, nodePath: '.', properties: least(320, 100) });
+    assert.deepEqual(sets('page_child.tscn', '[node name="Page"'), ['least = Vector2i(320, 100)']);
+    assert.deepEqual(sets('page_child.tscn', '[node name="ToolTip"'), ['delay = 0.5']);
+    assert.doesNotMatch(
+      fileOf('page_child.tscn'),
+      /\[node name="Tip"/,
+      `Tip gains no entry for what was left out of it:\n${fileOf('page_child.tscn')}`,
+    );
+    await written('scene_node', { ...child, nodePath: 'Tip', properties: { tooltip_text: 'Opens' } });
+    assert.deepEqual(
+      sets('page_child.tscn', '[node name="Tip"'),
+      ['tooltip_text = "Opens"'],
+      'nor on the node the call set',
+    );
+    await written('scene_node', { ...child, nodePath: 'Tip', properties: { delay: 0.75 } });
+    assert.deepEqual(sets('page_child.tscn', '[node name="Tip"'), ['tooltip_text = "Opens"', 'delay = 0.75']);
+    await written('scene_node', { ...child, nodePath: '.', properties: least(640, 200) });
+    assert.deepEqual(
+      sets('page_child.tscn', '[node name="Tip"'),
+      ['tooltip_text = "Opens"', 'delay = 0.75'],
+      'what the file holds stays',
+    );
+
+    await written('scene_node', {
+      op: 'set',
+      scenePath: 'page_wired.tscn',
+      nodePath: '.',
+      properties: least(64, 48),
+    });
+    assert.match(
+      fileOf('page_wired.tscn'),
+      /^\[connection signal="resized" from="Tip" to="\." method="hide"\]$/m,
+      fileOf('page_wired.tscn'),
+    );
+    assert.deepEqual(
+      sets('page_wired.tscn', '[node name="Tip"'),
+      [],
+      'an entry the connection names by its place stays, with nothing in it',
+    );
+
+    await written('resource_edit', { op: 'modify', resourcePath: 'paced.tres', properties: { hp: 4 } });
+    assert.deepEqual(sets('paced.tres', '[resource]'), ['script = ExtResource', 'hp = 4']);
+    await written('resource_edit', { op: 'modify', resourcePath: 'paced.tres', properties: { delay: 0.25 } });
+    await written('resource_edit', { op: 'modify', resourcePath: 'paced.tres', properties: { hp: 5 } });
+    assert.deepEqual(
+      sets('paced.tres', '[resource]'),
+      ['script = ExtResource', 'hp = 5', 'delay = 0.25'],
+      'a resource keeps what the call and the file set',
+    );
+
+    await written('scene_node', {
+      op: 'set',
+      scenePath: 'keeps.tscn',
+      nodePath: 'Other',
+      properties: { position: [1, 2] },
+    });
+    assert.deepEqual(
+      sets('keeps.tscn', '[sub_resource type="Resource"'),
+      ['script = ExtResource', 'hp = 3'],
+      'nor in a resource built into the scene',
+    );
+  } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });
     rmSync(runtimeDir, { recursive: true, force: true });
@@ -75997,6 +76226,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMoveWithNoEditorLeavesTheProjectLoading,
   testAReadWithNoEditorAnswersFromTheFile,
   testAWriteWithNoEditorGoesThroughAHeadlessEngine,
+  testAHeadlessWriteLeavesOutWhatAnEditorWould,
   testAnAnimationsKeysAndLengthAreWrittenWithNoEditor,
   testAnAnimationIsRenamedAndRemovedWithNoEditor,
   testAnAnimationNodeNotFoundIsToldWhereToLook,
