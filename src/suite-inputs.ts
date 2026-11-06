@@ -526,6 +526,17 @@ export class SuiteInputs {
     const body = text.slice(declared.index, after.exec(text)?.index ?? text.length);
     const parameters = argumentsAt(text, declared.index + declared[0].length);
     const index = parameters.findIndex((parameter) => /^\w+/.exec(parameter)?.[0] === name);
+    // A lambda taking the name, or another `var` of it such as a match binding, may be what is read.
+    const lambdas = [...body.slice(declared[0].length).matchAll(/\bfunc\b[ \t]*\w*[ \t]*\(/g)];
+    const shadowed =
+      lambdas.some((lambda) =>
+        argumentsAt(body, declared[0].length + lambda.index + lambda[0].length).some(
+          (parameter) => /^\w+/.exec(parameter)?.[0] === name,
+        ),
+      ) || [...body.matchAll(new RegExp(`\\bvar[ \\t]+${name}\\b`, 'g'))].length > (index === -1 ? 1 : 0);
+    if (shadowed) {
+      return null;
+    }
     if (index !== -1) {
       const fallback = /=\s*(.+)$/s.exec(parameters[index] ?? '')?.[1];
       return this.passedFor(declared[2] ?? '', index, { fallback, path, at: declared.index }, depth);

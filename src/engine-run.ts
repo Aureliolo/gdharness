@@ -47,28 +47,35 @@ export function crashedAtStart(run: EngineRun): boolean {
   return (
     run.failure === null &&
     run.exitSignal === null &&
-    run.exitCode !== null &&
-    run.exitCode >= 0xc0000000 &&
-    !NOT_A_START_RACE.has(run.exitCode) &&
-    run.log.everything().length === 0
+    diedAsItStarted(run.exitCode, run.log.everything().length === 0)
   );
 }
 
 /**
- * [param start] run until it gives a run that did not crash as it started, or {@link ENGINE_STARTS}
- * times, sleeping with [param sleep] between. A cancelled call is not started again.
+ * Whether an engine that exited with [param code], and that nothing here ended, died as it started:
+ * see {@link crashedAtStart}.
  */
-export async function startedUntilItRuns(
-  start: () => Promise<EngineRun>,
+export function diedAsItStarted(code: number | null, printedNothing: boolean): boolean {
+  return code !== null && code >>> 0 >= 0xc0000000 && !NOT_A_START_RACE.has(code >>> 0) && printedNothing;
+}
+
+/**
+ * [param start] run until it gives a run that did not crash as it started, by [param crashed], or
+ * {@link ENGINE_STARTS} times. [param sleep] waits between starts. A cancelled call is not started
+ * again.
+ */
+export async function startedUntilItRuns<Ran extends { readonly crashedStarts?: number }>(
+  start: () => Promise<Ran>,
   signal: AbortSignal | undefined,
+  crashed: (ran: Ran) => boolean,
   sleep: (ms: number) => Promise<void> = (ms) =>
     new Promise((done) => {
       setTimeout(done, ms);
     }),
-): Promise<EngineRun> {
+): Promise<Ran> {
   for (let started = 1; ; started += 1) {
     const ran = await start();
-    if (started >= ENGINE_STARTS || signal?.aborted === true || !crashedAtStart(ran)) {
+    if (started >= ENGINE_STARTS || signal?.aborted === true || !crashed(ran)) {
       return started === 1 ? ran : { ...ran, crashedStarts: started - 1 };
     }
     await sleep(START_RETRY_MS * 2 ** (started - 1));
@@ -100,7 +107,7 @@ export async function runEngine(
   const signal = callSignal();
   try {
     return await inASlot((lock) =>
-      startedUntilItRuns(() => runStarted(executable, args, lock, options, signal), signal),
+      startedUntilItRuns(() => runStarted(executable, args, lock, options, signal), signal, crashedAtStart),
     );
   } catch (error) {
     const said = error instanceof Error ? error.message : String(error);
