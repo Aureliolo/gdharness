@@ -766,7 +766,21 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
   if (wrongEngine !== null) {
     faults.push(wrongEngine);
   }
-  if (printed.executed === null || printed.executed === 0) {
+  // An engine dealt only rows a case has lost since its times were kept finds every row it holds
+  // left out and runs nothing, so gdUnit4 opens no suite and sums up nothing. Whether each row the
+  // case has now ran once is judged over all the engines, by rowsAcross.
+  const rowsGone = new Set(
+    handed.suites
+      .filter(
+        ({ path, cases, rows = {} }) =>
+          !printed.suites.has(path) &&
+          cases.length > 0 &&
+          cases.every((func) => rows[func] !== undefined && printed.leftOut.has(`${path} > ${func}`)),
+      )
+      .map(({ path }) => path),
+  );
+  const nothingLeft = handed.suites.length > 0 && rowsGone.size === handed.suites.length;
+  if (!nothingLeft && (printed.executed === null || printed.executed === 0)) {
     faults.push(
       printed.executed === null
         ? 'the run never printed its summary'
@@ -781,6 +795,9 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
   for (const { path, cases, rows = {} } of handed.suites) {
     const suite = printed.suites.get(path);
     if (suite === undefined) {
+      if (rowsGone.has(path)) {
+        continue;
+      }
       faults.push(`${path} never started`);
       failing.add(path);
       continue;
