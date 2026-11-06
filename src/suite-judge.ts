@@ -492,6 +492,8 @@ export interface EngineEnd {
    * that ran out from a fault in the engine.
    */
   readonly freeBytes?: number;
+  /** How many starts before this one died before printing a line, and were started again. */
+  readonly crashedStarts?: number;
 }
 
 export interface EngineVerdict {
@@ -891,6 +893,12 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
   }
   const selfTyped = selfTypedSentence(handed.selfTyped ?? []);
   const notes: string[] = [];
+  const crashedStarts = end.crashedStarts ?? 0;
+  if (crashedStarts > 0) {
+    notes.push(
+      `It died as it started ${crashedStarts === 1 ? 'once' : `${String(crashedStarts)} times`}, before printing a line, and was started again.`,
+    );
+  }
   const beforeExit = faults.length;
   const pushErrorsFailed =
     handed.failsOnPushErrors === true ? pushErrorsFailedSentence(failedOnPushErrors(printed)) : undefined;

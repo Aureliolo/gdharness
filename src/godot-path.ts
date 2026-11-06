@@ -74,6 +74,7 @@ export class GodotLocator {
   /** Why a path does not answer, or null for one that does. A path that only crashed is asked again. */
   private readonly answered = new Map<string, string | null>();
   private found: string | null = null;
+  private finding: Promise<Located> | null = null;
   private readonly start: (path: string) => Promise<unknown>;
   private readonly sleep: (ms: number) => Promise<void>;
 
@@ -88,7 +89,18 @@ export class GodotLocator {
     this.sleep = sleep;
   }
 
-  async find(): Promise<Located> {
+  /**
+   * The engine to run. A caller meeting a search under way shares it, so a tool called during the
+   * server's own first search starts no second engine.
+   */
+  find(): Promise<Located> {
+    this.finding ??= this.search().finally(() => {
+      this.finding = null;
+    });
+    return this.finding;
+  }
+
+  private async search(): Promise<Located> {
     if (this.found !== null && (await this.whyNot(this.found)) === null) {
       return { ok: true, path: this.found };
     }

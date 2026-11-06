@@ -11005,6 +11005,36 @@ async function testAnEngineThatDoesNotAnswerIsNamed(): Promise<void> {
 }
 
 /**
+ * A server answers its first request while its engine has yet to answer `--version`.
+ *
+ * The engine was looked for before stdio opened, and on a loaded Windows runner a fresh copy's first
+ * starts held server/discover past the client's thirty seconds. The stand-in waits on its input as
+ * a hung engine would, and leaves when the server's end closes it.
+ */
+async function testAServerAnswersBeforeItsEngineDoes(): Promise<void> {
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slow-engine-'));
+  let engine = process.env['ComSpec'] ?? 'C:\\Windows\\System32\\cmd.exe';
+  if (process.platform !== 'win32') {
+    engine = join(dir, 'godot');
+    writeFileSync(engine, '#!/bin/sh\nread line\n', { mode: 0o755 });
+  }
+  const server = new ServerProcess({ env: { GODOT_PATH: engine } });
+  try {
+    const answer = await server.request('server/discover', {}, 10_000);
+    assert.ok(answer.result !== undefined, `discover is answered: ${JSON.stringify(answer)}`);
+    assert.match(server.stderr, /gdharness running on stdio/);
+    assert.doesNotMatch(
+      server.stderr,
+      /Using Godot at|GODOT_PATH is set to/,
+      'while the engine has yet to answer',
+    );
+  } finally {
+    await server.stop();
+    sweep(dir);
+  }
+}
+
+/**
  * An engine that crashes as it starts is asked again, and refused only once it answers as something
  * else.
  *
@@ -11116,6 +11146,9 @@ async function testAnEngineThatCrashesAtStartIsAskedAgain(): Promise<void> {
     );
     await crashing.find();
     assert.equal(starts, 2 * VERSION_STARTS, 'a path that only crashed is asked again by the next find');
+    const together = await Promise.all([crashing.find(), crashing.find()]);
+    assert.equal(starts, 3 * VERSION_STARTS, 'two finds at once share one search');
+    assert.equal(together[0], together[1], 'and its answer');
 
     const signed = versionStartOf(failure({ code: 0xc06d007f | 0, signal: null, stdout: '', stderr: '' }));
     assert.deepEqual(
@@ -32070,6 +32103,7 @@ async function testAnEngineThatCrashesAsItStartsIsStartedAgain(): Promise<void> 
         return Promise.resolve(next);
       },
       signal,
+      crashedAtStart,
       (ms) => {
         waits.push(ms);
         return Promise.resolve();
@@ -32103,6 +32137,71 @@ async function testAnEngineThatCrashesAsItStartsIsStartedAgain(): Promise<void> 
     1,
     'a cancelled call is not started again',
   );
+
+  // A test run's engine is started again the same way: a run failed on 0xC06D007F with every suite
+  // unrun. A stand-in prints nothing and exits with that status at its first start, and its banner at
+  // the next. Windows only, since the status is one.
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-start-crash-'));
+  try {
+    const marker = join(scratch, 'started');
+    const directory = join(scratch, 'engine');
+    mkdirSync(join(directory, 'user'), { recursive: true });
+    const lock = join(scratch, '0.lock');
+    writeFileSync(lock, '');
+    const log = join(directory, 'engine.log');
+    const end = await watchedEngine(
+      {
+        godotPath: join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe'),
+        projectPath: scratch,
+        deadlineSeconds: 60,
+        running: new Set(),
+        cores: null,
+      },
+      lock,
+      [
+        '/d',
+        '/c',
+        `if exist ${marker} (echo Godot Engine) else (type nul > ${marker} & exit /b -1066598273)`,
+      ],
+      directory,
+      log,
+      30,
+    );
+    assert.deepEqual(
+      [end.code, end.crashedStarts, readFileSync(log, 'utf8').trim()],
+      [0, 1, 'Godot Engine'],
+      `a test run's engine that died as it started is started again: ${JSON.stringify(end)}`,
+    );
+    const verdict = judgeEngine(readRun(''), { suites: [], expected: { errors: {}, warnings: {} } }, end);
+    assert.ok(
+      verdict.notes.includes('It died as it started once, before printing a line, and was started again.'),
+      `and its run says so: ${verdict.notes.join(' | ')}`,
+    );
+    const printedFirst = await watchedEngine(
+      {
+        godotPath: join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe'),
+        projectPath: scratch,
+        deadlineSeconds: 60,
+        running: new Set(),
+        cores: null,
+      },
+      lock,
+      ['/d', '/c', 'echo Godot Engine & exit /b -1066598273'],
+      directory,
+      log,
+      30,
+    );
+    assert.deepEqual(
+      [printedFirst.code, printedFirst.crashedStarts],
+      [0xc06d007f, undefined],
+      'one that printed before it died is its own answer',
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -51027,6 +51126,18 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
         'extends Node\n\nconst FOLDER: String = "res://data/"\n\n\nfunc read(type: String) -> String:\n' +
         '\tvar path: String = FOLDER + type + ".json"\n\treturn FileAccess.get_file_as_string(path)\n\n\n' +
         'func named(type: String) -> String:\n\tvar path: String = type\n\treturn path\n',
+      'lambda_shadowed.gd':
+        'extends Node\n\nconst FOLDER: String = "res://data/"\n\n\nfunc read(type: String, names: Array) -> Array:\n' +
+        '\tvar path: String = FOLDER + type\n' +
+        '\treturn names.map(func(path: String) -> String: return FileAccess.get_file_as_string(path))\n',
+      'match_shadowed.gd':
+        'extends Node\n\nconst FOLDER: String = "res://data/"\n\n\nfunc read(type: String, given: Variant) -> String:\n' +
+        '\tvar path: String = FOLDER + type\n\tmatch given:\n\t\t[var path]:\n' +
+        '\t\t\treturn FileAccess.get_file_as_string(path)\n\treturn path\n',
+      'parameter_shadowed.gd':
+        'extends Node\n\nconst FOLDER: String = "res://data/"\n\n\nfunc every() -> void:\n\t_bound(FOLDER + "a.json", [])\n\n\n' +
+        'func _bound(path: String, given: Variant) -> String:\n\tmatch given:\n\t\t[var path]:\n' +
+        '\t\t\treturn FileAccess.get_file_as_string(path)\n\treturn path\n',
       'set_again.gd':
         'extends Node\n\n\nfunc read(type: String) -> String:\n\tvar path: String = "res://data/" + type\n' +
         '\tpath = type\n\treturn FileAccess.get_file_as_string(path)\n',
@@ -51142,6 +51253,13 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
       'a path held in a local set once from a constant folder, read as that folder',
     );
     assert.deepEqual(own('res://set_again.gd'), [EVERY_FILE], 'and not one set again');
+    assert.deepEqual(own('res://lambda_shadowed.gd'), [EVERY_FILE], 'nor one a lambda takes as its own');
+    assert.deepEqual(own('res://match_shadowed.gd'), [EVERY_FILE], 'nor one a match binds again');
+    assert.deepEqual(
+      own('res://parameter_shadowed.gd'),
+      [EVERY_FILE],
+      "nor a parameter's name a match binds",
+    );
     assert.deepEqual(
       own('res://passed.gd'),
       ['res://levels', 'res://passed.gd', 'tree:res://levels/'],
@@ -76885,6 +77003,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPresetIsSetRemovedAndPacked,
   testAnOldPresetFileKeepsThePresetItRuns,
   testASelfContainedEngineKeepsItsTemplates,
+  testAServerAnswersBeforeItsEngineDoes,
   testAnExportedBuildIsFoundInsideTheProject,
   testAnExportedBuildIsStartedAndStopped,
   testLibraryCopiesAreMovedAsideAndSwept,

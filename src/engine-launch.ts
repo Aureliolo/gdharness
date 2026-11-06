@@ -32,6 +32,7 @@ import {
   helperStep,
   throughHelper,
 } from './desktop.js';
+import { diedAsItStarted, startedUntilItRuns } from './engine-run.js';
 import { nameSlotEngineOf, onTheSlot } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
 import { errorCode, Refusal } from './errors.js';
@@ -380,8 +381,27 @@ export function endingWithRunner(
  * [param silenceIn] lengthens the silence for what was running as the engine fell silent, read from
  * what it had printed. It is asked only once a silence passes [param silenceSeconds], since the log
  * is read again each time.
+ *
+ * An engine that dies as it starts, with a Windows exception status before printing a line, is
+ * started again, as a headless call's is: a suite run failed on 0xC06D007F with every suite unrun.
  */
 export async function watchedEngine(
+  launch: EngineLaunch,
+  lock: string,
+  args: readonly string[],
+  directory: string,
+  log: string,
+  silenceSeconds: number,
+  silenceIn?: (printed: RunPrinted) => number,
+): Promise<EngineEnd> {
+  return await startedUntilItRuns(
+    () => engineWatchedOnce(launch, lock, args, directory, log, silenceSeconds, silenceIn),
+    undefined,
+    (end) => end.ended === null && end.signal === null && diedAsItStarted(end.code, readLog(log) === ''),
+  );
+}
+
+async function engineWatchedOnce(
   launch: EngineLaunch,
   lock: string,
   args: readonly string[],
