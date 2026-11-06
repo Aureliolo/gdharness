@@ -16472,6 +16472,7 @@ class GodotServer {
           `Editor not connected: ${opened}, is still running and has not reached the bridge in the ${String(Math.round((Date.now() - began) / 1000))}s this call waited. An editor dials in once it has imported the project and loaded its plugins, and the first open of a large project imports for minutes.`,
           [
             ...instead,
+            'Ask again: the call waits for this editor rather than opening another',
             'editor_status names it under awaitingLaunchedEditor until it has connected',
             'editor_output op editor shows what it is printing meanwhile',
           ],

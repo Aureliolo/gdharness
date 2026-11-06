@@ -13184,6 +13184,12 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
       `one that does not arrive is named, and waited for as long as a restart waits: ${refused}`,
     );
     assert.doesNotMatch(refused, /Open the project in the editor with editor_launch/, refused);
+    // The calls below are asked again, and each waits for the same editor.
+    assert.match(
+      refused,
+      /- Ask again: the call waits for this editor rather than opening another\n/,
+      refused,
+    );
 
     // The calls asked of the editor's language server rather than its bridge wait for it the same
     // way. Until the editor says which port it serves, the default is all there is to ask on, and an
