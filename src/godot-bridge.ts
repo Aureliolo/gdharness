@@ -104,10 +104,17 @@ interface ToolResultMessage {
   busyWith?: string;
   /** A mark that changes as the editor gets on with what it is busy with. */
   progress?: string;
+  /** The tool was not run because the editor is quitting after going unused. */
+  closing?: boolean;
 }
 
 interface PingMessage {
   type: 'ping';
+}
+
+/** Calls are being made, so an editor that quits after going unused is in use. */
+interface ActivityMessage {
+  type: 'activity';
 }
 
 interface PongMessage {
@@ -159,7 +166,7 @@ export function greetingFaults(message: object): string[] {
 }
 
 type IncomingMessage = ToolResultMessage | PongMessage | GodotReadyMessage;
-type OutgoingMessage = ToolInvokeMessage | PingMessage;
+type OutgoingMessage = ToolInvokeMessage | PingMessage | ActivityMessage;
 
 /** A port an editor says it serves on, or undefined for 0, its word for not knowing, or anything else not a port. */
 function servedPort(said: number): number | undefined {
@@ -368,6 +375,9 @@ export class BridgeTimeout extends Error {
  * release's. The message is the remedy.
  */
 export class AddonOfAnotherRelease extends Error {}
+
+/** The editor turned a tool away unrun because it is quitting after going unused. */
+export class EditorClosing extends Error {}
 
 /**
  * The commands an editor of another release is still sent, since only its addon can end it: the
@@ -903,6 +913,10 @@ export class GodotBridge extends EventEmitter {
           pending.reject(
             new EditorBusy(pending.toolName, message.busyWith ?? 'busy', message.progress ?? ''),
           );
+        } else if (message.closing === true) {
+          pending.reject(
+            new EditorClosing(message.error ?? `The editor is quitting, so ${pending.toolName} was not run.`),
+          );
         } else {
           pending.reject(new Error(message.error ?? `Tool ${pending.toolName} failed`));
         }
@@ -1011,6 +1025,13 @@ export class GodotBridge extends EventEmitter {
         reject(toError(error));
       }
     });
+  }
+
+  /** Tells the connected editor calls are being made, so it does not quit as unused. */
+  public noteActivity(): void {
+    if (this.isConnected() && this.socket?.readyState === WebSocket.OPEN) {
+      this.sendMessage({ type: 'activity' });
+    }
   }
 
   private sendMessage(message: OutgoingMessage): void {
@@ -1273,7 +1294,8 @@ export class GodotBridge extends EventEmitter {
       (message['error'] === undefined || typeof message['error'] === 'string') &&
       (message['busy'] === undefined || typeof message['busy'] === 'boolean') &&
       (message['busyWith'] === undefined || typeof message['busyWith'] === 'string') &&
-      (message['progress'] === undefined || typeof message['progress'] === 'string')
+      (message['progress'] === undefined || typeof message['progress'] === 'string') &&
+      (message['closing'] === undefined || typeof message['closing'] === 'boolean')
     );
   }
 

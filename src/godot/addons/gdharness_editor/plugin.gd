@@ -8,6 +8,7 @@ const GdhBridgeClient = preload("bridge_client.gd")
 const GdhToolExecutor = preload("tool_executor.gd")
 const GdhReleaseExport = preload("release_export.gd")
 const GdhSceneFile = preload("scene_file.gd")
+const GdhRead = preload("reading.gd")
 ## The tools answered while the editor scans or imports, because none of them saves a file: the
 ## ones a caller waits on a scan with, and the ones that only read or stop a played game.
 const ANSWERED_WHILE_SCANNING: Array[String] = [
@@ -36,6 +37,16 @@ const UNTIL_MARK: String = "--gdharness-until="
 const QUITS_FOLDER: String = "res://.godot/gdharness-editor-quits/"
 ## How often such an editor looks for the request, in seconds.
 const QUIT_LOOK_S: float = 1.0
+## The project setting holding the minutes a hidden editor waits with no call before it quits, 0
+## for never. Kept in step with `IDLE_CLOSE_SETTING` in src/idle-close.ts.
+const IDLE_SETTING: String = "gdharness/editor/idle_close_minutes"
+## The minutes when the setting is absent. Kept in step with `IDLE_CLOSE_MINUTES` there.
+const IDLE_MINUTES: float = 10.0
+## Where it says, as it quits, how it was started and what it had open, for the next server whose
+## call needs an editor to open it again. Kept in step with `IDLE_RECORD` in src/idle-close.ts.
+const IDLE_RECORD: String = "res://.godot/gdharness-editor-idle.json"
+## The most seconds between two looks at whether it has gone unused.
+const IDLE_LOOK_S: float = 30.0
 
 var _client: GdhBridgeClient
 var _tool_executor: GdhToolExecutor
@@ -43,6 +54,9 @@ var _status_label: Label
 var _release_export: GdhReleaseExport
 var _quit_look: Timer
 var _loaded_at: int = 0
+var _idle_look: Timer
+## Set once it has said it quits as unused, from when every call is answered as closing.
+var _closing: bool = false
 
 
 func _enter_tree() -> void:
@@ -65,6 +79,7 @@ func _enter_tree() -> void:
 	_setup_status_indicator()
 	_client.connect_to_server()
 	_look_for_a_quit_request()
+	_look_for_idleness()
 
 
 func _exit_tree() -> void:
@@ -124,6 +139,82 @@ func _on_quit_look() -> void:
 	if answer.get("ok", false) != true:
 		push_warning(
 			"gdharness: the process holding this editor has gone, and it stays open: %s"
+			% str(answer.get("error", ""))
+		)
+
+
+## Looks now and then at whether a hidden editor has gone unused, so one nobody calls frees its
+## memory. Nobody can be working in a hidden editor, and a visible one is left to whoever sees it.
+func _look_for_idleness() -> void:
+	var seconds: float = _idle_seconds()
+	if not GdhBridgeClient.is_hidden() or seconds <= 0.0:
+		return
+	_idle_look = Timer.new()
+	_idle_look.wait_time = clampf(seconds / 4.0, 1.0, IDLE_LOOK_S)
+	_idle_look.autostart = true
+	_listen(_idle_look.timeout, _on_idle_look)
+	add_child(_idle_look)
+
+
+## The seconds of [constant IDLE_SETTING], or of [constant IDLE_MINUTES] when it holds no number.
+func _idle_seconds() -> float:
+	var minutes: Variant = ProjectSettings.get_setting(IDLE_SETTING, IDLE_MINUTES)
+	if minutes is int or minutes is float:
+		return GdhRead.as_float(minutes) * 60.0
+	return IDLE_MINUTES * 60.0
+
+
+## Quits once no server has called for the setting's minutes, as quit_editor does, after writing
+## [constant IDLE_RECORD]. Not while a scene holds unsaved changes, a game plays, or the editor
+## scans, imports or runs a task.
+func _on_idle_look() -> void:
+	var seconds: float = _idle_seconds()
+	if _closing or _client == null or seconds <= 0.0:
+		return
+	if Time.get_unix_time_from_system() - _client.last_heard < seconds:
+		return
+	if (
+		EditorInterface.is_playing_scene()
+		or not EditorInterface.get_unsaved_scenes().is_empty()
+		or turned_away("quit_editor")
+	):
+		return
+	var record: Dictionary = {
+		"pid": OS.get_process_id(),
+		"closedAt": Time.get_datetime_string_from_system(true) + "Z",
+		"idleMinutes": seconds / 60.0,
+		"arguments": Array(OS.get_cmdline_args()) + ["--"] + Array(OS.get_cmdline_user_args()),
+		"scenes": Array(EditorInterface.get_open_scenes()),
+	}
+	var file: FileAccess = FileAccess.open(IDLE_RECORD, FileAccess.WRITE)
+	if file == null:
+		push_warning(
+			(
+				"gdharness: this hidden editor went unused and stays open, since %s could not be "
+				+ "written: %s"
+			)
+			% [IDLE_RECORD, error_string(FileAccess.get_open_error())]
+		)
+		return
+	if not file.store_string(JSON.stringify(record)):
+		push_warning(
+			"gdharness: this hidden editor went unused and stays open, since %s was not written"
+			% IDLE_RECORD
+		)
+		file.close()
+		return
+	file.close()
+	_closing = true
+	_idle_look.stop()
+	var answer: Dictionary = await _tool_executor.execute_tool("quit_editor", {})
+	if answer.get("ok", false) != true:
+		_closing = false
+		var removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(IDLE_RECORD))
+		if removed != OK:
+			push_error("gdharness: could not remove %s: %s" % [IDLE_RECORD, error_string(removed)])
+		_idle_look.start()
+		push_warning(
+			"gdharness: this hidden editor went unused and stays open: %s"
 			% str(answer.get("error", ""))
 		)
 
@@ -198,6 +289,10 @@ func busy_with() -> Array[String]:
 
 func _on_tool_requested(request_id: String, tool_name: String, args: Dictionary) -> void:
 	if _tool_executor == null or _client == null:
+		return
+
+	if _closing:
+		_client.send_closing(request_id, tool_name)
 		return
 
 	# Turned away rather than held, so the server asks again: a call held here could run after the

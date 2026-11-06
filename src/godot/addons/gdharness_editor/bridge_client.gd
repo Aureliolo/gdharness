@@ -51,6 +51,9 @@ const OPENED_BY_A_SERVER: String = "GDHARNESS_OPENED_BY_A_SERVER"
 ## Set for an editor a server started on its hidden desktop. Kept in step with `DESKTOP_VARIABLE`
 ## in src/desktop.ts.
 const DESKTOP_VARIABLE: String = "GDHARNESS_DESKTOP"
+## What a hidden editor with a window carries after `--`. Kept in step with `HIDDEN_EDITOR_MARK` in
+## src/launch.ts.
+const HIDDEN_MARK: String = "--gdharness-hidden"
 ## Put into this editor's own environment as it loads, so every game it plays inherits it and
 ## the runtime addon can announce which editor played it. A game of the same project that some
 ## other server started has no such variable, or another editor's number, and that is what
@@ -81,6 +84,9 @@ var version_at_load: String = ""
 ## The digest of the editor addon code this copy loaded, held for the same reason.
 var digest_at_load: String = ""
 var _is_connected: bool = false
+## When a server last asked this editor something, connected, or said calls are being made, in
+## seconds of the system clock. A hidden editor counts its idle minutes from it.
+var last_heard: float = Time.get_unix_time_from_system()
 var _reconnect_timer: Timer
 var _current_reconnect_delay: float = RECONNECT_DELAY
 ## Nothing reconnects until somebody has asked to connect once.
@@ -399,6 +405,7 @@ func _refused() -> void:
 
 func _handle_connect() -> void:
 	_is_connected = true
+	last_heard = Time.get_unix_time_from_system()
 	_current_reconnect_delay = RECONNECT_DELAY
 	_refused_url = ""
 
@@ -423,9 +430,8 @@ func _handle_connect() -> void:
 			# them away, so a server can say which before it sets one.
 			"syncs_breakpoints": _syncs_breakpoints(),
 			# Whether this editor runs with no window anybody sees, which for one opened by hand
-			# only
-			# it can say: headless, or a window on the hidden desktop a server started it on.
-			"hidden": DisplayServer.get_name() == "headless" or _on_the_hidden_desktop(),
+			# only it can say.
+			"hidden": is_hidden(),
 			# Whether a server started this editor, which is the only kind that can be started again
 			# as itself: the engine hands back none of the arguments it was given, so the arguments
 			# have to come from whoever wrote them. See `restart_editor` in play_tools.gd.
@@ -506,6 +512,16 @@ func _keep_breakpoints_through_sessions() -> void:
 			"[gdharness] turned on %s, so a debug session opening keeps the editor's breakpoints"
 			% SYNC_BREAKPOINTS_SETTING
 		)
+	)
+
+
+## Whether this editor runs with no window anybody sees: headless, on the hidden desktop a server
+## started it on, or started with the mark a hidden editor carries.
+static func is_hidden() -> bool:
+	return (
+		DisplayServer.get_name() == "headless"
+		or _on_the_hidden_desktop()
+		or OS.get_cmdline_user_args().has(HIDDEN_MARK)
 	)
 
 
@@ -623,7 +639,11 @@ func _handle_message(json_string: String) -> void:
 		"ping":
 			_send_message({ "type": "pong" })
 
+		"activity":
+			last_heard = Time.get_unix_time_from_system()
+
 		"tool_invoke":
+			last_heard = Time.get_unix_time_from_system()
 			var request_id: String = message.get("id", "")
 			var tool_name: String = message.get("tool", "")
 			var args: Dictionary = message.get("args", {})
@@ -646,6 +666,20 @@ func send_busy(request_id: String, tool_name: String, doing: String, mark: Strin
 			"busyWith": doing,
 			"progress": mark,
 			"error": "The editor is %s, so %s was not run." % [doing, tool_name],
+		}
+	)
+
+
+## Says [param tool_name] was not run because this editor is quitting after going unused, for the
+## server to ask the editor that opens in its place.
+func send_closing(request_id: String, tool_name: String) -> void:
+	_send_message(
+		{
+			"type": "tool_result",
+			"id": request_id,
+			"success": false,
+			"closing": true,
+			"error": "The editor is quitting after going unused, so %s was not run." % tool_name,
 		}
 	)
 

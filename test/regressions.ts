@@ -8400,6 +8400,184 @@ async function testAnEditorCloseWaitsForItToGo(): Promise<void> {
 }
 
 /**
+ * The server's half of a hidden editor quitting unused. It tells the editor calls are coming, since
+ * most never reach it. A call met by the editor's word that it is quitting is asked again of the
+ * editor that comes in its place, once the one quitting has gone. The record the editor wrote names
+ * the editor in editor_status, and an editor connecting removes it.
+ */
+async function testACallMetByAnEditorQuittingUnusedIsAskedAgain(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-idle-'));
+  const spelled = project.replaceAll('\\', '/');
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="Idle"\n\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+  );
+  mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+  mkdirSync(join(project, '.godot'));
+  const record = join(project, '.godot', 'gdharness-editor-idle.json');
+  const standIn = () =>
+    spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
+      detached: true,
+      stdio: 'ignore',
+    });
+  const quitting = standIn();
+  const first = standIn();
+  const second = standIn();
+  const writeRecord = (): void => {
+    writeFileSync(
+      record,
+      JSON.stringify({
+        pid: quitting.pid,
+        closedAt: '2026-11-06T10:00:00Z',
+        idleMinutes: 10,
+        arguments: ['--path', spelled, '--editor', '--', '--gdharness-hidden'],
+        scenes: ['res://main.tscn', 'res://level.tscn'],
+      }),
+    );
+  };
+  const port = await reservePort();
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '10000',
+      GDHARNESS_ACTIVITY_MS: '200',
+    },
+  });
+  const sockets: WebSocket[] = [];
+  const anEditor = async (
+    pid: number,
+    answer: (socket: WebSocket, message: Record<string, unknown>) => void,
+  ): Promise<string[]> => {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
+    sockets.push(socket);
+    await new Promise<void>((settle, reject) => {
+      socket.once('open', () => {
+        settle();
+      });
+      socket.once('error', reject);
+    });
+    const heard: string[] = [];
+    socket.on('message', (raw: Buffer) => {
+      const message: unknown = JSON.parse(String(raw));
+      if (isRecord(message)) {
+        heard.push(String(message['type']));
+        if (message['type'] === 'tool_invoke') {
+          answer(socket, message);
+        }
+      }
+    });
+    socket.send(JSON.stringify(greeting(`${spelled}/`, { editor_pid: pid, opened_by_a_server: true })));
+    return heard;
+  };
+  const status = async (): Promise<unknown> =>
+    get(
+      parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
+      'editor',
+    );
+  const greetedBy = async (pid: number): Promise<void> => {
+    for (let waited = 0; waited < 10_000; waited += 100) {
+      if (get(await status(), 'editorPid') === pid) {
+        return;
+      }
+      await delay(100);
+    }
+    assert.fail(`the fake editor ${pid} should have been greeted`);
+  };
+  try {
+    assert.ok(alive(quitting.pid ?? 0) && alive(first.pid ?? 0), 'the fixture needs live stand-ins');
+    await server.initialize('regression-test');
+
+    writeRecord();
+    const before = await status();
+    assert.deepEqual(
+      [get(before, 'quitUnused', 'editorPid'), get(before, 'quitUnused', 'scenes')],
+      [quitting.pid, ['res://main.tscn', 'res://level.tscn']],
+      `the editor that quit is named with its scenes: ${JSON.stringify(before)}`,
+    );
+    assert.match(
+      String(get(before, 'quitUnused', 'note')),
+      /^The hidden editor quit after 10 minutes with no call, as gdharness\/editor\/idle_close_minutes says\./,
+      JSON.stringify(before),
+    );
+
+    const answeredFirst: string[] = [];
+    const heardFirst = await anEditor(first.pid ?? 0, (socket, message) => {
+      // What the server asks an editor on its own as it connects.
+      if (message['tool'] !== 'get_project_setting') {
+        socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result: {} }));
+        return;
+      }
+      answeredFirst.push(message['tool']);
+      socket.send(
+        JSON.stringify({
+          type: 'tool_result',
+          id: message['id'],
+          success: false,
+          closing: true,
+          error: `The editor is quitting after going unused, so ${message['tool']} was not run.`,
+        }),
+      );
+      socket.terminate();
+    });
+    await greetedBy(first.pid ?? 0);
+    assert.equal(existsSync(record), false, 'an editor connecting removes the record');
+    assert.equal(get(await status(), 'quitUnused'), undefined, 'and nothing is said to have quit');
+    await delay(600);
+    assert.ok(heardFirst.includes('activity'), `calls are told of: ${heardFirst.join(', ')}`);
+    // Quiet once no call comes, so an editor nobody calls does go idle.
+    await delay(600);
+    const told = heardFirst.length;
+    await delay(1000);
+    assert.equal(heardFirst.length, told, `nothing is said without calls: ${heardFirst.join(', ')}`);
+
+    // The editor writes its record as it quits, and the stand-in still running is the one quitting.
+    writeRecord();
+    const asked = server.request('tools/call', {
+      name: 'project_settings',
+      arguments: { op: 'get', projectPath: project, setting: 'application/config/name', from: 'editor' },
+    });
+    for (let waited = 0; waited < 10_000 && answeredFirst.length === 0; waited += 100) {
+      await delay(100);
+    }
+    const early = await Promise.race([asked.then((said) => textOf(said)), delay(0).then(() => 'unanswered')]);
+    assert.deepEqual(answeredFirst, ['get_project_setting'], `the first editor was asked: ${early ?? ''}`);
+    // Late enough that the server is waiting for the one quitting, which goes after the next connects.
+    await delay(1500);
+    const answeredSecond: string[] = [];
+    await anEditor(second.pid ?? 0, (socket, message) => {
+      const setting = message['tool'] === 'get_project_setting';
+      if (setting) {
+        answeredSecond.push(String(message['tool']));
+      }
+      socket.send(
+        JSON.stringify({
+          type: 'tool_result',
+          id: message['id'],
+          success: true,
+          result: setting ? { value: 'Idle' } : {},
+        }),
+      );
+    });
+    await delay(500);
+    quitting.kill();
+    const answer = textOf(await asked) ?? '';
+    assert.deepEqual(answeredSecond, ['get_project_setting'], `asked again of the next editor: ${answer}`);
+    assert.match(answer, /"value": "Idle"/, `and answered from it: ${answer}`);
+    assert.equal(existsSync(record), false, 'which removed the record as it connected');
+  } finally {
+    for (const socket of sockets) {
+      socket.terminate();
+    }
+    await server.stop();
+    quitting.kill();
+    first.kill();
+    second.kill();
+    sweep(project);
+  }
+}
+
+/**
  * A server told to go ends, with an editor still holding the bridge.
  *
  * Written to catch a hang and it found none, which is worth saying plainly: `http.Server.close`
@@ -73908,6 +74086,191 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
 }
 
 /**
+ * A hidden editor nobody calls quits once the project's idle minutes pass, and the next call that
+ * needs it opens it again with the scenes it had open. Calls that never reach the editor keep it
+ * open too, and so does a scene with unsaved edits. A fixture plugin marks the edited scene unsaved
+ * while `dirty.flag` exists, since no tool leaves a scene unsaved.
+ */
+async function testAnUnusedHiddenEditorQuitsAndOpensAgain(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('idle editor regression skipped (Godot not found)');
+    return;
+  }
+  const project = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-idle-editor-')));
+  const home = join(project, 'home');
+  mkdirSync(home);
+  writeFileSync(join(home, '.gdignore'), '');
+  installAddons(project);
+  mkdirSync(join(project, 'addons', 'dirty'));
+  writeFileSync(
+    join(project, 'addons', 'dirty', 'plugin.cfg'),
+    '[plugin]\n\nname="Dirty"\ndescription=""\nauthor=""\nversion="1"\nscript="plugin.gd"\n',
+  );
+  writeFileSync(
+    join(project, 'addons', 'dirty', 'plugin.gd'),
+    [
+      '@tool',
+      'extends EditorPlugin',
+      '',
+      '',
+      'func _enter_tree() -> void:',
+      '\tvar look := Timer.new()',
+      '\tlook.wait_time = 0.5',
+      '\tlook.autostart = true',
+      '\tlook.timeout.connect(_mark)',
+      '\tadd_child(look)',
+      '',
+      '',
+      'func _mark() -> void:',
+      '\tif FileAccess.file_exists("res://dirty.flag") and EditorInterface.get_edited_scene_root() != null:',
+      '\t\tEditorInterface.mark_scene_as_unsaved()',
+      '',
+    ].join('\n'),
+  );
+  // Three seconds, so the case waits seconds rather than the ten minutes a project gets by default.
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="IdleEditor"\n\n[editor_plugins]\n\n' +
+      'enabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg", "res://addons/dirty/plugin.cfg")\n\n' +
+      '[gdharness]\n\neditor/idle_close_minutes=0.05\n',
+  );
+  writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node2D"]\n');
+  writeFileSync(join(project, 'other.tscn'), '[gd_scene format=3]\n\n[node name="Other" type="Node3D"]\n');
+  const record = join(project, '.godot', 'gdharness-editor-idle.json');
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_DAP_PORT: String(await reservePort()),
+      GDHARNESS_ACTIVITY_MS: '500',
+      // The reopen's call waits for the editor as long as the first open is waited for below.
+      GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '180000',
+      HOME: home,
+      USERPROFILE: home,
+      APPDATA: home,
+      LOCALAPPDATA: home,
+      XDG_CONFIG_HOME: home,
+      XDG_DATA_HOME: home,
+      XDG_CACHE_HOME: home,
+      GDHARNESS_RUNTIME_DIR: join(home, 'runtime'),
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name, arguments: args }, 240_000);
+  const editor = async (): Promise<unknown> =>
+    get(parseTextContent(await call('editor_status', {})), 'editor');
+  const connectedWithScenes = async (): Promise<unknown> => {
+    let status: unknown = null;
+    for (let waited = 0; waited < 180_000; waited += 500) {
+      status = await editor();
+      if (get(status, 'connected') === true && typeof get(status, 'editedScene') === 'string') {
+        return status;
+      }
+      await delay(500);
+    }
+    return assert.fail(`the hidden editor connected with its scenes: ${JSON.stringify(status)}`);
+  };
+  const scenes = (status: unknown): unknown[] => [get(status, 'editedScene'), get(status, 'openScenes')];
+  // Nothing asked of the server, so only the editor's own clock decides.
+  const untouchedFor = async (ms: number, pid: number): Promise<boolean> => {
+    for (let waited = 0; waited < ms; waited += 250) {
+      if (!alive(pid) || existsSync(record)) {
+        return false;
+      }
+      await delay(250);
+    }
+    return true;
+  };
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    mkdirSync(join(project, '.godot', 'editor'), { recursive: true });
+    writeFileSync(
+      join(project, '.godot', 'editor', 'editor_layout.cfg'),
+      '[EditorNode]\n\nopen_scenes=PackedStringArray("res://main.tscn", "res://other.tscn")\n' +
+        'current_scene="res://main.tscn"\n',
+    );
+    await server.initialize('idle-editor');
+    const opened = await call('editor_launch', { op: 'open', projectPath: project, hidden: true });
+    assert.notEqual(get(opened.result, 'isError'), true, textOf(opened) ?? '');
+    const first = await connectedWithScenes();
+    const firstPid = asNumber(get(first, 'editorPid'));
+    const shown = ['res://main.tscn', ['res://main.tscn', 'res://other.tscn']];
+    assert.deepEqual(scenes(first), shown, JSON.stringify(first));
+
+    // With no game running this call asks the editor nothing, so what keeps it open is the server's word.
+    for (let waited = 0; waited < 8000; waited += 400) {
+      assert.match(
+        textOf(await call('runtime_inspect', { op: 'tree' })) ?? '',
+        /^No game with the runtime addon/,
+      );
+      assert.ok(alive(firstPid) && !existsSync(record), `calls keep the editor open, at ${waited}ms`);
+      await delay(400);
+    }
+
+    // No call now: the editor writes its record and quits.
+    let quit = false;
+    for (let waited = 0; waited < 60_000 && !quit; waited += 250) {
+      quit = existsSync(record) && !alive(firstPid);
+      await delay(250);
+    }
+    assert.ok(quit, 'the unused editor wrote its record and quit');
+    const written: unknown = JSON.parse(readFileSync(record, 'utf8'));
+    assert.deepEqual(
+      [get(written, 'pid'), get(written, 'idleMinutes'), get(written, 'scenes')],
+      [firstPid, 0.05, ['res://main.tscn', 'res://other.tscn']],
+      JSON.stringify(written),
+    );
+    const gone = await editor();
+    assert.deepEqual(
+      [get(gone, 'connected'), get(gone, 'quitUnused', 'editorPid'), get(gone, 'quitUnused', 'scenes')],
+      [false, firstPid, ['res://main.tscn', 'res://other.tscn']],
+      JSON.stringify(gone),
+    );
+
+    const asked = await call('project_settings', {
+      op: 'get',
+      projectPath: project,
+      setting: 'application/config/name',
+      from: 'editor',
+    });
+    assert.match(
+      textOf(asked) ?? '',
+      /IdleEditor/,
+      `the call that needed it opened it again: ${textOf(asked)}`,
+    );
+    const again = await connectedWithScenes();
+    const againPid = asNumber(get(again, 'editorPid'));
+    assert.notEqual(againPid, firstPid, JSON.stringify(again));
+    assert.equal(get(again, 'hidden'), true, `opened hidden again: ${JSON.stringify(again)}`);
+    assert.deepEqual(scenes(again), shown, `with the scenes it had open: ${JSON.stringify(again)}`);
+    assert.equal(existsSync(record), false, 'and the record gone');
+
+    writeFileSync(join(project, 'dirty.flag'), '');
+    assert.ok(await untouchedFor(8000, againPid), 'an editor with unsaved edits stays open');
+    const dirty = await editor();
+    assert.deepEqual(
+      [get(dirty, 'connected'), get(dirty, 'editorPid'), get(dirty, 'unsavedScenes')],
+      [true, againPid, ['res://main.tscn']],
+      `the edits that kept it: ${JSON.stringify(dirty)}`,
+    );
+  } finally {
+    await call('editor_launch', { op: 'close' }).catch(() => undefined);
+    await server.stop();
+    for (const { pid } of await endEnginesUnder(project)) {
+      console.log(`ended engine ${pid}, which was still holding the idle editor fixture`);
+    }
+    sweep(project);
+  }
+}
+
+/**
  * A call reaching the editor while it registers script classes waits until it has.
  *
  * The editor's progress dialog runs frames of the editor at every step of a task, and the bridge
@@ -77021,6 +77384,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTwoWritesToOneSceneAtOnceBothLand,
   testAWriteWaitsForAnotherProcesssTurn,
   testTheEditorsViewShowsWhatToolScriptsDrawThere,
+  testAnUnusedHiddenEditorQuitsAndOpensAgain,
   testACallWaitsOutTheEditorsProgressTask,
   testAMovedNodeNamesTheScriptLinesReadingIt,
   testAHandWrittenValueIsNoChangeOfAScripts,
@@ -77486,6 +77850,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEditorStatusCountsOnlyOtherCallsInFlight,
   testARestartWaitsForTheOldEditorToGo,
   testAnEditorCloseWaitsForItToGo,
+  testACallMetByAnEditorQuittingUnusedIsAskedAgain,
   testCompletionsAreNarrowedToWhatWasTyped,
   testATestRunWithNothingToRunNamesTheRunnerToo,
   testEveryGreetingFieldIsRequired,
