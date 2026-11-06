@@ -41106,6 +41106,29 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         `all eight were welcomed before a one-second call sent on the first welcome answered, not ${beforeTheCall}`,
       );
 
+      // Naming the result read the freed node's methods, which failed the answer into {}.
+      const freed =
+        textOf(
+          await server.request(
+            'tools/call',
+            {
+              name: 'runtime_invoke',
+              arguments: { op: 'call', nodePath: '/root/Main/Rack', method: 'free' },
+            },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        ) ?? '';
+      assert.deepEqual(
+        [get(answered(freed), 'type'), get(answered(freed), 'result'), get(answered(freed), 'errors')],
+        ['method_result', null, undefined],
+        freed,
+      );
+      assert.match(
+        await inspected('/root/Main/Rack'),
+        /Node not found: \/root\/Main\/Rack/,
+        'and the node is gone',
+      );
+
       await server.request(
         'tools/call',
         { name: 'editor_run', arguments: { op: 'stop' } },
@@ -75403,6 +75426,42 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
       textOf(await call('scene_node', { ...map, op: 'set', properties: { tile_set: 'res://missing.tres' } })),
       "No resource at res://missing.tres for tile_set. The project's .tres files are res://box.tres, res://set.tres, res://spaced.tres, res://theme.tres, res://variant.tres, res://wide.tres.",
     );
+
+    // AudioBusLayout lists bus/1/name only once bus 1 exists, and setting it is what makes the bus.
+    // It declares bus/1/send a float and holds the name of the bus it sends to.
+    const buses = { resourcePath: 'res://buses.tres', op: 'modify' };
+    await call('resource_edit', { ...buses, op: 'create', resourceType: 'AudioBusLayout' });
+    const skipped =
+      textOf(await call('resource_edit', { ...buses, properties: { 'bus/2/name': 'Music' } })) ?? '';
+    assert.match(
+      skipped,
+      /^Setting bus\/2\/name would also make bus\/1, which nothing was given for: write bus\/1 first\./,
+      skipped,
+    );
+    const sfx =
+      textOf(
+        await call('resource_edit', {
+          ...buses,
+          properties: {
+            'bus/1/name': 'Sfx',
+            'bus/1/send': 'Master',
+            'bus/1/effect/0/effect': { _type: 'AudioEffectReverb' },
+            'bus/1/effect/0/enabled': true,
+          },
+        }),
+      ) ?? '';
+    assert.match(sfx, /^\{/, sfx);
+    const layout = fileOf('buses.tres');
+    for (const line of [
+      /\[sub_resource type="AudioEffectReverb" id="([^"]+)"\]/,
+      /\nbus\/1\/name = &"Sfx"\n/,
+      /\nbus\/1\/send = &"Master"\n/,
+      /\nbus\/1\/effect\/0\/effect = SubResource\("[^"]+"\)\n/,
+      /\nbus\/1\/effect\/0\/enabled = true\n/,
+    ]) {
+      assert.match(layout, line, layout);
+    }
+    assert.doesNotMatch(layout, /bus\/2\//, `the refused write made no bus 2: ${layout}`);
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });

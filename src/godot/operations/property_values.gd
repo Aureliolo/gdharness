@@ -289,6 +289,11 @@ func write_all(target: Object, properties: Dictionary) -> String:
 			if not ungrown.is_empty():
 				return ungrown + unwritten
 			declared = declaration(holder, name)
+			if declared.is_empty():
+				var unmade: String = GdhPropertyPaths.made_by_setting(holder, name)
+				if not unmade.is_empty():
+					return unmade + unwritten
+				declared = declaration(holder, name)
 		if declared.is_empty() and ":" in name:
 			declared = _component_slot(holder, name)
 			if declared.has("refused"):
@@ -552,6 +557,22 @@ func _component_slot(target: Object, path: String) -> Dictionary:
 
 ## [param raw] as the value [param declared] takes, as [ok, value] or [false, why not].
 func value_for(target: Object, declared: Dictionary, raw: Variant) -> Array:
+	var value: Array = _value_as(target, declared, raw)
+	if value[0]:
+		return value
+	# AudioBusLayout declares bus/N/send a float, holds the name of the bus it sends to and saves
+	# that name. A number held is left to the declared type, whose refusal of a fraction stands.
+	var property: String = str(declared.get("name", ""))
+	var held: int = typeof(target.get(property)) if property in target else TYPE_NIL
+	var numbers: Array[int] = [TYPE_BOOL, TYPE_INT, TYPE_FLOAT]
+	var expected: int = GdhRead.as_int(declared.get("type", TYPE_NIL), TYPE_NIL)
+	if held in [TYPE_NIL, TYPE_OBJECT, expected] or (held in numbers and expected in numbers):
+		return value
+	var as_held: Array = _value_as(target, { "name": property, "type": held }, raw)
+	return as_held if as_held[0] else value
+
+
+func _value_as(target: Object, declared: Dictionary, raw: Variant) -> Array:
 	var property: String = str(declared.get("name", ""))
 	var expected_type: int = GdhRead.as_int(declared.get("type", TYPE_NIL), TYPE_NIL)
 	var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
