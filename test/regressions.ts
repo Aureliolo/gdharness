@@ -46356,6 +46356,12 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         'var frames := 0',
         '',
         '',
+        // Paced, because a headless game draws as fast as it can: unpaced, its 30 frames ended
+        // before the profiler came on with no runtime addon holding the start, on a loaded runner.
+        'func _ready() -> void:',
+        '\tEngine.max_fps = 15',
+        '',
+        '',
         'func each_frame() -> void:',
         '\tframes += 1',
         '',
