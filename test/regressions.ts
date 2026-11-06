@@ -472,7 +472,7 @@ import {
 } from '../src/spawn.js';
 import { type ArmPlayed, armsPlayed, shareFaults, shareOf } from '../src/spread-run.js';
 import { followSuccessor, RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
-import { EVERY_FILE, reachedBySuite, SuiteInputs, walkSeen } from '../src/suite-inputs.js';
+import { EVERY_FILE, EVERY_NAME, reachedBySuite, SuiteInputs, walkSeen } from '../src/suite-inputs.js';
 import {
   COMPILED_SAID,
   exitNamed,
@@ -13838,15 +13838,22 @@ async function testEveryHiddenStartIsStartedHidden(): Promise<void> {
         `import { runHidden, runSyncHidden, spawnHidden, spawnShown, spawnSyncHidden } from ${JSON.stringify(pathToFileURL(resolve('build', 'spawn.js')).href)};`,
         `const [probe, scratch] = process.argv.slice(2);`,
         `const at = (name) => scratch + '/node-' + name + '.txt';`,
-        `spawnHidden(probe, [at('spawnHidden')], { stdio: 'ignore' });`,
-        `await runHidden(probe, [at('runHidden')]);`,
-        `runSyncHidden(probe, [at('runSyncHidden')], { encoding: 'utf8' });`,
-        `spawnSyncHidden(probe, [at('spawnSyncHidden')]);`,
-        `spawnShown(probe, [at('spawnShown')], { stdio: 'ignore', detached: true });`,
+        // Each start named as it begins, so a run that hangs shows which start it hung in.
+        `console.error('spawnHidden', Date.now()); spawnHidden(probe, [at('spawnHidden')], { stdio: 'ignore' });`,
+        `console.error('runHidden', Date.now()); await runHidden(probe, [at('runHidden')]);`,
+        `console.error('runSyncHidden', Date.now()); runSyncHidden(probe, [at('runSyncHidden')], { encoding: 'utf8' });`,
+        `console.error('spawnSyncHidden', Date.now()); spawnSyncHidden(probe, [at('spawnSyncHidden')]);`,
+        `console.error('spawnShown', Date.now()); spawnShown(probe, [at('spawnShown')], { stdio: 'ignore', detached: true });`,
+        `console.error('done', Date.now());`,
       ].join('\n'),
     );
+    const nodeBegan = Date.now();
     const node = spawnSyncHidden('node', [underNode, probe, scratch], { encoding: 'utf8', timeout: 90_000 });
-    assert.equal(node.status, 0, `the starts under Node should run: ${node.stdout} ${node.stderr}`);
+    assert.equal(
+      node.status,
+      0,
+      `the starts under Node should run, begun at ${String(nodeBegan)}, with ${String(node.signal)} after ${String(Date.now() - nodeBegan)} ms and ${readdirSync(scratch).join(', ')} written: ${node.stdout} ${node.stderr}`,
+    );
     const prelude = spawnSyncHidden(
       'node',
       [
@@ -49518,7 +49525,8 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
 /**
  * A suite's pass kept in one checkout is a pass in another of the same project on the same engine.
  * A game hands each checkout the shared install through a junction of its own, and the key named
- * the junction, so every cold checkout ran every suite again. A pin file named by its path did too.
+ * the junction, so every cold checkout ran every suite again. A pin file named by its path did too:
+ * a game keeps one in a cache outside its checkouts, which lie at different depths.
  */
 function testSuitePassesKeyAlikeInEveryCheckout(): void {
   const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-checkouts-'));
@@ -49526,7 +49534,10 @@ function testSuitePassesKeyAlikeInEveryCheckout(): void {
     const install = join(root, 'install');
     mkdirSync(install);
     writeFileSync(join(install, 'godot.exe'), 'an engine');
-    const checkouts = ['gate', 'gate-probe-1'].map((name) => {
+    const cache = join(root, 'cache', 'pins');
+    mkdirSync(cache, { recursive: true });
+    writeFileSync(join(cache, 'pins-1a2b.json'), '{"uv.lock": "3c4d"}');
+    const checkouts = [join('code', 'game'), join('worktrees', 'game-gate', 'game')].map((name) => {
       const checkout = join(root, name);
       mkdirSync(join(checkout, '.tools'), { recursive: true });
       symlinkSync(install, join(checkout, '.tools', 'godot'), 'junction');
@@ -49536,18 +49547,22 @@ function testSuitePassesKeyAlikeInEveryCheckout(): void {
     });
     const [gate, probe] = checkouts.map((checkout) => [
       engineSaid(join(checkout, '.tools', 'godot', 'godot.exe')),
-      ...reachedAlsoSaid(checkout, [join(checkout, 'tools', 'versions.json'), join(checkout, 'gone.toml')]),
+      ...reachedAlsoSaid([
+        join(checkout, 'tools', 'versions.json'),
+        join(cache, 'pins-1a2b.json'),
+        join(checkout, 'gone.toml'),
+      ]),
     ]);
     assert.deepEqual(probe, gate, 'the same engine and pins key alike in both checkouts');
     assert.match(gate?.[0] ?? '', /install[\\/]godot\.exe\n9\n/, 'the engine named as the file it is');
     assert.deepEqual(
       gate?.slice(1),
-      ['tools/versions.json\n{"godot": "4.7.2"}', 'gone.toml\nmissing'],
-      'and each pin by where it lies in the project, with what it holds',
+      ['{"godot": "4.7.2"}', '{"uv.lock": "3c4d"}', 'missing'],
+      'and each pin by what it holds, inside the checkout or outside',
     );
     writeFileSync(join(checkouts[1] ?? '', 'tools', 'versions.json'), '{"godot": "4.8"}');
     assert.notDeepEqual(
-      reachedAlsoSaid(checkouts[1] ?? '', [join(checkouts[1] ?? '', 'tools', 'versions.json')]),
+      reachedAlsoSaid([join(checkouts[1] ?? '', 'tools', 'versions.json')]),
       gate.slice(1, 2),
       'while a pin that differs keys apart',
     );
@@ -51004,6 +51019,42 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
         'extends Node\n\n\nfunc names() -> PackedStringArray:\n\treturn DirAccess.get_files_at("res://levels")\n',
       'computed.gd':
         'extends Node\n\n\nfunc read(name: String) -> String:\n\treturn FileAccess.get_file_as_string(name)\n',
+      'checker.gd':
+        'extends Node\n\n\nfunc there(folder: String) -> bool:\n' +
+        '\treturn FileAccess.file_exists(folder.path_join("art")) or ResourceLoader.exists(folder)\n\n\n' +
+        'func names(folder: String) -> PackedStringArray:\n\treturn DirAccess.get_files_at(folder)\n',
+      'held.gd':
+        'extends Node\n\nconst FOLDER: String = "res://data/"\n\n\nfunc read(type: String) -> String:\n' +
+        '\tvar path: String = FOLDER + type + ".json"\n\treturn FileAccess.get_file_as_string(path)\n\n\n' +
+        'func named(type: String) -> String:\n\tvar path: String = type\n\treturn path\n',
+      'set_again.gd':
+        'extends Node\n\n\nfunc read(type: String) -> String:\n\tvar path: String = "res://data/" + type\n' +
+        '\tpath = type\n\treturn FileAccess.get_file_as_string(path)\n',
+      'passed.gd':
+        'extends Node\n\nconst LEVELS: String = "res://levels"\n\n\nfunc every() -> void:\n' +
+        '\tfor file: String in DirAccess.get_files_at(LEVELS):\n\t\t_level("%s/%s" % [LEVELS, file])\n\n\n' +
+        'func _level(path: String) -> String:\n\treturn FileAccess.get_file_as_string(path)\n',
+      'passed_anything.gd':
+        'extends Node\n\n\nfunc other(name: String) -> void:\n\t_any(name)\n\n\n' +
+        'func _any(path: String) -> String:\n\treturn FileAccess.get_file_as_string(path)\n',
+      'handed.gd':
+        'extends Node\n\nconst LEVELS: String = "res://levels/"\n\n\nfunc every() -> Callable:\n' +
+        '\t_handed(LEVELS + "one.txt")\n\treturn _handed\n\n\n' +
+        'func _handed(path: String) -> String:\n\treturn FileAccess.get_file_as_string(path)\n',
+      'by_name.gd':
+        'extends Node\n\nconst LEVELS: String = "res://levels/"\n\n\nfunc every() -> void:\n' +
+        '\t_by_name(LEVELS + "one.txt")\n\tcall("_by_name", get_meta("anywhere"))\n\n\n' +
+        'func _by_name(path: String) -> String:\n\treturn FileAccess.get_file_as_string(path)\n',
+      'globalized.gd':
+        'extends Node\n\n\nfunc read() -> Image:\n' +
+        '\treturn Image.load_from_file(ProjectSettings.globalize_path("res://data/icon.png"))\n',
+      'globalized_folder.gd':
+        'extends Node\n\n\nfunc folder() -> PackedByteArray:\n' +
+        '\treturn FileAccess.get_file_as_bytes(ProjectSettings.globalize_path("res://data/icon.png").get_base_dir())\n',
+      'defaulted.gd':
+        'extends Node\n\nconst SOUNDS: String = "res://sound/"\n\n\nfunc every() -> void:\n\t_sound()\n\n\n' +
+        'func _sound(folder: String = SOUNDS) -> String:\n' +
+        '\treturn FileAccess.get_file_as_string(folder.path_join("a.ogg"))\n',
       'paths.gd': 'class_name Paths\nextends Node\n\nconst DATA: String = "res://da" + "ta"\n',
       'joined.gd':
         'extends Paths\n\nconst LEVELS: String = DATA + "/"\n\n\nfunc read(name: String) -> String:\n' +
@@ -51066,6 +51117,13 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
     assert.deepEqual(inputsOf(['res://computed.gd']), [EVERY_FILE], 'a file read by a computed path');
     assert.deepEqual(inputsOf(['res://by_uid.gd']), [EVERY_FILE], 'and a preload by uid');
     assert.deepEqual(
+      inputsOf(['res://checker.gd']).filter(
+        (path) => !path.startsWith('res://project') && !path.startsWith('res://ext'),
+      ),
+      [EVERY_NAME, 'res://checker.gd'],
+      'a check or listing by a computed path, as the names alone',
+    );
+    assert.deepEqual(
       inputsOf(['res://joined.gd']).filter(
         (path) => !path.startsWith('res://project') && !path.startsWith('res://ext'),
       ),
@@ -51075,6 +51133,33 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
     assert.ok(
       inputsOf(['res://formatted.gd']).includes('tree:res://levels/'),
       'and a path formatted into a literal, as the folder it begins in',
+    );
+    const own = (script: string): string[] =>
+      inputsOf([script]).filter((path) => !path.startsWith('res://project') && !path.startsWith('res://ext'));
+    assert.deepEqual(
+      own('res://held.gd'),
+      ['res://held.gd', 'tree:res://data/'],
+      'a path held in a local set once from a constant folder, read as that folder',
+    );
+    assert.deepEqual(own('res://set_again.gd'), [EVERY_FILE], 'and not one set again');
+    assert.deepEqual(
+      own('res://passed.gd'),
+      ['res://levels', 'res://passed.gd', 'tree:res://levels/'],
+      'a parameter every call fills with a path formatted onto a constant folder',
+    );
+    assert.deepEqual(own('res://passed_anything.gd'), [EVERY_FILE], 'and not one filled from anywhere');
+    assert.deepEqual(own('res://handed.gd'), [EVERY_FILE], 'nor one of a function handed on as a value');
+    assert.deepEqual(own('res://by_name.gd'), [EVERY_FILE], 'or called by its name');
+    assert.deepEqual(
+      own('res://globalized.gd'),
+      ['res://data/icon.png', 'res://globalized.gd'],
+      'a path handed to the system as the file it names',
+    );
+    assert.deepEqual(own('res://globalized_folder.gd'), [EVERY_FILE], 'and not one made into another');
+    assert.deepEqual(
+      own('res://defaulted.gd'),
+      ['res://defaulted.gd', 'tree:res://sound/'],
+      'a parameter left to its default',
     );
     assert.deepEqual(
       inputsOf(['res://saves.gd']).filter(
@@ -51111,6 +51196,22 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
       true,
       'any file, for a computed read',
     );
+    assert.equal(
+      moves(['res://checker.gd'], 'other.gd', 'class_name Other\nextends Control\n'),
+      false,
+      "no file's content, for a computed check",
+    );
+    assert.equal(moves(['res://checker.gd'], 'levels/three.txt', 'three\n'), true, 'a file added anywhere');
+    const beforeFolder = printOf(['res://checker.gd']);
+    mkdirSync(join(project, 'art'));
+    assert.notEqual(printOf(['res://checker.gd']), beforeFolder, 'and a folder');
+    const named = inputsOf(['res://checker.gd']);
+    const later = Date.now() + 60_000;
+    const changedSince = (): boolean =>
+      new SuiteInputs(new ProjectScripts(project), ['1']).modifiedAfter(named, later);
+    assert.equal(changedSince(), false, 'no name changed since');
+    utimesSync(join(project, 'art'), new Date(later + 5000), new Date(later + 5000));
+    assert.equal(changedSince(), true, 'a folder whose entries changed since');
     assert.equal(
       moves(['res://joined.gd'], 'data/levels.json', '[3]\n'),
       true,
@@ -53138,6 +53239,38 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     assert.match(besideSkipped.said, SKIPPED_COMPILE, besideSkipped.said);
     assert.match(besideSkipped.said, /^Passed: 1 case in 1 suite across 1 engine, /m, besideSkipped.said);
     assert.deepEqual(leftInSlots(slots), [], `its slot given back: ${besideSkipped.said}`);
+    // A pass kept in one checkout is a pass in another of the same files lying deeper, with the
+    // records copied as a game's tools copy them and the pins in a cache outside both.
+    const pins = join(checkouts, 'cache', 'pins.json');
+    mkdirSync(dirname(pins), { recursive: true });
+    writeFileSync(pins, '{"uv.lock": "1"}\n');
+    const pinned = test('tests/ok_test.gd', '--changed-only', '--reach-also', pins);
+    assert.match(pinned.said, /^Passed: 2 cases in 1 suite across 1 engine, /m, pinned.said);
+    const deeper = join(checkouts, 'worktrees', 'game-gate', 'game');
+    cpSync(project, deeper, { recursive: true });
+    const there = spawnSyncHidden(
+      process.execPath,
+      [
+        'build/cli.js',
+        'test',
+        deeper,
+        '--slots',
+        slots,
+        'tests/ok_test.gd',
+        '--changed-only',
+        '--reach-also',
+        pins,
+      ],
+      { encoding: 'utf8', env, timeout: 4 * ENGINE_CALL_TIMEOUT_MS },
+    );
+    const thereSaid = `${there.stdout}${there.stderr}`;
+    assert.equal(there.status, 0, thereSaid);
+    assert.match(
+      thereSaid,
+      /^1 suite passed on everything its engine loaded as it stands now, and is not run: res:\/\/tests\/ok_test\.gd\.$/m,
+      thereSaid,
+    );
+    assert.match(thereSaid, /^Nothing has changed since every suite last passed\.$/m, thereSaid);
     rmSync(join(project, 'tests', 'loads_test.gd'));
   } finally {
     sweep(project, slots, checkouts);
