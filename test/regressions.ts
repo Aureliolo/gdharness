@@ -447,6 +447,7 @@ import {
   shippedEditorDigest,
   shippedLoader,
   shippedRuntimeDigest,
+  worktreeAddonVersion,
   writeLoader,
 } from '../src/setup.js';
 import { skillFiles } from '../src/skill.js';
@@ -19916,6 +19917,17 @@ function testAWorktreeFindsItsMainCheckoutsEngine(): void {
     writeFileSync(join(root, 'main', 'game', 'project.godot'), 'config_version=5\n');
     writeFileSync(join(entry, 'commondir'), '../../../bare.git\n');
     assert.equal(mainCheckoutOf(worktree), null, 'a bare repository has no checkout');
+
+    // What an upgrade names a lagging worktree by. A worktree removed as the upgrade ran failed it
+    // with ENOENT on its project.godot, after the upgrade had finished its own project.
+    const addon = join(worktree, 'addons', 'gdharness_editor');
+    mkdirSync(addon, { recursive: true });
+    assert.equal(worktreeAddonVersion(worktree), null, 'an addon with no marker');
+    writeFileSync(join(addon, VERSION_MARKER), '1.2.3\n');
+    assert.equal(worktreeAddonVersion(worktree), '1.2.3', 'the marked version');
+    // Part way through its removal, as git takes the files out one by one.
+    rmSync(join(worktree, 'project.godot'));
+    assert.equal(worktreeAddonVersion(worktree), undefined, 'a worktree being removed reads as none');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -68288,6 +68300,15 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       resourceRoot,
     );
     assert.doesNotMatch(resourceRoot, /Editor/, resourceRoot);
+    // A script that is not there is refused as one, with no engine load errors beneath it.
+    const scriptless = await call('scene_create', {
+      op: 'create',
+      scenePath: 'scripted.tscn',
+      rootNodeType: 'Node2D',
+      script: 'res://mad.gd',
+    });
+    assert.match(textOf(scriptless) ?? '', /^No script at res:\/\/mad\.gd\./, JSON.stringify(scriptless));
+    assert.equal(asArray(get(scriptless, 'result', 'content')).length, 1, JSON.stringify(scriptless));
     // A folder the path names is made, and said to be.
     const mapped = await written('scene_create', {
       op: 'create',
@@ -75002,6 +75023,35 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
       JSON.stringify(variation),
     );
     assert.match(fileOf('theme.tres'), /\nButon\/colors\/font_color = Color\(1, 0, 0, 1\)\n/);
+    // Any name is an item, so one a class never reads is written and answered as set.
+    const misspelt = parseTextContent(
+      await call('resource_edit', {
+        ...theme,
+        op: 'set_theme_color',
+        controlType: 'Button',
+        colorName: 'font_colour',
+        color: { r: 0, g: 0, b: 1, a: 1 },
+      }),
+    );
+    assert.match(
+      text(get(misspelt, 'note')),
+      /^The engine's theme gives Button no colour font_colour, so only a script asking for it by name reads it\. The nearest it has (?:is|are) font_color(?:, [a-z_]+)*\. remove_theme_item with item colors\/font_colour takes it out\.$/,
+      JSON.stringify(misspelt),
+    );
+    const oddSize = parseTextContent(
+      await call('resource_edit', {
+        ...theme,
+        op: 'set_theme_font_size',
+        controlType: 'Button',
+        fontSizeName: 'font_sise',
+        size: 20,
+      }),
+    );
+    assert.match(
+      text(get(oddSize, 'note')),
+      /^The engine's theme gives Button no font size font_sise, so only a script asking for it by name reads it\. The nearest it has is font_size\. remove_theme_item with item font_sizes\/font_sise takes it out\.$/,
+      JSON.stringify(oddSize),
+    );
     // A colour as its html code, as scene_node takes one, and a word that is neither form.
     const coded = parseTextContent(
       await call('resource_edit', {

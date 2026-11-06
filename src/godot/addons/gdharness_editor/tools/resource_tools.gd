@@ -313,9 +313,10 @@ func create_resource(args: Dictionary) -> Dictionary:
 	# one asked for.
 	if script_path != "":
 		var script_file: String = _ensure_res_path(script_path)
-		var script: Script = load(script_file) as Script
-		if script == null:
-			return { "ok": false, "error": "No script loads from " + script_file }
+		var found: Variant = GdhSceneFile.script_at(script_file)
+		if found is String:
+			return { "ok": false, "error": found }
+		var script: Script = found
 		var uncompiled: String = GdhSceneFile.uncompiled(script, script_file)
 		if not uncompiled.is_empty():
 			return { "ok": false, "error": uncompiled }
@@ -614,14 +615,18 @@ func set_theme_color(args: Dictionary) -> Dictionary:
 		}
 
 	var stored: Color = saved.get_color(color_name, control_type)
-	return _noting_variation(
-		{
-			"ok": true,
-			"resourcePath": theme_path,
-			"controlType": control_type,
-			"colorName": color_name,
-			"color": { "r": stored.r, "g": stored.g, "b": stored.b, "a": stored.a },
-		}
+	return _noting_item(
+		_noting_variation(
+			{
+				"ok": true,
+				"resourcePath": theme_path,
+				"controlType": control_type,
+				"colorName": color_name,
+				"color": { "r": stored.r, "g": stored.g, "b": stored.b, "a": stored.a },
+			}
+		),
+		Theme.DATA_TYPE_COLOR,
+		color_name
 	)
 
 
@@ -673,14 +678,18 @@ func set_theme_font_size(args: Dictionary) -> Dictionary:
 			"ok": false, "error": "The theme saved without %s/%s" % [control_type, font_size_name],
 		}
 
-	return _noting_variation(
-		{
-			"ok": true,
-			"resourcePath": theme_path,
-			"controlType": control_type,
-			"fontSizeName": font_size_name,
-			"size": saved.get_font_size(font_size_name, control_type),
-		}
+	return _noting_item(
+		_noting_variation(
+			{
+				"ok": true,
+				"resourcePath": theme_path,
+				"controlType": control_type,
+				"fontSizeName": font_size_name,
+				"size": saved.get_font_size(font_size_name, control_type),
+			}
+		),
+		Theme.DATA_TYPE_FONT_SIZE,
+		font_size_name
 	)
 
 
@@ -733,6 +742,33 @@ func remove_theme_item(args: Dictionary) -> Dictionary:
 		"controlType": control_type,
 		"removed": removed,
 	}
+
+
+## [param answer] with a note when its controlType is a class the engine's own theme styles and
+## [param item] is no item of [param kind] that theme gives it. Any name is an item, so a misspelt
+## "font_colour" was saved, answered as set, and drew nothing.
+func _noting_item(answer: Dictionary, kind: Theme.DataType, item: String) -> Dictionary:
+	var type: String = str(answer.get("controlType", ""))
+	var engine_theme: Theme = ThemeDB.get_default_theme()
+	if answer.has("note") or not engine_theme.get_type_list().has(type):
+		return answer
+	var items: PackedStringArray = engine_theme.get_theme_item_list(kind, type)
+	if items.is_empty() or items.has(item):
+		return answer
+	var words: Dictionary[Theme.DataType, Array] = {
+		Theme.DATA_TYPE_COLOR: ["colour", "colors"],
+		Theme.DATA_TYPE_FONT_SIZE: ["font size", "font_sizes"],
+	}
+	var said: Array = words[kind]
+	var lacking: String = (
+		"The engine's theme gives %s no %s %s, so only a script asking for it by name reads it."
+		% [type, said[0], item]
+	)
+	answer["note"] = (
+		"%s. remove_theme_item with item %s/%s takes it out."
+		% [GdhRead.offered(lacking, item, Array(items)), said[1], item]
+	)
+	return answer
 
 
 ## [param answer] with a note when its controlType names no class a theme styles. Any name is a

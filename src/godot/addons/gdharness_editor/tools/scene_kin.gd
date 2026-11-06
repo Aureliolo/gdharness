@@ -45,9 +45,10 @@ static func inherited(
 		return taken(scene_path)
 	var script: Script = null
 	if not script_path.is_empty():
-		script = load(script_path) as Script
-		if script == null:
-			return { "ok": false, "error": "No script loads from " + script_path }
+		var found: Variant = GdhSceneFile.script_at(script_path)
+		if found is String:
+			return { "ok": false, "error": found }
+		script = found
 		var uncompiled: String = GdhSceneFile.uncompiled(script, script_path)
 		if not uncompiled.is_empty():
 			return { "ok": false, "error": uncompiled }
