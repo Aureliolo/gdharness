@@ -1850,7 +1850,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     resource_path: 'art.png',
     options: { 'compress/mod': 1 },
   });
-  assert.deepEqual(get(unlisted.answer, 'changed', 'compress/mod'), { was: null, now: 1 }, unlisted.stderr);
+  assert.deepEqual(get(unlisted.answer, 'changed', 'compress/mod'), { now: 1 }, unlisted.stderr);
   assert.doesNotMatch(unlisted.stderr, /Couldn't find the given section/, 'read without an engine error');
   writeFileSync(sidecarFile, kept);
   // A sidecar whose source has gone takes options nothing will ever apply.

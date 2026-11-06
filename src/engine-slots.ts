@@ -1567,8 +1567,8 @@ export interface CallSlot {
   readonly leave: () => void;
 }
 
-/** The lock a command of several engine steps holds for all of them, inside {@link inOneSlot}. */
-const keptForSteps = new AsyncLocalStorage<string>();
+/** The slot a command of several engine steps holds for all of them, inside {@link inOneSlot}. */
+const keptForSteps = new AsyncLocalStorage<{ held: Promise<CallSlot> | null }>();
 
 /**
  * Runs [param body] holding one of the machine's slots for the call, handing it the slot's lock,
@@ -1577,7 +1577,8 @@ const keptForSteps = new AsyncLocalStorage<string>();
 export async function inASlot<T>(body: (lock: string) => Promise<T>): Promise<T> {
   const kept = keptForSteps.getStore();
   if (kept !== undefined) {
-    return await body(kept);
+    kept.held ??= slotForCall();
+    return await body((await kept.held).lock);
   }
   const held = await slotForCall();
   try {
@@ -1590,16 +1591,19 @@ export async function inASlot<T>(body: (lock: string) => Promise<T>): Promise<T>
 /**
  * Runs [param body], a command whose engines run one after another, holding one slot for all of
  * them. Each engine taking its own slot queued again on a busy machine: one `gdharness setup` waited
- * 122, 933 and 335 seconds for its three, 24 minutes in all.
+ * 122, 933 and 335 seconds for its three, 24 minutes in all. The slot is taken at the first engine,
+ * so a command refused before one, for want of Godot or for its arguments, says so at once.
  */
 export async function inOneSlot<T>(body: () => Promise<T>): Promise<T> {
   if (keptForSteps.getStore() !== undefined) {
     return await body();
   }
-  const held = await slotForCall();
+  const kept: { held: Promise<CallSlot> | null } = { held: null };
   try {
-    return await keptForSteps.run(held.lock, body);
+    return await keptForSteps.run(kept, body);
   } finally {
-    held.release();
+    // A take that failed was thrown to the engine step that asked for it, and holds nothing.
+    const held = await kept.held?.catch(() => null);
+    held?.release();
   }
 }

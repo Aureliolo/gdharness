@@ -33,8 +33,8 @@ import {
   throughHelper,
 } from './desktop.js';
 import { nameSlotEngineOf, onTheSlot } from './engine-slots.js';
-import { nowSeconds, type Past, type Sample, Spent, STARVED, sampled, watching } from './engine-spent.js';
-import { Refusal } from './errors.js';
+import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
+import { errorCode, Refusal } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
 import { LOG_LIMIT_BYTES, readLog } from './log-read.js';
 import { belowNormal } from './priority.js';
@@ -61,20 +61,6 @@ const WINDOWS_EXCEPTION = 0xc0000000;
 const MEMORY_KEPT = 4 * 1024 ** 3;
 const MEMORY_PER_ENGINE = 1.5 * 1024 ** 3;
 const LOOK_MS = 500;
-
-/**
- * How [param spent] came past its limit at [param at], said only when other work crowded the
- * machine, since the plain seconds are then not the clock's.
- */
-export function countedBy(spent: Spent, past: Past, at: number): string {
-  const clock = Math.round(spent.clock(at));
-  if (past === 'clock') {
-    return `, ${String(STARVED)} times over on the clock (${String(clock)} s), the machine kept busy by other work`;
-  }
-  return spent.byWork === 0
-    ? ''
-    : ` of its own, counted by its processor time while other work kept the machine busy (${String(clock)} s on the clock)`;
-}
 
 /** How long Windows is given to say how much it can still commit, on a machine the run may load. */
 const COMMIT_ASK_MS = 15_000;
@@ -173,26 +159,44 @@ export const KEPT_RUN_DIRECTORIES = 5;
 
 /**
  * Removes what earlier runs left in [param runs], each a `<start>-<pid>` directory, other than a
- * run still going and the [param kept] most recent of those that have ended.
+ * run still going and the [param kept] most recent of those that have ended. Answers the directories
+ * left because another process holds them, such as an engine that outlived its run.
  */
-export function sweepRunDirectories(runs: string, kept = KEPT_RUN_DIRECTORIES): void {
+export function sweepRunDirectories(runs: string, kept = KEPT_RUN_DIRECTORIES): string[] {
   if (!existsSync(runs)) {
-    return;
+    return [];
   }
+  const held: string[] = [];
+  const remove = (entry: string): void => {
+    try {
+      rmSync(join(runs, entry), { recursive: true, force: true });
+    } catch (error) {
+      if (!['EBUSY', 'EPERM', 'ENOTEMPTY'].includes(errorCode(error) ?? '')) {
+        throw error;
+      }
+      held.push(join(runs, entry));
+    }
+  };
   const ended: { entry: string; started: number }[] = [];
   for (const entry of readdirSync(runs)) {
     const named = /^(\d+)-(\d+)$/.exec(entry);
     const pid = Number(named?.[2]);
     if (!Number.isInteger(pid)) {
-      rmSync(join(runs, entry), { recursive: true, force: true });
+      remove(entry);
     } else if (!alive(pid)) {
       ended.push({ entry, started: Number(named?.[1]) });
     }
   }
   ended.sort((a, b) => b.started - a.started);
   for (const { entry } of ended.slice(kept)) {
-    rmSync(join(runs, entry), { recursive: true, force: true });
+    remove(entry);
   }
+  return held;
+}
+
+/** The line for a run directory a sweep left: see {@link sweepRunDirectories}. */
+export function heldRunSaid(directory: string): string {
+  return `left ${directory}, which another process holds, such as an engine of that run still going`;
 }
 
 /**
@@ -345,6 +349,26 @@ export function heldToCores(
     : { command: 'taskset', args: ['-c', `0-${String(cores - 1)}`, command, ...args] };
 }
 
+/** Where util-linux puts setpriv: see {@link endingWithRunner}. */
+const SETPRIV_PATHS = ['/usr/bin/setpriv', '/bin/setpriv'];
+
+/**
+ * [param command] and [param args] killed by the kernel once the process starting them has gone,
+ * through setpriv on Linux, which execs the command in its own place so the pid is the engine's. As
+ * they are where Linux has no setpriv, and on macOS, which has no such signal. Windows ties the
+ * engine to the runner through the helper's job.
+ */
+export function endingWithRunner(
+  command: string,
+  args: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+  setpriv: string | null = SETPRIV_PATHS.find((path) => existsSync(path)) ?? null,
+): { command: string; args: string[] } {
+  return platform !== 'linux' || setpriv === null
+    ? { command, args: [...args] }
+    : { command: setpriv, args: ['--pdeathsig', 'KILL', '--', command, ...args] };
+}
+
 /**
  * Starts the engine with [param args], both its streams into [param log] through one handle so
  * their lines stay in the order printed (on Windows one pipe, copied into the log), and waits for it, ending it once it has printed nothing for
@@ -401,6 +425,7 @@ export async function watchedEngine(
       const how = {
         desktop: HIDDEN_DESKTOP,
         directory: launch.projectPath,
+        endsWithHelper: true,
         ...(launch.cores === null ? {} : { affinity: (1n << BigInt(launch.cores)) - 1n }),
       };
       const wrapper = throughHelper(how, launch.godotPath, args, {
@@ -425,7 +450,8 @@ export async function watchedEngine(
         writeFileSync(stopFile, '');
       };
     } else {
-      const held = heldToCores(launch.cores, launch.godotPath, args);
+      const ending = endingWithRunner(launch.godotPath, args);
+      const held = heldToCores(launch.cores, ending.command, ending.args);
       child = spawnHidden(held.command, held.args, {
         stdio: ['ignore', output, output],
         env,

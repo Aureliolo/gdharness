@@ -6,8 +6,10 @@
  * a boot that warns once per resource, was ended by Node and answered as an engine fault.
  */
 
+import { setTimeout as delay } from 'node:timers/promises';
 import { callSignal } from './call-signal.js';
 import { inASlot, nameSlotEngineOf, onTheSlot } from './engine-slots.js';
+import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
 import { GameLog } from './game-log.js';
 import { belowNormal } from './priority.js';
 import { spawnHidden } from './spawn.js';
@@ -73,15 +75,27 @@ export async function startedUntilItRuns(
   }
 }
 
+/** How long an engine may run, and the words for it. [param sample] reads the machine, for a test. */
+interface RunOptions {
+  readonly timeout?: { readonly ms: number; readonly said: string };
+  readonly sample?: () => Promise<Sample>;
+}
+
+/** How often an engine with a timeout is measured against it. */
+const MEASURE_MS = 1000;
+
 /**
  * Runs the engine in one of the machine's engine slots, waiting for one first, so an engine this
  * process starts counts against the same budget as every gate on the machine. The timeout starts
- * once the engine does. An engine that crashes as it starts is started again on the same slot.
+ * once the engine does, and counts the engine's own processor time while other work crowds the
+ * machine, up to eight times the timeout on the clock. A gate's add_autoload at below
+ * normal priority, on a machine 94% busy, was ended at ten minutes while it worked. An engine that
+ * crashes as it starts is started again on the same slot.
  */
 export async function runEngine(
   executable: string,
   args: readonly string[],
-  options: { readonly timeout?: { readonly ms: number; readonly said: string } } = {},
+  options: RunOptions = {},
 ): Promise<EngineRun> {
   const signal = callSignal();
   try {
@@ -109,7 +123,7 @@ function runStarted(
   executable: string,
   args: readonly string[],
   lock: string,
-  options: { readonly timeout?: { readonly ms: number; readonly said: string } },
+  options: RunOptions,
   signal: AbortSignal | undefined,
 ): Promise<EngineRun> {
   return new Promise((resolve) => {
@@ -133,20 +147,36 @@ function runStarted(
     child.stderr.on('data', (chunk: Buffer) => {
       log.append('stderr', chunk);
     });
+    const closed = { now: false };
     const { timeout } = options;
-    const timer =
-      timeout === undefined
-        ? undefined
-        : setTimeout(() => {
-            failure ??= `it ran past its ${timeout.said}`;
+    const { pid } = child;
+    if (timeout !== undefined && pid !== undefined) {
+      const sample = options.sample ?? sampled;
+      watching(pid, true);
+      void (async () => {
+        const spent = new Spent(nowSeconds(), await sample(), pid);
+        while (!closed.now) {
+          await delay(MEASURE_MS);
+          spent.counted(await sample(), pid);
+          const at = nowSeconds();
+          const past = spent.past(timeout.ms / 1000, at);
+          if (past !== null) {
+            failure ??= `it ran past its ${timeout.said}${countedBy(spent, past, at)}`;
             child.kill();
-          }, timeout.ms);
+            return;
+          }
+        }
+      })();
+    }
     child.on('error', (error) => {
       failure ??=
         error.name === 'AbortError' ? 'the call was cancelled' : `it could not be started: ${error.message}`;
     });
     child.on('close', (code, closedBy) => {
-      clearTimeout(timer);
+      closed.now = true;
+      if (pid !== undefined) {
+        watching(pid, false);
+      }
       log.finish();
       // A process that never started has a libuv error number where its exit code would be.
       const started = child.pid !== undefined;

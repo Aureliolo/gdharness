@@ -108,6 +108,20 @@ export class Spent {
   }
 }
 
+/**
+ * How [param spent] came past its limit at [param at], said only when other work crowded the
+ * machine, since the plain seconds are then not the clock's.
+ */
+export function countedBy(spent: Spent, past: Past, at: number): string {
+  const clock = Math.round(spent.clock(at));
+  if (past === 'clock') {
+    return `, ${String(STARVED)} times over on the clock (${String(clock)} s), the machine kept busy by other work`;
+  }
+  return spent.byWork === 0
+    ? ''
+    : ` of its own, counted by its processor time while other work kept the machine busy (${String(clock)} s on the clock)`;
+}
+
 /** Seconds on a clock that only goes forwards, the one samples are taken on. */
 export function nowSeconds(): number {
   return performance.now() / 1000;
