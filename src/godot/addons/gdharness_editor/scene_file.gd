@@ -1440,6 +1440,8 @@ func _moved_by_scripts() -> Array[Array]:
 			continue
 		var before: Dictionary = _before[id]
 		var changed: Array[String] = GdhHeadlessCheck.differing(node, before, on)
+		# What an editor's save leaves out is taken out of the pack, so it is not written at all.
+		changed = changed.filter(func(name: String) -> bool: return not _unsaved(node, name))
 		if not changed.is_empty():
 			moved.append([node, changed])
 	return moved
