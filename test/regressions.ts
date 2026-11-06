@@ -54054,19 +54054,31 @@ async function testAnEngineEndsWithTheRunnerThatStartedIt(): Promise<void> {
     const directory = join(scratch, 'engine-0');
     mkdirSync(directory);
     const pidFile = join(scratch, 'engine.pid');
-    const own = `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setTimeout(() => {}, 120000)`;
-    const launch = { godotPath: process.execPath, projectPath: scratch, deadlineSeconds: 120, cores: null };
+    // The code is fixed and what it runs on comes in the environment, which the engine inherits.
+    const own =
+      "require('node:fs').writeFileSync(process.env.GDH_TEST_PID_FILE, String(process.pid)); setTimeout(() => {}, 120000)";
+    const run = {
+      module: pathToFileURL(resolve('src', 'engine-launch.ts')).href,
+      launch: { godotPath: process.execPath, projectPath: scratch, deadlineSeconds: 120, cores: null },
+      lock: join(scratch, '0.lock'),
+      args: ['-e', own],
+      directory,
+      log: join(directory, 'engine.log'),
+    };
     const runner = spawnHidden(
       process.execPath,
       [
         '-e',
         [
-          `import { watchedEngine } from ${JSON.stringify(pathToFileURL(resolve('src', 'engine-launch.ts')).href)};`,
-          `await watchedEngine({ ...${JSON.stringify(launch)}, running: new Set() }, ${JSON.stringify(join(scratch, '0.lock'))},`,
-          `  ['-e', ${JSON.stringify(own)}], ${JSON.stringify(directory)}, ${JSON.stringify(join(directory, 'engine.log'))}, 60);`,
+          'const run = JSON.parse(process.env.GDH_TEST_RUN);',
+          'const { watchedEngine } = await import(run.module);',
+          'await watchedEngine({ ...run.launch, running: new Set() }, run.lock, run.args, run.directory, run.log, 60);',
         ].join('\n'),
       ],
-      { stdio: 'ignore' },
+      {
+        stdio: 'ignore',
+        env: { ...process.env, GDH_TEST_RUN: JSON.stringify(run), GDH_TEST_PID_FILE: pidFile },
+      },
     );
     const started = Date.now() + 60_000;
     while (!existsSync(pidFile) && Date.now() < started) {
@@ -54402,11 +54414,19 @@ async function testACommandOfSeveralEnginesHoldsOneSlot(): Promise<void> {
         '-e',
         [
           "import { readdirSync } from 'node:fs';",
-          `import { inOneSlot } from ${JSON.stringify(pathToFileURL(resolve('src', 'engine-slots.ts')).href)};`,
-          `await inOneSlot(async () => console.log('held ' + readdirSync(${JSON.stringify(slots)}).join(' ')));`,
+          'const { inOneSlot } = await import(process.env.GDH_TEST_MODULE);',
+          `await inOneSlot(async () => console.log('held ' + readdirSync(process.env.${SLOTS_VARIABLE}).join(' ')));`,
         ].join('\n'),
       ],
-      { encoding: 'utf8', env: { ...process.env, [SLOTS_VARIABLE]: slots }, timeout: 60_000 },
+      {
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          [SLOTS_VARIABLE]: slots,
+          GDH_TEST_MODULE: pathToFileURL(resolve('src', 'engine-slots.ts')).href,
+        },
+        timeout: 60_000,
+      },
     );
     assert.match(
       before.stdout,
