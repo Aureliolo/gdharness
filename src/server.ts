@@ -4169,14 +4169,6 @@ class GodotServer {
 
   async run(): Promise<void> {
     this.noteTheStart();
-    const located = await this.locator.find();
-    if (!located.ok) {
-      console.error(
-        `[SERVER] ${GodotLocator.refusal(located).message} Until that is fixed every tool that runs the engine will say so.`,
-      );
-    } else {
-      console.error(`[SERVER] Using Godot at: ${located.path}`);
-    }
 
     // A 2025 initialize is answered with the unsupported-protocol-version error naming 2026-07-28,
     // and the connection stays open for a modern opening.
@@ -4190,6 +4182,15 @@ class GodotServer {
       void this.handleShutdown('stdin:end', 0);
     });
     console.error('gdharness running on stdio');
+    // Looked for beside the first requests, not before them: an engine's first --version on a
+    // loaded machine held server/discover past the client's thirty seconds.
+    void this.locator.find().then((located) => {
+      console.error(
+        located.ok
+          ? `[SERVER] Using Godot at: ${located.path}`
+          : `[SERVER] ${GodotLocator.refusal(located).message} Until that is fixed every tool that runs the engine will say so.`,
+      );
+    });
     sweepAbandonedScratch();
     // The helper a windowed run starts through and the process table, compiled now rather than
     // inside the first windowed start or listing, which on a slow machine took longer than either

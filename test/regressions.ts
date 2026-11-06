@@ -11005,6 +11005,36 @@ async function testAnEngineThatDoesNotAnswerIsNamed(): Promise<void> {
 }
 
 /**
+ * A server answers its first request while its engine has yet to answer `--version`.
+ *
+ * The engine was looked for before stdio opened, and on a loaded Windows runner a fresh copy's first
+ * starts held server/discover past the client's thirty seconds. The stand-in waits on its input as
+ * a hung engine would, and leaves when the server's end closes it.
+ */
+async function testAServerAnswersBeforeItsEngineDoes(): Promise<void> {
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slow-engine-'));
+  let engine = process.env['ComSpec'] ?? 'C:\\Windows\\System32\\cmd.exe';
+  if (process.platform !== 'win32') {
+    engine = join(dir, 'godot');
+    writeFileSync(engine, '#!/bin/sh\nread line\n', { mode: 0o755 });
+  }
+  const server = new ServerProcess({ env: { GODOT_PATH: engine } });
+  try {
+    const answer = await server.request('server/discover', {}, 10_000);
+    assert.ok(answer.result !== undefined, `discover is answered: ${JSON.stringify(answer)}`);
+    assert.match(server.stderr, /gdharness running on stdio/);
+    assert.doesNotMatch(
+      server.stderr,
+      /Using Godot at|GODOT_PATH is set to/,
+      'while the engine has yet to answer',
+    );
+  } finally {
+    await server.stop();
+    sweep(dir);
+  }
+}
+
+/**
  * An engine that crashes as it starts is asked again, and refused only once it answers as something
  * else.
  *
@@ -11116,6 +11146,9 @@ async function testAnEngineThatCrashesAtStartIsAskedAgain(): Promise<void> {
     );
     await crashing.find();
     assert.equal(starts, 2 * VERSION_STARTS, 'a path that only crashed is asked again by the next find');
+    const together = await Promise.all([crashing.find(), crashing.find()]);
+    assert.equal(starts, 3 * VERSION_STARTS, 'two finds at once share one search');
+    assert.equal(together[0], together[1], 'and its answer');
 
     const signed = versionStartOf(failure({ code: 0xc06d007f | 0, signal: null, stdout: '', stderr: '' }));
     assert.deepEqual(
@@ -76970,6 +77003,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPresetIsSetRemovedAndPacked,
   testAnOldPresetFileKeepsThePresetItRuns,
   testASelfContainedEngineKeepsItsTemplates,
+  testAServerAnswersBeforeItsEngineDoes,
   testAnExportedBuildIsFoundInsideTheProject,
   testAnExportedBuildIsStartedAndStopped,
   testLibraryCopiesAreMovedAsideAndSwept,
