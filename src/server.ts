@@ -157,6 +157,7 @@ import {
   AddonOfAnotherRelease,
   anEditorIsStillComing,
   BridgeTimeout,
+  EditorClosing,
   type GodotBridge,
   getDefaultBridge,
   theEditorHasComeBack,
@@ -177,6 +178,7 @@ import {
   ENGINE_PASSES,
   HEADLESS_OPERATIONS,
 } from './headless-operations.js';
+import { IDLE_CLOSE_SETTING, idleClosed, idleSettled, portsIn } from './idle-close.js';
 import { importedIntoTheProject, staleImports } from './import-freshness.js';
 import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
 import {
@@ -489,6 +491,14 @@ function waitFromEnv(variable: string, fallback: number): number {
  */
 function greetingWaitMs(): number {
   return waitFromEnv('GDHARNESS_GREETING_WAIT_MS', 10_000);
+}
+
+/**
+ * How often the editor is told calls are being made, so a hidden one does not quit as unused while
+ * the calls go to tools that never ask it anything. GDHARNESS_ACTIVITY_MS sets another.
+ */
+function activityMs(): number {
+  return waitFromEnv('GDHARNESS_ACTIVITY_MS', 30_000);
 }
 
 /**
@@ -4081,6 +4091,8 @@ class GodotServer {
   /** The runtime calls being answered, each with the game it went to. */
   private readonly callsOnGames = new Set<CallOnAGame>();
   private callsTaken = 0;
+  /** [member callsTaken] when the editor was last told calls are being made. */
+  private callsToldOf = 0;
   /** Where answers too large to send are written, made the first time one is. */
   private answersDirectory: string | undefined;
   /** The client the lifecycle log last named, so a line is written only when it changes. */
@@ -4112,6 +4124,10 @@ class GodotServer {
         this.greetedEditors.add(greeted);
       }
       this.closedHere = null;
+      const project = this.godotBridge.getStatus().projectPath;
+      if (project !== undefined && project !== '') {
+        idleSettled(project);
+      }
       this.settleTheLaunchReading();
     });
     this.setupShutdownHandlers();
@@ -4182,6 +4198,7 @@ class GodotServer {
       void this.handleShutdown('stdin:end', 0);
     });
     console.error('gdharness running on stdio');
+    this.tellTheEditorItIsInUse();
     // Looked for beside the first requests, not before them: an engine's first --version on a
     // loaded machine held server/discover past the client's thirty seconds.
     void this.locator.find().then((located) => {
@@ -4346,6 +4363,22 @@ class GodotServer {
       clearInterval(this.bridgeRetry);
       this.bridgeRetry = null;
     }
+  }
+
+  /**
+   * Tells the connected editor, every [function activityMs], that calls came in since it was last
+   * told or are still being answered. A hidden editor counts its idle minutes from what it last
+   * heard, and most calls never reach it.
+   */
+  private tellTheEditorItIsInUse(): void {
+    const tell = setInterval(() => {
+      if (this.callsTaken === this.callsToldOf && this.inFlight.size === 0) {
+        return;
+      }
+      this.callsToldOf = this.callsTaken;
+      this.godotBridge.noteActivity();
+    }, activityMs());
+    tell.unref();
   }
 
   /**
@@ -9199,11 +9232,12 @@ class GodotServer {
     args: OperationParams,
     instead: readonly string[],
   ): Promise<ToolResponse | null> {
-    if (
-      this.godotBridge.isConnected() ||
-      this.launchedEditor === null ||
-      !(await this.launchedEditorIsUp())
-    ) {
+    if (this.godotBridge.isConnected()) {
+      return null;
+    }
+    const project = readNonEmptyString(args, 'projectPath') ?? this.ownProject;
+    const quitUnused = project !== null && idleClosed(project) !== null;
+    if (!quitUnused && (this.launchedEditor === null || !(await this.launchedEditorIsUp()))) {
       return null;
     }
     return await this.noEditorYet(args, instead);
@@ -9657,6 +9691,18 @@ class GodotServer {
               ...this.closedHere,
               note: 'This server closed the editor on request, so nothing is coming until editor_launch open starts one.',
             },
+      quitUnused: ((): Record<string, unknown> | undefined => {
+        const record = status.connected || this.ownProject === null ? null : idleClosed(this.ownProject);
+        return record === null
+          ? undefined
+          : {
+              editorPid: record.pid,
+              at: record.closedAt,
+              idleMinutes: record.idleMinutes,
+              scenes: record.scenes,
+              note: `The hidden editor quit after ${String(record.idleMinutes)} minutes with no call, as ${IDLE_CLOSE_SETTING} says. The next call that needs an editor opens it again, with these scenes.`,
+            };
+      })(),
       restartInterrupted:
         unfinished === null || unfinished.underway || arriving.length > 0
           ? undefined
@@ -16399,6 +16445,17 @@ class GodotServer {
         [...instead, ...missing.remedies, 'editor_launch then opens an editor that connects'],
       );
     }
+    const notReopened = project === null ? null : await this.reopenAfterIdle(project);
+    if (notReopened !== null) {
+      return this.createErrorResponse(
+        `Editor not connected: the hidden editor of ${project ?? ''} quit after going unused, and it could not be opened again: ${notReopened}`,
+        [...instead, 'editor_launch open starts one on the project'],
+      );
+    }
+    // The reopen waited for the editor that quit to go, and one may have connected meanwhile.
+    if (this.godotBridge.isConnected()) {
+      return null;
+    }
     const launched = this.launchedEditor;
     if (launched !== null && (await this.launchedEditorIsUp())) {
       const began = Date.now();
@@ -16415,6 +16472,7 @@ class GodotServer {
           `Editor not connected: ${opened}, is still running and has not reached the bridge in the ${String(Math.round((Date.now() - began) / 1000))}s this call waited. An editor dials in once it has imported the project and loaded its plugins, and the first open of a large project imports for minutes.`,
           [
             ...instead,
+            'Ask again: the call waits for this editor rather than opening another',
             'editor_status names it under awaitingLaunchedEditor until it has connected',
             'editor_output op editor shows what it is printing meanwhile',
           ],
@@ -16451,6 +16509,50 @@ class GodotServer {
     );
   }
 
+  /**
+   * Opens the hidden editor of [param projectPath] again, the way it was started, when it quit
+   * after going unused and nothing of the project has connected since. One still quitting is waited
+   * for first. Null when it was opened or there was none to open, else why it was not.
+   */
+  private async reopenAfterIdle(projectPath: string): Promise<string | null> {
+    const record = idleClosed(projectPath);
+    if (record === null || this.godotBridge.isConnected()) {
+      return null;
+    }
+    await this.waitForBridge(() => !alive(record.pid), Date.now() + editorRestartTimeoutMs());
+    if (alive(record.pid)) {
+      return `pid ${String(record.pid)} was still quitting after ${String(editorRestartTimeoutMs() / 1000)}s.`;
+    }
+    return await inTurnToOpen(projectPath, async () => {
+      // Another server, or this one for another call, may have opened it while this one waited.
+      const arriving = await this.editorsNotYetConnected(projectPath);
+      if (this.godotBridge.isConnected() || idleClosed(projectPath) === null || (arriving ?? []).length > 0) {
+        return null;
+      }
+      const refused = this.anEditorThatCannotConnect(projectPath);
+      if (refused !== null) {
+        return refused.content[0]?.text ?? 'it could not reach this server.';
+      }
+      const engine = await this.engine(projectPath);
+      if (!engine.ok) {
+        return engine.response.content[0]?.text ?? 'no engine was found.';
+      }
+      const held = startedAs(record.arguments.join(' ')).until;
+      const opened = await this.openAnEditor(
+        engine.value,
+        projectPath,
+        portsIn(record.arguments) ?? (await portsForAnEditor()),
+        { hidden: true, silent: true, until: held !== null && alive(held) ? held : null },
+      );
+      if (opened.error !== null) {
+        return opened.error;
+      }
+      idleSettled(projectPath);
+      this.launchedFrom = { projectPath, before: this.settingKeysOf(projectPath) };
+      return null;
+    });
+  }
+
   private async handleViaBridge(
     toolName: string,
     args: OperationParams,
@@ -16481,6 +16583,7 @@ class GodotServer {
     toolName: string,
     args: OperationParams,
     askedAs?: string,
+    afterAClose = false,
   ): Promise<ToolResponse | BridgeTimeout> {
     const callName = askedAs ?? toolName;
     if (!this.godotBridge.isConnected()) {
@@ -16510,6 +16613,14 @@ class GodotServer {
     } catch (error) {
       if (error instanceof BridgeTimeout) {
         return error;
+      }
+      // Asked again once it has gone, of the editor that opens again in its place.
+      if (error instanceof EditorClosing && !afterAClose) {
+        await this.waitForBridge(
+          () => !this.godotBridge.isConnected(),
+          Date.now() + editorRestartTimeoutMs(),
+        );
+        return await this.askViaBridge(toolName, args, askedAs, true);
       }
       if (error instanceof AddonOfAnotherRelease) {
         return this.createErrorResponse(error.message, ['editor_status says which addon the editor holds']);
