@@ -289,6 +289,11 @@ func write_all(target: Object, properties: Dictionary) -> String:
 			if not ungrown.is_empty():
 				return ungrown + unwritten
 			declared = declaration(holder, name)
+			if declared.is_empty():
+				var unmade: String = GdhPropertyPaths.made_by_setting(holder, name)
+				if not unmade.is_empty():
+					return unmade + unwritten
+				declared = declaration(holder, name)
 		if declared.is_empty() and ":" in name:
 			declared = _component_slot(holder, name)
 			if declared.has("refused"):
@@ -330,7 +335,7 @@ func write_all(target: Object, properties: Dictionary) -> String:
 	for property: String in given:
 		if (
 			written_at[property] < writes
-			and not GdhSame.same(read_at(target, property), given[property])
+			and not GdhSame.same(read_at(target, property), _as_held(target, property, given))
 		):
 			_write(target, property, given[property])
 			writes += 1
@@ -338,7 +343,7 @@ func write_all(target: Object, properties: Dictionary) -> String:
 			_note_undone(target, property, given, undone_by)
 	for property: String in given:
 		var held: Variant = read_at(target, property)
-		if not GdhSame.same(held, given[property]):
+		if not GdhSame.same(held, _as_held(target, property, given)):
 			unheld = property
 			if undone_by.has(property):
 				return (
@@ -379,8 +384,35 @@ func _note_undone(
 	target: Object, written: String, given: Dictionary, undone_by: Dictionary[String, String]
 ) -> void:
 	for other: String in given:
-		if other != written and not GdhSame.same(read_at(target, other), given[other]):
+		var held: Variant = read_at(target, other)
+		if other != written and not GdhSame.same(held, _as_held(target, other, given)):
 			undone_by[other] = written
+
+
+## What [param target] holds once [param property] of [param given] is set, where the engine
+## rewrites the value without changing it. SpriteFrames hands its animations back sorted by name,
+## with loop as 0 or 1, and saves them that way, so a write of two read as one it changed.
+static func _as_held(target: Object, property: String, given: Dictionary) -> Variant:
+	var value: Variant = given[property]
+	if not (target is SpriteFrames and property == "animations" and value is Array):
+		return value
+	var original: Array = value
+	var listed: Array = original.duplicate(true)
+	for entry: Variant in listed:
+		if not entry is Dictionary:
+			return value
+		var animation: Dictionary = entry
+		var loops: Variant = animation.get("loop")
+		if loops is bool:
+			var looping: bool = loops
+			animation["loop"] = 1 if looping else 0
+	listed.sort_custom(
+		func(
+			a: Dictionary,
+			b: Dictionary,
+		) -> bool: return str(a.get("name", "")) < str(b.get("name", ""))
+	)
+	return listed
 
 
 ## Why [param name] cannot be written on [param control], or "" once it can. A container places and
@@ -507,7 +539,14 @@ func _component_slot(target: Object, path: String) -> Dictionary:
 	var steps: PackedStringArray = path.split(":")
 	var owner: String = GdhPropertyPaths.class_called(target)
 	if declaration(target, steps[0]).is_empty():
-		return { "refused": no_property(target, steps[0]) }
+		# An atlas source names its tiles' properties with a colon, 0:0/0/terrain_set, and naming
+		# the part before it refused a misspelt tile property as "has no property 0".
+		var whole: bool = false
+		for declared: Dictionary in target.get_property_list():
+			if str(declared.get("name", "")).begins_with(steps[0] + ":"):
+				whole = true
+				break
+		return { "refused": no_property(target, path if whole else steps[0]) }
 	var value: Variant = target.get(steps[0])
 	var walked: String = steps[0]
 	for index: int in range(1, steps.size()):
@@ -552,6 +591,22 @@ func _component_slot(target: Object, path: String) -> Dictionary:
 
 ## [param raw] as the value [param declared] takes, as [ok, value] or [false, why not].
 func value_for(target: Object, declared: Dictionary, raw: Variant) -> Array:
+	var value: Array = _value_as(target, declared, raw)
+	if value[0]:
+		return value
+	# AudioBusLayout declares bus/N/send a float, holds the name of the bus it sends to and saves
+	# that name. A number held is left to the declared type, whose refusal of a fraction stands.
+	var property: String = str(declared.get("name", ""))
+	var held: int = typeof(target.get(property)) if property in target else TYPE_NIL
+	var numbers: Array[int] = [TYPE_BOOL, TYPE_INT, TYPE_FLOAT]
+	var expected: int = GdhRead.as_int(declared.get("type", TYPE_NIL), TYPE_NIL)
+	if held in [TYPE_NIL, TYPE_OBJECT, expected] or (held in numbers and expected in numbers):
+		return value
+	var as_held: Array = _value_as(target, { "name": property, "type": held }, raw)
+	return as_held if as_held[0] else value
+
+
+func _value_as(target: Object, declared: Dictionary, raw: Variant) -> Array:
 	var property: String = str(declared.get("name", ""))
 	var expected_type: int = GdhRead.as_int(declared.get("type", TYPE_NIL), TYPE_NIL)
 	var hint: int = GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE))
@@ -838,6 +893,23 @@ func _resource_at(path: String, property: String) -> Array:
 				% [path, path.get_slice("::", 0), property]
 			),
 		]
+	# A file imported as Keep File or Skip has an import file and no resource, so it read as one the
+	# engine could not find.
+	var sidecar: ConfigFile = ConfigFile.new()
+	if path.begins_with("res://") and sidecar.load(path + ".import") == OK:
+		var importer: String = str(sidecar.get_value("remap", "importer", ""))
+		if importer in ["keep", "skip"]:
+			return [
+				false,
+				(
+					(
+						"%s is imported with importer %s, which makes no resource of it for %s. "
+						+ "Set importer in %s.import to the one wanted, such as texture for an "
+						+ "image, then project_import reimport with resourcePath %s imports it."
+					)
+					% [path, importer, property, path, path]
+				),
+			]
 	if not ResourceLoader.exists(path):
 		# An image or a sound nobody has imported is a file the engine has no loader for, and "No
 		# resource at" sent a caller looking for a file that was there.

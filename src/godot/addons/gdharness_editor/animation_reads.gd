@@ -205,6 +205,9 @@ static func _track(anim: Animation, track: int, values: GdhSerialisation) -> Dic
 			keyframe["args"] = values.serialize_value(anim.method_track_get_params(track, key))
 		else:
 			keyframe["value"] = values.serialize_value(anim.track_get_key_value(track, key))
+			var eased: float = anim.track_get_key_transition(track, key)
+			if eased != 1.0:
+				keyframe["transition"] = eased
 		keyframes.append(keyframe)
 	# One method across every key is the track's, as add_track takes it. Keys calling different
 	# methods, which the editor can make and add_track cannot, keep their own.

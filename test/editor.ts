@@ -2371,7 +2371,7 @@ async function testAMovedNodeKeepsItsPathsInTheEditor({ call, refusal, project }
 }
 
 /** An animation and a track on it, read back out of the sub-resources the scene gained. */
-async function testSceneAnimation({ call, project }: Editor): Promise<void> {
+async function testSceneAnimation({ call, refusal, project }: Editor): Promise<void> {
   const scene = { projectPath: project, scenePath: SCENE };
 
   await call('scene_node', { ...scene, op: 'add', nodeType: 'AnimationPlayer', nodeName: 'Anim' });
@@ -2394,7 +2394,7 @@ async function testSceneAnimation({ call, project }: Editor): Promise<void> {
       nodePath: 'Press',
       property: 'modulate:a',
       keyframes: [
-        { time: 0, value: 1 },
+        { time: 0, value: 1, transition: 0.5 },
         { time: 2, value: 0 },
       ],
     },
@@ -2402,6 +2402,36 @@ async function testSceneAnimation({ call, project }: Editor): Promise<void> {
   assert.equal(get(track, 'trackIndex'), 0, 'the first track should be index 0');
 
   const saved = fileText(project, 'fixture.tscn');
+  assert.match(saved, /"transitions": PackedFloat32Array\(0\.5, 1\)/, 'each key keeps its easing');
+  const fade = await call('scene_animation', {
+    ...scene,
+    op: 'read',
+    playerNodePath: 'Anim',
+    animationName: 'fade',
+  });
+  assert.deepEqual(
+    get(fade, 'tracks', 0, 'keyframes'),
+    [
+      { time: 0, value: 1, transition: 0.5 },
+      { time: 2, value: 0 },
+    ],
+    'a read names an easing that is not linear, as add_track takes it',
+  );
+  assert.match(
+    await refusal('scene_animation', {
+      ...scene,
+      op: 'add_track',
+      playerNodePath: 'Anim',
+      animationName: 'fade',
+      track: {
+        type: 'method',
+        nodePath: '.',
+        method: 'queue_redraw',
+        keyframes: [{ time: 0.5, transition: 2 }],
+      },
+    }),
+    /keyframes\[0\]\.transition is for property tracks\. A method key is not eased\./,
+  );
   assert.match(saved, /\[sub_resource type="Animation"/, 'the animation should be in the scene');
   assert.match(saved, /length = 2\.0/);
   assert.match(saved, /loop_mode = 1/, 'linear is loop mode 1');

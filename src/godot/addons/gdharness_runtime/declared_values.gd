@@ -294,6 +294,34 @@ static func outside(target: Object, declared: Dictionary, value: Variant, shown:
 			)
 			% [shown, property, ", ".join(names)]
 		)
+	if hint == PROPERTY_HINT_FILE and typeof(value) == TYPE_STRING:
+		var filters: PackedStringArray = []
+		for filter: String in hint_string.split(",", false):
+			var _added: bool = filters.append(filter.get_slice(";", 0).strip_edges())
+		var file: String = str(value).get_file()
+		if file.is_empty() or filters.is_empty():
+			return ""
+		for filter: String in filters:
+			if file.matchn(filter):
+				return ""
+		return (
+			(
+				"%s is none of the files %s takes, %s, which the inspector's file dialog holds it "
+				+ "to. The engine stores it as given."
+			)
+			% [shown, property, ", ".join(filters)]
+		)
+	if hint == PROPERTY_HINT_COLOR_NO_ALPHA and value is Color:
+		var colour: Color = value
+		if is_equal_approx(colour.a, 1.0):
+			return ""
+		return (
+			(
+				"%s is declared with no alpha, so the inspector neither shows nor sets one, and "
+				+ "the colour given has alpha %s. The engine stores it as given."
+			)
+			% [property, _bound(snappedf(colour.a, 0.001))]
+		)
 	if typeof(value) != TYPE_INT and typeof(value) != TYPE_FLOAT:
 		return ""
 	var number: float = GdhRead.as_float(value)
@@ -325,7 +353,17 @@ static func outside(target: Object, declared: Dictionary, value: Variant, shown:
 	var low: float = parts[0].to_float()
 	var high: float = parts[1].to_float()
 	if (number <= high or parts.has("or_greater")) and (number >= low or parts.has("or_less")):
-		return ""
+		var stepped: bool = parts.size() > 2 and parts[2].is_valid_float()
+		var step: float = parts[2].to_float() if stepped else 0.0
+		if step <= 0.0 or is_equal_approx(snappedf(number - low, step) + low, number):
+			return ""
+		return (
+			(
+				"%s is not a step of %s from %s, as %s declares, which the inspector rounds it to. "
+				+ "The engine stores it as given."
+			)
+			% [shown, _bound(step), _bound(low), property]
+		)
 	return (
 		(
 			"%s is outside the range %s declares, %s to %s, which the inspector holds it to. The "

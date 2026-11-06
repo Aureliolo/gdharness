@@ -41106,6 +41106,29 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         `all eight were welcomed before a one-second call sent on the first welcome answered, not ${beforeTheCall}`,
       );
 
+      // Naming the result read the freed node's methods, which failed the answer into {}.
+      const freed =
+        textOf(
+          await server.request(
+            'tools/call',
+            {
+              name: 'runtime_invoke',
+              arguments: { op: 'call', nodePath: '/root/Main/Rack', method: 'free' },
+            },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        ) ?? '';
+      assert.deepEqual(
+        [get(answered(freed), 'type'), get(answered(freed), 'result'), get(answered(freed), 'errors')],
+        ['method_result', null, undefined],
+        freed,
+      );
+      assert.match(
+        await inspected('/root/Main/Rack'),
+        /Node not found: \/root\/Main\/Rack/,
+        'and the node is gone',
+      );
+
       await server.request(
         'tools/call',
         { name: 'editor_run', arguments: { op: 'stop' } },
@@ -60717,7 +60740,8 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     'class_name ItemData\nextends Resource\n\nenum Kind { SWORD, SHIELD, POTION }\n\n' +
       '@export var title: String = ""\n@export var kind: Kind = Kind.SWORD\n@export var tags: Array[String] = []\n' +
       '@export var icon: Texture2D\n@export_range(0, 10) var rarity: int = 0\n@export_range(0, 10, 1, "or_greater") var level: int = 0\n' +
-      '@export var growth: Curve\n',
+      '@export var growth: Curve\n@export_range(0, 10, 0.5) var reach: float = 0.0\n' +
+      '@export_file("*.png", "*.jpg") var art_path: String = ""\n@export_color_no_alpha var tint: Color = Color.WHITE\n',
   );
   writeFileSync(
     join(project, 'icon.svg'),
@@ -60826,7 +60850,7 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     assert.equal(await refused({ 'rarety:x': 1 }), rarity);
     assert.equal(
       await refused({ zzz: 1 }),
-      'ItemData has no property zzz. Its script declares growth, icon, kind, level, rarity, tags, title.',
+      'ItemData has no property zzz. Its script declares art_path, growth, icon, kind, level, rarity, reach, tags, tint, title.',
     );
     assert.equal(
       await refused({ 'title:x': 1 }),
@@ -60958,6 +60982,32 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     );
     assert.match(file(), /^rarity = 12$/m, file());
     assert.equal(get(await written({ rarity: 4 }), 'outsideDeclared'), undefined);
+    // The inspector also rounds to a range's step, offers only the files a filter takes, and shows
+    // no alpha for a colour declared without one.
+    const besides = await written({
+      reach: 0.3,
+      art_path: 'res://sound.wav',
+      tint: { r: 1, g: 0.5, b: 0, a: 0.5 },
+    });
+    assert.deepEqual(
+      get(besides, 'outsideDeclared'),
+      {
+        reach:
+          '0.3 is not a step of 0.5 from 0, as reach declares, which the inspector rounds it to. The engine stores it as given.',
+        art_path:
+          '"res://sound.wav" is none of the files art_path takes, *.png, *.jpg, which the inspector\'s file dialog holds it to. The engine stores it as given.',
+        tint: 'tint is declared with no alpha, so the inspector neither shows nor sets one, and the colour given has alpha 0.5. The engine stores it as given.',
+      },
+      JSON.stringify(besides),
+    );
+    assert.equal(
+      get(
+        await written({ reach: 7.5, art_path: 'res://Art.PNG', tint: { r: 1, g: 0.5, b: 0, a: 1 } }),
+        'outsideDeclared',
+      ),
+      undefined,
+      'a step, a matching file and an opaque colour are noted for nothing',
+    );
 
     // A picture that is there and never imported is told apart from one that is not there, and the
     // remedy given makes the write go through.
@@ -75223,6 +75273,23 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
     });
     assert.equal(get(parseTextContent(terrains), 'resourcePath'), 'res://set.tres', textOf(terrains) ?? '');
     assert.match(fileOf('set.tres'), /^terrain_set_0\/terrain_0\/name = "Grass"$/m, fileOf('set.tres'));
+    // A tile's properties are named with the colon of its atlas coordinates, which is no component
+    // path, so this was refused as "TileSetAtlasSource has no property 0".
+    const peering =
+      textOf(
+        await call('resource_edit', {
+          ...set,
+          properties: {
+            'sources/0/0:0/0/terrain_set': 0,
+            'sources/0/0:0/0/terrain_peering_bits/top_left_corner': 0,
+          },
+        }),
+      ) ?? '';
+    assert.match(
+      peering,
+      /^TileSetAtlasSource has no property 0:0\/0\/terrain_peering_bits\/top_left_corner\. The nearest it has (?:is|are) 0:0\/0\/terrains_peering_bit\/top_left_corner\b/,
+      peering,
+    );
     assert.equal(
       textOf(
         await call('resource_edit', {
@@ -75402,6 +75469,94 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
     assert.equal(
       textOf(await call('scene_node', { ...map, op: 'set', properties: { tile_set: 'res://missing.tres' } })),
       "No resource at res://missing.tres for tile_set. The project's .tres files are res://box.tres, res://set.tres, res://spaced.tres, res://theme.tres, res://variant.tres, res://wide.tres.",
+    );
+
+    // AudioBusLayout lists bus/1/name only once bus 1 exists, and setting it is what makes the bus.
+    // It declares bus/1/send a float and holds the name of the bus it sends to.
+    const buses = { resourcePath: 'res://buses.tres', op: 'modify' };
+    await call('resource_edit', { ...buses, op: 'create', resourceType: 'AudioBusLayout' });
+    const skipped =
+      textOf(await call('resource_edit', { ...buses, properties: { 'bus/2/name': 'Music' } })) ?? '';
+    assert.match(
+      skipped,
+      /^Setting bus\/2\/name would also make bus\/1, which nothing was given for: write bus\/1 first\./,
+      skipped,
+    );
+    const sfx =
+      textOf(
+        await call('resource_edit', {
+          ...buses,
+          properties: {
+            'bus/1/name': 'Sfx',
+            'bus/1/send': 'Master',
+            'bus/1/effect/0/effect': { _type: 'AudioEffectReverb' },
+            'bus/1/effect/0/enabled': true,
+          },
+        }),
+      ) ?? '';
+    assert.match(sfx, /^\{/, sfx);
+    const layout = fileOf('buses.tres');
+    for (const line of [
+      /\[sub_resource type="AudioEffectReverb" id="([^"]+)"\]/,
+      /\nbus\/1\/name = &"Sfx"\n/,
+      /\nbus\/1\/send = &"Master"\n/,
+      /\nbus\/1\/effect\/0\/effect = SubResource\("[^"]+"\)\n/,
+      /\nbus\/1\/effect\/0\/enabled = true\n/,
+    ]) {
+      assert.match(layout, line, layout);
+    }
+    assert.doesNotMatch(layout, /bus\/2\//, `the refused write made no bus 2: ${layout}`);
+
+    // SpriteFrames hands its animations back sorted by name with loop as a number, which read as a
+    // write the engine had changed.
+    const frames = { resourcePath: 'res://frames.tres', op: 'modify' };
+    await call('resource_edit', { ...frames, op: 'create', resourceType: 'SpriteFrames' });
+    const animated =
+      textOf(
+        await call('resource_edit', {
+          ...frames,
+          properties: {
+            animations: [
+              {
+                name: 'rest',
+                speed: 8,
+                loop: true,
+                frames: [{ texture: { _type: 'Resource', path: 'res://late.png' }, duration: 1 }],
+              },
+              { name: 'idle', speed: 5, loop: false, frames: [] },
+            ],
+          },
+        }),
+      ) ?? '';
+    assert.match(animated, /^\{/, animated);
+    assert.match(
+      fileOf('frames.tres'),
+      /"loop": 0,\n"name": &"idle",[\s\S]*"texture": ExtResource\("[^"]+"\)[\s\S]*"loop": 1,\n"name": &"rest",/,
+      fileOf('frames.tres'),
+    );
+    // A picture imported as Keep File has an import file and no resource to load.
+    writeFileSync(join(project, 'kept.png'), solidPng(4, 4, 4));
+    writeFileSync(join(project, 'kept.png.import'), '[remap]\n\nimporter="keep"\n');
+    const kept =
+      textOf(
+        await call('resource_edit', {
+          ...frames,
+          properties: {
+            animations: [
+              {
+                name: 'rest',
+                speed: 8,
+                loop: true,
+                frames: [{ texture: { _type: 'Resource', path: 'res://kept.png' } }],
+              },
+            ],
+          },
+        }),
+      ) ?? '';
+    assert.match(
+      kept,
+      /res:\/\/kept\.png is imported with importer keep, which makes no resource of it for the value\. Set importer in res:\/\/kept\.png\.import to the one wanted, such as texture for an image, then project_import reimport with resourcePath res:\/\/kept\.png imports it\./,
+      kept,
     );
   } finally {
     await server.stop();
