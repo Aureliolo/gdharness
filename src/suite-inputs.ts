@@ -152,6 +152,7 @@ export function reachedBySuite(file: string): Map<string, SuiteReached> {
 export class SuiteInputs {
   private readonly reads = new Map<string, Read>();
   private readonly constants = new Map<string, Map<string, string>>();
+  private readonly texts = new Map<string, string>();
   private readonly scripts: ProjectScripts;
   private readonly alwaysDigest: string;
   private readonly everywhere: string[];
@@ -348,8 +349,7 @@ export class SuiteInputs {
    * it reads or preloads by a path worked out at run time.
    */
   private scriptReaches(path: string): { follows: string[]; also: string[] } | null {
-    const source = this.scripts.sources.get(path) ?? '';
-    const text = uncommented(source);
+    const text = this.textOf(path);
     const constants = this.constantsOf(path);
     const follows: string[] = [];
     const also: string[] = [];
@@ -367,26 +367,15 @@ export class SuiteInputs {
       if (first === undefined || (found[0].startsWith('FileAccess.open') && WRITE_ONLY.test(second ?? ''))) {
         continue;
       }
-      const literal = STRING_ARGUMENT.exec(first);
-      const named = literal !== null ? (literal[1] ?? literal[2]) : this.constantNamed(first, path);
-      const start = named ?? this.knownStart(first, path);
-      if (start.startsWith('user://')) {
-        continue;
-      }
-      if (named?.startsWith('res://') === true) {
-        also.push(named);
-        continue;
-      }
-      // A path joined onto a folder the script names reads somewhere under that folder.
-      const folder = start.slice(0, start.lastIndexOf('/') + 1);
-      if (named !== undefined || !folder.startsWith('res://') || folder === 'res://') {
+      const read = readUnder(this.heldPaths(first, path, found.index, 0));
+      if (read === null) {
         if (!NAMES_READ.test(found[0])) {
           return null;
         }
         also.push(EVERY_NAME);
         continue;
       }
-      also.push(`${TREE}${folder}`);
+      also.push(...read);
     }
     for (const found of text.matchAll(RESOURCE_LOAD)) {
       const [first = ''] = argumentsAt(text, found.index + found[0].length);
@@ -394,7 +383,7 @@ export class SuiteInputs {
       const named = literal !== null ? (literal[1] ?? literal[2]) : this.constantNamed(first, path);
       // A load the cache can answer, by a path that names nothing here, is recorded only when asked.
       if (named === undefined || named.startsWith('uid://')) {
-        const start = this.knownStart(first, path);
+        const start = sharedStart(this.heldPaths(first, path, found.index, 0) ?? []);
         also.push(`${CACHE_HELD}${start.startsWith('res://') ? start : ''}`);
       } else {
         follows.push(
@@ -454,20 +443,206 @@ export class SuiteInputs {
   }
 
   /**
-   * How the path [param argument] the script at [param path] joins at run time is known to begin, or
-   * nothing.
+   * What the path [param argument], written at [param at] in the script at [param path], can hold
+   * as it runs: each way it is known whole or known to begin, or null when it could be anything. A
+   * name not a constant is followed to the local set once that holds it, or to what every call in
+   * the project passes for the parameter it is, [constant HELD_DEPTH] steps deep at most.
    */
-  private knownStart(argument: string, path: string): string {
+  private heldPaths(argument: string, path: string, at: number, depth: number): Held[] | null {
+    const literal = STRING_ARGUMENT.exec(argument);
+    const constant = literal === null ? this.constantNamed(argument, path) : (literal[1] ?? literal[2]);
+    if (constant !== undefined) {
+      return [{ text: constant, whole: true }];
+    }
+    if (CONSTANT_ARGUMENT.test(argument)) {
+      return depth < HELD_DEPTH ? this.heldIn(argument, path, at, depth + 1) : null;
+    }
+    // The same file, named as the system names it.
+    const globalized = GLOBALIZED.exec(argument);
+    if (globalized !== null) {
+      const [inner] = argumentsAt(argument, globalized[0].length);
+      const whole = inner !== undefined && argument === `${globalized[0]}${inner})`;
+      return whole ? this.heldPaths(inner, path, at, depth) : null;
+    }
     const joined = JOINED_ARGUMENT.exec(argument);
     if (joined === null) {
-      return '';
+      return null;
     }
-    const first = joined[1] ?? joined[2] ?? this.constantNamed(joined[3] ?? '', path) ?? '';
-    if (joined[4] === '%') {
-      return first.split('%')[0] ?? '';
+    const firsts =
+      joined[3] === undefined
+        ? [{ text: joined[1] ?? joined[2] ?? '', whole: true }]
+        : this.heldPaths(joined[3], path, at, depth);
+    if (firsts === null) {
+      return null;
     }
-    return joined[4] === undefined && !first.endsWith('/') && first !== '' ? `${first}/` : first;
+    const formatted =
+      joined[4] === '%' ? this.formattedFirst(argument.slice(joined[0].length), path, at, depth) : null;
+    return firsts.flatMap((first): Held[] => {
+      if (joined[4] === '%') {
+        // A format whose first part is put in begins as that part does.
+        if (first.whole && first.text.startsWith('%s') && formatted !== null) {
+          const after = first.text.slice(2).split('%')[0] ?? '';
+          return formatted.map((part) => ({
+            text: part.whole ? part.text + after : part.text,
+            whole: false,
+          }));
+        }
+        return [{ text: first.text.split('%')[0] ?? '', whole: false }];
+      }
+      const joinedOn =
+        joined[4] === undefined && first.whole && first.text !== '' && !first.text.endsWith('/');
+      return [{ text: joinedOn ? `${first.text}/` : first.text, whole: false }];
+    });
   }
+
+  /** What the first value put into a format can hold, from what follows its `%`, or null. */
+  private formattedFirst(values: string, path: string, at: number, depth: number): Held[] | null {
+    const given = values.trim();
+    const [first] = given.startsWith('[')
+      ? argumentsAt(`${given.slice(1, given.lastIndexOf(']'))})`, 0)
+      : [given];
+    return first === undefined ? null : this.heldPaths(first, path, at, depth);
+  }
+
+  /**
+   * What the name [param name], read at [param at] in the script at [param path], holds: a local of
+   * the function around it, declared once and never set again, or a parameter of that function.
+   */
+  private heldIn(name: string, path: string, at: number, depth: number): Held[] | null {
+    const text = this.textOf(path);
+    let declared: RegExpExecArray | undefined;
+    for (const found of text.matchAll(FUNCTION_DECLARED)) {
+      if (found.index > at) {
+        break;
+      }
+      declared = found;
+    }
+    if (declared === undefined) {
+      return null;
+    }
+    const indent = declared[1]?.length ?? 0;
+    const after = new RegExp(`\\n[ \\t]{0,${String(indent)}}(?=\\S)`, 'g');
+    after.lastIndex = at;
+    const body = text.slice(declared.index, after.exec(text)?.index ?? text.length);
+    const parameters = argumentsAt(text, declared.index + declared[0].length);
+    const index = parameters.findIndex((parameter) => /^\w+/.exec(parameter)?.[0] === name);
+    if (index !== -1) {
+      const fallback = /=\s*(.+)$/s.exec(parameters[index] ?? '')?.[1];
+      return this.passedFor(declared[2] ?? '', index, { fallback, path, at: declared.index }, depth);
+    }
+    const locals = [...body.matchAll(new RegExp(`\\bvar[ \\t]+${name}\\b[^=\\n]*=[ \\t]*([^\\n]+)`, 'g'))];
+    const setAgain = new RegExp(
+      `(?<!\\bvar[ \\t]+)(?<![\\w.])${name}[ \\t]*(?:[-+*/%&|^]|<<|>>)?=(?!=)|\\bfor[ \\t]+${name}\\b`,
+    );
+    const local = locals[0];
+    if (locals.length !== 1 || local === undefined || setAgain.test(body)) {
+      return null;
+    }
+    return this.heldPaths((local[1] ?? '').trim(), path, declared.index + local.index, depth);
+  }
+
+  /**
+   * What every call in the project passes the function [param named] as its parameter at
+   * [param index], or null. The function is only ever called by its name, or it could be handed
+   * anything: a function also named as a value, or in a string a call by name reads, is not followed.
+   */
+  private passedFor(
+    named: string,
+    index: number,
+    declared: { fallback: string | undefined; path: string; at: number },
+    depth: number,
+  ): Held[] | null {
+    const held: Held[] = [];
+    let calls = 0;
+    const declaring = new RegExp(`\\bfunc[ \\t]+${named}\\b`, 'g');
+    const mentioned = new RegExp(`(?<!\\w)${named}\\b(?![ \\t]*\\()`);
+    const call = new RegExp(`(?<!\\bfunc[ \\t]+)(?<!\\w)${named}[ \\t]*\\(`, 'g');
+    for (const caller of this.scripts.sources.keys()) {
+      const text = this.textOf(caller);
+      if (!text.includes(named)) {
+        continue;
+      }
+      if (mentioned.test(text.replaceAll(declaring, ''))) {
+        return null;
+      }
+      for (const found of text.matchAll(call)) {
+        calls += 1;
+        const given = argumentsAt(text, found.index + found[0].length)[index];
+        const passed =
+          given === undefined
+            ? declared.fallback === undefined
+              ? null
+              : this.heldPaths(declared.fallback.trim(), declared.path, declared.at, depth)
+            : this.heldPaths(given, caller, found.index, depth);
+        if (passed === null) {
+          return null;
+        }
+        held.push(...passed);
+      }
+    }
+    return calls === 0 ? null : held;
+  }
+
+  /** The script at [param path] with its comments blanked, read once per run. */
+  private textOf(path: string): string {
+    const known = this.texts.get(path);
+    if (known !== undefined) {
+      return known;
+    }
+    const text = uncommented(this.scripts.sources.get(path) ?? '');
+    this.texts.set(path, text);
+    return text;
+  }
+}
+
+/** One way a path written in a script can hold at run time: all of it, or how it begins. */
+interface Held {
+  readonly text: string;
+  readonly whole: boolean;
+}
+
+/** A path handed to the system as the file it names, up to the path. */
+const GLOBALIZED = /^ProjectSettings\.globalize_path\(/;
+
+/** How many names deep a path is followed back to what it was set from. */
+const HELD_DEPTH = 4;
+
+/** A named function's declaration, up to its parameters, with its indentation and name. */
+const FUNCTION_DECLARED = /^([ \t]*)(?:static[ \t]+)?func[ \t]+(\w+)[ \t]*\(/gm;
+
+/**
+ * What a read by a path holding [param held] reads: the file where the path is known whole, the
+ * folder it begins in where only its start is, and nothing for a `user://` path. Null where it could
+ * read anywhere.
+ */
+function readUnder(held: readonly Held[] | null): string[] | null {
+  if (held === null) {
+    return null;
+  }
+  const read: string[] = [];
+  for (const one of held) {
+    if (one.text.startsWith('user://')) {
+      continue;
+    }
+    const folder = one.text.slice(0, one.text.lastIndexOf('/') + 1);
+    if (one.whole ? !one.text.startsWith('res://') : !folder.startsWith('res://') || folder === 'res://') {
+      return null;
+    }
+    read.push(one.whole ? one.text : `${TREE}${folder}`);
+  }
+  return read;
+}
+
+/** How every one of [param held] begins, or nothing for none. */
+function sharedStart(held: readonly Held[]): string {
+  const [first, ...rest] = held.map((one) => one.text);
+  let start = first ?? '';
+  for (const text of rest) {
+    while (!text.startsWith(start)) {
+      start = start.slice(0, -1);
+    }
+  }
+  return start;
 }
 
 /** [param inputs] in order, or every file alone when they reach it, without the cache's mark. */

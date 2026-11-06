@@ -13838,15 +13838,22 @@ async function testEveryHiddenStartIsStartedHidden(): Promise<void> {
         `import { runHidden, runSyncHidden, spawnHidden, spawnShown, spawnSyncHidden } from ${JSON.stringify(pathToFileURL(resolve('build', 'spawn.js')).href)};`,
         `const [probe, scratch] = process.argv.slice(2);`,
         `const at = (name) => scratch + '/node-' + name + '.txt';`,
-        `spawnHidden(probe, [at('spawnHidden')], { stdio: 'ignore' });`,
-        `await runHidden(probe, [at('runHidden')]);`,
-        `runSyncHidden(probe, [at('runSyncHidden')], { encoding: 'utf8' });`,
-        `spawnSyncHidden(probe, [at('spawnSyncHidden')]);`,
-        `spawnShown(probe, [at('spawnShown')], { stdio: 'ignore', detached: true });`,
+        // Each start named as it begins, so a run that hangs shows which start it hung in.
+        `console.error('spawnHidden', Date.now()); spawnHidden(probe, [at('spawnHidden')], { stdio: 'ignore' });`,
+        `console.error('runHidden', Date.now()); await runHidden(probe, [at('runHidden')]);`,
+        `console.error('runSyncHidden', Date.now()); runSyncHidden(probe, [at('runSyncHidden')], { encoding: 'utf8' });`,
+        `console.error('spawnSyncHidden', Date.now()); spawnSyncHidden(probe, [at('spawnSyncHidden')]);`,
+        `console.error('spawnShown', Date.now()); spawnShown(probe, [at('spawnShown')], { stdio: 'ignore', detached: true });`,
+        `console.error('done', Date.now());`,
       ].join('\n'),
     );
+    const nodeBegan = Date.now();
     const node = spawnSyncHidden('node', [underNode, probe, scratch], { encoding: 'utf8', timeout: 90_000 });
-    assert.equal(node.status, 0, `the starts under Node should run: ${node.stdout} ${node.stderr}`);
+    assert.equal(
+      node.status,
+      0,
+      `the starts under Node should run, begun at ${String(nodeBegan)}, with ${String(node.signal)} after ${String(Date.now() - nodeBegan)} ms and ${readdirSync(scratch).join(', ')} written: ${node.stdout} ${node.stderr}`,
+    );
     const prelude = spawnSyncHidden(
       'node',
       [
@@ -51016,6 +51023,38 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
         'extends Node\n\n\nfunc there(folder: String) -> bool:\n' +
         '\treturn FileAccess.file_exists(folder.path_join("art")) or ResourceLoader.exists(folder)\n\n\n' +
         'func names(folder: String) -> PackedStringArray:\n\treturn DirAccess.get_files_at(folder)\n',
+      'held.gd':
+        'extends Node\n\nconst FOLDER: String = "res://data/"\n\n\nfunc read(type: String) -> String:\n' +
+        '\tvar path: String = FOLDER + type + ".json"\n\treturn FileAccess.get_file_as_string(path)\n\n\n' +
+        'func named(type: String) -> String:\n\tvar path: String = type\n\treturn path\n',
+      'set_again.gd':
+        'extends Node\n\n\nfunc read(type: String) -> String:\n\tvar path: String = "res://data/" + type\n' +
+        '\tpath = type\n\treturn FileAccess.get_file_as_string(path)\n',
+      'passed.gd':
+        'extends Node\n\nconst LEVELS: String = "res://levels"\n\n\nfunc every() -> void:\n' +
+        '\tfor file: String in DirAccess.get_files_at(LEVELS):\n\t\t_level("%s/%s" % [LEVELS, file])\n\n\n' +
+        'func _level(path: String) -> String:\n\treturn FileAccess.get_file_as_string(path)\n',
+      'passed_anything.gd':
+        'extends Node\n\n\nfunc other(name: String) -> void:\n\t_any(name)\n\n\n' +
+        'func _any(path: String) -> String:\n\treturn FileAccess.get_file_as_string(path)\n',
+      'handed.gd':
+        'extends Node\n\nconst LEVELS: String = "res://levels/"\n\n\nfunc every() -> Callable:\n' +
+        '\t_handed(LEVELS + "one.txt")\n\treturn _handed\n\n\n' +
+        'func _handed(path: String) -> String:\n\treturn FileAccess.get_file_as_string(path)\n',
+      'by_name.gd':
+        'extends Node\n\nconst LEVELS: String = "res://levels/"\n\n\nfunc every() -> void:\n' +
+        '\t_by_name(LEVELS + "one.txt")\n\tcall("_by_name", get_meta("anywhere"))\n\n\n' +
+        'func _by_name(path: String) -> String:\n\treturn FileAccess.get_file_as_string(path)\n',
+      'globalized.gd':
+        'extends Node\n\n\nfunc read() -> Image:\n' +
+        '\treturn Image.load_from_file(ProjectSettings.globalize_path("res://data/icon.png"))\n',
+      'globalized_folder.gd':
+        'extends Node\n\n\nfunc folder() -> PackedByteArray:\n' +
+        '\treturn FileAccess.get_file_as_bytes(ProjectSettings.globalize_path("res://data/icon.png").get_base_dir())\n',
+      'defaulted.gd':
+        'extends Node\n\nconst SOUNDS: String = "res://sound/"\n\n\nfunc every() -> void:\n\t_sound()\n\n\n' +
+        'func _sound(folder: String = SOUNDS) -> String:\n' +
+        '\treturn FileAccess.get_file_as_string(folder.path_join("a.ogg"))\n',
       'paths.gd': 'class_name Paths\nextends Node\n\nconst DATA: String = "res://da" + "ta"\n',
       'joined.gd':
         'extends Paths\n\nconst LEVELS: String = DATA + "/"\n\n\nfunc read(name: String) -> String:\n' +
@@ -51094,6 +51133,33 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
     assert.ok(
       inputsOf(['res://formatted.gd']).includes('tree:res://levels/'),
       'and a path formatted into a literal, as the folder it begins in',
+    );
+    const own = (script: string): string[] =>
+      inputsOf([script]).filter((path) => !path.startsWith('res://project') && !path.startsWith('res://ext'));
+    assert.deepEqual(
+      own('res://held.gd'),
+      ['res://held.gd', 'tree:res://data/'],
+      'a path held in a local set once from a constant folder, read as that folder',
+    );
+    assert.deepEqual(own('res://set_again.gd'), [EVERY_FILE], 'and not one set again');
+    assert.deepEqual(
+      own('res://passed.gd'),
+      ['res://levels', 'res://passed.gd', 'tree:res://levels/'],
+      'a parameter every call fills with a path formatted onto a constant folder',
+    );
+    assert.deepEqual(own('res://passed_anything.gd'), [EVERY_FILE], 'and not one filled from anywhere');
+    assert.deepEqual(own('res://handed.gd'), [EVERY_FILE], 'nor one of a function handed on as a value');
+    assert.deepEqual(own('res://by_name.gd'), [EVERY_FILE], 'or called by its name');
+    assert.deepEqual(
+      own('res://globalized.gd'),
+      ['res://data/icon.png', 'res://globalized.gd'],
+      'a path handed to the system as the file it names',
+    );
+    assert.deepEqual(own('res://globalized_folder.gd'), [EVERY_FILE], 'and not one made into another');
+    assert.deepEqual(
+      own('res://defaulted.gd'),
+      ['res://defaulted.gd', 'tree:res://sound/'],
+      'a parameter left to its default',
     );
     assert.deepEqual(
       inputsOf(['res://saves.gd']).filter(

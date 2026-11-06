@@ -555,6 +555,13 @@ A check or listing by any other computed path reads no file's content. Examples 
 names of every file and folder in the project one input. It changes only when a file or folder
 comes, goes or is renamed.
 
+### Paths held in names
+
+A path can come through a name. A local set once and never again holds what it was set to. A
+parameter holds what every call in the project passes it, or its default. A function also named
+without a call, such as one handed on as a `Callable` or called by name, could be passed anything.
+The trail is followed four names deep.
+
 ### Inputs of every suite
 
 Every suite also has these inputs:
