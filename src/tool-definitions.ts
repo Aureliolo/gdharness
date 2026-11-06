@@ -432,7 +432,8 @@ const TILESET_SOURCES: JsonSchema = {
 
 const TILEMAP_CELLS: JsonSchema = {
   type: 'array',
-  description: 'Cells to place.',
+  description:
+    'Cells to place. A cell named twice takes its last entry, and placed and erased count the cells as they end.',
   items: {
     type: 'object',
     properties: {

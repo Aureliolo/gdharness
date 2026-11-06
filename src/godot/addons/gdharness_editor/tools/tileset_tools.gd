@@ -289,8 +289,8 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 		checked.append(cell)
 	if not refusals.is_empty():
 		return scene.refuse("%s. Nothing was placed." % ". ".join(refusals))
-	var wanted: Array = []
-	var erased: int = 0
+	# A cell named twice ends as its last entry, so that one alone is what the file must hold.
+	var wanted: Dictionary[Vector2i, Array] = {}
 	for cell: Array in checked:
 		var at: Vector2i = cell[1]
 		var source_id: int = cell[2]
@@ -300,8 +300,10 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 			layered.set_cell(layer, at, source_id, atlas_coords, alternative)
 		else:
 			single.set_cell(at, source_id, atlas_coords, alternative)
-		wanted.append([at, source_id, atlas_coords, alternative])
-		if source_id == -1:
+		wanted[at] = [source_id, atlas_coords, alternative]
+	var erased: int = 0
+	for entry: Array in wanted.values():
+		if entry[0] == -1:
 			erased += 1
 	# An erased cell leaves the layer's data at its next update, which a layer outside the tree
 	# never has, so the pack wrote it as a cell naming no tile, where the editor's save leaves it
@@ -315,11 +317,10 @@ func set_tilemap_cells(args: Dictionary) -> Dictionary:
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
 			var copy: Node = saved.get_node_or_null(at_path)
-			for entry: Array in wanted:
-				var at: Vector2i = entry[0]
+			for at: Vector2i in wanted:
 				var held: Array = _cell_at(copy, layer, at)
-				if held != entry.slice(1):
-					return "the cell at %s would load as %s, not %s." % [at, held, entry.slice(1)]
+				if held != wanted[at]:
+					return "the cell at %s would load as %s, not %s." % [at, held, wanted[at]]
 			return ""
 	)
 	if not written.is_empty():
