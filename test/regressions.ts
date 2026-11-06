@@ -50670,6 +50670,20 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
     const holding = (rows: RowShare): HandedSuite[] => [
       { path: lone_.path, cases: ['test_only'], rows: { test_only: rows } },
     ];
+    // An engine dealt only rows a case cut from 12 rows to 2 no longer has: it leaves out the two
+    // rows it finds, runs nothing, and gdUnit4 opens no suite and prints no summary.
+    const gone = readRun(
+      [0, 1].map((row) => `gdharness left out ${lone_.path} > test_only:${String(row)}`).join('\n'),
+    );
+    const noEnd = { code: 0, signal: null, ended: null };
+    const expected = { errors: {}, warnings: {} };
+    const empty = judgeEngine(gone, { suites: holding({ only: [6] }), expected }, noEnd);
+    assert.deepEqual(empty.faults, [], 'an engine whose rows the case no longer has has nothing to run');
+    assert.deepEqual(
+      judgeEngine(gone, { suites: [{ path: lone_.path, cases: ['test_only'] }], expected }, noEnd).faults,
+      ['the run never printed its summary', `${lone_.path} never started`],
+      'while one handed the case whole that runs nothing still fails',
+    );
     const across = (...engines: Array<[RowShare, Array<[number, string]>]>): string[] =>
       rowsAcross(
         engines.map(([share, rows]) => ({ handed: holding(share), printed: rowRun(lone_.path, rows) })),
