@@ -28,6 +28,12 @@ import type { ProjectScripts } from './suite-plan.js';
 export const EVERY_FILE = 'res://';
 
 /**
+ * The input standing for the name of every file and folder in the project, for a suite reaching a
+ * check for a file or a listing by a computed path, which reads no file's content.
+ */
+export const EVERY_NAME = 'names:';
+
+/**
  * The mark of a load by a path worked out at run time, which the cache can answer without a loader
  * being asked, so nothing records it: a suite reaching one depends on what the cache held as it
  * began. Followed by the start the path is known to have (`"res://sound/" + take`), or by nothing
@@ -55,6 +61,9 @@ const PRELOAD = /\bpreload\(\s*(?:"([^"]*)"|'([^']*)'|([A-Za-z_]\w*))\s*\)/g;
  */
 const FILE_READ =
   /(?:\b(?:FileAccess\.(?:open\w*|get_file_as_string|get_file_as_bytes|file_exists|get_md5|get_sha256|get_modified_time|get_size)|DirAccess\.(?:open|get_files_at|get_directories_at|dir_exists_absolute)|ResourceLoader\.(?:list_directory|exists)|Image\.load_from_file)|(?<!\bResourceLoader)\.(?:load|load_from_file|change_dir))\(/g;
+/** A call of [constant FILE_READ] whose answer depends on which files and folders exist alone. */
+const NAMES_READ =
+  /^(?:FileAccess\.file_exists|DirAccess\.(?:open|get_files_at|get_directories_at|dir_exists_absolute)|ResourceLoader\.(?:list_directory|exists)|\.change_dir)\($/;
 /**
  * A load through the resource loaders, up to the start of its path. One the cache answers asks no
  * loader, so the recorder misses it whenever another suite of the engine already holds the resource:
@@ -201,7 +210,7 @@ export class SuiteInputs {
         continue;
       }
       inputs.add(path);
-      if (path === EVERY_FILE || path.startsWith(CACHE_HELD)) {
+      if (path === EVERY_FILE || path === EVERY_NAME || path.startsWith(CACHE_HELD)) {
         continue;
       }
       const read = this.read(path);
@@ -232,11 +241,13 @@ export class SuiteInputs {
     const read =
       path === EVERY_FILE
         ? this.everyFile()
-        : path.startsWith(TREE)
-          ? this.tree(path.slice(TREE.length))
-          : ADDON.test(path)
-            ? this.tree(path)
-            : this.readAnew(path);
+        : path === EVERY_NAME
+          ? this.everyName()
+          : path.startsWith(TREE)
+            ? this.tree(path.slice(TREE.length))
+            : ADDON.test(path)
+              ? this.tree(path)
+              : this.readAnew(path);
     this.reads.set(path, read);
     return read;
   }
@@ -248,6 +259,22 @@ export class SuiteInputs {
     walkSeen(this.scripts.projectPath, (under, bytes, at) => {
       hash.update(`${under}\n`).update(bytes);
       modified = Math.max(modified, at);
+    });
+    return { digest: hash.digest('hex'), follows: [], also: [], modified };
+  }
+
+  /**
+   * The name of every file and folder the engine sees, as a check or listing by a computed path read
+   * them. A folder's time moves when an entry in it comes, goes or is renamed.
+   */
+  private everyName(): Read {
+    const hash = createHash('sha256');
+    let modified = statOf(this.scripts.projectPath)?.mtimeMs ?? 0;
+    namesSeen(this.scripts.projectPath, (under, file, folder) => {
+      hash.update(`${under}\n`);
+      if (folder) {
+        modified = Math.max(modified, statOf(file)?.mtimeMs ?? 0);
+      }
     });
     return { digest: hash.digest('hex'), follows: [], also: [], modified };
   }
@@ -353,7 +380,11 @@ export class SuiteInputs {
       // A path joined onto a folder the script names reads somewhere under that folder.
       const folder = start.slice(0, start.lastIndexOf('/') + 1);
       if (named !== undefined || !folder.startsWith('res://') || folder === 'res://') {
-        return null;
+        if (!NAMES_READ.test(found[0])) {
+          return null;
+        }
+        also.push(EVERY_NAME);
+        continue;
       }
       also.push(`${TREE}${folder}`);
     }
@@ -448,7 +479,7 @@ function listed(inputs: ReadonlySet<string>): string[] {
 
 /** A recorded path as an input: the addon it is in, or null for one outside the project's files. */
 function inputPath(path: string): string | null {
-  if (path === EVERY_FILE || path.startsWith(CACHE_HELD) || path.startsWith(TREE)) {
+  if (path === EVERY_FILE || path === EVERY_NAME || path.startsWith(CACHE_HELD) || path.startsWith(TREE)) {
     return path;
   }
   if (!path.startsWith('res://') || path.startsWith('res://.godot/') || path === '') {
@@ -536,6 +567,20 @@ function joinedString(expression: string, named: (name: string) => string | unde
  * between the listing and the read is passed over.
  */
 export function walkSeen(root: string, seen: (under: string, bytes: Buffer, modified: number) => void): void {
+  namesSeen(root, (under, file, folder) => {
+    const content = folder ? null : contentOf(file);
+    if (content !== null) {
+      seen(under, content.bytes, content.modified);
+    }
+  });
+}
+
+/**
+ * Every file and folder under [param root] that [method walkSeen] would walk, in its order, by where
+ * it lies under the root, a folder ending in a slash. A folder holding a `.gdignore` is named, since
+ * a listing sees it, but nothing in it is.
+ */
+function namesSeen(root: string, seen: (under: string, file: string, folder: boolean) => void): void {
   const walk = (directory: string, under: string): void => {
     if (existsSync(join(directory, '.gdignore'))) {
       return;
@@ -546,13 +591,11 @@ export function walkSeen(root: string, seen: (under: string, bytes: Buffer, modi
       const file = join(directory, entry.name);
       if (entry.isDirectory()) {
         if (!entry.name.startsWith('.')) {
+          seen(`${under}${entry.name}/`, file, true);
           walk(file, `${under}${entry.name}/`);
         }
       } else if (entry.isFile() && !isLibraryCopy(entry.name, names)) {
-        const content = contentOf(file);
-        if (content !== null) {
-          seen(`${under}${entry.name}`, content.bytes, content.modified);
-        }
+        seen(`${under}${entry.name}`, file, false);
       }
     }
   };

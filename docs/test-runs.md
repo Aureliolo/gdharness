@@ -550,6 +550,11 @@ input. Examples are `FOLDER.path_join(name)`, `FOLDER + name` and `"res://data/%
 read by any other path computed at run time, or a `uid://` preload, makes every file in the project
 an input. A `user://` path is never one.
 
+A check or listing by any other computed path reads no file's content. Examples are
+`FileAccess.file_exists`, `ResourceLoader.exists` and `DirAccess.get_files_at`. Such a call makes the
+names of every file and folder in the project one input. It changes only when a file or folder
+comes, goes or is renamed.
+
 ### Inputs of every suite
 
 Every suite also has these inputs:
@@ -557,11 +562,12 @@ Every suite also has these inputs:
 - `project.godot`
 - the gdharness version and runner
 - the engine executable's path past every link, size and modification time
-- each file named with `--reach-also`, by its path in the project
+- what each file named with `--reach-also` holds, wherever it lies
 - all of gdUnit4, an addon the runner loads
 
 So checkouts reaching one engine install through junctions of their own, with the records copied
-between them, keep each other's passes.
+between them, keep each other's passes. That holds at any depth, with the `--reach-also` files
+inside them or outside.
 
 ## Engine slots
 

@@ -565,7 +565,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       getLocalVersion(),
       readFileSync(shippedListedRunner(), 'utf8'),
       engineSaid(godotPath),
-      ...reachedAlsoSaid(options.projectPath, options.reachAlso),
+      ...reachedAlsoSaid(options.reachAlso),
     ];
     const everySuite = suites;
     const compileKept = options.changedOnly ? { file: join(state, COMPILED_FILE), scripts, always } : null;
@@ -993,14 +993,12 @@ export function engineSaid(godotPath: string): string {
 }
 
 /**
- * The files at [param paths] a run was told its suites depend on, each named by where it lies in
- * [param projectPath], so the same file in another checkout keys the same suites.
+ * The files at [param paths] a run was told its suites depend on, by what each holds and never by
+ * where it lies. A game names one in a cache outside its checkouts, which sit at different depths,
+ * and the same pins key the same suites in each.
  */
-export function reachedAlsoSaid(projectPath: string, paths: readonly string[]): string[] {
-  return paths.map(
-    (path) =>
-      `${relative(projectPath, path).split(sep).join('/')}\n${existsSync(path) ? readFileSync(path, 'latin1') : 'missing'}`,
-  );
+export function reachedAlsoSaid(paths: readonly string[]): string[] {
+  return paths.map((path) => (existsSync(path) ? readFileSync(path, 'latin1') : 'missing'));
 }
 
 /** What compiling every script together found wrong, and where its engine's log is. */
