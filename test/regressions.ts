@@ -7546,11 +7546,25 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
   const dapPort = await reservePort();
   let met = 0;
   let attempts = 0;
+  const began = Date.now();
+  const phases: string[] = [];
+  const mark = (what: string): void => {
+    phases.push(`${String(Date.now() - began)}ms ${what}`);
+  };
+  // Twice on Linux this ran until the runner cut it off, which says nothing of where it stood.
+  const watchdog = setTimeout(() => {
+    console.error(
+      `testAStatusDuringArrivalIsOfOneMoment is still running. Its phases:\n${phases.join('\n')}\nThe shim was called as:\n${shimCalls()}\n${server.stderr.slice(-4000)}`,
+    );
+  }, 120_000);
+  watchdog.unref();
   try {
     await server.initialize('regression-test');
+    mark('initialised');
     // One try where the first read is held, since a held read meets the state on its first try or
     // says why it did not. Twenty tries of a hold that never took ran past a part's whole budget.
     for (; attempts < (held === null ? 20 : 1) && met === 0; attempts += 1) {
+      mark(`attempt ${String(attempts + 1)}`);
       const socket = new WebSocket(`ws://127.0.0.1:${port}/godot`);
       await new Promise<void>((settle, reject) => {
         socket.once('open', () => {
@@ -7596,8 +7610,10 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
         holding = existsSync(first);
       }
       const greetedAfter = Date.now() - askedAt;
+      mark(holding ? 'first read held, greeting' : 'greeting');
       socket.send(JSON.stringify(greeting(project, { lsp_port: lspPort, dap_port: dapPort })));
       const answer = parseTextContent(await asking);
+      mark('status answered');
       const editor = get(answer, 'editor');
       if (held !== null) {
         rmSync(join(held, 'armed'));
@@ -7621,7 +7637,8 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
         );
       }
       socket.close();
-      for (let waited = 0; waited < 5000; waited += 50) {
+      // By the clock rather than by the delays, which leave out the status calls between them.
+      for (const until = Date.now() + 5000; Date.now() < until; ) {
         const now = get(
           parseTextContent(await server.request('tools/call', { name: 'editor_status', arguments: {} })),
           'editor',
@@ -7631,6 +7648,7 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
         }
         await delay(50);
       }
+      mark('closed');
     }
     // The state is a race between the greeting and the process table, so it is tried until met. A
     // platform that never meets it in twenty tries says so rather than passing on the attempts.
@@ -7642,6 +7660,7 @@ async function testAStatusDuringArrivalIsOfOneMoment(): Promise<void> {
       assert.equal(attempts, 1, 'with the first read held, the first try meets the state');
     }
   } finally {
+    clearTimeout(watchdog);
     await server.stop();
     languageServer.close();
     rmSync(project, { recursive: true, force: true });
