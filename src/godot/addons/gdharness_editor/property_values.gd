@@ -539,7 +539,14 @@ func _component_slot(target: Object, path: String) -> Dictionary:
 	var steps: PackedStringArray = path.split(":")
 	var owner: String = GdhPropertyPaths.class_called(target)
 	if declaration(target, steps[0]).is_empty():
-		return { "refused": no_property(target, steps[0]) }
+		# An atlas source names its tiles' properties with a colon, 0:0/0/terrain_set, and naming
+		# the part before it refused a misspelt tile property as "has no property 0".
+		var whole: bool = false
+		for declared: Dictionary in target.get_property_list():
+			if str(declared.get("name", "")).begins_with(steps[0] + ":"):
+				whole = true
+				break
+		return { "refused": no_property(target, path if whole else steps[0]) }
 	var value: Variant = target.get(steps[0])
 	var walked: String = steps[0]
 	for index: int in range(1, steps.size()):

@@ -75246,6 +75246,23 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
     });
     assert.equal(get(parseTextContent(terrains), 'resourcePath'), 'res://set.tres', textOf(terrains) ?? '');
     assert.match(fileOf('set.tres'), /^terrain_set_0\/terrain_0\/name = "Grass"$/m, fileOf('set.tres'));
+    // A tile's properties are named with the colon of its atlas coordinates, which is no component
+    // path, so this was refused as "TileSetAtlasSource has no property 0".
+    const peering =
+      textOf(
+        await call('resource_edit', {
+          ...set,
+          properties: {
+            'sources/0/0:0/0/terrain_set': 0,
+            'sources/0/0:0/0/terrain_peering_bits/top_left_corner': 0,
+          },
+        }),
+      ) ?? '';
+    assert.match(
+      peering,
+      /^TileSetAtlasSource has no property 0:0\/0\/terrain_peering_bits\/top_left_corner\. The nearest it has (?:is|are) 0:0\/0\/terrains_peering_bit\/top_left_corner\b/,
+      peering,
+    );
     assert.equal(
       textOf(
         await call('resource_edit', {
