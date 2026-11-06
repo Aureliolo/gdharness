@@ -9491,7 +9491,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 157;
+const READ_IN_WORDS = 158;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
