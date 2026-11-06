@@ -560,7 +560,8 @@ comes, goes or is renamed.
 A path can come through a name. A local set once and never again holds what it was set to. A
 parameter holds what every call in the project passes it, or its default. A function also named
 without a call, such as one handed on as a `Callable` or called by name, could be passed anything.
-The trail is followed four names deep.
+So could a name a lambda in the function takes, or a `match` binds again. The trail is followed four
+names deep.
 
 ### Inputs of every suite
 
