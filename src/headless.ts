@@ -13,6 +13,7 @@ import { emptyRecord } from './dictionary.js';
 import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
 import { EXIT_LEAK, projectSelfTypedExports, selfTypedSentence } from './engine-leaks.js';
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
+import type { Sample } from './engine-spent.js';
 import type { GameLog, LogEntry } from './game-log.js';
 import { IMPORTABLE_EXTENSIONS } from './import-freshness.js';
 import { freeLibraryCopies } from './library-copies.js';
@@ -33,6 +34,8 @@ export interface HeadlessEngine {
   readonly editor?: boolean;
   /** How long an operation's engine may run before it is ended. Ten minutes when not given. */
   readonly ceiling?: { readonly ms: number; readonly said: string };
+  /** Reads the machine for the ceiling, for a test. */
+  readonly sample?: () => Promise<Sample>;
 }
 
 /** The problems a run reported, as many as an answer carries, and how many older ones it left out. */
@@ -521,7 +524,10 @@ async function operationOutcome(
     // Every operation answers one question about the project, and one that never finishes holds
     // an engine slot and a core for as long as the server lives: a dependency walk that never
     // answered spun for nearly four hours with nothing to end it.
-    ran = await runEngine(engine.godotPath, args, { timeout: engine.ceiling ?? OPERATION_CEILING });
+    ran = await runEngine(engine.godotPath, args, {
+      timeout: engine.ceiling ?? OPERATION_CEILING,
+      ...(engine.sample === undefined ? {} : { sample: engine.sample }),
+    });
     answer = answerIn(answerFile);
   } finally {
     discard(paramsDir);

@@ -98,6 +98,26 @@ public static class GdharnessDesktop {
   [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetProcessAffinityMask(IntPtr process, UIntPtr mask);
   [DllImport("kernel32.dll")] static extern uint ResumeThread(IntPtr thread);
   const uint CreateSuspended = 0x4;
+
+  [StructLayout(LayoutKind.Sequential)]
+  struct JobLimits {
+    public long perProcessUserTime, perJobUserTime;
+    public uint flags;
+    public UIntPtr minimumWorkingSet, maximumWorkingSet;
+    public uint activeProcesses;
+    public UIntPtr affinity;
+    public uint priorityClass, schedulingClass;
+    public ulong reads, writes, others, readBytes, writtenBytes, otherBytes;
+    public UIntPtr processMemory, jobMemory, peakProcessMemory, peakJobMemory;
+  }
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern IntPtr CreateJobObjectW(IntPtr attributes, string name);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref JobLimits info, int size);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+  const int ExtendedLimitInformation = 9;
+  const uint KillOnJobClose = 0x2000;
   const uint FailCriticalErrors = 0x1;
   const uint NoOpenFileErrorBox = 0x8000;
 
@@ -172,7 +192,8 @@ public static class GdharnessDesktop {
     Func<int, string> field = delegate(int index) { return Encoding.UTF8.GetString(Convert.FromBase64String(lines[index])); };
     string affinity = lines.Length > 7 ? field(7) : "";
     string exitFile = lines.Length > 8 ? field(8) : "";
-    return Run(field(0), field(1), field(2), field(3) == "1", field(4), field(5), field(6), affinity.Length == 0 ? 0UL : ulong.Parse(affinity), exitFile);
+    bool endsWithThis = lines.Length > 9 && field(9) == "1";
+    return Run(field(0), field(1), field(2), field(3) == "1", field(4), field(5), field(6), affinity.Length == 0 ? 0UL : ulong.Parse(affinity), exitFile, endsWithThis);
   }
 
   static void Step(string stepFile, string step) {
@@ -182,8 +203,11 @@ public static class GdharnessDesktop {
   }
 
   // With an affinity, the process starts suspended and is held to those processors before its
-  // first thread runs, so every thread it starts afterwards is held to them as well.
-  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory, string stepFile, ulong affinity, string exitFile) {
+  // first thread runs, so every thread it starts afterwards is held to them as well. With
+  // endsWithThis it starts suspended in a job that ends it once this process has gone, however it
+  // went. A runner's own job ends this helper with the runner, and the process breaks away from that
+  // job, so an engine of a runner that was killed ran on with no parent and held its run's folder.
+  public static int Run(string desktop, string commandLine, string pidFile, bool noActivate, string stopFile, string directory, string stepFile, ulong affinity, string exitFile, bool endsWithThis) {
     StartupInfo startup = new StartupInfo();
     startup.cb = Marshal.SizeOf(typeof(StartupInfo));
     if (desktop.Length > 0) {
@@ -233,9 +257,12 @@ public static class GdharnessDesktop {
     if (noActivate) {
       LockSetForegroundWindow(LockForeground);
     }
+    IntPtr job = IntPtr.Zero;
+    JobLimits limits = new JobLimits();
     try {
     Step(stepFile, "starting the process");
-    uint creation = DetachedProcess | BelowNormalPriorityClass | (affinity == 0 ? 0u : CreateSuspended);
+    bool suspended = affinity != 0 || endsWithThis;
+    uint creation = DetachedProcess | BelowNormalPriorityClass | (suspended ? CreateSuspended : 0u);
     if (!CreateProcessW(null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, creation, IntPtr.Zero, directory, ref startup, out started)) {
       throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessW " + commandLine);
     }
@@ -246,6 +273,21 @@ public static class GdharnessDesktop {
         TerminateProcess(started.process, 1);
         throw new Win32Exception(error, "SetProcessAffinityMask " + affinity);
       }
+    }
+    if (endsWithThis) {
+      Step(stepFile, "tying the process to this helper");
+      // The handle is never closed here: Windows closes it as this process goes, which ends the job.
+      job = CreateJobObjectW(IntPtr.Zero, null);
+      limits.flags = KillOnJobClose;
+      if (job == IntPtr.Zero
+          || !SetInformationJobObject(job, ExtendedLimitInformation, ref limits, Marshal.SizeOf(typeof(JobLimits)))
+          || !AssignProcessToJobObject(job, started.process)) {
+        int error = Marshal.GetLastWin32Error();
+        TerminateProcess(started.process, 1);
+        throw new Win32Exception(error, "a job ending the process with this helper");
+      }
+    }
+    if (suspended) {
       ResumeThread(started.thread);
     }
     File.WriteAllText(pidFile, started.processId.ToString());
@@ -267,6 +309,12 @@ public static class GdharnessDesktop {
           stopped = true;
         }
       }
+    }
+    // The process has ended, so what it started is let run on, as without the job: only a helper
+    // that was ended itself takes them with it.
+    if (job != IntPtr.Zero) {
+      limits.flags = 0;
+      SetInformationJobObject(job, ExtendedLimitInformation, ref limits, Marshal.SizeOf(typeof(JobLimits)));
     }
     uint code;
     GetExitCodeProcess(started.process, out code);
@@ -416,6 +464,8 @@ export function throughHelper(
     readonly directory: string;
     /** The processors the process is held to, one bit each, or none for every processor. */
     readonly affinity?: bigint;
+    /** The process is ended once the helper has gone, as it goes with the process that spawned it. */
+    readonly endsWithHelper?: boolean;
   },
   command: string,
   args: readonly string[],
@@ -434,6 +484,7 @@ export function throughHelper(
     files.step,
     how.affinity === undefined ? '' : how.affinity.toString(),
     files.exit,
+    how.endsWithHelper === true ? '1' : '0',
   ];
   writeFileSync(
     files.spec,

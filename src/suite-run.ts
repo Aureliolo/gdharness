@@ -29,6 +29,7 @@ import {
   type EngineLaunch,
   EngineUsageError,
   godotNamed,
+  heldRunSaid,
   homeOf,
   KEPT_RUN_DIRECTORIES,
   MOST_ENGINES,
@@ -494,9 +495,12 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
   const declared: CasesBySuite = new Map(wholeSuites.map((suite) => [suite.path, suite.cases]));
   const testRuns = join(options.projectPath, '.godot', 'gdharness', 'test-runs');
   const keptRuns = join(state, 'test-runs');
-  sweepRunDirectories(testRuns);
+  const held = sweepRunDirectories(testRuns);
   if (keptRuns !== testRuns) {
-    sweepRunDirectories(keptRuns);
+    held.push(...sweepRunDirectories(keptRuns));
+  }
+  for (const directory of held) {
+    console.log(heldRunSaid(directory));
   }
   const runName = `${String(startedAt)}-${String(process.pid)}`;
   const runDirectory = join(testRuns, runName);

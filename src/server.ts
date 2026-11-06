@@ -3976,7 +3976,7 @@ function unheldNote(changed: unknown): string {
     return '';
   }
   const unheld = Object.entries(changed)
-    .filter(([, change]) => isRecord(change) && change['was'] === null)
+    .filter(([, change]) => isRecord(change) && !('was' in change))
     .map(([name]) => name);
   if (unheld.length === 0) {
     return '';
@@ -5836,6 +5836,27 @@ class GodotServer {
       return { ok: false, response: this.createErrorResponse(refusal.message, [...refusal.advice]) };
     }
     return { ok: true, value: located.path, note: null };
+  }
+
+  /** The engine a run names with godot in place of this server's, checked to answer --version. */
+  private async otherEngine(path: string): Promise<EngineChoice> {
+    if (!isAbsolute(path)) {
+      return {
+        ok: false,
+        response: this.createErrorResponse(`godot must be an absolute path, not "${path}".`),
+      };
+    }
+    const version = existsSync(path) ? await this.versionOf(path) : null;
+    if (version === null) {
+      return {
+        ok: false,
+        response: this.createErrorResponse(
+          `godot names ${path}, which ${existsSync(path) ? 'does not answer --version' : 'does not exist'}.`,
+          ['Point godot at a Godot editor binary', "Or leave it out to run on this server's engine"],
+        ),
+      };
+    }
+    return { ok: true, value: path, note: `This ran Godot ${version} at ${path}, which godot names.` };
   }
 
   /** The project the call names, checked to be one. */
@@ -10884,11 +10905,19 @@ class GodotServer {
         anotherRuntime.remedies,
       );
     }
+    const otherGodot = readNonEmptyString(args, 'godot');
+    if (otherGodot !== undefined && exported !== null) {
+      return this.createErrorResponse(
+        'An exported build is its own engine, and takes no godot: leave godot out, or run the project without executable.',
+      );
+    }
     // An exported build is its own engine, so it needs no Godot here to start.
     const engine =
       exported?.ok === true
         ? { ok: true as const, value: exported.absolutePath, note: null }
-        : await this.engine(project.value.path);
+        : otherGodot === undefined
+          ? await this.engine(project.value.path)
+          : await this.otherEngine(otherGodot);
     if (!engine.ok) {
       return engine.response;
     }
@@ -10921,6 +10950,7 @@ class GodotServer {
         scanned,
         asked.value,
         flags.value,
+        engine.note,
       );
     }
 
@@ -11016,7 +11046,8 @@ class GodotServer {
       given.length === 0 &&
       flags.value.length === 0 &&
       !needsItsOwnProcess(asked.value) &&
-      !silentOnlyHere
+      !silentOnlyHere &&
+      otherGodot === undefined
     ) {
       return await this.playThroughEditor(
         sceneArgument,
@@ -11077,16 +11108,18 @@ class GodotServer {
     const spawnedInstead =
       exported !== null
         ? ' An exported build is started without a debugger, since a release build quits when given one, so breakpoints and debug_state do not reach it.'
-        : this.godotBridge.isConnected() && editorWouldPlay && (given.length > 0 || flags.value.length > 0)
-          ? ` The editor cannot be handed arguments for a game it plays, so this one was started here.${OWN_DEBUGGER}`
-          : this.godotBridge.isConnected() && editorWouldPlay && needsItsOwnProcess(asked.value)
-            ? ` The editor plays a game with its own environment, so a run given one was started here.${OWN_DEBUGGER}`
-            : this.godotBridge.isConnected() && editorWouldPlay && silentOnlyHere
-              ? ' The editor cannot play a game silent, which takes an engine flag, so this one was ' +
-                `started here, silent as every run is unless asked otherwise, and silent: false plays it through the editor, with sound.${OWN_DEBUGGER}`
-              : this.godotBridge.isConnected() && !editorWouldPlay
-                ? ` The editor plays this project's games with a window, so a headless run was started here. With --headless in the project's editor/run/main_run_args, which project_settings sets, the editor plays it headless.${OWN_DEBUGGER}`
-                : '';
+        : this.godotBridge.isConnected() && editorWouldPlay && otherGodot !== undefined
+          ? ` The editor plays a game only on its own engine, so a run on another was started here.${OWN_DEBUGGER}`
+          : this.godotBridge.isConnected() && editorWouldPlay && (given.length > 0 || flags.value.length > 0)
+            ? ` The editor cannot be handed arguments for a game it plays, so this one was started here.${OWN_DEBUGGER}`
+            : this.godotBridge.isConnected() && editorWouldPlay && needsItsOwnProcess(asked.value)
+              ? ` The editor plays a game with its own environment, so a run given one was started here.${OWN_DEBUGGER}`
+              : this.godotBridge.isConnected() && editorWouldPlay && silentOnlyHere
+                ? ' The editor cannot play a game silent, which takes an engine flag, so this one was ' +
+                  `started here, silent as every run is unless asked otherwise, and silent: false plays it through the editor, with sound.${OWN_DEBUGGER}`
+                : this.godotBridge.isConnected() && !editorWouldPlay
+                  ? ` The editor plays this project's games with a window, so a headless run was started here. With --headless in the project's editor/run/main_run_args, which project_settings sets, the editor plays it headless.${OWN_DEBUGGER}`
+                  : '';
     const endedForThis = endedToStartThis(ended);
     // A game of this project that was already running and that this server cannot read. It is not
     // in `ended`, because ending a run goes through the sweep that drops these, so the start left
@@ -13148,6 +13181,7 @@ class GodotServer {
     scanned: ScanWait,
     asked: RunEnvironment = {},
     engineArgs: readonly string[] = [],
+    engineNote: string | null = null,
   ): Promise<ToolResponse> {
     const frames = readPositiveNumber(args, 'frames') ?? 3;
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 60000;
@@ -13198,6 +13232,7 @@ class GodotServer {
     return this.jsonTextResponse({
       booted: !hung && boot.exitCode === 0 && errors === 0,
       hung,
+      engineNote: engineNote ?? undefined,
       exitCode: boot.exitCode,
       exitSignal: boot.exitSignal ?? undefined,
       durationMs: Date.now() - boot.startedAt,
