@@ -76025,6 +76025,15 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
     assert.deepEqual([get(painted, 'placed'), get(painted, 'erased')], [2, 0], JSON.stringify(painted));
     const erased = parseTextContent(await paint([{ coords: { x: 0, y: 0 }, sourceId: -1 }]));
     assert.deepEqual([get(erased, 'placed'), get(erased, 'erased')], [0, 1], JSON.stringify(erased));
+    // A cell named twice ends as its last entry, which leaves the file as it was.
+    const twice = await paint([
+      { coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
+      { coords: { x: 1, y: 0 }, sourceId: 0, atlasCoords: { x: 1, y: 1 } },
+      { coords: { x: 2, y: 0 }, sourceId: 0, atlasCoords: { x: 0, y: 0 } },
+      { coords: { x: 2, y: 0 }, sourceId: -1 },
+    ]);
+    const ended = parseTextContent(twice);
+    assert.deepEqual([get(ended, 'placed'), get(ended, 'erased')], [1, 1], textOf(twice) ?? '');
     // The format version, then the one cell left: (1, 0) from source 0 at (1, 1), alternative 0.
     assert.ok(
       fileOf('map.tscn').includes(

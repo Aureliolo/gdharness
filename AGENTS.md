@@ -109,6 +109,13 @@ A change only to `AGENTS.md`, `.github/*.md`, `docs/` or the README gets no rele
 its own and goes out with the next one. The skill and the tool reference ship in the package and
 count as code.
 
+### Batches
+
+Release in batches, not per fix. Every release raises the pin in each game, and each raise costs
+that game a whole gate of an hour or more. Merge fixes as they are done. Cut a release once the
+batch holds something a game needs, such as a fix a game reported or a fault a game would hit.
+A release that changes nothing a game runs, such as a description alone, waits for the next one.
+
 ### Whose issues
 
 Issues from the owner, reports from the owner's downstream projects and your own findings are
