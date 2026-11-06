@@ -107,6 +107,8 @@ import { editorQuitRequestPath, inTurnToOpen } from '../src/editor-open.js';
 import {
   countedBy,
   EngineUsageError,
+  endingWithRunner,
+  heldRunSaid,
   heldToCores,
   inTurns,
   KEPT_RUN_DIRECTORIES,
@@ -152,6 +154,7 @@ import {
   SHARE_COUNT_VARIABLE,
   SHARE_VARIABLE,
   SLOT_YIELD_MS,
+  SLOTS_VARIABLE,
   type SlotHolder,
   SlotLine,
   SPARE_FILE,
@@ -14699,6 +14702,113 @@ async function testAnotherProjectsRunLeavesOursStoppable(): Promise<void> {
 }
 
 /**
+ * A run can be started on an engine other than the server's, named by godot, so a patched engine
+ * can be proved on a game. editor_run took none, and changing GODOT_PATH swapped the whole server.
+ * The other engine here is the same binary at another path, which only that run's process can have.
+ */
+async function testARunCanBeStartedOnAnotherEngine(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('another engine regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-engine-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-engine-runtime-'));
+  const other = join(
+    mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-other-godot-')),
+    basename(godotPath),
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  const games = new MetProcesses();
+  const run = async (args: Record<string, unknown>): ReturnType<ServerProcess['request']> =>
+    await server.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: {
+          projectPath: project,
+          ...(args['op'] === 'start' ? { headless: true, runtimeWaitMs: 0 } : {}),
+          ...args,
+        },
+      },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+  const startedOn = async (godot?: string): Promise<{ answer: unknown; line: string }> => {
+    const started = await run({ op: 'start', ...(godot === undefined ? {} : { godot }) });
+    const answer = parseTextContent(started);
+    const pid = asNumber(get(answer, 'pid'));
+    await games.meet(pid);
+    const line = (await runningAs(pid))?.text ?? '';
+    const stopped = parseTextContent(
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    assert.equal(get(stopped, 'endedPid'), pid, `the stop ends that run: ${JSON.stringify(stopped)}`);
+    return { answer, line };
+  };
+  try {
+    try {
+      linkSync(godotPath, other);
+    } catch {
+      cpSync(godotPath, other);
+    }
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\nconfig/name="Other"\nrun/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tget_tree().create_timer(90.0).timeout.connect(get_tree().quit)\n',
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    await server.initialize('regression-test');
+
+    const onOther = await startedOn(other);
+    assert.ok(onOther.line.includes(other), `the run's process is the other engine: ${onOther.line}`);
+    const named = String(get(onOther.answer, 'engineNote'));
+    assert.ok(
+      /^This ran Godot \d+\.\d+/.test(named) && named.endsWith(` at ${other}, which godot names.`),
+      `the answer names the engine and its version: ${named}`,
+    );
+    const onOwn = await startedOn();
+    assert.ok(
+      onOwn.line.includes(godotPath) && !onOwn.line.includes(other),
+      `the next run is on the server's engine again: ${onOwn.line}`,
+    );
+    assert.equal(get(onOwn.answer, 'engineNote'), undefined, 'and names none');
+
+    const check = await run({ op: 'check', godot: other });
+    const checked = parseTextContent(check);
+    assert.equal(get(checked, 'booted'), true, textOf(check) ?? '');
+    assert.match(String(get(checked, 'engineNote')), /which godot names\.$/, 'a check names it too');
+
+    const bare = textOf(await run({ op: 'start', godot: 'godot.exe' })) ?? '';
+    assert.match(bare, /godot must be an absolute path, not "godot\.exe"/);
+    const missing = join(dirname(other), 'none', basename(other));
+    const absent = textOf(await run({ op: 'start', godot: missing })) ?? '';
+    assert.ok(absent.includes(`godot names ${missing}, which does not exist.`), absent);
+  } finally {
+    await games.end();
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
+    sweep(dirname(other));
+  }
+}
+
+/**
  * A game of this project that no note names is ended by its number, and nothing else is.
  *
  * A server before a reconnect that left no note, which every server before per-project notes could
@@ -23112,7 +23222,7 @@ function testTheLoaderPassesAGamesOwnLint(): void {
  * removed all of them, so running the one suite that had crashed an engine, to reproduce it, took
  * the log that explained the crash.
  */
-function testAFailedRunsLogsOutlastTheNextRun(): void {
+async function testAFailedRunsLogsOutlastTheNextRun(): Promise<void> {
   const runs = mkdtempSync(join(tmpdir(), 'gdharness-kept-runs-'));
   try {
     const ended = spawnSyncHidden(process.execPath, ['-e', '0']).pid;
@@ -23124,7 +23234,7 @@ function testAFailedRunsLogsOutlastTheNextRun(): void {
       mkdirSync(join(runs, entry, 'engine-0'), { recursive: true });
       writeFileSync(join(runs, entry, 'engine-0', 'engine.log'), entry);
     }
-    sweepRunDirectories(runs);
+    assert.deepEqual(sweepRunDirectories(runs), [], 'nothing holds a directory, so none is left');
     assert.deepEqual(
       readdirSync(runs).toSorted(),
       [...endedRuns.slice(2), live].toSorted(),
@@ -23135,6 +23245,34 @@ function testAFailedRunsLogsOutlastTheNextRun(): void {
       endedRuns.at(-1),
       'with their logs',
     );
+
+    // An engine that outlived its run, in a directory the sweep removes. Windows refuses to remove a
+    // directory a process runs in, which ended the next gdharness test on EBUSY.
+    const outlived = `1-${String(ended)}`;
+    mkdirSync(join(runs, outlived, 'engine-0'), { recursive: true });
+    writeFileSync(join(runs, outlived, 'engine-0', 'engine.log'), outlived);
+    const holder = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
+      cwd: join(runs, outlived, 'engine-0'),
+      stdio: 'ignore',
+    });
+    try {
+      await delay(500);
+      const held = sweepRunDirectories(runs);
+      const windows = process.platform === 'win32';
+      assert.deepEqual(held, windows ? [join(runs, outlived)] : [], 'the held directory is left and named');
+      assert.equal(existsSync(join(runs, outlived)), windows, 'where the platform holds it');
+      assert.deepEqual(
+        readdirSync(runs)
+          .filter((entry) => entry !== outlived)
+          .toSorted(),
+        [...endedRuns.slice(2), live].toSorted(),
+        'and the rest of the sweep goes ahead',
+      );
+      assert.match(heldRunSaid(join(runs, outlived)), /^left .+, which another process holds/);
+    } finally {
+      holder.kill();
+      await exitOf(holder);
+    }
   } finally {
     rmSync(runs, { recursive: true, force: true });
   }
@@ -33434,6 +33572,15 @@ async function testARunGivenEngineFlagsIsStartedHere(): Promise<void> {
         /takes engineArgs as array, not a string/,
         malformed.said,
       );
+      // Another engine is the editor's own engine here, which still plays only on itself.
+      const onAnother = await run({ godot: resolveGodotPath() });
+      assert.equal(get(onAnother.answer, 'through'), 'gdharness', onAnother.said);
+      assert.match(
+        text(get(onAnother.answer, 'message')),
+        /The editor plays a game only on its own engine, so a run on another was started here/,
+        onAnother.said,
+      );
+      await server.request('tools/call', { name: 'editor_run', arguments: { op: 'stop' } });
       assert.equal(plays, 0, 'and the editor is never asked to play');
     },
   );
@@ -53822,6 +53969,69 @@ async function testAnEngineIsHeldToTheProcessorsAsked(): Promise<void> {
 }
 
 /**
+ * An engine `gdharness test` starts ends with the runner that started it, however the runner went.
+ * A runner killed on Windows took the desktop helper with it, through the runner's own job, while
+ * the engine broke away from that job and ran on with no parent, holding its slot and its run's
+ * directory. On Linux it ran on, started detached. macOS has no signal for a parent gone.
+ */
+async function testAnEngineEndsWithTheRunnerThatStartedIt(): Promise<void> {
+  assert.deepEqual(endingWithRunner('godot', ['--headless'], 'linux', '/usr/bin/setpriv'), {
+    command: '/usr/bin/setpriv',
+    args: ['--pdeathsig', 'KILL', '--', 'godot', '--headless'],
+  });
+  assert.deepEqual(endingWithRunner('godot', [], 'linux', undefined), { command: 'godot', args: [] });
+  assert.deepEqual(endingWithRunner('godot', [], 'darwin', '/usr/bin/setpriv'), {
+    command: 'godot',
+    args: [],
+  });
+  if (process.platform === 'darwin') {
+    console.log('  skipped on macOS, where an engine outlives a runner that was killed');
+    return;
+  }
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-runner-gone-'));
+  let engine = 0;
+  try {
+    const directory = join(scratch, 'engine-0');
+    mkdirSync(directory);
+    const pidFile = join(scratch, 'engine.pid');
+    const own = `require('node:fs').writeFileSync(${JSON.stringify(pidFile)}, String(process.pid)); setTimeout(() => {}, 120000)`;
+    const launch = { godotPath: process.execPath, projectPath: scratch, deadlineSeconds: 120, cores: null };
+    const runner = spawnHidden(
+      process.execPath,
+      [
+        '-e',
+        [
+          `import { watchedEngine } from ${JSON.stringify(pathToFileURL(resolve('src', 'engine-launch.ts')).href)};`,
+          `await watchedEngine({ ...${JSON.stringify(launch)}, running: new Set() }, ${JSON.stringify(join(scratch, '0.lock'))},`,
+          `  ['-e', ${JSON.stringify(own)}], ${JSON.stringify(directory)}, ${JSON.stringify(join(directory, 'engine.log'))}, 60);`,
+        ].join('\n'),
+      ],
+      { stdio: 'ignore' },
+    );
+    const started = Date.now() + 60_000;
+    while (!existsSync(pidFile) && Date.now() < started) {
+      await delay(100);
+    }
+    assert.ok(existsSync(pidFile), 'the runner starts its engine');
+    await delay(200);
+    engine = Number(readFileSync(pidFile, 'utf8'));
+    assert.ok(alive(engine), `the engine ${String(engine)} runs while its runner does`);
+    runner.kill('SIGKILL');
+    await exitOf(runner);
+    const gone = Date.now() + 15_000;
+    while (alive(engine) && Date.now() < gone) {
+      await delay(100);
+    }
+    assert.ok(!alive(engine), 'and is gone once the runner has been killed');
+  } finally {
+    if (engine > 0 && alive(engine)) {
+      process.kill(engine, 'SIGKILL');
+    }
+    sweep(scratch);
+  }
+}
+
+/**
  * An engine's log is read only up to a limit, and an engine printing past it is ended.
  *
  * A layout loop in a change under test made an engine print 2 GB. The server held the whole log in
@@ -54123,22 +54333,36 @@ async function testACommandOfSeveralEnginesHoldsOneSlot(): Promise<void> {
     )?.[1];
   const heldBy = (lock: string | undefined): number | undefined =>
     lock === undefined || !existsSync(lock) ? undefined : holderOf(readFileSync(lock, 'utf8'))?.pid;
-  const alone = slotOf(await runEngine(process.execPath, own));
-  assert.notEqual(alone, undefined, 'an engine on its own is handed a slot');
-  const heldHere = (): string[] =>
-    readdirSync(dirname(alone ?? '')).filter(
-      (name) => name.endsWith('.lock') && heldBy(join(dirname(alone ?? ''), name)) === process.pid,
+  // In a process of its own on slots of its own, since the cases beside this one hold slots too.
+  const slots = mkdtempSync(join(tmpdir(), 'gdharness-one-slot-'));
+  try {
+    const before = spawnSyncHidden(
+      process.execPath,
+      [
+        '-e',
+        [
+          "import { readdirSync } from 'node:fs';",
+          `import { inOneSlot } from ${JSON.stringify(pathToFileURL(resolve('src', 'engine-slots.ts')).href)};`,
+          `await inOneSlot(async () => console.log('held ' + readdirSync(${JSON.stringify(slots)}).join(' ')));`,
+        ].join('\n'),
+      ],
+      { encoding: 'utf8', env: { ...process.env, [SLOTS_VARIABLE]: slots }, timeout: 60_000 },
     );
-  let before: string[] = [];
+    assert.match(
+      before.stdout,
+      /^held $/m,
+      `no slot is held before the first engine: ${before.stdout}${before.stderr}`,
+    );
+  } finally {
+    sweep(slots);
+  }
   let between: number | undefined;
   const [first, second] = await inOneSlot(async () => {
-    before = heldHere();
     const one = await runEngine(process.execPath, own);
     between = heldBy(slotOf(one));
     const two = await runEngine(process.execPath, own);
     return [one, two];
   });
-  assert.deepEqual(before, [], 'no slot is held before the first engine');
   const lock = slotOf(first);
   assert.notEqual(lock, undefined, howItEnded(first));
   assert.equal(slotOf(second), lock, 'the second engine is handed the same slot');
@@ -76362,6 +76586,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASuccessorIsTheEngineStartedAsTheGameExited,
   testARunFollowsTheGamesRestart,
   testAnotherProjectsRunLeavesOursStoppable,
+  testARunCanBeStartedOnAnotherEngine,
   testAGameNoNoteNamesIsStoppedByItsNumber,
   testARunsEnvironmentStaysOffCommandLines,
   testAStartWaitsOutTheEditorsScan,
@@ -76655,6 +76880,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnOrphanIsNamedWithTheCaseThatLeftIt,
   testAFreshCloneHasItsExtensionsListed,
   testAnEngineIsHeldToTheProcessorsAsked,
+  testAnEngineEndsWithTheRunnerThatStartedIt,
   testAnEngineWritesItsLogThroughAPipeOnWindows,
   testAnEngineCrashIsToldByItsWholeExitCode,
   testAnEngineStartedDirectlyIsToldByItsWholeExitCode,

@@ -21,6 +21,7 @@ import {
   type EngineLaunch,
   EngineUsageError,
   godotNamed,
+  heldRunSaid,
   inTurns,
   KEPT_RUN_DIRECTORIES,
   memoryAvailable,
@@ -243,7 +244,9 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
   }
   const startedAt = Date.now();
   const spreadRuns = join(options.projectPath, '.godot', 'gdharness', 'spread-runs');
-  sweepRunDirectories(spreadRuns);
+  for (const directory of sweepRunDirectories(spreadRuns)) {
+    console.log(heldRunSaid(directory));
+  }
   const runDirectory = join(spreadRuns, `${String(startedAt)}-${String(process.pid)}`);
   const shareDirectory = join(runDirectory, 'share');
   mkdirSync(shareDirectory, { recursive: true });

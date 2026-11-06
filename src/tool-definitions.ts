@@ -1829,6 +1829,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description:
           'start: an exported build to run instead of the project, as a path inside the project such as export/windows/game.exe, so what a player runs can be measured. It takes args, engineArgs, savesIn, env, headless and visible as the project does, goes on the hidden desktop the same way, and is ended by stop, but takes no scene (its pack holds the main scene) and no profile, and has no debugger: a release build quits when given one. Its runtime is not waited for.',
       },
+      godot: {
+        type: 'string',
+        ops: ['start', 'check'],
+        description:
+          "An absolute path to another Godot to run this one run on in place of this server's engine, such as a patched build. The editor plays a game only on its own engine, so a run given one is started by this server, and engineNote names the engine and its version. The next run without it is on this server's engine again.",
+      },
       savesIn: {
         type: 'string',
         ops: ['start', 'check'],
