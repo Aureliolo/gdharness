@@ -9491,7 +9491,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 157;
+const READ_IN_WORDS = 158;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -28876,6 +28876,62 @@ async function testAReimportReimportsThroughTheEngine(): Promise<void> {
         { was: 0, now: 1 },
         JSON.stringify(unjudged),
       );
+
+      // importer is no option: written under params, it changed nothing and was called updated.
+      // The importer argument switches it, as the Import dock's Import As does.
+      const said = async (args: Record<string, unknown>): Promise<string> =>
+        textOf(
+          await server.request(
+            'tools/call',
+            { name: 'project_import', arguments: { projectPath: project, ...args } },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        ) ?? '';
+      const sidecar = (): string => readFileSync(join(project, 'good.png.import'), 'utf8');
+      const misplaced = await said({
+        op: 'set_options',
+        resourcePath: 'good.png',
+        options: { importer: 'image' },
+      });
+      assert.match(
+        misplaced,
+        /importer is not an import option, and the import file's params hold only those\. importer switches the importer the file is imported with/,
+        misplaced,
+      );
+      assert.doesNotMatch(sidecar(), /^importer="image"$/m, sidecar());
+      const lacked = await said({ op: 'set_options', resourcePath: 'good.png', importer: 'nonsense' });
+      assert.match(
+        lacked,
+        /^The engine has no importer nonsense for res:\/\/good\.png, and the import took texture instead\. The import file was put back as it was and imported again\./,
+        lacked,
+      );
+      assert.match(sidecar(), /^importer="texture"$/m, sidecar());
+      assert.match(
+        sidecar(),
+        /^compress\/mode=1$/m,
+        `the options cleared for the switch came back:\n${sidecar()}`,
+      );
+      const switched = await call({ op: 'set_options', resourcePath: 'good.png', importer: 'image' });
+      assert.deepEqual(get(switched, 'importer'), { was: 'texture', now: 'image' }, JSON.stringify(switched));
+      assert.match(sidecar(), /^importer="image"\ntype="Image"$/m, sidecar());
+      assert.doesNotMatch(
+        sidecar(),
+        /^compress\/mode=/m,
+        `the texture's options went with it:\n${sidecar()}`,
+      );
+      assert.equal(
+        get(await call({ op: 'options', resourcePath: 'good.png' }), 'remap', 'importer'),
+        'image',
+      );
+      writeFileSync(
+        join(project, 'loads.gd'),
+        'extends SceneTree\n\nfunc _init() -> void:\n\tprint(load("res://good.png").get_class())\n\tquit()\n',
+      );
+      const loaded = spawnSyncHidden(godotPath, ['--headless', '--path', project, '-s', 'res://loads.gd'], {
+        encoding: 'utf8',
+        timeout: 120_000,
+      });
+      assert.match(loaded.stdout, /^Image$/m, `${loaded.stdout}\n${loaded.stderr}`);
 
       // A scene is loaded as it is and never imported. Asked for by name, it ran a pass and came
       // back as not reimported, which reads as its import failing.
