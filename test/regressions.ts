@@ -60740,7 +60740,8 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     'class_name ItemData\nextends Resource\n\nenum Kind { SWORD, SHIELD, POTION }\n\n' +
       '@export var title: String = ""\n@export var kind: Kind = Kind.SWORD\n@export var tags: Array[String] = []\n' +
       '@export var icon: Texture2D\n@export_range(0, 10) var rarity: int = 0\n@export_range(0, 10, 1, "or_greater") var level: int = 0\n' +
-      '@export var growth: Curve\n',
+      '@export var growth: Curve\n@export_range(0, 10, 0.5) var reach: float = 0.0\n' +
+      '@export_file("*.png", "*.jpg") var art_path: String = ""\n@export_color_no_alpha var tint: Color = Color.WHITE\n',
   );
   writeFileSync(
     join(project, 'icon.svg'),
@@ -60849,7 +60850,7 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     assert.equal(await refused({ 'rarety:x': 1 }), rarity);
     assert.equal(
       await refused({ zzz: 1 }),
-      'ItemData has no property zzz. Its script declares growth, icon, kind, level, rarity, tags, title.',
+      'ItemData has no property zzz. Its script declares art_path, growth, icon, kind, level, rarity, reach, tags, tint, title.',
     );
     assert.equal(
       await refused({ 'title:x': 1 }),
@@ -60981,6 +60982,32 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     );
     assert.match(file(), /^rarity = 12$/m, file());
     assert.equal(get(await written({ rarity: 4 }), 'outsideDeclared'), undefined);
+    // The inspector also rounds to a range's step, offers only the files a filter takes, and shows
+    // no alpha for a colour declared without one.
+    const besides = await written({
+      reach: 0.3,
+      art_path: 'res://sound.wav',
+      tint: { r: 1, g: 0.5, b: 0, a: 0.5 },
+    });
+    assert.deepEqual(
+      get(besides, 'outsideDeclared'),
+      {
+        reach:
+          '0.3 is not a step of 0.5 from 0, as reach declares, which the inspector rounds it to. The engine stores it as given.',
+        art_path:
+          '"res://sound.wav" is none of the files art_path takes, *.png, *.jpg, which the inspector\'s file dialog holds it to. The engine stores it as given.',
+        tint: 'tint is declared with no alpha, so the inspector neither shows nor sets one, and the colour given has alpha 0.5. The engine stores it as given.',
+      },
+      JSON.stringify(besides),
+    );
+    assert.equal(
+      get(
+        await written({ reach: 7.5, art_path: 'res://Art.PNG', tint: { r: 1, g: 0.5, b: 0, a: 1 } }),
+        'outsideDeclared',
+      ),
+      undefined,
+      'a step, a matching file and an opaque colour are noted for nothing',
+    );
 
     // A picture that is there and never imported is told apart from one that is not there, and the
     // remedy given makes the write go through.
