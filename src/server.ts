@@ -6586,9 +6586,18 @@ class GodotServer {
       timeoutMs: _timeoutMs,
       ...params
     } = contained.value;
+    const given = readNonEmptyString(contained.value, 'resourcePath') ?? '';
+    const resource = given.startsWith('res://') ? given : `res://${given}`;
+    const sidecar = join(project.value.path, `${resource.slice('res://'.length)}.import`);
+    const before = existsSync(sidecar) ? readFileSync(sidecar, 'utf8') : null;
     const written = await this.operation('set_import_options', params, project.value.path);
     const changed: unknown = written.ok ? written.payload['updated_options'] : null;
-    if (written.ok && Array.isArray(changed) && changed.length === 0) {
+    if (
+      written.ok &&
+      Array.isArray(changed) &&
+      changed.length === 0 &&
+      written.payload['importer'] === undefined
+    ) {
       return this.answer({
         ...written,
         payload: {
@@ -6635,6 +6644,23 @@ class GodotServer {
           ...applied.response.content,
         ],
       };
+    }
+    const asked = readNonEmptyString(args, 'importer');
+    // An importer the engine lacks is passed over for the default one, and the options cleared for
+    // the switch would then be lost, so the file is put back and imported as it was.
+    const took = /^\[remap\][^[]*?^importer="([^"]*)"/ms.exec(readFileSync(sidecar, 'utf8'))?.[1];
+    if (asked !== undefined && took !== asked && before !== null) {
+      writeFileSync(sidecar, before);
+      await this.reimport(
+        project.value.path,
+        given,
+        true,
+        readPositiveNumber(args, 'timeoutMs') ?? REIMPORT_TIMEOUT_MS,
+      );
+      return this.createErrorResponse(
+        `The engine has no importer ${asked} for ${resource}, and the import took ${took ?? 'none'} instead. The import file was put back as it was and imported again.`,
+        ['project_import options names the importer a file uses now, under remap'],
+      );
     }
     const dropped = await this.optionsTheImporterDropped(project.value.path, params, written.payload);
     if (dropped !== null) {

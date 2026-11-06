@@ -206,12 +206,33 @@ func set_import_options(params: Dictionary) -> Dictionary:
 	if err != OK:
 		return _log.failure("Failed to parse import file: " + str(err))
 
+	var switching: String = str(params.get("importer", "")).strip_edges()
+	if options.is_empty() and switching.is_empty():
+		return _log.failure("set_options takes options, importer or both, and was given neither")
 	# Every option checked before any is written, so a refused one leaves the sidecar as it was.
 	var importer: String = str(config.get_value("remap", "importer", ""))
+	var was_importer: String = importer
+	# Switched as the Import dock's Import As switches it: the new importer starts from its own
+	# defaults, which the reimport writes, and the options given are its options.
+	if not switching.is_empty() and switching != importer:
+		config.set_value("remap", "importer", switching)
+		if config.has_section("params"):
+			config.erase_section("params")
+		importer = switching
 	var fitted_values: Dictionary = {}
 	var refused: Array[String] = []
 	for key: Variant in options:
 		var name: String = str(key)
+		# Written under params, these changed nothing, and the answer called them updated.
+		if name in ["importer", "type"] or name.begins_with("remap/") or name.begins_with("deps/"):
+			refused.append(
+				(
+					"%s is not an import option, and the import file's params hold only those. "
+					+ "importer switches the importer the file is imported with"
+				)
+				% name
+			)
+			continue
 		var held: Variant = _held(config, name)
 		var given: Variant = _values.deserialize_value(options[key])
 		var value: Variant = _as_option(_values.fitted(options[key], typeof(held)), held)
@@ -261,13 +282,16 @@ func set_import_options(params: Dictionary) -> Dictionary:
 		}
 		_log.debug("Set " + name + " = " + str(value))
 
-	if not updated_keys.is_empty():
+	var switched: bool = importer != was_importer
+	if switched or not updated_keys.is_empty():
 		err = config.save(import_file_path)
 		if err != OK:
 			return _log.failure("Failed to save import file: " + str(err))
 
 	# The reimport that applies them is the server's, through the editor or the engine's import.
 	var answer: Dictionary = { "resource_path": resource_path, "updated_options": updated_keys }
+	if switched:
+		answer["importer"] = { "was": was_importer, "now": importer }
 	if not changes.is_empty():
 		answer["changed"] = changes
 	if not unchanged_keys.is_empty():

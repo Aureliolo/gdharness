@@ -757,6 +757,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'set_options: import options keyed as the .import file spells them, {"compress/mode": 1}. A dictionary option whose keys are numbers, a font\'s opentype_features or any option already holding number keys, takes them written as strings of digits, and opentype_features also takes an OpenType tag by its four-letter name: {"opentype_features": {"liga": 0}} turns ligatures off. Both are written as the numbers the engine reads. One already holding the value given is answered under unchanged_options rather than updated_options, and when none changed nothing is written or reimported. changed gives each option written as {was, now}.',
         additionalProperties: true,
       },
+      importer: {
+        type: 'string',
+        ops: ['set_options'],
+        description:
+          "set_options: the importer to import the file with, as the Import dock's Import As switches it, such as image for a picture loaded as an Image rather than a texture. The file's options go back to the new importer's defaults before the options given are set. An importer the engine lacks is refused, and the import file is put back as it was.",
+      },
       reimport: {
         type: 'boolean',
         ops: ['set_options'],
@@ -787,8 +793,9 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       options: { effect: 'read', summary: 'the import options of one resource', requires: ['resourcePath'] },
       set_options: {
         effect: 'destructive',
-        summary: 'change import options in the sidecar, then apply them with a reimport of that resource',
-        requires: ['resourcePath', 'options'],
+        summary:
+          'change import options or the importer in the sidecar, then apply them with a reimport of that resource. A key that is no import option, such as importer, is refused',
+        requires: ['resourcePath'],
       },
       reimport: {
         effect: 'destructive',
