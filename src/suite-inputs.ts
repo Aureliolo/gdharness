@@ -21,7 +21,9 @@ import { classesNamedIn } from './class-cache.js';
 import { regionsOf } from './gdscript-source.js';
 import { isLibraryCopy } from './library-copies.js';
 import { bytesOf, contentOf, entriesOf, statOf } from './listed-reads.js';
+import { projectFiles } from './project-scan.js';
 import { isRecord } from './records.js';
+import { parseProjectGodot } from './resources.js';
 import type { ProjectScripts } from './suite-plan.js';
 
 /** The input standing for every file in the project, for a suite reaching a computed file read. */
@@ -153,6 +155,12 @@ export class SuiteInputs {
   private readonly reads = new Map<string, Read>();
   private readonly constants = new Map<string, Map<string, string>>();
   private readonly texts = new Map<string, string>();
+  private readonly codes = new Map<string, string>();
+  private readonly passed = new Map<string, Held[] | null>();
+  private readonly lines = new Map<string, ReadonlySet<string>>();
+  private readonly unfollowed = new Map<string, Unfollowed>();
+  private autoloadPaths: ReadonlyMap<string, string> | null = null;
+  private scenes: readonly string[] | null = null;
   private readonly scripts: ProjectScripts;
   private readonly alwaysDigest: string;
   private readonly everywhere: string[];
@@ -218,6 +226,30 @@ export class SuiteInputs {
       pending.push(...read.follows, ...read.also);
     }
     return inputs;
+  }
+
+  /**
+   * Each script a suite of [param suites] reaches from itself and the autoloads whose reads make it
+   * depend on every file: its first read by a path that could be anything, and how many suites reach
+   * it. Most reached first.
+   */
+  wholeTreeReads(suites: readonly string[]): WholeTreeRead[] {
+    const roots = [...this.autoloads().values()];
+    const reached = new Map<string, number>();
+    for (const suite of suites) {
+      for (const path of this.reach([suite, ...roots])) {
+        if (this.unfollowed.has(path)) {
+          reached.set(path, (reached.get(path) ?? 0) + 1);
+        }
+      }
+    }
+    return [...reached]
+      .map(([path, count]) => ({
+        path,
+        suites: count,
+        ...(this.unfollowed.get(path) ?? { line: 0, argument: '' }),
+      }))
+      .toSorted((one, other) => other.suites - one.suites || one.path.localeCompare(other.path));
   }
 
   /** The print of [param inputs] as they stand now. */
@@ -356,6 +388,7 @@ export class SuiteInputs {
     for (const found of text.matchAll(PRELOAD)) {
       const named = found[1] ?? found[2] ?? constants.get(found[3] ?? '');
       if (named === undefined || named.startsWith('uid://')) {
+        this.unfollowed.set(path, { line: lineAt(text, found.index), argument: found[0] });
         return null;
       }
       follows.push(
@@ -370,6 +403,7 @@ export class SuiteInputs {
       const read = readUnder(this.heldPaths(first, path, found.index, 0));
       if (read === null) {
         if (!NAMES_READ.test(found[0])) {
+          this.unfollowed.set(path, { line: lineAt(text, found.index), argument: first });
           return null;
         }
         also.push(EVERY_NAME);
@@ -445,8 +479,8 @@ export class SuiteInputs {
   /**
    * What the path [param argument], written at [param at] in the script at [param path], can hold
    * as it runs: each way it is known whole or known to begin, or null when it could be anything. A
-   * name not a constant is followed to the local set once that holds it, or to what every call in
-   * the project passes for the parameter it is, [constant HELD_DEPTH] steps deep at most.
+   * name not a constant is followed to the local set once that holds it, or to what every call that
+   * can reach its function passes for the parameter it is, through any number of functions.
    */
   private heldPaths(argument: string, path: string, at: number, depth: number): Held[] | null {
     const literal = STRING_ARGUMENT.exec(argument);
@@ -539,7 +573,13 @@ export class SuiteInputs {
     }
     if (index !== -1) {
       const fallback = /=\s*(.+)$/s.exec(parameters[index] ?? '')?.[1];
-      return this.passedFor(declared[2] ?? '', index, { fallback, path, at: declared.index }, depth);
+      const most = parameters.some((parameter) => parameter.startsWith('...'))
+        ? Number.POSITIVE_INFINITY
+        : parameters.length;
+      const least = parameters.filter(
+        (parameter) => !parameter.includes('=') && !parameter.startsWith('...'),
+      ).length;
+      return this.passedFor(declared[2] ?? '', index, { fallback, path, at: declared.index, least, most });
     }
     const locals = [...body.matchAll(new RegExp(`\\bvar[ \\t]+${name}\\b[^=\\n]*=[ \\t]*([^\\n]+)`, 'g'))];
     const setAgain = new RegExp(
@@ -553,38 +593,73 @@ export class SuiteInputs {
   }
 
   /**
-   * What every call in the project passes the function [param named] as its parameter at
-   * [param index], or null. The function is only ever called by its name, or it could be handed
-   * anything: a function also named as a value, or in a string a call by name reads, is not followed.
+   * What every call that can reach the function [param named], declared as [param declared] says,
+   * passes as its parameter at [param index], or null. A function reached again while it is
+   * followed, through its own callers, is not followed.
    */
-  private passedFor(
-    named: string,
-    index: number,
-    declared: { fallback: string | undefined; path: string; at: number },
-    depth: number,
-  ): Held[] | null {
+  private passedFor(named: string, index: number, declared: Declared): Held[] | null {
+    const key = `${declared.path}\n${named}\n${String(index)}`;
+    if (this.passed.has(key)) {
+      return this.passed.get(key) ?? null;
+    }
+    this.passed.set(key, null);
+    const held = this.passedAnew(named, index, declared);
+    this.passed.set(key, held);
+    return held;
+  }
+
+  /**
+   * A call reaches the function from a script of its line (its own, its bases and the scripts
+   * extending it) bare or through `self` or `super`. From anywhere it reaches it through a class, an
+   * autoload, a preloaded script or a variable typed as one of the line, or through what could be any
+   * object. A call whose argument count the function cannot take is not to it. The function is
+   * followed only if every use that may be it is such a call. Named without a call, by name in a
+   * call such as `call()`, or as a scene's method, it could be handed anything.
+   */
+  private passedAnew(named: string, index: number, declared: Declared): Held[] | null {
+    const sceneNamed = new RegExp(`\\bmethod="${named}"|&"${named}"`);
+    if (this.sceneTexts().some((text) => sceneNamed.test(text))) {
+      return null;
+    }
+    const line = this.lineOf(declared.path);
+    const byName = new RegExp(
+      `&["']${named}["']|\\b(?:call|call_deferred|callv|has_method|rpc|rpc_id|Callable|create)[ \\t]*\\([^()]*?["']${named}["']`,
+    );
+    const used = new RegExp(`(?<![\\w$%])${named}\\b`, 'g');
     const held: Held[] = [];
     let calls = 0;
-    const declaring = new RegExp(`\\bfunc[ \\t]+${named}\\b`, 'g');
-    const mentioned = new RegExp(`(?<!\\w)${named}\\b(?![ \\t]*\\()`);
-    const call = new RegExp(`(?<!\\bfunc[ \\t]+)(?<!\\w)${named}[ \\t]*\\(`, 'g');
     for (const caller of this.scripts.sources.keys()) {
       const text = this.textOf(caller);
       if (!text.includes(named)) {
         continue;
       }
-      if (mentioned.test(text.replaceAll(declaring, ''))) {
+      if (byName.test(text)) {
         return null;
       }
-      for (const found of text.matchAll(call)) {
+      const code = this.codeOf(caller);
+      for (const found of code.matchAll(used)) {
+        if (DECLARING.test(code.slice(Math.max(0, found.index - 40), found.index))) {
+          continue;
+        }
+        if (!this.mayBeOnLine(receiverBefore(code, found.index), caller, line)) {
+          continue;
+        }
+        const opened = /^[ \t]*\(/.exec(code.slice(found.index + found[0].length));
+        if (opened === null) {
+          return null;
+        }
+        const given = argumentsAt(text, found.index + found[0].length + opened[0].length);
+        if (given.length < declared.least || given.length > declared.most) {
+          continue;
+        }
         calls += 1;
-        const given = argumentsAt(text, found.index + found[0].length)[index];
+        const argument = given[index];
         const passed =
-          given === undefined
+          argument === undefined
             ? declared.fallback === undefined
               ? null
-              : this.heldPaths(declared.fallback.trim(), declared.path, declared.at, depth)
-            : this.heldPaths(given, caller, found.index, depth);
+              : this.heldPaths(declared.fallback.trim(), declared.path, declared.at, 0)
+            : this.heldPaths(argument, caller, found.index, 0);
         if (passed === null) {
           return null;
         }
@@ -592,6 +667,150 @@ export class SuiteInputs {
       }
     }
     return calls === 0 ? null : held;
+  }
+
+  /**
+   * Whether a use through [param receiver] in the script at [param caller] may be of a function of
+   * [param line]: null for a bare use, the empty string for what could be any object.
+   */
+  private mayBeOnLine(receiver: string | null, caller: string, line: ReadonlySet<string>): boolean {
+    if (receiver === null || receiver === 'self' || receiver === 'super') {
+      return line.has(caller);
+    }
+    return this.targetsOf(receiver, caller).some((target) => target === null || line.has(target));
+  }
+
+  /**
+   * The scripts [param receiver], written in the script at [param caller], can be or be an instance
+   * of: null for any object, none for a value no script can be.
+   */
+  private targetsOf(receiver: string, caller: string): (string | null)[] {
+    if (receiver === '') {
+      return [null];
+    }
+    const named = this.scriptNamed(receiver, caller);
+    if (named !== undefined) {
+      return [named];
+    }
+    const text = this.textOf(caller);
+    const rests = [...text.matchAll(new RegExp(`\\b(?:var|for)[ \\t]+${receiver}\\b`, 'g'))].map((found) =>
+      text.slice(found.index + found[0].length),
+    );
+    for (const found of text.matchAll(/\bfunc\b[ \t]*\w*[ \t]*\(/g)) {
+      for (const parameter of argumentsAt(text, found.index + found[0].length)) {
+        if (/^\w+/.exec(parameter)?.[0] === receiver) {
+          rests.push(parameter.slice(receiver.length));
+        }
+      }
+    }
+    if (rests.length === 0) {
+      return [null];
+    }
+    return rests.flatMap((rest) => {
+      const type =
+        /^[ \t]*:[ \t]*([A-Za-z_]\w*)/.exec(rest)?.[1] ??
+        /^[ \t]*:=[ \t]*([A-Za-z_]\w*)\.new\(/.exec(rest)?.[1];
+      if (type === undefined) {
+        return [null];
+      }
+      const script = this.scriptNamed(type, caller);
+      return script !== undefined ? [script] : VALUE_TYPES.has(type) ? [] : [null];
+    });
+  }
+
+  /**
+   * The script the name [param name] in the script at [param caller] stands for: a global class, an
+   * autoload, or a constant preloading one. Null for an autoload that is a scene.
+   */
+  private scriptNamed(name: string, caller: string): string | null | undefined {
+    const global = this.scripts.classes.get(name);
+    if (global !== undefined) {
+      return global;
+    }
+    const autoload = this.autoloads().get(name);
+    if (autoload !== undefined) {
+      return autoload.endsWith('.gd') ? autoload : null;
+    }
+    const preloaded = new RegExp(
+      `\\bconst[ \\t]+${name}\\b[^=\\n]*=[ \\t]*preload\\([ \\t]*["']([^"']+)["']`,
+    ).exec(this.textOf(caller))?.[1];
+    if (preloaded === undefined) {
+      return undefined;
+    }
+    return preloaded.startsWith('res://')
+      ? preloaded
+      : `res://${posix.join(posix.dirname(caller.slice(6)), preloaded)}`;
+  }
+
+  /** The scripts of the line of the script at [param path]: it, its bases and the scripts extending it. */
+  private lineOf(path: string): ReadonlySet<string> {
+    const known = this.lines.get(path);
+    if (known !== undefined) {
+      return known;
+    }
+    const line = new Set(this.basesOf(path));
+    for (const script of this.scripts.sources.keys()) {
+      if (this.basesOf(script).includes(path)) {
+        line.add(script);
+      }
+    }
+    this.lines.set(path, line);
+    return line;
+  }
+
+  /** The script at [param path] and every project script it extends, nearest first. */
+  private basesOf(path: string): string[] {
+    const chain = [path];
+    for (
+      let base = this.scripts.base(path);
+      base !== null && 'path' in base;
+      base = this.scripts.base(base.path)
+    ) {
+      if (chain.includes(base.path)) {
+        break;
+      }
+      chain.push(base.path);
+    }
+    return chain;
+  }
+
+  /** The project's autoloads, by name, as `res://` paths. */
+  private autoloads(): ReadonlyMap<string, string> {
+    if (this.autoloadPaths === null) {
+      const settings = bytesOf(join(this.scripts.projectPath, 'project.godot'))?.toString('utf8') ?? '';
+      const autoload = parseProjectGodot(settings)['autoload'] ?? {};
+      this.autoloadPaths = new Map(
+        Object.entries(autoload).flatMap(([name, value]) => {
+          const said = typeof value === 'string' ? value.replace(/^\*/, '') : '';
+          return said.startsWith('res://') ? [[name, said] as const] : [];
+        }),
+      );
+    }
+    return this.autoloadPaths;
+  }
+
+  /** Every scene and resource of the project as text, read once per run. */
+  private sceneTexts(): readonly string[] {
+    this.scenes ??= projectFiles(this.scripts.projectPath, ['.tscn', '.tres']).map(
+      (file) => bytesOf(join(this.scripts.projectPath, file))?.toString('utf8') ?? '',
+    );
+    return this.scenes;
+  }
+
+  /** The script at [param path] with its comments and strings blanked, read once per run. */
+  private codeOf(path: string): string {
+    const known = this.codes.get(path);
+    if (known !== undefined) {
+      return known;
+    }
+    const source = this.scripts.sources.get(path) ?? '';
+    let code = '';
+    for (const region of regionsOf(source)) {
+      const part = source.slice(region.start, region.end);
+      code += region.kind === 'code' ? part : part.replace(/[^\n]/g, ' ');
+    }
+    this.codes.set(path, code);
+    return code;
   }
 
   /** The script at [param path] with its comments blanked, read once per run. */
@@ -615,8 +834,95 @@ interface Held {
 /** A path handed to the system as the file it names, up to the path. */
 const GLOBALIZED = /^ProjectSettings\.globalize_path\(/;
 
-/** How many names deep a path is followed back to what it was set from. */
-const HELD_DEPTH = 4;
+/** How many locals deep a path is followed within one function, for a script whose locals name each other. */
+const HELD_DEPTH = 16;
+
+/** A function whose parameter a path is: where it is declared, its default, and how many arguments it takes. */
+interface Declared {
+  readonly fallback: string | undefined;
+  readonly path: string;
+  readonly at: number;
+  readonly least: number;
+  readonly most: number;
+}
+
+/** The read a script makes by a path that could be anything, as `--whole-tree` names it. */
+interface Unfollowed {
+  readonly line: number;
+  readonly argument: string;
+}
+
+/** A script whose reads make every suite reaching it depend on every file. */
+export interface WholeTreeRead extends Unfollowed {
+  readonly path: string;
+  readonly suites: number;
+}
+
+/** Text before a function's name that declares it rather than uses it. */
+const DECLARING = /\bfunc[ \t]+$/;
+
+/** The types whose values no script can be. */
+const VALUE_TYPES = new Set([
+  'bool',
+  'int',
+  'float',
+  'String',
+  'StringName',
+  'NodePath',
+  'Array',
+  'Dictionary',
+  'Callable',
+  'Signal',
+  'RID',
+  'Color',
+  'Vector2',
+  'Vector2i',
+  'Vector3',
+  'Vector3i',
+  'Vector4',
+  'Vector4i',
+  'Rect2',
+  'Rect2i',
+  'Transform2D',
+  'Transform3D',
+  'Basis',
+  'Quaternion',
+  'AABB',
+  'Plane',
+  'Projection',
+  'PackedByteArray',
+  'PackedInt32Array',
+  'PackedInt64Array',
+  'PackedFloat32Array',
+  'PackedFloat64Array',
+  'PackedStringArray',
+  'PackedVector2Array',
+  'PackedVector3Array',
+  'PackedVector4Array',
+  'PackedColorArray',
+]);
+
+/**
+ * What a use at [param at] in [param code] is reached through: null for a bare use, the name before
+ * its dot, or the empty string for any other expression, such as a call, an index or `a.b`. A node
+ * path is blanked in [param code], so it is an expression too.
+ */
+function receiverBefore(code: string, at: number): string | null {
+  let index = at - 1;
+  while (code[index] === ' ' || code[index] === '\t') {
+    index -= 1;
+  }
+  if (code[index] !== '.') {
+    return null;
+  }
+  const end = index;
+  index -= 1;
+  while (index >= 0 && /\w/.test(code[index] ?? '')) {
+    index -= 1;
+  }
+  const name = code.slice(index + 1, end);
+  return /^[A-Za-z_]\w*$/.test(name) && code[index] !== '.' ? name : '';
+}
 
 /** A named function's declaration, up to its parameters, with its indentation and name. */
 const FUNCTION_DECLARED = /^([ \t]*)(?:static[ \t]+)?func[ \t]+(\w+)[ \t]*\(/gm;
@@ -706,6 +1012,15 @@ function argumentsAt(text: string, at: number): string[] {
     }
   }
   return found.length === 1 && found[0] === '' ? [] : found;
+}
+
+/** The line, counted from 1, of [param at] in [param text]. */
+function lineAt(text: string, at: number): number {
+  let line = 1;
+  for (let index = text.indexOf('\n'); index !== -1 && index < at; index = text.indexOf('\n', index + 1)) {
+    line += 1;
+  }
+  return line;
 }
 
 /** [param source] with its comments blanked and its strings kept. */

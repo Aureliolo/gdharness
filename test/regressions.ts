@@ -522,6 +522,7 @@ import {
   sharesSaid,
   silenceWhile,
   testOptionsOf,
+  wholeTreeSaid,
 } from '../src/suite-run.js';
 import { listenerAmong } from '../src/tcp-listeners.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
@@ -51088,6 +51089,160 @@ async function testAHiddenEditorStartsOnAnEmptyScriptReference(): Promise<void> 
 }
 
 /**
+ * A read's path is followed only through the calls that can reach its function, however many
+ * functions deep.
+ *
+ * Every same-named call in the project was taken as one. An addon's `read(path)` given a run-time
+ * path, a local named `read`, or a chain of three wrappers made a read by constant folders count as
+ * one of every file. `--whole-tree` names what is left, so a gate can see it come back.
+ */
+function testAReadsCallersAreThoseThatCanReachIt(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-callers-'));
+  const clean = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-callers-clean-'));
+  const func = (head: string, ...body: string[]): string =>
+    `\n\n${head}\n${body.map((line) => `\t${line}\n`).join('')}`;
+  const reads = 'return FileAccess.get_file_as_string(path)';
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[autoload]\n\nSaves="*res://saves.gd"\nLoose="*res://loose.gd"\n',
+      'book.gd':
+        'class_name Book\nextends RefCounted\n\nconst FOLDER: String = "res://books/"\n' +
+        func(
+          'static func read(folder: String) -> String:',
+          'return FileAccess.get_file_as_string(folder.path_join("a.txt"))',
+        ) +
+        func('static func words_in(folder: String) -> String:', 'return read(folder)'),
+      'shelf.gd':
+        'extends Node\n' +
+        func('func fill() -> void:', 'Book.read(Book.FOLDER)', 'Book.words_in("res://books/b")'),
+      'library.gd':
+        'class_name Library\nextends RefCounted\n' +
+        func('static func extra_in(id: String, folder: String) -> String:', 'return id + _extra(folder)') +
+        func('static func _extra(folder: String) -> String:', 'return Book.words_in(folder)'),
+      'tests/e_test.gd':
+        'extends GdUnitTestSuite\n' +
+        func(
+          'func test_e() -> void:',
+          'var where: String = Book.FOLDER + "extra"',
+          'Library.extra_in("x", where)',
+        ),
+      'saves.gd':
+        'extends Node\n' +
+        func('func read(path: String) -> String:', 'return path') +
+        func('func any(name: String) -> void:', 'read(name)', 'self.read(name)', 'super.read(name)'),
+      'addons/kit/json.gd':
+        'extends RefCounted\n' +
+        func('static func read(path: String) -> String:', reads) +
+        func('static func any(path: String) -> void:', 'read(path)'),
+      'callers.gd':
+        'extends Node\n\nconst Kit = preload("res://addons/kit/json.gd")\n' +
+        func(
+          'func through(name: String, given: Dictionary, consent) -> void:',
+          'var other: Note = Note.new()',
+          'var made := Note.new()',
+          'Saves.read(name)',
+          'given.read(name)',
+          'consent.read()',
+          'Kit.read(name)',
+          'other.read(name)',
+          'made.read(name)',
+          'for each: Note in []:',
+          '\teach.read(name)',
+        ) +
+        func('func local() -> void:', 'var read: Array = []', 'read.append(1)'),
+      'note.gd': `class_name Note\nextends RefCounted\n${func('static func open(path: String) -> String:', reads)}${func('static func every() -> void:', 'open("res://levels/one.txt")')}`,
+      'pad.gd': `extends Node\n${func('func any(name: String) -> void:', 'Note.open(name)')}`,
+      'leaf.gd': `class_name Leaf\nextends RefCounted\n${func('func turn(path: String) -> String:', reads)}${func('func every() -> void:', 'turn("res://levels/one.txt")')}`,
+      'leaf_child.gd': `extends Leaf\n${func('func any(name: String) -> void:', 'turn(name)')}`,
+      'page.gd': `class_name Page\nextends RefCounted\n${func('func shown(path: String) -> String:', reads)}${func('func every() -> void:', 'shown("res://levels/one.txt")')}`,
+      'typed_page.gd': `extends Node\n${func('func any(page: Page, name: String) -> void:', 'page.shown(name)')}`,
+      'scroll.gd': `extends Node\n${func('func unroll(path: String) -> String:', reads)}${func('func every() -> void:', 'unroll("res://levels/one.txt")')}`,
+      'unrolled.gd': `extends Node\n${func('func any(thing, name: String) -> void:', 'thing.unroll(name)')}`,
+      'entry.gd': `extends Node\n${func('func on_text(path: String) -> String:', reads)}${func('func every() -> void:', 'on_text("res://levels/one.txt")')}`,
+      'entry.tscn':
+        '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://entry.gd" id="1"]\n\n[node name="Entry" type="Node"]\nscript = ExtResource("1")\n\n' +
+        '[connection signal="tree_entered" from="." to="." method="on_text"]\n',
+      'track.gd': `extends Node\n${func('func tracked(path: String) -> String:', reads)}${func('func every() -> void:', 'tracked("res://levels/one.txt")')}`,
+      'track.tres':
+        '[gd_resource type="Animation" format=3]\n\n[resource]\ntracks/0/type = "method"\n' +
+        'tracks/0/keys = {\n"times": PackedFloat32Array(0),\n"values": [{\n"args": ["res://anywhere"],\n"method": &"tracked"\n}]\n}\n',
+      'walk.gd':
+        'extends Node\n' +
+        func('func walk(path: String) -> String:', 'walk(path.path_join("deeper"))', reads) +
+        func('func every() -> void:', 'walk("res://levels")'),
+      'stem.gd': `class_name Stem\nextends RefCounted\n${func('func grow(path: String) -> String:', 'return path')}${func('func any(name: String) -> void:', 'grow(name)')}`,
+      'branch.gd': `class_name Branch\nextends Stem\n${func('func grow(path: String) -> String:', reads)}${func('func every() -> void:', 'grow("res://levels/one.txt")')}`,
+      'spine.gd': `extends Node\n${func('func spine_read(path: String) -> String:', reads)}${func('func every() -> void:', 'spine_read("res://levels/one.txt")')}`,
+      'spine_caller.gd': `extends Node\n${func('func any(name: String) -> void:', 'owner.Saves.spine_read(name)')}`,
+      'rib.gd': `extends Node\n${func('func rib_read(path: String) -> String:', reads)}${func('func every() -> void:', 'rib_read("res://levels/one.txt")')}`,
+      'rib_caller.gd': `extends Node\n${func('func any(name: String) -> void:', 'inherited.rib_read(name)')}`,
+      'string_named.gd': `extends Node\n${func('func sn_read(path: String) -> String:', reads)}${func('func every() -> StringName:', 'sn_read("res://levels/one.txt")', 'return &"sn_read"')}`,
+      'callable_named.gd': `extends Node\n${func('func cn_read(path: String) -> String:', reads)}${func('func every() -> Callable:', 'cn_read("res://levels/one.txt")', 'return Callable(self, "cn_read")')}`,
+      'varargs.gd': `extends Node\n${func('func v_read(path: String, ...rest: Array) -> String:', reads)}${func('func every() -> void:', 'v_read("res://levels/one.txt", 1, 2, 3)')}`,
+      'varargs_one.gd': `extends Node\n${func('func w_read(path: String, ...rest: Array) -> String:', reads)}${func('func any(name: String) -> void:', 'w_read("res://levels/one.txt", 1)', 'w_read(name)')}`,
+      'loose.gd': `extends Node\n${func('func any(name: String) -> String:', 'return FileAccess.get_file_as_string(name)')}`,
+      'by_uid.gd': 'extends Node\nconst SCENE = preload("uid://b1234")\n',
+      'tests/f_test.gd': `extends GdUnitTestSuite\n\nconst UID = preload("res://by_uid.gd")\n${func('func test_f() -> void:', 'Page.new()')}`,
+      'books/a.txt': 'a\n',
+      'levels/one.txt': 'one\n',
+    });
+    const inputs = new SuiteInputs(new ProjectScripts(project), ['1']);
+    const book = inputs.inputsOf(['res://book.gd']);
+    assert.ok(
+      !book.includes(EVERY_FILE) && book.some((path) => path.includes('res://books')),
+      `a reader whose calls can be told apart reads its folders alone: ${JSON.stringify(book)}`,
+    );
+    assert.ok(
+      !inputs.inputsOf(['res://varargs.gd']).includes(EVERY_FILE),
+      'a function taking any number of arguments after its own is reached by a call passing more',
+    );
+    for (const [script, how] of [
+      ['res://note.gd', 'through its class'],
+      ['res://leaf.gd', 'bare from a script extending it'],
+      ['res://page.gd', 'through a variable typed as its class'],
+      ['res://scroll.gd', 'through an untyped variable'],
+      ['res://entry.gd', "as a scene's method"],
+      ['res://track.gd', "by an animation's method track"],
+      ['res://walk.gd', 'by itself, with a path it works out'],
+      ['res://branch.gd', 'bare from a base it overrides'],
+      ['res://spine.gd', 'through a chain of names'],
+      ['res://rib.gd', 'through a name its caller does not declare'],
+      ['res://string_named.gd', 'as a StringName'],
+      ['res://callable_named.gd', 'by name in a Callable'],
+      ['res://varargs_one.gd', 'by a call passing only what it needs'],
+    ] as const) {
+      assert.ok(
+        inputs.inputsOf([script]).includes(EVERY_FILE),
+        `${script} is reached ${how} with any path, so it reads every file`,
+      );
+    }
+    assert.deepEqual(
+      inputs.wholeTreeReads(['res://tests/e_test.gd', 'res://tests/f_test.gd']),
+      [
+        { path: 'res://loose.gd', suites: 2, line: 5, argument: 'name' },
+        { path: 'res://by_uid.gd', suites: 1, line: 2, argument: 'preload("uid://b1234")' },
+        { path: 'res://page.gd', suites: 1, line: 6, argument: 'path' },
+      ],
+      'the report names each script a suite reaches that reads every file, an autoload for every suite',
+    );
+    assert.deepEqual(wholeTreeSaid(testOptionsOf([project, '--whole-tree'], project)), [
+      'res://loose.gd:5: name could be any path, reached by 2 of 2 suites.',
+      'res://by_uid.gd:2: preload("uid://b1234") could be any path, reached by 1 of 2 suites.',
+      'res://page.gd:6: path could be any path, reached by 1 of 2 suites.',
+    ]);
+    writeTree(clean, {
+      'project.godot': 'config_version=5\n',
+      'tests/g_test.gd': `extends GdUnitTestSuite\n${func('func test_g() -> void:', 'Book.new()')}`,
+    });
+    assert.deepEqual(wholeTreeSaid(testOptionsOf([clean, '--whole-tree'], clean)), [
+      'No script makes a suite depend on every file (1 suite checked).',
+    ]);
+  } finally {
+    sweep(project, clean);
+  }
+}
+
+/**
  * A suite's inputs are what its engine recorded, followed along what compiles with a script and what
  * a resource names, and its print moves with those and nothing else. A file read or a folder listed
  * by a literal or constant path is an input. One read by a path worked out at run time makes every
@@ -77244,6 +77399,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASuiteDeclarationCanNameAClassConstant,
   testAHiddenEditorStartsOnAnEmptyScriptReference,
   testASuitesInputsAreWhatItsEngineLoaded,
+  testAReadsCallersAreThoseThatCanReachIt,
   testAFileGoneBetweenTheListingAndTheReadIsPassedOver,
   testTheCompileCheckAndUnattributedFaultsAreJudged,
   testTheTestCommandReadsItsOwnOptions,
