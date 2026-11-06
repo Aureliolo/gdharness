@@ -116,6 +116,8 @@ export interface TestOptions {
   /** The directories suites are looked for in, as `res://` paths, or none for `tests` and `test`. */
   readonly roots: readonly string[];
   readonly changedOnly: boolean;
+  /** Name the scripts that make suites depend on every file, and run nothing. */
+  readonly wholeTree: boolean;
   readonly reachAlso: readonly string[];
   readonly importFirst: boolean;
   /** Every suite in one engine in this order: `reversed`, or shuffled by the seed. */
@@ -243,7 +245,7 @@ const VALUED = new Set([
   '--result',
   '--times',
 ]);
-const SWITCHES = new Set(['--changed-only', '--import', '--print-output', '--verbose']);
+const SWITCHES = new Set(['--changed-only', '--whole-tree', '--import', '--print-output', '--verbose']);
 
 /** [param args], everything after `test`, read into options. Relative paths are read from [param cwd]. */
 export function testOptionsOf(args: readonly string[], cwd: string): TestOptions {
@@ -291,6 +293,7 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     cores: coresNamed(last('--cores')),
     roots: (valued.get('--tests') ?? []).map((root) => resPathOf(root, projectPath, cwd).replace(/\/$/, '')),
     changedOnly: switches.has('--changed-only'),
+    wholeTree: switches.has('--whole-tree'),
     reachAlso: (valued.get('--reach-also') ?? []).map((path) => resolve(projectPath, path)),
     importFirst: switches.has('--import'),
     order: order === undefined ? null : order === 'reversed' ? 'reversed' : seedOf(order),
@@ -473,6 +476,24 @@ interface Launch extends EngineLaunch {
   readonly godotVersion: string | null;
   readonly verbose: boolean;
   readonly failsOnPushErrors: boolean;
+}
+
+/**
+ * What `--whole-tree` prints: each script whose reads make the suites reaching it depend on every
+ * file, with its first read by a path that could be anything and how many of the suites asked for
+ * reach it from their own code and the autoloads.
+ */
+export function wholeTreeSaid(options: TestOptions): string[] {
+  const scripts = new ProjectScripts(options.projectPath);
+  const suites = selectedSuites(scripts, options).map((suite) => suite.path);
+  const reads = new SuiteInputs(scripts, []).wholeTreeReads(suites);
+  if (reads.length === 0) {
+    return [`No script makes a suite depend on every file (${plural(suites.length, 'suite')} checked).`];
+  }
+  return reads.map(
+    (read) =>
+      `${read.path}:${String(read.line)}: ${read.argument} could be any path, reached by ${String(read.suites)} of ${plural(suites.length, 'suite')}.`,
+  );
 }
 
 /** Runs the suites [param options] asks for with the engine at [param godotPath]. Answers the exit code. */
