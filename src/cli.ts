@@ -64,7 +64,7 @@ import {
 } from './setup.js';
 import { everySkillDirectory, removeSkill, skillDirectories, writeSkill } from './skill.js';
 import { runSpreadCommand, spreadOptionsOf } from './spread-run.js';
-import { runTestCommand, testOptionsOf } from './suite-run.js';
+import { runTestCommand, testOptionsOf, wholeTreeSaid } from './suite-run.js';
 import { getLocalVersion } from './version.js';
 import { prepareWholeExits } from './whole-exit.js';
 
@@ -887,7 +887,7 @@ Usage:
   gdharness classes [project]        Rebuild .godot/global_script_class_cache.cfg from disk
   gdharness test [project] [suite ...] [--engines N] [--slots DIR] [--slot-count N]
                  [--silence S] [--deadline S] [--tests DIR] [--changed-only] [--reach-also PATH]
-                 [--import] [--godot PATH] [--godot-version V] [--cores N]
+                 [--whole-tree] [--import] [--godot PATH] [--godot-version V] [--cores N]
                  [--order reversed|SEED] [--print-output] [--verbose] [--result FILE]
                  [--times FILE] [--runner]
                                      Run the project's gdUnit4 suites over several engines and
@@ -896,7 +896,9 @@ Usage:
                                      or a leak at exit. A suite is a script, a directory, or
                                      script.gd:test_case for one case. --changed-only leaves out
                                      suites that passed on exactly the files their engine loaded,
-                                     all unchanged, and still compiles every script. --print-output
+                                     all unchanged, and still compiles every script. --whole-tree
+                                     names each script that makes suites depend on every file,
+                                     with the line, and runs nothing. --print-output
                                      prints what every engine printed, for a
                                      benchmark run by hand. --verbose starts every engine verbose,
                                      so a leak at exit is named. --result writes the outcome, each
@@ -958,6 +960,12 @@ async function test(): Promise<void> {
     return;
   }
   const options = testOptionsOf(rest, process.cwd());
+  if (options.wholeTree) {
+    for (const line of wholeTreeSaid(options)) {
+      console.log(line);
+    }
+    return;
+  }
   const godotPath = options.godotPath ?? (await engine(options.projectPath)).godotPath;
   process.exitCode = await runTestCommand(options, godotPath);
 }

@@ -57,6 +57,8 @@ when the command line itself is wrong.
   cleanly on the same files last time.
 - `--reach-also PATH`: a file every suite depends on, for `--changed-only`. May be given more than
   once.
+- `--whole-tree`: run nothing, and print each script that makes suites depend on every file, as
+  `path:line: argument`. Each line says how many suites reach it from their code and the autoloads.
 - `--times FILE`: deal the suites by the times in `FILE` and record what they took into it, in
   place of `.godot/gdharness/suite-times.json`. A missing file deals as no times would.
 
@@ -558,10 +560,19 @@ comes, goes or is renamed.
 ### Paths held in names
 
 A path can come through a name. A local set once and never again holds what it was set to. A
-parameter holds what every call in the project passes it, or its default. A function also named
-without a call, such as one handed on as a `Callable` or called by name, could be passed anything.
-So could a name a lambda in the function takes, or a `match` binds again. The trail is followed four
-names deep.
+parameter holds what every call that can reach its function passes it, or its default. The trail is
+followed through any number of functions.
+
+### Calls that reach a function
+
+A call can reach a function from the function's own script, its bases and the scripts extending
+it. From any script, it can come through a class, an autoload, a preloaded script, or a variable
+typed as one of those. A call through an untyped variable or an expression could be to any
+object, unless it passes an argument count the function cannot take.
+
+A function also named without a call could be passed anything. That covers one handed on as a
+`Callable`, called by name through `call()`, or named as a scene's method. So could a name a lambda
+in the function takes, or a `match` binds again.
 
 ### Inputs of every suite
 
