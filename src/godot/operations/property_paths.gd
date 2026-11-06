@@ -229,6 +229,53 @@ static func grow(target: Object, name: String, called: String) -> String:
 	return ""
 
 
+## Makes the entry [param name] numbers on the resource [param target] by setting it, as loading
+## its file does, and answers "" (also when the engine makes nothing), or why not. AudioBusLayout
+## lists bus/1/name only once bus 1 exists, and makes it when bus/1/name is set. The set is tried
+## on a copy first, since setting bus/3/name on a layout with one bus also makes buses 1 and 2.
+static func made_by_setting(target: Object, name: String) -> String:
+	var steps: PackedStringArray = name.split("/")
+	var numbered: Array[int] = []
+	for depth: int in steps.size() - 1:
+		if steps[depth].is_valid_int() and steps[depth].to_int() >= 0:
+			numbered.append(depth)
+	if numbered.is_empty() or not target is Resource:
+		return ""
+	var trial: Resource = (target as Resource).duplicate()
+	var before: Dictionary[String, bool] = _listed(trial)
+	trial.set(name, null)
+	if declared_on(trial, name).is_empty():
+		return ""
+	var others: Array[String] = []
+	for listed: String in _listed(trial):
+		if before.has(listed):
+			continue
+		var parts: PackedStringArray = listed.split("/")
+		for depth: int in numbered:
+			if parts.size() <= depth or parts.slice(0, depth) != steps.slice(0, depth):
+				break
+			if parts[depth] != steps[depth]:
+				var owner: String = "/".join(parts.slice(0, depth + 1))
+				if owner not in others:
+					others.append(owner)
+				break
+	if not others.is_empty():
+		others.sort_custom(func(a: String, b: String) -> bool: return a.naturalnocasecmp_to(b) < 0)
+		return (
+			"Setting %s would also make %s, which nothing was given for: write %s first."
+			% [name, ", ".join(others), others[0]]
+		)
+	target.set(name, null)
+	return ""
+
+
+static func _listed(target: Object) -> Dictionary[String, bool]:
+	var names: Dictionary[String, bool] = {}
+	for declared: Dictionary in target.get_property_list():
+		names[str(declared.get("name", ""))] = true
+	return names
+
+
 ## Whether [param target] declares a list whose elements' properties start with [param prefix],
 ## as TileSet declares physics_layers for physics_layer_0/collision_layer.
 static func _listed_array(target: Object, prefix: String) -> bool:
