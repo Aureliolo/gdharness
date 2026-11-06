@@ -195,6 +195,11 @@ func _add_track(
 			return _not_added("track.method is required for method track")
 		for index: int in keyframes.size():
 			var keyframe: Dictionary = keyframes[index]
+			if keyframe.has("transition"):
+				return _not_added(
+					"keyframes[%d].transition is for property tracks. A method key is not eased."
+					% index
+				)
 			var given: Variant = keyframe.get("args", [])
 			if not given is Array:
 				return _not_added("keyframes[%d].args must be a list." % index)
@@ -271,7 +276,9 @@ func _add_track(
 		anim.track_set_interpolation_loop_wrap(track_idx, GdhRead.as_bool(track["loopWrap"]))
 	for index: int in keyframes.size():
 		var keyframe: Dictionary = keyframes[index]
-		if anim.track_insert_key(track_idx, GdhRead.as_float(keyframe["time"]), keys[index]) < 0:
+		var eased: float = GdhRead.as_float(keyframe.get("transition", 1.0))
+		var time: float = GdhRead.as_float(keyframe["time"])
+		if anim.track_insert_key(track_idx, time, keys[index], eased) < 0:
 			return _not_added("Keyframe %d could not be inserted." % index)
 	return [track_idx, "", method_found, existing, misfit, replaced]
 

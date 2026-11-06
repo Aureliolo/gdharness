@@ -312,6 +312,11 @@ const ANIMATION_TRACK: JsonSchema = {
         properties: {
           time: { type: 'number', description: 'Seconds from the start.' },
           value: { description: 'For property tracks: the value at this time.' },
+          transition: {
+            type: 'number',
+            description:
+              "For property tracks: the easing from this key to the next, the editor's Easing, read as Godot's ease() reads its curve: 1 is linear and 0 holds the value. Default 1. A read names it only when it is not 1.",
+          },
           args: { type: 'array', description: 'For method tracks: the arguments to call with.' },
         },
         required: ['time'],
