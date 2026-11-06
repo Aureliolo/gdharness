@@ -69219,8 +69219,8 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
  * tool initialises through a function, which the file does not set.
  *
  * The engine reports no default for it, so a headless pack writes what the initializer gave. That
- * read as a change the scene's scripts had made, and every scene holding such a node was refused.
- * The editor runs a stand-in for the script holding no value for it, and writes no line.
+ * read as a change the scene's scripts had made, and every scene holding such a node was refused,
+ * as was a root made with such a script or given one. The editor runs a stand-in for the script holding no value for it, and writes no line.
  */
 async function testAHeadlessWriteLeavesOutWhatAnEditorWould(): Promise<void> {
   const godotPath = process.env['GODOT_PATH'];
@@ -69266,6 +69266,8 @@ async function testAHeadlessWriteLeavesOutWhatAnEditorWould(): Promise<void> {
       '[sub_resource type="Resource" id="Resource_paced"]\nscript = ExtResource("2_paced")\nhp = 3\n\n' +
       '[node name="Keeps" type="Node"]\nscript = ExtResource("1_keeps")\npace = SubResource("Resource_paced")\n\n' +
       '[node name="Other" type="Node2D" parent="."]\n',
+    'room.gd': `extends Node2D\n\n@export var hp: int = 3\n${delayed}`,
+    'bare.tscn': '[gd_scene format=3]\n\n[node name="Bare" type="Node2D"]\n',
   };
   for (const [path, content] of Object.entries(files)) {
     writeFileSync(join(project, path), content);
@@ -69374,6 +69376,31 @@ async function testAHeadlessWriteLeavesOutWhatAnEditorWould(): Promise<void> {
       ['script = ExtResource', 'hp = 3'],
       'nor in a resource built into the scene',
     );
+
+    await written('scene_create', {
+      op: 'create',
+      scenePath: 'room.tscn',
+      rootNodeType: 'Node2D',
+      rootNodeName: 'Room',
+      script: 'res://room.gd',
+    });
+    assert.deepEqual(sets('room.tscn', '[node name="Room"'), ['script = ExtResource'], 'nor on a new root');
+    const attach = { op: 'set', scenePath: 'bare.tscn', nodePath: '.' };
+    await written('scene_node', {
+      ...attach,
+      properties: { script: { _type: 'Resource', path: 'res://room.gd' } },
+    });
+    assert.deepEqual(
+      sets('bare.tscn', '[node name="Bare"'),
+      ['script = ExtResource'],
+      'nor on a script attached',
+    );
+    await written('scene_node', { ...attach, properties: { hp: 7, delay: 0.25 } });
+    assert.deepEqual(sets('bare.tscn', '[node name="Bare"'), [
+      'script = ExtResource',
+      'hp = 7',
+      'delay = 0.25',
+    ]);
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });
