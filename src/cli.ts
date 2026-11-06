@@ -60,6 +60,7 @@ import {
   setRuntime,
   shippedListedRunner,
   shippedOperationsScript,
+  worktreeAddonVersion,
 } from './setup.js';
 import { everySkillDirectory, removeSkill, skillDirectories, writeSkill } from './skill.js';
 import { runSpreadCommand, spreadOptionsOf } from './spread-run.js';
@@ -673,8 +674,8 @@ async function upgrade(): Promise<void> {
   // Named rather than upgraded: a worktree pins its own version in its own config and can be on a
   // branch that wants the one it has, so the upgrade is the caller's to run there.
   const trailing = worktreeCheckoutsOf(projectPath).flatMap((path) => {
-    const addon = inspectProject(path).addons.find((one) => one.installed);
-    return addon === undefined || addon.version === version ? [] : [{ path, version: addon.version }];
+    const held = worktreeAddonVersion(path);
+    return held === undefined || held === version ? [] : [{ path, version: held }];
   });
   if (trailing.length > 0) {
     console.log(

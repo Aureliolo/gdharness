@@ -195,10 +195,11 @@ func _create_of_a_class(args: Dictionary) -> Dictionary:
 
 	if not script_path.is_empty():
 		var full_script_path: String = GdhSceneFile.res_path(project_path, script_path)
-		var script: Script = load(full_script_path) as Script
-		if script == null:
+		var found: Variant = GdhSceneFile.script_at(full_script_path)
+		if found is String:
 			root.free()
-			return { "ok": false, "error": "No script loads from " + full_script_path }
+			return { "ok": false, "error": found }
+		var script: Script = found
 		var uncompiled: String = GdhSceneFile.uncompiled(script, full_script_path)
 		if not uncompiled.is_empty():
 			root.free()
