@@ -418,8 +418,16 @@ static func declared_classes() -> Dictionary:
 		var path: String = str(entry.get("path", ""))
 		if FileAccess.file_exists(path):
 			declared[str(entry.get("class", ""))] = path
+	# Only lines naming class_name go through the patterns. Every line of a game's two thousand
+	# scripts did, which took an engine ten minutes on a busy machine before add_autoload could
+	# start.
 	for path: String in GdhFileWalk.new().find_files("res://", ".gd"):
-		for line: String in FileAccess.get_file_as_string(path).split("\n"):
+		var source: String = FileAccess.get_file_as_string(path)
+		if not source.contains("class_name"):
+			continue
+		for line: String in source.split("\n"):
+			if not line.contains("class_name"):
+				continue
 			var found: RegExMatch = GdhPatterns.declared_class(
 				GdhPatterns.without_annotations(line)
 			)

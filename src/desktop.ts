@@ -257,6 +257,8 @@ public static class GdharnessDesktop {
     if (noActivate) {
       LockSetForegroundWindow(LockForeground);
     }
+    IntPtr job = IntPtr.Zero;
+    JobLimits limits = new JobLimits();
     try {
     Step(stepFile, "starting the process");
     bool suspended = affinity != 0 || endsWithThis;
@@ -275,8 +277,7 @@ public static class GdharnessDesktop {
     if (endsWithThis) {
       Step(stepFile, "tying the process to this helper");
       // The handle is never closed here: Windows closes it as this process goes, which ends the job.
-      IntPtr job = CreateJobObjectW(IntPtr.Zero, null);
-      JobLimits limits = new JobLimits();
+      job = CreateJobObjectW(IntPtr.Zero, null);
       limits.flags = KillOnJobClose;
       if (job == IntPtr.Zero
           || !SetInformationJobObject(job, ExtendedLimitInformation, ref limits, Marshal.SizeOf(typeof(JobLimits)))
@@ -308,6 +309,12 @@ public static class GdharnessDesktop {
           stopped = true;
         }
       }
+    }
+    // The process has ended, so what it started is let run on, as without the job: only a helper
+    // that was ended itself takes them with it.
+    if (job != IntPtr.Zero) {
+      limits.flags = 0;
+      SetInformationJobObject(job, ExtendedLimitInformation, ref limits, Marshal.SizeOf(typeof(JobLimits)));
     }
     uint code;
     GetExitCodeProcess(started.process, out code);

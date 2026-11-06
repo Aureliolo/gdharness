@@ -33,7 +33,7 @@ import {
   throughHelper,
 } from './desktop.js';
 import { nameSlotEngineOf, onTheSlot } from './engine-slots.js';
-import { nowSeconds, type Past, type Sample, Spent, STARVED, sampled, watching } from './engine-spent.js';
+import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
 import { errorCode, Refusal } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
 import { LOG_LIMIT_BYTES, readLog } from './log-read.js';
@@ -61,20 +61,6 @@ const WINDOWS_EXCEPTION = 0xc0000000;
 const MEMORY_KEPT = 4 * 1024 ** 3;
 const MEMORY_PER_ENGINE = 1.5 * 1024 ** 3;
 const LOOK_MS = 500;
-
-/**
- * How [param spent] came past its limit at [param at], said only when other work crowded the
- * machine, since the plain seconds are then not the clock's.
- */
-export function countedBy(spent: Spent, past: Past, at: number): string {
-  const clock = Math.round(spent.clock(at));
-  if (past === 'clock') {
-    return `, ${String(STARVED)} times over on the clock (${String(clock)} s), the machine kept busy by other work`;
-  }
-  return spent.byWork === 0
-    ? ''
-    : ` of its own, counted by its processor time while other work kept the machine busy (${String(clock)} s on the clock)`;
-}
 
 /** How long Windows is given to say how much it can still commit, on a machine the run may load. */
 const COMMIT_ASK_MS = 15_000;
@@ -376,9 +362,9 @@ export function endingWithRunner(
   command: string,
   args: readonly string[],
   platform: NodeJS.Platform = process.platform,
-  setpriv: string | undefined = SETPRIV_PATHS.find((path) => existsSync(path)),
+  setpriv: string | null = SETPRIV_PATHS.find((path) => existsSync(path)) ?? null,
 ): { command: string; args: string[] } {
-  return platform !== 'linux' || setpriv === undefined
+  return platform !== 'linux' || setpriv === null
     ? { command, args: [...args] }
     : { command: setpriv, args: ['--pdeathsig', 'KILL', '--', command, ...args] };
 }

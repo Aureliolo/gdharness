@@ -105,7 +105,6 @@ import {
 } from '../src/editor-log.js';
 import { editorQuitRequestPath, inTurnToOpen } from '../src/editor-open.js';
 import {
-  countedBy,
   EngineUsageError,
   endingWithRunner,
   heldRunSaid,
@@ -173,7 +172,15 @@ import {
   UNWRITTEN_MS,
   WAITING_FOLDER,
 } from '../src/engine-slots.js';
-import { crowded, nowSeconds, processorSecondsOf, type Sample, Spent, STARVED } from '../src/engine-spent.js';
+import {
+  countedBy,
+  crowded,
+  nowSeconds,
+  processorSecondsOf,
+  type Sample,
+  Spent,
+  STARVED,
+} from '../src/engine-spent.js';
 import { Refusal } from '../src/errors.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
@@ -9239,7 +9246,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     );
     assert.match(
       await call('editor_run', { op: 'start', projectPath: '/p', frames: 3 }),
-      /start takes: projectPath, scene, suites, args, engineArgs, headless, visible, silent, executable, savesIn, env, runtimeWaitMs/,
+      /start takes: projectPath, scene, suites, args, engineArgs, headless, visible, silent, executable, godot, savesIn, env, runtimeWaitMs/,
       'and the refusal says what start takes instead',
     );
     assert.match(
@@ -31829,7 +31836,14 @@ async function testAnOperationThatNeverAnswersIsEnded(): Promise<void> {
   try {
     const began = Date.now();
     const outcome = await runOperation(
-      { godotPath, script, debug: false, ceiling: { ms: 3_000, said: 'three seconds' } },
+      // A quiet machine, where the ceiling is the clock's.
+      {
+        godotPath,
+        script,
+        debug: false,
+        ceiling: { ms: 3_000, said: 'three seconds' },
+        sample: () => Promise.resolve({ at: nowSeconds(), machine: 0, processors: null }),
+      },
       'get_dependencies',
       { resource_path: 'res://project.godot' },
       project,
@@ -31847,6 +31861,48 @@ async function testAnOperationThatNeverAnswersIsEnded(): Promise<void> {
 }
 
 /**
+ * An engine's ceiling counts its own processor time while other work crowds the machine, up to
+ * eight times the ceiling on the clock. A gate's add_autoload, at below normal priority on a machine
+ * 94% busy, was ended at ten minutes while it worked. The machine is read through a stand-in here.
+ */
+async function testAnEngineCeilingCountsItsOwnTimeOnACrowdedMachine(): Promise<void> {
+  class NoneUsed extends Map<number, number> {
+    override get(): number {
+      return 0;
+    }
+  }
+  const quiet = (): Promise<Sample> => Promise.resolve({ at: nowSeconds(), machine: 0, processors: null });
+  const crowdedMachine = (): Promise<Sample> => {
+    const at = nowSeconds();
+    return Promise.resolve({ at, machine: at * availableParallelism(), processors: new NoneUsed() });
+  };
+  const timed = async (
+    sample: () => Promise<Sample>,
+    sleepMs: number,
+  ): Promise<{ ran: Awaited<ReturnType<typeof runEngine>>; took: number }> => {
+    const began = Date.now();
+    const ran = await runEngine(process.execPath, ['-e', `setTimeout(() => {}, ${String(sleepMs)})`], {
+      timeout: { ms: 1000, said: 'second' },
+      sample,
+    });
+    return { ran, took: Date.now() - began };
+  };
+  const onQuiet = await timed(quiet, 6000);
+  assert.equal(onQuiet.ran.failure, 'it ran past its second', howItEnded(onQuiet.ran));
+  assert.ok(onQuiet.took < 5000, `ended near its second: ${String(onQuiet.took)} ms`);
+  const starved = await timed(crowdedMachine, 4000);
+  assert.equal(starved.ran.failure, null, `a starved engine runs on to its end: ${howItEnded(starved.ran)}`);
+  assert.equal(starved.ran.exitCode, 0, howItEnded(starved.ran));
+  const stuck = await timed(crowdedMachine, 60_000);
+  assert.match(
+    stuck.ran.failure ?? '',
+    /^it ran past its second, 8 times over on the clock \(\d+ s\), the machine kept busy by other work$/,
+    howItEnded(stuck.ran),
+  );
+  assert.ok(stuck.took < 20_000, `and one that never ends is ended on the clock: ${String(stuck.took)} ms`);
+}
+
+/**
  * An engine run says how it ended, and a run that talks a lot is not ended for it.
  *
  * A timeout kills with a signal and leaves no code, and a program that never started has none
@@ -31859,7 +31915,11 @@ async function testAnEngineRunSaysHowItEnded(): Promise<void> {
   const node = (script: string, options?: Parameters<typeof runEngine>[2]): Promise<EngineRun> =>
     runEngine(process.execPath, ['-e', script], options);
 
-  const late = await node('setTimeout(() => {}, 20000)', { timeout: { ms: 300, said: 'a moment' } });
+  // On a quiet machine, so the words are the clock's whatever else runs beside it.
+  const late = await node('setTimeout(() => {}, 20000)', {
+    timeout: { ms: 300, said: 'a moment' },
+    sample: () => Promise.resolve({ at: nowSeconds(), machine: 0, processors: null }),
+  });
   assert.deepEqual(
     [late.exitCode, late.exitSignal, late.failure, howItEnded(late)],
     [null, 'SIGTERM', 'it ran past its a moment', 'ended by SIGTERM, because it ran past its a moment'],
@@ -33572,8 +33632,8 @@ async function testARunGivenEngineFlagsIsStartedHere(): Promise<void> {
         /takes engineArgs as array, not a string/,
         malformed.said,
       );
-      // Another engine is the editor's own engine here, which still plays only on itself.
-      const onAnother = await run({ godot: resolveGodotPath() });
+      // Another engine is the server's own stand-in here, and the editor still plays only on its own.
+      const onAnother = await run({ godot: process.execPath });
       assert.equal(get(onAnother.answer, 'through'), 'gdharness', onAnother.said);
       assert.match(
         text(get(onAnother.answer, 'message')),
@@ -53979,7 +54039,7 @@ async function testAnEngineEndsWithTheRunnerThatStartedIt(): Promise<void> {
     command: '/usr/bin/setpriv',
     args: ['--pdeathsig', 'KILL', '--', 'godot', '--headless'],
   });
-  assert.deepEqual(endingWithRunner('godot', [], 'linux', undefined), { command: 'godot', args: [] });
+  assert.deepEqual(endingWithRunner('godot', [], 'linux', null), { command: 'godot', args: [] });
   assert.deepEqual(endingWithRunner('godot', [], 'darwin', '/usr/bin/setpriv'), {
     command: 'godot',
     args: [],
@@ -76609,6 +76669,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStoppedRunIsStillTheOneAnswered,
   testAStoppedSpawnedRunGivesWayToAPlay,
   testAKilledRunHasNoExitCode,
+  testAnEngineCeilingCountsItsOwnTimeOnACrowdedMachine,
   testAnEngineRunSaysHowItEnded,
   testAnEngineThatCrashesAsItStartsIsStartedAgain,
   testAnOperationThatNeverAnswersIsEnded,
