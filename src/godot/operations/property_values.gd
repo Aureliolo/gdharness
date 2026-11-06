@@ -335,7 +335,7 @@ func write_all(target: Object, properties: Dictionary) -> String:
 	for property: String in given:
 		if (
 			written_at[property] < writes
-			and not GdhSame.same(read_at(target, property), given[property])
+			and not GdhSame.same(read_at(target, property), _as_held(target, property, given))
 		):
 			_write(target, property, given[property])
 			writes += 1
@@ -343,7 +343,7 @@ func write_all(target: Object, properties: Dictionary) -> String:
 			_note_undone(target, property, given, undone_by)
 	for property: String in given:
 		var held: Variant = read_at(target, property)
-		if not GdhSame.same(held, given[property]):
+		if not GdhSame.same(held, _as_held(target, property, given)):
 			unheld = property
 			if undone_by.has(property):
 				return (
@@ -384,8 +384,35 @@ func _note_undone(
 	target: Object, written: String, given: Dictionary, undone_by: Dictionary[String, String]
 ) -> void:
 	for other: String in given:
-		if other != written and not GdhSame.same(read_at(target, other), given[other]):
+		var held: Variant = read_at(target, other)
+		if other != written and not GdhSame.same(held, _as_held(target, other, given)):
 			undone_by[other] = written
+
+
+## What [param target] holds once [param property] of [param given] is set, where the engine
+## rewrites the value without changing it. SpriteFrames hands its animations back sorted by name,
+## with loop as 0 or 1, and saves them that way, so a write of two read as one it changed.
+static func _as_held(target: Object, property: String, given: Dictionary) -> Variant:
+	var value: Variant = given[property]
+	if not (target is SpriteFrames and property == "animations" and value is Array):
+		return value
+	var original: Array = value
+	var listed: Array = original.duplicate(true)
+	for entry: Variant in listed:
+		if not entry is Dictionary:
+			return value
+		var animation: Dictionary = entry
+		var loops: Variant = animation.get("loop")
+		if loops is bool:
+			var looping: bool = loops
+			animation["loop"] = 1 if looping else 0
+	listed.sort_custom(
+		func(
+			a: Dictionary,
+			b: Dictionary,
+		) -> bool: return str(a.get("name", "")) < str(b.get("name", ""))
+	)
+	return listed
 
 
 ## Why [param name] cannot be written on [param control], or "" once it can. A container places and
@@ -859,6 +886,23 @@ func _resource_at(path: String, property: String) -> Array:
 				% [path, path.get_slice("::", 0), property]
 			),
 		]
+	# A file imported as Keep File or Skip has an import file and no resource, so it read as one the
+	# engine could not find.
+	var sidecar: ConfigFile = ConfigFile.new()
+	if path.begins_with("res://") and sidecar.load(path + ".import") == OK:
+		var importer: String = str(sidecar.get_value("remap", "importer", ""))
+		if importer in ["keep", "skip"]:
+			return [
+				false,
+				(
+					(
+						"%s is imported with importer %s, which makes no resource of it for %s. "
+						+ "Set importer in %s.import to the one wanted, such as texture for an "
+						+ "image, then project_import reimport with resourcePath %s imports it."
+					)
+					% [path, importer, property, path, path]
+				),
+			]
 	if not ResourceLoader.exists(path):
 		# An image or a sound nobody has imported is a file the engine has no loader for, and "No
 		# resource at" sent a caller looking for a file that was there.

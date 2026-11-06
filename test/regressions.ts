@@ -75462,6 +75462,58 @@ async function testAThemeAndATilesetWithNoEditor(): Promise<void> {
       assert.match(layout, line, layout);
     }
     assert.doesNotMatch(layout, /bus\/2\//, `the refused write made no bus 2: ${layout}`);
+
+    // SpriteFrames hands its animations back sorted by name with loop as a number, which read as a
+    // write the engine had changed.
+    const frames = { resourcePath: 'res://frames.tres', op: 'modify' };
+    await call('resource_edit', { ...frames, op: 'create', resourceType: 'SpriteFrames' });
+    const animated =
+      textOf(
+        await call('resource_edit', {
+          ...frames,
+          properties: {
+            animations: [
+              {
+                name: 'rest',
+                speed: 8,
+                loop: true,
+                frames: [{ texture: { _type: 'Resource', path: 'res://late.png' }, duration: 1 }],
+              },
+              { name: 'idle', speed: 5, loop: false, frames: [] },
+            ],
+          },
+        }),
+      ) ?? '';
+    assert.match(animated, /^\{/, animated);
+    assert.match(
+      fileOf('frames.tres'),
+      /"loop": 0,\n"name": &"idle",[\s\S]*"texture": ExtResource\("[^"]+"\)[\s\S]*"loop": 1,\n"name": &"rest",/,
+      fileOf('frames.tres'),
+    );
+    // A picture imported as Keep File has an import file and no resource to load.
+    writeFileSync(join(project, 'kept.png'), solidPng(4, 4, 4));
+    writeFileSync(join(project, 'kept.png.import'), '[remap]\n\nimporter="keep"\n');
+    const kept =
+      textOf(
+        await call('resource_edit', {
+          ...frames,
+          properties: {
+            animations: [
+              {
+                name: 'rest',
+                speed: 8,
+                loop: true,
+                frames: [{ texture: { _type: 'Resource', path: 'res://kept.png' } }],
+              },
+            ],
+          },
+        }),
+      ) ?? '';
+    assert.match(
+      kept,
+      /res:\/\/kept\.png is imported with importer keep, which makes no resource of it for the value\. Set importer in res:\/\/kept\.png\.import to the one wanted, such as texture for an image, then project_import reimport with resourcePath res:\/\/kept\.png imports it\./,
+      kept,
+    );
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });
