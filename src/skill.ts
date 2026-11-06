@@ -13,6 +13,7 @@
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import type { Harness } from './harnesses.js';
+import { IDLE_CLOSE_MINUTES, IDLE_CLOSE_SETTING } from './idle-close.js';
 import {
   BIND_ADDRESS_SETTING,
   PORT_SETTING,
@@ -172,6 +173,10 @@ the editor when one serves the project, so the files keep their formatting, and 
 otherwise. The headless engine runs the scene's scripts, so the answer puts back what they
 changed. It refuses a file where it cannot, such as a scene whose script does not compile. For
 those, open the editor (\`editor_launch\` with \`hidden: true\`) and ask again.
+
+A hidden editor quits after ${String(IDLE_CLOSE_MINUTES)} minutes with no call, and the next call
+that needs it opens it again. Set \`${IDLE_CLOSE_SETTING}\` in \`project.godot\` to change the
+minutes, or to 0 to keep it open.
 
 \`script_info\` comes from the editor's own language server, and so does
 \`script_diagnostics\` when this project's editor is open. Without it a headless engine compiles the

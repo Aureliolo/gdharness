@@ -312,7 +312,10 @@ export function editorArguments(
   ];
 }
 
-/** What a hidden editor with a window carries on its command line, after `--`. */
+/**
+ * What a hidden editor with a window carries on its command line, after `--`. Kept in step with
+ * `HIDDEN_MARK` in the editor addon's bridge_client.gd.
+ */
 const HIDDEN_EDITOR_MARK = '--gdharness-hidden';
 
 /**
