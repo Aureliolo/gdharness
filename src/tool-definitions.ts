@@ -466,7 +466,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Project info',
     effect: 'read',
     description:
-      'What a project is: its name and main scene from project.godot, the Godot that answers, and how many scenes, scripts and assets (images, fonts, sound, models, video and shaders) it holds, other counting every remaining file, leaving out the .import and .uid files the engine writes beside others, the addons gdharness installed and any folder holding a .gdignore, with optional sections on top.',
+      'What a project is: its name and main scene from project.godot, the Godot that answers, and how many scenes, scripts and assets (images, fonts, sound, models, video and shaders) it holds, other counting every remaining file. No count includes the .import and .uid files the engine writes beside others, the addons gdharness installed, or any file in a folder holding a .gdignore. Optional sections go on top.',
     parameters: {
       projectPath: PROJECT_PATH,
       include: {
