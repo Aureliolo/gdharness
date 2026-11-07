@@ -59,7 +59,7 @@ Rules are written out rather than inherited from a preset, so each file says wha
 turned off quietly. A rule that fires on good code is an argument about the rule. That argument goes
 next to the suppression, with what adopting the rule would cost.
 
-`gdstyle.toml` is copied byte for byte from the owner's game projects, where a change to it is made
+`gdstyle.toml` holds the settings of the owner's game projects, where a change to them is made
 first.
 
 ## Required checks

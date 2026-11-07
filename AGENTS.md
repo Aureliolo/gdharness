@@ -2,16 +2,16 @@
 
 ## Commands
 
-| Command                                                   | What it does                                                                                                                                                    |
-| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bun run build`                                           | Bundles into `build/` without typechecking. `ci`, `test:metadata`, `test:packaging` and `test:node-runtime` run it first. `test:ci` and the regressions do not. |
-| `bun run typecheck`                                       | `tsc --noEmit`.                                                                                                                                                 |
-| `bun run ci`                                              | Build, typecheck, `format:check`, `lint` and `test:ci`, in that order.                                                                                          |
-| `bun run lint`                                            | Biome, types, dead code and markdownlint.                                                                                                                       |
-| `bun run format:check`                                    | Biome and Prettier.                                                                                                                                             |
-| `bun run lint:gd`, `bun run format:gd:check`              | The pinned gdstyle with the lane's `gdstyle.toml`, on every script under `src/godot` and `test/support/gd`.                                                     |
-| `uv run yamllint --strict .`                              | The `yaml` job.                                                                                                                                                 |
-| `bun run format`, `bun run lint:fix`, `bun run format:gd` | Write the fixes.                                                                                                                                                |
+| Command                                                   | What it does                                                                                                                               |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bun run build`                                           | Bundles into `build/` without typechecking. `ci`, `test:metadata` and `test:packaging` run it first. `test:ci` and the regressions do not. |
+| `bun run typecheck`                                       | `tsc --noEmit`.                                                                                                                            |
+| `bun run ci`                                              | Build, typecheck, `format:check`, `lint` and `test:ci`, in that order.                                                                     |
+| `bun run lint`                                            | Biome, types, dead code and markdownlint.                                                                                                  |
+| `bun run format:check`                                    | Biome and Prettier.                                                                                                                        |
+| `bun run lint:gd`, `bun run format:gd:check`              | The pinned gdstyle with `gdstyle.toml`, on every script under `src/godot` and `test/support/gd`.                                           |
+| `uv run yamllint --strict .`                              | The `yaml` job.                                                                                                                            |
+| `bun run format`, `bun run lint:fix`, `bun run format:gd` | Write the fixes.                                                                                                                           |
 
 ## Test commands
 
@@ -29,8 +29,8 @@
 Set up with `bun install`, `bun scripts/install-gdstyle.ts` and `uv sync --locked`. The second puts
 the pinned gdstyle in `tools` under gdharness's cache folder, beside the engine slots, where the
 GDScript gates look for it. The third puts the pinned yamllint in `.venv`. `uv run` takes that copy
-before any on `PATH`. `gdstyle.toml` is copied byte for byte from the lane, where a change to it is
-made first.
+before any on `PATH`. `gdstyle.toml` holds the settings of the owner's game projects, where a change
+to them is made first. Its comments are written for this public repository.
 
 ## Engines and fixtures
 
