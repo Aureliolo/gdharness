@@ -357,9 +357,10 @@ runtime under it is listening.
 ### Exports
 
 A release export leaves gdharness out while the editor addon is enabled. The autoload entry is
-taken out of the exported settings. The `gdharness/` folder, the runtime and the editor addons are
-not exported, so no player's build carries them and `/root/GdharnessRuntime` is not there. Game
-code that ships reaches it only by path, as with `get_node_or_null`.
+taken out of the exported settings. The `gdharness/` folder and the runtime, editor, test and
+`auto_reload` addons are not exported, so no player's build carries them and
+`/root/GdharnessRuntime` is not there. Game code that ships reaches it only by path, as with
+`get_node_or_null`, and cannot use the test helpers' classes, such as `GdhWait`.
 
 A debug export keeps all of it and leaves `project.godot` as it was. The loader's own top-level
 folder, `gdharness/`, goes into a debug export. A check that refuses unexpected top-level folders in

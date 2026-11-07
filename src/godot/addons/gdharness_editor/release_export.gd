@@ -11,6 +11,7 @@ const LEFT_OUT: Array[String] = [
 	"res://gdharness/",
 	"res://addons/gdharness_runtime/",
 	"res://addons/gdharness_editor/",
+	"res://addons/gdharness_tests/",
 	"res://addons/auto_reload/",
 ]
 

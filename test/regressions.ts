@@ -2794,6 +2794,7 @@ function testAReleaseExportLeavesGdharnessOut(): void {
         '\t\t"loader": ResourceLoader.exists("res://gdharness/loader.gd"),',
         '\t\t"runtime": ResourceLoader.exists("res://addons/gdharness_runtime/runtime_autoload.gd"),',
         '\t\t"editor": ResourceLoader.exists("res://addons/gdharness_editor/plugin.gd"),',
+        '\t\t"tests": ResourceLoader.exists("res://addons/gdharness_tests/wait.gd"),',
         '\t\t"own": ResourceLoader.exists("res://first.gd"),',
         '\t\t"autoloads": [',
         '\t\t\tProjectSettings.has_setting("autoload/First"),',
@@ -2812,7 +2813,7 @@ function testAReleaseExportLeavesGdharnessOut(): void {
         '[preset.0]\n\nname="Pack"\nplatform="Linux"\nrunnable=true\nexport_filter="all_resources"\n' +
         'include_filter=""\nexclude_filter=""\nexport_path=""\n\n[preset.0.options]\n\nbinary_format/architecture="x86_64"\n',
     });
-    for (const addon of ['gdharness_editor', 'gdharness_runtime']) {
+    for (const addon of ['gdharness_editor', 'gdharness_runtime', 'gdharness_tests']) {
       cpSync(join('src', 'godot', 'addons', addon), join(project, 'addons', addon), { recursive: true });
     }
     mkdirSync(join(project, 'gdharness'));
@@ -2827,15 +2828,19 @@ function testAReleaseExportLeavesGdharnessOut(): void {
       return `${ran.stdout}${ran.stderr}`;
     };
     engine(['--path', project, '--import']);
+    const runs: Record<string, string> = {};
     const found = (kind: string, flag: string): unknown => {
       const pack = join(root, `${kind}.pck`);
       const said = engine(['--path', project, flag, 'Pack', pack]);
       assert.ok(existsSync(pack), `the ${kind} pack, exported: ${said}`);
       const ran = engine(['--main-pack', pack]);
+      runs[kind] = ran;
       const line = /^found (\{.*\})$/m.exec(ran)?.[1];
       assert.ok(line !== undefined, `what the ${kind} pack holds, said: ${ran}`);
       return JSON.parse(line);
     };
+    // The test helpers' addon shipped in every player's build, since only the other three were left
+    // out.
     assert.deepEqual(
       found('release', '--export-pack'),
       {
@@ -2843,14 +2848,26 @@ function testAReleaseExportLeavesGdharnessOut(): void {
         loader: false,
         runtime: false,
         editor: false,
+        tests: false,
         own: true,
         autoloads: [true, false, true],
       },
       "a release pack without gdharness's entry, loader or addons, and with the game's own",
     );
+    // The project's class list still names the test helpers' classes, which the pack does not hold.
+    const released = runs['release'] ?? '';
+    assert.doesNotMatch(released, /gdharness_tests|Gdh[A-Z]/, released);
     assert.deepEqual(
       found('debug', '--export-debug'),
-      { node: true, loader: true, runtime: true, editor: true, own: true, autoloads: [true, true, true] },
+      {
+        node: true,
+        loader: true,
+        runtime: true,
+        editor: true,
+        tests: true,
+        own: true,
+        autoloads: [true, true, true],
+      },
       'a debug pack with all of them',
     );
     assert.equal(
