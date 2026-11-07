@@ -5105,6 +5105,92 @@ function testAConnectionNamesWhatItReaches(godotPath: string): void {
 }
 
 /**
+ * Validation and health name each scene connection whose method takes a number of arguments other
+ * than the signal sends, less what it unbinds and plus what it binds, which fails on every emission
+ * as a missing method does. Measured on the engine: defaults, a rest parameter, unbinds and a
+ * signature over several lines all take the call, and a script signal is not held to the arguments
+ * it declares, so one is not judged.
+ */
+function testAConnectionPassesWhatItsMethodTakes(godotPath: string): void {
+  const dir = createProject(godotPath);
+  try {
+    mkdirSync(join(dir, 'args'));
+    const script = [
+      'extends Node',
+      '',
+      'signal shouted(a: int, b: int)',
+      '',
+      '',
+      'func one(a: int) -> void:\n\tpass',
+      'func none() -> void:\n\tpass',
+      'func pair(a: int, b: int = 2) -> void:\n\tpass',
+      'func rest_one(a: int, ...more: Array) -> void:\n\tpass',
+      'func rest(...more: Array) -> void:\n\tpass',
+      'func two(\n\ta: bool,\n\tb: int,\n) -> void:\n\tpass',
+      'func commented(\n\ta: bool,  # the (pressed) state)\n) -> void:\n\tpass',
+      'func three(a: bool, b: Vector2, c: String) -> void:\n\tpass',
+      '@rpc("any_peer") func remote_hit(a: bool) -> void:\n\tpass',
+      '',
+    ].join('\n');
+    writeFileSync(join(dir, 'args', 'hub.gd'), script);
+    const connections: [string, string, string, string, string][] = [
+      ['timeout', 'T', '.', 'one', ''],
+      ['pressed', 'B', '.', 'none', ' binds= [5]'],
+      ['toggled', 'B', '.', 'none', ''],
+      ['timeout', 'T', '.', 'pair', ''],
+      ['timeout', 'T', '.', 'rest_one', ''],
+      ['timeout', 'T', 'T', 'queue_free', ' binds= [1]'],
+      ['timeout', 'T', 'T', 'call_deferred', ''],
+      ['toggled', 'B', '.', 'none', ' unbinds=1'],
+      ['toggled', 'B', '.', 'pair', ''],
+      ['toggled', 'B', '.', 'rest', ''],
+      ['toggled', 'B', '.', 'two', ' binds= [7]'],
+      ['toggled', 'B', '.', 'commented', ''],
+      ['toggled', 'B', '.', 'three', ' binds= [Vector2(1, 2), "x, y"]'],
+      ['toggled', 'B', '.', 'remote_hit', ''],
+      ['shouted', '.', '.', 'none', ''],
+      ['timeout', 'T', 'T', 'start', ''],
+    ];
+    writeFileSync(
+      join(dir, 'args', 'main.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://args/hub.gd" id="1"]\n\n' +
+        '[node name="Hub" type="Node"]\nscript = ExtResource("1")\n\n' +
+        '[node name="T" type="Timer" parent="."]\n\n[node name="B" type="Button" parent="."]\n\n' +
+        connections
+          .map(
+            ([signal, from, to, method, extra]) =>
+              `[connection signal="${signal}" from="${from}" to="${to}" method="${method}"${extra}]\n`,
+          )
+          .join(''),
+    );
+    const fails = ', so every emission fails to call it.';
+    const expected = [
+      `res://args/main.tscn connects B.pressed to Hub.none, which takes 0 arguments where the connection passes 1${fails}`,
+      `res://args/main.tscn connects B.toggled to Hub.none, which takes 0 arguments where the connection passes 1${fails}`,
+      `res://args/main.tscn connects T.timeout to Hub.one, which takes 1 argument where the connection passes 0${fails}`,
+      `res://args/main.tscn connects T.timeout to Hub.pair, which takes 1 to 2 arguments where the connection passes 0${fails}`,
+      `res://args/main.tscn connects T.timeout to Hub.rest_one, which takes at least 1 argument where the connection passes 0${fails}`,
+      `res://args/main.tscn connects T.timeout to T.call_deferred, which takes at least 1 argument where the connection passes 0${fails}`,
+      `res://args/main.tscn connects T.timeout to T.queue_free, which takes 0 arguments where the connection passes 1${fails}`,
+    ].toSorted();
+    const validated = runOperation(godotPath, dir, 'validate_project', {});
+    const warned = asArray(get(validated, 'warnings'))
+      .filter((warning) => get(warning, 'check') === 'connections')
+      .map((warning) => asString(get(warning, 'message')))
+      .toSorted();
+    assert.deepEqual(warned, expected, JSON.stringify(get(validated, 'warnings')));
+    const health = runOperation(godotPath, dir, 'get_project_health', { categories: ['scenes'] });
+    const noted = asArray(get(health, 'checks', 'scenes', 'details'))
+      .map((detail) => asString(detail))
+      .filter((detail) => detail.includes(' connects '))
+      .toSorted();
+    assert.deepEqual(noted, expected, JSON.stringify(health));
+  } finally {
+    sweep(dir);
+  }
+}
+
+/**
  * Moves [sidecar]'s time two seconds past the second [importedAt] falls in, for a case that rewrites
  * a sidecar and then has `--import` act on it. The engine's filesystem cache keeps whole seconds and
  * asks the importer only about a sidecar whose time has moved, so a rewrite landing in the second
@@ -6152,6 +6238,9 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   },
   connectionsReached: (godotPath) => {
     testAConnectionNamesWhatItReaches(godotPath);
+  },
+  connectionArguments: (godotPath) => {
+    testAConnectionPassesWhatItsMethodTakes(godotPath);
   },
   everyUse: (godotPath) => {
     testEveryUseIsFound(godotPath);
