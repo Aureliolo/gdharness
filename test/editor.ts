@@ -5689,6 +5689,14 @@ async function testAutoReloadLeavesAGoneScene({ call, project, printed }: Editor
       await delay(100);
     }
     assert.ok(printed().includes(`reloading: ${path}`), `the scene is watched:\n${printed().slice(-2000)}`);
+    // The line is printed as the reload begins, and the reload takes the tab down and up again. A
+    // delete made on seeing it landed in between on a macOS runner, the reload found no file and
+    // the tab stayed closed. The hook answers on a later frame, once the reload is done.
+    const reopened = await hook(project, { op: 'report', path });
+    assert.ok(
+      asArray(get(reopened, 'open')).includes(path),
+      `the reload kept its tab: ${JSON.stringify(reopened)}`,
+    );
     const reloads = printed().split(`reloading: ${path}`).length;
     // Retried: on Windows the editor can still hold the file open from that reload.
     rmSync(file, { maxRetries: 20, retryDelay: 100 });

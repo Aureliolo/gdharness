@@ -15533,9 +15533,15 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
         '\t\tvar lock := FileAccess.open("res://successor_lock", FileAccess.WRITE)',
         '\t\tlock.store_string(OS.get_environment("GODOT_ENGINE_HELD"))',
         '\t\tlock.close()',
-        '\t\tvar mark := FileAccess.open("res://successor_pid", FileAccess.WRITE)',
+        // Written whole under another name and renamed: a stop can end the successor between
+        // opening its mark and writing it, which left an empty mark that read as pid 0.
+        '\t\tvar mark := FileAccess.open("res://successor_pid.part", FileAccess.WRITE)',
         '\t\tmark.store_string(str(OS.get_process_id()))',
         '\t\tmark.close()',
+        '\t\tDirAccess.rename_absolute(',
+        '\t\t\tProjectSettings.globalize_path("res://successor_pid.part"),',
+        '\t\t\tProjectSettings.globalize_path("res://successor_pid")',
+        '\t\t)',
         '\t\treturn',
         '\tif "--worker" in OS.get_cmdline_user_args():',
         '\t\treturn',
