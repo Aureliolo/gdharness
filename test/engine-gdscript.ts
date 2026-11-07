@@ -1532,6 +1532,25 @@ function testOperations(godotPath: string, projectDir: string): void {
     /^file_logging\/max_log_files=50$/m,
     'and a refused write leaves the file as it was',
   );
+  // An enum setting takes the name its menu shows, and a name it lacks is refused with its names.
+  const filter = 'rendering/textures/canvas_textures/default_texture_filter';
+  const nearest = operation('set_project_setting', { setting: filter, value: 'Nearest' });
+  assert.equal(get(nearest, 'new_value'), 0, `Nearest is 0: ${JSON.stringify(nearest)}`);
+  assert.match(
+    readFileSync(join(projectDir, 'project.godot'), 'utf8'),
+    /^textures\/canvas_textures\/default_texture_filter=0$/m,
+    'and is written as its number',
+  );
+  const blurry = runRefusedOperation(godotPath, projectDir, 'set_project_setting', {
+    setting: filter,
+    value: 'Blurry',
+  });
+  assert.match(
+    `${blurry.stdout}\n${blurry.stderr}`,
+    /default_texture_filter is an enum, and Blurry is none of its values: send .*Nearest.*Linear/,
+    `a name the enum lacks is refused with its names:\n${blurry.stderr.trim()}`,
+  );
+  operation('unset_project_setting', { setting: filter });
 
   // The engine writes each section's keys in the order it registered them, and an engine running a
   // script registers them in another order than the editor, so a one-setting change moved lines
@@ -2785,6 +2804,30 @@ function testOperations(godotPath: string, projectDir: string): void {
     [['AudioEffectChorus'], 'AudioEffectReverb', 'AudioEffectChorus'],
     `the effect in the slot is replaced, not pushed along: ${JSON.stringify(chorus)}`,
   );
+  // The chorus tuned as the editor would leave it, then turned off: it keeps its tuning.
+  const layoutFile = join(projectDir, 'default_bus_layout.tres');
+  writeFileSync(
+    layoutFile,
+    readFileSync(layoutFile, 'utf8').replace(
+      /(\[sub_resource type="AudioEffectChorus"[^\]]*\]\n)/,
+      '$1dry = 0.25\n',
+    ),
+  );
+  assert.match(readFileSync(layoutFile, 'utf8'), /\ndry = 0\.25\n/, 'the chorus was tuned');
+  const off = operation('set_audio_bus_effect', {
+    bus_index: 2,
+    effect_index: 0,
+    effect_type: 'Chorus',
+    enabled: false,
+  });
+  assert.deepEqual(
+    [get(off, 'kept'), get(off, 'replaced'), effects(off)],
+    [true, undefined, ['AudioEffectChorus']],
+    `the chorus already there is kept: ${JSON.stringify(off)}`,
+  );
+  const tuned = readFileSync(layoutFile, 'utf8');
+  assert.match(tuned, /\ndry = 0\.25\n/, `with its tuning: ${tuned}`);
+  assert.match(tuned, /\nbus\/2\/effect\/0\/enabled = false\n/, `and turned off: ${tuned}`);
   const beyond = runRefusedOperation(godotPath, projectDir, 'set_audio_bus_effect', {
     bus_index: 2,
     effect_index: 3,

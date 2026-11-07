@@ -137,10 +137,17 @@ func set_audio_bus_effect(params: Dictionary) -> Dictionary:
 			)
 		)
 	var replaced: String = ""
+	# One of the same class stays, as the slot already holds the effect asked for. A fresh one there
+	# reset every setting it was tuned to, so turning a tuned reverb off lost the room it described.
+	var kept: bool = false
 	if effect_idx < count:
-		replaced = AudioServer.get_bus_effect(bus_idx, effect_idx).get_class()
-		AudioServer.remove_bus_effect(bus_idx, effect_idx)
-	AudioServer.add_bus_effect(bus_idx, effect, effect_idx)
+		var held: AudioEffect = AudioServer.get_bus_effect(bus_idx, effect_idx)
+		kept = held.get_class() == effect.get_class()
+		if not kept:
+			replaced = held.get_class()
+			AudioServer.remove_bus_effect(bus_idx, effect_idx)
+	if not kept:
+		AudioServer.add_bus_effect(bus_idx, effect, effect_idx)
 	AudioServer.set_bus_effect_enabled(bus_idx, effect_idx, enabled)
 
 	var layout: String = _save_layout()
@@ -154,6 +161,8 @@ func set_audio_bus_effect(params: Dictionary) -> Dictionary:
 	}
 	if not replaced.is_empty():
 		answer["replaced"] = replaced
+	if kept:
+		answer["kept"] = true
 	return answer
 
 
