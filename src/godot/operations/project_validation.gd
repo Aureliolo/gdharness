@@ -13,8 +13,8 @@ const GdhRead = preload("reading.gd")
 const GdhSceneConnections = preload("scene_connections.gd")
 const GdhScriptCheck = preload("script_check.gd")
 const CONNECTION_FIX: String = (
-	"Write the method or signal, or point the connection at the one that replaced it with"
-	+ " scene_signal"
+	"Write the method or signal, give the method the arguments the connection passes, or point"
+	+ " the connection at the one that replaced it with scene_signal"
 )
 
 var _log: GdhLog
