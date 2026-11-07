@@ -1447,6 +1447,37 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     'and as plain numbers and strings when it is not to be shown',
   );
 
+  // A RefCounted's id, which runs past what a number holds, a script's int as large, a RID and a
+  // signal's object, each to its last digit.
+  bytes.length = 0;
+  const put64 = (value: bigint): void => {
+    wide.setBigUint64(0, BigInt.asUintN(64, value), true);
+    bytes.push(...new Uint8Array(wide.buffer));
+  };
+  u32(28);
+  u32(4);
+  u32(24 | (1 << 16));
+  put64(9223372063916427397n);
+  u32(2 | (1 << 16));
+  put64(2n ** 60n + 1n);
+  u32(23);
+  put64(2n ** 62n + 3n);
+  u32(26);
+  putString('done');
+  put64(9223372063916427399n);
+  const ids = decodeVariant(Uint8Array.from(bytes), true);
+  assert.deepEqual(ids, [
+    { kind: 'Object', values: ['9223372063916427397'] },
+    { kind: 'int', values: ['1152921504606846977'] },
+    { kind: 'RID', values: ['4611686018427387907'] },
+    { kind: 'Signal', values: ['done', '9223372063916427399'] },
+  ]);
+  const shownIds = isList(ids) ? ids : [];
+  assert.deepEqual(
+    [shownValue(shownIds[0] ?? null, 'RefCounted'), shownValue(shownIds[1] ?? null)],
+    ['<RefCounted#9223372063916427397>', '1152921504606846977'],
+  );
+
   // The command decodes back to what the game checks: a String name, thread 1, then the data.
   const command = profilerOn(1536);
   assert.equal(

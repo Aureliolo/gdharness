@@ -95,18 +95,24 @@ class Reader {
     return value;
   }
 
-  i64(): number {
+  /**
+   * A 64-bit int, as a number while a number holds it exactly. Past that it keeps its digits, since
+   * an instance id a script holds, which a RefCounted's always is, was shown rounded.
+   */
+  i64(): number | GodotOther {
     this.need(8);
-    const value = Number(this.view.getBigInt64(this.offset, true));
+    const value = this.view.getBigInt64(this.offset, true);
     this.offset += 8;
-    return value;
+    const near = Number(value);
+    return Number.isSafeInteger(near) ? near : { kind: 'int', values: [value.toString()] };
   }
 
-  u64(): number {
+  /** An object, RID or signal id, in full: a RefCounted's id runs past what a number holds. */
+  id(): string {
     this.need(8);
-    const value = Number(this.view.getBigUint64(this.offset, true));
+    const value = this.view.getBigUint64(this.offset, true);
     this.offset += 8;
-    return value;
+    return value.toString();
   }
 
   f32(): number {
@@ -282,17 +288,17 @@ function decodeValue(reader: Reader, depth: number, how: Decoding = { faithful: 
       return { kind: 'NodePath', values: [path] };
     }
     case 23:
-      return { kind: 'RID', values: [reader.u64()] };
+      return { kind: 'RID', values: [reader.id()] };
     case 24:
       if ((header & FLAG_64) === 0) {
         // A full object, which the debugger never sends: it encodes objects as ids.
         throw new RangeError('a full object, which this reader does not take');
       }
-      return { kind: 'Object', values: [reader.u64()] };
+      return { kind: 'Object', values: [reader.id()] };
     case 25:
       return { kind: 'Callable', values: [] };
     case 26:
-      return { kind: 'Signal', values: [reader.string(), reader.u64()] };
+      return { kind: 'Signal', values: [reader.string(), reader.id()] };
     case 27: {
       const keys = containerType(reader, (header >> 16) & 0b11);
       const values = containerType(reader, (header >> 18) & 0b11);
