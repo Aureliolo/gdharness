@@ -2,16 +2,16 @@
 
 ## Commands
 
-| Command                                                   | What it does                                                                                                                                                    |
-| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bun run build`                                           | Bundles into `build/` without typechecking. `ci`, `test:metadata`, `test:packaging` and `test:node-runtime` run it first. `test:ci` and the regressions do not. |
-| `bun run typecheck`                                       | `tsc --noEmit`.                                                                                                                                                 |
-| `bun run ci`                                              | Build, typecheck, `format:check`, `lint` and `test:ci`, in that order.                                                                                          |
-| `bun run lint`                                            | Biome, types, dead code and markdownlint.                                                                                                                       |
-| `bun run format:check`                                    | Biome and Prettier.                                                                                                                                             |
-| `bun run lint:gd`, `bun run format:gd:check`              | The pinned gdstyle with the lane's `gdstyle.toml`, on every script under `src/godot` and `test/support/gd`.                                                     |
-| `uv run yamllint --strict .`                              | The `yaml` job.                                                                                                                                                 |
-| `bun run format`, `bun run lint:fix`, `bun run format:gd` | Write the fixes.                                                                                                                                                |
+| Command                                                   | What it does                                                                                                                               |
+| --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `bun run build`                                           | Bundles into `build/` without typechecking. `ci`, `test:metadata` and `test:packaging` run it first. `test:ci` and the regressions do not. |
+| `bun run typecheck`                                       | `tsc --noEmit`.                                                                                                                            |
+| `bun run ci`                                              | Build, typecheck, `format:check`, `lint` and `test:ci`, in that order.                                                                     |
+| `bun run lint`                                            | Biome, types, dead code and markdownlint.                                                                                                  |
+| `bun run format:check`                                    | Biome and Prettier.                                                                                                                        |
+| `bun run lint:gd`, `bun run format:gd:check`              | The pinned gdstyle with the lane's `gdstyle.toml`, on every script under `src/godot` and `test/support/gd`.                                |
+| `uv run yamllint --strict .`                              | The `yaml` job.                                                                                                                            |
+| `bun run format`, `bun run lint:fix`, `bun run format:gd` | Write the fixes.                                                                                                                           |
 
 ## Test commands
 
