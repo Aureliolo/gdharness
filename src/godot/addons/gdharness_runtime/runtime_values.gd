@@ -249,8 +249,15 @@ static func actions_of(event: InputEvent) -> Array[String]:
 	# ui_left for a stick held right. Input presses only those its direction reaches past their
 	# deadzone.
 	var moved: bool = event is InputEventJoypadMotion
+	# A release matches with its modifiers unread, so that letting go of D after Ctrl still lets go
+	# of Ctrl+D, which named every Ctrl+D action for a D held alone. A release lets go of what the
+	# same press holds.
+	var asked: InputEvent = event
+	if not moved and not event.is_pressed() and "pressed" in event:
+		asked = event.duplicate() as InputEvent
+		asked.set("pressed", true)
 	for action: StringName in InputMap.get_actions():
-		if event.is_action_pressed(action) if moved else InputMap.event_is_action(event, action):
+		if event.is_action_pressed(action) if moved else InputMap.event_is_action(asked, action):
 			named.append(str(action))
 	named.sort()
 	return named
