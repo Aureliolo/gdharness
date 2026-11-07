@@ -1,5 +1,6 @@
 extends RefCounted
 
+const GdhDeclared = preload("declared_values.gd")
 const GdhFileWalk = preload("file_walk.gd")
 const GdhGdscriptAuthoring = preload("gdscript_authoring.gd")
 const GdhRead = preload("reading.gd")
@@ -112,6 +113,17 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 	var final_value: Variant = _values.deserialize_value(value)
 	if final_value is Dictionary or (wanted == TYPE_COLOR and final_value is String):
 		final_value = _values.fitted(value, wanted)
+	# An enum setting takes the name the editor's menu shows, as a property write does.
+	if wanted == TYPE_INT and final_value is String:
+		var declared: Dictionary = _declared(setting_path)
+		if GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE)) == PROPERTY_HINT_ENUM:
+			var by_name: Array = GdhDeclared.enum_by_name(
+				ProjectSettings, declared, str(final_value), "ProjectSettings"
+			)
+			if by_name[0]:
+				final_value = by_name[1]
+			elif not str(by_name[1]).is_empty():
+				return _log.failure(str(by_name[1]))
 	if wanted > TYPE_NIL and final_value != null and typeof(final_value) != wanted:
 		if not _converts_faithfully(final_value, wanted):
 			return _log.failure(_cannot_hold(setting_path, wanted, final_value))
@@ -355,10 +367,19 @@ static func _settings_near(setting_path: String) -> PackedStringArray:
 # A setting the engine does not declare has only its current value to go on, and a new one has
 # neither, which is the caller's type to choose.
 func _wanted_type(setting_path: String, current: Variant) -> int:
+	var info: Dictionary = _declared(setting_path)
+	if info.is_empty():
+		return typeof(current)
+	return GdhRead.as_int(info.get("type", TYPE_NIL), TYPE_NIL)
+
+
+## How the engine declares [param setting_path], as get_property_list gives it, or {} for a setting
+## it does not declare.
+static func _declared(setting_path: String) -> Dictionary:
 	for info: Dictionary in ProjectSettings.get_property_list():
 		if str(info.get("name", "")) == setting_path:
-			return GdhRead.as_int(info.get("type", TYPE_NIL), TYPE_NIL)
-	return typeof(current)
+			return info
+	return {}
 
 
 # What separates a narrowing from a guess: 50.0 through int and out again is 50.0, so it was an int
