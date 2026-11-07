@@ -61972,8 +61972,11 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
       ) ?? '';
     assert.match(
       await stallRefusal({ 'items/3/title': 'D' }),
-      /Shop\.items holds 3 elements, so items\/3\/title names none: an index goes from 0 to 2\./,
+      /Shop\.items holds 3 elements, so items\/3\/title names none: an index goes from 0 to 2\. To add an element, give items whole with it at the end\./,
     );
+    const pastNext = await stallRefusal({ 'items/5/title': 'D' });
+    assert.match(pastNext, /so items\/5\/title names none: an index goes from 0 to 2\./, pastNext);
+    assert.doesNotMatch(pastNext, /To add/, 'an index past the next one is not offered as an addition');
     assert.match(
       await stallRefusal({ 'items/first/title': 'D' }),
       /Shop\.items is a list, so the step after it is the index of one of its elements, from 0 to 2, not first\./,
@@ -61985,6 +61988,25 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
     assert.match(
       await stallRefusal({ 'items/1': 'D' }),
       /items\/1 is an element of Shop\.items, which a path does not replace alone: give items a whole list, or write a property of the element, as items\/1\/<property>\./,
+    );
+    // A default given to an element's property, by its path or inside the whole list, is left out of
+    // the element's section and named.
+    const cleared = await answered({
+      op: 'modify',
+      resourcePath: 'res://stall.tres',
+      properties: { 'items/1/title': '' },
+    });
+    assert.deepEqual(get(cleared, 'notStored'), ['items/1/title'], JSON.stringify(cleared));
+    const relisted = await answered({
+      op: 'modify',
+      resourcePath: 'res://stall.tres',
+      properties: titled('', 'x'),
+    });
+    assert.deepEqual(get(relisted, 'notStored'), ['items/0/title'], JSON.stringify(relisted));
+    assert.equal(
+      readFileSync(join(project, 'stall.tres'), 'utf8').match(/title = /g)?.length,
+      1,
+      readFileSync(join(project, 'stall.tres'), 'utf8'),
     );
     const intoCounts = await stallRefusal({ 'counts/keys': 2 });
     assert.match(
