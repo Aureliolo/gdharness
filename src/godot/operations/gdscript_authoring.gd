@@ -307,7 +307,7 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 			)
 		var refusal: String = (
 			"Nothing was changed: %s parses now, and would not with these additions: %s"
-			% [script_path, _reasons(made.raised, full_script_path)]
+			% [script_path, _reasons(made.raised, full_script_path, lines)]
 		)
 		if not made.others.is_empty():
 			refusal += " The engine raised errors in %s." % ", ".join(made.others)
@@ -325,10 +325,19 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 
 
 # The engine's errors in [param raised] for [param path], each with its line, as one sentence part.
-static func _reasons(raised: Array[Dictionary], path: String) -> String:
+## The errors [param raised] at [param path], each with its line. Given [param lines], the script as
+## the additions left it, each also quotes its line, since the file is put back and its numbers then
+## run past the end.
+static func _reasons(
+	raised: Array[Dictionary], path: String, lines: Array[String] = []
+) -> String:
 	var reasons: PackedStringArray = []
 	for error: Dictionary in raised:
-		var reason: String = "line %d, %s" % [GdhRead.as_int(error["line"]), str(error["message"])]
+		var line: int = GdhRead.as_int(error["line"])
+		var quoted: String = ""
+		if line >= 1 and line <= lines.size() and not lines[line - 1].strip_edges().is_empty():
+			quoted = ' of the script with them ("%s")' % lines[line - 1].strip_edges()
+		var reason: String = "line %d%s, %s" % [line, quoted, str(error["message"])]
 		if str(error["path"]) == path and not reason in reasons:
 			var _added: bool = reasons.append(reason)
 	if reasons.is_empty():
