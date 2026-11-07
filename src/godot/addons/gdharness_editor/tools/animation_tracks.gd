@@ -315,14 +315,18 @@ static func _as_the_editor_makes(
 ## [param target] as the editor reads it: a property of a property, as position:x, is no name the
 ## node declares, so it has none.
 static func _declared_type(target: Node, path: NodePath) -> int:
-	var reached: Array = target.get_node_and_resource(
-		NodePath(".:" + str(path.get_concatenated_subnames()))
-	)
-	var leftover: NodePath = reached[2]
-	var holder: Object = reached[1] if reached[1] != null else reached[0]
-	if holder == null or leftover.get_subname_count() == 0:
+	# Node.get_node_and_resource takes a resource's parameter, as material:shader_parameter/flash,
+	# into the resource it reached and leaves nothing over, so the float read as no type.
+	var count: int = path.get_subname_count()
+	if target == null or count == 0:
 		return TYPE_NIL
-	var leaf: String = str(leftover.get_subname(leftover.get_subname_count() - 1))
+	var holder: Object = target
+	for index: int in count - 1:
+		var value: Variant = holder.get(path.get_subname(index))
+		if not value is Object or value == null:
+			return TYPE_NIL
+		holder = value
+	var leaf: String = str(path.get_subname(count - 1))
 	for declared: Dictionary in holder.get_property_list():
 		if str(declared.get("name", "")) == leaf:
 			return GdhRead.as_int(declared.get("type", TYPE_NIL))
