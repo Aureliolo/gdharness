@@ -61419,6 +61419,32 @@ async function testAWriteSaysWhatElseItChanged(): Promise<void> {
       ],
       `the lines the named node gained are said: ${JSON.stringify(named)}`,
     );
+
+    // A player's libraries as one dictionary, which the engine saves as one line per library.
+    writeFileSync(
+      join(project, 'moves.tscn'),
+      '[gd_scene format=3]\n\n[sub_resource type="Animation" id="Walk"]\nresource_name = "walk"\n\n' +
+        '[sub_resource type="AnimationLibrary" id="Moves"]\n_data = {\n&"walk": SubResource("Walk")\n}\n\n' +
+        '[node name="Main" type="Node2D"]\n\n[node name="Anim" type="AnimationPlayer" parent="."]\n' +
+        'libraries = {\n&"moves": SubResource("Moves")\n}\n',
+    );
+    const beside = await call('scene_node', {
+      scenePath: 'res://moves.tscn',
+      op: 'add',
+      nodeType: 'Node2D',
+      nodeName: 'Beside',
+    });
+    assert.equal(get(beside, 'nodePath'), 'Beside', JSON.stringify(beside));
+    assert.match(
+      readFileSync(join(project, 'moves.tscn'), 'utf8'),
+      /\nlibraries\/moves = SubResource\("[^"]+"\)\n/,
+      'the engine wrote the library on a line of its own',
+    );
+    assert.equal(
+      get(beside, 'alsoSaved'),
+      undefined,
+      `the same libraries written another way are not named as lost: ${JSON.stringify(beside)}`,
+    );
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
