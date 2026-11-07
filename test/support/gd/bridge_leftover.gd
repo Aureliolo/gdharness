@@ -68,6 +68,7 @@ func _initialize() -> void:
 	_announce(stuck_port)
 
 	_client = GdhBridgeClient.new()
+	_client.connect_timeout = 1.0
 	root.add_child(_client)
 	_client.connect_to_server()
 	_started = Time.get_ticks_msec()

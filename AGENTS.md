@@ -19,7 +19,8 @@
 | ----------------------------------------------------- | ---------------------------------------------------------------------------------------- |
 | `bun run test:typed`                                  | Shipped scripts and fixtures in Godot, warnings as errors.                               |
 | `bun test/regressions.ts [name ...]`                  | Every regression. Names select tests, loosely matched.                                   |
-| `bun run test:ci`                                     | The eleven fast files, regressions included.                                             |
+| `bun run test:fast`                                   | The ten fast files.                                                                      |
+| `bun run test:ci`                                     | `test:fast` and the regressions.                                                         |
 | `test:integration`, `test:metadata`, `test:packaging` | The other four files the `build-and-test` job runs. `test:packaging` refuses on Windows. |
 | `bun run test:engine`, `bun run test:editor`          | The engine and editor legs. They need a real Godot.                                      |
 
@@ -84,7 +85,8 @@ the headless engine operations. Both are GDScript. `test/` holds the suites, wit
 
 - CI runs the suites, since the repository is public. Push and read every suite CI runs before
   calling a change done: `test:ci`, `test:integration`, `test:metadata` and `test:packaging`,
-  fifteen files in all, plus the engine and editor legs.
+  fifteen files in all, plus the engine and editor legs. `build-and-test` leaves the regressions and
+  `test:integration` to the engine legs, which run them with Godot, unless the legs are skipped.
 - Locally, run the regressions and editor cases the change touches. A change that passes the
   regressions can still fail `test/bridge.ts`, because the suites call the same code in different
   ways.

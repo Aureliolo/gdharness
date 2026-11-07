@@ -33,13 +33,6 @@ interface Call {
 
 const current = new AsyncLocalStorage<Call>();
 
-/**
- * How long a call whose client asked for progress goes without a notification before it is sent
- * one saying it is still going. Claude Code ends a call that says nothing for thirty minutes, and
- * the SDK's own default is a minute.
- */
-export const CALL_HEARTBEAT_MS = 20_000;
-
 /** The message a call of [param tool] and [param op] is sent [param elapsedMs] in. */
 export function stillGoingSaid(tool: string, op: string | null, elapsedMs: number): string {
   const seconds = Math.floor(elapsedMs / 1000);

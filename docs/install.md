@@ -209,7 +209,12 @@ reads for longer sets `GDHARNESS_LSP_INITIALIZE_TIMEOUT_MS`.
 
 ### Shorter waits
 
-Three shorter waits can be set the same way, in milliseconds:
+Five shorter waits can be set the same way, in milliseconds:
+
+- `GDHARNESS_ANSWER_WAIT_MS` (30 seconds): how long a call waits for the editor to answer one
+  request.
+- `GDHARNESS_HEARTBEAT_MS` (20 seconds): how long a call whose client asks for progress goes
+  without a notification saying it is still going.
 
 - `GDHARNESS_SCAN_WAIT_MS` (30 seconds): how long a start waits for the editor to finish scanning.
   After it, the start goes ahead and says so. A call the editor turns away while busy waits this

@@ -38,7 +38,6 @@ import { halfAsLongAgain, MAIN_SCENE, readBootNote, waitSizedTo, writeBootNote }
 import { readBreakpointNote, writeBreakpointNote } from './breakpoint-note.js';
 import { announceBridge, announcementPath, readAnnouncement, withdrawBridge } from './bridge-announce.js';
 import {
-  CALL_HEARTBEAT_MS,
   type CallProgress,
   callProgress,
   callSignal,
@@ -2623,8 +2622,15 @@ const STALLED_AFTER_MS = 30_000;
 /** How long a project_test run may take when timeoutMs is not given. */
 const TEST_TIMEOUT_MS = 600_000;
 
-/** The longest a test run goes without a progress notification while no suite finishes. */
-const TEST_HEARTBEAT_MS = 20_000;
+/**
+ * How long a call whose client asked for progress goes without a notification before it is sent
+ * one saying it is still going. A test run counts it from its last finished suite. Claude Code ends
+ * a call that says nothing for thirty minutes, and the SDK's own default is a minute.
+ * GDHARNESS_HEARTBEAT_MS sets another.
+ */
+function heartbeatMs(): number {
+  return waitFromEnv('GDHARNESS_HEARTBEAT_MS', 20_000);
+}
 
 /**
  * What the engine says of a script that failed only because one it depends on did. Kept in step with
@@ -4753,7 +4759,7 @@ class GodotServer {
           () => this.answered(spec.name, checked.op ?? '', args),
           progress,
           {
-            everyMs: CALL_HEARTBEAT_MS,
+            everyMs: heartbeatMs(),
             said: (elapsedMs) => stillGoingSaid(spec.name, checked.op, elapsedMs),
           },
           slotWaits,
@@ -7634,7 +7640,7 @@ class GodotServer {
       const finishedOne = entries.slice(read).some((entry) => finishesASuite(entry.text));
       read = entries.length;
       const now = Date.now();
-      if (!finishedOne && now - lastSent < TEST_HEARTBEAT_MS) {
+      if (!finishedOne && now - lastSent < heartbeatMs()) {
         return;
       }
       lastSent = now;

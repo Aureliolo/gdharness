@@ -50,6 +50,7 @@ func _initialize() -> void:
 
 	_announce(first_port)
 	_client = GdhBridgeClient.new()
+	_client.follow_interval = 0.5
 	root.add_child(_client)
 	# No address, so it works one out for itself, which is the thing being tested.
 	_client.connect_to_server()

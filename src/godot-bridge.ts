@@ -14,7 +14,6 @@ import { installedEditorDigest, shippedEditorDigest } from './setup.js';
 
 const DEFAULT_PORT = 6505;
 const DEFAULT_HOST = '127.0.0.1';
-const DEFAULT_TIMEOUT_MS = 30_000;
 const KEEPALIVE_INTERVAL_MS = 10_000;
 const SECOND_CONNECTION_CLOSE_CODE = 4000;
 
@@ -410,6 +409,12 @@ function busyWaitMs(): number {
   return Number.isInteger(override) && override > 0 ? override : 30_000;
 }
 
+/** How long a call waits for the editor's answer. GDHARNESS_ANSWER_WAIT_MS sets another. */
+function answerWaitMs(): number {
+  const override = Number.parseInt(envValue('GDHARNESS_ANSWER_WAIT_MS') ?? '', 10);
+  return Number.isInteger(override) && override > 0 ? override : 30_000;
+}
+
 /** How often a tool turned away by a busy editor is asked for again. */
 const BUSY_RETRY_MS = 100;
 
@@ -449,7 +454,7 @@ export class GodotBridge extends EventEmitter {
   public constructor(
     port: number = DEFAULT_PORT,
     host: string = DEFAULT_HOST,
-    timeoutMs: number = DEFAULT_TIMEOUT_MS,
+    timeoutMs: number = answerWaitMs(),
     ownProject: string | null = null,
   ) {
     super();
@@ -1310,7 +1315,7 @@ export function getDefaultBridge(ownProject: string | null = null): GodotBridge 
   defaultBridge ??= new GodotBridge(
     resolveDefaultBridgePort(),
     resolveDefaultBridgeHost(),
-    DEFAULT_TIMEOUT_MS,
+    answerWaitMs(),
     ownProject,
   );
   return defaultBridge;
