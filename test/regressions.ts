@@ -29576,7 +29576,7 @@ async function testAReimportReimportsThroughTheEngine(): Promise<void> {
       const lacked = await said({ op: 'set_options', resourcePath: 'good.png', importer: 'nonsense' });
       assert.match(
         lacked,
-        /^The engine has no importer nonsense for res:\/\/good\.png, and the import took texture instead\. The import file was put back as it was and imported again\./,
+        /^The engine has no importer nonsense for res:\/\/good\.png, so it imported the file with texture instead\. The import file was put back as it was, on texture, and imported again\./,
         lacked,
       );
       assert.match(sidecar(), /^importer="texture"$/m, sidecar());
@@ -29593,6 +29593,15 @@ async function testAReimportReimportsThroughTheEngine(): Promise<void> {
         /^compress\/mode=/m,
         `the texture's options went with it:\n${sidecar()}`,
       );
+      // From another importer than the default, the refusal names both: the one the engine fell
+      // back to and the one the file is back on.
+      const fellBack = await said({ op: 'set_options', resourcePath: 'good.png', importer: 'nonsense' });
+      assert.match(
+        fellBack,
+        /^The engine has no importer nonsense for res:\/\/good\.png, so it imported the file with texture instead\. The import file was put back as it was, on image, and imported again\./,
+        fellBack,
+      );
+      assert.match(sidecar(), /^importer="image"$/m, sidecar());
       assert.equal(
         get(await call({ op: 'options', resourcePath: 'good.png' }), 'remap', 'importer'),
         'image',
