@@ -52448,7 +52448,7 @@ async function testEveryLongCallIsHeardFrom(): Promise<void> {
   }
   // Through a real server: a wait on a game that runs past the interval, which says nothing of its own.
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-long-call-'));
-  const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
+  const server = new ServerProcess({ env: { GODOT_PATH: godotPath, GDHARNESS_HEARTBEAT_MS: '2000' } });
   try {
     writeFileSync(
       join(project, 'project.godot'),
@@ -52456,7 +52456,7 @@ async function testEveryLongCallIsHeardFrom(): Promise<void> {
     );
     writeFileSync(
       join(project, 'main.gd'),
-      'extends Node\n\n\nfunc _ready() -> void:\n\tawait get_tree().create_timer(25.0).timeout\n\tget_tree().quit()\n',
+      'extends Node\n\n\nfunc _ready() -> void:\n\tawait get_tree().create_timer(6.0).timeout\n\tget_tree().quit()\n',
     );
     writeFileSync(
       join(project, 'main.tscn'),
@@ -53270,6 +53270,19 @@ function testTheTestHelpersWaitStepAndPress(): void {
         '\tInput.parse_input_event(GdhEvent.pad(JOY_BUTTON_A))',
         '\tawait GdhWait.frames(get_tree(), 1)',
         '\tprint("pad confirm=%s" % Input.is_action_pressed("confirm"))',
+        '\tInputMap.add_action("tap")',
+        '\tInputMap.action_add_event("tap", GdhEvent.key(KEY_T))',
+        '\tvar taps: Array[String] = []',
+        '\tget_tree().root.window_input.connect(func(event: InputEvent) -> void:',
+        '\t\tif event.is_action("tap"):',
+        '\t\t\ttaps.append(str(event.is_pressed()))',
+        '\t)',
+        '\tGdhEvent.press_and_release(GdhEvent.key(KEY_T))',
+        '\tprint("tap=%s held=%s" % [",".join(taps), Input.is_action_pressed("tap")])',
+        '\tGdhEvent.press_and_release(GdhEvent.click(Vector2(30, 25)))',
+        '\tprint("tapped button pressed=%d mouse held=%d" % [pressed_count, Input.get_mouse_button_mask()])',
+        '\tGdhEvent.press_and_release(GdhEvent.pad(JOY_BUTTON_A))',
+        '\tprint("pad let go confirm=%s" % Input.is_action_pressed("confirm"))',
         '\tvar click: InputEventMouseButton = GdhEvent.click(Vector2(3, 4), MOUSE_BUTTON_RIGHT)',
         '\tprint("click=%d %s %s %s mask=%d" % [click.button_index, click.pressed, click.position, click.global_position, click.button_mask])',
         '\tvar wheel: InputEventMouseButton = GdhEvent.wheel(Vector2(1, 2), false)',
@@ -53310,6 +53323,9 @@ function testTheTestHelpersWaitStepAndPress(): void {
         'action go=true',
         'key jump=true',
         'pad confirm=true',
+        'tap=true,false held=false',
+        'tapped button pressed=2 mouse held=0',
+        'pad let go confirm=false',
         'click=2 true (3.0, 4.0) (3.0, 4.0) mask=2',
         'wheel=5 true',
         'motion=(5.0, 6.0) (5.0, 6.0) (1.0, 0.0) mask=1',
@@ -58638,7 +58654,7 @@ async function testGdUnitRunner(): Promise<void> {
  *
  * game-b's tier of 110 suites ran past thirty minutes, Claude Code ended the call for sending
  * nothing in that time, and every finished suite went with it. A client asking for progress is
- * told as each suite finishes and at least every twenty seconds through a long one, a client that
+ * told as each suite finishes and at least once a heartbeat through a long one, a client that
  * did not ask is told nothing, a run its own timeout ends answers with what it finished, and a run
  * its client cancels leaves that in the project for the next run there to hand back once.
  */
@@ -58750,7 +58766,7 @@ async function testATestRunSaysHowFarItHasGot(): Promise<void> {
     return;
   }
   const projectDir = mkdtempSync(join(tmpdir(), 'gdharness-test-progress-'));
-  const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
+  const server = new ServerProcess({ env: { GODOT_PATH: godotPath, GDHARNESS_HEARTBEAT_MS: '2000' } });
   const answerOf = (response: JsonRpcMessage): { note: string; json: unknown } => {
     const content = contentOf(response) ?? [];
     const json = content.findLast((part) => part.text?.startsWith('{') === true)?.text;
@@ -58829,7 +58845,7 @@ async function testATestRunSaysHowFarItHasGot(): Promise<void> {
     const timed = answerOf(
       await server.request(
         'tools/call',
-        { name: 'project_test', arguments: { projectPath: projectDir, path: [a, c], timeoutMs: 25_000 } },
+        { name: 'project_test', arguments: { projectPath: projectDir, path: [a, c], timeoutMs: 15_000 } },
         ENGINE_CALL_TIMEOUT_MS * 3,
       ),
     );
@@ -65812,8 +65828,13 @@ async function testARebuildSaysWhatItsOwnEngineCouldNotKnow(): Promise<void> {
  */
 async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<void> {
   const port = await reservePort();
+  // Every wait below is set against the wait for one answer, shortened from its thirty seconds.
   const server = new ServerProcess({
-    env: { GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot') },
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(port),
+      GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+      GDHARNESS_ANSWER_WAIT_MS: '3000',
+    },
   });
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-unanswered-scan-'));
   let editor: WebSocket | null = null;
@@ -65939,7 +65960,7 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
 
     // An import longer than the whole wait.
     imports = { classes: ['KitLicences'], ms: Number.POSITIVE_INFINITY };
-    const unanswered = await rescan();
+    const unanswered = await rescan(5_000);
     assert.equal(startsAskedFor, 1, `the scan was asked for: ${unanswered.said}`);
     assert.equal(
       get(unanswered.answer, 'stillWorking'),
@@ -65963,10 +65984,10 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
     // unanswered as well: an editor importing, to be waited out rather than scanned over.
     setTimeout(() => {
       finishImport(['KitLicences']);
-    }, 40_000);
-    const finished = await rescan(100_000);
+    }, 8_000);
+    const finished = await rescan(20_000);
     assert.ok(
-      asNumber(get(finished.answer, 'waitedForEditorScanMs') ?? 0) >= 30_000,
+      asNumber(get(finished.answer, 'waitedForEditorScanMs') ?? 0) >= 6_000,
       `the import is waited out before the scan is asked for: ${finished.said}`,
     );
     assert.deepEqual(
@@ -66003,8 +66024,8 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
       'class_name KitSpots\nextends RefCounted\n',
     );
     writeFileSync(join(project, 'board.gd'), 'extends Node\n\n\nfunc _ready() -> void:\n\tprint(KitSpots)\n');
-    imports = { classes: ['KitSpots'], ms: 70_000 };
-    const outlasted = await rescan(120_000);
+    imports = { classes: ['KitSpots'], ms: 7_000 };
+    const outlasted = await rescan(15_000);
     assert.equal(
       get(outlasted.answer, 'stillWorking'),
       false,

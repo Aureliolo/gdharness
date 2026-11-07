@@ -302,6 +302,7 @@ jobs:
 
   build-and-test:
     name: build-and-test
+    needs: scope
     runs-on: ubuntu-24.04
     timeout-minutes: 20
 
@@ -325,11 +326,18 @@ jobs:
       - name: Typecheck
         run: bun run typecheck
 
+      - name: Fast tests
+        run: bun run test:fast
+
+      # The engine legs run every regression and the bridge test on Linux too, with Godot, so these
+      # run here only where the legs are skipped.
       - name: Runtime regression tests
-        run: bun run test:ci
+        if: needs.scope.outputs.engine != 'true'
+        run: bun run test:regressions
 
       # The bridge, driven against a mock Godot over a real WebSocket.
       - name: Bridge integration test
+        if: needs.scope.outputs.engine != 'true'
         run: bun run test:integration
 
       - name: Metadata consistency tests

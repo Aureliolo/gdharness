@@ -60,22 +60,23 @@ const HIDDEN_MARK: String = "--gdharness-hidden"
 ## tells the two apart when both are announced at once. Kept in step with `EDITOR_PID_VARIABLE`
 ## in the runtime autoload.
 const EDITOR_PID_VARIABLE: String = "GDHARNESS_EDITOR_PID"
+## How many polls in a row the door has to stay connected before the WebSocket dials.
+## See [member _door].
+const DOOR_POLLS: int = 2
+
 ## How long one attempt is given before the address is called a bad one.
 ##
 ## A socket pointed at a port nothing holds gives up by itself, in thirty seconds on Windows. One
 ## pointed at something that accepts and then never speaks WebSocket does not give up at all:
 ## measured here, still connecting after forty-five seconds, because the peer has no handshake
 ## timeout of its own in 4.7. A leftover announcement can be either, and a port that has been
-## reused by some other program is the second.
-const CONNECT_TIMEOUT: float = 10.0
+## reused by some other program is the second. A variable so a fixture can wait less.
+var connect_timeout: float = 10.0
 ## How often the announcement is read again while connected, so a newer server is moved to
 ## rather than waited for. A harness reconnect leaves the server it replaced running and holding
 ## the old port, and an editor with no reason to look elsewhere stayed on it for the session.
-const FOLLOW_INTERVAL: float = 5.0
-## How many polls in a row the door has to stay connected before the WebSocket dials.
-## See [member _door].
-const DOOR_POLLS: int = 2
-
+## A variable so a fixture can wait less.
+var follow_interval: float = 5.0
 var socket: WebSocketPeer = WebSocketPeer.new()
 var server_url: String = DEFAULT_URL
 ## What this copy was when it loaded, which is what the editor is running until it is restarted.
@@ -181,7 +182,7 @@ func _process(_delta: float) -> void:
 
 		WebSocketPeer.STATE_CONNECTING:
 			_connecting_for += _delta
-			if _connecting_for >= CONNECT_TIMEOUT:
+			if _connecting_for >= connect_timeout:
 				_give_up_on_this_address()
 
 		WebSocketPeer.STATE_CLOSING:
@@ -248,7 +249,7 @@ func _follow_whoever_is_newest(delta: float) -> void:
 	if _named_by_caller:
 		return
 	_since_looked += delta
-	if _since_looked < FOLLOW_INTERVAL:
+	if _since_looked < follow_interval:
 		return
 	_since_looked = 0.0
 
@@ -369,7 +370,7 @@ func _knock(delta: float) -> void:
 	match _door.get_status():
 		StreamPeerTCP.STATUS_CONNECTING:
 			_connecting_for += delta
-			if _connecting_for >= CONNECT_TIMEOUT:
+			if _connecting_for >= connect_timeout:
 				_shut_the_door()
 				_give_up_on_this_address()
 		StreamPeerTCP.STATUS_CONNECTED:

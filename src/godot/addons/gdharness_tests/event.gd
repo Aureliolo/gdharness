@@ -86,6 +86,24 @@ static func action(
 	return made
 
 
+## Hands [param event], a press, to the engine through [method Input.parse_input_event], then the
+## same event let go. Each is flushed, so both have reached the game when this returns. A press
+## never let go stays held in [Input] for every suite after it in the same engine.
+static func press_and_release(event: InputEvent) -> void:
+	Input.parse_input_event(event)
+	Input.flush_buffered_events()
+	var let_go: InputEvent = event.duplicate() as InputEvent
+	let_go.set(&"pressed", false)
+	if let_go is InputEventMouseButton:
+		(let_go as InputEventMouseButton).button_mask = 0
+	elif let_go is InputEventJoypadButton:
+		(let_go as InputEventJoypadButton).pressure = 0.0
+	elif let_go is InputEventAction:
+		(let_go as InputEventAction).strength = 0.0
+	Input.parse_input_event(let_go)
+	Input.flush_buffered_events()
+
+
 static func _mask_of(button: MouseButton) -> int:
 	match button:
 		MOUSE_BUTTON_LEFT:
