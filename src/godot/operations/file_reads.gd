@@ -611,6 +611,9 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 	var unloaded: Array[String] = _not_loaded(loaded, file, res_path)
 	if not unloaded.is_empty():
 		answer["notLoaded"] = unloaded
+	# An imported translation lists no messages, which read as a table translating nothing.
+	if loaded is OptimizedTranslation:
+		answer["messagesNote"] = _hashed_note(file)
 	if script != null:
 		answer["script"] = script.resource_path
 		# resourceType is the engine class under the script, which for a class the project declares
@@ -648,6 +651,36 @@ static func shader_errors(path: String) -> Array[Dictionary]:
 	if headless:
 		printerr("[gdharness] resumed")
 	return caught.raised
+
+
+## Why the OptimizedTranslation at [param file] lists no messages, and which file holds them.
+static func _hashed_note(file: String) -> String:
+	var said: String = (
+		"An OptimizedTranslation keeps a hash of each key rather than the key, so it lists no "
+		+ "messages."
+	)
+	var source: String = _imported_from(file)
+	if source.is_empty():
+		return said
+	return said + " %s, which it was imported from, holds them." % source
+
+
+## The file whose import wrote [param file], named by the sidecar beside it, or "" when none does.
+static func _imported_from(file: String) -> String:
+	var folder: String = file.get_base_dir()
+	for name: String in DirAccess.get_files_at(folder):
+		if not name.ends_with(".import"):
+			continue
+		var sidecar: ConfigFile = ConfigFile.new()
+		if sidecar.load(folder.path_join(name)) != OK:
+			continue
+		var listed: Variant = sidecar.get_value("deps", "dest_files", [])
+		if not listed is Array:
+			continue
+		var outputs: Array = listed
+		if outputs.has(file):
+			return folder.path_join(name.trim_suffix(".import"))
+	return ""
 
 
 ## The names [param file] sets for [param loaded], read from [param res_path], that [param loaded]

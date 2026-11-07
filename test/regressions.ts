@@ -75649,6 +75649,16 @@ async function testAProjectsFilesAndLayersAreNamedWithNoEditor(): Promise<void> 
       'the import made the translations',
     );
     assert.deepEqual(await references(), [], 'and once they are made nothing is missing');
+    // An imported translation keeps a hash of each key, so a read listed no messages and named no
+    // file that holds them.
+    const translated = parseTextContent(
+      await call('resource_edit', { op: 'read', resourcePath: 'res://text/strings.de.translation' }),
+    );
+    assert.equal(
+      get(translated, 'messagesNote'),
+      'An OptimizedTranslation keeps a hash of each key rather than the key, so it lists no messages. res://text/strings.csv, which it was imported from, holds them.',
+      JSON.stringify(translated),
+    );
 
     // One .blend with no Blender set and the engine imports nothing at all, the CSV beside it too.
     rmSync(join(project, 'text', 'strings.csv.import'));
