@@ -20145,6 +20145,75 @@ async function testAPointerOnTheHiddenDesktopIsNoted(): Promise<void> {
   }
 }
 
+/** A key let go of names the actions its press held, not every one bound to it with a modifier. */
+async function testAKeyLetGoOfNamesWhatItsPressHeld(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('key release actions regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-key-release-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-key-release-rt-'));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  const games = new MetProcesses();
+  try {
+    const key =
+      'Object(InputEventKey,"resource_local_to_scene":false,"resource_name":"","device":-1,"window_id":0,' +
+      '"alt_pressed":false,"shift_pressed":false,"ctrl_pressed":false,"meta_pressed":false,"pressed":false,' +
+      '"keycode":0,"physical_keycode":68,"key_label":0,"unicode":100,"location":0,"echo":false,"script":null)';
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Release"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+        `[input]\n\nmove_right={\n"deadzone": 0.2,\n"events": [${key}]\n}\n`,
+    );
+    writeFileSync(join(project, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node2D"]\n');
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      {
+        recursive: true,
+      },
+    );
+    await server.initialize('regression-test');
+    const started = parseTextContent(
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { projectPath: project, op: 'start', headless: true } },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+    await games.meet(asNumber(get(started, 'runtime', 'pid')));
+    const keyed = async (pressed: boolean): Promise<unknown> =>
+      parseTextContent(
+        await server.request('tools/call', {
+          name: 'runtime_input',
+          arguments: { op: 'key', keycode: 'D', pressed },
+        }),
+      );
+    const held = await keyed(true);
+    const letGo = await keyed(false);
+    await stopItsRun(server);
+    assert.deepEqual(
+      [get(held, 'actions'), get(letGo, 'actions')],
+      [['move_right'], ['move_right']],
+      `D alone holds and lets go of move_right, and of no Ctrl+D action: ${JSON.stringify([held, letGo])}`,
+    );
+  } finally {
+    await games.end();
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
 /**
  * A relative GODOT_PATH is made whole against the directory the server runs in.
  *
@@ -78004,6 +78073,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryTwoHundredAndFiftiethAnswerAsksForWhatIsMissing,
   testARelativeEnginePathIsMadeWhole,
   testAPointerOnTheHiddenDesktopIsNoted,
+  testAKeyLetGoOfNamesWhatItsPressHeld,
   testAClickThatDoesNotProcessSaysWhy,
   testADoubleClickPressesTwice,
   testAWatchRecordsAPropertyEveryFrame,
