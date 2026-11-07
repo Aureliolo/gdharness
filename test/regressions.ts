@@ -56136,6 +56136,28 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
         );
         rmSync(join(project, 'many'), { recursive: true, force: true });
 
+        // A script error the case erred on is that case's failure, and nothing a suite declares.
+        writeTree(project, {
+          'erred/erred_test.gd':
+            'extends GdUnitTestSuite\n\n\nfunc test_null_call() -> void:\n\tvar kit: Object = null\n\tkit.call("add", 1, 2)\n\tassert_bool(true).is_true()\n',
+        });
+        const erred = jsonOf(
+          await call('project_test', { projectPath: project, path: 'erred' }, ENGINE_CALL_TIMEOUT_MS * 3),
+          'erred',
+        );
+        assert.deepEqual(
+          asArray(get(erred, 'failed')).map((entry) => [get(entry, 'name'), get(entry, 'status')]),
+          [['test_null_call', 'error']],
+          JSON.stringify(erred),
+        );
+        assert.deepEqual(
+          [get(erred, 'undeclaredErrors'), get(erred, 'errors')],
+          [undefined, 1],
+          `counted once, as the case's error: ${JSON.stringify(erred)}`,
+        );
+        assert.doesNotMatch(text(get(erred, 'verdict')), /no suite declared/, JSON.stringify(erred));
+        rmSync(join(project, 'erred'), { recursive: true, force: true });
+
         // gdUnit4's own setting fails a case on what it prints, declared or not, unless an
         // assert_error took it.
         const settings = readFileSync(join(project, 'project.godot'), 'utf8');
