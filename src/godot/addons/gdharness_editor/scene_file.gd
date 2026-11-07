@@ -1234,11 +1234,12 @@ func _also_saved(state: SceneState) -> Array[Dictionary]:
 		var on: Dictionary = _asked.get(id, {})
 		var filed: Dictionary = _filed[id]
 		var stored: Dictionary = _stored_at(state, index)
+		var restated: Dictionary = _restated_in_parts(filed, stored)
 		var names: Dictionary = filed.duplicate()
 		names.merge(stored)
 		for key: Variant in names:
 			var name: String = str(key)
-			if on.has(name):
+			if on.has(name) or restated.has(name):
 				continue
 			var held: bool = filed.has(name)
 			if held == stored.has(name) and (not held or GdhSame.same(stored[name], filed[name])):
@@ -1250,6 +1251,36 @@ func _also_saved(state: SceneState) -> Array[Dictionary]:
 				entry["saved"] = values.serialize_value(stored[name])
 			noted.append(entry)
 	return noted
+
+
+## Each dictionary of [param filed] that [param stored] holds as one property per key, name/key,
+## with the same values, by its name and its parts' names. The engine writes an AnimationPlayer's
+## libraries that way, so a file holding them as one dictionary saves the same libraries under
+## other names, which read as the libraries lost.
+static func _restated_in_parts(filed: Dictionary, stored: Dictionary) -> Dictionary:
+	var restated: Dictionary = {}
+	for key: Variant in filed:
+		var name: String = str(key)
+		if stored.has(name) or typeof(filed[key]) != TYPE_DICTIONARY:
+			continue
+		var whole: Dictionary = filed[key]
+		var parts: Array[String] = []
+		for stored_key: Variant in stored:
+			if str(stored_key).begins_with(name + "/"):
+				parts.append(str(stored_key))
+		if parts.size() != whole.size():
+			continue
+		var same: bool = true
+		for part_key: Variant in whole:
+			var part: String = name + "/" + str(part_key)
+			if not stored.has(part) or not GdhSame.same(stored[part], whole[part_key]):
+				same = false
+				break
+		if same:
+			restated[name] = true
+			for part: String in parts:
+				restated[part] = true
+	return restated
 
 
 func _holds_scripted_embedded() -> bool:
