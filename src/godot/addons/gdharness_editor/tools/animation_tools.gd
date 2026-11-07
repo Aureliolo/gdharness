@@ -344,6 +344,7 @@ func create_animation(args: Dictionary) -> Dictionary:
 		"animationName": animation_name,
 		"length": GdhAnimationReads.held_seconds(anim.length),
 		"loopMode": loop_mode_name,
+		"step": GdhAnimationReads.held_seconds(anim.step),
 	}
 	if library[2]:
 		answer["libraryMade"] = (

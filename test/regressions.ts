@@ -71715,7 +71715,17 @@ async function testAnAnimationsKeysAndLengthAreWrittenWithNoEditor(): Promise<vo
     return;
   }
   await withAnAnimationProject(godotPath, {}, async ({ call, written, fileOf }) => {
-    await written({ op: 'create', playerNodePath: 'Player', animationName: 'spin', length: 0.5 });
+    const created = await written({
+      op: 'create',
+      playerNodePath: 'Player',
+      animationName: 'spin',
+      length: 0.5,
+    });
+    assert.deepEqual(
+      { length: get(created, 'length'), loopMode: get(created, 'loopMode'), step: get(created, 'step') },
+      { length: 0.5, loopMode: 'none', step: 0.1 },
+      `create answers what it made, as set does: ${JSON.stringify(created)}`,
+    );
     const track = await written({
       op: 'add_track',
       playerNodePath: 'Player',
