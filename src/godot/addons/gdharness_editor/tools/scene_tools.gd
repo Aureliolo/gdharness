@@ -528,14 +528,27 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 	target_parent.add_child(duplicated_node)
 	GdhPlacing.place(duplicated_node, place)
 	var made: Dictionary = {}
-	for copy: Variant in copies.values():
-		made[copy] = true
+	# The original keeps its unique name, which a scene gives one node only. The engine took it off
+	# the copy with a warning saying the name was claimed, and the answer did not say so.
+	var plain: Array[Node] = []
+	for value: Variant in copies.values():
+		made[value] = true
+		var copy: Node = value
+		if copy.unique_name_in_owner:
+			copy.unique_name_in_owner = false
+			plain.append(copy)
 	GdhPlacing.own(duplicated_node, root, made)
 	GdhPlacing.reconnect(copies, source)
 	scene.copied(copies)
 
 	var new_path: String = scene.path_of(duplicated_node)
 	var placed: Array = [scene.path_of(target_parent), duplicated_node.get_index()]
+	var not_unique: Array[String] = []
+	for copy: Node in plain:
+		not_unique.append(scene.path_of(copy))
+	var connected: Array[Dictionary] = _connections_copied(
+		scene, scene.path_of(source), new_path
+	)
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
 			var copy: Node = saved.get_node_or_null(new_path)
@@ -550,7 +563,7 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 	if not written.is_empty():
 		return written
 
-	return {
+	var answer: Dictionary = {
 		"ok": true,
 		"nodePath": node_path,
 		"newName": new_name,
@@ -558,6 +571,37 @@ func duplicate_node(args: Dictionary) -> Dictionary:
 		"parentNodePath": placed[0],
 		"index": placed[1],
 	}
+	if not not_unique.is_empty():
+		answer["notUnique"] = not_unique
+	if not connected.is_empty():
+		answer["connectionsCopied"] = connected
+	return answer
+
+
+## The connections the file held from [param at] or a node under it, as
+## {sourceNodePath, signalName, targetNodePath, methodName} with each end under [param at] moved
+## under [param copy_at]: those the copy gets. One an instance makes inside itself is the instanced
+## scene's, which the file does not hold.
+static func _connections_copied(
+	scene: GdhSceneFile, at: String, copy_at: String
+) -> Array[Dictionary]:
+	var copied: Array[Dictionary] = []
+	for held: Dictionary in scene.held_connections():
+		var from: String = str(held["sourceNodePath"])
+		if from != at and not from.begins_with(at + "/"):
+			continue
+		var to: String = str(held["targetNodePath"])
+		if to == at or to.begins_with(at + "/"):
+			to = copy_at + to.substr(at.length())
+		copied.append(
+			{
+				"sourceNodePath": copy_at + from.substr(at.length()),
+				"signalName": held["signalName"],
+				"targetNodePath": to,
+				"methodName": held["methodName"],
+			}
+		)
+	return copied
 
 
 func reparent_node(args: Dictionary) -> Dictionary:

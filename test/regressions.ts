@@ -70508,7 +70508,50 @@ async function testANodeKeepsItsGroupsAndItsPlace(): Promise<void> {
     }
     // A copy's connections keep the arguments the original's bind and unbind, and one aimed inside
     // the copied nodes is aimed at the copy.
-    await node({ scenePath: 'panel.tscn', op: 'duplicate', nodePath: 'Rows', newName: 'Shelf' });
+    await node({
+      scenePath: 'panel.tscn',
+      op: 'set',
+      nodePath: 'Rows/Open',
+      properties: { unique_name_in_owner: true },
+    });
+    const shelf = await node({
+      scenePath: 'panel.tscn',
+      op: 'duplicate',
+      nodePath: 'Rows',
+      newName: 'Shelf',
+    });
+    // The answer named neither the connections the copy got nor the unique name the engine kept for
+    // the original.
+    assert.deepEqual(
+      [get(shelf, 'connectionsCopied'), get(shelf, 'notUnique')],
+      [
+        [
+          {
+            sourceNodePath: 'Shelf/Close',
+            signalName: 'pressed',
+            targetNodePath: '.',
+            methodName: '_on_quit',
+          },
+          {
+            sourceNodePath: 'Shelf/Open',
+            signalName: 'toggled',
+            targetNodePath: 'Shelf',
+            methodName: 'queue_sort',
+          },
+        ],
+        ['Shelf/Open'],
+      ],
+      JSON.stringify(shelf),
+    );
+    assert.deepEqual(
+      [
+        ...fileOf('panel.tscn').matchAll(
+          /\[node name="(\w+)" type="Button" parent="(\w+)"[^\]]*\]\nunique_name_in_owner = true/g,
+        ),
+      ].map((m) => `${m[2] ?? ''}/${m[1] ?? ''}`),
+      ['Rows/Open'],
+      fileOf('panel.tscn'),
+    );
     const connections = fileOf('panel.tscn')
       .split('\n')
       .filter((line) => line.startsWith('[connection'));
