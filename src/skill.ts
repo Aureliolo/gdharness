@@ -147,7 +147,7 @@ announces, nor do the engines it starts, unless it was started to be profiled fr
 
 The autoload names \`res://${RUNTIME_AUTOLOAD.path}\`, the loader \`gdharness setup\` writes, which
 brings the runtime up only in a debug build that has the addon. A release export leaves out the
-entry, the loader and the runtime, editor and auto_reload addons. A debug export keeps them. The
+entry, the loader and the runtime, editor, test and auto_reload addons. A debug export keeps them. The
 loader is committed with \`project.godot\`, and \`gdharness doctor\` says when it differs from the
 one gdharness ships.
 
