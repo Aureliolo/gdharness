@@ -61536,6 +61536,31 @@ async function testAWriteSaysWhatElseItChanged(): Promise<void> {
       undefined,
       `the same libraries written another way are not named as lost: ${JSON.stringify(beside)}`,
     );
+
+    // A node inside an editable instance that the file keeps no entry for gains one as it is saved.
+    writeFileSync(
+      join(project, 'panel.tscn'),
+      '[gd_scene format=3]\n\n[node name="Panel" type="Control"]\n\n[node name="Press" type="Button" parent="."]\n',
+    );
+    writeFileSync(
+      join(project, 'holder.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://panel.tscn" id="1_panel"]\n\n' +
+        '[node name="Holder" type="Node2D"]\n\n[node name="Shop" parent="." instance=ExtResource("1_panel")]\n\n' +
+        '[editable path="Shop"]\n',
+    );
+    const inside = await call('scene_node', {
+      scenePath: 'res://holder.tscn',
+      op: 'add',
+      nodeType: 'Node2D',
+      nodeName: 'Beside',
+    });
+    const holder = readFileSync(join(project, 'holder.tscn'), 'utf8');
+    assert.match(holder, /\[node name="Press" parent="Shop"[^\n]*\]\nlayout_mode = 0\n/, holder);
+    assert.deepEqual(
+      asArray(get(inside, 'alsoSaved')).filter((entry) => get(entry, 'node') === 'Shop/Press'),
+      [{ node: 'Shop/Press', property: 'layout_mode', saved: 0 }],
+      `the entry it gained is said: ${JSON.stringify(inside)}`,
+    );
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
