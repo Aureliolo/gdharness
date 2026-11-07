@@ -198,6 +198,8 @@ export function shownValue(value: GodotValue, typeHint = '', inside = false): st
       return `<${typeHint === '' ? 'Object' : typeHint}#${String(first)}>`;
     case 'float':
       return shownFloat(Number(first));
+    case 'int':
+      return String(first);
     case 'StringName':
       return inside ? `&${JSON.stringify(String(first))}` : String(first);
     case 'NodePath':
