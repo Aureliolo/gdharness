@@ -7879,16 +7879,15 @@ class GodotServer {
     const windowSaid =
       needing.length === 0 ? {} : { windowed, windowNote: windowNoteFor(needing, windowed ? sharing : null) };
     const cmdArgs = [
-      // The windowed engine as gdharness test starts it: the project's viewport size, and no sound.
+      // The engine as gdharness test starts it: windowed at the project's viewport size, and
+      // either way with no sound, since a suite can read the driver off the command line.
       ...(windowed
-        ? [
-            ...(viewport === null
-              ? []
-              : ['--resolution', `${String(viewport.width)}x${String(viewport.height)}`]),
-            '--audio-driver',
-            'Dummy',
-          ]
+        ? viewport === null
+          ? []
+          : ['--resolution', `${String(viewport.width)}x${String(viewport.height)}`]
         : ['--headless']),
+      '--audio-driver',
+      'Dummy',
       '--path',
       project.value.path,
       // Before the script, where the engine reads its own options rather than handing them on.
