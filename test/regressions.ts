@@ -62129,6 +62129,29 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       join(project, 'glow.gdshader'),
       'shader_type canvas_item;\n\nuniform float glow_strength : hint_range(0.0, 2.0) = 1.0;\nuniform vec4 tint : source_color;\n',
     );
+    const stale = parseTextContent(
+      await request('resource_edit', { op: 'read', resourcePath: 'res://glow.tres' }),
+    );
+    assert.deepEqual(get(stale, 'notLoaded'), ['shader_parameter/glow_power'], JSON.stringify(stale));
+    // A uniform's bare name was refused as a property the class lacks, with the class's list to
+    // read, which holds no shader parameter.
+    assert.equal(
+      textOf(await material('res://glow.tres', { tint: { _type: 'Color', r: 1, g: 0, b: 0, a: 1 } })),
+      'ShaderMaterial has no property tint. Its shader declares the uniform tint, which shader_parameter/tint sets.',
+    );
+    // A string's later lines are not lines the file sets, though one can read like one.
+    writeFileSync(
+      join(project, 'note.tres'),
+      '[gd_resource type="Resource" format=3]\n\n[resource]\nresource_name = "first \\"\nhidden = 1"\n',
+    );
+    const note = parseTextContent(
+      await request('resource_edit', { op: 'read', resourcePath: 'res://note.tres' }),
+    );
+    assert.deepEqual(
+      [get(note, 'notLoaded'), get(note, 'properties', 'resource_name')],
+      [undefined, 'first "\nhidden = 1'],
+      JSON.stringify(note),
+    );
     const tinted = await material('res://glow.tres', {
       'shader_parameter/tint': { _type: 'Color', r: 1, g: 0, b: 0, a: 1 },
     });
@@ -62381,7 +62404,7 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       [{ pack: [{ _type: 'Curve' }] }, 'Player.pack holds ItemData, and item 0 of the list given is Curve.'],
       [
         { pack: ['res://nothing.tres'] },
-        "No resource at res://nothing.tres for item 0 of pack. The project's .tres files are res://bare.tres, res://chain.tres, res://default_bus_layout.tres, res://glow.tres, res://sword.tres.",
+        "No resource at res://nothing.tres for item 0 of pack. The project's .tres files are res://bare.tres, res://chain.tres, res://default_bus_layout.tres, res://glow.tres, res://note.tres, res://sword.tres.",
       ],
       [{ named: { best: 'sword' } }, 'named["best"] takes a res:// or uid:// path, not sword'],
       [{ mates: ['Nobody'] }, 'item 0 of mates names Nobody, and there is no node at that path from Hero.'],
