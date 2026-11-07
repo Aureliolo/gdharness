@@ -606,6 +606,14 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 		"resourceType": loaded.get_class(),
 		"properties": properties,
 	}
+	# A line the engine does not load, such as a shader parameter whose uniform was renamed, was
+	# left out of the answer without a word, and the next save drops it.
+	var unloaded: Array[String] = _not_loaded(loaded, file, res_path)
+	if not unloaded.is_empty():
+		answer["notLoaded"] = unloaded
+	# An imported translation lists no messages, which read as a table translating nothing.
+	if loaded is OptimizedTranslation:
+		answer["messagesNote"] = _hashed_note(file)
 	if script != null:
 		answer["script"] = script.resource_path
 		# resourceType is the engine class under the script, which for a class the project declares
@@ -645,13 +653,69 @@ static func shader_errors(path: String) -> Array[Dictionary]:
 	return caught.raised
 
 
+## Why the OptimizedTranslation at [param file] lists no messages, and which file holds them.
+static func _hashed_note(file: String) -> String:
+	var said: String = (
+		"An OptimizedTranslation keeps a hash of each key rather than the key, so it lists no "
+		+ "messages."
+	)
+	var source: String = _imported_from(file)
+	if source.is_empty():
+		return said
+	return said + " %s, which it was imported from, holds them." % source
+
+
+## The file whose import wrote [param file], named by the sidecar beside it, or "" when none does.
+static func _imported_from(file: String) -> String:
+	var folder: String = file.get_base_dir()
+	for name: String in DirAccess.get_files_at(folder):
+		if not name.ends_with(".import"):
+			continue
+		var sidecar: ConfigFile = ConfigFile.new()
+		if sidecar.load(folder.path_join(name)) != OK:
+			continue
+		var listed: Variant = sidecar.get_value("deps", "dest_files", [])
+		if not listed is Array:
+			continue
+		var outputs: Array = listed
+		if outputs.has(file):
+			return folder.path_join(name.trim_suffix(".import"))
+	return ""
+
+
+## The names [param file] sets for [param loaded], read from [param res_path], that [param loaded]
+## has no property for, sorted.
+static func _not_loaded(loaded: Resource, file: String, res_path: String) -> Array[String]:
+	var unloaded: Array[String] = []
+	if not (file.ends_with(".tres") or file.ends_with(".tscn")):
+		return unloaded
+	var loads: Dictionary = {}
+	for listed: Dictionary in loaded.get_property_list():
+		loads[str(listed.get("name", ""))] = true
+	var set_in_file: Dictionary = _names_set_in(
+		FileAccess.get_file_as_string(file), res_path.trim_prefix(file).trim_prefix("::")
+	)
+	for name: String in set_in_file:
+		if not loads.has(name):
+			unloaded.append(name)
+	unloaded.sort()
+	return unloaded
+
+
 ## The names the [code][resource][/code] section of [param text], a .tres file, sets, or those of
 ## the embedded resource with the id [param id] when one is given, as a set.
 static func _names_set_in(text: String, id: String) -> Dictionary:
 	var names: Dictionary = {}
 	var inside: bool = false
 	var key: RegEx = RegEx.create_from_string("^([^\\s=\\[][^=]*?) = ")
+	# A string value runs on over lines, and a line of dialogue or an embedded script inside one
+	# reads as a property the file sets.
+	var in_string: bool = false
 	for line: String in text.split("\n"):
+		var opened: bool = in_string
+		in_string = _ends_in_string(line, in_string)
+		if opened:
+			continue
 		if line.begins_with("["):
 			inside = (
 				line.begins_with("[resource]")
@@ -663,6 +727,19 @@ static func _names_set_in(text: String, id: String) -> Dictionary:
 		if found != null:
 			names[found.get_string(1)] = true
 	return names
+
+
+## Whether a string is still open at the end of [param line], given whether one was at its start.
+static func _ends_in_string(line: String, open: bool) -> bool:
+	var escaped: bool = false
+	for character: String in line:
+		if escaped:
+			escaped = false
+		elif open and character == "\\":
+			escaped = true
+		elif character == '"':
+			open = not open
+	return open
 
 
 ## The resource [param file] keeps under [param id], found in [param value] or anything it holds.

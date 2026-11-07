@@ -675,3 +675,21 @@ static func no_uniform(material: ShaderMaterial, property: String) -> String:
 	if uniforms.is_empty():
 		return said + ". It declares no uniforms."
 	return GdhRead.offered(said, uniform, uniforms) + "."
+
+
+## Why [param material] has no [param property] when its shader declares a uniform of that name, or
+## empty when it declares none. The general refusal pointed at the class's property list, which
+## holds no shader parameter.
+static func bare_uniform(material: ShaderMaterial, property: String) -> String:
+	if material.shader == null or "/" in property:
+		return ""
+	for entry: Dictionary in material.shader.get_shader_uniform_list():
+		if str(entry["name"]) == property:
+			return (
+				(
+					"ShaderMaterial has no property %s. Its shader declares the uniform %s, which "
+					+ "shader_parameter/%s sets."
+				)
+				% [property, property, property]
+			)
+	return ""
