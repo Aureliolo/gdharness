@@ -1022,9 +1022,12 @@ function testOperations(godotPath: string, projectDir: string): void {
   for (const [modification, reason] of [
     [
       { type: 'add_variable', name: 'position', varType: 'Vector2' },
-      /additions: line 3, Parse Error: Member "position" redefined \(original in native class 'Node2D'\); /,
+      /additions: line 3 of the script with them \("var position: Vector2"\), Parse Error: Member "position" redefined \(original in native class 'Node2D'\); /,
     ],
-    [{ type: 'add_function', name: 'stray', body: 'nowhere_at_all()' }, /line \d+, .*nowhere_at_all/],
+    [
+      { type: 'add_function', name: 'stray', body: 'nowhere_at_all()' },
+      /line 9 of the script with them \("nowhere_at_all\(\)"\), .*nowhere_at_all/,
+    ],
   ] as const) {
     const refused = runRefusedOperation(godotPath, projectDir, 'modify_script', {
       script_path: 'made/plain.gd',

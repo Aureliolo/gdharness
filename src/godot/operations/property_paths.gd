@@ -118,9 +118,14 @@ static func _unlisted_in(items: Array, called: String, name: String, at: int) ->
 		)
 	var place: int = index.to_int()
 	if place < 0 or place > last:
+		var adding: String = (
+			" To add an element, give %s whole with it at the end." % head
+			if place == items.size()
+			else ""
+		)
 		return (
-			"%s holds %d element%s, so %s names none: an index goes from 0 to %d."
-			% [called, items.size(), "" if items.size() == 1 else "s", name, last]
+			"%s holds %d element%s, so %s names none: an index goes from 0 to %d.%s"
+			% [called, items.size(), "" if items.size() == 1 else "s", name, last, adding]
 		)
 	if not items[place] is Resource:
 		return (

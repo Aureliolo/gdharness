@@ -106,8 +106,13 @@ func _load_theme(theme_path: String) -> Theme:
 ## asked and the resource's script changes as it loads goes under loadsAs in [param answer], and one
 ## the file leaves out at its default under notStored.
 func _save_checked(
-	resource: Resource, path: String, names: Array, previous: Variant, answer: Dictionary
+	resource: Resource,
+	path: String,
+	asked: Dictionary,
+	previous: Variant,
+	answer: Dictionary,
 ) -> String:
+	var names: Array = asked.keys()
 	var carried: Dictionary = GdhHeadlessCheck.embedded_in(
 		GdhHeadlessCheck.stored(resource).values(), {}
 	)
@@ -154,8 +159,29 @@ func _save_checked(
 	_written(path)
 	_note_loads_as(answer, resource, path, loads_as)
 	if path.ends_with(".tres"):
-		_note_not_stored(answer, resource, names, saved)
+		var inside: Array = names.duplicate()
+		for key: Variant in asked:
+			_given_inside(str(key), asked[key], inside)
+		_note_not_stored(answer, resource, inside, FileAccess.get_file_as_string(path))
 	return ""
+
+
+## Into [param into], the path of each property given inside [param value], given at
+## [param prefix]: "items/0/stack" for a stack given in the first element of items. Only the paths
+## that reach a resource built into the file name a property of one.
+static func _given_inside(prefix: String, value: Variant, into: Array) -> void:
+	if value is Dictionary:
+		var fields: Dictionary = value
+		for key: Variant in fields:
+			if str(key).begins_with("_"):
+				continue
+			var path: String = prefix + "/" + str(key)
+			into.append(path)
+			_given_inside(path, fields[key], into)
+	elif value is Array:
+		var elements: Array = value
+		for at: int in elements.size():
+			_given_inside("%s/%d" % [prefix, at], elements[at], into)
 
 
 ## Whether [param entries], the lines of [param resource]'s section by name, give [param property]
@@ -201,16 +227,28 @@ static func _note_loads_as(
 
 
 ## Notes under notStored in [param answer] each of [param names] that is a stored property of
-## [param resource] and that [param saved], the saved file's main section, does not set: it holds
+## [param resource], or of a resource built into it that a path such as "items/0/stack" reaches,
+## and that the section of [param text], the saved file, for that resource does not set: it holds
 ## its default, so the saver leaves it out, as the editor does, and it follows that default.
 static func _note_not_stored(
-	answer: Dictionary, resource: Resource, names: Array, saved: Dictionary
+	answer: Dictionary, resource: Resource, names: Array, text: String
 ) -> void:
-	var stored: Dictionary = GdhHeadlessCheck.stored(resource)
+	var all: Dictionary = GdhHeadlessCheck.sections(text)
 	var left: Array[String] = []
 	for key: Variant in names:
 		var property: String = str(key)
-		if stored.has(property) and not saved.has(property):
+		var spot: Array = GdhPropertyPaths.holder_of(resource, property, resource.resource_path)
+		var holder: Object = spot[0]
+		var leaf: String = spot[1]
+		var section: Dictionary = all.get("resource", {})
+		if holder != resource:
+			var built_in: Resource = holder as Resource
+			if built_in == null or not all.has("sub:" + built_in.resource_scene_unique_id):
+				continue
+			section = all["sub:" + built_in.resource_scene_unique_id]
+		if not GdhHeadlessCheck.stored(holder).has(leaf):
+			continue
+		if not GdhHeadlessCheck.entries_of(section).has(leaf):
 			left.append(property)
 	if left.is_empty():
 		return
@@ -354,7 +392,7 @@ func create_resource(args: Dictionary) -> Dictionary:
 		if not attached.get_global_name().is_empty():
 			answer["scriptClass"] = str(attached.get_global_name())
 	_properties.note_write(answer)
-	var failed: String = _save_checked(resource, res_path, properties.keys(), null, answer)
+	var failed: String = _save_checked(resource, res_path, properties, null, answer)
 	if not failed.is_empty():
 		return { "ok": false, "error": failed }
 	_note_put_back(answer, resource, res_path)
@@ -414,7 +452,7 @@ func modify_resource(args: Dictionary) -> Dictionary:
 	var answer: Dictionary = { "ok": true, "resourcePath": res_path }
 	_properties.note_write(answer)
 	var previous: PackedByteArray = FileAccess.get_file_as_bytes(res_path)
-	var failed: String = _save_checked(resource, res_path, properties.keys(), previous, answer)
+	var failed: String = _save_checked(resource, res_path, properties, previous, answer)
 	if not failed.is_empty():
 		return { "ok": false, "error": failed }
 	_note_put_back(answer, resource, res_path)
