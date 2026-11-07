@@ -1316,10 +1316,15 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		answer["sharedWith"] = shared
 	if not adding.is_empty() or not removing.is_empty():
 		answer["groups"] = GdhGroups.read(scene, node).get("groups", [])
+	# What the node declares, not what it answers to: a MeshInstance3D reads any name under
+	# surface_material_override/0 as that slot, so a path into the slot's material read as the slot.
+	var declared_names: Dictionary = {}
+	for declared: Dictionary in node.get_property_list():
+		declared_names[str(declared.get("name", ""))] = true
 	var named: Array[String] = []
 	for key: Variant in properties:
 		var property: String = str(key).get_slice(":", 0)
-		if property != "name" and property in node and not named.has(property):
+		if property != "name" and declared_names.has(property) and not named.has(property):
 			named.append(property)
 	var source: String = scene.values_from(node, old_path)
 	# Read before the write, which frees the node.
