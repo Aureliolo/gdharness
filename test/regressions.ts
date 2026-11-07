@@ -20293,6 +20293,310 @@ async function testAKeyLetGoOfNamesWhatItsPressHeld(): Promise<void> {
 }
 
 /**
+ * Plays a scratch project headless with the runtime addon and hands the body a tool caller.
+ *
+ * `scene` is the whole main scene, whose root script is `main.gd` in `files`. `input` is the text
+ * of a `[input]` section. The run is stopped and every process it left is swept on the way out.
+ */
+async function withAHeadlessProbeGame(
+  prefix: string,
+  scene: string,
+  files: Record<string, string>,
+  body: (call: (tool: string, args: Record<string, unknown>) => Promise<unknown>) => Promise<void>,
+): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log(`${prefix} regression skipped (Godot not found)`);
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), `gdharness-${prefix}-`));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), `gdharness-${prefix}-rt-`));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  const games = new MetProcesses();
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      `; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Probe"\n` +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    writeFileSync(join(project, 'main.tscn'), scene);
+    for (const [name, content] of Object.entries(files)) {
+      writeFileSync(join(project, name), content);
+    }
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      { recursive: true },
+    );
+    await server.initialize('regression-test');
+    const started = parseTextContent(
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { projectPath: project, op: 'start', headless: true } },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    );
+    assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+    await games.meet(asNumber(get(started, 'runtime', 'pid')));
+    await body(async (tool, args) =>
+      parseTextContent(
+        await server.request('tools/call', { name: tool, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+      ),
+    );
+    await stopItsRun(server);
+  } finally {
+    await games.end();
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+const PROBE_SCENE_HEAD =
+  '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+  '[node name="Main" type="Control"]\nscript = ExtResource("1")\n\n';
+
+/**
+ * Typing replaces a field's text or adds at the caret, and a secret field answers its mask.
+ *
+ * The answer names the field the characters landed in and what it then holds, read back from the
+ * field. The game's own reading of both fields is compared, so a mask in the answer is not a mask
+ * in the field.
+ */
+async function testTypedTextLandsWhereTheAnswerSaysItDid(): Promise<void> {
+  await withAHeadlessProbeGame(
+    'typed-text',
+    PROBE_SCENE_HEAD +
+      '[node name="Name" type="LineEdit" parent="."]\ntext = "2.1"\n\n' +
+      '[node name="Secret" type="LineEdit" parent="."]\nsecret = true\n',
+    {
+      'main.gd':
+        'extends Control\n\n' +
+        'func focus_on(field_name: String) -> void:\n' +
+        '\tvar field: LineEdit = get_node(field_name)\n' +
+        '\tfield.edit()\n' +
+        '\tfield.caret_column = field.text.length()\n\n\n' +
+        'func texts() -> Dictionary:\n' +
+        '\treturn { "name": ($Name as LineEdit).text, "secret": ($Secret as LineEdit).text }\n',
+    },
+    async (call) => {
+      const focus = (field: string): Promise<unknown> =>
+        call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'focus_on', args: [field] });
+      const texts = async (): Promise<unknown> =>
+        get(await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'texts' }), 'result');
+
+      await focus('Name');
+      const appended = await call('runtime_input', { op: 'text', text: '0.3' });
+      const appendedShown = JSON.stringify(appended);
+      assert.equal(get(appended, 'type'), 'input_injected', appendedShown);
+      assert.equal(get(appended, 'into'), '/root/Main/Name', appendedShown);
+      assert.equal(get(appended, 'replaced'), false, appendedShown);
+      assert.equal(get(appended, 'characters'), 3, appendedShown);
+      assert.equal(
+        get(appended, 'holds'),
+        '2.10.3',
+        `typing without replace lands at the caret: ${appendedShown}`,
+      );
+      assert.equal(get(await texts(), 'name'), '2.10.3', 'and the field holds what the answer says');
+
+      const replaced = await call('runtime_input', { op: 'text', text: '0.3', replace: true });
+      const replacedShown = JSON.stringify(replaced);
+      assert.equal(get(replaced, 'replaced'), true, replacedShown);
+      assert.equal(get(replaced, 'holds'), '0.3', `replace writes over what was there: ${replacedShown}`);
+      assert.equal(get(await texts(), 'name'), '0.3', 'and the field holds that');
+
+      const emptied = await call('runtime_input', { op: 'text', text: '', replace: true });
+      assert.equal(
+        get(emptied, 'holds'),
+        '',
+        `"" with replace empties the field: ${JSON.stringify(emptied)}`,
+      );
+      assert.equal(get(await texts(), 'name'), '', 'and the field is empty');
+
+      await focus('Secret');
+      const secret = await call('runtime_input', { op: 'text', text: 'hunter2', replace: true });
+      const secretShown = JSON.stringify(secret);
+      assert.equal(get(secret, 'into'), '/root/Main/Secret', secretShown);
+      assert.equal(get(secret, 'holds'), '•'.repeat(7), `a secret field answers its mask: ${secretShown}`);
+      assert.equal(get(await texts(), 'secret'), 'hunter2', 'while the field itself holds the text');
+    },
+  );
+}
+
+/**
+ * A joypad motion reaches the game as an InputEventJoypadMotion and moves the axis it names.
+ *
+ * Two axes on two devices, one named and one numbered, so the device, the axis and the value are
+ * each read from the call and none from a default.
+ */
+async function testAJoypadMotionReachesTheGameOnItsAxis(): Promise<void> {
+  await withAHeadlessProbeGame(
+    'joypad-motion',
+    PROBE_SCENE_HEAD,
+    {
+      'main.gd':
+        'extends Control\n\nvar seen: Array = []\n\n\n' +
+        'func _input(event: InputEvent) -> void:\n' +
+        '\tvar motion: InputEventJoypadMotion = event as InputEventJoypadMotion\n' +
+        '\tif motion != null:\n' +
+        '\t\tself.seen.append([motion.device, motion.axis, motion.axis_value])\n\n\n' +
+        'func report() -> Dictionary:\n' +
+        '\treturn {\n' +
+        '\t\t"seen": self.seen,\n' +
+        '\t\t"left_x": Input.get_joy_axis(0, JOY_AXIS_LEFT_X),\n' +
+        '\t\t"right_y": Input.get_joy_axis(2, JOY_AXIS_RIGHT_Y),\n' +
+        '\t}\n',
+    },
+    async (call) => {
+      const named = await call('runtime_input', { op: 'joypad_motion', axis: 'left_x', value: 0.5 });
+      const namedShown = JSON.stringify(named);
+      assert.equal(get(named, 'type'), 'input_injected', namedShown);
+      assert.equal(get(named, 'axis_name'), 'left_x', namedShown);
+      assert.equal(get(named, 'value'), 0.5, namedShown);
+      assert.equal(get(named, 'device'), 0, namedShown);
+      const numbered = await call('runtime_input', { op: 'joypad_motion', axis: 3, value: -0.25, device: 2 });
+      const numberedShown = JSON.stringify(numbered);
+      assert.equal(get(numbered, 'axis_name'), 'right_y', numberedShown);
+      assert.equal(get(numbered, 'device'), 2, numberedShown);
+      const report = get(
+        await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'report' }),
+        'result',
+      );
+      const reportShown = JSON.stringify(report);
+      assert.deepEqual(
+        get(report, 'seen'),
+        [
+          [0, 0, 0.5],
+          [2, 3, -0.25],
+        ],
+        `the game received each motion on its device and axis: ${reportShown}`,
+      );
+      assert.equal(get(report, 'left_x'), 0.5, `and Input holds the axis: ${reportShown}`);
+      assert.equal(get(report, 'right_y'), -0.25, reportShown);
+    },
+  );
+}
+
+/** Shift, Ctrl and Alt on a key press arrive on the InputEventKey the game receives. */
+async function testAKeyPressCarriesItsModifiers(): Promise<void> {
+  await withAHeadlessProbeGame(
+    'key-modifiers',
+    PROBE_SCENE_HEAD,
+    {
+      'main.gd':
+        'extends Control\n\nvar seen: Array = []\n\n\n' +
+        'func _input(event: InputEvent) -> void:\n' +
+        '\tvar key: InputEventKey = event as InputEventKey\n' +
+        '\tif key != null and key.pressed:\n' +
+        '\t\tself.seen.append([key.shift_pressed, key.ctrl_pressed, key.alt_pressed])\n\n\n' +
+        'func report() -> Array:\n' +
+        '\treturn self.seen\n',
+    },
+    async (call) => {
+      const wanted: [string, boolean[]][] = [
+        ['none', [false, false, false]],
+        ['shift', [true, false, false]],
+        ['ctrl', [false, true, false]],
+        ['alt', [false, false, true]],
+        ['all', [true, true, true]],
+      ];
+      for (const [which, flags] of wanted) {
+        const args: Record<string, unknown> = {
+          op: 'key',
+          keycode: 'F5',
+          shift: which === 'shift' || which === 'all',
+          ctrl: which === 'ctrl' || which === 'all',
+          alt: which === 'alt' || which === 'all',
+        };
+        const answer = await call('runtime_input', args);
+        const shown = JSON.stringify(answer);
+        assert.deepEqual(
+          [get(answer, 'shift'), get(answer, 'ctrl'), get(answer, 'alt')],
+          flags,
+          `${which}: the answer names the modifiers held: ${shown}`,
+        );
+      }
+      const seen = get(
+        await call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'report' }),
+        'result',
+      );
+      assert.deepEqual(
+        seen,
+        wanted.map(([, flags]) => flags),
+        `the game received each press with those modifiers: ${JSON.stringify(seen)}`,
+      );
+    },
+  );
+}
+
+/** Words on a hidden node meet a wait only when it counts hidden nodes. */
+async function testAWaitForWordsCountsHiddenNodesOnlyWhenAsked(): Promise<void> {
+  await withAHeadlessProbeGame(
+    'wait-hidden',
+    PROBE_SCENE_HEAD +
+      '[node name="Shown" type="Label" parent="."]\ntext = "Plainly visible"\n\n' +
+      '[node name="Tucked" type="Label" parent="."]\nvisible = false\ntext = "Tucked away"\n',
+    { 'main.gd': 'extends Control\n' },
+    async (call) => {
+      const wait = (says: string, extra: Record<string, unknown>): Promise<unknown> =>
+        call('runtime_wait', { op: 'until', nodePath: '/root/Main', says, timeoutMs: 1500, ...extra });
+      const shown = await wait('Plainly visible', {});
+      assert.equal(get(shown, 'met'), true, `words on a shown node are met: ${JSON.stringify(shown)}`);
+      const unseen = await wait('Tucked away', {});
+      assert.equal(get(unseen, 'met'), false, `a hidden node's words are not met: ${JSON.stringify(unseen)}`);
+      assert.match(String(get(unseen, 'unseen_note')), /Tucked away|hidden/u, JSON.stringify(unseen));
+      const counted = await wait('Tucked away', { includeHidden: true });
+      assert.equal(get(counted, 'met'), true, `with includeHidden they are: ${JSON.stringify(counted)}`);
+    },
+  );
+}
+
+/** A call's `properties` reads the object it answered with, in the same answer. */
+async function testACallReadsThePropertiesOfWhatItReturned(): Promise<void> {
+  await withAHeadlessProbeGame(
+    'call-properties',
+    PROBE_SCENE_HEAD,
+    {
+      'main.gd':
+        'extends Control\n\n' + 'func make_lamp() -> Object:\n' + '\treturn preload("res://lamp.gd").new()\n',
+      'lamp.gd': 'extends RefCounted\n\nvar label: String = "lamp"\nvar weight: int = 3\n',
+    },
+    async (call) => {
+      const make = (extra: Record<string, unknown>): Promise<unknown> =>
+        call('runtime_invoke', { op: 'call', nodePath: '/root/Main', method: 'make_lamp', ...extra });
+      const bare = await make({});
+      assert.equal(get(bare, 'type'), 'method_result', JSON.stringify(bare));
+      assert.equal(
+        get(bare, 'result_properties'),
+        undefined,
+        `without properties none are read: ${JSON.stringify(bare)}`,
+      );
+      const some = await make({ properties: ['weight'] });
+      assert.deepEqual(get(some, 'result_properties'), { weight: 3 }, JSON.stringify(some));
+      const every = await make({ properties: true });
+      assert.deepEqual(
+        get(every, 'result_properties'),
+        { label: 'lamp', weight: 3 },
+        `true reads every variable the script declares: ${JSON.stringify(every)}`,
+      );
+      const missing = await make({ properties: ['weight', 'colour'] });
+      assert.equal(get(missing, 'result_properties', 'weight'), 3, JSON.stringify(missing));
+      assert.match(
+        JSON.stringify(get(missing, 'result_properties_missing')),
+        /colour/u,
+        JSON.stringify(missing),
+      );
+    },
+  );
+}
+
+/**
  * A relative GODOT_PATH is made whole against the directory the server runs in.
  *
  * Reported from a downstream lane: `gdharness test` with `GODOT_PATH=.tools/godot/godot_console.exe`
@@ -29323,6 +29627,67 @@ function testTheImportCheckKnowsWhatStatusImports(): void {
   const extensions = [...listed.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
   assert.equal(extensions.length, 31, `the list as it stands: ${extensions.join(', ')}`);
   assert.deepEqual([...IMPORTABLE_EXTENSIONS], extensions);
+}
+
+/**
+ * project_import uid answers the uid a resource holds and the file it was read from.
+ *
+ * One of each place the engine keeps one: a script's `.uid` sidecar, an imported image's `.import`
+ * file, which the import pass writes, and a scene's own header. Each answer is compared with the
+ * text of that file, so a uid read from somewhere else or made up fails.
+ */
+async function testTheUidOfAResourceIsWhatItsFileHolds(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('uid regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-uid-'));
+  const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Uid"\n',
+    );
+    writeFileSync(join(project, 'tool.gd'), 'extends Node\n');
+    writeFileSync(join(project, 'tool.gd.uid'), 'uid://btoolsidecar\n');
+    writeFileSync(join(project, 'icon.png'), solidPng(40, 160, 40));
+    writeFileSync(
+      join(project, 'level.tscn'),
+      '[gd_scene format=3 uid="uid://blevelheader"]\n\n[node name="Level" type="Node"]\n',
+    );
+    await server.initialize('regression-test');
+    const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+      parseTextContent(
+        await server.request(
+          'tools/call',
+          { name, arguments: { projectPath: project, ...args } },
+          ENGINE_CALL_TIMEOUT_MS,
+        ),
+      );
+    const imported = await call('project_import', { op: 'reimport' });
+    assert.deepEqual(asArray(get(imported, 'reimported')), ['res://icon.png'], JSON.stringify(imported));
+
+    const script = await call('project_import', { op: 'uid', resourcePath: 'res://tool.gd' });
+    assert.equal(get(script, 'uid'), 'uid://btoolsidecar', JSON.stringify(script));
+    assert.equal(get(script, 'from'), 'res://tool.gd.uid', JSON.stringify(script));
+
+    const sidecar = readFileSync(join(project, 'icon.png.import'), 'utf8');
+    const fromImport = /^uid="(uid:\/\/[^"]+)"/m.exec(sidecar)?.[1];
+    assert.ok(fromImport !== undefined, `the import should have written a uid: ${sidecar}`);
+    const image = await call('project_import', { op: 'uid', resourcePath: 'icon.png' });
+    assert.equal(get(image, 'uid'), fromImport, JSON.stringify(image));
+    assert.equal(get(image, 'from'), 'res://icon.png.import', JSON.stringify(image));
+
+    const scene = await call('project_import', { op: 'uid', resourcePath: 'res://level.tscn' });
+    assert.equal(get(scene, 'uid'), 'uid://blevelheader', JSON.stringify(scene));
+  } finally {
+    await server.stop();
+    sweep(project);
+  }
 }
 
 /**
@@ -78279,6 +78644,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStructureReadDescribesTheScriptItRead,
   testRefreshingUidsMakesTheSidecarAndWritesNoScene,
   testAReimportReimportsThroughTheEngine,
+  testTheUidOfAResourceIsWhatItsFileHolds,
   testARunImportsWhatChangedFirst,
   testAnotherCheckoutRunsTheEngineItsConfigNames,
   testTheImportCheckKnowsWhatStatusImports,
@@ -78353,6 +78719,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARelativeEnginePathIsMadeWhole,
   testAPointerOnTheHiddenDesktopIsNoted,
   testAKeyLetGoOfNamesWhatItsPressHeld,
+  testTypedTextLandsWhereTheAnswerSaysItDid,
+  testAJoypadMotionReachesTheGameOnItsAxis,
+  testAKeyPressCarriesItsModifiers,
+  testAWaitForWordsCountsHiddenNodesOnlyWhenAsked,
+  testACallReadsThePropertiesOfWhatItReturned,
   testAClickThatDoesNotProcessSaysWhy,
   testADoubleClickPressesTwice,
   testAWatchRecordsAPropertyEveryFrame,
