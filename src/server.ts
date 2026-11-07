@@ -8260,7 +8260,16 @@ class GodotServer {
     // Less those already under uncaughtScriptErrors, and folded with how often each was printed: a
     // stack overflow prints an error for every frame, and came back as a thousand entries.
     const uncaughtTexts = new Set(uncaught.map((entry) => entry.text));
-    const undeclaredPrinted = judgedErrors.printed.filter((error) => !uncaughtTexts.has(error.text));
+    // Less the script errors a case erred on, which are that case's failure under failed. Named here
+    // as well, one null call was counted twice and its note advised declaring it.
+    const erredOn = new Set(
+      failed.filter((entry) => entry.status === 'error').map((entry) => `${entry.path ?? ''}\n${entry.name}`),
+    );
+    const undeclaredPrinted = judgedErrors.printed.filter(
+      (error) =>
+        !uncaughtTexts.has(error.text) &&
+        !(error.script === true && erredOn.has(`${error.suite ?? ''}\n${error.during ?? ''}`)),
+    );
     const undeclaredFolded = new Map<
       string,
       {
