@@ -61561,6 +61561,28 @@ async function testAWriteSaysWhatElseItChanged(): Promise<void> {
       [{ node: 'Shop/Press', property: 'layout_mode', saved: 0 }],
       `the entry it gained is said: ${JSON.stringify(inside)}`,
     );
+
+    // A path into a surface's material, whose slot name holds a slash itself.
+    writeFileSync(
+      join(project, 'crate3d.tscn'),
+      '[gd_scene format=3]\n\n[sub_resource type="BoxMesh" id="Box"]\n\n' +
+        '[sub_resource type="StandardMaterial3D" id="Blue"]\nalbedo_color = Color(0, 0, 1, 1)\n\n' +
+        '[node name="Crate" type="MeshInstance3D"]\nmesh = SubResource("Box")\n' +
+        'surface_material_override/0 = SubResource("Blue")\n',
+    );
+    const rough = await call('scene_node', {
+      scenePath: 'res://crate3d.tscn',
+      op: 'set',
+      nodePath: '.',
+      properties: { 'surface_material_override/0/roughness': 0.3 },
+    });
+    const crate = readFileSync(join(project, 'crate3d.tscn'), 'utf8');
+    assert.match(crate, /\nalbedo_color = Color\(0, 0, 1, 1\)\nroughness = 0\.3\n/, crate);
+    assert.equal(
+      get(rough, 'notStored'),
+      undefined,
+      `a value the material keeps is not named as left out: ${JSON.stringify(rough)}`,
+    );
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
