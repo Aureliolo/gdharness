@@ -5,6 +5,18 @@ const GdhFileWalk = preload("file_walk.gd")
 const GdhPatterns = preload("patterns.gd")
 const GdhRead = preload("reading.gd")
 const GdhLog = preload("logger.gd")
+## Annotations that stand on their own line for themselves rather than for the declaration under
+## them: the script's, a group heading in the inspector, or a region of ignored warnings.
+const STANDALONE_ANNOTATIONS: Array[String] = [
+	"tool",
+	"icon",
+	"static_unload",
+	"export_category",
+	"export_group",
+	"export_subgroup",
+	"warning_ignore_start",
+	"warning_ignore_restore",
+]
 
 var _log: GdhLog
 ## Kept for the call, so the project's class names are read once however many bases are walked.
@@ -110,6 +122,7 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 		"full_path": full_script_path,
 		"class_name": own.declared_class_name,
 		"extends": extends_name,
+		"is_abstract": own.is_abstract,
 		"signals": own.signals,
 		"variables": own.variables,
 		"functions": functions,
@@ -137,6 +150,8 @@ func _members(
 ) -> GdhMembers:
 	var own: GdhMembers = GdhMembers.new()
 	var in_multiline_string: bool = false
+	# The annotations of the lines above that held nothing else, for the declaration they annotate.
+	var pending: String = ""
 	var doc: Array[String] = []
 
 	var i: int = first - 1
@@ -230,8 +245,22 @@ func _members(
 					break
 			in_multiline_string = false
 			header = GdhPatterns.without_annotations(stripped)
+		# An annotation alone on its line belongs to the declaration under it, and read without it
+		# an @export variable answered is_export false and an @abstract func is_abstract false.
+		if header.is_empty():
+			for one: String in GdhPatterns.annotations_on(stripped):
+				if not one.get_slice("(", 0) in STANDALONE_ANNOTATIONS:
+					pending += "@" + one + " "
+			_collect_dependencies(stripped, dependencies)
+			continue
+		stripped = pending + stripped
+		pending = ""
 		var declaration: RegExMatch = GdhPatterns.declared_class(header)
 		var entry: Dictionary = {}
+		if (declaration != null or header.begins_with("extends ")) and (
+			"abstract" in GdhPatterns.annotations_on(stripped)
+		):
+			own.is_abstract = true
 		if declaration != null:
 			own.declared_class_name = declaration.get_string(1)
 			# `class_name X extends Y` is also one line, and taking the rest of it as the name
@@ -934,6 +963,9 @@ class GdhMembers:
 	var declared_class_name: Variant = null
 
 	var extends_name: String = "RefCounted"
+
+	## Whether the class is marked @abstract, so nothing makes one of it.
+	var is_abstract: bool = false
 
 	var signals: Array[Dictionary] = []
 
