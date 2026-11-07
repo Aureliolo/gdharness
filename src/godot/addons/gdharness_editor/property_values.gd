@@ -304,6 +304,10 @@ func write_all(target: Object, properties: Dictionary) -> String:
 			and name.begins_with("shader_parameter/")
 		):
 			return GdhDeclared.no_uniform(holder as ShaderMaterial, name) + unwritten
+		if declared.is_empty() and holder is ShaderMaterial:
+			var bare: String = GdhDeclared.bare_uniform(holder as ShaderMaterial, name)
+			if not bare.is_empty():
+				return bare + unwritten
 		if declared.is_empty():
 			return no_property(holder, name) + unwritten
 		var unscripted: Variant = null
