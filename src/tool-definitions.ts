@@ -217,6 +217,9 @@ const SCENE_PATH: JsonSchema = {
 /** How the scene and resource tools answer when no editor serves the project. */
 export const WITHOUT_AN_EDITOR =
   "The call goes through the editor when one serves the project. With none, a headless engine runs the editor's own tool. The answer's writtenBy (readBy for a read) names the editor or the engine. That engine runs every script of the file, where the editor runs only tool scripts, so what a script changes as the file loads or as a property is set is put back before anything is saved, and a file where that cannot be done, such as a scene whose script does not compile, is refused and nothing is written. A class_name the project's class list lacks is put in it first, and classesRebuiltFirst names it. Each file the written one refers to is named by its uid, as the editor names it, except a file the project's uid cache has no uid for yet (one made since the project was last scanned), which is named by path and listed under namedByPath with the call that scans it. A running editor of the project that has not yet reached this server is waited for.";
+/** What a call answers of the class list it brought up to date before its engine ran. */
+const CLASSES_REBUILT =
+  "A class_name the project's class list lacks is put in it before the engine runs, and classesRebuiltFirst names it.";
 /** What a scene write says it saved on nodes it was not asked to change. */
 export const ALSO_SAVED =
   'A scene is saved as the engine holds it once the file has loaded, and one property can set others as it loads, as anchors_preset gives a centred Control both its grow directions, so a scene not last saved by an editor can gain, change or lose lines the call did not ask for, on any node the file held, the one it names among them: alsoSaved lists each as {node, property, was, saved}, was left out where the file set nothing and saved where it now sets nothing. What a set itself moved on its node is under alsoChanged rather than here, and neither a node the call adds nor the format lines (header uid, load_steps, unique_id) are listed. The scene loads as it did. Only its text changed.';
@@ -466,7 +469,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     title: 'Project info',
     effect: 'read',
     description:
-      'What a project is: its name and main scene from project.godot, the Godot that answers, and how many scenes, scripts and assets (images, fonts, sound, models, video and shaders) it holds, other counting every remaining file. No count includes the .import and .uid files the engine writes beside others, the addons gdharness installed, or any file in a folder holding a .gdignore. Optional sections go on top.',
+      'What a project is: its name and main scene from project.godot, the Godot that answers, and how many scenes, scripts and assets (images, fonts, sound, models, video and shaders) it holds, other counting every remaining file. No count includes the .import and .uid files the engine writes beside others, the addons gdharness installed, or any file in a folder holding a .gdignore. Optional sections go on top. ' +
+      CLASSES_REBUILT,
     parameters: {
       projectPath: PROJECT_PATH,
       include: {
@@ -708,7 +712,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'project_dependencies',
     title: 'Project dependencies',
     effect: 'read',
-    description: 'What a resource depends on, or what depends on it.',
+    description: `What a resource depends on, or what depends on it. ${CLASSES_REBUILT}`,
     parameters: {
       projectPath: PROJECT_PATH,
       resourcePath: RESOURCE_PATH,
@@ -2115,7 +2119,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'editor_classes',
     title: 'Engine classes',
     description:
-      "The engine's ClassDB, with the classes the project's scripts declare beside it: find classes, read one in full, or walk an inheritance tree. The project's classes are read from the scripts on disk, so one written a moment ago is there before any scan. query and inheritance answer them under project_classes, project_children and project_descendants, each with its path, what it extends and whether it is abstract. info reads engine classes only, and a project class is read in full by script_info structure.",
+      "The engine's ClassDB, with the classes the project's scripts declare beside it: find classes, read one in full, or walk an inheritance tree. The project's classes are read from the scripts on disk, so one written a moment ago is there before any scan. query and inheritance answer them under project_classes, project_children and project_descendants, each with its path, what it extends and whether it is abstract. filtered_count, direct_children_count and all_descendants_count count the engine classes in the lists beside them. info reads engine classes only, and a project class is read in full by script_info structure. " +
+      CLASSES_REBUILT,
     parameters: {
       projectPath: PROJECT_PATH,
       filter: { type: 'string', ops: ['query'], description: 'query: a substring of the class name.' },
