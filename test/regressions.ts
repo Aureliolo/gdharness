@@ -70798,8 +70798,10 @@ async function withAnAnimationProject(
     `[gd_scene format=3]\n\n[ext_resource type="AnimationLibrary" path="res://${library}" id="1_library"]\n` +
     '[ext_resource type="Script" path="res://root.gd" id="2_root"]\n\n' +
     '[sub_resource type="AnimationNodeStateMachine" id="StateMachine_1"]\n\n' +
+    '[sub_resource type="Shader" id="Glow"]\ncode = "shader_type canvas_item;\nuniform float flash = 0.0;\n"\n\n' +
+    '[sub_resource type="ShaderMaterial" id="Lit"]\nshader = SubResource("Glow")\n\n' +
     '[node name="Root" type="Node2D"]\nscript = ExtResource("2_root")\n\n' +
-    '[node name="Body" type="Sprite2D" parent="."]\n\n' +
+    '[node name="Body" type="Sprite2D" parent="."]\nmaterial = SubResource("Lit")\n\n' +
     '[node name="Player" type="AnimationPlayer" parent="."]\nlibraries = {\n&"moves": ExtResource("1_library")\n}\n\n' +
     '[node name="Tree" type="AnimationTree" parent="."]\ntree_root = SubResource("StateMachine_1")\n' +
     'anim_player = NodePath("../Player")\n\n[node name="Bare" type="AnimationTree" parent="."]\n';
@@ -71140,10 +71142,23 @@ async function testAnAnimationsKeysAndLengthAreWrittenWithNoEditor(): Promise<vo
       await keyed('frame', 0),
       await keyed('z_index', 0, { update: 'continuous' }),
       await keyed('flip_h', false),
+      // A shader parameter's float read as no declared type, since the engine's walk of the path
+      // took the parameter into the material it reached.
+      await keyed('material:shader_parameter/flash', 1),
+      await keyed('material:resource_local_to_scene', true),
     ];
     assert.deepEqual(
       made.map((answer) => get(answer, 'update')),
-      ['discrete', 'continuous', 'discrete', 'discrete', 'continuous', 'continuous'],
+      [
+        'discrete',
+        'continuous',
+        'discrete',
+        'discrete',
+        'continuous',
+        'continuous',
+        'continuous',
+        'discrete',
+      ],
       JSON.stringify(made),
     );
     const show = parseTextContent(
@@ -71158,6 +71173,8 @@ async function testAnAnimationsKeysAndLengthAreWrittenWithNoEditor(): Promise<vo
         ['frame', 'discrete'],
         ['z_index', 'continuous'],
         ['flip_h', 'continuous'],
+        ['material:shader_parameter/flash', 'continuous'],
+        ['material:resource_local_to_scene', 'discrete'],
       ],
       JSON.stringify(show),
     );
