@@ -73503,6 +73503,107 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
 }
 
 /**
+ * A node renamed or deleted in a scene is followed into a scene instancing one that inherits it,
+ * where the instance's root is the changed scene's root under another scene's name.
+ */
+async function testAMoveIsFollowedThroughAnInheritedInstance(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('inherited instance follow regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-follow-inherited-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-follow-inherited-rt-'));
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="FollowInherited"\n',
+    'base.tscn':
+      '[gd_scene format=3]\n\n[node name="Enemy" type="Node2D"]\n\n' +
+      '[node name="Look" type="Sprite2D" parent="."]\n\n[node name="Hitbox" type="Node2D" parent="."]\n\n' +
+      '[node name="Arm" type="Node2D" parent="."]\n\n[node name="Hand" type="Node2D" parent="Arm"]\n',
+    'goblin.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://base.tscn" id="1_base"]\n\n' +
+      '[node name="Goblin" instance=ExtResource("1_base")]\n\n' +
+      '[node name="Look" parent="." index="0"]\nmodulate = Color(0.4, 1, 0.4, 1)\n',
+    'level.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://goblin.tscn" id="1_gob"]\n\n' +
+      '[node name="Level" type="Node2D"]\n\n' +
+      '[node name="Second" parent="." instance=ExtResource("1_gob")]\n\n' +
+      '[node name="Look" parent="Second" index="0"]\nmodulate = Color(1, 0, 0, 1)\n\n' +
+      '[node name="Hitbox" parent="Second" index="1"]\nposition = Vector2(3, 0)\n\n' +
+      '[node name="Hand" parent="Second/Arm"]\nposition = Vector2(7, 0)\n\n' +
+      '[editable path="Second"]\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+    parseTextContent(
+      await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 240_000),
+    );
+  const level = (): string => readFileSync(join(project, 'level.tscn'), 'utf8');
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('follow-inherited-engine');
+
+    const renamed = await call('scene_node', {
+      op: 'set',
+      scenePath: 'base.tscn',
+      nodePath: 'Look',
+      properties: { name: 'Body' },
+    });
+    assert.deepEqual(
+      asArray(get(renamed, 'followed')).map(String).toSorted(),
+      ['res://goblin.tscn', 'res://level.tscn'],
+      JSON.stringify(renamed),
+    );
+    assert.ok(level().includes('[node name="Body" parent="Second" index="0"]'), level());
+    const red = get(
+      await call('scene_node', { op: 'get', scenePath: 'level.tscn', nodePath: 'Second/Body' }),
+      'properties',
+      'modulate',
+    );
+    assert.deepEqual([get(red, 'r'), get(red, 'g'), get(red, 'b')], [1, 0, 0], JSON.stringify(red));
+
+    const deleted = await call('scene_node', { op: 'delete', scenePath: 'base.tscn', nodePath: 'Hitbox' });
+    assert.deepEqual(
+      asArray(get(deleted, 'dropped')).filter((entry) => get(entry, 'scenePath') === 'res://level.tscn'),
+      [{ scenePath: 'res://level.tscn', nodePath: 'Second/Hitbox', entry: 'values' }],
+      JSON.stringify(deleted),
+    );
+    assert.ok(!level().includes('Hitbox'), level());
+    assert.ok(level().includes('[node name="Body" parent="Second" index="0"]'), level());
+
+    // Arm becomes an instance of its own scene, whose children level.tscn keeps a value on only
+    // while that instance is editable there too.
+    const saved = await call('scene_node', {
+      op: 'save_branch',
+      scenePath: 'base.tscn',
+      nodePath: 'Arm',
+      newScenePath: 'arm',
+    });
+    assert.ok(asArray(get(saved, 'followed')).includes('res://level.tscn'), JSON.stringify(saved));
+    assert.ok(level().includes('[editable path="Second/Arm"]'), level());
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * The node paths a scene holds after one of its nodes is renamed, moved or deleted with no editor:
  * NodePath values in properties, in arrays, dictionaries and a resource built into the scene, under a
  * unique name, and the tracks of animations built into the scene or kept in a library of their own.
@@ -77754,6 +77855,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEditableChildrenAreOpenedAndClosedWithNoEditor,
   testAnInheritedSceneFindsItsBaseAsTheEngineDoes,
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,
+  testAMoveIsFollowedThroughAnInheritedInstance,
   testAMovedNodeKeepsThePathsNamingIt,
   testADeleteDropsWhatOtherScenesKeptBelowIt,
   testAPropertyHoldingANodeFollowsIt,

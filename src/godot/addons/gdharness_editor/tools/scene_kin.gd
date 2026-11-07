@@ -189,15 +189,14 @@ static func follow(
 	for scene_path: String in kin:
 		if scene_path == changed:
 			continue
-		var moves: Dictionary = {}
-		if _inherits(scene_path, changed, texts):
-			moves[old_path] = new_path
 		var read: Dictionary = GdhFileReads.scene_tree(scene_path, -1, false, false)
 		if not read.get("ok", false):
 			not_followed.append({ "scenePath": scene_path, "reason": str(read.get("error", "")) })
 			continue
 		var tree: Dictionary = read["tree"]
-		_instances_of(tree, changed, old_path, new_path, moves)
+		var moves: Dictionary = {}
+		for at: String in _placements(scene_path, tree, changed, texts):
+			moves[_under(at, old_path)] = "" if new_path.is_empty() else _under(at, new_path)
 		var text: String = texts[scene_path]
 		var unsaved: String = GdhSceneFile.unsaved_in_editor(scene_path)
 		var rewritten: String = text
@@ -323,15 +322,14 @@ static func enclose(changed: String, at: String) -> Dictionary:
 	for scene_path: String in _kin_of(changed, texts):
 		if scene_path == changed:
 			continue
-		var moves: Dictionary = {}
-		if _inherits(scene_path, changed, texts):
-			moves[at] = at
 		var read: Dictionary = GdhFileReads.scene_tree(scene_path, -1, false, false)
 		if not read.get("ok", false):
 			not_followed.append({ "scenePath": scene_path, "reason": str(read.get("error", "")) })
 			continue
 		var tree: Dictionary = read["tree"]
-		_instances_of(tree, changed, at, at, moves)
+		var moves: Dictionary = {}
+		for root: String in _placements(scene_path, tree, changed, texts):
+			moves[_under(root, at)] = _under(root, at)
 		var text: String = texts[scene_path]
 		var marks: PackedStringArray = []
 		for path: String in moves:
@@ -442,19 +440,31 @@ static func _base_of(text: String) -> String:
 	return ""
 
 
-## Into [param moves], the path below each instance of [param changed] in [param entry]'s tree that
-## [param old_path] was at, with where it is now, or "" when [param new_path] is.
-static func _instances_of(
-	entry: Dictionary, changed: String, old_path: String, new_path: String, moves: Dictionary
+## Every path in [param tree], the scene at [param scene_path], where the root of [param changed]
+## sits, "." for the root: its own root when it inherits [param changed], and each instance of
+## [param changed] or of a scene inheriting it. The tree lays out every instance inside another, so
+## those are found by walking it.
+static func _placements(
+	scene_path: String, tree: Dictionary, changed: String, texts: Dictionary
+) -> Array[String]:
+	var placements: Array[String] = []
+	if _inherits(scene_path, changed, texts):
+		placements.append(".")
+	_instances_in(tree, changed, texts, placements)
+	return placements
+
+
+static func _instances_in(
+	entry: Dictionary, changed: String, texts: Dictionary, placements: Array[String]
 ) -> void:
-	if str(entry.get("instanceOf", "")) == changed:
-		var at: String = str(entry["path"])
-		moves[_under(at, old_path)] = "" if new_path.is_empty() else _under(at, new_path)
+	var instanced: String = str(entry.get("instanceOf", ""))
+	if instanced == changed or (not instanced.is_empty() and _inherits(instanced, changed, texts)):
+		placements.append(str(entry["path"]))
 	var children: Array = entry.get("children", [])
 	for child: Variant in children:
 		if child is Dictionary:
 			var below: Dictionary = child
-			_instances_of(below, changed, old_path, new_path, moves)
+			_instances_in(below, changed, texts, placements)
 
 
 ## [param text] with every path [param moves] names, and every path below one, moved.
