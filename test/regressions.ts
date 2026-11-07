@@ -61536,6 +61536,31 @@ async function testAWriteSaysWhatElseItChanged(): Promise<void> {
       undefined,
       `the same libraries written another way are not named as lost: ${JSON.stringify(beside)}`,
     );
+
+    // A node inside an editable instance that the file keeps no entry for gains one as it is saved.
+    writeFileSync(
+      join(project, 'panel.tscn'),
+      '[gd_scene format=3]\n\n[node name="Panel" type="Control"]\n\n[node name="Press" type="Button" parent="."]\n',
+    );
+    writeFileSync(
+      join(project, 'holder.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://panel.tscn" id="1_panel"]\n\n' +
+        '[node name="Holder" type="Node2D"]\n\n[node name="Shop" parent="." instance=ExtResource("1_panel")]\n\n' +
+        '[editable path="Shop"]\n',
+    );
+    const inside = await call('scene_node', {
+      scenePath: 'res://holder.tscn',
+      op: 'add',
+      nodeType: 'Node2D',
+      nodeName: 'Beside',
+    });
+    const holder = readFileSync(join(project, 'holder.tscn'), 'utf8');
+    assert.match(holder, /\[node name="Press" parent="Shop"[^\n]*\]\nlayout_mode = 0\n/, holder);
+    assert.deepEqual(
+      asArray(get(inside, 'alsoSaved')).filter((entry) => get(entry, 'node') === 'Shop/Press'),
+      [{ node: 'Shop/Press', property: 'layout_mode', saved: 0 }],
+      `the entry it gained is said: ${JSON.stringify(inside)}`,
+    );
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
@@ -61947,8 +61972,11 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
       ) ?? '';
     assert.match(
       await stallRefusal({ 'items/3/title': 'D' }),
-      /Shop\.items holds 3 elements, so items\/3\/title names none: an index goes from 0 to 2\./,
+      /Shop\.items holds 3 elements, so items\/3\/title names none: an index goes from 0 to 2\. To add an element, give items whole with it at the end\./,
     );
+    const pastNext = await stallRefusal({ 'items/5/title': 'D' });
+    assert.match(pastNext, /so items\/5\/title names none: an index goes from 0 to 2\./, pastNext);
+    assert.doesNotMatch(pastNext, /To add/, 'an index past the next one is not offered as an addition');
     assert.match(
       await stallRefusal({ 'items/first/title': 'D' }),
       /Shop\.items is a list, so the step after it is the index of one of its elements, from 0 to 2, not first\./,
@@ -61960,6 +61988,25 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
     assert.match(
       await stallRefusal({ 'items/1': 'D' }),
       /items\/1 is an element of Shop\.items, which a path does not replace alone: give items a whole list, or write a property of the element, as items\/1\/<property>\./,
+    );
+    // A default given to an element's property, by its path or inside the whole list, is left out of
+    // the element's section and named.
+    const cleared = await answered({
+      op: 'modify',
+      resourcePath: 'res://stall.tres',
+      properties: { 'items/1/title': '' },
+    });
+    assert.deepEqual(get(cleared, 'notStored'), ['items/1/title'], JSON.stringify(cleared));
+    const relisted = await answered({
+      op: 'modify',
+      resourcePath: 'res://stall.tres',
+      properties: titled('', 'x'),
+    });
+    assert.deepEqual(get(relisted, 'notStored'), ['items/0/title'], JSON.stringify(relisted));
+    assert.equal(
+      readFileSync(join(project, 'stall.tres'), 'utf8').match(/title = /g)?.length,
+      1,
+      readFileSync(join(project, 'stall.tres'), 'utf8'),
     );
     const intoCounts = await stallRefusal({ 'counts/keys': 2 });
     assert.match(
@@ -73503,6 +73550,107 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
 }
 
 /**
+ * A node renamed or deleted in a scene is followed into a scene instancing one that inherits it,
+ * where the instance's root is the changed scene's root under another scene's name.
+ */
+async function testAMoveIsFollowedThroughAnInheritedInstance(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('inherited instance follow regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-follow-inherited-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-follow-inherited-rt-'));
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="FollowInherited"\n',
+    'base.tscn':
+      '[gd_scene format=3]\n\n[node name="Enemy" type="Node2D"]\n\n' +
+      '[node name="Look" type="Sprite2D" parent="."]\n\n[node name="Hitbox" type="Node2D" parent="."]\n\n' +
+      '[node name="Arm" type="Node2D" parent="."]\n\n[node name="Hand" type="Node2D" parent="Arm"]\n',
+    'goblin.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://base.tscn" id="1_base"]\n\n' +
+      '[node name="Goblin" instance=ExtResource("1_base")]\n\n' +
+      '[node name="Look" parent="." index="0"]\nmodulate = Color(0.4, 1, 0.4, 1)\n',
+    'level.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://goblin.tscn" id="1_gob"]\n\n' +
+      '[node name="Level" type="Node2D"]\n\n' +
+      '[node name="Second" parent="." instance=ExtResource("1_gob")]\n\n' +
+      '[node name="Look" parent="Second" index="0"]\nmodulate = Color(1, 0, 0, 1)\n\n' +
+      '[node name="Hitbox" parent="Second" index="1"]\nposition = Vector2(3, 0)\n\n' +
+      '[node name="Hand" parent="Second/Arm"]\nposition = Vector2(7, 0)\n\n' +
+      '[editable path="Second"]\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
+    parseTextContent(
+      await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 240_000),
+    );
+  const level = (): string => readFileSync(join(project, 'level.tscn'), 'utf8');
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('follow-inherited-engine');
+
+    const renamed = await call('scene_node', {
+      op: 'set',
+      scenePath: 'base.tscn',
+      nodePath: 'Look',
+      properties: { name: 'Body' },
+    });
+    assert.deepEqual(
+      asArray(get(renamed, 'followed')).map(String).toSorted(),
+      ['res://goblin.tscn', 'res://level.tscn'],
+      JSON.stringify(renamed),
+    );
+    assert.ok(level().includes('[node name="Body" parent="Second" index="0"]'), level());
+    const red = get(
+      await call('scene_node', { op: 'get', scenePath: 'level.tscn', nodePath: 'Second/Body' }),
+      'properties',
+      'modulate',
+    );
+    assert.deepEqual([get(red, 'r'), get(red, 'g'), get(red, 'b')], [1, 0, 0], JSON.stringify(red));
+
+    const deleted = await call('scene_node', { op: 'delete', scenePath: 'base.tscn', nodePath: 'Hitbox' });
+    assert.deepEqual(
+      asArray(get(deleted, 'dropped')).filter((entry) => get(entry, 'scenePath') === 'res://level.tscn'),
+      [{ scenePath: 'res://level.tscn', nodePath: 'Second/Hitbox', entry: 'values' }],
+      JSON.stringify(deleted),
+    );
+    assert.ok(!level().includes('Hitbox'), level());
+    assert.ok(level().includes('[node name="Body" parent="Second" index="0"]'), level());
+
+    // Arm becomes an instance of its own scene, whose children level.tscn keeps a value on only
+    // while that instance is editable there too.
+    const saved = await call('scene_node', {
+      op: 'save_branch',
+      scenePath: 'base.tscn',
+      nodePath: 'Arm',
+      newScenePath: 'arm',
+    });
+    assert.ok(asArray(get(saved, 'followed')).includes('res://level.tscn'), JSON.stringify(saved));
+    assert.ok(level().includes('[editable path="Second/Arm"]'), level());
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * The node paths a scene holds after one of its nodes is renamed, moved or deleted with no editor:
  * NodePath values in properties, in arrays, dictionaries and a resource built into the scene, under a
  * unique name, and the tracks of animations built into the scene or kept in a library of their own.
@@ -77754,6 +77902,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEditableChildrenAreOpenedAndClosedWithNoEditor,
   testAnInheritedSceneFindsItsBaseAsTheEngineDoes,
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,
+  testAMoveIsFollowedThroughAnInheritedInstance,
   testAMovedNodeKeepsThePathsNamingIt,
   testADeleteDropsWhatOtherScenesKeptBelowIt,
   testAPropertyHoldingANodeFollowsIt,

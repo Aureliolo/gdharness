@@ -78,6 +78,9 @@ var _state: SceneState = null
 ## What the file stores on each node it was opened with, by the node's instance id, so a node keeps
 ## its record when a tool moves or renames it. Only kept outside the editor.
 var _filed: Dictionary = {}
+## The instance id of every node the scene had when it was opened, so a node inside an instance the
+## file kept nothing for is told apart from one a tool added.
+var _opened_with: Dictionary = {}
 ## The properties a tool set on each node, by instance id: the differences it asked for.
 var _asked: Dictionary = {}
 ## What each node a tool set properties on held before it did, by instance id.
@@ -150,6 +153,7 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 			var node: Node = _node_at(str(_state.get_node_path(index)))
 			if node != null:
 				_filed[node.get_instance_id()] = _stored_at(_state, index)
+		_note_opened(root)
 	if not Engine.is_editor_hint():
 		if for_writing:
 			_text = FileAccess.get_file_as_string(path)
@@ -593,6 +597,8 @@ func split_off(top: Node, branch_path: String) -> Array:
 		var id: int = node.get_instance_id()
 		if _filed.has(id):
 			branch._filed[id] = _filed[id]
+		if _opened_with.has(id):
+			branch._opened_with[id] = true
 		if _asked.has(id):
 			branch._asked[id] = _asked[id]
 		if _before.has(id):
@@ -1212,7 +1218,7 @@ func _write(check: Callable) -> Dictionary:
 	}
 
 
-## Each property [param state] stores differently from the file, on a node the file held, that the
+## Each property [param state] stores differently from the file, on a node the scene held, that the
 ## call neither asked for nor changed, as {node, property, was, saved}: was left out where the file
 ## did not set it, saved where the write does not. The engine writes a node as it holds it once the
 ## file has loaded, and one property can set others as it loads, as anchors_preset gives a centred
@@ -1227,12 +1233,13 @@ func _also_saved(state: SceneState) -> Array[Dictionary]:
 		if node == null:
 			continue
 		var id: int = node.get_instance_id()
-		if not _filed.has(id):
+		if not _opened_with.has(id):
 			continue
 		# What the call set on it, and what the engine moved as it did, which the answer gives as
 		# alsoChanged.
 		var on: Dictionary = _asked.get(id, {})
-		var filed: Dictionary = _filed[id]
+		# A node inside an instance that the file kept nothing for gains an entry of its own.
+		var filed: Dictionary = _filed.get(id, {})
 		var stored: Dictionary = _stored_at(state, index)
 		var restated: Dictionary = _restated_in_parts(filed, stored)
 		var names: Dictionary = filed.duplicate()
@@ -1251,6 +1258,12 @@ func _also_saved(state: SceneState) -> Array[Dictionary]:
 				entry["saved"] = values.serialize_value(stored[name])
 			noted.append(entry)
 	return noted
+
+
+func _note_opened(node: Node) -> void:
+	_opened_with[node.get_instance_id()] = true
+	for child: Node in node.get_children(true):
+		_note_opened(child)
 
 
 ## Each dictionary of [param filed] that [param stored] holds as one property per key, name/key,
