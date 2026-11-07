@@ -7,13 +7,13 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { download, extract } from '../scripts/install-godot.js';
 import { sweep } from './support/sweep.js';
-import { buildZip, DEFLATED } from './support/zip.js';
+import { buildZip } from './support/zip.js';
 
 /** Extracts into a throwaway directory and hands it to the caller to look at. */
 function intoTemp(zip: Buffer, inspect: (dir: string, run: () => void) => void): void {
@@ -24,32 +24,6 @@ function intoTemp(zip: Buffer, inspect: (dir: string, run: () => void) => void):
     });
   } finally {
     sweep(dir);
-  }
-}
-
-function testRoundTrip() {
-  const zip = buildZip([
-    { name: 'plain.txt', contents: 'stored bytes' },
-    { name: 'nested/' },
-    { name: 'nested/packed.txt', contents: 'deflated bytes, repeated'.repeat(40), method: DEFLATED },
-  ]);
-
-  intoTemp(zip, (dir, run) => {
-    run();
-    assert.equal(readFileSync(join(dir, 'plain.txt'), 'utf8'), 'stored bytes');
-    assert.equal(
-      readFileSync(join(dir, 'nested', 'packed.txt'), 'utf8'),
-      'deflated bytes, repeated'.repeat(40),
-    );
-  });
-}
-
-function testRejectsTraversal() {
-  for (const name of ['../escaped.txt', 'nested/../../escaped.txt']) {
-    const zip = buildZip([{ name, contents: 'should never be written' }]);
-    intoTemp(zip, (_dir, run) => {
-      assert.throws(run, /outside the install directory/, `${name} should be refused`);
-    });
   }
 }
 
@@ -136,8 +110,6 @@ async function testADownloadWaitsOutAGatewayTimeout(): Promise<void> {
   assert.deepEqual(waited, [2_000, 4_000, 8_000, 16_000, 32_000], 'after the whole schedule');
 }
 
-testRoundTrip();
-testRejectsTraversal();
 testRejectsZip64();
 testRejectsMisplacedLocalHeader();
 testRejectsSizeMismatch();

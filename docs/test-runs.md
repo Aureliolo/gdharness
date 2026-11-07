@@ -866,6 +866,9 @@ Asking once a frame, or stepping the tween, holds however slowly the frames come
 `release(at)`, `wheel(at, up)`, `motion(at, moved, held)`, `key(KEY_SPACE)`, `pad(JOY_BUTTON_A)`,
 `axis(JOY_AXIS_LEFT_X, value)` and `action("jump")`.
 
+`GdhEvent.press_and_release(event)` hands a press to `Input`, then the same event let go, and
+flushes both. A press never let go stays held for every later suite in the same engine.
+
 ## What suites cost, by function
 
 `gdharness test` runs suites as a script. The engine's script profiler only sees a scene, so it
