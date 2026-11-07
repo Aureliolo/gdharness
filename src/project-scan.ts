@@ -288,6 +288,34 @@ interface SearchMatch {
   readonly line: number;
   readonly content: string;
   readonly match: string;
+  /** Set on a line cut to [SHOWN_OF_A_LINE]: the column the shown part starts at, from 1. */
+  readonly shownFrom?: number;
+  /** Set on a line cut to [SHOWN_OF_A_LINE]: how long the whole line is. */
+  readonly lineLength?: number;
+}
+
+/**
+ * The characters of a matching line answered, around its first match. A scene keeps a tile map's
+ * cells and a mesh's arrays on one line each, and a minified JSON file is one line, so a search
+ * meeting one answered every character of it.
+ */
+export const SHOWN_OF_A_LINE = 400;
+
+/** [param line], which holds a match of [param length] characters at [param at], as answered. */
+function shownMatch(line: string, at: number, length: number, match: string, number: number): SearchMatch {
+  const trimmed = line.trim();
+  if (trimmed.length <= SHOWN_OF_A_LINE) {
+    return { line: number, content: trimmed, match };
+  }
+  const room = Math.max(0, SHOWN_OF_A_LINE - length);
+  const start = Math.min(Math.max(0, at - Math.floor(room / 2)), line.length - SHOWN_OF_A_LINE);
+  return {
+    line: number,
+    content: line.slice(start, start + SHOWN_OF_A_LINE),
+    match,
+    shownFrom: start + 1,
+    lineLength: line.length,
+  };
 }
 
 export interface SearchResult {
@@ -445,9 +473,14 @@ export function ignoredTexts(projectPath: string): ProjectText[] {
  * the line spells it, or null. The text found rather than the query: a search for "Item" answered
  * `match: "Item"` on a line holding only `item.gd`.
  */
-function plainMatch(line: string, needle: string, caseSensitive: boolean): [string] | null {
+function plainMatch(
+  line: string,
+  needle: string,
+  caseSensitive: boolean,
+): { text: string; at: number } | null {
   if (caseSensitive) {
-    return line.includes(needle) ? [needle] : null;
+    const at = line.indexOf(needle);
+    return at < 0 ? null : { text: needle, at };
   }
   const lowered = line.toLowerCase();
   const at = lowered.indexOf(needle);
@@ -456,7 +489,9 @@ function plainMatch(line: string, needle: string, caseSensitive: boolean): [stri
   }
   // Lowering can change a line's length ("İ" becomes two characters), and then the offsets
   // found in the lowered line do not land in the original, which is answered as lowered instead.
-  return [lowered.length === line.length ? line.slice(at, at + needle.length) : needle];
+  return lowered.length === line.length
+    ? { text: line.slice(at, at + needle.length), at }
+    : { text: needle, at: Math.min(at, line.length) };
 }
 
 /**
@@ -521,7 +556,13 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
     // Split on either ending, so `$` in a pattern meets the end of a line in a CRLF checkout.
     for (const [index, line] of bytes.toString('utf8').split(/\r?\n/).entries()) {
       // Found or not, rather than by what it matched: a lookahead matches the empty string.
-      const found = regex ? regex.exec(line) : plainMatch(line, needle, options.caseSensitive);
+      const exec = regex?.exec(line);
+      const found =
+        regex === null
+          ? plainMatch(line, needle, options.caseSensitive)
+          : exec === null || exec === undefined
+            ? null
+            : { text: exec[0], at: exec.index };
       if (found === null) {
         continue;
       }
@@ -532,7 +573,7 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
         continue;
       }
       shown += 1;
-      matches.push({ line: index + 1, content: line.trim(), match: found[0] });
+      matches.push(shownMatch(line, found.at, found.text.length, found.text, index + 1));
     }
     if (matched) {
       result.summary.files_with_matches += 1;

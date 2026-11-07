@@ -6725,9 +6725,12 @@ class GodotServer {
     const asked = readNonEmptyString(args, 'importer');
     // An importer the engine lacks is passed over for the default one, and the options cleared for
     // the switch would then be lost, so the file is put back and imported as it was.
-    const took = /^\[remap\][^[]*?^importer="([^"]*)"/ms.exec(readFileSync(sidecar, 'utf8'))?.[1];
+    const importerIn = (text: string): string | undefined =>
+      /^\[remap\][^[]*?^importer="([^"]*)"/ms.exec(text)?.[1];
+    const took = importerIn(readFileSync(sidecar, 'utf8'));
     if (asked !== undefined && took !== asked && before !== null) {
       writeFileSync(sidecar, before);
+      const was = importerIn(before);
       await this.reimport(
         project.value.path,
         given,
@@ -6735,7 +6738,7 @@ class GodotServer {
         readPositiveNumber(args, 'timeoutMs') ?? REIMPORT_TIMEOUT_MS,
       );
       return this.createErrorResponse(
-        `The engine has no importer ${asked} for ${resource}, and the import took ${took ?? 'none'} instead. The import file was put back as it was and imported again.`,
+        `The engine has no importer ${asked} for ${resource}, so it imported the file with ${took ?? 'none'} instead. The import file was put back as it was${was === undefined ? '' : `, on ${was},`} and imported again.`,
         ['project_import options names the importer a file uses now, under remap'],
       );
     }

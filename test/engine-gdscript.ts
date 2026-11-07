@@ -5105,6 +5105,165 @@ function testAConnectionNamesWhatItReaches(godotPath: string): void {
 }
 
 /**
+ * A scene tree names the nodes the engine did not read. Measured on the engine: it stops reading a
+ * scene at a node instancing a scene it cannot load, so the game loads the scene without that node
+ * and every one after it, while a missing texture leaves the rest of the file read.
+ */
+function testASceneTreeSaysWhatTheEngineDidNotRead(godotPath: string): void {
+  const dir = createProject(godotPath);
+  try {
+    mkdirSync(join(dir, 'cut'));
+    writeFileSync(join(dir, 'cut', 'part.tscn'), '[gd_scene format=3]\n\n[node name="Part" type="Node2D"]\n');
+    const scene = (missing: string, after: string): string =>
+      '[gd_scene format=3]\n\n' +
+      '[ext_resource type="PackedScene" path="res://cut/part.tscn" id="1_p"]\n' +
+      `${missing}\n\n` +
+      '[node name="Main" type="Node2D"]\n\n' +
+      '[node name="Kept" parent="." instance=ExtResource("1_p")]\n\n' +
+      '[node name="Label" type="Label" parent="."]\nunique_name_in_owner = true\n\n' +
+      after;
+    const goneScene = '[ext_resource type="PackedScene" path="res://cut/gone.tscn" id="2_g"]';
+    writeFileSync(
+      join(dir, 'cut', 'stops.tscn'),
+      scene(
+        goneScene,
+        '[node name="Gone" parent="." instance=ExtResource("2_g")]\n\n' +
+          '[node name="Panel" type="Panel" parent="." groups=["ui"]]\n\n' +
+          '[node name="Title" type="Label" parent="Panel"]\n',
+      ),
+    );
+    writeFileSync(
+      join(dir, 'cut', 'last.tscn'),
+      scene(goneScene, '[node name="Gone" parent="." instance=ExtResource("2_g")]\n'),
+    );
+    writeFileSync(
+      join(dir, 'cut', 'texture.tscn'),
+      scene(
+        '[ext_resource type="Texture2D" path="res://cut/gone.png" id="2_t"]',
+        '[node name="Icon" type="Sprite2D" parent="."]\ntexture = ExtResource("2_t")\n\n' +
+          '[node name="Panel" type="Panel" parent="."]\n',
+      ),
+    );
+    // The engine prints why it could not load the scene, so the answer is read past its complaints.
+    const read = (file: string): unknown => {
+      const run = runOperationScript(godotPath, dir, 'read_scene_tree', { scene_path: `res://cut/${file}` });
+      assert.equal(run.status, 0, `${file}: ${run.stdout}\n${run.stderr}`);
+      return run.answer;
+    };
+    const names = (answer: unknown): unknown[] =>
+      asArray(get(answer, 'tree', 'children')).map((child) => get(child, 'name'));
+    const stops = read('stops.tscn');
+    assert.deepEqual(names(stops), ['Kept', 'Label'], JSON.stringify(stops));
+    assert.deepEqual(
+      get(stops, 'notRead'),
+      {
+        nodes: ['Gone', 'Panel', 'Panel/Title'],
+        note: 'The engine stops reading res://cut/stops.tscn at Gone, which instances res://cut/gone.tscn, a scene it could not load, so a game loads the scene without these nodes. The tree is the scene as the engine reads it.',
+      },
+      JSON.stringify(stops),
+    );
+    const last = read('last.tscn');
+    assert.deepEqual(names(last), ['Kept', 'Label'], JSON.stringify(last));
+    assert.deepEqual(get(last, 'notRead', 'nodes'), ['Gone'], JSON.stringify(last));
+    const texture = read('texture.tscn');
+    assert.deepEqual(names(texture), ['Kept', 'Label', 'Icon', 'Panel'], JSON.stringify(texture));
+    assert.equal(
+      get(texture, 'notRead'),
+      undefined,
+      `a missing texture cuts nothing: ${JSON.stringify(texture)}`,
+    );
+  } finally {
+    sweep(dir);
+  }
+}
+
+/**
+ * Validation and health name each scene connection whose method takes a number of arguments other
+ * than the signal sends, less what it unbinds and plus what it binds, which fails on every emission
+ * as a missing method does. Measured on the engine: defaults, a rest parameter, unbinds and a
+ * signature over several lines all take the call, and a script signal is not held to the arguments
+ * it declares, so one is not judged.
+ */
+function testAConnectionPassesWhatItsMethodTakes(godotPath: string): void {
+  const dir = createProject(godotPath);
+  try {
+    mkdirSync(join(dir, 'args'));
+    const script = [
+      'extends Node',
+      '',
+      'signal shouted(a: int, b: int)',
+      '',
+      '',
+      'func one(a: int) -> void:\n\tpass',
+      'func none() -> void:\n\tpass',
+      'func pair(a: int, b: int = 2) -> void:\n\tpass',
+      'func rest_one(a: int, ...more: Array) -> void:\n\tpass',
+      'func rest(...more: Array) -> void:\n\tpass',
+      'func two(\n\ta: bool,\n\tb: int,\n) -> void:\n\tpass',
+      'func commented(\n\ta: bool,  # the (pressed) state)\n) -> void:\n\tpass',
+      'func three(a: bool, b: Vector2, c: String) -> void:\n\tpass',
+      '@rpc("any_peer") func remote_hit(a: bool) -> void:\n\tpass',
+      '',
+    ].join('\n');
+    writeFileSync(join(dir, 'args', 'hub.gd'), script);
+    const connections: [string, string, string, string, string][] = [
+      ['timeout', 'T', '.', 'one', ''],
+      ['pressed', 'B', '.', 'none', ' binds= [5]'],
+      ['toggled', 'B', '.', 'none', ''],
+      ['timeout', 'T', '.', 'pair', ''],
+      ['timeout', 'T', '.', 'rest_one', ''],
+      ['timeout', 'T', 'T', 'queue_free', ' binds= [1]'],
+      ['timeout', 'T', 'T', 'call_deferred', ''],
+      ['toggled', 'B', '.', 'none', ' unbinds=1'],
+      ['toggled', 'B', '.', 'pair', ''],
+      ['toggled', 'B', '.', 'rest', ''],
+      ['toggled', 'B', '.', 'two', ' binds= [7]'],
+      ['toggled', 'B', '.', 'commented', ''],
+      ['toggled', 'B', '.', 'three', ' binds= [Vector2(1, 2), "x, y"]'],
+      ['toggled', 'B', '.', 'remote_hit', ''],
+      ['shouted', '.', '.', 'none', ''],
+      ['timeout', 'T', 'T', 'start', ''],
+    ];
+    writeFileSync(
+      join(dir, 'args', 'main.tscn'),
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://args/hub.gd" id="1"]\n\n' +
+        '[node name="Hub" type="Node"]\nscript = ExtResource("1")\n\n' +
+        '[node name="T" type="Timer" parent="."]\n\n[node name="B" type="Button" parent="."]\n\n' +
+        connections
+          .map(
+            ([signal, from, to, method, extra]) =>
+              `[connection signal="${signal}" from="${from}" to="${to}" method="${method}"${extra}]\n`,
+          )
+          .join(''),
+    );
+    const fails = ', so every emission fails to call it.';
+    const expected = [
+      `res://args/main.tscn connects B.pressed to Hub.none, which takes 0 arguments where the connection passes 1${fails}`,
+      `res://args/main.tscn connects B.toggled to Hub.none, which takes 0 arguments where the connection passes 1${fails}`,
+      `res://args/main.tscn connects T.timeout to Hub.one, which takes 1 argument where the connection passes 0${fails}`,
+      `res://args/main.tscn connects T.timeout to Hub.pair, which takes 1 to 2 arguments where the connection passes 0${fails}`,
+      `res://args/main.tscn connects T.timeout to Hub.rest_one, which takes at least 1 argument where the connection passes 0${fails}`,
+      `res://args/main.tscn connects T.timeout to T.call_deferred, which takes at least 1 argument where the connection passes 0${fails}`,
+      `res://args/main.tscn connects T.timeout to T.queue_free, which takes 0 arguments where the connection passes 1${fails}`,
+    ].toSorted();
+    const validated = runOperation(godotPath, dir, 'validate_project', {});
+    const warned = asArray(get(validated, 'warnings'))
+      .filter((warning) => get(warning, 'check') === 'connections')
+      .map((warning) => asString(get(warning, 'message')))
+      .toSorted();
+    assert.deepEqual(warned, expected, JSON.stringify(get(validated, 'warnings')));
+    const health = runOperation(godotPath, dir, 'get_project_health', { categories: ['scenes'] });
+    const noted = asArray(get(health, 'checks', 'scenes', 'details'))
+      .map((detail) => asString(detail))
+      .filter((detail) => detail.includes(' connects '))
+      .toSorted();
+    assert.deepEqual(noted, expected, JSON.stringify(health));
+  } finally {
+    sweep(dir);
+  }
+}
+
+/**
  * Moves [sidecar]'s time two seconds past the second [importedAt] falls in, for a case that rewrites
  * a sidecar and then has `--import` act on it. The engine's filesystem cache keeps whole seconds and
  * asks the importer only about a sidecar whose time has moved, so a rewrite landing in the second
@@ -6152,6 +6311,12 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   },
   connectionsReached: (godotPath) => {
     testAConnectionNamesWhatItReaches(godotPath);
+  },
+  connectionArguments: (godotPath) => {
+    testAConnectionPassesWhatItsMethodTakes(godotPath);
+  },
+  sceneNotRead: (godotPath) => {
+    testASceneTreeSaysWhatTheEngineDidNotRead(godotPath);
   },
   everyUse: (godotPath) => {
     testEveryUseIsFound(godotPath);
