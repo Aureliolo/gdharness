@@ -54132,6 +54132,106 @@ function commandTestTree(): Record<string, string> {
   };
 }
 
+/**
+ * A headless suite run starts the engine with the same flags through project_test as through
+ * gdharness test, so a suite reading its own command line passes under both. Only the windowed
+ * project_test run named the dummy audio driver, and a suite asserting it failed there alone.
+ *
+ * Read off the process table while the suite holds, because the engine hands a script none of the
+ * options it took for itself: OS.get_cmdline_args() leaves out --headless and --audio-driver alike.
+ */
+async function testASuiteRunHasNoSoundWhicheverWayItStarts(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const { project, slots, checkouts, env } = commandTestProject(engines.godotPath, engines.gdunit);
+  const pidFile = join(project, 'driver_pid.txt');
+  const seenFile = join(project, 'driver_seen.txt');
+  try {
+    writeTree(project, {
+      'tests/driver_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_held_while_read() -> void:',
+        '\tvar mark: FileAccess = FileAccess.open("res://driver_pid.txt", FileAccess.WRITE)',
+        '\tmark.store_string(str(OS.get_process_id()))',
+        '\tmark.close()',
+        '\tvar waited: int = 0',
+        '\twhile not FileAccess.file_exists("res://driver_seen.txt") and waited < 600:',
+        '\t\tawait get_tree().create_timer(0.1).timeout',
+        '\t\twaited += 1',
+        '\tassert_bool(FileAccess.file_exists("res://driver_seen.txt")).is_true()',
+        '',
+      ].join('\n'),
+    });
+    // The engine command line of the run [param running] starts, read once its suite says its pid.
+    const commandOfTheSuite = async (running: Promise<unknown>): Promise<string> => {
+      rmSync(pidFile, { force: true });
+      rmSync(seenFile, { force: true });
+      let pid = 0;
+      for (let waited = 0; waited < 120_000 && pid === 0; waited += 250) {
+        await delay(250);
+        pid = existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8').trim()) || 0 : 0;
+      }
+      assert.ok(pid > 0, 'the suite said which engine runs it');
+      const command = (await processTree())?.get(pid)?.command ?? '';
+      writeFileSync(seenFile, 'seen\n');
+      await running;
+      return command;
+    };
+
+    let said = '';
+    const command = await commandOfTheSuite(
+      new Promise<number | null>((settle) => {
+        const child = spawnHidden(
+          process.execPath,
+          ['build/cli.js', 'test', project, '--slots', slots, '--import', 'tests/driver_test.gd'],
+          { env, stdio: ['ignore', 'pipe', 'pipe'] },
+        );
+        child.stdout.on('data', (chunk: Buffer) => {
+          said += String(chunk);
+        });
+        child.stderr.on('data', (chunk: Buffer) => {
+          said += String(chunk);
+        });
+        child.on('close', settle);
+      }).then((status) => {
+        assert.equal(status, 0, said);
+      }),
+    );
+    assert.match(command, /--headless/, `gdharness test runs it headless: ${command}`);
+    assert.match(command, /--audio-driver"?\s+"?Dummy\b/, `gdharness test names no sound: ${command}`);
+
+    await withStdioServer(
+      async (_call, request) => {
+        let blocks: string[] = [];
+        const tool = await commandOfTheSuite(
+          request(
+            'tools/call',
+            { name: 'project_test', arguments: { projectPath: project, path: 'res://tests/driver_test.gd' } },
+            ENGINE_CALL_TIMEOUT_MS * 3,
+          ).then((response) => {
+            blocks = asArray(get(response, 'result', 'content')).map((block) => String(get(block, 'text')));
+          }),
+        );
+        const answer = JSON.parse(blocks.find((one) => one.trimStart().startsWith('{')) ?? '{}') as unknown;
+        assert.equal(get(answer, 'verdict'), 'passed', blocks.join('\n'));
+        assert.match(tool, /--headless/, `project_test runs it headless: ${tool}`);
+        assert.match(
+          tool,
+          /--audio-driver"?\s+"?Dummy\b/,
+          `and names no sound, as gdharness test does: ${tool}`,
+        );
+      },
+      { GODOT_PATH: engines.godotPath },
+    );
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
 async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
   const engines = commandTestEngines();
   if (engines === null) {
@@ -78820,6 +78920,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testPinnedToolsInstallOutsideTheTemporaryFolder,
   testTheTestHelpersWaitStepAndPress,
   testASpreadBenchGathersTheTableItPlaysAlone,
+  testASuiteRunHasNoSoundWhicheverWayItStarts,
   testTheTestCommandRunsAndJudgesAProject,
   testTheTestCommandDealsAndReportsARun,
   testATestRunsLimitsEndAHungOrChattyEngine,
