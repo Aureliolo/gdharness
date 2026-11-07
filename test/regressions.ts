@@ -301,6 +301,7 @@ import {
   projectTexts,
   type SearchOptions,
   type SearchResult,
+  SHOWN_OF_A_LINE,
   searchProject,
   VERSION_MARKER,
 } from '../src/project-scan.js';
@@ -10778,6 +10779,46 @@ function testASearchReadsWhatItSaysItReads(): void {
       ['GameState'],
       'a search heeding case finds the query itself',
     );
+
+    // A line too long to answer whole, as a scene keeps a tile map's cells, is answered as the part
+    // around its first match. The answer says where that part starts and how long the line is. A
+    // match near the end of a line is shown with the end, and a line at the limit is whole.
+    const cells = `tile_map_data = PackedByteArray(${'0, '.repeat(3000)}GameState, ${'1, '.repeat(3000)})`;
+    const tail = `${'x'.repeat(5000)} GameState`;
+    const atLimit = `${'y'.repeat(SHOWN_OF_A_LINE - 'GameState'.length)}GameState`;
+    writeFileSync(join(sandbox, 'cells.tscn'), `${cells}\n\t${tail}\n${atLimit}\n`);
+    const long = search('gamestate', { fileTypes: ['tscn'] }).results.flatMap((entry) => entry.matches);
+    const around = cells.indexOf('GameState');
+    const start = around - Math.floor((SHOWN_OF_A_LINE - 'GameState'.length) / 2);
+    assert.deepEqual(
+      long,
+      [
+        {
+          line: 1,
+          content: cells.slice(start, start + SHOWN_OF_A_LINE),
+          match: 'GameState',
+          shownFrom: start + 1,
+          lineLength: cells.length,
+        },
+        {
+          line: 2,
+          content: `\t${tail}`.slice(-SHOWN_OF_A_LINE),
+          match: 'GameState',
+          shownFrom: tail.length + 2 - SHOWN_OF_A_LINE,
+          lineLength: tail.length + 1,
+        },
+        { line: 3, content: atLimit, match: 'GameState' },
+      ],
+      'each long line is answered as the part around its match',
+    );
+    assert.deepEqual(
+      search('Game[S]tate', { fileTypes: ['tscn'], regex: true }).results.flatMap((entry) =>
+        entry.matches.map((one) => one.shownFrom),
+      ),
+      [start + 1, tail.length + 2 - SHOWN_OF_A_LINE, undefined],
+      'and a regular expression is placed by where it matched',
+    );
+    rmSync(join(sandbox, 'cells.tscn'));
 
     // A folder or one file, answered by the file's place in the project rather than in the folder.
     mkdirSync(join(sandbox, 'scripts', 'empty'), { recursive: true });
