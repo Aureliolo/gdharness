@@ -25467,6 +25467,55 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
   }
 }
 
+/** Calls sent together on a project whose class cache lacks a class share one rebuild of it. */
+async function testCallsSentTogetherShareOneClassRebuild(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('shared class rebuild regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-shared-rebuild-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-shared-rebuild-rt-'));
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\nconfig/name="Shared"\n');
+  writeFileSync(join(project, 'stash.gd'), 'class_name FixtureShared\nextends Node\n');
+  writeFileSync(join(project, 'holder.gd'), 'extends Node\n\nvar held: FixtureShared\n');
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: engine,
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_DEBUG: '1',
+    },
+  });
+  const depends = async (resourcePath: string): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      { name: 'project_dependencies', arguments: { projectPath: project, resourcePath } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+  try {
+    await server.initialize('regression-test');
+    const answers = await Promise.all([depends('holder.gd'), depends('stash.gd')]);
+    const shown = answers.map((answer) => textOf(answer) ?? JSON.stringify(answer)).join('\n');
+    assert.deepEqual(
+      answers.map((answer) => get(parseTextContent(answer), 'classesRebuiltFirst')),
+      [['FixtureShared'], ['FixtureShared']],
+      `each call says the class was put in the cache before it ran: ${shown}`,
+    );
+    const rebuilds = server.stderr
+      .split('\n')
+      .filter((line) => line.includes('Running refresh_class_cache in'));
+    assert.equal(rebuilds.length, 1, `one rebuild engine for both calls:\n${rebuilds.join('\n')}\n${shown}`);
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
 /**
  * testAStaleEnumMemberIsNamed asked of the server: `script_diagnostics` answers a stale enum member with the member
  * under contradictedByTheFile and the reload in staleAnalysis. The stand-in language server
@@ -77813,6 +77862,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFailedReloadSaysWhatItKept,
   testDiagnosticsNameAStaleEnumMember,
   testDiagnosticsWithoutAnEditorComeFromTheEngine,
+  testCallsSentTogetherShareOneClassRebuild,
   testDiagnosticsFindAMemberInAProjectBase,
   testDiagnosticsAnswerSeveralScripts,
   testAClassTheEditorHasNotLoadedIsToldApartFromOneTheCacheLacks,
