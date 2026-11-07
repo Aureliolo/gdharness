@@ -27075,6 +27075,37 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         '',
       ].join('\n'),
     );
+    // Each annotation on a line of its own above what it annotates, which GDScript allows as well.
+    // A group heading stands for itself and annotates nothing under it.
+    writeFileSync(
+      join(project, 'lined.gd'),
+      [
+        '@tool',
+        '@abstract',
+        'class_name Lined',
+        'extends Node2D',
+        '',
+        '@export_group("Stats")',
+        '## How fast it goes.',
+        '@export',
+        'var speed: float = 1.0',
+        '',
+        '@export_range(0, 5)',
+        'var level: int = 1',
+        '',
+        'var plain: int = 0',
+        '',
+        '',
+        '@abstract',
+        'func area() -> float',
+        '',
+        '',
+        '@rpc("any_peer")',
+        'func ping() -> void:',
+        '\tpass',
+        '',
+      ].join('\n'),
+    );
 
     const server = new ServerProcess({ env: { GODOT_PATH: godotPath } });
     try {
@@ -27146,6 +27177,53 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
           ['body', false, '', true],
         ],
         `and the annotations on a variable are the answer about it: ${JSON.stringify(oneLine)}`,
+      );
+      const tooled = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://by_path.gd',
+      });
+      assert.deepEqual(
+        [get(oneLine, 'is_abstract'), get(read, 'is_abstract'), get(tooled, 'is_abstract')],
+        [true, true, false],
+        `the class is abstract by its own annotation, and @tool is none: ${JSON.stringify(tooled)}`,
+      );
+
+      // An annotation alone on its line was read as annotating nothing, so the declaration under it
+      // answered as a plain one: @export above a variable read is_export false.
+      const lined = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://lined.gd',
+      });
+      assert.deepEqual(
+        [
+          get(lined, 'class_name'),
+          get(lined, 'extends'),
+          get(lined, 'is_abstract'),
+          asArray(get(lined, 'variables')).map((each) => [
+            get(each, 'name'),
+            get(each, 'is_export'),
+            get(each, 'export_hint'),
+            get(each, 'doc'),
+          ]),
+          asArray(get(lined, 'functions')).map((each) => [get(each, 'name'), get(each, 'is_abstract')]),
+        ],
+        [
+          'Lined',
+          'Node2D',
+          true,
+          [
+            ['speed', true, '', 'How fast it goes.'],
+            ['level', true, 'range(0, 5)', undefined],
+            ['plain', false, '', undefined],
+          ],
+          [
+            ['area', true],
+            ['ping', false],
+          ],
+        ],
+        JSON.stringify(lined),
       );
 
       // The reverse walk reads the declaration itself, to find the uses that name the class rather
