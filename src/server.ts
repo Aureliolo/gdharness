@@ -3997,6 +3997,9 @@ function unheldNote(changed: unknown): string {
 
 const STATIC_LIST_HINT = { ttlMs: 5 * 60_000, cacheScope: 'private' } as const;
 
+/** A class cache rebuild's outcome: the classes it listed, or the engine's failure. */
+type ClassRebuild = { ok: true; listed: string[] } | { ok: false; outcome: HeadlessOutcome };
+
 class GodotServer {
   private stdio: StdioServerHandle | null = null;
   private readonly locator = new GodotLocator();
@@ -4005,6 +4008,8 @@ class GodotServer {
   private readonly exportOptionsRead = new Map<string, ExportOptions>();
   /** By project, the stale classes the last class cache rebuild left out, one per line. */
   private readonly unlistedClasses = new Map<string, string>();
+  /** By project, the class cache rebuild in progress, which a call arriving meanwhile waits on. */
+  private readonly classRebuilds = new Map<string, Promise<ClassRebuild>>();
   /** The pending calls answered while the kept game was held, whose timing counts the hold. */
   private readonly heldWhilePending = new Set<number>();
   // The game hands the errors an evaluate raises to whatever call it is held inside.
@@ -6124,9 +6129,26 @@ class GodotServer {
    * those are not rebuilt for again until the set changes, so a list no rebuild completes costs one
    * engine rather than one before every call.
    */
-  private async rebuildStaleClasses(
-    projectPath: string,
-  ): Promise<{ ok: true; listed: string[] } | { ok: false; outcome: HeadlessOutcome }> {
+  private async rebuildStaleClasses(projectPath: string): Promise<ClassRebuild> {
+    // Calls sent together each find the same classes missing. Unshared, each starts its own rebuild
+    // engine, waits for a slot of its own and writes the same cache file.
+    const running = this.classRebuilds.get(projectPath);
+    if (running !== undefined) {
+      const joined = await running;
+      if (!joined.ok) {
+        return joined;
+      }
+      const after = await this.rebuildStaleClasses(projectPath);
+      return after.ok ? { ok: true, listed: [...joined.listed, ...after.listed] } : after;
+    }
+    const rebuild = this.rebuildStaleClassesNow(projectPath).finally(() => {
+      this.classRebuilds.delete(projectPath);
+    });
+    this.classRebuilds.set(projectPath, rebuild);
+    return await rebuild;
+  }
+
+  private async rebuildStaleClassesNow(projectPath: string): Promise<ClassRebuild> {
     const stale = staleClassNames(projectPath);
     if (stale.length === 0 || stale.join('\n') === this.unlistedClasses.get(projectPath)) {
       return { ok: true, listed: [] };
