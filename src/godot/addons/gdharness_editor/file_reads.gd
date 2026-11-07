@@ -14,6 +14,9 @@ const GdhFileWalk = preload("file_walk.gd")
 const GdhSame = preload("same_values.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhShapes = preload("value_shapes.gd")
+const EXT_RESOURCE: String = "^\\[ext_resource [^\\]]*\\]"
+const NODE_HEADING: String = "^\\[node [^\\]]*\\]"
+const INSTANCE: String = 'instance=ExtResource\\(\\s*"([^"]+)"\\s*\\)'
 
 
 ## The nodes of [param scene_path] as {name, type, path, children}, with instanceOf and
@@ -29,10 +32,14 @@ static func scene_tree(
 	if not laid.get("ok", false):
 		return laid
 	var nodes: Dictionary = laid["nodes"]
-	return {
+	var answer: Dictionary = {
 		"ok": true,
 		"tree": _entry(nodes, ".", include_properties, include_defaults, depth, 0),
 	}
+	var unread: Dictionary = laid["unread"]
+	if not unread.is_empty():
+		answer["notRead"] = unread
+	return answer
 
 
 ## The node at [param node_path] in [param scene_path] as {ok, name, type, properties}, laid as
@@ -135,7 +142,79 @@ static func _laid(scene_path: String) -> Dictionary:
 	var base: SceneState = packed.get_state().get_base_scene_state()
 	if base != null:
 		nodes["."]["inherits"] = base.get_path()
-	return { "ok": true, "nodes": nodes }
+	return { "ok": true, "nodes": nodes, "unread": _unread(scene_path, packed.get_state()) }
+
+
+## The nodes the text of [param scene_path] declares that [param state], the engine's reading of
+## it, does not make, as {nodes, note}, or {} when it makes every one. Measured on 4.7.2: the engine
+## stops reading a scene at a node instancing a scene it cannot load, keeps that node as an entry
+## with no instance, which it skips as it makes the scene, and drops every node after it, so a game
+## loads the scene without them. A missing texture or script does not stop it.
+static func _unread(scene_path: String, state: SceneState) -> Dictionary:
+	if not scene_path.ends_with(".tscn"):
+		return {}
+	var read: Dictionary = {}
+	for index: int in state.get_node_count():
+		read[str(state.get_node_path(index))] = index
+	var resources: Dictionary = {}
+	var resource_line: RegEx = RegEx.create_from_string(EXT_RESOURCE)
+	var node_line: RegEx = RegEx.create_from_string(NODE_HEADING)
+	var unread: PackedStringArray = []
+	var stopped_at: String = ""
+	var stopped_by: String = ""
+	for line: String in FileAccess.get_file_as_string(scene_path).split("\n"):
+		var external: RegExMatch = resource_line.search(line)
+		if external != null:
+			resources[_attribute(external.get_string(0), "id")] = _attribute(
+				external.get_string(0), "path"
+			)
+			continue
+		var heading: RegExMatch = node_line.search(line)
+		if heading == null:
+			continue
+		var said: String = heading.get_string(0)
+		var name: String = _attribute(said, "name")
+		var parent: String = _attribute(said, "parent")
+		var path: String = (
+			"."
+			if not said.contains(' parent="')
+			else "./" + (name if parent == "." else "%s/%s" % [parent, name])
+		)
+		var instanced: RegExMatch = RegEx.create_from_string(INSTANCE).search(said)
+		var index: int = GdhRead.as_int(read.get(path, -1), -1)
+		var unmade: bool = (
+			index >= 0
+			and instanced != null
+			and state.get_node_instance(index) == null
+			and not state.is_node_instance_placeholder(index)
+		)
+		if index >= 0 and not unmade:
+			continue
+		if unmade and stopped_at.is_empty():
+			stopped_at = _joined(".", path)
+			stopped_by = str(resources.get(instanced.get_string(1), ""))
+		var _listed: bool = unread.append(_joined(".", path))
+	if unread.is_empty():
+		return {}
+	var note: String = (
+		"The engine does not read these nodes of the file, so a game loads the scene without them."
+	)
+	if not stopped_at.is_empty():
+		note = (
+			(
+				"The engine stops reading %s at %s, which instances %s, a scene it could not load,"
+				+ " so a game loads the scene without these nodes. The tree is the scene as the"
+				+ " engine reads it."
+			)
+			% [scene_path, stopped_at, stopped_by]
+		)
+	return { "nodes": unread, "note": note }
+
+
+## The value of [param attribute] in the bracketed heading [param heading], or "".
+static func _attribute(heading: String, attribute: String) -> String:
+	var found: RegExMatch = RegEx.create_from_string('\\b%s="([^"]*)"' % attribute).search(heading)
+	return "" if found == null else found.get_string(1)
 
 
 ## Lays the nodes of [param state] into [param nodes] under [param prefix], keyed by their path

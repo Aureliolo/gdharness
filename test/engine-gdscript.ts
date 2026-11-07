@@ -5105,6 +5105,79 @@ function testAConnectionNamesWhatItReaches(godotPath: string): void {
 }
 
 /**
+ * A scene tree names the nodes the engine did not read. Measured on the engine: it stops reading a
+ * scene at a node instancing a scene it cannot load, so the game loads the scene without that node
+ * and every one after it, while a missing texture leaves the rest of the file read.
+ */
+function testASceneTreeSaysWhatTheEngineDidNotRead(godotPath: string): void {
+  const dir = createProject(godotPath);
+  try {
+    mkdirSync(join(dir, 'cut'));
+    writeFileSync(join(dir, 'cut', 'part.tscn'), '[gd_scene format=3]\n\n[node name="Part" type="Node2D"]\n');
+    const scene = (missing: string, after: string): string =>
+      '[gd_scene format=3]\n\n' +
+      '[ext_resource type="PackedScene" path="res://cut/part.tscn" id="1_p"]\n' +
+      `${missing}\n\n` +
+      '[node name="Main" type="Node2D"]\n\n' +
+      '[node name="Kept" parent="." instance=ExtResource("1_p")]\n\n' +
+      '[node name="Label" type="Label" parent="."]\nunique_name_in_owner = true\n\n' +
+      after;
+    const goneScene = '[ext_resource type="PackedScene" path="res://cut/gone.tscn" id="2_g"]';
+    writeFileSync(
+      join(dir, 'cut', 'stops.tscn'),
+      scene(
+        goneScene,
+        '[node name="Gone" parent="." instance=ExtResource("2_g")]\n\n' +
+          '[node name="Panel" type="Panel" parent="." groups=["ui"]]\n\n' +
+          '[node name="Title" type="Label" parent="Panel"]\n',
+      ),
+    );
+    writeFileSync(
+      join(dir, 'cut', 'last.tscn'),
+      scene(goneScene, '[node name="Gone" parent="." instance=ExtResource("2_g")]\n'),
+    );
+    writeFileSync(
+      join(dir, 'cut', 'texture.tscn'),
+      scene(
+        '[ext_resource type="Texture2D" path="res://cut/gone.png" id="2_t"]',
+        '[node name="Icon" type="Sprite2D" parent="."]\ntexture = ExtResource("2_t")\n\n' +
+          '[node name="Panel" type="Panel" parent="."]\n',
+      ),
+    );
+    // The engine prints why it could not load the scene, so the answer is read past its complaints.
+    const read = (file: string): unknown => {
+      const run = runOperationScript(godotPath, dir, 'read_scene_tree', { scene_path: `res://cut/${file}` });
+      assert.equal(run.status, 0, `${file}: ${run.stdout}\n${run.stderr}`);
+      return run.answer;
+    };
+    const names = (answer: unknown): unknown[] =>
+      asArray(get(answer, 'tree', 'children')).map((child) => get(child, 'name'));
+    const stops = read('stops.tscn');
+    assert.deepEqual(names(stops), ['Kept', 'Label'], JSON.stringify(stops));
+    assert.deepEqual(
+      get(stops, 'notRead'),
+      {
+        nodes: ['Gone', 'Panel', 'Panel/Title'],
+        note: 'The engine stops reading res://cut/stops.tscn at Gone, which instances res://cut/gone.tscn, a scene it could not load, so a game loads the scene without these nodes. The tree is the scene as the engine reads it.',
+      },
+      JSON.stringify(stops),
+    );
+    const last = read('last.tscn');
+    assert.deepEqual(names(last), ['Kept', 'Label'], JSON.stringify(last));
+    assert.deepEqual(get(last, 'notRead', 'nodes'), ['Gone'], JSON.stringify(last));
+    const texture = read('texture.tscn');
+    assert.deepEqual(names(texture), ['Kept', 'Label', 'Icon', 'Panel'], JSON.stringify(texture));
+    assert.equal(
+      get(texture, 'notRead'),
+      undefined,
+      `a missing texture cuts nothing: ${JSON.stringify(texture)}`,
+    );
+  } finally {
+    sweep(dir);
+  }
+}
+
+/**
  * Validation and health name each scene connection whose method takes a number of arguments other
  * than the signal sends, less what it unbinds and plus what it binds, which fails on every emission
  * as a missing method does. Measured on the engine: defaults, a rest parameter, unbinds and a
@@ -6241,6 +6314,9 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
   },
   connectionArguments: (godotPath) => {
     testAConnectionPassesWhatItsMethodTakes(godotPath);
+  },
+  sceneNotRead: (godotPath) => {
+    testASceneTreeSaysWhatTheEngineDidNotRead(godotPath);
   },
   everyUse: (godotPath) => {
     testEveryUseIsFound(godotPath);
