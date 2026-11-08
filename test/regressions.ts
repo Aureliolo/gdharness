@@ -62374,6 +62374,13 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
       /^Item\.stock was given -5 and holds 0 after it was set: the engine changed or refused the value, so nothing was written\. res:\/\/item\.gd is not a tool script, so its setter ran in the headless engine writing this as it runs in the game\. An editor runs none and would have saved the value given\. Open the project's editor \(editor_launch with hidden: true\) and ask again/,
       clamped,
     );
+    // editor_launch refuses a project without the editor addon, so the advice says that comes first.
+    assert.ok(
+      lastRefusal.includes(
+        `editor_launch opens no editor here yet: the gdharness editor addon is not installed in ${project}. No gdharness tool installs the addon: run  `,
+      ),
+      lastRefusal,
+    );
     assert.equal(existsSync(join(project, 'sword.tres')), false, 'and nothing was written');
     const made = await answered({
       op: 'create',
@@ -62437,6 +62444,29 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
     ]) {
       assert.ok(bagFile.includes(line), `${line} in ${bagFile}`);
     }
+    const retagged = await answered({
+      op: 'modify',
+      resourcePath: 'res://bag.tres',
+      properties: { counts: { _type: 'Dictionary', entries: [['shield', 2]] } },
+    });
+    assert.deepEqual(get(retagged, 'properties'), { counts: { shield: 2 } }, JSON.stringify(retagged));
+    const untagged = await refused({
+      op: 'modify',
+      resourcePath: 'res://bag.tres',
+      properties: { counts: { _type: 'Dictionary', shield: 2 } },
+    });
+    assert.match(
+      untagged,
+      /^The value given is tagged \{"_type": "Dictionary"\} with no "entries" list of \[key, value\] pairs/,
+    );
+    assert.ok(
+      !lastRefusal.includes('opens no editor here yet'),
+      `a refusal not advising an editor: ${lastRefusal}`,
+    );
+    assert.ok(
+      readFileSync(join(project, 'bag.tres'), 'utf8').includes('&"shield": 2'),
+      'the refused write left the file as the last write saved it',
+    );
     // What stats.gd's setter and _init set is put back before the save, so neither a write's answer
     // nor a read gives it as something the file holds.
     const setNote =

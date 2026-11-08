@@ -88,12 +88,18 @@ func parse(value: Variant, expected_type: int = TYPE_NIL, elements: Array = []) 
 		var fields: Dictionary = value
 		# A dictionary with keys that are not text arrives as its entries, and is read against the
 		# declared element types like any other.
-		if (
-			str(fields.get("_type", "")) == "Dictionary"
-			and GdhSerialisation.pairs(fields.get("entries"))
-		):
-			var built: Dictionary = _values.deserialize_value(fields)
-			return _parse_entries(built, elements)
+		if str(fields.get("_type", "")) == "Dictionary":
+			if GdhSerialisation.pairs(fields.get("entries")):
+				var built: Dictionary = _values.deserialize_value(fields)
+				return _parse_entries(built, elements)
+			# Read as a map, the tag became an entry keyed "_type", and the refusal named its value.
+			_refused = (
+				'The value given is tagged {"_type": "Dictionary"} with no "entries" list of '
+				+ '[key, value] pairs, which that form carries its entries in: {"_type": '
+				+ '"Dictionary", "entries": [["sword", 1]]}. A map keyed by text may be given as '
+				+ 'a plain object instead, {"sword": 1}.'
+			)
+			return null
 		var tagged: Array = _parse_tagged_dictionary(fields)
 		if tagged[0]:
 			return tagged[1]
