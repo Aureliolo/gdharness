@@ -25911,6 +25911,29 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
       textOf(await diagnose('checked/brokn.gd')),
       'Script file does not exist: res://checked/brokn.gd. The nearest .gd file is res://checked/broken.gd.',
     );
+    // In a list it is named so too, with the rest compiled, rather than answered by the engine as
+    // a script it could not load.
+    const withMissing = parseTextContent(await diagnose(['checked/broken.gd', 'checked/brokn.gd']));
+    assert.deepEqual(
+      {
+        scriptsNotRead: get(withMissing, 'scriptsNotRead'),
+        entries: asArray(get(withMissing, 'scripts')).map((entry) => [
+          get(entry, 'scriptPath'),
+          get(entry, 'error') ?? get(entry, 'errors'),
+        ]),
+      },
+      {
+        scriptsNotRead: 1,
+        entries: [
+          [
+            'res://checked/brokn.gd',
+            'Script file does not exist: res://checked/brokn.gd. The nearest .gd file is res://checked/broken.gd.',
+          ],
+          ['res://checked/broken.gd', 2],
+        ],
+      },
+      JSON.stringify(withMissing),
+    );
     // A file that is not a script is refused as that, alone or in a list, rather than read as one
     // with nothing wrong in it.
     writeFileSync(

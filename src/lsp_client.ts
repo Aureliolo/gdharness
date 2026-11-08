@@ -1147,6 +1147,23 @@ function protocolPosition(args: JsonRecord): { line: number; character: number }
   return { line: line - 1, character: character - 1 };
 }
 
+/**
+ * The refusal for [param relativePath] when it is no .gd file, or null. Anything else would come
+ * back as a script with nothing wrong in it.
+ */
+export function notAScript(relativePath: string): string | null {
+  if (relativePath.toLowerCase().endsWith('.gd')) {
+    return null;
+  }
+  const said = `res://${relativePath} is not a GDScript file, and the language server reads .gd files only`;
+  const kind = extname(relativePath).toLowerCase();
+  return kind === '.tscn' || kind === '.scn'
+    ? `${said}: scene_tree reads a scene's nodes, and with properties the script each carries.`
+    : kind === '.tres' || kind === '.res'
+      ? `${said}: resource_edit read reads a resource.`
+      : `${said}.`;
+}
+
 async function resolveLSPPaths(
   projectPathValue: string,
   scriptPathValue: string,
@@ -1178,17 +1195,9 @@ async function resolveLSPPaths(
   } catch {
     throw new ArgumentRefusal(`Script file does not exist: res://${contained.relativePath}`);
   }
-  // Anything else would come back as a script with nothing wrong in it.
-  if (!scriptPath.toLowerCase().endsWith('.gd')) {
-    const said = `res://${contained.relativePath} is not a GDScript file, and the language server reads .gd files only`;
-    const kind = extname(scriptPath).toLowerCase();
-    throw new ArgumentRefusal(
-      kind === '.tscn' || kind === '.scn'
-        ? `${said}: scene_tree reads a scene's nodes, and with properties the script each carries.`
-        : kind === '.tres' || kind === '.res'
-          ? `${said}: resource_edit read reads a resource.`
-          : `${said}.`,
-    );
+  const notScript = notAScript(contained.relativePath);
+  if (notScript !== null) {
+    throw new ArgumentRefusal(notScript);
   }
 
   if (!isWithinRoot(projectPath, scriptPath)) {

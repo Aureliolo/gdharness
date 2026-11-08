@@ -225,6 +225,7 @@ import {
   handleLSPTool,
   LSPTimeout,
   normalizeLSPError,
+  notAScript,
 } from './lsp_client.js';
 import { nearest, withNearestFiles } from './nearest.js';
 import { launchOutsideTheTree } from './outside.js';
@@ -3857,6 +3858,38 @@ export function scriptsToDiagnose(
     return { ok: false, reason: empty.join(' ') };
   }
   return { ok: true, value: unique };
+}
+
+/**
+ * Why [param scriptPath], one script of a script_diagnostics list, cannot be read by either the
+ * language server or an engine, or null when it can.
+ */
+function unreadableScript(projectPath: string, scriptPath: string): string | null {
+  const location = resolveWithinProject(projectPath, scriptPath);
+  if (!location.ok) {
+    return location.reason;
+  }
+  if (!existsSync(location.absolutePath)) {
+    return missingScriptReason(
+      projectPath,
+      location.relativePath,
+      `Script file does not exist: res://${location.relativePath}`,
+    );
+  }
+  return notAScript(location.relativePath);
+}
+
+/** [param said], the refusal for [param relativePath], a script the project does not hold, with the nearest it does. */
+function missingScriptReason(projectPath: string, relativePath: string, said: string): string {
+  const scripts = projectFiles(projectPath, ['.gd']).map((script) => `res://${script}`);
+  const folder = dirname(relativePath.replaceAll('\\', '/'));
+  const inFolder = join(projectPath, folder);
+  const beside = existsSync(inFolder)
+    ? readdirSync(inFolder, { withFileTypes: true })
+        .filter((entry) => entry.isFile())
+        .map((entry) => `res://${folder === '.' ? '' : `${folder}/`}${entry.name}`)
+    : [];
+  return withNearestFiles(said, `res://${relativePath}`, scripts, beside);
 }
 
 /**
@@ -8776,11 +8809,28 @@ class GodotServer {
         return this.createErrorResponse(`Cancelled after ${at} of ${scripts.value.length} scripts.`);
       }
       progress?.(at + 1, `${at + 1} of ${scripts.value.length}: ${scriptPath}`);
+      const unreadable = project.ok ? unreadableScript(project.value.path, scriptPath) : null;
+      if (unreadable !== null) {
+        unread += 1;
+        reported.push({ scriptPath, error: unreadable });
+        continue;
+      }
       const one = await this.diagnosticsOf({ ...args, scriptPath });
       if ('noLanguageServer' in one) {
         // The rest in one engine, since what kept the language server from answering this script
-        // keeps it from answering the others.
-        const rest = scripts.value.slice(at);
+        // keeps it from answering the others. The engine answers a missing file as one it could
+        // not load, which reads as a broken script, so those are named as the language server
+        // names them.
+        const rest: string[] = [];
+        const refusedHere = new Map<string, string>();
+        for (const left of scripts.value.slice(at)) {
+          const refused = project.ok ? unreadableScript(project.value.path, left) : null;
+          if (refused === null) {
+            rest.push(left);
+          } else {
+            refusedHere.set(left, refused);
+          }
+        }
         progress?.(at + 1, `${rest.length} script(s) left, compiled by a headless engine`);
         const checked = await this.engineDiagnostics(
           project.ok ? project.value.path : '',
@@ -8791,6 +8841,10 @@ class GodotServer {
           return checked.refusal;
         }
         rebuilt = checked.classesRebuiltFirst;
+        for (const [left, error] of refusedHere) {
+          unread += 1;
+          reported.push({ scriptPath: left, error });
+        }
         for (const answer of checked.answers) {
           errors += Number(answer['errors']);
           engineWarned =
@@ -8843,17 +8897,8 @@ class GodotServer {
 
   /** The refusal for [param relativePath], a script the project does not hold, with the nearest it does. */
   private missingScript(projectPath: string, relativePath: string): ToolResponse {
-    const scripts = projectFiles(projectPath, ['.gd']).map((script) => `res://${script}`);
-    const wanted = `res://${relativePath}`;
-    const folder = dirname(relativePath.replaceAll('\\', '/'));
-    const inFolder = join(projectPath, folder);
-    const beside = existsSync(inFolder)
-      ? readdirSync(inFolder, { withFileTypes: true })
-          .filter((entry) => entry.isFile())
-          .map((entry) => `res://${folder === '.' ? '' : `${folder}/`}${entry.name}`)
-      : [];
     return this.createErrorResponse(
-      withNearestFiles(`Script file does not exist: ${wanted}`, wanted, scripts, beside),
+      missingScriptReason(projectPath, relativePath, `Script file does not exist: res://${relativePath}`),
     );
   }
 
