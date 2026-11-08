@@ -9820,7 +9820,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 158;
+const READ_IN_WORDS = 159;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -34445,6 +34445,26 @@ async function testAnEngineSingletonIsReachedAndOSIsNot(): Promise<void> {
       await call('runtime_wait', { op: 'frames', frames: 10 });
       const after = await frames();
       assert.ok(after >= before + 10, `Engine's frame count, read twice, grows: ${before} then ${after}`);
+      // The game's own time, which a headless game's frames are no measure of.
+      const waited = await call('runtime_wait', { op: 'seconds', seconds: 0.5 });
+      assert.match(waited, /^\{/, `the game waits seconds: ${waited}`);
+      const halfASecond = JSON.parse(waited) as unknown;
+      assert.ok(
+        Number(get(halfASecond, 'elapsed_ms')) >= 450 &&
+          Number(get(halfASecond, 'process_frames')) > 0 &&
+          get(halfASecond, 'seconds') === 0.5,
+        `half a second of game time passes: ${JSON.stringify(halfASecond)}`,
+      );
+      const tooLong = await call('runtime_wait', { op: 'seconds', seconds: 200 });
+      assert.match(tooLong, /^runtime_wait takes seconds of 120 or less, not 200\./, tooLong);
+      await call('runtime_invoke', { op: 'set', nodePath: 'Engine', property: 'time_scale', value: 0.001 });
+      const tooSlow = await call('runtime_wait', { op: 'seconds', seconds: 1 });
+      assert.match(
+        tooSlow,
+        /^seconds 1 of game time takes longer than the 120 real seconds a wait may take at Engine\.time_scale 0\.001\./,
+        tooSlow,
+      );
+      await call('runtime_invoke', { op: 'set', nodePath: 'Engine', property: 'time_scale', value: 1 });
 
       const written = await call('runtime_invoke', {
         op: 'set',

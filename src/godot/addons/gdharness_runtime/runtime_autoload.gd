@@ -61,6 +61,7 @@ const MODULE_COMMANDS: Dictionary = {
 	"click": [INPUT, "click"],
 	"choose": [TYPING, "choose"],
 	"wait_frames": [WAITS, "wait_frames"],
+	"wait_seconds": [WAITS, "wait_seconds"],
 	"wait_signal": [WAITS, "wait_signal"],
 	"watch_signal": [WAITS, "watch_signal"],
 	"watch_recorded": [WAITS, "recorded"],
