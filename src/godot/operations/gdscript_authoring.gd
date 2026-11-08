@@ -6,7 +6,7 @@ const GdhLog = preload("logger.gd")
 const GdhPatterns = preload("patterns.gd")
 const GdhScriptCheck = preload("script_check.gd")
 const MODIFICATION_TYPES: Array[String] = [
-	"add_constant", "add_variable", "add_signal", "add_function",
+	"add_constant", "add_variable", "add_signal", "add_function", "add_enum",
 ]
 ## The class each template's code is written for, and the base a script made from it extends
 ## when given none: the resource template's code is a Resource's, and on the default of Node it
@@ -253,6 +253,8 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 				at = _add_signal(lines, fields, placed)
 			"add_function":
 				at = _add_function(lines, fields, placed)
+			"add_enum":
+				at = _add_enum(lines, fields, placed)
 		if at == -1:
 			return _log.failure(
 				(
@@ -470,13 +472,15 @@ static func _modification_problems(modifications: Array, declared: Dictionary) -
 					which
 					+ " has type '"
 					+ mod_type
-					+ "', not add_constant, add_variable, add_signal or add_function"
+					+ "', not add_constant, add_variable, add_signal, add_function or add_enum"
 				)
 			)
 		if mod_type == "add_constant" and str(fields.get("defaultValue", "")).is_empty():
 			problems.append(
 				which + " is a constant with no defaultValue, and a constant needs a value"
 			)
+		if mod_type == "add_enum":
+			problems.append_array(_enum_problems(which, fields.get("values")))
 		if (
 			not str(fields.get("exportHint", "")).is_empty()
 			and fields.has("isExport")
@@ -494,11 +498,12 @@ static func _modification_problems(modifications: Array, declared: Dictionary) -
 			)
 		if (
 			GdhRead.as_bool(fields.get("isStatic", false))
-			and mod_type in ["add_constant", "add_signal"]
+			and mod_type in ["add_constant", "add_signal", "add_enum"]
 		):
+			var kind: String = mod_type.trim_prefix("add_")
 			problems.append(
-				which + " is a " + mod_type.trim_prefix("add_") + " with isStatic, which only a "
-				+ "function or a variable takes"
+				which + (" is an " if kind == "enum" else " is a ") + kind + " with isStatic, "
+				+ "which only a function or a variable takes"
 			)
 		if mod_name.is_empty():
 			problems.append(which + " has no name")
@@ -585,9 +590,13 @@ func _add_constant(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 		declared_type = _type_of_literal(value)
 	var const_line: String = "const %s: %s = %s" % [str(mod.get("name", "")), declared_type, value]
 	var after: int = 0
-	for i: int in range(lines.size()):
+	var i: int = 0
+	while i < lines.size():
 		var line: String = GdhPatterns.without_annotations(lines[i])
-		if (
+		if line.begins_with("enum "):
+			i = _enum_end(lines, i)
+			after = i + 1
+		elif (
 			line.begins_with("extends ")
 			or line.begins_with("class_name ")
 			or line.begins_with("signal ")
@@ -598,10 +607,10 @@ func _add_constant(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 			line.begins_with("var ")
 			or line.begins_with("func ")
 			or line.begins_with("static ")
-			or line.begins_with("enum ")
 			or line.begins_with("class ")
 		):
 			break
+		i += 1
 	after = _past_class_doc(lines, after)
 	# Set apart from the header or the signals above and from what follows, as the style guide lays
 	# out its groups. One below the constants already there joins them.
@@ -613,6 +622,77 @@ func _add_constant(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 	if not below.is_empty() and not GdhPatterns.without_annotations(below).begins_with("const "):
 		block.push_back("")
 	return after + block.find(const_line) if _insert(lines, after, block, placed) else -1
+
+
+## The index of the line closing the enum that opens on line [param at], since an enum may be
+## written over several lines.
+static func _enum_end(lines: Array[String], at: int) -> int:
+	var end: int = at
+	while end < lines.size() - 1 and not lines[end].contains("}"):
+		end += 1
+	return end
+
+
+## Why the members [param values] given for an enum cannot be written, one sentence each.
+static func _enum_problems(which: String, values: Variant) -> Array[String]:
+	var members: Array = values if values is Array else []
+	if members.is_empty():
+		return [which + " is an enum with no values, the members it declares"]
+	var problems: Array[String] = []
+	for value: Variant in members:
+		var member: String = str(value).get_slice("=", 0).strip_edges()
+		if not value is String or not member.is_valid_unicode_identifier():
+			problems.append(
+				which + " has the enum member '" + str(value) + "', which is not a name or a "
+				+ "name with its value"
+			)
+	return problems
+
+
+# An enum on one line, placed after the header, the signals and the enums already there, which is
+# where the style guide puts them. Its zero-based index, or -1.
+func _add_enum(lines: Array[String], mod: Dictionary, placed: Array[Dictionary]) -> int:
+	var members: PackedStringArray = []
+	var given: Variant = mod.get("values", [])
+	var values: Array = given if given is Array else []
+	for value: Variant in values:
+		var _added: bool = members.append(str(value).strip_edges())
+	var enum_line: String = "enum %s { %s }" % [str(mod.get("name", "")), ", ".join(members)]
+	var after: int = 0
+	var after_enum: bool = false
+	var i: int = 0
+	while i < lines.size():
+		var line: String = GdhPatterns.without_annotations(lines[i])
+		if line.begins_with("enum "):
+			i = _enum_end(lines, i)
+			after = i + 1
+			after_enum = true
+		elif (
+			line.begins_with("extends ")
+			or line.begins_with("class_name ")
+			or line.begins_with("signal ")
+		):
+			after = i + 1
+			after_enum = false
+		elif (
+			line.begins_with("const ")
+			or line.begins_with("var ")
+			or line.begins_with("func ")
+			or line.begins_with("static ")
+			or line.begins_with("class ")
+		):
+			break
+		i += 1
+	after = _past_class_doc(lines, after)
+	var block: Array[String] = [enum_line]
+	var above: String = lines[after - 1].strip_edges() if after > 0 else ""
+	var below: String = lines[after].strip_edges() if after < lines.size() else ""
+	# Joined to the enums above, the last of which may close on a line of its own.
+	if not above.is_empty() and not after_enum:
+		block.push_front("")
+	if not below.is_empty() and not GdhPatterns.without_annotations(below).begins_with("enum "):
+		block.push_back("")
+	return after + block.find(enum_line) if _insert(lines, after, block, placed) else -1
 
 
 # Inserts the declaration and answers with its zero-based index, or -1 for one that could not be
@@ -794,7 +874,8 @@ func _variable_insertion_point(lines: Array[String]) -> int:
 	var after_header: int = 0
 	var before_func: int = lines.size()
 
-	for i: int in range(lines.size()):
+	var i: int = 0
+	while i < lines.size():
 		# Annotations off first. `@abstract class_name X` is one line in Godot 4.5 and later, and
 		# unstripped it matches nothing here, so the header is only found when some other line
 		# carries it. A script whose whole header is that one line leaves `after_header` at 0 and
@@ -802,18 +883,26 @@ func _variable_insertion_point(lines: Array[String]) -> int:
 		# `extends` first takes it between the two, which does not parse either. Stripping also
 		# turns `@export var x` into `var x`, which is why the annotation names are gone below.
 		var line: String = GdhPatterns.without_annotations(lines[i])
-		if line.begins_with("extends ") or line.begins_with("class_name "):
+		if line.begins_with("enum "):
+			# The style guide puts enums and constants above the variables.
+			i = _enum_end(lines, i)
 			after_header = i + 1
-		elif line.begins_with("signal "):
+		elif (
+			line.begins_with("extends ")
+			or line.begins_with("class_name ")
+			or line.begins_with("signal ")
+			or line.begins_with("const ")
+		):
 			after_header = i + 1
 		elif line.begins_with("func ") or line.begins_with("static func "):
 			before_func = i
 			break
+		i += 1
 
 	after_header = _past_class_doc(lines, after_header)
-	for i: int in range(after_header, before_func):
-		if _declares_variable(lines[i]):
-			after_header = i + 1
+	for row: int in range(after_header, before_func):
+		if _declares_variable(lines[row]):
+			after_header = row + 1
 
 	return after_header
 
