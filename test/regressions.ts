@@ -72735,12 +72735,39 @@ async function testAnAnimationsKeysAndLengthAreWrittenWithNoEditor(): Promise<vo
       textOf(await call({ ...rotaton, track: { ...rotaton.track, property: 'rotaton' } })),
       'Sprite2D has no property rotaton. The nearest it has are rotation, global_rotation.',
     );
+    // Godot's own form for a property track's path names the property after a colon. A property
+    // given beside it that disagrees is refused, and so is a colon on a method track.
+    const colonForm = {
+      op: 'add_track',
+      playerNodePath: 'Player',
+      animationName: 'spin',
+      track: { type: 'property', nodePath: 'Body:rotation', keyframes: [{ time: 0.05, value: 0.2 }] },
+    };
+    const colonKeyed = await written(colonForm);
+    assert.deepEqual(
+      [get(colonKeyed, 'trackIndex'), get(colonKeyed, 'existingTrack'), get(colonKeyed, 'keys')],
+      [0, true, 5],
+      JSON.stringify(colonKeyed),
+    );
+    assert.equal(
+      textOf(await call({ ...colonForm, track: { ...colonForm.track, property: 'scale' } })),
+      'track.nodePath names the property rotation after its colon and track.property names scale. Give one.',
+    );
+    assert.equal(
+      textOf(
+        await call({
+          ...colonForm,
+          track: { type: 'method', nodePath: 'Body:rotation', method: 'hide', keyframes: [{ time: 0.3 }] },
+        }),
+      ),
+      'track.nodePath names rotation after its colon, and only a property track has a property.',
+    );
     // Only the keys a call writes are judged against the length: the key at 2 s was named again on
     // every later call to the track, as though the one just written were past the end.
     const inside = await written(rotation([{ time: 0.1, value: 0.5 }]));
     assert.deepEqual(
       [get(inside, 'keys'), get(inside, 'pastLength')],
-      [5, undefined],
+      [6, undefined],
       JSON.stringify(inside),
     );
     // replaceKeys is how one key's value changes: it takes the old key's place, which is named with
@@ -72759,12 +72786,12 @@ async function testAnAnimationsKeysAndLengthAreWrittenWithNoEditor(): Promise<vo
         get(replacedKey, 'keys'),
         get(replacedKey, 'existingTrack'),
       ],
-      [[{ time: 0.5, was: 3.14 }], 1, 6, true],
+      [[{ time: 0.5, was: 3.14 }], 1, 7, true],
       JSON.stringify(replacedKey),
     );
     assert.match(
       fileOf('moves.tscn'),
-      /"times": PackedFloat32Array\(0, 0\.1, 0\.2, 0\.25, 0\.5, 2\),[\s\S]*?"values": \[0\.0, 0\.5, 2\.0, 1\.5, 1\.0, 6\.0\]/,
+      /"times": PackedFloat32Array\(0, 0\.05, 0\.1, 0\.2, 0\.25, 0\.5, 2\),[\s\S]*?"values": \[0\.0, 0\.2, 0\.5, 2\.0, 1\.5, 1\.0, 6\.0\]/,
       fileOf('moves.tscn'),
     );
 

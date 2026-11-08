@@ -283,7 +283,7 @@ const ANIMATION_TRACK: JsonSchema = {
     nodePath: {
       type: 'string',
       description:
-        "Target node, relative to the AnimationPlayer's root_node, which is the player's parent unless the scene sets it.",
+        "Target node, relative to the AnimationPlayer's root_node, which is the player's parent unless the scene sets it. A property track takes Godot's own form too, \"Sprite2D:position\", in place of property.",
     },
     property: { type: 'string', description: 'For property tracks: the property to animate.' },
     update: {
