@@ -215,7 +215,6 @@ Five shorter waits can be set the same way, in milliseconds:
   request.
 - `GDHARNESS_HEARTBEAT_MS` (20 seconds): how long a call whose client asks for progress goes
   without a notification saying it is still going.
-
 - `GDHARNESS_SCAN_WAIT_MS` (30 seconds): how long a start waits for the editor to finish scanning.
   After it, the start goes ahead and says so. A call the editor turns away while busy waits this
   long after the editor last moved on, and at most ten times as long. A client that asks for
@@ -224,6 +223,12 @@ Five shorter waits can be set the same way, in milliseconds:
   it, the stop answers that it is still running.
 - `GDHARNESS_GREETING_WAIT_MS` (10 seconds): how long a restart waits for a newly connected editor
   to say who it is.
+
+## Named suites only
+
+`GDHARNESS_SUITE_FILES_ONLY=1` makes `project_test` refuse a directory, its default included. Your
+agent then runs only the suite files it names. Use it when whole runs happen somewhere else, such as
+a gate or CI.
 
 ## Debug output
 

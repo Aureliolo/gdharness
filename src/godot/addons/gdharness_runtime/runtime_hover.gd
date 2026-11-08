@@ -85,11 +85,6 @@ func hovered_in(viewport: Viewport) -> Control:
 	return instance_from_id(top) as Control
 
 
-## Whether the hover in [param viewport] is one this supplied.
-func supplied_in(viewport: Viewport) -> bool:
-	return viewport.gui_get_hovered_control() == null and _supplied.has(viewport.get_instance_id())
-
-
 func _listen(window: Window) -> void:
 	var id: int = window.get_instance_id()
 	if _listened.has(id):

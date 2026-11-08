@@ -8223,6 +8223,53 @@ async function testATestRunWithNothingToRunNamesTheRunnerToo(): Promise<void> {
 }
 
 /**
+ * With GDHARNESS_SUITE_FILES_ONLY set, project_test refuses a directory, the default included, and
+ * runs a named suite file or case. With no gdUnit4 installed, a run that gets past the refusal
+ * meets the runner's instead, which is also what a directory meets with the variable unset.
+ */
+async function testASuiteFilesOnlyServerRefusesADirectory(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-files-only-'));
+  writeFileSync(join(project, 'project.godot'), '; Engine configuration file.\nconfig_version=5\n');
+  mkdirSync(join(project, 'tests'));
+  writeFileSync(
+    join(project, 'tests', 'a_test.gd'),
+    'extends GdUnitTestSuite\n\n\nfunc test_one() -> void:\n\tpass\n',
+  );
+  const filesOnly = new ServerProcess({
+    env: { GDHARNESS_BRIDGE_PORT: String(await reservePort()), GDHARNESS_SUITE_FILES_ONLY: '1' },
+  });
+  const plain = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(await reservePort()) } });
+  try {
+    await filesOnly.initialize('regression-test');
+    await plain.initialize('regression-test');
+    const said = async (server: ServerProcess, path?: unknown): Promise<string> =>
+      textOf(
+        await server.request('tools/call', {
+          name: 'project_test',
+          arguments: { projectPath: project, ...(path === undefined ? {} : { path }) },
+        }),
+      ) ?? '';
+    const refusal =
+      /^Refused a run of res:\/\/tests: GDHARNESS_SUITE_FILES_ONLY is set, so only named suite files run\. Name the suite file\.$/;
+    const noRunner = /^gdUnit4 is not installed in this project/;
+    for (const path of [undefined, 'res://tests', 'tests/', ['res://tests/a_test.gd', 'res://tests']]) {
+      const refused = await said(filesOnly, path);
+      assert.match(refused, refusal, `${JSON.stringify(path)}: ${refused}`);
+      const ran = await said(plain, path);
+      assert.match(ran, noRunner, `unset, ${JSON.stringify(path)}: ${ran}`);
+    }
+    for (const path of ['res://tests/a_test.gd', 'res://tests/a_test.gd:test_one']) {
+      const answer = await said(filesOnly, path);
+      assert.match(answer, noRunner, `${path}: ${answer}`);
+    }
+  } finally {
+    await filesOnly.stop();
+    await plain.stop();
+    sweep(project);
+  }
+}
+
+/**
  * Completions are narrowed to the part of a name written before the position, and capped.
  *
  * Godot's language server offers the whole scope and leaves narrowing to the editor, so passed
@@ -49593,7 +49640,7 @@ function testARowSkippedForItsDataIsNoPass(): void {
 /**
  * A wait for a slot looks when the slots' folder changes, and otherwise once a second.
  *
- * The lane measured a wait looking every 50 ms at some 2.7% of a core for each waiting taker, for
+ * A wait looking every 50 ms was measured at some 2.7% of a core for each waiting taker, for
  * as long as a gate held every slot, charged to the waiting gate. Counted here as looks rather than
  * processor time: the slot is given back 2.5 s into the wait, which a wait polling as before met
  * with some fifty looks. The wake on a change is held apart from the wait: when the looks by the
@@ -56071,7 +56118,7 @@ function testATestRunImportsWhatSetupLeftUnimported(): void {
     writeTree(project, {
       'project.godot': 'config_version=5\n',
       'native/kit.gdextension': '[configuration]\n',
-      'kit/thing.gd': 'class_name KitThing\nextends Node\n',
+      'kit/thing.gd': 'class_name SharedThing\nextends Node\n',
     });
     assert.equal(
       importNeeded(project),
@@ -56079,7 +56126,7 @@ function testATestRunImportsWhatSetupLeftUnimported(): void {
       'no cache at all',
     );
     mkdirSync(join(project, '.godot'));
-    writeFileSync(cache, cacheOf({ KitThing: 'res://kit/thing.gd' }));
+    writeFileSync(cache, cacheOf({ SharedThing: 'res://kit/thing.gd' }));
     assert.equal(
       importNeeded(project),
       "No import has listed the project's extensions, res://native/kit.gdextension, so the engine would load none of them, and the project is imported first.",
@@ -56087,19 +56134,19 @@ function testATestRunImportsWhatSetupLeftUnimported(): void {
     );
     writeFileSync(list, 'res://native/kit.gdextension\n');
     assert.equal(importNeeded(project), null, 'everything current');
-    writeTree(project, { 'kit/other.gd': 'class_name KitOther\nextends Node\n' });
+    writeTree(project, { 'kit/other.gd': 'class_name SharedOther\nextends Node\n' });
     assert.equal(
       importNeeded(project),
-      'The class cache does not list KitOther where the scripts declare it, so the project is imported first.',
+      'The class cache does not list SharedOther where the scripts declare it, so the project is imported first.',
       'a class the cache lacks',
     );
-    writeFileSync(cache, cacheOf({ KitThing: 'res://old/thing.gd', KitOther: 'res://kit/other.gd' }));
+    writeFileSync(cache, cacheOf({ SharedThing: 'res://old/thing.gd', SharedOther: 'res://kit/other.gd' }));
     assert.equal(
       importNeeded(project),
-      'The class cache does not list KitThing where the scripts declare it, so the project is imported first.',
+      'The class cache does not list SharedThing where the scripts declare it, so the project is imported first.',
       'a class the cache has at another path',
     );
-    writeFileSync(cache, cacheOf({ KitThing: 'res://kit/thing.gd', KitOther: 'res://kit/other.gd' }));
+    writeFileSync(cache, cacheOf({ SharedThing: 'res://kit/thing.gd', SharedOther: 'res://kit/other.gd' }));
     assert.equal(importNeeded(project), null, 'current again');
     rmSync(list);
     rmSync(join(project, 'native'), { recursive: true });
@@ -56341,7 +56388,7 @@ async function testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly(): Promise<void> {
       'project.godot':
         '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Inherited"\n',
       'addons/kit/tests/kit_base_suite.gd': [
-        'class_name KitBaseSuite',
+        'class_name SharedBaseSuite',
         'extends GdUnitTestSuite',
         ...cases('test_base_a', 'test_base_b'),
         '',
@@ -56352,15 +56399,15 @@ async function testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly(): Promise<void> {
         '',
       ].join('\n'),
       'addons/kit/tests/kit_shell_suite.gd': [
-        'class_name KitShellSuite',
-        'extends KitBaseSuite',
+        'class_name SharedShellSuite',
+        'extends SharedBaseSuite',
         ...cases('test_shell_a'),
         '',
       ].join('\n'),
-      'tests/shell_test.gd': suite('KitShellSuite', 'test_own_a', 'test_own_b', 'test_own_c'),
-      'tests/sibling_test.gd': suite('KitShellSuite', 'test_sibling'),
+      'tests/shell_test.gd': suite('SharedShellSuite', 'test_own_a', 'test_own_b', 'test_own_c'),
+      'tests/sibling_test.gd': suite('SharedShellSuite', 'test_sibling'),
       'tests/more/tests/shell_test.gd': suite('GdUnitTestSuite', 'test_own_a', 'test_own_b'),
-      'tests/bare_test.gd': suite('KitShellSuite'),
+      'tests/bare_test.gd': suite('SharedShellSuite'),
     });
     cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
     const test = (...args: string[]): { said: string; status: number | null } => {
@@ -66310,11 +66357,11 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
     mkdirSync(join(project, 'addons', 'kit', 'licences'), { recursive: true });
     writeFileSync(
       join(project, 'addons', 'kit', 'licences', 'licences.gd'),
-      'class_name KitLicences\nextends RefCounted\n',
+      'class_name SharedLicences\nextends RefCounted\n',
     );
     writeFileSync(
       join(project, 'gate.gd'),
-      'extends Node\n\n\nfunc _ready() -> void:\n\tprint(KitLicences)\n',
+      'extends Node\n\n\nfunc _ready() -> void:\n\tprint(SharedLicences)\n',
     );
 
     await server.initialize('regression-test');
@@ -66424,7 +66471,7 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
     };
 
     // An import longer than the whole wait.
-    imports = { classes: ['KitLicences'], ms: Number.POSITIVE_INFINITY };
+    imports = { classes: ['SharedLicences'], ms: Number.POSITIVE_INFINITY };
     const unanswered = await rescan(5_000);
     assert.equal(startsAskedFor, 1, `the scan was asked for: ${unanswered.said}`);
     assert.equal(
@@ -66435,12 +66482,12 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
     assert.equal(get(unanswered.answer, 'ok'), false, unanswered.said);
     assert.match(
       text(get(unanswered.answer, 'note')),
-      /took the rescan in and did not answer it.*Scripts naming KitLicences, which the editor could not see before this scan/,
+      /took the rescan in and did not answer it.*Scripts naming SharedLicences, which the editor could not see before this scan/,
       unanswered.said,
     );
     assert.deepEqual(
       readClassNote(project)?.unseenBeforeAnUnfinishedScan,
-      { editorPid, classes: ['KitLicences'] },
+      { editorPid, classes: ['SharedLicences'] },
       'and what the editor could not see is noted for the next server, against this editor',
     );
     assert.deepEqual(reloadsAskedFor, [], 'nothing is reloaded while the scan is not known to be over');
@@ -66448,7 +66495,7 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
     // Asked again while that import is still going, so the question whether the editor is busy goes
     // unanswered as well: an editor importing, to be waited out rather than scanned over.
     setTimeout(() => {
-      finishImport(['KitLicences']);
+      finishImport(['SharedLicences']);
     }, 8_000);
     const finished = await rescan(20_000);
     assert.ok(
@@ -66457,7 +66504,7 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
     );
     assert.deepEqual(
       asArray(get(finished.answer, 'broughtIn') ?? []).map(String),
-      ['KitLicences'],
+      ['SharedLicences'],
       `the class the unanswered scan brought in is counted by the next: ${finished.said}`,
     );
     assert.deepEqual(
@@ -66486,10 +66533,13 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
     mkdirSync(join(project, 'addons', 'kit', 'spots'), { recursive: true });
     writeFileSync(
       join(project, 'addons', 'kit', 'spots', 'spots.gd'),
-      'class_name KitSpots\nextends RefCounted\n',
+      'class_name SharedSpots\nextends RefCounted\n',
     );
-    writeFileSync(join(project, 'board.gd'), 'extends Node\n\n\nfunc _ready() -> void:\n\tprint(KitSpots)\n');
-    imports = { classes: ['KitSpots'], ms: 7_000 };
+    writeFileSync(
+      join(project, 'board.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tprint(SharedSpots)\n',
+    );
+    imports = { classes: ['SharedSpots'], ms: 7_000 };
     const outlasted = await rescan(15_000);
     assert.equal(
       get(outlasted.answer, 'stillWorking'),
@@ -66498,7 +66548,7 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
     );
     assert.deepEqual(
       asArray(get(outlasted.answer, 'broughtIn') ?? []).map(String),
-      ['KitSpots'],
+      ['SharedSpots'],
       `and counts what the import brought in: ${outlasted.said}`,
     );
     assert.deepEqual(
@@ -76060,8 +76110,8 @@ async function testTheProjectsOwnClassesAreListedAndAnAddonsCounted(): Promise<v
   const files: Record<string, string> = {
     'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Classes"\n',
     'hero.gd': 'class_name Hero\nextends Node\n',
-    'addons/kit/part.gd': 'class_name KitPart\nextends RefCounted\n',
-    'addons/kit/deep/whole.gd': 'class_name KitWhole\nextends RefCounted\n',
+    'addons/kit/part.gd': 'class_name SharedPart\nextends RefCounted\n',
+    'addons/kit/deep/whole.gd': 'class_name SharedWhole\nextends RefCounted\n',
     'addons/tool/tool.gd': 'class_name ToolMain\nextends RefCounted\n',
   };
   for (const [path, content] of Object.entries(files)) {
@@ -76098,15 +76148,19 @@ async function testTheProjectsOwnClassesAreListedAndAnAddonsCounted(): Promise<v
     await server.initialize('classes-engine');
     assert.deepEqual(await section({}), [['Hero res://hero.gd'], { kit: 2, tool: 1 }, 4]);
     assert.deepEqual(await section({ addonClasses: ['kit'] }), [
-      ['Hero res://hero.gd', 'KitPart res://addons/kit/part.gd', 'KitWhole res://addons/kit/deep/whole.gd'],
+      [
+        'Hero res://hero.gd',
+        'SharedPart res://addons/kit/part.gd',
+        'SharedWhole res://addons/kit/deep/whole.gd',
+      ],
       { tool: 1 },
       4,
     ]);
     assert.deepEqual(await section({ addonClasses: ['tool', 'kit'] }), [
       [
         'Hero res://hero.gd',
-        'KitPart res://addons/kit/part.gd',
-        'KitWhole res://addons/kit/deep/whole.gd',
+        'SharedPart res://addons/kit/part.gd',
+        'SharedWhole res://addons/kit/deep/whole.gd',
         'ToolMain res://addons/tool/tool.gd',
       ],
       undefined,
@@ -78995,6 +79049,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACallMetByAnEditorQuittingUnusedIsAskedAgain,
   testCompletionsAreNarrowedToWhatWasTyped,
   testATestRunWithNothingToRunNamesTheRunnerToo,
+  testASuiteFilesOnlyServerRefusesADirectory,
   testEveryGreetingFieldIsRequired,
   testAnEditorOfAnotherReleaseIsAskedNothing,
   testACurrentAddonLackingAnOpSaysAScriptFailedToLoad,
