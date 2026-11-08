@@ -1058,6 +1058,14 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 			"%s has no property %s. It has a method of that name, which a path calls as %s()"
 			% [called_as, named, named]
 		)
+	# Many values the engine works out, such as a RichTextLabel's content height, have a getter and
+	# no property, and the nearest property name points at something else.
+	for getter: String in ["get_" + named, "is_" + named]:
+		if object.has_method(getter) and object.get_method_argument_count(getter) == 0:
+			return (
+				"%s has no property %s. It has the method %s, which a path calls as %s() to read it"
+				% [called_as, named, getter, getter]
+			)
 	return GdhRead.near_property("%s has no property %s" % [called_as, named], object, named)
 
 

@@ -850,6 +850,21 @@ func _check_calling_a_step_along_the_path(hero: Node2D, button: Button) -> void:
 			)
 		)
 
+	for worked_out: String in ["minimum_size", "visible_in_tree"]:
+		var getter: String = ("is_" if worked_out == "visible_in_tree" else "get_") + worked_out
+		var unread: Dictionary = await node._execute_command(
+			"get_property", { "path": "/root/Panel/Go", "property": worked_out }
+		)
+		var pointed: String = str(unread.get("message", ""))
+		if (
+			unread.get("type") != "error"
+			or not pointed.contains(
+				"has no property %s. It has the method %s, which a path calls as %s() to read it"
+				% [worked_out, getter, getter]
+			)
+		):
+			_fail("a value the engine works out names its getter: %s" % str(unread))
+
 	var needing: Dictionary = await node._execute_command(
 		"get_property", { "path": "/root/Level/Hero", "property": "first():called" }
 	)
