@@ -118,6 +118,21 @@ export function keptInside(given: string): { file: string; inner: string | undef
 }
 
 /**
+ * Whether [param path] is a file on this machine's own disks. A network path is not asked about,
+ * since a share that does not answer holds the call for as long as the network takes to give up.
+ */
+function isLocalFile(path: string): boolean {
+  if (/^[\\/]{2}/.test(path)) {
+    return false;
+  }
+  try {
+    return statSync(path, { throwIfNoEntry: false })?.isFile() ?? false;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * A caller-supplied path read as a location inside the project.
  *
  * Both spellings of the same file are accepted, `res://scenes/main.tscn` and
@@ -190,6 +205,14 @@ export function resolveWithinProject(
   // Refused here rather than left to the containment check below, which would accept a leading
   // separator on the platform where node:path does not read it as absolute.
   if (withoutScheme.startsWith('/') || withoutScheme.startsWith('\\') || isAbsolute(withoutScheme)) {
+    // A file that is there is one the caller meant, such as a game's save under its user://, so an
+    // example made of its path's end names a project file that is not.
+    if (isAbsolute(trimmed) && isLocalFile(trimmed)) {
+      return {
+        ok: false,
+        reason: `Path '${trimmed}' names a file outside the project, and only paths inside it are taken here. Read that file with a file reader of your own, or give a path inside the project.`,
+      };
+    }
     // The example is the end of the path given, so a build output is offered a build path and a
     // scene a scene path. A fixed scene path was offered for an export's .exe.
     // A file beside the project or above it keeps only its name: its folder holds the project, so

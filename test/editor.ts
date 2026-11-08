@@ -1591,6 +1591,21 @@ async function testSceneNodes({ call, project }: Editor): Promise<void> {
   const whole = await call('scene_node', { ...scene, op: 'get', nodePath: '.', includeDefaults: true });
   assert.ok(get(whole, 'properties', 'position') !== undefined, JSON.stringify(whole));
   assert.equal(get(whole, 'note'), undefined, 'and a read that lists them needs no note');
+  // And the defaults of a resource the scene builds in.
+  await call('scene_node', { ...scene, op: 'add', nodeType: 'CollisionShape2D', nodeName: 'Hit' });
+  await call('scene_node', {
+    ...scene,
+    op: 'set',
+    nodePath: 'Hit',
+    properties: { shape: { _type: 'CircleShape2D', radius: 8 } },
+  });
+  const hit = await call('scene_node', { ...scene, op: 'get', nodePath: 'Hit', includeDefaults: true });
+  assert.deepEqual(
+    get(hit, 'properties', 'shape'),
+    { _type: 'CircleShape2D', radius: 8, custom_solver_bias: 0, resource_name: '' },
+    JSON.stringify(hit),
+  );
+  await call('scene_node', { ...scene, op: 'delete', nodePath: 'Hit' });
 
   await call('scene_node', { ...scene, op: 'add', nodeType: 'Node2D', nodeName: 'Panel' });
   await call('scene_node', { ...scene, op: 'duplicate', nodePath: 'Press', newName: 'Copy' });
