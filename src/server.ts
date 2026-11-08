@@ -15988,7 +15988,7 @@ class GodotServer {
         projectPath,
       );
       if (!outcome.ok) {
-        return this.answer(outcome);
+        return this.withLaunchBlocker(this.answer(outcome), projectPath);
       }
       return this.headlessAnswer(outcome, effect, typeName, declaring);
     };
@@ -15997,6 +15997,26 @@ class GodotServer {
     const target =
       effect === 'writes' && written !== undefined ? resolveWithinProject(projectPath, written) : null;
     return target?.ok === true ? await inTurnFor(projectPath, target.absolutePath, run) : await run();
+  }
+
+  /**
+   * A headless refusal advising editor_launch, with what editor_launch would refuse on first. Told
+   * only to open the editor, a caller met a launch refused for the addon and no word of it before.
+   */
+  private withLaunchBlocker(response: ToolResponse, projectPath: string): ToolResponse {
+    const advised = response.content.some(
+      (part) => part.type === 'text' && part.text.includes('editor_launch'),
+    );
+    const blocker = advised
+      ? (editorAddonMissing(projectPath) ?? editorAddonOfAnotherRelease(projectPath))
+      : null;
+    if (blocker !== null) {
+      response.content.push({
+        type: 'text',
+        text: `editor_launch opens no editor here yet: ${blocker.why}. ${blocker.remedies.join('. ')}.`,
+      });
+    }
+    return response;
   }
 
   /** What a headless engine's run of an editor tool answers, with how it was read or written. */

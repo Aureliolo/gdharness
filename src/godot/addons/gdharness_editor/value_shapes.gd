@@ -254,7 +254,7 @@ static func remedy(value: Variant, type: int) -> String:
 			var whole: float = value
 			if is_finite(whole) and whole == floorf(whole):
 				number = int(whole)
-		return ' Text is sent in quotes, as "%s".' % str(number)
+		return ' Send text as a JSON string, "%s", with no quote marks inside it.' % str(number)
 	var shape: String = written_as(type)
 	if shape.is_empty():
 		return ""

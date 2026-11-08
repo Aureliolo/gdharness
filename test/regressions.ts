@@ -33407,6 +33407,7 @@ async function testAWordsWaitLeavesTheGameItsSpeed(): Promise<void> {
       for (let round = 0; round < 3; round += 1) {
         const property = await waitOn('/root/Main', { property: 'never', value: 1 });
         assert.equal(get(property, 'met'), false, JSON.stringify(property));
+        assert.equal(get(property, 'waited_for'), 1, JSON.stringify(property));
         unwatched.push(property);
         const words = await waitOn('/root/Main', { says: 'words nobody says' });
         assert.equal(get(words, 'met'), false, JSON.stringify(words));
@@ -33715,7 +33716,26 @@ async function testAPathStepsIntoAVectorsComponents(): Promise<void> {
         timeoutMs: 20_000,
       });
       assert.equal(get(JSON.parse(waited), 'met'), true, `a wait on one axis is met: ${waited}`);
+      assert.equal(
+        get(JSON.parse(waited), 'waited_for'),
+        undefined,
+        `a met wait answers its reading: ${waited}`,
+      );
       assert.ok(asNumber(await value('/root/Main', 'pointer:x')) >= 300, waited);
+      const behind = await call('runtime_wait', {
+        op: 'until',
+        nodePath: '/root/Main',
+        property: 'pointer:x',
+        compare: '<=',
+        value: -1,
+        timeoutMs: 200,
+      });
+      assert.equal(get(JSON.parse(behind), 'met'), false, behind);
+      assert.equal(
+        get(JSON.parse(behind), 'waited_for'),
+        -1,
+        `a wait that ran out names its value: ${behind}`,
+      );
       // And on its length, which is how a wait sees a thing come to rest or get far enough.
       const far = await call('runtime_wait', {
         op: 'until',
@@ -47223,6 +47243,16 @@ async function testSuitesPlayInASceneTheProfilerSees(): Promise<void> {
         `the suite's own function, called once by its case: ${shown}`,
       );
       assert.equal(get(row('HeavyTest.step'), 'calls'), 4, `stepped once a frame, four times: ${shown}`);
+      // The directory's suites compiled as one script first, as gdharness test compiles them, so
+      // gdUnit4's scan finds each compiled. Each compiled alone, its loads took 274 ms here against
+      // 0.14 ms after a compile together of 46.
+      const together = row('compiled_together');
+      const loads = row('GdUnitTestSuiteScanner.load_with_disabled_warnings');
+      assert.equal(get(together, 'calls'), 1, shown);
+      assert.ok(
+        asNumber(get(loads, 'totalMs')) < asNumber(get(together, 'totalMs')),
+        `gdUnit4's loads took a fraction of the compile together: ${shown}`,
+      );
     } finally {
       await server.stop();
     }
@@ -62320,6 +62350,11 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
       '\t\tlabel = "hp %d" % value\n\n@export var label: String = ""\n@export var tags: Array[String] = []\n\n\n' +
       'func _init() -> void:\n\ttags = ["base"]\n',
   );
+  writeFileSync(
+    join(project, 'bag.gd'),
+    'class_name Bag\nextends Resource\n\n@export var counts: Dictionary[StringName, int] = {}\n' +
+      '@export var tags: Array[StringName] = []\n@export var spots: Dictionary[NodePath, int] = {}\n',
+  );
   // Saved after marks, level's setter adds to marks as the file loads.
   writeFileSync(
     join(project, 'rolls.gd'),
@@ -62369,6 +62404,13 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
       /^Item\.stock was given -5 and holds 0 after it was set: the engine changed or refused the value, so nothing was written\. res:\/\/item\.gd is not a tool script, so its setter ran in the headless engine writing this as it runs in the game\. An editor runs none and would have saved the value given\. Open the project's editor \(editor_launch with hidden: true\) and ask again/,
       clamped,
     );
+    // editor_launch refuses a project without the editor addon, so the advice says that comes first.
+    assert.ok(
+      lastRefusal.includes(
+        `editor_launch opens no editor here yet: the gdharness editor addon is not installed in ${project}. No gdharness tool installs the addon: run  `,
+      ),
+      lastRefusal,
+    );
     assert.equal(existsSync(join(project, 'sword.tres')), false, 'and nothing was written');
     const made = await answered({
       op: 'create',
@@ -62404,6 +62446,56 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
       [get(plain, 'resourceType'), get(plain, 'script'), get(plain, 'scriptClass')],
       ['Resource', 'res://item.gd', 'Item'],
       `given by its script, the class is named too: ${JSON.stringify(plain)}`,
+    );
+    // JSON has no StringName or NodePath, so text stands for them. Left as text, the keys kept a
+    // map untyped, and the engine refused the whole map.
+    const bag = await answered({
+      op: 'create',
+      resourcePath: 'res://bag.tres',
+      resourceType: 'Bag',
+      properties: { counts: { sword: 1, potion: 3 }, tags: ['rare'], spots: { 'Shelf/Top': 2 } },
+    });
+    assert.deepEqual(
+      get(bag, 'properties'),
+      {
+        counts: { sword: 1, potion: 3 },
+        tags: ['rare'],
+        spots: { _type: 'Dictionary', entries: [[{ _type: 'NodePath', path: 'Shelf/Top' }, 2]] },
+      },
+      JSON.stringify(bag),
+    );
+    const bagFile = readFileSync(join(project, 'bag.tres'), 'utf8');
+    for (const line of [
+      'counts = Dictionary[StringName, int]({',
+      '&"potion": 3,',
+      'tags = Array[StringName]([&"rare"])',
+      'spots = Dictionary[NodePath, int]({',
+      'NodePath("Shelf/Top"): 2',
+    ]) {
+      assert.ok(bagFile.includes(line), `${line} in ${bagFile}`);
+    }
+    const retagged = await answered({
+      op: 'modify',
+      resourcePath: 'res://bag.tres',
+      properties: { counts: { _type: 'Dictionary', entries: [['shield', 2]] } },
+    });
+    assert.deepEqual(get(retagged, 'properties'), { counts: { shield: 2 } }, JSON.stringify(retagged));
+    const untagged = await refused({
+      op: 'modify',
+      resourcePath: 'res://bag.tres',
+      properties: { counts: { _type: 'Dictionary', shield: 2 } },
+    });
+    assert.match(
+      untagged,
+      /^The value given is tagged \{"_type": "Dictionary"\} with no "entries" list of \[key, value\] pairs/,
+    );
+    assert.ok(
+      !lastRefusal.includes('opens no editor here yet'),
+      `a refusal not advising an editor: ${lastRefusal}`,
+    );
+    assert.ok(
+      readFileSync(join(project, 'bag.tres'), 'utf8').includes('&"shield": 2'),
+      'the refused write left the file as the last write saved it',
     );
     // What stats.gd's setter and _init set is put back before the save, so neither a write's answer
     // nor a read gives it as something the file holds.
@@ -63009,13 +63101,13 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
     const listed = await refused({ tags: [1, 2] });
     assert.match(
       listed,
-      /ItemData\.tags is Array and item 0 of the list given is a number, not String\. Text is sent in quotes, as "1"\. Setting it would save a different value/,
+      /ItemData\.tags is Array and item 0 of the list given is a number, not String\. Send text as a JSON string, "1", with no quote marks inside it\. Setting it would save a different value/,
       listed,
     );
     const titled = await refused({ title: 5 });
     assert.match(
       titled,
-      /ItemData\.title is String and the value given is a number, which cannot become one\. Text is sent in quotes, as "5"\./,
+      /ItemData\.title is String and the value given is a number, which cannot become one\. Send text as a JSON string, "5", with no quote marks inside it\./,
       titled,
     );
     await written({ tags: ['1', '2'] });
@@ -63434,8 +63526,11 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       shift:
         '"Evening" is none of the names shift lists: Day, Night, which the inspector holds it to. The engine stores it as given.',
     });
+    const lived = textOf(await request('scene_node', { ...hero, properties: { lives: 20 } })) ?? '';
+    const blocker = `editor_launch opens no editor here yet: the gdharness editor addon is not installed in ${project}.`;
+    assert.ok(lived.includes(blocker), lived);
     assert.equal(
-      textOf(await request('scene_node', { ...hero, properties: { lives: 20 } })),
+      lived.split(blocker)[0],
       "Player.lives was given 20 and holds 9 after it was set: the engine changed or refused the value, so nothing was written. res://player.gd is not a tool script, so its setter ran in the headless engine writing this as it runs in the game. An editor runs none and would have saved the value given. Open the project's editor (editor_launch with hidden: true) and ask again: the write then goes through it, and the editor runs no script that is not a tool.",
     );
 
