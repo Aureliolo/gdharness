@@ -23814,6 +23814,33 @@ async function testParametersReachTheEngine(): Promise<void> {
           ),
         );
         assert.equal(get(quieter, 'bus', 'name'), 'Music', JSON.stringify(quieter));
+        // The strip's toggles, each set only when given, so the volume stays where it was.
+        const muted: unknown = JSON.parse(
+          await call(
+            'project_settings',
+            {
+              projectPath: projectDir,
+              op: 'set_audio_bus_volume',
+              busIndex,
+              mute: true,
+              bypassEffects: true,
+            },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        assert.deepEqual(
+          ['volume_db', 'mute', 'solo', 'bypass_effects'].map((field) => get(muted, 'bus', field)),
+          [-6, true, false, true],
+          JSON.stringify(muted),
+        );
+        assert.match(
+          await call(
+            'project_settings',
+            { projectPath: projectDir, op: 'set_audio_bus_volume', busIndex },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+          /Give volumeDb, mute, solo or bypassEffects: nothing to set was given\./,
+        );
         const jump = await call(
           'project_settings',
           {
@@ -23843,6 +23870,11 @@ async function testParametersReachTheEngine(): Promise<void> {
         );
         assert.ok(music, `the bus is still there in a fresh process:\n${JSON.stringify(listed, null, 2)}`);
         assert.equal(asNumber(get(music, 'volume_db')), -6, 'and so is its volume');
+        assert.deepEqual(
+          ['mute', 'solo', 'bypass_effects'].map((field) => get(music, field)),
+          [true, false, true],
+          `and its toggles: ${JSON.stringify(music)}`,
+        );
         assert.equal(get(listed, 'mainScene'), 'res://main.tscn');
 
         writeFileSync(

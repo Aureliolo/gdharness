@@ -629,6 +629,17 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description: 'Effect class, such as "AudioEffectReverb".',
       },
       volumeDb: { type: 'number', ops: ['set_audio_bus_volume'], description: 'Bus volume in decibels.' },
+      mute: { type: 'boolean', ops: ['set_audio_bus_volume'], description: 'Mute the bus, or unmute it.' },
+      solo: {
+        type: 'boolean',
+        ops: ['set_audio_bus_volume'],
+        description: 'Solo the bus, which silences every bus not soloed, or end it.',
+      },
+      bypassEffects: {
+        type: 'boolean',
+        ops: ['set_audio_bus_volume'],
+        description: "Pass the bus's sound by its effects, or through them again.",
+      },
     },
     requires: ['projectPath'],
     operations: {
@@ -677,8 +688,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       set_audio_bus_volume: {
         effect: 'destructive',
-        summary: 'set a bus volume',
-        requires: ['busIndex', 'volumeDb'],
+        summary: "set a bus's volume, mute, solo or effect bypass, each only when given",
+        requires: ['busIndex'],
       },
       rename_audio_bus: {
         effect: 'destructive',
