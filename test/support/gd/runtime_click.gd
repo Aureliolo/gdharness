@@ -693,7 +693,7 @@ func _check_words_in_a_rich_label() -> void:
 	var told: Dictionary = patterned.get("found", {})
 	if (
 		told.get("pressedOn") != "the middle of the label"
-		or not str(told.get("note", "")).contains("so the press went to its middle")
+		or not str(told.get("note", "")).contains("so the press went to the label's middle")
 		or patterned.get("link_pressed") != false
 		or patterned.has("link_meta")
 	):
@@ -704,6 +704,18 @@ func _check_words_in_a_rich_label() -> void:
 	var bare: Dictionary = await input.click({ "says": "Ab" })
 	if bare.get("link_pressed") != true or bare.get("link_meta") != "":
 		_fail("a link with an empty meta is said to be pressed: %s" % JSON.stringify(bare))
+	# #1544: words that are the whole text of a label wider than they are, left-aligned, so the
+	# label's middle is past their end.
+	line.text = "[url=solo]Ab[/url]"
+	await process_frame
+	var whole: Dictionary = await input.click({ "says": "Ab" })
+	var whole_found: Dictionary = whole.get("found", {})
+	if (
+		whole.get("link_pressed") != true
+		or whole.get("link_meta") != "solo"
+		or whole_found.get("pressedOn") != "the words"
+	):
+		_fail("a wide label's whole text is pressed where it is drawn: %s" % JSON.stringify(whole))
 	line.queue_free()
 	await process_frame
 
