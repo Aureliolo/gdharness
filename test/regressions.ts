@@ -389,6 +389,7 @@ import {
 import {
   aboveTheRunner,
   autoloadNotCompiledNote,
+  bakingRenderer,
   beganBy,
   CRASH_EXIT_GRACE_MS,
   captureDestinationRefusal,
@@ -522,6 +523,7 @@ import {
   roomSaid,
   sharesSaid,
   silenceWhile,
+  startsSaid,
   testOptionsOf,
   wholeTreeSaid,
 } from '../src/suite-run.js';
@@ -9615,7 +9617,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     );
     assert.equal(
       await nested({ type: 'add_variable', name: 'x', vartype: 'int' }),
-      'script_edit takes modifications[0] with only the fields type, name, values, params, returnType, body, varType, defaultValue, isExport, exportHint, isOnready, isStatic, position, and vartype is none of them (the nearest is varType).',
+      'script_edit takes modifications[0] with only the fields type, name, values, params, returnType, body, varType, defaultValue, isExport, exportHint, exportGroup, isOnready, isStatic, position, and vartype is none of them (the nearest is varType).',
     );
     assert.equal(
       await call('scene_animation', {
@@ -23814,6 +23816,33 @@ async function testParametersReachTheEngine(): Promise<void> {
           ),
         );
         assert.equal(get(quieter, 'bus', 'name'), 'Music', JSON.stringify(quieter));
+        // The strip's toggles, each set only when given, so the volume stays where it was.
+        const muted: unknown = JSON.parse(
+          await call(
+            'project_settings',
+            {
+              projectPath: projectDir,
+              op: 'set_audio_bus_volume',
+              busIndex,
+              mute: true,
+              bypassEffects: true,
+            },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+        );
+        assert.deepEqual(
+          ['volume_db', 'mute', 'solo', 'bypass_effects'].map((field) => get(muted, 'bus', field)),
+          [-6, true, false, true],
+          JSON.stringify(muted),
+        );
+        assert.match(
+          await call(
+            'project_settings',
+            { projectPath: projectDir, op: 'set_audio_bus_volume', busIndex },
+            ENGINE_CALL_TIMEOUT_MS,
+          ),
+          /Give volumeDb, mute, solo or bypassEffects: nothing to set was given\./,
+        );
         const jump = await call(
           'project_settings',
           {
@@ -23843,6 +23872,11 @@ async function testParametersReachTheEngine(): Promise<void> {
         );
         assert.ok(music, `the bus is still there in a fresh process:\n${JSON.stringify(listed, null, 2)}`);
         assert.equal(asNumber(get(music, 'volume_db')), -6, 'and so is its volume');
+        assert.deepEqual(
+          ['mute', 'solo', 'bypass_effects'].map((field) => get(music, field)),
+          [true, false, true],
+          `and its toggles: ${JSON.stringify(music)}`,
+        );
         assert.equal(get(listed, 'mainScene'), 'res://main.tscn');
 
         writeFileSync(
@@ -25878,6 +25912,29 @@ async function testDiagnosticsWithoutAnEditorComeFromTheEngine(): Promise<void> 
     assert.equal(
       textOf(await diagnose('checked/brokn.gd')),
       'Script file does not exist: res://checked/brokn.gd. The nearest .gd file is res://checked/broken.gd.',
+    );
+    // In a list it is named so too, with the rest compiled, rather than answered by the engine as
+    // a script it could not load.
+    const withMissing = parseTextContent(await diagnose(['checked/broken.gd', 'checked/brokn.gd']));
+    assert.deepEqual(
+      {
+        scriptsNotRead: get(withMissing, 'scriptsNotRead'),
+        entries: asArray(get(withMissing, 'scripts')).map((entry) => [
+          get(entry, 'scriptPath'),
+          get(entry, 'error') ?? get(entry, 'errors'),
+        ]),
+      },
+      {
+        scriptsNotRead: 1,
+        entries: [
+          [
+            'res://checked/brokn.gd',
+            'Script file does not exist: res://checked/brokn.gd. The nearest .gd file is res://checked/broken.gd.',
+          ],
+          ['res://checked/broken.gd', 2],
+        ],
+      },
+      JSON.stringify(withMissing),
     );
     // A file that is not a script is refused as that, alone or in a list, rather than read as one
     // with nothing wrong in it.
@@ -28237,6 +28294,81 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
       }
       rmSync(join(project, 'made', 'foe.gd'), { force: true });
       rmSync(join(project, 'made', 'foe.gd.uid'), { force: true });
+
+      // An export added below an open subgroup lands in it, and the answer and script_info name the
+      // group. exportGroup moves an export to the group named, "" being none.
+      const grouped = join(project, 'made', 'loot.gd');
+      writeFileSync(
+        grouped,
+        'extends Node\n\n@export_group("Stats")\n@export var health: int = 1\n@export_subgroup("Loot")\n@export var drop_chance: float = 0.5\n',
+      );
+      const placedIn = async (modification: Record<string, unknown>): Promise<unknown> => {
+        const answer = await call('script_edit', {
+          projectPath: project,
+          op: 'modify',
+          scriptPath: 'res://made/loot.gd',
+          modifications: [modification],
+        });
+        assert.equal(get(answer, 'parses'), true, JSON.stringify(answer));
+        return get(answer, 'modifications_applied');
+      };
+      assert.deepEqual(
+        await placedIn({ type: 'add_variable', name: 'gold', varType: 'int', isExport: true }),
+        [{ type: 'add_variable', name: 'gold', line: 7, group: 'Stats/Loot' }],
+      );
+      assert.deepEqual(
+        await placedIn({ type: 'add_variable', name: 'armour', varType: 'int', exportGroup: 'Stats' }),
+        [{ type: 'add_variable', name: 'armour', line: 9, group: 'Stats' }],
+      );
+      assert.deepEqual(
+        await placedIn({ type: 'add_variable', name: 'lore', varType: 'String', exportGroup: '' }),
+        [{ type: 'add_variable', name: 'lore', line: 11 }],
+      );
+      assert.deepEqual(
+        await placedIn({ type: 'add_variable', name: 'speed', varType: 'float', exportGroup: 'Motion/Air' }),
+        [{ type: 'add_variable', name: 'speed', line: 14, group: 'Motion/Air' }],
+      );
+      assert.equal(
+        readFileSync(grouped, 'utf8'),
+        'extends Node\n\n@export_group("Stats")\n@export var health: int = 1\n@export_subgroup("Loot")\n@export var drop_chance: float = 0.5\n@export var gold: int\n@export_subgroup("")\n@export var armour: int\n@export_group("")\n@export var lore: String\n@export_group("Motion")\n@export_subgroup("Air")\n@export var speed: float\n',
+      );
+      const groupedInfo = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://made/loot.gd',
+      });
+      assert.deepEqual(
+        asArray(get(groupedInfo, 'variables')).map((each) => [get(each, 'name'), get(each, 'group')]),
+        [
+          ['health', 'Stats'],
+          ['drop_chance', 'Stats/Loot'],
+          ['gold', 'Stats/Loot'],
+          ['armour', 'Stats'],
+          ['lore', undefined],
+          ['speed', 'Motion/Air'],
+        ],
+      );
+      const notExported = await server.request(
+        'tools/call',
+        {
+          name: 'script_edit',
+          arguments: {
+            projectPath: project,
+            op: 'modify',
+            scriptPath: 'res://made/loot.gd',
+            modifications: [
+              { type: 'add_variable', name: 'hidden', varType: 'int', exportGroup: 'Stats', isExport: false },
+            ],
+          },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      assert.equal(
+        textOf(notExported),
+        'Nothing was changed: modification 1 has an exportGroup and isExport false, and only an export is in a group',
+      );
+      rmSync(grouped, { force: true });
+      rmSync(`${grouped}.uid`, { force: true });
 
       // A file that is not GDScript is refused with what does write it.
       const shaderText = 'shader_type canvas_item;\n\nuniform vec4 tint : source_color;\n';
@@ -31852,6 +31984,101 @@ function testAnExportOfAMissingPresetIsRefusedFirst(): void {
 }
 
 /**
+ * A preset that bakes its shaders is exported by an editor drawing with its platform's renderer,
+ * since a headless editor bakes none and says nothing. A game's export stalled 219 s at its first
+ * start compiling them. The renderer is the preset's platform's, by the project's overrides and the
+ * engine's own defaults for mobile and web, and Compatibility bakes nothing.
+ */
+async function testABakingPresetIsExportedDrawn(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-baking-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-baking-rt-'));
+  const presets = (entries: readonly (readonly [string, string, boolean])[]): string =>
+    entries
+      .map(
+        ([name, platform, bakes], index) =>
+          `[preset.${String(index)}]\n\nname="${name}"\nplatform="${platform}"\n\n` +
+          `[preset.${String(index)}.options]\n\nshader_baker/enabled=${String(bakes)}\n`,
+      )
+      .join('\n');
+  const godot = (rendering: string): void => {
+    writeFileSync(
+      join(project, 'project.godot'),
+      `config_version=5\n\n[application]\n\nconfig/name="Baking"\n${rendering === '' ? '' : `\n[rendering]\n\n${rendering}\n`}`,
+    );
+  };
+  writeFileSync(
+    join(project, 'export_presets.cfg'),
+    presets([
+      ['Win', 'Windows Desktop', true],
+      ['Plain', 'Windows Desktop', false],
+      ['Phone', 'Android', true],
+      ['Site', 'Web', true],
+      ['Mac', 'macOS', true],
+    ]),
+  );
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  try {
+    const renderers = (): (string | null)[] =>
+      ['Win', 'Plain', 'Phone', 'Site', 'Mac'].map((preset) => bakingRenderer(project, preset));
+    godot('');
+    assert.deepEqual(renderers(), ['forward_plus', null, 'mobile', null, 'forward_plus'], 'the defaults');
+    godot(
+      'renderer/rendering_method="gl_compatibility"\nrenderer/rendering_method.mobile="gl_compatibility"',
+    );
+    assert.deepEqual(renderers(), [null, null, null, null, null], 'Compatibility everywhere bakes nothing');
+    godot('renderer/rendering_method="gl_compatibility"\nrenderer/rendering_method.windows="mobile"');
+    assert.deepEqual(
+      renderers(),
+      ['mobile', null, 'mobile', null, null],
+      'the most particular override wins',
+    );
+
+    // Only Windows has a desktop out of sight to draw on, so elsewhere the export needs showWindow.
+    // Without it the export is refused before any engine starts, and the refusal names it.
+    if (process.platform !== 'win32') {
+      await server.initialize('baking');
+      const exported = async (more: Record<string, unknown>): Promise<string> =>
+        textOf(
+          await server.request(
+            'tools/call',
+            {
+              name: 'project_export',
+              arguments: {
+                projectPath: project,
+                op: 'run',
+                preset: 'Win',
+                outputPath: 'build/game.exe',
+                ...more,
+              },
+            },
+            60_000,
+          ),
+        ) ?? '';
+      const refused = await exported({});
+      assert.match(
+        refused,
+        /^Win bakes its shaders \(shader_baker\/enabled\), which needs an editor drawing with mobile rather than a headless one\. On this system that editor shows its window while it exports\. Give showWindow true to allow the window\./,
+        refused,
+      );
+      // Allowed, the export goes on to look for its engine, which this server has none of.
+      const allowed = await exported({ showWindow: true });
+      assert.match(allowed, /^GODOT_PATH is set to .*gdharness-no-such-godot/, allowed);
+    }
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
  * A self-contained engine's export templates are looked for beside it, and judged per platform.
  *
  * Run here as well as in the engine fixtures because the engine legs run those on Linux and Windows
@@ -34242,6 +34469,21 @@ async function testAnEngineSingletonIsReachedAndOSIsNot(): Promise<void> {
         'number',
         `a Performance monitor is read: ${JSON.stringify(monitor)}`,
       );
+      // The game's own actions, which a key rebinding screen changes.
+      await call('runtime_invoke', {
+        op: 'call',
+        nodePath: 'InputMap',
+        method: 'add_action',
+        args: ['rebound'],
+      });
+      const bound = await call('runtime_invoke', {
+        op: 'call',
+        nodePath: 'InputMap',
+        method: 'has_action',
+        args: ['rebound'],
+      });
+      assert.match(bound, /^\{/, `InputMap is called rather than refused: ${bound}`);
+      assert.equal(get(JSON.parse(bound), 'result'), true, `InputMap is reached: ${bound}`);
 
       const refused = await call('runtime_invoke', { op: 'call', nodePath: 'OS', method: 'get_name' });
       assert.match(
@@ -46469,6 +46711,14 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
           by(quick, 'engine') > Number(get(quick, 'time')) * 1000,
         `tookMsBy splits tookMs into its steps: ${JSON.stringify(quick)}`,
       );
+      // Within the engine step, what it spent before its first suite, the suites' compile part of it.
+      assert.ok(
+        by(quick, 'engineStart') > 0 &&
+          by(quick, 'engineCompile') >= 0 &&
+          by(quick, 'engineCompile') <= by(quick, 'engineStart') &&
+          by(quick, 'engineStart') < by(quick, 'engine'),
+        `tookMsBy names the engine's start within its step: ${JSON.stringify(quick)}`,
+      );
       const steady = await run('res://steady');
       assert.equal(
         get(steady, 'hung'),
@@ -48815,6 +49065,55 @@ function cannedRun(body: readonly string[], verdict = 'PASSED', executed = 4): s
     'Total execution time: 1min 2s 30ms',
     ' Exit code: 0',
   ].join('\r\n');
+}
+
+/**
+ * What an engine spends outside its cases is read off the runner's timing lines: its start until
+ * gdUnit4 opened the session, and each suite's load and `before()`, so no case's figure holds them.
+ * A suite whose cases never began has no line and so no set-up.
+ */
+function testAnEngineRunsStartAndSetUpAreReadApart(): void {
+  const other = 'res://tests/other_test.gd';
+  const printed = readRun(
+    [
+      'Godot Engine v4.7.2.stable.official - https://godotengine.org',
+      'gdharness timing: started 2310 ms, compiled together 450 ms',
+      `Run Test Suite: ${S_TEST}`,
+      `gdharness timing: ${S_TEST} loaded 120 ms, before 340 ms`,
+      caseLine(S_TEST, 'test_a', 'STARTED'),
+      caseLine(S_TEST, 'test_a', 'PASSED', '8ms'),
+      `Statistics: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED 400ms`,
+      `Run Test Suite: ${other}`,
+      `Statistics: 0 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED 5ms`,
+    ].join('\r\n'),
+  );
+  assert.deepEqual(printed.started, { seconds: 2.31, compiledSeconds: 0.45 }, 'the engine start');
+  assert.deepEqual(
+    [...printed.suites.values()].map((suite) => [suite.path, suite.setUp]),
+    [
+      [S_TEST, { loadSeconds: 0.12, beforeSeconds: 0.34 }],
+      [other, null],
+    ],
+    'each suite set up',
+  );
+  assert.deepEqual(
+    printed.suites.get(S_TEST)?.cases.map((ran) => ran.seconds),
+    [0.008],
+    'the case keeps its own time',
+  );
+  assert.deepEqual(printed.errors, [], 'a timing line is no error');
+  assert.equal(readRun(cannedRun([])).started, null, 'a run that printed no start has none');
+  assert.equal(
+    startsSaid([{ seconds: 2.31, compiledSeconds: 0.45 }]),
+    'Before its first suite the engine spent 2.3 s starting, 0.5 s of it compiling the suites together.',
+  );
+  assert.equal(
+    startsSaid([
+      { seconds: 2.31, compiledSeconds: 0.45 },
+      { seconds: 3.04, compiledSeconds: 1.2 },
+    ]),
+    'Before their first suite the engines spent 2.3 s, 3.0 s starting, 0.5 s, 1.2 s of it compiling the suites together.',
+  );
 }
 
 /**
@@ -54776,6 +55075,92 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     );
     assert.match(thereSaid, /^Nothing has changed since every suite last passed\.$/m, thereSaid);
     rmSync(join(project, 'tests', 'loads_test.gd'));
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
+/**
+ * A case's time is its own: a suite whose script holds the engine 300 ms as it compiles and whose
+ * before() holds it 400 ms more still has its first case timed at what the case took. The result
+ * puts the compile under the engine's start and the before() under the suite, and so does the line
+ * the run prints.
+ */
+function testATestRunTimesStartAndSetUpApartFromItsCases(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  try {
+    writeTree(project, {
+      'tests/set_up_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        'static var held: int = _held()',
+        '',
+        '',
+        'static func _held() -> int:',
+        '\tOS.delay_msec(300)',
+        '\treturn 1',
+        '',
+        '',
+        'func before() -> void:',
+        '\tOS.delay_msec(400)',
+        '',
+        '',
+        'func test_first() -> void:',
+        '\tassert_int(held).is_equal(1)',
+        '',
+      ].join('\n'),
+    });
+    const resultFile = join(checkouts, 'result.json');
+    const timesFile = join(checkouts, 'times.json');
+    const ran = test(
+      'tests/set_up_test.gd',
+      'tests/ok_test.gd',
+      '--engines',
+      '1',
+      // Reversed by path, so the suite with the slow before() runs first and the other one's load
+      // would hold it, were a load timed from anything but the end of the suite before.
+      '--order',
+      'reversed',
+      '--result',
+      resultFile,
+      '--times',
+      timesFile,
+    );
+    assert.equal(ran.status, 0, ran.said);
+    const result = readRunResult(resultFile);
+    const [engine] = result.engines;
+    assert.ok(
+      engine?.startSeconds != null &&
+        engine.compiledSeconds != null &&
+        engine.compiledSeconds >= 0.3 &&
+        engine.startSeconds > engine.compiledSeconds &&
+        engine.startSeconds < engine.seconds,
+      `the engine's start holds the compile, inside the engine's time: ${JSON.stringify(result.engines)}`,
+    );
+    const setUp = result.suites.find((suite) => suite.path === 'res://tests/set_up_test.gd');
+    assert.ok(
+      setUp?.beforeSeconds != null &&
+        setUp.beforeSeconds >= 0.4 &&
+        setUp.loadSeconds !== null &&
+        setUp.loadSeconds < 0.3,
+      `the suite's before() is its own, and its compile is not its load: ${JSON.stringify(result.suites)}`,
+    );
+    const ok = result.suites.find((suite) => suite.path === 'res://tests/ok_test.gd');
+    assert.ok(
+      ok?.loadSeconds != null && ok.loadSeconds < 0.3 && ok.beforeSeconds != null && ok.beforeSeconds < 0.4,
+      `the suite after it loads from the end of the one before, and has no before() of its own: ${JSON.stringify(result.suites)}`,
+    );
+    const first = readTimes(timesFile)['res://tests/set_up_test.gd']?.cases['test_first'];
+    assert.ok(first !== undefined && first < 0.3, `the first case is timed alone: ${String(first)}`);
+    assert.match(
+      ran.said,
+      /^Before its first suite the engine spent \d+\.\d s starting, \d+\.\d s of it compiling the suites together\.$/m,
+      ran.said,
+    );
   } finally {
     sweep(project, slots, checkouts);
   }
@@ -79086,6 +79471,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStaleCopyNoteEndsOnce,
   testAnExportThatCouldNotCopyALibrarySaysSo,
   testAnExportOfAMissingPresetIsRefusedFirst,
+  testABakingPresetIsExportedDrawn,
   testAnAddedPresetExports,
   testAPresetIsSetRemovedAndPacked,
   testAnOldPresetFileKeepsThePresetItRuns,
@@ -79319,6 +79705,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testGdUnitRunner,
   testTheShippedRunnerRunsAFileOfSuites,
   testAnEngineRunIsReadCaseByCase,
+  testAnEngineRunsStartAndSetUpAreReadApart,
   testAnEngineMayBeSilentAsLongAsWhatItRuns,
   testAnEngineRunIsJudgedOnEverythingItPrinted,
   testGdUnitFailingOnPushErrorsIsSaid,
@@ -79352,6 +79739,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASuiteRunHasNoSoundWhicheverWayItStarts,
   testTheTestCommandRunsAndJudgesAProject,
   testTheTestCommandDealsAndReportsARun,
+  testATestRunTimesStartAndSetUpApartFromItsCases,
   testATestRunsLimitsEndAHungOrChattyEngine,
   testATestRunDealsByAndRecordsIntoTheTimesItIsGiven,
   testTheShutdownWalkIsHeldAndARealLeakStillFails,

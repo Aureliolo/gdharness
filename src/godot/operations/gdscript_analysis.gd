@@ -153,6 +153,8 @@ func _members(
 	# The annotations of the lines above that held nothing else, for the declaration they annotate.
 	var pending: String = ""
 	var doc: Array[String] = []
+	# The export group open here, which an @export variable is shown under in the inspector.
+	var group: String = ""
 
 	var i: int = first - 1
 	while i + 1 < lines.size():
@@ -249,6 +251,7 @@ func _members(
 		# an @export variable answered is_export false and an @abstract func is_abstract false.
 		if header.is_empty():
 			for one: String in GdhPatterns.annotations_on(stripped):
+				group = GdhPatterns.group_after(one, group)
 				if not one.get_slice("(", 0) in STANDALONE_ANNOTATIONS:
 					pending += "@" + one + " "
 			_collect_dependencies(stripped, dependencies)
@@ -286,7 +289,11 @@ func _members(
 		elif _declares_variable(header):
 			# The whole line here, not the header: which annotations a variable carries is the
 			# answer rather than noise in front of it, and `@export_range(0, 1)` is the hint.
+			for one: String in GdhPatterns.annotations_on(stripped):
+				group = GdhPatterns.group_after(one, group)
 			entry = _parse_variable(stripped, at + 1)
+			if GdhRead.as_bool(entry.get("is_export", false)) and not group.is_empty():
+				entry["group"] = group
 			own.variables.append(entry)
 		elif header.begins_with("func ") or header.begins_with("static func "):
 			entry = _parse_function(header, at + 1, stripped)

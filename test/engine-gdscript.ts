@@ -997,7 +997,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     [
       'engine_named',
       { class_name: 'Node2D', extends: 'Node' },
-      'class_name Node2D is the name of an engine class, which a script cannot take. Nothing was written.',
+      'class_name Node2D is the name of an engine class, which a script cannot take. Give it another class_name, or leave className out. Nothing was written.',
     ],
     [
       'misnamed_base',
@@ -2678,20 +2678,20 @@ function testOperations(godotPath: string, projectDir: string): void {
       /A joypad_button event needs button, a whole number from 0 to 127 /,
     ],
     [
-      { type: 'joypad_axis', axisValue: 1 },
-      /A joypad_axis event needs axis, a whole number from 0 to 9 \(0 and 1 the left stick[^)]*\): none was given\./,
+      { type: 'joypad_motion', axisValue: 1 },
+      /A joypad_motion event needs axis, a whole number from 0 to 9 \(0 and 1 the left stick[^)]*\): none was given\./,
     ],
     [
-      { type: 'joypad_axis', axis: 2, axisValue: 0.5 },
-      /A joypad_axis event needs axisValue, -1 or 1, the way the axis is pushed: 0\.5 was given\./,
+      { type: 'joypad_motion', axis: 2, axisValue: 0.5 },
+      /A joypad_motion event needs axisValue, -1 or 1, the way the axis is pushed: 0\.5 was given\./,
     ],
     [
-      { type: 'joypad_axis', axis: 2 },
-      /A joypad_axis event needs axisValue, -1 or 1, [^:]*: none was given\./,
+      { type: 'joypad_motion', axis: 2 },
+      /A joypad_motion event needs axisValue, -1 or 1, [^:]*: none was given\./,
     ],
     [
-      { type: 'joypad_axis', axis: 2, axisValue: '1' },
-      /A joypad_axis event needs axisValue, -1 or 1, [^:]*: "1" was given\./,
+      { type: 'joypad_motion', axis: 2, axisValue: '1' },
+      /A joypad_motion event needs axisValue, -1 or 1, [^:]*: "1" was given\./,
     ],
   ];
   for (const [event, refusal] of unbound) {
@@ -2705,7 +2705,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   const aimed = operation('add_input_action', {
     action_name: 'fixture_aim',
     events: [
-      { type: 'joypad_axis', axis: 2, axisValue: -1 },
+      { type: 'joypad_motion', axis: 2, axisValue: -1 },
       { type: 'mouse_button', button: 9 },
       { type: 'joypad_button', button: 127 },
     ],

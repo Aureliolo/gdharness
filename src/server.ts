@@ -225,6 +225,7 @@ import {
   handleLSPTool,
   LSPTimeout,
   normalizeLSPError,
+  notAScript,
 } from './lsp_client.js';
 import { nearest, withNearestFiles } from './nearest.js';
 import { launchOutsideTheTree } from './outside.js';
@@ -2181,32 +2182,86 @@ export function notRunNote(notRun: number, failFast: boolean): string | undefine
  * The name and platform of each preset in the project's export_presets.cfg, in the file's order, or
  * null when it has none.
  */
-function presetsIn(projectPath: string): { name: string; platform: string }[] | null {
+function presetsIn(projectPath: string): { name: string; platform: string; bakes: boolean }[] | null {
   let text: string;
   try {
     text = readFileSync(join(projectPath, 'export_presets.cfg'), 'utf8');
   } catch {
     return null;
   }
-  const presets: { name: string; platform: string }[] = [];
-  let held: { name: string; platform: string } | null = null;
+  const presets: { name: string; platform: string; bakes: boolean }[] = [];
+  const byNumber = new Map<string, { name: string; platform: string; bakes: boolean }>();
+  let held: { name: string; platform: string; bakes: boolean } | null = null;
+  let options: string | null = null;
   const quoted = (line: string, key: string): string | undefined =>
     new RegExp(`^\\s*${key}\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(line)?.[1]?.replace(/\\(.)/g, '$1');
   for (const line of text.split(/\r?\n/)) {
-    const section = /^\s*\[([^\]]+)\]/.exec(line)?.[1];
+    const section = /^\s*\[([^\]]+)\]/.exec(line)?.[1]?.trim();
     if (section !== undefined) {
-      held = /^preset\.\d+$/.test(section.trim()) ? { name: '', platform: '' } : null;
-      if (held !== null) {
+      const number = /^preset\.(\d+)$/.exec(section)?.[1];
+      held = number === undefined ? null : { name: '', platform: '', bakes: false };
+      if (held !== null && number !== undefined) {
         presets.push(held);
+        byNumber.set(number, held);
       }
+      options = /^preset\.(\d+)\.options$/.exec(section)?.[1] ?? null;
       continue;
     }
     if (held !== null) {
       held.name = quoted(line, 'name') ?? held.name;
       held.platform = quoted(line, 'platform') ?? held.platform;
     }
+    const owner = options === null ? undefined : byNumber.get(options);
+    if (owner !== undefined && /^\s*shader_baker\/enabled\s*=\s*true\s*$/.test(line)) {
+      owner.bakes = true;
+    }
   }
   return presets;
+}
+
+/**
+ * The feature tags of each platform that a renderer override in project.godot may name, the most
+ * particular first, and the renderer the engine itself gives a tag the project leaves unset.
+ */
+const RENDERER_FEATURES: Readonly<Record<string, readonly string[]>> = {
+  'Windows Desktop': ['windows', 'pc'],
+  Linux: ['linuxbsd', 'linux', 'pc'],
+  macOS: ['macos', 'pc'],
+  Android: ['android', 'mobile'],
+  iOS: ['ios', 'mobile'],
+  Web: ['web'],
+};
+const ENGINE_RENDERERS: Readonly<Record<string, string>> = { mobile: 'mobile', web: 'gl_compatibility' };
+/** The renderers Godot's shader baker bakes for. Compatibility has no RenderingDevice to bake with. */
+const BAKED_RENDERERS = new Set(['forward_plus', 'mobile']);
+
+/**
+ * The renderer whose shaders [param preset] bakes into its export, or null when it bakes none: its
+ * shader baker is off, or its platform draws with Compatibility.
+ */
+export function bakingRenderer(projectPath: string, preset: string): string | null {
+  const held = presetsIn(projectPath)?.find((one) => one.name === preset);
+  if (held?.bakes !== true) {
+    return null;
+  }
+  let settings = new Map<string, unknown>();
+  try {
+    settings = settingKeys(readFileSync(join(projectPath, 'project.godot'), 'utf8'));
+  } catch {
+    // A project with no readable project.godot draws with the engine's defaults.
+  }
+  const method = 'rendering/renderer/rendering_method';
+  let drawn: string | undefined;
+  for (const feature of RENDERER_FEATURES[held.platform] ?? []) {
+    const set = settings.get(`${method}.${feature}`);
+    drawn = typeof set === 'string' ? set : ENGINE_RENDERERS[feature];
+    if (drawn !== undefined) {
+      break;
+    }
+  }
+  const base = settings.get(method);
+  drawn ??= typeof base === 'string' ? base : 'forward_plus';
+  return BAKED_RENDERERS.has(drawn) ? drawn : null;
 }
 
 /**
@@ -2223,14 +2278,6 @@ function presetPlatform(projectPath: string, preset: string): string | null {
   return presetsIn(projectPath)?.find((held) => held.name === preset)?.platform ?? null;
 }
 
-/**
- * Why [param preset] cannot be exported with, read off the project's export_presets.cfg, or null
- * when it is one of the presets there.
- *
- * Asked before the engine is started: the engine refused a missing file with "doesn't have an
- * export_presets.cfg file at its root" and never named the preset, and starting it cost an import
- * of the whole project to learn that.
- */
 /** How [param ending] ended, for after "as", where it did not end cleanly. */
 function engineEndSaid(ending: EngineRun): string {
   if (ending.failure === null && ending.exitSignal === null) {
@@ -2240,6 +2287,14 @@ function engineEndSaid(ending: EngineRun): string {
   return how.startsWith('ended by') ? `the engine was ${how}` : how;
 }
 
+/**
+ * Why [param preset] cannot be exported with, read off the project's export_presets.cfg, or null
+ * when it is one of the presets there.
+ *
+ * Asked before the engine is started: the engine refused a missing file with "doesn't have an
+ * export_presets.cfg file at its root" and never named the preset, and starting it cost an import
+ * of the whole project to learn that.
+ */
 export function exportPresetRefusal(projectPath: string, preset: string): string | null {
   const presets = presetsIn(projectPath);
   if (presets === null) {
@@ -2273,6 +2328,7 @@ export function exportAnswer(
     readonly outputPath: string;
     readonly debug: boolean;
     readonly pack?: boolean;
+    readonly bakedWith?: string;
   },
   before: number | null,
   after: number | null,
@@ -3857,6 +3913,38 @@ export function scriptsToDiagnose(
     return { ok: false, reason: empty.join(' ') };
   }
   return { ok: true, value: unique };
+}
+
+/**
+ * Why [param scriptPath], one script of a script_diagnostics list, cannot be read by either the
+ * language server or an engine, or null when it can.
+ */
+function unreadableScript(projectPath: string, scriptPath: string): string | null {
+  const location = resolveWithinProject(projectPath, scriptPath);
+  if (!location.ok) {
+    return location.reason;
+  }
+  if (!existsSync(location.absolutePath)) {
+    return missingScriptReason(
+      projectPath,
+      location.relativePath,
+      `Script file does not exist: res://${location.relativePath}`,
+    );
+  }
+  return notAScript(location.relativePath);
+}
+
+/** [param said], the refusal for [param relativePath], a script the project does not hold, with the nearest it does. */
+function missingScriptReason(projectPath: string, relativePath: string, said: string): string {
+  const scripts = projectFiles(projectPath, ['.gd']).map((script) => `res://${script}`);
+  const folder = dirname(relativePath.replaceAll('\\', '/'));
+  const inFolder = join(projectPath, folder);
+  const beside = existsSync(inFolder)
+    ? readdirSync(inFolder, { withFileTypes: true })
+        .filter((entry) => entry.isFile())
+        .map((entry) => `res://${folder === '.' ? '' : `${folder}/`}${entry.name}`)
+    : [];
+  return withNearestFiles(said, `res://${relativePath}`, scripts, beside);
 }
 
 /**
@@ -7516,6 +7604,18 @@ class GodotServer {
         'project_export add_preset adds one',
       ]);
     }
+    // Godot's shader baker runs only in an editor drawing with the preset's renderer. A headless
+    // one exports every shader unbaked without a word, and the game then compiles them at its first
+    // start: a game's export stalled 219 s there. Only Windows has a desktop out of sight to draw on,
+    // so elsewhere the editor's window shows, which the caller allows with showWindow.
+    const baking = bakingRenderer(project.value.path, preset);
+    const outOfSight = process.platform === 'win32';
+    if (baking !== null && !outOfSight && readBoolean(args, 'showWindow') !== true) {
+      return this.createErrorResponse(
+        `${preset} bakes its shaders (shader_baker/enabled), which needs an editor drawing with ${baking} rather than a headless one. On this system that editor shows its window while it exports. Give showWindow true to allow the window.`,
+        ['Or turn shader_baker/enabled off with project_export set_preset to export without baked shaders'],
+      );
+    }
     const engine = await this.engine(project.value.path);
     if (!engine.ok) {
       return engine.response;
@@ -7562,7 +7662,11 @@ class GodotServer {
     // answered with, so the file it writes is of no use to anybody either.
     const exportLogs = scratchDirectory('export');
     const exportArgs = [
-      '--headless',
+      // Vulkan whatever driver the project names, since the baker writes each driver's shaders
+      // either way, and Vulkan is the one proved drawing on the hidden desktop.
+      ...(baking === null
+        ? ['--headless']
+        : ['--rendering-method', baking, '--rendering-driver', 'vulkan', '--audio-driver', 'Dummy']),
       '--log-file',
       join(exportLogs, 'engine.log'),
       '--path',
@@ -7591,6 +7695,9 @@ class GodotServer {
       // An export of a real project is slow, so it gets five minutes rather than no limit.
       const ending = await runEngine(engine.value, exportArgs, {
         timeout: { ms: 300000, said: 'five minutes' },
+        ...(baking === null || !outOfSight
+          ? {}
+          : { desktop: { directory: project.value.path, scratch: exportLogs } }),
       });
       const crash = docCacheCrash(ending, cachesBefore, docCachesWritten(caches), 'export');
       return { ending, before, listedBefore, crash };
@@ -7618,7 +7725,13 @@ class GodotServer {
     );
     return exportAnswer(
       ending,
-      { preset, outputPath: output.relativePath, debug, ...(pack ? { pack } : {}) },
+      {
+        preset,
+        outputPath: output.relativePath,
+        debug,
+        ...(pack ? { pack } : {}),
+        ...(baking === null ? {} : { bakedWith: baking }),
+      },
       before,
       writtenAt(),
       beside,
@@ -8023,10 +8136,23 @@ class GodotServer {
     const tookMs = endedAt - began;
     // A run on a quiet project took nine minutes once, with no import and two seconds of suites, and
     // nothing in the answer said which step the time went to.
+    const casePrinted = withNestedErrors(
+      readRun(existsSync(engineLog) ? readFileSync(engineLog, 'utf8') : ''),
+      run.log.all,
+    );
+    const { started } = casePrinted;
     const tookMsBy = {
       classes: rebuiltAt - began,
       import: importedAt - rebuiltAt,
       engine: endedAt - importedAt,
+      // Parts of engine: what it spent before its first suite, the suites' compile included, which
+      // gdUnit4's case and suite times leave out.
+      ...(started === null
+        ? {}
+        : {
+            engineStart: Math.round(started.seconds * 1000),
+            engineCompile: Math.round(started.compiledSeconds * 1000),
+          }),
     };
     // Read again once the run is over, so a run that ended between two looks answers as one that
     // was stopped: whether it got through its suites first is a race, and what they said about
@@ -8039,10 +8165,6 @@ class GodotServer {
     const reportsDir = join(project.value.path, '.godot', ...ours.split('/'));
     let report: TestReport | null = null;
     let reportProblem: string | null = null;
-    const casePrinted = withNestedErrors(
-      readRun(existsSync(engineLog) ? readFileSync(engineLog, 'utf8') : ''),
-      run.log.all,
-    );
     const declaredErrors = readExpected(expectedFile);
     try {
       const written =
@@ -8776,11 +8898,28 @@ class GodotServer {
         return this.createErrorResponse(`Cancelled after ${at} of ${scripts.value.length} scripts.`);
       }
       progress?.(at + 1, `${at + 1} of ${scripts.value.length}: ${scriptPath}`);
+      const unreadable = project.ok ? unreadableScript(project.value.path, scriptPath) : null;
+      if (unreadable !== null) {
+        unread += 1;
+        reported.push({ scriptPath, error: unreadable });
+        continue;
+      }
       const one = await this.diagnosticsOf({ ...args, scriptPath });
       if ('noLanguageServer' in one) {
         // The rest in one engine, since what kept the language server from answering this script
-        // keeps it from answering the others.
-        const rest = scripts.value.slice(at);
+        // keeps it from answering the others. The engine answers a missing file as one it could
+        // not load, which reads as a broken script, so those are named as the language server
+        // names them.
+        const rest: string[] = [];
+        const refusedHere = new Map<string, string>();
+        for (const left of scripts.value.slice(at)) {
+          const refused = project.ok ? unreadableScript(project.value.path, left) : null;
+          if (refused === null) {
+            rest.push(left);
+          } else {
+            refusedHere.set(left, refused);
+          }
+        }
         progress?.(at + 1, `${rest.length} script(s) left, compiled by a headless engine`);
         const checked = await this.engineDiagnostics(
           project.ok ? project.value.path : '',
@@ -8791,6 +8930,10 @@ class GodotServer {
           return checked.refusal;
         }
         rebuilt = checked.classesRebuiltFirst;
+        for (const [left, error] of refusedHere) {
+          unread += 1;
+          reported.push({ scriptPath: left, error });
+        }
         for (const answer of checked.answers) {
           errors += Number(answer['errors']);
           engineWarned =
@@ -8843,17 +8986,8 @@ class GodotServer {
 
   /** The refusal for [param relativePath], a script the project does not hold, with the nearest it does. */
   private missingScript(projectPath: string, relativePath: string): ToolResponse {
-    const scripts = projectFiles(projectPath, ['.gd']).map((script) => `res://${script}`);
-    const wanted = `res://${relativePath}`;
-    const folder = dirname(relativePath.replaceAll('\\', '/'));
-    const inFolder = join(projectPath, folder);
-    const beside = existsSync(inFolder)
-      ? readdirSync(inFolder, { withFileTypes: true })
-          .filter((entry) => entry.isFile())
-          .map((entry) => `res://${folder === '.' ? '' : `${folder}/`}${entry.name}`)
-      : [];
     return this.createErrorResponse(
-      withNearestFiles(`Script file does not exist: ${wanted}`, wanted, scripts, beside),
+      missingScriptReason(projectPath, relativePath, `Script file does not exist: res://${relativePath}`),
     );
   }
 

@@ -166,13 +166,27 @@ func set_audio_bus_effect(params: Dictionary) -> Dictionary:
 	return answer
 
 
+## The bus strip the editor's Audio panel shows: its volume and its mute, solo and bypass toggles,
+## each set only when given.
 func set_audio_bus_volume(params: Dictionary) -> Dictionary:
 	var bus_idx: int = GdhRead.as_int(params.get("bus_index", 0))
-	var volume_db: float = GdhRead.as_float(params.get("volume_db", 0.0))
 	if bus_idx < 0 or bus_idx >= AudioServer.bus_count:
 		return _log.failure(_no_index(bus_idx))
+	var given: Array[String] = []
+	for key: String in ["volume_db", "mute", "solo", "bypass_effects"]:
+		if params.has(key) and params[key] != null:
+			given.append(key)
+	if given.is_empty():
+		return _log.failure("Give volumeDb, mute, solo or bypassEffects: nothing to set was given.")
 
-	AudioServer.set_bus_volume_db(bus_idx, volume_db)
+	if given.has("volume_db"):
+		AudioServer.set_bus_volume_db(bus_idx, GdhRead.as_float(params["volume_db"]))
+	if given.has("mute"):
+		AudioServer.set_bus_mute(bus_idx, GdhRead.as_bool(params["mute"]))
+	if given.has("solo"):
+		AudioServer.set_bus_solo(bus_idx, GdhRead.as_bool(params["solo"]))
+	if given.has("bypass_effects"):
+		AudioServer.set_bus_bypass_effects(bus_idx, GdhRead.as_bool(params["bypass_effects"]))
 
 	var layout: String = _save_layout()
 	if layout.is_empty():
@@ -296,6 +310,7 @@ func _bus(index: int) -> Dictionary:
 		"volume_db": AudioServer.get_bus_volume_db(index),
 		"mute": AudioServer.is_bus_mute(index),
 		"solo": AudioServer.is_bus_solo(index),
+		"bypass_effects": AudioServer.is_bus_bypassing_effects(index),
 		"send": AudioServer.get_bus_send(index),
 		"effects": effects,
 	}

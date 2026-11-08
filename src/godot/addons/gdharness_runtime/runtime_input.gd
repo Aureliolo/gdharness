@@ -619,10 +619,7 @@ func click(params: Dictionary) -> Dictionary:
 			found_here["pressedOn"] = "the words"
 		elif placed.has("unplaced"):
 			found_here["pressedOn"] = "the middle of the label"
-			found_here["note"] = (
-				"the words are part of a longer label and %s, so the press went to its middle"
-				% placed["unplaced"]
-			)
+			found_here["note"] = "%s, so the press went to the label's middle" % placed["unplaced"]
 
 	# In the control's own viewport first, which is the space its scrolling happens in.
 	var own: Viewport = control.get_viewport()

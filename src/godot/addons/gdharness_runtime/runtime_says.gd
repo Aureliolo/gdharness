@@ -167,9 +167,10 @@ static func as_said(wanted: String) -> String:
 	return spaced(wanted.replace("\\n", "\n"))
 
 
-## Where [param label] draws the words [param wanted] matched in it, in the label's own space, when
-## they are part of its text: {"point"} on their middle, {"unplaced"} saying why there is none, or
-## {} when the words are the whole text, whose middle is the label's.
+## Where [param label] draws the words [param wanted] matched in it, in the label's own space:
+## {"point"} on their middle, or {"unplaced"} saying why there is none. Words that are the whole
+## text
+## are placed too, since a label wider than its text, aligned to one side, has its middle past them.
 ##
 ## A line of a dispatch names two people, each a link to their page, and a press on the label's
 ## middle landed on the second name when the first was asked for, so the game opened the wrong page.
@@ -192,8 +193,6 @@ static func point_on_words(label: RichTextLabel, wanted: String) -> Dictionary:
 		return {
 			"unplaced": "the words were matched as a pattern, which names no one place in the text",
 		}
-	if text.strip_edges().length() == length:
-		return {}
 	var line: int = label.get_character_line(start)
 	var shown: Vector2i = label.get_line_range(line)
 	if line < 0 or shown.x > start:

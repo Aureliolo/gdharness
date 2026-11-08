@@ -369,12 +369,17 @@ const SCRIPT_MODIFICATIONS: JsonSchema = {
       },
       isExport: {
         type: 'boolean',
-        description: 'Variables: add @export. Default true when exportHint is given.',
+        description: 'Variables: add @export. Default true when exportHint or exportGroup is given.',
       },
       exportHint: {
         type: 'string',
         description:
           'Variables: the export hint, such as "range(0, 100)", written as @export_range(0, 100). Refused beside isExport false.',
+      },
+      exportGroup: {
+        type: 'string',
+        description:
+          'Variables: the inspector group the export goes in, such as "Stats", "Stats/Loot" for a subgroup, or "" for none. The @export_group or @export_subgroup lines it needs are written above it. Without it, an export joins the group open where it lands, below the last variable, and modifications_applied names it under group. Refused beside isExport false.',
       },
       isOnready: { type: 'boolean', description: 'Variables: add @onready.' },
       isStatic: {
@@ -401,7 +406,7 @@ const INPUT_EVENTS: JsonSchema = {
   items: {
     type: 'object',
     properties: {
-      type: { type: 'string', enum: ['key', 'mouse_button', 'joypad_button', 'joypad_axis'] },
+      type: { type: 'string', enum: ['key', 'mouse_button', 'joypad_button', 'joypad_motion'] },
       keycode: {
         type: 'string',
         description: 'Keys: the key name, such as "Space", "W" or "Menu", as the Input Map names keys.',
@@ -629,6 +634,17 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         description: 'Effect class, such as "AudioEffectReverb".',
       },
       volumeDb: { type: 'number', ops: ['set_audio_bus_volume'], description: 'Bus volume in decibels.' },
+      mute: { type: 'boolean', ops: ['set_audio_bus_volume'], description: 'Mute the bus, or unmute it.' },
+      solo: {
+        type: 'boolean',
+        ops: ['set_audio_bus_volume'],
+        description: 'Solo the bus, which silences every bus not soloed, or end it.',
+      },
+      bypassEffects: {
+        type: 'boolean',
+        ops: ['set_audio_bus_volume'],
+        description: "Pass the bus's sound by its effects, or through them again.",
+      },
     },
     requires: ['projectPath'],
     operations: {
@@ -677,8 +693,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       },
       set_audio_bus_volume: {
         effect: 'destructive',
-        summary: 'set a bus volume',
-        requires: ['busIndex', 'volumeDb'],
+        summary: "set a bus's volume, mute, solo or effect bypass, each only when given",
+        requires: ['busIndex'],
       },
       rename_audio_bus: {
         effect: 'destructive',
@@ -848,7 +864,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     name: 'project_export',
     title: 'Export',
     description:
-      "Export presets and exports. add_preset writes a preset to export_presets.cfg with the keys the editor's Project > Export writes for a new one and every option a new preset of its platform shows, each at its default, and makes it the platform's runnable preset when the platform has none. set_preset changes a preset's export path, its resource filter and the files it lists, its include and exclude filters, its custom features and its platform's options, and answers under changed what each held before and holds now, and under unchanged what already held the value given. saved says whether the file was written, and is false when nothing changed. Nothing is written when any of it is refused. The option names are the exporter's own, as the Export dialog's Options tab shows them by their paths, such as binary_format/embed_pck, and a name the platform does not have is refused with the nearest it has, or all of them when none is near. An option the dialog shows only while another is on, such as codesign/identity behind codesign/enable, is taken when the preset has that one on or the same call turns it on, and otherwise refused naming what shows it. A secret option, such as a signing password, is written to .godot/export_credentials.cfg, where the editor keeps secrets out of the committed file, and its value is never answered. A file an option names that is not there is written and listed under missing_files, or for a secret its option under secretsNamingNoFile. remove_preset takes a preset out, and when it was its platform's runnable preset the next of that platform becomes it, under runnableNow, which is null when the platform has no other. A secret it held is taken out with it. It answers where this engine's export templates belong and whether the preset's platform has them, since an export needs them. list says the same for every preset. An editor open on the project does not see a preset added this way until it restarts. run first imports whatever changed on disk since it was imported, named under importedFirst, so the build carries each file as it is now. It answers bytes, the size of the output it wrote, and names, as alsoWritten, what else the export wrote beside its output, such as the .pck a Windows or Linux build cannot start without. Its entries are the errors and warnings the export printed, the newest two hundred distinct ones, one printed more than once carrying times, and errors and warnings count them. exported is true only when this run wrote the output and printed no error.",
+      "Export presets and exports. add_preset writes a preset to export_presets.cfg with the keys the editor's Project > Export writes for a new one and every option a new preset of its platform shows, each at its default, and makes it the platform's runnable preset when the platform has none. set_preset changes a preset's export path, its resource filter and the files it lists, its include and exclude filters, its custom features and its platform's options, and answers under changed what each held before and holds now, and under unchanged what already held the value given. saved says whether the file was written, and is false when nothing changed. Nothing is written when any of it is refused. The option names are the exporter's own, as the Export dialog's Options tab shows them by their paths, such as binary_format/embed_pck, and a name the platform does not have is refused with the nearest it has, or all of them when none is near. An option the dialog shows only while another is on, such as codesign/identity behind codesign/enable, is taken when the preset has that one on or the same call turns it on, and otherwise refused naming what shows it. A secret option, such as a signing password, is written to .godot/export_credentials.cfg, where the editor keeps secrets out of the committed file, and its value is never answered. A file an option names that is not there is written and listed under missing_files, or for a secret its option under secretsNamingNoFile. remove_preset takes a preset out, and when it was its platform's runnable preset the next of that platform becomes it, under runnableNow, which is null when the platform has no other. A secret it held is taken out with it. It answers where this engine's export templates belong and whether the preset's platform has them, since an export needs them. list says the same for every preset. An editor open on the project does not see a preset added this way until it restarts. run first imports whatever changed on disk since it was imported, named under importedFirst, so the build carries each file as it is now. A preset with shader_baker/enabled on, whose platform draws with Forward+ or Mobile, is exported by an editor drawing with that renderer, since a headless one bakes no shader, and bakedWith names the renderer. On Windows that editor draws on a desktop of its own, out of sight and silent. Elsewhere its window shows while it exports, which showWindow allows. It answers bytes, the size of the output it wrote, and names, as alsoWritten, what else the export wrote beside its output, such as the .pck a Windows or Linux build cannot start without. Its entries are the errors and warnings the export printed, the newest two hundred distinct ones, one printed more than once carrying times, and errors and warnings count them. exported is true only when this run wrote the output and printed no error.",
     parameters: {
       projectPath: PROJECT_PATH,
       preset: {
@@ -869,6 +885,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           'Where the export is written, inside the project. The directory is created if it is not there: Godot\'s command-line exporter refuses a missing one with "The given export path doesn\'t exist", which reads as a wrong path in the preset. add_preset, set_preset: the path the preset exports to from the editor, optional.',
       },
       debug: { type: 'boolean', ops: ['run'], description: 'run: a debug export. Default false.' },
+      showWindow: {
+        type: 'boolean',
+        ops: ['run'],
+        description:
+          "run, on Linux and macOS: let a preset that bakes its shaders export with the editor's window showing, which baking needs. Without it such an export is refused. Windows draws out of sight and needs none. Default false.",
+      },
       pack: {
         type: 'boolean',
         ops: ['run'],
@@ -949,7 +971,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       '- failures and errors: failures counts the cases that failed an assertion and errors the cases that hit an error, so such a case counts in both.',
       "- exitCode: the engine's own exit, gdUnit4's code for what it saw (100 a case failed, 101 only warnings, 105 script errors it detected). It is 0 beside passed false when the run is failed for something gdUnit4 does not judge, such as an engine error no suite declared.",
       "- time: gdUnit4's own sum of the seconds its cases took, from its report.",
-      "- tookMs: the whole call in milliseconds, from the class rebuild to the engine's exit, which is what a caller waits for. tookMsBy splits it into the class rebuild (classes), the import after it (import) and the engine running the suites (engine), each with any wait for an engine slot or the editor's scan in it. A call that waited a second or more for slots in all is answered with an engine_slot_wait block giving waitedMs and who held them.",
+      "- tookMs: the whole call in milliseconds, from the class rebuild to the engine's exit, which is what a caller waits for. tookMsBy splits it into the class rebuild (classes), the import after it (import) and the engine running the suites (engine), each with any wait for an engine slot or the editor's scan in it. Within engine, engineStart is what the engine spent before its first suite and engineCompile the part of it compiling the suites, which no case's time holds. A call that waited a second or more for slots in all is answered with an engine_slot_wait block giving waitedMs and who held them.",
       "- engineEntries: identical engine messages come back once, with times saying how often they were printed, and with script, line and function for the project script one points at, as editor_output's entries have. An engine message keeps the frames above gdUnit4, not the twenty inside it.",
       '- undeclaredErrors: each engine error that no suite declared in its GDHARNESS_EXPECTED_ERRORS constant, and each engine warning a suite printed and did not declare in its GDHARNESS_EXPECTED_WARNINGS, marked warning true, with the suite and the case that printed it. The run is judged as gdharness test judges it. gdUnit4 does not fail a case on push_error, push_warning or an engine error unless the project turns on its report/godot/push_error setting, so a case that printed one undeclared is otherwise in neither failed nor errors. It is named here, and the run is failed for it. With that setting on, gdUnit4 fails the case on each one, declared or not, and the note names those cases. One printed inside assert_error(...).is_push_error(...) or is_push_warning(...) passes there, and is declared all the same.',
       '- declaredNotPrinted: each declared error or warning its case did not print. A declared text must be the whole line after ERROR: or WARNING: and its space, so a longer one its case printed holding the text is named under printedInstead. Either fails the run, and each suite holding one is listed with its count.',
@@ -1395,7 +1417,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['connect_states'],
         enum: ['immediate', 'sync', 'at_end'],
-        description: 'connect_states: default immediate.',
+        description:
+          "connect_states: immediate switches the moment it advances, so an auto one with no advanceCondition leaves its state the frame the state is reached. at_end waits for the state's animation to end, as a jump going back to idle does. sync switches at once and carries the playback position over. Default immediate.",
       },
       advanceCondition: {
         type: 'string',
@@ -1576,7 +1599,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       structure: {
         effect: 'read',
         summary:
-          "functions (each parameter's default the source text after its =, so = null reads \"null\", and null for a parameter with none), variables (static ones marked is_static, and one written with := has the type of a literal or built-in constructor it is given, marked inferred, as a constant always does), signals, constants, enums (each with its members under values and their numbers under numbers, counted on from the last whole number the file gives, as the engine counts, and left out from one given an expression), inner_classes (each with its name, line and extends, and its own members in these same fields), class_name, extends, is_abstract and line_count, read from the file, and dependencies: the paths it loads or preloads as written, by a constant it declares too, and the paths it or an inner class extends by, then the scripts declaring each project class_name its code uses, which classes_used names with the class. autoloads_used names each autoload the code uses by its global name, with the autoload's script, which the project loads rather than this script, so it is not under dependencies. A member or inner class with a ## documentation comment directly above it carries the comment's text as doc, and the script's own, the ## block above class_name or extends or one followed by a blank line before any member, comes back as class_doc",
+          'functions (each parameter\'s default the source text after its =, so = null reads "null", and null for a parameter with none), variables (static ones marked is_static, and one written with := has the type of a literal or built-in constructor it is given, marked inferred, as a constant always does. An export in an inspector group names it under group, as "Stats/Loot" for a subgroup), signals, constants, enums (each with its members under values and their numbers under numbers, counted on from the last whole number the file gives, as the engine counts, and left out from one given an expression), inner_classes (each with its name, line and extends, and its own members in these same fields), class_name, extends, is_abstract and line_count, read from the file, and dependencies: the paths it loads or preloads as written, by a constant it declares too, and the paths it or an inner class extends by, then the scripts declaring each project class_name its code uses, which classes_used names with the class. autoloads_used names each autoload the code uses by its global name, with the autoload\'s script, which the project loads rather than this script, so it is not under dependencies. A member or inner class with a ## documentation comment directly above it carries the comment\'s text as doc, and the script\'s own, the ## block above class_name or extends or one followed by a blank line before any member, comes back as class_doc',
         requires: [],
       },
       symbols: {
@@ -2356,7 +2379,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['set', 'call'],
         description:
-          'Absolute node path, such as "/root/Main/Player", a unique name in the current scene, such as "%Player", or the name of an engine singleton: Engine, Performance, RenderingServer, AudioServer, PhysicsServer2D, PhysicsServer3D, NavigationServer2D, NavigationServer3D, Time or TranslationServer, so "RenderingServer" with method viewport_get_measured_render_time_cpu reads what the engine measures. The other singletons are refused: OS runs programs, DisplayServer switches the keyboard layout and Input moves the real pointer. call: also a class whose static function method names, by its class_name or its script\'s res:// path, such as "Chooser" with method best, for a class no node carries. A node of that name comes first, and an argument naming an object is a path from /root.',
+          'Absolute node path, such as "/root/Main/Player", a unique name in the current scene, such as "%Player", or the name of an engine singleton: Engine, Performance, RenderingServer, AudioServer, PhysicsServer2D, PhysicsServer3D, NavigationServer2D, NavigationServer3D, Time, TranslationServer or InputMap, so "RenderingServer" with method viewport_get_measured_render_time_cpu reads what the engine measures, and "InputMap" with action_erase_events and action_add_event rebinds an action in the running game alone. The other singletons are refused: OS runs programs, DisplayServer switches the keyboard layout and Input moves the real pointer. call: also a class whose static function method names, by its class_name or its script\'s res:// path, such as "Chooser" with method best, for a class no node carries. A node of that name comes first, and an argument naming an object is a path from /root.',
       },
       property: {
         type: 'string',
