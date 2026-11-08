@@ -57,6 +57,7 @@ import { EVERY_FILE, type PassedSuite, reachedBySuite, SuiteInputs } from './sui
 import {
   type EngineAssignment,
   type EngineEnd,
+  type EngineStart,
   type EngineVerdict,
   exitNamed,
   funcOf,
@@ -148,7 +149,12 @@ export interface RunResult {
   /** Each suite an engine closed, slowest first. */
   readonly suites: readonly {
     readonly path: string;
+    /** gdUnit4's time for it, from its `before()` to its `after()`. */
     readonly seconds: number;
+    /** Its load before that, or null when no case of it began. */
+    readonly loadSeconds: number | null;
+    /** Its `before()`, up to its first case, or null when no case of it began. */
+    readonly beforeSeconds: number | null;
     /** gdUnit4's word for it, such as `PASSED` or `FAILED`. */
     readonly verdict: string;
     readonly engine: number;
@@ -160,6 +166,10 @@ export interface RunResult {
     /** When it started, in seconds after the command did, once it had a slot. */
     readonly startedAfter: number;
     readonly seconds: number;
+    /** From its start until gdUnit4 opened its session, or null when it never did. */
+    readonly startSeconds: number | null;
+    /** The part of [member startSeconds] spent compiling its suites together. */
+    readonly compiledSeconds: number | null;
     /** What the deal expected it to take, from the times kept. */
     readonly dealt: number;
     readonly passed: boolean;
@@ -1601,6 +1611,10 @@ function report(
       `The engines took ${ran.map((engine) => `${engine.seconds.toFixed(1)} s`).join(', ')}, dealt ${ran.map((engine) => `${engine.plan.cost.toFixed(1)} s`).join(', ')}.`,
     );
   }
+  const starts = ran.flatMap((engine) => (engine.printed.started === null ? [] : [engine.printed.started]));
+  if (starts.length > 0) {
+    console.log(startsSaid(starts));
+  }
   const closed = ran
     .flatMap((engine) =>
       [...engine.printed.suites.values()].flatMap((suite) =>
@@ -1610,6 +1624,8 @@ function report(
               {
                 path: suite.path,
                 seconds: suite.closed.seconds,
+                loadSeconds: suite.setUp?.loadSeconds ?? null,
+                beforeSeconds: suite.setUp?.beforeSeconds ?? null,
                 verdict: suite.closed.verdict,
                 engine: engine.index,
               },
@@ -1649,6 +1665,8 @@ function report(
       lane: engine.plan.lane,
       startedAfter: (engine.began - startedAt) / 1000,
       seconds: engine.seconds,
+      startSeconds: engine.printed.started?.seconds ?? null,
+      compiledSeconds: engine.printed.started?.compiledSeconds ?? null,
       dealt: engine.plan.cost,
       passed: engine.verdict.passed,
       windowed: engine.plan.windowed,
@@ -1678,6 +1696,16 @@ function report(
     );
   }
   return 1;
+}
+
+/**
+ * The line saying what [param starts], one for each engine that opened a session, spent before the
+ * first suite: time no suite's or case's figure holds.
+ */
+export function startsSaid(starts: readonly EngineStart[]): string {
+  const seconds = (all: readonly number[]): string => all.map((one) => `${one.toFixed(1)} s`).join(', ');
+  const one = starts.length === 1;
+  return `Before ${one ? 'its' : 'their'} first suite the ${one ? 'engine' : 'engines'} spent ${seconds(starts.map((start) => start.seconds))} starting, ${seconds(starts.map((start) => start.compiledSeconds))} of it compiling the suites together.`;
 }
 
 /** Writes a result for a run that started no engine to [param file], when the run was asked for one. */

@@ -42,6 +42,27 @@ interface SuitePrinted {
   readonly cases: CaseRan[];
   /** The verdict and time on its statistics line, or null when the run never reached it. */
   closed: { readonly verdict: string; readonly seconds: number } | null;
+  /** What it spent before its first case, as the runner printed it, or null when it printed none. */
+  setUp: SuiteSetUp | null;
+}
+
+/**
+ * What a suite spent before its first case, which gdUnit4's case and suite times leave out of the
+ * one and spread over the other.
+ */
+interface SuiteSetUp {
+  /** From the suite before it ending, or the session opening, until gdUnit4 began it: its load. */
+  readonly loadSeconds: number;
+  /** Its `before()`, up to its first case. */
+  readonly beforeSeconds: number;
+}
+
+/** What an engine spent before its first suite, as the runner printed it. */
+export interface EngineStart {
+  /** From the engine starting until gdUnit4 opened its session. */
+  readonly seconds: number;
+  /** The part of it spent compiling the engine's suites together. */
+  readonly compiledSeconds: number;
 }
 
 /** An error or warning line the engine printed, and what was running when it did. */
@@ -90,6 +111,8 @@ export interface RunPrinted {
   readonly leftOut: ReadonlyMap<string, readonly (number | null)[]>;
   /** The version the engine's banner gives, such as `4.7.2.stable.official.ed1daf0bf`, or null. */
   readonly engineVersion: string | null;
+  /** What the engine spent before its first suite, or null when the run never opened a session. */
+  readonly started: EngineStart | null;
   /** The orphans each case or suite's hooks left, as the runner named them. */
   readonly orphansLeft: readonly OrphansLeft[];
   /** The rows gdUnit4 skipped for data that does not fit their case's parameters. */
@@ -111,6 +134,9 @@ interface MismatchedRow {
 }
 
 const SUITE_OPENED = /^Run Test Suite:\s*(res:\/\/.+?\.gd)\s*$/;
+// Printed by the runner in src/godot/tests/listed.gd, TIMING there.
+const STARTED_TIMING = /^gdharness timing: started (\d+) ms, compiled together (\d+) ms\s*$/;
+const SET_UP_TIMING = /^gdharness timing: (res:\/\/.+?\.(?:gd|cs)) loaded (\d+) ms, before (\d+) ms\s*$/;
 const TIME = String.raw`(?:\d+h )?(?:\d+min )?(?:\d+s )?\d+ms`;
 const CASE_LINE = new RegExp(
   String.raw`^\s*(res://.+?\.gd) > (.+?) (STARTED|PASSED|FAILED|FLAKY|SKIPPED|WARNING)(?: \((?:retry \d+|\d+ retries)\))?(?: (${TIME}))?\s*$`,
@@ -260,6 +286,7 @@ export function readRun(printed: string): RunPrinted {
   const leftOut = new Map<string, (number | null)[]>();
   const orphansLeft: OrphansLeft[] = [];
   let engineVersion: string | null = null;
+  let started: EngineStart | null = null;
   for (const [at, line] of lines.entries()) {
     const banner: RegExpExecArray | null = engineVersion === null ? BANNER.exec(line) : null;
     if (banner !== null) {
@@ -269,6 +296,22 @@ export function readRun(printed: string): RunPrinted {
     const orphaned = orphansLeftOn(line);
     if (orphaned !== null) {
       orphansLeft.push(orphaned);
+      continue;
+    }
+    const startTimed = STARTED_TIMING.exec(line);
+    if (startTimed !== null) {
+      started = { seconds: Number(startTimed[1]) / 1000, compiledSeconds: Number(startTimed[2]) / 1000 };
+      continue;
+    }
+    const setUpTimed = SET_UP_TIMING.exec(line);
+    if (setUpTimed !== null) {
+      const timed = suites.get(setUpTimed[1] ?? '');
+      if (timed !== undefined) {
+        timed.setUp = {
+          loadSeconds: Number(setUpTimed[2]) / 1000,
+          beforeSeconds: Number(setUpTimed[3]) / 1000,
+        };
+      }
       continue;
     }
     const left = LEFT_OUT.exec(line);
@@ -281,7 +324,7 @@ export function readRun(printed: string): RunPrinted {
     const opened = SUITE_OPENED.exec(line);
     if (opened?.[1] !== undefined) {
       settleAfterCase('after');
-      open = suites.get(opened[1]) ?? { path: opened[1], cases: [], closed: null };
+      open = suites.get(opened[1]) ?? { path: opened[1], cases: [], closed: null, setUp: null };
       suites.set(open.path, open);
       during = 'before';
       lastCase = null;
@@ -385,6 +428,7 @@ export function readRun(printed: string): RunPrinted {
     running: last === null ? null : { suite: last.path, during },
     leftOut,
     engineVersion,
+    started,
     orphansLeft,
     ...skippedAsDeclaredIn(lines),
   };

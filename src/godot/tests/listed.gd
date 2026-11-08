@@ -65,6 +65,13 @@ const REACHED_OUT: String = "--reached-out"
 ## game, then once more as the one script it made.
 const COMPILE_ONLY: String = "--compile-only"
 const COMPILED: String = "gdharness compiled every script together"
+## Printed with what a run spends outside its cases, which gdUnit4's own case times leave out:
+## `gdharness timing: started 2310 ms, compiled together 450 ms` as gdUnit4 opens its session, the
+## engine's time since it began, of which [constant TOGETHER] took the second figure, and
+## `gdharness timing: res://a_test.gd loaded 120 ms, before 340 ms` as a suite's first case begins.
+## A suite loads from the end of the suite before it, or from the session's opening, until gdUnit4
+## reports it begun, and its `before()` runs from there to its first case.
+const TIMING: String = "gdharness timing:"
 ## The tool name gdUnit4 reads its options after.
 const TOOL: String = "GdUnitCmdTool.gd"
 ## Ends the runner's own arguments: everything after it is gdUnit4's options, for a run with no
@@ -170,9 +177,11 @@ static func started(given: PackedStringArray) -> GdhRunner:
 	if at >= 0:
 		runner.given = given.slice(at + 1)
 	if asked.has(TOGETHER):
+		var compiling: int = Time.get_ticks_usec()
 		# Walked here, since editor_run hands the runner directories, and a directory left to
 		# gdUnit4's scan compiled each of its scripts on its own.
 		runner.together = compiled_together(scripts_in(suites), [])
+		runner.compiled_usec = Time.get_ticks_usec() - compiling
 	var expected_out: String = argument_after(asked, EXPECTED_OUT)
 	if not expected_out.is_empty():
 		write_expected(expected_out, suites)
@@ -408,6 +417,12 @@ class GdhRunner:
 	## Whether gdUnit4 has minimised the window, or is about to, and it is not back yet: it does as
 	## its runner starts, and after every suite.
 	var minimise_pending: bool = true
+	## How long [constant TOGETHER] took, in microseconds.
+	var compiled_usec: int = 0
+	## When the running suite's load began, and when gdUnit4 reported it begun, in the engine's
+	## microseconds ([constant TIMING]).
+	var suite_load_began: int = 0
+	var suite_began: int = 0
 
 	## As the run ends, the marker of the walk's newest end, and every script held past the walk, on
 	## an engine whose walk can stop part way ([GdhShutdownWalk]).
@@ -493,14 +508,23 @@ class GdhRunner:
 	## is announced: everything that reads the session, the hooks, the cases and the console
 	## printing every case, is handed it after this.
 	func _on_gdunit_event(event: GdUnitEvent) -> void:
+		var now: int = Time.get_ticks_usec()
 		match event.type():
 			GdUnitEvent.SESSION_START:
+				suite_load_began = now
+				print(
+					(
+						"%s started %d ms, compiled together %d ms"
+						% [TIMING, milliseconds(now), milliseconds(compiled_usec)]
+					)
+				)
 				if not GdhIndexedSession.indexes_itself(_test_session):
 					_test_session = GdhIndexedSession.of(_test_session)
 				var tree: SceneTree = get_tree()
 				if not tree.process_frame.is_connected(drawn_window):
 					var _watched: int = tree.process_frame.connect(drawn_window)
 			GdUnitEvent.TESTSUITE_BEFORE:
+				suite_began = now
 				drawn_window()
 				if GdhReached.current != null:
 					GdhReached.current.began(event.resource_path())
@@ -513,6 +537,7 @@ class GdhRunner:
 				orphans_at_case = orphan_ids()
 				if not case_began:
 					case_began = true
+					say_set_up(now)
 					for id: int in new_orphans(orphans_at_suite):
 						orphans_from_before[id] = true
 			GdUnitEvent.TESTCASE_AFTER:
@@ -520,6 +545,7 @@ class GdhRunner:
 		super(event)
 		# gdUnit4 minimises the window once the suite's end is reported.
 		if event.type() == GdUnitEvent.TESTSUITE_AFTER:
+			suite_load_began = Time.get_ticks_usec()
 			minimise_pending = true
 			if GdhReached.current != null:
 				GdhReached.current.ended(event.resource_path())
@@ -572,6 +598,24 @@ class GdhRunner:
 		if mode == DisplayServer.WINDOW_MODE_MINIMIZED:
 			DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
 			minimise_pending = false
+
+	## Prints the running suite's load and its `before()`, which ended as its first case began at
+	## [param first_case] ([constant TIMING]).
+	func say_set_up(first_case: int) -> void:
+		print(
+			(
+				"%s %s loaded %d ms, before %d ms"
+				% [
+					TIMING,
+					suite_running,
+					milliseconds(suite_began - suite_load_began),
+					milliseconds(first_case - suite_began),
+				]
+			)
+		)
+
+	static func milliseconds(usec: int) -> int:
+		return roundi(usec / 1000.0)
 
 	## The orphans now that were not there in [param before] and no line has named yet.
 	func new_orphans(before: Dictionary[int, bool]) -> Array[int]:

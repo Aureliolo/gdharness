@@ -92,8 +92,10 @@ output can still read it there. It holds:
 - `passed` and `seconds`.
 - `problems`: every problem the output lists, one sentence each. An engine's is prefixed with
   `engine N:`.
-- `suites`: each suite an engine closed, slowest first. Each has its `path`, `seconds`, gdUnit4's
-  `verdict` and the `engine` that ran it.
+- `suites`: each suite an engine closed, slowest first. Each has its `path`, gdUnit4's `seconds`
+  and `verdict`, and the `engine` that ran it.
+- In each suite, `loadSeconds` runs from the end of the suite before it, and `beforeSeconds` is its
+  `before()`. Both are null when none of its cases began.
 - `engines`: each engine, with the fields below.
 - `logs`: the directory every engine's output is kept under.
 - `enginesAsked`.
@@ -106,12 +108,18 @@ output can still read it there. It holds:
 - `index` and `lane`.
 - `startedAfter`: the seconds after the command started that it got a slot and began.
 - `seconds`, and `dealt`, the seconds the times kept had it at.
+- `startSeconds`: its start until gdUnit4 began, null when it never did. `compiledSeconds` is
+  the part spent compiling its suites together.
 - `passed` and `windowed`.
 - `suites`: the suites it was handed.
 - `log`: the file its output is kept in.
 
 `log` and `logs` are null once a passing run has removed them. A run that failed its import, or had
 nothing left to run under `--changed-only`, writes empty `suites` and `engines`.
+
+A case's own time, as gdUnit4 prints it, runs from its `before_test()` to its `after_test()`. An
+engine's start and a suite's load and `before()` are in the fields above, never in a case's time.
+The run's closing lines also say what each engine spent starting.
 
 ## Which suites run
 

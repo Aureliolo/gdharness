@@ -523,6 +523,7 @@ import {
   roomSaid,
   sharesSaid,
   silenceWhile,
+  startsSaid,
   testOptionsOf,
   wholeTreeSaid,
 } from '../src/suite-run.js';
@@ -49044,6 +49045,55 @@ function cannedRun(body: readonly string[], verdict = 'PASSED', executed = 4): s
 }
 
 /**
+ * What an engine spends outside its cases is read off the runner's timing lines: its start until
+ * gdUnit4 opened the session, and each suite's load and `before()`, so no case's figure holds them.
+ * A suite whose cases never began has no line and so no set-up.
+ */
+function testAnEngineRunsStartAndSetUpAreReadApart(): void {
+  const other = 'res://tests/other_test.gd';
+  const printed = readRun(
+    [
+      'Godot Engine v4.7.2.stable.official - https://godotengine.org',
+      'gdharness timing: started 2310 ms, compiled together 450 ms',
+      `Run Test Suite: ${S_TEST}`,
+      `gdharness timing: ${S_TEST} loaded 120 ms, before 340 ms`,
+      caseLine(S_TEST, 'test_a', 'STARTED'),
+      caseLine(S_TEST, 'test_a', 'PASSED', '8ms'),
+      `Statistics: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED 400ms`,
+      `Run Test Suite: ${other}`,
+      `Statistics: 0 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED 5ms`,
+    ].join('\r\n'),
+  );
+  assert.deepEqual(printed.started, { seconds: 2.31, compiledSeconds: 0.45 }, 'the engine start');
+  assert.deepEqual(
+    [...printed.suites.values()].map((suite) => [suite.path, suite.setUp]),
+    [
+      [S_TEST, { loadSeconds: 0.12, beforeSeconds: 0.34 }],
+      [other, null],
+    ],
+    'each suite set up',
+  );
+  assert.deepEqual(
+    printed.suites.get(S_TEST)?.cases.map((ran) => ran.seconds),
+    [0.008],
+    'the case keeps its own time',
+  );
+  assert.deepEqual(printed.errors, [], 'a timing line is no error');
+  assert.equal(readRun(cannedRun([])).started, null, 'a run that printed no start has none');
+  assert.equal(
+    startsSaid([{ seconds: 2.31, compiledSeconds: 0.45 }]),
+    'Before its first suite the engine spent 2.3 s starting, 0.5 s of it compiling the suites together.',
+  );
+  assert.equal(
+    startsSaid([
+      { seconds: 2.31, compiledSeconds: 0.45 },
+      { seconds: 3.04, compiledSeconds: 1.2 },
+    ]),
+    'Before their first suite the engines spent 2.3 s, 3.0 s starting, 0.5 s, 1.2 s of it compiling the suites together.',
+  );
+}
+
+/**
  * An engine's console is read case by case, every error credited to what was running.
  *
  * The shapes are gdUnit4's own, captured from a real run: a parameterised row prints as
@@ -55002,6 +55052,92 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
     );
     assert.match(thereSaid, /^Nothing has changed since every suite last passed\.$/m, thereSaid);
     rmSync(join(project, 'tests', 'loads_test.gd'));
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
+/**
+ * A case's time is its own: a suite whose script holds the engine 300 ms as it compiles and whose
+ * before() holds it 400 ms more still has its first case timed at what the case took. The result
+ * puts the compile under the engine's start and the before() under the suite, and so does the line
+ * the run prints.
+ */
+function testATestRunTimesStartAndSetUpApartFromItsCases(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  try {
+    writeTree(project, {
+      'tests/set_up_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        'static var held: int = _held()',
+        '',
+        '',
+        'static func _held() -> int:',
+        '\tOS.delay_msec(300)',
+        '\treturn 1',
+        '',
+        '',
+        'func before() -> void:',
+        '\tOS.delay_msec(400)',
+        '',
+        '',
+        'func test_first() -> void:',
+        '\tassert_int(held).is_equal(1)',
+        '',
+      ].join('\n'),
+    });
+    const resultFile = join(checkouts, 'result.json');
+    const timesFile = join(checkouts, 'times.json');
+    const ran = test(
+      'tests/set_up_test.gd',
+      'tests/ok_test.gd',
+      '--engines',
+      '1',
+      // Reversed by path, so the suite with the slow before() runs first and the other one's load
+      // would hold it, were a load timed from anything but the end of the suite before.
+      '--order',
+      'reversed',
+      '--result',
+      resultFile,
+      '--times',
+      timesFile,
+    );
+    assert.equal(ran.status, 0, ran.said);
+    const result = readRunResult(resultFile);
+    const [engine] = result.engines;
+    assert.ok(
+      engine?.startSeconds != null &&
+        engine.compiledSeconds != null &&
+        engine.compiledSeconds >= 0.3 &&
+        engine.startSeconds > engine.compiledSeconds &&
+        engine.startSeconds < engine.seconds,
+      `the engine's start holds the compile, inside the engine's time: ${JSON.stringify(result.engines)}`,
+    );
+    const setUp = result.suites.find((suite) => suite.path === 'res://tests/set_up_test.gd');
+    assert.ok(
+      setUp?.beforeSeconds != null &&
+        setUp.beforeSeconds >= 0.4 &&
+        setUp.loadSeconds !== null &&
+        setUp.loadSeconds < 0.3,
+      `the suite's before() is its own, and its compile is not its load: ${JSON.stringify(result.suites)}`,
+    );
+    const ok = result.suites.find((suite) => suite.path === 'res://tests/ok_test.gd');
+    assert.ok(
+      ok?.loadSeconds != null && ok.loadSeconds < 0.3 && ok.beforeSeconds != null && ok.beforeSeconds < 0.4,
+      `the suite after it loads from the end of the one before, and has no before() of its own: ${JSON.stringify(result.suites)}`,
+    );
+    const first = readTimes(timesFile)['res://tests/set_up_test.gd']?.cases['test_first'];
+    assert.ok(first !== undefined && first < 0.3, `the first case is timed alone: ${String(first)}`);
+    assert.match(
+      ran.said,
+      /^Before its first suite the engine spent \d+\.\d s starting, \d+\.\d s of it compiling the suites together\.$/m,
+      ran.said,
+    );
   } finally {
     sweep(project, slots, checkouts);
   }
@@ -79546,6 +79682,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testGdUnitRunner,
   testTheShippedRunnerRunsAFileOfSuites,
   testAnEngineRunIsReadCaseByCase,
+  testAnEngineRunsStartAndSetUpAreReadApart,
   testAnEngineMayBeSilentAsLongAsWhatItRuns,
   testAnEngineRunIsJudgedOnEverythingItPrinted,
   testGdUnitFailingOnPushErrorsIsSaid,
@@ -79579,6 +79716,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASuiteRunHasNoSoundWhicheverWayItStarts,
   testTheTestCommandRunsAndJudgesAProject,
   testTheTestCommandDealsAndReportsARun,
+  testATestRunTimesStartAndSetUpApartFromItsCases,
   testATestRunsLimitsEndAHungOrChattyEngine,
   testATestRunDealsByAndRecordsIntoTheTimesItIsGiven,
   testTheShutdownWalkIsHeldAndARealLeakStillFails,
