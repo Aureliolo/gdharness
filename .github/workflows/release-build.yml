@@ -252,18 +252,41 @@ jobs:
           tar -xzf "dist/gdharness-${VERSION}.tgz" -C sbom-input
           cp bun.lock sbom-input/bun.lock
 
+      # The release archive, refused unless it matches the digest written here, fetched through the
+      # API as every release file here is. sbom-action's installer reads github.com's releases page,
+      # which answered 504 while the API served the same files.
+      - name: Install syft
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # renovate: datasource=github-release-attachments depName=anchore/syft versioning=regex:^v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$
+          SYFT_TAG: v1.57.0
+          SYFT_SHA256: 9c077a7d43029b3b13e98a8db720661e700c4d58db6352153a06395ae4a2a704
+        run: |
+          set -euo pipefail
+          name="syft_${SYFT_TAG#v}_linux_amd64.tar.gz"
+          archive="${RUNNER_TEMP}/${name}"
+          api=(--proto '=https' --tlsv1.2 --retry 6 --retry-all-errors --connect-timeout 20
+            -H "Authorization: Bearer ${GH_TOKEN}")
+          url="$(curl -fsSL "${api[@]}" "https://api.github.com/repos/anchore/syft/releases/tags/${SYFT_TAG}" |
+            jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .url')"
+          [[ -n "${url}" ]] || { echo "syft ${SYFT_TAG} has no ${name}." >&2; exit 1; }
+          curl -fsSL "${api[@]}" --speed-limit 1024 --speed-time 60 \
+            -H 'Accept: application/octet-stream' -o "${archive}" "${url}"
+          echo "${SYFT_SHA256}  ${archive}" | sha256sum --check --strict
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}" syft
+
       - name: Generate SBOM
-        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        shell: bash
         env:
           SYFT_SOURCE_NAME: gdharness
           SYFT_SOURCE_VERSION: ${{ needs.build_test.outputs.version }}
-        with:
-          path: sbom-input
-          config: .github/syft.yaml
-          format: spdx-json
-          output-file: dist/gdharness-${{ needs.build_test.outputs.version }}.spdx.json
-          upload-artifact: false
-          upload-release-assets: false
+          SYFT_CHECK_FOR_APP_UPDATE: 'false'
+          VERSION: ${{ needs.build_test.outputs.version }}
+        run: |
+          set -euo pipefail
+          "${RUNNER_TEMP}/syft" scan dir:sbom-input --config .github/syft.yaml \
+            --output "spdx-json=dist/gdharness-${VERSION}.spdx.json"
 
       - name: Check the SBOM lists what ships
         shell: bash
