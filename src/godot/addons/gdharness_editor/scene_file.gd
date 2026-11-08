@@ -894,7 +894,10 @@ static func make_folder_for(file_path: String) -> String:
 ## loaded all the same, and answered with the engine's own load errors and no word of the file.
 static func script_at(script_path: String) -> Variant:
 	if not ResourceLoader.exists(script_path):
-		return GdhFileWalk.new().with_nearest_files("No script at %s" % script_path, script_path)
+		var missing: String = GdhFileWalk.new().with_nearest_files(
+			"No script at %s" % script_path, script_path
+		)
+		return "%s script_edit create writes a new one there first." % missing
 	var script: Script = load(script_path) as Script
 	if script == null:
 		return "No script loads from %s" % script_path

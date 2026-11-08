@@ -278,6 +278,7 @@ import {
   realAsFarAsItExists,
   resolveWithinProject,
 } from '../src/paths.js';
+import { keepPipelineCache, seedPipelineCache } from '../src/pipeline-cache.js';
 import { acceptsConnections, notListeningNote } from '../src/port-probe.js';
 import { freePort } from '../src/ports.js';
 import {
@@ -9829,6 +9830,161 @@ const READ_IN_WORDS = 159;
  * they had: script_edit create was given the additions only modify reads and answered success
  * over a bare template.
  */
+/**
+ * The pipeline cache one run's engine leaves in its user:// is handed to the next run of the same
+ * project on the same engine build, where the engine kept it, so a drawing suite does not rebuild
+ * every pipeline cold. A run that built fewer pipelines leaves the kept cache alone, and another
+ * engine build is handed none.
+ */
+function testAPipelineCacheIsCarriedToTheNextRun(): void {
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-pipelines-'));
+  try {
+    const home = join(scratch, 'home');
+    const project = join(scratch, 'game');
+    const godot = join(scratch, 'godot.exe');
+    const other = join(scratch, 'other.exe');
+    mkdirSync(project);
+    writeFileSync(godot, 'engine');
+    writeFileSync(other, 'another engine');
+    const where = join('Godot', 'app_userdata', 'Game', 'shader_cache');
+    const run = (name: string, bytes: number | null): string => {
+      const user = join(scratch, name, 'user');
+      mkdirSync(join(user, 'Godot', 'app_userdata', 'Game'), { recursive: true });
+      seedPipelineCache(user, project, godot, home);
+      if (bytes !== null) {
+        mkdirSync(join(user, where), { recursive: true });
+        writeFileSync(join(user, where, 'pipelines.cache'), 'x'.repeat(bytes));
+      }
+      return user;
+    };
+    const cached = (user: string): string | null =>
+      existsSync(join(user, where, 'pipelines.cache'))
+        ? readFileSync(join(user, where, 'pipelines.cache'), 'utf8')
+        : null;
+
+    const first = run('first', null);
+    assert.equal(cached(first), null, 'the first run starts with no cache');
+    mkdirSync(join(first, where), { recursive: true });
+    writeFileSync(join(first, where, 'pipelines.cache'), 'x'.repeat(100));
+    keepPipelineCache(first, project, godot, home);
+
+    const second = join(scratch, 'second', 'user');
+    seedPipelineCache(second, project, godot, home);
+    assert.equal(
+      cached(second)?.length,
+      100,
+      'the next run starts with what the first left, where it left it',
+    );
+
+    const headless = run('headless', null);
+    rmSync(join(headless, where), { recursive: true, force: true });
+    keepPipelineCache(headless, project, godot, home);
+    const fewer = run('fewer', 40);
+    keepPipelineCache(fewer, project, godot, home);
+    const third = join(scratch, 'third', 'user');
+    seedPipelineCache(third, project, godot, home);
+    assert.equal(cached(third)?.length, 100, 'a run with no cache or a smaller one leaves the kept cache');
+
+    const more = run('more', 200);
+    keepPipelineCache(more, project, godot, home);
+    const fourth = join(scratch, 'fourth', 'user');
+    seedPipelineCache(fourth, project, godot, home);
+    assert.equal(cached(fourth)?.length, 200, 'a run that built more pipelines replaces it');
+
+    const elsewhere = join(scratch, 'elsewhere', 'user');
+    seedPipelineCache(elsewhere, project, other, home);
+    assert.equal(cached(elsewhere), null, 'another engine build is handed nothing');
+
+    // One copy per project: a smaller cache from another engine build replaces the kept one, since
+    // the old build's is good for nothing once the project moves on.
+    mkdirSync(join(elsewhere, where), { recursive: true });
+    writeFileSync(join(elsewhere, where, 'pipelines.cache'), 'y'.repeat(10));
+    keepPipelineCache(elsewhere, project, other, home);
+    const kept = join(home, 'pipeline-caches');
+    assert.equal(readdirSync(kept).length, 1, `one kept cache: ${readdirSync(kept).join(', ')}`);
+    const onOther = join(scratch, 'on-other', 'user');
+    seedPipelineCache(onOther, project, other, home);
+    assert.equal(cached(onOther), 'y'.repeat(10), 'the other build is handed its own cache');
+
+    // A project that is gone takes its kept cache with it, at the next keep of any project.
+    const gone = join(scratch, 'gone');
+    mkdirSync(gone);
+    const goneRun = join(scratch, 'gone-run', 'user');
+    mkdirSync(join(goneRun, where), { recursive: true });
+    writeFileSync(join(goneRun, where, 'pipelines.cache'), 'z');
+    keepPipelineCache(goneRun, gone, godot, home);
+    assert.equal(readdirSync(kept).length, 2, readdirSync(kept).join(', '));
+    rmSync(gone, { recursive: true });
+    keepPipelineCache(more, project, godot, home);
+    assert.equal(
+      readdirSync(kept).length,
+      1,
+      `the gone project's cache is removed: ${readdirSync(kept).join(', ')}`,
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A test run's engine starts with the pipeline cache the last run's engine left in its user://. A
+ * stand-in shell writes a cache into the user folder its environment names, and the next run's
+ * stand-in says whether it found one there before it started.
+ */
+async function testATestRunsEngineStartsWithTheLastRunsPipelineCache(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-pipeline-run-'));
+  const before = process.env['XDG_CACHE_HOME'];
+  process.env['XDG_CACHE_HOME'] = join(scratch, 'cache');
+  try {
+    const project = join(scratch, 'game');
+    mkdirSync(project);
+    const lock = join(scratch, '0.lock');
+    writeFileSync(lock, '');
+    const windows = process.platform === 'win32';
+    const shell = windows
+      ? join(process.env['SystemRoot'] ?? 'C:\\Windows', 'System32', 'cmd.exe')
+      : '/bin/sh';
+    const cache = windows
+      ? '%APPDATA%\\Godot\\app_userdata\\Game\\shader_cache'
+      : '$XDG_DATA_HOME/godot/app_userdata/Game/shader_cache';
+    const script = (line: string): string[] => (windows ? ['/d', '/c', line] : ['-c', line]);
+    const engine = async (name: string, line: string): Promise<string> => {
+      const directory = join(scratch, name);
+      mkdirSync(join(directory, 'user'), { recursive: true });
+      const log = join(directory, 'engine.log');
+      await watchedEngine(
+        { godotPath: shell, projectPath: project, deadlineSeconds: 60, running: new Set(), cores: null },
+        lock,
+        script(line),
+        directory,
+        log,
+        30,
+      );
+      return readFileSync(log, 'utf8').trim();
+    };
+    const found = windows
+      ? `if exist ${cache}\\pipelines.cache (echo seeded) else (echo cold)`
+      : `if [ -f ${cache}/pipelines.cache ]; then echo seeded; else echo cold; fi`;
+    const write = windows
+      ? `mkdir ${cache} & echo built> ${cache}\\pipelines.cache`
+      : `mkdir -p ${cache} && echo built > ${cache}/pipelines.cache`;
+    const then = windows ? ' & ' : '; ';
+    assert.equal(await engine('first', `${found}${then}${write}`), 'cold');
+    assert.equal(
+      await engine('second', found),
+      'seeded',
+      'the next run starts with the cache the first left',
+    );
+  } finally {
+    if (before === undefined) {
+      delete process.env['XDG_CACHE_HOME'];
+    } else {
+      process.env['XDG_CACHE_HOME'] = before;
+    }
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
 function testAnArgumentScopedInWordsIsScopedInItsSchema(): void {
   let read = 0;
   for (const spec of TOOL_SPECS) {
@@ -70526,7 +70682,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
         'visibility_changed',
         'set_scale',
         undefined,
-        `visibility_changed passes no arguments, and set_scale needs 1${fails}`,
+        `visibility_changed passes no arguments, and set_scale needs 1${fails} Connect it with binds holding 1 value, passed after the signal's own.`,
       ],
       [
         'child_entered_tree',
@@ -70568,6 +70724,21 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       get(overBound, 'misfit'),
       `visibility_changed passes no arguments and the connection binds 1, so hide is called with 1 argument, and takes none${fails}`,
       JSON.stringify(overBound),
+    );
+    // binds replaces what the connection binds, so the remedy counts the bound value already there.
+    const boundShort = await written('scene_signal', {
+      op: 'connect',
+      scenePath: 'wires.tscn',
+      sourceNodePath: 'Emitter',
+      signalName: 'tree_entered',
+      targetNodePath: 'Taker',
+      methodName: 'set_meta',
+      binds: ['key'],
+    });
+    assert.equal(
+      get(boundShort, 'misfit'),
+      `tree_entered passes no arguments and the connection binds 1, so set_meta is called with 1 argument, and needs 2${fails} Connect it with binds holding 2 values, passed after the signal's own.`,
+      JSON.stringify(boundShort),
     );
     const boundWrong = await written('scene_signal', {
       op: 'connect',
@@ -71105,7 +71276,11 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       rootNodeType: 'Node2D',
       script: 'res://mad.gd',
     });
-    assert.match(textOf(scriptless) ?? '', /^No script at res:\/\/mad\.gd\./, JSON.stringify(scriptless));
+    assert.match(
+      textOf(scriptless) ?? '',
+      /^No script at res:\/\/mad\.gd\. .* script_edit create writes a new one there first\.$/,
+      JSON.stringify(scriptless),
+    );
     assert.equal(asArray(get(scriptless, 'result', 'content')).length, 1, JSON.stringify(scriptless));
     // A folder the path names is made, and said to be.
     const mapped = await written('scene_create', {
@@ -79898,6 +80073,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEvaluateNamesAGlobalClassThatDoesNotParse,
   testEditorStatusOnAProjectWithNoAddonIsFinal,
   testEveryArgumentNamesOpsItsToolHas,
+  testAPipelineCacheIsCarriedToTheNextRun,
+  testATestRunsEngineStartsWithTheLastRunsPipelineCache,
   testAnArgumentScopedInWordsIsScopedInItsSchema,
   testEveryToolTellsAClientWhatItCanChange,
   testEveryPromptAsksForCallsTheToolsTake,
