@@ -118,6 +118,10 @@ const BUILDERS: Dictionary = {
 ## The built-in resources being described, outermost first, so one holding itself somewhere inside
 ## is answered by its class rather than without end.
 var _describing: Array[Resource] = []
+## Whether a built-in resource is described with the properties still at their default. A read
+## asking for defaults asks for them inside the resources a file builds in too, such as the offsets
+## of a Gradient it holds.
+var with_defaults: bool = false
 
 
 # Converts a Godot value into something JSON can carry. A type with no entry in the table
@@ -770,7 +774,7 @@ func _describe_built_in(resource: Resource) -> Dictionary:
 			default = fresh.get(name)
 		elif script != null and usage & PROPERTY_USAGE_SCRIPT_VARIABLE:
 			default = script.get_property_default_value(name)
-		if typeof(held) == typeof(default) and held == default:
+		if not with_defaults and typeof(held) == typeof(default) and held == default:
 			continue
 		described[name] = serialize_value(held)
 	_describing.pop_back()

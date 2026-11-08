@@ -577,6 +577,7 @@ static func _stored(type: String, given: Dictionary, include_defaults: bool) -> 
 	# for a property that holds the node once it is in a tree.
 	values.merge(given, true)
 	var serialiser: GdhSerialisation = GdhSerialisation.new()
+	serialiser.with_defaults = include_defaults
 	var answered: Dictionary = {}
 	var left_out: int = 0
 	for property: Variant in values:
@@ -638,6 +639,7 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 		for declared: Dictionary in script.get_script_property_list():
 			scripted[str(declared.get("name", ""))] = true
 	var serialiser: GdhSerialisation = GdhSerialisation.new()
+	serialiser.with_defaults = include_defaults
 	var properties: Dictionary = {}
 	# A headless engine runs a script that is not a tool as the file loads, so what its _init and
 	# setters gave other properties read as values the file sets. The file's own lines say which it

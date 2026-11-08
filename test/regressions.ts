@@ -10295,7 +10295,7 @@ function testProjectPathsAreContained(): void {
   // The example offered is the end of the path given, so an export's .exe is not offered a scene.
   for (const [candidate, example] of [
     ['/home/me/builds/game.exe', 'builds/game.exe'],
-    ['\\Windows\\win.ini', 'Windows/win.ini'],
+    ['\\Windows\\none.ini', 'Windows/none.ini'],
     ['/game.pck', 'game.pck'],
     ['/', 'scenes/main.tscn'],
     // Beside the project, its folder holds the project and is no folder inside it.
@@ -10324,6 +10324,18 @@ function testProjectPathsAreContained(): void {
       beside.ok ? 'contained' : beside.reason,
       `Path '${given}' is absolute and outside the project. Give a path inside it, such as 'escape.png'.`,
     );
+    // A file that is there, such as a game's save, is offered no project path made of its name,
+    // beside the project or anywhere else.
+    const saves = join(holding, 'app_userdata', 'Game');
+    mkdirSync(saves, { recursive: true });
+    for (const there of [join(saves, 'save.json'), join(real, 'notes.txt')]) {
+      writeFileSync(there, '{}');
+      const read = resolveWithinProject(join(real, 'game'), there);
+      assert.equal(
+        read.ok ? 'contained' : read.reason,
+        `Path '${there}' names a file outside the project, and only paths inside it are taken here. Read that file with a file reader of your own, or give a path inside the project.`,
+      );
+    }
   } finally {
     sweep(holding);
   }
@@ -63385,6 +63397,17 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       growth,
       'and what was read writes back as it was',
     );
+    const withDefaults = parseTextContent(
+      await request('resource_edit', { op: 'read', resourcePath: 'res://sword.tres', includeDefaults: true }),
+    );
+    assert.deepEqual(
+      [
+        get(withDefaults, 'properties', 'growth', 'min_value'),
+        get(withDefaults, 'properties', 'growth', 'bake_resolution'),
+      ],
+      [0, 100],
+      `includeDefaults reaches into the Curve the file builds in: ${JSON.stringify(withDefaults)}`,
+    );
     // So is a Curve read as a file of its own.
     writeFileSync(
       join(project, 'ease.tres'),
@@ -69848,6 +69871,11 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     'shapes.tscn':
       '[gd_scene format=3]\n\n[node name="Shapes" type="Node2D"]\n\n[node name="One" type="CollisionShape2D" parent="."]\n\n' +
       '[node name="Two" type="CollisionShape2D" parent="."]\n',
+    'sky.tscn':
+      '[gd_scene format=3]\n\n[sub_resource type="ProceduralSkyMaterial" id="Top"]\nsky_top_color = Color(0.5, 0.75, 1, 1)\n\n' +
+      '[sub_resource type="Sky" id="Sky"]\nsky_material = SubResource("Top")\n\n' +
+      '[sub_resource type="Environment" id="Day"]\nbackground_mode = 2\nsky = SubResource("Sky")\nfog_enabled = true\n\n' +
+      '[node name="World" type="WorldEnvironment"]\nenvironment = SubResource("Day")\n',
     'loop.gd': 'extends Resource\n\n@export var next: Resource\n',
     'loop.tscn':
       '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://loop.gd" id="1_loop"]\n\n' +
@@ -70941,6 +70969,54 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       'shape',
     );
     assert.deepEqual(shapeRead, { _type: 'CircleShape2D', radius: 8 }, JSON.stringify(shapeRead));
+    // includeDefaults reaches into the resources a scene builds in, in both reads that take it.
+    const whole = { _type: 'CircleShape2D', radius: 8, custom_solver_bias: 0, resource_name: '' };
+    const node = parseTextContent(
+      await call('scene_node', {
+        op: 'get',
+        scenePath: 'shapes.tscn',
+        nodePath: 'One',
+        includeDefaults: true,
+      }),
+    );
+    assert.deepEqual(get(node, 'properties', 'shape'), whole, JSON.stringify(node));
+    const shapes = parseTextContent(
+      await call('scene_tree', { scenePath: 'shapes.tscn', includeProperties: true, includeDefaults: true }),
+    );
+    const one = asArray(get(shapes, 'tree', 'children')).find((child) => get(child, 'name') === 'One');
+    assert.deepEqual(get(one, 'properties', 'shape'), whole, JSON.stringify(shapes));
+    // A resource built into a scene becomes a file of its own from what a read answers for it, as
+    // resource_edit's create says, with the resources built into it.
+    const day = asObject(
+      get(
+        parseTextContent(await call('scene_node', { op: 'get', scenePath: 'sky.tscn', nodePath: '.' })),
+        'properties',
+        'environment',
+      ),
+      'environment',
+    );
+    const { _type: dayType, ...dayHolds } = day;
+    await written('resource_edit', {
+      op: 'create',
+      resourcePath: 'res://day.tres',
+      resourceType: dayType,
+      properties: dayHolds,
+    });
+    await written('scene_node', {
+      op: 'set',
+      scenePath: 'sky.tscn',
+      nodePath: '.',
+      properties: { environment: 'res://day.tres' },
+    });
+    const filed = parseTextContent(
+      await call('resource_edit', { op: 'read', resourcePath: 'res://day.tres' }),
+    );
+    assert.deepEqual(
+      [get(filed, 'resourceType'), get(filed, 'properties')],
+      ['Environment', dayHolds],
+      `day.tres holds what the scene built in: ${JSON.stringify(filed)}`,
+    );
+    assert.match(fileOf('sky.tscn'), /^environment = ExtResource\("[^"]+"\)$/m, fileOf('sky.tscn'));
     await written('scene_node', {
       op: 'set',
       scenePath: 'shapes.tscn',

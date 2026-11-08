@@ -74,6 +74,7 @@ func _properties_of(node: Node, include_defaults: bool, set_here: Dictionary) ->
 		for declared: Dictionary in script.get_script_property_list():
 			scripted[str(declared.get("name", ""))] = true
 	var props: Dictionary = {}
+	_values.with_defaults = include_defaults
 	for p: Dictionary in node.get_property_list():
 		if not (GdhRead.as_int(p.get("usage", 0)) & PROPERTY_USAGE_STORAGE):
 			continue
@@ -90,6 +91,7 @@ func _properties_of(node: Node, include_defaults: bool, set_here: Dictionary) ->
 			if GdhSame.same(value, default):
 				continue
 		props[property] = _readable(node, value)
+	_values.with_defaults = false
 	return props
 
 

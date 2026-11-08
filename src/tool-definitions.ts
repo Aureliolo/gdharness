@@ -1081,7 +1081,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       includeDefaults: {
         type: 'boolean',
         description:
-          'List every stored property, defaults included, which turns includeProperties on when it is left out: a Control has about a hundred, so ten Controls answer about 57,000 characters. Default false.',
+          'List every stored property, defaults included, inside the resources the scene builds in too. It turns includeProperties on when it is left out: a Control has about a hundred, so ten Controls answer about 57,000 characters. Default false.',
       },
     },
     requires: ['projectPath', 'scenePath'],
@@ -1188,7 +1188,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       includeDefaults: {
         type: 'boolean',
         ops: ['get'],
-        description: 'get: include properties still at their default. Default false.',
+        description:
+          'get: include properties still at their default, inside the resources the scene builds in too. Default false.',
       },
       layer: {
         type: 'number',
@@ -1629,7 +1630,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['create'],
         description:
-          'create: the resource class, such as "PhysicsMaterial" or "StandardMaterial3D", or a class_name a project script declares, which the resource is made as with that script attached. With no editor open, a class_name the class cache does not list yet is put in it first, and classCacheRebuilt says so.',
+          'create: the resource class, such as "PhysicsMaterial" or "StandardMaterial3D", or a class_name a project script declares, which the resource is made as with that script attached. With no editor open, a class_name the class cache does not list yet is put in it first, and classCacheRebuilt says so. A resource built into a scene becomes a file of its own by a create given its _type and the rest of what a read answers for it as properties, then a set of the property to the new file.',
       },
       properties: { ...PROPERTIES, ops: ['create', 'modify'] },
       script: {
@@ -1640,7 +1641,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       includeDefaults: {
         type: 'boolean',
         ops: ['read'],
-        description: 'read: include properties still at their default. Default false.',
+        description:
+          'read: include properties still at their default, inside the resources the file builds in too. Default false.',
       },
       shaderType: {
         type: 'string',
