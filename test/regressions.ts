@@ -389,6 +389,7 @@ import {
 import {
   aboveTheRunner,
   autoloadNotCompiledNote,
+  bakingRenderer,
   beganBy,
   CRASH_EXIT_GRACE_MS,
   captureDestinationRefusal,
@@ -31978,6 +31979,101 @@ function testAnExportOfAMissingPresetIsRefusedFirst(): void {
     assert.match(exportPresetRefusal(project, 'Linux') ?? '', /^export_presets\.cfg names no preset/);
   } finally {
     sweep(project);
+  }
+}
+
+/**
+ * A preset that bakes its shaders is exported by an editor drawing with its platform's renderer,
+ * since a headless editor bakes none and says nothing. A game's export stalled 219 s at its first
+ * start compiling them. The renderer is the preset's platform's, by the project's overrides and the
+ * engine's own defaults for mobile and web, and Compatibility bakes nothing.
+ */
+async function testABakingPresetIsExportedDrawn(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-baking-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-baking-rt-'));
+  const presets = (entries: readonly (readonly [string, string, boolean])[]): string =>
+    entries
+      .map(
+        ([name, platform, bakes], index) =>
+          `[preset.${String(index)}]\n\nname="${name}"\nplatform="${platform}"\n\n` +
+          `[preset.${String(index)}.options]\n\nshader_baker/enabled=${String(bakes)}\n`,
+      )
+      .join('\n');
+  const godot = (rendering: string): void => {
+    writeFileSync(
+      join(project, 'project.godot'),
+      `config_version=5\n\n[application]\n\nconfig/name="Baking"\n${rendering === '' ? '' : `\n[rendering]\n\n${rendering}\n`}`,
+    );
+  };
+  writeFileSync(
+    join(project, 'export_presets.cfg'),
+    presets([
+      ['Win', 'Windows Desktop', true],
+      ['Plain', 'Windows Desktop', false],
+      ['Phone', 'Android', true],
+      ['Site', 'Web', true],
+      ['Mac', 'macOS', true],
+    ]),
+  );
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: join(tmpdir(), 'gdharness-no-such-godot'),
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  try {
+    const renderers = (): (string | null)[] =>
+      ['Win', 'Plain', 'Phone', 'Site', 'Mac'].map((preset) => bakingRenderer(project, preset));
+    godot('');
+    assert.deepEqual(renderers(), ['forward_plus', null, 'mobile', null, 'forward_plus'], 'the defaults');
+    godot(
+      'renderer/rendering_method="gl_compatibility"\nrenderer/rendering_method.mobile="gl_compatibility"',
+    );
+    assert.deepEqual(renderers(), [null, null, null, null, null], 'Compatibility everywhere bakes nothing');
+    godot('renderer/rendering_method="gl_compatibility"\nrenderer/rendering_method.windows="mobile"');
+    assert.deepEqual(
+      renderers(),
+      ['mobile', null, 'mobile', null, null],
+      'the most particular override wins',
+    );
+
+    // Only Windows has a desktop out of sight to draw on, so elsewhere the export needs showWindow.
+    // Without it the export is refused before any engine starts, and the refusal names it.
+    if (process.platform !== 'win32') {
+      await server.initialize('baking');
+      const exported = async (more: Record<string, unknown>): Promise<string> =>
+        textOf(
+          await server.request(
+            'tools/call',
+            {
+              name: 'project_export',
+              arguments: {
+                projectPath: project,
+                op: 'run',
+                preset: 'Win',
+                outputPath: 'build/game.exe',
+                ...more,
+              },
+            },
+            60_000,
+          ),
+        ) ?? '';
+      const refused = await exported({});
+      assert.match(
+        refused,
+        /^Win bakes its shaders \(shader_baker\/enabled\), which needs an editor drawing with mobile rather than a headless one\. On this system that editor shows its window while it exports\. Give showWindow true to allow the window\./,
+        refused,
+      );
+      // Allowed, the export goes on to look for its engine, which this server has none of.
+      const allowed = await exported({ showWindow: true });
+      assert.match(allowed, /^GODOT_PATH is set to .*gdharness-no-such-godot/, allowed);
+    }
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
   }
 }
 
@@ -79216,6 +79312,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStaleCopyNoteEndsOnce,
   testAnExportThatCouldNotCopyALibrarySaysSo,
   testAnExportOfAMissingPresetIsRefusedFirst,
+  testABakingPresetIsExportedDrawn,
   testAnAddedPresetExports,
   testAPresetIsSetRemovedAndPacked,
   testAnOldPresetFileKeepsThePresetItRuns,

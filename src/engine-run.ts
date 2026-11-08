@@ -6,8 +6,20 @@
  * a boot that warns once per resource, was ended by Node and answered as an engine fault.
  */
 
+import { readFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { callSignal } from './call-signal.js';
+import {
+  DESKTOP_VARIABLE,
+  ensureHelperCompiled,
+  type HelperFiles,
+  HIDDEN_DESKTOP,
+  helperExit,
+  helperFailure,
+  throughHelper,
+} from './desktop.js';
 import { inASlot, nameSlotEngineOf, onTheSlot } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
 import { GameLog } from './game-log.js';
@@ -86,6 +98,12 @@ export async function startedUntilItRuns<Ran extends { readonly crashedStarts?: 
 interface RunOptions {
   readonly timeout?: { readonly ms: number; readonly said: string };
   readonly sample?: () => Promise<Sample>;
+  /**
+   * Windows only: start the engine on the hidden desktop, from [code]directory[/code], with the
+   * helper's files in [code]scratch[/code]. An engine that draws opens a window, which there
+   * neither shows nor takes the keyboard.
+   */
+  readonly desktop?: { readonly directory: string; readonly scratch: string };
 }
 
 /** How often an engine with a timeout is measured against it. */
@@ -105,6 +123,17 @@ export async function runEngine(
   options: RunOptions = {},
 ): Promise<EngineRun> {
   const signal = callSignal();
+  if (options.desktop !== undefined) {
+    const compiled = await ensureHelperCompiled();
+    if (compiled !== null) {
+      return {
+        log: new GameLog(),
+        exitCode: null,
+        exitSignal: null,
+        failure: `it could not be started on a desktop of its own: ${compiled}`,
+      };
+    }
+  }
   try {
     return await inASlot((lock) =>
       startedUntilItRuns(() => runStarted(executable, args, lock, options, signal), signal, crashedAtStart),
@@ -136,16 +165,57 @@ function runStarted(
   return new Promise((resolve) => {
     const log = new GameLog();
     let failure: string | null = null;
-    const child = spawnHidden(executable, args, {
+    let command = executable;
+    let spawned: readonly string[] = args;
+    let env = onTheSlot(process.env, lock);
+    let files: HelperFiles | null = null;
+    const { desktop } = options;
+    if (desktop !== undefined) {
+      const at = (name: string): string => join(desktop.scratch, name);
+      files = {
+        spec: at('spec'),
+        pid: at('pid'),
+        error: at('error'),
+        stop: '',
+        step: at('step'),
+        exit: at('exit'),
+      };
+      // A start after one that crashed must not read that one's files.
+      for (const file of [files.pid, files.error, files.step, files.exit]) {
+        rmSync(file, { force: true });
+      }
+      const wrapper = throughHelper(
+        { desktop: HIDDEN_DESKTOP, directory: desktop.directory, endsWithHelper: true },
+        executable,
+        args,
+        files,
+      );
+      command = wrapper.command;
+      spawned = wrapper.args;
+      env = { ...env, [DESKTOP_VARIABLE]: HIDDEN_DESKTOP };
+    }
+    const child = spawnHidden(command, spawned, {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: onTheSlot(process.env, lock),
+      env,
       ...(signal === undefined ? {} : { signal }),
     });
     belowNormal(child);
     const whole = holdExit(child.pid);
+    // The engine itself, which on the hidden desktop the helper starts and writes down.
+    const engineAt = (): number | undefined => {
+      if (files === null) {
+        return child.pid;
+      }
+      try {
+        const written = Number(readFileSync(files.pid, 'utf8').trim());
+        return Number.isInteger(written) && written > 0 ? written : undefined;
+      } catch {
+        return undefined;
+      }
+    };
     // The lock names this process, and what the engine starts runs on its slot only when it names
     // the engine too.
-    if (child.pid !== undefined) {
+    if (child.pid !== undefined && files === null) {
       void nameSlotEngineOf(lock, process.pid, child.pid);
     }
     child.stdout.on('data', (chunk: Buffer) => {
@@ -156,14 +226,28 @@ function runStarted(
     });
     const closed = { now: false };
     const { timeout } = options;
-    const { pid } = child;
-    if (timeout !== undefined && pid !== undefined) {
+    let pid = engineAt();
+    const found = (engine: number): void => {
+      watching(engine, true);
+      if (files !== null) {
+        void nameSlotEngineOf(lock, process.pid, engine);
+      }
+    };
+    if (pid !== undefined) {
+      found(pid);
+    }
+    if (timeout !== undefined && child.pid !== undefined) {
       const sample = options.sample ?? sampled;
-      watching(pid, true);
       void (async () => {
         const spent = new Spent(nowSeconds(), await sample(), pid);
         while (!closed.now) {
           await delay(MEASURE_MS);
+          if (pid === undefined) {
+            pid = engineAt();
+            if (pid !== undefined) {
+              found(pid);
+            }
+          }
           spent.counted(await sample(), pid);
           const at = nowSeconds();
           const past = spent.past(timeout.ms / 1000, at);
@@ -187,7 +271,19 @@ function runStarted(
       log.finish();
       // A process that never started has a libuv error number where its exit code would be.
       const started = child.pid !== undefined;
-      resolve({ log, exitCode: started ? whole(code) : null, exitSignal: closedBy, failure });
+      const told = started ? whole(code) : null;
+      if (files !== null) {
+        const helperSaid = helperFailure(files.error);
+        if (helperSaid !== null) {
+          failure ??= `it could not be started on a desktop of its own: ${helperSaid}`;
+        }
+      }
+      resolve({
+        log,
+        exitCode: files === null ? told : helperExit(files.exit, told),
+        exitSignal: closedBy,
+        failure,
+      });
     });
   });
 }
