@@ -10,6 +10,14 @@ const GdhSerialisation = preload("serialisation.gd")
 const GdhSettingReads = preload("setting_reads.gd")
 const GdhShapes = preload("value_shapes.gd")
 ## The words GDScript reserves, which no script could reach an autoload by.
+## The settings beside the autoloads whose file the engine loads at boot.
+const BOOT_LOADED: Array[String] = [
+	"internationalization/locale/translations",
+	"application/boot_splash/image",
+	"gui/theme/custom",
+	"gui/theme/custom_font",
+	"display/mouse_cursor/custom_image",
+]
 const GDSCRIPT_KEYWORDS: Array[String] = [
 	"and",
 	"as",
@@ -194,19 +202,17 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 			% [setting_path, "setting is" if near.size() == 1 else "settings are", ", ".join(near)]
 		)
 	# Written as given, since a file can be made after the setting names it, as an import makes a
-	# translation. Said, since until then the engine complains of it on every boot.
+	# translation.
 	var missing: Array[String] = _missing_files(final_value)
 	if not missing.is_empty():
 		answer["missing_files"] = missing
-		var said: String = (
-			"%s %s not exist, and the engine reports %s on every boot until %s"
-			% [
-				", ".join(missing),
-				"does" if missing.size() == 1 else "do",
-				"it" if missing.size() == 1 else "them",
-				"it does" if missing.size() == 1 else "they do",
-			]
-		)
+		var one: bool = missing.size() == 1
+		var said: String = "%s %s not exist" % [", ".join(missing), "does" if one else "do"]
+		if _loaded_at_boot(setting_path):
+			said += (
+				", and the engine reports %s on every boot until %s"
+				% ["it" if one else "them", "it does" if one else "they do"]
+			)
 		var made: Array[String] = _translations_made_by(missing)
 		if not made.is_empty():
 			said += (
@@ -238,6 +244,15 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 			% "; ".join(parts)
 		)
 	return answer
+
+
+## Whether the engine loads what [param setting_path] names as it boots, and so prints an error for
+## a
+## file that is not there. Measured on a headless boot: the icon, the bus layout and a setting only
+## a
+## tool reads print nothing.
+static func _loaded_at_boot(setting_path: String) -> bool:
+	return setting_path.begins_with("autoload/") or setting_path in BOOT_LOADED
 
 
 ## The res:// files [param value] names that are not on disk: a path, an autoload's starred path, or
