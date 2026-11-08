@@ -997,7 +997,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     [
       'engine_named',
       { class_name: 'Node2D', extends: 'Node' },
-      'class_name Node2D is the name of an engine class, which a script cannot take. Nothing was written.',
+      'class_name Node2D is the name of an engine class, which a script cannot take. Give it another class_name, or leave className out. Nothing was written.',
     ],
     [
       'misnamed_base',

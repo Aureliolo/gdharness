@@ -357,7 +357,11 @@ static func _header_refusal(named: String, base: String) -> String:
 	if not named.is_empty():
 		if ClassDB.class_exists(named):
 			return (
-				"class_name %s is the name of an engine class, which a script cannot take." % named
+				(
+					"class_name %s is the name of an engine class, which a script cannot take. "
+					+ "Give it another class_name, or leave className out."
+				)
+				% named
 			)
 		if declared.has(named):
 			return (
