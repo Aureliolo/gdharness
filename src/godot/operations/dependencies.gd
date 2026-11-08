@@ -200,8 +200,7 @@ func _loaded_and_missing(script: String) -> Array[String]:
 
 
 ## The files project.godot's settings name that are not on disk: an autoload, a registered
-## translation, an icon, an enabled plugin. Not the main scene, which has a check of its own, and
-## the engine reports each of the rest on every boot.
+## translation, an icon, an enabled plugin. Not the main scene, which has a check of its own.
 static func _named_by_settings() -> Array[String]:
 	var named: Array[String] = []
 	for line: String in FileAccess.get_file_as_string(PROJECT_FILE).split("\n"):

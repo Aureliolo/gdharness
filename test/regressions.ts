@@ -76722,6 +76722,18 @@ async function testAProjectsFilesAndLayersAreNamedWithNoEditor(): Promise<void> 
     await call('project_settings', { op: 'unset', setting: 'autoload/Ghost' });
     await setting('application/run/main_scene', 'res://main.tscn');
 
+    // A setting the engine never loads at boot names a missing file without a boot report claimed:
+    // one only a tool reads, and the icon, which a headless boot leaves unread.
+    for (const [name, value, path] of [
+      ['gdharness/tests/not_searched', ['res://tests/nightly'], 'res://tests/nightly'],
+      ['application/config/icon', 'res://gone_icon.png', 'res://gone_icon.png'],
+    ] as const) {
+      const unread = await setting(name, value);
+      assert.deepEqual(get(parseTextContent(unread), 'missing_files'), [path], textOf(unread) ?? '');
+      assert.equal(get(parseTextContent(unread), 'note'), `${path} does not exist.`, textOf(unread) ?? '');
+      await call('project_settings', { op: 'unset', setting: name });
+    }
+
     assert.equal(get(await statusOf('res://text/strings.csv'), 'status'), 'needs_reimport');
     const imported = await call('project_import', { op: 'reimport' });
     assert.deepEqual(
