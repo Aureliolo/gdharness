@@ -30,7 +30,9 @@ async function main(): Promise<void> {
   rmSync(root, { recursive: true, force: true });
   mkdirSync(root, { recursive: true });
 
-  const archive = await download(`https://github.com/${REPOSITORY}/archive/${COMMIT}.zip`);
+  // codeload, where github.com's archive address redirects: that address answered 502 to 504 while
+  // codeload served the same bytes.
+  const archive = await download(`https://codeload.github.com/${REPOSITORY}/zip/${COMMIT}`);
   const digest = createHash('sha256').update(archive).digest('hex');
   if (digest !== DIGEST) {
     throw new Error(

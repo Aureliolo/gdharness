@@ -492,6 +492,14 @@ static func _modification_problems(modifications: Array, declared: Dictionary) -
 					)
 				)
 			)
+		if (
+			GdhRead.as_bool(fields.get("isStatic", false))
+			and mod_type in ["add_constant", "add_signal"]
+		):
+			problems.append(
+				which + " is a " + mod_type.trim_prefix("add_") + " with isStatic, which only a "
+				+ "function or a variable takes"
+			)
 		if mod_name.is_empty():
 			problems.append(which + " has no name")
 			continue
@@ -617,6 +625,7 @@ func _add_variable(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 	# A hint can only mean an export, so a hint given alone writes one.
 	var is_export: bool = GdhRead.as_bool(mod.get("isExport", not export_hint.is_empty()))
 	var is_onready: bool = GdhRead.as_bool(mod.get("isOnready", false))
+	var is_static: bool = GdhRead.as_bool(mod.get("isStatic", false))
 
 	var var_line: String = ""
 
@@ -629,6 +638,8 @@ func _add_variable(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 	if is_onready:
 		var_line += "@onready "
 
+	if is_static:
+		var_line += "static "
 	var_line += "var " + var_name
 
 	# Every declaration this writes carries a type, so it parses in a project that treats an
@@ -648,9 +659,15 @@ func _add_variable(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 	# The first variable below the header or the signals is set apart from them by a blank line, as
 	# the style guide and gdformat lay a script out.
 	var above: String = lines[insert_line - 1].strip_edges() if insert_line > 0 else ""
-	if not above.is_empty() and not GdhPatterns.without_annotations(above).begins_with("var "):
+	if not above.is_empty() and not _declares_variable(above):
 		return insert_line + 1 if _insert(lines, insert_line, ["", var_line], placed) else -1
 	return insert_line if _insert(lines, insert_line, [var_line], placed) else -1
+
+
+# Whether [param line] declares a variable, static or not, past its annotations.
+static func _declares_variable(line: String) -> bool:
+	var bare: String = GdhPatterns.without_annotations(line.strip_edges())
+	return bare.begins_with("var ") or bare.begins_with("static var ")
 
 
 # The type name a constant expression evaluates to, or Variant when it is not one: a call
@@ -714,7 +731,8 @@ func _add_function(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 	for i: int in range(_blank_run(lines, insert_line - 1, -1), BLANKS_AROUND_FUNCTIONS):
 		func_lines.append("")
 	var declared_at: int = insert_line + func_lines.size()
-	func_lines.append("func " + func_name + "(" + func_params + ") -> " + return_type + ":")
+	var opening: String = "static func " if GdhRead.as_bool(mod.get("isStatic", false)) else "func "
+	func_lines.append(opening + func_name + "(" + func_params + ") -> " + return_type + ":")
 
 	# The body's statements relative to the function, whether or not the caller indented them for
 	# it: a body written with its tab already on came out two levels in. A blank line stays empty,
@@ -794,7 +812,7 @@ func _variable_insertion_point(lines: Array[String]) -> int:
 
 	after_header = _past_class_doc(lines, after_header)
 	for i: int in range(after_header, before_func):
-		if GdhPatterns.without_annotations(lines[i]).begins_with("var "):
+		if _declares_variable(lines[i]):
 			after_header = i + 1
 
 	return after_header

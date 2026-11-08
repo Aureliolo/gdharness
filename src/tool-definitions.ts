@@ -368,6 +368,11 @@ const SCRIPT_MODIFICATIONS: JsonSchema = {
           'Variables: the export hint, such as "range(0, 100)", written as @export_range(0, 100). Refused beside isExport false.',
       },
       isOnready: { type: 'boolean', description: 'Variables: add @onready.' },
+      isStatic: {
+        type: 'boolean',
+        description:
+          'Functions and variables: write static func or static var. Refused on a constant or a signal.',
+      },
       position: {
         type: 'string',
         enum: ['end', 'after_ready', 'after_init'],
@@ -477,7 +482,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'array',
         items: { type: 'string', enum: [...PROJECT_INFO_SECTIONS] },
         description:
-          "Extra sections: registered autoloads, the classes the project's scripts declare with class_name, each with its script, read from the files (those an addon declares counted per addon under inAddons, unless addonClasses names the addon), the input actions project.godot holds with their events (an engine ui_ action only when the project rebinds it, as engineAction), addons and whether each is enabled, export presets (runnable marks the one preset of its platform the editor's one-click deploy uses), the audio bus layout, a health report, or export validation. health and validation compile every script of the project in headless engines and name each that fails with its first error, each file a scene, resource or script refers to that does not exist, each input action a script reads by a name written in the call that neither the project nor the engine defines, with every line reading it, and each signal connection in a scene whose method or signal the node at its end does not have, or whose method takes a number of arguments other than the connection passes, judged from the node's type and scripts as their files are written.",
+          "Extra sections: registered autoloads, the classes the project's scripts declare with class_name, each with its script, read from the files (those an addon declares counted per addon under inAddons, unless addonClasses names the addon), the input actions project.godot holds with their events (an engine ui_ action only when the project rebinds it, as engineAction), addons and whether each is enabled, export presets (runnable marks the one preset of its platform the editor's one-click deploy uses), the audio bus layout, a health report, or export validation. health and validation compile every script of the project in headless engines and name each that fails with its first error, each file a scene, resource or script refers to that does not exist, each input action a script reads by a name written in the call that neither the project nor the engine defines, with every line reading it, and each signal connection in a scene whose method or signal the node at its end does not have, or whose method takes a number of arguments other than the connection passes, judged from the node's type and scripts as their files are written. health's score starts at 100 and loses points for each finding by its weight, 15 for a main scene that does not exist and 5 for a broken connection. Its grade is A from 90 down to F below 60, so a failed check can still grade A. Notes such as TODO in scripts under addons/ are left out, as their authors' work.",
       },
       addonClasses: {
         type: 'array',

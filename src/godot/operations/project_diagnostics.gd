@@ -83,6 +83,9 @@ func get_project_health(params: Dictionary) -> Dictionary:
 		var todo_count: int = 0
 
 		for script_path: String in script_files:
+			# An addon's notes are its authors' work, not the project's.
+			if script_path.begins_with("res://addons/"):
+				continue
 			var file: FileAccess = FileAccess.open(script_path, FileAccess.READ)
 			if file:
 				var content: String = file.get_as_text()
@@ -95,7 +98,9 @@ func get_project_health(params: Dictionary) -> Dictionary:
 		# "empty functions" read off a script ending in `pass` went with it: a virtual left for an
 		# override to fill ends that way and is exactly right.
 		if todo_count > 0:
-			recommendations.append("%d scripts have TODO or FIXME comments to look at" % todo_count)
+			recommendations.append(
+				"%d scripts outside addons/ have TODO or FIXME comments to look at" % todo_count
+			)
 
 		# Compiled by the server before this runs, since an engine stops at the first script that
 		# fails, and handed in. Without it the check read only comments and said "passed" beside
