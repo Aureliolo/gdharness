@@ -561,15 +561,22 @@ jobs:
 
       # The release archive, refused unless it matches the digest written here. The documented
       # install line fetches `releases/latest` and verifies nothing, which is not something to run
-      # in a job that holds id-token.
+      # in a job that holds id-token. It comes through the API, as every release file here does.
       - name: Install mcp-publisher
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          archive="${RUNNER_TEMP}/mcp-publisher_linux_amd64.tar.gz"
-          curl -fsSL --proto '=https' --tlsv1.2 --retry 6 --retry-all-errors \
-            --connect-timeout 20 --speed-limit 1024 --speed-time 60 -o "${archive}" \
-            "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_TAG}/mcp-publisher_linux_amd64.tar.gz"
+          name=mcp-publisher_linux_amd64.tar.gz
+          archive="${RUNNER_TEMP}/${name}"
+          api=(--proto '=https' --tlsv1.2 --retry 6 --retry-all-errors --connect-timeout 20
+            -H "Authorization: Bearer ${GH_TOKEN}")
+          url="$(curl -fsSL "${api[@]}" "https://api.github.com/repos/modelcontextprotocol/registry/releases/tags/${MCP_PUBLISHER_TAG}" |
+            jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .url')"
+          [[ -n "${url}" ]] || { echo "mcp-publisher ${MCP_PUBLISHER_TAG} has no ${name}." >&2; exit 1; }
+          curl -fsSL "${api[@]}" --speed-limit 1024 --speed-time 60 \
+            -H 'Accept: application/octet-stream' -o "${archive}" "${url}"
           echo "${MCP_PUBLISHER_SHA256}  ${archive}" | sha256sum --check --strict
           tar -xzf "${archive}" -C "${RUNNER_TEMP}" mcp-publisher
 

@@ -5179,8 +5179,8 @@ function testASceneTreeSaysWhatTheEngineDidNotRead(godotPath: string): void {
 
 /**
  * Validation and health name each scene connection whose method takes a number of arguments other
- * than the signal sends, less what it unbinds and plus what it binds, which fails on every emission
- * as a missing method does. Measured on the engine: defaults, a rest parameter, unbinds and a
+ * than the signal sends, less what it unbinds and plus its appended source and what it binds, which
+ * fails on every emission as a missing method does. Measured on the engine: defaults, a rest parameter, unbinds and a
  * signature over several lines all take the call, and a script signal is not held to the arguments
  * it declares, so one is not judged.
  */
@@ -5223,6 +5223,11 @@ function testAConnectionPassesWhatItsMethodTakes(godotPath: string): void {
       ['toggled', 'B', '.', 'remote_hit', ''],
       ['shouted', '.', '.', 'none', ''],
       ['timeout', 'T', 'T', 'start', ''],
+      // flags 18 holds append_source_object, which passes the emitter after what unbinds leaves.
+      ['pressed', 'B', '.', 'one', ' flags=18'],
+      ['toggled', 'B', '.', 'one', ' flags=18 unbinds=1'],
+      ['pressed', 'B', '.', 'two', ' flags=18 binds= [7]'],
+      ['timeout', 'T', '.', 'none', ' flags=18'],
     ];
     writeFileSync(
       join(dir, 'args', 'main.tscn'),
@@ -5245,6 +5250,7 @@ function testAConnectionPassesWhatItsMethodTakes(godotPath: string): void {
       `res://args/main.tscn connects T.timeout to Hub.rest_one, which takes at least 1 argument where the connection passes 0${fails}`,
       `res://args/main.tscn connects T.timeout to T.call_deferred, which takes at least 1 argument where the connection passes 0${fails}`,
       `res://args/main.tscn connects T.timeout to T.queue_free, which takes 0 arguments where the connection passes 1${fails}`,
+      `res://args/main.tscn connects T.timeout to Hub.none, which takes 0 arguments where the connection passes 1${fails}`,
     ].toSorted();
     const validated = runOperation(godotPath, dir, 'validate_project', {});
     const warned = asArray(get(validated, 'warnings'))

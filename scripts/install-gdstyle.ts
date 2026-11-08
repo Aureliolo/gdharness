@@ -15,7 +15,7 @@ import { appendFileSync, chmodSync, existsSync, mkdirSync, rmSync, writeFileSync
 import { dirname, join } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { toolHome } from '../src/cache-home.js';
-import { download, extract } from './install-godot.js';
+import { extract, releaseAsset } from './install-godot.js';
 
 const REPOSITORY = 'atelico/gdstyle';
 // renovate: datasource=github-releases depName=atelico/gdstyle
@@ -76,9 +76,7 @@ async function main(): Promise<void> {
   rmSync(root, { recursive: true, force: true });
   mkdirSync(root, { recursive: true });
 
-  const archive = await download(
-    `https://github.com/${REPOSITORY}/releases/download/${GDSTYLE_VERSION}/${pinned.asset}`,
-  );
+  const archive = await releaseAsset(REPOSITORY, GDSTYLE_VERSION, pinned.asset);
   const digest = createHash('sha256').update(archive).digest('hex');
   if (digest !== pinned.digest) {
     throw new Error(

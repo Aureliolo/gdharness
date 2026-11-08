@@ -226,9 +226,9 @@ Five shorter waits can be set the same way, in milliseconds:
 
 ## Named suites only
 
-`GDHARNESS_SUITE_FILES_ONLY=1` makes `project_test` refuse a directory, its default included. Your
-agent then runs only the suite files it names. Use it when whole runs happen somewhere else, such as
-a gate or CI.
+`GDHARNESS_SUITE_FILES_ONLY=1` makes `project_test` refuse a directory, its default included. The
+refusal names the suite files under it. Your agent then runs only the files it names. Use it when
+whole runs happen somewhere else, such as a gate or CI.
 
 ## Debug output
 

@@ -136,6 +136,62 @@ export async function download(
 }
 
 /**
+ * A file attached to a GitHub release, fetched through the API. The `releases/download` address on
+ * github.com answered 504 for over half an hour while the API served the same files.
+ *
+ * The API answers with a redirect to signed storage, which is followed without the token, since
+ * the token is for GitHub and the signed address needs none.
+ */
+export async function releaseAsset(
+  repository: string,
+  tag: string,
+  name: string,
+  fetching: (url: string, init: RequestInit) => Promise<Response> = (target, init) => fetch(target, init),
+  waiting?: (ms: number) => Promise<void>,
+): Promise<Buffer> {
+  const token = process.env['GH_TOKEN'] ?? process.env['GITHUB_TOKEN'];
+  const api: Record<string, string> = {
+    'x-github-api-version': '2022-11-28',
+    ...(token === undefined || token === '' ? {} : { authorization: `Bearer ${token}` }),
+  };
+  const release: unknown = JSON.parse(
+    (
+      await download(
+        `https://api.github.com/repos/${repository}/releases/tags/${tag}`,
+        async (url) => await fetching(url, { headers: { ...api, accept: 'application/vnd.github+json' } }),
+        waiting,
+      )
+    ).toString('utf8'),
+  );
+  const assets: unknown[] =
+    typeof release === 'object' && release !== null && 'assets' in release && Array.isArray(release.assets)
+      ? release.assets
+      : [];
+  const [address] = assets.flatMap((each) =>
+    typeof each === 'object' && each !== null && 'name' in each && each.name === name && 'url' in each
+      ? [each.url]
+      : [],
+  );
+  if (typeof address !== 'string') {
+    throw new Error(`Release ${tag} of ${repository} has no file named ${name}.`);
+  }
+  return await download(
+    address,
+    async (url) => {
+      const answer = await fetching(url, {
+        headers: { ...api, accept: 'application/octet-stream' },
+        redirect: 'manual',
+      });
+      const location = answer.headers.get('location');
+      return answer.status >= 300 && answer.status < 400 && location !== null
+        ? await fetching(location, { redirect: 'follow' })
+        : answer;
+    },
+    waiting,
+  );
+}
+
+/**
  * Where the end-of-central-directory record starts. It is the last thing in the file, 22 bytes
  * plus a comment of up to 65535, so the search starts at the end and walks back that far.
  */
@@ -284,7 +340,7 @@ async function main(): Promise<void> {
   mkdirSync(root, { recursive: true });
 
   const asset = build.asset(tag);
-  const archive = await download(`https://github.com/godotengine/godot/releases/download/${tag}/${asset}`);
+  const archive = await releaseAsset('godotengine/godot', tag, asset);
   const digest = createHash('sha512').update(archive).digest('hex');
   if (digest !== build.digest) {
     throw new Error(

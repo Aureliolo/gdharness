@@ -322,27 +322,32 @@ static func _misfit(source: Node, signal_name: String, callable: Callable, flags
 			for argument: Dictionary in info.get("args", []):
 				passed.append(argument)
 			break
-	if flags & Object.CONNECT_APPEND_SOURCE_OBJECT:
-		passed.append({ "name": "source", "type": TYPE_OBJECT, "class_name": source.get_class() })
 	var emitted: int = passed.size()
 	var unbound: int = callable.get_unbound_arguments_count()
 	passed = passed.slice(0, maxi(emitted - unbound, 0))
 	var from_signal: int = passed.size()
+	# The engine puts the source after what unbinds leaves, so no unbinds drops it.
+	var appended: bool = (flags & Object.CONNECT_APPEND_SOURCE_OBJECT) != 0
+	if appended:
+		passed.append({ "name": "source", "type": TYPE_OBJECT, "class_name": source.get_class() })
+	var before_binds: int = passed.size()
 	for bound: Variant in callable.get_bound_arguments():
 		var bound_class: String = ""
 		if bound is Object:
 			var object: Object = bound
 			bound_class = object.get_class()
 		passed.append({ "name": "bound", "type": typeof(bound), "class_name": bound_class })
-	var binds: int = passed.size() - from_signal
+	var binds: int = passed.size() - before_binds
 
 	# What the method is called with, said in the parts that make it: an answer counting the bound
 	# arguments among the signal's said the signal passed more than it declares.
 	var called: String = "%s passes %s" % [signal_name, _count(emitted)]
-	if unbound > 0 or binds > 0:
+	if unbound > 0 or appended or binds > 0:
 		var changed: Array[String] = []
 		if unbound > 0:
 			changed.append("unbinds %d" % unbound)
+		if appended:
+			changed.append("appends its source")
 		if binds > 0:
 			changed.append("binds %d" % binds)
 		called += (
@@ -378,11 +383,11 @@ static func _misfit(source: Node, signal_name: String, callable: Callable, flags
 		var parameter: Dictionary = parameters[at]
 		if not _unrelated(given, parameter):
 			continue
-		var whose: String = (
-			"%s passes argument %d" % [signal_name, at + 1]
-			if at < from_signal
-			else "the connection binds argument %d" % (at + 1)
-		)
+		var whose: String = "the connection binds argument %d" % (at + 1)
+		if at < from_signal:
+			whose = "%s passes argument %d" % [signal_name, at + 1]
+		elif at < before_binds:
+			whose = "the connection appends its source, argument %d," % (at + 1)
 		return (
 			"%s as %s, and %s takes it as %s: %s%s"
 			% [

@@ -119,6 +119,14 @@ export function scriptsWithoutCases(projectPath: string, asked: readonly string[
   );
 }
 
+/** The scripts under [param folders], res:// paths of directories in the project, that declare a case. */
+export function suiteFilesUnder(projectPath: string, folders: readonly string[]): string[] {
+  const scripts = new ProjectScripts(projectPath);
+  return suitesUnder(projectPath, folders)
+    .filter((path) => casesIn(scripts, path).length > 0)
+    .toSorted();
+}
+
 /** The suite files under [param asked], res:// paths of files or directories in the project. */
 function suitesUnder(projectPath: string, asked: readonly string[]): string[] {
   const scripts = projectFiles(projectPath, ['.gd']).map((path) => `res://${path}`);

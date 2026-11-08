@@ -8224,17 +8224,27 @@ async function testATestRunWithNothingToRunNamesTheRunnerToo(): Promise<void> {
 
 /**
  * With GDHARNESS_SUITE_FILES_ONLY set, project_test refuses a directory, the default included, and
- * runs a named suite file or case. With no gdUnit4 installed, a run that gets past the refusal
- * meets the runner's instead, which is also what a directory meets with the variable unset.
+ * runs a named suite file or case. The refusal names the suite files under the directory, scripts
+ * with no case left out. With no gdUnit4 installed, a run that gets past the refusal meets the
+ * runner's instead, which is also what a directory meets with the variable unset.
  */
 async function testASuiteFilesOnlyServerRefusesADirectory(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-files-only-'));
   writeFileSync(join(project, 'project.godot'), '; Engine configuration file.\nconfig_version=5\n');
-  mkdirSync(join(project, 'tests'));
+  const suite = 'extends GdUnitTestSuite\n\n\nfunc test_one() -> void:\n\tpass\n';
+  mkdirSync(join(project, 'tests', 'unit'), { recursive: true });
+  writeFileSync(join(project, 'tests', 'a_test.gd'), suite);
+  writeFileSync(join(project, 'tests', 'unit', 'b_test.gd'), suite);
   writeFileSync(
-    join(project, 'tests', 'a_test.gd'),
-    'extends GdUnitTestSuite\n\n\nfunc test_one() -> void:\n\tpass\n',
+    join(project, 'tests', 'helper.gd'),
+    'extends RefCounted\n\n\nfunc one() -> int:\n\treturn 1\n',
   );
+  mkdirSync(join(project, 'tools'));
+  writeFileSync(join(project, 'tools', 'helper.gd'), 'extends RefCounted\n');
+  mkdirSync(join(project, 'many'));
+  for (let index = 10; index < 32; index += 1) {
+    writeFileSync(join(project, 'many', `s${index}_test.gd`), suite);
+  }
   const filesOnly = new ServerProcess({
     env: { GDHARNESS_BRIDGE_PORT: String(await reservePort()), GDHARNESS_SUITE_FILES_ONLY: '1' },
   });
@@ -8250,7 +8260,20 @@ async function testASuiteFilesOnlyServerRefusesADirectory(): Promise<void> {
         }),
       ) ?? '';
     const refusal =
-      /^Refused a run of res:\/\/tests: GDHARNESS_SUITE_FILES_ONLY is set, so only named suite files run\. Name the suite file\.$/;
+      /^Refused a run of res:\/\/tests: GDHARNESS_SUITE_FILES_ONLY is set, so only named suite files run\. Name one of the suite files there: res:\/\/tests\/a_test\.gd, res:\/\/tests\/unit\/b_test\.gd\.$/;
+    const many = Array.from({ length: 20 }, (_, at) => `res://many/s${at + 10}_test.gd`).join(', ');
+    for (const [path, expected] of [
+      [
+        'res://tools',
+        'Refused a run of res://tools: GDHARNESS_SUITE_FILES_ONLY is set, so only named suite files run. It holds no suite file.',
+      ],
+      [
+        ['res://tools', 'res://many'],
+        `Refused a run of res://tools and res://many: GDHARNESS_SUITE_FILES_ONLY is set, so only named suite files run. Name one of the suite files there: ${many} and 2 more.`,
+      ],
+    ] as const) {
+      assert.equal(await said(filesOnly, path), expected);
+    }
     const noRunner = /^gdUnit4 is not installed in this project/;
     for (const path of [undefined, 'res://tests', 'tests/', ['res://tests/a_test.gd', 'res://tests']]) {
       const refused = await said(filesOnly, path);
@@ -70131,6 +70154,26 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     assert.equal(
       lineOf('tree_exited', 'scale_by'),
       '[connection signal="tree_exited" from="Emitter" to="Taker" method="scale_by" flags=18 binds= [2]]',
+    );
+    // The engine puts the source after what unbinds leaves, so unbinding the node child_entered_tree
+    // passes leaves take_node the emitter.
+    const sourced = await rewire('child_entered_tree', 'take_node', { flags: 16, unbinds: 1 });
+    assert.deepEqual(
+      [get(sourced, 'argumentsFit'), get(sourced, 'misfit')],
+      [true, undefined],
+      JSON.stringify(sourced),
+    );
+    const overfull = await rewire('visibility_changed', 'take_node', { flags: 16, binds: [3] });
+    assert.equal(
+      get(overfull, 'misfit'),
+      `visibility_changed passes no arguments and the connection appends its source and binds 1, so take_node is called with 2 arguments, and takes at most 1${fails}`,
+      JSON.stringify(overfull),
+    );
+    const sourceWrong = await rewire('ready', 'take', { flags: 16 });
+    assert.equal(
+      get(sourceWrong, 'misfit'),
+      `the connection appends its source, argument 1, as Node2D, and take takes it as amount: int${fails}`,
+      JSON.stringify(sourceWrong),
     );
     // A number past 2^53 stays the float JSON carried, since no int holds it as written.
     await rewire('died', 'take', { binds: [1e20] });

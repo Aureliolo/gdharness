@@ -11,7 +11,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { download, extract } from '../scripts/install-godot.js';
+import { download, extract, releaseAsset } from '../scripts/install-godot.js';
 import { sweep } from './support/sweep.js';
 import { buildZip } from './support/zip.js';
 
@@ -110,11 +110,75 @@ async function testADownloadWaitsOutAGatewayTimeout(): Promise<void> {
   assert.deepEqual(waited, [2_000, 4_000, 8_000, 16_000, 32_000], 'after the whole schedule');
 }
 
+async function testAReleaseFileComesThroughTheApi(): Promise<void> {
+  const saved = process.env['GH_TOKEN'];
+  process.env['GH_TOKEN'] = 'the-token';
+  const asked: { url: string; headers: Headers; redirect: string | undefined }[] = [];
+  const github = (url: string, init: RequestInit): Promise<Response> => {
+    asked.push({ url, headers: new Headers(init.headers), redirect: init.redirect });
+    if (url.endsWith('/releases/tags/v1')) {
+      return Promise.resolve(
+        Response.json({
+          assets: [{ name: 'tool.zip', url: 'https://api.github.com/repos/o/r/releases/assets/7' }],
+        }),
+      );
+    }
+    if (url.endsWith('/assets/7')) {
+      return Promise.resolve(
+        new Response(null, { status: 302, headers: { location: 'https://storage.invalid/signed?sig=1' } }),
+      );
+    }
+    return Promise.resolve(new Response('the tool'));
+  };
+  const instantly = (): Promise<void> => Promise.resolve();
+
+  try {
+    const got = await releaseAsset('o/r', 'v1', 'tool.zip', github, instantly);
+    assert.equal(got.toString('utf8'), 'the tool');
+    assert.deepEqual(
+      asked.map((each) => [
+        each.url,
+        each.headers.get('accept') ?? undefined,
+        each.headers.get('authorization') ?? undefined,
+        each.redirect,
+      ]),
+      [
+        [
+          'https://api.github.com/repos/o/r/releases/tags/v1',
+          'application/vnd.github+json',
+          'Bearer the-token',
+          undefined,
+        ],
+        [
+          'https://api.github.com/repos/o/r/releases/assets/7',
+          'application/octet-stream',
+          'Bearer the-token',
+          'manual',
+        ],
+        ['https://storage.invalid/signed?sig=1', undefined, undefined, 'follow'],
+      ],
+      'the release is looked up and its file fetched through the API, and the token never reaches storage',
+    );
+
+    await assert.rejects(
+      releaseAsset('o/r', 'v1', 'other.zip', github, instantly),
+      /^Error: Release v1 of o\/r has no file named other\.zip\.$/,
+    );
+  } finally {
+    if (saved === undefined) {
+      delete process.env['GH_TOKEN'];
+    } else {
+      process.env['GH_TOKEN'] = saved;
+    }
+  }
+}
+
 testRejectsZip64();
 testRejectsMisplacedLocalHeader();
 testRejectsSizeMismatch();
 testRejectsUnknownCompression();
 testRejectsNonZip();
 await testADownloadWaitsOutAGatewayTimeout();
+await testAReleaseFileComesThroughTheApi();
 
 console.log('zip extract tests passed');
