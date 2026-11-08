@@ -9615,7 +9615,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     );
     assert.equal(
       await nested({ type: 'add_variable', name: 'x', vartype: 'int' }),
-      'script_edit takes modifications[0] with only the fields type, name, params, returnType, body, varType, defaultValue, isExport, exportHint, isOnready, position, and vartype is none of them (the nearest is varType).',
+      'script_edit takes modifications[0] with only the fields type, name, params, returnType, body, varType, defaultValue, isExport, exportHint, isOnready, isStatic, position, and vartype is none of them (the nearest is varType).',
     );
     assert.equal(
       await call('scene_animation', {
@@ -28096,6 +28096,49 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         textOf(contradicted) ?? '',
         /^Nothing was changed: modification 1 has an exportHint and isExport false, and a hint is written only on an export/,
       );
+
+      // isStatic writes static on a function and a variable, the variable below a static one there.
+      writeFileSync(join(project, 'made', 'counts.gd'), 'extends RefCounted\n\nstatic var kept: int = 0\n');
+      const statics = await call('script_edit', {
+        projectPath: project,
+        op: 'modify',
+        scriptPath: 'res://made/counts.gd',
+        modifications: [
+          { type: 'add_variable', name: 'total', varType: 'int', defaultValue: '0', isStatic: true },
+          {
+            type: 'add_function',
+            name: 'doubled',
+            params: 'n: int',
+            returnType: 'int',
+            body: 'return n * 2',
+            isStatic: true,
+          },
+        ],
+      });
+      assert.equal(get(statics, 'parses'), true, JSON.stringify(statics));
+      assert.equal(
+        readFileSync(join(project, 'made', 'counts.gd'), 'utf8'),
+        'extends RefCounted\n\nstatic var kept: int = 0\nstatic var total: int = 0\n\n\nstatic func doubled(n: int) -> int:\n\treturn n * 2\n',
+      );
+      const staticSignal = await server.request(
+        'tools/call',
+        {
+          name: 'script_edit',
+          arguments: {
+            projectPath: project,
+            op: 'modify',
+            scriptPath: 'res://made/counts.gd',
+            modifications: [{ type: 'add_signal', name: 'counted', isStatic: true }],
+          },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      assert.equal(
+        textOf(staticSignal),
+        'Nothing was changed: modification 1 is a signal with isStatic, which only a function or a variable takes',
+      );
+      rmSync(join(project, 'made', 'counts.gd'), { force: true });
+      rmSync(join(project, 'made', 'counts.gd.uid'), { force: true });
 
       // A file that is not GDScript is refused with what does write it.
       const shaderText = 'shader_type canvas_item;\n\nuniform vec4 tint : source_color;\n';

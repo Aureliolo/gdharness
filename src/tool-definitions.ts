@@ -368,6 +368,11 @@ const SCRIPT_MODIFICATIONS: JsonSchema = {
           'Variables: the export hint, such as "range(0, 100)", written as @export_range(0, 100). Refused beside isExport false.',
       },
       isOnready: { type: 'boolean', description: 'Variables: add @onready.' },
+      isStatic: {
+        type: 'boolean',
+        description:
+          'Functions and variables: write static func or static var. Refused on a constant or a signal.',
+      },
       position: {
         type: 'string',
         enum: ['end', 'after_ready', 'after_init'],
