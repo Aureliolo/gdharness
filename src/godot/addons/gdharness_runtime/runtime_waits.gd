@@ -234,6 +234,12 @@ func _collect(id: int, timeout_ms: int) -> Dictionary:
 	}
 	if watch.catcher.fired:
 		answer["fired_after_ms"] = watch.catcher.fired_after_ms
+	else:
+		answer["note"] = (
+			"A watch hears the signal only from when it was armed, so one that fired before, such "
+			+ "as in the game's first frames, is not counted. Put back the state that sends it, "
+			+ "such as a position with runtime_invoke set, then arm a watch and collect it again"
+		)
 	if before:
 		answer["fired_before_wait"] = true
 	return answer

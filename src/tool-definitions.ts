@@ -2743,7 +2743,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         minimum: 1,
         ops: ['signal', 'recorded'],
         description:
-          'signal: the watch an earlier watch of a signal answered, in place of nodePath and signal. Answers at once, with fired_before_wait, when the signal fired after the watch was armed, and otherwise waits for it. times counts how often it fired, args is what the first carried, fired_after_ms the milliseconds from the arming to the first, and elapsed_ms how long the wait itself took. recorded: the watch an earlier watch of a property answered. The watch goes with the answer either way.',
+          'signal: the watch an earlier watch of a signal answered, in place of nodePath and signal. Answers at once, with fired_before_wait, when the signal fired after the watch was armed, and otherwise waits for it. times counts how often it fired, args is what the first carried, fired_after_ms the milliseconds from the arming to the first, and elapsed_ms how long the wait itself took. A watch that never fired says that one fired before the arming is not counted. recorded: the watch an earlier watch of a property answered. The watch goes with the answer either way.',
       },
       property: {
         type: 'string',

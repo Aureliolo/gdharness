@@ -20137,6 +20137,18 @@ async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
     assert.match(collected, /"fired": true/, collected);
     assert.match(collected, /"fired_before_wait": true/, collected);
     assert.match(collected, /"times": 1/, collected);
+    assert.doesNotMatch(collected, /hears the signal only from when it was armed/, collected);
+    // A watch armed after the signal went has nothing to collect, and says why.
+    const late = await call('runtime_wait', { op: 'watch', nodePath: '/root/Main/Near', signal: 'pressed' });
+    const lateWatch = /"watch": (\d+)/.exec(late)?.[1];
+    assert.ok(lateWatch !== undefined, late);
+    const missed = await call('runtime_wait', { op: 'signal', watch: Number(lateWatch), timeoutMs: 200 });
+    assert.match(missed, /"fired": false/, missed);
+    assert.match(
+      missed,
+      /A watch hears the signal only from when it was armed, so one that fired before, such as in the game's first frames, is not counted\. Put back the state that sends it/,
+      missed,
+    );
     assert.match(
       await call('runtime_wait', { op: 'signal', timeoutMs: 100 }),
       /runtime_wait signal needs nodePath and signal, or the watch an earlier runtime_wait watch answered/,
