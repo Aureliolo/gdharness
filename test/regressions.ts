@@ -63127,6 +63127,26 @@ async function testAWriteReadsWhatThePropertyDeclares(): Promise<void> {
       await axis({ zzz: 1 }),
       'Node2D has no property zzz. editor_classes info with className Node2D and includeInherited true lists the ones it has.',
     );
+    // A property the class lacks and a class under it declares is a node of the wrong class.
+    const plain = async (properties: Record<string, unknown>): Promise<string> =>
+      textOf(
+        await request('scene_node', {
+          op: 'add',
+          scenePath: 'res://speaker.tscn',
+          parentNodePath: '.',
+          nodeType: 'Node',
+          nodeName: 'Plain',
+          properties,
+        }),
+      ) ?? '';
+    assert.equal(
+      await plain({ anchor_left: 0.5 }),
+      'Node has no property anchor_left. Control declares it, and the classes under it have it too, such as BaseButton or ColorRect.',
+    );
+    assert.match(
+      await plain({ modulate: { _type: 'Color', r: 1, g: 0, b: 0, a: 1 } }),
+      /^Node has no property modulate\. CanvasItem, \w+, \w+ and \d+ more declare it\.$/,
+    );
     assert.equal(
       await axis({ 'position:z': 1, visible: false }),
       'Node2D.position is a Vector2, so it has no z. It has x, y. None of the 2 properties given was written.',
