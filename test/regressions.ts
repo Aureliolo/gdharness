@@ -8223,6 +8223,53 @@ async function testATestRunWithNothingToRunNamesTheRunnerToo(): Promise<void> {
 }
 
 /**
+ * With GDHARNESS_SUITE_FILES_ONLY set, project_test refuses a directory, the default included, and
+ * runs a named suite file or case. With no gdUnit4 installed, a run that gets past the refusal
+ * meets the runner's instead, which is also what a directory meets with the variable unset.
+ */
+async function testASuiteFilesOnlyServerRefusesADirectory(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-files-only-'));
+  writeFileSync(join(project, 'project.godot'), '; Engine configuration file.\nconfig_version=5\n');
+  mkdirSync(join(project, 'tests'));
+  writeFileSync(
+    join(project, 'tests', 'a_test.gd'),
+    'extends GdUnitTestSuite\n\n\nfunc test_one() -> void:\n\tpass\n',
+  );
+  const filesOnly = new ServerProcess({
+    env: { GDHARNESS_BRIDGE_PORT: String(await reservePort()), GDHARNESS_SUITE_FILES_ONLY: '1' },
+  });
+  const plain = new ServerProcess({ env: { GDHARNESS_BRIDGE_PORT: String(await reservePort()) } });
+  try {
+    await filesOnly.initialize('regression-test');
+    await plain.initialize('regression-test');
+    const said = async (server: ServerProcess, path?: unknown): Promise<string> =>
+      textOf(
+        await server.request('tools/call', {
+          name: 'project_test',
+          arguments: { projectPath: project, ...(path === undefined ? {} : { path }) },
+        }),
+      ) ?? '';
+    const refusal =
+      /^Refused a run of res:\/\/tests: GDHARNESS_SUITE_FILES_ONLY is set, so only named suite files run\. Name the suite file\.$/;
+    const noRunner = /^gdUnit4 is not installed in this project/;
+    for (const path of [undefined, 'res://tests', 'tests/', ['res://tests/a_test.gd', 'res://tests']]) {
+      const refused = await said(filesOnly, path);
+      assert.match(refused, refusal, `${JSON.stringify(path)}: ${refused}`);
+      const ran = await said(plain, path);
+      assert.match(ran, noRunner, `unset, ${JSON.stringify(path)}: ${ran}`);
+    }
+    for (const path of ['res://tests/a_test.gd', 'res://tests/a_test.gd:test_one']) {
+      const answer = await said(filesOnly, path);
+      assert.match(answer, noRunner, `${path}: ${answer}`);
+    }
+  } finally {
+    await filesOnly.stop();
+    await plain.stop();
+    sweep(project);
+  }
+}
+
+/**
  * Completions are narrowed to the part of a name written before the position, and capped.
  *
  * Godot's language server offers the whole scope and leaves narrowing to the editor, so passed
@@ -66488,7 +66535,10 @@ async function testARescanTheEditorDidNotAnswerIsFinishedByTheNext(): Promise<vo
       join(project, 'addons', 'kit', 'spots', 'spots.gd'),
       'class_name SharedSpots\nextends RefCounted\n',
     );
-    writeFileSync(join(project, 'board.gd'), 'extends Node\n\n\nfunc _ready() -> void:\n\tprint(SharedSpots)\n');
+    writeFileSync(
+      join(project, 'board.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tprint(SharedSpots)\n',
+    );
     imports = { classes: ['SharedSpots'], ms: 7_000 };
     const outlasted = await rescan(15_000);
     assert.equal(
@@ -76098,7 +76148,11 @@ async function testTheProjectsOwnClassesAreListedAndAnAddonsCounted(): Promise<v
     await server.initialize('classes-engine');
     assert.deepEqual(await section({}), [['Hero res://hero.gd'], { kit: 2, tool: 1 }, 4]);
     assert.deepEqual(await section({ addonClasses: ['kit'] }), [
-      ['Hero res://hero.gd', 'SharedPart res://addons/kit/part.gd', 'SharedWhole res://addons/kit/deep/whole.gd'],
+      [
+        'Hero res://hero.gd',
+        'SharedPart res://addons/kit/part.gd',
+        'SharedWhole res://addons/kit/deep/whole.gd',
+      ],
       { tool: 1 },
       4,
     ]);
@@ -78995,6 +79049,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACallMetByAnEditorQuittingUnusedIsAskedAgain,
   testCompletionsAreNarrowedToWhatWasTyped,
   testATestRunWithNothingToRunNamesTheRunnerToo,
+  testASuiteFilesOnlyServerRefusesADirectory,
   testEveryGreetingFieldIsRequired,
   testAnEditorOfAnotherReleaseIsAskedNothing,
   testACurrentAddonLackingAnOpSaysAScriptFailedToLoad,

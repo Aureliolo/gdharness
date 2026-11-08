@@ -7698,6 +7698,13 @@ class GodotServer {
     if (!paths.ok) {
       return this.createErrorResponse(paths.reason, PATH_SOLUTIONS);
     }
+    // For a setup that runs whole suites some other way and wants its callers to name suite files.
+    const folders = paths.value.filter((path) => !path.endsWith('.gd'));
+    if (folders.length > 0 && envValue('GDHARNESS_SUITE_FILES_ONLY') !== undefined) {
+      return this.createErrorResponse(
+        `Refused a run of ${folders.join(' and ')}: GDHARNESS_SUITE_FILES_ONLY is set, so only named suite files run. Name the suite file.`,
+      );
+    }
     // Before any engine starts, the class rebuild's included: a refused flag costs nothing.
     const flags = this.engineArguments(args);
     if (!flags.ok) {
