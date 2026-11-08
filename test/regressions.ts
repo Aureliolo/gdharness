@@ -47243,6 +47243,16 @@ async function testSuitesPlayInASceneTheProfilerSees(): Promise<void> {
         `the suite's own function, called once by its case: ${shown}`,
       );
       assert.equal(get(row('HeavyTest.step'), 'calls'), 4, `stepped once a frame, four times: ${shown}`);
+      // The directory's suites compiled as one script first, as gdharness test compiles them, so
+      // gdUnit4's scan finds each compiled. Each compiled alone, its loads took 274 ms here against
+      // 0.14 ms after a compile together of 46.
+      const together = row('compiled_together');
+      const loads = row('GdUnitTestSuiteScanner.load_with_disabled_warnings');
+      assert.equal(get(together, 'calls'), 1, shown);
+      assert.ok(
+        asNumber(get(loads, 'totalMs')) < asNumber(get(together, 'totalMs')),
+        `gdUnit4's loads took a fraction of the compile together: ${shown}`,
+      );
     } finally {
       await server.stop();
     }

@@ -170,7 +170,9 @@ static func started(given: PackedStringArray) -> GdhRunner:
 	if at >= 0:
 		runner.given = given.slice(at + 1)
 	if asked.has(TOGETHER):
-		runner.together = compiled_together(suites, [])
+		# Walked here, since editor_run hands the runner directories, and a directory left to
+		# gdUnit4's scan compiled each of its scripts on its own.
+		runner.together = compiled_together(scripts_in(suites), [])
 	var expected_out: String = argument_after(asked, EXPECTED_OUT)
 	if not expected_out.is_empty():
 		write_expected(expected_out, suites)
@@ -212,7 +214,7 @@ static func unread_off(
 ## two hundred suites compiled in a third of the time they took one at a time. The names are public,
 ## since a private one unread is a warning and every warning an error, and each a variable, since a
 ## class is no constant expression. A suite that does not compile fails here and again when gdUnit4
-## loads it, which reports it as it would have. A directory listed is left to gdUnit4 to walk.
+## loads it, which reports it as it would have.
 static func compiled_together(suites: PackedStringArray, classes: PackedStringArray) -> GDScript:
 	var lines: PackedStringArray = ["extends RefCounted"]
 	var at: int = 0
@@ -338,7 +340,7 @@ static func scripts_in(paths: PackedStringArray) -> PackedStringArray:
 	for path: String in paths:
 		if path.ends_with(".gd"):
 			var _script: bool = found.append(path)
-		else:
+		elif DirAccess.dir_exists_absolute(path):
 			var _directory: bool = pending.append(path.trim_suffix("/"))
 	while not pending.is_empty():
 		var directory: String = pending[pending.size() - 1]

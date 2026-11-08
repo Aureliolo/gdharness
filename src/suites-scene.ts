@@ -42,6 +42,9 @@ export function suitesSceneArgs(projectPath: string, suites: readonly string[]):
     suitesFile,
     '--html-report-off',
     '--junit-report-off',
+    // As gdharness test runs them, so a profile shows the start-up a test engine pays: compiled
+    // one at a time, the suites cost gdUnit4's scan several seconds more.
+    '--compile-together',
     '--gdh-gdunit',
     '-c',
     // Harmless in a window, and a headless run is refused by gdUnit4 without it.
