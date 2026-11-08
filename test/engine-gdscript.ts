@@ -4940,8 +4940,12 @@ function testAFamilySaysWhatTheProjectSets(godotPath: string): void {
       false,
       `a setting the project changed: ${JSON.stringify(changed)}`,
     );
+    // With the default it left, as a single get names it.
+    assert.equal(typeof get(changed, 'default_value'), 'number', JSON.stringify(changed));
+    assert.notEqual(get(changed, 'default_value'), get(changed, 'value'), JSON.stringify(changed));
     const untouched = entry('application/run/', 'application/run/max_fps');
     assert.equal(get(untouched, 'at_default'), true, `one it left alone: ${JSON.stringify(untouched)}`);
+    assert.equal(get(untouched, 'default_value'), undefined, JSON.stringify(untouched));
     const shipped = entry('input/', 'input/ui_accept');
     assert.equal(get(shipped, 'at_default'), true, `an action the engine ships: ${JSON.stringify(shipped)}`);
     const own = entry('input/', 'input/jump');

@@ -9615,7 +9615,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     );
     assert.equal(
       await nested({ type: 'add_variable', name: 'x', vartype: 'int' }),
-      'script_edit takes modifications[0] with only the fields type, name, params, returnType, body, varType, defaultValue, isExport, exportHint, isOnready, isStatic, position, and vartype is none of them (the nearest is varType).',
+      'script_edit takes modifications[0] with only the fields type, name, values, params, returnType, body, varType, defaultValue, isExport, exportHint, isOnready, isStatic, position, and vartype is none of them (the nearest is varType).',
     );
     assert.equal(
       await call('scene_animation', {
@@ -20057,7 +20057,7 @@ async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
       '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
         '[node name="Main" type="Control"]\nscript = ExtResource("1")\n\n' +
         '[node name="Near" type="Button" parent="."]\noffset_right = 30.0\noffset_bottom = 20.0\ntext = "Near"\n\n' +
-        '[node name="Far" type="Button" parent="."]\noffset_left = 100.0\noffset_top = 20.0\noffset_right = 160.0\noffset_bottom = 50.0\ntext = "Far"\n\n' +
+        '[node name="Far" type="Button" parent="."]\nunique_name_in_owner = true\noffset_left = 100.0\noffset_top = 20.0\noffset_right = 160.0\noffset_bottom = 50.0\ntext = "Far"\n\n' +
         '[node name="Beyond" type="Button" parent="."]\noffset_left = 900.0\noffset_top = 20.0\noffset_right = 960.0\noffset_bottom = 50.0\ntext = "Beyond"\n',
     );
     cpSync(
@@ -20137,6 +20137,35 @@ async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
     assert.match(collected, /"fired": true/, collected);
     assert.match(collected, /"fired_before_wait": true/, collected);
     assert.match(collected, /"times": 1/, collected);
+    assert.doesNotMatch(collected, /hears the signal only from when it was armed/, collected);
+    // A watch armed after the signal went has nothing to collect, and says why.
+    const late = await call('runtime_wait', { op: 'watch', nodePath: '/root/Main/Near', signal: 'pressed' });
+    const lateWatch = /"watch": (\d+)/.exec(late)?.[1];
+    assert.ok(lateWatch !== undefined, late);
+    const missed = await call('runtime_wait', { op: 'signal', watch: Number(lateWatch), timeoutMs: 200 });
+    assert.match(missed, /"fired": false/, missed);
+    assert.match(
+      missed,
+      /A watch hears the signal only from when it was armed, so one that fired before, such as in the game's first frames, is not counted\. Put back the state that sends it/,
+      missed,
+    );
+
+    // A unique name is the current scene's, as the scene's own scripts read it.
+    const renamed = await call('runtime_invoke', {
+      op: 'set',
+      nodePath: '%Far',
+      property: 'text',
+      value: 'Farther',
+    });
+    assert.doesNotMatch(renamed, /"type": "error"|Node not found/, renamed);
+    assert.match(
+      await call('runtime_inspect', { op: 'property', nodePath: '/root/Main/Far', property: 'text' }),
+      /"value": "Farther"/,
+    );
+    assert.match(
+      await call('runtime_invoke', { op: 'set', nodePath: '%Gone', property: 'text', value: 'x' }),
+      /Node not found: %Gone\. A unique name is looked up in the current scene, \/root\/Main, whose unique names are %Far\./,
+    );
     assert.match(
       await call('runtime_wait', { op: 'signal', timeoutMs: 100 }),
       /runtime_wait signal needs nodePath and signal, or the watch an earlier runtime_wait watch answered/,
@@ -28139,6 +28168,63 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
       );
       rmSync(join(project, 'made', 'counts.gd'), { force: true });
       rmSync(join(project, 'made', 'counts.gd.uid'), { force: true });
+
+      // An enum goes after the signals and the enums there, before the constants, on one line, and
+      // a variable typed by it can come in the same call. A constant goes after a multi-line enum.
+      writeFileSync(
+        join(project, 'made', 'foe.gd'),
+        'extends Node\n\nsignal died\n\nenum Mood {\n\tCALM,\n\tANGRY,\n}\n\nconst SPEED: float = 1.0\n',
+      );
+      const enumerated = await call('script_edit', {
+        projectPath: project,
+        op: 'modify',
+        scriptPath: 'res://made/foe.gd',
+        modifications: [
+          { type: 'add_variable', name: 'state', varType: 'State', isExport: true },
+          { type: 'add_enum', name: 'State', values: ['IDLE', 'CHASE', 'FLEE = 5'] },
+          { type: 'add_constant', name: 'RANGE', varType: 'int', defaultValue: '3' },
+        ],
+      });
+      assert.equal(get(enumerated, 'parses'), true, JSON.stringify(enumerated));
+      assert.equal(
+        readFileSync(join(project, 'made', 'foe.gd'), 'utf8'),
+        'extends Node\n\nsignal died\n\nenum Mood {\n\tCALM,\n\tANGRY,\n}\nenum State { IDLE, CHASE, FLEE = 5 }\n\nconst SPEED: float = 1.0\nconst RANGE: int = 3\n\n@export var state: State\n',
+      );
+      for (const [modification, refusal] of [
+        [
+          { type: 'add_enum', name: 'Empty' },
+          'modification 1 is an enum with no values, the members it declares',
+        ],
+        [
+          { type: 'add_enum', name: 'Odd', values: ['A', '2B'] },
+          "modification 1 has the enum member '2B', which is not a name or a name with its value",
+        ],
+        [
+          { type: 'add_enum', name: 'Kept', values: ['A'], isStatic: true },
+          'modification 1 is an enum with isStatic, which only a function or a variable takes',
+        ],
+        [
+          { type: 'add_enum', name: 'Mood', values: ['A'] },
+          'modification 1 adds Mood, and the script already declares enum Mood on line 5. modify only adds members. To change one the script declares already, edit its lines in the file',
+        ],
+      ] as const) {
+        const refused = await server.request(
+          'tools/call',
+          {
+            name: 'script_edit',
+            arguments: {
+              projectPath: project,
+              op: 'modify',
+              scriptPath: 'res://made/foe.gd',
+              modifications: [modification],
+            },
+          },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        assert.equal(textOf(refused), `Nothing was changed: ${refusal}`, JSON.stringify(modification));
+      }
+      rmSync(join(project, 'made', 'foe.gd'), { force: true });
+      rmSync(join(project, 'made', 'foe.gd.uid'), { force: true });
 
       // A file that is not GDScript is refused with what does write it.
       const shaderText = 'shader_type canvas_item;\n\nuniform vec4 tint : source_color;\n';

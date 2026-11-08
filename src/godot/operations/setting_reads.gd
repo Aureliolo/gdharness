@@ -88,6 +88,8 @@ static func under(prefix: String, values: GdhSerialisation) -> Dictionary:
 		var default_value: Variant = ProjectSettings.property_get_revert(name)
 		if default_value != null:
 			described["at_default"] = value == default_value
+			if value != default_value:
+				described["default_value"] = values.serialize_value(default_value)
 		var base: String = override_base(name)
 		if not base.is_empty():
 			described["override_of"] = base
