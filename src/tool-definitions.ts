@@ -283,7 +283,7 @@ const ANIMATION_TRACK: JsonSchema = {
     nodePath: {
       type: 'string',
       description:
-        "Target node, relative to the AnimationPlayer's root_node, which is the player's parent unless the scene sets it.",
+        "Target node, relative to the AnimationPlayer's root_node, which is the player's parent unless the scene sets it. A property track takes Godot's own form too, \"Sprite2D:position\", in place of property.",
     },
     property: { type: 'string', description: 'For property tracks: the property to animate.' },
     update: {
@@ -2752,6 +2752,14 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['frames'],
         description: 'frames: how many to let pass, 1 to 600. More than that is refused.',
       },
+      seconds: {
+        type: 'number',
+        exclusiveMinimum: 0,
+        maximum: 120,
+        ops: ['seconds'],
+        description:
+          "seconds: how much of the game's own time to let pass, above 0 up to 120. It is scaled by Engine.time_scale, as the game's tweens and timers are, and refused when that makes it longer than 120 real seconds.",
+      },
       nodePath: {
         type: 'string',
         ops: ['signal', 'watch', 'until'],
@@ -2811,6 +2819,12 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
     requires: [],
     operations: {
       frames: { effect: 'read', summary: 'let frames pass', requires: ['frames'] },
+      seconds: {
+        effect: 'read',
+        summary:
+          "let seconds of the game's own time pass, which a headless game's frames are no measure of: it draws them far faster. Answers with the real milliseconds and the frames that passed. A paused game's wait still ends",
+        requires: ['seconds'],
+      },
       signal: {
         effect: 'read',
         summary: 'wait for a signal and answer with what it carried',

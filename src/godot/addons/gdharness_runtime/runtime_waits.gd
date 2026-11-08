@@ -15,6 +15,8 @@ const GdhValues = preload("runtime_values.gd")
 const CEILING_MSEC: int = 120000
 ## The most frames one wait may cover, which is about half a minute of a game drawing slowly.
 const MOST_FRAMES: int = 600
+## The most seconds one wait may take, of game time and of real time alike: CEILING_MSEC's.
+const MOST_SECONDS: int = 120
 ## How long a wait for words leaves between looks, as a multiple of what the last look took: nine
 ## gives looking about a tenth of the time.
 const LOOKS_APART: int = 9
@@ -96,6 +98,46 @@ func wait_frames(params: Dictionary) -> Dictionary:
 	for _frame: int in frames:
 		await _host.get_tree().process_frame
 	return { "type": "waited", "frames": frames, "elapsed_ms": Time.get_ticks_msec() - started }
+
+
+## Lets [code]seconds[/code] of the game's own time pass, as a SceneTreeTimer counts it: scaled by
+## Engine.time_scale, as the game's tweens, timers and smoothing are. A headless game draws far
+## more frames a second than a windowed one, so no count of frames is a stretch of its time.
+func wait_seconds(params: Dictionary) -> Dictionary:
+	# The server's schema holds seconds above 0 and up to MOST_SECONDS.
+	var seconds: float = GdhRead.as_float(params.get("seconds", 0.0))
+	var scale: float = Engine.time_scale
+	if scale <= 0.0 or seconds / scale > MOST_SECONDS:
+		return {
+			"type": "error",
+			"message": (
+				(
+					"seconds %s of game time takes longer than the %d real seconds a wait may "
+					+ "take at Engine.time_scale %s. Wait fewer seconds, or set "
+					+ "Engine.time_scale higher with runtime_invoke set first."
+				)
+				% [_as_sent(seconds), MOST_SECONDS, _as_sent(scale)]
+			),
+		}
+	var tree: SceneTree = _host.get_tree()
+	var started: int = Time.get_ticks_msec()
+	var process_before: int = Engine.get_process_frames()
+	var physics_before: int = Engine.get_physics_frames()
+	# Counted while the game is paused too, since a paused game's time stands still and the wait
+	# would never end.
+	await tree.create_timer(seconds, true).timeout
+	return {
+		"type": "waited",
+		"seconds": seconds,
+		"elapsed_ms": Time.get_ticks_msec() - started,
+		"process_frames": Engine.get_process_frames() - process_before,
+		"physics_frames": Engine.get_physics_frames() - physics_before,
+	}
+
+
+## [param number] as a caller wrote it: JSON has one kind of number, so 1 arrives as 1.0.
+static func _as_sent(number: float) -> String:
+	return str(int(number)) if number == floorf(number) else str(number)
 
 
 ## Waits for a signal to fire, and answers with what it carried, or that the time ran out. Given a

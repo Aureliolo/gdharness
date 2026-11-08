@@ -66,6 +66,27 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 		return scene.refuse(str(homes[1]))
 
 	var target_path: String = str(track.get("nodePath", ""))
+	# Godot writes a property track's path as "Sprite2D:position", the node and then the property.
+	var colon: int = target_path.find(":")
+	if colon >= 0:
+		var after: String = target_path.substr(colon + 1)
+		target_path = target_path.substr(0, colon)
+		var given: String = str(track.get("property", ""))
+		if str(track.get("type", "")) != "property":
+			return scene.refuse(
+				"track.nodePath names %s after its colon, and only a property track has a property."
+				% after
+			)
+		if not given.is_empty() and given != after:
+			return scene.refuse(
+				(
+					"track.nodePath names the property %s after its colon and track.property "
+					+ "names %s. Give one."
+				)
+				% [after, given]
+			)
+		track = track.duplicate()
+		track["property"] = after
 	if target_path.is_empty():
 		target_path = "."
 	var target: Node = _animated(player, target_path)

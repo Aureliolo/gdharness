@@ -17451,6 +17451,17 @@ class GodotServer {
         { tool: 'runtime_wait', op, patience: waited },
       );
     }
+    if (op === 'seconds') {
+      // As given, so a refusal names the value that was sent rather than a default.
+      const seconds = args['seconds'] ?? 0;
+      // As long as the game takes at its own time scale, which only the game knows and caps at the
+      // ceiling a wait has, and the standing patience on top for the answer to arrive.
+      return await this.handleRuntimeCommand(
+        'wait_seconds',
+        { ...whichGame(args), seconds },
+        { tool: 'runtime_wait', op, patience: 120_000 + this.runtimeTimeoutMs() },
+      );
+    }
 
     if (op === 'watch') {
       const property = readNonEmptyString(args, 'property');

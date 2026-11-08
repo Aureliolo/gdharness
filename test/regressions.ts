@@ -9820,7 +9820,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 158;
+const READ_IN_WORDS = 159;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -34445,6 +34445,26 @@ async function testAnEngineSingletonIsReachedAndOSIsNot(): Promise<void> {
       await call('runtime_wait', { op: 'frames', frames: 10 });
       const after = await frames();
       assert.ok(after >= before + 10, `Engine's frame count, read twice, grows: ${before} then ${after}`);
+      // The game's own time, which a headless game's frames are no measure of.
+      const waited = await call('runtime_wait', { op: 'seconds', seconds: 0.5 });
+      assert.match(waited, /^\{/, `the game waits seconds: ${waited}`);
+      const halfASecond = JSON.parse(waited) as unknown;
+      assert.ok(
+        Number(get(halfASecond, 'elapsed_ms')) >= 450 &&
+          Number(get(halfASecond, 'process_frames')) > 0 &&
+          get(halfASecond, 'seconds') === 0.5,
+        `half a second of game time passes: ${JSON.stringify(halfASecond)}`,
+      );
+      const tooLong = await call('runtime_wait', { op: 'seconds', seconds: 200 });
+      assert.match(tooLong, /^runtime_wait takes seconds of 120 or less, not 200\./, tooLong);
+      await call('runtime_invoke', { op: 'set', nodePath: 'Engine', property: 'time_scale', value: 0.001 });
+      const tooSlow = await call('runtime_wait', { op: 'seconds', seconds: 1 });
+      assert.match(
+        tooSlow,
+        /^seconds 1 of game time takes longer than the 120 real seconds a wait may take at Engine\.time_scale 0\.001\./,
+        tooSlow,
+      );
+      await call('runtime_invoke', { op: 'set', nodePath: 'Engine', property: 'time_scale', value: 1 });
 
       const written = await call('runtime_invoke', {
         op: 'set',
@@ -72715,12 +72735,39 @@ async function testAnAnimationsKeysAndLengthAreWrittenWithNoEditor(): Promise<vo
       textOf(await call({ ...rotaton, track: { ...rotaton.track, property: 'rotaton' } })),
       'Sprite2D has no property rotaton. The nearest it has are rotation, global_rotation.',
     );
+    // Godot's own form for a property track's path names the property after a colon. A property
+    // given beside it that disagrees is refused, and so is a colon on a method track.
+    const colonForm = {
+      op: 'add_track',
+      playerNodePath: 'Player',
+      animationName: 'spin',
+      track: { type: 'property', nodePath: 'Body:rotation', keyframes: [{ time: 0.05, value: 0.2 }] },
+    };
+    const colonKeyed = await written(colonForm);
+    assert.deepEqual(
+      [get(colonKeyed, 'trackIndex'), get(colonKeyed, 'existingTrack'), get(colonKeyed, 'keys')],
+      [0, true, 5],
+      JSON.stringify(colonKeyed),
+    );
+    assert.equal(
+      textOf(await call({ ...colonForm, track: { ...colonForm.track, property: 'scale' } })),
+      'track.nodePath names the property rotation after its colon and track.property names scale. Give one.',
+    );
+    assert.equal(
+      textOf(
+        await call({
+          ...colonForm,
+          track: { type: 'method', nodePath: 'Body:rotation', method: 'hide', keyframes: [{ time: 0.3 }] },
+        }),
+      ),
+      'track.nodePath names rotation after its colon, and only a property track has a property.',
+    );
     // Only the keys a call writes are judged against the length: the key at 2 s was named again on
     // every later call to the track, as though the one just written were past the end.
     const inside = await written(rotation([{ time: 0.1, value: 0.5 }]));
     assert.deepEqual(
       [get(inside, 'keys'), get(inside, 'pastLength')],
-      [5, undefined],
+      [6, undefined],
       JSON.stringify(inside),
     );
     // replaceKeys is how one key's value changes: it takes the old key's place, which is named with
@@ -72739,12 +72786,12 @@ async function testAnAnimationsKeysAndLengthAreWrittenWithNoEditor(): Promise<vo
         get(replacedKey, 'keys'),
         get(replacedKey, 'existingTrack'),
       ],
-      [[{ time: 0.5, was: 3.14 }], 1, 6, true],
+      [[{ time: 0.5, was: 3.14 }], 1, 7, true],
       JSON.stringify(replacedKey),
     );
     assert.match(
       fileOf('moves.tscn'),
-      /"times": PackedFloat32Array\(0, 0\.1, 0\.2, 0\.25, 0\.5, 2\),[\s\S]*?"values": \[0\.0, 0\.5, 2\.0, 1\.5, 1\.0, 6\.0\]/,
+      /"times": PackedFloat32Array\(0, 0\.05, 0\.1, 0\.2, 0\.25, 0\.5, 2\),[\s\S]*?"values": \[0\.0, 0\.2, 0\.5, 2\.0, 1\.5, 1\.0, 6\.0\]/,
       fileOf('moves.tscn'),
     );
 
