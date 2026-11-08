@@ -71282,6 +71282,18 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       JSON.stringify(scriptless),
     );
     assert.equal(asArray(get(scriptless, 'result', 'content')).length, 1, JSON.stringify(scriptless));
+    // A resource given an extension the engine cannot save it as is told the ones it can, before
+    // anything is written: an Image at a .png path failed with no more than "File unrecognized".
+    const picture =
+      textOf(
+        await call('resource_edit', { op: 'create', resourcePath: 'picture.png', resourceType: 'Image' }),
+      ) ?? '';
+    assert.match(
+      picture,
+      /^The engine saves an Image as (\.\w+, )*\.tres(, \.\w+)*, not \.png\. Give resourcePath one of those\.$/,
+      picture,
+    );
+    assert.ok(!existsSync(join(project, 'picture.png')), 'and nothing is written');
     // A folder the path names is made, and said to be.
     const mapped = await written('scene_create', {
       op: 'create',

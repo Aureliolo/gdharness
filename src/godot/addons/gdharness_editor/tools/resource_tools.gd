@@ -378,6 +378,22 @@ func create_resource(args: Dictionary) -> Dictionary:
 			),
 		}
 
+	# The engine names the extensions it can save the resource as. Any other one failed with no more
+	# than "File unrecognized", which named no way to save it.
+	var extensions: PackedStringArray = ResourceSaver.get_recognized_extensions(resource)
+	if not extensions.has(res_path.get_extension().to_lower()):
+		return {
+			"ok": false,
+			"error":
+			(
+				"The engine saves %s as %s, not .%s. Give resourcePath one of those."
+				% [
+					GdhRead.with_article(resource_type),
+					", ".join(Array(extensions).map(func(one: String) -> String: return "." + one)),
+					res_path.get_extension(),
+				]
+			),
+		}
 	var folder: String = GdhSceneFile.make_folder_for(res_path)
 	if not folder.is_empty():
 		return { "ok": false, "error": folder }
