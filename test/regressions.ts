@@ -46696,6 +46696,14 @@ async function testATestRunCutShortIsNamedForWhatItWasDoing(): Promise<void> {
           by(quick, 'engine') > Number(get(quick, 'time')) * 1000,
         `tookMsBy splits tookMs into its steps: ${JSON.stringify(quick)}`,
       );
+      // Within the engine step, what it spent before its first suite, the suites' compile part of it.
+      assert.ok(
+        by(quick, 'engineStart') > 0 &&
+          by(quick, 'engineCompile') >= 0 &&
+          by(quick, 'engineCompile') <= by(quick, 'engineStart') &&
+          by(quick, 'engineStart') < by(quick, 'engine'),
+        `tookMsBy names the engine's start within its step: ${JSON.stringify(quick)}`,
+      );
       const steady = await run('res://steady');
       assert.equal(
         get(steady, 'hung'),

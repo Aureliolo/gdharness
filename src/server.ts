@@ -8136,10 +8136,23 @@ class GodotServer {
     const tookMs = endedAt - began;
     // A run on a quiet project took nine minutes once, with no import and two seconds of suites, and
     // nothing in the answer said which step the time went to.
+    const casePrinted = withNestedErrors(
+      readRun(existsSync(engineLog) ? readFileSync(engineLog, 'utf8') : ''),
+      run.log.all,
+    );
+    const { started } = casePrinted;
     const tookMsBy = {
       classes: rebuiltAt - began,
       import: importedAt - rebuiltAt,
       engine: endedAt - importedAt,
+      // Parts of engine: what it spent before its first suite, the suites' compile included, which
+      // gdUnit4's case and suite times leave out.
+      ...(started === null
+        ? {}
+        : {
+            engineStart: Math.round(started.seconds * 1000),
+            engineCompile: Math.round(started.compiledSeconds * 1000),
+          }),
     };
     // Read again once the run is over, so a run that ended between two looks answers as one that
     // was stopped: whether it got through its suites first is a race, and what they said about
@@ -8152,10 +8165,6 @@ class GodotServer {
     const reportsDir = join(project.value.path, '.godot', ...ours.split('/'));
     let report: TestReport | null = null;
     let reportProblem: string | null = null;
-    const casePrinted = withNestedErrors(
-      readRun(existsSync(engineLog) ? readFileSync(engineLog, 'utf8') : ''),
-      run.log.all,
-    );
     const declaredErrors = readExpected(expectedFile);
     try {
       const written =
