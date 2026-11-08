@@ -24,7 +24,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { declaredClassLines } from '../src/class-cache.js';
 import {
@@ -2129,14 +2129,29 @@ function testOperations(godotPath: string, projectDir: string): void {
   const notedCount = (checked: unknown): number =>
     Number(
       asArray(get(checked, 'recommendations'))
-        .map((said) => /^(\d+) scripts have TODO or FIXME comments/.exec(String(said))?.[1])
+        .map((said) => /^(\d+) scripts outside addons\/ have TODO or FIXME comments/.exec(String(said))?.[1])
         .find(Boolean) ?? 0,
     );
+  const validatedIssues = (): number =>
+    asArray(get(operation('validate_project', {}), 'warnings'))
+      .filter((warning) => get(warning, 'check') === 'scripts')
+      .map((warning) => Number.parseInt(asString(get(warning, 'message')), 10))
+      .find(Boolean) ?? 0;
   const unnoted = notedCount(operation('get_project_health', { categories: ['scripts'] }));
+  const unvalidated = validatedIssues();
   const noted = join(projectDir, 'noted_for_later.gd');
+  // An addon's notes are its authors' work, so one there moves neither count.
+  const addonNoted = join(projectDir, 'addons', 'vendored', 'noted_upstream.gd');
+  mkdirSync(dirname(addonNoted), { recursive: true });
+  writeFileSync(addonNoted, 'extends Node\n\n\n# TODO: upstream work\nfunc later() -> void:\n\tpass\n');
   // No space after the mark, as the editor still highlights it.
   writeFileSync(noted, 'extends Node\n\n\n#TODO: something later\nfunc later() -> void:\n\tpass\n');
   try {
+    assert.equal(
+      validatedIssues(),
+      unvalidated + 1,
+      'validation counts the noted script outside addons/ alone',
+    );
     const withNotes = operation('get_project_health', { categories: ['scripts'] });
     assert.equal(
       get(withNotes, 'checks', 'scripts', 'passed'),
@@ -2150,6 +2165,7 @@ function testOperations(godotPath: string, projectDir: string): void {
     );
   } finally {
     rmSync(noted);
+    rmSync(join(projectDir, 'addons', 'vendored'), { recursive: true, force: true });
   }
 
   // A main scene named by a UID nothing resolves is said to be that, not a file that does not exist.

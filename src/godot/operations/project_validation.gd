@@ -206,7 +206,12 @@ func validate_project(params: Dictionary) -> Dictionary:
 			var content: String = file.get_as_text()
 			file.close()
 
-			var noted: Array[String] = GdhPatterns.noted_work(content)
+			# An addon's notes are its authors' work, not the project's.
+			var noted: Array[String] = (
+				[] as Array[String]
+				if script_path.begins_with("res://addons/")
+				else GdhPatterns.noted_work(content)
+			)
 			if not noted.is_empty():
 				script_issues.append(
 					{ "path": script_path, "issue": "Contains TODO/FIXME comments" }
