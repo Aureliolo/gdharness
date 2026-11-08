@@ -55,6 +55,8 @@ jobs:
       # only way to know it is the one the repository pins. It exports GODOT_PATH.
       - name: Install Godot
         run: bun scripts/install-godot.ts
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       # The test runner project_test drives, pinned by commit and digest the same way. It
       # exports GDUNIT4_PATH, and the regression that needs it fails rather than skips here.
@@ -103,6 +105,8 @@ jobs:
 
       - name: Install Godot
         run: bun scripts/install-godot.ts
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Install gdUnit4
         run: bun scripts/install-gdunit4.ts

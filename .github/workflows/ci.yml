@@ -66,20 +66,26 @@ jobs:
       # the download and what is accepted is still one exact archive. Every pinned download in
       # this repository carries the same flags for the same reason.
       #
-      # Six retries on curl's own doubling wait, one second then two, four, up to thirty-two: a
-      # minute in all, which is what a gateway timeout on GitHub's download front takes to
-      # clear. A fixed two seconds between attempts gives up inside one.
+      # The file comes through the API, as every release file here does: the releases/download
+      # address on github.com answered 504 for over half an hour while the API served the same
+      # files. curl drops the token when the API redirects to signed storage.
       - name: Install uv
         env:
+          GH_TOKEN: ${{ github.token }}
           # renovate: datasource=github-release-attachments depName=astral-sh/uv versioning=semver
           UV_TAG: 0.13.6
           UV_SHA256: f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645
         run: |
           set -euo pipefail
-          archive="${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu.tar.gz"
-          curl -fsSL --proto '=https' --tlsv1.2 --retry 6 --retry-all-errors \
-            --connect-timeout 20 --speed-limit 1024 --speed-time 60 -o "${archive}" \
-            "https://github.com/astral-sh/uv/releases/download/${UV_TAG}/uv-x86_64-unknown-linux-gnu.tar.gz"
+          name=uv-x86_64-unknown-linux-gnu.tar.gz
+          archive="${RUNNER_TEMP}/${name}"
+          api=(--proto '=https' --tlsv1.2 --retry 6 --retry-all-errors --connect-timeout 20
+            -H "Authorization: Bearer ${GH_TOKEN}")
+          url="$(curl -fsSL "${api[@]}" "https://api.github.com/repos/astral-sh/uv/releases/tags/${UV_TAG}" |
+            jq -r --arg name "${name}" '.assets[] | select(.name == $name) | .url')"
+          [[ -n "${url}" ]] || { echo "uv ${UV_TAG} has no ${name}." >&2; exit 1; }
+          curl -fsSL "${api[@]}" --speed-limit 1024 --speed-time 60 \
+            -H 'Accept: application/octet-stream' -o "${archive}" "${url}"
           echo "${UV_SHA256}  ${archive}" | sha256sum --check --strict
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/uv-x86_64-unknown-linux-gnu" >> "${GITHUB_PATH}"
@@ -120,6 +126,8 @@ jobs:
 
       - name: Install gdstyle
         run: bun scripts/install-gdstyle.ts
+        env:
+          GH_TOKEN: ${{ github.token }}
 
       - name: Check formatting
         run: bun run format:gd:check
