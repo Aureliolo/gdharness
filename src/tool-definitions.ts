@@ -369,12 +369,17 @@ const SCRIPT_MODIFICATIONS: JsonSchema = {
       },
       isExport: {
         type: 'boolean',
-        description: 'Variables: add @export. Default true when exportHint is given.',
+        description: 'Variables: add @export. Default true when exportHint or exportGroup is given.',
       },
       exportHint: {
         type: 'string',
         description:
           'Variables: the export hint, such as "range(0, 100)", written as @export_range(0, 100). Refused beside isExport false.',
+      },
+      exportGroup: {
+        type: 'string',
+        description:
+          'Variables: the inspector group the export goes in, such as "Stats", "Stats/Loot" for a subgroup, or "" for none. The @export_group or @export_subgroup lines it needs are written above it. Without it, an export joins the group open where it lands, below the last variable, and modifications_applied names it under group. Refused beside isExport false.',
       },
       isOnready: { type: 'boolean', description: 'Variables: add @onready.' },
       isStatic: {
@@ -1588,7 +1593,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       structure: {
         effect: 'read',
         summary:
-          "functions (each parameter's default the source text after its =, so = null reads \"null\", and null for a parameter with none), variables (static ones marked is_static, and one written with := has the type of a literal or built-in constructor it is given, marked inferred, as a constant always does), signals, constants, enums (each with its members under values and their numbers under numbers, counted on from the last whole number the file gives, as the engine counts, and left out from one given an expression), inner_classes (each with its name, line and extends, and its own members in these same fields), class_name, extends, is_abstract and line_count, read from the file, and dependencies: the paths it loads or preloads as written, by a constant it declares too, and the paths it or an inner class extends by, then the scripts declaring each project class_name its code uses, which classes_used names with the class. autoloads_used names each autoload the code uses by its global name, with the autoload's script, which the project loads rather than this script, so it is not under dependencies. A member or inner class with a ## documentation comment directly above it carries the comment's text as doc, and the script's own, the ## block above class_name or extends or one followed by a blank line before any member, comes back as class_doc",
+          'functions (each parameter\'s default the source text after its =, so = null reads "null", and null for a parameter with none), variables (static ones marked is_static, and one written with := has the type of a literal or built-in constructor it is given, marked inferred, as a constant always does. An export in an inspector group names it under group, as "Stats/Loot" for a subgroup), signals, constants, enums (each with its members under values and their numbers under numbers, counted on from the last whole number the file gives, as the engine counts, and left out from one given an expression), inner_classes (each with its name, line and extends, and its own members in these same fields), class_name, extends, is_abstract and line_count, read from the file, and dependencies: the paths it loads or preloads as written, by a constant it declares too, and the paths it or an inner class extends by, then the scripts declaring each project class_name its code uses, which classes_used names with the class. autoloads_used names each autoload the code uses by its global name, with the autoload\'s script, which the project loads rather than this script, so it is not under dependencies. A member or inner class with a ## documentation comment directly above it carries the comment\'s text as doc, and the script\'s own, the ## block above class_name or extends or one followed by a blank line before any member, comes back as class_doc',
         requires: [],
       },
       symbols: {

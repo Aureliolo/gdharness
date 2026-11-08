@@ -66,6 +66,24 @@ static func annotations_on(line: String) -> Array[String]:
 	return found
 
 
+# The export group open after [param annotation], given [param group] open before it, as a path
+# such as "Stats/Loot", or "" for none. A category closes both levels, a group closes the subgroup,
+# and an empty name closes its own level. Any other annotation leaves the group as it was.
+static func group_after(annotation: String, group: String) -> String:
+	var kind: String = annotation.get_slice("(", 0)
+	if not kind in ["export_category", "export_group", "export_subgroup"]:
+		return group
+	var named: String = annotation.get_slice('"', 1) if annotation.contains('"') else ""
+	if kind == "export_category":
+		return ""
+	if kind == "export_group":
+		return named
+	var outer: String = group.get_slice("/", 0)
+	if named.is_empty():
+		return outer
+	return named if outer.is_empty() else outer + "/" + named
+
+
 # A line with its leading annotations taken off, for anything reading a script's header.
 #
 # Annotations may share a line with what they annotate: `@abstract class_name X` is one line in

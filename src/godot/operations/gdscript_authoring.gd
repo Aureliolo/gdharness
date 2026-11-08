@@ -265,14 +265,29 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 					+ " could not be placed"
 				)
 			)
-		placed.append({ "type": mod_type, "name": str(fields.get("name")), "index": at })
+		placed.append(
+			{
+				"type": mod_type,
+				"name": str(fields.get("name")),
+				"index": at,
+				"exported": mod_type == "add_variable" and lines[at].begins_with("@export"),
+			}
+		)
 
 	var modifications_applied: Array[Dictionary] = []
 	for entry: Dictionary in placed:
 		var index: int = entry["index"]
-		modifications_applied.append(
-			{ "type": entry["type"], "name": entry["name"], "line": index + 1 }
-		)
+		var applied: Dictionary = {
+			"type": entry["type"],
+			"name": entry["name"],
+			"line": index + 1,
+		}
+		# An export lands in the group open above it, so the answer names that group.
+		if entry["exported"]:
+			var group: String = group_open_at(lines, index)
+			if not group.is_empty():
+				applied["group"] = group
+		modifications_applied.append(applied)
 
 	file = FileAccess.open(full_script_path, FileAccess.WRITE)
 	if not file:
@@ -501,6 +516,14 @@ static func _modification_problems(modifications: Array, declared: Dictionary) -
 				)
 			)
 		if (
+			fields.has("exportGroup")
+			and fields.has("isExport")
+			and not GdhRead.as_bool(fields["isExport"])
+		):
+			problems.append(
+				which + " has an exportGroup and isExport false, and only an export is in a group"
+			)
+		if (
 			GdhRead.as_bool(fields.get("isStatic", false))
 			and mod_type in ["add_constant", "add_signal", "add_enum"]
 		):
@@ -706,8 +729,10 @@ func _add_variable(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 	var var_type: String = str(mod.get("varType", ""))
 	var default_value: String = str(mod.get("defaultValue", ""))
 	var export_hint: String = str(mod.get("exportHint", ""))
-	# A hint can only mean an export, so a hint given alone writes one.
-	var is_export: bool = GdhRead.as_bool(mod.get("isExport", not export_hint.is_empty()))
+	# A hint or a group can only mean an export, so either given alone writes one.
+	var is_export: bool = GdhRead.as_bool(
+		mod.get("isExport", not export_hint.is_empty() or mod.has("exportGroup"))
+	)
 	var is_onready: bool = GdhRead.as_bool(mod.get("isOnready", false))
 	var is_static: bool = GdhRead.as_bool(mod.get("isStatic", false))
 
@@ -740,12 +765,49 @@ func _add_variable(lines: Array[String], mod: Dictionary, placed: Array[Dictiona
 		var_line += ": Variant"
 
 	var insert_line: int = _variable_insertion_point(lines)
+	var block: Array[String] = []
+	if is_export and mod.has("exportGroup"):
+		block = _group_lines(group_open_at(lines, insert_line), str(mod["exportGroup"]))
+	block.append(var_line)
 	# The first variable below the header or the signals is set apart from them by a blank line, as
 	# the style guide and gdformat lay a script out.
 	var above: String = lines[insert_line - 1].strip_edges() if insert_line > 0 else ""
 	if not above.is_empty() and not _declares_variable(above):
-		return insert_line + 1 if _insert(lines, insert_line, ["", var_line], placed) else -1
-	return insert_line if _insert(lines, insert_line, [var_line], placed) else -1
+		block.push_front("")
+	if not _insert(lines, insert_line, block, placed):
+		return -1
+	return insert_line + block.size() - 1
+
+
+## The annotation lines that move the export group from [param open] to [param wanted], each a path
+## such as "Stats/Loot" or "" for none. None when they are the same.
+static func _group_lines(open: String, wanted: String) -> Array[String]:
+	wanted = wanted.trim_prefix("/").trim_suffix("/")
+	if wanted == open:
+		return []
+	if wanted.is_empty():
+		return ['@export_group("")']
+	var outer: String = wanted.get_slice("/", 0)
+	var inner: String = wanted.get_slice("/", 1) if wanted.contains("/") else ""
+	if outer == open.get_slice("/", 0) and not open.is_empty():
+		return ['@export_subgroup("%s")' % inner]
+	var opened: Array[String] = ['@export_group("%s")' % outer]
+	if not inner.is_empty():
+		opened.append('@export_subgroup("%s")' % inner)
+	return opened
+
+
+## The export group open above line [param end] of the script's own body, as a path such as
+## "Stats/Loot", or "" for none.
+static func group_open_at(lines: Array[String], end: int) -> String:
+	var group: String = ""
+	for i: int in range(mini(end, lines.size())):
+		var line: String = lines[i]
+		if line.begins_with("\t") or line.begins_with(" "):
+			continue
+		for one: String in GdhPatterns.annotations_on(GdhPatterns.without_comment(line)):
+			group = GdhPatterns.group_after(one, group)
+	return group
 
 
 # Whether [param line] declares a variable, static or not, past its annotations.

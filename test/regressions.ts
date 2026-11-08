@@ -9615,7 +9615,7 @@ async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
     );
     assert.equal(
       await nested({ type: 'add_variable', name: 'x', vartype: 'int' }),
-      'script_edit takes modifications[0] with only the fields type, name, values, params, returnType, body, varType, defaultValue, isExport, exportHint, isOnready, isStatic, position, and vartype is none of them (the nearest is varType).',
+      'script_edit takes modifications[0] with only the fields type, name, values, params, returnType, body, varType, defaultValue, isExport, exportHint, exportGroup, isOnready, isStatic, position, and vartype is none of them (the nearest is varType).',
     );
     assert.equal(
       await call('scene_animation', {
@@ -28269,6 +28269,81 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
       }
       rmSync(join(project, 'made', 'foe.gd'), { force: true });
       rmSync(join(project, 'made', 'foe.gd.uid'), { force: true });
+
+      // An export added below an open subgroup lands in it, and the answer and script_info name the
+      // group. exportGroup moves an export to the group named, "" being none.
+      const grouped = join(project, 'made', 'loot.gd');
+      writeFileSync(
+        grouped,
+        'extends Node\n\n@export_group("Stats")\n@export var health: int = 1\n@export_subgroup("Loot")\n@export var drop_chance: float = 0.5\n',
+      );
+      const placedIn = async (modification: Record<string, unknown>): Promise<unknown> => {
+        const answer = await call('script_edit', {
+          projectPath: project,
+          op: 'modify',
+          scriptPath: 'res://made/loot.gd',
+          modifications: [modification],
+        });
+        assert.equal(get(answer, 'parses'), true, JSON.stringify(answer));
+        return get(answer, 'modifications_applied');
+      };
+      assert.deepEqual(
+        await placedIn({ type: 'add_variable', name: 'gold', varType: 'int', isExport: true }),
+        [{ type: 'add_variable', name: 'gold', line: 7, group: 'Stats/Loot' }],
+      );
+      assert.deepEqual(
+        await placedIn({ type: 'add_variable', name: 'armour', varType: 'int', exportGroup: 'Stats' }),
+        [{ type: 'add_variable', name: 'armour', line: 9, group: 'Stats' }],
+      );
+      assert.deepEqual(
+        await placedIn({ type: 'add_variable', name: 'lore', varType: 'String', exportGroup: '' }),
+        [{ type: 'add_variable', name: 'lore', line: 11 }],
+      );
+      assert.deepEqual(
+        await placedIn({ type: 'add_variable', name: 'speed', varType: 'float', exportGroup: 'Motion/Air' }),
+        [{ type: 'add_variable', name: 'speed', line: 14, group: 'Motion/Air' }],
+      );
+      assert.equal(
+        readFileSync(grouped, 'utf8'),
+        'extends Node\n\n@export_group("Stats")\n@export var health: int = 1\n@export_subgroup("Loot")\n@export var drop_chance: float = 0.5\n@export var gold: int\n@export_subgroup("")\n@export var armour: int\n@export_group("")\n@export var lore: String\n@export_group("Motion")\n@export_subgroup("Air")\n@export var speed: float\n',
+      );
+      const groupedInfo = await call('script_info', {
+        projectPath: project,
+        op: 'structure',
+        scriptPath: 'res://made/loot.gd',
+      });
+      assert.deepEqual(
+        asArray(get(groupedInfo, 'variables')).map((each) => [get(each, 'name'), get(each, 'group')]),
+        [
+          ['health', 'Stats'],
+          ['drop_chance', 'Stats/Loot'],
+          ['gold', 'Stats/Loot'],
+          ['armour', 'Stats'],
+          ['lore', undefined],
+          ['speed', 'Motion/Air'],
+        ],
+      );
+      const notExported = await server.request(
+        'tools/call',
+        {
+          name: 'script_edit',
+          arguments: {
+            projectPath: project,
+            op: 'modify',
+            scriptPath: 'res://made/loot.gd',
+            modifications: [
+              { type: 'add_variable', name: 'hidden', varType: 'int', exportGroup: 'Stats', isExport: false },
+            ],
+          },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      assert.equal(
+        textOf(notExported),
+        'Nothing was changed: modification 1 has an exportGroup and isExport false, and only an export is in a group',
+      );
+      rmSync(grouped, { force: true });
+      rmSync(`${grouped}.uid`, { force: true });
 
       // A file that is not GDScript is refused with what does write it.
       const shaderText = 'shader_type canvas_item;\n\nuniform vec4 tint : source_color;\n';
