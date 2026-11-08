@@ -46,7 +46,7 @@
   ],
   "customManagers": [
     {
-      "description": "A version with the SHA-256 or SHA-512 of the file it names on the next line: Bun, uv, actionlint and the engine. The tag and the digest move together, and the datasource finds the new digest in the checksum file the release publishes.",
+      "description": "A version with the SHA-256 or SHA-512 of the file it names on the next line: Bun, uv, actionlint, mcp-publisher, syft and the engine. The tag and the digest move together, and the datasource finds the new digest in the checksum file the release publishes.",
       "customType": "regex",
       "managerFilePatterns": ["/^\\.github/.+\\.ya?ml$/", "/^scripts/.+\\.ts$/"],
       "matchStrings": [
