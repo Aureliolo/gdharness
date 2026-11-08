@@ -255,6 +255,9 @@ static func near_property(said: String, target: Object, property: String) -> Str
 			names.append(str(declared.get("name", "")))
 		if usage & PROPERTY_USAGE_SCRIPT_VARIABLE and not usage & headings:
 			scripted.append(str(declared.get("name", "")))
+	var below: String = _declared_below(target.get_class(), property)
+	if not below.is_empty():
+		return "%s %s" % [ended(said), below]
 	var close: PackedStringArray = nearest(property, PackedStringArray(names))
 	if not close.is_empty():
 		return (
@@ -275,6 +278,48 @@ static func near_property(said: String, target: Object, property: String) -> Str
 		)
 	scripted.sort()
 	return "%s Its script declares %s" % [ended(said), ", ".join(PackedStringArray(scripted))]
+
+
+## Which engine classes inheriting [param type] declare [param property], or empty when none does.
+## A modulate on a plain Node was refused with the script's names, when the property was right and
+## the class was not. Only the highest declaring classes are named, since every class under one has
+## it too, and the editor's own classes are left out, as no scene or resource holds one.
+static func _declared_below(type: String, property: String) -> String:
+	var declaring: Array[String] = []
+	for inheriting: String in ClassDB.get_inheriters_from_class(type):
+		if inheriting.begins_with("Editor"):
+			continue
+		for declared: Dictionary in ClassDB.class_get_property_list(inheriting, true):
+			if str(declared.get("name", "")) == property:
+				declaring.append(inheriting)
+				break
+	var highest: Array[String] = []
+	for one: String in declaring:
+		var above: String = ClassDB.get_parent_class(one)
+		while above != type and not declaring.has(above):
+			above = ClassDB.get_parent_class(above)
+		if above == type:
+			highest.append(one)
+	highest.sort()
+	if highest.size() > 1:
+		var named: String = ", ".join(PackedStringArray(highest.slice(0, 3)))
+		if highest.size() > 3:
+			named += " and %d more" % (highest.size() - 3)
+		return "%s declare it" % named
+	if highest.is_empty():
+		return ""
+	var declarer: String = highest[0]
+	var made: Array[String] = []
+	for child: String in ClassDB.get_inheriters_from_class(declarer):
+		if ClassDB.get_parent_class(child) == declarer and ClassDB.can_instantiate(child):
+			made.append(child)
+	made.sort()
+	if made.is_empty():
+		return "%s declares it, and the classes under it have it too" % declarer
+	return (
+		"%s declares it, and the classes under it have it too, such as %s"
+		% [declarer, " or ".join(PackedStringArray(made.slice(0, 2)))]
+	)
 
 
 ## How [param target] keeps the list [param property] names, when that is the label of one of the
