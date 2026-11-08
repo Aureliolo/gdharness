@@ -72,6 +72,11 @@ static func node_at(root: Node, path: String) -> Dictionary:
 		}
 
 	var node: Node = root.get_node_or_null(path)
+	# A unique name is the current scene's, as get_node("%Name") reads it in the scene's scripts.
+	if node == null and path.begins_with("%") and root.is_inside_tree():
+		var scene: Node = root.get_tree().current_scene
+		if scene != null:
+			node = scene.get_node_or_null(path)
 	if node == null:
 		return { "type": "error", "message": _not_found(root, path) }
 	return { "node": node }
@@ -84,6 +89,23 @@ static func node_at(root: Node, path: String) -> Dictionary:
 static func _not_found(root: Node, path: String) -> String:
 	var said: String = "Node not found: " + path
 	var scene: Node = root.get_tree().current_scene if root.is_inside_tree() else null
+	if path.begins_with("%") and scene != null:
+		var unique: PackedStringArray = []
+		for found: Node in scene.find_children("*", "", true, false):
+			if found.is_unique_name_in_owner() and found.owner == scene:
+				var _named: bool = unique.append("%" + str(found.name))
+		return (
+			"%s. A unique name is looked up in the current scene, %s, %s."
+			% [
+				said,
+				str(scene.get_path()),
+				(
+					"which has none"
+					if unique.is_empty()
+					else "whose unique names are " + ", ".join(unique)
+				),
+			]
+		)
 	if not path.begins_with("/") and scene != null:
 		var meant: Node = scene.get_node_or_null(path)
 		if meant != null:

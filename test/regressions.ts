@@ -20057,7 +20057,7 @@ async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
       '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
         '[node name="Main" type="Control"]\nscript = ExtResource("1")\n\n' +
         '[node name="Near" type="Button" parent="."]\noffset_right = 30.0\noffset_bottom = 20.0\ntext = "Near"\n\n' +
-        '[node name="Far" type="Button" parent="."]\noffset_left = 100.0\noffset_top = 20.0\noffset_right = 160.0\noffset_bottom = 50.0\ntext = "Far"\n\n' +
+        '[node name="Far" type="Button" parent="."]\nunique_name_in_owner = true\noffset_left = 100.0\noffset_top = 20.0\noffset_right = 160.0\noffset_bottom = 50.0\ntext = "Far"\n\n' +
         '[node name="Beyond" type="Button" parent="."]\noffset_left = 900.0\noffset_top = 20.0\noffset_right = 960.0\noffset_bottom = 50.0\ntext = "Beyond"\n',
     );
     cpSync(
@@ -20148,6 +20148,23 @@ async function testAHeadlessGameSaysItHasNoWindow(): Promise<void> {
       missed,
       /A watch hears the signal only from when it was armed, so one that fired before, such as in the game's first frames, is not counted\. Put back the state that sends it/,
       missed,
+    );
+
+    // A unique name is the current scene's, as the scene's own scripts read it.
+    const renamed = await call('runtime_invoke', {
+      op: 'set',
+      nodePath: '%Far',
+      property: 'text',
+      value: 'Farther',
+    });
+    assert.doesNotMatch(renamed, /"type": "error"|Node not found/, renamed);
+    assert.match(
+      await call('runtime_inspect', { op: 'property', nodePath: '/root/Main/Far', property: 'text' }),
+      /"value": "Farther"/,
+    );
+    assert.match(
+      await call('runtime_invoke', { op: 'set', nodePath: '%Gone', property: 'text', value: 'x' }),
+      /Node not found: %Gone\. A unique name is looked up in the current scene, \/root\/Main, whose unique names are %Far\./,
     );
     assert.match(
       await call('runtime_wait', { op: 'signal', timeoutMs: 100 }),

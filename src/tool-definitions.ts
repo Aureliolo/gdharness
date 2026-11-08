@@ -2221,7 +2221,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['tree', 'text', 'find', 'rect', 'property', 'accessibility'],
         description:
-          'tree, find, text: where to start, default /root. rect: the node to place. property: the node to read, or an engine singleton by name as runtime_invoke takes them, "Engine" with property "get_frames_drawn()". accessibility: only the elements that node and those below it made, whether as node or part_of, each window keeping the outermost of them with what they hold, and matched counting them. What a ScrollContainer holds out of its sight is not in the tree until it is scrolled to, so an element missing under one may be scrolled away rather than hidden.',
+          'tree, find, text: where to start, default /root. rect: the node to place. property: the node to read, or an engine singleton by name as runtime_invoke takes them, "Engine" with property "get_frames_drawn()". accessibility: only the elements that node and those below it made, whether as node or part_of, each window keeping the outermost of them with what they hold, and matched counting them. What a ScrollContainer holds out of its sight is not in the tree until it is scrolled to, so an element missing under one may be scrolled away rather than hidden. A node may be named by its unique name in the current scene, "%Player".',
       },
       property: {
         type: 'string',
@@ -2354,7 +2354,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['set', 'call'],
         description:
-          'Absolute node path, such as "/root/Main/Player", or the name of an engine singleton: Engine, Performance, RenderingServer, AudioServer, PhysicsServer2D, PhysicsServer3D, NavigationServer2D, NavigationServer3D, Time or TranslationServer, so "RenderingServer" with method viewport_get_measured_render_time_cpu reads what the engine measures. The other singletons are refused: OS runs programs, DisplayServer switches the keyboard layout and Input moves the real pointer. call: also a class whose static function method names, by its class_name or its script\'s res:// path, such as "Chooser" with method best, for a class no node carries. A node of that name comes first, and an argument naming an object is a path from /root.',
+          'Absolute node path, such as "/root/Main/Player", a unique name in the current scene, such as "%Player", or the name of an engine singleton: Engine, Performance, RenderingServer, AudioServer, PhysicsServer2D, PhysicsServer3D, NavigationServer2D, NavigationServer3D, Time or TranslationServer, so "RenderingServer" with method viewport_get_measured_render_time_cpu reads what the engine measures. The other singletons are refused: OS runs programs, DisplayServer switches the keyboard layout and Input moves the real pointer. call: also a class whose static function method names, by its class_name or its script\'s res:// path, such as "Chooser" with method best, for a class no node carries. A node of that name comes first, and an argument naming an object is a path from /root.',
       },
       property: {
         type: 'string',
@@ -2496,7 +2496,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['click', 'choose', 'mouse_click', 'mouse_motion', 'mouse_drag', 'touch', 'touch_drag'],
         description:
-          "click: the Control to click, at its centre, at x and y in its own space when those are given, or at the middle of the part on screen when no scroll brings its centre into view (said under pressed_on), or the 3D node to click, where it is drawn. With says, where to look for the control instead, default the whole tree. choose: the PopupMenu, or the OptionButton or MenuButton in front of one. mouse_click, mouse_motion, mouse_drag, touch, touch_drag: the Control, Node2D or Window whose own space the points are in, a Window's being its own pixels. The events go to the window that shows it, a native one included, which the game's window pixels cannot reach, and the answer names it under window when it is not the game's own. Default the game's window.",
+          "click: the Control to click, at its centre, at x and y in its own space when those are given, or at the middle of the part on screen when no scroll brings its centre into view (said under pressed_on), or the 3D node to click, where it is drawn. With says, where to look for the control instead, default the whole tree. choose: the PopupMenu, or the OptionButton or MenuButton in front of one. mouse_click, mouse_motion, mouse_drag, touch, touch_drag: the Control, Node2D or Window whose own space the points are in, a Window's being its own pixels. The events go to the window that shows it, a native one included, which the game's window pixels cannot reach, and the answer names it under window when it is not the game's own. Default the game's window. A node may be named by its unique name in the current scene, \"%Player\".",
       },
       says: {
         type: 'string',
@@ -2731,7 +2731,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['signal', 'watch', 'until'],
         description:
-          'signal, watch, until: the node, by its path from the root, such as "/root/Main/Player". Needed for a signal without a watch, a watch of either kind and a property. For says, it defaults to /root, the whole screen.',
+          'signal, watch, until: the node, by its path from the root, such as "/root/Main/Player", or its unique name in the current scene, "%Player". Needed for a signal without a watch, a watch of either kind and a property. For says, it defaults to /root, the whole screen.',
       },
       signal: {
         type: 'string',
