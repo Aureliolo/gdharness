@@ -518,20 +518,24 @@ func wait_until(params: Dictionary) -> Dictionary:
 			return watched
 		current = watched["value"]
 
+	var met: bool = (
+		GdhValues.comparable(current, wanted)
+		and GdhChanges.held_already(wanted, current) != differs
+	)
 	var answer: Dictionary = {
 		"type": "condition",
 		"path": node_path,
 		"property": property,
 		"compare": compare,
-		"met":
-		(
-			GdhValues.comparable(current, wanted)
-			and GdhChanges.held_already(wanted, current) != differs
-		),
+		"met": met,
 		"value": _values.serialize(current),
 		"elapsed_ms": Time.get_ticks_msec() - started,
 		"frames": frames,
 	}
+	# Beside the value read, so a wait that ran out shows what it compared, such as text sent with
+	# quote marks inside it.
+	if not met:
+		answer["waited_for"] = _values.serialize(wanted)
 	# Said rather than refused, since a game may store a number no value has, as set says it stores
 	# one: a wait for 7 on an enum of three ran its whole timeout and answered only that it was not
 	# met.
@@ -605,16 +609,20 @@ func _wait_in_order(
 		if not unordered.is_empty():
 			return { "type": "error", "message": unordered }
 
-	return {
+	var met: bool = _in_order(compare, limit, current)
+	var answer: Dictionary = {
 		"type": "condition",
 		"path": node_path,
 		"property": property,
 		"compare": compare,
-		"met": _in_order(compare, limit, current),
+		"met": met,
 		"value": _values.serialize(current),
 		"elapsed_ms": Time.get_ticks_msec() - started,
 		"frames": frames,
 	}
+	if not met:
+		answer["waited_for"] = _values.serialize(number)
+	return answer
 
 
 ## Why [param current] cannot be put in order, or "" when it is a number.
