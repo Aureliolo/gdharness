@@ -71105,7 +71105,11 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       rootNodeType: 'Node2D',
       script: 'res://mad.gd',
     });
-    assert.match(textOf(scriptless) ?? '', /^No script at res:\/\/mad\.gd\./, JSON.stringify(scriptless));
+    assert.match(
+      textOf(scriptless) ?? '',
+      /^No script at res:\/\/mad\.gd\. .* script_edit create writes a new one there first\.$/,
+      JSON.stringify(scriptless),
+    );
     assert.equal(asArray(get(scriptless, 'result', 'content')).length, 1, JSON.stringify(scriptless));
     // A folder the path names is made, and said to be.
     const mapped = await written('scene_create', {
