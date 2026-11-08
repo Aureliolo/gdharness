@@ -62320,6 +62320,11 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
       '\t\tlabel = "hp %d" % value\n\n@export var label: String = ""\n@export var tags: Array[String] = []\n\n\n' +
       'func _init() -> void:\n\ttags = ["base"]\n',
   );
+  writeFileSync(
+    join(project, 'bag.gd'),
+    'class_name Bag\nextends Resource\n\n@export var counts: Dictionary[StringName, int] = {}\n' +
+      '@export var tags: Array[StringName] = []\n@export var spots: Dictionary[NodePath, int] = {}\n',
+  );
   // Saved after marks, level's setter adds to marks as the file loads.
   writeFileSync(
     join(project, 'rolls.gd'),
@@ -62405,6 +62410,33 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
       ['Resource', 'res://item.gd', 'Item'],
       `given by its script, the class is named too: ${JSON.stringify(plain)}`,
     );
+    // JSON has no StringName or NodePath, so text stands for them. Left as text, the keys kept a
+    // map untyped, and the engine refused the whole map.
+    const bag = await answered({
+      op: 'create',
+      resourcePath: 'res://bag.tres',
+      resourceType: 'Bag',
+      properties: { counts: { sword: 1, potion: 3 }, tags: ['rare'], spots: { 'Shelf/Top': 2 } },
+    });
+    assert.deepEqual(
+      get(bag, 'properties'),
+      {
+        counts: { sword: 1, potion: 3 },
+        tags: ['rare'],
+        spots: { _type: 'Dictionary', entries: [[{ _type: 'NodePath', path: 'Shelf/Top' }, 2]] },
+      },
+      JSON.stringify(bag),
+    );
+    const bagFile = readFileSync(join(project, 'bag.tres'), 'utf8');
+    for (const line of [
+      'counts = Dictionary[StringName, int]({',
+      '&"potion": 3,',
+      'tags = Array[StringName]([&"rare"])',
+      'spots = Dictionary[NodePath, int]({',
+      'NodePath("Shelf/Top"): 2',
+    ]) {
+      assert.ok(bagFile.includes(line), `${line} in ${bagFile}`);
+    }
     // What stats.gd's setter and _init set is put back before the save, so neither a write's answer
     // nor a read gives it as something the file holds.
     const setNote =

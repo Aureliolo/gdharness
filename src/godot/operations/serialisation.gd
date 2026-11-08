@@ -408,6 +408,13 @@ func fitted(value: Variant, type: int) -> Variant:
 	if type == TYPE_COLOR and rebuilt is String and Color.html_is_valid(str(rebuilt)):
 		return Color.html(str(rebuilt))
 
+	# JSON has no StringName or NodePath, so text stands for them. Left as text, a key of a
+	# Dictionary[StringName, int] kept the map untyped, and the engine refused the whole map.
+	if type == TYPE_STRING_NAME and rebuilt is String:
+		return StringName(str(rebuilt))
+	if type == TYPE_NODE_PATH and rebuilt is String:
+		return NodePath(str(rebuilt))
+
 	var simple: Array[int] = [TYPE_BOOL, TYPE_INT, TYPE_FLOAT, TYPE_STRING]
 	if not simple.has(type) or not simple.has(typeof(rebuilt)):
 		return rebuilt
