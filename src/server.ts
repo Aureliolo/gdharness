@@ -395,7 +395,13 @@ import {
   windowNeedsOf,
 } from './suite-plan.js';
 import { hasSuitesScene, SUITES_SCENE, suitesSceneArgs } from './suites-scene.js';
-import { caseInSuites, casesOutOfPath, scriptsWithoutCases, selectTests } from './test-selection.js';
+import {
+  caseInSuites,
+  casesOutOfPath,
+  scriptsWithoutCases,
+  selectTests,
+  suiteFilesUnder,
+} from './test-selection.js';
 import {
   asParams,
   readArray,
@@ -440,6 +446,9 @@ const TYPE_ARGUMENTS: Readonly<Record<string, string>> = {
  * scrolled well out of anybody's reading, and a session shorter than it gets exactly one.
  */
 const UPDATE_NOTICE_EVERY = 500;
+
+/** How many suite files a refused directory run names, so a project of hundreds stays one line. */
+const SUITES_NAMED = 20;
 
 /**
  * How many answers pass between one invitation to report a gap and the next.
@@ -7701,8 +7710,15 @@ class GodotServer {
     // For a setup that runs whole suites some other way and wants its callers to name suite files.
     const folders = paths.value.filter((path) => !path.endsWith('.gd'));
     if (folders.length > 0 && envValue('GDHARNESS_SUITE_FILES_ONLY') !== undefined) {
+      const suites = suiteFilesUnder(project.value.path, folders);
+      const shown = suites.slice(0, SUITES_NAMED);
+      const more = suites.length - shown.length;
+      const next =
+        suites.length === 0
+          ? `${folders.length === 1 ? 'It holds' : 'They hold'} no suite file.`
+          : `Name one of the suite files there: ${shown.join(', ')}${more > 0 ? ` and ${more} more` : ''}.`;
       return this.createErrorResponse(
-        `Refused a run of ${folders.join(' and ')}: GDHARNESS_SUITE_FILES_ONLY is set, so only named suite files run. Name the suite file.`,
+        `Refused a run of ${folders.join(' and ')}: GDHARNESS_SUITE_FILES_ONLY is set, so only named suite files run. ${next}`,
       );
     }
     // Before any engine starts, the class rebuild's included: a refused flag costs nothing.

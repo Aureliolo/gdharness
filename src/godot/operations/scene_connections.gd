@@ -20,7 +20,8 @@ const EXT_RESOURCE: String = '^\\[ext_resource [^\\]]*?path="([^"]+)"[^\\]]*? id
 const NODE: String = "^\\[node ([^\\]]*)\\]"
 const CONNECTION: String = "^\\[connection ([^\\]]*)\\]"
 const ATTRIBUTE: String = '(\\w+)="([^"]*)"'
-## The unquoted attributes Godot writes as `unbinds=1` and `binds= [5, "a"]`.
+## The unquoted attributes Godot writes as `flags=18`, `unbinds=1` and `binds= [5, "a"]`.
+const FLAGS: String = "\\bflags=(\\d+)"
 const UNBINDS: String = "\\bunbinds=(\\d+)"
 const BINDS: String = "\\bbinds=\\s*\\["
 const INSTANCE: String = 'instance=ExtResource\\(\\s*"([^"]+)"\\s*\\)'
@@ -89,7 +90,9 @@ func broken() -> Array[Dictionary]:
 			var kept: int = sent - _unbinds(line)
 			if kept < 0:
 				continue
-			var passed: int = kept + _binds(line)
+			# The engine puts the source after what unbinds leaves, so no unbinds drops it.
+			var appended: int = 1 if _flags(line) & Object.CONNECT_APPEND_SOURCE_OBJECT else 0
+			var passed: int = kept + appended + _binds(line)
 			var least: int = takes["least"]
 			var most: int = takes["most"]
 			if passed < least or (most >= 0 and passed > most):
@@ -282,6 +285,12 @@ func _engine_class(nodes: Dictionary, path: String, member: String, kind: String
 			return ""
 		engine_class = str(declared["class"])
 	return engine_class if ClassDB.class_exists(engine_class) else ""
+
+
+## The flags the connection line [param line] is written with, 0 when it names none.
+static func _flags(line: String) -> int:
+	var matched: RegExMatch = RegEx.create_from_string(FLAGS).search(line)
+	return 0 if matched == null else matched.get_string(1).to_int()
 
 
 ## How many of the signal's last arguments the connection line [param line] drops.
