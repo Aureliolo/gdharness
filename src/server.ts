@@ -3748,6 +3748,11 @@ function uncaughtNote(uncaught: readonly LogEntry[]): string | undefined {
   );
 }
 
+/** Where gdUnit4 comes from, for a project without it or with one too old to run the tests. */
+function gdUnit4From(missing: boolean): string {
+  return `${missing ? 'Install' : 'Update'} gdUnit4 under addons/gdUnit4, from https://github.com/godot-gdunit-labs/gdUnit4`;
+}
+
 /**
  * Where a run that found nothing might have meant instead, as a sentence, or nothing to add.
  *
@@ -7864,11 +7869,12 @@ class GodotServer {
       // Both, when both: a project with neither tests nor gdUnit4 was told only about the folder,
       // and the caller who wrote tests into it next would have been refused again for the runner.
       const andNoRunner = unusable === null ? '' : `, and ${unusable.reason}`;
+      const runnerFrom = unusable === null ? '' : ` ${gdUnit4From(unusable.missing)}.`;
       return {
         content: [
           {
             type: 'text',
-            text: `No tests ran: ${verdict}${andNoRunner}.${elsewhereIn(project.value.path, missing[0] ?? '')}`,
+            text: `No tests ran: ${verdict}${andNoRunner}.${elsewhereIn(project.value.path, missing[0] ?? '')}${runnerFrom}`,
           },
           {
             type: 'text',
@@ -7884,9 +7890,7 @@ class GodotServer {
       };
     }
     if (unusable !== null) {
-      return this.createErrorResponse(`${unusable.reason}.`, [
-        `${unusable.missing ? 'Install' : 'Update'} gdUnit4 under addons/gdUnit4, from https://github.com/godot-gdunit-labs/gdUnit4`,
-      ]);
+      return this.createErrorResponse(`${unusable.reason}.`, [gdUnit4From(unusable.missing)]);
     }
     const caseless = scriptsWithoutCases(project.value.path, asked);
     if (caseless.length > 0) {
@@ -11040,9 +11044,7 @@ class GodotServer {
     }
     const unusable = gdUnit4Unusable(projectPath);
     if (unusable !== null) {
-      return refused(`${unusable.reason}.`, [
-        `${unusable.missing ? 'Install' : 'Update'} gdUnit4 under addons/gdUnit4, from https://github.com/godot-gdunit-labs/gdUnit4`,
-      ]);
+      return refused(`${unusable.reason}.`, [gdUnit4From(unusable.missing)]);
     }
     const asked = new ProjectScripts(projectPath).searchedAsTold(paths.value);
     const caseless = scriptsWithoutCases(projectPath, asked);

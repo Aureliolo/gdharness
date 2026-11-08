@@ -8174,7 +8174,7 @@ async function testATestRunWithNothingToRunNamesTheRunnerToo(): Promise<void> {
     const said = textOf(answer) ?? '';
     assert.match(
       said,
-      /^No tests ran: nothing at res:\/\/tests and res:\/\/test, and gdUnit4 is not installed in this project: no addons\/gdUnit4\/plugin\.cfg\./,
+      /^No tests ran: nothing at res:\/\/tests and res:\/\/test, and gdUnit4 is not installed in this project: no addons\/gdUnit4\/plugin\.cfg\..* Install gdUnit4 under addons\/gdUnit4, from https:\/\/github\.com\/godot-gdunit-labs\/gdUnit4\./,
       said,
     );
     const content = get(answer, 'result', 'content');
