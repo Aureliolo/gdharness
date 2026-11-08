@@ -1,0 +1,205 @@
+import { createHash } from 'node:crypto';
+import {
+  cpSync,
+  type Dirent,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { join, relative, resolve, sep } from 'node:path';
+import { cacheHome } from './cache-home.js';
+import { isRecord } from './records.js';
+
+/**
+ * A test run's engine gets a user:// of its own, and Godot keeps its pipeline cache there, in
+ * user://shader_cache. A drawing engine started cold rebuilt every pipeline: one game's windowed
+ * suite spent five to seven seconds of a case building the pipelines of one screen. So the cache a
+ * run leaves is kept per project, and handed to the next run on the same engine build before it
+ * starts. Copied in and out rather than shared, since runs go side by side.
+ */
+const NAME = 'shader_cache';
+
+/** How deep under a run's user folder the cache is looked for: Godot/app_userdata/<name>/. */
+const DEPTH = 4;
+
+const RECORD = 'kept.json';
+
+/** Where every project's kept cache is. */
+function keptHome(home: string): string {
+  return join(home, 'pipeline-caches');
+}
+
+/** The folder [param projectPath]'s cache is kept in: one per project, whichever engine built it. */
+function keptFor(projectPath: string, home: string): string {
+  const key = createHash('sha256').update(resolve(projectPath)).digest('hex').slice(0, 16);
+  return join(keptHome(home), key);
+}
+
+/** The engine build at [param godotPath], which a pipeline cache is good for alone. */
+function engineBuild(godotPath: string): string | null {
+  try {
+    const engine = statSync(godotPath);
+    return [resolve(godotPath), engine.size, engine.mtimeMs].join('|');
+  } catch {
+    return null;
+  }
+}
+
+/** The pipeline cache under [param user], as its path from there, or null for none. */
+function cacheUnder(user: string): string | null {
+  const walk = (folder: string, depth: number): string | null => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(folder, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name === NAME) {
+        return relative(user, join(folder, entry.name));
+      }
+    }
+    if (depth === 0) {
+      return null;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        const found = walk(join(folder, entry.name), depth - 1);
+        if (found !== null) {
+          return found;
+        }
+      }
+    }
+    return null;
+  };
+  return walk(user, DEPTH);
+}
+
+function bytesIn(folder: string): number {
+  let total = 0;
+  for (const entry of readdirSync(folder, { withFileTypes: true, recursive: true })) {
+    if (entry.isFile()) {
+      total += statSync(join(entry.parentPath, entry.name)).size;
+    }
+  }
+  return total;
+}
+
+interface Kept {
+  readonly project: string;
+  readonly engine: string;
+  readonly where: string;
+  readonly bytes: number;
+}
+
+function keptRecord(kept: string): Kept | null {
+  try {
+    const record: unknown = JSON.parse(readFileSync(join(kept, RECORD), 'utf8'));
+    if (!isRecord(record)) {
+      return null;
+    }
+    const { project, engine, where, bytes } = record;
+    if (
+      typeof project !== 'string' ||
+      typeof engine !== 'string' ||
+      typeof where !== 'string' ||
+      typeof bytes !== 'number'
+    ) {
+      return null;
+    }
+    // Written by this module only, and still held to a path inside the user folder it names.
+    if (where.split(/[\\/]/).includes('..')) {
+      return null;
+    }
+    return { project, engine, where, bytes };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Puts the pipeline cache kept for [param projectPath] into [param user], the user folder a run is
+ * about to start with, where the last run's engine kept it, when the same engine build made it.
+ * A run is never held up by the cache: any failure leaves it to build its pipelines as it would
+ * have.
+ */
+export function seedPipelineCache(
+  user: string,
+  projectPath: string,
+  godotPath: string,
+  home: string = cacheHome(),
+): void {
+  const kept = keptFor(projectPath, home);
+  const record = keptRecord(kept);
+  if (record === null || record.engine !== engineBuild(godotPath) || !existsSync(join(kept, NAME))) {
+    return;
+  }
+  try {
+    cpSync(join(kept, NAME), join(user, record.where), { recursive: true });
+  } catch {
+    // A partial copy is a cache with fewer pipelines in it, which the engine fills in.
+  }
+}
+
+/**
+ * Keeps the pipeline cache a run left in [param user] for the next run of [param projectPath]. It
+ * replaces the kept one when another engine build made that, or when it holds more: a headless run
+ * builds none, and a run of one suite fewer than a run of all of them. The caches of projects no
+ * longer on disk go at the same time, as test projects do.
+ */
+export function keepPipelineCache(
+  user: string,
+  projectPath: string,
+  godotPath: string,
+  home: string = cacheHome(),
+): void {
+  const engine = engineBuild(godotPath);
+  const where = cacheUnder(user);
+  if (engine === null || where === null) {
+    return;
+  }
+  const kept = keptFor(projectPath, home);
+  const left = join(user, where);
+  try {
+    const bytes = bytesIn(left);
+    const record = keptRecord(kept);
+    if (bytes === 0 || (record?.engine === engine && bytes <= record.bytes)) {
+      return;
+    }
+    // Built beside the kept one and swapped in whole, so a run seeding from it meanwhile copies
+    // the old cache or the new one and never half of each.
+    const building = `${kept}.${process.pid}.${Date.now()}`;
+    mkdirSync(building, { recursive: true });
+    cpSync(left, join(building, NAME), { recursive: true });
+    const made: Kept = { project: resolve(projectPath), engine, where: where.split(sep).join('/'), bytes };
+    writeFileSync(join(building, RECORD), JSON.stringify(made));
+    rmSync(kept, { recursive: true, force: true });
+    try {
+      renameSync(building, kept);
+    } catch {
+      rmSync(building, { recursive: true, force: true });
+    }
+    forgetGoneProjects(home);
+  } catch {
+    // Not kept, so the next run builds its pipelines again.
+  }
+}
+
+/** Removes every kept cache whose project folder is gone. */
+function forgetGoneProjects(home: string): void {
+  for (const entry of readdirSync(keptHome(home), { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name.includes('.')) {
+      continue;
+    }
+    const folder = join(keptHome(home), entry.name);
+    const record = keptRecord(folder);
+    if (record !== null && !existsSync(record.project)) {
+      rmSync(folder, { recursive: true, force: true });
+    }
+  }
+}

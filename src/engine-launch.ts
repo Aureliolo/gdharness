@@ -38,6 +38,7 @@ import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './
 import { errorCode, Refusal } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
 import { LOG_LIMIT_BYTES, readLog } from './log-read.js';
+import { keepPipelineCache, seedPipelineCache } from './pipeline-cache.js';
 import { belowNormal } from './priority.js';
 import { askProcessTable } from './process-table.js';
 import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
@@ -394,11 +395,17 @@ export async function watchedEngine(
   silenceSeconds: number,
   silenceIn?: (printed: RunPrinted) => number,
 ): Promise<EngineEnd> {
-  return await startedUntilItRuns(
-    () => engineWatchedOnce(launch, lock, args, directory, log, silenceSeconds, silenceIn),
-    undefined,
-    (end) => end.ended === null && end.signal === null && diedAsItStarted(end.code, readLog(log) === ''),
-  );
+  const user = join(directory, 'user');
+  seedPipelineCache(user, launch.projectPath, launch.godotPath);
+  try {
+    return await startedUntilItRuns(
+      () => engineWatchedOnce(launch, lock, args, directory, log, silenceSeconds, silenceIn),
+      undefined,
+      (end) => end.ended === null && end.signal === null && diedAsItStarted(end.code, readLog(log) === ''),
+    );
+  } finally {
+    keepPipelineCache(user, launch.projectPath, launch.godotPath);
+  }
 }
 
 async function engineWatchedOnce(

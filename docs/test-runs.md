@@ -83,6 +83,14 @@ That is when one of these holds:
   since it writes the class cache without importing.
 - The cache does not list a class a script declares where the script declares it.
 
+## The pipeline cache
+
+Each engine gets a `user://` of its own, so a game's saves stay apart from the player's. Godot keeps
+its pipeline cache there, in `user://shader_cache`. Each engine starts with the cache the project's
+last run left, when the same engine build made it, so a drawing suite does not build every pipeline
+again. The largest cache a run leaves is kept in gdharness's cache folder, one per project. The
+cache of a project that is gone is removed.
+
 ## The result file
 
 Every run writes its result to `.godot/gdharness/last-run.json`, beside the project's suite times.
