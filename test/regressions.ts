@@ -70526,7 +70526,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
         'visibility_changed',
         'set_scale',
         undefined,
-        `visibility_changed passes no arguments, and set_scale needs 1${fails}`,
+        `visibility_changed passes no arguments, and set_scale needs 1${fails} Connect it with binds holding 1 value, passed after the signal's own.`,
       ],
       [
         'child_entered_tree',
@@ -70568,6 +70568,21 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       get(overBound, 'misfit'),
       `visibility_changed passes no arguments and the connection binds 1, so hide is called with 1 argument, and takes none${fails}`,
       JSON.stringify(overBound),
+    );
+    // binds replaces what the connection binds, so the remedy counts the bound value already there.
+    const boundShort = await written('scene_signal', {
+      op: 'connect',
+      scenePath: 'wires.tscn',
+      sourceNodePath: 'Emitter',
+      signalName: 'tree_entered',
+      targetNodePath: 'Taker',
+      methodName: 'set_meta',
+      binds: ['key'],
+    });
+    assert.equal(
+      get(boundShort, 'misfit'),
+      `tree_entered passes no arguments and the connection binds 1, so set_meta is called with 1 argument, and needs 2${fails} Connect it with binds holding 2 values, passed after the signal's own.`,
+      JSON.stringify(boundShort),
     );
     const boundWrong = await written('scene_signal', {
       op: 'connect',

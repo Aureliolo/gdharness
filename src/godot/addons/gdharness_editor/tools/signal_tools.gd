@@ -361,7 +361,12 @@ static func _misfit(source: Node, signal_name: String, callable: Callable, flags
 	var defaults: Array = taken.get("default_args", [])
 	var needed: int = parameters.size() - defaults.size()
 	if passed.size() < needed:
-		return "%s needs %d%s" % [called, needed, FAILS]
+		# binds replaces the connection's bound values, so it is given every one the method lacks.
+		var short: int = binds + needed - passed.size()
+		return (
+			"%s needs %d%s Connect it with binds holding %s, passed after the signal's own."
+			% [called, needed, FAILS, "1 value" if short == 1 else "%d values" % short]
+		)
 	if passed.size() > parameters.size():
 		var most: String = "none" if parameters.is_empty() else "at most %d" % parameters.size()
 		# Said with the misfit, since unbinds is what a connection to a method wanting less is for,
