@@ -12,7 +12,8 @@ const GdhRead = preload("reading.gd")
 const GdhSerialisation = preload("serialisation.gd")
 const GdhShapes = preload("value_shapes.gd")
 ## The engine singletons a call, a write or a read may name instead of a node: what the engine
-## measures, and the engine settings that are the game's own. Not every singleton: OS runs programs
+## measures, and the engine settings that are the game's own, such as the actions InputMap binds,
+## which a game's own key rebinding changes. Not every singleton: OS runs programs
 ## and opens files, DisplayServer switches the keyboard's layout and Input moves the real pointer,
 ## and none of that is a game's to do to the machine it runs on.
 const SINGLETONS: Array[String] = [
@@ -26,6 +27,7 @@ const SINGLETONS: Array[String] = [
 	"NavigationServer3D",
 	"Time",
 	"TranslationServer",
+	"InputMap",
 ]
 ## The most frames a press is held in one call, as many as a frames wait takes.
 const MOST_HELD: int = 600

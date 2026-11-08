@@ -406,7 +406,7 @@ const INPUT_EVENTS: JsonSchema = {
   items: {
     type: 'object',
     properties: {
-      type: { type: 'string', enum: ['key', 'mouse_button', 'joypad_button', 'joypad_axis'] },
+      type: { type: 'string', enum: ['key', 'mouse_button', 'joypad_button', 'joypad_motion'] },
       keycode: {
         type: 'string',
         description: 'Keys: the key name, such as "Space", "W" or "Menu", as the Input Map names keys.',
@@ -2379,7 +2379,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['set', 'call'],
         description:
-          'Absolute node path, such as "/root/Main/Player", a unique name in the current scene, such as "%Player", or the name of an engine singleton: Engine, Performance, RenderingServer, AudioServer, PhysicsServer2D, PhysicsServer3D, NavigationServer2D, NavigationServer3D, Time or TranslationServer, so "RenderingServer" with method viewport_get_measured_render_time_cpu reads what the engine measures. The other singletons are refused: OS runs programs, DisplayServer switches the keyboard layout and Input moves the real pointer. call: also a class whose static function method names, by its class_name or its script\'s res:// path, such as "Chooser" with method best, for a class no node carries. A node of that name comes first, and an argument naming an object is a path from /root.',
+          'Absolute node path, such as "/root/Main/Player", a unique name in the current scene, such as "%Player", or the name of an engine singleton: Engine, Performance, RenderingServer, AudioServer, PhysicsServer2D, PhysicsServer3D, NavigationServer2D, NavigationServer3D, Time, TranslationServer or InputMap, so "RenderingServer" with method viewport_get_measured_render_time_cpu reads what the engine measures, and "InputMap" with action_erase_events and action_add_event rebinds an action in the running game alone. The other singletons are refused: OS runs programs, DisplayServer switches the keyboard layout and Input moves the real pointer. call: also a class whose static function method names, by its class_name or its script\'s res:// path, such as "Chooser" with method best, for a class no node carries. A node of that name comes first, and an argument naming an object is a path from /root.',
       },
       property: {
         type: 'string',

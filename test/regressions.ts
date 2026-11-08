@@ -34469,6 +34469,21 @@ async function testAnEngineSingletonIsReachedAndOSIsNot(): Promise<void> {
         'number',
         `a Performance monitor is read: ${JSON.stringify(monitor)}`,
       );
+      // The game's own actions, which a key rebinding screen changes.
+      await call('runtime_invoke', {
+        op: 'call',
+        nodePath: 'InputMap',
+        method: 'add_action',
+        args: ['rebound'],
+      });
+      const bound = await call('runtime_invoke', {
+        op: 'call',
+        nodePath: 'InputMap',
+        method: 'has_action',
+        args: ['rebound'],
+      });
+      assert.match(bound, /^\{/, `InputMap is called rather than refused: ${bound}`);
+      assert.equal(get(JSON.parse(bound), 'result'), true, `InputMap is reached: ${bound}`);
 
       const refused = await call('runtime_invoke', { op: 'call', nodePath: 'OS', method: 'get_name' });
       assert.match(

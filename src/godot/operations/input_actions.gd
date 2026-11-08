@@ -520,10 +520,10 @@ func _event_config(fields: Dictionary) -> Variant:
 			if pad is String:
 				return "A joypad_button event " + str(pad)
 			return { "class_name": "InputEventJoypadButton", "button_index": pad }
-		"joypad_axis":
+		"joypad_motion":
 			var axis: Variant = _whole_in(fields, "axis", 0, JOY_AXIS_MAX - 1, AXIS_NAMES)
 			if axis is String:
-				return "A joypad_axis event " + str(axis)
+				return "A joypad_motion event " + str(axis)
 			# The direction is half the binding: left on a stick and right on it are two actions,
 			# and the editor binds only a whole push one way, so a guessed direction or part of one
 			# is a binding nobody asked for.
@@ -532,8 +532,8 @@ func _event_config(fields: Dictionary) -> Variant:
 			if not numeric or absf(GdhRead.as_float(direction)) != 1.0:
 				return (
 					(
-						"A joypad_axis event needs axisValue, -1 or 1, the way the axis is pushed: "
-						+ "%s was given."
+						"A joypad_motion event needs axisValue, -1 or 1, the way the axis is "
+						+ "pushed: %s was given."
 					)
 					% _shown(direction)
 				)
@@ -542,7 +542,7 @@ func _event_config(fields: Dictionary) -> Variant:
 				"axis": axis,
 				"axis_value": GdhRead.as_float(direction),
 			}
-	var known: String = "key, mouse_button, joypad_button, joypad_axis"
+	var known: String = "key, mouse_button, joypad_button, joypad_motion"
 	return "Unknown event type: " + event_type + ". One of " + known + "."
 
 
