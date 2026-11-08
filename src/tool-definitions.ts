@@ -1395,7 +1395,8 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         type: 'string',
         ops: ['connect_states'],
         enum: ['immediate', 'sync', 'at_end'],
-        description: 'connect_states: default immediate.',
+        description:
+          "connect_states: immediate switches the moment it advances, so an auto one with no advanceCondition leaves its state the frame the state is reached. at_end waits for the state's animation to end, as a jump going back to idle does. sync switches at once and carries the playback position over. Default immediate.",
       },
       advanceCondition: {
         type: 'string',
