@@ -46,7 +46,7 @@ export function withNearestFiles(
     .toSorted();
   if (namesakes.length > 0) {
     const alone = namesakes.length === 1;
-    return `${said}. The ${alone ? 'file' : 'files'} of that name beside it ${alone ? 'is' : 'are'} ${namesakes.join(', ')}.`;
+    return `${said}. ${namesakes.join(', ')} ${alone ? 'has' : 'have'} that name with ${alone ? 'another extension' : 'other extensions'}.`;
   }
   const extension = /\.([^./]+)$/.exec(wanted)?.[1];
   if (extension === undefined) {

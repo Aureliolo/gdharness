@@ -2833,7 +2833,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       seconds: {
         effect: 'read',
         summary:
-          "let seconds of the game's own time pass, which a headless game's frames are no measure of: it draws them far faster. Answers with the real milliseconds and the frames that passed. A paused game's wait still ends",
+          "let seconds of the game's own time pass, which a headless game's frames are no measure of: it draws them far faster. Answers with the real milliseconds and the frames that passed. The wait still ends in a game whose tree is paused. A game held by its debugger answers nothing until it goes on",
         requires: ['seconds'],
       },
       signal: {

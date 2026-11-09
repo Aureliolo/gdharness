@@ -65049,11 +65049,11 @@ function testAMisspeltExtensionIsOfferedTheFileOfThatName(): void {
   const beside = ['res://ai/brain.gd', 'res://ai/brain.tscn', 'res://ai/brawn.gd'];
   assert.equal(
     withNearestFiles('Script file does not exist: res://ai/brain.gdd', 'res://ai/brain.gdd', scripts, beside),
-    'Script file does not exist: res://ai/brain.gdd. The files of that name beside it are res://ai/brain.gd, res://ai/brain.tscn.',
+    'Script file does not exist: res://ai/brain.gdd. res://ai/brain.gd, res://ai/brain.tscn have that name with other extensions.',
   );
   assert.equal(
     withNearestFiles('res://ai/brain.tscn is not a script', 'res://ai/brain.gd2', scripts, beside),
-    'res://ai/brain.tscn is not a script. The file of that name beside it is res://ai/brain.gd.',
+    'res://ai/brain.tscn is not a script. res://ai/brain.gd has that name with another extension.',
     'a file the refusal names is not offered back',
   );
   assert.equal(
