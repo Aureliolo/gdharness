@@ -219,12 +219,22 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 				". project_import reimport makes the translation files from " + ", ".join(made)
 			)
 		var resources: Array[String] = []
+		var translating: bool = setting_path == "internationalization/locale/translations"
 		for path: String in missing:
-			if path.get_extension() in ["tres", "res"]:
+			var kind: String = path.get_extension()
+			if kind == "res" or (kind == "tres" and not translating):
 				resources.append(path)
 		if not resources.is_empty():
 			said += ". resource_edit create makes " + ", ".join(resources)
 		answer["note"] = (str(answer["note"]) + " " if answer.has("note") else "") + said + "."
+	if setting_path == "internationalization/locale/translations":
+		var untranslated: String = text_translations_line(final_value)
+		if not untranslated.is_empty():
+			answer["note"] = (
+				(str(answer["note"]) + " " if answer.has("note") else "")
+				+ untranslated
+				+ ". resource_edit create writes a Translation to a .res path."
+			)
 	ProjectSettings.set_setting(setting_path, final_value)
 	var err: Error = GdhProjectFile.save([setting_path])
 	if err != OK:
@@ -259,6 +269,34 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 ## tool reads print nothing.
 static func _loaded_at_boot(setting_path: String) -> bool:
 	return setting_path.begins_with("autoload/") or setting_path in BOOT_LOADED
+
+
+## What the engine says of the .tres translations [param value] names, or "" for none. It loads
+## the translations as the game starts, before it can read a text resource, so each .tres one is
+## "No loader found" and the game runs untranslated, while the same translation as .res loads.
+static func text_translations_line(value: Variant) -> String:
+	var texts: Array[String] = []
+	if value is PackedStringArray or value is Array:
+		for item: Variant in value:
+			if str(item).get_extension() == "tres":
+				texts.append(str(item))
+	if texts.is_empty():
+		return ""
+	return (
+		(
+			"The engine cannot load %s as the game starts: it reports \"No loader found\" for a"
+			+ " .tres translation, and the game shows its keys. The same translation saved as"
+			+ " .res loads, as does one imported from a .csv or .po"
+		)
+		% ", ".join(texts)
+	)
+
+
+## [method text_translations_line] for the project's own translations setting.
+static func project_text_translations() -> String:
+	return text_translations_line(
+		ProjectSettings.get_setting("internationalization/locale/translations", [])
+	)
 
 
 ## The res:// files [param value] names that are not on disk: a path, an autoload's starred path, or

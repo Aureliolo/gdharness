@@ -64090,6 +64090,51 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
       [true, undefined],
       JSON.stringify(plainRead),
     );
+    // A headless engine compiles nothing without a shader type, and text that is no shader at all
+    // read as compiling. Comments may come before the type, as the compiler allows.
+    const untyped = await answered({
+      op: 'create_shader',
+      resourcePath: 'res://strings.gdshader',
+      shaderType: 'canvas_item',
+      code: 'key,en,de\nGREETING,Hello,Hallo\n',
+    });
+    assert.deepEqual(
+      [get(untyped, 'compiles'), get(untyped, 'compileErrors')],
+      [
+        false,
+        [
+          {
+            line: 1,
+            message:
+              "Expected 'shader_type' at the beginning of shader. Valid types are: spatial, canvas_item, particles, sky, fog.",
+          },
+        ],
+      ],
+      JSON.stringify(untyped),
+    );
+    const commented = await answered({
+      op: 'create_shader',
+      resourcePath: 'res://commented.gdshader',
+      shaderType: 'canvas_item',
+      code: '// A tint.\n/* Kept red. */\nshader_type canvas_item;\n\nvoid fragment() {\n\tCOLOR = vec4(1.0);\n}\n',
+    });
+    assert.deepEqual(
+      [get(commented, 'compiles'), get(commented, 'compileErrors')],
+      [true, undefined],
+      JSON.stringify(commented),
+    );
+
+    // The engine keeps each message under a context and its plural forms, so a translation's
+    // messages read back in another shape than they were given and were refused as changed.
+    const translated = await answered({
+      op: 'create',
+      resourcePath: 'res://strings.de.res',
+      resourceType: 'Translation',
+      properties: { locale: 'de', messages: { GREETING: 'Hallo', QUIT: 'Beenden' } },
+    });
+    assert.equal(get(translated, 'resourcePath'), 'res://strings.de.res', JSON.stringify(translated));
+    const translation = JSON.stringify(await answered({ op: 'read', resourcePath: 'res://strings.de.res' }));
+    assert.match(translation, /GREETING[\s\S]*Hallo[\s\S]*QUIT[\s\S]*Beenden/, translation);
   } finally {
     await server.stop();
     sweep(project, runtimeDir);
@@ -78564,6 +78609,32 @@ async function testAProjectsFilesAndLayersAreNamedWithNoEditor(): Promise<void> 
       get(parseTextContent(translations), 'note'),
       'res://text/strings.en.translation, res://text/strings.de.translation do not exist, and the engine reports them on every boot until they do. project_import reimport makes the translation files from res://text/strings.csv.',
     );
+    // A .tres translation is one the engine cannot load as the game starts, so the setting says
+    // so, and points at .res rather than at making the .tres it names.
+    const texts = await setting('internationalization/locale/translations', ['res://text/strings.de.tres']);
+    assert.equal(
+      get(parseTextContent(texts), 'note'),
+      'res://text/strings.de.tres does not exist, and the engine reports it on every boot until it does. The engine cannot load res://text/strings.de.tres as the game starts: it reports "No loader found" for a .tres translation, and the game shows its keys. The same translation saved as .res loads, as does one imported from a .csv or .po. resource_edit create writes a Translation to a .res path.',
+      textOf(texts) ?? '',
+    );
+    const checked = await call('project_info', { include: ['validation', 'health'] });
+    const issues = asArray(get(parseTextContent(checked), 'validation', 'issues'), 'validation issues');
+    assert.deepEqual(
+      issues.filter((issue) => get(issue, 'check') === 'translations').map((issue) => get(issue, 'message')),
+      [
+        'The engine cannot load res://text/strings.de.tres as the game starts: it reports "No loader found" for a .tres translation, and the game shows its keys. The same translation saved as .res loads, as does one imported from a .csv or .po',
+      ],
+      textOf(checked) ?? '',
+    );
+    assert.match(
+      textOf(checked) ?? '',
+      /"details": \[[^\]]*No loader found/,
+      'and health counts it under its configuration',
+    );
+    await setting('internationalization/locale/translations', [
+      'res://text/strings.en.translation',
+      'res://text/strings.de.translation',
+    ]);
     const ghost = await setting('autoload/Ghost', '*res://ghost.gd');
     assert.equal(
       get(parseTextContent(ghost), 'note'),

@@ -9,6 +9,7 @@ const GdhImportPipeline = preload("import_pipeline.gd")
 const GdhInputActions = preload("input_actions.gd")
 const GdhLog = preload("logger.gd")
 const GdhPatterns = preload("patterns.gd")
+const GdhProjectConfig = preload("project_config.gd")
 const GdhRead = preload("reading.gd")
 const GdhSceneConnections = preload("scene_connections.gd")
 const GdhScriptCheck = preload("script_check.gd")
@@ -68,6 +69,22 @@ func validate_project(params: Dictionary) -> Dictionary:
 				"main_scene",
 				"Main scene " + GdhFileWalk.missing_reason(main_scene),
 				"Update the main scene setting or create the missing scene file",
+				include_suggestions
+			)
+		)
+
+	checks_performed.append("translations")
+	var untranslated: String = GdhProjectConfig.project_text_translations()
+	if not untranslated.is_empty():
+		issues.append(
+			_finding(
+				"error",
+				"translations",
+				untranslated,
+				(
+					"resource_edit create each Translation at a .res path, then name that in the"
+					+ " setting"
+				),
 				include_suggestions
 			)
 		)

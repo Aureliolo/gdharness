@@ -6,6 +6,7 @@ const GdhImportPipeline = preload("import_pipeline.gd")
 const GdhInputActions = preload("input_actions.gd")
 const GdhLog = preload("logger.gd")
 const GdhPatterns = preload("patterns.gd")
+const GdhProjectConfig = preload("project_config.gd")
 const GdhRead = preload("reading.gd")
 const GdhSceneConnections = preload("scene_connections.gd")
 const GdhScriptCheck = preload("script_check.gd")
@@ -170,6 +171,10 @@ func get_project_health(params: Dictionary) -> Dictionary:
 		elif not GdhFileWalk.missing_reason(main_scene).is_empty():
 			details.append("Main scene " + GdhFileWalk.missing_reason(main_scene))
 			deductions += 15
+		var untranslated: String = GdhProjectConfig.project_text_translations()
+		if not untranslated.is_empty():
+			details.append(untranslated)
+			deductions += 10
 
 		var project_name: String = str(ProjectSettings.get_setting("application/config/name", ""))
 		if project_name.is_empty():

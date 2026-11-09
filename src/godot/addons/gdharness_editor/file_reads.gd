@@ -732,7 +732,27 @@ static func shader_errors(path: String) -> Array[Dictionary]:
 	OS.remove_logger(caught)
 	if headless:
 		printerr("[gdharness] resumed")
+	# A headless engine's dummy renderer compiles nothing without a shader type, and says so as an
+	# engine error rather than a shader one, so text that is no shader at all read as compiling.
+	if shader != null and caught.raised.is_empty() and not _declares_type(shader.code):
+		caught.raised.append(
+			{
+				"line": 1,
+				"message":
+				(
+					"Expected 'shader_type' at the beginning of shader. Valid types are: spatial,"
+					+ " canvas_item, particles, sky, fog."
+				),
+			}
+		)
 	return caught.raised
+
+
+## Whether [param code] opens with its shader_type statement, past any comments, as the shader
+## compiler requires.
+static func _declares_type(code: String) -> bool:
+	var uncommented: RegEx = RegEx.create_from_string("(?s)/\\*.*?\\*/|//[^\\n]*")
+	return uncommented.sub(code, "", true).strip_edges().begins_with("shader_type")
 
 
 ## Why the OptimizedTranslation at [param file] lists no messages, and which file holds them.

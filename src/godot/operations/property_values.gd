@@ -404,6 +404,13 @@ func _note_undone(
 ## with loop as 0 or 1, and saves them that way, so a write of two read as one it changed.
 static func _as_held(target: Object, property: String, given: Dictionary) -> Variant:
 	var value: Variant = given[property]
+	if target is Translation and property == "messages" and value is Dictionary:
+		# The engine keeps {"GREETING": "Hallo"} as {["", "GREETING"]: ["Hallo"]}, a context and
+		# plural forms, so a fresh Translation shapes it the same. One it dropped stays unmatched.
+		var sent: Dictionary = value
+		var shaped: Translation = Translation.new()
+		shaped.messages = sent
+		return shaped.messages if shaped.messages.size() == sent.size() else value
 	if not (target is SpriteFrames and property == "animations" and value is Array):
 		return value
 	var original: Array = value
