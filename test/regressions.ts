@@ -8653,6 +8653,8 @@ async function testACallMetByAnEditorQuittingUnusedIsAskedAgain(): Promise<void>
         return;
       }
       answeredFirst.push(message['tool']);
+      // Gone once its word is written, as the editor quits after answering: terminate() at once
+      // drops a frame not yet flushed, which a Windows runner did, and the server heard no word.
       socket.send(
         JSON.stringify({
           type: 'tool_result',
@@ -8661,8 +8663,10 @@ async function testACallMetByAnEditorQuittingUnusedIsAskedAgain(): Promise<void>
           closing: true,
           error: `The editor is quitting after going unused, so ${message['tool']} was not run.`,
         }),
+        () => {
+          socket.terminate();
+        },
       );
-      socket.terminate();
     });
     await greetedBy(first.pid ?? 0);
     assert.equal(existsSync(record), false, 'an editor connecting removes the record');
@@ -54930,6 +54934,19 @@ async function testAGateAskingForBatchesGivesItsSlotBackBetweenThem(): Promise<v
       await delay(100);
     }
     assert.ok(started(0), `the first engine started: ${said}`);
+    // And once the run's second lane waits, for the slot or for memory, which counts the first
+    // engine at its whole allowance as it starts. A lane in the slot line is ahead of the gate. One
+    // held for memory joins the line after it, and the run says nothing of that hold.
+    const heldToOne = (): boolean => /^Memory had room for one of/m.test(said);
+    for (
+      let looked = 0;
+      looked < 300 && run.exitCode === null && slotWaiters(slots).length === 0 && !heldToOne();
+      looked += 1
+    ) {
+      await delay(100);
+    }
+    assert.ok(slotWaiters(slots).length > 0 || heldToOne(), `the run's second lane waits: ${said}`);
+    const inLine = !heldToOne() && slotWaiters(slots).some((one) => String(one.taker) !== 'memory');
     const other = new EngineSlots(
       slots,
       1,
@@ -54951,10 +54968,8 @@ async function testAGateAskingForBatchesGivesItsSlotBackBetweenThem(): Promise<v
       `the run gave its slot to the gate waiting longer between its engines, and ran its last engine after: asked ${String(askedAt)}, took ${String(tookAt)}, gave back ${String(gaveBackAt)}, run ended ${String(endedAt)}: ${said}`,
     );
     assert.equal(startedBefore[1], false, `the run took no second slot ahead of the gate: ${said}`);
-    // Its second lane waits in the line only when memory has room for two engines, 7 GB free.
-    // Held to one, the lane waits for memory and joins the line after the gate.
-    if (/^Memory had room for one of/m.test(said)) {
-      console.log('batch regression: memory held the run to one engine, so its one wait ahead is not read');
+    if (!inLine) {
+      console.log('batch regression: memory held the second lane as the gate came, so its one wait ahead is not read');
     } else {
       assert.equal(
         startedBefore[0],
