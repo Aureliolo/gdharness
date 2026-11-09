@@ -64090,6 +64090,46 @@ async function testAResourceWriteWithNoEditorSaysWhatStoppedIt(): Promise<void> 
       [true, undefined],
       JSON.stringify(plainRead),
     );
+  } finally {
+    await server.stop();
+    sweep(project, runtimeDir);
+  }
+}
+
+/**
+ * With no editor, text that is no shader does not read as compiling, and a translation is stored
+ * with the messages it was given.
+ */
+async function testAShaderWithNoTypeAndATranslationWithNoEditor(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('untyped shader and translation regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-stored-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-stored-rt-'));
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="Stored"\n',
+  );
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+  });
+  const answered = async (args: Record<string, unknown>): Promise<unknown> => {
+    const response = await server.request(
+      'tools/call',
+      { name: 'resource_edit', arguments: { projectPath: project, ...args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const answer = parseTextContent(response);
+    assert.ok(answer !== null, `${JSON.stringify(args)}: ${textOf(response) ?? JSON.stringify(response)}`);
+    return answer;
+  };
+  try {
+    await server.initialize('regression-test');
     // A headless engine compiles nothing without a shader type, and text that is no shader at all
     // read as compiling. Comments may come before the type, as the compiler allows.
     const untyped = await answered({
@@ -80562,6 +80602,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWriteSaysWhatElseItChanged,
   testAWriteReadsWhatThePropertyDeclares,
   testAResourceWriteWithNoEditorSaysWhatStoppedIt,
+  testAShaderWithNoTypeAndATranslationWithNoEditor,
   testATestRunTakesTheCasesNamed,
   testACaseGdUnitLeavesUnrunIsNoPass,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
