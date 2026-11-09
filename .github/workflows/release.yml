@@ -550,8 +550,8 @@ jobs:
     # what every other line here is held to.
     env:
       # renovate: datasource=github-release-attachments depName=modelcontextprotocol/registry versioning=regex:^v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)$
-      MCP_PUBLISHER_TAG: v1.8.7
-      MCP_PUBLISHER_SHA256: 00b21004149a4ce66f0782508ae4a2bce67d1bea395a8da0bd8028159fb59579
+      MCP_PUBLISHER_TAG: v1.8.8
+      MCP_PUBLISHER_SHA256: 09f1fa70ee146b640584274a1a6b2b8a0310b05d4321fa9224e6df6a016d67f4
 
     steps:
       - name: Checkout

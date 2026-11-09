@@ -19,7 +19,7 @@ import { extract, releaseAsset } from './install-godot.js';
 
 const REPOSITORY = 'atelico/gdstyle';
 // renovate: datasource=github-releases depName=atelico/gdstyle
-export const GDSTYLE_VERSION = 'v0.6.0';
+export const GDSTYLE_VERSION = 'v0.7.0';
 
 const ASSETS: Record<string, { asset: string; digest: string }> = {
   'win32-x64': {
