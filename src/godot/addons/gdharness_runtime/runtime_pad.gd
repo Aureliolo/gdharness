@@ -98,8 +98,8 @@ func inject_joypad_button(params: Dictionary) -> Dictionary:
 
 
 ## Moves a stick or trigger axis to a value, where it stays until another motion moves it, as a
-## stick held over does. With holdFrames it is held there for that many frames inside the game and
-## let go back to 0, so the time between calls is not counted as held.
+## stick held over does. With holdFrames it is held there for that many frames inside the game, then
+## let go back to 0.
 func inject_joypad_motion(params: Dictionary) -> Dictionary:
 	var given: Variant = params.get("axis", null)
 	var axis: int = _named_or_numbered(given, JOY_AXES, JOY_AXIS_MAX)
@@ -125,7 +125,8 @@ func inject_joypad_motion(params: Dictionary) -> Dictionary:
 	if whole and is_zero_approx(value):
 		return {
 			"type": "error",
-			"message": "holdFrames holds an axis away from 0 and lets it go, and value is 0.",
+			"message":
+			"holdFrames holds an axis away from 0 and then lets it go, so value cannot be 0.",
 		}
 
 	var event: InputEventJoypadMotion = _motion(axis, device, value)

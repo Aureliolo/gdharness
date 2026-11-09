@@ -2559,7 +2559,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         maximum: 600,
         ops: ['action', 'key', 'mouse_click', 'joypad_button', 'joypad_motion', 'touch'],
         description:
-          'action, key, mouse_click, joypad_button, joypad_motion, touch: hold a whole press down for this many process frames and then let go, both inside the game, so a pour, a charge or a long press runs to a set length. joypad_motion holds the axis at value and lets it go back to 0. It is held on until a physics tick has run with it down, so _physics_process sees every whole press. A press, a frames wait and a release sent as three calls hold it for the time between the calls as well, and the release answers how long that was. The answer says held_frames, and under held_for the seconds the hold lasted and the physics_frames that ran in it: a process frame is no set time, and a headless game, drawing nothing, runs them far faster than the sixty physics ticks a second that _physics_process sees. Not with pressed, and not on a wheel step. Default 1.',
+          'action, key, mouse_click, joypad_button, joypad_motion, touch: hold a whole press down for this many process frames and then let go, both inside the game, so a pour, a charge or a long press runs to a set length. The axis of joypad_motion is held at value, then goes back to 0. It is held on until a physics tick has run with it down, so _physics_process sees every whole press. A press, a wait and a release sent as three calls hold it for the time between the calls as well. The release answers how long, as held_frames and held_for. The answer says held_frames, and under held_for the seconds the hold lasted and the physics_frames that ran in it: a process frame is no set time, and a headless game, drawing nothing, runs them far faster than the sixty physics ticks a second that _physics_process sees. Not with pressed, and not on a wheel step. Default 1.',
       },
       strength: {
         type: 'number',
@@ -2650,7 +2650,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         maximum: 1,
         ops: ['joypad_motion'],
         description:
-          'joypad_motion: where the axis is, -1 to 1: down and right are positive on a stick, and a trigger runs 0 to 1. The axis stays there until another motion moves it, as a stick held over does, unless holdFrames is given. Send 0 to let it go back.',
+          'joypad_motion: where the axis is, -1 to 1: down and right are positive on a stick, and a trigger runs 0 to 1. The axis stays there until another motion moves it, as a stick held over does, or for holdFrames frames when that is given. Send 0 to let it go back. holdFrames needs a value other than 0.',
       },
       device: {
         type: 'number',

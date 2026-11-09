@@ -39,8 +39,7 @@ const MOST_HELD: int = 600
 
 ## Read by [method _key_names], once a game.
 static var _named_keys: PackedStringArray = []
-## When each press sent as two halves went down, by what it pressed, as [method split_half] keeps
-## it.
+## When each half press went down, keyed by the name given to [method split_half].
 static var _down_since: Dictionary[String, Dictionary] = {}
 
 var _shared: GdhSerialisation = GdhSerialisation.new()
@@ -167,11 +166,9 @@ static func held_for(params: Dictionary) -> Variant:
 	return frames
 
 
-## Notes the half of a press [param down] says for what [param pressed] names, and answers a
-## release with how long the press was held, as [method hold] answers a whole one. The time between
-## a press, a wait and a release sent as three calls counts as held, and a caller reading only the
-## wait's half second was led to expect half the distance a 2.4 s hold covered. Nothing for a press,
-## or for a release of something no half-press put down.
+## Records a half press ([param down] true) of what [param pressed] names. On the release it answers
+## how long the press was held, as [method hold] answers a whole one. The calls are separate, so the
+## game times the hold itself. Nothing for a press, or for a release with no recorded press.
 static func split_half(pressed: String, down: bool) -> Variant:
 	if down:
 		if not _down_since.has(pressed):
@@ -193,8 +190,9 @@ static func split_half(pressed: String, down: bool) -> Variant:
 	}
 
 
-## The process frames a whole press was held for, taken out of [param lasted], which [method hold]
-## or [method split_half] answered, and which answers the rest under held_for. Nothing for a press.
+## Takes the process frame count out of [param lasted], the answer of [method hold] or
+## [method split_half], and leaves seconds and physics_frames in it for held_for. Nothing when
+## [param lasted] is not a dictionary.
 static func held_answer(lasted: Variant) -> Variant:
 	if not lasted is Dictionary:
 		return null

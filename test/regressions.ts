@@ -34814,7 +34814,7 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
       });
       assert.match(
         centred,
-        /^holdFrames holds an axis away from 0 and lets it go, and value is 0\.$/,
+        /^holdFrames holds an axis away from 0 and then lets it go, so value cannot be 0\.$/,
         centred,
       );
       // Each hold says how long it lasted by the clock and in physics ticks: thirty held in a
