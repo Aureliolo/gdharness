@@ -89,14 +89,14 @@ static func run(params: Dictionary) -> Dictionary:
 			var one: bool = GdhSceneUids.by_path.size() == 1
 			answered["namedByPath"] = (
 				(
-					"This saved %s by path, since the project's uid cache does not hold %s "
-					+ "yet. %s the same. project_import refresh_uids lets later writes name "
-					+ "%s by uid."
+					"This saved %s by path, which loads the same. The project's uid cache does "
+					+ "not hold %s until the project is next scanned, and a uid it lacks warns on "
+					+ "every load. project_import refresh_uids scans it, so later writes name %s "
+					+ "by uid."
 				)
 				% [
 					", ".join(GdhSceneUids.by_path),
 					"its uid" if one else "their uids",
-					"It loads" if one else "They load",
 					"it" if one else "them",
 				]
 			)
