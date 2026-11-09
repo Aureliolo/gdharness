@@ -73,8 +73,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           # renovate: datasource=github-release-attachments depName=astral-sh/uv versioning=semver
-          UV_TAG: 0.13.6
-          UV_SHA256: f29c3e94ffabd7e6f3ba521dba169a9b7ec12100bf3257087f0f24f6123f3645
+          UV_TAG: 0.13.7
+          UV_SHA256: c5221ff41b7892bfc223543883600125f6a47fe845093e0f5bdff4f359196d83
         run: |
           set -euo pipefail
           name=uv-x86_64-unknown-linux-gnu.tar.gz
