@@ -64,7 +64,7 @@ func inject_touch(params: Dictionary) -> Dictionary:
 		"input_type": "touch",
 		"index": index,
 		"position": [position.x, position.y],
-		"held_frames": GdhValues.held_answer(whole, frames),
+		"held_frames": GdhValues.held_answer(lasted),
 		"held_for": lasted,
 		"pressed": held and not whole,
 		"whole": whole,

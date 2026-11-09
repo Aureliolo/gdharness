@@ -2896,6 +2896,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.deepEqual(operation('remove_input_action', { action_name: 'fixture_jump' }), {
     action_name: 'fixture_jump',
     removed: true,
+    saved: true,
   });
   assert.doesNotMatch(
     readFileSync(projectFile, 'utf8'),

@@ -83,7 +83,7 @@ func inject_joypad_button(params: Dictionary) -> Dictionary:
 	var answer: Dictionary = {
 		"type": "input_injected",
 		"input_type": "joypad_button",
-		"held_frames": GdhValues.held_answer(whole, frames),
+		"held_frames": GdhValues.held_answer(lasted),
 		"held_for": lasted,
 		"button": button,
 		"button_name": _name_of(button, JOY_BUTTONS),

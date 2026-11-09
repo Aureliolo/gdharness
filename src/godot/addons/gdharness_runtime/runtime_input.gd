@@ -213,7 +213,7 @@ func inject_action(params: Dictionary) -> Dictionary:
 		"shortcut_pressed": shortcuts["shortcut_pressed"],
 		"pressed": held and not whole,
 		"whole": whole,
-		"held_frames": GdhValues.held_answer(whole, frames),
+		"held_frames": GdhValues.held_answer(lasted),
 		"held_for": lasted,
 	}
 	return GdhValues.focus_noted(answer, focused, _host)
@@ -288,7 +288,7 @@ func inject_key(params: Dictionary) -> Dictionary:
 	var answer: Dictionary = {
 		"type": "input_injected",
 		"input_type": "key",
-		"held_frames": GdhValues.held_answer(whole, frames),
+		"held_frames": GdhValues.held_answer(lasted),
 		"held_for": lasted,
 		"keycode": event.keycode,
 		"physical_keycode": event.physical_keycode,
@@ -378,7 +378,7 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	var answer: Dictionary = {
 		"type": "input_injected",
 		"input_type": "mouse_click",
-		"held_frames": GdhValues.held_answer(whole and not notch, frames),
+		"held_frames": GdhValues.held_answer(lasted),
 		"held_for": lasted,
 		"position": [position.x, position.y],
 		"button": button,

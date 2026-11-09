@@ -34639,6 +34639,79 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
 }
 
 /**
+ * A whole press is held until a physics tick has run with it down. A headless game with no frame
+ * cap runs process frames of a few milliseconds, so a press of one frame ended before
+ * _physics_process saw it, and a game polling is_action_pressed there never moved.
+ */
+async function testAWholePressIsSeenByAPhysicsTick(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('physics tick press regression skipped (Godot not found)');
+    return;
+  }
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true },
+    async ({ server, project }) => {
+      writeFileSync(
+        join(project, 'main.gd'),
+        [
+          'extends Node',
+          '',
+          'var seen: int = 0',
+          '',
+          '',
+          'func _physics_process(_delta: float) -> void:',
+          '\tif Input.is_action_pressed("ui_accept"):',
+          '\t\tseen += 1',
+          '',
+        ].join('\n'),
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+      );
+      const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
+        textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
+      const started = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless: true,
+        args: ['--stay'],
+        runtimeWaitMs: 30_000,
+      });
+      assert.match(started, /"listening": true/, started);
+      const presses = 8;
+      for (let press = 0; press < presses; press += 1) {
+        const answer = await call('runtime_input', { op: 'action', action: 'ui_accept' });
+        const parsed: unknown = JSON.parse(answer);
+        assert.ok(Number(get(get(parsed, 'held_for'), 'physics_frames')) >= 1, answer);
+        assert.ok(Number(get(parsed, 'held_frames')) >= 1, answer);
+      }
+      const seen = get(
+        JSON.parse(
+          await call('runtime_inspect', { op: 'property', nodePath: '/root/Main', property: 'seen' }),
+        ),
+        'value',
+      );
+      assert.ok(
+        Number(seen) >= presses,
+        `_physics_process saw ${String(seen)} ticks of ${String(presses)} presses`,
+      );
+      await call('editor_run', { op: 'stop' });
+    },
+    { realAddon: true, engine },
+  );
+}
+
+/**
  * An engine singleton is called, written and read the way a node is, and one that acts on the
  * machine is refused.
  *
@@ -80217,6 +80290,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHeadlessAccessibilityReadNamesWhatItNeeds,
   testAnEngineSingletonIsReachedAndOSIsNot,
   testAPressIsHeldForTheFramesAsked,
+  testAWholePressIsSeenByAPhysicsTick,
   testAPathStepsIntoAVectorsComponents,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
   testTheWaitSizedToABootIsSaid,
