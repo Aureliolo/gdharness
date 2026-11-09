@@ -218,6 +218,12 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 			said += (
 				". project_import reimport makes the translation files from " + ", ".join(made)
 			)
+		var resources: Array[String] = []
+		for path: String in missing:
+			if path.get_extension() in ["tres", "res"]:
+				resources.append(path)
+		if not resources.is_empty():
+			said += ". resource_edit create makes " + ", ".join(resources)
 		answer["note"] = (str(answer["note"]) + " " if answer.has("note") else "") + said + "."
 	ProjectSettings.set_setting(setting_path, final_value)
 	var err: Error = GdhProjectFile.save([setting_path])
