@@ -70499,6 +70499,12 @@ async function testAReadWithNoEditorAnswersFromTheFile(): Promise<void> {
 
     const missing = textOf(await call('scene_tree', { scenePath: 'res://nope.tscn' })) ?? '';
     assert.match(missing, /Scene not found: res:\/\/nope\.tscn/, missing);
+    const misplaced = textOf(await call('scene_tree', { scenePath: 'res://scenes/moves.tscn' })) ?? '';
+    assert.match(
+      misplaced,
+      /^Scene not found: res:\/\/scenes\/moves\.tscn\. The nearest \.tscn file is res:\/\/moves\.tscn\./,
+      `a scene asked for in the wrong folder names where it is: ${misplaced}`,
+    );
     const outside =
       textOf(await call('resource_edit', { op: 'read', resourcePath: '../elsewhere.tres' })) ?? '';
     assert.match(outside, /outside|inside the project/i, outside);
@@ -73182,6 +73188,10 @@ async function testANodeChangesItsType(): Promise<void> {
     );
     assert.match(await refusal({ nodePath: 'Body', nodeType: 'Node2DD' }), /^nodeType must be a node class/);
     assert.match(
+      await refusal({ scenePath: 'scenes/main.tscn', nodePath: 'Body', nodeType: 'Node2D' }),
+      /^Scene not found: res:\/\/scenes\/main\.tscn\. The nearest \.tscn file is res:\/\/main\.tscn\./,
+    );
+    assert.match(
       await refusal({ scenePath: 'child.tscn', nodePath: '.', nodeType: 'Node3D' }),
       /^The root of res:\/\/child\.tscn comes from the scene it inherits, which gives its type\./,
     );
@@ -74777,7 +74787,13 @@ async function testAnInheritedSceneIsMadeWithNoEditor(): Promise<void> {
         { rootNodeType: 'Node2D' },
         "inherits takes the root's class from res://parts/crate.tscn, so rootNodeType is not given with it.",
       ],
-      [{ inherits: 'parts/none.tscn' }, 'inherits: Scene not found: res://parts/none.tscn'],
+      [
+        { inherits: 'parts/none.tscn' },
+        "inherits: Scene not found: res://parts/none.tscn. The project's .tscn files are res://main.tscn, " +
+          'res://parts/big_crate.tscn, res://parts/bigger_crate.tscn, res://parts/bolt.tscn, ' +
+          'res://parts/crate.tscn, res://parts/heavy_crate.tscn, res://parts/peg.tscn, res://parts/plank.tscn, ' +
+          'res://parts/tally.tscn, res://parts/tally_kin.tscn, res://wide_plank.tscn.',
+      ],
       [
         { inherits: 'gloss.tres' },
         'inherits: res://gloss.tres is an AnimationNodeStateMachine, not a scene: resource_edit read reads its properties.',
@@ -76627,6 +76643,19 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
       textOf(scaled) ?? '',
     );
     assert.equal(readPng(readFileSync(join(saved, 'small.png'))).width, 120);
+
+    const misplaced = textOf(
+      await call('editor_capture', {
+        projectPath: project,
+        scenePath: 'scenes/sample.tscn',
+        outputPath: join(saved, 'none.png'),
+      }),
+    );
+    assert.match(
+      misplaced ?? '',
+      /Scene not found: res:\/\/scenes\/sample\.tscn\. The nearest \.tscn file is res:\/\/sample\.tscn\.$/,
+      `a scene asked for in the wrong folder names where it is: ${misplaced ?? ''}`,
+    );
   } finally {
     await call('editor_launch', { op: 'close' }).catch(() => undefined);
     await server.stop();

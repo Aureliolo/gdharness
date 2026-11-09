@@ -118,7 +118,10 @@ var _unmade: Array[Dictionary] = []
 func open(scene_path: String, for_writing: bool) -> Dictionary:
 	path = scene_path
 	if not FileAccess.file_exists(path):
-		return { "ok": false, "error": "Scene not found: " + path }
+		return {
+			"ok": false,
+			"error": GdhFileWalk.new().with_nearest_files("Scene not found: " + path, path),
+		}
 	if for_writing:
 		var held_back: String = unsaved_in_editor(path)
 		if not held_back.is_empty():
