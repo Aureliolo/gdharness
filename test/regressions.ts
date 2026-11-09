@@ -70901,6 +70901,30 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       `visibility_changed passes no arguments and the connection binds 1, so hide is called with 1 argument, and takes none${fails}`,
       JSON.stringify(overBound),
     );
+    // A script's own method can be given room for the bound value, which unbinding would put in
+    // place of the signal's last argument.
+    const boundOver = await written('scene_signal', {
+      op: 'connect',
+      scenePath: 'wires.tscn',
+      sourceNodePath: 'Emitter',
+      signalName: 'died',
+      targetNodePath: 'Taker',
+      methodName: 'scale_by',
+      binds: ['gold'],
+    });
+    assert.equal(
+      get(boundOver, 'misfit'),
+      `died passes 1 argument and the connection binds 1, so scale_by is called with 2 arguments, and takes at most 1${fails} Connect it with unbinds 1 to leave out the last argument the signal passes, or give scale_by 1 more parameter.`,
+      JSON.stringify(boundOver),
+    );
+    await written('scene_signal', {
+      op: 'disconnect',
+      scenePath: 'wires.tscn',
+      sourceNodePath: 'Emitter',
+      signalName: 'died',
+      targetNodePath: 'Taker',
+      methodName: 'scale_by',
+    });
     // binds replaces what the connection binds, so the remedy counts the bound value already there.
     const boundShort = await written('scene_signal', {
       op: 'connect',
@@ -71190,7 +71214,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     const overfull = await rewire('visibility_changed', 'take_node', { flags: 16, binds: [3] });
     assert.equal(
       get(overfull, 'misfit'),
-      `visibility_changed passes no arguments and the connection appends its source and binds 1, so take_node is called with 2 arguments, and takes at most 1${fails}`,
+      `visibility_changed passes no arguments and the connection appends its source and binds 1, so take_node is called with 2 arguments, and takes at most 1${fails} Give take_node 1 more parameter.`,
       JSON.stringify(overfull),
     );
     const sourceWrong = await rewire('ready', 'take', { flags: 16 });
@@ -74720,7 +74744,7 @@ async function testAnInheritedSceneIsMadeWithNoEditor(): Promise<void> {
     );
     assert.equal(
       get(further, 'namedByPath'),
-      "What this saved names res://parts/big_crate.tscn by path rather than by uid, which loads the same. A reference by uid is resolved through the project's uid cache, which holds none for it yet, as with a file made since the project was last scanned, so naming it by uid now would warn on every load. project_import refresh_uids scans the project, and writes after it name it by uid.",
+      "This saved res://parts/big_crate.tscn by path, since the project's uid cache has no uid for it yet. It loads the same. project_import refresh_uids lets later writes name it by uid.",
       'and the answer says why, with the call that changes it',
     );
     assert.equal(get(made, 'namedByPath'), undefined, `crate.tscn was imported: ${JSON.stringify(made)}`);
@@ -75620,7 +75644,7 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
     });
     assert.equal(
       get(both, 'namedByPath'),
-      "What this saved names res://lamp.tscn, res://desk.tscn by path rather than by uid, which loads the same. A reference by uid is resolved through the project's uid cache, which holds none for them yet, as with a file made since the project was last scanned, so naming them by uid now would warn on every load. project_import refresh_uids scans the project, and writes after it name them by uid.",
+      "This saved res://lamp.tscn, res://desk.tscn by path, since the project's uid cache has no uid for them yet. They load the same. project_import refresh_uids lets later writes name them by uid.",
       JSON.stringify(both),
     );
     assert.equal(await energy('unrelated.tscn', 'Top/DeskLamp/Bulb'), 3, fileOf('unrelated.tscn'));

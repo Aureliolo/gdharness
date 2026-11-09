@@ -15,5 +15,6 @@ export function serverInstructions(): string {
     'its clean verdict and its error entries are how a run is judged, and editor_run wait is how to wait for one.',
     'The runtime_* tools work on the running game and the debug_* tools on its debugger.',
     'A refusal names what would have worked, so read it before calling again.',
+    'A call that waited for an engine slot says how long, and who held the slots, in a last engine_slot_wait block.',
   ].join(' ');
 }

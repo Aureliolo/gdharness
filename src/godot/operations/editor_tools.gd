@@ -86,19 +86,18 @@ static func run(params: Dictionary) -> Dictionary:
 		if not GdhSceneFile.unmade_note.is_empty():
 			answered["unmadeConnections"] = GdhSceneFile.unmade_note
 		if not GdhSceneUids.by_path.is_empty():
+			var one: bool = GdhSceneUids.by_path.size() == 1
 			answered["namedByPath"] = (
 				(
-					"What this saved names %s by path rather than by uid, which loads the same. A "
-					+ "reference by uid is resolved through the project's uid cache, which holds "
-					+ "none for %s yet, as with a file made since the project was last scanned, so "
-					+ "naming %s by uid now would warn on every load. project_import refresh_uids "
-					+ "scans the project, and writes after it name %s by uid."
+					"This saved %s by path, since the project's uid cache has no uid for %s "
+					+ "yet. %s the same. project_import refresh_uids lets later writes name "
+					+ "%s by uid."
 				)
 				% [
 					", ".join(GdhSceneUids.by_path),
-					"it" if GdhSceneUids.by_path.size() == 1 else "them",
-					"it" if GdhSceneUids.by_path.size() == 1 else "them",
-					"it" if GdhSceneUids.by_path.size() == 1 else "them",
+					"it" if one else "them",
+					"It loads" if one else "They load",
+					"it" if one else "them",
 				]
 			)
 		return answered

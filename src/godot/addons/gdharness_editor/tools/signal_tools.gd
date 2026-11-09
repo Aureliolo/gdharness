@@ -374,14 +374,27 @@ static func _misfit(source: Node, signal_name: String, callable: Callable, flags
 		# arguments the signal passes before it adds the bound ones, so a bound one is never
 		# dropped.
 		var extra: int = passed.size() - parameters.size()
-		var remedy: String = (
-			(
-				" Connect it with unbinds %d to leave out the last %s the signal passes."
-				% [extra + unbound, "argument" if extra == 1 else "%d arguments" % extra]
+		var remedies: Array[String] = []
+		if extra <= from_signal:
+			remedies.append(
+				(
+					"connect it with unbinds %d to leave out the last %s the signal passes"
+					% [extra + unbound, "argument" if extra == 1 else "%d arguments" % extra]
+				)
 			)
-			if extra <= from_signal
-			else ""
-		)
+		# Only a script's own method can be given room for them, and dropping the signal's last
+		# argument to make room for a bound one hands the method the bound value in its place.
+		if target != null and not ClassDB.class_has_method(target.get_class(), method):
+			remedies.append(
+				"give %s %s" % [
+					method,
+					"1 more parameter" if extra == 1 else "%d more parameters" % extra,
+				]
+			)
+		var remedy: String = ""
+		if not remedies.is_empty():
+			var joined: String = ", or ".join(PackedStringArray(remedies))
+			remedy = " %s%s." % [joined.left(1).to_upper(), joined.substr(1)]
 		return "%s takes %s%s%s" % [called, most, FAILS, remedy]
 	for at: int in passed.size():
 		var given: Dictionary = passed[at]
