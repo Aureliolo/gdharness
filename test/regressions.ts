@@ -137,6 +137,7 @@ import {
 import {
   claimIsOurs,
   EngineSlots,
+  endedNoteOf,
   FolderChanges,
   gamesKeptOf,
   holderOf,
@@ -145,6 +146,7 @@ import {
   keptSlotsOf,
   lockIsFree,
   machineSlots,
+  markBegan,
   nameSlotEngine,
   ONE_OFF_AGED_MS,
   ownStart,
@@ -20864,7 +20866,7 @@ async function testAQueryObjectIsBuiltFromItsProperties(): Promise<void> {
       '[node name="Main" type="Node2D"]\n\n' +
       '[node name="Wall" type="StaticBody2D" parent="."]\nposition = Vector2(100, 100)\n\n' +
       '[node name="Shape" type="CollisionShape2D" parent="Wall"]\nshape = SubResource("box")\n',
-    {},
+    { 'wide.tres': '[gd_resource type="CircleShape2D" format=3]\n\n[resource]\nradius = 200.0\n' },
     async (call, said) => {
       await call('runtime_wait', { op: 'frames', frames: 3 });
       const asked = (argument: unknown): Record<string, unknown> => ({
@@ -20903,6 +20905,36 @@ async function testAQueryObjectIsBuiltFromItsProperties(): Promise<void> {
         shape,
         /a resource is named by the res:\/\/ path of its file, and the RectangleShape2D given has none/,
         shape,
+      );
+
+      // Inside a query being built, its shape is part of the query and is built with it. The shape
+      // sits at the origin, so a radius of 200 reaches the wall at (100, 100) and one of 50 does not.
+      const overlapping = (circle: unknown): Record<string, unknown> => ({
+        op: 'call',
+        nodePath: '/root/Main',
+        method: 'get_world_2d():direct_space_state:intersect_shape',
+        args: [{ _type: 'PhysicsShapeQueryParameters2D', shape: circle }],
+      });
+      const reaching = await call('runtime_invoke', overlapping({ _type: 'CircleShape2D', radius: 200 }));
+      assert.match(JSON.stringify(get(reaching, 'result')), /\/root\/Main\/Wall/, JSON.stringify(reaching));
+      const short = await call('runtime_invoke', overlapping({ _type: 'CircleShape2D', radius: 50 }));
+      assert.deepEqual(get(short, 'result'), [], JSON.stringify(short));
+      // One naming its file is the game's, loaded from there rather than built.
+      const filed = await call('runtime_invoke', overlapping({ _type: 'Resource', path: 'res://wide.tres' }));
+      assert.match(JSON.stringify(get(filed, 'result')), /\/root\/Main\/Wall/, JSON.stringify(filed));
+      const typed = await call(
+        'runtime_invoke',
+        overlapping({ _type: 'CircleShape2D', path: 'res://wide.tres' }),
+      );
+      assert.match(JSON.stringify(get(typed, 'result')), /\/root\/Main\/Wall/, JSON.stringify(typed));
+      const mistyped = await said(
+        'runtime_invoke',
+        overlapping({ _type: 'RectangleShape2D', path: 'res://wide.tres' }),
+      );
+      assert.match(
+        mistyped,
+        /res:\/\/wide\.tres holds a CircleShape2D, not the RectangleShape2D given/,
+        mistyped,
       );
     },
   );
@@ -32940,6 +32972,10 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
         'binary_format/embed_pck is true or false, not "yes".',
       ],
       [
+        { preset: 'Penguin', options: { 'binary_format/embed_pck': 1.5 } },
+        'binary_format/embed_pck is true or false, not 1.5.',
+      ],
+      [
         { preset: 'Penguin', exportFilter: 'scenes', files: ['res://notes.txt'] },
         'export_filter scenes lists scenes, and res://notes.txt is not one',
       ],
@@ -32958,6 +32994,13 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
       assert.ok(said.includes(expected), `${JSON.stringify(args)} is refused: ${said}`);
       assert.equal(file(), written, `and nothing was written for ${JSON.stringify(args)}`);
     }
+    // A whole number is shown as it was sent, though it reaches the engine as a float.
+    const one = await refused({
+      op: 'set_preset',
+      preset: 'Penguin',
+      options: { 'binary_format/embed_pck': 1 },
+    });
+    assert.match(one, /binary_format\/embed_pck is true or false, not 1\.(?!\d)/, one);
 
     const filtered = await set({
       preset: 'Penguin',
@@ -34638,12 +34681,16 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
           'var pad_down: bool = false',
           'var pad_frames: int = 0',
           'var pad_held: int = -1',
-          'var ticks: Dictionary = {"mouse": 0, "key": 0, "action": 0, "pad": 0}',
+          'var stick_down: bool = false',
+          'var stick_frames: int = 0',
+          'var stick_held: int = -1',
+          'var stick_value: float = 0.0',
+          'var ticks: Dictionary = {"mouse": 0, "key": 0, "action": 0, "pad": 0, "stick": 0}',
           'var ticks_held: Dictionary = {}',
           '',
           '',
           'func _physics_process(_delta: float) -> void:',
-          '\tfor named: String in ["mouse", "key", "action", "pad"]:',
+          '\tfor named: String in ["mouse", "key", "action", "pad", "stick"]:',
           '\t\tif get(named + "_down"):',
           '\t\t\tticks[named] += 1',
           '',
@@ -34672,6 +34719,17 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
           '\t\t\tpad_frames = 0',
           '\t\telse:',
           '\t\t\tpad_held = pad_frames',
+          '\tvar stick: InputEventJoypadMotion = event as InputEventJoypadMotion',
+          '\tif stick != null and stick.axis == JOY_AXIS_LEFT_X:',
+          '\t\tstick_value = stick.axis_value',
+          '\t\tvar moved: bool = not is_zero_approx(stick.axis_value)',
+          '\t\tif moved != stick_down:',
+          '\t\t\tstick_down = moved',
+          '\t\t\t_pressed("stick", moved)',
+          '\t\t\tif moved:',
+          '\t\t\t\tstick_frames = 0',
+          '\t\t\telse:',
+          '\t\t\t\tstick_held = stick_frames',
           '\tvar button: InputEventMouseButton = event as InputEventMouseButton',
           '\tif button != null and button.button_index == MOUSE_BUTTON_LEFT:',
           '\t\tmouse_down = button.pressed',
@@ -34699,6 +34757,8 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
           '\t\taction_frames += 1',
           '\tif pad_down:',
           '\t\tpad_frames += 1',
+          '\tif stick_down:',
+          '\t\tstick_frames += 1',
           '',
         ].join('\n'),
       );
@@ -34737,6 +34797,26 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
       const padded = await call('runtime_input', { op: 'joypad_button', button: 'a', holdFrames: 9 });
       assert.match(padded, /"held_frames": 9/, padded);
       assert.equal(await read('pad_held'), 9, `the pad button was down for the 9 frames asked: ${padded}`);
+      const stuck = await call('runtime_input', {
+        op: 'joypad_motion',
+        axis: 'left_x',
+        value: -1,
+        holdFrames: 11,
+      });
+      assert.match(stuck, /"held_frames": 11/, stuck);
+      assert.equal(await read('stick_held'), 11, `the stick was over for the 11 frames asked: ${stuck}`);
+      assert.equal(await read('stick_value'), 0, `and let go back to 0: ${stuck}`);
+      const centred = await call('runtime_input', {
+        op: 'joypad_motion',
+        axis: 'left_x',
+        value: 0,
+        holdFrames: 3,
+      });
+      assert.match(
+        centred,
+        /^holdFrames holds an axis away from 0 and then lets it go, so value cannot be 0\.$/,
+        centred,
+      );
       // Each hold says how long it lasted by the clock and in physics ticks: thirty held in a
       // headless game, which runs them as fast as it can, moved a body for twelve ticks. The ticks
       // are held to the ones the game itself ran while the input was down, not to the clock: the
@@ -34748,6 +34828,7 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
         [keyed, 12, 'key'],
         [acted, 7, 'action'],
         [padded, 9, 'pad'],
+        [stuck, 11, 'stick'],
       ] as const) {
         const held = get(JSON.parse(answer), 'held_for');
         const seconds = Number(get(held, 'seconds'));
@@ -34758,6 +34839,62 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
           Number.isInteger(ticks) && ran > 0 && Math.abs(ticks - ran) <= 1,
           `the ${named} hold says ${ticks} ticks and the game ran ${ran} while it was down: ${answer}`,
         );
+      }
+
+      // A press sent as two halves with a wait between is held for the time between the calls, and
+      // the release says how long that was, so a caller reading only the wait is not misled.
+      const halves: [Record<string, unknown>, Record<string, unknown>, string | null][] = [
+        [
+          { op: 'mouse_click', x: 10, y: 10, pressed: true },
+          { op: 'mouse_click', x: 10, y: 10, pressed: false },
+          'mouse',
+        ],
+        [
+          { op: 'key', keycode: 'Space', pressed: true },
+          { op: 'key', keycode: 'Space', pressed: false },
+          'key',
+        ],
+        [
+          { op: 'action', action: 'ui_accept', pressed: true },
+          { op: 'action', action: 'ui_accept', pressed: false },
+          'action',
+        ],
+        [
+          { op: 'joypad_button', button: 'a', pressed: true },
+          { op: 'joypad_button', button: 'a', pressed: false },
+          'pad',
+        ],
+        [
+          { op: 'joypad_motion', axis: 'left_x', value: -1 },
+          { op: 'joypad_motion', axis: 'left_x', value: 0 },
+          'stick',
+        ],
+        [{ op: 'touch', x: 10, y: 10, pressed: true }, { op: 'touch', x: 10, y: 10, pressed: false }, null],
+      ];
+      for (const [down, up, named] of halves) {
+        const pressed = await call('runtime_input', down);
+        assert.equal(
+          get(JSON.parse(pressed), 'held_for'),
+          null,
+          `a press alone has held nothing yet: ${pressed}`,
+        );
+        const waited = await call('runtime_wait', { op: 'frames', frames: 20 });
+        const released = await call('runtime_input', up);
+        const held = get(JSON.parse(released), 'held_for');
+        const ticks = Number(get(held, 'physics_frames'));
+        const waitedFor: unknown = JSON.parse(waited);
+        assert.ok(
+          Number(get(JSON.parse(released), 'held_frames')) >= Number(get(waitedFor, 'frames')) &&
+            Number(get(held, 'seconds')) * 1000 >= Number(get(waitedFor, 'elapsed_ms')),
+          `the release counts the wait between the halves: ${released} after ${waited}`,
+        );
+        if (named !== null) {
+          const ran = Number(await read(`ticks_held:${named}`));
+          assert.ok(
+            Math.abs(ticks - ran) <= 1,
+            `the ${named} release says ${ticks} ticks, the game ran ${ran}`,
+          );
+        }
       }
 
       const both = await call('runtime_input', { op: 'key', keycode: 'Space', pressed: true, holdFrames: 5 });
@@ -42900,7 +43037,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         ],
         [
           { _type: 'GradientTexture1D', width: 8 },
-          /^\/root\/Main\.art holds an object: a resource is named by the res:\/\/ path of its file, and the GradientTexture1D given has none: a resource built into a scene has no path, and the game builds none from its properties\. resource_edit create writes a GradientTexture1D to a \.tres file\. Pass that file's res:\/\/ path here$/,
+          /^\/root\/Main\.art holds an object: a resource is named by the res:\/\/ path of its file, and the GradientTexture1D given has none\. A resource built into a scene has no path\. The call builds a resource from its properties only inside an object it builds, such as a PhysicsShapeQueryParameters2D's shape\. resource_edit create writes a GradientTexture1D to a \.tres file\. Pass that file's res:\/\/ path here$/,
         ],
       ];
       for (const [value, expected] of unfiled) {
@@ -51754,7 +51891,12 @@ async function testTakersWaitTheirTurn(): Promise<void> {
 async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
   const marks = join(directory, WAITING_FOLDER);
-  const marked = (): string[] => (existsSync(marks) ? readdirSync(marks).toSorted() : []);
+  const marked = (): string[] =>
+    existsSync(marks)
+      ? readdirSync(marks)
+          .filter((name) => name.endsWith('.json'))
+          .toSorted()
+      : [];
   const markedSoon = async (count: number): Promise<string[]> => {
     const until = Date.now() + 5000;
     while (marked().length !== count && Date.now() < until) {
@@ -51791,6 +51933,15 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
       typeof since === 'number' && Math.abs(since * 1000 - Date.now()) < 10_000,
       `and when it began to wait, in seconds: ${String(since)}`,
     );
+    const firstMark = join(marks, one[0] ?? '');
+    const firstBegan = markBegan(firstMark);
+    // An old wait's note goes as the next wait begins, and one still within its keeping stays.
+    const stale = join(marks, '1-1.ended');
+    const fresh = join(marks, '1-2.ended');
+    writeFileSync(stale, '{}');
+    writeFileSync(fresh, '{}');
+    const elevenMinutesAgo = new Date(Date.now() - 660_000);
+    utimesSync(stale, elevenMinutesAgo, elevenMinutesAgo);
     const besideIt = new AbortController();
     const another = waitFor(besideIt.signal);
     const two = await markedSoon(2);
@@ -51799,6 +51950,22 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
     slots.release(first);
     assert.equal(await waited, first, 'the wait takes the slot given back');
     assert.deepEqual(await markedSoon(1), [two.find((name) => name !== one[0])], 'and its mark is gone');
+    assert.deepEqual(
+      [existsSync(stale), existsSync(fresh)],
+      [false, true],
+      'the old note went, the new one stayed',
+    );
+    // Beside it, when the wait began and ended, for a reader whose looks came too late to see it end.
+    const note = asObject(JSON.parse(readFileSync(endedNoteOf(firstMark), 'utf8')), 'the ended note');
+    assert.equal(note['began'], firstBegan, `began is the mark's own time: ${JSON.stringify(note)}`);
+    const endedAt = note['ended'];
+    assert.ok(
+      typeof endedAt === 'number' &&
+        typeof firstBegan === 'number' &&
+        endedAt >= firstBegan &&
+        Math.abs(endedAt * 1000 - Date.now()) < 10_000,
+      `and ended is when it ended, in seconds: ${JSON.stringify(note)}`,
+    );
     besideIt.abort();
     await assert.rejects(another, /abort/i, 'an aborted wait');
     assert.deepEqual(await markedSoon(0), [], 'takes its mark with it');
@@ -74971,7 +75138,7 @@ async function testAnInheritedSceneIsMadeWithNoEditor(): Promise<void> {
     );
     assert.equal(
       get(further, 'namedByPath'),
-      "This saved res://parts/big_crate.tscn by path, which loads the same. The project's uid cache does not hold its uid until the project is next scanned. Named by uid before then, it would warn on every load. project_import refresh_uids scans it, so later writes name it by uid.",
+      "This saved res://parts/big_crate.tscn by path, because the project's uid cache does not hold its uid until the project is scanned. A path loads the same. project_import refresh_uids scans the project, so later writes name it by uid.",
       'and the answer says why, with the call that changes it',
     );
     assert.equal(get(made, 'namedByPath'), undefined, `crate.tscn was imported: ${JSON.stringify(made)}`);
@@ -75871,7 +76038,7 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
     });
     assert.equal(
       get(both, 'namedByPath'),
-      "This saved res://lamp.tscn, res://desk.tscn by path, which loads the same. The project's uid cache does not hold their uids until the project is next scanned. Named by uid before then, they would warn on every load. project_import refresh_uids scans it, so later writes name them by uid.",
+      "This saved res://lamp.tscn, res://desk.tscn by path, because the project's uid cache does not hold their uids until the project is scanned. A path loads the same. project_import refresh_uids scans the project, so later writes name them by uid.",
       JSON.stringify(both),
     );
     assert.equal(await energy('unrelated.tscn', 'Top/DeskLamp/Bulb'), 3, fileOf('unrelated.tscn'));

@@ -39,6 +39,8 @@ const MOST_HELD: int = 600
 
 ## Read by [method _key_names], once a game.
 static var _named_keys: PackedStringArray = []
+## When each half press went down, keyed by the name given to [method split_half].
+static var _down_since: Dictionary[String, Dictionary] = {}
 
 var _shared: GdhSerialisation = GdhSerialisation.new()
 
@@ -164,8 +166,33 @@ static func held_for(params: Dictionary) -> Variant:
 	return frames
 
 
-## The process frames a whole press was held for, taken out of [param lasted], which [method hold]
-## answered and which answers the rest under held_for. Nothing for one half, which held nothing.
+## Records a half press ([param down] true) of what [param pressed] names. On the release it answers
+## how long the press was held, as [method hold] answers a whole one. The calls are separate, so the
+## game times the hold itself. Nothing for a press, or for a release with no recorded press.
+static func split_half(pressed: String, down: bool) -> Variant:
+	if down:
+		if not _down_since.has(pressed):
+			_down_since[pressed] = {
+				"usec": Time.get_ticks_usec(),
+				"frame": Engine.get_process_frames(),
+				"tick": Engine.get_physics_frames(),
+			}
+		return null
+	if not _down_since.has(pressed):
+		return null
+	var began: Dictionary = _down_since[pressed]
+	var _gone: bool = _down_since.erase(pressed)
+	return {
+		"frames": Engine.get_process_frames() - GdhRead.as_int(began["frame"]),
+		"seconds":
+		snappedf((Time.get_ticks_usec() - GdhRead.as_int(began["usec"])) / 1_000_000.0, 0.001),
+		"physics_frames": Engine.get_physics_frames() - GdhRead.as_int(began["tick"]),
+	}
+
+
+## Takes the process frame count out of [param lasted], the answer of [method hold] or
+## [method split_half], and leaves seconds and physics_frames in it for held_for. Nothing when
+## [param lasted] is not a dictionary.
 static func held_answer(lasted: Variant) -> Variant:
 	if not lasted is Dictionary:
 		return null

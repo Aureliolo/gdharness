@@ -179,6 +179,48 @@ const COMMAND_WAIT_SAID_MS = 2000;
 const START_READ_MS = 10_000;
 /** The folder, inside the slots', of the marks takers keep while they wait. */
 export const WAITING_FOLDER = 'waiting';
+/** The suffix of the note a wait leaves beside its mark as it ends, in place of the mark's `.json`. */
+export const ENDED_SUFFIX = '.ended';
+/** How long an ended wait's note is kept, after which the next wait in the folder removes it. */
+const ENDED_KEPT_MS = 600_000;
+
+/** The note [param mark]'s wait leaves as it ends. */
+export function endedNoteOf(mark: string): string {
+  return `${mark.replace(/\.json$/, '')}${ENDED_SUFFIX}`;
+}
+
+/**
+ * When [param mark] was made, in seconds since the epoch, or undefined when it cannot be read. Summed
+ * from whole seconds and nanoseconds as Python's `st_mtime` is, so a reader in Python matching a
+ * note to its mark by this start finds the same number.
+ */
+export function markBegan(mark: string): number | undefined {
+  try {
+    const ns = statSync(mark, { bigint: true }).mtimeNs;
+    return Number(ns / 1_000_000_000n) + Number(ns % 1_000_000_000n) * 1e-9;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Removes the notes of waits in [param marks] that ended longer ago than they are kept. */
+function endedNotesSwept(marks: string): void {
+  let names: string[];
+  try {
+    names = readdirSync(marks).filter((name) => name.endsWith(ENDED_SUFFIX));
+  } catch {
+    return;
+  }
+  for (const name of names) {
+    try {
+      if (Date.now() - statSync(join(marks, name)).mtimeMs > ENDED_KEPT_MS) {
+        removeWhole(join(marks, name));
+      }
+    } catch {
+      // Gone already, or held past the retries, which the next wait sweeps again.
+    }
+  }
+}
 /**
  * The folder, inside the slots', of the marks the gates in the machine's queue keep, one a gate's
  * ticket from its arrival to its release. A mark holds what a lock does.
@@ -731,7 +773,8 @@ export async function ownStart(): Promise<number> {
 export class EngineSlots {
   private readonly starts = new Map<number, { started: number | undefined; readAt: number }>();
   private readonly held = new Set<string>();
-  private readonly marks = new Set<string>();
+  /** Each waiting mark this process keeps, with when its wait began as {@link markBegan} reads it. */
+  private readonly marks = new Map<string, number>();
   /**
    * The waiting marks this process has left a free slot to, each with when it first did. One that
    * lets a slot left to it stand {@link SLOT_YIELD_MS} is waiting for something else, a share or
@@ -828,8 +871,8 @@ export class EngineSlots {
       }
     } finally {
       changes?.close();
-      if (mark !== undefined && this.marks.delete(mark)) {
-        removeWhole(mark);
+      if (mark !== undefined) {
+        this.waitEnded(mark);
       }
     }
   }
@@ -1001,8 +1044,8 @@ export class EngineSlots {
   markWaiting(): () => void {
     const mark = this.waitMarked({ ...this.holder, taker: MEMORY_TAKER });
     return () => {
-      if (mark !== undefined && this.marks.delete(mark)) {
-        removeWhole(mark);
+      if (mark !== undefined) {
+        this.waitEnded(mark);
       }
     };
   }
@@ -1020,14 +1063,30 @@ export class EngineSlots {
     } catch {
       return undefined;
     }
+    endedNotesSwept(marks);
     if (!this.made(mark, line instanceof SlotLine ? line.marked(this.holder) : line)) {
       return undefined;
     }
     if (line instanceof SlotLine) {
       line.mark = basename(mark);
     }
-    this.marks.add(mark);
+    this.marks.set(mark, markBegan(mark) ?? Date.now() / 1000);
     return mark;
+  }
+
+  /**
+   * Takes up the mark [param mark], first writing beside it when its wait began and ended. A reader
+   * whose looks come seconds apart under load would otherwise end the wait at its last sighting:
+   * measured, a 10.7 s wait was counted as 7.2 s.
+   */
+  private waitEnded(mark: string): void {
+    const began = this.marks.get(mark);
+    if (began === undefined) {
+      return;
+    }
+    this.marks.delete(mark);
+    writeWhole(endedNoteOf(mark), JSON.stringify({ began, ended: Date.now() / 1000 }));
+    removeWhole(mark);
   }
 
   /** Which of the slots [param numbers] a live game editor_run started holds. */
@@ -1104,9 +1163,8 @@ export class EngineSlots {
     for (const lock of this.held) {
       this.release(lock);
     }
-    for (const mark of this.marks) {
-      this.marks.delete(mark);
-      removeWhole(mark);
+    for (const mark of this.marks.keys()) {
+      this.waitEnded(mark);
     }
   }
 

@@ -53,7 +53,7 @@ func inject_touch(params: Dictionary) -> Dictionary:
 	var at: Array[Vector2] = [position]
 	var where: Dictionary = GdhMouse.where(aim, viewport, at)
 	var emulates: bool = _send(viewport, _touch(position, index, whole or held))
-	var lasted: Variant = null
+	var lasted: Variant = GdhValues.split_half("touch %d" % index, held) if not whole else null
 	if whole:
 		lasted = await GdhValues.hold(_host.get_tree(), frames)
 		var _lifted: bool = _send(viewport, _touch(position, index, false))

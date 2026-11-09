@@ -61,7 +61,7 @@ static func names() -> Array[String]:
 	return named
 
 
-func list_export_presets(_params: Dictionary) -> Dictionary:
+func list_export_presets(params: Dictionary) -> Dictionary:
 	if not FileAccess.file_exists(PRESETS_FILE):
 		return {
 			"presets": [],
@@ -101,12 +101,37 @@ func list_export_presets(_params: Dictionary) -> Dictionary:
 			preset["templates_installed"] = _installed(templates, platform)
 		presets.append(preset)
 		index += 1
-	return {
+	var answer: Dictionary = {
 		"presets": presets,
 		"presets_file_exists": true,
 		"total_presets": index,
 		"templates": templates,
 	}
+	var asked: String = str(params.get("preset", ""))
+	if not asked.is_empty():
+		var section: String = ""
+		for at: int in index:
+			if str(config.get_value("preset." + str(at), "name", "")) == asked:
+				section = "preset." + str(at)
+		if section.is_empty():
+			var held: Array[String] = names()
+			return _log.failure(
+				"No preset is named %s. %s"
+				% [
+					JSON.stringify(asked),
+					(
+						"export_presets.cfg holds none."
+						if held.is_empty()
+						else "The presets are %s." % ", ".join(held)
+					),
+				]
+			)
+		var options: Dictionary = {}
+		if config.has_section(section + ".options"):
+			for key: String in config.get_section_keys(section + ".options"):
+				options[key] = config.get_value(section + ".options", key)
+		answer["options"] = options
+	return answer
 
 
 ## Whether the preset in [param section] is the one its platform runs. The editor names that preset
@@ -241,8 +266,9 @@ func add_export_preset(params: Dictionary) -> Dictionary:
 		answer["templates_note"] = (
 			(
 				"No %s export templates for this engine are at %s, and an export for %s needs "
-				+ "them. The editor installs them in Editor > Manage Export Templates, or they can "
-				+ "be unpacked there from the export templates archive of this engine's release."
+				+ "them. An export with pack true needs none. The editor installs them in "
+				+ "Editor > Manage Export Templates, or they can be unpacked there from the export "
+				+ "templates archive of this engine's release."
 			)
 			% [platform, templates, platform]
 		)
@@ -856,6 +882,11 @@ static func _fitted(name: String, value: Variant, option: Dictionary) -> Variant
 	var hint: int = GdhRead.as_int(option.get("hint", PROPERTY_HINT_NONE))
 	var choices: PackedStringArray = str(option.get("hintString", "")).split(",", false)
 	var shown: String = JSON.stringify(value)
+	# Every JSON number arrives as a float, and the caller who sent 1 was told of a 1.0.
+	if value is float:
+		var number: float = value
+		if is_finite(number) and number == floorf(number) and absf(number) < 1.0e15:
+			shown = str(int(number))
 	if type not in WRITABLE:
 		return {
 			"refused":
