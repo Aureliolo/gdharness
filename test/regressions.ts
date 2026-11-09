@@ -20646,7 +20646,10 @@ async function withAHeadlessProbeGame(
   prefix: string,
   scene: string,
   files: Record<string, string>,
-  body: (call: (tool: string, args: Record<string, unknown>) => Promise<unknown>) => Promise<void>,
+  body: (
+    call: (tool: string, args: Record<string, unknown>) => Promise<unknown>,
+    said: (tool: string, args: Record<string, unknown>) => Promise<string>,
+  ) => Promise<void>,
 ): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
@@ -20688,10 +20691,14 @@ async function withAHeadlessProbeGame(
     );
     assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
     await games.meet(asNumber(get(started, 'runtime', 'pid')));
-    await body(async (tool, args) =>
-      parseTextContent(
-        await server.request('tools/call', { name: tool, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
-      ),
+    await body(
+      async (tool, args) =>
+        parseTextContent(
+          await server.request('tools/call', { name: tool, arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+        ),
+      async (tool, args) =>
+        textOf(await server.request('tools/call', { name: tool, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ??
+        '',
     );
     await stopItsRun(server);
   } finally {
@@ -20787,6 +20794,62 @@ async function testTypedTextLandsWhereTheAnswerSaysItDid(): Promise<void> {
       assert.equal(get(moused, 'focused_after'), '/root/Main/Secret', JSON.stringify(moused));
       const typed = await call('runtime_input', { op: 'text', text: 'x' });
       assert.equal(get(typed, 'into'), '/root/Main/Secret', JSON.stringify(typed));
+    },
+  );
+}
+
+/**
+ * A physics query's parameters are built from their class and properties. intersect_point takes a
+ * PhysicsPointQueryParameters2D, which the game holds none of to name by path, so no call could ask
+ * whether a point hits a collision shape.
+ */
+async function testAQueryObjectIsBuiltFromItsProperties(): Promise<void> {
+  await withAHeadlessProbeGame(
+    'query-object',
+    '[gd_scene load_steps=2 format=3]\n\n[sub_resource type="RectangleShape2D" id="box"]\nsize = Vector2(32, 32)\n\n' +
+      '[node name="Main" type="Node2D"]\n\n' +
+      '[node name="Wall" type="StaticBody2D" parent="."]\nposition = Vector2(100, 100)\n\n' +
+      '[node name="Shape" type="CollisionShape2D" parent="Wall"]\nshape = SubResource("box")\n',
+    {},
+    async (call, said) => {
+      await call('runtime_wait', { op: 'frames', frames: 3 });
+      const asked = (argument: unknown): Record<string, unknown> => ({
+        op: 'call',
+        nodePath: '/root/Main',
+        method: 'get_world_2d():direct_space_state:intersect_point',
+        args: [argument],
+      });
+      const at = (position: unknown): Record<string, unknown> =>
+        asked({ _type: 'PhysicsPointQueryParameters2D', position });
+      const hit = await call('runtime_invoke', at({ x: 100, y: 100 }));
+      const hits = get(hit, 'result');
+      assert.ok(Array.isArray(hits) && hits.length === 1, JSON.stringify(hit));
+      assert.match(JSON.stringify(hits), /\/root\/Main\/Wall/, JSON.stringify(hit));
+      const missed = await call('runtime_invoke', at({ x: 300, y: 300 }));
+      assert.deepEqual(get(missed, 'result'), [], JSON.stringify(missed));
+
+      const misnamed = await said(
+        'runtime_invoke',
+        asked({ _type: 'PhysicsPointQueryParameters2D', place: { x: 1, y: 1 } }),
+      );
+      assert.match(misnamed, /argument 1: PhysicsPointQueryParameters2D has no property place/, misnamed);
+      const unfitting = await said('runtime_invoke', at('left'));
+      assert.match(unfitting, /argument 1: PhysicsPointQueryParameters2D\.position holds Vector2/, unfitting);
+      const bare = await said('runtime_invoke', asked({ position: { x: 1, y: 1 } }));
+      assert.match(bare, /is built from \{"_type": its class, and its properties\}/, bare);
+      const node = await said('runtime_invoke', asked({ _type: 'Node2D' }));
+      assert.match(
+        node,
+        /a node is named by its path, such as \/root\/Main\/Player, and the Node2D given has none/,
+        node,
+      );
+      // A resource is the game's to make or load, so one is named by its file and never built.
+      const shape = await said('runtime_invoke', asked({ _type: 'RectangleShape2D', size: { x: 1, y: 1 } }));
+      assert.match(
+        shape,
+        /a resource is named by the res:\/\/ path of its file, and the RectangleShape2D given has none/,
+        shape,
+      );
     },
   );
 }
@@ -80465,6 +80528,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPointerOnTheHiddenDesktopIsNoted,
   testAKeyLetGoOfNamesWhatItsPressHeld,
   testTypedTextLandsWhereTheAnswerSaysItDid,
+  testAQueryObjectIsBuiltFromItsProperties,
   testAJoypadMotionReachesTheGameOnItsAxis,
   testAKeyPressCarriesItsModifiers,
   testAWaitForWordsCountsHiddenNodesOnlyWhenAsked,

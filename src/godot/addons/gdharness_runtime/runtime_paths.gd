@@ -399,7 +399,14 @@ static func _no_path_in(record: Dictionary) -> String:
 	if sort.is_empty():
 		return (
 			"an object is named by its path, or a resource by the res:// path of its file, and a"
-			+ " dictionary names neither"
+			+ " dictionary names neither. An engine object that is neither a node nor a resource,"
+			+ ' such as PhysicsPointQueryParameters2D, is built from {"_type": its class, and its'
+			+ " properties}"
+		)
+	if ClassDB.class_exists(sort) and ClassDB.is_parent_class(sort, "Node"):
+		return (
+			"a node is named by its path, such as /root/Main/Player, and the %s given has none"
+			% sort
 		)
 	return (
 		(
