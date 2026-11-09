@@ -428,7 +428,7 @@ func remove_input_action(params: Dictionary) -> Dictionary:
 	var err: Error = GdhProjectFile.save([setting])
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
-	return { "action_name": action_name, "removed": true }
+	return { "action_name": action_name, "removed": true, "saved": true }
 
 
 # The value project.godot stores for one input action.

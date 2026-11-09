@@ -164,11 +164,15 @@ static func held_for(params: Dictionary) -> Variant:
 	return frames
 
 
-## What a press says it was held for: [param frames] for a whole one, nothing for one half.
-static func held_answer(whole: bool, frames: int) -> Variant:
-	if whole:
-		return frames
-	return null
+## The process frames a whole press was held for, taken out of [param lasted], which [method hold]
+## answered and which answers the rest under held_for. Nothing for one half, which held nothing.
+static func held_answer(lasted: Variant) -> Variant:
+	if not lasted is Dictionary:
+		return null
+	var held: Dictionary = lasted
+	var frames: Variant = held.get("frames")
+	var _taken: bool = held.erase("frames")
+	return frames
 
 
 ## Waits out [param frames] process frames of [param tree], how long a whole press is held down,
@@ -179,9 +183,15 @@ static func held_answer(whole: bool, frames: int) -> Variant:
 static func hold(tree: SceneTree, frames: int) -> Dictionary:
 	var began_usec: int = Time.get_ticks_usec()
 	var began_tick: int = Engine.get_physics_frames()
-	for _frame: int in frames:
+	var held: int = 0
+	# Held on past the frames asked until a physics tick has run: a headless game's frame of a few
+	# milliseconds ended a press before _physics_process saw it down, so a game polling
+	# is_action_pressed there never moved.
+	while held < frames or Engine.get_physics_frames() == began_tick:
 		await tree.process_frame
+		held += 1
 	return {
+		"frames": held,
 		"seconds": snappedf((Time.get_ticks_usec() - began_usec) / 1_000_000.0, 0.001),
 		"physics_frames": Engine.get_physics_frames() - began_tick,
 	}

@@ -55,8 +55,13 @@ func with_nearest_files(said: String, path: String) -> String:
 	if not namesakes.is_empty():
 		var alone: bool = namesakes.size() == 1
 		return (
-			"%s. The %s of that name beside it %s %s."
-			% [said, "file" if alone else "files", "is" if alone else "are", ", ".join(namesakes)]
+			"%s. %s %s that name with %s."
+			% [
+				said,
+				", ".join(namesakes),
+				"has" if alone else "have",
+				"another extension" if alone else "other extensions",
+			]
 		)
 	var extension: String = path.get_extension()
 	if extension.is_empty():

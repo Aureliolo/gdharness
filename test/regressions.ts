@@ -20717,8 +20717,8 @@ async function testTypedTextLandsWhereTheAnswerSaysItDid(): Promise<void> {
   await withAHeadlessProbeGame(
     'typed-text',
     PROBE_SCENE_HEAD +
-      '[node name="Name" type="LineEdit" parent="."]\ntext = "2.1"\n\n' +
-      '[node name="Secret" type="LineEdit" parent="."]\nsecret = true\n',
+      '[node name="Name" type="LineEdit" parent="."]\noffset_right = 200.0\noffset_bottom = 31.0\ntext = "2.1"\n\n' +
+      '[node name="Secret" type="LineEdit" parent="."]\noffset_top = 50.0\noffset_right = 200.0\noffset_bottom = 81.0\nsecret = true\n',
     {
       'main.gd':
         'extends Control\n\n' +
@@ -20769,6 +20769,24 @@ async function testTypedTextLandsWhereTheAnswerSaysItDid(): Promise<void> {
       assert.equal(get(secret, 'into'), '/root/Main/Secret', secretShown);
       assert.equal(get(secret, 'holds'), '•'.repeat(7), `a secret field answers its mask: ${secretShown}`);
       assert.equal(get(await texts(), 'secret'), 'hunter2', 'while the field itself holds the text');
+
+      // A click says where it moved the focus, so typing next is known to land there.
+      const clicked = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Name' });
+      assert.deepEqual(
+        [get(clicked, 'landed'), get(clicked, 'focused_after')],
+        [true, '/root/Main/Name'],
+        JSON.stringify(clicked),
+      );
+      const again = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Name' });
+      assert.deepEqual(
+        [get(again, 'landed'), get(again, 'focused_after')],
+        [true, undefined],
+        `a click that leaves the focus where it was says nothing of it: ${JSON.stringify(again)}`,
+      );
+      const moused = await call('runtime_input', { op: 'mouse_click', x: 100, y: 65 });
+      assert.equal(get(moused, 'focused_after'), '/root/Main/Secret', JSON.stringify(moused));
+      const typed = await call('runtime_input', { op: 'text', text: 'x' });
+      assert.equal(get(typed, 'into'), '/root/Main/Secret', JSON.stringify(typed));
     },
   );
 }
@@ -34632,6 +34650,79 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
         both,
       );
       assert.equal(await read('key_down'), false, 'and the refused press was never sent');
+      await call('editor_run', { op: 'stop' });
+    },
+    { realAddon: true, engine },
+  );
+}
+
+/**
+ * A whole press is held until a physics tick has run with it down. A headless game with no frame
+ * cap runs process frames of a few milliseconds, so a press of one frame ended before
+ * _physics_process saw it, and a game polling is_action_pressed there never moved.
+ */
+async function testAWholePressIsSeenByAPhysicsTick(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('physics tick press regression skipped (Godot not found)');
+    return;
+  }
+  await withAPlayingEditor(
+    ({ adapter }) =>
+      (tool) =>
+        tool === 'playing_status'
+          ? { ok: true, playing: false, scenePath: '', debugPort: adapter }
+          : { ok: true },
+    async ({ server, project }) => {
+      writeFileSync(
+        join(project, 'main.gd'),
+        [
+          'extends Node',
+          '',
+          'var seen: int = 0',
+          '',
+          '',
+          'func _physics_process(_delta: float) -> void:',
+          '\tif Input.is_action_pressed("ui_accept"):',
+          '\t\tseen += 1',
+          '',
+        ].join('\n'),
+      );
+      writeFileSync(
+        join(project, 'main.tscn'),
+        '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+          '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+      );
+      const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
+        textOf(await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS)) ?? '';
+      const started = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless: true,
+        args: ['--stay'],
+        runtimeWaitMs: 30_000,
+      });
+      assert.match(started, /"listening": true/, started);
+      const presses = 8;
+      for (let press = 0; press < presses; press += 1) {
+        const answer = await call('runtime_input', { op: 'action', action: 'ui_accept' });
+        const parsed: unknown = JSON.parse(answer);
+        assert.ok(Number(get(get(parsed, 'held_for'), 'physics_frames')) >= 1, answer);
+        assert.ok(Number(get(parsed, 'held_frames')) >= 1, answer);
+      }
+      const seen = get(
+        JSON.parse(
+          await call('runtime_inspect', { op: 'property', nodePath: '/root/Main', property: 'seen' }),
+        ),
+        'value',
+      );
+      assert.ok(
+        Number(seen) >= presses,
+        `_physics_process saw ${String(seen)} ticks of ${String(presses)} presses`,
+      );
       await call('editor_run', { op: 'stop' });
     },
     { realAddon: true, engine },
@@ -64958,11 +65049,11 @@ function testAMisspeltExtensionIsOfferedTheFileOfThatName(): void {
   const beside = ['res://ai/brain.gd', 'res://ai/brain.tscn', 'res://ai/brawn.gd'];
   assert.equal(
     withNearestFiles('Script file does not exist: res://ai/brain.gdd', 'res://ai/brain.gdd', scripts, beside),
-    'Script file does not exist: res://ai/brain.gdd. The files of that name beside it are res://ai/brain.gd, res://ai/brain.tscn.',
+    'Script file does not exist: res://ai/brain.gdd. res://ai/brain.gd, res://ai/brain.tscn have that name with other extensions.',
   );
   assert.equal(
     withNearestFiles('res://ai/brain.tscn is not a script', 'res://ai/brain.gd2', scripts, beside),
-    'res://ai/brain.tscn is not a script. The file of that name beside it is res://ai/brain.gd.',
+    'res://ai/brain.tscn is not a script. res://ai/brain.gd has that name with another extension.',
     'a file the refusal names is not offered back',
   );
   assert.equal(
@@ -70901,6 +70992,30 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       `visibility_changed passes no arguments and the connection binds 1, so hide is called with 1 argument, and takes none${fails}`,
       JSON.stringify(overBound),
     );
+    // A script's own method can be given room for the bound value, which unbinding would put in
+    // place of the signal's last argument.
+    const boundOver = await written('scene_signal', {
+      op: 'connect',
+      scenePath: 'wires.tscn',
+      sourceNodePath: 'Emitter',
+      signalName: 'died',
+      targetNodePath: 'Taker',
+      methodName: 'scale_by',
+      binds: ['gold'],
+    });
+    assert.equal(
+      get(boundOver, 'misfit'),
+      `died passes 1 argument and the connection binds 1, so scale_by is called with 2 arguments, and takes at most 1${fails} Connect it with unbinds 1 to leave out the last argument the signal passes, or give scale_by 1 more parameter.`,
+      JSON.stringify(boundOver),
+    );
+    await written('scene_signal', {
+      op: 'disconnect',
+      scenePath: 'wires.tscn',
+      sourceNodePath: 'Emitter',
+      signalName: 'died',
+      targetNodePath: 'Taker',
+      methodName: 'scale_by',
+    });
     // binds replaces what the connection binds, so the remedy counts the bound value already there.
     const boundShort = await written('scene_signal', {
       op: 'connect',
@@ -71190,7 +71305,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     const overfull = await rewire('visibility_changed', 'take_node', { flags: 16, binds: [3] });
     assert.equal(
       get(overfull, 'misfit'),
-      `visibility_changed passes no arguments and the connection appends its source and binds 1, so take_node is called with 2 arguments, and takes at most 1${fails}`,
+      `visibility_changed passes no arguments and the connection appends its source and binds 1, so take_node is called with 2 arguments, and takes at most 1${fails} Give take_node 1 more parameter.`,
       JSON.stringify(overfull),
     );
     const sourceWrong = await rewire('ready', 'take', { flags: 16 });
@@ -74720,7 +74835,7 @@ async function testAnInheritedSceneIsMadeWithNoEditor(): Promise<void> {
     );
     assert.equal(
       get(further, 'namedByPath'),
-      "What this saved names res://parts/big_crate.tscn by path rather than by uid, which loads the same. A reference by uid is resolved through the project's uid cache, which holds none for it yet, as with a file made since the project was last scanned, so naming it by uid now would warn on every load. project_import refresh_uids scans the project, and writes after it name it by uid.",
+      "This saved res://parts/big_crate.tscn by path, which loads the same. The project's uid cache does not hold its uid until the project is next scanned. Named by uid before then, it would warn on every load. project_import refresh_uids scans it, so later writes name it by uid.",
       'and the answer says why, with the call that changes it',
     );
     assert.equal(get(made, 'namedByPath'), undefined, `crate.tscn was imported: ${JSON.stringify(made)}`);
@@ -75620,7 +75735,7 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
     });
     assert.equal(
       get(both, 'namedByPath'),
-      "What this saved names res://lamp.tscn, res://desk.tscn by path rather than by uid, which loads the same. A reference by uid is resolved through the project's uid cache, which holds none for them yet, as with a file made since the project was last scanned, so naming them by uid now would warn on every load. project_import refresh_uids scans the project, and writes after it name them by uid.",
+      "This saved res://lamp.tscn, res://desk.tscn by path, which loads the same. The project's uid cache does not hold their uids until the project is next scanned. Named by uid before then, they would warn on every load. project_import refresh_uids scans it, so later writes name them by uid.",
       JSON.stringify(both),
     );
     assert.equal(await energy('unrelated.tscn', 'Top/DeskLamp/Bulb'), 3, fileOf('unrelated.tscn'));
@@ -80193,6 +80308,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHeadlessAccessibilityReadNamesWhatItNeeds,
   testAnEngineSingletonIsReachedAndOSIsNot,
   testAPressIsHeldForTheFramesAsked,
+  testAWholePressIsSeenByAPhysicsTick,
   testAPathStepsIntoAVectorsComponents,
   testTheAnnounceWaitIsNotHeldByASlowEditor,
   testTheWaitSizedToABootIsSaid,
