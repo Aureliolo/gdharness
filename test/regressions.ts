@@ -28426,6 +28426,23 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
         /^Nothing was changed: modification 1 has an exportHint and isExport false, and a hint is written only on an export/,
       );
 
+      // A create onto a script that exists says how its lines are changed, and writes nothing.
+      const marker = readFileSync(join(project, 'marker.gd'), 'utf8');
+      const overwrite = await server.request(
+        'tools/call',
+        {
+          name: 'script_edit',
+          arguments: { projectPath: project, op: 'create', scriptPath: 'res://marker.gd', extends: 'Node' },
+        },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+      assert.match(
+        textOf(overwrite) ?? '',
+        /Script file already exists: res:\/\/marker\.gd\. script_edit modify adds declarations to it\. A line already there is changed by editing the file's text\./,
+        textOf(overwrite) ?? '',
+      );
+      assert.equal(readFileSync(join(project, 'marker.gd'), 'utf8'), marker, 'the script is left as it was');
+
       // isStatic writes static on a function and a variable, the variable below a static one there.
       writeFileSync(join(project, 'made', 'counts.gd'), 'extends RefCounted\n\nstatic var kept: int = 0\n');
       const statics = await call('script_edit', {
