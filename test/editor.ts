@@ -3910,7 +3910,25 @@ async function testTilesDrawWhatTheyName({ call, refusal, project }: Editor): Pr
       resourcePath: 'res://tiles/other.tres',
       sources: [{ texture: 'res://tiles/nothing.png', tileSize: { x: 4, y: 4 } }],
     }),
-    /no texture at res:\/\/tiles\/nothing\.png/,
+    /no texture at res:\/\/tiles\/nothing\.png\. .*resource_edit create with resourceType PlaceholderTexture2D and properties \{"size": \{"x": 64, "y": 32\}\} makes a stand-in of that size\./,
+  );
+  // The stand-in the refusal offers is one a tile set is built from.
+  await call('resource_edit', {
+    projectPath: project,
+    op: 'create',
+    resourcePath: 'res://tiles/stand_in.tres',
+    resourceType: 'PlaceholderTexture2D',
+    properties: { size: { x: 64, y: 32 } },
+  });
+  const stoodIn = await call('resource_edit', {
+    ...tileset,
+    resourcePath: 'res://tiles/stood_in.tres',
+    sources: [{ texture: 'res://tiles/stand_in.tres', tileSize: { x: 32, y: 32 } }],
+  });
+  assert.equal(
+    get(asArray(get(stoodIn, 'sources'), 'sources')[0], 'texture'),
+    'res://tiles/stand_in.tres',
+    JSON.stringify(stoodIn),
   );
   const outside = await refusal('resource_edit', {
     ...tileset,
