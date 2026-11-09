@@ -150,18 +150,7 @@ func _atlas(entry: Variant, index: int) -> Array:
 					% [index, texture_path, texture_path]
 				),
 			]
-		return [
-			false,
-			(
-				(
-					"sources[%d].texture: no texture at %s. A tile set takes an image the project "
-					+ "imports, such as a PNG from an image editor, or a texture resource: "
-					+ "resource_edit create with resourceType PlaceholderTexture2D and properties "
-					+ '{"size": {"x": 64, "y": 32}} makes a stand-in of that size.'
-				)
-				% [index, texture_path]
-			),
-		]
+		return [false, "sources[%d].texture: no texture at %s" % [index, texture_path]]
 	var texture: Texture2D = load(texture_path) as Texture2D
 	if texture == null:
 		return [false, "sources[%d].texture: %s is not a texture" % [index, texture_path]]
