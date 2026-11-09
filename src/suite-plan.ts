@@ -695,13 +695,21 @@ export class Shares {
   private readonly declared: CasesBySuite;
   private readonly all: readonly Unit[];
   private readonly lanes: number;
+  private readonly batch: number;
 
-  constructor(units: readonly Unit[], declared: CasesBySuite, lanes: number) {
+  /** [param batch] caps each headless share's seconds, though a unit costing more still goes alone. */
+  constructor(
+    units: readonly Unit[],
+    declared: CasesBySuite,
+    lanes: number,
+    batch = Number.POSITIVE_INFINITY,
+  ) {
     this.windowed = units.filter((unit) => unit.windowed);
     this.headless = units.filter((unit) => !unit.windowed).toSorted(slowestFirst);
     this.declared = declared;
     this.all = units;
     this.lanes = Math.max(1, lanes);
+    this.batch = batch;
   }
 
   /** Whether every unit has been handed out. */
@@ -720,7 +728,7 @@ export class Shares {
       return null;
     }
     const left = this.headless.reduce((sum, unit) => sum + unit.cost, 0);
-    const target = Math.max(SHARE_FLOOR_SECONDS, left / this.lanes);
+    const target = Math.min(Math.max(SHARE_FLOOR_SECONDS, left / this.lanes), this.batch);
     const share: Unit[] = [];
     const rest: Unit[] = [];
     let cost = 0;

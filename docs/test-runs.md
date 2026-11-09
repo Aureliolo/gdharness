@@ -244,6 +244,16 @@ The shares shrink as the work runs out. A slot freed partway through takes on pa
 left, rather than a part fixed when the run began. Once everything is handed out, the run stops
 waiting for slots.
 
+### Batches in a gate
+
+A gate sets `GODOT_ENGINE_BATCH_SECONDS` to make runs sharing the slots take turns. Its run then
+hands the work out in shares of about that many seconds, or four engine starts if that is longer.
+The start is the middle one of the last run's engines. A suite that takes longer goes alone.
+
+After each share, the run gives its slot back and waits for one again behind every taker waiting
+longer. A suite is never stopped partway. Each share starts an engine, so batches cost a start
+each. Outside a gate the variable does nothing.
+
 ### When memory is short
 
 Memory is handed out the same way. The memory free as a run begins may hold it below the engines
@@ -752,8 +762,8 @@ The last `kept = max(2, floor(count / 4))` slots are kept for engines outside a 
 
 ### Which slots each engine takes
 
-A process runs inside a gate when `GODOT_ENGINE_SHARE` and `GODOT_ENGINE_SHARE_COUNT` are both
-set. Each kind of engine takes:
+A process runs inside a gate when `GODOT_ENGINE_SEATED` is set and not empty. Each kind of engine
+takes:
 
 - A gate's engine takes only the slots below `count - kept`, and slot 0 at least, whatever the queue
   holds. A gate's seat counts only these slots, so work in the kept ones never holds a seat back.

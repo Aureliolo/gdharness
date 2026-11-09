@@ -45,7 +45,7 @@ import {
   wholeFlag,
 } from './engine-launch.js';
 import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
-import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
+import { BATCH_VARIABLE, batchSecondsOf, EngineSlots, machineSlots, ownStart } from './engine-slots.js';
 import { staleImports } from './import-freshness.js';
 import { hiddenWindowFlags } from './launch.js';
 import { freeLibraryCopies, seedExtensionList, unlistedExtensions } from './library-copies.js';
@@ -754,9 +754,17 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     if (memoryHeld) {
       say(memorySaid(byMemory.engines, lanes.length, byMemory.held ?? ''));
     }
-    const shared = options.order === null && lanes.length > 1 && (memoryHeld || taken.length < lanes.length);
+    const batch = options.order === null ? batchOf(lastRunFile) : null;
+    const shared =
+      options.order === null &&
+      (batch !== null || (lanes.length > 1 && (memoryHeld || taken.length < lanes.length)));
     if (shared && taken.length < startable) {
       say(sharesSaid(taken.length, startable));
+    }
+    if (batch !== null) {
+      say(
+        `Each engine runs about ${String(Math.round(batch))} s of suites, after which its slot is given back and taken again behind those waiting longer, as ${BATCH_VARIABLE} asks.`,
+      );
     }
     // Once the lanes hold what slots were free, so it takes one only beside them.
     const handed = new HandedSlot();
@@ -773,6 +781,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
           times,
           handed,
           memoryHeld ? new MemoryGate(slots, async () => (await memoryAvailable()).bytes) : undefined,
+          batch,
         )
       : (await Promise.all(lanes.map((lane, at) => runLane(launch, lane, times, taken[at] ?? null, handed))))
           .flat()
@@ -1308,6 +1317,31 @@ async function importProject(launch: Launch): Promise<string | null> {
 }
 
 /**
+ * The seconds of suites an engine runs before its lane gives the slot back, or null when the gate
+ * asks for no batches: what it asks, and never less than four engine starts as the last run measured
+ * them, so starting engines takes at most a fifth of a slot's time.
+ */
+function batchOf(lastRunFile: string): number | null {
+  const asked = batchSecondsOf();
+  if (asked === null) {
+    return null;
+  }
+  let starts: number[] = [];
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(lastRunFile, 'utf8'));
+    const engines = isRecord(parsed) ? parsed['engines'] : null;
+    starts = (Array.isArray(engines) ? engines : []).flatMap((engine: unknown) => {
+      const seconds = isRecord(engine) ? engine['startSeconds'] : null;
+      return typeof seconds === 'number' ? [seconds] : [];
+    });
+  } catch {
+    // No run before this one, so no start measured.
+  }
+  const middle = starts.toSorted((a, b) => a - b)[Math.floor(starts.length / 2)] ?? 0;
+  return Math.max(asked, 4 * middle);
+}
+
+/**
  * Runs the engines of one lane one after another in a single slot, taken before the first and given
  * back after the last, so another run on the machine cannot take it in between.
  */
@@ -1336,7 +1370,8 @@ async function runLane(
  * starting only once [param memory] has room for it when the run is held by memory. A lane still
  * waiting once every share is handed out stops waiting: a slot somebody else holds is not to keep a
  * run open that has nothing left to give it. Memory is waited for before a slot, so a lane waiting
- * for it holds no slot from anybody else.
+ * for it holds no slot from anybody else. Given [param batch], each headless share holds about that
+ * many seconds and a lane gives its slot back after each. It takes one again for the next.
  */
 async function runShares(
   launch: Launch,
@@ -1347,8 +1382,9 @@ async function runShares(
   times: SuiteTimes,
   handed?: HandedSlot,
   memory?: MemoryGate,
+  batch: number | null = null,
 ): Promise<EngineRan[]> {
-  const shares = new Shares(units, declared, lanes);
+  const shares = new Shares(units, declared, lanes, batch ?? Number.POSITIVE_INFINITY);
   const handedOut = new AbortController();
   let engines = 0;
   // Asked through a call, since another lane empties it while this one waits.
@@ -1383,6 +1419,11 @@ async function runShares(
           ran.push(await runEngine(launch, plan, index, times, '', lock));
         } finally {
           ended?.();
+        }
+        // A new take waits behind every taker that began waiting before it.
+        if (batch !== null && !empty()) {
+          doneWith(launch, lock, handed);
+          lock = null;
         }
       }
       return ran;

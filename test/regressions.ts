@@ -135,6 +135,8 @@ import {
   startedUntilItRuns,
 } from '../src/engine-run.js';
 import {
+  BATCH_VARIABLE,
+  batchSecondsOf,
   claimIsOurs,
   EngineSlots,
   FolderChanges,
@@ -150,8 +152,7 @@ import {
   ownStart,
   QUEUED_FOLDER,
   inAGate as runsInAGate,
-  SHARE_COUNT_VARIABLE,
-  SHARE_VARIABLE,
+  SEATED_VARIABLE,
   SLOT_YIELD_MS,
   SLOTS_VARIABLE,
   type SlotHolder,
@@ -50930,7 +50931,7 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
   assert.deepEqual(slotsDrawnOn(1, 'other', 'queued'), { numbers: [0] }, "one slot is everybody's");
   assert.deepEqual(
     [
-      slotTaker({ [SHARE_VARIABLE]: 'share', [SHARE_COUNT_VARIABLE]: '3', GODOT_ENGINE_TIMED: 'x' }),
+      slotTaker({ [SEATED_VARIABLE]: '1', GODOT_ENGINE_TIMED: 'x' }),
       slotTaker({ GODOT_ENGINE_TIMED: '/slots/3.lock', GODOT_ENGINE_TIER: 'fast' }),
       slotTaker({ GODOT_ENGINE_TIER: 'full' }),
       slotTaker({ GODOT_ENGINE_TIER: 'ship' }),
@@ -50942,12 +50943,23 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
   );
   assert.deepEqual(
     [
-      runsInAGate({ [SHARE_VARIABLE]: 'share', [SHARE_COUNT_VARIABLE]: '3' }),
-      runsInAGate({ [SHARE_VARIABLE]: 'share' }),
-      runsInAGate({ [SHARE_VARIABLE]: '', [SHARE_COUNT_VARIABLE]: '3' }),
+      runsInAGate({ [SEATED_VARIABLE]: '1' }),
+      runsInAGate({ [SEATED_VARIABLE]: '' }),
+      runsInAGate({ GODOT_ENGINE_SHARE: 'share', GODOT_ENGINE_SHARE_COUNT: '3' }),
     ],
     [true, false, false],
-    'a gate names its share in both variables',
+    `a gate sets ${SEATED_VARIABLE}`,
+  );
+  assert.deepEqual(
+    [
+      batchSecondsOf({ [SEATED_VARIABLE]: '1', [BATCH_VARIABLE]: '60' }),
+      batchSecondsOf({ [BATCH_VARIABLE]: '60' }),
+      batchSecondsOf({ [SEATED_VARIABLE]: '1' }),
+      batchSecondsOf({ [SEATED_VARIABLE]: '1', [BATCH_VARIABLE]: '0' }),
+      batchSecondsOf({ [SEATED_VARIABLE]: '1', [BATCH_VARIABLE]: 'soon' }),
+    ],
+    [60, null, null, null, null],
+    'batches are asked for by a gate alone, as seconds above 0',
   );
 
   const started = await ownStart();
@@ -54757,6 +54769,123 @@ function testATestRunDealsByAndRecordsIntoTheTimesItIsGiven(): void {
       `dealt by the times in the file named, the project's own being empty: ${byGateTimes.said}`,
     );
     assert.equal(readFileSync(own, 'utf8'), '{}\n', "the project's own left as it was");
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+    rmSync(slots, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A gate asking for batches has each engine run about that many seconds of suites, never fewer than
+ * four engine starts as the last run measured them. Its lane gives the slot back between engines, so
+ * a gate that began waiting during the first takes it before the second.
+ */
+async function testAGateAskingForBatchesGivesItsSlotBackBetweenThem(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('batch regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-batches-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-slots-'));
+  try {
+    const names = ['a', 'b', 'c', 'd'];
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\nconfig/name="Batches"\n',
+      ...Object.fromEntries(
+        names.map((name) => [
+          `tests/${name}_test.gd`,
+          `extends GdUnitTestSuite\n\nfunc test_${name}() -> void:\n\tassert_int(1).is_equal(1)\n`,
+        ]),
+      ),
+      // Fifteen seconds a suite, so a batch of 20 s holds one and a batch of 40 s holds two.
+      '.godot/gdharness/suite-times.json': JSON.stringify(
+        Object.fromEntries(
+          names.map((name) => [
+            `res://tests/${name}_test.gd`,
+            { seconds: 15, cases: { [`test_${name}`]: 15 } },
+          ]),
+        ),
+      ),
+      '.godot/gdharness/last-run.json': JSON.stringify({
+        engines: [{ startSeconds: 9 }, { startSeconds: 10 }],
+      }),
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const resultFile = join(project, 'result.json');
+    const run = spawnHidden(
+      process.execPath,
+      // One lane, since a lane waiting from the start waits longer than the other gate and goes first.
+      ['build/cli.js', 'test', project, '--slots', slots, '--result', resultFile, '--engines', '1'],
+      {
+        env: {
+          ...process.env,
+          GODOT_PATH: godotPath,
+          GODOT_ENGINE_SLOT_COUNT: '1',
+          GODOT_ENGINE_SEATED: '1',
+          GODOT_ENGINE_BATCH_SECONDS: '20',
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    let said = '';
+    run.stdout.on('data', (chunk: Buffer) => {
+      said += String(chunk);
+    });
+    run.stderr.on('data', (chunk: Buffer) => {
+      said += String(chunk);
+    });
+    let endedAt = 0;
+    const ended = new Promise<number | null>((resolveEnd) => {
+      run.once('exit', (code) => {
+        endedAt = Date.now();
+        resolveEnd(code);
+      });
+    });
+    // Another gate begins waiting while the first engine runs, after the import before it.
+    const runs = join(project, '.godot', 'gdharness', 'test-runs');
+    const firstEngine = (): boolean =>
+      existsSync(runs) && readdirSync(runs).some((one) => existsSync(join(runs, one, 'engine-0')));
+    for (let looked = 0; looked < 1200 && run.exitCode === null && !firstEngine(); looked += 1) {
+      await delay(100);
+    }
+    assert.ok(firstEngine(), `the first engine started: ${said}`);
+    const other = new EngineSlots(
+      slots,
+      1,
+      { pid: process.pid, started: await ownStart(), by: 'another gate' },
+      undefined,
+      () => 'gate',
+    );
+    const askedAt = Date.now();
+    const lock = await other.take();
+    const tookAt = Date.now();
+    const tookWhileRunning = run.exitCode === null;
+    await delay(3000);
+    other.release(lock);
+    const gaveBackAt = Date.now();
+    assert.equal(await ended, 0, said);
+    assert.ok(
+      tookWhileRunning && endedAt - gaveBackAt > 1000,
+      `the run gave its slot to the gate waiting longer between its engines, and ran its second engine after: asked ${String(askedAt)}, took ${String(tookAt)}, gave back ${String(gaveBackAt)}, run ended ${String(endedAt)}: ${said}`,
+    );
+    assert.match(
+      said,
+      /^Each engine runs about 40 s of suites, after which its slot is given back and taken again behind those waiting longer, as GODOT_ENGINE_BATCH_SECONDS asks\.$/m,
+      `four times the last run's middle start, being more than the 20 s asked: ${said}`,
+    );
+    const result: unknown = JSON.parse(readFileSync(resultFile, 'utf8'));
+    assert.deepEqual(
+      asArray(get(result, 'engines'), 'engines').map(
+        (engine) => asArray(get(engine, 'suites'), 'suites').length,
+      ),
+      [2, 2],
+      `two suites an engine: ${said}`,
+    );
   } finally {
     rmSync(project, { recursive: true, force: true });
     rmSync(slots, { recursive: true, force: true });
@@ -79976,6 +80105,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunTimesStartAndSetUpApartFromItsCases,
   testATestRunsLimitsEndAHungOrChattyEngine,
   testATestRunDealsByAndRecordsIntoTheTimesItIsGiven,
+  testAGateAskingForBatchesGivesItsSlotBackBetweenThem,
   testTheShutdownWalkIsHeldAndARealLeakStillFails,
   testAParameterisedCaseIsDealtByItsRows,
   testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly,

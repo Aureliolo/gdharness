@@ -184,12 +184,20 @@ export const WAITING_FOLDER = 'waiting';
  * ticket from its arrival to its release. A mark holds what a lock does.
  */
 export const QUEUED_FOLDER = 'queued';
+/** The variable set in every process a gate runs, which says the engine is a gate's. */
+export const SEATED_VARIABLE = 'GODOT_ENGINE_SEATED';
 /**
- * The variables naming the share of the gate a process runs in, set in every process a gate runs,
- * so both set says the engine is a gate's.
+ * The variable a gate sets to have its test run give a slot back after each batch of about that
+ * many seconds of suites and queue again, so gates sharing slots take turns instead of each keeping
+ * its slots to its end.
  */
-export const SHARE_VARIABLE = 'GODOT_ENGINE_SHARE';
-export const SHARE_COUNT_VARIABLE = 'GODOT_ENGINE_SHARE_COUNT';
+export const BATCH_VARIABLE = 'GODOT_ENGINE_BATCH_SECONDS';
+
+/** The seconds [constant BATCH_VARIABLE] asks for, or null outside a gate or when it is unset. */
+export function batchSecondsOf(env: NodeJS.ProcessEnv = process.env): number | null {
+  const seconds = Number(nonEmpty(env[BATCH_VARIABLE]));
+  return inAGate(env) && Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+}
 /**
  * How many slots of [param count] are kept for engines outside a gate while a gate is queued, the
  * last ones: a quarter, at least two. The gates draw on the rest alone, and an engine outside a gate
@@ -525,9 +533,9 @@ function forAGame(queue: GateQueue, game: boolean): GateQueue {
   return game && queue === 'spare' ? 'queued' : queue;
 }
 
-/** Whether [param env] says this process runs inside a gate, which names its share in both. */
+/** Whether [param env] says this process runs inside a gate. */
 export function inAGate(env: NodeJS.ProcessEnv = process.env): boolean {
-  return nonEmpty(env[SHARE_VARIABLE]) !== undefined && nonEmpty(env[SHARE_COUNT_VARIABLE]) !== undefined;
+  return nonEmpty(env[SEATED_VARIABLE]) !== undefined;
 }
 
 /**
