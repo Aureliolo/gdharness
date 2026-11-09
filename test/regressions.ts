@@ -78424,6 +78424,14 @@ async function testAProjectsFilesAndLayersAreNamedWithNoEditor(): Promise<void> 
       assert.equal(get(parseTextContent(unread), 'note'), `${path} does not exist.`, textOf(unread) ?? '');
       await call('project_settings', { op: 'unset', setting: name });
     }
+    // A resource file not there yet is one resource_edit writes.
+    const layout = await setting('audio/buses/default_bus_layout', 'res://buses.tres');
+    assert.equal(
+      get(parseTextContent(layout), 'note'),
+      'res://buses.tres does not exist. resource_edit create writes res://buses.tres.',
+      textOf(layout) ?? '',
+    );
+    await call('project_settings', { op: 'unset', setting: 'audio/buses/default_bus_layout' });
 
     assert.equal(get(await statusOf('res://text/strings.csv'), 'status'), 'needs_reimport');
     const imported = await call('project_import', { op: 'reimport' });
