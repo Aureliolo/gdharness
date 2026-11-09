@@ -71,7 +71,9 @@ func inject_joypad_button(params: Dictionary) -> Dictionary:
 	var focused: String = GdhValues.focus_path(_host)
 	var event: InputEventJoypadButton = _button(button, device, whole or held)
 	Input.parse_input_event(event)
-	var lasted: Variant = null
+	var lasted: Variant = (
+		GdhValues.split_half("pad %d button %d" % [device, button], held) if not whole else null
+	)
 	if whole:
 		# A frame between the halves at least, as a key has, so a game that acts on the press and
 		# one that acts on the release each get a frame to do it in.
@@ -96,7 +98,8 @@ func inject_joypad_button(params: Dictionary) -> Dictionary:
 
 
 ## Moves a stick or trigger axis to a value, where it stays until another motion moves it, as a
-## stick held over does.
+## stick held over does. With holdFrames it is held there for that many frames inside the game and
+## let go back to 0, so the time between calls is not counted as held.
 func inject_joypad_motion(params: Dictionary) -> Dictionary:
 	var given: Variant = params.get("axis", null)
 	var axis: int = _named_or_numbered(given, JOY_AXES, JOY_AXIS_MAX)
@@ -114,13 +117,27 @@ func inject_joypad_motion(params: Dictionary) -> Dictionary:
 			"message": "value %s is outside -1 to 1, the whole travel of an axis" % value,
 		}
 	var device: int = GdhRead.as_int(params.get("device", 0), 0)
+	var whole: bool = params.has("holdFrames")
+	var holding: Variant = GdhValues.held_for(params)
+	if holding is String:
+		return { "type": "error", "message": holding }
+	var frames: int = holding
+	if whole and is_zero_approx(value):
+		return {
+			"type": "error",
+			"message": "holdFrames holds an axis away from 0 and lets it go, and value is 0.",
+		}
 
-	var event: InputEventJoypadMotion = InputEventJoypadMotion.new()
-	event.axis = axis as JoyAxis
-	event.axis_value = value
-	event.device = device
+	var event: InputEventJoypadMotion = _motion(axis, device, value)
 	var focused: String = GdhValues.focus_path(_host)
 	Input.parse_input_event(event)
+	var moved: String = "pad %d axis %d" % [device, axis]
+	var lasted: Variant = (
+		GdhValues.split_half(moved, not is_zero_approx(value)) if not whole else null
+	)
+	if whole:
+		lasted = await GdhValues.hold(_host.get_tree(), frames)
+		Input.parse_input_event(_motion(axis, device, 0.0))
 	await _host.get_tree().process_frame
 
 	var answer: Dictionary = {
@@ -131,8 +148,19 @@ func inject_joypad_motion(params: Dictionary) -> Dictionary:
 		"value": value,
 		"device": device,
 		"actions": GdhValues.actions_of(event),
+		"whole": whole,
+		"held_frames": GdhValues.held_answer(lasted),
+		"held_for": lasted,
 	}
 	return GdhValues.focus_noted(answer, focused, _host)
+
+
+static func _motion(axis: int, device: int, value: float) -> InputEventJoypadMotion:
+	var event: InputEventJoypadMotion = InputEventJoypadMotion.new()
+	event.axis = axis as JoyAxis
+	event.axis_value = value
+	event.device = device
+	return event
 
 
 static func _button(button: int, device: int, down: bool) -> InputEventJoypadButton:

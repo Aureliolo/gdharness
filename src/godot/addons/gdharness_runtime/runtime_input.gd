@@ -217,7 +217,7 @@ func inject_action(params: Dictionary) -> Dictionary:
 	var shortcuts: Dictionary = { "shortcuts": [], "shortcut_pressed": null }
 	if whole or held:
 		shortcuts = await GdhValues.press_shortcuts(_host.get_tree().root, action)
-	var lasted: Variant = null
+	var lasted: Variant = GdhValues.split_half("action %s" % action, held) if not whole else null
 	if whole:
 		# A frame between the halves at least, as a click has: a listener that acts on the press and
 		# a listener that acts on the release both get their own frame to do it in.
@@ -298,7 +298,9 @@ func inject_key(params: Dictionary) -> Dictionary:
 	var field: Control = GdhTyping.focus_owner(_host.get_tree().root)
 	var before: Dictionary = GdhTyping.field_before(field)
 	Input.parse_input_event(event)
-	var lasted: Variant = null
+	var lasted: Variant = (
+		GdhValues.split_half("key %d" % event.keycode, held) if not whole else null
+	)
 	if whole:
 		lasted = await GdhValues.hold(_host.get_tree(), frames)
 		var up: InputEventKey = event.duplicate()
@@ -386,7 +388,7 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 		position, button, whole or held, double, _held_in(viewport)
 	)
 	_send(viewport, press)
-	var lasted: Variant = null
+	var lasted: Variant = GdhValues.split_half("mouse %d" % button, held) if not whole else null
 	if notch:
 		_send(viewport, GdhMouse.button_event(position, button, false, false, _held_in(viewport)))
 	elif whole:

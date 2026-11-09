@@ -34681,12 +34681,16 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
           'var pad_down: bool = false',
           'var pad_frames: int = 0',
           'var pad_held: int = -1',
-          'var ticks: Dictionary = {"mouse": 0, "key": 0, "action": 0, "pad": 0}',
+          'var stick_down: bool = false',
+          'var stick_frames: int = 0',
+          'var stick_held: int = -1',
+          'var stick_value: float = 0.0',
+          'var ticks: Dictionary = {"mouse": 0, "key": 0, "action": 0, "pad": 0, "stick": 0}',
           'var ticks_held: Dictionary = {}',
           '',
           '',
           'func _physics_process(_delta: float) -> void:',
-          '\tfor named: String in ["mouse", "key", "action", "pad"]:',
+          '\tfor named: String in ["mouse", "key", "action", "pad", "stick"]:',
           '\t\tif get(named + "_down"):',
           '\t\t\tticks[named] += 1',
           '',
@@ -34715,6 +34719,17 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
           '\t\t\tpad_frames = 0',
           '\t\telse:',
           '\t\t\tpad_held = pad_frames',
+          '\tvar stick: InputEventJoypadMotion = event as InputEventJoypadMotion',
+          '\tif stick != null and stick.axis == JOY_AXIS_LEFT_X:',
+          '\t\tstick_value = stick.axis_value',
+          '\t\tvar moved: bool = not is_zero_approx(stick.axis_value)',
+          '\t\tif moved != stick_down:',
+          '\t\t\tstick_down = moved',
+          '\t\t\t_pressed("stick", moved)',
+          '\t\t\tif moved:',
+          '\t\t\t\tstick_frames = 0',
+          '\t\t\telse:',
+          '\t\t\t\tstick_held = stick_frames',
           '\tvar button: InputEventMouseButton = event as InputEventMouseButton',
           '\tif button != null and button.button_index == MOUSE_BUTTON_LEFT:',
           '\t\tmouse_down = button.pressed',
@@ -34742,6 +34757,8 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
           '\t\taction_frames += 1',
           '\tif pad_down:',
           '\t\tpad_frames += 1',
+          '\tif stick_down:',
+          '\t\tstick_frames += 1',
           '',
         ].join('\n'),
       );
@@ -34780,6 +34797,26 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
       const padded = await call('runtime_input', { op: 'joypad_button', button: 'a', holdFrames: 9 });
       assert.match(padded, /"held_frames": 9/, padded);
       assert.equal(await read('pad_held'), 9, `the pad button was down for the 9 frames asked: ${padded}`);
+      const stuck = await call('runtime_input', {
+        op: 'joypad_motion',
+        axis: 'left_x',
+        value: -1,
+        holdFrames: 11,
+      });
+      assert.match(stuck, /"held_frames": 11/, stuck);
+      assert.equal(await read('stick_held'), 11, `the stick was over for the 11 frames asked: ${stuck}`);
+      assert.equal(await read('stick_value'), 0, `and let go back to 0: ${stuck}`);
+      const centred = await call('runtime_input', {
+        op: 'joypad_motion',
+        axis: 'left_x',
+        value: 0,
+        holdFrames: 3,
+      });
+      assert.match(
+        centred,
+        /^holdFrames holds an axis away from 0 and lets it go, and value is 0\.$/,
+        centred,
+      );
       // Each hold says how long it lasted by the clock and in physics ticks: thirty held in a
       // headless game, which runs them as fast as it can, moved a body for twelve ticks. The ticks
       // are held to the ones the game itself ran while the input was down, not to the clock: the
@@ -34791,6 +34828,7 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
         [keyed, 12, 'key'],
         [acted, 7, 'action'],
         [padded, 9, 'pad'],
+        [stuck, 11, 'stick'],
       ] as const) {
         const held = get(JSON.parse(answer), 'held_for');
         const seconds = Number(get(held, 'seconds'));
@@ -34801,6 +34839,62 @@ async function testAPressIsHeldForTheFramesAsked(): Promise<void> {
           Number.isInteger(ticks) && ran > 0 && Math.abs(ticks - ran) <= 1,
           `the ${named} hold says ${ticks} ticks and the game ran ${ran} while it was down: ${answer}`,
         );
+      }
+
+      // A press sent as two halves with a wait between is held for the time between the calls, and
+      // the release says how long that was, so a caller reading only the wait is not misled.
+      const halves: [Record<string, unknown>, Record<string, unknown>, string | null][] = [
+        [
+          { op: 'mouse_click', x: 10, y: 10, pressed: true },
+          { op: 'mouse_click', x: 10, y: 10, pressed: false },
+          'mouse',
+        ],
+        [
+          { op: 'key', keycode: 'Space', pressed: true },
+          { op: 'key', keycode: 'Space', pressed: false },
+          'key',
+        ],
+        [
+          { op: 'action', action: 'ui_accept', pressed: true },
+          { op: 'action', action: 'ui_accept', pressed: false },
+          'action',
+        ],
+        [
+          { op: 'joypad_button', button: 'a', pressed: true },
+          { op: 'joypad_button', button: 'a', pressed: false },
+          'pad',
+        ],
+        [
+          { op: 'joypad_motion', axis: 'left_x', value: -1 },
+          { op: 'joypad_motion', axis: 'left_x', value: 0 },
+          'stick',
+        ],
+        [{ op: 'touch', x: 10, y: 10, pressed: true }, { op: 'touch', x: 10, y: 10, pressed: false }, null],
+      ];
+      for (const [down, up, named] of halves) {
+        const pressed = await call('runtime_input', down);
+        assert.equal(
+          get(JSON.parse(pressed), 'held_for'),
+          null,
+          `a press alone has held nothing yet: ${pressed}`,
+        );
+        const waited = await call('runtime_wait', { op: 'frames', frames: 20 });
+        const released = await call('runtime_input', up);
+        const held = get(JSON.parse(released), 'held_for');
+        const ticks = Number(get(held, 'physics_frames'));
+        const waitedFor: unknown = JSON.parse(waited);
+        assert.ok(
+          Number(get(JSON.parse(released), 'held_frames')) >= Number(get(waitedFor, 'frames')) &&
+            Number(get(held, 'seconds')) * 1000 >= Number(get(waitedFor, 'elapsed_ms')),
+          `the release counts the wait between the halves: ${released} after ${waited}`,
+        );
+        if (named !== null) {
+          const ran = Number(await read(`ticks_held:${named}`));
+          assert.ok(
+            Math.abs(ticks - ran) <= 1,
+            `the ${named} release says ${ticks} ticks, the game ran ${ran}`,
+          );
+        }
       }
 
       const both = await call('runtime_input', { op: 'key', keycode: 'Space', pressed: true, holdFrames: 5 });
