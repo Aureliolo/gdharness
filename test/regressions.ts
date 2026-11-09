@@ -34661,11 +34661,56 @@ async function testAnEngineSingletonIsReachedAndOSIsNot(): Promise<void> {
       });
       assert.match(bound, /^\{/, `InputMap is called rather than refused: ${bound}`);
       assert.equal(get(JSON.parse(bound), 'result'), true, `InputMap is reached: ${bound}`);
+      // What the game sees of its actions is read, and nothing of Input that moves the pointer.
+      const pressed = await call('runtime_invoke', {
+        op: 'call',
+        nodePath: 'Input',
+        method: 'is_action_pressed',
+        args: ['rebound'],
+      });
+      assert.match(pressed, /^\{/, `Input is called to read rather than refused: ${pressed}`);
+      assert.equal(get(JSON.parse(pressed), 'result'), false, pressed);
+      const strength = JSON.parse(
+        await call('runtime_inspect', {
+          op: 'property',
+          nodePath: 'Input',
+          property: 'get_action_strength("rebound")',
+        }),
+      ) as unknown;
+      assert.equal(get(strength, 'value'), 0, `an action's strength is read: ${JSON.stringify(strength)}`);
+      const warped = await call('runtime_invoke', {
+        op: 'call',
+        nodePath: 'Input',
+        method: 'warp_mouse',
+        args: [{ x: 0, y: 0 }],
+      });
+      assert.match(
+        warped,
+        /^Input is reached only to read, through runtime_inspect property or a runtime_invoke call of a method starting is_, get_ or has_, such as is_action_pressed\("jump"\) or get_action_strength\("move_left"\), and warp_mouse is not one\. /,
+        warped,
+      );
+      const walked = await call('runtime_inspect', {
+        op: 'property',
+        nodePath: 'Input',
+        property: 'warp_mouse(0)',
+      });
+      assert.match(walked, /^Input is reached only to read.*, and warp_mouse is not one\./, walked);
+      const captured = await call('runtime_invoke', {
+        op: 'set',
+        nodePath: 'Input',
+        property: 'mouse_mode',
+        value: 2,
+      });
+      assert.match(
+        captured,
+        /^Input is reached only to read.*\)\. The rest of it acts on the real pointer\./,
+        captured,
+      );
 
       const refused = await call('runtime_invoke', { op: 'call', nodePath: 'OS', method: 'get_name' });
       assert.match(
         refused,
-        /^OS is an engine singleton, and the ones that can be reached are Engine, Performance, RenderingServer/,
+        /^OS is an engine singleton, and the ones that can be reached are Engine, Performance, RenderingServer.*InputMap, and Input to read\./,
         refused,
       );
       await call('editor_run', { op: 'stop' });
