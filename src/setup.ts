@@ -244,15 +244,25 @@ export function loaderState(projectPath: string): 'current' | 'differs' | 'missi
   return lines(copy) === lines(shippedLoader()) ? 'current' : 'differs';
 }
 
-/** The shipped loader written into [param projectPath]. Answers whether anything changed. */
+/**
+ * The shipped loader written into [param projectPath], with its `.uid` where the project has none.
+ * Without one, the project's first scan writes a `.uid` for a file nobody there wrote. A `.uid`
+ * already there is kept, because the project's uid cache and its scenes name the loader by it.
+ * Answers whether anything changed.
+ */
 export function writeLoader(projectPath: string): boolean {
-  if (loaderState(projectPath) === 'current') {
-    return false;
-  }
   const copy = join(projectPath, ...RUNTIME_AUTOLOAD.path.split('/'));
-  mkdirSync(dirname(copy), { recursive: true });
-  writeFileSync(copy, readFileSync(shippedLoader()));
-  return true;
+  let changed = false;
+  if (loaderState(projectPath) !== 'current') {
+    mkdirSync(dirname(copy), { recursive: true });
+    writeFileSync(copy, readFileSync(shippedLoader()));
+    changed = true;
+  }
+  if (!existsSync(`${copy}.uid`)) {
+    writeFileSync(`${copy}.uid`, readFileSync(`${shippedLoader()}.uid`));
+    changed = true;
+  }
+  return changed;
 }
 
 /** The project's copy of the loader taken out, and its folder with it when nothing else is there. */

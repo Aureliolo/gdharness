@@ -60917,7 +60917,26 @@ function testTheShippedLoaderBringsTheRuntimeUpFirst(): void {
     );
     assert.equal(writeLoader(project), true, 'the loader is written into a project that has none');
     assert.equal(loaderState(project), 'current');
+    const loaderUid = join(project, ...`${RUNTIME_AUTOLOAD.path}.uid`.split('/'));
+    assert.equal(
+      readFileSync(loaderUid, 'utf8'),
+      readFileSync(`${shippedLoader()}.uid`, 'utf8'),
+      'its .uid goes with it, so no scan writes one for a file the project did not write',
+    );
     assert.equal(writeLoader(project), false, 'and left alone once it is the shipped one');
+    writeFileSync(loaderUid, 'uid://cprojectowned\n');
+    writeFileSync(join(project, ...RUNTIME_AUTOLOAD.path.split('/')), 'extends Node\n');
+    assert.equal(writeLoader(project), true, 'a loader that differs is put back');
+    assert.equal(
+      readFileSync(loaderUid, 'utf8'),
+      'uid://cprojectowned\n',
+      'and the uid the project knows it by kept',
+    );
+    rmSync(loaderUid);
+    assert.equal(writeLoader(project), true, 'a current loader missing its .uid gets it');
+    assert.equal(readFileSync(loaderUid, 'utf8'), readFileSync(`${shippedLoader()}.uid`, 'utf8'));
+    rmSync(loaderUid);
+    writeLoader(project);
     const play = (): string => {
       const ran = spawnSyncHidden(godotPath, ['--headless', '--path', project, '--quit-after', '600'], {
         encoding: 'utf8',
