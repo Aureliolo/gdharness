@@ -681,7 +681,9 @@ func remove_autoload(params: Dictionary) -> Dictionary:
 	if err != OK:
 		return _log.failure("Failed to save project.godot: " + error_string(err))
 
-	return { "name": name, "removed": true, "old_path": old_value.trim_prefix("*") }
+	return {
+		"name": name, "removed": true, "old_path": old_value.trim_prefix("*"), "saved": true,
+	}
 
 
 # List all autoload singletons

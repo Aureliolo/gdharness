@@ -961,7 +961,11 @@ func _object_named(
 ) -> Dictionary:
 	if names_no_object(given):
 		return { "object": null }
-	var found: Dictionary = GdhPaths.object_at(_host.get_tree().root, node, node_path, given)
+	var found: Dictionary = (
+		_built(given, node, node_path)
+		if buildable(given)
+		else GdhPaths.object_at(_host.get_tree().root, node, node_path, given)
+	)
 	if found.has("message"):
 		return found
 	var instance: Object = found["object"]
@@ -988,6 +992,47 @@ func _object_named(
 			"message": "%s is %s, not %s" % [str(given), GdhValues.class_of(instance), wanted],
 		}
 	return found
+
+
+## Whether [param given] is {"_type": a class, and its properties} for an engine class that is
+## neither a node nor a resource, which [method _built] makes. A physics query takes its parameters
+## as such an object, PhysicsPointQueryParameters2D for intersect_point, and the game holds none to
+## name by path. A node or a resource is the game's to make, so it is named by its path.
+static func buildable(given: Variant) -> bool:
+	if not given is Dictionary:
+		return false
+	var record: Dictionary = given
+	var tag: String = str(record.get("_type", ""))
+	return (
+		ClassDB.class_exists(tag)
+		and ClassDB.can_instantiate(tag)
+		and ClassDB.is_parent_class(tag, "RefCounted")
+		and not ClassDB.is_parent_class(tag, "Resource")
+	)
+
+
+## The object [param record] describes, made and given each property it names through the
+## conversion a write to that property takes, as `{"object": ...}`, or `{"message": ...}` naming the
+## property that cannot take its value. See [method buildable].
+func _built(given: Variant, node: Node, node_path: String) -> Dictionary:
+	var record: Dictionary = given
+	var tag: String = str(record["_type"])
+	var made: Object = ClassDB.instantiate(tag)
+	for key: Variant in record:
+		var named: String = str(key)
+		if named == "_type":
+			continue
+		if not GdhPaths.can_read(made, named):
+			return { "message": GdhPaths.nothing_there(made, named, tag) }
+		var reached: Dictionary = { "holder": made, "name": named, "called": tag, "chain": [] }
+		var slot: Dictionary = GdhValues.slot_declared(made, named)
+		var fitting: Dictionary = _value_for(
+			record[key], slot, made.get(named), reached, node, node_path
+		)
+		if fitting.has("message"):
+			return { "message": fitting["message"] }
+		made.set(named, fitting["value"])
+	return { "object": made }
 
 
 ## Whether [param given] is the text null, which is how a caller's null arrives. Public because a
