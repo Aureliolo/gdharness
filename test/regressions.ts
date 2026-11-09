@@ -78582,15 +78582,26 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
     // that read the crate. The walls under the other regions are theirs and go unnamed.
     assert.equal(
       get(parseTextContent(plain), 'note'),
-      "No obstacle was read from the region's children (source mode root_node_children), so all the outlines enclose is walkable, less the agent_radius 10.0 kept from their edges. Crate (a StaticBody2D) is outside what was read. The bake reads a node elsewhere once it is in the group navigation_polygon_source_geometry_group and source_geometry_mode is groups_with_children, or once it is moved under the region.",
+      "No obstacle was read from the region's children (source mode SOURCE_GEOMETRY_ROOT_NODE_CHILDREN), so all the outlines enclose is walkable, less the agent_radius 10.0 kept from their edges. Crate (a StaticBody2D) is outside what was read. The bake reads a node elsewhere once it is in the group navigation_polygon_source_geometry_group and navigation_polygon/source_geometry_mode is SOURCE_GEOMETRY_GROUPS_WITH_CHILDREN, or once it is moved under the region.",
       textOf(plain) ?? '',
+    );
+    // The key and value the note names are ones a set takes as written.
+    const [, key, mode] =
+      / and (\S+) is (\S+), or once/.exec(String(get(parseTextContent(plain), 'note'))) ?? [];
+    assert.ok(key !== undefined && mode !== undefined, textOf(plain) ?? '');
+    const grouping = await set('Bare', { [key]: mode });
+    assert.notEqual(get(grouping, 'result', 'isError'), true, textOf(grouping) ?? '');
+    assert.match(
+      readFileSync(join(project, 'walled.tscn'), 'utf8'),
+      /^source_geometry_mode = 1$/m,
+      `the mode the note names is set: ${textOf(grouping) ?? ''}`,
     );
     assert.equal(get(parseTextContent(walled), 'note'), undefined, textOf(walled) ?? '');
 
     const covered = await bake('walled.tscn', 'Covered');
     assert.equal(
       get(parseTextContent(covered), 'note'),
-      "Nothing was left to walk inside the outlines once the obstacles read from the region's children (source mode root_node_children), and the agent_radius 10.0 kept from their edges, were taken out.",
+      "Nothing was left to walk inside the outlines once the obstacles read from the region's children (source mode SOURCE_GEOMETRY_ROOT_NODE_CHILDREN), and the agent_radius 10.0 kept from their edges, were taken out.",
       textOf(covered) ?? '',
     );
 
@@ -78624,7 +78635,7 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
     const empty = await bake('room.tscn', 'Empty');
     assert.equal(
       get(parseTextContent(empty), 'note'),
-      "No geometry was read from the region's children (source mode root_node_children) with geometry_parsed_geometry_type both, so there was nothing to bake: mesh_instances reads MeshInstance3D nodes, static_colliders the shapes of physics bodies on geometry_collision_mask, and both reads both.",
+      "No geometry was read from the region's children (source mode SOURCE_GEOMETRY_ROOT_NODE_CHILDREN) with geometry_parsed_geometry_type both, so there was nothing to bake: mesh_instances reads MeshInstance3D nodes, static_colliders the shapes of physics bodies on geometry_collision_mask, and both reads both.",
       textOf(empty) ?? '',
     );
     assert.match(
