@@ -14,8 +14,8 @@ const GdhShapes = preload("value_shapes.gd")
 ## The engine singletons a call, a write or a read may name instead of a node: what the engine
 ## measures, and the engine settings that are the game's own, such as the actions InputMap binds,
 ## which a game's own key rebinding changes. Not every singleton: OS runs programs
-## and opens files and DisplayServer switches the keyboard's layout, and none of that is a game's to
-## do to the machine it runs on.
+## and opens files, DisplayServer switches the keyboard's layout and Input moves the real pointer,
+## and none of that is a game's to do to the machine it runs on.
 const SINGLETONS: Array[String] = [
 	"Engine",
 	"Performance",
@@ -29,11 +29,6 @@ const SINGLETONS: Array[String] = [
 	"TranslationServer",
 	"InputMap",
 ]
-## The singleton reached only to read: the game's actions, keys and joypads as the engine sees them,
-## through its methods named with one of [constant READ_PREFIXES]. The rest of it warps, captures or
-## redraws the real pointer.
-const READ_ONLY_SINGLETON: String = "Input"
-const READ_PREFIXES: Array[String] = ["is_", "get_", "has_"]
 ## The most frames a press is held in one call, as many as a frames wait takes.
 const MOST_HELD: int = 600
 
@@ -385,53 +380,21 @@ static func methods_of(object: Object) -> Array[Dictionary]:
 
 ## What [param path] names: a node under [param root], as [method node_at] reads it, or an engine
 ## singleton by its name. Answers the object under "object", and under "node" the node that objects
-## named in a value are found from, which for a singleton is [param root]. [param reading] says the
-## caller only reads, calling the methods [param calls], which is all
-## [constant READ_ONLY_SINGLETON] is reached for.
-static func target_at(
-	root: Node, path: String, reading: bool = false, calls: PackedStringArray = []
-) -> Dictionary:
+## named in a value are found from, which for a singleton is [param root].
+static func target_at(root: Node, path: String) -> Dictionary:
 	if SINGLETONS.has(path):
 		return { "object": Engine.get_singleton(path), "node": root }
-	if path == READ_ONLY_SINGLETON:
-		var acting: PackedStringArray = []
-		for method: String in calls:
-			var reads: bool = READ_PREFIXES.any(
-				func(prefix: String) -> bool: return method.begins_with(prefix)
-			)
-			if not reads:
-				var _added: bool = acting.push_back(method)
-		if reading and acting.is_empty():
-			return { "object": Input, "node": root }
-		return {
-			"type": "error",
-			"message":
-			(
-				(
-					"%s is reached only to read, through runtime_inspect property or a "
-					+ "runtime_invoke call of a method starting %s, such as "
-					+ "is_action_pressed(\"jump\") or get_action_strength(\"move_left\")%s. The "
-					+ "rest of it acts on the real pointer. runtime_input presses keys, buttons "
-					+ "and actions in the game."
-				)
-				% [
-					path,
-					", ".join(READ_PREFIXES.slice(0, -1)) + " or " + READ_PREFIXES[-1],
-					"" if acting.is_empty() else ", and %s is not one" % ", ".join(acting),
-				]
-			),
-		}
 	if not path.contains("/") and Engine.has_singleton(path):
 		return {
 			"type": "error",
 			"message":
 			(
 				(
-					"%s is an engine singleton, and the ones that can be reached are %s, and %s "
-					+ "to read. The rest act on the machine rather than the game: OS runs "
-					+ "programs and DisplayServer switches the keyboard's layout."
+					"%s is an engine singleton, and the ones that can be reached are %s. The rest "
+					+ "act on the machine rather than the game: OS runs programs, DisplayServer "
+					+ "switches the keyboard's layout and Input moves the real pointer."
 				)
-				% [path, ", ".join(SINGLETONS), READ_ONLY_SINGLETON]
+				% [path, ", ".join(SINGLETONS)]
 			),
 		}
 	var standing: Dictionary = node_at(root, path)
