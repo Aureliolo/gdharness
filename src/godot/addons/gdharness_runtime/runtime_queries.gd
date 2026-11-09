@@ -819,7 +819,11 @@ func get_property(params: Dictionary) -> Dictionary:
 	if node_path.is_empty() or property.is_empty():
 		return { "type": "error", "message": "Node path and property required" }
 
-	var standing: Dictionary = GdhValues.target_at(_host.get_tree().root, node_path)
+	var calls: PackedStringArray = []
+	for step: String in GdhPaths.steps_of(property):
+		if not GdhPaths.method_of(step).is_empty():
+			var _added: bool = calls.push_back(GdhPaths.method_of(step))
+	var standing: Dictionary = GdhValues.target_at(_host.get_tree().root, node_path, true, calls)
 	if standing.has("message"):
 		return standing
 	var target: Object = standing["object"]
