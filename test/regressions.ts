@@ -8570,7 +8570,8 @@ async function testACallMetByAnEditorQuittingUnusedIsAskedAgain(): Promise<void>
       record,
       JSON.stringify({
         pid: quitting.pid,
-        closedAt: '2026-11-06T10:00:00Z',
+        // As the addon writes it, after the editor it names started.
+        closedAt: `${new Date().toISOString().slice(0, 19)}Z`,
         idleMinutes: 10,
         arguments: ['--path', spelled, '--editor', '--', '--gdharness-hidden'],
         scenes: ['res://main.tscn', 'res://level.tscn'],
@@ -8715,6 +8716,79 @@ async function testACallMetByAnEditorQuittingUnusedIsAskedAgain(): Promise<void>
     quitting.kill();
     first.kill();
     second.kill();
+    sweep(project);
+  }
+}
+
+/**
+ * The editor that quit unused is waited for only while its pid is held by the process that wrote
+ * the record. A process the system gave the pid to afterwards is not waited on, so the reopen goes
+ * ahead at once. With no engine there, it says so rather than that the pid is still quitting.
+ */
+async function testAReopenAfterAnIdleQuitWaitsOnlyForTheEditorItself(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-idle-pid-'));
+  const spelled = project.replaceAll('\\', '/');
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\nconfig/name="Idle"\n\n[editor_plugins]\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+  );
+  mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+  mkdirSync(join(project, '.godot'));
+  const holder = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 120000)'], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  const writeRecord = (closedAt: Date): void => {
+    writeFileSync(
+      join(project, '.godot', 'gdharness-editor-idle.json'),
+      JSON.stringify({
+        pid: holder.pid,
+        closedAt: `${closedAt.toISOString().slice(0, 19)}Z`,
+        idleMinutes: 10,
+        arguments: ['--path', spelled, '--editor', '--', '--gdharness-hidden'],
+        scenes: [],
+      }),
+    );
+  };
+  const server = new ServerProcess({
+    env: {
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '5000',
+      GODOT_PATH: join(project, 'no-godot.exe'),
+    },
+  });
+  const asked = async (): Promise<{ text: string; took: number }> => {
+    const began = Date.now();
+    const answer = await server.request('tools/call', {
+      name: 'project_settings',
+      arguments: { op: 'get', projectPath: project, setting: 'application/config/name', from: 'editor' },
+    });
+    return { text: textOf(answer) ?? JSON.stringify(answer), took: Date.now() - began };
+  };
+  try {
+    assert.ok(alive(holder.pid ?? 0), 'the fixture needs a live process');
+    await server.initialize('regression-test');
+
+    writeRecord(new Date(Date.now() - 3_600_000));
+    const reused = await asked();
+    assert.match(
+      reused.text,
+      /quit after going unused, and it could not be opened again: (?!pid )/,
+      `a pid taken after the editor quit is not waited on: ${reused.text}`,
+    );
+    assert.ok(reused.took < 4000, `nor waited for at all, ${String(reused.took)} ms: ${reused.text}`);
+
+    writeRecord(new Date(Date.now() + 3_600_000));
+    const own = await asked();
+    assert.match(
+      own.text,
+      new RegExp(`could not be opened again: pid ${String(holder.pid)} was still quitting after 5s\\.`),
+      `the process that wrote the record is waited for: ${own.text}`,
+    );
+  } finally {
+    await server.stop();
+    holder.kill();
     sweep(project);
   }
 }
@@ -73115,6 +73189,15 @@ async function testANodeChangesItsType(): Promise<void> {
       await refusal({ scenePath: 'child.tscn', nodePath: 'Body', nodeType: 'Node2D' }),
       /^Body is made by res:\/\/main\.tscn, a scene res:\/\/child\.tscn inherits/,
     );
+
+    // A Control holds arrays typed to NodePath, which a node held in an untyped value walks past.
+    const panel = await changed({ nodePath: 'Body', nodeType: 'Control' });
+    assert.deepEqual(
+      [get(panel, 'nodeType'), get(panel, 'engine_messages')],
+      ['Control', undefined],
+      `nothing walked raised an error: ${JSON.stringify(panel)}`,
+    );
+    assert.match(scene(), /^seen = NodePath\("Body"\)$/m, 'the untyped value still holds it');
   } finally {
     await server.stop();
     rmSync(project, { recursive: true, force: true });
@@ -80361,6 +80444,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARestartWaitsForTheOldEditorToGo,
   testAnEditorCloseWaitsForItToGo,
   testACallMetByAnEditorQuittingUnusedIsAskedAgain,
+  testAReopenAfterAnIdleQuitWaitsOnlyForTheEditorItself,
   testCompletionsAreNarrowedToWhatWasTyped,
   testATestRunWithNothingToRunNamesTheRunnerToo,
   testASuiteFilesOnlyServerRefusesADirectory,

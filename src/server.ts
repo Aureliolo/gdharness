@@ -177,7 +177,7 @@ import {
   ENGINE_PASSES,
   HEADLESS_OPERATIONS,
 } from './headless-operations.js';
-import { IDLE_CLOSE_SETTING, idleClosed, idleSettled, portsIn } from './idle-close.js';
+import { IDLE_CLOSE_SETTING, idleClosed, idleSettled, portsIn, stillQuitting } from './idle-close.js';
 import { importedIntoTheProject, staleImports } from './import-freshness.js';
 import { DefectsSeen, defectReport, feedbackNotice } from './issues.js';
 import {
@@ -16739,9 +16739,11 @@ class GodotServer {
     if (record === null || this.godotBridge.isConnected()) {
       return null;
     }
-    await this.waitForBridge(() => !alive(record.pid), Date.now() + editorRestartTimeoutMs());
-    if (alive(record.pid)) {
-      return `pid ${String(record.pid)} was still quitting after ${String(editorRestartTimeoutMs() / 1000)}s.`;
+    if (await stillQuitting(record)) {
+      await this.waitForBridge(() => !alive(record.pid), Date.now() + editorRestartTimeoutMs());
+      if (await stillQuitting(record)) {
+        return `pid ${String(record.pid)} was still quitting after ${String(editorRestartTimeoutMs() / 1000)}s.`;
+      }
     }
     return await inTurnToOpen(projectPath, async () => {
       // Another server, or this one for another call, may have opened it while this one waited.

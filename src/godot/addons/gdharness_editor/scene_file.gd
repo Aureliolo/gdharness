@@ -332,8 +332,11 @@ func _repointed(
 				holding[named] = str(declared.get("class_name", ""))
 			elif value is Array:
 				var listed: Array = value
-				if listed.has(was):
-					holding[named] = str(listed.get_typed_class_name())
+				# Not has(): a typed array raises an engine error for a node it could not hold.
+				for item: Variant in listed:
+					if is_same(item, was):
+						holding[named] = str(listed.get_typed_class_name())
+						break
 		if own and not holding.is_empty():
 			asked(top, holding.keys())
 		for named: String in holding:

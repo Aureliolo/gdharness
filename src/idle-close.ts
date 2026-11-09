@@ -9,7 +9,9 @@
 
 import { readFileSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
+import { alive } from './alive.js';
 import type { EditorPorts } from './launch.js';
+import { startTimesOf } from './process-children.js';
 import { isRecord } from './records.js';
 
 /**
@@ -63,6 +65,20 @@ export function idleClosed(projectPath: string): IdleClosed | null {
     arguments: given.filter((word): word is string => typeof word === 'string'),
     scenes: scenes.filter((scene): scene is string => typeof scene === 'string'),
   };
+}
+
+/**
+ * Whether the editor [param record] names is still running as it quits. Its pid is alive, and the
+ * process holding it started before the record was written, to the second the addon writes. A
+ * process the system gave the pid to later is not the editor, and one whose start the platform
+ * would not say is taken as it.
+ */
+export async function stillQuitting(record: IdleClosed): Promise<boolean> {
+  if (!alive(record.pid)) {
+    return false;
+  }
+  const started = (await startTimesOf([record.pid])).get(record.pid);
+  return started === undefined || started < Date.parse(record.closedAt) + 1000;
 }
 
 /** Removes the record, once an editor of the project has connected or been opened again. */
