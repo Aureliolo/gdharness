@@ -114,9 +114,17 @@ func list_export_presets(params: Dictionary) -> Dictionary:
 			if str(config.get_value("preset." + str(at), "name", "")) == asked:
 				section = "preset." + str(at)
 		if section.is_empty():
+			var held: Array[String] = names()
 			return _log.failure(
-				"No preset is named %s. The presets are %s."
-				% [JSON.stringify(asked), ", ".join(names())]
+				"No preset is named %s. %s"
+				% [
+					JSON.stringify(asked),
+					(
+						"export_presets.cfg holds none."
+						if held.is_empty()
+						else "The presets are %s." % ", ".join(held)
+					),
+				]
 			)
 		var options: Dictionary = {}
 		if config.has_section(section + ".options"):
@@ -258,7 +266,7 @@ func add_export_preset(params: Dictionary) -> Dictionary:
 		answer["templates_note"] = (
 			(
 				"No %s export templates for this engine are at %s, and an export for %s needs "
-				+ "them. A pack, run with pack true, needs none. The editor installs them in "
+				+ "them. An export with pack true needs none. The editor installs them in "
 				+ "Editor > Manage Export Templates, or they can be unpacked there from the export "
 				+ "templates archive of this engine's release."
 			)

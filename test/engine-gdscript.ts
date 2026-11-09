@@ -661,7 +661,7 @@ function checkTemplatesArePerPlatform(godotPath: string, projectDir: string): vo
     assert.equal(get(bare, 'templates_installed'), false, JSON.stringify(bare));
     assert.match(
       asString(get(bare, 'templates_note')),
-      /^No Linux export templates for this engine are at .*, and an export for Linux needs them\. A pack, run with pack true, needs none\. The editor installs/,
+      /^No Linux export templates for this engine are at .*, and an export for Linux needs them\. An export with pack true needs none\. The editor installs/,
     );
 
     mkdirSync(templates, { recursive: true });
@@ -2081,6 +2081,18 @@ function testOperations(godotPath: string, projectDir: string): void {
     /No preset is named "Nowhere"\. The presets are Desktop, Desktop Debug\./,
     unnamed.stderr,
   );
+  const presetsHeld = readFileSync(presetsFile, 'utf8');
+  try {
+    writeFileSync(presetsFile, '[runnable_presets]\n');
+    const noneHeld = runRefusedOperation(godotPath, projectDir, 'list_export_presets', { preset: 'Desktop' });
+    assert.match(
+      noneHeld.stderr,
+      /No preset is named "Desktop"\. export_presets\.cfg holds none\./,
+      noneHeld.stderr,
+    );
+  } finally {
+    writeFileSync(presetsFile, presetsHeld);
+  }
   const taken = runRefusedOperation(godotPath, projectDir, 'add_export_preset', {
     preset: 'Desktop',
     platform: 'Linux',

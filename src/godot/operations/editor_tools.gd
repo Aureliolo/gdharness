@@ -90,8 +90,8 @@ static func run(params: Dictionary) -> Dictionary:
 			answered["namedByPath"] = (
 				(
 					"This saved %s by path, because the project's uid cache does not hold %s "
-					+ "until the project is next scanned. A path loads the same. project_import "
-					+ "refresh_uids scans it, so later writes name %s by uid."
+					+ "until the project is scanned. A path loads the same. project_import "
+					+ "refresh_uids scans the project, so later writes name %s by uid."
 				)
 				% [
 					", ".join(GdhSceneUids.by_path),
