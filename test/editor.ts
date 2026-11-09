@@ -1618,6 +1618,29 @@ async function testSceneNodes({ call, project }: Editor): Promise<void> {
   );
   assert.match(fileText(project, 'fixture.tscn'), /\[node name="Copy" type="Button" parent="Panel"/);
 
+  // Through the editor too, a node made another class keeps the unique_id the file gave it.
+  const panelId = /^\[node name="Panel" type="Node2D" parent="\." unique_id=(\d+)\]$/m.exec(
+    fileText(project, 'fixture.tscn'),
+  )?.[1];
+  assert.ok(panelId !== undefined, fileText(project, 'fixture.tscn'));
+  const retyped = await call('scene_node', {
+    ...scene,
+    op: 'change_type',
+    nodePath: 'Panel',
+    nodeType: 'Marker2D',
+  });
+  assert.equal(get(retyped, 'wasType'), 'Node2D', JSON.stringify(retyped));
+  assert.match(
+    fileText(project, 'fixture.tscn'),
+    new RegExp(String.raw`^\[node name="Panel" type="Marker2D" parent="\." unique_id=${panelId}\]$`, 'm'),
+  );
+  assert.match(fileText(project, 'fixture.tscn'), /\[node name="Copy" type="Button" parent="Panel"/);
+  await call('scene_node', { ...scene, op: 'change_type', nodePath: 'Panel', nodeType: 'Node2D' });
+  assert.match(
+    fileText(project, 'fixture.tscn'),
+    new RegExp(String.raw`^\[node name="Panel" type="Node2D" parent="\." unique_id=${panelId}\]$`, 'm'),
+  );
+
   await call('scene_node', { ...scene, op: 'delete', nodePath: 'Panel/Copy' });
   assert.deepEqual(nodePaths(get(await call('scene_tree', scene), 'tree')), ['.', 'Panel', 'Press']);
   assert.doesNotMatch(fileText(project, 'fixture.tscn'), /name="Copy"/, 'and be gone from the file');

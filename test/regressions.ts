@@ -513,6 +513,7 @@ import {
   windowedSaid,
 } from '../src/suite-plan.js';
 import {
+  acrossSaid,
   engineSaid,
   importFault,
   importNeeded,
@@ -52073,6 +52074,32 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       '2 of the 3 slots this run uses were free as it began, so its engines are handed the suites a share at a time as each starts, and an engine starts as each slot comes free.',
     );
     assert.match(sharesSaid(1, 2), /^1 of the 2 slots this run uses was free as it began/);
+    // How many ran together, which a run handed out by shares says beside how many it started.
+    assert.deepEqual(
+      [
+        acrossSaid([
+          { began: 0, seconds: 2 },
+          { began: 2000, seconds: 1 },
+          { began: 2500, seconds: 1 },
+        ]),
+        acrossSaid([
+          { began: 1000, seconds: 1 },
+          { began: 0, seconds: 1 },
+        ]),
+        acrossSaid([
+          { began: 0, seconds: 2 },
+          { began: 1000, seconds: 2 },
+        ]),
+        acrossSaid([{ began: 0, seconds: 1 }]),
+      ],
+      [
+        'across 3 engines, at most 2 at once',
+        'across 2 engines, at most 1 at once',
+        'across 2 engines',
+        'across 1 engine',
+      ],
+      'one ending as the next begins is not two at once',
+    );
     assert.match(sharesSaid(0, 4), /^None of the 4 slots this run uses were free as it began/);
     assert.equal(
       memorySaid(1, 4, memory),
@@ -72862,6 +72889,240 @@ async function withAnAnimationProject(
 }
 
 /**
+ * scene_node change_type makes a node another class as the editor's Change Type does: the root and
+ * a child keep their unique_id, children, groups, script, connections and node values. A narrower
+ * class answers what it could not keep, and a script, an instance or the same class is refused.
+ */
+async function testANodeChangesItsType(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('change_type regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-change-type-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-change-type-rt-'));
+  const files: Record<string, string> = {
+    'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Types"\n',
+    'root.gd':
+      'extends Node\n\n@export var aim: Node2D\n@export var seen: Node\n@export var crowd: Array[Node2D] = []\n' +
+      '@export var chief: Boss\n\n\n' +
+      'func _on_shown(_code: int) -> void:\n\tpass\n',
+    'mover.gd': 'extends Node2D\n',
+    'boss.gd': 'class_name Boss\nextends Node2D\n',
+    'coin.tscn': '[gd_scene format=3]\n\n[node name="Coin" type="Area2D"]\n',
+    'child.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="PackedScene" path="res://main.tscn" id="1_main"]\n\n' +
+      '[node name="Child" instance=ExtResource("1_main")]\n',
+    'main.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://root.gd" id="1_root"]\n' +
+      '[ext_resource type="Script" path="res://mover.gd" id="2_mover"]\n' +
+      '[ext_resource type="PackedScene" path="res://coin.tscn" id="3_coin"]\n' +
+      '[ext_resource type="Script" path="res://boss.gd" id="4_boss"]\n\n' +
+      '[node name="Main" type="Node" unique_id=111 node_paths=PackedStringArray("aim", "seen", "crowd", "chief")]\n' +
+      'script = ExtResource("1_root")\n' +
+      'aim = NodePath("Body")\nseen = NodePath("Body")\ncrowd = [NodePath("Body")]\nchief = NodePath("Chief")\n\n' +
+      '[node name="Body" type="Node2D" parent="." unique_id=222 groups=["solid"]]\nposition = Vector2(4, 5)\n' +
+      'metadata/hp = 3\n\n' +
+      '[node name="Leg" type="Node2D" parent="Body" unique_id=333]\n\n' +
+      '[node name="Main" type="Node2D" parent="Body/Leg" unique_id=666]\n\n' +
+      '[node name="Mover" type="Node2D" parent="." unique_id=444]\nscript = ExtResource("2_mover")\n\n' +
+      '[node name="Coin" parent="." unique_id=555 instance=ExtResource("3_coin")]\n\n' +
+      '[node name="Chief" type="Node2D" parent="." unique_id=777]\nscript = ExtResource("4_boss")\n\n' +
+      '[connection signal="visibility_changed" from="Body" to="." method="_on_shown" binds= [3]]\n' +
+      '[connection signal="tree_entered" from="." to="Body" method="set_process" binds= [false]]\n' +
+      '[connection signal="ready" from="." to="Body" method="queue_redraw"]\n' +
+      '[connection signal="tree_exiting" from="Body" to="Body" method="queue_redraw"]\n' +
+      '[connection signal="tree_exited" from="Body" to="Body" method="set_physics_process" binds= [true]]\n',
+  };
+  for (const [path, content] of Object.entries(files)) {
+    writeFileSync(join(project, path), content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request(
+      'tools/call',
+      {
+        name: 'scene_node',
+        arguments: { projectPath: project, scenePath: 'main.tscn', op: 'change_type', ...args },
+      },
+      240_000,
+    );
+  const changed = async (args: Record<string, unknown>): Promise<unknown> => {
+    const answer = await call(args);
+    assert.notEqual(get(answer, 'result', 'isError'), true, textOf(answer) ?? JSON.stringify(answer));
+    return parseTextContent(answer);
+  };
+  const refusal = async (args: Record<string, unknown>): Promise<string> => textOf(await call(args)) ?? '';
+  const scene = (): string => readFileSync(join(project, 'main.tscn'), 'utf8');
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('change-type');
+
+    const rooted = await changed({ nodePath: '.', nodeType: 'Node2D' });
+    assert.deepEqual(
+      [get(rooted, 'nodePath'), get(rooted, 'nodeType'), get(rooted, 'wasType'), get(rooted, 'dropped')],
+      ['.', 'Node2D', 'Node', undefined],
+      JSON.stringify(rooted),
+    );
+    let file = scene();
+    assert.match(
+      file,
+      /^\[node name="Main" type="Node2D" unique_id=111 node_paths=PackedStringArray\("aim", "seen", "crowd", "chief"\)\]\nscript = ExtResource\(/m,
+      file,
+    );
+    assert.match(file, /^aim = NodePath\("Body"\)$/m, file);
+    assert.match(file, /^crowd = \[NodePath\("Body"\)\]$/m, file);
+    assert.match(file, /^\[node name="Leg" type="Node2D" parent="Body" unique_id=333\]$/m, file);
+    assert.match(
+      file,
+      /^\[node name="Main" type="Node2D" parent="Body\/Leg" unique_id=666\]$/m,
+      `a node named and typed as the root keeps its own id: ${file}`,
+    );
+    const connections = (): string[] => scene().match(/^\[connection .*$/gm) ?? [];
+    const filed = [
+      '[connection signal="visibility_changed" from="Body" to="." method="_on_shown" binds= [3]]',
+      '[connection signal="tree_entered" from="." to="Body" method="set_process" binds= [false]]',
+      '[connection signal="ready" from="." to="Body" method="queue_redraw"]',
+      '[connection signal="tree_exiting" from="Body" to="Body" method="queue_redraw"]',
+      '[connection signal="tree_exited" from="Body" to="Body" method="set_physics_process" binds= [true]]',
+    ];
+    assert.deepEqual(
+      connections().toSorted(),
+      filed.toSorted(),
+      'the root keeps the connections from and to it',
+    );
+
+    const drawn = await changed({ nodePath: 'Body', nodeType: 'Sprite2D' });
+    assert.equal(get(drawn, 'connectionsRemoved'), undefined, JSON.stringify(drawn));
+    assert.deepEqual(
+      connections().toSorted(),
+      filed.toSorted(),
+      'a node keeps its connections from, to and to itself, with their binds',
+    );
+    file = scene();
+    assert.match(
+      file,
+      /^\[node name="Body" type="Sprite2D" parent="\." unique_id=222 groups=\["solid"\]\]\nposition = Vector2\(4, 5\)\nmetadata\/hp = 3$/m,
+      `the node keeps its id, groups and values: ${file}`,
+    );
+    assert.match(file, /^\[node name="Leg" type="Node2D" parent="Body" unique_id=333\]$/m, file);
+    assert.match(
+      file,
+      /^aim = NodePath\("Body"\)\nseen = NodePath\("Body"\)\ncrowd = \[NodePath\("Body"\)\]$/m,
+      file,
+    );
+
+    const plain = await changed({ nodePath: 'Body', nodeType: 'Node' });
+    assert.deepEqual(
+      [get(plain, 'dropped'), get(plain, 'cleared')],
+      [
+        ['position'],
+        [
+          { nodePath: '.', property: 'aim' },
+          { nodePath: '.', property: 'crowd' },
+        ],
+      ],
+      JSON.stringify(plain),
+    );
+    assert.deepEqual(
+      asArray(get(plain, 'connectionsRemoved'))
+        .map((one) =>
+          ['sourceNodePath', 'signalName', 'targetNodePath', 'methodName']
+            .map((key) => String(get(one, key)))
+            .join(' '),
+        )
+        .toSorted(),
+      [
+        '. ready Body queue_redraw',
+        'Body tree_exiting Body queue_redraw',
+        'Body visibility_changed . _on_shown',
+      ],
+      `a Node has neither the signal nor the method: ${JSON.stringify(plain)}`,
+    );
+    assert.deepEqual(connections().toSorted(), [filed[1], filed[4]], 'those a Node can hold are kept');
+    file = scene();
+    assert.match(
+      file,
+      /^\[node name="Body" type="Node" parent="\." unique_id=222 groups=\["solid"\]\]$/m,
+      file,
+    );
+    assert.match(file, /^seen = NodePath\("Body"\)$/m, `an untyped node value keeps the node: ${file}`);
+    assert.equal(
+      get(plain, 'engine_messages'),
+      undefined,
+      `nothing set raised an error: ${JSON.stringify(plain)}`,
+    );
+    assert.match(file, /^metadata\/hp = 3$/m, `metadata goes with any node: ${file}`);
+    assert.doesNotMatch(file, /^aim = |^crowd = \[NodePath|^position = Vector2\(4, 5\)/m, file);
+
+    const boss = await changed({ nodePath: 'Body/Leg', nodeType: 'Boss' });
+    assert.deepEqual(
+      [get(boss, 'nodeType'), get(boss, 'scriptClass')],
+      ['Node2D', 'Boss'],
+      JSON.stringify(boss),
+    );
+    assert.match(
+      scene(),
+      /^\[node name="Leg" type="Node2D" parent="Body" unique_id=333\]\nscript = ExtResource\(/m,
+    );
+
+    const chief = await changed({ nodePath: 'Chief', nodeType: 'Sprite2D' });
+    assert.equal(
+      get(chief, 'cleared'),
+      undefined,
+      `a Boss-typed value still holds it: ${JSON.stringify(chief)}`,
+    );
+    file = scene();
+    assert.match(file, /^chief = NodePath\("Chief"\)$/m, file);
+    assert.match(
+      file,
+      /^\[node name="Chief" type="Sprite2D" parent="\." unique_id=777\]\nscript = ExtResource\(/m,
+      file,
+    );
+
+    assert.match(
+      await refusal({ nodePath: 'Mover', nodeType: 'Node' }),
+      /^Mover has the script res:\/\/mover\.gd, which extends Node2D, and a Node is not one\. Change the script's extends line/,
+    );
+    assert.match(
+      await refusal({ nodePath: 'Coin', nodeType: 'Node2D' }),
+      /^Coin is an instance of res:\/\/coin\.tscn, whose root gives its type\./,
+    );
+    assert.match(await refusal({ nodePath: 'Body', nodeType: 'Node' }), /^Body is a Node already\./);
+    assert.match(await refusal({ nodePath: 'Body/Leg', nodeType: 'Boss' }), /^Body\/Leg is a Boss already\./);
+    assert.match(
+      await refusal({ nodePath: 'Mover', nodeType: 'Boss' }),
+      /^Mover has the script res:\/\/mover\.gd, and the class_name Boss brings its own\. Clear the script/,
+    );
+    assert.match(await refusal({ nodePath: 'Body', nodeType: 'Node2DD' }), /^nodeType must be a node class/);
+    assert.match(
+      await refusal({ scenePath: 'child.tscn', nodePath: '.', nodeType: 'Node3D' }),
+      /^The root of res:\/\/child\.tscn comes from the scene it inherits, which gives its type\./,
+    );
+    assert.match(
+      await refusal({ scenePath: 'child.tscn', nodePath: 'Body', nodeType: 'Node2D' }),
+      /^Body is made by res:\/\/main\.tscn, a scene res:\/\/child\.tscn inherits/,
+    );
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+/**
  * An animation's tracks, keys and length written with no editor: each op lands in the file that
  * keeps it, and root.gd's _init (position) is not saved by a write that never asked for it.
  */
@@ -79599,6 +79860,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMethodKeyIsJudgedAgainstItsMethodWithNoEditor,
   testAStateMachineWrittenWithNoEditorRunsAsWritten,
   testANodeKeepsItsGroupsAndItsPlace,
+  testANodeChangesItsType,
   testAThemeAndATilesetWithNoEditor,
   testABranchIsSavedAsItsOwnSceneWithNoEditor,
   testAControlIsLaidOutAsTheEditorLaysItOut,

@@ -476,6 +476,213 @@ static func _connections_with(scene: GdhSceneFile, at: String) -> Array[Dictiona
 	return cut
 
 
+## The editor's Change Type: the node at nodePath is made again as nodeType. It keeps its name,
+## place, children, groups, the connections from and to it, the node values naming it and every
+## value it stores that the new type has.
+func change_node_type(args: Dictionary) -> Dictionary:
+	var project_path: String = str(args.get("projectPath", ""))
+	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var node_path: String = str(args.get("nodePath", ""))
+	var node_type: String = str(args.get("nodeType", ""))
+	if node_type.is_empty():
+		return { "ok": false, "error": "change_type takes nodeType, the class to make the node." }
+	var class_script: Script = null
+	if not ClassDB.class_exists(node_type):
+		var declared: Dictionary = GdhSceneFile.script_class(node_type, "Node")
+		if declared.has("error"):
+			return { "ok": false, "error": declared["error"] }
+		var held: Variant = declared.get("script")
+		if held is Script:
+			class_script = held
+			node_type = str(declared["base"])
+	var making: Array = GdhPlacing.what_to_add(node_type, "", scene_path)
+	if not str(making[1]).is_empty():
+		return { "ok": false, "error": making[1] }
+
+	var opened: Array = _open(scene_path, true)
+	var scene: GdhSceneFile = opened[0]
+	var refused: Dictionary = opened[1]
+	if not refused.is_empty():
+		return refused
+	var was: Node = GdhSceneFile.node_at(scene.root, node_path)
+	if not was:
+		return scene.refuse(scene.not_found("Node not found: " + node_path, node_path))
+	var unchangeable: String = _type_fixed(scene, was)
+	if not unchangeable.is_empty():
+		return scene.refuse(unchangeable)
+	var at: String = scene.path_of(was)
+	var attached: Variant = was.get_script()
+	var script: Script = attached if attached is Script else null
+	var given: String = str(args.get("nodeType", ""))
+	var clearing: String = 'scene_node set with properties {"script": null}'
+	if class_script == script:
+		class_script = null
+	if class_script != null and script != null:
+		return scene.refuse(
+			(
+				(
+					"%s has the script %s, and the class_name %s brings its own. Clear the "
+					+ "script with %s first, or give nodeType an engine class to keep it."
+				)
+				% [at, script.resource_path, given, clearing]
+			)
+		)
+	var base: String = "" if script == null else str(script.get_instance_base_type())
+	if script != null and not ClassDB.is_parent_class(node_type, base):
+		return scene.refuse(
+			(
+				(
+					"%s has the script %s, which extends %s, and a %s is not one. Change the "
+					+ "script's extends line to a class %s inherits, or clear the script with %s, "
+					+ "then change the type."
+				)
+				% [at, script.resource_path, base, node_type, node_type, clearing]
+			)
+		)
+	if was.get_class() == node_type and class_script == null:
+		return scene.refuse("%s is a %s already." % [at, given])
+
+	var now: Node = GdhPlacing.made(null, node_type)
+	now.name = was.name
+	var dropped: Array[String] = _carried_values(was, now, class_script)
+	if class_script != null:
+		# Taken as asked once the values are carried, so a headless write keeps the script the file
+		# never held and still puts back what the script's own code changes from here.
+		scene.asked(now, ["script"])
+	var cut: Array[Dictionary] = _connections_carried(scene, was, now)
+	var was_type: String = was.get_class()
+	var unheld: Array[Dictionary] = scene.replace(was, now)
+	var written: Dictionary = scene.write(
+		func(saved: Node) -> String:
+			var copy: Node = saved.get_node_or_null(at)
+			if copy == null or copy.get_class() != node_type:
+				return "%s would not load as a %s." % [at, node_type]
+			return ""
+	)
+	if not written.is_empty():
+		return written
+	var answer: Dictionary = {
+		"ok": true, "nodePath": at, "nodeType": node_type, "wasType": was_type,
+	}
+	if class_script != null:
+		answer["scriptClass"] = given
+	if not dropped.is_empty():
+		answer["dropped"] = dropped
+	if not cut.is_empty():
+		answer["connectionsRemoved"] = cut
+	if not unheld.is_empty():
+		answer["cleared"] = unheld
+	return answer
+
+
+## Why [param node]'s type cannot change in [param scene], or "": its type is another scene's,
+## since it is an instance, inside one, or made by a scene this one inherits.
+static func _type_fixed(scene: GdhSceneFile, node: Node) -> String:
+	var at: String = scene.path_of(node)
+	if node == scene.root:
+		if scene.inherits():
+			return (
+				"The root of %s comes from the scene it inherits, which gives its type. Change the "
+				+ "type there."
+			) % scene.path
+		return ""
+	var fixed: String = scene.fixed(node)
+	if not fixed.is_empty():
+		return fixed
+	if not node.scene_file_path.is_empty():
+		return (
+			(
+				"%s is an instance of %s, whose root gives its type. Change the type there, or "
+				+ "delete the instance and add a node in its place."
+			)
+			% [at, node.scene_file_path]
+		)
+	return ""
+
+
+## Gives [param now] what [param was] stores, as the editor's Change Type does: each value that is
+## not its class's default, the script first so its variables take theirs. [param class_script] is
+## the class_name script a type named, which [param now] takes instead of none. Answers the names
+## of the values [param now]'s type has no property for.
+static func _carried_values(was: Node, now: Node, class_script: Script) -> Array[String]:
+	var plain: Object = ClassDB.instantiate(was.get_class())
+	if class_script != null:
+		now.set_script(class_script)
+	elif was.get_script() != null:
+		now.set_script(was.get_script())
+	var has: Dictionary = {}
+	for declared: Dictionary in now.get_property_list():
+		has[str(declared["name"])] = true
+	var dropped: Array[String] = []
+	for declared: Dictionary in was.get_property_list():
+		var named: String = str(declared["name"])
+		if not GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
+			continue
+		var value: Variant = was.get(named)
+		if named in plain and GdhSame.same(plain.get(named), value):
+			continue
+		if has.has(named) or named.begins_with("metadata/"):
+			now.set(named, value)
+		else:
+			dropped.append(named)
+	if plain is Node:
+		(plain as Node).free()
+	return dropped
+
+
+## Moves each persistent connection from and to [param was] onto [param now], with its flags, binds
+## and unbinds. Answers each one [param now] cannot hold, a signal it lacks or a method it lacks, as
+## {sourceNodePath, signalName, targetNodePath, methodName}, which is left out.
+static func _connections_carried(scene: GdhSceneFile, was: Node, now: Node) -> Array[Dictionary]:
+	var cut: Array[Dictionary] = []
+	var at: String = scene.path_of(was)
+	for info: Dictionary in was.get_signal_list():
+		var signal_name: String = str(info["name"])
+		for conn: Dictionary in was.get_signal_connection_list(signal_name):
+			var flags: int = GdhRead.as_int(conn.get("flags", 0))
+			var callable: Callable = conn["callable"]
+			var target: Object = callable.get_object()
+			if not flags & Object.CONNECT_PERSIST or target == null:
+				continue
+			var to: Object = now if target == was else target
+			var target_path: String = at if target == was else scene.path_of(target as Node)
+			if not now.has_signal(signal_name) or not to.has_method(callable.get_method()):
+				cut.append(_connection(at, signal_name, target_path, callable.get_method()))
+			else:
+				var _joined: Error = now.connect(signal_name, GdhPlacing.aimed(callable, to), flags)
+	# Moved here rather than by replace_by, which aims each at the method alone and so drops its
+	# binds and unbinds.
+	for conn: Dictionary in was.get_incoming_connections():
+		var flags: int = GdhRead.as_int(conn.get("flags", 0))
+		var source_signal: Signal = conn["signal"]
+		var source: Object = source_signal.get_object()
+		var callable: Callable = conn["callable"]
+		if not flags & Object.CONNECT_PERSIST or source == was:
+			continue
+		source.disconnect(source_signal.get_name(), callable)
+		if now.has_method(callable.get_method()):
+			var aimed: Callable = GdhPlacing.aimed(callable, now)
+			var _joined: Error = source.connect(source_signal.get_name(), aimed, flags)
+		else:
+			var from: String = scene.path_of(source as Node)
+			cut.append(_connection(from, source_signal.get_name(), at, callable.get_method()))
+	return cut
+
+
+static func _connection(
+	from: String,
+	signal_name: String,
+	to: String,
+	method: String,
+) -> Dictionary:
+	return {
+		"sourceNodePath": from,
+		"signalName": signal_name,
+		"targetNodePath": to,
+		"methodName": method,
+	}
+
+
 func duplicate_node(args: Dictionary) -> Dictionary:
 	var project_path: String = str(args.get("projectPath", ""))
 	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))

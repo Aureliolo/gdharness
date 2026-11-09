@@ -116,6 +116,7 @@ func _init_tools() -> void:
 		"list_scene_nodes": [_scene_tools, "list_scene_nodes"],
 		"add_node": [_scene_tools, "add_node"],
 		"delete_node": [_scene_tools, "delete_node"],
+		"change_node_type": [_scene_tools, "change_node_type"],
 		"duplicate_node": [_scene_tools, "duplicate_node"],
 		"reparent_node": [_scene_tools, "reparent_node"],
 		"save_branch": [_scene_tools, "save_branch"],

@@ -5438,6 +5438,8 @@ class GodotServer {
             return await editorOrEngine('save_branch', 'writes');
           case 'delete':
             return await editorOrEngine('delete_node', 'writes');
+          case 'change_type':
+            return await editorOrEngine('change_node_type', 'writes');
           case 'bake_navigation':
             return await editorOrEngine('bake_navigation', 'writes');
           default:

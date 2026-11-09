@@ -96,6 +96,8 @@ var _text: String = ""
 ## id. Scripts cannot set one, the engine gives the instance a new one as it packs it, and a scene
 ## inheriting this one finds a moved node by it.
 var _held_ids: Dictionary = {}
+## The unique_id each node a change of type replaced had in the file, by the new node's object id.
+var _retyped_ids: Dictionary = {}
 ## The engine properties a put back did not take on a node, as "id:name": the engine derives them
 ## from where the node is, as it keeps layout_mode at Container under a container, and stores the
 ## same from an editor.
@@ -217,15 +219,56 @@ static func _filed_id(text: String, header: String) -> String:
 	return ""
 
 
-## The unique_id to write back on each placeholder put back as its instance, by its entry's header,
-## for those still in the scene.
+## Whether this scene inherits another, which then makes its root.
+func inherits() -> bool:
+	return _state != null and _state.get_base_scene_state() != null
+
+
+## How a text scene opens the entry of [param node], a node of class [param type] that is not an
+## instance: its name and type, then its parent's path unless it is the root.
+func _typed_header(node: Node, type: String) -> String:
+	var header: String = '[node name="%s" type="%s"' % [str(node.name).c_escape(), type]
+	if node == root:
+		return header
+	return header + ' parent="%s"' % str(root.get_path_to(node.get_parent())).c_escape()
+
+
+## The unique_id to write back on each placeholder put back as its instance and each node a change
+## of type replaced, by its entry's header, for those still in the scene.
 func _ids_to_keep() -> Dictionary:
 	var keep: Dictionary = {}
 	for key: Variant in _held_ids:
 		var node: Node = instance_from_id(GdhRead.as_int(key)) as Node
 		if node != null and root.is_ancestor_of(node):
 			keep[_header_of(root.get_path_to(node))] = _held_ids[key]
+	for key: Variant in _retyped_ids:
+		var node: Node = instance_from_id(GdhRead.as_int(key)) as Node
+		if node != null and (node == root or root.is_ancestor_of(node)):
+			keep[_typed_header(node, node.get_class())] = _retyped_ids[key]
 	return keep
+
+
+## Puts [param now] in [param was]'s place, as the editor's Change Type does: its place among its
+## siblings, its children, its owner and groups, the values naming it and what the file stores on
+## it. It keeps the unique_id the file gave it, which a scene inheriting this one finds it by. The
+## engine gives a new node a new one, and a script cannot set it. [param was] is freed. Answers each
+## value that held [param was] and is typed so it cannot hold [param now], as
+## {nodePath, property}, which holds null now.
+func replace(was: Node, now: Node) -> Array[Dictionary]:
+	var text: String = FileAccess.get_file_as_string(path) if path.ends_with(".tscn") else ""
+	var header: String = _typed_header(was, was.get_class())
+	var filed_id: String = "" if text.is_empty() else _filed_id(text, header)
+	var rooted: bool = was == root
+	was.replace_by(now, true)
+	if rooted:
+		root = now
+	if not filed_id.is_empty():
+		_retyped_ids[now.get_instance_id()] = filed_id
+	var unheld: Array[Dictionary] = []
+	_repointed(root, was, now, unheld, true)
+	copied({ was: now })
+	was.free()
+	return unheld
 
 
 ## Saves [param packed] at [param file_path] as [method save_packed] does, with the unique_ids in
@@ -246,6 +289,9 @@ static func _keep_ids(file_path: String, keep: Dictionary) -> Error:
 	for index: int in lines.size():
 		for header: Variant in keep:
 			var opening: String = str(header)
+			# The root's header names no parent, and so begins a child's of the same name and type.
+			if not opening.contains(" parent=") and lines[index].contains(" parent="):
+				continue
 			if lines[index].begins_with(opening + " ") or lines[index].begins_with(opening + "]"):
 				lines[index] = id.sub(lines[index], " unique_id=" + str(keep[header]))
 				changed = true
@@ -270,26 +316,56 @@ func _placeholders_under(top: Node, into: Array[InstancePlaceholder]) -> void:
 
 
 ## Points every value of a node of this scene that holds [param was], alone or in an array, at
-## [param now].
-func _repointed(top: Node, was: Node, now: Node) -> void:
+## [param now]. With [param unheld], each value is the tool's own change ([method asked]), and each
+## typed so it cannot hold [param now] is cleared and named there as {nodePath, property}.
+func _repointed(
+	top: Node, was: Node, now: Node, unheld: Array[Dictionary] = [], own: bool = false
+) -> void:
 	if top.owner == root or top == root:
+		var holding: Dictionary[String, String] = {}
 		for declared: Dictionary in top.get_property_list():
 			if not GdhRead.as_int(declared.get("usage", 0)) & PROPERTY_USAGE_STORAGE:
 				continue
 			var named: String = str(declared["name"])
 			var value: Variant = top.get(named)
 			if value is Object and value == was:
-				top.set(named, now)
+				holding[named] = str(declared.get("class_name", ""))
 			elif value is Array:
 				var listed: Array = value
 				if listed.has(was):
-					var swapped: Array = listed.duplicate()
-					for index: int in swapped.size():
-						if swapped[index] == was:
-							swapped[index] = now
-					top.set(named, swapped)
+					holding[named] = str(listed.get_typed_class_name())
+		if own and not holding.is_empty():
+			asked(top, holding.keys())
+		for named: String in holding:
+			var fits: bool = _takes(holding[named], now)
+			var put: Variant = now if fits else null
+			var value: Variant = top.get(named)
+			if value is Array:
+				var held: Array = value
+				var listed: Array = held.duplicate()
+				for index: int in listed.size():
+					if listed[index] == was:
+						listed[index] = put
+				put = listed
+			top.set(named, put)
+			if not fits and own:
+				unheld.append({ "nodePath": path_of(top), "property": named })
 	for child: Node in top.get_children():
-		_repointed(child, was, now)
+		_repointed(child, was, now, unheld, own)
+
+
+## Whether a value typed as [param type], an engine class or a script's class_name, can hold
+## [param node]. An untyped one holds any.
+static func _takes(type: String, node: Node) -> bool:
+	if type.is_empty() or ClassDB.class_exists(type):
+		return type.is_empty() or node.is_class(type)
+	var attached: Variant = node.get_script()
+	var script: Script = attached if attached is Script else null
+	while script != null:
+		if str(script.get_global_name()) == type:
+			return true
+		script = script.get_base_script()
+	return false
 
 
 ## Why a write to the scene at [param scene_path], whose text is [param text], is refused, or "":
@@ -1179,7 +1255,7 @@ func _write(check: Callable) -> Dictionary:
 		if not missing.is_empty():
 			return refuse("Nothing was written: " + missing)
 	var also: Array[Dictionary] = _also_saved(packed.get_state())
-	var keep: Dictionary = _ids_to_keep() if headless and path.ends_with(".tscn") else {}
+	var keep: Dictionary = _ids_to_keep() if path.ends_with(".tscn") else {}
 	close()
 	var previous: Variant = null
 	if FileAccess.file_exists(path):

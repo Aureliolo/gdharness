@@ -1639,7 +1639,7 @@ function report(
       `The slowest suites: ${slowest.map((suite) => `${suite.path} ${suite.seconds.toFixed(1)} s`).join(', ')}.`,
     );
   }
-  const totals = `${plural(cases, 'case')} in ${plural(suites, 'suite')} across ${plural(ran.length, 'engine')}, ${took.toFixed(1)} s. The longest engine took ${longest.toFixed(1)} s.`;
+  const totals = `${plural(cases, 'case')} in ${plural(suites, 'suite')} ${acrossSaid(ran)}, ${took.toFixed(1)} s. The longest engine took ${longest.toFixed(1)} s.`;
   console.log('');
   const passed =
     failed.length === 0 && compiled.faults.length === 0 && across.length === 0 && uncollected.length === 0;
@@ -1726,6 +1726,34 @@ function writeEarlyResult(
     slotsFree: 0,
     dealing: [],
   });
+}
+
+/**
+ * How many engines [param ran] took, for the closing line, with the most that ran at once when that
+ * is fewer. A run handed out a share at a time starts more engines than --engines, never more at
+ * once, and a count of every engine it started read as the cap not holding.
+ */
+export function acrossSaid(ran: readonly Pick<EngineRan, 'began' | 'seconds'>[]): string {
+  const together = mostAtOnce(ran);
+  const atOnce = together < ran.length ? `, at most ${String(together)} at once` : '';
+  return `across ${plural(ran.length, 'engine')}${atOnce}`;
+}
+
+/** The most engines of [param ran] that ran at the same moment. One ending as another begins is not. */
+function mostAtOnce(ran: readonly Pick<EngineRan, 'began' | 'seconds'>[]): number {
+  const changes = ran
+    .flatMap((engine): [number, number][] => [
+      [engine.began, 1],
+      [engine.began + engine.seconds * 1000, -1],
+    ])
+    .toSorted((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let running = 0;
+  let most = 0;
+  for (const [, change] of changes) {
+    running += change;
+    most = Math.max(most, running);
+  }
+  return most;
 }
 
 /** Writes [param result] to the last run's file, and to --result's when it was given. */
