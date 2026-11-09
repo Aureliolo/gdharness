@@ -104,6 +104,27 @@ static func _hover_noted(answer: Dictionary, supplied: bool) -> Dictionary:
 
 ## Hovers what is under [param position], in [param viewport]'s pixels, when the engine cannot: see
 ## runtime_hover.gd.
+## The path of the Control holding [param gui]'s keyboard focus, or "" when none does. A path, so
+## a click that frees the control holding it is still compared.
+static func _focus_of(gui: Viewport) -> String:
+	var holding: Control = gui.gui_get_focus_owner()
+	return "" if holding == null else str(holding.get_path())
+
+
+## [param answer] with focused_after when a click moved [param gui]'s focus from [param before]. A
+## click into a field focused it with nothing in the answer saying so, so a caller typing next
+## learnt where the text went only from the typing's own answer.
+static func _focus_moved(answer: Dictionary, gui: Viewport, before: String) -> Dictionary:
+	if not is_instance_valid(gui):
+		return answer
+	var now: String = _focus_of(gui)
+	if now.is_empty() and not before.is_empty():
+		answer["focused_after"] = null
+	elif now != before:
+		answer["focused_after"] = now
+	return answer
+
+
 func _follow_in(viewport: Viewport, position: Vector2) -> bool:
 	return _hover.follow(viewport, viewport.get_final_transform().affine_inverse() * position)
 
@@ -352,6 +373,9 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	var where: Dictionary = GdhMouse.where(aim, viewport, at)
 	var own: Viewport = _own_of(aim, viewport)
 	var pressing: Dictionary = _hover.press_of(aim, viewport, position) if held else {}
+	# Read in the viewport the click lands in, since a click into a SubViewport moves that one's
+	# focus and leaves the root's alone.
+	var focus_before: String = _focus_of(viewport)
 	# A double click's first click goes whole before it, as [method _click_button] sends one.
 	if double and held and not notch:
 		_send(viewport, GdhMouse.button_event(position, button, true, false, _held_in(viewport)))
@@ -390,7 +414,7 @@ func inject_mouse_click(params: Dictionary) -> Dictionary:
 	}
 	answer.merge(where)
 	answer.merge(pressing)
-	return _pointer_noted(_hover_noted(answer, supplied))
+	return _pointer_noted(_hover_noted(_focus_moved(answer, viewport, focus_before), supplied))
 
 
 ## Moves the pointer to a position, with the movement the event carries taken from where the
@@ -740,6 +764,8 @@ func click(params: Dictionary) -> Dictionary:
 	var heard_press: Callable = func() -> void: fired[0] = true
 	if toggle != null:
 		var _hearing: int = toggle.pressed.connect(heard_press)
+	var gui: Viewport = control.get_viewport()
+	var focus_before: String = _focus_of(gui)
 	var press: InputEventMouseButton = await _click_button(viewport, position, button, double)
 	# The release is what a button acts on, and a queue_free it causes lands at the end of
 	# this frame. The frame passes so the answer describes the control as the click left it.
@@ -787,7 +813,7 @@ func click(params: Dictionary) -> Dictionary:
 		answer["link_pressed"] = not links.is_empty()
 		if not links.is_empty():
 			answer["link_meta"] = _values.serialize(links.back())
-	return _pointer_noted(_hover_noted(answer, supplied))
+	return _pointer_noted(_hover_noted(_focus_moved(answer, gui, focus_before), supplied))
 
 
 ## Why a click at [param control]'s centre, or at the point [param aimed] names, would reach

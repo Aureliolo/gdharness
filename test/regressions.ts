@@ -20717,8 +20717,8 @@ async function testTypedTextLandsWhereTheAnswerSaysItDid(): Promise<void> {
   await withAHeadlessProbeGame(
     'typed-text',
     PROBE_SCENE_HEAD +
-      '[node name="Name" type="LineEdit" parent="."]\ntext = "2.1"\n\n' +
-      '[node name="Secret" type="LineEdit" parent="."]\nsecret = true\n',
+      '[node name="Name" type="LineEdit" parent="."]\noffset_right = 200.0\noffset_bottom = 31.0\ntext = "2.1"\n\n' +
+      '[node name="Secret" type="LineEdit" parent="."]\noffset_top = 50.0\noffset_right = 200.0\noffset_bottom = 81.0\nsecret = true\n',
     {
       'main.gd':
         'extends Control\n\n' +
@@ -20769,6 +20769,24 @@ async function testTypedTextLandsWhereTheAnswerSaysItDid(): Promise<void> {
       assert.equal(get(secret, 'into'), '/root/Main/Secret', secretShown);
       assert.equal(get(secret, 'holds'), '•'.repeat(7), `a secret field answers its mask: ${secretShown}`);
       assert.equal(get(await texts(), 'secret'), 'hunter2', 'while the field itself holds the text');
+
+      // A click says where it moved the focus, so typing next is known to land there.
+      const clicked = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Name' });
+      assert.deepEqual(
+        [get(clicked, 'landed'), get(clicked, 'focused_after')],
+        [true, '/root/Main/Name'],
+        JSON.stringify(clicked),
+      );
+      const again = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Name' });
+      assert.deepEqual(
+        [get(again, 'landed'), get(again, 'focused_after')],
+        [true, undefined],
+        `a click that leaves the focus where it was says nothing of it: ${JSON.stringify(again)}`,
+      );
+      const moused = await call('runtime_input', { op: 'mouse_click', x: 100, y: 65 });
+      assert.equal(get(moused, 'focused_after'), '/root/Main/Secret', JSON.stringify(moused));
+      const typed = await call('runtime_input', { op: 'text', text: 'x' });
+      assert.equal(get(typed, 'into'), '/root/Main/Secret', JSON.stringify(typed));
     },
   );
 }
@@ -74817,7 +74835,7 @@ async function testAnInheritedSceneIsMadeWithNoEditor(): Promise<void> {
     );
     assert.equal(
       get(further, 'namedByPath'),
-      "This saved res://parts/big_crate.tscn by path, which loads the same. The project's uid cache does not hold its uid until the project is next scanned, and a uid it lacks warns on every load. project_import refresh_uids scans it, so later writes name it by uid.",
+      "This saved res://parts/big_crate.tscn by path, which loads the same. The project's uid cache does not hold its uid until the project is next scanned. Named by uid before then, it would warn on every load. project_import refresh_uids scans it, so later writes name it by uid.",
       'and the answer says why, with the call that changes it',
     );
     assert.equal(get(made, 'namedByPath'), undefined, `crate.tscn was imported: ${JSON.stringify(made)}`);
@@ -75717,7 +75735,7 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
     });
     assert.equal(
       get(both, 'namedByPath'),
-      "This saved res://lamp.tscn, res://desk.tscn by path, which loads the same. The project's uid cache does not hold their uids until the project is next scanned, and a uid it lacks warns on every load. project_import refresh_uids scans it, so later writes name them by uid.",
+      "This saved res://lamp.tscn, res://desk.tscn by path, which loads the same. The project's uid cache does not hold their uids until the project is next scanned. Named by uid before then, they would warn on every load. project_import refresh_uids scans it, so later writes name them by uid.",
       JSON.stringify(both),
     );
     assert.equal(await energy('unrelated.tscn', 'Top/DeskLamp/Bulb'), 3, fileOf('unrelated.tscn'));
