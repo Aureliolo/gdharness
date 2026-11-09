@@ -412,8 +412,8 @@ static func _no_path_in(record: Dictionary) -> String:
 		(
 			"a resource is named by the res:// path of its file, and the %s given has none: a"
 			+ " resource built into a scene has no path, and the game builds none from its"
-			+ " properties. resource_edit create writes a %s to a .tres file, and its res://"
-			+ " path names it here"
+			+ " properties. resource_edit create writes a %s to a .tres file. Pass that file's"
+			+ " res:// path here"
 		)
 		% [sort, sort]
 	)
