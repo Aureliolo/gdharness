@@ -74971,7 +74971,7 @@ async function testAnInheritedSceneIsMadeWithNoEditor(): Promise<void> {
     );
     assert.equal(
       get(further, 'namedByPath'),
-      "This saved res://parts/big_crate.tscn by path, which loads the same. The project's uid cache does not hold its uid until the project is next scanned. Named by uid before then, it would warn on every load. project_import refresh_uids scans it, so later writes name it by uid.",
+      "This saved res://parts/big_crate.tscn by path, because the project's uid cache does not hold its uid until the project is next scanned. A path loads the same. project_import refresh_uids scans it, so later writes name it by uid.",
       'and the answer says why, with the call that changes it',
     );
     assert.equal(get(made, 'namedByPath'), undefined, `crate.tscn was imported: ${JSON.stringify(made)}`);
@@ -75871,7 +75871,7 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
     });
     assert.equal(
       get(both, 'namedByPath'),
-      "This saved res://lamp.tscn, res://desk.tscn by path, which loads the same. The project's uid cache does not hold their uids until the project is next scanned. Named by uid before then, they would warn on every load. project_import refresh_uids scans it, so later writes name them by uid.",
+      "This saved res://lamp.tscn, res://desk.tscn by path, because the project's uid cache does not hold their uids until the project is next scanned. A path loads the same. project_import refresh_uids scans it, so later writes name them by uid.",
       JSON.stringify(both),
     );
     assert.equal(await energy('unrelated.tscn', 'Top/DeskLamp/Bulb'), 3, fileOf('unrelated.tscn'));
