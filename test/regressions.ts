@@ -71765,6 +71765,16 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
     });
     assert.equal(get(calm, 'savedPath'), 'res://calm.scn', JSON.stringify(calm));
     assert.ok(existsSync(join(project, 'calm.scn')), 'a binary scene with no such resource is written');
+    const copied = readFileSync(join(project, 'calm.scn'));
+    const over =
+      textOf(await call('scene_create', { op: 'save_as', scenePath: 'calm.tscn', newPath: 'calm.scn' })) ??
+      '';
+    assert.match(
+      over,
+      /^res:\/\/calm\.scn already exists, and save_as writes a new scene only\. Give newPath a path with no file, or change the scene there with scene_node\./,
+      over,
+    );
+    assert.deepEqual(readFileSync(join(project, 'calm.scn')), copied, 'and the file there is as it was');
     for (const name of ['holder', 'mapped', 'nested']) {
       const binary =
         textOf(
