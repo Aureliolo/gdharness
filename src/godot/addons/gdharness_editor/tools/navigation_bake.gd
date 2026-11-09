@@ -12,10 +12,13 @@ extends RefCounted
 
 const GdhSceneFile = preload("../scene_file.gd")
 const GdhSceneUids = preload("../scene_uids.gd")
-## The names NavigationPolygon.SourceGeometryMode and NavigationMesh.SourceGeometryMode give each
-## mode, which share their values.
+## The constants NavigationPolygon.SourceGeometryMode and NavigationMesh.SourceGeometryMode give
+## each
+## mode, which share their values, and which a set of source_geometry_mode takes.
 const SOURCE_MODES: Array[String] = [
-	"root_node_children", "groups_with_children", "groups_explicit",
+	"SOURCE_GEOMETRY_ROOT_NODE_CHILDREN",
+	"SOURCE_GEOMETRY_GROUPS_WITH_CHILDREN",
+	"SOURCE_GEOMETRY_GROUPS_EXPLICIT",
 ]
 
 
@@ -289,9 +292,9 @@ static func _nothing_read(scene: GdhSceneFile, held: Resource) -> String:
 		return said
 	return (
 		(
-			"%s %s %s outside what was read. The bake reads a node elsewhere once it is in the "
-			+ "group %s and source_geometry_mode is groups_with_children, or once it is moved "
-			+ "under the region."
+			"%s %s %s outside what was read. The bake reads a node elsewhere when it is in the "
+			+ "group %s and navigation_polygon/source_geometry_mode is "
+			+ "SOURCE_GEOMETRY_GROUPS_WITH_CHILDREN. It also reads a node moved under the region."
 		)
 		% [
 			said,
@@ -314,5 +317,5 @@ static func _in_a_region(node: Node) -> bool:
 
 static func _source_said(mode: int, group: String) -> String:
 	if mode == 0:
-		return "the region's children (source mode root_node_children)"
+		return "the region's children (source mode %s)" % SOURCE_MODES[0]
 	return "the nodes in the group %s (source mode %s)" % [group, SOURCE_MODES[mode]]

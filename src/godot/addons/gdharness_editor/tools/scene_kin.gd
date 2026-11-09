@@ -18,7 +18,8 @@ static func taken(scene_path: String) -> Dictionary:
 		(
 			(
 				"%s already exists, and scene_create op=create would replace everything in it. "
-				+ "Edit it with scene_node, or create the scene under another path."
+				+ "Edit it with scene_node (op=change_type changes its root class), or "
+				+ "create the scene under another path."
 			)
 			% scene_path
 		),

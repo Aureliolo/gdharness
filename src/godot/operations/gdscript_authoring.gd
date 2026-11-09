@@ -63,7 +63,12 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 
 	if FileAccess.file_exists(full_script_path):
 		return _log.failure(
-			"Script file already exists: " + full_script_path + ". script_edit modify adds to it."
+			(
+				"Script file already exists: "
+				+ full_script_path
+				+ ". script_edit modify adds declarations to it. To change an existing line, edit "
+				+ "the file's text."
+			)
 		)
 
 	# Content is left to the parse below: two scripts that name each other are written one at a

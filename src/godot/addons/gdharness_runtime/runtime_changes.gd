@@ -476,7 +476,7 @@ func call_method(params: Dictionary) -> Dictionary:
 	var root: Node = _host.get_tree().root
 	var standing: Dictionary = GdhValues.class_at(root, node_path)
 	if standing.is_empty():
-		standing = GdhValues.target_at(root, node_path)
+		standing = GdhValues.target_at(root, node_path, true, PackedStringArray([method]))
 		if standing.has("message") and node_path.is_valid_ascii_identifier():
 			var classes: Array[String] = []
 			for declared: Dictionary in ProjectSettings.get_global_class_list():

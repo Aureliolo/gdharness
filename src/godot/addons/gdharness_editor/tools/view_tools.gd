@@ -6,6 +6,7 @@ extends Node
 ## engine draws nothing at all. The editor's own 2D and 3D views are the one place it is drawn.
 
 const GdhRead = preload("../reading.gd")
+const GdhFileWalk = preload("../file_walk.gd")
 const GdhSceneFile = preload("../scene_file.gd")
 const GdhPictures = preload("../picture_saves.gd")
 const HEADLESS_DISPLAY: String = "headless"
@@ -51,7 +52,11 @@ func capture_editor_view(args: Dictionary) -> Dictionary:
 	var project_path: String = str(args.get("projectPath", ""))
 	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
 	if not ResourceLoader.exists(scene_path, "PackedScene"):
-		return { "ok": false, "error": "Scene not found: " + scene_path }
+		return {
+			"ok": false,
+			"error":
+			GdhFileWalk.new().with_nearest_files("Scene not found: " + scene_path, scene_path),
+		}
 	var view: String = str(args.get("view", ""))
 	var shown: Node = EditorInterface.get_edited_scene_root()
 	var previous: String = shown.scene_file_path if shown != null else ""

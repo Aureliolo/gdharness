@@ -1618,6 +1618,29 @@ async function testSceneNodes({ call, project }: Editor): Promise<void> {
   );
   assert.match(fileText(project, 'fixture.tscn'), /\[node name="Copy" type="Button" parent="Panel"/);
 
+  // Through the editor too, a node made another class keeps the unique_id the file gave it.
+  const panelId = /^\[node name="Panel" type="Node2D" parent="\." unique_id=(\d+)\]$/m.exec(
+    fileText(project, 'fixture.tscn'),
+  )?.[1];
+  assert.ok(panelId !== undefined, fileText(project, 'fixture.tscn'));
+  const retyped = await call('scene_node', {
+    ...scene,
+    op: 'change_type',
+    nodePath: 'Panel',
+    nodeType: 'Marker2D',
+  });
+  assert.equal(get(retyped, 'wasType'), 'Node2D', JSON.stringify(retyped));
+  assert.match(
+    fileText(project, 'fixture.tscn'),
+    new RegExp(String.raw`^\[node name="Panel" type="Marker2D" parent="\." unique_id=${panelId}\]$`, 'm'),
+  );
+  assert.match(fileText(project, 'fixture.tscn'), /\[node name="Copy" type="Button" parent="Panel"/);
+  await call('scene_node', { ...scene, op: 'change_type', nodePath: 'Panel', nodeType: 'Node2D' });
+  assert.match(
+    fileText(project, 'fixture.tscn'),
+    new RegExp(String.raw`^\[node name="Panel" type="Node2D" parent="\." unique_id=${panelId}\]$`, 'm'),
+  );
+
   await call('scene_node', { ...scene, op: 'delete', nodePath: 'Panel/Copy' });
   assert.deepEqual(nodePaths(get(await call('scene_tree', scene), 'tree')), ['.', 'Panel', 'Press']);
   assert.doesNotMatch(fileText(project, 'fixture.tscn'), /name="Copy"/, 'and be gone from the file');
@@ -3910,7 +3933,25 @@ async function testTilesDrawWhatTheyName({ call, refusal, project }: Editor): Pr
       resourcePath: 'res://tiles/other.tres',
       sources: [{ texture: 'res://tiles/nothing.png', tileSize: { x: 4, y: 4 } }],
     }),
-    /no texture at res:\/\/tiles\/nothing\.png/,
+    /no texture at res:\/\/tiles\/nothing\.png\. .*resource_edit create with resourceType PlaceholderTexture2D and properties \{"size": \{"x": 64, "y": 32\}\} makes a stand-in of that size\./,
+  );
+  // The stand-in the refusal offers is one a tile set is built from.
+  await call('resource_edit', {
+    projectPath: project,
+    op: 'create',
+    resourcePath: 'res://tiles/stand_in.tres',
+    resourceType: 'PlaceholderTexture2D',
+    properties: { size: { x: 64, y: 32 } },
+  });
+  const stoodIn = await call('resource_edit', {
+    ...tileset,
+    resourcePath: 'res://tiles/stood_in.tres',
+    sources: [{ texture: 'res://tiles/stand_in.tres', tileSize: { x: 32, y: 32 } }],
+  });
+  assert.equal(
+    get(asArray(get(stoodIn, 'sources'), 'sources')[0], 'texture'),
+    'res://tiles/stand_in.tres',
+    JSON.stringify(stoodIn),
   );
   const outside = await refusal('resource_edit', {
     ...tileset,

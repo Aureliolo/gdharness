@@ -25,6 +25,7 @@ const SCENE_COMMANDS: Array[String] = [
 	"reparent_node",
 	"save_branch",
 	"delete_node",
+	"change_node_type",
 	"bake_navigation",
 ]
 const SIGNAL_COMMANDS: Array[String] = ["connect_signal", "disconnect_signal", "list_connections"]

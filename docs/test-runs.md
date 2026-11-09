@@ -23,7 +23,9 @@ when the command line itself is wrong.
 
 ## Engine options
 
-- `--engines N`: at most this many engines, 4 by default.
+- `--engines N`: at most this many engines at once, 4 by default. A run handed out a share at a
+  time starts one engine per share. In total it may start more engines than this, never more at
+  once.
 - `--slots DIR`: the slot directory, the machine's own by default (see
   [Engine slots](#engine-slots)).
 - `--slot-count N`: how many slots that directory has. By default it is half the processors, at

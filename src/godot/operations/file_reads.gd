@@ -119,7 +119,8 @@ static func _missing_in(nodes: Dictionary, said: String, node_path: String) -> S
 ## Every node of [param scene_path] as {ok, nodes}, keyed by path, or a refusal.
 static func _laid(scene_path: String) -> Dictionary:
 	if not FileAccess.file_exists(scene_path):
-		return { "ok": false, "error": "Scene not found: " + scene_path }
+		var said: String = "Scene not found: " + scene_path
+		return { "ok": false, "error": GdhFileWalk.new().with_nearest_files(said, scene_path) }
 	# Loaded without naming the type, so a resource handed in by mistake loads as what it is and the
 	# refusal can say so, where asking for a PackedScene printed the loader's error and a backtrace.
 	var loaded: Resource = ResourceLoader.load(scene_path, "", ResourceLoader.CACHE_MODE_IGNORE)
