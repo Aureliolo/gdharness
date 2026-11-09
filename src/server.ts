@@ -959,6 +959,33 @@ function cleanVerdict(run: GodotProcess): boolean | undefined {
   return run.log.count('error') === 0;
 }
 
+/** Signals an engine ends on only when it crashes, as against the ones a stop sends. */
+const CRASH_SIGNALS: ReadonlySet<string> = new Set(['SIGSEGV', 'SIGBUS', 'SIGILL', 'SIGFPE', 'SIGABRT']);
+/** The Windows status of a console closed or sent Ctrl+C, which ends a process without a fault. */
+const CONSOLE_CLOSED = 0xc000013a;
+
+/**
+ * An error entry for a run that ended in a crash its log holds no report of, entered once. Godot
+ * on Windows can crash as it closes with nothing printed: measured, a game closed through the
+ * runtime exited 0xC0000005 with an empty log, and was answered clean.
+ */
+export function enterASilentCrash(run: Pick<GodotProcess, 'exitCode' | 'exitSignal' | 'log'>): void {
+  if (run.log.crashReport() !== undefined) {
+    return;
+  }
+  const code = run.exitCode === null ? null : run.exitCode >>> 0;
+  const signal = run.exitSignal ?? null;
+  const text =
+    code !== null && code >= 0xc0000000 && code !== CONSOLE_CLOSED
+      ? `The engine ended with ${exitCodeText(code)}. It printed no crash report.`
+      : signal !== null && CRASH_SIGNALS.has(signal)
+        ? `The engine ended on ${signal}, so it crashed. It printed no crash report.`
+        : null;
+  if (text !== null && !run.log.all.some((entry) => entry.text === text)) {
+    run.log.record('error', text);
+  }
+}
+
 /**
  * Whether a run is still going.
  *
@@ -14170,6 +14197,7 @@ class GodotServer {
       run.log.finish();
       run.endedUnwatched = noCodeWillCome(run);
     }
+    enterASilentCrash(run);
     const severity = readString(args, 'severity');
     const selected = run.log.selectFolded({
       severity: severity === 'error' || severity === 'warning' ? severity : 'info',
@@ -14467,6 +14495,7 @@ class GodotServer {
         }
       }
     }
+    enterASilentCrash(stopped);
     const verdict = stopVerdict({
       wasRunning,
       ending,

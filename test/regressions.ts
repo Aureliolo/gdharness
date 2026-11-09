@@ -398,6 +398,7 @@ import {
   endedPreviousRun,
   endedToStartThis,
   endedWithoutACode,
+  enterASilentCrash,
   exportAnswer,
   exportPresetRefusal,
   failedVerdict,
@@ -16965,6 +16966,59 @@ function testAPidPicksOneOfSeveralGames(): void {
       `and it names every game running: ${JSON.stringify(twoProjects)}`,
     );
   }
+}
+
+/**
+ * A run that ended in a crash it printed no report of is an error, so editor_run stop and
+ * editor_output never answer it clean. Godot on Windows was measured exiting 0xC0000005 as a game
+ * closed, with nothing printed. A stop's own endings and a closed console are not crashes.
+ */
+function testACrashWithNoReportIsAnError(): void {
+  const entered = (exitCode: number | null, exitSignal: string | null, printed = ''): GameLog => {
+    const log = new GameLog();
+    if (printed !== '') {
+      log.append('stderr', printed);
+    }
+    enterASilentCrash({ exitCode, exitSignal, log });
+    return log;
+  };
+  const errorsOf = (log: GameLog): string[] =>
+    log.all.filter((entry) => entry.severity === 'error').map((entry) => entry.text);
+
+  const violation = entered(0xc0000005, null);
+  assert.deepEqual(errorsOf(violation), [
+    'The engine ended with exit code 0xC0000005, an access violation, so it crashed. It printed no crash report.',
+  ]);
+  enterASilentCrash({ exitCode: 0xc0000005, exitSignal: null, log: violation });
+  assert.equal(violation.count('error'), 1, 'entered once, however often a verdict is read');
+  assert.deepEqual(
+    errorsOf(entered(-1073741819, null)),
+    errorsOf(violation),
+    'a status read signed is the same crash',
+  );
+  assert.deepEqual(errorsOf(entered(0xc0000123, null)), [
+    'The engine ended with exit code 0xC0000123, a Windows error status. It printed no crash report.',
+  ]);
+  assert.deepEqual(errorsOf(entered(null, 'SIGSEGV')), [
+    'The engine ended on SIGSEGV, so it crashed. It printed no crash report.',
+  ]);
+
+  for (const [exitCode, exitSignal, why] of [
+    [0, null, 'a game that quit'],
+    [1, null, 'a game that quit with a code'],
+    [0xc000013a, null, 'a console closed or sent Ctrl+C'],
+    [null, 'SIGTERM', 'a stop by signal'],
+    [null, 'SIGKILL', 'a stop that killed it'],
+  ] as const) {
+    assert.deepEqual(errorsOf(entered(exitCode, exitSignal)), [], `${why} is not a crash`);
+  }
+  const reported = entered(0xc0000005, null, 'CrashHandlerException: Program crashed\nEngine version: x\n');
+  assert.ok(reported.crashReport() !== undefined, 'the crash handler report is read as the crash');
+  assert.deepEqual(
+    errorsOf(reported).filter((said) => said.includes('no crash report')),
+    [],
+    'and a crash with its report is not entered twice',
+  );
 }
 
 /**
@@ -80599,6 +80653,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARecordedEndingIsReadBack,
   testARestartBeingLookedForIsWaitedFor,
   testAnExitTheKeeperIsStillWritingIsWaitedFor,
+  testACrashWithNoReportIsAnError,
   testARuntimeCallAfterOurRunEndedSaysSo,
   testARunEndedWithoutACodeSaysWhy,
   testAForeignRunSurvivesAStart,
