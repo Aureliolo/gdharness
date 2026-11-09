@@ -11,20 +11,24 @@ import { availableParallelism, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { MOST_ENGINES } from '../../src/engine-launch.js';
-import { SLOT_COUNT_VARIABLE, SLOTS_VARIABLE, WAITING_FOLDER } from '../../src/engine-slots.js';
+import { ENDED_SUFFIX, SLOT_COUNT_VARIABLE, SLOTS_VARIABLE, WAITING_FOLDER } from '../../src/engine-slots.js';
 
 process.env[SLOTS_VARIABLE] ??= join(tmpdir(), 'gdharness-test-slots');
 process.env[SLOT_COUNT_VARIABLE] ??= String(Math.min(MOST_ENGINES, availableParallelism()));
 
 /**
  * What is left in the slot directory [param slots]: every lock, and every wait mark as
- * `waiting/<name>`. The folder of marks stays once a wait has made it, so a run that gave back
- * everything leaves an empty list rather than an empty directory.
+ * `waiting/<name>`. The folder of marks stays once a wait has made it, and so does the note each
+ * ended wait leaves, which holds nothing. A run that gave back everything leaves an empty list.
  */
 export function leftInSlots(slots: string): string[] {
   const marks = join(slots, WAITING_FOLDER);
   return [
     ...readdirSync(slots).filter((name) => name !== WAITING_FOLDER),
-    ...(existsSync(marks) ? readdirSync(marks).map((name) => `${WAITING_FOLDER}/${name}`) : []),
+    ...(existsSync(marks)
+      ? readdirSync(marks)
+          .filter((name) => !name.endsWith(ENDED_SUFFIX))
+          .map((name) => `${WAITING_FOLDER}/${name}`)
+      : []),
   ].toSorted();
 }

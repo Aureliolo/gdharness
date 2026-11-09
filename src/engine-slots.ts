@@ -180,7 +180,7 @@ const START_READ_MS = 10_000;
 /** The folder, inside the slots', of the marks takers keep while they wait. */
 export const WAITING_FOLDER = 'waiting';
 /** The suffix of the note a wait leaves beside its mark as it ends, in place of the mark's `.json`. */
-const ENDED_SUFFIX = '.ended';
+export const ENDED_SUFFIX = '.ended';
 /** How long an ended wait's note is kept, after which the next wait in the folder removes it. */
 const ENDED_KEPT_MS = 600_000;
 
