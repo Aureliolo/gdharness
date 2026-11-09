@@ -137,6 +137,7 @@ import {
 import {
   claimIsOurs,
   EngineSlots,
+  endedNoteOf,
   FolderChanges,
   gamesKeptOf,
   holderOf,
@@ -145,6 +146,7 @@ import {
   keptSlotsOf,
   lockIsFree,
   machineSlots,
+  markBegan,
   nameSlotEngine,
   ONE_OFF_AGED_MS,
   ownStart,
@@ -51765,7 +51767,12 @@ async function testTakersWaitTheirTurn(): Promise<void> {
 async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slots-'));
   const marks = join(directory, WAITING_FOLDER);
-  const marked = (): string[] => (existsSync(marks) ? readdirSync(marks).toSorted() : []);
+  const marked = (): string[] =>
+    existsSync(marks)
+      ? readdirSync(marks)
+          .filter((name) => name.endsWith('.json'))
+          .toSorted()
+      : [];
   const markedSoon = async (count: number): Promise<string[]> => {
     const until = Date.now() + 5000;
     while (marked().length !== count && Date.now() < until) {
@@ -51802,6 +51809,15 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
       typeof since === 'number' && Math.abs(since * 1000 - Date.now()) < 10_000,
       `and when it began to wait, in seconds: ${String(since)}`,
     );
+    const firstMark = join(marks, one[0] ?? '');
+    const firstBegan = markBegan(firstMark);
+    // An old wait's note goes as the next wait begins, and one still within its keeping stays.
+    const stale = join(marks, '1-1.ended');
+    const fresh = join(marks, '1-2.ended');
+    writeFileSync(stale, '{}');
+    writeFileSync(fresh, '{}');
+    const elevenMinutesAgo = new Date(Date.now() - 660_000);
+    utimesSync(stale, elevenMinutesAgo, elevenMinutesAgo);
     const besideIt = new AbortController();
     const another = waitFor(besideIt.signal);
     const two = await markedSoon(2);
@@ -51810,6 +51826,22 @@ async function testAWaitForASlotKeepsAMarkUntilItEnds(): Promise<void> {
     slots.release(first);
     assert.equal(await waited, first, 'the wait takes the slot given back');
     assert.deepEqual(await markedSoon(1), [two.find((name) => name !== one[0])], 'and its mark is gone');
+    assert.deepEqual(
+      [existsSync(stale), existsSync(fresh)],
+      [false, true],
+      'the old note went, the new one stayed',
+    );
+    // Beside it, when the wait began and ended, for a reader whose looks came too late to see it end.
+    const note = asObject(JSON.parse(readFileSync(endedNoteOf(firstMark), 'utf8')), 'the ended note');
+    assert.equal(note['began'], firstBegan, `began is the mark's own time: ${JSON.stringify(note)}`);
+    const endedAt = note['ended'];
+    assert.ok(
+      typeof endedAt === 'number' &&
+        typeof firstBegan === 'number' &&
+        endedAt >= firstBegan &&
+        Math.abs(endedAt * 1000 - Date.now()) < 10_000,
+      `and ended is when it ended, in seconds: ${JSON.stringify(note)}`,
+    );
     besideIt.abort();
     await assert.rejects(another, /abort/i, 'an aborted wait');
     assert.deepEqual(await markedSoon(0), [], 'takes its mark with it');
