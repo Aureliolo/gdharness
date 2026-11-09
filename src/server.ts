@@ -979,7 +979,7 @@ export function enterASilentCrash(run: Pick<GodotProcess, 'exitCode' | 'exitSign
     code !== null && code >= 0xc0000000 && code !== CONSOLE_CLOSED
       ? `The engine ended with ${exitCodeText(code)}. It printed no crash report.`
       : signal !== null && CRASH_SIGNALS.has(signal)
-        ? `The engine ended on ${signal}, so it crashed. It printed no crash report.`
+        ? `The engine crashed on ${signal}. It printed no crash report.`
         : null;
   if (text !== null && !run.log.all.some((entry) => entry.text === text)) {
     run.log.record('error', text);

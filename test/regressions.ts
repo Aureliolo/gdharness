@@ -17000,7 +17000,7 @@ function testACrashWithNoReportIsAnError(): void {
     'The engine ended with exit code 0xC0000123, a Windows error status. It printed no crash report.',
   ]);
   assert.deepEqual(errorsOf(entered(null, 'SIGSEGV')), [
-    'The engine ended on SIGSEGV, so it crashed. It printed no crash report.',
+    'The engine crashed on SIGSEGV. It printed no crash report.',
   ]);
 
   for (const [exitCode, exitSignal, why] of [
@@ -78428,7 +78428,7 @@ async function testAProjectsFilesAndLayersAreNamedWithNoEditor(): Promise<void> 
     const layout = await setting('audio/buses/default_bus_layout', 'res://buses.tres');
     assert.equal(
       get(parseTextContent(layout), 'note'),
-      'res://buses.tres does not exist. resource_edit create writes res://buses.tres.',
+      'res://buses.tres does not exist. resource_edit create makes res://buses.tres.',
       textOf(layout) ?? '',
     );
     await call('project_settings', { op: 'unset', setting: 'audio/buses/default_bus_layout' });
