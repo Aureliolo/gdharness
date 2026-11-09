@@ -154,7 +154,8 @@ const MISMATCHED_ROW = /^\s*The test data set at index \(\d+\) does not match th
 const UNRUNNABLE_CASE =
   /^\s*Reason: '((?:Unknown test case argument's \[.*\] found|Fuzzer argument '.+' must be declared before the test config argument\(s\) \[.*\])\.)'\s*$/;
 // The engine's first line, `Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org`.
-const BANNER = /^\s*Godot Engine v(\S+?)(?:\s+-\s+\S+)?\s*$/;
+// A build of its own adds when it was built, `(2026-08-17 01:18:38 UTC)`, before the address.
+const BANNER = /^\s*Godot Engine v(\S+?)(?:\s+\([^)]*\))?(?:\s+-\s+\S+)?\s*$/;
 // Printed by the runner in src/godot/tests/listed.gd as it leaves a row out, -1 for a case whole.
 const LEFT_OUT = /^gdharness left out (res:\/\/.+?\.gd) > ([^:\s]+):(-?\d+)\s*$/;
 // Godot giving up on a rendering driver it could not start, and starting the next. The display

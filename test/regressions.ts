@@ -52623,6 +52623,13 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       'the first banner, without the address',
     );
     assert.equal(readRun('Godot Engine v4.8.dev1.custom_build\n').engineVersion, '4.8.dev1.custom_build');
+    assert.equal(
+      readRun(
+        'Godot Engine v4.7.2.stable.stable37.ed1daf0bf (2026-08-17 01:18:38 UTC) - https://godotengine.org\r\n',
+      ).engineVersion,
+      '4.7.2.stable.stable37.ed1daf0bf',
+      'a build of its own, which says when it was built',
+    );
     assert.equal(readRun('Run Test Suite: res://a_test.gd\n').engineVersion, null);
     const bannered = '4.7.2.stable.official.ed1daf0bf';
     assert.equal(versionFault(bannered, '4.7.2'), null);
