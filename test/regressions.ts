@@ -42846,7 +42846,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         ],
         [
           { _type: 'GradientTexture1D', width: 8 },
-          /^\/root\/Main\.art holds an object: a resource is named by the res:\/\/ path of its file, and the GradientTexture1D given has none: a resource built into a scene has no path, and the game builds none from its properties$/,
+          /^\/root\/Main\.art holds an object: a resource is named by the res:\/\/ path of its file, and the GradientTexture1D given has none: a resource built into a scene has no path, and the game builds none from its properties\. resource_edit create writes a GradientTexture1D to a \.tres file, and its res:\/\/ path names it here$/,
         ],
       ];
       for (const [value, expected] of unfiled) {
