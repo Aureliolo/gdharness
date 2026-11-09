@@ -1065,7 +1065,11 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
           "create: a scene for the new one to inherit, such as \"parts/crate.tscn\", as the editor's New Inherited Scene makes one. Its root is an instance of that scene, so changes there reach it, and scene_node set gives the nodes it inherits values of this scene's own. The root's class is that scene's, so rootNodeType is not given with it. The answer names it under rootNodeType and the scene under inherits.",
       },
       script: { type: 'string', ops: ['create'], description: 'create: a script to attach to the root.' },
-      newPath: { type: 'string', ops: ['save_as'], description: 'save_as: where the copy goes.' },
+      newPath: {
+        type: 'string',
+        ops: ['save_as'],
+        description: 'save_as: where the copy goes. An existing file is refused.',
+      },
     },
     requires: ['projectPath', 'scenePath'],
     operations: {

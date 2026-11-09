@@ -1589,6 +1589,18 @@ func save_scene(args: Dictionary) -> Dictionary:
 		target_path = GdhSceneFile.res_path(project_path, new_path_raw)
 
 	if target_path != scene_path:
+		if FileAccess.file_exists(target_path):
+			return {
+				"ok": false,
+				"error":
+				(
+					(
+						"%s already exists, and save_as writes a new scene only. Give newPath a "
+						+ "path with no file, or change the scene there with scene_node."
+					)
+					% target_path
+				),
+			}
 		var unsaved: String = GdhSceneFile.unsaved_in_editor(target_path)
 		if not unsaved.is_empty():
 			return { "ok": false, "error": unsaved }
