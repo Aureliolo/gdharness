@@ -74744,7 +74744,7 @@ async function testAnInheritedSceneIsMadeWithNoEditor(): Promise<void> {
     );
     assert.equal(
       get(further, 'namedByPath'),
-      "This saved res://parts/big_crate.tscn by path, since the project's uid cache has no uid for it yet. It loads the same. project_import refresh_uids lets later writes name it by uid.",
+      "This saved res://parts/big_crate.tscn by path, since the project's uid cache does not hold its uid yet. It loads the same. project_import refresh_uids lets later writes name it by uid.",
       'and the answer says why, with the call that changes it',
     );
     assert.equal(get(made, 'namedByPath'), undefined, `crate.tscn was imported: ${JSON.stringify(made)}`);
@@ -75644,7 +75644,7 @@ async function testAMovedNodeIsFollowedIntoTheScenesNamingIt(): Promise<void> {
     });
     assert.equal(
       get(both, 'namedByPath'),
-      "This saved res://lamp.tscn, res://desk.tscn by path, since the project's uid cache has no uid for them yet. They load the same. project_import refresh_uids lets later writes name them by uid.",
+      "This saved res://lamp.tscn, res://desk.tscn by path, since the project's uid cache does not hold their uids yet. They load the same. project_import refresh_uids lets later writes name them by uid.",
       JSON.stringify(both),
     );
     assert.equal(await energy('unrelated.tscn', 'Top/DeskLamp/Bulb'), 3, fileOf('unrelated.tscn'));
