@@ -659,7 +659,10 @@ function checkTemplatesArePerPlatform(godotPath: string, projectDir: string): vo
       `a self-contained engine keeps its templates beside it: ${JSON.stringify(bare)}`,
     );
     assert.equal(get(bare, 'templates_installed'), false, JSON.stringify(bare));
-    assert.match(asString(get(bare, 'templates_note')), /^No Linux export templates for this engine are at /);
+    assert.match(
+      asString(get(bare, 'templates_note')),
+      /^No Linux export templates for this engine are at .*, and an export for Linux needs them\. A pack, run with pack true, needs none\. The editor installs/,
+    );
 
     mkdirSync(templates, { recursive: true });
     writeFileSync(join(templates, 'windows_release_x86_64.exe'), '');
@@ -2058,6 +2061,25 @@ function testOperations(godotPath: string, projectDir: string): void {
       ['Desktop Debug', 'Windows Desktop', false, get(desktop, 'templates_installed')],
     ],
     `the list reads templates as add_preset does: ${JSON.stringify(presetList)}`,
+  );
+  // A preset named answers its options as the file holds them, so a set can be read back.
+  const optionsRead = operation('list_export_presets', { preset: 'Desktop Debug' });
+  assert.match(
+    presetsText,
+    /\[preset\.1\.options\]\n\ncustom_template\/debug=""\ncustom_template\/release=""\n/,
+    presetsText,
+  );
+  assert.deepEqual(
+    get(optionsRead, 'options'),
+    { 'custom_template/debug': '', 'custom_template/release': '' },
+    JSON.stringify(optionsRead),
+  );
+  assert.equal(get(operation('list_export_presets', {}), 'options'), undefined, 'and none without a preset');
+  const unnamed = runRefusedOperation(godotPath, projectDir, 'list_export_presets', { preset: 'Nowhere' });
+  assert.match(
+    unnamed.stderr,
+    /No preset is named "Nowhere"\. The presets are Desktop, Desktop Debug\./,
+    unnamed.stderr,
   );
   const taken = runRefusedOperation(godotPath, projectDir, 'add_export_preset', {
     preset: 'Desktop',

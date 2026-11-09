@@ -32940,6 +32940,10 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
         'binary_format/embed_pck is true or false, not "yes".',
       ],
       [
+        { preset: 'Penguin', options: { 'binary_format/embed_pck': 1.5 } },
+        'binary_format/embed_pck is true or false, not 1.5.',
+      ],
+      [
         { preset: 'Penguin', exportFilter: 'scenes', files: ['res://notes.txt'] },
         'export_filter scenes lists scenes, and res://notes.txt is not one',
       ],
@@ -32958,6 +32962,13 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
       assert.ok(said.includes(expected), `${JSON.stringify(args)} is refused: ${said}`);
       assert.equal(file(), written, `and nothing was written for ${JSON.stringify(args)}`);
     }
+    // A whole number is shown as it was sent, though it reaches the engine as a float.
+    const one = await refused({
+      op: 'set_preset',
+      preset: 'Penguin',
+      options: { 'binary_format/embed_pck': 1 },
+    });
+    assert.match(one, /binary_format\/embed_pck is true or false, not 1\.(?!\d)/, one);
 
     const filtered = await set({
       preset: 'Penguin',
