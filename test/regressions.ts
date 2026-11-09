@@ -54892,16 +54892,24 @@ async function testAGateAskingForBatchesGivesItsSlotBackBetweenThem(): Promise<v
     // And once the run's second lane waits, for the slot or for memory, which counts the first
     // engine at its whole allowance as it starts. A lane in the slot line is ahead of the gate. One
     // held for memory joins the line after it, and the run says nothing of that hold.
+    // slotWaiters leaves out the marks of waits for memory, which take no slot.
+    const marked = (): number => {
+      try {
+        return readdirSync(join(slots, WAITING_FOLDER)).filter((name) => name.endsWith('.json')).length;
+      } catch {
+        return 0;
+      }
+    };
     const heldToOne = (): boolean => /^Memory had room for one of/m.test(said);
     for (
       let looked = 0;
-      looked < 300 && run.exitCode === null && slotWaiters(slots).length === 0 && !heldToOne();
+      looked < 300 && run.exitCode === null && marked() === 0 && !heldToOne();
       looked += 1
     ) {
       await delay(100);
     }
-    assert.ok(slotWaiters(slots).length > 0 || heldToOne(), `the run's second lane waits: ${said}`);
-    const inLine = !heldToOne() && slotWaiters(slots).some((one) => String(one.taker) !== 'memory');
+    assert.ok(marked() > 0 || heldToOne(), `the run's second lane waits: ${said}`);
+    const inLine = !heldToOne() && slotWaiters(slots).length > 0;
     const other = new EngineSlots(
       slots,
       1,
@@ -54924,7 +54932,9 @@ async function testAGateAskingForBatchesGivesItsSlotBackBetweenThem(): Promise<v
     );
     assert.equal(startedBefore[1], false, `the run took no second slot ahead of the gate: ${said}`);
     if (!inLine) {
-      console.log('batch regression: memory held the second lane as the gate came, so its one wait ahead is not read');
+      console.log(
+        'batch regression: memory held the second lane as the gate came, so its one wait ahead is not read',
+      );
     } else {
       assert.equal(
         startedBefore[0],
