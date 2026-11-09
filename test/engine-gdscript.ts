@@ -1745,7 +1745,8 @@ function testOperations(godotPath: string, projectDir: string): void {
   );
   const listedQuiet = named(get(operation('list_autoloads', {}), 'autoloads'), 'Quiet');
   assert.deepEqual([get(listedQuiet, 'enabled'), get(listedQuiet, 'global')], [true, false]);
-  assert.equal(get(operation('remove_autoload', { name: 'Quiet' }), 'removed'), true);
+  const removedQuiet = operation('remove_autoload', { name: 'Quiet' });
+  assert.deepEqual([get(removedQuiet, 'removed'), get(removedQuiet, 'saved')], [true, true]);
   const disabled = runRefusedOperation(godotPath, projectDir, 'add_autoload', {
     name: 'Off',
     path: 'made/hero.gd',
@@ -2371,8 +2372,8 @@ function testOperations(godotPath: string, projectDir: string): void {
   const beforePlugin = readFileSync(projectFile, 'utf8');
   const enabledOne = operation('enable_plugin', { plugin_name: 'gdharness_editor' });
   assert.deepEqual(
-    [get(enabledOne, 'action'), get(enabledOne, 'note')],
-    ['enabled', undefined],
+    [get(enabledOne, 'action'), get(enabledOne, 'note'), get(enabledOne, 'saved')],
+    ['enabled', undefined, true],
     `a plugin the editor loads is enabled with nothing to say: ${JSON.stringify(enabledOne)}`,
   );
   const withPlugin = readFileSync(projectFile, 'utf8');
@@ -2385,13 +2386,18 @@ function testOperations(godotPath: string, projectDir: string): void {
   const enabled = operation('list_plugins', {});
   assert.equal(get(named(get(enabled, 'plugins'), 'gdharness_editor'), 'enabled'), true);
   assert.equal(get(enabled, 'enabled_count'), 1);
-  assert.equal(
-    get(operation('enable_plugin', { plugin_name: 'gdharness_editor' }), 'action'),
-    'already_enabled',
-  );
+  // Whether project.godot was written, as every project_settings write answers it.
+  const enabledAgain = operation('enable_plugin', { plugin_name: 'gdharness_editor' });
+  assert.deepEqual([get(enabledAgain, 'action'), get(enabledAgain, 'saved')], ['already_enabled', false]);
 
-  assert.equal(get(operation('disable_plugin', { plugin_name: 'gdharness_editor' }), 'action'), 'disabled');
+  const pluginOff = operation('disable_plugin', { plugin_name: 'gdharness_editor' });
+  assert.deepEqual([get(pluginOff, 'action'), get(pluginOff, 'saved')], ['disabled', true]);
   assert.equal(get(operation('list_plugins', {}), 'enabled_count'), 0);
+  const pluginStillOff = operation('disable_plugin', { plugin_name: 'gdharness_editor' });
+  assert.deepEqual(
+    [get(pluginStillOff, 'action'), get(pluginStillOff, 'saved')],
+    ['already_disabled', false],
+  );
   assert.equal(
     readFileSync(projectFile, 'utf8'),
     beforePlugin,

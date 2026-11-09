@@ -102,6 +102,7 @@ func enable_plugin(params: Dictionary) -> Dictionary:
 			"plugin_name": plugin_name,
 			"action": "already_enabled",
 			"message": "Plugin is already enabled",
+			"saved": false,
 		}
 
 	enabled_paths.append(plugin_cfg_path)
@@ -113,6 +114,7 @@ func enable_plugin(params: Dictionary) -> Dictionary:
 		"plugin_name": plugin_name,
 		"action": "enabled",
 		"enabled_plugins": _names_of(enabled_paths),
+		"saved": true,
 	}
 	var unloadable: String = _why_not_loaded(plugin_cfg_path)
 	if not unloadable.is_empty():
@@ -171,6 +173,7 @@ func disable_plugin(params: Dictionary) -> Dictionary:
 			"plugin_name": plugin_name,
 			"action": "already_disabled",
 			"message": "Plugin is not currently enabled",
+			"saved": false,
 		}
 
 	enabled_paths.erase(plugin_cfg_path)
@@ -182,6 +185,7 @@ func disable_plugin(params: Dictionary) -> Dictionary:
 		"plugin_name": plugin_name,
 		"action": "disabled",
 		"enabled_plugins": _names_of(enabled_paths),
+		"saved": true,
 	}
 
 
