@@ -1389,19 +1389,37 @@ async function runShares(
   let engines = 0;
   // Asked through a call, since another lane empties it while this one waits.
   const empty = (): boolean => shares.empty;
+  // In batches, a waiting lane begins its wait again whenever the run takes or gives back a slot,
+  // so it waits behind every taker who began before then. Waiting from the run's start, its lanes
+  // went before a gate arriving later at every slot the run gave back.
+  let redated = new AbortController();
+  const redate = (): void => {
+    if (batch !== null) {
+      const was = redated;
+      redated = new AbortController();
+      was.abort();
+    }
+  };
   const lane = async (at: number): Promise<EngineRan[]> => {
     let lock = taken[at] ?? null;
     const ran: EngineRan[] = [];
     try {
       while (!empty()) {
         let ended: (() => void) | undefined;
+        const waited = redated.signal;
         try {
           ended = await memory?.admit(handedOut.signal);
-          lock ??= await launch.slots.take(handedOut.signal);
+          if (lock === null) {
+            lock = await launch.slots.take(AbortSignal.any([handedOut.signal, waited]));
+            redate();
+          }
         } catch (error) {
           ended?.();
           if (handedOut.signal.aborted) {
             break;
+          }
+          if (waited.aborted) {
+            continue;
           }
           throw error;
         }
@@ -1424,6 +1442,7 @@ async function runShares(
         if (batch !== null && !empty()) {
           doneWith(launch, lock, handed);
           lock = null;
+          redate();
         }
       }
       return ran;

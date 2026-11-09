@@ -762,8 +762,8 @@ The last `kept = max(2, floor(count / 4))` slots are kept for engines outside a 
 
 ### Which slots each engine takes
 
-A process runs inside a gate when `GODOT_ENGINE_SEATED` is set and not empty. Each kind of engine
-takes:
+A process runs inside a gate when `GODOT_ENGINE_SEATED` is set and not empty, or both
+`GODOT_ENGINE_SHARE` and `GODOT_ENGINE_SHARE_COUNT` are. Each kind of engine takes:
 
 - A gate's engine takes only the slots below `count - kept`, and slot 0 at least, whatever the queue
   holds. A gate's seat counts only these slots, so work in the kept ones never holds a seat back.

@@ -184,8 +184,13 @@ export const WAITING_FOLDER = 'waiting';
  * ticket from its arrival to its release. A mark holds what a lock does.
  */
 export const QUEUED_FOLDER = 'queued';
-/** The variable set in every process a gate runs, which says the engine is a gate's. */
+/**
+ * The variable set in every process a gate runs, which says the engine is a gate's. The pair after
+ * it says the same where a gate's tools set those instead, both of them set.
+ */
 export const SEATED_VARIABLE = 'GODOT_ENGINE_SEATED';
+export const SHARE_VARIABLE = 'GODOT_ENGINE_SHARE';
+export const SHARE_COUNT_VARIABLE = 'GODOT_ENGINE_SHARE_COUNT';
 /**
  * The variable a gate sets to have its test run give a slot back after each batch of about that
  * many seconds of suites and queue again, so gates sharing slots take turns instead of each keeping
@@ -535,7 +540,10 @@ function forAGame(queue: GateQueue, game: boolean): GateQueue {
 
 /** Whether [param env] says this process runs inside a gate. */
 export function inAGate(env: NodeJS.ProcessEnv = process.env): boolean {
-  return nonEmpty(env[SEATED_VARIABLE]) !== undefined;
+  return (
+    nonEmpty(env[SEATED_VARIABLE]) !== undefined ||
+    (nonEmpty(env[SHARE_VARIABLE]) !== undefined && nonEmpty(env[SHARE_COUNT_VARIABLE]) !== undefined)
+  );
 }
 
 /**

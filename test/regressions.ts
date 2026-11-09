@@ -153,6 +153,8 @@ import {
   QUEUED_FOLDER,
   inAGate as runsInAGate,
   SEATED_VARIABLE,
+  SHARE_COUNT_VARIABLE,
+  SHARE_VARIABLE,
   SLOT_YIELD_MS,
   SLOTS_VARIABLE,
   type SlotHolder,
@@ -50990,10 +50992,12 @@ async function testGatesInTheQueueKeepTheirSlots(): Promise<void> {
     [
       runsInAGate({ [SEATED_VARIABLE]: '1' }),
       runsInAGate({ [SEATED_VARIABLE]: '' }),
-      runsInAGate({ GODOT_ENGINE_SHARE: 'share', GODOT_ENGINE_SHARE_COUNT: '3' }),
+      runsInAGate({ [SHARE_VARIABLE]: 'share', [SHARE_COUNT_VARIABLE]: '3' }),
+      runsInAGate({ [SHARE_VARIABLE]: 'share' }),
+      runsInAGate({ [SHARE_VARIABLE]: '', [SHARE_COUNT_VARIABLE]: '3' }),
     ],
-    [true, false, false],
-    `a gate sets ${SEATED_VARIABLE}`,
+    [true, false, true, false, false],
+    `a gate sets ${SEATED_VARIABLE}, or both of the pair`,
   );
   assert.deepEqual(
     [
@@ -54864,8 +54868,8 @@ async function testAGateAskingForBatchesGivesItsSlotBackBetweenThem(): Promise<v
     const resultFile = join(project, 'result.json');
     const run = spawnHidden(
       process.execPath,
-      // One lane, since a lane waiting from the start waits longer than the other gate and goes first.
-      ['build/cli.js', 'test', project, '--slots', slots, '--result', resultFile, '--engines', '1'],
+      // Its lanes for the other engines wait from its start, before the other gate begins to.
+      ['build/cli.js', 'test', project, '--slots', slots, '--result', resultFile],
       {
         env: {
           ...process.env,
