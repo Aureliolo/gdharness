@@ -1389,16 +1389,17 @@ async function runShares(
   let engines = 0;
   // Asked through a call, since another lane empties it while this one waits.
   const empty = (): boolean => shares.empty;
-  // In batches, a waiting lane begins its wait again whenever the run takes or gives back a slot,
-  // so it waits behind every taker who began before then. Waiting from the run's start, its lanes
-  // went before a gate arriving later at every slot the run gave back.
-  let redated = new AbortController();
-  const redate = (): void => {
-    if (batch !== null) {
-      const was = redated;
-      redated = new AbortController();
-      was.abort();
+  // In batches, one lane waits for a slot at a time, its wait beginning as the one before it takes
+  // a slot, so the run takes one slot each time it heads the line. Waiting together from the run's
+  // start, its lanes went before a gate arriving later at every slot the run gave back.
+  let queue: Promise<unknown> = Promise.resolve();
+  const take = async (): Promise<string> => {
+    if (batch === null) {
+      return await launch.slots.take(handedOut.signal);
     }
+    const taking = queue.then(async () => await launch.slots.take(handedOut.signal));
+    queue = taking.catch(() => undefined);
+    return await taking;
   };
   const lane = async (at: number): Promise<EngineRan[]> => {
     let lock = taken[at] ?? null;
@@ -1406,20 +1407,13 @@ async function runShares(
     try {
       while (!empty()) {
         let ended: (() => void) | undefined;
-        const waited = redated.signal;
         try {
           ended = await memory?.admit(handedOut.signal);
-          if (lock === null) {
-            lock = await launch.slots.take(AbortSignal.any([handedOut.signal, waited]));
-            redate();
-          }
+          lock ??= await take();
         } catch (error) {
           ended?.();
           if (handedOut.signal.aborted) {
             break;
-          }
-          if (waited.aborted) {
-            continue;
           }
           throw error;
         }
@@ -1442,7 +1436,6 @@ async function runShares(
         if (batch !== null && !empty()) {
           doneWith(launch, lock, handed);
           lock = null;
-          redate();
         }
       }
       return ran;

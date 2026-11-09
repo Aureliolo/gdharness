@@ -53902,6 +53902,31 @@ async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
     assert.ok(waiting.endsWith(oneSlot), waiting);
     assert.deepEqual([told.length, unheard], [1, []], `told at ${told.join(', ')}: ${unheard.join('\n')}`);
 
+    // A process holding a slot of its own still says it waits for another held by someone else,
+    // since a run's lanes waited minutes with nothing said while one of them held a slot.
+    const pair = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-slot-pair-'));
+    try {
+      const parent = process.ppid;
+      const parentStart = (await startTimesOf([parent])).get(parent);
+      assert.ok(parentStart !== undefined, 'the parent process has a start');
+      const holding = new EngineSlots(pair, 2, me, (line) => {
+        lines.push(line);
+      });
+      const own = await holding.take();
+      const theirs = join(pair, own.endsWith('0.lock') ? '1.lock' : '0.lock');
+      writeFileSync(theirs, JSON.stringify({ pid: parent, started: parentStart, by: 'another run' }));
+      lines.length = 0;
+      const more = new AbortController();
+      const another = holding.take(more.signal).catch(() => null);
+      await delay(2600);
+      more.abort();
+      assert.equal(await another, null, 'the second take waits, both slots held');
+      holding.release(own);
+      assert.match(lines[0] ?? '', /^Waiting [23] s so far for an engine: .*another run/, lines.join('\n'));
+    } finally {
+      rmSync(pair, { recursive: true, force: true });
+    }
+
     writeFileSync(lineHeld, JSON.stringify(me));
     const brief: string[] = [];
     const briefly = new EngineSlots(lined, 1, me, (line) => {
@@ -54826,8 +54851,10 @@ function testATestRunDealsByAndRecordsIntoTheTimesItIsGiven(): void {
 
 /**
  * A gate asking for batches has each engine run about that many seconds of suites, never fewer than
- * four engine starts as the last run measured them. Its lane gives the slot back between engines, so
- * a gate that began waiting during the first takes it before the second.
+ * four engine starts as the last run measured them. Its lanes give the slot back between engines and
+ * wait for one a lane at a time, each from when the one before it took a slot. A gate that began
+ * waiting during the first engine then waits behind the second alone, the one wait the run had in
+ * the line before it, and takes the slot before the third.
  */
 async function testAGateAskingForBatchesGivesItsSlotBackBetweenThem(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -54842,7 +54869,7 @@ async function testAGateAskingForBatchesGivesItsSlotBackBetweenThem(): Promise<v
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-batches-'));
   const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-test-slots-'));
   try {
-    const names = ['a', 'b', 'c', 'd'];
+    const names = ['a', 'b', 'c', 'd', 'e', 'f'];
     writeTree(project, {
       'project.godot': 'config_version=5\n\n[application]\nconfig/name="Batches"\n',
       ...Object.fromEntries(
@@ -54868,7 +54895,6 @@ async function testAGateAskingForBatchesGivesItsSlotBackBetweenThem(): Promise<v
     const resultFile = join(project, 'result.json');
     const run = spawnHidden(
       process.execPath,
-      // Its lanes for the other engines wait from its start, before the other gate begins to.
       ['build/cli.js', 'test', project, '--slots', slots, '--result', resultFile],
       {
         env: {
@@ -54897,12 +54923,13 @@ async function testAGateAskingForBatchesGivesItsSlotBackBetweenThem(): Promise<v
     });
     // Another gate begins waiting while the first engine runs, after the import before it.
     const runs = join(project, '.godot', 'gdharness', 'test-runs');
-    const firstEngine = (): boolean =>
-      existsSync(runs) && readdirSync(runs).some((one) => existsSync(join(runs, one, 'engine-0')));
-    for (let looked = 0; looked < 1200 && run.exitCode === null && !firstEngine(); looked += 1) {
+    const started = (index: number): boolean =>
+      existsSync(runs) &&
+      readdirSync(runs).some((one) => existsSync(join(runs, one, `engine-${String(index)}`)));
+    for (let looked = 0; looked < 1200 && run.exitCode === null && !started(0); looked += 1) {
       await delay(100);
     }
-    assert.ok(firstEngine(), `the first engine started: ${said}`);
+    assert.ok(started(0), `the first engine started: ${said}`);
     const other = new EngineSlots(
       slots,
       1,
@@ -54914,14 +54941,27 @@ async function testAGateAskingForBatchesGivesItsSlotBackBetweenThem(): Promise<v
     const lock = await other.take();
     const tookAt = Date.now();
     const tookWhileRunning = run.exitCode === null;
+    const startedBefore = [started(1), started(2)];
     await delay(3000);
     other.release(lock);
     const gaveBackAt = Date.now();
     assert.equal(await ended, 0, said);
     assert.ok(
       tookWhileRunning && endedAt - gaveBackAt > 1000,
-      `the run gave its slot to the gate waiting longer between its engines, and ran its second engine after: asked ${String(askedAt)}, took ${String(tookAt)}, gave back ${String(gaveBackAt)}, run ended ${String(endedAt)}: ${said}`,
+      `the run gave its slot to the gate waiting longer between its engines, and ran its last engine after: asked ${String(askedAt)}, took ${String(tookAt)}, gave back ${String(gaveBackAt)}, run ended ${String(endedAt)}: ${said}`,
     );
+    assert.equal(startedBefore[1], false, `the run took no second slot ahead of the gate: ${said}`);
+    // Its second lane waits in the line only when memory has room for two engines, 7 GB free.
+    // Held to one, the lane waits for memory and joins the line after the gate.
+    if (/^Memory had room for one of/m.test(said)) {
+      console.log('batch regression: memory held the run to one engine, so its one wait ahead is not read');
+    } else {
+      assert.equal(
+        startedBefore[0],
+        true,
+        `the run took one slot ahead of the gate, its second engine's: ${said}`,
+      );
+    }
     assert.match(
       said,
       /^Each engine runs about 40 s of suites, after which its slot is given back and taken again behind those waiting longer, as GODOT_ENGINE_BATCH_SECONDS asks\.$/m,
@@ -54932,7 +54972,7 @@ async function testAGateAskingForBatchesGivesItsSlotBackBetweenThem(): Promise<v
       asArray(get(result, 'engines'), 'engines').map(
         (engine) => asArray(get(engine, 'suites'), 'suites').length,
       ),
-      [2, 2],
+      [2, 2, 2],
       `two suites an engine: ${said}`,
     );
   } finally {

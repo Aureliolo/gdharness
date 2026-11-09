@@ -819,9 +819,9 @@ export class EngineSlots {
           }
         } else if (
           this.say !== undefined &&
-          this.held.size === 0 &&
           now - began >= COMMAND_WAIT_SAID_MS &&
-          now - this.saidAt >= WAIT_SAID_MS
+          now - this.saidAt >= WAIT_SAID_MS &&
+          !this.behindItself()
         ) {
           this.saidAt = now;
           this.say(slotWaitSaid(now - began, this.count, this.directory, this.holders(), this.drawn));
@@ -837,7 +837,7 @@ export class EngineSlots {
         const sayAt =
           waiting !== undefined
             ? said + WAIT_SAID_MS
-            : this.say !== undefined && this.held.size === 0
+            : this.say !== undefined
               ? Math.max(began + COMMAND_WAIT_SAID_MS, this.saidAt + WAIT_SAID_MS)
               : Number.POSITIVE_INFINITY;
         await changes.next(Math.max(0, Math.min(SLOT_LOOK_MS, sayAt - Date.now())), SLOT_SETTLE_MS, signal);
@@ -1113,6 +1113,20 @@ export class EngineSlots {
       }
     }
     return found;
+  }
+
+  /**
+   * Whether every slot a take may have is held by this process, a run waiting behind its own engines
+   * and held up by nobody else. One holding a slot while another holds the rest waits on them, which
+   * is said: a run's lanes waited 247 s with nothing in its log to show it.
+   */
+  private behindItself(): boolean {
+    const found = this.holders();
+    return (
+      this.held.size > 0 &&
+      found.length === this.drawn.numbers.length &&
+      found.every((holder) => holder.pid === this.holder.pid)
+    );
   }
 
   /** Gives back every slot this process holds, as it ends. */
