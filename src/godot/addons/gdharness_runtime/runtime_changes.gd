@@ -306,6 +306,7 @@ func _value_for(
 ) -> Dictionary:
 	var named: String = reached["name"]
 	var called: String = reached["called"]
+	var inside_built: bool = reached.get("built", false)
 	var declared: int = slot["type"]
 	var declared_script: Script = slot["script"]
 	var wanted: int = declared if declared != TYPE_NIL else typeof(old_value)
@@ -339,7 +340,7 @@ func _value_for(
 		return { "value": null }
 	if wanted == TYPE_OBJECT and (value is String or value is Dictionary):
 		var named_object: Dictionary = _object_named(
-			node, node_path, value, str(slot["class"]), declared_script
+			node, node_path, value, str(slot["class"]), declared_script, inside_built
 		)
 		if named_object.has("message"):
 			return {
@@ -957,13 +958,18 @@ static func _sort_of(container: Variant) -> String:
 ## Checked against [param script] where the declaration hands one over, which only a typed container
 ## does: see [method GdhValues.is_a].
 func _object_named(
-	node: Node, node_path: String, given: Variant, declared: String, script: Script = null
+	node: Node,
+	node_path: String,
+	given: Variant,
+	declared: String,
+	script: Script = null,
+	inside_built: bool = false
 ) -> Dictionary:
 	if names_no_object(given):
 		return { "object": null }
 	var found: Dictionary = (
 		_built(given, node, node_path)
-		if buildable(given)
+		if buildable(given, inside_built)
 		else GdhPaths.object_at(_host.get_tree().root, node, node_path, given)
 	)
 	if found.has("message"):
@@ -998,17 +1004,23 @@ func _object_named(
 ## neither a node nor a resource, which [method _built] makes. A physics query takes its parameters
 ## as such an object, PhysicsPointQueryParameters2D for intersect_point, and the game holds none to
 ## name by path. A node or a resource is the game's to make, so it is named by its path.
-static func buildable(given: Variant) -> bool:
+##
+## A resource given [param inside_built], as a property of an object being built, is built too
+## unless it names its file: a shape query's shape is part of the query, not of the game.
+static func buildable(given: Variant, inside_built: bool = false) -> bool:
 	if not given is Dictionary:
 		return false
 	var record: Dictionary = given
 	var tag: String = str(record.get("_type", ""))
-	return (
+	if not (
 		ClassDB.class_exists(tag)
 		and ClassDB.can_instantiate(tag)
 		and ClassDB.is_parent_class(tag, "RefCounted")
-		and not ClassDB.is_parent_class(tag, "Resource")
-	)
+	):
+		return false
+	if ClassDB.is_parent_class(tag, "Resource"):
+		return inside_built and not record.get("path") is String
+	return true
 
 
 ## The object [param record] describes, made and given each property it names through the
@@ -1024,7 +1036,9 @@ func _built(given: Variant, node: Node, node_path: String) -> Dictionary:
 			continue
 		if not GdhPaths.can_read(made, named):
 			return { "message": GdhPaths.nothing_there(made, named, tag) }
-		var reached: Dictionary = { "holder": made, "name": named, "called": tag, "chain": [] }
+		var reached: Dictionary = {
+			"holder": made, "name": named, "called": tag, "chain": [], "built": true,
+		}
 		var slot: Dictionary = GdhValues.slot_declared(made, named)
 		var fitting: Dictionary = _value_for(
 			record[key], slot, made.get(named), reached, node, node_path

@@ -20866,7 +20866,7 @@ async function testAQueryObjectIsBuiltFromItsProperties(): Promise<void> {
       '[node name="Main" type="Node2D"]\n\n' +
       '[node name="Wall" type="StaticBody2D" parent="."]\nposition = Vector2(100, 100)\n\n' +
       '[node name="Shape" type="CollisionShape2D" parent="Wall"]\nshape = SubResource("box")\n',
-    {},
+    { 'wide.tres': '[gd_resource type="CircleShape2D" format=3]\n\n[resource]\nradius = 200.0\n' },
     async (call, said) => {
       await call('runtime_wait', { op: 'frames', frames: 3 });
       const asked = (argument: unknown): Record<string, unknown> => ({
@@ -20906,6 +20906,22 @@ async function testAQueryObjectIsBuiltFromItsProperties(): Promise<void> {
         /a resource is named by the res:\/\/ path of its file, and the RectangleShape2D given has none/,
         shape,
       );
+
+      // Inside a query being built, its shape is part of the query and is built with it. The shape
+      // sits at the origin, so a radius of 200 reaches the wall at (100, 100) and one of 50 does not.
+      const overlapping = (circle: unknown): Record<string, unknown> => ({
+        op: 'call',
+        nodePath: '/root/Main',
+        method: 'get_world_2d():direct_space_state:intersect_shape',
+        args: [{ _type: 'PhysicsShapeQueryParameters2D', shape: circle }],
+      });
+      const reaching = await call('runtime_invoke', overlapping({ _type: 'CircleShape2D', radius: 200 }));
+      assert.match(JSON.stringify(get(reaching, 'result')), /\/root\/Main\/Wall/, JSON.stringify(reaching));
+      const short = await call('runtime_invoke', overlapping({ _type: 'CircleShape2D', radius: 50 }));
+      assert.deepEqual(get(short, 'result'), [], JSON.stringify(short));
+      // One naming its file is the game's, loaded from there rather than built.
+      const filed = await call('runtime_invoke', overlapping({ _type: 'Resource', path: 'res://wide.tres' }));
+      assert.match(JSON.stringify(get(filed, 'result')), /\/root\/Main\/Wall/, JSON.stringify(filed));
     },
   );
 }
