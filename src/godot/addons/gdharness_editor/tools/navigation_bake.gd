@@ -292,9 +292,9 @@ static func _nothing_read(scene: GdhSceneFile, held: Resource) -> String:
 		return said
 	return (
 		(
-			"%s %s %s outside what was read. The bake reads a node elsewhere once it is in the "
+			"%s %s %s outside what was read. The bake reads a node elsewhere when it is in the "
 			+ "group %s and navigation_polygon/source_geometry_mode is "
-			+ "SOURCE_GEOMETRY_GROUPS_WITH_CHILDREN, or once it is moved under the region."
+			+ "SOURCE_GEOMETRY_GROUPS_WITH_CHILDREN. It also reads a node moved under the region."
 		)
 		% [
 			said,

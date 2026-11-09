@@ -1735,7 +1735,7 @@ function writeEarlyResult(
  */
 export function acrossSaid(ran: readonly Pick<EngineRan, 'began' | 'seconds'>[]): string {
   const together = mostAtOnce(ran);
-  const atOnce = together < ran.length ? `, at most ${String(together)} at once` : '';
+  const atOnce = together < ran.length ? ` (at most ${String(together)} at once)` : '';
   return `across ${plural(ran.length, 'engine')}${atOnce}`;
 }
 

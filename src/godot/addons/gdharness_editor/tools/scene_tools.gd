@@ -521,7 +521,7 @@ func change_node_type(args: Dictionary) -> Dictionary:
 		return scene.refuse(
 			(
 				(
-					"%s has the script %s, and the class_name %s brings its own. Clear the "
+					"%s has the script %s. The class_name %s brings its own. Clear the "
 					+ "script with %s first, or give nodeType an engine class to keep it."
 				)
 				% [at, script.resource_path, given, clearing]
@@ -532,11 +532,11 @@ func change_node_type(args: Dictionary) -> Dictionary:
 		return scene.refuse(
 			(
 				(
-					"%s has the script %s, which extends %s, and a %s is not one. Change the "
-					+ "script's extends line to a class %s inherits, or clear the script with %s, "
-					+ "then change the type."
+					"%s has the script %s, which extends %s. A %s does not inherit %s. Change the "
+					+ "script's extends line to a class %s inherits, or clear the script with %s. "
+					+ "Then change the type."
 				)
-				% [at, script.resource_path, base, node_type, node_type, clearing]
+				% [at, script.resource_path, base, node_type, base, node_type, clearing]
 			)
 		)
 	if was.get_class() == node_type and class_script == null:
@@ -582,8 +582,7 @@ static func _type_fixed(scene: GdhSceneFile, node: Node) -> String:
 	if node == scene.root:
 		if scene.inherits():
 			return (
-				"The root of %s comes from the scene it inherits, which gives its type. Change the "
-				+ "type there."
+				"The root of %s takes its type from the scene it inherits. Change the type there."
 			) % scene.path
 		return ""
 	var fixed: String = scene.fixed(node)
@@ -1802,8 +1801,8 @@ func save_scene(args: Dictionary) -> Dictionary:
 				"error":
 				(
 					(
-						"%s already exists, and save_as writes a new scene only. Give newPath a "
-						+ "path with no file, or change the scene there with scene_node."
+						"%s already exists. save_as writes a new scene only. Give newPath a path "
+						+ "with no file, or change that scene with scene_node."
 					)
 					% target_path
 				),

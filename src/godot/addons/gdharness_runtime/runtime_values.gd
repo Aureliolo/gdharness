@@ -408,16 +408,16 @@ static func target_at(
 			"message":
 			(
 				(
-					"%s is reached only to read, through runtime_inspect property or a "
+					"%s can only be read, through runtime_inspect property or a "
 					+ "runtime_invoke call of a method starting %s, such as "
-					+ "is_action_pressed(\"jump\") or get_action_strength(\"move_left\")%s. The "
+					+ "is_action_pressed(\"jump\") or get_action_strength(\"move_left\").%s The "
 					+ "rest of it acts on the real pointer. runtime_input presses keys, buttons "
 					+ "and actions in the game."
 				)
 				% [
 					path,
 					", ".join(READ_PREFIXES.slice(0, -1)) + " or " + READ_PREFIXES[-1],
-					"" if acting.is_empty() else ", and %s is not one" % ", ".join(acting),
+					"" if acting.is_empty() else " %s is not one of those." % ", ".join(acting),
 				]
 			),
 		}
@@ -427,8 +427,8 @@ static func target_at(
 			"message":
 			(
 				(
-					"%s is an engine singleton, and the ones that can be reached are %s, and %s "
-					+ "to read. The rest act on the machine rather than the game: OS runs "
+					"%s is an engine singleton. The ones that can be reached are %s, and %s "
+					+ "for reads only. The rest act on the machine rather than the game: OS runs "
 					+ "programs and DisplayServer switches the keyboard's layout."
 				)
 				% [path, ", ".join(SINGLETONS), READ_ONLY_SINGLETON]

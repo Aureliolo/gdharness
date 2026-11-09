@@ -66,8 +66,8 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 			(
 				"Script file already exists: "
 				+ full_script_path
-				+ ". script_edit modify adds declarations to it. A line already there is changed "
-				+ "by editing the file's text."
+				+ ". script_edit modify adds declarations to it. To change an existing line, edit "
+				+ "the file's text."
 			)
 		)
 

@@ -28438,7 +28438,7 @@ async function testAnAnnotatedDeclarationIsStillADeclaration(): Promise<void> {
       );
       assert.match(
         textOf(overwrite) ?? '',
-        /Script file already exists: res:\/\/marker\.gd\. script_edit modify adds declarations to it\. A line already there is changed by editing the file's text\./,
+        /Script file already exists: res:\/\/marker\.gd\. script_edit modify adds declarations to it\. To change an existing line, edit the file's text\./,
         textOf(overwrite) ?? '',
       );
       assert.equal(readFileSync(join(project, 'marker.gd'), 'utf8'), marker, 'the script is left as it was');
@@ -34777,7 +34777,7 @@ async function testAnEngineSingletonIsReachedAndOSIsNot(): Promise<void> {
       });
       assert.match(
         warped,
-        /^Input is reached only to read, through runtime_inspect property or a runtime_invoke call of a method starting is_, get_ or has_, such as is_action_pressed\("jump"\) or get_action_strength\("move_left"\), and warp_mouse is not one\. /,
+        /^Input can only be read, through runtime_inspect property or a runtime_invoke call of a method starting is_, get_ or has_, such as is_action_pressed\("jump"\) or get_action_strength\("move_left"\)\. warp_mouse is not one of those\. /,
         warped,
       );
       const walked = await call('runtime_inspect', {
@@ -34785,7 +34785,7 @@ async function testAnEngineSingletonIsReachedAndOSIsNot(): Promise<void> {
         nodePath: 'Input',
         property: 'warp_mouse(0)',
       });
-      assert.match(walked, /^Input is reached only to read.*, and warp_mouse is not one\./, walked);
+      assert.match(walked, /^Input can only be read.*\. warp_mouse is not one of those\./, walked);
       const captured = await call('runtime_invoke', {
         op: 'set',
         nodePath: 'Input',
@@ -34794,14 +34794,14 @@ async function testAnEngineSingletonIsReachedAndOSIsNot(): Promise<void> {
       });
       assert.match(
         captured,
-        /^Input is reached only to read.*\)\. The rest of it acts on the real pointer\./,
+        /^Input can only be read.*\)\. The rest of it acts on the real pointer\./,
         captured,
       );
 
       const refused = await call('runtime_invoke', { op: 'call', nodePath: 'OS', method: 'get_name' });
       assert.match(
         refused,
-        /^OS is an engine singleton, and the ones that can be reached are Engine, Performance, RenderingServer.*InputMap, and Input to read\./,
+        /^OS is an engine singleton\. The ones that can be reached are Engine, Performance, RenderingServer.*InputMap, and Input for reads only\./,
         refused,
       );
       await call('editor_run', { op: 'stop' });
@@ -52184,8 +52184,8 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
         acrossSaid([{ began: 0, seconds: 1 }]),
       ],
       [
-        'across 3 engines, at most 2 at once',
-        'across 2 engines, at most 1 at once',
+        'across 3 engines (at most 2 at once)',
+        'across 2 engines (at most 1 at once)',
         'across 2 engines',
         'across 1 engine',
       ],
@@ -71433,6 +71433,12 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       textOf(await call('scene_create', { op: 'create', scenePath: 'typo.tscn', rootNodeType: 'Node2DD' })),
       "rootNodeType must be a node class or a class_name in the project's class list, and Node2DD is neither. The nearest are Node2D, Node, Node3D.",
     );
+    const heroKept = readFileSync(join(project, 'hero.tscn'), 'utf8');
+    assert.equal(
+      textOf(await call('scene_create', { op: 'create', scenePath: 'hero.tscn', rootNodeType: 'Node3D' })),
+      'res://hero.tscn already exists, and scene_create op=create would replace everything in it. Edit it with scene_node (op=change_type changes its root class), or create the scene under another path.',
+    );
+    assert.equal(readFileSync(join(project, 'hero.tscn'), 'utf8'), heroKept, 'the scene is left as it was');
     // Offered from the classes the editor's Create Node dialog lists, which holds none of the
     // editor's own nodes: Resource was offered EditorResourcePreview and EditorResourcePicker.
     const resourceRoot =
@@ -71902,7 +71908,7 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
       '';
     assert.match(
       over,
-      /^res:\/\/calm\.scn already exists, and save_as writes a new scene only\. Give newPath a path with no file, or change the scene there with scene_node\./,
+      /^res:\/\/calm\.scn already exists\. save_as writes a new scene only\. Give newPath a path with no file, or change that scene with scene_node\./,
       over,
     );
     assert.deepEqual(readFileSync(join(project, 'calm.scn')), copied, 'and the file there is as it was');
@@ -73198,7 +73204,7 @@ async function testANodeChangesItsType(): Promise<void> {
 
     assert.match(
       await refusal({ nodePath: 'Mover', nodeType: 'Node' }),
-      /^Mover has the script res:\/\/mover\.gd, which extends Node2D, and a Node is not one\. Change the script's extends line/,
+      /^Mover has the script res:\/\/mover\.gd, which extends Node2D\. A Node does not inherit Node2D\. Change the script's extends line to a class Node inherits, or clear the script with .*\. Then change the type\.$/,
     );
     assert.match(
       await refusal({ nodePath: 'Coin', nodeType: 'Node2D' }),
@@ -73208,7 +73214,7 @@ async function testANodeChangesItsType(): Promise<void> {
     assert.match(await refusal({ nodePath: 'Body/Leg', nodeType: 'Boss' }), /^Body\/Leg is a Boss already\./);
     assert.match(
       await refusal({ nodePath: 'Mover', nodeType: 'Boss' }),
-      /^Mover has the script res:\/\/mover\.gd, and the class_name Boss brings its own\. Clear the script/,
+      /^Mover has the script res:\/\/mover\.gd\. The class_name Boss brings its own\. Clear the script/,
     );
     assert.match(await refusal({ nodePath: 'Body', nodeType: 'Node2DD' }), /^nodeType must be a node class/);
     assert.match(
@@ -73217,7 +73223,7 @@ async function testANodeChangesItsType(): Promise<void> {
     );
     assert.match(
       await refusal({ scenePath: 'child.tscn', nodePath: '.', nodeType: 'Node3D' }),
-      /^The root of res:\/\/child\.tscn comes from the scene it inherits, which gives its type\./,
+      /^The root of res:\/\/child\.tscn takes its type from the scene it inherits\. Change the type there\.$/,
     );
     assert.match(
       await refusal({ scenePath: 'child.tscn', nodePath: 'Body', nodeType: 'Node2D' }),
@@ -78606,12 +78612,12 @@ async function testANavigationRegionIsBakedWithNoEditor(): Promise<void> {
     // that read the crate. The walls under the other regions are theirs and go unnamed.
     assert.equal(
       get(parseTextContent(plain), 'note'),
-      "No obstacle was read from the region's children (source mode SOURCE_GEOMETRY_ROOT_NODE_CHILDREN), so all the outlines enclose is walkable, less the agent_radius 10.0 kept from their edges. Crate (a StaticBody2D) is outside what was read. The bake reads a node elsewhere once it is in the group navigation_polygon_source_geometry_group and navigation_polygon/source_geometry_mode is SOURCE_GEOMETRY_GROUPS_WITH_CHILDREN, or once it is moved under the region.",
+      "No obstacle was read from the region's children (source mode SOURCE_GEOMETRY_ROOT_NODE_CHILDREN), so all the outlines enclose is walkable, less the agent_radius 10.0 kept from their edges. Crate (a StaticBody2D) is outside what was read. The bake reads a node elsewhere when it is in the group navigation_polygon_source_geometry_group and navigation_polygon/source_geometry_mode is SOURCE_GEOMETRY_GROUPS_WITH_CHILDREN. It also reads a node moved under the region.",
       textOf(plain) ?? '',
     );
     // The key and value the note names are ones a set takes as written.
     const [, key, mode] =
-      / and (\S+) is (\S+), or once/.exec(String(get(parseTextContent(plain), 'note'))) ?? [];
+      / and (\S+) is (\S+)\. It also reads/.exec(String(get(parseTextContent(plain), 'note'))) ?? [];
     assert.ok(key !== undefined && mode !== undefined, textOf(plain) ?? '');
     const grouping = await set('Bare', { [key]: mode });
     assert.notEqual(get(grouping, 'result', 'isError'), true, textOf(grouping) ?? '');

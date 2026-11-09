@@ -155,7 +155,7 @@ func _atlas(entry: Variant, index: int) -> Array:
 			(
 				(
 					"sources[%d].texture: no texture at %s. A tile set takes an image the project "
-					+ "imports, such as a PNG from an image editor, or a texture resource: "
+					+ "imports, such as a PNG, or a texture resource: "
 					+ "resource_edit create with resourceType PlaceholderTexture2D and properties "
 					+ '{"size": {"x": 64, "y": 32}} makes a stand-in of that size.'
 				)
