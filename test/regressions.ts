@@ -20922,6 +20922,20 @@ async function testAQueryObjectIsBuiltFromItsProperties(): Promise<void> {
       // One naming its file is the game's, loaded from there rather than built.
       const filed = await call('runtime_invoke', overlapping({ _type: 'Resource', path: 'res://wide.tres' }));
       assert.match(JSON.stringify(get(filed, 'result')), /\/root\/Main\/Wall/, JSON.stringify(filed));
+      const typed = await call(
+        'runtime_invoke',
+        overlapping({ _type: 'CircleShape2D', path: 'res://wide.tres' }),
+      );
+      assert.match(JSON.stringify(get(typed, 'result')), /\/root\/Main\/Wall/, JSON.stringify(typed));
+      const mistyped = await said(
+        'runtime_invoke',
+        overlapping({ _type: 'RectangleShape2D', path: 'res://wide.tres' }),
+      );
+      assert.match(
+        mistyped,
+        /res:\/\/wide\.tres holds a CircleShape2D, not the RectangleShape2D given/,
+        mistyped,
+      );
     },
   );
 }
@@ -42929,7 +42943,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
         ],
         [
           { _type: 'GradientTexture1D', width: 8 },
-          /^\/root\/Main\.art holds an object: a resource is named by the res:\/\/ path of its file, and the GradientTexture1D given has none: a resource built into a scene has no path, and the game builds none from its properties\. resource_edit create writes a GradientTexture1D to a \.tres file\. Pass that file's res:\/\/ path here$/,
+          /^\/root\/Main\.art holds an object: a resource is named by the res:\/\/ path of its file, and the GradientTexture1D given has none\. A resource built into a scene has no path\. The call builds a resource from its properties only inside an object it builds, such as a PhysicsShapeQueryParameters2D's shape\. resource_edit create writes a GradientTexture1D to a \.tres file\. Pass that file's res:\/\/ path here$/,
         ],
       ];
       for (const [value, expected] of unfiled) {

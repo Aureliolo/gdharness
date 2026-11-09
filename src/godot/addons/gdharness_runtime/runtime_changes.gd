@@ -1000,13 +1000,14 @@ func _object_named(
 	return found
 
 
-## Whether [param given] is {"_type": a class, and its properties} for an engine class that is
-## neither a node nor a resource, which [method _built] makes. A physics query takes its parameters
-## as such an object, PhysicsPointQueryParameters2D for intersect_point, and the game holds none to
-## name by path. A node or a resource is the game's to make, so it is named by its path.
+## Whether [param given] is {"_type": a class, and its properties} for an engine class that
+## [method _built] makes: a RefCounted that is no resource, or a resource inside an object being
+## built. A physics query takes its parameters as such an object, PhysicsPointQueryParameters2D for
+## intersect_point, and the game holds none to name by path. A node is the game's to make, and so is
+## a resource outside such an object, so each is named by its path.
 ##
-## A resource given [param inside_built], as a property of an object being built, is built too
-## unless it names its file: a shape query's shape is part of the query, not of the game.
+## [param inside_built] is true for a property of an object [method _built] makes. A resource there
+## is built too unless the record has a "path", since a shape query's shape belongs to the query.
 static func buildable(given: Variant, inside_built: bool = false) -> bool:
 	if not given is Dictionary:
 		return false

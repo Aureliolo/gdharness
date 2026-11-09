@@ -349,9 +349,15 @@ static func object_at(root: Node, node: Node, node_path: String, given: Variant)
 	if given is Dictionary:
 		var record: Dictionary = given
 		var tag: String = str(record.get("_type", ""))
-		if not (tag in ["Node", "Resource"] and record.get("path") is String):
+		var filed: bool = (
+			tag == "Resource"
+			or (ClassDB.class_exists(tag) and ClassDB.is_parent_class(tag, "Resource"))
+		)
+		if not ((tag == "Node" or filed) and record.get("path") is String):
 			return { "message": _no_path_in(record) }
 		named = record["path"]
+		if filed and tag != "Resource":
+			return _resource_of_class(str(named), tag)
 	var path: String = named
 	if path.begins_with("res://") or path.begins_with("uid://"):
 		return _resource_at(path)
@@ -410,9 +416,9 @@ static func _no_path_in(record: Dictionary) -> String:
 		)
 	return (
 		(
-			"a resource is named by the res:// path of its file, and the %s given has none: a"
-			+ " resource built into a scene has no path, and the game builds none from its"
-			+ " properties, except inside an object it builds, such as a"
+			"a resource is named by the res:// path of its file, and the %s given has none. A"
+			+ " resource built into a scene has no path. The call builds a resource from its"
+			+ " properties only inside an object it builds, such as a"
 			+ " PhysicsShapeQueryParameters2D's shape. resource_edit create writes a %s to a"
 			+ " .tres file. Pass that file's res:// path here"
 		)
@@ -450,6 +456,24 @@ static func _resource_at(path: String) -> Dictionary:
 	if loaded == null:
 		return { "message": "%s did not load. The game's output says why" % path }
 	return { "object": loaded }
+
+
+## The resource at [param path], refused when it is not the [param tag] a record naming it said.
+static func _resource_of_class(path: String, tag: String) -> Dictionary:
+	if not (path.begins_with("res://") or path.begins_with("uid://")):
+		return {
+			"message":
+			"a resource is named by the res:// path of its file, and %s is not one" % path,
+		}
+	var found: Dictionary = _resource_at(path)
+	if found.has("object"):
+		var loaded: Resource = found["object"]
+		if not loaded.is_class(tag):
+			return {
+				"message":
+				"%s holds a %s, not the %s given" % [path, loaded.get_class(), tag],
+			}
+	return found
 
 
 ## Whether a step can be taken into [param value] at all: an object, a list, a map or a value with
