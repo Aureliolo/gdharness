@@ -15,6 +15,17 @@ export function envValue(name: string, variables: NodeJS.ProcessEnv = process.en
   return value === undefined || value === '' ? undefined : value;
 }
 
+/**
+ * [param variable] as a positive whole number of milliseconds, or [param fallback] when it is not
+ * one. Whole digits only, since `parseInt` reads `1e5` as 1 and `90s` as 90, a wait that gives up
+ * at once.
+ */
+export function waitFromEnv(variable: string, fallback: number): number {
+  const text = envValue(variable)?.trim() ?? '';
+  const override = /^\d+$/.test(text) ? Number(text) : 0;
+  return Number.isSafeInteger(override) && override > 0 ? override : fallback;
+}
+
 export interface LaunchHost {
   readonly platform: NodeJS.Platform;
   readonly variables: NodeJS.ProcessEnv;

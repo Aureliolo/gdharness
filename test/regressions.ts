@@ -103,7 +103,13 @@ import {
   theConsoleWasNotCaptured,
   writeEditorLogNote,
 } from '../src/editor-log.js';
-import { editorQuitRequestPath, inTurnToOpen } from '../src/editor-open.js';
+import {
+  editorOpenOptionsOf,
+  editorQuitRequestPath,
+  editorRestartTimeoutMs,
+  inTurnToOpen,
+  openTheEditor,
+} from '../src/editor-open.js';
 import {
   EngineUsageError,
   endingWithRunner,
@@ -8337,6 +8343,93 @@ function testEveryGreetingFieldIsRequired(): void {
     assert.deepEqual(greetingFaults(greeting('/p', { [field]: undefined })), [field], `${field} left out`);
     const wrong = typeof full[field] === 'string' ? 7 : 'seven';
     assert.deepEqual(greetingFaults(greeting('/p', { [field]: wrong })), [field], `${field} mistyped`);
+  }
+}
+
+/**
+ * The restart timeout is read as whole digits. A near miss such as `1e5` or `90s` falls back to the
+ * default instead of becoming a timeout of a few milliseconds that gives up at once.
+ */
+function testTheRestartTimeoutReadsWholeDigitsOnly(): void {
+  const name = 'GDHARNESS_EDITOR_RESTART_TIMEOUT_MS';
+  const before = process.env[name];
+  try {
+    for (const [value, wanted] of [
+      ['120000', 120_000],
+      [' 5000 ', 5000],
+      ['1e5', 90_000],
+      ['120_000', 90_000],
+      ['90s', 90_000],
+      ['2.5e5', 90_000],
+      ['0', 90_000],
+      ['-5', 90_000],
+      ['banana', 90_000],
+      ['99999999999999999999', 90_000],
+    ] as const) {
+      process.env[name] = value;
+      assert.equal(editorRestartTimeoutMs(), wanted, value);
+    }
+    delete process.env[name];
+    assert.equal(editorRestartTimeoutMs(), 90_000);
+  } finally {
+    if (before === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = before;
+    }
+  }
+}
+
+/**
+ * `gdharness editor open` refuses a project the editor would never reach a server from, and says
+ * why, as the server's own editor_launch does: no addon, and an addon of another release.
+ */
+async function testEditorOpenRefusesAnAddonThatCannotConnect(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-open-'));
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    const start = { hidden: true, silent: true, until: null };
+    const bare = await openTheEditor({ projectPath: project, start }, 'unused-engine', 'unused-holder');
+    assert.ok('refused' in bare, JSON.stringify(bare));
+    assert.match('refused' in bare ? bare.refused : '', /addon is not installed/);
+
+    installAddons(project);
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[editor_plugins]\n\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+    );
+    writeFileSync(join(project, 'addons', 'gdharness_editor', '.gdharness-digest'), 'another\n');
+    const another = await openTheEditor({ projectPath: project, start }, 'unused-engine', 'unused-holder');
+    assert.ok('refused' in another, JSON.stringify(another));
+    assert.match('refused' in another ? another.refused : '', /would be asked nothing but to quit/);
+  } finally {
+    sweep(project);
+  }
+}
+
+/** Each way `gdharness editor` can be misspelt is refused with a sentence naming the fault. */
+function testEditorOpenOptionsRefuseEachMisuse(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-open-'));
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    const refusals: [string[], RegExp][] = [
+      [[], /gdharness editor takes open, not nothing/],
+      [['close'], /gdharness editor takes open, not close/],
+      [['open', '--until'], /--until takes a process id, not nothing/],
+      [['open', '--until', 'x'], /--until takes a process id, not x/],
+      [['open', '--bogus'], /Unknown option --bogus/],
+      [['open', 'one', 'two'], /takes one project, and was given one and two/],
+      [['open', 'missing'], /Not a Godot project/],
+      [['open', '--until', '2147483646'], /Process 2147483646 is not running/],
+    ];
+    for (const [args, message] of refusals) {
+      assert.throws(() => editorOpenOptionsOf(args, project), message, args.join(' '));
+    }
+    const hidden = editorOpenOptionsOf(['open', '--hidden'], project);
+    assert.deepEqual(hidden.start, { hidden: true, silent: true, until: null });
+    assert.equal(hidden.projectPath, project);
+  } finally {
+    sweep(project);
   }
 }
 
@@ -52375,7 +52468,10 @@ function testARestartedCountDoesNotTakeWorkFromBeforeTheRestart(): void {
   assert.ok(Math.abs(spent.byClock - 0.1) < 1e-9, String(spent.byClock));
   // The readings after that are compared with each other again.
   spent.counted(sample(12, 2.2 + 10 * 4 * 0.5, 2), pid);
-  assert.ok(Math.abs(spent.byClock - 0.1) < 1e-9, `a stuck engine in a crowded machine gains nothing: ${spent.byClock}`);
+  assert.ok(
+    Math.abs(spent.byClock - 0.1) < 1e-9,
+    `a stuck engine in a crowded machine gains nothing: ${spent.byClock}`,
+  );
   spent.counted(sample(22, 2.2 + 10 * 4 * 0.5 + 10 * 4 * 0.5 + 2.5, 4.5), pid);
   assert.equal(spent.byWork, 2.5, 'and a crowded stretch counts the engine own work');
 }
@@ -82554,6 +82650,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunWithNothingToRunNamesTheRunnerToo,
   testASuiteFilesOnlyServerRefusesADirectory,
   testEveryGreetingFieldIsRequired,
+  testTheRestartTimeoutReadsWholeDigitsOnly,
+  testEditorOpenRefusesAnAddonThatCannotConnect,
+  testEditorOpenOptionsRefuseEachMisuse,
   testAnEditorOfAnotherReleaseIsAskedNothing,
   testACurrentAddonLackingAnOpSaysAScriptFailedToLoad,
   testAServerEndsWithAnEditorStillOnTheBridge,

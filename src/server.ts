@@ -207,6 +207,7 @@ import {
   engineFlagsAmongGameArgs,
   environmentFor,
   envValue,
+  waitFromEnv,
   RESERVED_VARIABLE_PREFIX,
   resolveHeadless,
   resolveSilent,
@@ -486,12 +487,6 @@ const PARENT_ASKED_AFTER_MS = 5_000;
  * greeted. The two came up within a few seconds of each other downstream, in either order.
  */
 const EDITOR_SERVERS_START_MS = 20_000;
-
-/** [param variable] as a positive number of milliseconds, or [param fallback] when it is not one. */
-function waitFromEnv(variable: string, fallback: number): number {
-  const override = Number.parseInt(envValue(variable) ?? '', 10);
-  return Number.isInteger(override) && override > 0 ? override : fallback;
-}
 
 /**
  * How long a restart waits for a connected editor's greeting. It follows the socket by a frame, so
@@ -16897,8 +16892,7 @@ class GodotServer {
 
   /** How long one runtime request may take. Ten seconds, unless the environment says otherwise. */
   private runtimeTimeoutMs(): number {
-    const override = Number.parseInt(envValue('GDHARNESS_RUNTIME_TIMEOUT_MS') ?? '', 10);
-    return Number.isInteger(override) && override > 0 ? override : 10000;
+    return waitFromEnv('GDHARNESS_RUNTIME_TIMEOUT_MS', 10_000);
   }
 
   /**

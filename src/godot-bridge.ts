@@ -5,7 +5,7 @@ import type { RawData } from 'ws';
 import { WebSocket, WebSocketServer } from 'ws';
 import { callProgress } from './call-signal.js';
 import { errorCode, errorMessage, Refusal, toError } from './errors.js';
-import { envValue } from './launch.js';
+import { waitFromEnv } from './launch.js';
 import { isSameDirectory } from './paths.js';
 import { portFromEnv } from './ports.js';
 import { isRecord } from './records.js';
@@ -405,14 +405,12 @@ class EditorBusy extends Error {
  * over more than thirty seconds. GDHARNESS_SCAN_WAIT_MS sets another.
  */
 function busyWaitMs(): number {
-  const override = Number.parseInt(envValue('GDHARNESS_SCAN_WAIT_MS') ?? '', 10);
-  return Number.isInteger(override) && override > 0 ? override : 30_000;
+  return waitFromEnv('GDHARNESS_SCAN_WAIT_MS', 30_000);
 }
 
 /** How long a call waits for the editor's answer. GDHARNESS_ANSWER_WAIT_MS sets another. */
 function answerWaitMs(): number {
-  const override = Number.parseInt(envValue('GDHARNESS_ANSWER_WAIT_MS') ?? '', 10);
-  return Number.isInteger(override) && override > 0 ? override : 30_000;
+  return waitFromEnv('GDHARNESS_ANSWER_WAIT_MS', 30_000);
 }
 
 /** How often a tool turned away by a busy editor is asked for again. */
