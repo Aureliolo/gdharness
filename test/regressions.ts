@@ -81432,6 +81432,53 @@ async function testAWriteWaitsForAnotherProcesssTurn(): Promise<void> {
 }
 
 /**
+ * A turn that cannot be given back is reported, since its lock names this live server and every
+ * later write to the file would wait on it for good. A give-back that is refused once is tried
+ * again, and a write that threw gives its turn back and keeps its own error.
+ */
+async function testAWriteReportsATurnItCouldNotGiveBack(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-turns-'));
+  const file = join(project, 'floor.tscn');
+  const lock = writeLockOf(project, file);
+  try {
+    // Refused for good: the lock path is a folder, which a removal of a file never takes.
+    await assert.rejects(
+      inTurnFor(project, file, () => {
+        rmSync(lock, { force: true });
+        mkdirSync(join(lock, 'held'), { recursive: true });
+        return Promise.resolve('written');
+      }),
+      (error: unknown) =>
+        error instanceof Error && error.message.includes(lock) && error.message.includes('given back'),
+      'a turn that cannot be given back is named, with the lock to remove',
+    );
+    rmSync(lock, { recursive: true, force: true });
+
+    // Refused once and then free: tried again, and the write's answer is returned.
+    const answer = await inTurnFor(project, file, () => {
+      rmSync(lock, { force: true });
+      mkdirSync(join(lock, 'held'), { recursive: true });
+      setTimeout(() => {
+        rmSync(lock, { recursive: true, force: true });
+      }, 150);
+      return Promise.resolve('written');
+    });
+    assert.equal(answer, 'written', 'a give-back that succeeds on a later try is not an error');
+    assert.equal(existsSync(lock), false, 'and the lock is gone');
+
+    // A write that throws keeps its own error, and gives its turn back.
+    await assert.rejects(
+      inTurnFor(project, file, () => Promise.reject(new Error('the write failed'))),
+      /the write failed/,
+    );
+    assert.equal(existsSync(lock), false, 'a failed write gives its turn back');
+    assert.equal(await inTurnFor(project, file, () => Promise.resolve('next')), 'next', 'and the next one runs');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * editor_capture shows what a scene's @tool script draws only in the editor. A game asked to check
  * such a sample had no way to see it: runtime_capture needs a game, which never runs the editor
  * branch, and a headless editor draws nothing. A hidden editor on Windows is a window on a desktop
@@ -85007,6 +85054,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHeadlessWriteOfScriptedNodesSavesWhatTheEditorWould,
   testTwoWritesToOneSceneAtOnceBothLand,
   testAWriteWaitsForAnotherProcesssTurn,
+  testAWriteReportsATurnItCouldNotGiveBack,
   testTheEditorsViewShowsWhatToolScriptsDrawThere,
   testAnUnusedHiddenEditorQuitsAndOpensAgain,
   testACallWaitsOutTheEditorsProgressTask,

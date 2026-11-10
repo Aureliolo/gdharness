@@ -24,6 +24,9 @@ const WRITES_FOLDER = 'gdharness-writes';
 /** How often a write waiting its turn looks at the lock again. */
 const TURN_LOOK_MS = 100;
 
+/** How many times a refused give-back is tried, each after a look's wait. */
+const GIVE_BACK_TRIES = 5;
+
 /** The lock for writes to [param file], an absolute path in [param projectPath]. */
 export function writeLockOf(projectPath: string, file: string): string {
   const named = relative(projectPath, file).split('\\').join('/');
@@ -46,11 +49,33 @@ export async function inTurnFor<T>(projectPath: string, file: string, write: () 
   while (!made(lock, holder) && !(await takenOver(lock, holder, starts))) {
     await delay(TURN_LOOK_MS);
   }
+  let result: T;
   try {
-    return await write();
-  } finally {
-    removeWhole(lock);
+    result = await write();
+  } catch (error) {
+    await giveBack(lock);
+    throw error;
   }
+  if (!(await giveBack(lock))) {
+    throw new Error(
+      `The write to ${file} finished, but its turn could not be given back: remove ${lock} so later writes to it can run.`,
+    );
+  }
+  return result;
+}
+
+/**
+ * Removes [param lock], trying again for a moment, and answers whether it is gone. A lock left
+ * behind names this live server, so every later write to the file waits on it with no limit.
+ */
+async function giveBack(lock: string): Promise<boolean> {
+  for (let tries = 0; tries < GIVE_BACK_TRIES; tries += 1) {
+    if (removeWhole(lock)) {
+      return true;
+    }
+    await delay(TURN_LOOK_MS);
+  }
+  return false;
 }
 
 /** Makes [param path] holding [param content] unless it exists, and answers whether it did. */
