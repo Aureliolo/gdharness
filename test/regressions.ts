@@ -63237,7 +63237,16 @@ function gdscriptArguments(source: string, open: number): string[] {
  */
 function testEveryProcessStartsThroughTheHiddenSpawn(): void {
   // Built from parts, because this file is one of the files walked.
-  const starters = [['child', 'process'].join('_'), ['Bun', 'spawn'].join('.'), ['Bun', '$'].join('.')];
+  const starters = [
+    ['child', 'process'].join('_'),
+    ['Bun', 'spawn'].join('.'),
+    ['Bun', '$'].join('.'),
+    ['Create', 'ProcessW('].join(''),
+    ['Start', 'Process'].join('-'),
+    ['Process', 'Start'].join('.'),
+    ['Shell', 'Execute'].join(''),
+    ['new', 'Worker'].join(' '),
+  ];
   const shell = new RegExp(['from', "'bun'"].join(' '));
   const roots = ['src', 'scripts', 'test'];
   const walked = roots.flatMap((root) =>
@@ -63255,7 +63264,9 @@ function testEveryProcessStartsThroughTheHiddenSpawn(): void {
     .toSorted();
   assert.deepEqual(
     starting,
-    [join('src', 'spawn.ts'), join('test', 'support', 'hidden-spawn.ts')],
+    // The desktop helper is C# text that starts an engine or a game on a desktop of its own, which
+    // spawn.ts cannot do. The helper itself is started through spawnHidden.
+    [join('src', 'desktop.ts'), join('src', 'spawn.ts'), join('test', 'support', 'hidden-spawn.ts')],
     'start a process with spawnHidden, runHidden, runSyncHidden or spawnSyncHidden from src/spawn.ts, ' +
       'spawnShown for a game somebody asked to see, or HIDDEN_SPAWN_PRELUDE in a script handed to Node',
   );
@@ -63279,8 +63290,15 @@ function testEveryProcessStartsThroughTheHiddenSpawn(): void {
   );
   const starts: string[] = [];
   const consoles: string[] = [];
+  const unchecked: string[] = [];
   for (const script of scripts) {
     const source = readFileSync(script, 'utf8');
+    // The other ways to start a program or open one, which have no console argument to check.
+    for (const call of source.matchAll(
+      /\bOS\s*\.\s*(execute_with_pipe|create_instance|shell_open|shell_show_in_file_manager)\s*\(/g,
+    )) {
+      unchecked.push(`${script} ${call[1] ?? ''}`);
+    }
     for (const call of source.matchAll(/\bOS\s*\.\s*(create_process|execute)\s*\(/g)) {
       const name = call[1] ?? '';
       const given = gdscriptArguments(source, call.index + call[0].length - 1);
@@ -63293,6 +63311,7 @@ function testEveryProcessStartsThroughTheHiddenSpawn(): void {
   }
   assert.ok(starts.length >= 1, `the scripts' process starts were found: ${JSON.stringify(starts)}`);
   assert.deepEqual(consoles, [], 'a process a script starts opens no console window');
+  assert.deepEqual(unchecked, [], 'a script starts programs through create_process or execute alone');
 }
 
 /**
