@@ -51253,6 +51253,33 @@ function testAnEngineMayBeSilentAsLongAsWhatItRuns(): void {
  * suite that does not load is reported by none of its cases, a case printing an engine error passes,
  * and a declared error that stopped printing means the case no longer reaches what it tests.
  */
+/** An export annotation whose arguments hold a call or a bracket in a string is still an export. */
+function testAnExportAnnotationHoldingACallIsFound(): void {
+  const found = selfTypedExports([
+    [
+      'res://custom.gd',
+      'class_name Item\nextends Resource\n@export_custom(PROPERTY_HINT_NONE, str(1)) var parts: Array[Item]\n',
+    ],
+    [
+      'res://deep.gd',
+      'class_name Item\nextends Resource\n@export_custom(PROPERTY_HINT_NONE, str(abs(1))) @export_range(0, 1) var parts: Array[Item]\n',
+    ],
+    [
+      'res://string.gd',
+      'class_name Item\nextends Resource\n@export_custom(PROPERTY_HINT_NONE, ")") var parts: Array[Item]\n',
+    ],
+    ['res://empty.gd', ''],
+    [
+      'res://quiet.gd',
+      'class_name Item\nextends Resource\n@export_custom(PROPERTY_HINT_NONE, str(1)) var parts: Array[Resource]\n',
+    ],
+  ]);
+  assert.deepEqual(
+    found.map((one) => `${one.script}:${one.property}`),
+    ['res://custom.gd:parts', 'res://deep.gd:parts', 'res://string.gd:parts'],
+  );
+}
+
 /**
  * The scripts Godot never frees once loaded: an exported array or dictionary typed with the script's
  * own class, the annotation on its own line or the variable's. A headless write of such a resource
@@ -82545,6 +82572,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACrashIsReadFromTheCrashHandlersReport,
   testARowSkippedForItsDataIsNoPass,
   testTheScriptsGodotNeverFreesAreFound,
+  testAnExportAnnotationHoldingACallIsFound,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
   testATakeSweepsGoneLocksPastTheCount,
   testASlotWaitLooksWhenTheSlotsChange,
