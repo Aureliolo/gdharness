@@ -51,11 +51,6 @@ export class EngineUsageError extends Refusal {}
 export const MOST_ENGINES = 4;
 /** The least time an engine may print nothing before it is ended. */
 export const SILENCE_FLOOR_SECONDS = 300;
-/**
- * A terminal control sequence. gdUnit4 opens its output by clearing the screen, which printed as it
- * stands would wipe the lines the run had printed before it.
- */
-export const CONTROL_SEQUENCE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;?]*[A-Za-z]`, 'g');
 
 /** The least exit code that is a Windows exception status, such as 0xC0000005, read unsigned. */
 const WINDOWS_EXCEPTION = 0xc0000000;
