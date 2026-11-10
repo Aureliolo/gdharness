@@ -3,12 +3,12 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
-  readFileSync,
   renameSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
+import { readWhole } from './whole-file.js';
 
 /** What freeing a project's library copies did, for the debug log. */
 export interface FreedCopies {
@@ -170,14 +170,14 @@ export function unlistedExtensions(projectPath: string): string[] {
  * `.godot/extension_list.cfg` lists. A project no editor has opened has no list and no copies.
  */
 function windowsLibraries(projectPath: string): string[] {
-  const listed = readOrNull(join(projectPath, '.godot', 'extension_list.cfg'));
+  const listed = readWhole(join(projectPath, '.godot', 'extension_list.cfg'));
   if (listed === null) {
     return [];
   }
   const libraries = new Set<string>();
   for (const line of listed.split(/\r?\n/)) {
     const manifest = resolveResource(projectPath, projectPath, line.trim());
-    const text = manifest === null ? null : readOrNull(manifest);
+    const text = manifest === null ? null : readWhole(manifest);
     if (manifest === null || text === null) {
       continue;
     }
@@ -207,12 +207,4 @@ function resolveResource(projectPath: string, relativeTo: string, path: string):
     return join(projectPath, path.slice('res://'.length));
   }
   return isAbsolute(path) ? path : join(relativeTo, path);
-}
-
-function readOrNull(path: string): string | null {
-  try {
-    return readFileSync(path, 'utf8');
-  } catch {
-    return null;
-  }
 }

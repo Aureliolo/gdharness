@@ -27,7 +27,7 @@ export function forceNextImport(projectPath: string, resourcePath: string): void
 }
 
 /** Where the editor records the hashes of `resourcePath`'s last import. */
-function importRecord(projectPath: string, resourcePath: string): string {
+export function importRecord(projectPath: string, resourcePath: string): string {
   const digest = createHash('md5').update(resourcePath).digest('hex');
   return join(projectPath, '.godot', 'imported', `${basename(resourcePath)}-${digest}.md5`);
 }

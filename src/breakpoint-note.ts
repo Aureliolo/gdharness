@@ -1,9 +1,10 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import type { HeldBreakpoint } from './dap_client.js';
 import { errorMessage } from './errors.js';
-import { realAsFarAsItExists } from './paths.js';
+import { realAsFarAsItExists, relativeWithin } from './paths.js';
 import { isRecord } from './records.js';
+import { writeWhole } from './whole-file.js';
 
 /**
  * The breakpoints set through this server, written down in the project.
@@ -53,7 +54,9 @@ export function writeBreakpointNote(projectPath: string, held: readonly HeldBrea
       })),
     };
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, `${JSON.stringify(note, null, 2)}\n`, 'utf8');
+    if (!writeWhole(path, `${JSON.stringify(note, null, 2)}\n`)) {
+      console.error(`[SERVER] Could not record the breakpoints at ${path}.`);
+    }
   } catch (error) {
     console.error(`[SERVER] Could not record the breakpoints at ${path}: ${errorMessage(error)}`);
   }
@@ -77,8 +80,14 @@ export function readBreakpointNote(projectPath: string): HeldBreakpoint[] {
       if (!isRecord(entry)) {
         continue;
       }
-      const { script, lines: listed } = entry;
-      if (typeof script !== 'string' || isAbsolute(script) || script.split('/').includes('..')) {
+      const { script: written, lines: listed } = entry;
+      if (typeof written !== 'string') {
+        continue;
+      }
+      // A project path never holds a backslash in a name, since the engine's paths use slashes, so
+      // a note spelt with backslashes reads the same on every system.
+      const script = written.replaceAll('\\', '/');
+      if (isAbsolute(script) || !withinProject(projectPath, join(projectPath, script))) {
         continue;
       }
       const lines = Array.isArray(listed)
@@ -97,6 +106,6 @@ export function readBreakpointNote(projectPath: string): HeldBreakpoint[] {
 }
 
 function withinProject(projectPath: string, scriptPath: string): boolean {
-  const rel = relative(projectPath, scriptPath);
-  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+  const rel = relativeWithin(projectPath, scriptPath);
+  return rel !== null && rel !== '';
 }

@@ -24,7 +24,6 @@ import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { cachedClasses, staleAgainst } from './class-cache.js';
 import {
-  CONTROL_SEQUENCE,
   coresNamed,
   type EngineLaunch,
   EngineUsageError,
@@ -46,6 +45,7 @@ import {
 } from './engine-launch.js';
 import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
 import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
+import { CONTROL_SEQUENCE } from './game-log.js';
 import { staleImports } from './import-freshness.js';
 import { hiddenWindowFlags } from './launch.js';
 import { freeLibraryCopies, seedExtensionList, unlistedExtensions } from './library-copies.js';

@@ -8,8 +8,9 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { cacheHome } from './cache-home.js';
 import { isRecord } from './records.js';
 import { currentRunner, runLine } from './runner.js';
 
@@ -89,28 +90,12 @@ interface Cached {
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
-/** The per-user cache directory each platform keeps for exactly this. */
-function cacheDirectory(environment: Environment): string {
-  const set = (name: string): string | null => {
-    const value = environment[name];
-    return value !== undefined && value !== '' ? value : null;
-  };
-  const home = set('HOME') ?? homedir();
-  if (process.platform === 'win32') {
-    return join(set('LOCALAPPDATA') ?? home, 'gdharness');
-  }
-  if (process.platform === 'darwin') {
-    return join(home, 'Library', 'Caches', 'gdharness');
-  }
-  return join(set('XDG_CACHE_HOME') ?? join(home, '.cache'), 'gdharness');
-}
-
 /** Where the answer is kept between runs, so a restart does not mean another request. */
 export function cacheFile(environment: Environment = process.env): string {
   // A home directory is not guaranteed to exist under a service account, and a cache is the one
   // thing that may live in a temporary directory: losing it costs one extra request.
   try {
-    const directory = cacheDirectory(environment);
+    const directory = cacheHome(environment);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     return join(directory, 'update-check.json');
   } catch {

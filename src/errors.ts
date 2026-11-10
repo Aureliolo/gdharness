@@ -23,7 +23,8 @@ export class Refusal extends Error {}
 /**
  * The sentence to show a caller. `fallback` is what a throw with no usable message reads as.
  * Objects and symbols are deliberately not stringified: "[object Object]" tells a reader
- * nothing, and `String(symbol)` throws. `toError` keeps the thrown value on `cause` instead.
+ * nothing, and `String(Object.create(null))` throws. `toError` keeps the thrown value on `cause`
+ * instead.
  */
 export function errorMessage(error: unknown, fallback = 'Unknown error'): string {
   if (error instanceof Error) {

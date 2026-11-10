@@ -308,13 +308,7 @@ static func missing_animation(
 	var close: PackedStringArray = GdhRead.nearest(animation_name, player.get_animation_list())
 	if close.is_empty():
 		return said
-	return (
-		said
-		+ (
-			" The nearest %s %s."
-			% ["it has is" if close.size() == 1 else "it has are", ", ".join(close)]
-		)
-	)
+	return said + " The nearest it has %s." % GdhRead.are_named(close)
 
 
 ## The states and transitions of the state machine at [param state_machine_path] in [param tree].

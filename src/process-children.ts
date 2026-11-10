@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
+import { commandLineWords } from './launch.js';
 import { isSameDirectory } from './paths.js';
 import { askProcessTable, ProcessTableUnbuilt } from './process-table.js';
 import { runHidden as run } from './spawn.js';
@@ -289,7 +290,7 @@ function linked(tree: ProcessTree, child: number, parent: number, since?: number
  * since anything can be called conhost.exe.
  */
 function isConsoleHost(listed: ListedProcess): boolean {
-  const executable = commandWords(listed.command)[0];
+  const executable = commandLineWords(listed.command)[0];
   if (executable === undefined) {
     return false;
   }
@@ -366,15 +367,6 @@ export function ancestorsIn(tree: ProcessTree, pid: number, root: number): numbe
     parent = tree.get(parent)?.parent;
   }
   return chain;
-}
-
-/**
- * The processes whose parent is [param pid] right now, or undefined when the platform will not say,
- * with [param since] as [method descendantsIn] takes it.
- */
-export async function childrenOf(pid: number, since?: number): Promise<number[] | undefined> {
-  const tree = await processTree();
-  return tree === undefined ? undefined : childrenIn(tree, pid, since);
 }
 
 /** What a command line says a process is: the executable it runs and the project it was pointed at. */
@@ -454,6 +446,9 @@ export function editorsOfProjectIn(tree: ProcessTree, projectPath: string): numb
   return found.toSorted((a, b) => a - b);
 }
 
+/** A word that is a scene, script or resource given to the engine, which ends a directory read off an unquoted line. */
+const RESOURCE_FILE = /\.(?:tscn|scn|gd|tres|res)$/i;
+
 /**
  * [param command] read the way the engine reads its own: the executable first, then `--path` and
  * the directory after it. Quoted where the platform quotes, which Windows does and `ps` does not,
@@ -466,7 +461,7 @@ export function editorsOfProjectIn(tree: ProcessTree, projectPath: string): numb
  * spaces in it onto the game it plays, and how the engine reads it back.
  */
 export function readCommandLine(command: string): CommandLineRead {
-  const all = commandWords(command);
+  const all = commandLineWords(command);
   const separator = all.findIndex((word) => word === '--' || word === '++');
   const words = separator === -1 ? all : all.slice(0, separator);
   const executable = words[0] === undefined ? '' : basename(words[0].replaceAll('\\', '/'));
@@ -475,12 +470,24 @@ export function readCommandLine(command: string): CommandLineRead {
   if (at !== -1 && at + 1 < words.length) {
     const taken: string[] = [];
     for (const word of words.slice(at + 1)) {
-      if (taken.length > 0 && (word.startsWith('-') || /^[a-z]+:\/\//.test(word))) {
+      if (
+        taken.length > 0 &&
+        (word.startsWith('-') || /^[a-z]+:\/\//.test(word) || RESOURCE_FILE.test(word))
+      ) {
         break;
       }
       taken.push(word);
+      // A line with a quote is Windows's own, where the directory is the one word the quotes or
+      // the next space ended. Anywhere else the words are an unquoted list and a directory with
+      // spaces in it runs on to the next argument-shaped word.
+      if (command.includes('"')) {
+        break;
+      }
     }
-    projectPath = taken.join(' ').replaceAll('%20', ' ');
+    const named = taken.join(' ').replaceAll('%20', ' ');
+    // A relative directory is relative to the folder the process was started in, which no command
+    // line holds, so it names no project that can be told from this process's own folder.
+    projectPath = /^(?:[\\/]|[A-Za-z]:[\\/])/.test(named) ? named : null;
   }
   return {
     executable,
@@ -502,33 +509,6 @@ export async function oneShotOptionOf(pid: number): Promise<string | null | unde
     return undefined;
   }
   return readCommandLine(listed.command).oneShot;
-}
-
-/** [param command] split into its words, with double quotes grouping and removed. */
-function commandWords(command: string): string[] {
-  const words: string[] = [];
-  let word = '';
-  let quoted = false;
-  let started = false;
-  for (const char of command) {
-    if (char === '"') {
-      quoted = !quoted;
-      started = true;
-    } else if (!quoted && /\s/.test(char)) {
-      if (started) {
-        words.push(word);
-        word = '';
-        started = false;
-      }
-    } else {
-      word += char;
-      started = true;
-    }
-  }
-  if (started) {
-    words.push(word);
-  }
-  return words;
 }
 
 function listWindows(): Promise<string> {

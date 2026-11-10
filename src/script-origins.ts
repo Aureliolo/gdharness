@@ -15,7 +15,8 @@ import type { LogEntry } from './game-log.js';
 import { discoveryListing, type ScriptError } from './junit.js';
 import { discard, scratchDirectory } from './scratch.js';
 
-const UNRESOLVED = /Could not resolve class "([A-Za-z_][A-Za-z0-9_]*)", because of a parser error/;
+// GDScript accepts any letter in an identifier, so a class named outside ASCII is named here too.
+const UNRESOLVED = /Could not resolve class "([\p{L}_][\p{L}\p{N}_]*)", because of a parser error/u;
 
 /** An error the engine's check found in a script declaring a class others could not resolve. */
 export interface ScriptOrigin extends ScriptError {

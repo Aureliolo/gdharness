@@ -69,7 +69,9 @@ const RAISED_MARK = /^gdharness: (.+?) raised from (.+?): (.*)$/;
  * that takes the run over reads it too.
  */
 export function raisedMark(by: RaisedBy, text: string, file: string): string {
-  return `gdharness: ${by} raised from ${file}: ${text}\n`;
+  // An entry's text is its headline's first line, so a message of several lines is marked by that
+  // line. Its other lines on the mark's own line would be printed lines of their own.
+  return `gdharness: ${by} raised from ${file}: ${text.split(/\r?\n/, 1)[0] ?? ''}\n`;
 }
 
 const REPORTED_ERROR =
@@ -111,8 +113,11 @@ const GDUNIT_CASE = /^\s+res:\/\/.+?\.(?:gd|cs) > .+? (?:STARTED|PASSED|FAILED|E
  */
 const CRASH_FILLER = /^(?:=+|-- END OF .* BACKTRACE --|\[\d+\] .* - no debug info in .*)$/;
 
-/** An ANSI colour sequence: the escape byte, a bracket, the parameters, the letter m. */
-export const COLOUR_CODE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;]*m`, 'g');
+/**
+ * A terminal control sequence: the escape byte, a bracket, the parameters, a letter. Colours are one
+ * kind. gdUnit4 opens its output by clearing the screen, which left on a line hid its headline.
+ */
+export const CONTROL_SEQUENCE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;?]*[A-Za-z]`, 'g');
 
 /** The severity a headline announces, or null for a line that announces nothing. */
 function announced(line: string): { severity: Severity; text: string; byScript: boolean } | null {
@@ -125,6 +130,15 @@ function announced(line: string): { severity: Severity; text: string; byScript: 
     text: match[3] ?? '',
     byScript: match[2] === 'SCRIPT ERROR',
   };
+}
+
+/** The headline a stream printed last, with the entry it made and the lines that may belong to it. */
+interface Headed {
+  readonly index: number;
+  readonly detail: string[];
+  continues: boolean;
+  /** Entries of unindented lines that followed the headline, until an indented line claims them. */
+  loose: LogEntry[];
 }
 
 /** The sources a log is written into as bytes arrive, as against the debugger's own entries. */
@@ -256,11 +270,7 @@ function consecutiveFrames(detail: readonly string[], at: number): Frame[] {
     const number = Number(match?.[1]);
     const frame = match?.[2];
     const before = frames.at(-1);
-    if (
-      frame === undefined ||
-      !Number.isInteger(number) ||
-      (before !== undefined && number !== before.number + 1)
-    ) {
+    if (frame === undefined || (before !== undefined && number !== before.number + 1)) {
       break;
     }
     frames.push({ number, frame });
@@ -345,7 +355,12 @@ export class GameLog {
     stderr: new StringDecoder('utf8'),
     transcript: new StringDecoder('utf8'),
   };
-  private readonly partial: Record<Stream, string> = { stdout: '', stderr: '', transcript: '' };
+  /**
+   * The unfinished last line of each stream, in the pieces it arrived in. Joined only when a newline
+   * ends it, because joining on every read costs the square of the line for a megabyte printed
+   * without one.
+   */
+  private readonly partial: Record<Stream, string[]> = { stdout: [], stderr: [], transcript: [] };
   /**
    * The headline each stream printed last, while nothing but its detail has followed it there.
    *
@@ -354,7 +369,7 @@ export class GameLog {
    * headline for both streams a `PASSED` line landing after a stderr error became that error's
    * detail and was gone from what the run printed, which the suite counts are read off.
    */
-  private readonly lastHeadline: Record<Stream, { detail: string[]; continues: boolean } | null> = {
+  private readonly lastHeadline: Record<Stream, Headed | null> = {
     stdout: null,
     stderr: null,
     transcript: null,
@@ -387,13 +402,23 @@ export class GameLog {
    * print the same `ERROR` headline and only a script error says the code under test faulted.
    */
   private readonly byScript = new Set<number>();
-  /** The errors a debugger call raised that were marked before the engine's line reached here. */
-  private readonly awaitedRaised: { readonly by: RaisedBy; readonly text: string }[] = [];
+  /**
+   * The errors a debugger call raised that were marked before the engine's line reached here, with
+   * the file the engine named for each. An error is taken as the call's only when its own `at:` line
+   * names that file, which arrives after its headline.
+   */
+  private readonly awaitedRaised: { readonly by: RaisedBy; readonly text: string; readonly file: string }[] =
+    [];
 
   append(source: Stream, chunk: Buffer | string): void {
     const decoded = typeof chunk === 'string' ? chunk : this.decoders[source].write(chunk);
-    const lines = (this.partial[source] + decoded).split('\n');
-    this.partial[source] = lines.pop() ?? '';
+    const newline = decoded.lastIndexOf('\n');
+    if (newline === -1) {
+      this.partial[source].push(decoded);
+      return;
+    }
+    const lines = [...this.partial[source], decoded.slice(0, newline)].join('').split('\n');
+    this.partial[source] = [decoded.slice(newline + 1)];
     for (const raw of lines) {
       this.line(source, raw.replace(/\r$/, ''));
     }
@@ -402,8 +427,8 @@ export class GameLog {
   /** Whatever was printed without a final newline, once the stream has ended. */
   finish(): void {
     for (const source of STREAMS) {
-      const tail = this.partial[source] + this.decoders[source].end();
-      this.partial[source] = '';
+      const tail = (this.partial[source].join('') + this.decoders[source].end()).replace(/\r$/, '');
+      this.partial[source] = [];
       if (tail !== '') {
         this.line(source, tail);
       }
@@ -412,7 +437,7 @@ export class GameLog {
 
   private line(source: Stream, raw: string): void {
     // Colour codes are for a terminal. A caller reading entries wants the words.
-    const line = raw.replace(COLOUR_CODE, '');
+    const line = raw.replace(CONTROL_SEQUENCE, '');
     if (line.trim() === '') {
       return;
     }
@@ -439,8 +464,10 @@ export class GameLog {
     }
     const owner = this.lastHeadline[source];
     if (owner !== null && /^\s/.test(line) && !GDUNIT_CASE.test(line)) {
+      this.takeLooseLines(owner);
       owner.detail.push(line.trim());
       owner.continues = false;
+      this.claimedByCall(owner.index);
       return;
     }
     const headline = announced(line);
@@ -449,16 +476,12 @@ export class GameLog {
       return;
     }
     const detail: string[] = [];
-    const awaited =
-      headline?.severity === 'error' ? this.awaitedRaised.findIndex((one) => one.text === headline.text) : -1;
-    const marked = awaited === -1 ? undefined : this.awaitedRaised.splice(awaited, 1)[0];
     const entry: LogEntry = {
       index: this.entries.length,
-      severity: marked === undefined ? (headline?.severity ?? 'info') : 'info',
+      severity: headline?.severity ?? 'info',
       source,
       text: headline?.text ?? line,
       detail,
-      ...(marked === undefined ? {} : { raisedBy: marked.by }),
     };
     this.entries.push(entry);
     if (headline?.byScript === true) {
@@ -469,9 +492,46 @@ export class GameLog {
     // names every missing template on the lines below, which read as prints of their own and never
     // reached the answer. Only stderr, where the engine's errors go, so a game printing a line that
     // looks like a headline does not take the prints after it.
-    this.lastHeadline[source] = headline
-      ? { detail, continues: source === 'stderr' && headline.text.endsWith(':') }
-      : null;
+    if (headline) {
+      this.lastHeadline[source] = {
+        index: entry.index,
+        detail,
+        continues: source === 'stderr' && headline.text.endsWith(':'),
+        loose: [],
+      };
+    } else if (owner?.detail.length === 0 && source !== 'stdout' && !/^\s/.test(line)) {
+      // An unindented line straight after a headline is the rest of its message when an `at:` line
+      // follows, and a print of its own when none does, which only that later line settles.
+      owner.loose.push(entry);
+    } else {
+      this.lastHeadline[source] = null;
+    }
+  }
+
+  /** Moves the lines that followed [param owner]'s headline, now known to be its message, into its detail. */
+  private takeLooseLines(owner: Headed): void {
+    const count = owner.loose.length;
+    const tail = this.entries.slice(this.entries.length - count);
+    if (count > 0 && tail.every((entry, at) => entry === owner.loose[at])) {
+      this.entries.length -= count;
+      owner.detail.push(...tail.map((entry) => entry.text.trim()));
+    }
+    owner.loose = [];
+  }
+
+  /** Takes the error at [param index] as raised by a call whose mark waits for the file its detail names. */
+  private claimedByCall(index: number): void {
+    const entry = this.entries[index];
+    if (entry?.severity !== 'error') {
+      return;
+    }
+    const at = this.awaitedRaised.findIndex(
+      (one) => one.text === entry.text && entry.detail.some((line) => line.includes(one.file)),
+    );
+    const mark = at === -1 ? undefined : this.awaitedRaised.splice(at, 1)[0];
+    if (mark !== undefined) {
+      this.entries[index] = { ...entry, severity: 'info', raisedBy: mark.by };
+    }
   }
 
   /**
@@ -491,7 +551,7 @@ export class GameLog {
         return;
       }
     }
-    this.awaitedRaised.push({ by, text });
+    this.awaitedRaised.push({ by, text, file });
   }
 
   /** Whether the engine headed [param entry] `SCRIPT ERROR`, for an entry of this log or a copy. */

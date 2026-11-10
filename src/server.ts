@@ -28,7 +28,6 @@ import {
 } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, normalize, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { fileURLToPath } from 'node:url';
 import { McpServer, ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 import { type StdioServerHandle, serveStdio } from '@modelcontextprotocol/server/stdio';
 import { alive } from './alive.js';
@@ -215,6 +214,7 @@ import {
   savesStayPut,
   startedAs,
   userDataIn,
+  waitFromEnv,
 } from './launch.js';
 import { freeLibraryCopies } from './library-copies.js';
 import { type CallInFlight, callsInFlight, lifecycleLogPath, writeLifecycle } from './lifecycle-log.js';
@@ -302,6 +302,7 @@ import {
   writeEditorRunNote,
   writeLatestRun,
 } from './run-record.js';
+import { currentRunner, runLine } from './runner.js';
 import {
   ANNOUNCE_BUDGET_MS,
   announcedSince,
@@ -358,7 +359,6 @@ import type {
 } from './server-types.js';
 import {
   DEBUG_MODE,
-  gdharnessCommand,
   runtimeAddonUnknown,
   runtimeMismatch,
   SERVER_VERSION,
@@ -371,6 +371,7 @@ import {
   installedRuntimeDigest,
   RUNTIME_SCRIPT,
   shippedListedRunner,
+  shippedOperationsScript,
   shippedRuntimeDigest,
 } from './setup.js';
 import { runHidden, spawnHidden } from './spawn.js';
@@ -476,8 +477,6 @@ const FAILED_BUDGET = 1_000_000;
  */
 const ANSWER_BUDGET = 4_000_000;
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
 /** How long a server runs before the lifecycle log asks which process started it. */
 const PARENT_ASKED_AFTER_MS = 5_000;
 
@@ -486,12 +485,6 @@ const PARENT_ASKED_AFTER_MS = 5_000;
  * greeted. The two came up within a few seconds of each other downstream, in either order.
  */
 const EDITOR_SERVERS_START_MS = 20_000;
-
-/** [param variable] as a positive number of milliseconds, or [param fallback] when it is not one. */
-function waitFromEnv(variable: string, fallback: number): number {
-  const override = Number.parseInt(envValue(variable) ?? '', 10);
-  return Number.isInteger(override) && override > 0 ? override : fallback;
-}
 
 /**
  * How long a restart waits for a connected editor's greeting. It follows the socket by a frame, so
@@ -1876,7 +1869,7 @@ function isOfType(value: unknown, kind: unknown): boolean {
     case 'array':
       return Array.isArray(value);
     case 'object':
-      return typeof value === 'object' && value !== null && !Array.isArray(value);
+      return isRecord(value);
     default:
       return true;
   }
@@ -2812,7 +2805,7 @@ export function withUidsMissing(answer: ToolResponse, missing: readonly string[]
   const last = content.at(-1);
   try {
     const parsed: unknown = JSON.parse(last?.text ?? '');
-    if (last !== undefined && typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+    if (last !== undefined && isRecord(parsed)) {
       last.text = answerJson({
         ...parsed,
         uidsMissing: missing,
@@ -2835,7 +2828,7 @@ export function withPreviousCut(answer: ToolResponse, previous: CutTestRun): Too
   let json: Record<string, unknown> | null = null;
   try {
     const parsed: unknown = JSON.parse(last?.text ?? '');
-    json = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? { ...parsed } : null;
+    json = isRecord(parsed) ? { ...parsed } : null;
   } catch {
     // An answer that does not end in JSON carries the sentence alone.
   }
@@ -4138,7 +4131,7 @@ type ClassRebuild = { ok: true; listed: string[] } | { ok: false; outcome: Headl
 class GodotServer {
   private stdio: StdioServerHandle | null = null;
   private readonly locator = new GodotLocator();
-  private readonly operationsScript = join(__dirname, 'godot', 'operations', 'godot_operations.gd');
+  private readonly operationsScript = shippedOperationsScript();
   /** The options of each platform's presets, by engine and platform, read once in an editor. */
   private readonly exportOptionsRead = new Map<string, ExportOptions>();
   /** By project, the stale classes the last class cache rebuild left out, one per line. */
@@ -4355,7 +4348,7 @@ class GodotServer {
     // without waiting.
     if (process.platform === 'win32') {
       void ensureHelperCompiled(undefined, undefined, false);
-      void ensureProcessTable(undefined, false);
+      void ensureProcessTable(false);
     }
 
     // A bridge that cannot bind must not take the stdio server down with it: the tools that
@@ -4375,10 +4368,7 @@ class GodotServer {
       console.error(`[SERVER] Godot Editor Bridge started on ${bridgeStatus.host}:${bridgeStatus.port}`);
       this.announceTheBridge();
     } catch (bridgeError) {
-      const code =
-        bridgeError instanceof Error && 'code' in bridgeError && typeof bridgeError.code === 'string'
-          ? bridgeError.code
-          : null;
+      const code = errorCode(bridgeError) ?? null;
       const reason = errorMessage(bridgeError);
       this.bridgeStartupError = code && !reason.includes(code) ? `${code}: ${reason}` : reason;
       console.error(`[SERVER] Warning: Godot Editor Bridge failed to start: ${this.bridgeStartupError}`);
@@ -4949,7 +4939,7 @@ class GodotServer {
     }
     const small: Record<string, unknown> = {};
     const leftOut: string[] = [];
-    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+    if (isRecord(parsed)) {
       for (const [key, value] of Object.entries(parsed)) {
         if (JSON.stringify(value).length <= 2_000) {
           small[key] = value;
@@ -5051,7 +5041,7 @@ class GodotServer {
             `The project's gdharness addons are ${moved}, older than this ${SERVER_VERSION} server. ` +
             'Restarting the editor would load that older addon code again, and reconnecting would start ' +
             'this same server version again, so neither brings the two into step. Tell the ' +
-            `user, and offer to run  ${gdharnessCommand(SERVER_VERSION, this.ownProject === null ? 'upgrade' : `upgrade "${this.ownProject}"`)}  ` +
+            `user, and offer to run  ${runLine(currentRunner(), SERVER_VERSION, this.ownProject === null ? 'upgrade' : `upgrade "${this.ownProject}"`)}  ` +
             "in a shell, which replaces the addons with this server's. Ask first, since it changes " +
             'files in their project. editor_launch restart then loads them.',
         },
@@ -5317,7 +5307,7 @@ class GodotServer {
     if (tool !== 'editor_status' && this.godotBridge.isArriving()) {
       await this.waitForBridge(() => !this.godotBridge.isArriving(), Date.now() + greetingWaitMs());
     }
-    if (ENGINE_PASSES[tool]?.[op] !== undefined) {
+    if (ENGINE_PASSES[tool]?.includes(op) === true) {
       return op === 'reimport' ? await this.handleReimport(args) : await this.handleRefreshUids(args);
     }
     const settingsWrite =
@@ -11068,7 +11058,7 @@ class GodotServer {
     }
     if (!hasSuitesScene(projectPath)) {
       return refused(`The project has no ${SUITES_SCENE}, which the tests addon of this release ships.`, [
-        `Run  ${gdharnessCommand(SERVER_VERSION, `upgrade "${projectPath}"`)}  in a shell, which brings the addons into step with this server`,
+        `Run  ${runLine(currentRunner(), SERVER_VERSION, `upgrade "${projectPath}"`)}  in a shell, which brings the addons into step with this server`,
       ]);
     }
     const unusable = gdUnit4Unusable(projectPath);
@@ -16900,8 +16890,7 @@ class GodotServer {
 
   /** How long one runtime request may take. Ten seconds, unless the environment says otherwise. */
   private runtimeTimeoutMs(): number {
-    const override = Number.parseInt(envValue('GDHARNESS_RUNTIME_TIMEOUT_MS') ?? '', 10);
-    return Number.isInteger(override) && override > 0 ? override : 10000;
+    return waitFromEnv('GDHARNESS_RUNTIME_TIMEOUT_MS', 10_000);
   }
 
   /**

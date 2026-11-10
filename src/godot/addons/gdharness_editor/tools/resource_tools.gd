@@ -74,9 +74,10 @@ func _parse_properties_dict(raw: Variant) -> Dictionary:
 		return raw
 	if typeof(raw) == TYPE_STRING and raw != "":
 		var text: String = raw
-		var json: JSON = JSON.new()
-		if json.parse(text) == OK and typeof(json.data) == TYPE_DICTIONARY:
-			return json.data
+		var parsed: Variant = GdhRead.json_or_null(text)
+		if parsed is Dictionary:
+			var data: Dictionary = parsed
+			return data
 	return {}
 
 
@@ -852,9 +853,9 @@ func _noting_variation(answer: Dictionary) -> Dictionary:
 	if not close.is_empty():
 		answer["note"] += (
 			(
-				" If a class was meant, the nearest %s %s, and remove_theme_item with controlType "
+				" If a class was meant, the nearest %s, and remove_theme_item with controlType "
 				+ "%s takes this out."
 			)
-			% ["is" if close.size() == 1 else "are", ", ".join(close), type]
+			% [GdhRead.are_named(close), type]
 		)
 	return answer

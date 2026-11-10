@@ -86,12 +86,16 @@ export class Spent {
     this.last = { at: sample.at, machine: sample.machine, processor };
   }
 
-  /** Starts counting again from [param at]. The last reading becomes the start of the next stretch. */
+  /**
+   * Starts counting again from [param at]. The stretch up to the next reading counts by the clock,
+   * since the last reading's processor and machine seconds were taken before [param at] and would
+   * credit the new count with work done in the old one.
+   */
   restart(at: number): void {
     this.since = at;
     this.byClock = 0;
     this.byWork = 0;
-    this.last = { ...this.last, at: Math.max(this.last.at, at) };
+    this.last = { at: Math.max(this.last.at, at), machine: Number.NaN, processor: undefined };
   }
 
   /** Clock seconds from the start of the count to [param now]. */

@@ -8,6 +8,8 @@
  * it unreadable. Encoded only for what a command needs: nil, bool, int, float, string and array.
  */
 
+import { errorMessage } from './errors.js';
+
 /** A decoded value. Containers and the engine's own types keep enough shape to be told apart. */
 export type GodotValue =
   | null
@@ -74,7 +76,7 @@ class Reader {
   }
 
   private need(bytes: number): void {
-    if (bytes < 0 || bytes > this.remaining) {
+    if (bytes > this.remaining) {
       throw new RangeError(
         `a value runs past the end of its message (${bytes} bytes wanted, ${this.remaining} left)`,
       );
@@ -115,10 +117,23 @@ class Reader {
     return value.toString();
   }
 
+  /**
+   * A 32-bit real as the fewest digits that read back as the same float32. The engine prints 0.1 for
+   * the float it holds, and the double that float widens to has seventeen digits it never had.
+   */
   f32(): number {
     this.need(4);
     const value = this.view.getFloat32(this.offset, true);
     this.offset += 4;
+    if (!Number.isFinite(value) || value === 0) {
+      return value;
+    }
+    for (let digits = 1; digits < 9; digits += 1) {
+      const shorter = Number(value.toPrecision(digits));
+      if (Math.fround(shorter) === value) {
+        return shorter;
+      }
+    }
     return value;
   }
 
@@ -202,6 +217,12 @@ export function containerTypeOf(value: GodotValue): string | undefined {
   return value !== null && typeof value === 'object' ? CONTAINER_TYPES.get(value) : undefined;
 }
 
+/** [param array] as the packed array of [param type], which a bare list could not say it was. */
+function packed<Element extends GodotValue>(type: number, array: Element[]): Element[] {
+  CONTAINER_TYPES.set(array, TYPE_NAMES[type] ?? String(type));
+  return array;
+}
+
 /**
  * The element type a container's header names, or null for none. The debugger sends objects as
  * ids, so an element of any class is named as the class of the id (core/io/marshalls.cpp).
@@ -246,10 +267,13 @@ function decodeValue(reader: Reader, depth: number, how: Decoding = { faithful: 
   const vectorWidth = PACKED_VECTORS[type];
   if (vectorWidth !== undefined) {
     const count = reader.u32();
-    return Array.from({ length: count }, () => ({
-      kind: 'Vector',
-      values: Array.from({ length: vectorWidth }, () => reader.real(wide)),
-    }));
+    return packed(
+      type,
+      Array.from({ length: count }, () => ({
+        kind: `Vector${vectorWidth}`,
+        values: Array.from({ length: vectorWidth }, () => reader.real(wide)),
+      })),
+    );
   }
   switch (type) {
     case NIL:
@@ -327,24 +351,42 @@ function decodeValue(reader: Reader, depth: number, how: Decoding = { faithful: 
       const count = reader.u32();
       const bytes = [...reader.bytes(count)];
       reader.bytes((4 - (count % 4)) % 4);
-      return bytes;
+      return packed(type, bytes);
     }
     case 30:
-      return Array.from({ length: reader.u32() }, () => reader.i32());
+      return packed(
+        type,
+        Array.from({ length: reader.u32() }, () => reader.i32()),
+      );
     case 31:
-      return Array.from({ length: reader.u32() }, () => reader.i64());
+      return packed(
+        type,
+        Array.from({ length: reader.u32() }, () => reader.i64()),
+      );
     case 32:
-      return Array.from({ length: reader.u32() }, () => reader.f32());
+      return packed(
+        type,
+        Array.from({ length: reader.u32() }, () => reader.f32()),
+      );
     case 33:
-      return Array.from({ length: reader.u32() }, () => reader.f64());
+      return packed(
+        type,
+        Array.from({ length: reader.u32() }, () => reader.f64()),
+      );
     case 34:
       // Each element's length counts a trailing NUL, unlike a plain string's.
-      return Array.from({ length: reader.u32() }, () => reader.string().replace(/\0$/, ''));
+      return packed(
+        type,
+        Array.from({ length: reader.u32() }, () => reader.string().replace(/\0$/, '')),
+      );
     case 37:
-      return Array.from({ length: reader.u32() }, () => ({
-        kind: 'Color',
-        values: [reader.f32(), reader.f32(), reader.f32(), reader.f32()],
-      }));
+      return packed(
+        type,
+        Array.from({ length: reader.u32() }, () => ({
+          kind: 'Color',
+          values: [reader.f32(), reader.f32(), reader.f32(), reader.f32()],
+        })),
+      );
     default:
       throw new RangeError(`a value of type ${type}, which Godot 4.7 does not have`);
   }
@@ -378,11 +420,13 @@ function encodeInto(out: number[], value: SentValue): void {
     pushU32(out, value ? 1 : 0);
   } else if (typeof value === 'number') {
     const view = new DataView(new ArrayBuffer(8));
-    if (Number.isInteger(value) && value >= -0x80000000 && value <= 0x7fffffff) {
+    // A negative zero and a whole number past 64 bits are floats: an INT would send another number.
+    const whole = Number.isInteger(value) && !Object.is(value, -0);
+    if (whole && value >= -0x80000000 && value <= 0x7fffffff) {
       pushU32(out, INT);
       view.setInt32(0, value, true);
       out.push(...new Uint8Array(view.buffer, 0, 4));
-    } else if (Number.isInteger(value)) {
+    } else if (whole && value >= -(2 ** 63) && value < 2 ** 63) {
       pushU32(out, INT | FLAG_64);
       view.setBigInt64(0, BigInt(value), true);
       out.push(...new Uint8Array(view.buffer));
@@ -442,8 +486,13 @@ const MOST_MESSAGE_BYTES = (8 << 20) + 4;
  */
 export class DebuggerStream {
   private pending = new Uint8Array(0);
+  /** Why the stream is out of step. Raised on the push after the one that met it, so that push's messages are not lost. */
+  private lost: string | null = null;
 
   push(chunk: Uint8Array): DebuggerMessage[] {
+    if (this.lost !== null) {
+      throw new RangeError(this.lost);
+    }
     const joined = new Uint8Array(this.pending.length + chunk.length);
     joined.set(this.pending, 0);
     joined.set(chunk, this.pending.length);
@@ -452,7 +501,9 @@ export class DebuggerStream {
     while (joined.length - at >= 4) {
       const length = new DataView(joined.buffer, joined.byteOffset + at, 4).getUint32(0, true);
       if (length > MOST_MESSAGE_BYTES) {
-        throw new RangeError(`a message of ${length} bytes, more than the engine sends`);
+        this.lost = `a message of ${length} bytes, more than the engine sends`;
+        this.pending = new Uint8Array(0);
+        return out;
       }
       if (joined.length - at - 4 < length) {
         break;
@@ -476,7 +527,7 @@ function readMessage(body: Uint8Array): DebuggerMessage {
   try {
     value = decodeVariant(body);
   } catch (error) {
-    return { unreadable: error instanceof Error ? error.message : String(error) };
+    return { unreadable: errorMessage(error) };
   }
   if (!Array.isArray(value) || value.length !== 3) {
     return { unreadable: 'a message that is not [message, thread, data]' };

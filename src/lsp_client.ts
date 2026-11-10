@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { answerJson } from './answer-json.js';
 import { Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
-import { envValue } from './launch.js';
+import { waitFromEnv } from './launch.js';
 import { isSameDirectory, isWithinRoot, resolveWithinProject } from './paths.js';
 import { portFromEnv } from './ports.js';
 import { isRecord } from './records.js';
@@ -51,8 +51,7 @@ const REFERENCES_TIMEOUT_MS = 180_000;
  * A project whose language server reads for longer sets GDHARNESS_LSP_INITIALIZE_TIMEOUT_MS.
  */
 function initializeTimeoutMs(): number {
-  const override = Number.parseInt(envValue('GDHARNESS_LSP_INITIALIZE_TIMEOUT_MS') ?? '', 10);
-  return Number.isInteger(override) && override > 0 ? override : 180_000;
+  return waitFromEnv('GDHARNESS_LSP_INITIALIZE_TIMEOUT_MS', 180_000);
 }
 
 /**

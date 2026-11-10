@@ -4,9 +4,10 @@
  */
 
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { basename, extname, join, relative, sep } from 'node:path';
+import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { errorMessage } from './errors.js';
 import { bytesOf, entriesOf } from './listed-reads.js';
+import { relativeWithin } from './paths.js';
 import { uidCacheEntries } from './uid-cache.js';
 
 /** Directories that are never part of a project's own files, and are not spelled with a dot. */
@@ -15,6 +16,11 @@ const SKIPPED = new Set(['node_modules']);
 /** Whether this entry is one both walks here step over, so that they cannot disagree. */
 function skipped(name: string): boolean {
   return name.startsWith('.') || SKIPPED.has(name);
+}
+
+/** The extension of a file name without its dot, lower case, empty for a name with none such as `gd`. */
+function extensionOf(name: string): string {
+  return extname(name).slice(1).toLowerCase();
 }
 
 /** Written into each addon gdharness installs, so it can be told from one the project wrote. */
@@ -42,7 +48,8 @@ function gdignored(directory: string): boolean {
   return existsSync(join(directory, '.gdignore'));
 }
 
-function installedByUs(directory: string): boolean {
+/** Whether gdharness installed the addon in [param directory], which it marks with its version. */
+export function installedByUs(directory: string): boolean {
   return existsSync(join(directory, VERSION_MARKER));
 }
 
@@ -107,7 +114,7 @@ export function projectStructure(projectPath: string): ProjectStructure {
       if (entry.isDirectory()) {
         visit(join(directory, entry.name));
       } else if (entry.isFile()) {
-        const extension = entry.name.split('.').pop()?.toLowerCase() ?? '';
+        const extension = extensionOf(entry.name);
         if (SIDECAR_EXTENSIONS.has(extension)) {
           continue;
         }
@@ -248,7 +255,7 @@ export function scriptsWithoutUid(projectPath: string): string[] {
       if (!entry.isFile()) {
         continue;
       }
-      const extension = entry.name.split('.').pop()?.toLowerCase() ?? '';
+      const extension = extensionOf(entry.name);
       if (CARRIES_A_UID.has(extension) && !existsSync(join(directory, `${entry.name}.uid`))) {
         found.push(spelled);
       }
@@ -418,7 +425,7 @@ export function projectTexts(projectPath: string): ProjectText[] {
         visit(absolute, `${spelled}/`);
         continue;
       }
-      const extension = entry.name.includes('.') ? (entry.name.split('.').pop()?.toLowerCase() ?? '') : '';
+      const extension = extensionOf(entry.name);
       if (!entry.isFile() || BINARY_EXTENSIONS.has(extension)) {
         continue;
       }
@@ -454,7 +461,7 @@ export function ignoredTexts(projectPath: string): ProjectText[] {
         visit(absolute, `${spelled}/`, under);
         continue;
       }
-      const extension = entry.name.includes('.') ? (entry.name.split('.').pop()?.toLowerCase() ?? '') : '';
+      const extension = extensionOf(entry.name);
       if (!under || !entry.isFile() || BINARY_EXTENSIONS.has(extension) || entry.name === '.gdignore') {
         continue;
       }
@@ -511,8 +518,47 @@ function compiledQuery(query: string, caseSensitive: boolean): RegExp {
   }
 }
 
+/** Whether two paths name one file or folder, by its identity on disk rather than its spelling. */
+function sameEntry(one: string, other: string): boolean {
+  try {
+    const first = statSync(one, { bigint: true });
+    const second = statSync(other, { bigint: true });
+    return first.ino === second.ino && first.dev === second.dev;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The steps from [param projectPath] down to [param place], or null when it is not below it.
+ *
+ * Taken from the two paths rather than by cutting a length off the front, so a project path written
+ * with a trailing separator, in the other slash or with `..` in it names the same files. Where the
+ * paths disagree, the folders are compared by identity: a macOS temporary folder is reached as
+ * `/var` and as `/private/var`, and its file system takes `T` and `t` for one folder.
+ */
+function stepsBelow(projectPath: string, place: string): string[] | null {
+  const inside = relativeWithin(projectPath, place);
+  if (inside !== null) {
+    return inside === '' ? [] : inside.split('/');
+  }
+  const steps: string[] = [];
+  for (let at = resolve(place); !sameEntry(at, projectPath); at = dirname(at)) {
+    if (dirname(at) === at) {
+      return null;
+    }
+    steps.unshift(basename(at));
+  }
+  return steps;
+}
+
 /** Where the query occurs in the project's text files, as res:// paths with line numbers. */
 export function searchProject(projectPath: string, options: SearchOptions): SearchResult {
+  if (options.query === '') {
+    throw new Error(
+      'The query is empty, and an empty query matches every line of every file. Give the text to find.',
+    );
+  }
   const extensions =
     options.fileTypes === undefined
       ? null
@@ -533,9 +579,15 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
   // The extensions the walk met, for a search whose fileTypes matched none of them: answered as an
   // empty search, it read as a project where nothing held the query.
   const met = new Set<string>();
+  const within = options.within ?? projectPath;
+  // Everything the walk meets is below where it starts, spelt as that is, so only the start is
+  // measured against the project.
+  const start = stepsBelow(projectPath, within) ?? relative(projectPath, within).split(sep);
+  const resPathOf = (place: string): string =>
+    [...start, ...relative(within, place).split(sep)].filter((step) => step !== '').join('/');
 
   const searchFile = (entryPath: string, name: string): void => {
-    const extension = name.includes('.') ? (name.split('.').pop()?.toLowerCase() ?? '') : '';
+    const extension = extensionOf(name);
     if (extension !== '') {
       met.add(extension);
     }
@@ -579,18 +631,19 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
       result.summary.files_with_matches += 1;
     }
     if (matches.length > 0) {
-      const relativePath = entryPath.slice(projectPath.length + 1).replace(/\\/g, '/');
-      result.results.push({ file: `res://${relativePath}`, matches });
+      result.results.push({ file: `res://${resPathOf(entryPath)}`, matches });
     }
   };
   const visit = (directory: string, named = false): void => {
     if (!named && steppedOver(directory)) {
       if (gdignored(directory)) {
-        notSearched.push(`res://${directory.slice(projectPath.length + 1).replace(/\\/g, '/')}/`);
+        notSearched.push(`res://${resPathOf(directory)}/`);
       }
       return;
     }
-    for (const entry of entriesOf(directory)) {
+    // By name, so the matches a search cut at its limit shows are the same on every file system
+    // rather than whichever the directory lists first.
+    for (const entry of entriesOf(directory).toSorted((a, b) => (a.name < b.name ? -1 : 1))) {
       if (skipped(entry.name)) {
         continue;
       }
@@ -602,7 +655,6 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
       }
     }
   };
-  const within = options.within ?? projectPath;
   if (statSync(within).isDirectory()) {
     visit(within, true);
   } else {

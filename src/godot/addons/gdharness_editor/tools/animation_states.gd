@@ -188,17 +188,14 @@ static func _no_state(sm: AnimationNodeStateMachine, state_name: String) -> Stri
 		var _listed: bool = states.append(str(state))
 	var close: PackedStringArray = GdhRead.nearest(state_name, states)
 	if not close.is_empty():
-		return (
-			"%s. The nearest it has %s %s."
-			% [said, "is" if close.size() == 1 else "are", ", ".join(close)]
-		)
+		return "%s. The nearest it has %s." % [said, GdhRead.are_named(close)]
 	return "%s. Its states are %s." % [said, ", ".join(states)]
 
 
 ## The state machine [param args] names, as [scene, machine, files, refusal, tree]: the machine is
 ## null and the refusal says why when the scene, the tree or the machine is not there.
 func _machine_at(args: Dictionary) -> Array:
-	var scene_path: String = GdhSceneFile.res_path("", str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var anim_tree_path: String = str(args.get("animTreePath", ""))
 	if scene_path.strip_edges() == "res://":
 		return [null, null, {}, { "ok": false, "error": "Missing scenePath" }]

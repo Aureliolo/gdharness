@@ -12,6 +12,7 @@ import { delimiter, join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type RawData, WebSocket } from 'ws';
+import { currentRunner, runLine } from '../src/runner.js';
 import { RUNTIME_PROTOCOL } from '../src/runtime-client.js';
 import { SERVER_VERSION } from '../src/server-version.js';
 import { shippedRuntimeDigest } from '../src/setup.js';
@@ -819,7 +820,9 @@ async function main(): Promise<void> {
       assert.match(staleNote, /running the 1\.1\.20 runtime addon, while this server ships/, staleNote);
       // The fixture project holds no addons, so it is sent to upgrade rather than to a restart.
       assert.ok(
-        staleNote.includes(`run  npx -y gdharness@${SERVER_VERSION} upgrade "${projectPath}"  in a shell`),
+        staleNote.includes(
+          `run  ${runLine(currentRunner(), SERVER_VERSION, `upgrade "${projectPath}"`)}  in a shell`,
+        ),
         staleNote,
       );
       const refused = textOf(await call('runtime_inspect', {})) ?? '';

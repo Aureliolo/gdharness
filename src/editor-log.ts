@@ -33,8 +33,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { COLOUR_CODE, GameLog, type LogEntry, type Severity } from './game-log.js';
-import { asParams, readNumber, readString } from './tool-args.js';
+import { CONTROL_SEQUENCE, GameLog, type LogEntry, type Severity } from './game-log.js';
+import { asParams, readNumber } from './tool-args.js';
 
 /** Where the editor of [param projectPath] writes its console, beside the other notes gdharness keeps. */
 export function editorLogPath(projectPath: string): string {
@@ -55,7 +55,6 @@ function editorLogNotePath(projectPath: string): string {
  */
 export interface EditorLogNote {
   readonly pid: number;
-  readonly startedAt: string;
   /**
    * When the process began, as the platform says, which is what tells the editor from a later
    * process given its pid once it has gone. Absent while it is being asked, and when the platform
@@ -68,10 +67,9 @@ export function readEditorLogNote(projectPath: string): EditorLogNote | null {
   try {
     const fields = asParams(JSON.parse(readFileSync(editorLogNotePath(projectPath), 'utf8')));
     const pid = readNumber(fields, 'pid');
-    const startedAt = readString(fields, 'startedAt');
     const processStartedAt = readNumber(fields, 'processStartedAt');
-    return pid !== undefined && Number.isInteger(pid) && pid > 0 && startedAt !== undefined
-      ? { pid, startedAt, ...(processStartedAt === undefined ? {} : { processStartedAt }) }
+    return pid !== undefined && Number.isInteger(pid) && pid > 0
+      ? { pid, ...(processStartedAt === undefined ? {} : { processStartedAt }) }
       : null;
   } catch {
     return null;
@@ -108,7 +106,6 @@ export function writeEditorLogNote(projectPath: string, pid: number, processStar
       JSON.stringify(
         {
           pid,
-          startedAt: new Date().toISOString(),
           ...(processStartedAt === undefined ? {} : { processStartedAt }),
         },
         null,
@@ -182,10 +179,10 @@ export function editorConsole(
     return { kind: 'not written' };
   }
   const log = new GameLog();
-  const { text, of } = theFirstOf(path);
+  const { text, bytes, of } = theFirstOf(path);
   log.append('transcript', foldProgress(withoutLooksElsewhere(text)));
   log.finish();
-  return { log, path, ...(of === undefined ? {} : { readBytes: text.length, of }) };
+  return { log, path, ...(of === undefined ? {} : { readBytes: bytes, of }) };
 }
 
 /**
@@ -234,7 +231,7 @@ function foldProgress(text: string): string {
   const open = new Map<string, Task>();
   for (const raw of text.split('\n')) {
     // The engine colours the task name on its standard output, and the bar is the same line under it.
-    const line = raw.replace(/\r$/, '').replace(COLOUR_CODE, '');
+    const line = raw.replace(/\r$/, '').replace(CONTROL_SEQUENCE, '');
     const step = PROGRESS_STEP.exec(line);
     if (step !== null) {
       const [, percent = '', name = '', said = ''] = step;
@@ -287,20 +284,22 @@ function foldProgress(text: string): string {
  */
 const MOST_CONSOLE_BYTES = 8 * 1024 * 1024;
 
-function theFirstOf(path: string): { text: string; of?: number } {
+function theFirstOf(path: string): { text: string; bytes: number; of?: number } {
   const whole = statSync(path).size;
-  if (whole <= MOST_CONSOLE_BYTES) {
-    return { text: readFileSync(path, 'utf8') };
-  }
   const handle = openSync(path, 'r');
   try {
-    const buffer = Buffer.alloc(MOST_CONSOLE_BYTES);
-    const read = readSync(handle, buffer, 0, MOST_CONSOLE_BYTES, 0);
+    const buffer = Buffer.alloc(Math.min(whole, MOST_CONSOLE_BYTES));
+    const read = readSync(handle, buffer, 0, buffer.length, 0);
     // To the last newline, so the answer does not end on half a line that would be parsed as a
-    // whole one and reported as something the editor never printed.
-    const decoded = buffer.subarray(0, read).toString('utf8');
-    const lastLine = decoded.lastIndexOf('\n');
-    return { text: lastLine === -1 ? decoded : decoded.slice(0, lastLine + 1), of: whole };
+    // whole one and reported as something the editor never printed. An editor still writing
+    // leaves one under the cap as much as past it.
+    const lastLine = buffer.subarray(0, read).lastIndexOf(0x0a);
+    const kept = buffer.subarray(0, lastLine === -1 ? read : lastLine + 1);
+    return {
+      text: kept.toString('utf8'),
+      bytes: kept.length,
+      ...(whole > MOST_CONSOLE_BYTES ? { of: whole } : {}),
+    };
   } finally {
     closeSync(handle);
   }
@@ -352,6 +351,11 @@ const WALK_BACK_LIMIT = 500;
  */
 const SLOTS = [/"[^"]*"/g, /'[^']*'/g, /\b(?:res|user):\/\/\S+/g, /(?<=\.gd|\.tscn|\.cs):\d+(?::\d+)?/g];
 
+/** Text kept in a shape as written, with the placeholder's own character escaped so it stays apart. */
+function literal(text: string): string {
+  return text.replace(/[\\…]/g, '\\$&');
+}
+
 /**
  * The shape of [param text], and the values that were taken out of it, left to right.
  *
@@ -383,18 +387,10 @@ export function shapeOf(text: string): { shape: string; values: string[] } {
       }
     }
     if (earliest === null) {
-      shape += text.slice(at);
+      shape += literal(text.slice(at));
       break;
     }
-    // Every pattern above needs at least two characters, so this cannot be reached today. It is
-    // here because a pattern that can match nothing would leave the cursor where it is, and the
-    // loop would spin inside the server rather than answer wrongly.
-    if (earliest.value.length === 0) {
-      shape += text.slice(at, at + 1);
-      at += 1;
-      continue;
-    }
-    shape += `${text.slice(at, earliest.index)}…`;
+    shape += `${literal(text.slice(at, earliest.index))}…`;
     values.push(earliest.value);
     at = earliest.index + earliest.value.length;
   }
@@ -473,7 +469,7 @@ function slotsOf(values: readonly (readonly string[])[], count: number): readonl
     const seen = distinct[at] ?? [];
     const partner = theSlotItMovesWith(values, distinct, at);
     const paired = partner === undefined ? {} : { movesWith: partner };
-    if (seen.length === count && count > 1) {
+    if (seen.length === count) {
       slots.push({ distinct: seen.length, allDifferent: true, ...paired });
       continue;
     }

@@ -1,8 +1,9 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { errorMessage } from './errors.js';
 import { startTimesOf } from './process-children.js';
 import { isRecord } from './records.js';
+import { writeWhole } from './whole-file.js';
 
 /**
  * Where this server says its editor bridge is, so an editor can find it without anybody having
@@ -78,10 +79,10 @@ export interface AnnouncedServer {
  * platforms give the start to the second and the announcement carries milliseconds.
  */
 export function serverBehind(
-  announcement: BridgeAnnouncement | null,
+  announcement: BridgeAnnouncement,
   startedAt: number | undefined,
 ): AnnouncedServer | null {
-  if (announcement === null || startedAt === undefined) {
+  if (startedAt === undefined) {
     return null;
   }
   const announcedAt = Date.parse(announcement.startedAt);
@@ -131,7 +132,10 @@ export function announceBridge(
       version: bridge.version,
       startedAt: new Date().toISOString(),
     };
-    writeFileSync(path, `${JSON.stringify(announcement, null, 2)}\n`, 'utf8');
+    if (!writeWhole(path, `${JSON.stringify(announcement, null, 2)}\n`)) {
+      console.error(`[SERVER] Could not announce the editor bridge at ${path}.`);
+      return null;
+    }
     return path;
   } catch (error) {
     console.error(`[SERVER] Could not announce the editor bridge at ${path}: ${errorMessage(error)}`);

@@ -7,9 +7,10 @@
  * it had run, and the only remedy was to run them all again. In the project rather than in this
  * process, because the client that cut the call may restart the server before it asks again.
  */
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { isRecord, isStringList } from './records.js';
+import { writeWhole } from './whole-file.js';
 
 /** A suite that finished with cases that did not pass, and which ones. */
 interface FailingSuite {
@@ -37,7 +38,7 @@ export function keepCutTestRun(projectPath: string, run: CutTestRun): void {
   const path = keptAt(projectPath);
   try {
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, `${JSON.stringify(run, null, 2)}\n`, 'utf8');
+    writeWhole(path, `${JSON.stringify(run, null, 2)}\n`);
   } catch {
     // A project that cannot be written to keeps nothing, and the call it was for has no reader.
   }

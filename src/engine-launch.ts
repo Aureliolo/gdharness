@@ -10,7 +10,6 @@ import {
   fstatSync,
   openSync,
   readdirSync,
-  readFileSync,
   readSync,
   rmSync,
   statSync,
@@ -18,7 +17,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { availableParallelism, freemem, totalmem } from 'node:os';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import process from 'node:process';
 import type { Readable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -29,15 +28,17 @@ import {
   HIDDEN_DESKTOP,
   helperExit,
   helperFailure,
+  helperPid,
   helperStep,
   throughHelper,
 } from './desktop.js';
 import { diedAsItStarted, startedUntilItRuns } from './engine-run.js';
 import { nameSlotEngineOf, onTheSlot } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
-import { errorCode, Refusal } from './errors.js';
+import { errorCode, errorMessage, Refusal } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
 import { LOG_LIMIT_BYTES, readLog } from './log-read.js';
+import { relativeWithin } from './paths.js';
 import { keepPipelineCache, seedPipelineCache } from './pipeline-cache.js';
 import { belowNormal } from './priority.js';
 import { askProcessTable } from './process-table.js';
@@ -51,11 +52,6 @@ export class EngineUsageError extends Refusal {}
 export const MOST_ENGINES = 4;
 /** The least time an engine may print nothing before it is ended. */
 export const SILENCE_FLOOR_SECONDS = 300;
-/**
- * A terminal control sequence. gdUnit4 opens its output by clearing the screen, which printed as it
- * stands would wipe the lines the run had printed before it.
- */
-export const CONTROL_SEQUENCE = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;?]*[A-Za-z]`, 'g');
 
 /** The least exit code that is a Windows exception status, such as 0xC0000005, read unsigned. */
 const WINDOWS_EXCEPTION = 0xc0000000;
@@ -139,11 +135,11 @@ export function resPathOf(entry: string, projectPath: string, cwd: string): stri
   const fromHere = resolve(cwd, file);
   const absolute =
     isAbsolute(file) || (!existsSync(fromProject) && existsSync(fromHere)) ? fromHere : fromProject;
-  const inside = relative(projectPath, absolute);
-  if (inside.startsWith('..') || isAbsolute(inside)) {
+  const inside = relativeWithin(projectPath, absolute);
+  if (inside === null) {
     throw new EngineUsageError(`${entry} is not inside the project at ${projectPath}.`);
   }
-  const path = `res://${inside.split(sep).join('/')}`;
+  const path = `res://${inside}`;
   return caseAt === null ? path : `${path}:${caseAt[2] ?? ''}`;
 }
 
@@ -286,7 +282,7 @@ export async function windowsCommitLeft(): Promise<number | string | null> {
     const bytes = Number(said.trim());
     return Number.isFinite(bytes) && bytes > 0 ? bytes : `it answered ${JSON.stringify(said.trim())}`;
   } catch (error) {
-    return error instanceof Error ? error.message : String(error);
+    return errorMessage(error);
   }
 }
 
@@ -519,12 +515,7 @@ async function engineWatchedOnce(
     if (helper === null) {
       return child.pid;
     }
-    try {
-      const pid = Number(readFileSync(helper.pid, 'utf8').trim());
-      return Number.isInteger(pid) && pid > 0 ? pid : undefined;
-    } catch {
-      return undefined;
-    }
+    return helperPid(helper.pid);
   };
   // Named in the lock as well, since the lock names this process, and what the engine starts runs on
   // its slot only when the lock names the engine.

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
+import { errorMessage } from './errors.js';
 
 /**
  * Giving back a scratch directory, without letting that decide the call that made it.
@@ -49,6 +50,9 @@ export type ScratchKind =
   | 'editor-capture'
   | 'export'
   | 'import'
+  | 'keeper'
+  | 'keeper-exit'
+  | 'keeper-stop'
   | 'params'
   | 'runtime-screenshot'
   | 'script-docs'
@@ -60,6 +64,9 @@ const KINDS: readonly ScratchKind[] = [
   'editor-capture',
   'export',
   'import',
+  'keeper',
+  'keeper-exit',
+  'keeper-stop',
   'params',
   'runtime-screenshot',
   'script-docs',
@@ -122,7 +129,7 @@ export function discardWith(
     try {
       removePath(path);
     } catch (error) {
-      left.push({ path, reason: error instanceof Error ? error.message : String(error) });
+      left.push({ path, reason: errorMessage(error) });
     }
   }
   return left;

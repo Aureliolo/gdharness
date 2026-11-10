@@ -9,7 +9,7 @@
 import assert from 'node:assert/strict';
 import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 
 import { godotCandidates, scanDirectoryForGodotBinaries } from '../src/detection.js';
 import { sweep } from './support/sweep.js';
@@ -87,6 +87,94 @@ function testNewestFirstOrdering() {
   }
 }
 
+/** Writes the files with the first newest, so the expected list is the order given. */
+function layDown(dir: string, names: readonly string[]) {
+  names.forEach((name, index) => {
+    const path = join(dir, name);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, '');
+    const at = new Date(Date.now() - (index + 1) * 60_000);
+    utimesSync(path, at, at);
+  });
+}
+
+function testOnlyEnginesAreListedNotInstallersTemplatesOrArchives() {
+  const dir = mkdtempSync(join(tmpdir(), 'gdharness-detect-only-'));
+  try {
+    layDown(dir, [
+      'godot-export-templates-installer.exe',
+      'GodotSteamSetup.exe',
+      'Godots.exe',
+      'Godot_v4.4.1-stable_win64_console.exe',
+      'Godot_v4.4.1-stable_win64.exe',
+      'Godot_v4.3-stable_mono_win64.exe',
+      'godot4.exe',
+      'Godot_v4.4.1-stable_export_templates.tpz',
+      'godot-4.4.1-stable.tar.xz',
+      'godot-build.sh',
+      'godot.png',
+      'Godot_v4.4.1-stable_linux.x86_64',
+    ]);
+    assert.deepEqual(
+      scanDirectoryForGodotBinaries(dir, 'win32').map((path) => basename(path)),
+      ['Godot_v4.4.1-stable_win64.exe', 'Godot_v4.3-stable_mono_win64.exe', 'godot4.exe'],
+      'win32 lists the engines only, and the plain program stands in for its console wrapper',
+    );
+    assert.deepEqual(
+      scanDirectoryForGodotBinaries(dir, 'linux').map((path) => basename(path)),
+      ['Godot_v4.4.1-stable_linux.x86_64'],
+      'linux lists the engine, not the archive, the template pack, the script or the picture',
+    );
+  } finally {
+    sweep(dir);
+  }
+}
+
+function testAConsoleWrapperIsListedOnlyWhenThePlainProgramIsMissing() {
+  const dir = mkdtempSync(join(tmpdir(), 'gdharness-detect-console-'));
+  try {
+    layDown(dir, ['Godot_v4.7.2-stable_win64_console.exe', 'Godot_v4.7.2-stable_win64.exe']);
+    assert.deepEqual(
+      scanDirectoryForGodotBinaries(dir, 'win32').map((path) => basename(path)),
+      ['Godot_v4.7.2-stable_win64.exe'],
+      'the newer wrapper does not come first',
+    );
+    const alone = mkdtempSync(join(tmpdir(), 'gdharness-detect-console-alone-'));
+    try {
+      layDown(alone, ['Godot_v4.7.2-stable_win64_console.exe', 'Godot_v4.6-stable_win64_console.exe']);
+      assert.deepEqual(
+        scanDirectoryForGodotBinaries(alone, 'win32').map((path) => basename(path)),
+        ['Godot_v4.7.2-stable_win64_console.exe', 'Godot_v4.6-stable_win64_console.exe'],
+        'and is kept when it is all there is',
+      );
+    } finally {
+      sweep(alone);
+    }
+  } finally {
+    sweep(dir);
+  }
+}
+
+function testMacAppBundlesAreFoundByTheirProgram() {
+  const dir = mkdtempSync(join(tmpdir(), 'gdharness-detect-mac-'));
+  try {
+    layDown(dir, [
+      'Godot_mono.app/Contents/MacOS/Godot',
+      'Godot_v4.4.1.app/Contents/MacOS/Godot',
+      'Godot_empty.app/Contents/Resources/x',
+    ]);
+    assert.deepEqual(
+      scanDirectoryForGodotBinaries(dir, 'darwin')
+        .map((path) => relative(dir, path).replaceAll('\\', '/'))
+        .toSorted(),
+      ['Godot_mono.app/Contents/MacOS/Godot', 'Godot_v4.4.1.app/Contents/MacOS/Godot'],
+      'a bundle with a program is listed by the program, one without is not',
+    );
+  } finally {
+    sweep(dir);
+  }
+}
+
 function testIgnoresDirectoriesMatchingPattern() {
   const dir = mkdtempSync(join(tmpdir(), 'gdharness-detect-dir-'));
   try {
@@ -124,7 +212,7 @@ function testDownloadsAreTriedAfterTheConventionalPaths() {
       },
       darwin: {
         directory: 'Applications',
-        binary: 'Godot_v4.4.1-stable_macos.universal',
+        binary: 'Godot_mono.app',
         named: `${home}/Applications/Godot.app/Contents/MacOS/Godot`,
       },
     } as const;
@@ -133,7 +221,13 @@ function testDownloadsAreTriedAfterTheConventionalPaths() {
     const host = hosts[platform];
 
     mkdirSync(join(home, host.directory));
-    writeFileSync(join(home, host.directory, host.binary), '');
+    // A Mac download is an app bundle, and the engine in it is the program under Contents/MacOS.
+    const executable =
+      platform === 'darwin'
+        ? join(home, host.directory, host.binary, 'Contents', 'MacOS', 'Godot')
+        : join(home, host.directory, host.binary);
+    mkdirSync(dirname(executable), { recursive: true });
+    writeFileSync(executable, '');
     writeFileSync(join(home, host.directory, `${host.binary}.zip`), '');
     writeFileSync(
       join(home, host.directory, platform === 'win32' ? 'godot_linux.x86_64' : 'Godot_win64.exe'),
@@ -141,7 +235,7 @@ function testDownloadsAreTriedAfterTheConventionalPaths() {
     );
 
     const candidates = godotCandidates(platform, home);
-    const downloaded = candidates.indexOf(join(home, host.directory, host.binary));
+    const downloaded = candidates.indexOf(executable);
     assert.ok(downloaded !== -1, `the download should be a candidate: ${candidates.join(', ')}`);
     assert.equal(candidates[0], 'godot', 'PATH is asked first');
     assert.ok(candidates.indexOf(host.named) < downloaded, 'named paths come before the scan');
@@ -178,6 +272,9 @@ function main() {
   testDetectsVersionedWindowsBinaries();
   testDetectsVersionedLinuxBinaries();
   testNewestFirstOrdering();
+  testOnlyEnginesAreListedNotInstallersTemplatesOrArchives();
+  testAConsoleWrapperIsListedOnlyWhenThePlainProgramIsMissing();
+  testMacAppBundlesAreFoundByTheirProgram();
   testIgnoresDirectoriesMatchingPattern();
   testDownloadsAreTriedAfterTheConventionalPaths();
   testNoHomeMeansNoHomeCandidates();

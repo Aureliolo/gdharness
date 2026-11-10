@@ -9,6 +9,7 @@ import {
 } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { errorMessage } from './errors.js';
 
 /**
  * A project's uid cache, `.godot/uid_cache.bin`, set right before an engine starts on it: an entry
@@ -194,6 +195,30 @@ function declaringFiles(projectPath: string, wanted: ReadonlySet<bigint>): Map<b
 }
 
 /**
+ * The `res://` path of the file declaring each `uid://` text of [param texts], by the same walk the
+ * cache mend uses. A text no file declares, or that is not a uid, has no entry.
+ */
+export function uidTargets(projectPath: string, texts: readonly string[]): Map<string, string> {
+  const ids = new Map<bigint, string[]>();
+  for (const text of texts) {
+    const id = uidOfText(text);
+    if (id !== null) {
+      ids.set(id, [...(ids.get(id) ?? []), text]);
+    }
+  }
+  const targets = new Map<string, string>();
+  if (ids.size === 0) {
+    return targets;
+  }
+  for (const [id, path] of declaringFiles(projectPath, new Set(ids.keys()))) {
+    for (const text of ids.get(id) ?? []) {
+      targets.set(text, path);
+    }
+  }
+  return targets;
+}
+
+/**
  * Sets [param projectPath]'s cache right and answers what changed. A sound cache, a missing one or
  * one not in Godot's form is left byte for byte. The new cache is written beside the old and renamed
  * over it, so an engine never reads half of one.
@@ -279,7 +304,7 @@ export function mendBeforeStart(args: readonly string[], cwd: string | URL | und
       process.stderr.write(`uid cache: dropped what names a file gone from ${where}: ${named}\n`);
     }
   } catch (error) {
-    const said = error instanceof Error ? error.message : String(error);
+    const said = errorMessage(error);
     process.stderr.write(`uid cache: could not rewrite ${where}, which names files gone: ${said}\n`);
   }
 }

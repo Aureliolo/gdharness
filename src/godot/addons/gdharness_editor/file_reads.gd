@@ -18,6 +18,10 @@ const EXT_RESOURCE: String = "^\\[ext_resource [^\\]]*\\]"
 const NODE_HEADING: String = "^\\[node [^\\]]*\\]"
 const INSTANCE: String = 'instance=ExtResource\\(\\s*"([^"]+)"\\s*\\)'
 
+## Built at first use, since the editor plugin calls this before the script's static
+## initialisers have run.
+static var _unique_id_pattern: RegEx = null
+
 
 ## The nodes of [param scene_path] as {name, type, path, children}, with instanceOf and
 ## editableChildren on a node that instances another scene and its stored properties when
@@ -50,7 +54,7 @@ static func scene_node(scene_path: String, node_path: String) -> Dictionary:
 	if not laid.get("ok", false):
 		return laid
 	var nodes: Dictionary = laid["nodes"]
-	var path: String = _joined(".", node_path)
+	var path: String = _joined(".", "/".join(_parts_of(nodes, node_path)))
 	if not nodes.has(path):
 		return {}
 	var found: Dictionary = nodes[path]
@@ -68,7 +72,8 @@ static func scene_node_of_kind(scene_path: String, node_path: String, kind: Stri
 	if not laid.get("ok", false):
 		return laid
 	var nodes: Dictionary = laid["nodes"]
-	var path: String = _joined(".", node_path)
+	var parts: PackedStringArray = _parts_of(nodes, node_path)
+	var path: String = _joined(".", "/".join(parts))
 	var said: String = "%s not found at: %s" % [kind, node_path]
 	var found: String = ""
 	if nodes.has(path):
@@ -84,7 +89,7 @@ static func scene_node_of_kind(scene_path: String, node_path: String, kind: Stri
 		var hinted: String = said
 		if not nodes.has(_joined(".", node_path.get_slice("/", 0))):
 			hinted = GdhRead.from_the_root(said, node_path, str(nodes["."]["name"]))
-		said = hinted if hinted != said else _missing_in(nodes, said, node_path)
+		said = hinted if hinted != said else _missing_in(nodes, said, parts)
 	var held: PackedStringArray = []
 	for at: Variant in nodes:
 		var type: String = str(nodes[at]["type"])
@@ -93,10 +98,45 @@ static func scene_node_of_kind(scene_path: String, node_path: String, kind: Stri
 	return { "ok": false, "error": GdhRead.not_of_kind(said, node_path, found, kind, held) }
 
 
-## [param said], the refusal for [param node_path], which the scene laid as [param nodes] does not
-## have, with where the path leaves the scene as [method GdhRead.missing_below] says it.
-static func _missing_in(nodes: Dictionary, said: String, node_path: String) -> String:
-	var parts: PackedStringArray = node_path.trim_prefix("./").split("/", false)
+## [param node_path] as the names to walk from the root of the scene laid as [param nodes], read as
+## the engine's get_node reads it: a doubled or trailing slash and a "." part mean nothing, ".."
+## steps back, "%Name" is the node of that unique name, and "/root/" followed by the root's name
+## starts at the root. A part that leads nowhere stays in the list, for the refusal to name.
+static func _parts_of(nodes: Dictionary, node_path: String) -> PackedStringArray:
+	var parts: PackedStringArray = node_path.split("/", false)
+	if node_path.begins_with("/") and parts.size() > 1 and parts[0] == "root":
+		if parts[1] == str(nodes["."]["name"]):
+			parts = parts.slice(2)
+	var walked: PackedStringArray = []
+	for part: String in parts:
+		if part == ".":
+			continue
+		if part == ".." and not walked.is_empty() and walked[-1] != "..":
+			walked.remove_at(walked.size() - 1)
+		elif part.begins_with("%") and not _unique_in(nodes, part.trim_prefix("%")).is_empty():
+			walked = _unique_in(nodes, part.trim_prefix("%")).split("/")
+		else:
+			var _added: bool = walked.append(part)
+	return walked
+
+
+## The path of the node called [param name] that is unique in the scene's root, or "". A node under
+## an instance belongs to that instance's file, whose unique names are its own.
+static func _unique_in(nodes: Dictionary, name: String) -> String:
+	for path: String in nodes:
+		var entry: Dictionary = nodes[path]
+		if path == "." or str(entry["name"]) != name:
+			continue
+		var held: Dictionary = entry["properties"]
+		var above: String = "." if not path.contains("/") else path.get_base_dir()
+		if held.get("unique_name_in_owner", false) == true and _owner_of(nodes, above, ".") == ".":
+			return path
+	return ""
+
+
+## [param said], the refusal for the path of [param parts], which the scene laid as [param nodes]
+## does not have, with where the path leaves the scene as [method GdhRead.missing_below] says it.
+static func _missing_in(nodes: Dictionary, said: String, parts: PackedStringArray) -> String:
 	var at: String = "."
 	var reached: PackedStringArray = []
 	for part: String in parts:
@@ -351,12 +391,18 @@ static func _unique_ids(scene_path: String, count: int) -> Array[int]:
 	if not scene_path.ends_with(".tscn") or not FileAccess.file_exists(scene_path):
 		return ids
 	var read: Array[int] = []
-	var pattern: RegEx = RegEx.create_from_string(" unique_id=(\\d+)")
 	for line: String in FileAccess.get_file_as_string(scene_path).split("\n"):
 		if line.begins_with("[node "):
-			var found: RegExMatch = pattern.search(line)
-			read.append(int(found.get_string(1)) if found != null else -1)
+			read.append(unique_id_of(line))
 	return read if read.size() == count else ids
+
+
+## The unique_id a text scene's entry [param line] gives its node, or -1 where it gives none.
+static func unique_id_of(line: String) -> int:
+	if _unique_id_pattern == null:
+		_unique_id_pattern = RegEx.create_from_string(" unique_id=(\\d+)")
+	var found: RegExMatch = _unique_id_pattern.search(line)
+	return int(found.get_string(1)) if found != null else -1
 
 
 ## Whether entry [param index] of [param state] only sets values on a node another file makes.

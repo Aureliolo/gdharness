@@ -61,6 +61,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
 import { cacheHome } from './cache-home.js';
 import { callProgress, callSignal, callSlotWaits } from './call-signal.js';
+import { helperPid } from './desktop.js';
 import { EngineUsageError } from './engine-launch.js';
 import {
   ancestorsIn,
@@ -1393,13 +1394,8 @@ export async function slotEngineNamed(
     state.settled = true;
   });
   while (!state.settled) {
-    let written = Number.NaN;
-    try {
-      written = Number(readFileSync(pidFile, 'utf8').trim());
-    } catch {
-      // Not written yet.
-    }
-    if (Number.isInteger(written) && written > 0) {
+    const written = helperPid(pidFile);
+    if (written !== undefined) {
       await nameSlotEngineOf(lock, process.pid, written);
       return;
     }

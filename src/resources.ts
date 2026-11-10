@@ -191,6 +191,12 @@ function completeResourcePath(
 // Godot writes dictionaries, arrays and Object(...) values across several lines, so a
 // value is only finished once its brackets balance outside of a string.
 function isValueComplete(value: string): boolean {
+  const { depth, inString } = scanValue(value);
+  return depth <= 0 && !inString;
+}
+
+/** How deep [param value] is in brackets, and whether it ends inside a string. */
+function scanValue(value: string): { depth: number; inString: boolean } {
   let depth = 0;
   let inString = false;
   let escaped = false;
@@ -218,7 +224,7 @@ function isValueComplete(value: string): boolean {
     }
   }
 
-  return depth <= 0 && !inString;
+  return { depth, inString };
 }
 
 type IniValue = string | number | boolean | null;
@@ -302,23 +308,58 @@ export function parseProjectGodot(content: string): Record<string, Record<string
       continue;
     }
 
-    const eqIndex = line.indexOf('=');
-    if (eqIndex === -1) {
+    // Whitespace after the line's last character stays until the value is whole, because a string
+    // carried over to the next line holds it.
+    const named = splitKeyAndValue((lines[index] ?? '').trimStart());
+    if (named === null) {
       continue;
     }
 
-    const key = line.slice(0, eqIndex).trim();
-    let rawValue = line.slice(eqIndex + 1).trim();
+    const key = named.key;
+    let rawValue = named.value;
 
     while (index + 1 < lines.length && !isValueComplete(rawValue)) {
       index += 1;
-      rawValue += `\n${(lines[index] ?? '').trim()}`;
+      // Inside a string the indentation is content, and between a dictionary's entries it is not.
+      const next = lines[index] ?? '';
+      const carried = scanValue(rawValue).inString;
+      rawValue += `\n${carried ? next : next.trimStart()}`;
+      // A line that ends outside a string has nothing after its last character worth keeping.
+      if (!scanValue(rawValue).inString) {
+        rawValue = rawValue.trimEnd();
+      }
     }
 
-    section[key] = parseIniLikeValue(rawValue);
+    section[key] = parseIniLikeValue(rawValue.trimEnd());
   }
 
   return result;
+}
+
+/**
+ * A line's key and the text after its `=`, or null for a line with no `=`. Godot quotes a key
+ * holding a space, `=`, `;`, `[`, `]`, a quote or a character outside ASCII, so a key opening with
+ * a quote ends at its closing quote and not at the first `=` inside it.
+ */
+function splitKeyAndValue(line: string): { key: string; value: string } | null {
+  if (line.startsWith('"')) {
+    for (let at = 1; at < line.length; at += 1) {
+      if (line[at] === '\\') {
+        at += 1;
+      } else if (line[at] === '"') {
+        const rest = line.slice(at + 1).trimStart();
+        if (rest.startsWith('=')) {
+          return { key: godotStringText(line.slice(1, at)), value: rest.slice(1).trimStart() };
+        }
+        break;
+      }
+    }
+  }
+  const eqIndex = line.indexOf('=');
+  if (eqIndex === -1) {
+    return null;
+  }
+  return { key: line.slice(0, eqIndex).trim(), value: line.slice(eqIndex + 1).trimStart() };
 }
 
 function parseIniLikeValue(value: string): IniValue {
@@ -341,7 +382,8 @@ function parseIniLikeValue(value: string): IniValue {
     return Number.isSafeInteger(parsed) ? parsed : value;
   }
 
-  if (/^-?\d*\.\d+$/.test(value)) {
+  // Godot writes a small or large float with an exponent, as 1e-05 or 1.5e+10.
+  if (/^-?(?:\d*\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)$/.test(value)) {
     const parsed = Number.parseFloat(value);
     return Number.isFinite(parsed) ? parsed : value;
   }

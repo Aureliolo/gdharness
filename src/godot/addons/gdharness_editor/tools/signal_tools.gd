@@ -35,8 +35,7 @@ var _values: GdhSerialisation = GdhSerialisation.new()
 
 
 func connect_signal(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var source_node_path: String = str(args.get("sourceNodePath", ""))
 	var signal_name: String = str(args.get("signalName", ""))
 	var target_node_path: String = str(args.get("targetNodePath", ""))
@@ -476,8 +475,7 @@ static func _count(arguments: int) -> String:
 
 
 func disconnect_signal(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var source_node_path: String = str(args.get("sourceNodePath", ""))
 	var signal_name: String = str(args.get("signalName", ""))
 	var target_node_path: String = str(args.get("targetNodePath", ""))
@@ -568,8 +566,7 @@ func disconnect_signal(args: Dictionary) -> Dictionary:
 
 
 func list_connections(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var filter_path: String = str(args.get("nodePath", ""))
 
 	var scene: GdhSceneFile = GdhSceneFile.new()

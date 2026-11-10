@@ -18,7 +18,7 @@ import { join } from 'node:path';
  * Only `.mcp.json`, and only an exact version. A tag such as `gdharness@latest` names no version
  * to disagree with, and a config that pins nothing is a config with nothing to say.
  */
-const PINNED = /\bgdharness@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\b/g;
+const PINNED = /(?<![\w@/.-])gdharness@(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)\b/g;
 
 /**
  * Every exact gdharness version named anywhere in the project's `.mcp.json`.
@@ -38,14 +38,21 @@ function versionsNamedInConfig(projectPath: string): readonly string[] {
   }
   let text: string;
   try {
-    text = readFileSync(config, 'utf8');
-    JSON.parse(text);
+    text = readFileSync(config, 'utf8').replace(/^﻿/, '');
+    JSON.parse(withoutComments(text));
   } catch {
     return [];
   }
-  return [...new Set([...text.matchAll(PINNED)].map((found) => found[1] ?? ''))].filter(
-    (version) => version !== '',
-  );
+  return [...new Set([...text.matchAll(PINNED)].flatMap((found) => found.slice(1, 2)))];
+}
+
+/** JSON as editors write it: `//` and block comments, and a comma before a closing bracket, are dropped. */
+function withoutComments(text: string): string {
+  return text
+    .replace(/"(?:[^"\\]|\\.)*"|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (match) =>
+      match.startsWith('"') ? match : '',
+    )
+    .replace(/"(?:[^"\\]|\\.)*"|,(\s*[\]}])/g, (match, closing: string | undefined) => closing ?? match);
 }
 
 /**

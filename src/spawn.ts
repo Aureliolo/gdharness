@@ -32,6 +32,15 @@ import { mendBeforeStart } from './uid-cache.js';
 
 export type { ChildProcess, ChildProcessWithoutNullStreams, SpawnSyncReturns } from 'node:child_process';
 
+/**
+ * Sets the uid cache of the project a start names right. Only the arguments before a bare `--` are
+ * the program's own: what follows belongs to the game, whose `--path` is no project of ours.
+ */
+function mendProjectOf(args: readonly string[], cwd: string | URL | undefined): void {
+  const end = args.indexOf('--');
+  mendBeforeStart(end < 0 ? args : args.slice(0, end), cwd);
+}
+
 type Stdio = StdioNull | StdioPipe;
 type Piped<S extends Stdio, Stream> = S extends StdioPipe ? Stream : null;
 
@@ -52,7 +61,7 @@ export function spawnHidden(
   args: readonly string[],
   options: SpawnOptions = {},
 ): ChildProcess {
-  mendBeforeStart(args, options.cwd);
+  mendProjectOf(args, options.cwd);
   return spawn(command, [...args], { ...options, windowsHide: true });
 }
 
@@ -66,7 +75,7 @@ export function spawnShown(
   args: readonly string[],
   options: SpawnOptions = {},
 ): ChildProcess {
-  mendBeforeStart(args, options.cwd);
+  mendProjectOf(args, options.cwd);
   return spawn(command, [...args], { ...options, windowsHide: false });
 }
 
@@ -76,7 +85,7 @@ export function runHidden(
   args: readonly string[],
   options: ExecFileOptions = {},
 ): Promise<{ stdout: string; stderr: string }> {
-  mendBeforeStart(args, options.cwd ?? undefined);
+  mendProjectOf(args, options.cwd ?? undefined);
   return new Promise((resolve, reject) => {
     execFile(
       command,
@@ -100,7 +109,7 @@ export function runSyncHidden(
   args: readonly string[],
   options: ExecFileSyncOptionsWithStringEncoding,
 ): string {
-  mendBeforeStart(args, options.cwd ?? undefined);
+  mendProjectOf(args, options.cwd ?? undefined);
   return execFileSync(command, [...args], { ...options, windowsHide: true });
 }
 
@@ -120,6 +129,6 @@ export function spawnSyncHidden(
   args: readonly string[],
   options: SpawnSyncOptions = {},
 ): SpawnSyncReturns<string | Buffer> {
-  mendBeforeStart(args, options.cwd);
+  mendProjectOf(args, options.cwd);
   return spawnSync(command, [...args], { ...options, windowsHide: true });
 }

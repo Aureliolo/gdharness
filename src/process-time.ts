@@ -1,3 +1,4 @@
+import process from 'node:process';
 import { askProcessTable } from './process-table.js';
 import { runHidden as run } from './spawn.js';
 
@@ -36,26 +37,31 @@ async function secondsOnWindows(pid: number): Promise<number | undefined> {
 }
 
 async function askPosix(pid: number): Promise<number | undefined> {
-  const { stdout } = await run('ps', ['-o', 'time=', '-p', String(pid)], { timeout: ASK_TIMEOUT_MS });
+  // In the C locale, since a comma-decimal one prints the fraction of a second after a comma.
+  const { stdout } = await run('ps', ['-o', 'time=', '-p', String(pid)], {
+    timeout: ASK_TIMEOUT_MS,
+    env: { ...process.env, LC_ALL: 'C' },
+  });
   return secondsFromClock(stdout.trim());
 }
 
 /**
  * `ps` prints processor time as `MM:SS`, `HH:MM:SS` or `DD-HH:MM:SS` depending on how long it has
- * been going, so the parts are read from the right rather than the left.
+ * been going, with fractions of a second on some systems, after a comma in some locales. Anything
+ * else is no clock, so a bare dash or colon is not read as zero processor time.
  */
+const CLOCK = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+(?:[.,]\d+)?)$/;
+
 export function secondsFromClock(printed: string): number | undefined {
-  if (printed === '') {
+  const parts = CLOCK.exec(printed.trim());
+  if (parts === null) {
     return undefined;
   }
-  const dashed = printed.includes('-');
-  const days = dashed ? printed.slice(0, printed.indexOf('-')) : null;
-  const clock = dashed ? printed.slice(printed.indexOf('-') + 1) : printed;
-  const parts = clock.split(':').map((part) => Number(part));
-  if (parts.length === 0 || parts.some((part) => !Number.isFinite(part))) {
-    return undefined;
-  }
-  const seconds = parts.reduce((total, part) => total * 60 + part, 0);
-  const extra = days === null ? 0 : Number(days) * 86_400;
-  return Number.isFinite(extra) ? seconds + extra : undefined;
+  const [, days, hours, minutes, seconds] = parts;
+  return (
+    Number(days ?? 0) * 86_400 +
+    Number(hours ?? 0) * 3600 +
+    Number(minutes) * 60 +
+    Number(seconds?.replace(',', '.'))
+  );
 }

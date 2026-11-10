@@ -29,6 +29,14 @@ export function resolveHomeDirectory(): string {
   }
 }
 
+/** `godot`, optionally followed by a version, as release downloads and distributions name it. */
+const ENGINE = /^godot(?:[_-]?v?\d[^\\/]*)?$/i;
+const WINDOWS_ENGINE = /^godot(?:[_-]?v?\d[^\\/]*)?\.exe$/i;
+const MAC_BUNDLE = /^godot(?:[_-]?v?\d[^\\/]*|_mono)?\.app$/i;
+const NOT_AN_ENGINE =
+  /\.(?:exe|zip|tpz|tar(?:\.\w+)?|7z|gz|xz|sh|png|txt|md|json|sig|sha\d*)$|export_templates/i;
+const CONSOLE_WRAPPER = /_console\.exe$/i;
+
 /**
  * Every Godot binary in one directory, newest first.
  *
@@ -48,20 +56,38 @@ export function scanDirectoryForGodotBinaries(directory: string, platform: NodeJ
     return [];
   }
 
-  // A download directory also holds the archive the binary came out of, and on a shared drive
-  // the other platform's build. Neither answers --version, so neither is worth the spawn.
-  const pattern = platform === 'win32' ? /^godot.*\.exe$/i : /^godot(?!.*\.(?:exe|zip)$)/i;
+  // A download directory also holds the archives and export templates beside the engine, installers
+  // and launchers that start with the same word, and on a shared drive the other platform's build.
+  // None answers --version, and the caller starts every one it is given, so only a name that is the
+  // engine's own, with an optional version, is listed.
+  const pattern = platform === 'win32' ? WINDOWS_ENGINE : ENGINE;
+  const plain = new Set(entries.map((name) => name.toLowerCase()));
 
-  const matches: { name: string; mtime: number }[] = [];
+  const matches: { path: string; mtime: number }[] = [];
   for (const name of entries) {
-    if (!pattern.test(name)) {
+    const bundle = platform === 'darwin' && MAC_BUNDLE.test(name);
+    if (!bundle && (!pattern.test(name) || (platform !== 'win32' && NOT_AN_ENGINE.test(name)))) {
+      continue;
+    }
+    // The plain program is what is tried. Its console wrapper is the same engine, so it is only
+    // listed when the plain one is not there.
+    if (
+      platform === 'win32' &&
+      CONSOLE_WRAPPER.test(name) &&
+      plain.has(name.toLowerCase().replace(CONSOLE_WRAPPER, '.exe'))
+    ) {
       continue;
     }
     const fullPath = join(directory, name);
     try {
       const stat = statSync(fullPath);
-      if (stat.isFile()) {
-        matches.push({ name, mtime: stat.mtimeMs });
+      if (bundle) {
+        const executable = join(fullPath, 'Contents', 'MacOS', 'Godot');
+        if (stat.isDirectory() && existsSync(executable)) {
+          matches.push({ path: executable, mtime: stat.mtimeMs });
+        }
+      } else if (stat.isFile()) {
+        matches.push({ path: fullPath, mtime: stat.mtimeMs });
       }
     } catch {
       // An entry that cannot be stat'd is not a binary this can run.
@@ -69,7 +95,7 @@ export function scanDirectoryForGodotBinaries(directory: string, platform: NodeJ
   }
 
   matches.sort((a, b) => b.mtime - a.mtime);
-  return matches.map((m) => join(directory, m.name));
+  return matches.map((m) => m.path);
 }
 
 /** The install paths worth trying by name, before any directory is read. */

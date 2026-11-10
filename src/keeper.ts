@@ -12,16 +12,7 @@
  * Both are handed their spec down stdin, never on the command line: see `SentSpec`.
  */
 
-import {
-  appendFileSync,
-  closeSync,
-  existsSync,
-  mkdtempSync,
-  openSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { appendFileSync, closeSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -31,6 +22,7 @@ import {
   ensureHelperCompiled,
   helperExit,
   helperFailure,
+  helperPid,
   helperStep,
   throughHelper,
 } from './desktop.js';
@@ -168,8 +160,8 @@ async function startThroughHelper(
       exited.now = true;
     });
     for (let waited = 0; waited < DESKTOP_START_MS; waited += 50) {
-      const pid = existsSync(pidFile) ? Number(readFileSync(pidFile, 'utf8').trim()) : Number.NaN;
-      if (Number.isInteger(pid) && pid > 0) {
+      const pid = helperPid(pidFile);
+      if (pid !== undefined) {
         return { child: started.child, pid, whole: started.whole };
       }
       if (exited.now) {
@@ -356,10 +348,6 @@ function writeNoteIfItCan(record: Parameters<typeof writeRunRecord>[0]): void {
 async function keep(): Promise<void> {
   const spec = await receivedSpec();
   const run = spec.run;
-  if (run === undefined && !needsItsHelperKept(spec)) {
-    process.stdout.write('error a keeper was started without a run or a helper to keep\n');
-    process.exit(1);
-  }
   // The game's debugger, opened before the game so it is listening when the game dials it: the
   // engine dials once, as it starts, and runs with no debugger if nobody answers.
   const profiled = run?.profile === undefined ? null : profiledBy(run.profile, run.projectPath);
@@ -377,7 +365,7 @@ async function keep(): Promise<void> {
             }
           },
         );
-  const exitNotes = run === undefined ? null : mkdtempSync(join(tmpdir(), 'gdharness-exit-'));
+  const exitNotes = run === undefined ? null : scratchDirectory('keeper-exit');
   const noted =
     exitNotes === null
       ? spec
@@ -388,8 +376,7 @@ async function keep(): Promise<void> {
       : { ...noted, args: withEngineArguments(noted.args, debuggerPeer.engineArguments) };
   const transcript = run === undefined ? 'ignore' : openSync(run.transcript, 'a');
   // Private to this keeper, for the file a helper watches for its stop.
-  const own =
-    run !== undefined && throughTheHelper(spec) ? mkdtempSync(join(tmpdir(), 'gdharness-stop-')) : null;
+  const own = run !== undefined && throughTheHelper(spec) ? scratchDirectory('keeper-stop') : null;
   const stopFile = own === null ? '' : join(own, 'stop');
   const exitFile = own === null ? '' : join(own, 'exit');
   let started: Awaited<ReturnType<typeof startDetached>>;
@@ -563,11 +550,7 @@ async function keep(): Promise<void> {
   }
   debuggerPeer?.close();
   listening?.close();
-  for (const made of [own, exitNotes]) {
-    if (made !== null) {
-      rmSync(made, { recursive: true, force: true });
-    }
-  }
+  discard(own, exitNotes);
   process.exit(0);
 }
 
