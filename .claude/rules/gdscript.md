@@ -18,6 +18,10 @@ script's own constant. A game with `class_name Log` or an autoload called `Log` 
 that preloads its logger as `Log`. The engine leg's `ourNames` case refuses a name without the
 prefix. It also compiles the shipped scripts beside a class and an autoload for each name.
 
+Build a static variable at first use, never in its initialiser. The editor plugin can call a
+module whose static initialisers have not run, and reads null there. `runtime_says.gd` shows the
+shape.
+
 ## Shared modules and packaging
 
 The modules listed in `scripts/sync-shared-gd.ts` (`reading.gd`, `serialisation.gd`,
