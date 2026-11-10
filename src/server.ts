@@ -5317,7 +5317,7 @@ class GodotServer {
     if (tool !== 'editor_status' && this.godotBridge.isArriving()) {
       await this.waitForBridge(() => !this.godotBridge.isArriving(), Date.now() + greetingWaitMs());
     }
-    if (ENGINE_PASSES[tool]?.[op] !== undefined) {
+    if (ENGINE_PASSES[tool]?.includes(op) === true) {
       return op === 'reimport' ? await this.handleReimport(args) : await this.handleRefreshUids(args);
     }
     const settingsWrite =

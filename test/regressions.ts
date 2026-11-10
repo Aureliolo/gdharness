@@ -240,14 +240,20 @@ import {
 } from '../src/godot-variant.js';
 import { mainCheckoutOf, recordedEnginePath, worktreeCheckoutsOf } from '../src/harnesses.js';
 import {
+  ASIDE,
+  answerIn,
   type ImportOutcome,
   librariesNotCopied,
   notImportedNote,
+  RESUMED,
   runImport,
   runOperation,
+  scriptFault,
+  withoutAsides,
 } from '../src/headless.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS, HEADLESS_TOOLS } from '../src/headless-operations.js';
-import { IMPORTABLE_EXTENSIONS, staleImports } from '../src/import-freshness.js';
+import { idleClosed, idleSettled, portsIn } from '../src/idle-close.js';
+import { IMPORTABLE_EXTENSIONS, importedIntoTheProject, staleImports } from '../src/import-freshness.js';
 import { defectReport, defectSignature, withoutMachinePaths } from '../src/issues.js';
 import { RENDERED_AWAY_NOTE, type ScriptError } from '../src/junit.js';
 import { askTheKeepersDebugger, askTheKeeperToStop, listenForTheServer } from '../src/keeper-channel.js';
@@ -1116,6 +1122,174 @@ function testAnEvaluatesErrorIsNotTheGames(): void {
   const unmarked = new GameLog();
   unmarked.append('transcript', `${printed.join('\n')}\n`);
   assert.equal(unmarked.count('error'), 1, 'an expression the game itself ran is its error');
+}
+
+/**
+ * An error whose message runs over several lines keeps them, its `at:` line and its backtrace as one
+ * entry, however the text is cut, whatever ends its lines and whichever stream carries it. The
+ * lines after the headline are unindented, so only the `at:` line after them says they belong to it.
+ */
+function testAnErrorOfSeveralLinesIsOneEntry(): void {
+  const where = [
+    '   at: push_error (core/variant/variant_utility.cpp:1024)',
+    '   GDScript backtrace (most recent call first):',
+    '       [0] _save (res://save.gd:12)',
+  ];
+  const located = {
+    script: 'res://save.gd',
+    line: 12,
+    function: '_save',
+  };
+  const trace = [
+    'at: push_error (core/variant/variant_utility.cpp:1024)',
+    'GDScript backtrace (most recent call first):',
+    '[0] _save (res://save.gd:12)',
+  ];
+  const shape = (log: GameLog): unknown => forAnswer(log.all).map(({ index: _index, ...entry }) => entry);
+  const cases: readonly (readonly [string, readonly string[], string, readonly string[]])[] = [
+    ['two lines', ['USER ERROR: save failed', 'disk full', ...where], 'save failed', ['disk full', ...trace]],
+    [
+      'three lines',
+      ['ERROR: save failed', 'disk full', 'again', ...where],
+      'save failed',
+      ['disk full', 'again', ...trace],
+    ],
+    [
+      'an empty line between',
+      ['ERROR: save failed', '', 'disk full', ...where],
+      'save failed',
+      ['disk full', ...trace],
+    ],
+    ['one line', ['ERROR: save failed', ...where], 'save failed', trace],
+  ];
+  for (const source of ['transcript', 'stderr'] as const) {
+    for (const [name, lines, headline, detail] of cases) {
+      for (const ending of ['\n', '\r\n']) {
+        const whole = `${lines.join(ending)}${ending}`;
+        const expected = [{ severity: 'error', source, text: headline, detail, ...located }];
+        const at = `${name} on ${source} ending in ${JSON.stringify(ending)}`;
+        const once = new GameLog();
+        once.append(source, whole);
+        once.finish();
+        assert.deepEqual(shape(once), expected, at);
+        const cut = new GameLog();
+        for (const character of whole) {
+          cut.append(source, character);
+        }
+        cut.finish();
+        assert.deepEqual(shape(cut), expected, `${at}, a character at a time`);
+      }
+    }
+  }
+  // The last line of the text, with no line ending after it, or only the carriage return of one.
+  for (const tail of ['', '\r']) {
+    const ended = new GameLog();
+    ended.append('stderr', `ERROR: boom${tail}`);
+    ended.finish();
+    assert.deepEqual(
+      ended.all.map((entry) => [entry.severity, entry.text]),
+      [['error', 'boom']],
+      `a headline that ends the text with ${JSON.stringify(tail)}`,
+    );
+  }
+  // A clear-screen sequence on the line is not part of the headline.
+  const screen = new GameLog();
+  screen.append(
+    'stdout',
+    `${String.fromCharCode(0x1b)}[2J${String.fromCharCode(0x1b)}[HERROR: boom\n   at: f (res://a.gd:1)\n`,
+  );
+  assert.deepEqual(
+    screen.all.map((entry) => [entry.severity, entry.text, entry.detail]),
+    [['error', 'boom', ['at: f (res://a.gd:1)']]],
+  );
+  // A line after a message that no `at:` follows is a print of its own, and stdout never joins one.
+  const alone = new GameLog();
+  alone.append('stderr', 'ERROR: first\nplain print\n');
+  alone.append('stdout', 'ERROR: game text\nits next print\n   at: indented print\n');
+  alone.finish();
+  assert.deepEqual(
+    alone.all.map((entry) => [entry.source, entry.severity, entry.text, entry.detail]),
+    [
+      ['stderr', 'error', 'first', []],
+      ['stderr', 'info', 'plain print', []],
+      ['stdout', 'error', 'game text', []],
+      ['stdout', 'info', 'its next print', []],
+      ['stdout', 'info', '   at: indented print', []],
+    ],
+  );
+}
+
+/**
+ * A call's mark takes an error only when the error's own `at:` line names the file the mark names,
+ * wherever the mark lands among the lines and however many lines the message has.
+ */
+function testAMarkTakesOnlyTheErrorOfItsFile(): void {
+  const mine = raisedMark(
+    'debug_state evaluate',
+    "Invalid call. Nonexistent function 'go'.",
+    'core/math/expression.cpp',
+  );
+  const theirs = [
+    "SCRIPT ERROR: Invalid call. Nonexistent function 'go'.",
+    '   at: _process (res://game.gd:40)',
+  ];
+  const early = new GameLog();
+  early.append('transcript', mine);
+  early.append('transcript', 'print between\n');
+  early.append('transcript', `${theirs.join('\n')}\n`);
+  assert.deepEqual(
+    early.all.map((entry) => [entry.severity, entry.raisedBy]),
+    [
+      ['info', undefined],
+      ['error', undefined],
+    ],
+    'a mark that came first leaves a later error of the same words from another file standing',
+  );
+  const halfway = new GameLog();
+  halfway.append('transcript', 'ERROR: Got break when already broke!\n');
+  halfway.append(
+    'transcript',
+    raisedMark('debug_control pause', 'Got break when already broke!', 'core/debugger/remote_debugger.cpp'),
+  );
+  assert.equal(halfway.count('error'), 1, 'until its at: line names the file, the error stands');
+  halfway.append('transcript', '   at: debug (core/debugger/remote_debugger.cpp:480)\n');
+  assert.deepEqual(
+    halfway.all.map((entry) => [entry.severity, entry.raisedBy]),
+    [['info', 'debug_control pause']],
+    'and the mark that landed before the at: line takes the error once it does',
+  );
+  const message = 'first line\nsecond line';
+  assert.equal(
+    raisedMark('debug_state evaluate', message, 'core/math/expression.cpp'),
+    'gdharness: debug_state evaluate raised from core/math/expression.cpp: first line\n',
+    'a message of several lines is marked by its first',
+  );
+  for (const order of ['error first', 'mark first'] as const) {
+    const log = new GameLog();
+    const error = 'ERROR: first line\nsecond line\n   at: f (core/math/expression.cpp:1)\n';
+    const mark = raisedMark('debug_state evaluate', message, 'core/math/expression.cpp');
+    log.append('transcript', order === 'error first' ? error + mark : mark + error);
+    assert.deepEqual(
+      log.all.map((entry) => [entry.severity, entry.text, entry.detail, entry.raisedBy]),
+      [['info', 'first line', ['second line', 'at: f (core/math/expression.cpp:1)'], 'debug_state evaluate']],
+      order,
+    );
+  }
+}
+
+/** A line printed without a newline, in many small reads, costs time in proportion to its length. */
+function testALongUnfinishedLineIsHeldInLinearTime(): void {
+  const log = new GameLog();
+  const chunk = Buffer.from('x'.repeat(4096));
+  const began = performance.now();
+  for (let sent = 0; sent < 2048; sent += 1) {
+    log.append('stdout', chunk);
+  }
+  log.append('stdout', '\n');
+  const took = performance.now() - began;
+  assert.equal(log.all.length, 1, 'one line');
+  assert.equal(log.all[0]?.text.length, 2048 * 4096, 'whole');
+  assert.ok(took < 1500, `8 MB in 4 KB reads took ${Math.round(took)} ms`);
 }
 
 /**
@@ -2708,6 +2882,193 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   } finally {
     sweep(holder);
   }
+}
+
+/**
+ * A game's own reals are shown as the engine holds them. A 32-bit one is the fewest digits that read
+ * back as the same float32, since the double it widens to carries digits the engine never printed. A
+ * negative zero and a float past 1e21 keep their sign and their exponent, and a packed array says
+ * what it is inside another container, with its vectors named as Godot names them.
+ */
+function testARealIsShownAsTheEngineHoldsIt(): void {
+  const bytes: number[] = [];
+  const view = new DataView(new ArrayBuffer(8));
+  const u32 = (value: number): void => {
+    bytes.push(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
+  };
+  const f32 = (value: number): void => {
+    view.setFloat32(0, value, true);
+    bytes.push(...new Uint8Array(view.buffer, 0, 4));
+  };
+  const f64 = (value: number): void => {
+    view.setFloat64(0, value, true);
+    bytes.push(...new Uint8Array(view.buffer));
+  };
+  const shown = (inside = false): string => {
+    const value = decodeVariant(Uint8Array.from(bytes), true);
+    bytes.length = 0;
+    return shownValue(value, '', inside);
+  };
+
+  u32(20);
+  for (const part of [0.1, 0.2, 0.3, 1]) {
+    f32(part);
+  }
+  assert.equal(shown(), 'Color(0.1, 0.2, 0.3, 1)', 'a colour of 32-bit parts');
+  u32(5);
+  f32(0.1);
+  f32(0.2);
+  assert.equal(shown(), 'Vector2(0.1, 0.2)', 'a vector of 32-bit reals');
+  u32(3);
+  f32(0.1);
+  assert.equal(shown(), '0.1', 'a 32-bit float');
+  u32(3);
+  f32(3.4028235e38);
+  assert.equal(shown(), '3.4028235e+38', 'the largest float32, in the exponent form that is its text');
+  u32(5 | (1 << 16));
+  f64(0.1);
+  f64(0.2);
+  assert.equal(shown(), 'Vector2(0.1, 0.2)', 'and 64-bit reals as they were');
+
+  for (const [float, expected] of [
+    [-0, '-0.0'],
+    [1e21, '1e+21'],
+    [2, '2.0'],
+    [1.5, '1.5'],
+  ] as const) {
+    u32(3 | (1 << 16));
+    f64(float);
+    assert.equal(shown(), expected, `a 64-bit float ${expected}`);
+  }
+
+  // Inside another container a packed array reads as a list unless it names itself.
+  u32(28);
+  u32(5);
+  u32(30);
+  u32(2);
+  u32(1);
+  u32(2);
+  u32(28);
+  u32(2);
+  u32(2);
+  u32(1);
+  u32(2);
+  u32(2);
+  u32(35);
+  u32(1);
+  f32(1);
+  f32(2);
+  u32(36);
+  u32(0);
+  u32(34);
+  u32(1);
+  u32(2);
+  bytes.push(...new TextEncoder().encode('a\0'), 0, 0);
+  const holder = decodeVariant(Uint8Array.from(bytes), true);
+  assert.equal(
+    shownValue(holder),
+    '[PackedInt32Array([1, 2]), [1, 2], PackedVector2Array([Vector2(1, 2)]), PackedVector3Array([]), PackedStringArray(["a"])]',
+  );
+  const members = Array.isArray(holder) ? (holder as readonly GodotValue[]) : [];
+  assert.deepEqual(
+    members.map((member) => containerTypeOf(member)),
+    ['PackedInt32Array', undefined, 'PackedVector2Array', 'PackedVector3Array', 'PackedStringArray'],
+    'each member says whether it is packed',
+  );
+  assert.equal(
+    shownValue(members[0] ?? null),
+    '[1, 2]',
+    'and on its own it is its list, its type being beside it',
+  );
+}
+
+/** A command carries a number as the number it is: past 64 bits, or a negative zero, it is a float. */
+function testACommandCarriesANumberAsItIs(): void {
+  const read = new DebuggerStream().push(
+    framedCommand('m', [1e300, -0, 2 ** 63, 2 ** 53 + 2, -(2 ** 63), 2 ** 31, -(2 ** 31), 2.5, 7]),
+  );
+  const [first] = read;
+  assert.deepEqual(
+    first !== undefined && 'message' in first ? first.data : read,
+    [
+      1e300,
+      -0,
+      2 ** 63,
+      { kind: 'int', values: ['9007199254740994'] },
+      { kind: 'int', values: ['-9223372036854775808'] },
+      2 ** 31,
+      -(2 ** 31),
+      2.5,
+      7,
+    ],
+    'each comes back as it was sent',
+  );
+}
+
+/**
+ * A length no message has ends the stream, and the messages read before it in the same chunk are
+ * still taken: the error one of them carried was lost with the throw.
+ */
+function testABadLengthKeepsTheMessagesBeforeIt(): void {
+  const names = (read: ReturnType<DebuggerStream['push']>): (string | undefined)[] =>
+    read.map((one) => ('message' in one ? one.message : undefined));
+  const bad = Uint8Array.of(0xff, 0xff, 0xff, 0x7f);
+  const together = new DebuggerStream();
+  assert.deepEqual(
+    names(together.push(Uint8Array.from([...framedCommand('error', [1]), ...bad]))),
+    ['error'],
+    'a whole message and then a bad length',
+  );
+  assert.throws(
+    () => together.push(Uint8Array.of(1)),
+    /a message of 2147483647 bytes, more than the engine sends/,
+  );
+  assert.throws(() => together.push(Uint8Array.of(1)), /more than the engine sends/, 'and it stays ended');
+  const alone = new DebuggerStream();
+  assert.deepEqual(alone.push(bad), [], 'a bad length alone has nothing before it');
+  assert.throws(() => alone.push(Uint8Array.of(1)), /more than the engine sends/);
+}
+
+/** Every way the variant reader refuses a message names what was wrong with it. */
+function testTheVariantReaderRefusesWithItsReason(): void {
+  const word = (value: number): number[] => [
+    value & 0xff,
+    (value >>> 8) & 0xff,
+    (value >>> 16) & 0xff,
+    value >>> 24,
+  ];
+  const refused = (...words: number[]): string => {
+    try {
+      decodeVariant(Uint8Array.from(words.flatMap(word)));
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+    return 'accepted';
+  };
+  assert.equal(refused(99), 'a value of type 99, which Godot 4.7 does not have');
+  assert.equal(refused(22, 0), 'a node path in the format before 3.0');
+  assert.equal(refused(24, 1, 2), 'a full object, which this reader does not take');
+  assert.equal(refused(0, 0), '4 bytes left over after the value');
+  assert.equal(refused(4), 'a value runs past the end of its message (4 bytes wanted, 0 left)');
+  assert.equal(
+    refused(...Array.from({ length: 1030 }, () => [28, 1]).flat()),
+    'a value nests deeper than the engine allows',
+  );
+
+  const framed = (...words: number[]): Uint8Array => {
+    const body = words.flatMap(word);
+    return Uint8Array.from([...word(body.length), ...body]);
+  };
+  const unreadable = (chunk: Uint8Array): string | undefined => {
+    const [one] = new DebuggerStream().push(chunk);
+    return one !== undefined && 'unreadable' in one ? one.unreadable : undefined;
+  };
+  assert.equal(unreadable(framed(0)), 'a message that is not [message, thread, data]');
+  assert.equal(
+    unreadable(framed(28, 3, 2, 1, 2, 1, 28, 0)),
+    'a message whose name, thread or data is the wrong type',
+  );
+  assert.equal(unreadable(framed(99)), 'a value of type 99, which Godot 4.7 does not have');
 }
 
 async function turnedAwayAtTheBridge(
@@ -8889,6 +9250,71 @@ async function testAReopenAfterAnIdleQuitWaitsOnlyForTheEditorItself(): Promise<
 }
 
 /**
+ * The record of an editor that quit unused is read whole or not at all, and the ports an editor was
+ * started on are read only when both flags name one. A missing flag once read the first word of the
+ * line as its port.
+ */
+function testTheIdleRecordAndTheEditorsPortsAreRead(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-idle-record-'));
+  try {
+    mkdirSync(join(project, '.godot'));
+    const record = join(project, '.godot', 'gdharness-editor-idle.json');
+    assert.equal(idleClosed(project), null, 'no record');
+    const whole = {
+      pid: 4242,
+      closedAt: '2026-11-10T10:00:00Z',
+      idleMinutes: 10,
+      arguments: ['--editor', '--lsp-port', '6005', 7],
+      scenes: ['res://a.tscn', 3],
+    };
+    writeFileSync(record, JSON.stringify(whole));
+    assert.deepEqual(
+      idleClosed(project),
+      { ...whole, arguments: ['--editor', '--lsp-port', '6005'], scenes: ['res://a.tscn'] },
+      'a record, with the words that are not text left out',
+    );
+    for (const field of ['pid', 'closedAt', 'idleMinutes', 'arguments', 'scenes'] as const) {
+      const { [field]: _left, ...without } = whole;
+      writeFileSync(record, JSON.stringify(without));
+      assert.equal(idleClosed(project), null, `a record without ${field}`);
+    }
+    writeFileSync(record, JSON.stringify({ ...whole, pid: '4242' }));
+    assert.equal(idleClosed(project), null, 'a pid that is text');
+    for (const held of ['[1]', '{unfinished', '']) {
+      writeFileSync(record, held);
+      assert.equal(idleClosed(project), null, `a record holding ${JSON.stringify(held)}`);
+    }
+    writeFileSync(record, JSON.stringify(whole));
+    idleSettled(project);
+    assert.equal(existsSync(record), false, 'settled, the record is gone');
+    assert.equal(idleClosed(project), null, 'and read as none');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+
+  assert.deepEqual(portsIn(['--editor', '--lsp-port', '6005', '--dap-port', '6006']), {
+    lsp: 6005,
+    dap: 6006,
+  });
+  assert.deepEqual(
+    portsIn(['--dap-port', '6006', '--lsp-port', '6005']),
+    { lsp: 6005, dap: 6006 },
+    'in any order',
+  );
+  assert.equal(portsIn(['--editor', '--dap-port', '6006']), null, 'no language server port');
+  assert.equal(portsIn(['--editor', '--lsp-port', '6005']), null, 'no debug adapter port');
+  assert.equal(
+    portsIn(['7001', '--dap-port', '6006']),
+    null,
+    'the first word is no port when a flag is missing',
+  );
+  assert.equal(portsIn(['--lsp-port', '6005', '--dap-port']), null, 'a flag with no value after it');
+  assert.equal(portsIn(['--lsp-port', '0', '--dap-port', '6006']), null, 'port 0');
+  assert.equal(portsIn(['--lsp-port', 'six', '--dap-port', '6006']), null, 'a word that is no number');
+  assert.equal(portsIn([]), null);
+}
+
+/**
  * A server told to go ends, with an editor still holding the bridge.
  *
  * Written to catch a hang and it found none, which is worth saying plainly: `http.Server.close`
@@ -11882,6 +12308,49 @@ async function testAnEngineThatCrashesAtStartIsAskedAgain(): Promise<void> {
 }
 
 /**
+ * A locator that has answered is asked again when the engine appears at the path after the server
+ * started, and when the engine it found has gone, since the file system is cheap to ask and the
+ * answer of a server's whole life is not.
+ */
+async function testALocatorAsksAgainWhenTheEngineAppearsOrGoes(): Promise<void> {
+  const before = process.env['GODOT_PATH'];
+  const root = mkdtempSync(join(tmpdir(), 'gdharness-engine-moves-'));
+  const path = join(root, 'godot.exe');
+  const missing = { ok: false, named: path, reason: 'does not exist' } as const;
+  let starts = 0;
+  const locator = new GodotLocator(
+    () => {
+      starts += 1;
+      return Promise.resolve();
+    },
+    () => Promise.resolve(),
+  );
+  try {
+    process.env['GODOT_PATH'] = path;
+    assert.deepEqual(await locator.find(), missing, 'before the engine is installed');
+    assert.equal(starts, 0, 'nothing was started');
+    writeFileSync(path, '');
+    assert.deepEqual(await locator.find(), { ok: true, path }, 'once it is installed');
+    assert.deepEqual(await locator.find(), { ok: true, path }, 'and again');
+    assert.equal(starts, 1, 'the engine answered once');
+    rmSync(path);
+    assert.deepEqual(await locator.find(), missing, 'after it is deleted');
+    assert.equal(
+      GodotLocator.refusal(missing).message,
+      `GODOT_PATH is set to ${path}, which does not exist.`,
+      'and the refusal says why',
+    );
+  } finally {
+    if (before === undefined) {
+      delete process.env['GODOT_PATH'];
+    } else {
+      process.env['GODOT_PATH'] = before;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
  * An autoload naming a file the repository does not carry.
  *
  * project.godot is committed and what it names may not be. `setup` registers the runtime addon by
@@ -12183,6 +12652,111 @@ function testANeverImportedFileIsSaidToBeOne(): void {
     undefined,
   );
   assert.equal(notImportedNote([]), undefined);
+}
+
+/** A never-imported file is named whole when its path holds a space, in a folder or in its name. */
+function testANeverImportedFileWithASpaceIsSaidToBeOne(): void {
+  const entry = (line: string): LogEntry => ({
+    index: 0,
+    severity: 'error',
+    source: 'stderr',
+    text: line,
+    detail: [],
+  });
+  for (const path of ['res://my art/hero.png', 'res://art/hero idle.png', 'res://a b/c d/e f.OGG']) {
+    assert.match(
+      notImportedNote([entry(`No loader found for resource: ${path} (expected type: Texture2D)`)]) ?? '',
+      new RegExp(`^${path.replaceAll('.', '\\.')} has no import the engine can load`),
+      path,
+    );
+  }
+  assert.match(
+    notImportedNote([entry('No loader found for resource: res://my art/hero.png')]) ?? '',
+    /^res:\/\/my art\/hero\.png has no import/,
+    'a message with no expected type after the path',
+  );
+  assert.equal(
+    notImportedNote([entry('No loader found for resource: res://my art/table.json (expected type: JSON)')]),
+    undefined,
+    'and a file the engine reads as it is still has none',
+  );
+}
+
+/** What an operation's answer leaves out: the stretches between an aside mark and the resumed mark. */
+function testAsidesAreLeftOutOfAnOperationsEntries(): void {
+  const entry = (index: number, printed: string, source: LogEntry['source'] = 'stderr'): LogEntry => ({
+    index,
+    severity: 'info',
+    source,
+    text: printed,
+    detail: [],
+  });
+  const texts = (entries: readonly LogEntry[]): string[] => entries.map((one) => one.text);
+  assert.deepEqual(
+    texts(
+      withoutAsides([
+        entry(0, 'before'),
+        entry(1, ASIDE),
+        entry(2, 'provoked'),
+        entry(3, 'also provoked'),
+        entry(4, RESUMED),
+        entry(5, 'after'),
+        entry(6, ASIDE),
+        entry(7, 'provoked again'),
+        entry(8, RESUMED),
+      ]),
+    ),
+    ['before', 'after'],
+    'each stretch between the marks goes, and the marks with it',
+  );
+  assert.deepEqual(
+    texts(withoutAsides([entry(0, ASIDE, 'stdout'), entry(1, 'printed'), entry(2, RESUMED, 'stdout')])),
+    [ASIDE, 'printed', RESUMED],
+    'a mark counts on stderr only',
+  );
+  assert.deepEqual(
+    texts(withoutAsides([entry(0, 'before'), entry(1, ASIDE), entry(2, 'cut off')])),
+    ['before'],
+    'a stretch the engine ended inside runs to the end of the log',
+  );
+  assert.deepEqual(texts(withoutAsides([])), []);
+}
+
+/** A script fault is quoted by its own `at:` line, though its message runs over several lines. */
+function testAScriptFaultQuotesItsAtLine(): void {
+  const script = 'C:/pkg/godot/operations/godot_operations.gd';
+  const at = 'run (C:/pkg/godot/operations/plugins.gd:3)';
+  const log = new GameLog();
+  log.append('stderr', `SCRIPT ERROR: Invalid call:\nNonexistent function go\n   at: ${at}\n`);
+  assert.deepEqual(scriptFault(log.all, script), { text: 'Invalid call:', at });
+  const project = new GameLog();
+  project.append('stderr', 'SCRIPT ERROR: boom\n   at: _ready (res://game.gd:1)\n');
+  assert.equal(scriptFault(project.all, script), undefined, "an error of the project is the project's");
+  const warning = new GameLog();
+  warning.append('stderr', `WARNING: odd\n   at: ${at}\n`);
+  assert.equal(scriptFault(warning.all, script), undefined, 'and a warning is no fault');
+}
+
+/** An operation's answer file is read to an object, or refused with what is wrong with it. */
+function testAnOperationsAnswerFileIsReadOrRefusedWithItsReason(): void {
+  const folder = mkdtempSync(join(tmpdir(), 'gdharness-answer-'));
+  try {
+    const file = join(folder, 'answer.json');
+    assert.deepEqual(answerIn(file), { kind: 'none' }, 'no file is no answer');
+    writeFileSync(file, '{"found":[1,2]}');
+    assert.deepEqual(answerIn(file), { kind: 'answer', payload: { found: [1, 2] } });
+    writeFileSync(file, '[1,2]');
+    assert.deepEqual(answerIn(file), { kind: 'unreadable', why: 'it is JSON but not an object: [1,2]' });
+    writeFileSync(file, `{"cut":"${'x'.repeat(300)}`);
+    const cut = answerIn(file);
+    assert.equal(cut.kind, 'unreadable');
+    assert.ok(
+      'why' in cut && cut.why.endsWith(`: {"cut":"${'x'.repeat(192)}`),
+      `its start, 200 characters of it, follows the parser's words: ${JSON.stringify(cut)}`,
+    );
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -30704,6 +31278,233 @@ async function testARunImportsWhatChangedFirst(): Promise<void> {
     });
   } finally {
     sweep(project);
+  }
+}
+
+/**
+ * Writes the record of an import by hand, as the engine leaves it: the sidecar, the imported output
+ * and the hash of the source, each left out on request.
+ */
+function writeImported(
+  project: string,
+  name: string,
+  bytes: string,
+  options: {
+    readonly sidecarName?: string;
+    readonly uid?: boolean;
+    readonly output?: boolean;
+    readonly listed?: boolean;
+    readonly record?: string | false;
+    readonly sourceFile?: string;
+    readonly importer?: string;
+    readonly valid?: boolean;
+  } = {},
+): void {
+  const digest = (value: string): string => createHash('md5').update(value).digest('hex');
+  const resPath = `res://${name}`;
+  const out = `${name}-${digest(resPath)}`;
+  mkdirSync(join(project, '.godot', 'imported'), { recursive: true });
+  writeFileSync(join(project, name), bytes);
+  const listed = options.listed ?? true;
+  writeFileSync(
+    join(project, options.sidecarName ?? `${name}.import`),
+    [
+      '[remap]',
+      '',
+      `importer="${options.importer ?? 'texture'}"`,
+      ...(options.valid === false ? ['valid=false'] : []),
+      ...(options.uid === false ? [] : ['uid="uid://b1"']),
+      ...(listed ? [`path="res://.godot/imported/${out}.ctex"`] : []),
+      '',
+      '[deps]',
+      '',
+      `source_file="${options.sourceFile ?? resPath}"`,
+      ...(listed ? [`dest_files=["res://.godot/imported/${out}.ctex"]`] : []),
+      '',
+    ].join('\n'),
+  );
+  if (options.output !== false) {
+    writeFileSync(join(project, '.godot', 'imported', `${out}.ctex`), 'x');
+  }
+  if (options.record !== false) {
+    writeFileSync(
+      join(project, '.godot', 'imported', `${out}.md5`),
+      `source_md5="${digest(options.record ?? bytes)}"\ndest_md5="0"\n`,
+    );
+  }
+}
+
+/**
+ * Each reason a source's import is behind it, read off the files with no engine: the output gone, a
+ * sidecar written for another file or without a uid or an output, no hash of the source, a source
+ * that changed, a sidecar changed since the editor read it, and a file never imported. What is
+ * current, kept, skipped or a failed import on unchanged bytes is not behind. Names starting with a
+ * dot, folders holding `.gdignore` and addons gdharness installed are not walked.
+ */
+function testStaleImportsNameEachReason(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-stale-reasons-'));
+  try {
+    writeImported(project, 'a_current.png', 'A');
+    writeImported(project, 'b_no_output.png', 'B', { output: false });
+    writeImported(project, 'c_other_source.png', 'C', { sourceFile: 'res://elsewhere.png' });
+    writeImported(project, 'd_no_uid.png', 'D', { uid: false });
+    writeImported(project, 'e_nothing_imported.png', 'E', { listed: false });
+    writeImported(project, 'f_no_record.png', 'F', { record: false });
+    writeImported(project, 'g_changed.png', 'G', { record: 'before' });
+    writeImported(project, 'i_kept.png', 'I', { importer: 'keep', output: false, record: false });
+    writeImported(project, 'j_skipped.png', 'J', { importer: 'skip', uid: false });
+    writeImported(project, 'k_failed.png', 'K', { valid: false, uid: false, listed: false, output: false });
+    writeImported(project, 'l_failed_then_changed.png', 'L', {
+      valid: false,
+      uid: false,
+      listed: false,
+      output: false,
+      record: 'before',
+    });
+    writeFileSync(join(project, 'h_never.png'), 'H');
+    writeFileSync(join(project, 'm_not_an_import.json'), '{}');
+    mkdirSync(join(project, 'ignored'));
+    writeFileSync(join(project, 'ignored', '.gdignore'), '');
+    writeFileSync(join(project, 'ignored', 'raw.png'), 'R');
+    mkdirSync(join(project, '.hidden'));
+    writeFileSync(join(project, '.hidden', 'raw.png'), 'R');
+    mkdirSync(join(project, 'addons', 'ours'), { recursive: true });
+    writeFileSync(join(project, 'addons', 'ours', '.gdharness-version'), '1');
+    writeFileSync(join(project, 'addons', 'ours', 'raw.png'), 'R');
+    writeFileSync(join(project, 'orphan.png.import'), '[remap]\n');
+    const changed = 'the source changed after it was imported';
+    assert.deepEqual(staleImports(project), [
+      { path: 'res://b_no_output.png', reason: 'its imported output is not on disk' },
+      { path: 'res://c_other_source.png', reason: 'its import file was written for res://elsewhere.png' },
+      { path: 'res://d_no_uid.png', reason: 'its import file has no uid, which the import writes' },
+      {
+        path: 'res://e_nothing_imported.png',
+        reason:
+          'its import file names no imported output, as one written before the engine imports from it does',
+      },
+      { path: 'res://f_no_record.png', reason: 'its import recorded no hash of its source' },
+      { path: 'res://g_changed.png', reason: changed },
+      { path: 'res://h_never.png', reason: 'it has not been imported' },
+      { path: 'res://l_failed_then_changed.png', reason: changed },
+    ]);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+
+  // A sidecar changed after the editor read it, by the hash the editor's cache keeps of it.
+  const edited = mkdtempSync(join(tmpdir(), 'gdharness-stale-sidecar-'));
+  try {
+    writeImported(edited, 'a.png', 'A');
+    const sidecar = readFileSync(join(edited, 'a.png.import'), 'utf8');
+    const cache = (md5: string): void => {
+      mkdirSync(join(edited, '.godot', 'editor'), { recursive: true });
+      writeFileSync(
+        join(edited, '.godot', 'editor', 'filesystem_cache10'),
+        `1\n::res://::0\na.png::Texture2D::uid://b1::0::0::0::0::x<>x<>x<>x<>x<>${md5}<>x::\n`,
+      );
+    };
+    cache(createHash('md5').update(sidecar).digest('hex'));
+    assert.deepEqual(staleImports(edited), [], 'a sidecar as the editor imported it');
+    cache('0'.repeat(32));
+    assert.deepEqual(staleImports(edited), [
+      {
+        path: 'res://a.png',
+        reason: 'its import file changed after it was imported, as setting an option does',
+      },
+    ]);
+  } finally {
+    rmSync(edited, { recursive: true, force: true });
+  }
+
+  // What an import wrote into the project itself, apart from what it kept under .godot.
+  const wrote = mkdtempSync(join(tmpdir(), 'gdharness-imported-into-'));
+  try {
+    writeFileSync(
+      join(wrote, 'words.csv.import'),
+      '[remap]\n\nimporter="csv_translation"\n\n[deps]\n\nsource_file="res://words.csv"\n' +
+        'dest_files=["res://words.en.translation", "res://words.de.translation", "res://.godot/imported/x.md5"]\n',
+    );
+    writeFileSync(join(wrote, 'plain.png.import'), '[deps]\n\ndest_files=["res://.godot/imported/p.ctex"]\n');
+    assert.deepEqual(
+      importedIntoTheProject(wrote, ['res://words.csv', 'res://plain.png', 'res://never.png']),
+      { 'res://words.csv': ['res://words.en.translation', 'res://words.de.translation'] },
+      'a source that wrote nothing there, or has no sidecar, is left out',
+    );
+  } finally {
+    rmSync(wrote, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A source rewritten at the same size, with its modification time put back, is read again: the
+ * hash kept for a file is kept by the change time too, which only a write moves. On a volume that
+ * stamps whole seconds a second write inside the step leaves the modification time as it was.
+ */
+async function testASourceRewrittenInTheSameClockStepIsSeen(): Promise<void> {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-stale-clock-'));
+  try {
+    writeImported(project, 'a.bmp', 'AAAA');
+    const file = join(project, 'a.bmp');
+    const tick = new Date('2026-11-09T10:00:00Z');
+    utimesSync(file, tick, tick);
+    assert.deepEqual(staleImports(project), [], 'as imported');
+    await delay(60);
+    writeFileSync(file, 'BBBB');
+    utimesSync(file, tick, tick);
+    assert.equal(
+      statSync(file).mtimeMs,
+      tick.getTime(),
+      'the fixture leaves the modification time as it was',
+    );
+    assert.deepEqual(
+      staleImports(project),
+      [{ path: 'res://a.bmp', reason: 'the source changed after it was imported' }],
+      'the same size and the same time, other bytes',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The walk finds what the engine's walk finds: a source whose sidecar the file system opens under
+ * another spelling has one, and a folder behind a link is walked, a link back up the tree once.
+ */
+function testStaleImportsWalkLinksAndSpellingsAsTheFileSystemDoes(): void {
+  const root = mkdtempSync(join(tmpdir(), 'gdharness-stale-walk-'));
+  try {
+    const project = join(root, 'project');
+    writeImported(project, 'Hero.png', 'PNG', { sidecarName: 'hero.png.import' });
+    const opensAsOne = existsSync(join(project, 'Hero.png.import'));
+    assert.deepEqual(
+      staleImports(project),
+      opensAsOne ? [] : [{ path: 'res://Hero.png', reason: 'it has not been imported' }],
+      `a sidecar spelled in another case, which this file system ${opensAsOne ? 'opens as one file' : 'keeps apart'}`,
+    );
+
+    const outside = join(root, 'shared-art');
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'new.png'), 'PNG2');
+    writeFileSync(join(outside, 'kept.png'), 'PNG3');
+    writeFileSync(
+      join(outside, 'kept.png.import'),
+      '[remap]\n\nimporter="keep"\n\n[deps]\n\nsource_file="res://art/kept.png"\n',
+    );
+    mkdirSync(join(project, 'plain'));
+    writeFileSync(join(project, 'plain', 'new.png'), 'PNG2');
+    symlinkSync(outside, join(project, 'art'), 'junction');
+    symlinkSync(project, join(project, 'plain', 'back'), 'junction');
+    const stale = staleImports(project).filter((one) => one.path !== 'res://Hero.png');
+    assert.deepEqual(
+      stale,
+      [
+        { path: 'res://art/new.png', reason: 'it has not been imported' },
+        { path: 'res://plain/new.png', reason: 'it has not been imported' },
+      ],
+      'a folder behind a link is walked as a folder, and a link back up the tree is entered once',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 }
 
@@ -81296,8 +82097,15 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAOneShotRunOfAnotherProjectIsTurnedAwayQuietly,
   testEngineEntriesFoldAndScriptErrorsAreKnown,
   testAnEvaluatesErrorIsNotTheGames,
+  testAnErrorOfSeveralLinesIsOneEntry,
+  testAMarkTakesOnlyTheErrorOfItsFile,
+  testALongUnfinishedLineIsHeldInLinearTime,
   testTheDebuggerNamesTheErrorsItsCallsRaise,
   testTheProfilerReadsWhatTheEngineSends,
+  testARealIsShownAsTheEngineHoldsIt,
+  testACommandCarriesANumberAsItIs,
+  testABadLengthKeepsTheMessagesBeforeIt,
+  testTheVariantReaderRefusesWithItsReason,
   testSceneToolsVectorRegression,
   testAReleaseExportLeavesGdharnessOut,
   testRunArgumentsLeaveTheLocalDebuggerOff,
@@ -81473,6 +82281,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAReimportReimportsThroughTheEngine,
   testTheUidOfAResourceIsWhatItsFileHolds,
   testARunImportsWhatChangedFirst,
+  testStaleImportsNameEachReason,
+  testASourceRewrittenInTheSameClockStepIsSeen,
+  testStaleImportsWalkLinksAndSpellingsAsTheFileSystemDoes,
   testAnotherCheckoutRunsTheEngineItsConfigNames,
   testTheImportCheckKnowsWhatStatusImports,
   testEachSettingsWriteNamesItsSetting,
@@ -81486,6 +82297,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testProjectDefaultsToTheWorkingDirectory,
   testAnEngineThatDoesNotAnswerIsNamed,
   testAnEngineThatCrashesAtStartIsAskedAgain,
+  testALocatorAsksAgainWhenTheEngineAppearsOrGoes,
   testAnAutoloadGitWillNotCarry,
   testAnAutoloadNamingAFileThatIsNotThere,
   testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome,
@@ -81493,6 +82305,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testVersionOrdering,
   testChangelogReach,
   testANeverImportedFileIsSaidToBeOne,
+  testANeverImportedFileWithASpaceIsSaidToBeOne,
+  testAsidesAreLeftOutOfAnOperationsEntries,
+  testAScriptFaultQuotesItsAtLine,
+  testAnOperationsAnswerFileIsReadOrRefusedWithItsReason,
   testTheCureIsWrittenWhole,
   testEveryRemedyLeadsWithTheScan,
   testTheStaleNoteNamesTheCallThatRebuildsTheCopy,
@@ -81726,6 +82542,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEditorCloseWaitsForItToGo,
   testACallMetByAnEditorQuittingUnusedIsAskedAgain,
   testAReopenAfterAnIdleQuitWaitsOnlyForTheEditorItself,
+  testTheIdleRecordAndTheEditorsPortsAreRead,
   testCompletionsAreNarrowedToWhatWasTyped,
   testATestRunWithNothingToRunNamesTheRunnerToo,
   testASuiteFilesOnlyServerRefusesADirectory,

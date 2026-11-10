@@ -14,6 +14,7 @@ import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cac
 import { EXIT_LEAK, projectSelfTypedExports, selfTypedSentence } from './engine-leaks.js';
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
 import type { Sample } from './engine-spent.js';
+import { errorMessage } from './errors.js';
 import type { GameLog, LogEntry } from './game-log.js';
 import { IMPORTABLE_EXTENSIONS } from './import-freshness.js';
 import { freeLibraryCopies } from './library-copies.js';
@@ -164,7 +165,9 @@ export function notImportedNote(entries: readonly LogEntry[]): string | undefine
   const paths = [
     ...new Set(
       entries.flatMap((entry) => {
-        const path = /^No loader found for resource: (res:\/\/\S+)/.exec(entry.text)?.[1];
+        const path = /^No loader found for resource: (res:\/\/.+?)(?: \(expected type: .*\))?$/.exec(
+          entry.text,
+        )?.[1];
         const extension = path?.split('.').pop()?.toLowerCase() ?? '';
         return path !== undefined && IMPORTABLE_EXTENSIONS.includes(extension) ? [path] : [];
       }),
@@ -205,7 +208,7 @@ export const ASIDE = '[gdharness] aside';
 export const RESUMED = '[gdharness] resumed';
 
 /** [param entries] without the stretches between an `ASIDE` mark and the `RESUMED` after it. */
-function withoutAsides(entries: readonly LogEntry[]): LogEntry[] {
+export function withoutAsides(entries: readonly LogEntry[]): LogEntry[] {
   const kept: LogEntry[] = [];
   let aside = false;
   for (const entry of entries) {
@@ -293,22 +296,25 @@ function refusalsIn(log: GameLog): LogEntry[] {
  * empty. Read from the error's own location, not its backtrace: a project script that fails while
  * an operation calls it has operation frames further down, and that failure is the project's.
  */
-function scriptFault(problems: readonly LogEntry[], script: string): LogEntry | undefined {
+export function scriptFault(
+  problems: readonly LogEntry[],
+  script: string,
+): { readonly text: string; readonly at: string } | undefined {
   const spelled = (path: string): string => `(${path.replaceAll('\\', '/').toLowerCase()}/`;
   // Both spellings, because the engine may print the resolved one: a temporary directory on macOS
   // is reached through the /var link to /private/var.
   const directories = [...new Set([spelled(dirname(script)), spelled(realAsFarAsItExists(dirname(script)))])];
-  return problems.find((entry) => {
-    const at = entry.detail
-      .find((line) => line.startsWith('at: '))
-      ?.replaceAll('\\', '/')
-      .toLowerCase();
-    return (
-      entry.severity === 'error' &&
-      at !== undefined &&
-      directories.some((directory) => at.includes(directory))
-    );
-  });
+  for (const entry of problems) {
+    const at = entry.detail.find((line) => line.startsWith('at: '));
+    if (entry.severity !== 'error' || at === undefined) {
+      continue;
+    }
+    const lowered = at.replaceAll('\\', '/').toLowerCase();
+    if (directories.some((directory) => lowered.includes(directory))) {
+      return { text: entry.text, at: at.slice('at: '.length) };
+    }
+  }
+  return undefined;
 }
 
 /** One import pass's outcome, and the extension libraries a first pass could not load, if any. */
@@ -605,7 +611,7 @@ async function operationOutcome(
       ok: false,
       message:
         `${operation} hit an error in the operations script, so its answer is left out: part of it was ` +
-        `never computed. ${fault.text} (${fault.detail[0]?.slice('at: '.length) ?? 'no location given'})`,
+        `never computed. ${fault.text} (${fault.at})`,
       ...reported(problems),
       ...afterAnswered,
     };
@@ -631,7 +637,7 @@ async function operationOutcome(
 }
 
 /** The answer the script wrote, null when it wrote none, or why what it wrote is not one. */
-function answerIn(
+export function answerIn(
   file: string,
 ):
   | { readonly kind: 'none' }
@@ -649,7 +655,7 @@ function answerIn(
   } catch (error) {
     return {
       kind: 'unreadable',
-      why: `${error instanceof Error ? error.message : String(error)}: ${text.slice(0, 200)}`,
+      why: `${errorMessage(error)}: ${text.slice(0, 200)}`,
     };
   }
 }

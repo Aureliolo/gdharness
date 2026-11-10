@@ -88,7 +88,10 @@ export function idleSettled(projectPath: string): void {
 
 /** The language server and debug adapter ports [param words] started an editor on, or null. */
 export function portsIn(words: readonly string[]): EditorPorts | null {
-  const after = (flag: string): number => Number(words[words.indexOf(flag) + 1]);
+  const after = (flag: string): number => {
+    const at = words.indexOf(flag);
+    return at === -1 ? Number.NaN : Number(words[at + 1]);
+  };
   const lsp = after('--lsp-port');
   const dap = after('--dap-port');
   return Number.isInteger(lsp) && lsp > 0 && Number.isInteger(dap) && dap > 0 ? { lsp, dap } : null;
