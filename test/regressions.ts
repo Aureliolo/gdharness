@@ -6332,6 +6332,50 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
 }
 
 /**
+ * The restart note is replaced whole, so a successor reading it while it is written never sees a
+ * half. A write that cannot be finished leaves the note that was there, and a finished one leaves
+ * no temporary file beside it.
+ */
+function testTheRestartNoteIsReplacedWholeOrNotAtAll(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-restart-note-'));
+  const note = (editorPid: number): Parameters<typeof noteRestartBegun>[0] => ({
+    projectPath: project,
+    editorPid,
+    ports: { lsp: 6005, dap: 6006 },
+    quitAt: '2026-10-08T11:42:49.000Z',
+    byPid: 1,
+  });
+  try {
+    noteRestartBegun(note(111));
+    assert.equal(restartOwed(project)?.editorPid, 111);
+    noteRestartBegun(note(222));
+    assert.equal(restartOwed(project)?.editorPid, 222, 'a second note replaces the first');
+    assert.deepEqual(
+      readdirSync(dirname(restartNotePath(project))),
+      [basename(restartNotePath(project))],
+      'and leaves no temporary file',
+    );
+
+    // The temporary name taken by a folder, so the write cannot even begin.
+    mkdirSync(`${restartNotePath(project)}.${process.pid}.partial`);
+    const logged: unknown[][] = [];
+    const error = console.error;
+    console.error = (...said: unknown[]): void => {
+      logged.push(said);
+    };
+    try {
+      noteRestartBegun(note(333));
+    } finally {
+      console.error = error;
+    }
+    assert.equal(restartOwed(project)?.editorPid, 222, 'a write that fails leaves the note as it was');
+    assert.match(String(logged[0]?.[0]), /Could not record the restart at /, 'and says so');
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * #931: an editor of this project that is running and has not reached this server is coming,
  * whoever opened it. A reconnect in the middle of a restart ended the server after it had launched
  * the new editor and before that editor connected. The next server said no pid, and an open beside
@@ -83225,6 +83269,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryFixtureIsCalled,
   testBothEndsAgreeAboutTheAnnouncement,
   testARestartLeftHalfDoneIsSaid,
+  testTheRestartNoteIsReplacedWholeOrNotAtAll,
   testAnEditorStillArrivingIsNotOpenedBeside,
   testAnEditorThisServerStartsIsSilentUnlessAsked,
   testOpensOfOneEditorTakeTurns,

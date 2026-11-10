@@ -1,8 +1,9 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { errorMessage } from './errors.js';
 import type { EditorPorts } from './launch.js';
 import { isRecord } from './records.js';
+import { writeWhole } from './whole-file.js';
 
 /**
  * A restart of an editor this server opened is two acts with a gap between them: the editor is
@@ -43,7 +44,11 @@ export function noteRestartBegun(note: RestartNote): void {
   const path = restartNotePath(note.projectPath);
   try {
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, `${JSON.stringify(note, null, 2)}\n`, 'utf8');
+    // Whole or not at all: a successor reading it mid-write would otherwise read no note, which
+    // says nothing is owed and is the fault the note exists to stop.
+    if (!writeWhole(path, `${JSON.stringify(note, null, 2)}\n`)) {
+      console.error(`[SERVER] Could not record the restart at ${path}.`);
+    }
   } catch (error) {
     console.error(`[SERVER] Could not record the restart at ${path}: ${errorMessage(error)}`);
   }
