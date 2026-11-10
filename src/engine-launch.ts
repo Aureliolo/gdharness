@@ -17,7 +17,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { availableParallelism, freemem, totalmem } from 'node:os';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import process from 'node:process';
 import type { Readable } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -38,6 +38,7 @@ import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './
 import { errorCode, Refusal } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
 import { LOG_LIMIT_BYTES, readLog } from './log-read.js';
+import { relativeWithin } from './paths.js';
 import { keepPipelineCache, seedPipelineCache } from './pipeline-cache.js';
 import { belowNormal } from './priority.js';
 import { askProcessTable } from './process-table.js';
@@ -134,11 +135,11 @@ export function resPathOf(entry: string, projectPath: string, cwd: string): stri
   const fromHere = resolve(cwd, file);
   const absolute =
     isAbsolute(file) || (!existsSync(fromProject) && existsSync(fromHere)) ? fromHere : fromProject;
-  const inside = relative(projectPath, absolute);
-  if (inside.startsWith('..') || isAbsolute(inside)) {
+  const inside = relativeWithin(projectPath, absolute);
+  if (inside === null) {
     throw new EngineUsageError(`${entry} is not inside the project at ${projectPath}.`);
   }
-  const path = `res://${inside.split(sep).join('/')}`;
+  const path = `res://${inside}`;
   return caseAt === null ? path : `${path}:${caseAt[2] ?? ''}`;
 }
 

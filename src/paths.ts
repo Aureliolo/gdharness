@@ -95,13 +95,24 @@ export function isSameDirectory(onePath: string, otherPath: string): boolean {
   return relative(realAsFarAsItExists(resolve(onePath)), realAsFarAsItExists(resolve(otherPath))) === '';
 }
 
-/** Whether `candidatePath` is `rootPath` or sits underneath it. */
-export function isWithinRoot(rootPath: string, candidatePath: string): boolean {
+/**
+ * [param candidatePath] relative to [param rootPath] with forward slashes, empty for the root
+ * itself, or null when it is not underneath it.
+ */
+export function relativeWithin(rootPath: string, candidatePath: string): string | null {
   const step = relative(resolve(rootPath), resolve(candidatePath));
 
   // `..` on its own and `..` followed by a separator climb out. A name that merely begins with
   // two dots, such as `..config`, does not. An absolute answer means another drive or share.
-  return step !== '..' && !step.startsWith(`..${sep}`) && !isAbsolute(step);
+  if (step === '..' || step.startsWith(`..${sep}`) || isAbsolute(step)) {
+    return null;
+  }
+  return step.split(sep).join('/');
+}
+
+/** Whether `candidatePath` is `rootPath` or sits underneath it. */
+export function isWithinRoot(rootPath: string, candidatePath: string): boolean {
+  return relativeWithin(rootPath, candidatePath) !== null;
 }
 
 /** The id Godot gives a resource kept inside a scene or resource file, as written after `::`. */
@@ -130,6 +141,22 @@ function isLocalFile(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+/**
+ * [param candidate], an absolute path, as a project-relative path with forward slashes, or null when
+ * it is not one inside [param root]. Judged as written first. A spelling that is text-wise elsewhere
+ * is judged again with the links in both resolved, since a `\\?\` prefix, a Windows short name or a
+ * linked folder above the project each name a file of the project that the text does not show.
+ */
+function insideProject(root: string, candidate: string): string | null {
+  if (!isAbsolute(candidate)) {
+    return null;
+  }
+  return (
+    relativeWithin(root, candidate) ??
+    relativeWithin(realAsFarAsItExists(root), realAsFarAsItExists(resolve(candidate)))
+  );
 }
 
 /**
@@ -176,9 +203,7 @@ export function resolveWithinProject(
   // below as the stream marker it would otherwise be.
   const withoutScheme = trimmed.startsWith(RESOURCE_SCHEME)
     ? trimmed.slice(RESOURCE_SCHEME.length)
-    : isAbsolute(trimmed) && isWithinRoot(root, trimmed)
-      ? relative(root, resolve(trimmed)).split(sep).join('/')
-      : trimmed;
+    : (insideProject(root, trimmed) ?? trimmed);
 
   // A UID names a file in this project, and where it is on disk is known only to the engine that
   // resolves it, so containment, which is a question about where, cannot be answered for one here.

@@ -12,8 +12,9 @@
  */
 
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, extname, join, relative } from 'node:path';
+import { basename, dirname, extname, join } from 'node:path';
 import { bytesOf, entriesOf } from './listed-reads.js';
+import { relativeWithin } from './paths.js';
 import { ignoredTexts, projectTexts, VERSION_MARKER } from './project-scan.js';
 import {
   ClassGraph,
@@ -142,14 +143,11 @@ function binaryResources(projectPath: string): string[] {
  * tell the two apart, and the rename reads as a move to where the file already is.
  */
 function targetPathOf(projectPath: string, absolute: string): string | null {
-  const inside = relative(
+  const inside = relativeWithin(
     onDiskSpelling(projectPath),
     join(onDiskSpelling(dirname(absolute)), basename(absolute)),
   );
-  if (inside === '' || inside.startsWith('..') || /^[A-Za-z]:/.test(inside)) {
-    return null;
-  }
-  return `res://${inside.replace(/\\/g, '/')}`;
+  return inside === null || inside === '' ? null : `res://${inside}`;
 }
 
 export function planFileMove(projectPath: string, absoluteFrom: string, absoluteTo: string): MoveOutcome {

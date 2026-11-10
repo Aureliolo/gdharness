@@ -128,6 +128,7 @@ import {
   KEPT_RUN_DIRECTORIES,
   macMemoryLevel,
   memoryRoomOf,
+  resPathOf,
   roomFor,
   sweepRunDirectories,
   watchedEngine,
@@ -300,6 +301,7 @@ import {
   isSameDirectory,
   isWithinRoot,
   realAsFarAsItExists,
+  relativeWithin,
   resolveWithinProject,
 } from '../src/paths.js';
 import { keepPipelineCache, seedPipelineCache } from '../src/pipeline-cache.js';
@@ -337,6 +339,7 @@ import {
   LEFT_ALONE_ANSWER_LINES,
   type RenameServices,
   renameSymbol,
+  resourcePathOf,
   writeLeftAloneDetail,
 } from '../src/rename-symbol.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
@@ -11149,6 +11152,94 @@ function testProjectPathsAreContained(): void {
     true,
     'a file under the project root is inside it',
   );
+}
+
+/**
+ * A file of the project named through another spelling of its folder is a file of the project: a
+ * `\\?\` prefix, a link above the project, the other slash, the other letter case, a `..` step and
+ * a folder with a space. A neighbour with the same start is still outside.
+ */
+function testAFileInsideTheProjectIsContainedWhateverWayItsFolderIsSpelled(): void {
+  const holding = realpathSync(mkdtempSync(join(tmpdir(), 'gdharness-spelled-')));
+  try {
+    const real = join(holding, 'real');
+    const project = join(real, 'my game');
+    mkdirSync(join(project, 'scenes'), { recursive: true });
+    mkdirSync(`${project}-beside`, { recursive: true });
+    writeFileSync(join(project, 'scenes', 'main.tscn'), '');
+    const link = join(holding, 'link');
+    symlinkSync(real, link, 'junction');
+    const onWindows = process.platform === 'win32';
+    const spellings = [
+      join(link, 'my game', 'scenes', 'main.tscn'),
+      join(project, 'scenes', '..', 'scenes', 'main.tscn'),
+      ...(onWindows
+        ? [
+            `${project.replaceAll('\\', '/')}/scenes/main.tscn`,
+            `\\\\?\\${join(project, 'scenes', 'main.tscn')}`,
+            join(project, 'scenes', 'main.tscn').toUpperCase(),
+            join(project, 'scenes', 'main.tscn').toLowerCase(),
+          ]
+        : []),
+    ];
+    // The project itself given through the link, and as written.
+    for (const given of [project, join(link, 'my game')]) {
+      for (const spelled of spellings) {
+        const answer = resolveWithinProject(given, spelled);
+        assert.deepEqual(
+          // A Windows path keeps the case it was given in, so only the letters are compared loosely.
+          answer.ok ? answer.relativePath.toLowerCase() : answer.reason,
+          'scenes/main.tscn',
+          `${spelled} inside ${given}`,
+        );
+      }
+    }
+    const beside = resolveWithinProject(project, join(`${project}-beside`, 'main.tscn'));
+    assert.equal(beside.ok, false, 'a sibling folder sharing the start of the name is outside');
+    const above = resolveWithinProject(project, join(link, 'my game', '..', 'main.tscn'));
+    assert.equal(above.ok, false, 'a file one step above the project is outside');
+
+    // The one containment rule every caller shares: a folder that merely starts with two dots is
+    // inside, a step up, a sibling and another share or drive are outside.
+    const root = join(holding, 'my game');
+    assert.deepEqual(
+      [
+        relativeWithin(root, join(root, '..config', 'a.gd')),
+        relativeWithin(root, join(root, 'a', 'b.gd')),
+        relativeWithin(root, root),
+        relativeWithin(root, `${root}${sep}`),
+        relativeWithin(root, join(root, '..', 'a.gd')),
+        relativeWithin(root, `${root}-beside${sep}a.gd`),
+        ...(onWindows
+          ? [
+              relativeWithin(root, '\\\\server\\share\\a.gd'),
+              relativeWithin(root, 'D:\\a.gd'),
+              relativeWithin(root.toUpperCase(), join(root, 'x.gd').toLowerCase()),
+            ]
+          : []),
+      ],
+      ['..config/a.gd', 'a/b.gd', '', '', null, null, ...(onWindows ? [null, null, 'x.gd'] : [])],
+    );
+    assert.equal(
+      resourcePathOf(project, join(project, '..config', 'a.gd')),
+      'res://..config/a.gd',
+      'a project folder named with two leading dots is inside the project',
+    );
+    assert.equal(
+      resPathOf(join('..config', 'a.gd'), project, holding),
+      'res://..config/a.gd',
+      'a launch entry in a folder named with two leading dots is inside the project',
+    );
+    assert.throws(
+      () => resPathOf(join('..', 'a.gd'), project, holding),
+      EngineUsageError,
+      'and one a step up is not',
+    );
+    assert.equal(resourcePathOf(project, project), null, 'the project folder is no file of it');
+    assert.equal(resourcePathOf(project, `${project}-beside${sep}a.gd`), null, 'nor is a sibling');
+  } finally {
+    sweep(holding);
+  }
 }
 
 /**
@@ -82789,6 +82880,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testFramingCeilingFailsLoudly,
   testDictionariesHaveNothingBehindThem,
   testProjectPathsAreContained,
+  testAFileInsideTheProjectIsContainedWhateverWayItsFolderIsSpelled,
   testToolAndOpLookupsCannotReachThePrototype,
   testArgumentsOfTheWrongTypeAreRefused,
   testAnArgumentMeantForAnotherOpIsRefused,
