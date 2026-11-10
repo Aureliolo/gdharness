@@ -6,6 +6,8 @@
  * first time a body carries an accent, and never recovers.
  */
 
+import { errorMessage } from './errors.js';
+
 const HEADER_TERMINATOR = '\r\n\r\n';
 
 /**
@@ -43,15 +45,22 @@ export function frame(message: unknown): Buffer {
  * nothing here can shift a byte offset. A header block with no usable Content-Length is
  * skipped rather than failed: the only way to find the next message is to move on.
  */
-function announcedLength(header: string): number | null {
+function announcedLength(header: string, resyncing: boolean): number | null {
   for (const line of header.split('\r\n')) {
+    if (resyncing) {
+      // The block starts with the tail of a body that was skipped, so the name is found
+      // after whatever that left on the line.
+      const found = /content-length[ \t]*:[ \t]*(\d+)[ \t]*$/i.exec(line);
+      if (found?.[1] !== undefined) return Number(found[1]);
+      continue;
+    }
     const separator = line.indexOf(':');
     if (separator === -1) continue;
     if (line.slice(0, separator).trim().toLowerCase() !== 'content-length') continue;
     const value = line.slice(separator + 1).trim();
     if (!/^\d+$/.test(value)) continue;
-    const parsed = Number.parseInt(value, 10);
-    if (Number.isSafeInteger(parsed)) return parsed;
+    // Beyond 2^53 the value is not exact, but it is far over the ceiling, which is all that matters.
+    return Number(value);
   }
   return null;
 }
@@ -59,6 +68,7 @@ function announcedLength(header: string): number | null {
 /** Accumulates bytes as they arrive and yields every complete message they hold. */
 export class FrameReader {
   private buffer: Buffer = Buffer.alloc(0);
+  private resyncing = false;
 
   get buffered(): number {
     return this.buffer.length;
@@ -84,8 +94,11 @@ export class FrameReader {
         break;
       }
 
-      const contentLength = announcedLength(this.buffer.toString('latin1', 0, headerEnd));
+      const contentLength = announcedLength(this.buffer.toString('latin1', 0, headerEnd), this.resyncing);
       if (contentLength === null) {
+        // The body that follows is skipped too, by reading the next header block through what
+        // it left on the line.
+        this.resyncing = true;
         this.buffer = this.buffer.subarray(headerEnd + HEADER_TERMINATOR.length);
         continue;
       }
@@ -102,13 +115,16 @@ export class FrameReader {
 
       try {
         frames.push({ kind: 'message', value: JSON.parse(body) as unknown, byteLength: contentLength });
+        this.resyncing = false;
       } catch (error) {
         // A body that will not parse is the only symptom a framing fault has, so it is
-        // reported rather than skipped in silence.
+        // reported rather than skipped in silence. A length that was wrong leaves bytes of the
+        // body in front of the next header, so that one is read through them.
+        this.resyncing = true;
         frames.push({
           kind: 'malformed',
           byteLength: contentLength,
-          reason: error instanceof Error ? error.message : String(error),
+          reason: errorMessage(error),
         });
       }
     }

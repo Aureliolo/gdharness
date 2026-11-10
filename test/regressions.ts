@@ -185,6 +185,7 @@ import {
 } from '../src/engine-spent.js';
 import { Refusal } from '../src/errors.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
+import { FrameReader, frame, OversizedStreamError } from '../src/framing.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
 import {
   ALREADY_HELD,
@@ -71500,7 +71501,10 @@ function testAMoveWritesEveryFileOrNone(): void {
     assert.ok(existsSync(join(project, 'scenes', 'hero.tscn')));
 
     // A read-only script whose own text changes, which fails the move after the rewrites.
-    writeFileSync(join(project, 'scenes', 'hero.gd'), 'extends Node\n\nconst SELF := preload("res://scenes/hero.gd")\n');
+    writeFileSync(
+      join(project, 'scenes', 'hero.gd'),
+      'extends Node\n\nconst SELF := preload("res://scenes/hero.gd")\n',
+    );
     const blocked = planFileMove(
       project,
       join(project, 'scenes', 'hero.gd'),
@@ -71540,12 +71544,9 @@ function testAFailedMoveLeavesNoStagingFile(): void {
     assert.ok(outcome.inPlace.some((rewrite) => rewrite.path === 'res://game.gd'));
     chmodSync(join(project, 'game.gd'), 0o444);
     try {
-      assert.throws(
-        () => {
-          applyFileMove(outcome);
-        },
-        /EPERM|EACCES/,
-      );
+      assert.throws(() => {
+        applyFileMove(outcome);
+      }, /EPERM|EACCES/);
     } finally {
       chmodSync(join(project, 'game.gd'), 0o666);
     }
@@ -71572,14 +71573,13 @@ function testAMovePlanRefusesATargetTheWritesCannotUse(): void {
       join(project, 'blocked', 'hero.tscn'),
     );
     assert.ok(!below.ok);
-    assert.match(below.reason, /res:\/\/blocked is a file, so res:\/\/blocked\/hero\.tscn cannot go below it/);
+    assert.match(
+      below.reason,
+      /res:\/\/blocked is a file, so res:\/\/blocked\/hero\.tscn cannot go below it/,
+    );
 
     writeFileSync(join(project, 'art', 'new.png.import'), 'an orphan sidecar');
-    const sidecar = planFileMove(
-      project,
-      join(project, 'art', 'hero.png'),
-      join(project, 'art', 'new.png'),
-    );
+    const sidecar = planFileMove(project, join(project, 'art', 'hero.png'), join(project, 'art', 'new.png'));
     assert.ok(!sidecar.ok);
     assert.match(sidecar.reason, /res:\/\/art\/new\.png\.import already exists/);
 
@@ -71616,6 +71616,55 @@ function testAMoveRefusesToRewriteAFileThatIsNotUtf8(): void {
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
+}
+
+/**
+ * A block with no usable length, or a body of the wrong length, costs only its own message: the
+ * messages after it arrive. A length too large for a number is over the ceiling, not absent.
+ */
+function testAFrameReaderRecoversAfterAFaultyBlock(): void {
+  const good = Buffer.concat([frame({ id: 1 }), frame({ id: 2 }), frame({ id: 3 })]);
+  const valuesOf = (wire: Buffer, size = wire.length): unknown[] => {
+    const reader = new FrameReader();
+    const found: unknown[] = [];
+    for (let at = 0; at < wire.length; at += size) {
+      for (const one of reader.push(wire.subarray(at, at + size))) {
+        if (one.kind === 'message') found.push(one.value);
+      }
+    }
+    return found;
+  };
+  const wanted = [{ id: 1 }, { id: 2 }, { id: 3 }];
+  assert.deepEqual(valuesOf(Buffer.alloc(0)), []);
+  assert.deepEqual(valuesOf(good), wanted);
+  assert.deepEqual(valuesOf(good, 1), wanted, 'a message split across every chunk');
+  assert.deepEqual(valuesOf(good, 7), wanted);
+  const faults = [
+    'Content-Length: -7\r\n\r\n{"a":1}',
+    'Content-Type: x\r\n\r\n{"a":1}',
+    'Content-Length: 9\r\n\r\n{"s":"é"}',
+  ];
+  for (const fault of faults) {
+    const wire = Buffer.concat([Buffer.from(fault, 'utf8'), good]);
+    assert.deepEqual(valuesOf(wire), wanted, fault);
+    assert.deepEqual(valuesOf(wire, 1), wanted, `${fault} a byte at a time`);
+  }
+  for (const huge of ['9007199254740993', '99999999999999999999']) {
+    assert.throws(
+      () => new FrameReader().push(Buffer.from(`Content-Length: ${huge}\r\n\r\n{}`)),
+      OversizedStreamError,
+      huge,
+    );
+  }
+  const started = performance.now();
+  const reader = new FrameReader();
+  const long = Buffer.from(`${'x'.repeat(4 * 1024 * 1024)}\r\n\r\n`);
+  reader.push(long);
+  assert.deepEqual(
+    reader.push(frame({ id: 1 })).map((one) => (one.kind === 'message' ? one.value : one.reason)),
+    [{ id: 1 }],
+  );
+  assert.ok(performance.now() - started < 2000, 'a very long block is read in linear time');
 }
 
 /** A target whose name starts with two dots is inside the project, and is judged as any other name. */
@@ -81852,6 +81901,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFailedMoveLeavesNoStagingFile,
   testAMovePlanRefusesATargetTheWritesCannotUse,
   testAMoveRefusesToRewriteAFileThatIsNotUtf8,
+  testAFrameReaderRecoversAfterAFaultyBlock,
   testAMoveTargetNamedWithTwoLeadingDotsIsInsideTheProject,
   testAMoveCanChangeOnlyTheCase,
   testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight,
