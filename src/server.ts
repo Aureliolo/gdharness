@@ -4350,7 +4350,7 @@ class GodotServer {
     // without waiting.
     if (process.platform === 'win32') {
       void ensureHelperCompiled(undefined, undefined, false);
-      void ensureProcessTable(undefined, false);
+      void ensureProcessTable(false);
     }
 
     // A bridge that cannot bind must not take the stdio server down with it: the tools that

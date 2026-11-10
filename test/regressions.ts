@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import { ChildProcess as UnstartedProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
@@ -25,6 +26,8 @@ import {
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { PassThrough, Readable } from 'node:stream';
+import { text as pipedText } from 'node:stream/consumers';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
@@ -134,6 +137,7 @@ import {
   KEPT_RUN_DIRECTORIES,
   macMemoryLevel,
   memoryRoomOf,
+  resPathOf,
   roomFor,
   sweepRunDirectories,
   watchedEngine,
@@ -302,11 +306,13 @@ import {
   removeLeftRecords,
 } from '../src/lsp-bridge.js';
 import { nearest as nearestNames, withNearestFiles } from '../src/nearest.js';
+import { readLaunched, receivedSpec, type SentSpec, sendSpec, withChanges } from '../src/outside.js';
 import {
   exportedBuild,
   isSameDirectory,
   isWithinRoot,
   realAsFarAsItExists,
+  relativeWithin,
   resolveWithinProject,
 } from '../src/paths.js';
 import { keepPipelineCache, seedPipelineCache } from '../src/pipeline-cache.js';
@@ -314,7 +320,6 @@ import { acceptsConnections, notListeningNote } from '../src/port-probe.js';
 import { freePort } from '../src/ports.js';
 import {
   ancestorsIn,
-  childrenOf,
   descendantsIn,
   editorsOfProjectIn,
   linuxStartEarliest,
@@ -334,6 +339,7 @@ import {
   type SearchOptions,
   type SearchResult,
   SHOWN_OF_A_LINE,
+  scriptsWithoutUid,
   searchProject,
   VERSION_MARKER,
 } from '../src/project-scan.js';
@@ -343,6 +349,7 @@ import {
   LEFT_ALONE_ANSWER_LINES,
   type RenameServices,
   renameSymbol,
+  resourcePathOf,
   writeLeftAloneDetail,
 } from '../src/rename-symbol.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
@@ -10661,6 +10668,70 @@ function testAPipelineCacheIsCarriedToTheNextRun(): void {
 }
 
 /**
+ * One project is one kept cache however its folder is spelled, and a copy a keep left unfinished
+ * is swept once it is old, while one a keep is still building is left.
+ */
+function testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept(): void {
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-pipelines-'));
+  try {
+    const home = join(scratch, 'home');
+    const project = join(scratch, 'my game');
+    const linked = join(scratch, 'linked');
+    const godot = join(scratch, 'godot.exe');
+    mkdirSync(project);
+    symlinkSync(project, linked, 'junction');
+    writeFileSync(godot, 'engine');
+    const where = join('Godot', 'app_userdata', 'Game', 'shader_cache');
+    const left = join(scratch, 'left', 'user');
+    mkdirSync(join(left, where), { recursive: true });
+    writeFileSync(join(left, where, 'pipelines.cache'), 'x'.repeat(50));
+    keepPipelineCache(left, project, godot, home);
+
+    const spellings = [
+      linked,
+      `${project}${sep}`,
+      join(project, '..', 'my game'),
+      ...(process.platform === 'win32' ? [project.toUpperCase(), project.replaceAll('\\', '/')] : []),
+    ];
+    for (const spelled of spellings) {
+      const user = join(scratch, 'seeded', 'user');
+      rmSync(join(scratch, 'seeded'), { recursive: true, force: true });
+      mkdirSync(user, { recursive: true });
+      seedPipelineCache(user, spelled, godot, home);
+      assert.equal(
+        existsSync(join(user, where, 'pipelines.cache'))
+          ? readFileSync(join(user, where, 'pipelines.cache'), 'utf8').length
+          : null,
+        50,
+        `a run given the project as ${spelled} is seeded`,
+      );
+    }
+
+    const kept = join(home, 'pipeline-caches');
+    const [key] = readdirSync(kept);
+    assert.ok(key !== undefined);
+    const stale = join(kept, `${key}.4242.1700000000000`);
+    const building = join(kept, `${key}.4243.1700000000001`);
+    for (const folder of [stale, building]) {
+      mkdirSync(join(folder, 'shader_cache'), { recursive: true });
+    }
+    const longAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    utimesSync(stale, longAgo, longAgo);
+    const more = join(scratch, 'more', 'user');
+    mkdirSync(join(more, where), { recursive: true });
+    writeFileSync(join(more, where, 'pipelines.cache'), 'x'.repeat(80));
+    keepPipelineCache(more, project, godot, home);
+    assert.deepEqual(
+      readdirSync(kept).toSorted(),
+      [key, basename(building)].toSorted(),
+      'the old unfinished copy is swept, the recent one and the kept cache stay',
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
  * A test run's engine starts with the pipeline cache the last run's engine left in its user://. A
  * stand-in shell writes a cache into the user folder its environment names, and the next run's
  * stand-in says whether it found one there before it started.
@@ -11277,6 +11348,94 @@ function testProjectPathsAreContained(): void {
 }
 
 /**
+ * A file of the project named through another spelling of its folder is a file of the project: a
+ * `\\?\` prefix, a link above the project, the other slash, the other letter case, a `..` step and
+ * a folder with a space. A neighbour with the same start is still outside.
+ */
+function testAFileInsideTheProjectIsContainedWhateverWayItsFolderIsSpelled(): void {
+  const holding = realpathSync(mkdtempSync(join(tmpdir(), 'gdharness-spelled-')));
+  try {
+    const real = join(holding, 'real');
+    const project = join(real, 'my game');
+    mkdirSync(join(project, 'scenes'), { recursive: true });
+    mkdirSync(`${project}-beside`, { recursive: true });
+    writeFileSync(join(project, 'scenes', 'main.tscn'), '');
+    const link = join(holding, 'link');
+    symlinkSync(real, link, 'junction');
+    const onWindows = process.platform === 'win32';
+    const spellings = [
+      join(link, 'my game', 'scenes', 'main.tscn'),
+      join(project, 'scenes', '..', 'scenes', 'main.tscn'),
+      ...(onWindows
+        ? [
+            `${project.replaceAll('\\', '/')}/scenes/main.tscn`,
+            `\\\\?\\${join(project, 'scenes', 'main.tscn')}`,
+            join(project, 'scenes', 'main.tscn').toUpperCase(),
+            join(project, 'scenes', 'main.tscn').toLowerCase(),
+          ]
+        : []),
+    ];
+    // The project itself given through the link, and as written.
+    for (const given of [project, join(link, 'my game')]) {
+      for (const spelled of spellings) {
+        const answer = resolveWithinProject(given, spelled);
+        assert.deepEqual(
+          // A Windows path keeps the case it was given in, so only the letters are compared loosely.
+          answer.ok ? answer.relativePath.toLowerCase() : answer.reason,
+          'scenes/main.tscn',
+          `${spelled} inside ${given}`,
+        );
+      }
+    }
+    const beside = resolveWithinProject(project, join(`${project}-beside`, 'main.tscn'));
+    assert.equal(beside.ok, false, 'a sibling folder sharing the start of the name is outside');
+    const above = resolveWithinProject(project, join(link, 'my game', '..', 'main.tscn'));
+    assert.equal(above.ok, false, 'a file one step above the project is outside');
+
+    // The one containment rule every caller shares: a folder that merely starts with two dots is
+    // inside, a step up, a sibling and another share or drive are outside.
+    const root = join(holding, 'my game');
+    assert.deepEqual(
+      [
+        relativeWithin(root, join(root, '..config', 'a.gd')),
+        relativeWithin(root, join(root, 'a', 'b.gd')),
+        relativeWithin(root, root),
+        relativeWithin(root, `${root}${sep}`),
+        relativeWithin(root, join(root, '..', 'a.gd')),
+        relativeWithin(root, `${root}-beside${sep}a.gd`),
+        ...(onWindows
+          ? [
+              relativeWithin(root, '\\\\server\\share\\a.gd'),
+              relativeWithin(root, 'D:\\a.gd'),
+              relativeWithin(root.toUpperCase(), join(root, 'x.gd').toLowerCase()),
+            ]
+          : []),
+      ],
+      ['..config/a.gd', 'a/b.gd', '', '', null, null, ...(onWindows ? [null, null, 'x.gd'] : [])],
+    );
+    assert.equal(
+      resourcePathOf(project, join(project, '..config', 'a.gd')),
+      'res://..config/a.gd',
+      'a project folder named with two leading dots is inside the project',
+    );
+    assert.equal(
+      resPathOf(join('..config', 'a.gd'), project, holding),
+      'res://..config/a.gd',
+      'a launch entry in a folder named with two leading dots is inside the project',
+    );
+    assert.throws(
+      () => resPathOf(join('..', 'a.gd'), project, holding),
+      EngineUsageError,
+      'and one a step up is not',
+    );
+    assert.equal(resourcePathOf(project, project), null, 'the project folder is no file of it');
+    assert.equal(resourcePathOf(project, `${project}-beside${sep}a.gd`), null, 'nor is a sibling');
+  } finally {
+    sweep(holding);
+  }
+}
+
+/**
  * The same, through the tools, because the check is only worth anything where it is called.
  *
  * Every argument below is documented as a path inside the project and is read as one: the
@@ -11562,7 +11721,7 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
       maxResults: 100,
     });
     assert.deepEqual(
-      found.results.map((entry) => entry.file).toSorted(),
+      found.results.map((entry) => entry.file),
       ['res://addons/auto_reload/theirs.gd', 'res://scripts/hero.gd'],
       'the search should read the project and nothing standing beside it',
     );
@@ -11678,7 +11837,7 @@ function testASearchReadsWhatItSaysItReads(): void {
 
     const everywhere = search('GameState');
     assert.deepEqual(
-      everywhere.results.map((entry) => entry.file).toSorted(),
+      everywhere.results.map((entry) => entry.file),
       ['res://Hero.cs', 'res://project.godot'],
       `every text file is read, and a binary one is not: ${JSON.stringify(everywhere)}`,
     );
@@ -11722,6 +11881,11 @@ function testASearchReadsWhatItSaysItReads(): void {
     writeFileSync(join(sandbox, 'zz_vendor', '.gdignore'), '');
     const cut = search('GameState', { maxResults: 1 });
     assert.equal(cut.summary.truncated, true, 'and one more than the limit is cut');
+    assert.deepEqual(
+      cut.results.map((entry) => entry.file),
+      ['res://Hero.cs'],
+      'a cut search shows the first file by name, whichever order the file system lists them in',
+    );
     // Cut in what it answers, not in what it counts or where it looked.
     assert.deepEqual(
       [
@@ -11836,6 +12000,83 @@ function testASearchReadsWhatItSaysItReads(): void {
       undefined,
       `a type that matched files is no note, found or not: ${JSON.stringify(matched)}`,
     );
+    // Names that order differently by letter case and by character code, which a Windows listing
+    // does and a Linux one does not.
+    writeFileSync(join(sandbox, 'alpha.txt'), 'cutword\n');
+    writeFileSync(join(sandbox, 'Zed.txt'), 'cutword\n');
+    assert.deepEqual(
+      search('cutword', { maxResults: 1 }).results.map((entry) => entry.file),
+      ['res://Zed.txt'],
+      'a cut search shows the same file on every file system',
+    );
+  } finally {
+    sweep(sandbox);
+  }
+}
+
+/**
+ * A project path spelled with a trailing separator, in the other slash or with a `..` in it names
+ * the same res:// files, a file named like an extension is no file of that kind, and a search
+ * needs something to look for.
+ */
+function testASearchNamesFilesWhateverWayTheProjectPathIsSpelled(): void {
+  const sandbox = mkdtempSync(join(tmpdir(), 'gdharness-spelled-'));
+  try {
+    const project = join(sandbox, 'my proj');
+    mkdirSync(join(project, 'scripts'), { recursive: true });
+    mkdirSync(join(project, 'kit'), { recursive: true });
+    writeFileSync(join(project, 'scripts', 'hero.gd'), '# findable\n');
+    writeFileSync(join(project, 'kit', '.gdignore'), '');
+    const options = { query: 'findable', regex: false, caseSensitive: false, maxResults: 100 };
+    const forward = project.replaceAll('\\', '/');
+    const spellings = [
+      project,
+      `${project}${sep}`,
+      `${forward}/`,
+      forward,
+      join(project, 'scripts', '..'),
+      join(project, 'scripts', '..') + sep,
+      project.toLowerCase() === project ? project.toUpperCase() : project.toLowerCase(),
+    ];
+    for (const spelled of spellings) {
+      if (!existsSync(spelled)) {
+        continue;
+      }
+      const found = searchProject(spelled, options);
+      assert.deepEqual(
+        [found.results.map((entry) => entry.file), found.not_searched],
+        [['res://scripts/hero.gd'], ['res://kit/']],
+        `a project spelled ${JSON.stringify(spelled)}`,
+      );
+      const within = searchProject(spelled, { ...options, within: join(project, 'scripts') });
+      assert.deepEqual(
+        within.results.map((entry) => entry.file),
+        ['res://scripts/hero.gd'],
+        `a place within a project spelled ${JSON.stringify(spelled)}`,
+      );
+    }
+
+    assert.throws(
+      () => searchProject(project, { ...options, query: '' }),
+      /empty query matches every line/u,
+      'an empty query is refused rather than matching every line',
+    );
+    assert.throws(
+      () => searchProject(project, { ...options, query: '', regex: true }),
+      /empty query matches every line/u,
+      'and so is an empty expression',
+    );
+
+    // Names that are an extension and nothing more, which are files of no kind.
+    for (const name of ['gd', 'shader', 'png', 'tscn']) {
+      writeFileSync(join(project, name), '');
+    }
+    assert.deepEqual(
+      projectStructure(project),
+      { scenes: 0, scripts: 1, assets: 0, other: 4 },
+      'a file named gd, shader, png or tscn counts as other',
+    );
+    assert.deepEqual(scriptsWithoutUid(project), ['scripts/hero.gd'], 'and wants no uid file');
   } finally {
     sweep(sandbox);
   }
@@ -15233,6 +15474,111 @@ async function testALaunchIsOutsideTheServersTree(): Promise<void> {
     await met.end();
     sweep(scratch);
   }
+}
+
+/**
+ * What the launcher is sent and what it answers are read strictly: a spec comes back as it was
+ * sent, a malformed one is refused whole, a variable is set or taken away by name, and the first
+ * line a launcher prints is its answer.
+ */
+async function testALauncherSpecIsReadBackAsSentAndAnAnswerByItsFirstLine(): Promise<void> {
+  const sent: SentSpec = {
+    command: 'godot',
+    args: ['--path', 'my game'],
+    envChanges: { KEPT: 'a', GONE: null },
+    run: {
+      transcript: 'out.log',
+      startedAt: 5,
+      projectPath: 'p',
+      servedBy: 'q',
+      profile: 'prof',
+      breakpoints: ['res://a.gd:3'],
+      debugged: false,
+      slot: { lock: 'l', from: 1, by: 'k' },
+    },
+    desktop: 'desk',
+    noActivate: true,
+  };
+  // Only the stdin of a child is written to, so an unstarted one with a pipe in its place will do.
+  const child = new UnstartedProcess();
+  const pipe = new PassThrough();
+  Object.defineProperty(child, 'stdin', { value: pipe });
+  sendSpec(child, sent);
+  const written = await pipedText(pipe);
+  const received = async (body: string): Promise<SentSpec> => {
+    const real = Object.getOwnPropertyDescriptor(process, 'stdin');
+    Object.defineProperty(process, 'stdin', { value: Readable.from([body]), configurable: true });
+    try {
+      return await receivedSpec();
+    } finally {
+      if (real !== undefined) {
+        Object.defineProperty(process, 'stdin', real);
+      }
+    }
+  };
+  assert.deepEqual(await received(written), sent, 'a spec comes back as it was sent');
+  assert.deepEqual(
+    await received(JSON.stringify({ command: 'x', args: [], envChanges: {} })),
+    { command: 'x', args: [], envChanges: {} },
+    'a spec with only the required parts has no others made up',
+  );
+  const base = { command: 'x', args: [], envChanges: {} };
+  for (const [name, spoiled] of [
+    ['no command', { ...base, command: undefined }],
+    ['a command that is a number', { ...base, command: 3 }],
+    ['an argument that is a number', { ...base, args: ['a', 4] }],
+    ['arguments that are a string', { ...base, args: 'a' }],
+    ['an environment change that is a number', { ...base, envChanges: { A: 1 } }],
+    ['an environment that is a list', { ...base, envChanges: [] }],
+    ['a run with no transcript', { ...base, run: { startedAt: 1, projectPath: 'p' } }],
+    ['a run started at a string', { ...base, run: { transcript: 't', startedAt: '1', projectPath: 'p' } }],
+    [
+      'a run with a half slot',
+      { ...base, run: { transcript: 't', startedAt: 1, projectPath: 'p', slot: { lock: 'l' } } },
+    ],
+    [
+      'breakpoints that are not text',
+      { ...base, run: { transcript: 't', startedAt: 1, projectPath: 'p', breakpoints: [1] } },
+    ],
+    ['a desktop that is a number', { ...base, desktop: 7 }],
+    ['a noActivate that is a string', { ...base, noActivate: 'yes' }],
+  ] as const) {
+    await assert.rejects(
+      received(JSON.stringify(spoiled)),
+      /is not a spec a server sends/u,
+      `${name} is refused`,
+    );
+  }
+  await assert.rejects(received('[]'), /is not a spec a server sends/u, 'a list is no spec');
+
+  const env = { KEPT: 'old', GONE: 'x', OTHER: 'y' };
+  assert.deepEqual(
+    withChanges(env, { KEPT: 'new', GONE: null, ADDED: 'z' }),
+    { KEPT: 'new', OTHER: 'y', ADDED: 'z' },
+    'a change sets or removes a variable and leaves the rest',
+  );
+  assert.deepEqual(
+    env,
+    { KEPT: 'old', GONE: 'x', OTHER: 'y' },
+    'and the environment it was given is not touched',
+  );
+  assert.deepEqual(withChanges(env, {}), env, 'no change is the same environment');
+
+  assert.deepEqual(readLaunched('pid 12\n'), { pid: 12 });
+  assert.deepEqual(
+    readLaunched('\n  \n  pid 7  \nmore\n'),
+    { pid: 7 },
+    'blank lines before the answer are skipped',
+  );
+  assert.deepEqual(readLaunched('error no such file\n'), { error: 'no such file' });
+  assert.deepEqual(readLaunched(''), { error: 'the launcher said nothing' });
+  assert.deepEqual(readLaunched('  \n'), { error: 'the launcher said nothing' });
+  assert.deepEqual(
+    readLaunched('warning: x\npid 9\n'),
+    { error: 'warning: x' },
+    'the first line is the answer, so a line before the pid is an error naming it',
+  );
+  assert.deepEqual(readLaunched('pid abc'), { error: 'pid abc' }, 'a pid that is no number is an error');
 }
 
 /**
@@ -45778,6 +46124,42 @@ function testACommandLineIsReadTheWayTheEngineReadsIt(): void {
     null,
     'a --path with nothing after it names nothing',
   );
+  // A scene given by a plain path after the directory is the engine's argument, not part of the
+  // directory, whether Windows quoted the directory or not.
+  assert.equal(
+    readCommandLine('godot.exe --path "C:\\my game" scenes/main.tscn').projectPath,
+    'C:\\my game',
+    'a quoted directory is the one word the quotes ended',
+  );
+  assert.equal(readCommandLine('godot.exe --path C:\\game main.tscn --verbose').projectPath, 'C:\\game');
+  assert.equal(
+    readCommandLine('godot.exe --path "C:\\my game" level_one').projectPath,
+    'C:\\my game',
+    'a word that names no file still ends a quoted directory',
+  );
+  assert.equal(
+    readCommandLine('/opt/godot/Godot --path /home/me/My Project main.tscn --verbose').projectPath,
+    '/home/me/My Project',
+    'an unquoted list still runs on across a space to the scene',
+  );
+  // A relative directory names no project, since the folder the process started in is not on the line.
+  for (const given of ['.', '..', 'game', 'my game', './game', '..\\game']) {
+    assert.equal(
+      readCommandLine(`godot -e --path ${given}`).projectPath,
+      null,
+      `${given} is relative to a folder the command line does not hold`,
+    );
+  }
+  assert.deepEqual(
+    editorsOfProjectIn(
+      parseProcessTable(
+        '100 1 godot -e --path .\n101 1 godot -e --path /srv/game\n102 1 godot -e --path "C:\\my game"',
+      ),
+      '/srv/game',
+    ),
+    [101],
+    'an editor started with a relative path is not taken for one of whatever folder this server is in',
+  );
 
   const table = parseProcessTable(
     [
@@ -46042,10 +46424,14 @@ async function testTheProcessTableAgreesWithWmi(): Promise<void> {
  * for the platform that forgets rather than the one that remembers.
  */
 async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
+  const descendantsNow = async (pid: number, since?: number): Promise<number[] | undefined> => {
+    const tree = await processTree();
+    return tree === undefined ? undefined : descendantsIn(tree, pid, since);
+  };
   const probe = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   try {
     assert.ok(typeof probe.pid === 'number');
-    const listed = await childrenOf(process.pid);
+    const listed = await descendantsNow(process.pid);
     assert.ok(
       listed !== undefined,
       `this platform has to list a process's children, and did not: ${whyTheProcessTreeFailed() ?? 'no reason recorded'}`,
@@ -46102,7 +46488,7 @@ async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
     child = Number(printed.trim());
     await met.meet(child);
     assert.ok(child > 0 && alive(child), 'the grandchild is there to be listed');
-    const alive_ = await childrenOf(parent.pid);
+    const alive_ = await descendantsNow(parent.pid);
     assert.deepEqual(alive_, [child], `listed under the living parent: ${JSON.stringify(alive_)}`);
     // Read while it lives, as a run's start is known after it ends: once gone, an orphan of an
     // earlier holder of its number is listed under it too unless held to when it began.
@@ -46114,7 +46500,7 @@ async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
       'the parent should have ended',
     );
     assert.ok(alive(child), 'the orphan is still there');
-    const afterwards = await childrenOf(parent.pid, began);
+    const afterwards = await descendantsNow(parent.pid, began);
     assert.ok(afterwards !== undefined, 'the platform still answers about a number that is gone');
     if (process.platform === 'win32') {
       assert.deepEqual(
@@ -64082,6 +64468,14 @@ function testProcessorTimeIsReadOffEveryClockFormat(): void {
   // used no processor time at all.
   assert.equal(secondsFromClock(''), undefined);
   assert.equal(secondsFromClock('not a clock'), undefined);
+  for (const printed of ['-', ':', '-:', '1-', ':12', '1:2:3:4', ' ', '1:-2', '0:1e1']) {
+    assert.equal(secondsFromClock(printed), undefined, `${JSON.stringify(printed)} is no clock`);
+  }
+  // A fraction of a second, with the point of the C locale and the comma of another.
+  assert.equal(secondsFromClock('0:00.05'), 0.05);
+  assert.equal(secondsFromClock('0:01,23'), 1.23);
+  assert.equal(secondsFromClock('1-00:00:00'), 86_400);
+  assert.equal(secondsFromClock(' 00:12'), 12, 'a clock padded by the column is read');
 }
 
 /**
@@ -83102,6 +83496,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testStaleClassesAreReadFromDisk,
   testTheProjectWalksAgreeAboutWhatIsInIt,
   testASearchReadsWhatItSaysItReads,
+  testASearchNamesFilesWhateverWayTheProjectPathIsSpelled,
   testClassesAnEditorIsNotHolding,
   testAScanThatHasNotStartedIsNotFinished,
   testARescanWaitsOutTheEditorsImport,
@@ -83109,6 +83504,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARescanWaitsForItsScanToComplete,
   testARescanCountsNoSlowAnswerAsScanning,
   testALaunchIsOutsideTheServersTree,
+  testALauncherSpecIsReadBackAsSentAndAnAnswerByItsFirstLine,
   testAWindowsCommandLineReadsBackAsItsArguments,
   testARunOnItsOwnDesktopIsThere,
   testARunThatQuitsAtOnceOnItsOwnDesktopEnds,
@@ -83558,6 +83954,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testFramingCeilingFailsLoudly,
   testDictionariesHaveNothingBehindThem,
   testProjectPathsAreContained,
+  testAFileInsideTheProjectIsContainedWhateverWayItsFolderIsSpelled,
   testToolAndOpLookupsCannotReachThePrototype,
   testArgumentsOfTheWrongTypeAreRefused,
   testAnArgumentMeantForAnotherOpIsRefused,
@@ -83569,6 +83966,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEditorStatusOnAProjectWithNoAddonIsFinal,
   testEveryArgumentNamesOpsItsToolHas,
   testAPipelineCacheIsCarriedToTheNextRun,
+  testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept,
   testATestRunsEngineStartsWithTheLastRunsPipelineCache,
   testAnArgumentScopedInWordsIsScopedInItsSchema,
   testEveryToolTellsAClientWhatItCanChange,

@@ -13,6 +13,7 @@ import {
 } from 'node:fs';
 import { join, relative, resolve, sep } from 'node:path';
 import { cacheHome } from './cache-home.js';
+import { realAsFarAsItExists } from './paths.js';
 import { isRecord } from './records.js';
 
 /**
@@ -36,7 +37,11 @@ function keptHome(home: string): string {
 
 /** The folder [param projectPath]'s cache is kept in: one per project, whichever engine built it. */
 function keptFor(projectPath: string, home: string): string {
-  const key = createHash('sha256').update(resolve(projectPath)).digest('hex').slice(0, 16);
+  // As the file system spells it, so a project given in another case or through a link is the same one.
+  const key = createHash('sha256')
+    .update(realAsFarAsItExists(resolve(projectPath)))
+    .digest('hex')
+    .slice(0, 16);
   return join(keptHome(home), key);
 }
 
@@ -110,10 +115,6 @@ function keptRecord(kept: string): Kept | null {
       typeof where !== 'string' ||
       typeof bytes !== 'number'
     ) {
-      return null;
-    }
-    // Written by this module only, and still held to a path inside the user folder it names.
-    if (where.split(/[\\/]/).includes('..')) {
       return null;
     }
     return { project, engine, where, bytes };
@@ -190,13 +191,28 @@ export function keepPipelineCache(
   }
 }
 
-/** Removes every kept cache whose project folder is gone. */
+/** A keep builds its copy in `<key>.<pid>.<time>`, which one that ended midway leaves behind. */
+const BUILDING = /^[0-9a-f]{16}\.\d+\.\d+$/;
+
+/** Long enough for any keep still copying, since a copy is a few files and takes seconds. */
+const BUILDING_ABANDONED_MS = 60 * 60 * 1000;
+
+/** Removes every kept cache whose project folder is gone, and every copy a keep left unfinished. */
 function forgetGoneProjects(home: string): void {
   for (const entry of readdirSync(keptHome(home), { withFileTypes: true })) {
-    if (!entry.isDirectory() || entry.name.includes('.')) {
+    if (!entry.isDirectory()) {
       continue;
     }
     const folder = join(keptHome(home), entry.name);
+    if (BUILDING.test(entry.name)) {
+      if (Date.now() - statSync(folder).mtimeMs > BUILDING_ABANDONED_MS) {
+        rmSync(folder, { recursive: true, force: true });
+      }
+      continue;
+    }
+    if (entry.name.includes('.')) {
+      continue;
+    }
     const record = keptRecord(folder);
     if (record !== null && !existsSync(record.project)) {
       rmSync(folder, { recursive: true, force: true });

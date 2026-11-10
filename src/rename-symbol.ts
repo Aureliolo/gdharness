@@ -6,9 +6,10 @@
  */
 
 import { existsSync, mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { type DeclarationKind, isIdentifier, type Position } from './gdscript-source.js';
 import { LSPTimeout } from './lsp_client.js';
+import { relativeWithin } from './paths.js';
 import { ignoredTexts, type ProjectText, projectTexts } from './project-scan.js';
 import {
   ClassGraph,
@@ -104,11 +105,8 @@ const WHAT: Record<DeclarationKind, string> = {
 
 /** [param absolute] as the `res://` path the walk spells it with, or null outside the project. */
 export function resourcePathOf(projectPath: string, absolute: string): string | null {
-  const inside = relative(onDiskSpelling(projectPath), onDiskSpelling(absolute));
-  if (inside === '' || inside.startsWith('..') || /^[A-Za-z]:/.test(inside)) {
-    return null;
-  }
-  return `res://${inside.replace(/\\/g, '/')}`;
+  const inside = relativeWithin(onDiskSpelling(projectPath), onDiskSpelling(absolute));
+  return inside === null || inside === '' ? null : `res://${inside}`;
 }
 
 /**
