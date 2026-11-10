@@ -81479,6 +81479,67 @@ async function testAWriteReportsATurnItCouldNotGiveBack(): Promise<void> {
 }
 
 /**
+ * A whole-file write answers at once for a target that refuses for good, and clears the partial
+ * file a dead writer left beside its note in any folder, never one a live process may be writing.
+ */
+async function testAWholeFileWriteAnswersAtOnceWhereTheTargetRefusesAndSweepsDeadPartials(): Promise<void> {
+  const folder = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-whole-'));
+  try {
+    // A file that does not exist, and one that does.
+    const note = join(folder, 'note.json');
+    assert.equal(writeWhole(note, 'first'), true);
+    assert.equal(readFileSync(note, 'utf8'), 'first', 'a new file is written');
+    assert.equal(writeWhole(note, 'second'), true);
+    assert.equal(readFileSync(note, 'utf8'), 'second', 'an existing file is replaced whole');
+    assert.deepEqual(readdirSync(folder), ['note.json'], 'with no partial file left');
+
+    // A folder that does not exist, and a target that is a folder or read-only: each answers false
+    // without waiting out a reader that is not there, and leaves no partial file.
+    const timed = (run: () => boolean): { answer: boolean; ms: number } => {
+      const from = Date.now();
+      return { answer: run(), ms: Date.now() - from };
+    };
+    const missing = timed(() => writeWhole(join(folder, 'absent', 'note.json'), 'x'));
+    assert.deepEqual([missing.answer, missing.ms < 500], [false, true], 'a missing folder answers false');
+    mkdirSync(join(folder, 'a-directory'));
+    const asFolder = timed(() => writeWhole(join(folder, 'a-directory'), 'x'));
+    assert.deepEqual([asFolder.answer, asFolder.ms < 500], [false, true], `a folder answers false at once: ${String(asFolder.ms)} ms`);
+    const locked = join(folder, 'read-only.json');
+    writeFileSync(locked, 'old');
+    chmodSync(locked, 0o444);
+    const asLocked = timed(() => writeWhole(locked, 'new'));
+    chmodSync(locked, 0o666);
+    assert.deepEqual([asLocked.answer, asLocked.ms < 500], [false, true], `a read-only file answers false at once: ${String(asLocked.ms)} ms`);
+    assert.equal(readFileSync(locked, 'utf8'), 'old', 'and keeps its text');
+    assert.deepEqual(
+      readdirSync(folder).toSorted(),
+      ['a-directory', 'note.json', 'read-only.json'],
+      'no refused write leaves a partial file',
+    );
+
+    // A dead writer's partial goes at the next write to that note, a live process's stays.
+    const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    const live = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+    try {
+      const ended = new Promise((resolved) => gone.once('exit', resolved));
+      await ended;
+      const deadPartial = join(folder, `other.json.${String(gone.pid)}.partial`);
+      const livePartial = join(folder, `other.json.${String(live.pid)}.partial`);
+      const unrelated = join(folder, `unrelated.json.${String(gone.pid)}.partial`);
+      for (const one of [deadPartial, livePartial, unrelated]) writeFileSync(one, 'half');
+      assert.equal(writeWhole(join(folder, 'other.json'), 'whole'), true);
+      assert.equal(existsSync(deadPartial), false, 'a dead writer\'s partial file is removed');
+      assert.equal(existsSync(livePartial), true, 'a live process\'s partial file is kept');
+      assert.equal(existsSync(unrelated), true, 'and so is the partial of another note');
+    } finally {
+      live.kill();
+    }
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+}
+
+/**
  * editor_capture shows what a scene's @tool script draws only in the editor. A game asked to check
  * such a sample had no way to see it: runtime_capture needs a game, which never runs the editor
  * branch, and a headless editor draws nothing. A hidden editor on Windows is a window on a desktop
@@ -85055,6 +85116,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTwoWritesToOneSceneAtOnceBothLand,
   testAWriteWaitsForAnotherProcesssTurn,
   testAWriteReportsATurnItCouldNotGiveBack,
+  testAWholeFileWriteAnswersAtOnceWhereTheTargetRefusesAndSweepsDeadPartials,
   testTheEditorsViewShowsWhatToolScriptsDrawThere,
   testAnUnusedHiddenEditorQuitsAndOpensAgain,
   testACallWaitsOutTheEditorsProgressTask,
