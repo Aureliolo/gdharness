@@ -61039,7 +61039,7 @@ func _init() -> void:
 		R.as_int("12abc", 9), R.as_int(" 42 "), R.as_int("1.9"),
 	]
 	out["asBool"] = [
-		R.as_bool("false"), R.as_bool("0"), R.as_bool(0.000001), R.as_bool("true"), R.as_bool("FALSE"),
+		R.as_bool("false", true), R.as_bool("0", true), R.as_bool(0.000001), R.as_bool("true"), R.as_bool("FALSE", true),
 		R.as_bool("maybe", true), R.as_bool(NAN, true), R.as_bool(""), R.as_bool("2"),
 	]
 	out["asFloat"] = [R.as_float("abc", 5.0), R.as_float("1e3"), R.as_float("1e999", 6.0), R.as_float(" 0.5 ")]
@@ -61158,33 +61158,27 @@ func _init() -> void:
 `;
   const { answer } = await runReadingProbe(godotPath, files, probe);
   const at = (key: string): unknown => answer[key];
-  for (const path of [
-    'Body/Player',
-    'Body/Player/',
-    'Body//Player',
-    '/root/Main/Body/Player',
-    './Body/Player',
-    'Body/../Body/Player',
-  ]) {
-    assert.equal(at(path), 'ok Player', `${path} is the player`);
-  }
-  for (const path of ['%Uniq', 'Body/%Uniq']) {
-    assert.equal(at(path), 'ok Uniq', `${path} is the unique node`);
-  }
-  assert.equal(at('scene_node'), 'Uniq', 'and a node read by a unique name and a trailing slash');
-  assert.equal(
-    at('Body/Gone/Player'),
-    'AnimationPlayer not found at: Body/Gone/Player. Body has no Gone. Its children are Player, Uniq. The scene\'s AnimationPlayers are at "Body/Player", "Body/Uniq", "Inst/Deep".',
-  );
-  assert.equal(
-    at('%Nowhere'),
-    'AnimationPlayer not found at: %Nowhere. The root, Main, has no %Nowhere. Its children are Body, Inst. The scene\'s AnimationPlayers are at "Body/Player", "Body/Uniq", "Inst/Deep".',
-  );
-  assert.equal(
-    at(' Body/Player'),
-    'AnimationPlayer not found at:  Body/Player. The root, Main, has no " Body". Its children are Body, Inst. The scene\'s AnimationPlayers are at "Body/Player", "Body/Uniq", "Inst/Deep".',
-  );
-  assert.match(String(at('/root/Other/Body/Player')), /^AnimationPlayer not found at: \/root\/Other\/Body\/Player\. The root, Main, has no root\./);
+  const players = 'The scene\'s AnimationPlayers are at "Body/Player", "Body/Uniq", "Inst/Deep".';
+  // Every path is judged before any is reported, so one run names each path that is wrong.
+  const expected: Record<string, string> = {
+    'Body/Player': 'ok Player',
+    'Body/Player/': 'ok Player',
+    'Body//Player': 'ok Player',
+    '/root/Main/Body/Player': 'ok Player',
+    './Body/Player': 'ok Player',
+    'Body/../Body/Player': 'ok Player',
+    '%Uniq': 'ok Uniq',
+    'Body/%Uniq': 'ok Uniq',
+    scene_node: 'Uniq',
+    'Body/Gone/Player': `AnimationPlayer not found at: Body/Gone/Player. Body has no Gone. Its children are Player, Uniq. ${players}`,
+    '%Nowhere': `AnimationPlayer not found at: %Nowhere. The root, Main, has no %Nowhere. Its children are Body, Inst. ${players}`,
+    ' Body/Player': `AnimationPlayer not found at:  Body/Player. The root, Main, has no " Body". Its children are Body, Inst. ${players}`,
+    '/root/Other/Body/Player': `AnimationPlayer not found at: /root/Other/Body/Player. The root, Main, has no root. Its children are Body, Inst. ${players}`,
+  };
+  const wrong = Object.entries(expected)
+    .filter(([key, value]) => at(key) !== value)
+    .map(([key]) => `${key}: ${JSON.stringify(at(key))}`);
+  assert.deepEqual(wrong, [], 'every path is read as the engine reads it, or refused with where it leaves');
 }
 
 /**
@@ -61218,12 +61212,13 @@ async function testTheErrorsOfAScriptBeforeAChangeAreLeftOutOfTheAnswer(): Promi
       project,
     );
     assert.ok(outcome.ok, JSON.stringify(outcome));
-    const said = outcome.messages.map((entry) => entry.text).join('\n');
-    assert.match(said, /unmended\.gd/, `the script after the change is reported: ${said}`);
-    assert.doesNotMatch(
-      said,
-      /unmended\.gd:5\b/,
-      `and the script as it was, whose line numbers moved, is not: ${said}`,
+    const parseErrors = outcome.messages.filter((entry) =>
+      entry.text.includes('Function "mend_before_the_change()" not found'),
+    );
+    assert.equal(
+      parseErrors.length,
+      1,
+      `only the script after the change is reported, not the script as it was: ${JSON.stringify(outcome.messages)}`,
     );
   } finally {
     sweep(project);
