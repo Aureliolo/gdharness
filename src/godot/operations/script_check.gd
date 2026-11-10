@@ -14,7 +14,6 @@ extends RefCounted
 ## engine.
 
 const GdhRead = preload("reading.gd")
-const GdhLog = preload("logger.gd")
 ## Where the engine raises a script's compile errors from.
 const RELOAD: String = "GDScript::reload"
 ## What the engine puts on the end of a warning it raised as an error. Kept in step with
@@ -27,12 +26,6 @@ const DEPENDED_FAILED: String = "Failed to compile depended scripts"
 const WARNING_LEVELS: String = "debug/gdscript/warnings/"
 const WARN: int = 1
 const ERROR_LEVEL: int = 2
-
-var _log: GdhLog
-
-
-func _init(p_log: GdhLog) -> void:
-	_log = p_log
 
 
 ## One line for [param failure], a script [method check_scripts] answered as failing, with its

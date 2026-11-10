@@ -1,13 +1,5 @@
 extends RefCounted
 
-const GdhLog = preload("logger.gd")
-
-var _log: GdhLog
-
-
-func _init(p_log: GdhLog) -> void:
-	_log = p_log
-
 
 # What each of the names asked about already is to the engine, and which class in the native
 # chain from the base asked about declares it. A file cannot answer either: the native classes, the

@@ -188,10 +188,7 @@ static func _no_state(sm: AnimationNodeStateMachine, state_name: String) -> Stri
 		var _listed: bool = states.append(str(state))
 	var close: PackedStringArray = GdhRead.nearest(state_name, states)
 	if not close.is_empty():
-		return (
-			"%s. The nearest it has %s %s."
-			% [said, "is" if close.size() == 1 else "are", ", ".join(close)]
-		)
+		return "%s. The nearest it has %s." % [said, GdhRead.are_named(close)]
 	return "%s. Its states are %s." % [said, ", ".join(states)]
 
 
