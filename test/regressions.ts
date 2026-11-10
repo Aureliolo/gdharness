@@ -600,7 +600,13 @@ import {
   toolSpec,
 } from '../src/tool-definitions.js';
 import { argumentShape, headlessSection, namedType, renderToolsMarkdown } from '../src/tool-reference.js';
-import { encodedUidCache, mendUidCache, type UidEntry, uidCacheEntries } from '../src/uid-cache.js';
+import {
+  encodedUidCache,
+  mendBeforeStart,
+  mendUidCache,
+  type UidEntry,
+  uidCacheEntries,
+} from '../src/uid-cache.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { holdExit, prepareWholeExits } from '../src/whole-exit.js';
 import { writeWhole } from '../src/whole-file.js';
@@ -18410,6 +18416,88 @@ function testAStartMendsOnlyTheProjectItsOwnArgumentsName(): void {
     assert.deepEqual(readFileSync(cache), stale, 'a --path after the bare -- is left alone');
     started('--path', project);
     assert.deepEqual(readFileSync(cache), encodedUidCache([]), 'one before it is mended, so the case ran');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A `.uid` or `.import` whose file is gone declares no uid, and what a mend did is said on stderr.
+ *
+ * The editor leaves a sidecar behind when a file is deleted outside it. Read as the file's own
+ * declaration, it moved an entry from a gone path to the same gone path on every start, and where
+ * the real file sat in a folder walked later, the orphan won and the entry named a path with nothing
+ * there.
+ */
+function testASidecarWithNoFileDeclaresNoUid(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-uid-orphan-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'gone.gd.uid': 'uid://1\n',
+      'old.png.import': '[remap]\n\nuid="uid://2"\n',
+      'a_stale/s.gd.uid': 'uid://3\n',
+      'm_new/s.gd': 'extends Node\n',
+      'm_new/s.gd.uid': 'uid://3\n',
+      'first/twin.gd': 'extends Node\n',
+      'first/twin.gd.uid': 'uid://4\n',
+      'second/twin.gd': 'extends Node\n',
+      'second/twin.gd.uid': 'uid://4\n',
+      'beside/kept.gd': 'extends Node\n',
+      'beside/kept.gd.uid': 'uid://5\n',
+    });
+    mkdirSync(join(project, '.godot'));
+    const cache = join(project, '.godot', 'uid_cache.bin');
+    // A digit in a uid text is its value plus 25, so uid://1 is 26n and uid://5 is 30n.
+    const entries: UidEntry[] = [
+      [26n, 'res://gone.gd'],
+      [27n, 'res://old.png'],
+      [28n, 'res://z_old/s.gd'],
+      [29n, 'res://elsewhere/twin.gd'],
+      [30n, 'res://beside/kept.gd'],
+    ];
+    writeFileSync(cache, encodedUidCache(entries));
+    assert.deepEqual(
+      mendUidCache(project),
+      {
+        moved: [
+          [28n, 'res://z_old/s.gd', 'res://m_new/s.gd'],
+          [29n, 'res://elsewhere/twin.gd', 'res://first/twin.gd'],
+        ],
+        dropped: [
+          [26n, 'res://gone.gd'],
+          [27n, 'res://old.png'],
+        ],
+      },
+      'only a sidecar beside its file declares, and of two files claiming one uid the first walked wins',
+    );
+    assert.deepEqual(
+      readFileSync(cache),
+      encodedUidCache([
+        [28n, 'res://m_new/s.gd'],
+        [29n, 'res://first/twin.gd'],
+        [30n, 'res://beside/kept.gd'],
+      ]),
+    );
+    assert.deepEqual(mendUidCache(project), { moved: [], dropped: [] }, 'a second mend finds nothing to do');
+
+    const said: string[] = [];
+    const write = process.stderr.write.bind(process.stderr);
+    writeFileSync(cache, encodedUidCache(entries));
+    process.stderr.write = ((text: string): boolean => {
+      said.push(text);
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      mendBeforeStart(['--path', project], undefined);
+    } finally {
+      process.stderr.write = write;
+    }
+    const where = join(project, '.godot', 'uid_cache.bin');
+    assert.deepEqual(said, [
+      `uid cache: moved what names a file gone in ${where}: res://z_old/s.gd to res://m_new/s.gd, res://elsewhere/twin.gd to res://first/twin.gd\n`,
+      `uid cache: dropped what names a file gone from ${where}: res://gone.gd, res://old.png\n`,
+    ]);
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -85292,6 +85380,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEditorWritesItsConsoleWhereTheServerLooks,
   testAUidCacheNamingAFileGoneIsMended,
   testAStartMendsOnlyTheProjectItsOwnArgumentsName,
+  testASidecarWithNoFileDeclaresNoUid,
   testAMovedAutoloadBootsFromWhereItIs,
   testACancelledCallEndsTheEngineItStarted,
   testAnErrorReportOutlivesItsGameForAnHour,
