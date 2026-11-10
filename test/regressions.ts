@@ -45747,6 +45747,42 @@ function testACommandLineIsReadTheWayTheEngineReadsIt(): void {
     null,
     'a --path with nothing after it names nothing',
   );
+  // A scene given by a plain path after the directory is the engine's argument, not part of the
+  // directory, whether Windows quoted the directory or not.
+  assert.equal(
+    readCommandLine('godot.exe --path "C:\\my game" scenes/main.tscn').projectPath,
+    'C:\\my game',
+    'a quoted directory is the one word the quotes ended',
+  );
+  assert.equal(readCommandLine('godot.exe --path C:\\game main.tscn --verbose').projectPath, 'C:\\game');
+  assert.equal(
+    readCommandLine('godot.exe --path "C:\\my game" level_one').projectPath,
+    'C:\\my game',
+    'a word that names no file still ends a quoted directory',
+  );
+  assert.equal(
+    readCommandLine('/opt/godot/Godot --path /home/me/My Project main.tscn --verbose').projectPath,
+    '/home/me/My Project',
+    'an unquoted list still runs on across a space to the scene',
+  );
+  // A relative directory names no project, since the folder the process started in is not on the line.
+  for (const given of ['.', '..', 'game', 'my game', './game', '..\\game']) {
+    assert.equal(
+      readCommandLine(`godot -e --path ${given}`).projectPath,
+      null,
+      `${given} is relative to a folder the command line does not hold`,
+    );
+  }
+  assert.deepEqual(
+    editorsOfProjectIn(
+      parseProcessTable(
+        '100 1 godot -e --path .\n101 1 godot -e --path /srv/game\n102 1 godot -e --path "C:\\my game"',
+      ),
+      '/srv/game',
+    ),
+    [101],
+    'an editor started with a relative path is not taken for one of whatever folder this server is in',
+  );
 
   const table = parseProcessTable(
     [
@@ -63996,6 +64032,14 @@ function testProcessorTimeIsReadOffEveryClockFormat(): void {
   // used no processor time at all.
   assert.equal(secondsFromClock(''), undefined);
   assert.equal(secondsFromClock('not a clock'), undefined);
+  for (const printed of ['-', ':', '-:', '1-', ':12', '1:2:3:4', ' ', '1:-2', '0:1e1']) {
+    assert.equal(secondsFromClock(printed), undefined, `${JSON.stringify(printed)} is no clock`);
+  }
+  // A fraction of a second, with the point of the C locale and the comma of another.
+  assert.equal(secondsFromClock('0:00.05'), 0.05);
+  assert.equal(secondsFromClock('0:01,23'), 1.23);
+  assert.equal(secondsFromClock('1-00:00:00'), 86_400);
+  assert.equal(secondsFromClock(' 00:12'), 12, 'a clock padded by the column is read');
 }
 
 /**
