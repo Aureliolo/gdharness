@@ -138,12 +138,35 @@ const SUITE_OPENED = /^Run Test Suite:\s*(res:\/\/.+?\.gd)\s*$/;
 const STARTED_TIMING = /^gdharness timing: started (\d+) ms, compiled together (\d+) ms\s*$/;
 const SET_UP_TIMING = /^gdharness timing: (res:\/\/.+?\.(?:gd|cs)) loaded (\d+) ms, before (\d+) ms\s*$/;
 const TIME = String.raw`(?:\d+h )?(?:\d+min )?(?:\d+s )?\d+ms`;
-const CASE_LINE = new RegExp(
-  String.raw`^\s*(res://.+?\.gd) > (.+?) (STARTED|PASSED|FAILED|FLAKY|SKIPPED|WARNING)(?: \((?:retry \d+|\d+ retries)\))?(?: (${TIME}))?\s*$`,
+const CASE_HEAD = /^\s*res:\/\/.+?\.gd > (.+)$/;
+const CASE_TAIL = new RegExp(
+  String.raw` (STARTED|PASSED|FAILED|FLAKY|SKIPPED|WARNING)(?: \((?:retry \d+|\d+ retries)\))?(?: (${TIME}))?$`,
 );
+/** More characters than a case line's verdict, retries and time run to. */
+const CASE_TAIL_MOST = 96;
 const STATISTICS = new RegExp(String.raw`^Statistics:.*\|\s*([A-Z]+)(?:\s+\(.*?\))?\s+(${TIME})\s*$`);
-const ERROR_LINE = /^\s*(?:SCRIPT |USER )?ERROR: (.*?)\s*$/;
-const WARNING_LINE = /^\s*(?:SCRIPT |USER )?WARNING: (.*?)\s*$/;
+// The text keeps its trailing blanks here and loses them where it is read: a pattern leaving them
+// out took a minute over one line of 200,000 blanks, with the watch on a silent engine stopped.
+const ERROR_LINE = /^\s*(?:SCRIPT |USER )?ERROR: (.*)$/;
+const WARNING_LINE = /^\s*(?:SCRIPT |USER )?WARNING: (.*)$/;
+/**
+ * The engine's own line for what it held as it exited, which opens with the count or the report. An
+ * error of the project's that quotes the report further in is the project's.
+ */
+const EXIT_LEAK_LINE = new RegExp(String.raw`^\s*(?:ERROR|WARNING): (?:\d+ )?(?:${EXIT_LEAK.source})`);
+
+/**
+ * gdUnit4's line for a case in [param line], or null for any other line. Read from its end, and
+ * its name from what is left: one pattern for the whole line tried every split of a long line
+ * naming many scripts, and took thirteen seconds over 260,000 characters.
+ */
+function caseLineOf(line: string): { name: string; verdict: string; time: string } | null {
+  const trimmed = line.trimEnd();
+  const tail = CASE_TAIL.exec(trimmed.slice(-CASE_TAIL_MOST));
+  const name =
+    tail === null ? undefined : CASE_HEAD.exec(trimmed.slice(0, trimmed.length - tail[0].length))?.[1];
+  return tail === null || name === undefined ? null : { name, verdict: tail[1] ?? '', time: tail[2] ?? '' };
+}
 const EXECUTED = /^Executed test cases\s*:\s*\((\d+)\//;
 // gdUnit4's reason for skipping a row whose data does not fit its case, printed under the row, which
 // it prints as PASSED first. The run's summary counts it skipped, and nothing else says it never ran.
@@ -240,9 +263,9 @@ function skippedAsDeclaredIn(printed: readonly string[]): {
       lastCase = null;
       continue;
     }
-    const caseLine = CASE_LINE.exec(line);
+    const caseLine = caseLineOf(line);
     if (caseLine !== null) {
-      lastCase = caseLine[3] === 'STARTED' ? lastCase : (caseLine[2] ?? null);
+      lastCase = caseLine.verdict === 'STARTED' ? lastCase : caseLine.name;
       continue;
     }
     if (suite === null || lastCase === null) {
@@ -331,10 +354,10 @@ export function readRun(printed: string): RunPrinted {
       lastCase = null;
       continue;
     }
-    const caseLine = CASE_LINE.exec(line);
+    const caseLine = caseLineOf(line);
     if (caseLine !== null && open !== null) {
-      const name = caseLine[2] ?? '';
-      if (caseLine[3] === 'STARTED') {
+      const { name } = caseLine;
+      if (caseLine.verdict === 'STARTED') {
         settleAfterCase(lastCase ?? 'before');
         during = name;
       } else {
@@ -342,8 +365,8 @@ export function readRun(printed: string): RunPrinted {
           name,
           func: funcOf(name),
           row: rowOf(name),
-          verdict: caseLine[3] ?? '',
-          seconds: secondsOf(caseLine[4] ?? ''),
+          verdict: caseLine.verdict,
+          seconds: secondsOf(caseLine.time),
           at,
         });
         lastCase = name;
@@ -365,7 +388,7 @@ export function readRun(printed: string): RunPrinted {
       executed = Number(counted[1]);
       continue;
     }
-    if (EXIT_LEAK.test(line)) {
+    if (EXIT_LEAK_LINE.test(line)) {
       leaks.push(line.trim());
       continue;
     }
@@ -391,7 +414,7 @@ export function readRun(printed: string): RunPrinted {
     if (found === null) {
       continue;
     }
-    const text = found[1] ?? '';
+    const text = (found[1] ?? '').trimEnd();
     const warning = error === null;
     const script = /^\s*SCRIPT /.test(line);
     if (open === null) {
@@ -641,9 +664,14 @@ export function rowsAcross(
     if (suites.some((suite) => suite?.closed === null || suite?.closed === undefined)) {
       continue;
     }
+    // The engines that ran each row, not the lines saying so: a row gdUnit4 tries again prints a
+    // line for each try in the one engine.
     const counts = new Map<number | null, number>();
-    for (const ran of suites.flatMap((suite) => suite?.cases ?? []).filter((one) => one.func === func)) {
-      counts.set(ran.row, (counts.get(ran.row) ?? 0) + 1);
+    for (const suite of suites) {
+      const ran = (suite?.cases ?? []).filter((one) => one.func === func).map((one) => one.row);
+      for (const row of new Set(ran)) {
+        counts.set(row, (counts.get(row) ?? 0) + 1);
+      }
     }
     const said = (row: number | null): string => (row === null ? 'the case whole' : `row ${String(row)}`);
     if (counts.size === 0) {
@@ -782,7 +810,7 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
   const crashed = crashIn(printed.lines);
   if (end.ended !== null) {
     faults.push(end.ended);
-  } else if (end.code !== 0 && !explained) {
+  } else if (crashed?.reported === true || (end.code !== 0 && !explained)) {
     const free =
       end.freeBytes === undefined
         ? ''
@@ -905,6 +933,17 @@ export function judgeEngine(printed: RunPrinted, handed: EngineAssignment, end: 
       }
     }
   }
+  // No loop above reads a suite the engine ran without being handed it, so a case failing in one
+  // explained gdUnit4's exit and the run passed.
+  const handedHere = new Set(handed.suites.map((suite) => suite.path));
+  for (const path of printed.suites.keys()) {
+    if (!handedHere.has(path)) {
+      faults.push(
+        `${path} ran here, which gdharness did not hand this engine, so its plan of the suites was wrong`,
+      );
+      failing.add(path);
+    }
+  }
   // Failing the suite, as the run it fails is: recorded as passed, a suite leaving orphans was
   // skipped by the next run that skips what passed, which then passed.
   for (const left of printed.orphansLeft) {
@@ -1004,7 +1043,7 @@ export function judgeCompile(printed: RunPrinted, end: EngineEnd): string[] {
   const crashed = crashIn(printed.lines);
   if (end.ended !== null) {
     faults.push(end.ended);
-  } else if (end.code !== 0) {
+  } else if (crashed?.reported === true || end.code !== 0) {
     faults.push(
       crashed?.reported === true
         ? crashSaid(crashed, '')
@@ -1119,19 +1158,28 @@ export function unexpectedErrors(
   expected: Expected,
   paths: readonly string[],
 ): { printed: PrintedError[]; neverPrinted: MissingError[] } {
-  const owed = new Map<string, { suite: string; during: string; warning: boolean; texts: string[] }>();
+  const owed = new Map<
+    string,
+    { suite: string; during: string; warning: boolean; texts: string[]; finished: boolean }
+  >();
   for (const path of paths) {
     const suite = printed.suites.get(path);
     if (suite === undefined) {
       continue;
     }
     const ranHooks = suite.closed === null ? ['before'] : ['before', 'after'];
+    const finished = new Set([...ranHooks, ...suite.cases.map((ran) => ran.name)]);
+    // A case the engine ended in printed what it declares all the same. It owes nothing it had yet
+    // to print, since the engine ending there is the fault and is said.
+    const cutShort = printed.errors.flatMap((error) =>
+      error.suite === path && error.during !== null && !finished.has(error.during) ? [error.during] : [],
+    );
     for (const warning of [false, true]) {
       const declared = (warning ? expected.warnings : expected.errors)[path];
       if (declared === undefined) {
         continue;
       }
-      for (const during of [...ranHooks, ...suite.cases.map((ran) => ran.name)]) {
+      for (const during of new Set([...finished, ...cutShort])) {
         const texts: unknown = declared[funcOf(during)];
         if (Array.isArray(texts) && texts.length > 0) {
           owed.set(`${path}\n${during}\n${String(warning)}`, {
@@ -1139,6 +1187,7 @@ export function unexpectedErrors(
             during,
             warning,
             texts: texts.map((text: unknown) => String(text)),
+            finished: finished.has(during),
           });
         }
       }
@@ -1157,8 +1206,10 @@ export function unexpectedErrors(
       debt.texts.splice(index, 1);
     }
   }
-  const neverPrinted = [...owed.values()].flatMap((debt) =>
-    debt.texts.map((text) => ({ suite: debt.suite, during: debt.during, text, warning: debt.warning })),
-  );
+  const neverPrinted = [...owed.values()]
+    .filter((debt) => debt.finished)
+    .flatMap((debt) =>
+      debt.texts.map((text) => ({ suite: debt.suite, during: debt.during, text, warning: debt.warning })),
+    );
   return { printed: unexpected, neverPrinted };
 }

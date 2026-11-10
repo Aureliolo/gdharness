@@ -127,6 +127,14 @@ output can still read it there. It holds:
 `log` and `logs` are null once a passing run has removed them. A run that failed its import, or had
 nothing left to run under `--changed-only`, writes empty `suites` and `engines`.
 
+### Refused runs and unwritten results
+
+A run refused before any engine started, such as one naming a suite that is not there, writes a
+failed result with empty `suites` and `engines`. Its refusal is its one problem.
+
+A run that cannot write a result file says which and exits 1, whatever its suites did. The file
+would otherwise hold an earlier run's result.
+
 A case's own time, as gdUnit4 prints it, runs from its `before_test()` to its `after_test()`. An
 engine's start and a suite's load and `before()` are in the fields above, never in a case's time.
 The run's closing lines also say what each engine spent starting.
@@ -266,7 +274,7 @@ It takes its slot only once memory has room, so it holds no slot from anybody el
   except [before a driver switch](#errors-before-a-driver-switch).
 - An error a suite declares that it did not print.
 - A suite that never started, never finished, or finished without running every case it declares.
-- A case that ran without being planned.
+- A case that ran without being planned, or a suite the engine ran without being handed it.
 - A suite that reports a failure while all its cases passed, which is a failing `before` or `after`.
 - A run that printed no summary or ran no case, or a script gdUnit4 could not load.
 - A script under the folders searched for suites that declares `test_` functions but extends
@@ -278,6 +286,7 @@ It takes its slot only once memory has room, so it holds no slot from anybody el
 - Objects, resources, memory pages or a server's RIDs still held as the engine exits
   ([leaks at exit](#leaks-at-exit)).
 - An exit code other than 0, named by its meaning ([exit codes](#exit-codes)).
+- A crash report from the engine's crash handler, whatever code the engine exited with.
 - Orphan nodes ([orphan nodes](#orphan-nodes)).
 - An engine that printed nothing at all.
 - An engine ended for its silence or its deadline, or because an autoload did not start.
@@ -526,6 +535,10 @@ run with nothing to run then takes no engine slot and waits for none.
 A suite is recorded as passed only when its engine raised nothing outside any suite and none of
 its inputs changed while it ran. The suites that passed are kept with their inputs in
 `.godot/gdharness/suite-passed.json`, beside the times.
+
+A run of chosen cases, such as `suite.gd:test_one`, records no pass for the suite, since the rest
+of its cases did not run. A failing case still removes the pass its suite had. A run that cannot
+write that file fails, because the file would go on keeping a suite that failed as passed.
 
 ### A suite's inputs
 
