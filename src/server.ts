@@ -1871,7 +1871,7 @@ function isOfType(value: unknown, kind: unknown): boolean {
     case 'array':
       return Array.isArray(value);
     case 'object':
-      return typeof value === 'object' && value !== null && !Array.isArray(value);
+      return isRecord(value);
     default:
       return true;
   }
@@ -2807,7 +2807,7 @@ export function withUidsMissing(answer: ToolResponse, missing: readonly string[]
   const last = content.at(-1);
   try {
     const parsed: unknown = JSON.parse(last?.text ?? '');
-    if (last !== undefined && typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+    if (last !== undefined && isRecord(parsed)) {
       last.text = answerJson({
         ...parsed,
         uidsMissing: missing,
@@ -2830,7 +2830,7 @@ export function withPreviousCut(answer: ToolResponse, previous: CutTestRun): Too
   let json: Record<string, unknown> | null = null;
   try {
     const parsed: unknown = JSON.parse(last?.text ?? '');
-    json = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? { ...parsed } : null;
+    json = isRecord(parsed) ? { ...parsed } : null;
   } catch {
     // An answer that does not end in JSON carries the sentence alone.
   }
@@ -4941,7 +4941,7 @@ class GodotServer {
     }
     const small: Record<string, unknown> = {};
     const leftOut: string[] = [];
-    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+    if (isRecord(parsed)) {
       for (const [key, value] of Object.entries(parsed)) {
         if (JSON.stringify(value).length <= 2_000) {
           small[key] = value;
