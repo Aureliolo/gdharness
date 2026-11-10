@@ -191,6 +191,12 @@ function completeResourcePath(
 // Godot writes dictionaries, arrays and Object(...) values across several lines, so a
 // value is only finished once its brackets balance outside of a string.
 function isValueComplete(value: string): boolean {
+  const { depth, inString } = scanValue(value);
+  return depth <= 0 && !inString;
+}
+
+/** How deep [param value] is in brackets, and whether it ends inside a string. */
+function scanValue(value: string): { depth: number; inString: boolean } {
   let depth = 0;
   let inString = false;
   let escaped = false;
@@ -218,7 +224,7 @@ function isValueComplete(value: string): boolean {
     }
   }
 
-  return depth <= 0 && !inString;
+  return { depth, inString };
 }
 
 type IniValue = string | number | boolean | null;
@@ -302,7 +308,9 @@ export function parseProjectGodot(content: string): Record<string, Record<string
       continue;
     }
 
-    const named = splitKeyAndValue(line);
+    // Whitespace after the line's last character stays until the value is whole, because a string
+    // carried over to the next line holds it.
+    const named = splitKeyAndValue((lines[index] ?? '').trimStart());
     if (named === null) {
       continue;
     }
@@ -310,13 +318,19 @@ export function parseProjectGodot(content: string): Record<string, Record<string
     const key = named.key;
     let rawValue = named.value;
 
-    // Raw, because Godot writes a string's line breaks as they are and its indentation is content.
     while (index + 1 < lines.length && !isValueComplete(rawValue)) {
       index += 1;
-      rawValue += `\n${lines[index] ?? ''}`;
+      // Inside a string the indentation is content, and between a dictionary's entries it is not.
+      const next = lines[index] ?? '';
+      const carried = scanValue(rawValue).inString;
+      rawValue += `\n${carried ? next : next.trimStart()}`;
+      // A line that ends outside a string has nothing after its last character worth keeping.
+      if (!scanValue(rawValue).inString) {
+        rawValue = rawValue.trimEnd();
+      }
     }
 
-    section[key] = parseIniLikeValue(rawValue);
+    section[key] = parseIniLikeValue(rawValue.trimEnd());
   }
 
   return result;
@@ -335,7 +349,7 @@ function splitKeyAndValue(line: string): { key: string; value: string } | null {
       } else if (line[at] === '"') {
         const rest = line.slice(at + 1).trimStart();
         if (rest.startsWith('=')) {
-          return { key: godotStringText(line.slice(1, at)), value: rest.slice(1).trim() };
+          return { key: godotStringText(line.slice(1, at)), value: rest.slice(1).trimStart() };
         }
         break;
       }
@@ -345,7 +359,7 @@ function splitKeyAndValue(line: string): { key: string; value: string } | null {
   if (eqIndex === -1) {
     return null;
   }
-  return { key: line.slice(0, eqIndex).trim(), value: line.slice(eqIndex + 1).trim() };
+  return { key: line.slice(0, eqIndex).trim(), value: line.slice(eqIndex + 1).trimStart() };
 }
 
 function parseIniLikeValue(value: string): IniValue {

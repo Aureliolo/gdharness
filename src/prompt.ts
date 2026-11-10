@@ -12,7 +12,12 @@ import { createInterface, type Interface } from 'node:readline/promises';
 /** Whether there is somebody at a terminal to answer. */
 export function interactive(): boolean {
   // isTTY is undefined, not false, on a pipe.
-  return process.stdin.isTTY === true && process.stdout.isTTY === true;
+  return atTerminal(process.stdin) && atTerminal(process.stdout);
+}
+
+/** Node's types say isTTY is always a boolean, and on a pipe it is undefined. */
+function atTerminal(stream: { readonly isTTY?: boolean }): boolean {
+  return stream.isTTY === true;
 }
 
 export class Ask {

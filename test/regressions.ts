@@ -11208,6 +11208,14 @@ function testProjectGodotKeepsIndentInsideMultilineStrings(): void {
   assert.equal(get(parsed, 'application', 'run/x'), 2, 'the key after the string is still read');
   assert.equal(parsed['  [not a section]'], undefined, 'and a bracketed line in the string opens no section');
 
+  const trailing = parseProjectGodot('[a]\nk="one  \n  two  "  \nd={\n  "x": 1,\n  "y": "p  q",  \n}\n')['a'];
+  assert.equal(trailing?.['k'], 'one  \n  two  ', 'a space ending a line inside a string is kept');
+  assert.equal(
+    trailing?.['d'],
+    '{\n"x": 1,\n"y": "p  q",\n}',
+    'but the indentation of a dictionary entry, which is not in a string, is not',
+  );
+
   const crlf = parseProjectGodot('[a]\r\nk="one\r\n\ttwo"\r\nafter=3\r\n');
   assert.equal(get(crlf, 'a', 'k'), 'one\n\ttwo', 'a CRLF file reads the same, tab kept');
   assert.equal(get(crlf, 'a', 'after'), 3);
