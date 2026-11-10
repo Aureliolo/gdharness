@@ -29,6 +29,7 @@ import { parseProjectGodot } from './resources.js';
 import { SERVER_VERSION } from './server-version.js';
 import { spawnSyncHidden } from './spawn.js';
 import { readString } from './tool-args.js';
+import { uidTargets } from './uid-cache.js';
 
 /** The addons the package ships, by directory name under addons/. */
 export const ADDONS = ['gdharness_editor', 'gdharness_runtime', 'auto_reload', 'gdharness_tests'] as const;
@@ -554,17 +555,45 @@ function loaderAmong(
   return byName;
 }
 
-/** Every autoload in project.godot, as the project-relative path each one names. */
-export function autoloadPaths(settings: Record<string, Record<string, unknown>>): Map<string, string> {
-  const named = new Map<string, string>();
+/**
+ * Every autoload in project.godot, as the project-relative path each one names. An entry naming a
+ * `uid://` is resolved through [param projectPath], and left out when no file there declares it.
+ */
+export function autoloadPaths(
+  settings: Record<string, Record<string, unknown>>,
+  projectPath: string,
+): Map<string, string> {
+  return readAutoloads(settings, projectPath).paths;
+}
+
+const RES_PREFIX = 'res://';
+
+function readAutoloads(
+  settings: Record<string, Record<string, unknown>>,
+  projectPath: string,
+): { paths: Map<string, string>; unresolved: Map<string, string> } {
+  const said = new Map<string, string>();
   for (const [name, value] of Object.entries(settings['autoload'] ?? {})) {
     // A leading star is the enabled marker the editor writes, not part of the path.
-    const said = typeof value === 'string' ? value.replace(/^\*/, '') : '';
-    if (said.startsWith('res://')) {
-      named.set(name, said.slice('res://'.length));
+    if (typeof value === 'string') {
+      said.set(name, value.replace(/^\*/, ''));
     }
   }
-  return named;
+  const targets = uidTargets(
+    projectPath,
+    [...said.values()].filter((value) => value.startsWith('uid://')),
+  );
+  const paths = new Map<string, string>();
+  const unresolved = new Map<string, string>();
+  for (const [name, value] of said) {
+    const resolved = value.startsWith('uid://') ? targets.get(value) : value;
+    if (resolved?.startsWith(RES_PREFIX)) {
+      paths.set(name, resolved.slice(RES_PREFIX.length));
+    } else if (value.startsWith('uid://')) {
+      unresolved.set(name, value);
+    }
+  }
+  return { paths, unresolved };
 }
 
 /**
@@ -691,7 +720,11 @@ export function inspectProject(projectPath: string): ProjectReport {
   const autoload = settings['autoload'];
   const registered = autoload === undefined ? undefined : readString(autoload, RUNTIME_AUTOLOAD.name);
   // The star is the enabled marker the editor writes, not part of the path.
-  const runtimeAutoloadPath = typeof registered === 'string' ? registered.replace(/^\*/, '') : null;
+  const registeredText = typeof registered === 'string' ? registered.replace(/^\*/, '') : null;
+  const runtimeAutoloadPath =
+    registeredText === null
+      ? null
+      : (uidTargets(projectPath, [registeredText]).get(registeredText) ?? registeredText);
   if (runtimeAutoloadPath === `res://${RUNTIME_SCRIPT}`) {
     problems.push(
       `the ${RUNTIME_AUTOLOAD.name} autoload names the addon's own script, which a clone or an export without addons/ boots as a missing script. Run gdharness setup to point it at res://${RUNTIME_AUTOLOAD.path}, the loader it writes`,
@@ -711,7 +744,12 @@ export function inspectProject(projectPath: string): ProjectReport {
   // repository says why. Found on two projects, and nothing said so at the moment it was created. A
   // file git ignores is said and not failed: a project ignoring it has an install step that puts it
   // there, and setup runs in fresh clones.
-  const named = autoloadPaths(settings);
+  const { paths: named, unresolved } = readAutoloads(settings, projectPath);
+  for (const [name, uid] of unresolved) {
+    problems.push(
+      `the ${name} autoload names ${uid}, which no file in this project declares, so it boots with a missing script. Restore that file, or point the autoload at one that is here`,
+    );
+  }
   const runtimeLoaderAutoload = loaderAmong(projectPath, named);
   // Whether the runtime is brought up at all, which is the question the name asks. It used to mean
   // "is there an entry called GdharnessRuntime", so a project bringing it up through a loader was

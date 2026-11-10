@@ -12758,6 +12758,34 @@ function testTheRuntimeAutoloadIsFoundByWhatItNames(): void {
 }
 
 /**
+ * An autoload the project names by uid is read through the file that declares the uid. One that no
+ * file declares boots with a missing script and is reported like a path with no file.
+ */
+function testAnAutoloadNamedByUidIsResolvedOrReported(): void {
+  const uid = readFileSync(`${shippedLoader()}.uid`, 'utf8').trim();
+  const report = inspectedFrom(
+    `config_version=5\n\n[autoload]\n\n${RUNTIME_AUTOLOAD.name}="*${uid}"\nGone="*uid://dgq6lk2yqnw4a"\n`,
+    {
+      [RUNTIME_AUTOLOAD.path]: readFileSync(shippedLoader(), 'utf8'),
+      [`${RUNTIME_AUTOLOAD.path}.uid`]: `${uid}\n`,
+    },
+  );
+  assert.equal(
+    report.runtimeAutoloadPath,
+    `res://${RUNTIME_AUTOLOAD.path}`,
+    'the runtime entry names its file',
+  );
+  assert.equal(autoloadIsOurs(report.runtimeAutoloadPath), true, 'so it is read as ours');
+  const said = report.problems.join('\n');
+  assert.doesNotMatch(said, /which is not in this project/, 'the loader that is there is not called missing');
+  assert.match(
+    said,
+    /the Gone autoload names uid:\/\/dgq6lk2yqnw4a, which no file in this project declares/,
+    'and the entry no file declares is named',
+  );
+}
+
+/**
  * Which changelog section a change is listed under, by the files it touched.
  *
  * The split exists because a pull request title says what changed and not how far it reaches. Two
@@ -83330,6 +83358,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAutoloadGitWillNotCarry,
   testAnAutoloadNamingAFileThatIsNotThere,
   testTheRuntimeAutoloadIsFoundByWhatItNames,
+  testAnAutoloadNamedByUidIsResolvedOrReported,
   testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome,
   testTheReleaseButtonOffersWhatBothDocumentsDescribe,
   testVersionOrdering,

@@ -29,7 +29,7 @@ export function scriptsAutoloaded(projectPath: string): Map<string, string> {
   } catch {
     return scripts;
   }
-  for (const [name, path] of autoloadPaths(settings)) {
+  for (const [name, path] of autoloadPaths(settings, projectPath)) {
     if (!path.endsWith('.tscn')) {
       scripts.set(`res://${path}`, name);
       continue;
