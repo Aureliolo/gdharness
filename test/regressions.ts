@@ -74456,6 +74456,400 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
   }
 }
 
+/** What a case of scene writes through a headless engine needs: a project, a call and the files. */
+interface SceneWriteProject {
+  call: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>;
+  written: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  fileOf: (file: string) => string;
+  put: (file: string, content: string | Buffer) => void;
+  project: string;
+}
+
+/** Runs [run] against a headless server over a project holding [files], or skips without Godot. */
+async function withASceneProject(
+  label: string,
+  files: Record<string, string>,
+  run: (scenes: SceneWriteProject) => Promise<void>,
+): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log(`${label} regression skipped (Godot not found)`);
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-scene-write-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-scene-write-rt-'));
+  const put = (file: string, content: string | Buffer): void => {
+    mkdirSync(dirname(join(project, file)), { recursive: true });
+    writeFileSync(join(project, file), content);
+  };
+  put('project.godot', 'config_version=5\n\n[application]\n\nconfig/name="SceneWrite"\n');
+  for (const [file, content] of Object.entries(files)) {
+    put(file, content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 240_000);
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('scene-write');
+    await run({
+      call,
+      written: async (name, args) => {
+        const answer = await call(name, args);
+        const payload = parseTextContent(answer);
+        assert.match(
+          text(get(payload, 'writtenBy')),
+          /^a headless engine, since no editor serves this project$/,
+          `${name} ${String(args['op'])}: ${textOf(answer) ?? JSON.stringify(answer)}`,
+        );
+        return payload;
+      },
+      fileOf: (file) => readFileSync(join(project, file), 'utf8'),
+      put,
+      project,
+    });
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+const connectionLines = (file: string): string[] =>
+  file
+    .split('\n')
+    .filter((line) => line.startsWith('[connection'))
+    .toSorted();
+
+/**
+ * A write keeps every connection the file held that the engine could not make, whether for a
+ * signal the source lacks or a node the scene lacks, and says so. One the engine makes and a scene
+ * with none are untouched.
+ */
+async function testAWriteKeepsConnectionsWhoseSignalOrNodeIsMissing(): Promise<void> {
+  const header =
+    '[gd_scene format=3]\n\n[node name="Root" type="Node"]\n\n[node name="B" type="Button" parent="."]\n\n';
+  const lines = {
+    signal: '[connection signal="no_such_signal" from="B" to="." method="on_b"]',
+    source: '[connection signal="pressed" from="Ghost" to="." method="on_b"]',
+    target: '[connection signal="pressed" from="B" to="Vanished" method="on_b"]',
+    whole: '[connection signal="pressed" from="B" to="." method="on_b"]',
+  };
+  await withASceneProject(
+    'write keeps unmade connections',
+    {
+      'lost.tscn': `${header}${Object.values(lines).join('\n')}\n`,
+      'whole.tscn': `${header}${lines.whole}\n`,
+      'none.tscn': header,
+    },
+    async ({ written, fileOf }) => {
+      const set = (scenePath: string): Promise<unknown> =>
+        written('scene_node', { op: 'set', scenePath, nodePath: 'B', properties: { text: 'x' } });
+      const lost = await set('lost.tscn');
+      assert.deepEqual(
+        connectionLines(fileOf('lost.tscn')),
+        Object.values(lines).toSorted(),
+        `every connection is kept:\n${fileOf('lost.tscn')}`,
+      );
+      assert.match(fileOf('lost.tscn'), /text = "x"/, 'and the set was written');
+      const note = text(get(lost, 'unmadeConnections'));
+      for (const said of [
+        'B.no_such_signal to Root.on_b',
+        'B has no signal no_such_signal',
+        'Ghost is not in the scene',
+        'Vanished is not in the scene',
+      ]) {
+        assert.ok(note.includes(said), `the answer names ${said}: ${note}`);
+      }
+      assert.ok(!note.includes('B.pressed to Root.on_b'), `and not the whole connection: ${note}`);
+      assert.ok(note.includes('until what they name exists'), note);
+      const whole = await set('whole.tscn');
+      assert.deepEqual(connectionLines(fileOf('whole.tscn')), [lines.whole]);
+      assert.equal(get(whole, 'unmadeConnections'), undefined, JSON.stringify(whole));
+      const none = await set('none.tscn');
+      assert.deepEqual(connectionLines(fileOf('none.tscn')), []);
+      assert.equal(get(none, 'unmadeConnections'), undefined, JSON.stringify(none));
+    },
+  );
+}
+
+/**
+ * A connection a write keeps is written with the escapes the engine's saver uses, so a quote, a
+ * backslash and a line break in its names read back as the same names.
+ */
+async function testAKeptConnectionIsWrittenWithTheEnginesEscapes(): Promise<void> {
+  const kept = [
+    '[connection signal="pressed" from="a\\\\b" to="." method="nope" binds= [1]]',
+    '[connection signal="no_such" from="Plain" to="." method="q\\"b\\\\c\\nd"]',
+  ];
+  await withASceneProject(
+    'kept connection escapes',
+    {
+      'escapes.tscn':
+        '[gd_scene format=3]\n\n[node name="Root" type="Node"]\n\n[node name="a\\\\b" type="Button" parent="."]\n\n' +
+        `[node name="Plain" type="Button" parent="."]\n\n${kept.join('\n')}\n`,
+    },
+    async ({ written, fileOf }) => {
+      await written('scene_node', {
+        op: 'set',
+        scenePath: 'escapes.tscn',
+        nodePath: 'Plain',
+        properties: { text: 'x' },
+      });
+      assert.deepEqual(connectionLines(fileOf('escapes.tscn')), kept.toSorted(), fileOf('escapes.tscn'));
+      await written('scene_node', {
+        op: 'set',
+        scenePath: 'escapes.tscn',
+        nodePath: 'Plain',
+        properties: { text: 'y' },
+      });
+      assert.deepEqual(
+        connectionLines(fileOf('escapes.tscn')),
+        kept.toSorted(),
+        `and a second write finds them again:\n${fileOf('escapes.tscn')}`,
+      );
+    },
+  );
+}
+
+/**
+ * A scene's file reference is judged as the engine loads it: a path with no scheme is read from the
+ * scene's own folder, a uid finds a moved file, and only a file that is nowhere refuses the write.
+ */
+async function testAWriteJudgesAFileReferenceAsTheEngineLoadsIt(): Promise<void> {
+  const scene = (reference: string): string =>
+    `[gd_scene format=3]\n\n[ext_resource type="Script" ${reference} id="1_ref"]\n\n` +
+    '[node name="Root" type="Node2D"]\nscript = ExtResource("1_ref")\n';
+  await withASceneProject(
+    'write judges a file reference',
+    {
+      'levels/beside.gd': 'extends Node2D\n',
+      'moved.gd': 'extends Node2D\n',
+      'moved.gd.uid': 'uid://dmovedrefhw1\n',
+      'levels/relative.tscn': scene('path="beside.gd"'),
+      'levels/absolute.tscn': scene('path="res://levels/beside.gd"'),
+      'levels/by_uid.tscn': scene('path="res://old/gone.gd" uid="uid://dmovedrefhw1"'),
+      'levels/lost.tscn': scene('path="nowhere.gd"'),
+    },
+    async ({ call, written, fileOf }) => {
+      for (const kept of ['relative', 'absolute']) {
+        await written('scene_node', {
+          op: 'set',
+          scenePath: `levels/${kept}.tscn`,
+          nodePath: '.',
+          properties: { position: [1, 2] },
+        });
+        const saved = fileOf(`levels/${kept}.tscn`);
+        assert.match(saved, /position = Vector2\(1, 2\)/, `${kept} was written:\n${saved}`);
+        assert.match(saved, /script = ExtResource/, `and kept its script:\n${saved}`);
+      }
+      await written('scene_node', {
+        op: 'set',
+        scenePath: 'levels/by_uid.tscn',
+        nodePath: '.',
+        properties: { position: [1, 2] },
+      });
+      assert.match(fileOf('levels/by_uid.tscn'), /script = ExtResource/, fileOf('levels/by_uid.tscn'));
+      const before = fileOf('levels/lost.tscn');
+      const refused =
+        textOf(
+          await call('scene_node', {
+            op: 'set',
+            scenePath: 'levels/lost.tscn',
+            nodePath: '.',
+            properties: { position: [1, 2] },
+          }),
+        ) ?? '';
+      assert.match(
+        refused,
+        /^Nothing was written: res:\/\/levels\/lost\.tscn names nowhere\.gd, which is not there/,
+        refused,
+      );
+      assert.equal(fileOf('levels/lost.tscn'), before);
+    },
+  );
+}
+
+/**
+ * A binary scene naming a file that is gone is refused a write, as its text twin is, since the
+ * engine loads it without the file and a save would drop the reference.
+ */
+async function testABinarySceneNamingAGoneFileIsRefusedAWrite(): Promise<void> {
+  await withASceneProject(
+    'binary scene with a gone file',
+    {
+      'dep.tres': '[gd_resource type="Resource" format=3]\n\n[resource]\n',
+      'bin.tscn':
+        '[gd_scene format=3]\n\n[ext_resource type="Resource" path="res://dep.tres" id="1_dep"]\n\n' +
+        '[node name="Root" type="Node2D"]\nmetadata/dep = ExtResource("1_dep")\n',
+    },
+    async ({ call, written, fileOf, project }) => {
+      await written('scene_create', { op: 'save_as', scenePath: 'bin.tscn', newPath: 'bin.scn' });
+      assert.ok(existsSync(join(project, 'bin.scn')), 'the binary twin is made');
+      const source = fileOf('bin.tscn');
+      assert.match(source, /dep\.tres/, source);
+      rmSync(join(project, 'dep.tres'));
+      const before = readFileSync(join(project, 'bin.scn'));
+      const refused =
+        textOf(
+          await call('scene_node', {
+            op: 'set',
+            scenePath: 'bin.scn',
+            nodePath: '.',
+            properties: { position: [1, 2] },
+          }),
+        ) ?? '';
+      assert.match(
+        refused,
+        /^Nothing was written: res:\/\/bin\.scn names res:\/\/dep\.tres, which is not there/,
+        refused,
+      );
+      assert.ok(readFileSync(join(project, 'bin.scn')).equals(before), 'and the file is as it was');
+    },
+  );
+}
+
+/**
+ * Runs [script], a SceneTree script, in a project holding the editor addon and [files], and answers
+ * the JSON it prints after RESULT.
+ */
+function runASceneProbe(label: string, files: Record<string, string>, script: string): unknown {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    throw new Error(`${label}: GODOT_PATH names no existing file.`);
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-scene-probe-'));
+  try {
+    cpSync('src/godot/addons/gdharness_editor', join(project, 'addons', 'gdharness_editor'), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\n\nconfig/name="SceneProbe"\n',
+    );
+    writeFileSync(join(project, 'probe.gd'), script);
+    for (const [file, content] of Object.entries(files)) {
+      writeFileSync(join(project, file), content);
+    }
+    const run = spawnSyncHidden(godotPath, ['--headless', '--path', project, '-s', 'res://probe.gd'], {
+      encoding: 'utf8',
+      timeout: ENGINE_CALL_TIMEOUT_MS,
+    });
+    const printed = /^RESULT (.+)$/m.exec(run.stdout)?.[1];
+    assert.ok(printed, `${label}: the probe printed no result:\n${run.stdout}\n${run.stderr}`);
+    const parsed: unknown = JSON.parse(printed);
+    return parsed;
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A write refuses a scene file that someone else changed after it was read, and leaves their change.
+ */
+function testAWriteRefusesAFileChangedSinceItWasRead(): void {
+  const result = runASceneProbe(
+    'file changed since read',
+    {
+      'late.tscn':
+        '[gd_scene format=3]\n\n[node name="Root" type="Node" unique_id=11]\n\n[node name="Kid" type="Node2D" parent="." unique_id=22]\n',
+    },
+    [
+      'extends SceneTree',
+      '',
+      'const GdhSceneFile = preload("res://addons/gdharness_editor/scene_file.gd")',
+      '',
+      '',
+      'func _initialize() -> void:',
+      '\tvar scene: GdhSceneFile = GdhSceneFile.new()',
+      '\tvar opened: Dictionary = scene.open("res://late.tscn", true)',
+      '\tvar current: String = FileAccess.get_file_as_string("res://late.tscn")',
+      '\tvar file: FileAccess = FileAccess.open("res://late.tscn", FileAccess.WRITE)',
+      '\tvar _stored: bool = file.store_string(current + "\\n[node name=\\"Late\\" type=\\"Node\\" parent=\\".\\"]\\n")',
+      '\tfile.close()',
+      '\tvar kid: Node2D = scene.root.get_node("Kid")',
+      '\tscene.asked(kid, ["position"])',
+      '\tkid.position = Vector2(7, 8)',
+      '\tvar answer: Dictionary = scene.write()',
+      '\tvar after: String = FileAccess.get_file_as_string("res://late.tscn")',
+      '\tprint("RESULT " + JSON.stringify({ "opened": opened, "answer": answer, "after": after }))',
+      '\tquit()',
+      '',
+    ].join('\n'),
+  );
+  assert.deepEqual(get(result, 'opened'), {}, JSON.stringify(result));
+  assert.equal(get(result, 'answer', 'ok'), false, JSON.stringify(result));
+  assert.match(
+    text(get(result, 'answer', 'error')),
+    /^Nothing was written: res:\/\/late\.tscn changed on disk after it was read/,
+    JSON.stringify(result),
+  );
+  const after = text(get(result, 'after'));
+  assert.ok(after.includes('name="Late"'), `their change is still in the file:\n${after}`);
+  assert.ok(!after.includes('position = Vector2(7, 8)'), `and ours is not written:\n${after}`);
+}
+
+/**
+ * A scene something holds in the cache is brought up to date after the unique ids the file keeps
+ * are written back, so the cached copy holds the ids the file does.
+ */
+function testTheCachedSceneHoldsTheUniqueIdsTheFileKeeps(): void {
+  const result = runASceneProbe(
+    'cache after kept ids',
+    {
+      'retype.tscn':
+        '[gd_scene format=3]\n\n[node name="Root" type="Node" unique_id=1111]\n\n[node name="Kid" type="Node2D" parent="." unique_id=2222]\n',
+    },
+    [
+      'extends SceneTree',
+      '',
+      'const GdhSceneFile = preload("res://addons/gdharness_editor/scene_file.gd")',
+      '',
+      '',
+      'func _initialize() -> void:',
+      '\tvar held: PackedScene = load("res://retype.tscn")',
+      '\tvar scene: GdhSceneFile = GdhSceneFile.new()',
+      '\tvar opened: Dictionary = scene.open("res://retype.tscn", true)',
+      '\tvar was: Node = scene.root.get_node("Kid")',
+      '\tvar now: Sprite2D = Sprite2D.new()',
+      '\tnow.name = was.name',
+      '\tvar _unheld: Array[Dictionary] = scene.replace(was, now)',
+      '\tvar answer: Dictionary = scene.write()',
+      '\tvar cached: PackedScene = load("res://retype.tscn")',
+      '\tvar fresh: PackedScene = ResourceLoader.load("res://retype.tscn", "PackedScene", ResourceLoader.CACHE_MODE_IGNORE)',
+      '\tvar cached_ids: Variant = (cached.get("_bundled") as Dictionary).get("node_ids")',
+      '\tvar file_ids: Variant = (fresh.get("_bundled") as Dictionary).get("node_ids")',
+      '\tprint("RESULT " + JSON.stringify({ "opened": opened, "answer": answer, "cached": cached_ids, "file": file_ids, "same": cached == held }))',
+      '\tquit()',
+      '',
+    ].join('\n'),
+  );
+  assert.deepEqual([get(result, 'opened'), get(result, 'answer')], [{}, {}], JSON.stringify(result));
+  assert.deepEqual(
+    get(result, 'file'),
+    [1111, 2222],
+    `the file keeps the id of the node it replaced: ${JSON.stringify(result)}`,
+  );
+  assert.deepEqual(
+    get(result, 'cached'),
+    get(result, 'file'),
+    `and the cached copy holds the same: ${JSON.stringify(result)}`,
+  );
+  assert.equal(get(result, 'same'), true, 'in the object that was held');
+}
+
 /**
  * A headless write leaves out what an editor's save leaves out: a property a script that is not a
  * tool initialises through a function, which the file does not set.
@@ -82534,6 +82928,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMoveWithNoEditorLeavesTheProjectLoading,
   testAReadWithNoEditorAnswersFromTheFile,
   testAWriteWithNoEditorGoesThroughAHeadlessEngine,
+  testAWriteKeepsConnectionsWhoseSignalOrNodeIsMissing,
+  testAKeptConnectionIsWrittenWithTheEnginesEscapes,
+  testAWriteJudgesAFileReferenceAsTheEngineLoadsIt,
+  testABinarySceneNamingAGoneFileIsRefusedAWrite,
+  testAWriteRefusesAFileChangedSinceItWasRead,
+  testTheCachedSceneHoldsTheUniqueIdsTheFileKeeps,
   testAHeadlessWriteLeavesOutWhatAnEditorWould,
   testAnAnimationsKeysAndLengthAreWrittenWithNoEditor,
   testAnAnimationIsRenamedAndRemovedWithNoEditor,

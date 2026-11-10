@@ -127,22 +127,19 @@ func _parse_properties_arg(raw_properties: Variant) -> Dictionary:
 
 
 func _inherited(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
 	var script_path: String = str(args.get("script", ""))
 	return GdhKin.inherited(
 		args,
 		_new_scene_path(args),
-		GdhSceneFile.res_path(project_path, str(args.get("inherits", ""))),
-		"" if script_path.is_empty() else GdhSceneFile.res_path(project_path, script_path)
+		GdhSceneFile.res_path(str(args.get("inherits", ""))),
+		"" if script_path.is_empty() else GdhSceneFile.res_path(script_path)
 	)
 
 
 ## The res:// path [param args] give under [param argument] for a new scene, given .tscn when it
 ## has no extension, or "".
 func _new_scene_path(args: Dictionary, argument: String = "scenePath") -> String:
-	var scene_path: String = GdhSceneFile.res_path(
-		str(args.get("projectPath", "")), str(args.get(argument, ""))
-	)
+	var scene_path: String = GdhSceneFile.res_path(str(args.get(argument, "")))
 	if scene_path == "res://":
 		return ""
 	return scene_path if scene_path.ends_with(".tscn") else scene_path + ".tscn"
@@ -155,7 +152,6 @@ func create_scene(args: Dictionary) -> Dictionary:
 
 
 func _create_of_a_class(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
 	var scene_path: String = _new_scene_path(args)
 	var root_node_type: String = str(args.get("rootNodeType", "Node"))
 	var root_node_name: String = str(args.get("rootNodeName", root_node_type))
@@ -165,7 +161,7 @@ func _create_of_a_class(args: Dictionary) -> Dictionary:
 		return { "ok": false, "error": "Missing scenePath" }
 	var made: Dictionary = GdhSceneFile.made_as(
 		root_node_type,
-		"" if script_path.is_empty() else GdhSceneFile.res_path(project_path, script_path),
+		"" if script_path.is_empty() else GdhSceneFile.res_path(script_path),
 		"Node",
 		"rootNodeType"
 	)
@@ -196,7 +192,7 @@ func _create_of_a_class(args: Dictionary) -> Dictionary:
 	scene.asked(root, ["script"])
 
 	if not script_path.is_empty():
-		var full_script_path: String = GdhSceneFile.res_path(project_path, script_path)
+		var full_script_path: String = GdhSceneFile.res_path(script_path)
 		var found: Variant = GdhSceneFile.script_at(full_script_path)
 		if found is String:
 			root.free()
@@ -249,8 +245,7 @@ func _create_of_a_class(args: Dictionary) -> Dictionary:
 
 
 func list_scene_nodes(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var depth: int = GdhRead.as_int(args.get("depth", -1), -1)
 	var include_properties: bool = GdhRead.as_bool(args.get("includeProperties", false))
 	var include_defaults: bool = GdhRead.as_bool(args.get("includeDefaults", false))
@@ -266,8 +261,7 @@ func list_scene_nodes(args: Dictionary) -> Dictionary:
 
 
 func add_node(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var node_type: String = str(args.get("nodeType", ""))
 	var instance_path: String = str(args.get("instancePath", ""))
 	var node_name: String = str(args.get("nodeName", ""))
@@ -407,8 +401,7 @@ static func _placeholder_of(node: Node) -> bool:
 
 
 func delete_node(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", ""))
 
 	if node_path.is_empty() or node_path == ".":
@@ -480,8 +473,7 @@ static func _connections_with(scene: GdhSceneFile, at: String) -> Array[Dictiona
 ## place, children, groups, the connections from and to it, the node values naming it and every
 ## value it stores that the new type has.
 func change_node_type(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", ""))
 	var node_type: String = str(args.get("nodeType", ""))
 	if node_type.is_empty():
@@ -683,8 +675,7 @@ static func _connection(
 
 
 func duplicate_node(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", ""))
 	var new_name: String = str(args.get("newName", ""))
 	var parent_path: String = str(args.get("parentNodePath", ""))
@@ -813,8 +804,7 @@ static func _connections_copied(
 
 
 func reparent_node(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", ""))
 	var new_parent_path: String = str(args.get("newParentPath", ""))
 
@@ -963,8 +953,7 @@ func reparent_node(args: Dictionary) -> Dictionary:
 ## its nodes, the properties holding them and the %unique paths, which no longer reach a node
 ## unique only in the new scene.
 func save_branch(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", ""))
 	var branch_path: String = _new_scene_path(args, "newScenePath")
 	if node_path.is_empty() or node_path == ".":
@@ -1399,8 +1388,7 @@ static func _scripts_naming_outside(
 
 
 func set_node_properties(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", "."))
 	var properties: Dictionary = _parse_properties_arg(args.get("properties", {}))
 	var editable: Variant = args.get("editableChildren")
@@ -1668,8 +1656,7 @@ static func _note_left_out(
 
 
 func get_node_properties(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", "."))
 	var include_defaults: bool = GdhRead.as_bool(args.get("includeDefaults", false))
 
@@ -1769,8 +1756,7 @@ func get_node_properties(args: Dictionary) -> Dictionary:
 
 
 func bake_navigation(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var node_path: String = str(args.get("nodePath", "."))
 	var opened: Array = _open(scene_path, true)
 	var scene: GdhSceneFile = opened[0]
@@ -1787,12 +1773,11 @@ func bake_navigation(args: Dictionary) -> Dictionary:
 
 
 func save_scene(args: Dictionary) -> Dictionary:
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var new_path_raw: String = str(args.get("newPath", ""))
 	var target_path: String = scene_path
 	if not new_path_raw.is_empty():
-		target_path = GdhSceneFile.res_path(project_path, new_path_raw)
+		target_path = GdhSceneFile.res_path(new_path_raw)
 
 	if target_path != scene_path:
 		if FileAccess.file_exists(target_path):

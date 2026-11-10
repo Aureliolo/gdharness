@@ -31,7 +31,7 @@ const BLENDED_TYPES: Array[int] = [
 # add_animation_track, remove_animation_track
 # =============================================================================
 func add_animation_track(args: Dictionary) -> Dictionary:
-	var scene_path: String = GdhSceneFile.res_path("", str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var player_node_path: String = str(args.get("playerNodePath", "."))
 	var animation_name: String = str(args.get("animationName", ""))
 	var given_track: Variant = args.get("track", {})
@@ -445,7 +445,7 @@ static func _key_misfit(target: Node, method: String, arguments: Array, index: i
 ## track given a method loses only the keys calling it, since add_track puts every method called on
 ## one node in one track. The track goes once no key is left.
 func remove_animation_track(args: Dictionary) -> Dictionary:
-	var scene_path: String = GdhSceneFile.res_path("", str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var player_node_path: String = str(args.get("playerNodePath", "."))
 	var animation_name: String = str(args.get("animationName", ""))
 	var given_track: Variant = args.get("track", {})

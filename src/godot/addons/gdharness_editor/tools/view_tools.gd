@@ -49,8 +49,7 @@ func capture_editor_view(args: Dictionary) -> Dictionary:
 				+ "editor, or a hidden one on Windows."
 			),
 		}
-	var project_path: String = str(args.get("projectPath", ""))
-	var scene_path: String = GdhSceneFile.res_path(project_path, str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	if not ResourceLoader.exists(scene_path, "PackedScene"):
 		return {
 			"ok": false,
