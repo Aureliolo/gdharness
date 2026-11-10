@@ -12851,6 +12851,28 @@ function testDoctorJudgesAddonsByTheirCodeAndNotTheirVersionMarker(): void {
 }
 
 /**
+ * An uninstall takes out an addon that is a link to a folder that has gone, and the addons folder
+ * with it once nothing else is there. Reported as removed rather than as nothing to do.
+ */
+function testAnUninstallRemovesALinkWhoseFolderIsGone(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-dead-link-'));
+  try {
+    mkdirSync(join(project, 'addons'), { recursive: true });
+    const elsewhere = join(project, 'elsewhere');
+    mkdirSync(elsewhere);
+    const link = join(project, 'addons', 'gdharness_runtime');
+    symlinkSync(elsewhere, link, 'junction');
+    rmSync(elsewhere, { recursive: true });
+    assert.equal(existsSync(link), false, 'the link points at nothing');
+    assert.deepEqual(removeAddons(project), [link, join(project, 'addons')]);
+    assert.equal(existsSync(join(project, 'addons')), false, 'and the folder it sat in is gone with it');
+    assert.deepEqual(removeAddons(project), [], 'a second uninstall finds nothing');
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * Which changelog section a change is listed under, by the files it touched.
  *
  * The split exists because a pull request title says what changed and not how far it reaches. Two
@@ -83428,6 +83450,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheRuntimeAutoloadIsFoundByWhatItNames,
   testAnAutoloadNamedByUidIsResolvedOrReported,
   testDoctorJudgesAddonsByTheirCodeAndNotTheirVersionMarker,
+  testAnUninstallRemovesALinkWhoseFolderIsGone,
   testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome,
   testTheReleaseButtonOffersWhatBothDocumentsDescribe,
   testVersionOrdering,

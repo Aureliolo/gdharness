@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -310,6 +311,16 @@ export interface InstalledAddon {
   readonly replaced: boolean;
 }
 
+/** Whether [param path] is anything, a link to a folder that is gone included, which `existsSync` follows. */
+function somethingAt(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Each addon copied whole into the project's addons/, over whatever was there. */
 export function installAddons(
   projectPath: string,
@@ -322,7 +333,7 @@ export function installAddons(
       throw new Error(`The package holds no ${name} addon at ${source}.`);
     }
     const target = join(projectPath, 'addons', name);
-    const replaced = existsSync(target);
+    const replaced = somethingAt(target);
     rmSync(target, { recursive: true, force: true });
     mkdirSync(dirname(target), { recursive: true });
     cpSync(source, target, { recursive: true });
@@ -370,7 +381,7 @@ export function removeAddons(projectPath: string): readonly string[] {
   const removed: string[] = [];
   for (const name of ADDONS) {
     const target = join(projectPath, 'addons', name);
-    if (existsSync(target)) {
+    if (somethingAt(target)) {
       rmSync(target, { recursive: true, force: true });
       removed.push(target);
     }
