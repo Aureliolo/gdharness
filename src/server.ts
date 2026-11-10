@@ -207,7 +207,6 @@ import {
   engineFlagsAmongGameArgs,
   environmentFor,
   envValue,
-  waitFromEnv,
   RESERVED_VARIABLE_PREFIX,
   resolveHeadless,
   resolveSilent,
@@ -216,6 +215,7 @@ import {
   savesStayPut,
   startedAs,
   userDataIn,
+  waitFromEnv,
 } from './launch.js';
 import { freeLibraryCopies } from './library-copies.js';
 import { type CallInFlight, callsInFlight, lifecycleLogPath, writeLifecycle } from './lifecycle-log.js';

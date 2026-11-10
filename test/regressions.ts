@@ -191,7 +191,7 @@ import {
 } from '../src/engine-spent.js';
 import { errorCode, errorMessage, Refusal } from '../src/errors.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
-import { FrameReader, frame, OversizedStreamError } from '../src/framing.js';
+import { FrameReader, OversizedStreamError, frame as wireFrame } from '../src/framing.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
 import {
   ALREADY_HELD,
@@ -71836,7 +71836,7 @@ function testAMoveRefusesToRewriteAFileThatIsNotUtf8(): void {
  * messages after it arrive. A length too large for a number is over the ceiling, not absent.
  */
 function testAFrameReaderRecoversAfterAFaultyBlock(): void {
-  const good = Buffer.concat([frame({ id: 1 }), frame({ id: 2 }), frame({ id: 3 })]);
+  const good = Buffer.concat([wireFrame({ id: 1 }), wireFrame({ id: 2 }), wireFrame({ id: 3 })]);
   const valuesOf = (wire: Buffer, size = wire.length): unknown[] => {
     const reader = new FrameReader();
     const found: unknown[] = [];
@@ -71874,7 +71874,7 @@ function testAFrameReaderRecoversAfterAFaultyBlock(): void {
   const long = Buffer.from(`${'x'.repeat(4 * 1024 * 1024)}\r\n\r\n`);
   reader.push(long);
   assert.deepEqual(
-    reader.push(frame({ id: 1 })).map((one) => (one.kind === 'message' ? one.value : one.reason)),
+    reader.push(wireFrame({ id: 1 })).map((one) => (one.kind === 'message' ? one.value : one.reason)),
     [{ id: 1 }],
   );
   assert.ok(performance.now() - started < 2000, 'a very long block is read in linear time');
