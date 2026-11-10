@@ -4,9 +4,10 @@
  */
 
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { basename, extname, join, relative, sep } from 'node:path';
+import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { errorMessage } from './errors.js';
 import { bytesOf, entriesOf } from './listed-reads.js';
+import { relativeWithin } from './paths.js';
 import { uidCacheEntries } from './uid-cache.js';
 
 /** Directories that are never part of a project's own files, and are not spelled with a dot. */
@@ -517,13 +518,38 @@ function compiledQuery(query: string, caseSensitive: boolean): RegExp {
   }
 }
 
+/** Whether two paths name one file or folder, by its identity on disk rather than its spelling. */
+function sameEntry(one: string, other: string): boolean {
+  try {
+    const first = statSync(one, { bigint: true });
+    const second = statSync(other, { bigint: true });
+    return first.ino === second.ino && first.dev === second.dev;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * [param place] below [param projectPath] with forward slashes. Taken from the two paths rather
- * than by cutting a length off the front, so a project path written with a trailing separator,
- * in the other slash or with `..` in it names the same files.
+ * The steps from [param projectPath] down to [param place], or null when it is not below it.
+ *
+ * Taken from the two paths rather than by cutting a length off the front, so a project path written
+ * with a trailing separator, in the other slash or with `..` in it names the same files. Where the
+ * paths disagree, the folders are compared by identity: a macOS temporary folder is reached as
+ * `/var` and as `/private/var`, and its file system takes `T` and `t` for one folder.
  */
-function resPathBelow(projectPath: string, place: string): string {
-  return relative(projectPath, place).split(sep).join('/');
+function stepsBelow(projectPath: string, place: string): string[] | null {
+  const inside = relativeWithin(projectPath, place);
+  if (inside !== null) {
+    return inside === '' ? [] : inside.split('/');
+  }
+  const steps: string[] = [];
+  for (let at = resolve(place); !sameEntry(at, projectPath); at = dirname(at)) {
+    if (dirname(at) === at) {
+      return null;
+    }
+    steps.unshift(basename(at));
+  }
+  return steps;
 }
 
 /** Where the query occurs in the project's text files, as res:// paths with line numbers. */
@@ -553,6 +579,12 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
   // The extensions the walk met, for a search whose fileTypes matched none of them: answered as an
   // empty search, it read as a project where nothing held the query.
   const met = new Set<string>();
+  const within = options.within ?? projectPath;
+  // Everything the walk meets is below where it starts, spelt as that is, so only the start is
+  // measured against the project.
+  const start = stepsBelow(projectPath, within) ?? relative(projectPath, within).split(sep);
+  const resPathOf = (place: string): string =>
+    [...start, ...relative(within, place).split(sep)].filter((step) => step !== '').join('/');
 
   const searchFile = (entryPath: string, name: string): void => {
     const extension = extensionOf(name);
@@ -599,13 +631,13 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
       result.summary.files_with_matches += 1;
     }
     if (matches.length > 0) {
-      result.results.push({ file: `res://${resPathBelow(projectPath, entryPath)}`, matches });
+      result.results.push({ file: `res://${resPathOf(entryPath)}`, matches });
     }
   };
   const visit = (directory: string, named = false): void => {
     if (!named && steppedOver(directory)) {
       if (gdignored(directory)) {
-        notSearched.push(`res://${resPathBelow(projectPath, directory)}/`);
+        notSearched.push(`res://${resPathOf(directory)}/`);
       }
       return;
     }
@@ -623,7 +655,6 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
       }
     }
   };
-  const within = options.within ?? projectPath;
   if (statSync(within).isDirectory()) {
     visit(within, true);
   } else {

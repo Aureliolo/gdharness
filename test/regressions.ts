@@ -15186,8 +15186,10 @@ async function testTheLifecycleLogSaysHowAServerEnded(): Promise<void> {
  */
 function testADefectReportHidesTheFoldersOfTheMachine(): void {
   const made = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-redaction-'));
-  const keptHome = { USERPROFILE: process.env['USERPROFILE'], HOME: process.env['HOME'] };
+  // Handed in, since Bun on Linux and macOS reads the home folder from the user database and not
+  // from HOME, so moving it through the environment holds on Windows alone.
   const fakeHome = join(made, 'Users', 'Jane Doe');
+  const redact = (message: string): string => withoutMachinePaths(message, fakeHome);
   try {
     const plain = join(made, 'janedoe', 'secret-game');
     const spaced = join(made, 'Jane Doe', 'secret game');
@@ -15196,9 +15198,6 @@ function testADefectReportHidesTheFoldersOfTheMachine(): void {
       writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
     }
     mkdirSync(fakeHome, { recursive: true });
-    process.env['USERPROFILE'] = fakeHome;
-    process.env['HOME'] = fakeHome;
-    assert.equal(homedir(), fakeHome, 'the fixture moved the home folder');
     const slashes = (path: string): string => path.replaceAll('\\', '/');
     const scene = (project: string): string => join(project, 'scenes', 'a.tscn');
 
@@ -15207,27 +15206,27 @@ function testADefectReportHidesTheFoldersOfTheMachine(): void {
       ['with a space', spaced],
     ] as const) {
       assert.equal(
-        withoutMachinePaths(`ENOENT: open '${scene(project)}'`),
+        redact(`ENOENT: open '${scene(project)}'`),
         `ENOENT: open '<project>${sep}scenes${sep}a.tscn'`,
         `a quoted file in a project ${label}`,
       );
       assert.equal(
-        withoutMachinePaths(`ENOENT: open ${scene(project)}`),
+        redact(`ENOENT: open ${scene(project)}`),
         `ENOENT: open <project>${sep}scenes${sep}a.tscn`,
         `a file at the end of the line in a project ${label}`,
       );
       assert.equal(
-        withoutMachinePaths(`ENOENT: scandir '${project}'`),
+        redact(`ENOENT: scandir '${project}'`),
         "ENOENT: scandir '<project>'",
         `the project folder itself, ${label}`,
       );
       assert.equal(
-        withoutMachinePaths(`cannot list ${project}.`),
+        redact(`cannot list ${project}.`),
         'cannot list <project>.',
         `the project folder before a full stop, ${label}`,
       );
       assert.equal(
-        withoutMachinePaths(`ENOENT: open '${slashes(scene(project))}'`),
+        redact(`ENOENT: open '${slashes(scene(project))}'`),
         `ENOENT: open '<project>/scenes/a.tscn'`,
         `a forward-slash spelling, ${label}`,
       );
@@ -15235,30 +15234,30 @@ function testADefectReportHidesTheFoldersOfTheMachine(): void {
 
     const outside = join(made, 'elsewhere', 'notes.txt');
     assert.equal(
-      withoutMachinePaths(`copy ${scene(spaced)} to '${outside}'`),
+      redact(`copy ${scene(spaced)} to '${outside}'`),
       `copy <project>${sep}scenes${sep}a.tscn to '${outside}'`,
       'two paths in one line are each read for themselves',
     );
 
     const cache = join(fakeHome, '.cache', 'thing.json');
     assert.equal(
-      withoutMachinePaths(`EBUSY: read ${cache}`),
+      redact(`EBUSY: read ${cache}`),
       `EBUSY: read ~${sep}.cache${sep}thing.json`,
       'a home folder with a space',
     );
     assert.equal(
-      withoutMachinePaths(`EBUSY: read '${cache}'`),
+      redact(`EBUSY: read '${cache}'`),
       `EBUSY: read '~${sep}.cache${sep}thing.json'`,
       'and the same quoted',
     );
     assert.equal(
-      withoutMachinePaths(`${fakeHome}2${sep}x`),
+      redact(`${fakeHome}2${sep}x`),
       `${fakeHome}2${sep}x`,
       'a folder that only begins like the home folder is kept',
     );
     if (process.platform === 'win32') {
       assert.equal(
-        withoutMachinePaths(`EBUSY: read ${slashes(cache)}`),
+        redact(`EBUSY: read ${slashes(cache)}`),
         'EBUSY: read ~/.cache/thing.json',
         'the home folder spelt with forward slashes',
       );
@@ -15282,13 +15281,6 @@ function testADefectReportHidesTheFoldersOfTheMachine(): void {
       );
     }
   } finally {
-    for (const [name, value] of Object.entries(keptHome)) {
-      if (value === undefined) {
-        delete process.env[name];
-      } else {
-        process.env[name] = value;
-      }
-    }
     rmSync(made, { recursive: true, force: true });
   }
 
@@ -74136,14 +74128,19 @@ function testAFailedMoveLeavesNoStagingFile(): void {
     );
     assert.ok(outcome.ok, JSON.stringify(outcome));
     assert.ok(outcome.inPlace.some((rewrite) => rewrite.path === 'res://game.gd'));
-    chmodSync(join(project, 'game.gd'), 0o444);
+    // Windows refuses a rename over a read-only file, so there the staged copy is written and the
+    // rename fails. Linux and macOS allow that rename, so there the folder refuses the staged copy.
+    const onWindows = process.platform === 'win32';
+    const held = onWindows ? join(project, 'game.gd') : project;
+    chmodSync(held, onWindows ? 0o444 : 0o555);
     try {
       assert.throws(() => {
         applyFileMove(outcome);
       }, /EPERM|EACCES/);
     } finally {
-      chmodSync(join(project, 'game.gd'), 0o666);
+      chmodSync(held, onWindows ? 0o666 : 0o755);
     }
+    assert.equal(readFileSync(join(project, 'game.gd'), 'utf8'), MOVE_FIXTURE['game.gd']);
     const left = readdirSync(project, { recursive: true }).map(String);
     assert.deepEqual(
       left.filter((path) => path.endsWith('.gdharness-move')),

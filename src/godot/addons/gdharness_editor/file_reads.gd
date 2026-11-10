@@ -18,7 +18,9 @@ const EXT_RESOURCE: String = "^\\[ext_resource [^\\]]*\\]"
 const NODE_HEADING: String = "^\\[node [^\\]]*\\]"
 const INSTANCE: String = 'instance=ExtResource\\(\\s*"([^"]+)"\\s*\\)'
 
-static var _unique_id_pattern: RegEx = RegEx.create_from_string(" unique_id=(\\d+)")
+## Built at first use, since the editor plugin calls this before the script's static
+## initialisers have run.
+static var _unique_id_pattern: RegEx = null
 
 
 ## The nodes of [param scene_path] as {name, type, path, children}, with instanceOf and
@@ -397,6 +399,8 @@ static func _unique_ids(scene_path: String, count: int) -> Array[int]:
 
 ## The unique_id a text scene's entry [param line] gives its node, or -1 where it gives none.
 static func unique_id_of(line: String) -> int:
+	if _unique_id_pattern == null:
+		_unique_id_pattern = RegEx.create_from_string(" unique_id=(\\d+)")
 	var found: RegExMatch = _unique_id_pattern.search(line)
 	return int(found.get_string(1)) if found != null else -1
 

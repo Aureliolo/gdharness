@@ -93,8 +93,7 @@ const PATH_REACH = 1024;
  * A folder name may hold a space, so a path is not cut at white space. Each place a folder could
  * end is tried instead, longest first, and the project folder itself counts.
  */
-export function withoutMachinePaths(message: string): string {
-  const home = homedir();
+export function withoutMachinePaths(message: string, home = homedir()): string {
   let out = '';
   let from = 0;
   for (const start of message.matchAll(PATH_START)) {

@@ -80,12 +80,14 @@ export function readBreakpointNote(projectPath: string): HeldBreakpoint[] {
       if (!isRecord(entry)) {
         continue;
       }
-      const { script, lines: listed } = entry;
-      if (
-        typeof script !== 'string' ||
-        isAbsolute(script) ||
-        !withinProject(projectPath, join(projectPath, script))
-      ) {
+      const { script: written, lines: listed } = entry;
+      if (typeof written !== 'string') {
+        continue;
+      }
+      // A project path never holds a backslash in a name, since the engine's paths use slashes, so
+      // a note spelt with backslashes reads the same on every system.
+      const script = written.replaceAll('\\', '/');
+      if (isAbsolute(script) || !withinProject(projectPath, join(projectPath, script))) {
         continue;
       }
       const lines = Array.isArray(listed)

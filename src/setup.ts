@@ -693,9 +693,9 @@ export function worktreeAddonVersion(projectPath: string): string | null | undef
 }
 
 /**
- * Whether the addon installed in the project is the code this server ships. The two addons whose
- * digest is marked at install are held to it, as the server holds the editor and a game, so that
- * doctor and the server answer alike. The others have only the version to go by.
+ * Whether the addon installed in the project is the code this server ships. The editor plugins and
+ * the runtime have their digest marked at install and are held to it, as the server holds the editor
+ * and a game, so that doctor and the server answer alike. The tests addon has only its version.
  */
 function addonIsCurrent(projectPath: string, name: string, version: string | null): boolean {
   if (name === ADDONS[0] || name === ADDONS[2]) {
