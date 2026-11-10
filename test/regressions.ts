@@ -27,7 +27,7 @@ import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
-import { stripVTControlCharacters } from 'node:util';
+import { isDeepStrictEqual, stripVTControlCharacters } from 'node:util';
 import { inflateSync } from 'node:zlib';
 import { WebSocket } from 'ws';
 import { serviceDidNotAnswer } from '../scripts/audit-production.js';
@@ -60944,6 +60944,340 @@ function testNoShippedScriptParsesJsonLoudly(): void {
 }
 
 /**
+ * Runs [param probe], a GDScript `extends SceneTree` body, in a headless engine on a project holding
+ * a copy of the operations and [param files]. The probe prints one line, `@@` and a JSON object,
+ * and the answer is that object with the lines the engine put on stderr.
+ */
+async function runReadingProbe(
+  godotPath: string,
+  files: Readonly<Record<string, string>>,
+  probe: string,
+): Promise<{ answer: Record<string, unknown>; errors: string[] }> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-reading-'));
+  try {
+    cpSync(join('src', 'godot', 'operations'), join(project, 'operations'), { recursive: true });
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\n\nconfig/name="Reading"\n');
+    for (const [path, content] of Object.entries({ ...files, 'probe.gd': probe })) {
+      writeFileSync(join(project, path), content);
+    }
+    const ran = await runEngine(godotPath, ['--headless', '--path', project, '-s', 'res://probe.gd']);
+    const lines = ran.log.all.map((entry) => entry.text);
+    const answered = lines.find((line) => line.startsWith('@@'));
+    assert.ok(answered !== undefined, `the probe answered: ${lines.join(' | ')}`);
+    return {
+      answer: JSON.parse(answered.slice(2)) as Record<string, unknown>,
+      errors: ran.log.all.filter((entry) => entry.source === 'stderr').map((entry) => entry.text),
+    };
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * The reading helpers every refusal and every parameter read goes through. `nearest` names three
+ * of the equally near in the order given, however many there are, and twelve at most. `offered`
+ * with no names says so. A property that differs by case is offered as that. `missing_below`
+ * quotes a name that would read as something else. The converters answer their fallback for text
+ * that is no number and for numbers past 64 bits. A script's own signal with a leading underscore
+ * is listed. `single` gives one digit for every one-digit decimal. `json_or_null` answers the data
+ * and prints nothing for text that is no JSON.
+ */
+async function testTheReadingHelpersAnswerWhatTheyAreAsked(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('reading helpers regression skipped (Godot not found)');
+    return;
+  }
+  const probe = `extends SceneTree
+
+const R = preload("res://operations/reading.gd")
+
+
+func _names(prefix: String, count: int) -> PackedStringArray:
+	var made: PackedStringArray = []
+	for at: int in count:
+		made.append("%s%03d" % [prefix, at])
+	return made
+
+
+func _init() -> void:
+	var out: Dictionary = {}
+	out["none"] = Array(R.nearest("zzzzzz", ["abc", "def"]))
+	out["one"] = Array(R.nearest("Playr", ["Player", "Body"]))
+	out["three"] = Array(R.nearest("Playr", ["Player", "Players", "Playe", "Body"]))
+	out["four"] = Array(R.nearest("attack", ["attack_a", "attack_b", "attack_c", "attack_d"]))
+	out["many"] = Array(R.nearest("attack", _names("attack_", 300)))
+	var ties: PackedStringArray = ["aab", "bab", "cab", "dab"]
+	out["ties4"] = Array(R.nearest("xab", ties))
+	var long: PackedStringArray = []
+	for letter: String in "abcdefghijklmnopqrstuvwyz":
+		long.append(letter + "ab")
+	out["ties25"] = Array(R.nearest("xab", long))
+	long.reverse()
+	out["ties25reversed"] = Array(R.nearest("xab", long))
+	out["offeredNone"] = R.offered("res://t.tres holds no type Label", "Label", [])
+	out["offeredFar"] = R.offered("S has no signal qwxz", "qwxz", Array(_names("sig", 30)))
+	var cased: GDScript = GDScript.new()
+	cased.source_code = "extends Node\\nvar Text: String = \\"\\"\\nvar Visible: bool = true\\n"
+	cased.reload()
+	var node: Node = Node.new()
+	node.set_script(cased)
+	out["caseText"] = R.near_property("N has no property text", node, "text")
+	out["caseVisible"] = R.near_property("N has no property visible", node, "visible")
+	node.free()
+	out["spaced"] = R.missing_below("X", "Main", ["Body"], " Body", ["Player"])
+	out["dots"] = R.missing_below("X", "Main", ["Body"], "..", ["Player", "Uniq"])
+	out["commas"] = R.missing_below("X", "Main", ["Body"], "Arm Left", ["A, B", "C"])
+	out["plain"] = R.missing_below("X", "Main", [], "Gone", ["Body", "My Node"])
+	out["asInt"] = [
+		R.as_int("1e3"), R.as_int("five", 7), R.as_int(1e30, 5), R.as_int(INF, 6), R.as_int(NAN, 8),
+		R.as_int(-0.0, 4), R.as_int(float(9007199254740991)), R.as_int("9223372036854775807"),
+		R.as_int("9223372036854775808", 3), R.as_int("-9223372036854775808"), R.as_int("-9223372036854775809", 2),
+		R.as_int("12abc", 9), R.as_int(" 42 "), R.as_int("1.9"),
+	]
+	out["asBool"] = [
+		R.as_bool("false"), R.as_bool("0"), R.as_bool(0.000001), R.as_bool("true"), R.as_bool("FALSE"),
+		R.as_bool("maybe", true), R.as_bool(NAN, true), R.as_bool(""), R.as_bool("2"),
+	]
+	out["asFloat"] = [R.as_float("abc", 5.0), R.as_float("1e3"), R.as_float("1e999", 6.0), R.as_float(" 0.5 ")]
+	out["json"] = [R.json_or_null('{"a":1}'), R.json_or_null("five"), R.json_or_null("[1 2]"), R.json_or_null("null")]
+	var made: GDScript = GDScript.new()
+	made.source_code = "extends Button\\nsignal _hidden_done\\nsignal done\\n"
+	made.reload()
+	var button: Button = Button.new()
+	button.set_script(made)
+	var listed: Array = R.signals_of(button)
+	out["signals"] = [listed.slice(0, 2), "_hidden_done" in listed, "_pressed_private" in listed]
+	button.free()
+	out["singles"] = [R.single(1e25), R.single(1e36), R.single(1e38), R.single(1e-31), R.single(1e-37), R.single(0.2)]
+	var sweep: Array = []
+	for exponent: int in range(-37, 39):
+		for digit: int in range(1, 10):
+			var written: String = "%de%d" % [digit, exponent]
+			var held: float = PackedFloat32Array([written.to_float()])[0]
+			if is_finite(held) and held != 0.0:
+				sweep.append([written, held, R.single(held)])
+	out["singleSweep"] = sweep
+	print("@@" + JSON.stringify(out, "", false, true))
+	quit()
+`;
+  const { answer, errors } = await runReadingProbe(godotPath, {}, probe);
+  const at = (key: string): unknown => answer[key];
+  const walked = at('singleSweep') as [string, number, number][];
+  // Every answer is judged before any is reported, so one run names each answer that is wrong.
+  const expected: Record<string, unknown> = {
+    none: [],
+    one: ['Player'],
+    three: ['Playe', 'Player', 'Players'],
+    four: ['attack_a', 'attack_b', 'attack_c', 'attack_d'],
+    many: Array.from({ length: 12 }, (_, index) => `attack_${String(index).padStart(3, '0')}`),
+    ties4: ['aab', 'bab', 'cab'],
+    ties25: ['aab', 'bab', 'cab'],
+    ties25reversed: ['zab', 'yab', 'wab'],
+    offeredNone: 'res://t.tres holds no type Label. It has none',
+    offeredFar:
+      'S has no signal qwxz. It has sig000, sig001, sig002, sig003, sig004, sig005, sig006, sig007, sig008, sig009, sig010, sig011 and 18 more',
+    caseText: 'N has no property text. The nearest it has is Text',
+    caseVisible: 'N has no property visible. The nearest it has is Visible',
+    spaced: 'X. Body has no " Body". Its children are Player.',
+    dots: 'X. Body has no "..". Its children are Player, Uniq.',
+    commas: 'X. Body has no Arm Left. Its children are "A, B", C.',
+    plain: 'X. The root, Main, has no Gone. Its children are Body, My Node.',
+    asInt: [
+      1000, 7, 5, 6, 8, 0, 9007199254740991, 9223372036854775807, 3, -9223372036854775808, 2, 9, 42, 1,
+    ],
+    asBool: [false, false, true, true, false, true, true, false, true],
+    asFloat: [5, 1000, 6, 0.5],
+    json: [{ a: 1 }, null, null, null],
+    signals: [['_hidden_done', 'done'], true, false],
+    singles: [1e25, 1e36, 1e38, 1e-31, 1e-37, 0.2],
+  };
+  const wrong = Object.entries(expected)
+    .filter(([key, value]) => !isDeepStrictEqual(at(key), value))
+    .map(([key]) => `${key}: ${JSON.stringify(at(key))}`);
+  assert.ok(walked.length > 600, `the one-digit decimals were walked: ${String(walked.length)}`);
+  wrong.push(
+    ...walked
+      .filter(
+        ([, held, short]) =>
+          Math.fround(short) !== Math.fround(held) || !/^-?[1-9]e[+-]\d+$/.test(short.toExponential()),
+      )
+      .map(([written]) => `a one-digit decimal not given back as one digit: ${written}`),
+    ...errors
+      .filter((line) => /ERROR|SCRIPT ERROR|Parse JSON/.test(line))
+      .map((line) => `text that is no JSON printed: ${line}`),
+  );
+  assert.deepEqual(wrong, [], 'every answer is the one the helper owes');
+}
+
+/**
+ * A read of a node by its path with no editor resolves the paths the engine's get_node resolves: a
+ * unique name with a percent sign, a trailing or doubled slash, a step back, and a path from
+ * /root. A path that leads nowhere is still refused with where it leaves the scene.
+ */
+async function testTheHeadlessNodePathReaderResolvesWhatTheEngineResolves(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('headless node path regression skipped (Godot not found)');
+    return;
+  }
+  const files = {
+    'child.tscn':
+      '[gd_scene format=3]\n\n[node name="Inst" type="Node2D"]\n\n[node name="Deep" type="AnimationPlayer" parent="."]\n',
+    'main.tscn':
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="PackedScene" path="res://child.tscn" id="1"]\n\n' +
+      '[node name="Main" type="Node2D"]\n\n[node name="Body" type="Node2D" parent="."]\n\n' +
+      '[node name="Player" type="AnimationPlayer" parent="Body"]\n\n' +
+      '[node name="Uniq" type="AnimationPlayer" parent="Body"]\nunique_name_in_owner = true\n\n' +
+      '[node name="Inst" parent="." instance=ExtResource("1")]\n',
+  };
+  const probe = `extends SceneTree
+
+const FileReads = preload("res://operations/file_reads.gd")
+
+
+func _init() -> void:
+	var out: Dictionary = {}
+	for path: String in [
+		"Body/Player", "%Uniq", "Body/%Uniq", "Body/Player/", "Body//Player", "/root/Main/Body/Player",
+		"./Body/Player", "Body/../Body/Player", "Body/Gone/Player", "%Nowhere", "/root/Other/Body/Player",
+		"Inst/%Deep", " Body/Player", "Body/Player:speed_scale",
+	]:
+		var answer: Dictionary = FileReads.scene_node_of_kind("res://main.tscn", path, "AnimationPlayer")
+		out[path] = "ok " + str(answer.get("name")) if answer.get("ok", false) else str(answer.get("error"))
+	var node: Dictionary = FileReads.scene_node("res://main.tscn", "Body/%Uniq/")
+	out["scene_node"] = node.get("name", "")
+	print("@@" + JSON.stringify(out))
+	quit()
+`;
+  const { answer } = await runReadingProbe(godotPath, files, probe);
+  const at = (key: string): unknown => answer[key];
+  for (const path of [
+    'Body/Player',
+    'Body/Player/',
+    'Body//Player',
+    '/root/Main/Body/Player',
+    './Body/Player',
+    'Body/../Body/Player',
+  ]) {
+    assert.equal(at(path), 'ok Player', `${path} is the player`);
+  }
+  for (const path of ['%Uniq', 'Body/%Uniq']) {
+    assert.equal(at(path), 'ok Uniq', `${path} is the unique node`);
+  }
+  assert.equal(at('scene_node'), 'Uniq', 'and a node read by a unique name and a trailing slash');
+  assert.equal(
+    at('Body/Gone/Player'),
+    'AnimationPlayer not found at: Body/Gone/Player. Body has no Gone. Its children are Player, Uniq. The scene\'s AnimationPlayers are at "Body/Player", "Body/Uniq", "Inst/Deep".',
+  );
+  assert.equal(
+    at('%Nowhere'),
+    'AnimationPlayer not found at: %Nowhere. The root, Main, has no %Nowhere. Its children are Body, Inst. The scene\'s AnimationPlayers are at "Body/Player", "Body/Uniq", "Inst/Deep".',
+  );
+  assert.equal(
+    at(' Body/Player'),
+    'AnimationPlayer not found at:  Body/Player. The root, Main, has no " Body". Its children are Body, Inst. The scene\'s AnimationPlayers are at "Body/Player", "Body/Uniq", "Inst/Deep".',
+  );
+  assert.match(String(at('/root/Other/Body/Player')), /^AnimationPlayer not found at: \/root\/Other\/Body\/Player\. The root, Main, has no root\./);
+}
+
+/**
+ * The engine's errors about a script as it was before a change are left out of the answer. The
+ * script is loaded between two marks to learn whether it parsed, and what it prints between them is
+ * about lines that have since moved.
+ */
+async function testTheErrorsOfAScriptBeforeAChangeAreLeftOutOfTheAnswer(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('script errors before a change regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-aside-'));
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\n\nconfig/name="Aside"\n');
+    writeFileSync(
+      join(project, 'unmended.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tmend_before_the_change()\n',
+    );
+    const outcome = await runOperation(
+      { godotPath, script: resolve('src', 'godot', 'operations', 'godot_operations.gd'), debug: false },
+      'modify_script',
+      {
+        script_path: 'unmended.gd',
+        modifications: [{ type: 'add_variable', name: 'pace', varType: 'float', defaultValue: '1.0' }],
+      },
+      project,
+    );
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    const said = outcome.messages.map((entry) => entry.text).join('\n');
+    assert.match(said, /unmended\.gd/, `the script after the change is reported: ${said}`);
+    assert.doesNotMatch(
+      said,
+      /unmended\.gd:5\b/,
+      `and the script as it was, whose line numbers moved, is not: ${said}`,
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * The file an operation answers in keeps a float as it was: a tiny one was written as zero, and a
+ * huge or a fractional one lost digits.
+ */
+async function testTheAnswerFileKeepsAFloatAsItWas(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('answer file floats regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-answer-floats-'));
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\n\nconfig/name="Floats"\n');
+    writeFileSync(
+      join(project, 'floats.gd'),
+      'extends Resource\n\n@export var tiny: float = 5.0\n@export var huge: float = 5.0\n' +
+        '@export var tenth: float = 5.0\n@export var whole: float = 5.0\n',
+    );
+    writeFileSync(
+      join(project, 'floats.tres'),
+      '[gd_resource type="Resource" script_class="" format=3]\n\n' +
+        '[ext_resource type="Script" path="res://floats.gd" id="1_floats"]\n\n[resource]\n' +
+        'script = ExtResource("1_floats")\ntiny = 1e-37\nhuge = 1e300\ntenth = 0.1\nwhole = 7.0\n',
+    );
+    const outcome = await runOperation(
+      { godotPath, script: resolve('src', 'godot', 'operations', 'godot_operations.gd'), debug: false },
+      'read_resource',
+      { resource_path: 'res://floats.tres' },
+      project,
+    );
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    const read = outcome.payload['properties'] as Record<string, unknown>;
+    // The engine reads 1e-37 from the file a step below the nearest double, so the tiny one is
+    // compared by ratio.
+    assert.ok(
+      Math.abs(Number(read['tiny']) / 1e-37 - 1) < 1e-12,
+      `a tiny float is not written as zero: ${JSON.stringify(outcome.payload)}`,
+    );
+    assert.deepEqual([read['huge'], read['tenth'], read['whole']], [1e300, 0.1, 7]);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * The top-level arguments of the call whose opening bracket is at [param open] in [param source],
  * GDScript: brackets inside strings and comments are not counted, and neither are commas.
  */
@@ -81022,6 +81356,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testCommandLineSetup,
   testUninstallLeavesAddonsItDidNotMake,
   testNoShippedScriptParsesJsonLoudly,
+  testTheReadingHelpersAnswerWhatTheyAreAsked,
+  testTheHeadlessNodePathReaderResolvesWhatTheEngineResolves,
+  testTheAnswerFileKeepsAFloatAsItWas,
+  testTheErrorsOfAScriptBeforeAChangeAreLeftOutOfTheAnswer,
   testEveryProcessStartsThroughTheHiddenSpawn,
   testTheWrittenConfigNamesAProgramThatStarts,
 

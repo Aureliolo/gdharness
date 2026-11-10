@@ -24,6 +24,10 @@ extends RefCounted
 
 ## How many of a node's children a refusal for a path missing below it names.
 const NAMED_CHILDREN: int = 12
+## 2^63, the first float that is no 64-bit whole number.
+const INT_LIMIT: float = 9_223_372_036_854_775_808.0
+const INT_MAX: int = 9_223_372_036_854_775_807
+const INT_MIN: int = -9_223_372_036_854_775_807 - 1
 ## The types holding their floats as the engine's real numbers, 32-bit unless it was built for 64.
 const SHAPES_OF_REALS: Array[int] = [
 	TYPE_VECTOR2,
@@ -43,19 +47,38 @@ const SHAPES_OF_REALS: Array[int] = [
 ]
 
 
+## Text and numbers that are no whole number in 64 bits answer [param fallback] rather than a
+## wrapped or cut-off value.
 static func as_int(value: Variant, fallback: int = 0) -> int:
 	if value is int:
 		var already: int = value
 		return already
 	if value is float:
 		var real: float = value
+		if not is_finite(real) or real >= INT_LIMIT or real < -INT_LIMIT:
+			return fallback
 		return int(real)
 	if value is bool:
 		var flag: bool = value
 		return 1 if flag else 0
 	if value is String:
 		var text: String = value
-		return text.to_int()
+		return _int_in(text.strip_edges(), fallback)
+	return fallback
+
+
+## [param text] as a whole number, which may be written with an exponent or a fraction, or
+## [param fallback] when it is none or does not fit in 64 bits.
+static func _int_in(text: String, fallback: int) -> int:
+	if text.is_valid_int():
+		var whole: int = text.to_int()
+		# to_int stops at the ends of the range, so an end that the text does not spell is an
+		# overflow.
+		if (whole == INT_MAX or whole == INT_MIN) and str(whole) != text.trim_prefix("+"):
+			return fallback
+		return whole
+	if text.is_valid_float():
+		return as_int(text.to_float(), fallback)
 	return fallback
 
 
@@ -70,8 +93,12 @@ static func as_float(value: Variant, fallback: float = 0.0) -> float:
 		var flag: bool = value
 		return 1.0 if flag else 0.0
 	if value is String:
-		var text: String = value
-		return text.to_float()
+		var raw: String = value
+		var text: String = raw.strip_edges()
+		if text.is_valid_float():
+			var read: float = text.to_float()
+			return read if is_finite(read) else fallback
+		return non_finite(text, fallback)
 	if value is Dictionary:
 		var tagged: Dictionary = value
 		if str(tagged.get("_type", "")) == "float":
@@ -95,6 +122,8 @@ static func non_finite(word: String, fallback: float = 0.0) -> float:
 	return fallback
 
 
+## Text answers true for "true" and false for "false" and the empty text, in any case, and a number
+## in text is true unless it is zero. Any other text answers [param fallback], as does NaN.
 static func as_bool(value: Variant, fallback: bool = false) -> bool:
 	if value is bool:
 		var already: bool = value
@@ -104,10 +133,17 @@ static func as_bool(value: Variant, fallback: bool = false) -> bool:
 		return whole != 0
 	if value is float:
 		var real: float = value
-		return not is_zero_approx(real)
+		return fallback if is_nan(real) else real != 0.0
 	if value is String:
-		var text: String = value
-		return not text.is_empty()
+		var raw: String = value
+		var text: String = raw.strip_edges().to_lower()
+		if text.is_empty() or text == "false":
+			return false
+		if text == "true":
+			return true
+		if text.is_valid_float():
+			return text.to_float() != 0.0
+		return fallback
 	return fallback
 
 
@@ -131,7 +167,7 @@ static func json_or_null(text: String) -> Variant:
 ## there.
 static func from_the_root(said: String, node_path: String, root_name: String) -> String:
 	var first: String = node_path.get_slice("/", 0)
-	if root_name.is_empty() or first != root_name:
+	if first != root_name:
 		return said
 	var rest: String = node_path.substr(first.length() + 1)
 	var how: String = 'Paths go from the root, %s, whose own path is "."' % root_name
@@ -151,18 +187,39 @@ static func missing_below(
 	missing: String,
 	children: PackedStringArray
 ) -> String:
-	var shown: String = ", ".join(children.slice(0, NAMED_CHILDREN))
+	var named: PackedStringArray = []
+	for child: String in children.slice(0, NAMED_CHILDREN):
+		var _named: bool = named.append(_spelt(child))
+	var shown: String = ", ".join(named)
 	if children.size() > NAMED_CHILDREN:
 		shown += " and %d more" % (children.size() - NAMED_CHILDREN)
+	var walked: PackedStringArray = []
+	for part: String in reached:
+		var _walked: bool = walked.append(_spelt(part))
 	return (
 		"%s %s has no %s. %s."
 		% [
 			ended(said),
-			"The root, %s," % root_name if reached.is_empty() else "/".join(reached),
-			missing,
+			"The root, %s," % _spelt(root_name) if reached.is_empty() else "/".join(walked),
+			_spelt(missing),
 			"Its children are " + shown if not children.is_empty() else "It has no children",
 		]
 	)
+
+
+## [param name] as a refusal writes it: bare, unless that would read as something else. A name with
+## a comma, an edge space, a quote or a leading or trailing dot is quoted, so a list of names stays
+## a list and a sentence's full stop is not taken for part of a name.
+static func _spelt(name: String) -> String:
+	var plain: bool = (
+		not name.is_empty()
+		and name == name.strip_edges()
+		and not name.contains(",")
+		and not name.contains('"')
+		and not name.begins_with(".")
+		and not name.ends_with(".")
+	)
+	return name if plain else '"%s"' % name.replace('"', '\\"')
 
 
 ## [param said] with a full stop at its end, so another sentence can follow it.
@@ -203,37 +260,65 @@ static func not_of_kind(
 
 
 ## Up to three of [param names] closest to [param word], closest first, ignoring case: the names a
-## refusal offers for one that is not there, as a typo usually is one of them.
+## refusal offers for one that is not there, as a typo usually is one of them. Names that add to the
+## word come beyond the three, up to [constant NAMED_CHILDREN] in all. Names equally near keep the
+## order given, so the pick does not depend on how many names there are.
 static func nearest(word: String, names: PackedStringArray) -> PackedStringArray:
 	var wanted: String = word.to_lower()
 	var close: Array[String] = []
+	var scores: Array[float] = []
 	for name: String in names:
-		if name.to_lower().similarity(wanted) >= 0.5:
+		var score: float = name.to_lower().similarity(wanted)
+		if score >= 0.5:
 			close.append(name)
-	close.sort_custom(
-		func(a: String, b: String) -> bool:
-			return a.to_lower().similarity(wanted) > b.to_lower().similarity(wanted)
+			scores.append(score)
+	var order: Array[int] = []
+	for at: int in close.size():
+		order.append(at)
+	# The index breaks a tie, since the engine's sort keeps the given order only for a short list.
+	order.sort_custom(
+		func(
+			a: int,
+			b: int,
+		) -> bool: return scores[a] > scores[b] or (scores[a] == scores[b] and a < b)
 	)
 	# Every name that only adds to the word stays, since cutting at three named three corners of
 	# corner_radius and left out the fourth as if it were not there.
-	var named: PackedStringArray = PackedStringArray(close.slice(0, 3))
-	for name: String in close.slice(3):
-		if name.to_lower().begins_with(wanted):
-			var _added: bool = named.append(name)
+	var named: PackedStringArray = []
+	for at: int in order:
+		if (
+			named.size() < 3
+			or (named.size() < NAMED_CHILDREN and close[at].to_lower().begins_with(wanted))
+		):
+			var _added: bool = named.append(close[at])
 	return named
 
 
+## "is" and the one name of [param close], or "are" and all of them, to end a sentence that offers
+## the names nearest a word.
+static func are_named(close: PackedStringArray) -> String:
+	return "%s %s" % ["is" if close.size() == 1 else "are", ", ".join(close)]
+
+
+## [param said] with the sentence that offers [param close], the names it has nearest the one asked.
+static func nearest_told(said: String, close: PackedStringArray) -> String:
+	return "%s The nearest it has %s" % [ended(said), are_named(close)]
+
+
 ## [param said], the refusal for [param word], which is not among [param names], with those nearest
-## it when any are, or else every one of them, so the caller has a name to send instead.
+## it when any are, or else the first [constant NAMED_CHILDREN] of them, so the caller has a name to
+## send instead.
 static func offered(said: String, word: String, names: Array) -> String:
 	var every: PackedStringArray = PackedStringArray(names)
 	var close: PackedStringArray = nearest(word, every)
+	if every.is_empty():
+		return "%s It has none" % ended(said)
 	if close.is_empty():
-		return "%s It has %s" % [ended(said), ", ".join(every)]
-	return (
-		"%s The nearest it has %s %s"
-		% [ended(said), "is" if close.size() == 1 else "are", ", ".join(close)]
-	)
+		var shown: String = ", ".join(every.slice(0, NAMED_CHILDREN))
+		if every.size() > NAMED_CHILDREN:
+			shown += " and %d more" % (every.size() - NAMED_CHILDREN)
+		return "%s It has %s" % [ended(said), shown]
+	return nearest_told(said, close)
 
 
 ## [param said], the refusal for [param property], which [param target] does not declare, with the
@@ -255,15 +340,19 @@ static func near_property(said: String, target: Object, property: String) -> Str
 			names.append(str(declared.get("name", "")))
 		if usage & PROPERTY_USAGE_SCRIPT_VARIABLE and not usage & headings:
 			scripted.append(str(declared.get("name", "")))
+	# A name that differs only by case is the likelier meaning, and the engine classes below the
+	# node
+	# that declare the lower-case one are not.
+	var wanted: String = property.to_lower()
+	for name: String in names:
+		if name != property and name.to_lower() == wanted:
+			return nearest_told(said, PackedStringArray([name]))
 	var below: String = _declared_below(target.get_class(), property)
 	if not below.is_empty():
 		return "%s %s" % [ended(said), below]
 	var close: PackedStringArray = nearest(property, PackedStringArray(names))
 	if not close.is_empty():
-		return (
-			"%s The nearest it has %s %s"
-			% [ended(said), "is" if close.size() == 1 else "are", ", ".join(close)]
-		)
+		return nearest_told(said, close)
 	# With a script that declares nothing readable, as one that does not compile, the name is
 	# likelier the script's than the class's, so the class's list would point the wrong way.
 	if scripted.is_empty() and target.get_script() != null:
@@ -368,14 +457,15 @@ static func _bare(word: String) -> String:
 ## as declared, then the engine's from the class down to Object. The engine lists its own from
 ## Object down, which puts a Button's pressed after thirty a Control has, and its script's ahead of
 ## those, so reversing the whole list put a game's own two signals after twenty-four of the
-## engine's. Names starting with an underscore are the engine's own.
+## engine's. The engine's names starting with an underscore are its own and left out, a script's
+## not.
 static func signals_of(object: Object) -> Array:
 	var declared: Array = []
 	var script: Script = object.get_script()
 	if script != null:
 		for entry: Dictionary in script.get_script_signal_list():
 			var name: String = str(entry["name"])
-			if not name.begins_with("_") and not name in declared:
+			if not name in declared:
 				declared.append(name)
 	var names: Array = []
 	for entry: Dictionary in object.get_signal_list():
@@ -401,16 +491,66 @@ static func single(value: float) -> float:
 		return value
 	var held: float = PackedFloat32Array([value])[0]
 	var magnitude: int = floori(log(absf(held)) / log(10.0))
-	for digits: int in range(1, 10):
-		var shift: int = digits - 1 - magnitude
-		var tried: float = (
-			roundf(held * pow(10.0, shift)) / pow(10.0, shift)
-			if shift >= 0
-			else roundf(held / pow(10.0, -shift)) * pow(10.0, -shift)
-		)
+	for digits: int in range(1, 9):
+		var tried: float = _rounded_to(held, magnitude, digits)
 		if PackedFloat32Array([tried])[0] == held:
 			return tried
-	return held
+	# Nine digits always name a 32-bit float.
+	return _rounded_to(held, magnitude, 9)
+
+
+## [param value] to [param digits] significant digits, as the double nearest that decimal.
+static func _rounded_to(value: float, magnitude: int, digits: int) -> float:
+	var shift: int = digits - 1 - magnitude
+	# Only the whole number of digits comes from this scale, which is a step off past 10^22 and so
+	# decides nothing but which whole number is tried.
+	var scale: float = pow(10.0, absi(shift))
+	return _decimal(roundf(value * scale if shift >= 0 else value / scale), -shift)
+
+
+## [param whole] times ten to the [param power], rounded once. The power of ten is not exact past
+## 10^22 and a product or quotient with it lands a step off the nearest double, so it is carried as
+## a high and a low double and the rounding happens last.
+static func _decimal(whole: float, power: int) -> float:
+	var ten: PackedFloat64Array = _ten_to(absi(power))
+	var high: float = ten[0]
+	var low: float = ten[1]
+	if power >= 0:
+		var product: PackedFloat64Array = _product(whole, high)
+		return product[0] + (product[1] + whole * low)
+	var quotient: float = whole / high
+	var back: PackedFloat64Array = _product(quotient, high)
+	return quotient + (((whole - back[0]) - back[1]) - quotient * low) / high
+
+
+## Ten to the [param power] as {high, low}, which add up to it far past a double's precision.
+static func _ten_to(power: int) -> PackedFloat64Array:
+	var high: float = 1.0
+	var low: float = 0.0
+	for _step: int in power:
+		var product: PackedFloat64Array = _product(high, 10.0)
+		var tail: float = product[1] + low * 10.0
+		var sum: float = product[0] + tail
+		low = tail - (sum - product[0])
+		high = sum
+	return PackedFloat64Array([high, low])
+
+
+## [param a] times [param b] as {product, error}, exactly: Dekker's product, which splits each
+## factor
+## in halves whose products are exact.
+static func _product(a: float, b: float) -> PackedFloat64Array:
+	var product: float = a * b
+	var split_a: float = 134_217_729.0 * a
+	var a_high: float = split_a - (split_a - a)
+	var split_b: float = 134_217_729.0 * b
+	var b_high: float = split_b - (split_b - b)
+	var a_low: float = a - a_high
+	var b_low: float = b - b_high
+	var error: float = (
+		((a_high * b_high - product) + a_high * b_low + a_low * b_high) + a_low * b_low
+	)
+	return PackedFloat64Array([product, error])
 
 
 ## Whether a value of [param type] holds its floats in 32 bits: a colour always, and the vectors and
