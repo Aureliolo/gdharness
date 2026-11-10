@@ -24,6 +24,7 @@ import { bytesOf, contentOf, entriesOf, statOf } from './listed-reads.js';
 import { projectFiles } from './project-scan.js';
 import { isRecord } from './records.js';
 import { parseProjectGodot } from './resources.js';
+import { autoloadPaths } from './setup.js';
 import type { ProjectScripts } from './suite-plan.js';
 
 /** The input standing for every file in the project, for a suite reaching a computed file read. */
@@ -778,12 +779,10 @@ export class SuiteInputs {
   private autoloads(): ReadonlyMap<string, string> {
     if (this.autoloadPaths === null) {
       const settings = bytesOf(join(this.scripts.projectPath, 'project.godot'))?.toString('utf8') ?? '';
-      const autoload = parseProjectGodot(settings)['autoload'] ?? {};
       this.autoloadPaths = new Map(
-        Object.entries(autoload).flatMap(([name, value]) => {
-          const said = typeof value === 'string' ? value.replace(/^\*/, '') : '';
-          return said.startsWith('res://') ? [[name, said] as const] : [];
-        }),
+        [...autoloadPaths(parseProjectGodot(settings), this.scripts.projectPath)].map(
+          ([name, path]) => [name, `res://${path}`] as const,
+        ),
       );
     }
     return this.autoloadPaths;

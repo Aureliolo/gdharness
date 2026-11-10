@@ -21,6 +21,7 @@ import {
   callSitesOf,
   codeOf,
   enclosingFunction,
+  Lines,
   shapeOf,
 } from './gdscript-source.js';
 import { type DebuggerMessage, framedCommand, type GodotValue, type SentValue } from './godot-variant.js';
@@ -301,6 +302,8 @@ export class ProfileAggregate {
     data: readonly GodotValue[],
     into: Map<string, { calls: number; selfSeconds: number; totalSeconds: number }>,
   ): number | null {
+    // Read in full before anything is added, so a frame that fails halfway leaves [param into] as it was.
+    const read: [string, number, number, number][] = [];
     let at = 6;
     const servers = data[at];
     if (typeof servers !== 'number') {
@@ -329,7 +332,9 @@ export class ProfileAggregate {
       ) {
         return null;
       }
-      const name = this.names.get(id) ?? `${UNNAMED_PREFIX}${id}`;
+      read.push([this.names.get(id) ?? `${UNNAMED_PREFIX}${id}`, calls, self, total]);
+    }
+    for (const [name, calls, self, total] of read) {
       const sum = into.get(name) ?? { calls: 0, selfSeconds: 0, totalSeconds: 0 };
       sum.calls += calls;
       sum.selfSeconds += self;
@@ -684,6 +689,49 @@ function classNamesOf(source: string): string[] {
   return [...(shape.className === null ? [] : [shape.className.name]), ...inner(shape.body)];
 }
 
+/**
+ * Whether two `res://` paths name one script. Compared without case, because the engine's profile
+ * spells a path as the file system does and a project's listing may spell it as a scene did.
+ */
+function sameScript(a: string, b: string): boolean {
+  return a === b || a.toLowerCase() === b.toLowerCase();
+}
+
+/**
+ * The profile's row for the function [param within] that holds line [param line] of [param source],
+ * or undefined when it made no counted call. Several functions of one script can share a bare name,
+ * one per class, so the row is the one whose class is the innermost class holding the line.
+ */
+function rowOfSite(
+  rows: readonly ProfiledFunction[],
+  script: string,
+  source: string,
+  line: number,
+  within: string,
+): ProfiledFunction | undefined {
+  const shape = shapeOf(source);
+  const offset = new Lines(source).offsetOf({ line: line - 1, character: 0 }) ?? 0;
+  let body = shape.body;
+  for (
+    let inner = body.inner.find((one) => one.start <= offset && offset < one.end);
+    inner !== undefined;
+    inner = body.inner.find((one) => one.start <= offset && offset < one.end)
+  ) {
+    body = inner;
+  }
+  const innerNames = classNamesOf(source).filter((name) => name !== shape.className?.name);
+  const endsWith = (owner: string, name: string): boolean => owner === name || owner.endsWith(`.${name}`);
+  return rows.find((row) => {
+    if (!sameScript(row.script, script) || bareName(row.function) !== within) {
+      return false;
+    }
+    const owner = row.function.includes('.') ? row.function.slice(0, row.function.lastIndexOf('.')) : '';
+    return body.name === null
+      ? !innerNames.some((name) => endsWith(owner, name))
+      : endsWith(owner, body.name);
+  });
+}
+
 /** How many places a callers answer lists before saying how many more there were. */
 const CALL_SITES = 40;
 
@@ -712,9 +760,11 @@ export function callersOf(
   const sources = new Map(listed);
   // With the profiler's share, as the table's rows have it, so a row read here says the same.
   const perCallUs = perCallCostOf(totals);
-  const rows = rowsOf(totals, (script) => sources.get(script) ?? null).map((row) =>
-    withOverhead(row, perCallUs),
-  );
+  const folded = new Map(listed.map(([script, source]) => [script.toLowerCase(), source] as const));
+  const rows = rowsOf(
+    totals,
+    (script) => sources.get(script) ?? folded.get(script.toLowerCase()) ?? null,
+  ).map((row) => withOverhead(row, perCallUs));
   const asked = name.includes('.') ? name.slice(0, name.lastIndexOf('.')) : null;
   // A property's get and set blocks run wherever the property is named, so asked by either block's
   // name or by the property's, the places are the property's and so are the rows.
@@ -740,9 +790,7 @@ export function callersOf(
   for (const [script, source] of listed) {
     for (const site of callSitesOf(source, bare, otherClasses, property)) {
       const within =
-        site.within === null
-          ? undefined
-          : rows.find((row) => row.script === script && bareName(row.function) === site.within);
+        site.within === null ? undefined : rowOfSite(rows, script, source, site.line, site.within);
       sites.push({
         script,
         ...site,

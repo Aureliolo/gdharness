@@ -420,12 +420,14 @@ import {
   propertyOf,
   queuedMessagesOf,
   readProfileFile,
+  readProfileMark,
   type SourceOf,
   signatureParts,
   totalsSince,
   UNNAMED_PREFIX,
   withEngineArguments,
   writeProfileFile,
+  writeProfileMark,
 } from '../src/script-profile.js';
 import {
   aboveTheRunner,
@@ -477,9 +479,11 @@ import {
   withUidsMissing,
   writtenBeside,
 } from '../src/server.js';
+import { serverInstructions } from '../src/server-instructions.js';
 import type { GodotProcess, ToolResponse } from '../src/server-types.js';
 import {
   addonMismatch,
+  runtimeAddonUnknown,
   runtimeMismatch,
   SERVER_VERSION,
   sameCodeNote,
@@ -488,18 +492,31 @@ import {
 import {
   ADDONS,
   autoloadIsOurs,
+  autoloadPaths,
+  BIND_ADDRESS_SETTING,
   editorUpgradeNote,
+  gdUnit4Unusable,
+  inspectProject,
   installAddons,
+  installedAddonVersion,
   installedEditorDigest,
   installedRuntimeDigest,
+  installedRuntimeVersion,
   loaderState,
+  PORT_SETTING,
+  type ProjectReport,
   QUIET_SCENES_SETTING,
   RUNTIME_AUTOLOAD,
   RUNTIME_SCRIPT,
   removeAddons,
+  removeLoader,
   SCRIPT_RUNS_SETTING,
+  SHARE_SCRIPT,
+  shippedAddonsDirectory,
   shippedEditorDigest,
+  shippedListedRunner,
   shippedLoader,
+  shippedOperationsScript,
   shippedRuntimeDigest,
   worktreeAddonVersion,
   writeLoader,
@@ -2900,6 +2917,92 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   } finally {
     sweep(holder);
   }
+}
+
+/**
+ * A frame the profiler reader cannot finish adds nothing to the totals. It is counted unreadable
+ * and not as a frame, beside a readable one that is summed.
+ */
+function testAFrameReadHalfwayAddsNothingToTheTotals(): void {
+  const aggregate = new ProfileAggregate(1000, 64);
+  const frame = (number: number, rows: GodotValue[]): Parameters<ProfileAggregate['take']>[0] => ({
+    message: 'servers:profile_frame',
+    thread: 1,
+    data: [number, 0, 0, 0, 0, 0, 0, rows.length, ...rows],
+  });
+  aggregate.take(frame(9, [7, 1, 0.25, 0.25, 0]), 1001);
+  aggregate.take(frame(10, [7, 2, 0.5, 0.5, 0, 'not a number', 1, 0.1, 0.1, 0]), 1002);
+  const read = aggregate.snapshot();
+  assert.deepEqual(
+    [read.frames, read.unreadable, read.functions['#7']],
+    [1, 1, { calls: 1, selfSeconds: 0.25, totalSeconds: 0.25 }],
+    JSON.stringify(read),
+  );
+}
+
+/**
+ * A call site is given the numbers of the function it is written in, and not of another function
+ * of the same name in another class of the script. The path the profile spells with another case
+ * than the project's listing is the same script.
+ */
+function testACallSiteTakesTheNumbersOfItsOwnFunction(): void {
+  const source = [
+    'class_name Outer',
+    'func run():',
+    '\thelper()',
+    'func helper():',
+    '\tpass',
+    'class Inner:',
+    '\tfunc run():',
+    '\t\tpass',
+    '\tfunc other():',
+    '\t\thelper()',
+    '',
+  ].join('\n');
+  const totals = (script: string, withOuterRun: boolean): ProfileTotals => ({
+    startedAt: 1,
+    lastFrameAt: 2,
+    frames: 1,
+    complete: false,
+    unreadable: 0,
+    functions: {
+      ...(withOuterRun
+        ? { [`${script}::3::Outer.run`]: { calls: 1, selfSeconds: 0.001, totalSeconds: 0.002 } }
+        : {}),
+      [`${script}::5::Outer.helper`]: { calls: 1, selfSeconds: 0.001, totalSeconds: 0.001 },
+      [`${script}::8::Outer.Inner.run`]: { calls: 900, selfSeconds: 5, totalSeconds: 5 },
+    },
+  });
+  const sites = (given: ProfileTotals): (number | string | null | undefined)[][] =>
+    callersOf(given, 'helper', [['res://o.gd', source]]).sites.map((one) => [
+      one.line,
+      one.within,
+      one.withinCalls,
+    ]);
+  assert.deepEqual(
+    sites(totals('res://o.gd', true)),
+    [
+      [3, 'run', 1],
+      [10, 'other', undefined],
+    ],
+    'the site in the outer run reads the outer run, and one in a function with no row reads none',
+  );
+  assert.deepEqual(
+    sites(totals('res://o.gd', false)),
+    [
+      [3, 'run', undefined],
+      [10, 'other', undefined],
+    ],
+    'an outer run that made no counted call is not given the inner one',
+  );
+  assert.deepEqual(
+    sites(totals('res://O.gd', true)),
+    [
+      [3, 'run', 1],
+      [10, 'other', undefined],
+    ],
+    'a path spelled in another case is the same script',
+  );
 }
 
 /**
@@ -13104,7 +13207,10 @@ function testAnAutoloadNamingAFileThatIsNotThere(): void {
     // The positive: put the loader back and the loader line is clean, so the sentence above is
     // this check and not the whole command going quiet.
     mkdirSync(join(project, 'tools'), { recursive: true });
-    writeFileSync(join(project, 'tools', 'gdharness_loader.gd'), 'extends Node\n');
+    writeFileSync(
+      join(project, 'tools', 'gdharness_loader.gd'),
+      `extends Node\nconst RUNTIME = "res://${RUNTIME_SCRIPT}"\n`,
+    );
     const restored: unknown = JSON.parse(doctor('--json').stdout);
     assert.equal(get(get(restored, 'runtimeLoaderAutoload'), 'exists'), true, 'restored, the file is there');
     assert.doesNotMatch(
@@ -13117,6 +13223,309 @@ function testAnAutoloadNamingAFileThatIsNotThere(): void {
       /Gone autoload names res:\/\/tools\/not_here\.gd, which is not in this project/,
       'while the one still missing still is',
     );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A throwaway project holding [param projectGodot] and [param files], inspected and swept. The
+ * class cache is written so that its absence is not among the problems.
+ */
+function inspectedFrom(projectGodot: string, files: Record<string, string> = {}): ProjectReport {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-inspect-'));
+  try {
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    writeFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'list=Array[Dictionary]([])\n');
+    writeFileSync(join(project, 'project.godot'), projectGodot);
+    for (const [path, content] of Object.entries(files)) {
+      mkdirSync(dirname(join(project, path)), { recursive: true });
+      writeFileSync(join(project, path), content);
+    }
+    return inspectProject(project);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * Whether the runtime counts as registered is read from the autoloads by what each one names, in
+ * every shape project.godot takes: no section, the entry, a commented one, a name holding the word,
+ * Windows line ends, and the section last. An entry under another name that names the addon's
+ * script or the shipped loader is ours, and a file that merely has gdharness in its name is not.
+ */
+function testTheRuntimeAutoloadIsFoundByWhatItNames(): void {
+  const head = 'config_version=5\n\n';
+  const loader = `res://${RUNTIME_AUTOLOAD.path}`;
+  const registered = (report: ProjectReport): [boolean, string | null, string | null] => [
+    report.runtimeAutoload,
+    report.runtimeAutoloadPath,
+    report.runtimeLoaderAutoload?.name ?? null,
+  ];
+  assert.deepEqual(registered(inspectedFrom(`${head}[application]\nconfig/name="X"\n`)), [false, null, null]);
+  assert.deepEqual(
+    registered(inspectedFrom(`${head}[autoload]\n\n${RUNTIME_AUTOLOAD.name}="*${loader}"\n\n[display]\n`)),
+    [true, loader, null],
+    'the entry itself is read, with the section followed by another',
+  );
+  assert.deepEqual(
+    registered(inspectedFrom(`${head}[autoload]\n\n;${RUNTIME_AUTOLOAD.name}="*${loader}"\n`)),
+    [false, null, null],
+    'a commented entry registers nothing',
+  );
+  assert.deepEqual(
+    registered(
+      inspectedFrom(`${head}[autoload]\n\nGdharnessNotes="*res://tools/notes.gd"\n`, {
+        'tools/notes.gd': 'extends Node\n',
+      }),
+    ),
+    [false, null, null],
+    'an autoload whose name holds the word is not the runtime',
+  );
+  assert.deepEqual(
+    registered(
+      inspectedFrom(`${head}[autoload]\n\nOther="*res://tools/gdharness_notes.gd"\n`, {
+        'tools/gdharness_notes.gd': 'extends Node\n',
+      }),
+    ),
+    [false, null, null],
+    'nor is a script of the project that only has gdharness in its filename',
+  );
+  assert.deepEqual(
+    registered(
+      inspectedFrom(`${head}[autoload]\n\nBoot="*res://${RUNTIME_SCRIPT}"\n`.replaceAll('\n', '\r\n')),
+    ),
+    [true, null, 'Boot'],
+    'the addon script under another name is ours, in a file with Windows line ends',
+  );
+  assert.deepEqual(
+    registered(
+      inspectedFrom(`${head}[autoload]\n\nBoot="*${loader}"\n`, {
+        [RUNTIME_AUTOLOAD.path]: readFileSync(shippedLoader(), 'utf8'),
+      }),
+    ),
+    [true, null, 'Boot'],
+    'the shipped loader under another name is ours, as the last section of the file',
+  );
+  const gone = inspectedFrom(`${head}[autoload]\n\nBoot="*res://${RUNTIME_SCRIPT}"\n`);
+  assert.equal(gone.runtimeLoaderAutoload?.exists, false, 'and says its file is not there when it is not');
+  assert.deepEqual(
+    registered(inspectedFrom(`${head}[autoload]\n\nLoad="*res://tools/gdharness_loader.gd"\n`)),
+    [true, null, 'Load'],
+    'a loader known only by its name, with its file gone, is still taken for one',
+  );
+}
+
+/**
+ * An autoload the project names by uid is read through the file that declares the uid. One that no
+ * file declares boots with a missing script and is reported like a path with no file.
+ */
+function testAnAutoloadNamedByUidIsResolvedOrReported(): void {
+  const uid = readFileSync(`${shippedLoader()}.uid`, 'utf8').trim();
+  const report = inspectedFrom(
+    `config_version=5\n\n[autoload]\n\n${RUNTIME_AUTOLOAD.name}="*${uid}"\nGone="*uid://dgq6lk2yqnw4a"\n`,
+    {
+      [RUNTIME_AUTOLOAD.path]: readFileSync(shippedLoader(), 'utf8'),
+      [`${RUNTIME_AUTOLOAD.path}.uid`]: `${uid}\n`,
+    },
+  );
+  assert.equal(
+    report.runtimeAutoloadPath,
+    `res://${RUNTIME_AUTOLOAD.path}`,
+    'the runtime entry names its file',
+  );
+  assert.equal(autoloadIsOurs(report.runtimeAutoloadPath), true, 'so it is read as ours');
+  const said = report.problems.join('\n');
+  assert.doesNotMatch(said, /which is not in this project/, 'the loader that is there is not called missing');
+  assert.match(
+    said,
+    /the Gone autoload names uid:\/\/dgq6lk2yqnw4a, which no file in this project declares/,
+    'and the entry no file declares is named',
+  );
+}
+
+/**
+ * Doctor calls an addon current by the same rule the server holds an editor and a game to: the
+ * code it was installed with. A version marker left behind by an upgrade that changed no addon code
+ * is no fault, and a missing digest marker, as a failed install leaves, is one. An empty version
+ * marker reads as no marker in every reader.
+ */
+function testDoctorJudgesAddonsByTheirCodeAndNotTheirVersionMarker(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-current-'));
+  const addonProblems = (): string[] =>
+    inspectProject(project).problems.filter((problem) => problem.startsWith('addons/'));
+  const currentFlags = (): boolean[] => inspectProject(project).addons.map((addon) => addon.current);
+  try {
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    writeFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'list=Array[Dictionary]([])\n');
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    installAddons(project);
+    assert.deepEqual(currentFlags(), [true, true, true, true], 'a whole install is current');
+    assert.deepEqual(addonProblems(), []);
+
+    for (const name of ADDONS) {
+      writeFileSync(join(project, 'addons', name, '.gdharness-version'), '0.0.1\n');
+    }
+    assert.deepEqual(
+      currentFlags(),
+      [true, true, true, false],
+      'an old version marker over the same code is current for every addon the digest covers',
+    );
+    assert.deepEqual(addonProblems(), [
+      `addons/gdharness_tests is 0.0.1, this gdharness is ${SERVER_VERSION}. Run gdharness setup`,
+    ]);
+
+    for (const name of ['gdharness_tests', 'gdharness_editor', 'auto_reload']) {
+      writeFileSync(join(project, 'addons', name, '.gdharness-version'), `${SERVER_VERSION}\n`);
+    }
+    rmSync(join(project, 'addons', 'gdharness_editor', '.gdharness-digest'));
+    assert.deepEqual(
+      currentFlags(),
+      [false, true, false, true],
+      'a missing digest marker is not current, for the editor plugins it covers',
+    );
+    assert.deepEqual(addonProblems(), [
+      `addons/gdharness_editor is not the ${SERVER_VERSION} code this gdharness ships. Run gdharness setup`,
+      `addons/auto_reload is not the ${SERVER_VERSION} code this gdharness ships. Run gdharness setup`,
+    ]);
+
+    writeFileSync(join(project, 'addons', 'gdharness_tests', '.gdharness-version'), '\n');
+    assert.deepEqual(
+      inspectProject(project).addons.map((addon) => addon.version),
+      [SERVER_VERSION, '0.0.1', SERVER_VERSION, null],
+      'an empty version marker is no version',
+    );
+    assert.equal(worktreeAddonVersion(project), SERVER_VERSION, 'the editor addon is the one asked');
+    rmSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+    assert.equal(worktreeAddonVersion(project), '0.0.1', 'and the next one when it is gone');
+    writeFileSync(join(project, 'addons', 'gdharness_runtime', '.gdharness-version'), '\n');
+    assert.equal(
+      worktreeAddonVersion(project),
+      null,
+      'an empty marker is an unmarked copy, not an empty version',
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * The small answers setup, the server's instructions and the profile mark give, asked directly:
+ * where the shipped files are, what an install reads back, which gdUnit4 can run the shipped runner,
+ * what the instructions tell a client, and a mark kept and read again.
+ */
+function testTheSetupAndInstructionHelpersAnswerWhatTheyAreAsked(): void {
+  assert.equal(runLine('npx', '1.2.3', 'upgrade'), 'npx -y gdharness@1.2.3 upgrade');
+  assert.equal(runLine('bunx', '1.2.3', 'upgrade'), 'bunx gdharness@1.2.3 upgrade');
+  const packaged: unknown = JSON.parse(readFileSync('package.json', 'utf8'));
+  assert.equal(SERVER_VERSION, get(packaged, 'version'), 'the server runs as the version the package says');
+  assert.deepEqual(
+    [
+      runtimeAddonUnknown({ version: '', digest: '' }),
+      runtimeAddonUnknown({ version: '1.0.0', digest: '' }),
+      runtimeAddonUnknown({ version: '', digest: 'abc' }),
+    ],
+    [true, false, false],
+  );
+  const instructions = serverInstructions();
+  for (const named of ['editor_status', 'editor_run start', 'editor_output', 'runtime_*', 'debug_*']) {
+    assert.ok(instructions.includes(named), `the instructions name ${named}: ${instructions}`);
+  }
+  assert.doesNotMatch(instructions, /\s{2}/, 'and read as plain sentences');
+
+  for (const shipped of [
+    join(shippedAddonsDirectory(), 'gdharness_tests', basename(SHARE_SCRIPT)),
+    shippedOperationsScript(),
+    shippedListedRunner(),
+    shippedLoader(),
+  ]) {
+    assert.ok(existsSync(shipped), `the shipped file is there: ${shipped}`);
+  }
+
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-helpers-'));
+  try {
+    assert.deepEqual([installedAddonVersion(project), installedRuntimeVersion(project)], [null, null]);
+    installAddons(project);
+    assert.deepEqual(
+      [installedAddonVersion(project), installedRuntimeVersion(project)],
+      [SERVER_VERSION, SERVER_VERSION],
+    );
+    assert.equal(removeLoader(project), false, 'no loader to take out');
+    writeLoader(project);
+    assert.equal(removeLoader(project), true, 'the loader written is taken out');
+    assert.equal(existsSync(join(project, 'gdharness')), false, 'with the folder it made');
+
+    assert.deepEqual(gdUnit4Unusable(project), {
+      missing: true,
+      reason: 'gdUnit4 is not installed in this project: no addons/gdUnit4/plugin.cfg',
+    });
+    mkdirSync(join(project, 'addons', 'gdUnit4'), { recursive: true });
+    writeFileSync(join(project, 'addons', 'gdUnit4', 'plugin.cfg'), '');
+    assert.equal(gdUnit4Unusable(project)?.missing, false, 'an older gdUnit4 is installed and unusable');
+    mkdirSync(join(project, 'addons', 'gdUnit4', 'src', 'core', 'runners'), { recursive: true });
+    writeFileSync(join(project, 'addons', 'gdUnit4', 'src', 'core', 'runners', 'GdUnitTestCIRunner.gd'), '');
+    assert.equal(gdUnit4Unusable(project), null, 'and one with the runner is usable');
+
+    assert.deepEqual(
+      [
+        ...autoloadPaths(
+          { autoload: { A: '*res://a.gd', B: 'res://b.gd', C: '*uid://nowhere', D: 3 } },
+          project,
+        ),
+      ],
+      [
+        ['A', 'a.gd'],
+        ['B', 'b.gd'],
+      ],
+      'the star is dropped, and what is not a path of the project is left out',
+    );
+
+    const file = join(project, 'mark.json');
+    const mark = {
+      takenAt: 5,
+      projectPath: null,
+      runStartedAt: 4,
+      coveredMs: 100,
+      totals: {
+        startedAt: 1,
+        lastFrameAt: 2,
+        frames: 1,
+        complete: false,
+        unreadable: 0,
+        functions: { 'res://a.gd::3::A.f': { calls: 1, selfSeconds: 0.5, totalSeconds: 1 } },
+      },
+    };
+    assert.equal(readProfileMark(file), null, 'no mark yet');
+    assert.equal(writeProfileMark(file, mark), true);
+    assert.deepEqual(
+      Object.entries(readProfileMark(file)?.totals.functions ?? {}),
+      Object.entries(mark.totals.functions),
+    );
+    assert.equal(readProfileMark(file)?.coveredMs, 100);
+    writeFileSync(file, '{"takenAt":"soon"}');
+    assert.equal(readProfileMark(file), null, 'a mark that is not one is no mark');
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * An uninstall takes out an addon that is a link to a folder that has gone, and the addons folder
+ * with it once nothing else is there. Reported as removed rather than as nothing to do.
+ */
+function testAnUninstallRemovesALinkWhoseFolderIsGone(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-dead-link-'));
+  try {
+    mkdirSync(join(project, 'addons'), { recursive: true });
+    const elsewhere = join(project, 'elsewhere');
+    mkdirSync(elsewhere);
+    const link = join(project, 'addons', 'gdharness_runtime');
+    symlinkSync(elsewhere, link, 'junction');
+    rmSync(elsewhere, { recursive: true });
+    assert.equal(existsSync(link), false, 'the link points at nothing');
+    assert.deepEqual(removeAddons(project), [link, join(project, 'addons')]);
+    assert.equal(existsSync(join(project, 'addons')), false, 'and the folder it sat in is gone with it');
+    assert.deepEqual(removeAddons(project), [], 'a second uninstall finds nothing');
   } finally {
     sweep(project);
   }
@@ -17994,6 +18403,30 @@ function testAUidCacheNamingAFileGoneIsMended(): void {
 }
 
 /**
+ * A start sets right the uid cache of the project its own `--path` names, and a `--path` after the
+ * bare `--` that begins the game's arguments is the game's and touches nothing.
+ */
+function testAStartMendsOnlyTheProjectItsOwnArgumentsName(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-uid-path-'));
+  try {
+    writeTree(project, { 'project.godot': 'config_version=5\n' });
+    mkdirSync(join(project, '.godot'));
+    const cache = join(project, '.godot', 'uid_cache.bin');
+    const stale = encodedUidCache([[7n, 'res://moved_away.gd']]);
+    writeFileSync(cache, stale);
+    const started = (...args: string[]): void => {
+      spawnSyncHidden(process.execPath, ['-e', '0', ...args], { encoding: 'utf8', timeout: 60000 });
+    };
+    started('--', '--path', project);
+    assert.deepEqual(readFileSync(cache), stale, 'a --path after the bare -- is left alone');
+    started('--path', project);
+    assert.deepEqual(readFileSync(cache), encodedUidCache([]), 'one before it is mended, so the case ran');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * An autoload named by its uid boots from where its script now is after the script moves.
  *
  * Reported by a downstream game: the script and its `.uid` moved to another folder, and the boot
@@ -19379,6 +19812,17 @@ function testAGameOnAnotherRuntimeAddonSaysSo(): void {
     /The project holds this server's runtime addon, so the game picks it up when it next starts\./,
   );
   assert.doesNotMatch(restartable, /\bupgrade\b/, `a current project is not sent to upgrade: ${restartable}`);
+  const unknownProject = note({ version: '1.1.20', digest: 'an older digest' }, undefined) ?? '';
+  assert.match(
+    unknownProject,
+    /The game reported no project, so what it loads when it next starts is not known\. Run {2}npx -y gdharness@\S+ upgrade {2}in a shell in its project directory/,
+    unknownProject,
+  );
+  assert.doesNotMatch(
+    unknownProject,
+    /The project holds this server's runtime addon/,
+    'a project nothing was read from is not called current',
+  );
 
   const unmarked = note({ version: '', digest: 'an older digest' }, 'an older digest') ?? '';
   assert.match(
@@ -29431,6 +29875,28 @@ function testTheSkillNamesTheSettingThatServesAScriptRun(): void {
     /ProjectSettings\.get_setting\(QUIET_SCENES_SETTING[^\n]*\n\s*if not _profiled_from_start and not quiet_scene_in\(/,
     'and the server start should be the thing that consults it',
   );
+}
+
+/**
+ * The bind address and the port the skill names are the settings the addon reads, and the addon
+ * reads each where it listens. A renamed setting would leave the skill sending a caller to one that
+ * nothing consults.
+ */
+function testTheSkillNamesTheBindAddressAndPortTheAddonReads(): void {
+  const addon = readFileSync('src/godot/addons/gdharness_runtime/runtime_autoload.gd', 'utf8');
+  const declared = (constant: string): string | undefined =>
+    new RegExp(`${constant}\\s*:\\s*String\\s*=\\s*"([^"]+)"`).exec(addon)?.[1];
+  assert.equal(BIND_ADDRESS_SETTING, declared('BIND_ADDRESS_SETTING'), 'the bind address setting');
+  assert.equal(PORT_SETTING, declared('PORT_SETTING'), 'and the port setting');
+  assert.match(
+    addon,
+    /ProjectSettings\.get_setting\(\s*BIND_ADDRESS_SETTING/,
+    'the bind address is consulted',
+  );
+  assert.match(addon, /ProjectSettings\.get_setting\(PORT_SETTING/, 'and so is the port');
+  const skill = skillFiles('0.0.0').get('SKILL.md') ?? '';
+  assert.ok(skill.includes(BIND_ADDRESS_SETTING), 'the skill names the bind address setting');
+  assert.ok(skill.includes(PORT_SETTING), 'and the port setting');
 }
 
 /**
@@ -64231,7 +64697,16 @@ function gdscriptArguments(source: string, open: number): string[] {
  */
 function testEveryProcessStartsThroughTheHiddenSpawn(): void {
   // Built from parts, because this file is one of the files walked.
-  const starters = [['child', 'process'].join('_'), ['Bun', 'spawn'].join('.'), ['Bun', '$'].join('.')];
+  const starters = [
+    ['child', 'process'].join('_'),
+    ['Bun', 'spawn'].join('.'),
+    ['Bun', '$'].join('.'),
+    ['Create', 'ProcessW('].join(''),
+    ['Start', 'Process'].join('-'),
+    ['Process', 'Start'].join('.'),
+    ['Shell', 'Execute'].join(''),
+    ['new', 'Worker'].join(' '),
+  ];
   const shell = new RegExp(['from', "'bun'"].join(' '));
   const roots = ['src', 'scripts', 'test'];
   const walked = roots.flatMap((root) =>
@@ -64249,7 +64724,9 @@ function testEveryProcessStartsThroughTheHiddenSpawn(): void {
     .toSorted();
   assert.deepEqual(
     starting,
-    [join('src', 'spawn.ts'), join('test', 'support', 'hidden-spawn.ts')],
+    // The desktop helper is C# text that starts an engine or a game on a desktop of its own, which
+    // spawn.ts cannot do. The helper itself is started through spawnHidden.
+    [join('src', 'desktop.ts'), join('src', 'spawn.ts'), join('test', 'support', 'hidden-spawn.ts')],
     'start a process with spawnHidden, runHidden, runSyncHidden or spawnSyncHidden from src/spawn.ts, ' +
       'spawnShown for a game somebody asked to see, or HIDDEN_SPAWN_PRELUDE in a script handed to Node',
   );
@@ -64273,8 +64750,15 @@ function testEveryProcessStartsThroughTheHiddenSpawn(): void {
   );
   const starts: string[] = [];
   const consoles: string[] = [];
+  const unchecked: string[] = [];
   for (const script of scripts) {
     const source = readFileSync(script, 'utf8');
+    // The other ways to start a program or open one, which have no console argument to check.
+    for (const call of source.matchAll(
+      /\bOS\s*\.\s*(execute_with_pipe|create_instance|shell_open|shell_show_in_file_manager)\s*\(/g,
+    )) {
+      unchecked.push(`${script} ${call[1] ?? ''}`);
+    }
     for (const call of source.matchAll(/\bOS\s*\.\s*(create_process|execute)\s*\(/g)) {
       const name = call[1] ?? '';
       const given = gdscriptArguments(source, call.index + call[0].length - 1);
@@ -64287,6 +64771,7 @@ function testEveryProcessStartsThroughTheHiddenSpawn(): void {
   }
   assert.ok(starts.length >= 1, `the scripts' process starts were found: ${JSON.stringify(starts)}`);
   assert.deepEqual(consoles, [], 'a process a script starts opens no console window');
+  assert.deepEqual(unchecked, [], 'a script starts programs through create_process or execute alone');
 }
 
 /**
@@ -64611,7 +65096,7 @@ function testCommandLineSetup(): void {
     mkdirSync(guard, { recursive: true });
     writeFileSync(
       join(guard, 'gdharness_loader.gd'),
-      'extends Node\n\n\nfunc _ready() -> void:\n\tif OS.has_feature("template"):\n\t\treturn\n',
+      `extends Node\n\n\nfunc _ready() -> void:\n\tif OS.has_feature("template"):\n\t\treturn\n\tload("res://${RUNTIME_SCRIPT}")\n`,
     );
     const project = join(projectDir, 'project.godot');
     writeFileSync(
@@ -64865,7 +65350,10 @@ function testCommandLineSetup(): void {
       `setup for the loader case:\n${reinstalled.stdout}${reinstalled.stderr}`,
     );
     mkdirSync(guard, { recursive: true });
-    writeFileSync(join(guard, 'gdharness_loader.gd'), 'extends Node\n');
+    writeFileSync(
+      join(guard, 'gdharness_loader.gd'),
+      `extends Node\nconst RUNTIME = "res://${RUNTIME_SCRIPT}"\n`,
+    );
     writeFileSync(
       project,
       readFileSync(project, 'utf8').replace(loaderEntry, 'GdharnessLoader="*res://boot/gdharness_loader.gd"'),
@@ -84539,6 +85027,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALongUnfinishedLineIsHeldInLinearTime,
   testTheDebuggerNamesTheErrorsItsCallsRaise,
   testTheProfilerReadsWhatTheEngineSends,
+  testAFrameReadHalfwayAddsNothingToTheTotals,
+  testACallSiteTakesTheNumbersOfItsOwnFunction,
   testARealIsShownAsTheEngineHoldsIt,
   testACommandCarriesANumberAsItIs,
   testABadLengthKeepsTheMessagesBeforeIt,
@@ -84715,6 +85205,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheReferencePrintsEveryShapeOfType,
   testTheSkillNamesEverySettingTheAddonsRead,
   testTheSkillNamesTheSettingThatServesAScriptRun,
+  testTheSkillNamesTheBindAddressAndPortTheAddonReads,
   testAQuietSceneIsNotServed,
   testTheSkillWritesNoEscapedBackticks,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
@@ -84743,6 +85234,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALocatorAsksAgainWhenTheEngineAppearsOrGoes,
   testAnAutoloadGitWillNotCarry,
   testAnAutoloadNamingAFileThatIsNotThere,
+  testTheRuntimeAutoloadIsFoundByWhatItNames,
+  testAnAutoloadNamedByUidIsResolvedOrReported,
+  testDoctorJudgesAddonsByTheirCodeAndNotTheirVersionMarker,
+  testAnUninstallRemovesALinkWhoseFolderIsGone,
+  testTheSetupAndInstructionHelpersAnswerWhatTheyAreAsked,
   testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome,
   testTheReleaseButtonOffersWhatBothDocumentsDescribe,
   testVersionOrdering,
@@ -84779,6 +85275,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEditorsProgressIsOneLinePerTask,
   testAnEditorWritesItsConsoleWhereTheServerLooks,
   testAUidCacheNamingAFileGoneIsMended,
+  testAStartMendsOnlyTheProjectItsOwnArgumentsName,
   testAMovedAutoloadBootsFromWhereItIs,
   testACancelledCallEndsTheEngineItStarted,
   testAnErrorReportOutlivesItsGameForAnHour,

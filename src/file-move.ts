@@ -24,7 +24,7 @@ import {
 import { basename, dirname, extname, join } from 'node:path';
 import { bytesOf, entriesOf } from './listed-reads.js';
 import { relativeWithin } from './paths.js';
-import { ignoredTexts, projectTexts, VERSION_MARKER } from './project-scan.js';
+import { ignoredTexts, installedByUs, projectTexts } from './project-scan.js';
 import {
   ClassGraph,
   declaredIn,
@@ -118,9 +118,7 @@ function installedAddonOf(projectPath: string, path: string): string | null {
   if (steps[0] !== 'addons' || steps[1] === undefined) {
     return null;
   }
-  return existsSync(join(projectPath, 'addons', steps[1], VERSION_MARKER))
-    ? `res://addons/${steps[1]}`
-    : null;
+  return installedByUs(join(projectPath, 'addons', steps[1])) ? `res://addons/${steps[1]}` : null;
 }
 
 /** The addon gdharness installed that [param path], a directory, holds, or null. */
@@ -129,7 +127,7 @@ function holdingAddonOf(projectPath: string, path: string): string | null {
     return null;
   }
   const held = entriesOf(join(projectPath, 'addons')).find(
-    (entry) => entry.isDirectory() && existsSync(join(projectPath, 'addons', entry.name, VERSION_MARKER)),
+    (entry) => entry.isDirectory() && installedByUs(join(projectPath, 'addons', entry.name)),
   );
   return held === undefined ? null : `res://addons/${held.name}`;
 }

@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
@@ -29,6 +30,7 @@ import { parseProjectGodot } from './resources.js';
 import { SERVER_VERSION } from './server-version.js';
 import { spawnSyncHidden } from './spawn.js';
 import { readString } from './tool-args.js';
+import { uidTargets } from './uid-cache.js';
 
 /** The addons the package ships, by directory name under addons/. */
 export const ADDONS = ['gdharness_editor', 'gdharness_runtime', 'auto_reload', 'gdharness_tests'] as const;
@@ -309,6 +311,16 @@ export interface InstalledAddon {
   readonly replaced: boolean;
 }
 
+/** Whether [param path] is anything, a link to a folder that is gone included, which `existsSync` follows. */
+function somethingAt(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Each addon copied whole into the project's addons/, over whatever was there. */
 export function installAddons(
   projectPath: string,
@@ -321,7 +333,7 @@ export function installAddons(
       throw new Error(`The package holds no ${name} addon at ${source}.`);
     }
     const target = join(projectPath, 'addons', name);
-    const replaced = existsSync(target);
+    const replaced = somethingAt(target);
     rmSync(target, { recursive: true, force: true });
     mkdirSync(dirname(target), { recursive: true });
     cpSync(source, target, { recursive: true });
@@ -369,7 +381,7 @@ export function removeAddons(projectPath: string): readonly string[] {
   const removed: string[] = [];
   for (const name of ADDONS) {
     const target = join(projectPath, 'addons', name);
-    if (existsSync(target)) {
+    if (somethingAt(target)) {
       rmSync(target, { recursive: true, force: true });
       removed.push(target);
     }
@@ -526,8 +538,13 @@ function loaderAmong(
 ): { name: string; path: string; exists: boolean } | null {
   let byName: { name: string; path: string; exists: boolean } | null = null;
   for (const [entry, path] of named) {
-    if (entry === RUNTIME_AUTOLOAD.name || path === RUNTIME_AUTOLOAD.path || path === RUNTIME_SCRIPT) {
+    if (entry === RUNTIME_AUTOLOAD.name) {
       continue;
+    }
+    // Under any other name these are still ours: a second entry beside them would bring the runtime
+    // up twice, and the script of an uninstalled addon is a missing script the entry still names.
+    if (path === RUNTIME_AUTOLOAD.path || path === RUNTIME_SCRIPT) {
+      return { name: entry, path, exists: existsSync(join(projectPath, path)) };
     }
     let source: string | null = null;
     try {
@@ -539,24 +556,55 @@ function loaderAmong(
     if (source?.includes(RUNTIME_SCRIPT)) {
       return { name: entry, path, exists: true };
     }
-    byName ??= path.toLowerCase().includes('gdharness')
-      ? { name: entry, path, exists: source !== null }
-      : null;
+    // The filename guess is for a file that is gone. A file that is there and does not name the
+    // runtime script is the project's own, whatever it is called.
+    byName ??=
+      source === null && path.toLowerCase().includes('gdharness')
+        ? { name: entry, path, exists: false }
+        : null;
   }
   return byName;
 }
 
-/** Every autoload in project.godot, as the project-relative path each one names. */
-export function autoloadPaths(settings: Record<string, Record<string, unknown>>): Map<string, string> {
-  const named = new Map<string, string>();
+/**
+ * Every autoload in project.godot, as the project-relative path each one names. An entry naming a
+ * `uid://` is resolved through [param projectPath], and left out when no file there declares it.
+ */
+export function autoloadPaths(
+  settings: Record<string, Record<string, unknown>>,
+  projectPath: string,
+): Map<string, string> {
+  return readAutoloads(settings, projectPath).paths;
+}
+
+const RES_PREFIX = 'res://';
+
+function readAutoloads(
+  settings: Record<string, Record<string, unknown>>,
+  projectPath: string,
+): { paths: Map<string, string>; unresolved: Map<string, string> } {
+  const said = new Map<string, string>();
   for (const [name, value] of Object.entries(settings['autoload'] ?? {})) {
     // A leading star is the enabled marker the editor writes, not part of the path.
-    const said = typeof value === 'string' ? value.replace(/^\*/, '') : '';
-    if (said.startsWith('res://')) {
-      named.set(name, said.slice('res://'.length));
+    if (typeof value === 'string') {
+      said.set(name, value.replace(/^\*/, ''));
     }
   }
-  return named;
+  const targets = uidTargets(
+    projectPath,
+    [...said.values()].filter((value) => value.startsWith('uid://')),
+  );
+  const paths = new Map<string, string>();
+  const unresolved = new Map<string, string>();
+  for (const [name, value] of said) {
+    const resolved = value.startsWith('uid://') ? targets.get(value) : value;
+    if (resolved?.startsWith(RES_PREFIX)) {
+      paths.set(name, resolved.slice(RES_PREFIX.length));
+    } else if (value.startsWith('uid://')) {
+      unresolved.set(name, value);
+    }
+  }
+  return { paths, unresolved };
 }
 
 /**
@@ -638,9 +686,25 @@ export function worktreeAddonVersion(projectPath: string): string | null | undef
     if (statOf(join(projectPath, 'project.godot')) === undefined) {
       return undefined;
     }
-    return marker === null ? null : marker.toString('utf8').trim();
+    const said = marker?.toString('utf8').trim() ?? '';
+    return said === '' ? null : said;
   }
   return undefined;
+}
+
+/**
+ * Whether the addon installed in the project is the code this server ships. The two addons whose
+ * digest is marked at install are held to it, as the server holds the editor and a game, so that
+ * doctor and the server answer alike. The others have only the version to go by.
+ */
+function addonIsCurrent(projectPath: string, name: string, version: string | null): boolean {
+  if (name === ADDONS[0] || name === ADDONS[2]) {
+    return installedEditorDigest(projectPath) === shippedEditorDigest();
+  }
+  if (name === RUNTIME_ADDON) {
+    return installedRuntimeDigest(projectPath) === shippedRuntimeDigest();
+  }
+  return version === SERVER_VERSION;
 }
 
 /** What holds and what does not, read from the project directory alone. */
@@ -648,13 +712,14 @@ export function inspectProject(projectPath: string): ProjectReport {
   const problems: string[] = [];
   const addons = ADDONS.map((name): AddonState => {
     const directory = join(projectPath, 'addons', name);
-    const marker = join(directory, VERSION_MARKER);
     const installed = existsSync(directory);
-    const version = existsSync(marker) ? readFileSync(marker, 'utf8').trim() : null;
-    const current = version === SERVER_VERSION;
+    const version = versionMarker(projectPath, name);
+    const current = addonIsCurrent(projectPath, name, version);
     if (installed && !current) {
       problems.push(
-        `addons/${name} is ${version ?? 'of an unknown version'}, this gdharness is ${SERVER_VERSION}. Run gdharness setup`,
+        version === SERVER_VERSION
+          ? `addons/${name} is not the ${SERVER_VERSION} code this gdharness ships. Run gdharness setup`
+          : `addons/${name} is ${version ?? 'of an unknown version'}, this gdharness is ${SERVER_VERSION}. Run gdharness setup`,
       );
     }
     return { name, installed, version, current };
@@ -683,7 +748,11 @@ export function inspectProject(projectPath: string): ProjectReport {
   const autoload = settings['autoload'];
   const registered = autoload === undefined ? undefined : readString(autoload, RUNTIME_AUTOLOAD.name);
   // The star is the enabled marker the editor writes, not part of the path.
-  const runtimeAutoloadPath = typeof registered === 'string' ? registered.replace(/^\*/, '') : null;
+  const registeredText = typeof registered === 'string' ? registered.replace(/^\*/, '') : null;
+  const runtimeAutoloadPath =
+    registeredText === null
+      ? null
+      : (uidTargets(projectPath, [registeredText]).get(registeredText) ?? registeredText);
   if (runtimeAutoloadPath === `res://${RUNTIME_SCRIPT}`) {
     problems.push(
       `the ${RUNTIME_AUTOLOAD.name} autoload names the addon's own script, which a clone or an export without addons/ boots as a missing script. Run gdharness setup to point it at res://${RUNTIME_AUTOLOAD.path}, the loader it writes`,
@@ -703,7 +772,12 @@ export function inspectProject(projectPath: string): ProjectReport {
   // repository says why. Found on two projects, and nothing said so at the moment it was created. A
   // file git ignores is said and not failed: a project ignoring it has an install step that puts it
   // there, and setup runs in fresh clones.
-  const named = autoloadPaths(settings);
+  const { paths: named, unresolved } = readAutoloads(settings, projectPath);
+  for (const [name, uid] of unresolved) {
+    problems.push(
+      `the ${name} autoload names ${uid}, which no file in this project declares, so it boots with a missing script. Restore that file, or point the autoload at one that is here`,
+    );
+  }
   const runtimeLoaderAutoload = loaderAmong(projectPath, named);
   // Whether the runtime is brought up at all, which is the question the name asks. It used to mean
   // "is there an entry called GdharnessRuntime", so a project bringing it up through a loader was
