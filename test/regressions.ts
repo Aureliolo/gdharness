@@ -17725,6 +17725,30 @@ function testAUidCacheNamingAFileGoneIsMended(): void {
 }
 
 /**
+ * A start sets right the uid cache of the project its own `--path` names, and a `--path` after the
+ * bare `--` that begins the game's arguments is the game's and touches nothing.
+ */
+function testAStartMendsOnlyTheProjectItsOwnArgumentsName(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-uid-path-'));
+  try {
+    writeTree(project, { 'project.godot': 'config_version=5\n' });
+    mkdirSync(join(project, '.godot'));
+    const cache = join(project, '.godot', 'uid_cache.bin');
+    const stale = encodedUidCache([[7n, 'res://moved_away.gd']]);
+    writeFileSync(cache, stale);
+    const started = (...args: string[]): void => {
+      spawnSyncHidden(process.execPath, ['-e', '0', ...args], { encoding: 'utf8', timeout: 60000 });
+    };
+    started('--', '--path', project);
+    assert.deepEqual(readFileSync(cache), stale, 'a --path after the bare -- is left alone');
+    started('--path', project);
+    assert.deepEqual(readFileSync(cache), encodedUidCache([]), 'one before it is mended, so the case ran');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * An autoload named by its uid boots from where its script now is after the script moves.
  *
  * Reported by a downstream game: the script and its `.uid` moved to another folder, and the boot
@@ -83586,6 +83610,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEditorsProgressIsOneLinePerTask,
   testAnEditorWritesItsConsoleWhereTheServerLooks,
   testAUidCacheNamingAFileGoneIsMended,
+  testAStartMendsOnlyTheProjectItsOwnArgumentsName,
   testAMovedAutoloadBootsFromWhereItIs,
   testACancelledCallEndsTheEngineItStarted,
   testAnErrorReportOutlivesItsGameForAnHour,
