@@ -411,12 +411,14 @@ import {
   propertyOf,
   queuedMessagesOf,
   readProfileFile,
+  readProfileMark,
   type SourceOf,
   signatureParts,
   totalsSince,
   UNNAMED_PREFIX,
   withEngineArguments,
   writeProfileFile,
+  writeProfileMark,
 } from '../src/script-profile.js';
 import {
   aboveTheRunner,
@@ -468,9 +470,12 @@ import {
   withUidsMissing,
   writtenBeside,
 } from '../src/server.js';
+import { serverInstructions } from '../src/server-instructions.js';
 import type { GodotProcess, ToolResponse } from '../src/server-types.js';
 import {
   addonMismatch,
+  gdharnessCommand,
+  runtimeAddonUnknown,
   runtimeMismatch,
   SERVER_VERSION,
   sameCodeNote,
@@ -479,12 +484,16 @@ import {
 import {
   ADDONS,
   autoloadIsOurs,
+  autoloadPaths,
   BIND_ADDRESS_SETTING,
   editorUpgradeNote,
+  gdUnit4Unusable,
   inspectProject,
   installAddons,
+  installedAddonVersion,
   installedEditorDigest,
   installedRuntimeDigest,
+  installedRuntimeVersion,
   loaderState,
   PORT_SETTING,
   type ProjectReport,
@@ -492,9 +501,14 @@ import {
   RUNTIME_AUTOLOAD,
   RUNTIME_SCRIPT,
   removeAddons,
+  removeLoader,
   SCRIPT_RUNS_SETTING,
+  SHARE_SCRIPT,
+  shippedAddonsDirectory,
   shippedEditorDigest,
+  shippedListedRunner,
   shippedLoader,
+  shippedOperationsScript,
   shippedRuntimeDigest,
   worktreeAddonVersion,
   writeLoader,
@@ -12933,6 +12947,103 @@ function testDoctorJudgesAddonsByTheirCodeAndNotTheirVersionMarker(): void {
       null,
       'an empty marker is an unmarked copy, not an empty version',
     );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * The small answers setup, the server's instructions and the profile mark give, asked directly:
+ * where the shipped files are, what an install reads back, which gdUnit4 can run the shipped runner,
+ * what the instructions tell a client, and a mark kept and read again.
+ */
+function testTheSetupAndInstructionHelpersAnswerWhatTheyAreAsked(): void {
+  assert.equal(gdharnessCommand('1.2.3', 'upgrade'), 'npx -y gdharness@1.2.3 upgrade');
+  assert.deepEqual(
+    [
+      runtimeAddonUnknown({ version: '', digest: '' }),
+      runtimeAddonUnknown({ version: '1.0.0', digest: '' }),
+      runtimeAddonUnknown({ version: '', digest: 'abc' }),
+    ],
+    [true, false, false],
+  );
+  const instructions = serverInstructions();
+  for (const named of ['editor_status', 'editor_run start', 'editor_output', 'runtime_*', 'debug_*']) {
+    assert.ok(instructions.includes(named), `the instructions name ${named}: ${instructions}`);
+  }
+  assert.doesNotMatch(instructions, /\s{2}/, 'and read as plain sentences');
+
+  for (const shipped of [
+    join(shippedAddonsDirectory(), 'gdharness_tests', basename(SHARE_SCRIPT)),
+    shippedOperationsScript(),
+    shippedListedRunner(),
+    shippedLoader(),
+  ]) {
+    assert.ok(existsSync(shipped), `the shipped file is there: ${shipped}`);
+  }
+
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-helpers-'));
+  try {
+    assert.deepEqual([installedAddonVersion(project), installedRuntimeVersion(project)], [null, null]);
+    installAddons(project);
+    assert.deepEqual(
+      [installedAddonVersion(project), installedRuntimeVersion(project)],
+      [SERVER_VERSION, SERVER_VERSION],
+    );
+    assert.equal(removeLoader(project), false, 'no loader to take out');
+    writeLoader(project);
+    assert.equal(removeLoader(project), true, 'the loader written is taken out');
+    assert.equal(existsSync(join(project, 'gdharness')), false, 'with the folder it made');
+
+    assert.deepEqual(gdUnit4Unusable(project), {
+      missing: true,
+      reason: 'gdUnit4 is not installed in this project: no addons/gdUnit4/plugin.cfg',
+    });
+    mkdirSync(join(project, 'addons', 'gdUnit4'), { recursive: true });
+    writeFileSync(join(project, 'addons', 'gdUnit4', 'plugin.cfg'), '');
+    assert.equal(gdUnit4Unusable(project)?.missing, false, 'an older gdUnit4 is installed and unusable');
+    mkdirSync(join(project, 'addons', 'gdUnit4', 'src', 'core', 'runners'), { recursive: true });
+    writeFileSync(join(project, 'addons', 'gdUnit4', 'src', 'core', 'runners', 'GdUnitTestCIRunner.gd'), '');
+    assert.equal(gdUnit4Unusable(project), null, 'and one with the runner is usable');
+
+    assert.deepEqual(
+      [
+        ...autoloadPaths(
+          { autoload: { A: '*res://a.gd', B: 'res://b.gd', C: '*uid://nowhere', D: 3 } },
+          project,
+        ),
+      ],
+      [
+        ['A', 'a.gd'],
+        ['B', 'b.gd'],
+      ],
+      'the star is dropped, and what is not a path of the project is left out',
+    );
+
+    const file = join(project, 'mark.json');
+    const mark = {
+      takenAt: 5,
+      projectPath: null,
+      runStartedAt: 4,
+      coveredMs: 100,
+      totals: {
+        startedAt: 1,
+        lastFrameAt: 2,
+        frames: 1,
+        complete: false,
+        unreadable: 0,
+        functions: { 'res://a.gd::3::A.f': { calls: 1, selfSeconds: 0.5, totalSeconds: 1 } },
+      },
+    };
+    assert.equal(readProfileMark(file), null, 'no mark yet');
+    assert.equal(writeProfileMark(file, mark), true);
+    assert.deepEqual(
+      Object.entries(readProfileMark(file)?.totals.functions ?? {}),
+      Object.entries(mark.totals.functions),
+    );
+    assert.equal(readProfileMark(file)?.coveredMs, 100);
+    writeFileSync(file, '{"takenAt":"soon"}');
+    assert.equal(readProfileMark(file), null, 'a mark that is not one is no mark');
   } finally {
     sweep(project);
   }
@@ -83599,6 +83710,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAutoloadNamedByUidIsResolvedOrReported,
   testDoctorJudgesAddonsByTheirCodeAndNotTheirVersionMarker,
   testAnUninstallRemovesALinkWhoseFolderIsGone,
+  testTheSetupAndInstructionHelpersAnswerWhatTheyAreAsked,
   testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome,
   testTheReleaseButtonOffersWhatBothDocumentsDescribe,
   testVersionOrdering,
