@@ -5749,7 +5749,16 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
     servers.push(started);
     return started;
   };
-  const free = await reservePort();
+  // Held until the server meant for it starts. The two servers before it take whichever port the
+  // kernel offers, and the kernel offers a port this process reserved and let go.
+  const keptFree = createServer();
+  const free = await listenOnAReservedPort(keptFree);
+  const letGo = (listener: Server): Promise<void> =>
+    new Promise<void>((settle) => {
+      listener.close(() => {
+        settle();
+      });
+    });
   try {
     writeFileSync(
       join(project, 'project.godot'),
@@ -5810,7 +5819,9 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
     assert.equal(get(other, 'bridgeHandover'), undefined, JSON.stringify(other));
     assert.notEqual(get(other, 'port'), wanted, `it moved at once: ${JSON.stringify(other)}`);
     assert.match(text(get(other, 'portNote')), /was held by another process/, JSON.stringify(other));
+    assert.notEqual(get(other, 'port'), free, `the kept port was not offered: ${JSON.stringify(other)}`);
 
+    await letGo(keptFree);
     const settled = spawn(free);
     await settled.initialize('regression-test');
     const plain = get(
@@ -5839,11 +5850,10 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
     for (const started of servers) {
       await started.stop();
     }
-    await new Promise<void>((settle) => {
-      holder.close(() => {
-        settle();
-      });
-    });
+    await letGo(holder);
+    if (keptFree.listening) {
+      await letGo(keptFree);
+    }
     sweep(project);
   }
 }
