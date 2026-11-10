@@ -634,6 +634,7 @@ import {
   sweep,
   sweepingFor,
 } from './support/sweep.js';
+import { WINDOWS_ASK_STAND_IN } from './support/windows-ask-stand-in.js';
 
 /**
  * Runs [param run] with a bridge port held by something else, handed to it to configure a server
@@ -25777,9 +25778,15 @@ function testTheRegistryIsHttpsOrNpm(): void {
  */
 function testAMirrorWithAQueryOrFragmentStillNamesTheDocument(): void {
   const at = (named: string): string => registryFor({ GDHARNESS_REGISTRY: named });
-  assert.equal(at('https://npm.inside.example/?token=abc'), 'https://npm.inside.example/gdharness/latest?token=abc');
+  assert.equal(
+    at('https://npm.inside.example/?token=abc'),
+    'https://npm.inside.example/gdharness/latest?token=abc',
+  );
   assert.equal(at('https://npm.inside.example/#frag'), 'https://npm.inside.example/gdharness/latest');
-  assert.equal(at('https://npm.inside.example/npm/?a=1'), 'https://npm.inside.example/npm/gdharness/latest?a=1');
+  assert.equal(
+    at('https://npm.inside.example/npm/?a=1'),
+    'https://npm.inside.example/npm/gdharness/latest?a=1',
+  );
   assert.equal(at('https://npm.inside.example/npm//'), 'https://npm.inside.example/npm/gdharness/latest');
   assert.equal(at('https://npm.inside.example:8443'), 'https://npm.inside.example:8443/gdharness/latest');
 }
@@ -25848,15 +25855,22 @@ async function testTheUpdateCheckKeepsItsCacheWithTheOthersAndDistrustsAFutureAn
     };
     const settle = (): Promise<void> => new Promise((done) => setTimeout(done, 0));
     const now = Date.now();
-    writeFileSync(cacheFile(environment), JSON.stringify({ checkedAt: now + 365 * 24 * 3600_000, latest: '99.9.9' }));
+    writeFileSync(
+      cacheFile(environment),
+      JSON.stringify({ checkedAt: now + 365 * 24 * 3600_000, latest: '99.9.9' }),
+    );
     const check = new UpdateCheck('0.1.0', environment, down);
     check.refresh(now);
     await settle();
     assert.equal(asks, 1, 'the first ask is made');
-    assert.equal(check.notice(now)?.latest, '99.9.9', 'and the kept one is still named while the registry is down');
+    assert.equal(
+      check.notice(now)?.latest,
+      '99.9.9',
+      'and the kept one is still named while the registry is down',
+    );
     check.refresh(now + 3 * 3600_000);
     await settle();
-    assert.equal(asks, 2, 'asked again once the retry window has passed, not only at the answer\'s date');
+    assert.equal(asks, 2, "asked again once the retry window has passed, not only at the answer's date");
 
     // A good answer taken now, then the clock set back two hours: the next look asks again.
     let lookups = 0;
@@ -29718,28 +29732,32 @@ async function testThePowerShellHelperGoesWithItsProcess(): Promise<void> {
  * module's `spawn.ts` is replaced before it loads, and the script refuses to ask if it was not.
  */
 function testWindowsAskKeepsEachHelpersAnswersApartAndDoesNotChargeAStart(): void {
-  const standIn = join('test', 'support', 'windows-ask-stand-in.ts');
-  assert.ok(existsSync(standIn), 'the stand-in script exists');
-  const run = spawnSyncHidden(process.execPath, [standIn], { encoding: 'utf8', timeout: 60_000 });
+  const run = spawnSyncHidden(process.execPath, [WINDOWS_ASK_STAND_IN], {
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
   assert.equal(run.status, 0, `the stand-in run ends cleanly: ${run.stderr}`);
-  const out = JSON.parse(run.stdout.trim().split('\n').at(-1) ?? '{}') as Record<string, unknown>;
+  const parsed: unknown = JSON.parse(run.stdout.trim().split('\n').at(-1) ?? '{}');
+  assert.ok(isRecord(parsed), `the stand-in run printed its result: ${run.stdout}`);
+  const out = parsed;
   assert.equal(out['warm'], 'answered warm', 'the first helper answers its first question');
-  assert.equal(out['tailFirstEnded'], true, 'a question that outlasts its budget ends a helper that has answered');
+  assert.equal(
+    out['tailFirstEnded'],
+    true,
+    'a question that outlasts its budget ends a helper that has answered',
+  );
   assert.equal(out['tailSecondStarted'], true, 'and the question behind it gets a new helper');
   assert.equal(out['tailFirst'], 'PowerShell did not answer within 100ms');
   assert.equal(
     out['tailSecond'],
     'answered right',
-    'the ended helper\'s unfinished answer does not swallow the new helper\'s',
+    "the ended helper's unfinished answer does not swallow the new helper's",
   );
   // The first question's own budget runs out before the helper has started, and that one is
   // refused. The helper is kept, so every question after it is answered.
   assert.deepEqual(
     out['slowStart'],
-    [
-      'PowerShell did not answer within 300ms',
-      ...Array.from({ length: 4 }, () => 'answered ready'),
-    ],
+    ['PowerShell did not answer within 300ms', ...Array.from({ length: 4 }, () => 'answered ready')],
     'a helper still starting answers the questions after the one that outlasted its budget',
   );
   assert.equal(out['slowStartHelpers'], 1, 'and is not ended and replaced for them');
@@ -81621,7 +81639,11 @@ async function testAWriteReportsATurnItCouldNotGiveBack(): Promise<void> {
       /the write failed/,
     );
     assert.equal(existsSync(lock), false, 'a failed write gives its turn back');
-    assert.equal(await inTurnFor(project, file, () => Promise.resolve('next')), 'next', 'and the next one runs');
+    assert.equal(
+      await inTurnFor(project, file, () => Promise.resolve('next')),
+      'next',
+      'and the next one runs',
+    );
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -81652,13 +81674,21 @@ async function testAWholeFileWriteAnswersAtOnceWhereTheTargetRefusesAndSweepsDea
     assert.deepEqual([missing.answer, missing.ms < 500], [false, true], 'a missing folder answers false');
     mkdirSync(join(folder, 'a-directory'));
     const asFolder = timed(() => writeWhole(join(folder, 'a-directory'), 'x'));
-    assert.deepEqual([asFolder.answer, asFolder.ms < 500], [false, true], `a folder answers false at once: ${String(asFolder.ms)} ms`);
+    assert.deepEqual(
+      [asFolder.answer, asFolder.ms < 500],
+      [false, true],
+      `a folder answers false at once: ${String(asFolder.ms)} ms`,
+    );
     const locked = join(folder, 'read-only.json');
     writeFileSync(locked, 'old');
     chmodSync(locked, 0o444);
     const asLocked = timed(() => writeWhole(locked, 'new'));
     chmodSync(locked, 0o666);
-    assert.deepEqual([asLocked.answer, asLocked.ms < 500], [false, true], `a read-only file answers false at once: ${String(asLocked.ms)} ms`);
+    assert.deepEqual(
+      [asLocked.answer, asLocked.ms < 500],
+      [false, true],
+      `a read-only file answers false at once: ${String(asLocked.ms)} ms`,
+    );
     assert.equal(readFileSync(locked, 'utf8'), 'old', 'and keeps its text');
     assert.deepEqual(
       readdirSync(folder).toSorted(),
@@ -81677,8 +81707,8 @@ async function testAWholeFileWriteAnswersAtOnceWhereTheTargetRefusesAndSweepsDea
       const unrelated = join(folder, `unrelated.json.${String(gone.pid)}.partial`);
       for (const one of [deadPartial, livePartial, unrelated]) writeFileSync(one, 'half');
       assert.equal(writeWhole(join(folder, 'other.json'), 'whole'), true);
-      assert.equal(existsSync(deadPartial), false, 'a dead writer\'s partial file is removed');
-      assert.equal(existsSync(livePartial), true, 'a live process\'s partial file is kept');
+      assert.equal(existsSync(deadPartial), false, "a dead writer's partial file is removed");
+      assert.equal(existsSync(livePartial), true, "a live process's partial file is kept");
       assert.equal(existsSync(unrelated), true, 'and so is the partial of another note');
     } finally {
       live.kill();
