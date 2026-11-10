@@ -4,7 +4,7 @@ import http from 'node:http';
 import type { RawData } from 'ws';
 import { WebSocket, WebSocketServer } from 'ws';
 import { callProgress } from './call-signal.js';
-import { errorMessage, Refusal, toError } from './errors.js';
+import { errorCode, errorMessage, Refusal, toError } from './errors.js';
 import { envValue } from './launch.js';
 import { isSameDirectory } from './paths.js';
 import { portFromEnv } from './ports.js';
@@ -515,7 +515,7 @@ export class GodotBridge extends EventEmitter {
     try {
       await this.listenOn(this.wantedPort);
     } catch (error) {
-      const held = error instanceof Error && 'code' in error && error.code === 'EADDRINUSE';
+      const held = errorCode(error) === 'EADDRINUSE';
       if (!held || !this.mayMove || !moveIfHeld) {
         throw error;
       }

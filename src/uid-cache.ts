@@ -9,6 +9,7 @@ import {
 } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { errorMessage } from './errors.js';
 
 /**
  * A project's uid cache, `.godot/uid_cache.bin`, set right before an engine starts on it: an entry
@@ -279,7 +280,7 @@ export function mendBeforeStart(args: readonly string[], cwd: string | URL | und
       process.stderr.write(`uid cache: dropped what names a file gone from ${where}: ${named}\n`);
     }
   } catch (error) {
-    const said = error instanceof Error ? error.message : String(error);
+    const said = errorMessage(error);
     process.stderr.write(`uid cache: could not rewrite ${where}, which names files gone: ${said}\n`);
   }
 }

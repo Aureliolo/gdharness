@@ -183,7 +183,7 @@ import {
   Spent,
   STARVED,
 } from '../src/engine-spent.js';
-import { Refusal } from '../src/errors.js';
+import { errorCode, errorMessage, Refusal } from '../src/errors.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { FrameReader, frame, OversizedStreamError } from '../src/framing.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
@@ -13704,9 +13704,10 @@ function testAnUncapturedConsoleSaysWhichEditorItIs(): void {
     assert.ok(!('kind' in huge), JSON.stringify(huge));
     if (!('kind' in huge)) {
       assert.equal(huge.of, line.length * 60_000, 'the whole size is reported');
-      assert.ok(
-        huge.readBytes !== undefined && huge.readBytes <= 8 * 1024 * 1024,
-        `and no more than the cap was read: ${huge.readBytes}`,
+      assert.equal(
+        huge.readBytes,
+        Math.floor((8 * 1024 * 1024) / line.length) * line.length,
+        'and the bytes read are the whole lines that fit under the cap',
       );
       const last = huge.log.everything().at(-1);
       assert.ok(last !== undefined);
@@ -13720,6 +13721,70 @@ function testAnUncapturedConsoleSaysWhichEditorItIs(): void {
   } finally {
     sweep(project);
   }
+}
+
+/**
+ * An editor's console is read to its last whole line, and what is reported as read is bytes.
+ *
+ * A line the editor is still writing is not an entry, and a console of accents is longer in bytes
+ * than in characters, so a count of characters understates how much of the file was read.
+ */
+function testTheEditorsConsoleIsCutAtItsLastWholeLineAndCountedInBytes(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-console-'));
+  try {
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    writeEditorLogNote(project, 4242);
+    const entries = (): string[] => {
+      const read = editorConsole(project, 4242, true);
+      assert.ok(!('kind' in read), JSON.stringify(read));
+      return 'kind' in read ? [] : read.log.everything().map((entry) => `${entry.severity}: ${entry.text}`);
+    };
+    writeFileSync(editorLogPath(project), '');
+    assert.deepEqual(entries(), []);
+    writeFileSync(editorLogPath(project), 'Godot Engine v4.7.2.stable.official\n');
+    assert.deepEqual(entries(), ['info: Godot Engine v4.7.2.stable.official']);
+    writeFileSync(
+      editorLogPath(project),
+      'Godot Engine v4.7.2.stable.official\r\nERROR: Could not parse glo',
+    );
+    assert.deepEqual(entries(), ['info: Godot Engine v4.7.2.stable.official']);
+    writeFileSync(editorLogPath(project), 'one\ntwo\nthree\n');
+    assert.deepEqual(entries(), ['info: one', 'info: two', 'info: three']);
+
+    const line = 'WARNING: geöffnet für Änderungen an Größe\n';
+    const bytes = Buffer.byteLength(line);
+    const many = Math.ceil((9 * 1024 * 1024) / bytes);
+    writeFileSync(editorLogPath(project), line.repeat(many));
+    const huge = editorConsole(project, 4242, true);
+    assert.ok(!('kind' in huge), JSON.stringify(huge));
+    if (!('kind' in huge)) {
+      assert.equal(huge.of, bytes * many);
+      assert.equal(huge.readBytes, Math.floor((8 * 1024 * 1024) / bytes) * bytes);
+    }
+
+    const started = performance.now();
+    writeFileSync(editorLogPath(project), `${'x'.repeat(6 * 1024 * 1024)}\nok\n`);
+    assert.equal(entries().length, 2);
+    assert.ok(performance.now() - started < 3000, 'a very long line is read in linear time');
+  } finally {
+    sweep(project);
+  }
+}
+
+/** A line holding the placeholder character is not the same shape as a line holding a value. */
+function testALiteralEllipsisIsNotAValueInAShape(): void {
+  assert.notEqual(shapeOf('Loading "a.png"').shape, shapeOf('Loading …').shape);
+  assert.notEqual(shapeOf('Loading \\…').shape, shapeOf('Loading …').shape);
+  const grouped = bursts(
+    (() => {
+      const log = new GameLog();
+      log.append('transcript', 'ERROR: Loading "a.png"\nERROR: Loading …\n');
+      log.finish();
+      return log.everything();
+    })(),
+    0,
+  );
+  assert.deepEqual(grouped, [], 'two different shapes make no burst');
 }
 
 /**
@@ -71667,6 +71732,18 @@ function testAFrameReaderRecoversAfterAFaultyBlock(): void {
   assert.ok(performance.now() - started < 2000, 'a very long block is read in linear time');
 }
 
+/** A thrown value that is not an Error never reads as "[object Object]" and never throws when read. */
+function testAThrownNonErrorReadsAsTheFallback(): void {
+  assert.equal(errorMessage({ code: 1 }), 'Unknown error');
+  assert.equal(errorMessage(Object.create(null)), 'Unknown error');
+  assert.equal(errorMessage(Symbol('x'), 'gone'), 'gone');
+  assert.equal(errorMessage('plain'), 'plain');
+  assert.equal(errorMessage(7), '7');
+  assert.equal(errorMessage(new Error('')), 'Unknown error');
+  assert.equal(errorCode(Object.assign(new Error('x'), { code: 'EEXIST' })), 'EEXIST');
+  assert.equal(errorCode({ code: 'EEXIST' }), undefined);
+}
+
 /** A target whose name starts with two dots is inside the project, and is judged as any other name. */
 function testAMoveTargetNamedWithTwoLeadingDotsIsInsideTheProject(): void {
   const project = moveProject();
@@ -81902,6 +81979,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMovePlanRefusesATargetTheWritesCannotUse,
   testAMoveRefusesToRewriteAFileThatIsNotUtf8,
   testAFrameReaderRecoversAfterAFaultyBlock,
+  testAThrownNonErrorReadsAsTheFallback,
   testAMoveTargetNamedWithTwoLeadingDotsIsInsideTheProject,
   testAMoveCanChangeOnlyTheCase,
   testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight,
@@ -82238,6 +82316,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameTooNewToTalkToIsStillAGame,
   testAWallOfOneMessageCollapsesToItsShape,
   testAnUncapturedConsoleSaysWhichEditorItIs,
+  testTheEditorsConsoleIsCutAtItsLastWholeLineAndCountedInBytes,
+  testALiteralEllipsisIsNotAValueInAShape,
   testTheEditorsConsoleLeavesOutTheLookElsewhere,
   testAnEditorsProgressIsOneLinePerTask,
   testAnEditorWritesItsConsoleWhereTheServerLooks,

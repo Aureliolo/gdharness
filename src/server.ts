@@ -4375,10 +4375,7 @@ class GodotServer {
       console.error(`[SERVER] Godot Editor Bridge started on ${bridgeStatus.host}:${bridgeStatus.port}`);
       this.announceTheBridge();
     } catch (bridgeError) {
-      const code =
-        bridgeError instanceof Error && 'code' in bridgeError && typeof bridgeError.code === 'string'
-          ? bridgeError.code
-          : null;
+      const code = errorCode(bridgeError) ?? null;
       const reason = errorMessage(bridgeError);
       this.bridgeStartupError = code && !reason.includes(code) ? `${code}: ${reason}` : reason;
       console.error(`[SERVER] Warning: Godot Editor Bridge failed to start: ${this.bridgeStartupError}`);

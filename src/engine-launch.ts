@@ -35,7 +35,7 @@ import {
 import { diedAsItStarted, startedUntilItRuns } from './engine-run.js';
 import { nameSlotEngineOf, onTheSlot } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
-import { errorCode, Refusal } from './errors.js';
+import { errorCode, errorMessage, Refusal } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
 import { LOG_LIMIT_BYTES, readLog } from './log-read.js';
 import { keepPipelineCache, seedPipelineCache } from './pipeline-cache.js';
@@ -281,7 +281,7 @@ export async function windowsCommitLeft(): Promise<number | string | null> {
     const bytes = Number(said.trim());
     return Number.isFinite(bytes) && bytes > 0 ? bytes : `it answered ${JSON.stringify(said.trim())}`;
   } catch (error) {
-    return error instanceof Error ? error.message : String(error);
+    return errorMessage(error);
   }
 }
 
