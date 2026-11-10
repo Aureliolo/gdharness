@@ -118,7 +118,13 @@ import {
   theConsoleWasNotCaptured,
   writeEditorLogNote,
 } from '../src/editor-log.js';
-import { editorQuitRequestPath, inTurnToOpen } from '../src/editor-open.js';
+import {
+  editorOpenOptionsOf,
+  editorQuitRequestPath,
+  editorRestartTimeoutMs,
+  inTurnToOpen,
+  openTheEditor,
+} from '../src/editor-open.js';
 import {
   EngineUsageError,
   endingWithRunner,
@@ -198,8 +204,9 @@ import {
   Spent,
   STARVED,
 } from '../src/engine-spent.js';
-import { Refusal } from '../src/errors.js';
+import { errorCode, errorMessage, Refusal } from '../src/errors.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
+import { FrameReader, OversizedStreamError, frame as wireFrame } from '../src/framing.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
 import {
   ALREADY_HELD,
@@ -8443,6 +8450,93 @@ function testEveryGreetingFieldIsRequired(): void {
 }
 
 /**
+ * The restart timeout is read as whole digits. A near miss such as `1e5` or `90s` falls back to the
+ * default instead of becoming a timeout of a few milliseconds that gives up at once.
+ */
+function testTheRestartTimeoutReadsWholeDigitsOnly(): void {
+  const name = 'GDHARNESS_EDITOR_RESTART_TIMEOUT_MS';
+  const before = process.env[name];
+  try {
+    for (const [value, wanted] of [
+      ['120000', 120_000],
+      [' 5000 ', 5000],
+      ['1e5', 90_000],
+      ['120_000', 90_000],
+      ['90s', 90_000],
+      ['2.5e5', 90_000],
+      ['0', 90_000],
+      ['-5', 90_000],
+      ['banana', 90_000],
+      ['99999999999999999999', 90_000],
+    ] as const) {
+      process.env[name] = value;
+      assert.equal(editorRestartTimeoutMs(), wanted, value);
+    }
+    delete process.env[name];
+    assert.equal(editorRestartTimeoutMs(), 90_000);
+  } finally {
+    if (before === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = before;
+    }
+  }
+}
+
+/**
+ * `gdharness editor open` refuses a project the editor would never reach a server from, and says
+ * why, as the server's own editor_launch does: no addon, and an addon of another release.
+ */
+async function testEditorOpenRefusesAnAddonThatCannotConnect(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-open-'));
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    const start = { hidden: true, silent: true, until: null };
+    const bare = await openTheEditor({ projectPath: project, start }, 'unused-engine', 'unused-holder');
+    assert.ok('refused' in bare, JSON.stringify(bare));
+    assert.match('refused' in bare ? bare.refused : '', /addon is not installed/);
+
+    installAddons(project);
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[editor_plugins]\n\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+    );
+    writeFileSync(join(project, 'addons', 'gdharness_editor', '.gdharness-digest'), 'another\n');
+    const another = await openTheEditor({ projectPath: project, start }, 'unused-engine', 'unused-holder');
+    assert.ok('refused' in another, JSON.stringify(another));
+    assert.match('refused' in another ? another.refused : '', /would be asked nothing but to quit/);
+  } finally {
+    sweep(project);
+  }
+}
+
+/** Each way `gdharness editor` can be misspelt is refused with a sentence naming the fault. */
+function testEditorOpenOptionsRefuseEachMisuse(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-open-'));
+  try {
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    const refusals: [string[], RegExp][] = [
+      [[], /gdharness editor takes open, not nothing/],
+      [['close'], /gdharness editor takes open, not close/],
+      [['open', '--until'], /--until takes a process id, not nothing/],
+      [['open', '--until', 'x'], /--until takes a process id, not x/],
+      [['open', '--bogus'], /Unknown option --bogus/],
+      [['open', 'one', 'two'], /takes one project, and was given one and two/],
+      [['open', 'missing'], /Not a Godot project/],
+      [['open', '--until', '2147483646'], /Process 2147483646 is not running/],
+    ];
+    for (const [args, message] of refusals) {
+      assert.throws(() => editorOpenOptionsOf(args, project), message, args.join(' '));
+    }
+    const hidden = editorOpenOptionsOf(['open', '--hidden'], project);
+    assert.deepEqual(hidden.start, { hidden: true, silent: true, until: null });
+    assert.equal(hidden.projectPath, project);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * An editor on another release's addon is asked nothing but to quit, and every other call is
  * refused with what brings it into step.
  *
@@ -13806,9 +13900,10 @@ function testAnUncapturedConsoleSaysWhichEditorItIs(): void {
     assert.ok(!('kind' in huge), JSON.stringify(huge));
     if (!('kind' in huge)) {
       assert.equal(huge.of, line.length * 60_000, 'the whole size is reported');
-      assert.ok(
-        huge.readBytes !== undefined && huge.readBytes <= 8 * 1024 * 1024,
-        `and no more than the cap was read: ${huge.readBytes}`,
+      assert.equal(
+        huge.readBytes,
+        Math.floor((8 * 1024 * 1024) / line.length) * line.length,
+        'and the bytes read are the whole lines that fit under the cap',
       );
       const last = huge.log.everything().at(-1);
       assert.ok(last !== undefined);
@@ -13822,6 +13917,70 @@ function testAnUncapturedConsoleSaysWhichEditorItIs(): void {
   } finally {
     sweep(project);
   }
+}
+
+/**
+ * An editor's console is read to its last whole line, and what is reported as read is bytes.
+ *
+ * A line the editor is still writing is not an entry, and a console of accents is longer in bytes
+ * than in characters, so a count of characters understates how much of the file was read.
+ */
+function testTheEditorsConsoleIsCutAtItsLastWholeLineAndCountedInBytes(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-console-'));
+  try {
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    writeEditorLogNote(project, 4242);
+    const entries = (): string[] => {
+      const read = editorConsole(project, 4242, true);
+      assert.ok(!('kind' in read), JSON.stringify(read));
+      return 'kind' in read ? [] : read.log.everything().map((entry) => `${entry.severity}: ${entry.text}`);
+    };
+    writeFileSync(editorLogPath(project), '');
+    assert.deepEqual(entries(), []);
+    writeFileSync(editorLogPath(project), 'Godot Engine v4.7.2.stable.official\n');
+    assert.deepEqual(entries(), ['info: Godot Engine v4.7.2.stable.official']);
+    writeFileSync(
+      editorLogPath(project),
+      'Godot Engine v4.7.2.stable.official\r\nERROR: Could not parse glo',
+    );
+    assert.deepEqual(entries(), ['info: Godot Engine v4.7.2.stable.official']);
+    writeFileSync(editorLogPath(project), 'one\ntwo\nthree\n');
+    assert.deepEqual(entries(), ['info: one', 'info: two', 'info: three']);
+
+    const line = 'WARNING: geöffnet für Änderungen an Größe\n';
+    const bytes = Buffer.byteLength(line);
+    const many = Math.ceil((9 * 1024 * 1024) / bytes);
+    writeFileSync(editorLogPath(project), line.repeat(many));
+    const huge = editorConsole(project, 4242, true);
+    assert.ok(!('kind' in huge), JSON.stringify(huge));
+    if (!('kind' in huge)) {
+      assert.equal(huge.of, bytes * many);
+      assert.equal(huge.readBytes, Math.floor((8 * 1024 * 1024) / bytes) * bytes);
+    }
+
+    const started = performance.now();
+    writeFileSync(editorLogPath(project), `${'x'.repeat(6 * 1024 * 1024)}\nok\n`);
+    assert.equal(entries().length, 2);
+    assert.ok(performance.now() - started < 3000, 'a very long line is read in linear time');
+  } finally {
+    sweep(project);
+  }
+}
+
+/** A line holding the placeholder character is not the same shape as a line holding a value. */
+function testALiteralEllipsisIsNotAValueInAShape(): void {
+  assert.notEqual(shapeOf('Loading "a.png"').shape, shapeOf('Loading …').shape);
+  assert.notEqual(shapeOf('Loading \\…').shape, shapeOf('Loading …').shape);
+  const grouped = bursts(
+    (() => {
+      const log = new GameLog();
+      log.append('transcript', 'ERROR: Loading "a.png"\nERROR: Loading …\n');
+      log.finish();
+      return log.everything();
+    })(),
+    0,
+  );
+  assert.deepEqual(grouped, [], 'two different shapes make no burst');
 }
 
 /**
@@ -51221,6 +51380,33 @@ function testAnEngineMayBeSilentAsLongAsWhatItRuns(): void {
  * suite that does not load is reported by none of its cases, a case printing an engine error passes,
  * and a declared error that stopped printing means the case no longer reaches what it tests.
  */
+/** An export annotation whose arguments hold a call or a bracket in a string is still an export. */
+function testAnExportAnnotationHoldingACallIsFound(): void {
+  const found = selfTypedExports([
+    [
+      'res://custom.gd',
+      'class_name Item\nextends Resource\n@export_custom(PROPERTY_HINT_NONE, str(1)) var parts: Array[Item]\n',
+    ],
+    [
+      'res://deep.gd',
+      'class_name Item\nextends Resource\n@export_custom(PROPERTY_HINT_NONE, str(abs(1))) @export_range(0, 1) var parts: Array[Item]\n',
+    ],
+    [
+      'res://string.gd',
+      'class_name Item\nextends Resource\n@export_custom(PROPERTY_HINT_NONE, ")") var parts: Array[Item]\n',
+    ],
+    ['res://empty.gd', ''],
+    [
+      'res://quiet.gd',
+      'class_name Item\nextends Resource\n@export_custom(PROPERTY_HINT_NONE, str(1)) var parts: Array[Resource]\n',
+    ],
+  ]);
+  assert.deepEqual(
+    found.map((one) => `${one.script}:${one.property}`),
+    ['res://custom.gd:parts', 'res://deep.gd:parts', 'res://string.gd:parts'],
+  );
+}
+
 /**
  * The scripts Godot never frees once loaded: an exported array or dictionary typed with the script's
  * own class, the annotation on its own line or the variable's. A headless write of such a resource
@@ -52414,6 +52600,34 @@ async function testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded(): Promis
     );
     assert.equal(read.size, 1, JSON.stringify([...read]));
   }
+}
+
+/**
+ * A restart between two readings leaves the work done before it out of the new count. The first
+ * stretch after it counts by the clock, so a second of work in the old count is not credited to a
+ * tenth of a second in the new one.
+ */
+function testARestartedCountDoesNotTakeWorkFromBeforeTheRestart(): void {
+  const pid = 7;
+  const sample = (at: number, machine: number, processor: number): Sample => ({
+    at,
+    machine,
+    processors: new Map([[pid, processor]]),
+  });
+  const spent = new Spent(0, sample(0, 0, 0), pid, 4);
+  spent.counted(sample(1, 1.1, 1), pid);
+  spent.restart(1.9);
+  spent.counted(sample(2, 2.2, 2), pid);
+  assert.equal(spent.byWork, 0);
+  assert.ok(Math.abs(spent.byClock - 0.1) < 1e-9, String(spent.byClock));
+  // The readings after that are compared with each other again.
+  spent.counted(sample(12, 2.2 + 10 * 4 * 0.5, 2), pid);
+  assert.ok(
+    Math.abs(spent.byClock - 0.1) < 1e-9,
+    `a stuck engine in a crowded machine gains nothing: ${spent.byClock}`,
+  );
+  spent.counted(sample(22, 2.2 + 10 * 4 * 0.5 + 10 * 4 * 0.5 + 2.5, 4.5), pid);
+  assert.equal(spent.byWork, 2.5, 'and a crowded stretch counts the engine own work');
 }
 
 /**
@@ -71899,20 +72113,193 @@ function testAMoveWritesEveryFileOrNone(): void {
     assert.equal(read('scenes/main.tscn'), MOVE_FIXTURE['scenes/main.tscn'], 'nothing was written');
     assert.ok(existsSync(join(project, 'scenes', 'hero.tscn')));
 
-    // A file where the target's directory has to be, which fails the move after the rewrites.
-    writeFileSync(join(project, 'blocked'), 'a file where a directory has to be');
+    // A read-only script whose own text changes, which fails the move after the rewrites.
+    writeFileSync(
+      join(project, 'scenes', 'hero.gd'),
+      'extends Node\n\nconst SELF := preload("res://scenes/hero.gd")\n',
+    );
     const blocked = planFileMove(
+      project,
+      join(project, 'scenes', 'hero.gd'),
+      join(project, 'actors', 'deep', 'hero.gd'),
+    );
+    assert.ok(blocked.ok, JSON.stringify(blocked));
+    chmodSync(join(project, 'scenes', 'hero.gd'), 0o444);
+    try {
+      assert.throws(
+        () => {
+          applyFileMove(blocked);
+        },
+        /EPERM|EACCES/,
+        'the write into the read-only file fails',
+      );
+    } finally {
+      chmodSync(join(project, 'scenes', 'hero.gd'), 0o666);
+    }
+    assert.equal(read('scenes/main.tscn'), MOVE_FIXTURE['scenes/main.tscn'], 'the rewrites were put back');
+    assert.ok(existsSync(join(project, 'scenes', 'hero.gd')), 'and the file is where it was');
+    assert.ok(!existsSync(join(project, 'actors')), 'the directories made for it are gone');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** A move that fails halfway leaves no staging file behind. */
+function testAFailedMoveLeavesNoStagingFile(): void {
+  const project = moveProject();
+  try {
+    const outcome = planFileMove(
+      project,
+      join(project, 'scenes', 'hero.tscn'),
+      join(project, 'actors', 'hero.tscn'),
+    );
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    assert.ok(outcome.inPlace.some((rewrite) => rewrite.path === 'res://game.gd'));
+    chmodSync(join(project, 'game.gd'), 0o444);
+    try {
+      assert.throws(() => {
+        applyFileMove(outcome);
+      }, /EPERM|EACCES/);
+    } finally {
+      chmodSync(join(project, 'game.gd'), 0o666);
+    }
+    const left = readdirSync(project, { recursive: true }).map(String);
+    assert.deepEqual(
+      left.filter((path) => path.endsWith('.gdharness-move')),
+      [],
+    );
+    assert.ok(left.includes('game.gd'), 'the move ran far enough to rewrite and fail');
+    assert.ok(!existsSync(join(project, 'actors')));
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** A plan refuses what it already knows the writes cannot do, and names why. */
+function testAMovePlanRefusesATargetTheWritesCannotUse(): void {
+  const project = moveProject();
+  try {
+    writeFileSync(join(project, 'blocked'), 'a file where a directory has to be');
+    const below = planFileMove(
       project,
       join(project, 'scenes', 'hero.tscn'),
       join(project, 'blocked', 'hero.tscn'),
     );
-    assert.ok(blocked.ok, JSON.stringify(blocked));
-    assert.ok(blocked.inPlace.length > 0, 'the rewrites come first, so there is something to put back');
-    assert.throws(() => {
-      applyFileMove(blocked);
-    });
-    assert.equal(read('scenes/main.tscn'), MOVE_FIXTURE['scenes/main.tscn'], 'the rewrites were put back');
-    assert.equal(read('scenes/hero.tscn'), MOVE_FIXTURE['scenes/hero.tscn'], 'and the file is where it was');
+    assert.ok(!below.ok);
+    assert.match(
+      below.reason,
+      /res:\/\/blocked is a file, so res:\/\/blocked\/hero\.tscn cannot go below it/,
+    );
+
+    writeFileSync(join(project, 'art', 'new.png.import'), 'an orphan sidecar');
+    const sidecar = planFileMove(project, join(project, 'art', 'hero.png'), join(project, 'art', 'new.png'));
+    assert.ok(!sidecar.ok);
+    assert.match(sidecar.reason, /res:\/\/art\/new\.png\.import already exists/);
+
+    mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+    writeFileSync(join(project, 'addons', 'gdharness_editor', '.gdharness-version'), '1.0.0\n');
+    const addons = planFileMove(project, join(project, 'addons'), join(project, 'vendor'));
+    assert.ok(!addons.ok);
+    assert.match(addons.reason, /res:\/\/addons holds res:\/\/addons\/gdharness_editor/);
+    assert.ok(existsSync(join(project, 'addons', 'gdharness_editor')));
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** A rewritten file is refused when a byte outside the edit is not UTF-8, since it would be replaced. */
+function testAMoveRefusesToRewriteAFileThatIsNotUtf8(): void {
+  const project = moveProject();
+  try {
+    const latin = Buffer.concat([
+      Buffer.from('extends Node\n# caf', 'ascii'),
+      Buffer.from([0xe9]),
+      Buffer.from('\nconst HERO := preload("res://scenes/hero.tscn")\n', 'ascii'),
+    ]);
+    writeFileSync(join(project, 'menu.gd'), latin);
+    const outcome = planFileMove(
+      project,
+      join(project, 'scenes', 'hero.tscn'),
+      join(project, 'actors', 'hero.tscn'),
+    );
+    assert.ok(!outcome.ok);
+    assert.match(outcome.reason, /res:\/\/menu\.gd is not valid UTF-8/);
+    assert.deepEqual(readFileSync(join(project, 'menu.gd')), latin);
+    assert.ok(existsSync(join(project, 'scenes', 'hero.tscn')));
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A block with no usable length, or a body of the wrong length, costs only its own message: the
+ * messages after it arrive. A length too large for a number is over the ceiling, not absent.
+ */
+function testAFrameReaderRecoversAfterAFaultyBlock(): void {
+  const good = Buffer.concat([wireFrame({ id: 1 }), wireFrame({ id: 2 }), wireFrame({ id: 3 })]);
+  const valuesOf = (wire: Buffer, size = wire.length): unknown[] => {
+    const reader = new FrameReader();
+    const found: unknown[] = [];
+    for (let at = 0; at < wire.length; at += size) {
+      for (const one of reader.push(wire.subarray(at, at + size))) {
+        if (one.kind === 'message') found.push(one.value);
+      }
+    }
+    return found;
+  };
+  const wanted = [{ id: 1 }, { id: 2 }, { id: 3 }];
+  assert.deepEqual(valuesOf(Buffer.alloc(0)), []);
+  assert.deepEqual(valuesOf(good), wanted);
+  assert.deepEqual(valuesOf(good, 1), wanted, 'a message split across every chunk');
+  assert.deepEqual(valuesOf(good, 7), wanted);
+  const faults = [
+    'Content-Length: -7\r\n\r\n{"a":1}',
+    'Content-Type: x\r\n\r\n{"a":1}',
+    'Content-Length: 9\r\n\r\n{"s":"é"}',
+  ];
+  for (const fault of faults) {
+    const wire = Buffer.concat([Buffer.from(fault, 'utf8'), good]);
+    assert.deepEqual(valuesOf(wire), wanted, fault);
+    assert.deepEqual(valuesOf(wire, 1), wanted, `${fault} a byte at a time`);
+  }
+  for (const huge of ['9007199254740993', '99999999999999999999']) {
+    assert.throws(
+      () => new FrameReader().push(Buffer.from(`Content-Length: ${huge}\r\n\r\n{}`)),
+      OversizedStreamError,
+      huge,
+    );
+  }
+  const started = performance.now();
+  const reader = new FrameReader();
+  const long = Buffer.from(`${'x'.repeat(4 * 1024 * 1024)}\r\n\r\n`);
+  reader.push(long);
+  assert.deepEqual(
+    reader.push(wireFrame({ id: 1 })).map((one) => (one.kind === 'message' ? one.value : one.reason)),
+    [{ id: 1 }],
+  );
+  assert.ok(performance.now() - started < 2000, 'a very long block is read in linear time');
+}
+
+/** A thrown value that is not an Error never reads as "[object Object]" and never throws when read. */
+function testAThrownNonErrorReadsAsTheFallback(): void {
+  assert.equal(errorMessage({ code: 1 }), 'Unknown error');
+  assert.equal(errorMessage(Object.create(null)), 'Unknown error');
+  assert.equal(errorMessage(Symbol('x'), 'gone'), 'gone');
+  assert.equal(errorMessage('plain'), 'plain');
+  assert.equal(errorMessage(7), '7');
+  assert.equal(errorMessage(new Error('')), 'Unknown error');
+  assert.equal(errorCode(Object.assign(new Error('x'), { code: 'EEXIST' })), 'EEXIST');
+  assert.equal(errorCode({ code: 'EEXIST' }), undefined);
+}
+
+/** A target whose name starts with two dots is inside the project, and is judged as any other name. */
+function testAMoveTargetNamedWithTwoLeadingDotsIsInsideTheProject(): void {
+  const project = moveProject();
+  try {
+    const outcome = planFileMove(project, join(project, 'game.gd'), join(project, '..game.gd'));
+    assert.ok(!outcome.ok);
+    assert.doesNotMatch(outcome.reason, /newPath must be a path inside the project/);
+    assert.match(outcome.reason, /res:\/\/\.\.game\.gd is under \.\.game\.gd/);
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -82136,6 +82523,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMovedDirectoryTakesEverythingInIt,
   testAMoveThatCannotBeMadeIsRefused,
   testAMoveWritesEveryFileOrNone,
+  testAFailedMoveLeavesNoStagingFile,
+  testAMovePlanRefusesATargetTheWritesCannotUse,
+  testAMoveRefusesToRewriteAFileThatIsNotUtf8,
+  testAFrameReaderRecoversAfterAFaultyBlock,
+  testAThrownNonErrorReadsAsTheFallback,
+  testAMoveTargetNamedWithTwoLeadingDotsIsInsideTheProject,
   testAMoveCanChangeOnlyTheCase,
   testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight,
   testAMoveWithNoEditorLeavesTheProjectLoading,
@@ -82473,6 +82866,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameTooNewToTalkToIsStillAGame,
   testAWallOfOneMessageCollapsesToItsShape,
   testAnUncapturedConsoleSaysWhichEditorItIs,
+  testTheEditorsConsoleIsCutAtItsLastWholeLineAndCountedInBytes,
+  testALiteralEllipsisIsNotAValueInAShape,
   testTheEditorsConsoleLeavesOutTheLookElsewhere,
   testAnEditorsProgressIsOneLinePerTask,
   testAnEditorWritesItsConsoleWhereTheServerLooks,
@@ -82579,6 +82974,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACrashIsReadFromTheCrashHandlersReport,
   testARowSkippedForItsDataIsNoPass,
   testTheScriptsGodotNeverFreesAreFound,
+  testAnExportAnnotationHoldingACallIsFound,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
   testATakeSweepsGoneLocksPastTheCount,
   testASlotWaitLooksWhenTheSlotsChange,
@@ -82589,6 +82985,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testGatesInTheQueueKeepTheirSlots,
   testAnEngineOnASlotLendsItToWhatItStarts,
   testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded,
+  testARestartedCountDoesNotTakeWorkFromBeforeTheRestart,
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testASuiteDeclarationCanNameAClassConstant,
   testAHiddenEditorStartsOnAnEmptyScriptReference,
@@ -82692,6 +83089,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunWithNothingToRunNamesTheRunnerToo,
   testASuiteFilesOnlyServerRefusesADirectory,
   testEveryGreetingFieldIsRequired,
+  testTheRestartTimeoutReadsWholeDigitsOnly,
+  testEditorOpenRefusesAnAddonThatCannotConnect,
+  testEditorOpenOptionsRefuseEachMisuse,
   testAnEditorOfAnotherReleaseIsAskedNothing,
   testACurrentAddonLackingAnOpSaysAScriptFailedToLoad,
   testAServerEndsWithAnEditorStillOnTheBridge,

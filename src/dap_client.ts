@@ -1,7 +1,7 @@
 import { createConnection, type Socket } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
 import { answerJson } from './answer-json.js';
-import { Refusal } from './errors.js';
+import { errorMessage, Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { EVALUATE_MS } from './game-debugger.js';
 import { portFromEnv } from './ports.js';
@@ -803,7 +803,7 @@ export class GodotDAPClient {
         this.breakpoints.delete(key);
         refused.push({
           scriptPath: filePath,
-          reason: error instanceof Error ? error.message : String(error),
+          reason: errorMessage(error),
         });
       }
     }
@@ -1252,7 +1252,7 @@ export async function handleDAPTool(
         throw new Error(`Unknown DAP tool: ${toolName}`);
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = errorMessage(error);
     // A breakpoint is set on the editor's adapter with no game running, so a refusal there is
     // about the editor or the file and never about a game: "start one with editor_run" sent a
     // caller whose script the adapter could not find to start a game that would not have helped.

@@ -23,6 +23,7 @@ import {
 } from './desktop.js';
 import { inASlot, nameSlotEngineOf, onTheSlot } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
+import { errorMessage } from './errors.js';
 import { GameLog } from './game-log.js';
 import { belowNormal } from './priority.js';
 import { spawnHidden } from './spawn.js';
@@ -140,7 +141,7 @@ export async function runEngine(
       startedUntilItRuns(() => runStarted(executable, args, lock, options, signal), signal, crashedAtStart),
     );
   } catch (error) {
-    const said = error instanceof Error ? error.message : String(error);
+    const said = errorMessage(error);
     return {
       log: new GameLog(),
       exitCode: null,

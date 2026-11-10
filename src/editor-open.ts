@@ -12,7 +12,7 @@ import { HIDDEN_DESKTOP } from './desktop.js';
 import { placeEmptyScriptDocs } from './doc-cache.js';
 import { clearEditorLog, editorLogPath, writeEditorLogNote } from './editor-log.js';
 import { EngineUsageError } from './engine-launch.js';
-import { type EditorPorts, editorArguments, envValue, OPENED_BY_A_SERVER, startedAs } from './launch.js';
+import { type EditorPorts, editorArguments, OPENED_BY_A_SERVER, startedAs, waitFromEnv } from './launch.js';
 import { freeLibraryCopies } from './library-copies.js';
 import { DEFAULT_LSP_PORT } from './lsp_client.js';
 import { launchOutsideTheTree } from './outside.js';
@@ -41,8 +41,7 @@ import { inTurnFor } from './write-turns.js';
  * usually a dialog. A project whose import runs past it sets GDHARNESS_EDITOR_RESTART_TIMEOUT_MS.
  */
 export function editorRestartTimeoutMs(): number {
-  const override = Number.parseInt(envValue('GDHARNESS_EDITOR_RESTART_TIMEOUT_MS') ?? '', 10);
-  return Number.isInteger(override) && override > 0 ? override : 90_000;
+  return waitFromEnv('GDHARNESS_EDITOR_RESTART_TIMEOUT_MS', 90_000);
 }
 
 /**
@@ -409,6 +408,12 @@ export async function openTheEditor(
       refused: `${missing.why}, so an editor opened on it would never reach a server. ${missing.remedies.join('. ')}.`,
     };
   }
+  const another = editorAddonOfAnotherRelease(projectPath);
+  if (another !== null) {
+    return {
+      refused: `${another.why}, so an editor opened on it would be asked nothing but to quit. ${another.remedies.join('. ')}.`,
+    };
+  }
   return await inTurnToOpen(projectPath, async (): Promise<EditorOpenOutcome> => {
     const owed = restartOwed(projectPath);
     if (owed !== null && restartUnderway(owed)) {
@@ -429,7 +434,7 @@ export async function openTheEditor(
     }
     const opened = await openEditorProcess(engine, projectPath, await portsForAnEditor(), start);
     if (opened.pid === null) {
-      return { refused: `Could not start the editor: ${opened.error ?? 'no reason given'}` };
+      return { refused: `Could not start the editor: ${opened.error}` };
     }
     // The launch a restart ended before its start was owed, and this is it.
     restartSettled(projectPath);

@@ -115,8 +115,12 @@ export interface SelfTypedExport {
 const NAME = '[\\p{L}_][\\p{L}\\p{N}_]*';
 // Any export annotation but the three that head a group in the inspector and export nothing, with
 // any other annotation after it, then the variable and the first type argument list it is given.
+// An argument list, whose arguments may hold a call (`str(1)`) or a string with a bracket in it, two
+// calls deep.
+const INNER = '(?:"[^"\\n]*"|[^()"])*';
+const ARGUMENTS = `\\((?:"[^"\\n]*"|[^()"]|\\((?:"[^"\\n]*"|[^()"]|\\(${INNER}\\))*\\))*\\)`;
 const EXPORTED = new RegExp(
-  `@export(?!_(?:group|subgroup|category)\\b)\\w*(?:\\([^)]*\\))?\\s+(?:@${NAME}(?:\\([^)]*\\))?\\s+)*` +
+  `@export(?!_(?:group|subgroup|category)\\b)\\w*(?:${ARGUMENTS})?\\s+(?:@${NAME}(?:${ARGUMENTS})?\\s+)*` +
     `(?:static\\s+)?var\\s+(${NAME})\\s*:\\s*(?:Array|Dictionary)\\s*\\[([^\\]]*)\\]`,
   'gu',
 );
