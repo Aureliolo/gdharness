@@ -12959,6 +12959,8 @@ function testDoctorJudgesAddonsByTheirCodeAndNotTheirVersionMarker(): void {
  */
 function testTheSetupAndInstructionHelpersAnswerWhatTheyAreAsked(): void {
   assert.equal(gdharnessCommand('1.2.3', 'upgrade'), 'npx -y gdharness@1.2.3 upgrade');
+  const packaged: unknown = JSON.parse(readFileSync('package.json', 'utf8'));
+  assert.equal(SERVER_VERSION, get(packaged, 'version'), 'the server runs as the version the package says');
   assert.deepEqual(
     [
       runtimeAddonUnknown({ version: '', digest: '' }),

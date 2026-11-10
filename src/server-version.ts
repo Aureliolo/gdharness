@@ -1,19 +1,10 @@
-import { readFileSync } from 'node:fs';
-import { isRecord } from './records.js';
 import { isNewer } from './update-check.js';
+import { getLocalVersion } from './version.js';
 
 /** Debug lines on stderr, and headless engines run with `--debug-godot`. */
 export const DEBUG_MODE: boolean = process.env['GDHARNESS_DEBUG'] === '1';
 
-export const SERVER_VERSION = (() => {
-  try {
-    const pkg: unknown = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
-    const version = isRecord(pkg) ? pkg['version'] : undefined;
-    return typeof version === 'string' ? version : '0.0.0';
-  } catch {
-    return '0.0.0';
-  }
-})();
+export const SERVER_VERSION = getLocalVersion();
 
 /**
  * Whether an addon is running code other than what this server ships.
