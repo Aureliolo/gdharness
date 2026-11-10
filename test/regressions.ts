@@ -10539,6 +10539,70 @@ function testAPipelineCacheIsCarriedToTheNextRun(): void {
 }
 
 /**
+ * One project is one kept cache however its folder is spelled, and a copy a keep left unfinished
+ * is swept once it is old, while one a keep is still building is left.
+ */
+function testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept(): void {
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-pipelines-'));
+  try {
+    const home = join(scratch, 'home');
+    const project = join(scratch, 'my game');
+    const linked = join(scratch, 'linked');
+    const godot = join(scratch, 'godot.exe');
+    mkdirSync(project);
+    symlinkSync(project, linked, 'junction');
+    writeFileSync(godot, 'engine');
+    const where = join('Godot', 'app_userdata', 'Game', 'shader_cache');
+    const left = join(scratch, 'left', 'user');
+    mkdirSync(join(left, where), { recursive: true });
+    writeFileSync(join(left, where, 'pipelines.cache'), 'x'.repeat(50));
+    keepPipelineCache(left, project, godot, home);
+
+    const spellings = [
+      linked,
+      `${project}${sep}`,
+      join(project, '..', 'my game'),
+      ...(process.platform === 'win32' ? [project.toUpperCase(), project.replaceAll('\\', '/')] : []),
+    ];
+    for (const spelled of spellings) {
+      const user = join(scratch, 'seeded', 'user');
+      rmSync(join(scratch, 'seeded'), { recursive: true, force: true });
+      mkdirSync(user, { recursive: true });
+      seedPipelineCache(user, spelled, godot, home);
+      assert.equal(
+        existsSync(join(user, where, 'pipelines.cache'))
+          ? readFileSync(join(user, where, 'pipelines.cache'), 'utf8').length
+          : null,
+        50,
+        `a run given the project as ${spelled} is seeded`,
+      );
+    }
+
+    const kept = join(home, 'pipeline-caches');
+    const [key] = readdirSync(kept);
+    assert.ok(key !== undefined);
+    const stale = join(kept, `${key}.4242.1700000000000`);
+    const building = join(kept, `${key}.4243.1700000000001`);
+    for (const folder of [stale, building]) {
+      mkdirSync(join(folder, 'shader_cache'), { recursive: true });
+    }
+    const longAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    utimesSync(stale, longAgo, longAgo);
+    const more = join(scratch, 'more', 'user');
+    mkdirSync(join(more, where), { recursive: true });
+    writeFileSync(join(more, where, 'pipelines.cache'), 'x'.repeat(80));
+    keepPipelineCache(more, project, godot, home);
+    assert.deepEqual(
+      readdirSync(kept).toSorted(),
+      [key, basename(building)].toSorted(),
+      'the old unfinished copy is swept, the recent one and the kept cache stay',
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
  * A test run's engine starts with the pipeline cache the last run's engine left in its user://. A
  * stand-in shell writes a cache into the user folder its environment names, and the next run's
  * stand-in says whether it found one there before it started.
@@ -82936,6 +83000,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEditorStatusOnAProjectWithNoAddonIsFinal,
   testEveryArgumentNamesOpsItsToolHas,
   testAPipelineCacheIsCarriedToTheNextRun,
+  testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept,
   testATestRunsEngineStartsWithTheLastRunsPipelineCache,
   testAnArgumentScopedInWordsIsScopedInItsSchema,
   testEveryToolTellsAClientWhatItCanChange,
