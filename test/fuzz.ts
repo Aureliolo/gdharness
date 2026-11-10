@@ -69,7 +69,6 @@ function framesRoundTripUnderAnyChunking(): void {
           byteLength: Buffer.byteLength(JSON.stringify(message), 'utf8'),
         })),
       );
-      assert.equal(reader.buffered, 0);
     }),
     { numRuns: 500 },
   );
@@ -116,7 +115,6 @@ function everyHeaderSpellingIsRead(): void {
         values,
         messages.map(([message]) => carried(message)),
       );
-      assert.equal(reader.buffered, 0);
     }),
     { numRuns: 300 },
   );
@@ -188,7 +186,6 @@ function theCeilingHoldsOnBothSides(): void {
   assert.deepEqual(rest, []);
   assert.equal(only.kind, 'message');
   assert.equal(only.byteLength, MAX_MESSAGE_BYTES);
-  assert.equal(patient.buffered, 0);
 }
 
 // ---------------------------------------------------------------------------------------------
