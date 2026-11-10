@@ -83,6 +83,7 @@ import {
   writeToml,
   writeYaml,
 } from '../src/config-formats.js';
+import { configDisagrees } from '../src/config-pin.js';
 import { type CutTestRun, cutTestRunNote, keepCutTestRun, takeCutTestRun } from '../src/cut-test-run.js';
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import {
@@ -54735,6 +54736,30 @@ function testAYamlConfigWeCannotReadIsRefusedAndOneWithEmptyKeysIsWritten(): voi
   );
 }
 
+// The pin is the version a client fetches, so only a gdharness package of that name counts, and an
+// editor's own spelling of JSON must not hide it.
+function testAConfigPinNamesOnlyGdharnessWhateverTheEditorWroteTheFileAs(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-pin-'));
+  const pin = (body: string): string | null => {
+    writeFileSync(join(project, '.mcp.json'), body);
+    return configDisagrees(project, '1.2.3');
+  };
+  const entry = (spec: string): string =>
+    `{ "mcpServers": { "x": { "command": "npx", "args": ["-y", "${spec}"] } } }`;
+  try {
+    assert.match(pin(entry('gdharness@0.0.1')) ?? '', /names gdharness@0\.0\.1,/, 'a plain pin');
+    assert.equal(pin(entry('@someone/not-gdharness@7.0.0')), null, 'a scoped package of a like name');
+    assert.equal(pin(entry('godot-gdharness@4.5.6')), null, 'a package ending in the name');
+    assert.equal(pin(entry('gdharness@1.2.3')), null, 'a pin equal to the server');
+    assert.match(pin(`﻿${entry('gdharness@0.0.1')}`) ?? '', /gdharness@0\.0\.1/, 'a byte-order mark');
+    const commented = `// mine\n{ /* why */ "mcpServers": { "x": { "args": ["gdharness@0.0.1", "// not a comment",], }, }, }`;
+    assert.match(pin(commented) ?? '', /gdharness@0\.0\.1/, 'comments and trailing commas');
+    assert.equal(pin('{ "args": [ gdharness@0.0.1 '), null, 'a file that is not JSON');
+  } finally {
+    sweep(project);
+  }
+}
+
 async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
   const machine = (env: NodeJS.ProcessEnv, platform: NodeJS.Platform, processors = 32) => ({
     env,
@@ -81540,6 +81565,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATomlEntryWrittenAsKeysIsRefusedNotDuplicated,
   testATomlEnableTableKeepsTheByteOrderMarkAndRootKeys,
   testAYamlConfigWeCannotReadIsRefusedAndOneWithEmptyKeysIsWritten,
+  testAConfigPinNamesOnlyGdharnessWhateverTheEditorWroteTheFileAs,
   testTheTestHelpersWaitStepAndPress,
   testASpreadBenchGathersTheTableItPlaysAlone,
   testASuiteRunHasNoSoundWhicheverWayItStarts,
