@@ -70127,7 +70127,9 @@ async function testAClassWhoseScriptCameBackIsNotTheEditorsLoss(): Promise<void>
     assert.doesNotMatch(text(get(second, 'note')), /editor_launch restart is what/, said);
     // And the editor is not remembered as one that loses classes, which is what turned the remedy
     // for what it cannot see into the restart.
-    assert.equal(readClassNote(project)?.shortListEditorPid, undefined, said);
+    const kept = readClassNote(project);
+    assert.ok(kept !== null, `a note is there to say so: ${said}`);
+    assert.equal(kept.shortListEditorPid, undefined, said);
     assert.match(text(get(second, 'note')), /editor_rescan does, on its own/, said);
   } finally {
     editor?.close();
