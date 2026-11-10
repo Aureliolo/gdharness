@@ -92,6 +92,9 @@ var _copied_from: Dictionary = {}
 var _reached: Dictionary = {}
 ## The file as it was opened, to compare its embedded resources with what the write saves.
 var _text: String = ""
+## The hash of the file when it was opened for writing, so a write finds a file someone else
+## changed since and does not save over it.
+var _opened_sha: String = ""
 ## The unique_id each placeholder put back as its instance had in the file, by the instance's object
 ## id. Scripts cannot set one, the engine gives the instance a new one as it packs it, and a scene
 ## inheriting this one finds a moved node by it.
@@ -123,6 +126,7 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 			"error": GdhFileWalk.new().with_nearest_files("Scene not found: " + path, path),
 		}
 	if for_writing:
+		_opened_sha = FileAccess.get_sha256(path)
 		var held_back: String = unsaved_in_editor(path)
 		if not held_back.is_empty():
 			return { "ok": false, "error": held_back }
@@ -1340,6 +1344,14 @@ func _write(check: Callable) -> Dictionary:
 		saved.free()
 		if not missing.is_empty():
 			return refuse("Nothing was written: " + missing)
+	if not _opened_sha.is_empty() and FileAccess.get_sha256(path) != _opened_sha:
+		return refuse(
+			(
+				"Nothing was written: %s changed on disk after it was read, and saving would write "
+				+ "over that change. Ask again to start from the file as it is now."
+			)
+			% path
+		)
 	var also: Array[Dictionary] = _also_saved(packed.get_state())
 	var keep: Dictionary = _ids_to_keep() if path.ends_with(".tscn") else {}
 	close()
@@ -1352,13 +1364,7 @@ func _write(check: Callable) -> Dictionary:
 	for index: int in state.get_node_count():
 		values.append_array(_stored_at(state, index).values())
 	var carried: Dictionary = GdhHeadlessCheck.embedded_in(values, {})
-	var written: Dictionary = save_packed(packed, path)
-	if written.is_empty():
-		var ids_kept: Error = _keep_ids(path, keep)
-		if ids_kept != OK:
-			written = {
-				"ok": false, "error": "Failed to save %s: %s" % [path, error_string(ids_kept)],
-			}
+	var written: Dictionary = save_packed(packed, path, keep)
 	if not written.is_empty() or not headless or not path.ends_with(".tscn"):
 		if written.is_empty():
 			also_saved.append_array(also)
@@ -1472,9 +1478,12 @@ func _holds_scripted_embedded() -> bool:
 	return false
 
 
-## Writes [param packed] to [param scene_path], making its directory, and brings the editor up to
-## date with it. Answers a refusal, or {}.
-static func save_packed(packed: PackedScene, scene_path: String) -> Dictionary:
+## Writes [param packed] to [param scene_path], making its directory, with the unique_ids in
+## [param keep], and brings the editor up to date with it once the file holds them, since the cached
+## copy and the editor's tab are read from the file. Answers a refusal, or {}.
+static func save_packed(
+	packed: PackedScene, scene_path: String, keep: Dictionary = { }
+) -> Dictionary:
 	var directory: String = scene_path.get_base_dir()
 	if not DirAccess.dir_exists_absolute(directory):
 		var made: Error = DirAccess.make_dir_recursive_absolute(directory)
@@ -1488,7 +1497,13 @@ static func save_packed(packed: PackedScene, scene_path: String) -> Dictionary:
 			"ok": false,
 			"error": "Failed to save %s: %s" % [scene_path, error_string(saving)],
 		}
+	var ids_kept: Error = _keep_ids(scene_path, keep)
 	refresh(scene_path)
+	if ids_kept != OK:
+		return {
+			"ok": false,
+			"error": "Failed to save %s: %s" % [scene_path, error_string(ids_kept)],
+		}
 	return {}
 
 

@@ -72726,6 +72726,122 @@ async function testABinarySceneNamingAGoneFileIsRefusedAWrite(): Promise<void> {
 }
 
 /**
+ * Runs [script], a SceneTree script, in a project holding the editor addon and [files], and answers
+ * the JSON it prints after RESULT.
+ */
+function runASceneProbe(label: string, files: Record<string, string>, script: string): Record<string, unknown> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    throw new Error(`${label}: GODOT_PATH names no existing file.`);
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-scene-probe-'));
+  try {
+    cpSync('src/godot/addons/gdharness_editor', join(project, 'addons', 'gdharness_editor'), { recursive: true });
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\n\nconfig/name="SceneProbe"\n');
+    writeFileSync(join(project, 'probe.gd'), script);
+    for (const [file, content] of Object.entries(files)) {
+      writeFileSync(join(project, file), content);
+    }
+    const run = spawnSyncHidden(godotPath, ['--headless', '--path', project, '-s', 'res://probe.gd'], {
+      encoding: 'utf8',
+      timeout: ENGINE_CALL_TIMEOUT_MS,
+    });
+    const printed = /^RESULT (.+)$/m.exec(run.stdout)?.[1];
+    assert.ok(printed, `${label}: the probe printed no result:\n${run.stdout}\n${run.stderr}`);
+    return JSON.parse(printed) as Record<string, unknown>;
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A write refuses a scene file that someone else changed after it was read, and leaves their change.
+ */
+function testAWriteRefusesAFileChangedSinceItWasRead(): void {
+  const result = runASceneProbe(
+    'file changed since read',
+    {
+      'late.tscn':
+        '[gd_scene format=3]\n\n[node name="Root" type="Node" unique_id=11]\n\n[node name="Kid" type="Node2D" parent="." unique_id=22]\n',
+    },
+    [
+      'extends SceneTree',
+      '',
+      'const GdhSceneFile = preload("res://addons/gdharness_editor/scene_file.gd")',
+      '',
+      '',
+      'func _initialize() -> void:',
+      '\tvar scene: GdhSceneFile = GdhSceneFile.new()',
+      '\tvar opened: Dictionary = scene.open("res://late.tscn", true)',
+      '\tvar current: String = FileAccess.get_file_as_string("res://late.tscn")',
+      '\tvar file: FileAccess = FileAccess.open("res://late.tscn", FileAccess.WRITE)',
+      '\tvar _stored: bool = file.store_string(current + "\\n[node name=\\"Late\\" type=\\"Node\\" parent=\\".\\"]\\n")',
+      '\tfile.close()',
+      '\tvar kid: Node2D = scene.root.get_node("Kid")',
+      '\tscene.asked(kid, ["position"])',
+      '\tkid.position = Vector2(7, 8)',
+      '\tvar answer: Dictionary = scene.write()',
+      '\tvar after: String = FileAccess.get_file_as_string("res://late.tscn")',
+      '\tprint("RESULT " + JSON.stringify({ "opened": opened, "answer": answer, "after": after }))',
+      '\tquit()',
+      '',
+    ].join('\n'),
+  );
+  assert.deepEqual(result['opened'], {}, JSON.stringify(result));
+  const answer = result['answer'] as Record<string, unknown>;
+  assert.equal(answer['ok'], false, JSON.stringify(result));
+  assert.match(
+    text(answer['error']),
+    /^Nothing was written: res:\/\/late\.tscn changed on disk after it was read/,
+    JSON.stringify(result),
+  );
+  const after = text(result['after']);
+  assert.ok(after.includes('name="Late"'), `their change is still in the file:\n${after}`);
+  assert.ok(!after.includes('position = Vector2(7, 8)'), `and ours is not written:\n${after}`);
+}
+
+/**
+ * A scene something holds in the cache is brought up to date after the unique ids the file keeps
+ * are written back, so the cached copy holds the ids the file does.
+ */
+function testTheCachedSceneHoldsTheUniqueIdsTheFileKeeps(): void {
+  const result = runASceneProbe(
+    'cache after kept ids',
+    {
+      'retype.tscn':
+        '[gd_scene format=3]\n\n[node name="Root" type="Node" unique_id=1111]\n\n[node name="Kid" type="Node2D" parent="." unique_id=2222]\n',
+    },
+    [
+      'extends SceneTree',
+      '',
+      'const GdhSceneFile = preload("res://addons/gdharness_editor/scene_file.gd")',
+      '',
+      '',
+      'func _initialize() -> void:',
+      '\tvar held: PackedScene = load("res://retype.tscn")',
+      '\tvar scene: GdhSceneFile = GdhSceneFile.new()',
+      '\tvar opened: Dictionary = scene.open("res://retype.tscn", true)',
+      '\tvar was: Node = scene.root.get_node("Kid")',
+      '\tvar now: Sprite2D = Sprite2D.new()',
+      '\tnow.name = was.name',
+      '\tvar _unheld: Array[Dictionary] = scene.replace(was, now)',
+      '\tvar answer: Dictionary = scene.write()',
+      '\tvar cached: PackedScene = load("res://retype.tscn")',
+      '\tvar fresh: PackedScene = ResourceLoader.load("res://retype.tscn", "PackedScene", ResourceLoader.CACHE_MODE_IGNORE)',
+      '\tvar cached_ids: Variant = (cached.get("_bundled") as Dictionary).get("node_ids")',
+      '\tvar file_ids: Variant = (fresh.get("_bundled") as Dictionary).get("node_ids")',
+      '\tprint("RESULT " + JSON.stringify({ "opened": opened, "answer": answer, "cached": cached_ids, "file": file_ids, "same": cached == held }))',
+      '\tquit()',
+      '',
+    ].join('\n'),
+  );
+  assert.deepEqual([result['opened'], result['answer']], [{}, {}], JSON.stringify(result));
+  assert.deepEqual(result['file'], [1111, 2222], `the file keeps the id of the node it replaced: ${JSON.stringify(result)}`);
+  assert.deepEqual(result['cached'], result['file'], `and the cached copy holds the same: ${JSON.stringify(result)}`);
+  assert.equal(result['same'], true, 'in the object that was held');
+}
+
+/**
  * A headless write leaves out what an editor's save leaves out: a property a script that is not a
  * tool initialises through a function, which the file does not set.
  *
@@ -80801,6 +80917,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeptConnectionIsWrittenWithTheEnginesEscapes,
   testAWriteJudgesAFileReferenceAsTheEngineLoadsIt,
   testABinarySceneNamingAGoneFileIsRefusedAWrite,
+  testAWriteRefusesAFileChangedSinceItWasRead,
+  testTheCachedSceneHoldsTheUniqueIdsTheFileKeeps,
   testAHeadlessWriteLeavesOutWhatAnEditorWould,
   testAnAnimationsKeysAndLengthAreWrittenWithNoEditor,
   testAnAnimationIsRenamedAndRemovedWithNoEditor,
