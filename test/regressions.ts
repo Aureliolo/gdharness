@@ -72637,6 +72637,95 @@ async function testAKeptConnectionIsWrittenWithTheEnginesEscapes(): Promise<void
 }
 
 /**
+ * A scene's file reference is judged as the engine loads it: a path with no scheme is read from the
+ * scene's own folder, a uid finds a moved file, and only a file that is nowhere refuses the write.
+ */
+async function testAWriteJudgesAFileReferenceAsTheEngineLoadsIt(): Promise<void> {
+  const scene = (reference: string): string =>
+    `[gd_scene format=3]\n\n[ext_resource type="Script" ${reference} id="1_ref"]\n\n` +
+    '[node name="Root" type="Node2D"]\nscript = ExtResource("1_ref")\n';
+  await withASceneProject(
+    'write judges a file reference',
+    {
+      'levels/beside.gd': 'extends Node2D\n',
+      'moved.gd': 'extends Node2D\n',
+      'moved.gd.uid': 'uid://dmovedrefhw1\n',
+      'levels/relative.tscn': scene('path="beside.gd"'),
+      'levels/absolute.tscn': scene('path="res://levels/beside.gd"'),
+      'levels/by_uid.tscn': scene('path="res://old/gone.gd" uid="uid://dmovedrefhw1"'),
+      'levels/lost.tscn': scene('path="nowhere.gd"'),
+    },
+    async ({ call, written, fileOf }) => {
+      for (const kept of ['relative', 'absolute']) {
+        await written('scene_node', {
+          op: 'set',
+          scenePath: `levels/${kept}.tscn`,
+          nodePath: '.',
+          properties: { position: [1, 2] },
+        });
+        const saved = fileOf(`levels/${kept}.tscn`);
+        assert.match(saved, /position = Vector2\(1, 2\)/, `${kept} was written:\n${saved}`);
+        assert.match(saved, /script = ExtResource/, `and kept its script:\n${saved}`);
+      }
+      await written('scene_node', {
+        op: 'set',
+        scenePath: 'levels/by_uid.tscn',
+        nodePath: '.',
+        properties: { position: [1, 2] },
+      });
+      assert.match(fileOf('levels/by_uid.tscn'), /script = ExtResource/, fileOf('levels/by_uid.tscn'));
+      const before = fileOf('levels/lost.tscn');
+      const refused =
+        textOf(
+          await call('scene_node', {
+            op: 'set',
+            scenePath: 'levels/lost.tscn',
+            nodePath: '.',
+            properties: { position: [1, 2] },
+          }),
+        ) ?? '';
+      assert.match(refused, /^Nothing was written: res:\/\/levels\/lost\.tscn names nowhere\.gd, which is not there/, refused);
+      assert.equal(fileOf('levels/lost.tscn'), before);
+    },
+  );
+}
+
+/**
+ * A binary scene naming a file that is gone is refused a write, as its text twin is, since the
+ * engine loads it without the file and a save would drop the reference.
+ */
+async function testABinarySceneNamingAGoneFileIsRefusedAWrite(): Promise<void> {
+  await withASceneProject(
+    'binary scene with a gone file',
+    {
+      'dep.tres': '[gd_resource type="Resource" format=3]\n\n[resource]\n',
+      'bin.tscn':
+        '[gd_scene format=3]\n\n[ext_resource type="Resource" path="res://dep.tres" id="1_dep"]\n\n' +
+        '[node name="Root" type="Node2D"]\nmetadata/dep = ExtResource("1_dep")\n',
+    },
+    async ({ call, written, fileOf, project }) => {
+      await written('scene_create', { op: 'save_as', scenePath: 'bin.tscn', newPath: 'bin.scn' });
+      assert.ok(existsSync(join(project, 'bin.scn')), 'the binary twin is made');
+      const source = fileOf('bin.tscn');
+      assert.match(source, /dep\.tres/, source);
+      rmSync(join(project, 'dep.tres'));
+      const before = readFileSync(join(project, 'bin.scn'));
+      const refused =
+        textOf(
+          await call('scene_node', {
+            op: 'set',
+            scenePath: 'bin.scn',
+            nodePath: '.',
+            properties: { position: [1, 2] },
+          }),
+        ) ?? '';
+      assert.match(refused, /^Nothing was written: res:\/\/bin\.scn names res:\/\/dep\.tres, which is not there/, refused);
+      assert.ok(readFileSync(join(project, 'bin.scn')).equals(before), 'and the file is as it was');
+    },
+  );
+}
+
+/**
  * A headless write leaves out what an editor's save leaves out: a property a script that is not a
  * tool initialises through a function, which the file does not set.
  *
@@ -80710,6 +80799,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWriteWithNoEditorGoesThroughAHeadlessEngine,
   testAWriteKeepsConnectionsWhoseSignalOrNodeIsMissing,
   testAKeptConnectionIsWrittenWithTheEnginesEscapes,
+  testAWriteJudgesAFileReferenceAsTheEngineLoadsIt,
+  testABinarySceneNamingAGoneFileIsRefusedAWrite,
   testAHeadlessWriteLeavesOutWhatAnEditorWould,
   testAnAnimationsKeysAndLengthAreWrittenWithNoEditor,
   testAnAnimationIsRenamedAndRemovedWithNoEditor,

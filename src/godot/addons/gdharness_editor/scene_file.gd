@@ -126,7 +126,8 @@ func open(scene_path: String, for_writing: bool) -> Dictionary:
 		var held_back: String = unsaved_in_editor(path)
 		if not held_back.is_empty():
 			return { "ok": false, "error": held_back }
-		var missing: String = missing_said(path, FileAccess.get_file_as_string(path))
+		var as_text: String = FileAccess.get_file_as_string(path) if path.ends_with(".tscn") else ""
+		var missing: String = missing_said(path, as_text)
 		if not missing.is_empty():
 			return { "ok": false, "error": missing }
 	# A script the scene's scripts load that fails to compile names no node, so nothing else sees
@@ -374,26 +375,46 @@ static func _takes(type: String, node: Node) -> bool:
 	return false
 
 
+## Whether a file a scene at [param scene_path] names by [param uid], by [param written] or both is
+## there. A path without a scheme is read from the scene's own folder, as the engine loads it.
+static func _named_file_there(scene_path: String, uid: String, written: String) -> bool:
+	if uid.begins_with("uid://") and ResourceUID.has_id(ResourceUID.text_to_id(uid)):
+		if FileAccess.file_exists(ResourceUID.get_id_path(ResourceUID.text_to_id(uid))):
+			return true
+	if written.is_empty() or written.contains("://"):
+		return FileAccess.file_exists(written)
+	return FileAccess.file_exists(scene_path.get_base_dir().path_join(written).simplify_path())
+
+
 ## Why a write to the scene at [param scene_path], whose text is [param text], is refused, or "":
 ## an [ext_resource] naming no file the project has, by its uid or by its path. The engine loads the
 ## scene without it, so a save drops the entry and every value set from it, and the answer could
 ## only call those values empty.
 static func missing_said(scene_path: String, text: String) -> String:
 	var gone: Dictionary = {}
-	var entry: RegEx = RegEx.create_from_string("(?m)^\\[ext_resource\\b[^\\n]*\\]")
-	var field: RegEx = RegEx.create_from_string('\\b(path|uid|id)="([^"]*)"')
-	for found: RegExMatch in entry.search_all(text):
-		var fields: Dictionary = {}
-		for one: RegExMatch in field.search_all(found.get_string()):
-			fields[one.get_string(1)] = one.get_string(2)
-		var uid: String = str(fields.get("uid", ""))
-		var by_uid: String = ""
-		if uid.begins_with("uid://") and ResourceUID.has_id(ResourceUID.text_to_id(uid)):
-			by_uid = ResourceUID.get_id_path(ResourceUID.text_to_id(uid))
-		var named: String = str(fields.get("path", ""))
-		if FileAccess.file_exists(by_uid) or FileAccess.file_exists(named):
-			continue
-		gone[str(fields.get("id", ""))] = named if not named.is_empty() else uid
+	if scene_path.ends_with(".tscn"):
+		var entry: RegEx = RegEx.create_from_string("(?m)^\\[ext_resource\\b[^\\n]*\\]")
+		var field: RegEx = RegEx.create_from_string('\\b(path|uid|id)="([^"]*)"')
+		for found: RegExMatch in entry.search_all(text):
+			var fields: Dictionary = {}
+			for one: RegExMatch in field.search_all(found.get_string()):
+				fields[one.get_string(1)] = one.get_string(2)
+			var uid: String = str(fields.get("uid", ""))
+			var named: String = str(fields.get("path", ""))
+			if _named_file_there(scene_path, uid, named):
+				continue
+			gone[str(fields.get("id", ""))] = named if not named.is_empty() else uid
+	else:
+		# A binary scene has no entries to read, but the engine lists what it loads.
+		for dependency: String in ResourceLoader.get_dependencies(scene_path):
+			var uid: String = dependency.get_slice("::", 0) if dependency.begins_with("uid://") else ""
+			var named: String = (
+				dependency.substr(dependency.rfind("::") + 2) if dependency.contains("::") else ""
+			)
+			if uid.is_empty() and named.is_empty():
+				named = dependency
+			if not _named_file_there(scene_path, uid, named):
+				gone[dependency] = named if not named.is_empty() else uid
 	if gone.is_empty():
 		return ""
 	var uses: PackedStringArray = []
