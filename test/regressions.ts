@@ -19024,6 +19024,17 @@ function testAGameOnAnotherRuntimeAddonSaysSo(): void {
     /The project holds this server's runtime addon, so the game picks it up when it next starts\./,
   );
   assert.doesNotMatch(restartable, /\bupgrade\b/, `a current project is not sent to upgrade: ${restartable}`);
+  const unknownProject = note({ version: '1.1.20', digest: 'an older digest' }, undefined) ?? '';
+  assert.match(
+    unknownProject,
+    /The game reported no project, so what it loads when it next starts is not known\. Run {2}npx -y gdharness@\S+ upgrade {2}in a shell in its project directory/,
+    unknownProject,
+  );
+  assert.doesNotMatch(
+    unknownProject,
+    /The project holds this server's runtime addon/,
+    'a project nothing was read from is not called current',
+  );
 
   const unmarked = note({ version: '', digest: 'an older digest' }, 'an older digest') ?? '';
   assert.match(

@@ -137,9 +137,13 @@ export function runtimeMismatch(
   } else {
     loaded = `the ${addon.version} runtime addon, while this server ships ${serverVersion}`;
   }
-  const remedy =
-    onDisk !== undefined && onDisk !== shippedDigest
-      ? `The project's own runtime addon is not this server's either, so starting the game again loads the same code: run  ${gdharnessCommand(serverVersion, `upgrade "${projectPath}"`)}  in a shell, which installs the ${serverVersion} addons, and the game picks them up when it next starts.`
-      : `The project holds this server's runtime addon, so the game picks it up when it next starts.`;
+  let remedy: string;
+  if (onDisk === undefined) {
+    remedy = `The game reported no project, so what it loads when it next starts is not known. Run  ${gdharnessCommand(serverVersion, 'upgrade')}  in a shell in its project directory, which installs the ${serverVersion} addons, then start the game again.`;
+  } else if (onDisk !== shippedDigest) {
+    remedy = `The project's own runtime addon is not this server's either, so starting the game again loads the same code: run  ${gdharnessCommand(serverVersion, `upgrade "${projectPath}"`)}  in a shell, which installs the ${serverVersion} addons, and the game picks them up when it next starts.`;
+  } else {
+    remedy = `The project holds this server's runtime addon, so the game picks it up when it next starts.`;
+  }
   return `${game} is running ${loaded}, so this server asks it nothing: its answers would come from that code. ${remedy}`;
 }
