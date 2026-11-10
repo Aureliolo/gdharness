@@ -14,14 +14,13 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
 import { connect, createServer, type Server } from 'node:net';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
 import { errorMessage } from './errors.js';
 import type { DebugAnswer, DebugRequest } from './game-debugger.js';
 import { isRecord } from './records.js';
+import { discard, scratchDirectory } from './scratch.js';
 
 /** How a question for the game's debugger starts its line. The JSON of the request follows. */
 const DEBUG_PREFIX = 'debug ';
@@ -111,7 +110,7 @@ export async function listenForTheServer(
 ): Promise<KeeperListening | null> {
   let directory: string | null = null;
   try {
-    directory = process.platform === 'win32' ? null : mkdtempSync(join(tmpdir(), 'gdharness-keeper-'));
+    directory = process.platform === 'win32' ? null : scratchDirectory('keeper');
     const address =
       directory === null ? `\\\\.\\pipe\\gdharness-keeper-${randomUUID()}` : join(directory, 'keeper.sock');
     const server = createServer((socket) => {
@@ -145,15 +144,11 @@ export async function listenForTheServer(
       address,
       close: () => {
         server.close();
-        if (made !== null) {
-          rmSync(made, { recursive: true, force: true });
-        }
+        discard(made);
       },
     };
   } catch {
-    if (directory !== null) {
-      rmSync(directory, { recursive: true, force: true });
-    }
+    discard(directory);
     return null;
   }
 }

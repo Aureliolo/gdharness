@@ -32612,6 +32612,49 @@ async function testAnAbandonedScratchDirectoryIsSweptAndNothingElse(): Promise<v
 }
 
 /**
+ * What the keeper makes for a run is swept once the keeper is gone, like every other scratch folder.
+ *
+ * A keeper is ended by being killed as often as by finishing, and its exit notes, stop file folder and
+ * socket folder were named without a process, so no sweep could tell them from a live one's.
+ */
+async function testAKeepersScratchFoldersAreSweptWhenItIsGone(): Promise<void> {
+  const parent = mkdtempSync(join(tmpdir(), 'gdharness-abandoned-keeper-'));
+  const kinds = ['keeper', 'keeper-exit', 'keeper-stop'] as const;
+  try {
+    const exited = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await new Promise((settle) => exited.once('exit', settle));
+    const gone = exited.pid ?? 0;
+    assert.equal(alive(gone), false, 'the owner stood in for has to have gone');
+    const running = process.ppid;
+    assert.equal(alive(running), true, 'and the live owner has to be running');
+
+    const abandoned = kinds.map((kind) => join(parent, `gdharness-${kind}-${gone}-aB3dE9`));
+    const live = kinds.map((kind) => join(parent, `gdharness-${kind}-${running}-aB3dE9`));
+    for (const path of [...abandoned, ...live]) {
+      mkdirSync(join(path, 'inner'), { recursive: true });
+    }
+    sweepAbandonedScratch(parent);
+    for (const path of abandoned) {
+      assert.equal(existsSync(path), false, `${basename(path)} is swept`);
+    }
+    for (const path of live) {
+      assert.equal(existsSync(path), true, `${basename(path)} of a running keeper stays`);
+    }
+
+    for (const kind of kinds) {
+      const made = scratchDirectory(kind);
+      try {
+        assert.match(basename(made), new RegExp(`^gdharness-${kind}-${process.pid}-[A-Za-z0-9]{6}$`));
+      } finally {
+        discard(made);
+      }
+    }
+  } finally {
+    sweep(parent);
+  }
+}
+
+/**
  * Who is listening on a port, which is what says a debug adapter is the connected editor's.
  *
  * Godot gives every editor the same debug adapter port by default, and the addon reports the port
@@ -83359,6 +83402,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAClassCacheHeldShutIsReadOnceLetGo,
   testATestRunImportsWhatSetupLeftUnimported,
   testAnAbandonedScratchDirectoryIsSweptAndNothingElse,
+  testAKeepersScratchFoldersAreSweptWhenItIsGone,
   testADiagnosticTheFileContradictsIsNamed,
   testAnImportThatCouldNotCopyAnExtensionRunsAgain,
   testAnImportOrExportOverAStaleDocCacheRunsAgain,

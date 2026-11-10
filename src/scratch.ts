@@ -50,6 +50,9 @@ export type ScratchKind =
   | 'editor-capture'
   | 'export'
   | 'import'
+  | 'keeper'
+  | 'keeper-exit'
+  | 'keeper-stop'
   | 'params'
   | 'runtime-screenshot'
   | 'script-docs'
@@ -61,6 +64,9 @@ const KINDS: readonly ScratchKind[] = [
   'editor-capture',
   'export',
   'import',
+  'keeper',
+  'keeper-exit',
+  'keeper-stop',
   'params',
   'runtime-screenshot',
   'script-docs',

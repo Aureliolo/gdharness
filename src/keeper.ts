@@ -12,15 +12,7 @@
  * Both are handed their spec down stdin, never on the command line: see `SentSpec`.
  */
 
-import {
-  appendFileSync,
-  closeSync,
-  mkdtempSync,
-  openSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from 'node:fs';
+import { appendFileSync, closeSync, openSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -373,7 +365,7 @@ async function keep(): Promise<void> {
             }
           },
         );
-  const exitNotes = run === undefined ? null : mkdtempSync(join(tmpdir(), 'gdharness-exit-'));
+  const exitNotes = run === undefined ? null : scratchDirectory('keeper-exit');
   const noted =
     exitNotes === null
       ? spec
@@ -384,8 +376,7 @@ async function keep(): Promise<void> {
       : { ...noted, args: withEngineArguments(noted.args, debuggerPeer.engineArguments) };
   const transcript = run === undefined ? 'ignore' : openSync(run.transcript, 'a');
   // Private to this keeper, for the file a helper watches for its stop.
-  const own =
-    run !== undefined && throughTheHelper(spec) ? mkdtempSync(join(tmpdir(), 'gdharness-stop-')) : null;
+  const own = run !== undefined && throughTheHelper(spec) ? scratchDirectory('keeper-stop') : null;
   const stopFile = own === null ? '' : join(own, 'stop');
   const exitFile = own === null ? '' : join(own, 'exit');
   let started: Awaited<ReturnType<typeof startDetached>>;
@@ -559,11 +550,7 @@ async function keep(): Promise<void> {
   }
   debuggerPeer?.close();
   listening?.close();
-  for (const made of [own, exitNotes]) {
-    if (made !== null) {
-      rmSync(made, { recursive: true, force: true });
-    }
-  }
+  discard(own, exitNotes);
   process.exit(0);
 }
 
