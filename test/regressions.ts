@@ -2894,6 +2894,27 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
 }
 
 /**
+ * A frame the profiler reader cannot finish adds nothing to the totals. It is counted unreadable
+ * and not as a frame, beside a readable one that is summed.
+ */
+function testAFrameReadHalfwayAddsNothingToTheTotals(): void {
+  const aggregate = new ProfileAggregate(1000, 64);
+  const frame = (number: number, rows: GodotValue[]): Parameters<ProfileAggregate['take']>[0] => ({
+    message: 'servers:profile_frame',
+    thread: 1,
+    data: [number, 0, 0, 0, 0, 0, 0, rows.length, ...rows],
+  });
+  aggregate.take(frame(9, [7, 1, 0.25, 0.25, 0]), 1001);
+  aggregate.take(frame(10, [7, 2, 0.5, 0.5, 0, 'not a number', 1, 0.1, 0.1, 0]), 1002);
+  const read = aggregate.snapshot();
+  assert.deepEqual(
+    [read.frames, read.unreadable, read.functions['#7']],
+    [1, 1, { calls: 1, selfSeconds: 0.25, totalSeconds: 0.25 }],
+    JSON.stringify(read),
+  );
+}
+
+/**
  * A game's own reals are shown as the engine holds them. A 32-bit one is the fewest digits that read
  * back as the same float32, since the double it widens to carries digits the engine never printed. A
  * negative zero and a float past 1e21 keep their sign and their exponent, and a packed array says
@@ -83258,6 +83279,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALongUnfinishedLineIsHeldInLinearTime,
   testTheDebuggerNamesTheErrorsItsCallsRaise,
   testTheProfilerReadsWhatTheEngineSends,
+  testAFrameReadHalfwayAddsNothingToTheTotals,
   testARealIsShownAsTheEngineHoldsIt,
   testACommandCarriesANumberAsItIs,
   testABadLengthKeepsTheMessagesBeforeIt,

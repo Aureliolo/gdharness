@@ -301,6 +301,8 @@ export class ProfileAggregate {
     data: readonly GodotValue[],
     into: Map<string, { calls: number; selfSeconds: number; totalSeconds: number }>,
   ): number | null {
+    // Read in full before anything is added, so a frame that fails halfway leaves [param into] as it was.
+    const read: [string, number, number, number][] = [];
     let at = 6;
     const servers = data[at];
     if (typeof servers !== 'number') {
@@ -329,7 +331,9 @@ export class ProfileAggregate {
       ) {
         return null;
       }
-      const name = this.names.get(id) ?? `${UNNAMED_PREFIX}${id}`;
+      read.push([this.names.get(id) ?? `${UNNAMED_PREFIX}${id}`, calls, self, total]);
+    }
+    for (const [name, calls, self, total] of read) {
       const sum = into.get(name) ?? { calls: 0, selfSeconds: 0, totalSeconds: 0 };
       sum.calls += calls;
       sum.selfSeconds += self;
