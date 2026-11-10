@@ -52,7 +52,7 @@ import {
   BRIDGE_ANNOUNCE_PROTOCOL,
   readAnnouncement,
 } from '../src/bridge-announce.js';
-import { toolHome } from '../src/cache-home.js';
+import { cacheHome, toolHome } from '../src/cache-home.js';
 import { callProgress, stillGoingSaid, withCallSignal } from '../src/call-signal.js';
 import {
   type Contradicted,
@@ -54470,6 +54470,78 @@ async function testAHiddenEditorStartsOnAnEmptyScriptReference(): Promise<void> 
   }
 }
 
+// An engine that ends mid-save leaves no bytes, and a kept cache of none must not be placed.
+async function testAKeptScriptReferenceOfNoBytesIsMadeAgainNotPlaced(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-script-docs-empty-'));
+  const kept = join(root, 'kept');
+  const project = join(root, 'project');
+  const engine = join(root, 'not-an-engine');
+  try {
+    writeTree(project, { 'project.godot': 'config_version=5\n' });
+    writeFileSync(engine, 'x');
+    const { size, mtimeMs } = statSync(engine);
+    const digest = createHash('sha256')
+      .update(`${engine}\0${String(size)}\0${String(mtimeMs)}`)
+      .digest('hex')
+      .slice(0, 16);
+    mkdirSync(kept, { recursive: true });
+    writeFileSync(join(kept, `${digest}.res`), '');
+    const answer = await placeEmptyScriptDocs(engine, project, kept);
+    assert.match(
+      answer ?? '',
+      /did not save an empty script reference cache/,
+      'it is made again, and cannot be',
+    );
+    assert.equal(
+      existsSync(scriptDocCachePath(project)),
+      false,
+      'and nothing of no bytes reaches the project',
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
+// The cache folder is shared by every engine, so only the crashing engine's own version counts.
+function testACrashIsBlamedOnlyOnTheCacheOfTheEnginesOwnVersion(): void {
+  const ran = (printed: string) => {
+    const log = new GameLog();
+    log.append('stdout', printed);
+    log.finish();
+    return { exitCode: 0xc0000005, exitSignal: null, failure: null, log };
+  };
+  const mine = join('cache', 'editor_doc_cache-4.7.res');
+  const other = join('cache', 'editor_doc_cache-4.3.res');
+  const before = new Map([
+    [mine, 1],
+    [other, 1],
+  ]);
+  const banner = 'Godot Engine v4.7.2.stable.official.abc - https://godotengine.org\n';
+  assert.equal(
+    docCacheCrash(
+      ran(banner),
+      before,
+      new Map([
+        [mine, 1],
+        [other, 2],
+      ]),
+      'import',
+    ),
+    null,
+    "another version's cache written meanwhile is not this crash's",
+  );
+  const own = docCacheCrash(
+    ran(banner),
+    before,
+    new Map([
+      [mine, 2],
+      [other, 2],
+    ]),
+    'import',
+  );
+  assert.ok(own?.includes(`cache, ${mine}. `), `the engine's own cache is the one named: ${own}`);
+}
+
 /**
  * A read's path is followed only through the calls that can reach its function, however many
  * functions deep.
@@ -55496,6 +55568,37 @@ function tablesNamed(source: string, header: string): number {
 }
 
 // The reader's comments, blank lines and strings are theirs, whatever form our entry was in.
+// Every tool that keeps something for the machine finds the same folder, and a relative variable
+// names no folder that two processes share.
+function testEveryToolFindsOneCacheFolderAndIgnoresARelativeVariable(): void {
+  const absolute = join(sep, 'xdg');
+  const local = join(sep, 'local');
+  const win = cacheHome({ XDG_CACHE_HOME: absolute, LOCALAPPDATA: local }, 'win32', join(sep, 'home'));
+  assert.equal(win, join(absolute, 'gdharness'), 'the cache variable wins on Windows too');
+  for (const [said, value] of [
+    ['a relative path', 'relative'],
+    ['a space', ' '],
+    ['an empty variable', ''],
+  ] as const) {
+    assert.equal(
+      cacheHome({ XDG_CACHE_HOME: value }, 'linux', join(sep, 'home')),
+      join(sep, 'home', '.cache', 'gdharness'),
+      `${said} is not a folder`,
+    );
+  }
+  const base = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cache-home-'));
+  try {
+    const environment = { HOME: base, XDG_CACHE_HOME: base, LOCALAPPDATA: join(base, 'local') };
+    assert.equal(
+      dirname(cacheFile(environment)),
+      cacheHome(environment),
+      'the update check keeps its answer in that folder',
+    );
+  } finally {
+    sweep(base);
+  }
+}
+
 function testATomlEntryIsReplacedInPlaceWhateverFormTheFileHoldsIt(): void {
   const fresh = writeToml('', TABLE_ENTRY, ENTRY_LAUNCH);
   assert.deepEqual(parseToml(fresh), {
@@ -82253,6 +82356,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testADiagnosticTheFileContradictsIsNamed,
   testAnImportThatCouldNotCopyAnExtensionRunsAgain,
   testAnImportOrExportOverAStaleDocCacheRunsAgain,
+  testACrashIsBlamedOnlyOnTheCacheOfTheEnginesOwnVersion,
   testAStaleEnumMemberIsNamed,
   testAStaleStaticFunctionIsNamed,
   testAFailedReloadSaysWhatItKept,
@@ -82449,6 +82553,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testASuiteDeclarationCanNameAClassConstant,
   testAHiddenEditorStartsOnAnEmptyScriptReference,
+  testAKeptScriptReferenceOfNoBytesIsMadeAgainNotPlaced,
   testASuitesInputsAreWhatItsEngineLoaded,
   testAReadsCallersAreThoseThatCanReachIt,
   testAFileGoneBetweenTheListingAndTheReadIsPassedOver,
@@ -82458,6 +82563,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryLongCallIsHeardFrom,
   testEveryEngineWaitsForAMachineSlot,
   testPinnedToolsInstallOutsideTheTemporaryFolder,
+  testEveryToolFindsOneCacheFolderAndIgnoresARelativeVariable,
   testATomlEntryIsReplacedInPlaceWhateverFormTheFileHoldsIt,
   testATomlEntryWrittenAsKeysIsRefusedNotDuplicated,
   testATomlEnableTableKeepsTheByteOrderMarkAndRootKeys,

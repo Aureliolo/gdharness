@@ -19,6 +19,7 @@ import {
   mkdirSync,
   readdirSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -27,6 +28,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path';
 import process from 'node:process';
 import { cacheHome } from './cache-home.js';
 import { type EngineRun, howItEnded, runEngine } from './engine-run.js';
+import { envValue } from './launch.js';
 import { discard, scratchDirectory } from './scratch.js';
 
 const CACHE_FILE = /^editor_doc_cache-\d+\.\d+\.res$/;
@@ -53,9 +55,10 @@ export function editorCacheDirectory(
     }
   }
   if (platform === 'win32') {
-    // An empty variable counts as unset, as the engine counts it.
-    const set = (name: string): string | undefined => (env[name] === '' ? undefined : env[name]);
-    return join(set('LOCALAPPDATA') ?? set('TEMP') ?? join(home, 'AppData', 'Local'), 'Godot');
+    return join(
+      envValue('LOCALAPPDATA', env) ?? envValue('TEMP', env) ?? join(home, 'AppData', 'Local'),
+      'Godot',
+    );
   }
   if (platform === 'darwin') {
     return join(home, 'Library', 'Caches', 'Godot');
@@ -114,7 +117,8 @@ export async function placeEmptyScriptDocs(
     .digest('hex')
     .slice(0, 16);
   const made = join(kept, `${digest}.res`);
-  if (!existsSync(made)) {
+  // A kept file of no bytes is what a save cut short leaves, and is made again.
+  if (!existsSync(made) || statSync(made).size === 0) {
     const scratch = scratchDirectory('script-docs');
     try {
       writeFileSync(join(scratch, 'project.godot'), 'config_version=5\n');
@@ -129,7 +133,9 @@ export async function placeEmptyScriptDocs(
           timeout: { ms: 120_000, said: 'it ran for two minutes' },
         },
       );
-      if (!existsSync(partial)) {
+      // An engine that ends mid-save leaves a partial file, which must not become the kept cache.
+      if (ran.exitCode !== 0 || !existsSync(partial) || statSync(partial).size === 0) {
+        rmSync(partial, { force: true });
         return `the engine did not save an empty script reference cache (${howItEnded(ran)})`;
       }
       renameSync(partial, made);
@@ -178,7 +184,14 @@ export function docCacheCrash(
   if ((ran.exitCode === 0 && ran.exitSignal === null && report === undefined) || ran.failure !== null) {
     return null;
   }
-  const rewritten = [...after].find(([path, at]) => before.get(path) !== at)?.[0];
+  // The folder is shared by every engine on the machine, so a cache another version wrote meanwhile
+  // says nothing about this crash. The run's own banner names the version when it printed one.
+  const banner = ran.log.everything().find((entry) => /^Godot Engine v\d+\.\d+/.test(entry.text));
+  const own = /^Godot Engine v(\d+\.\d+)/.exec(banner?.text ?? '')?.[1];
+  const rewritten = [...after].find(
+    ([path, at]) =>
+      before.get(path) !== at && (own === undefined || basename(path) === `editor_doc_cache-${own}.res`),
+  )?.[0];
   if (rewritten === undefined) {
     return null;
   }
