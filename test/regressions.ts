@@ -343,6 +343,7 @@ import {
   LEFT_ALONE_ANSWER_LINES,
   type RenameServices,
   renameSymbol,
+  resourcePathOf,
   writeLeftAloneDetail,
 } from '../src/rename-symbol.js';
 import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
@@ -71214,6 +71215,47 @@ async function testARenameRefusesANameAlreadyTaken(): Promise<void> {
 }
 
 /**
+ * The engine's answer is read by the name asked, so a name every plain object carries finds
+ * nothing in an answer that lacks it, and finds what the engine said when it names it.
+ */
+async function testANameOnEveryObjectIsReadOnlyFromTheEnginesAnswer(): Promise<void> {
+  const project = renameProject();
+  try {
+    const ask = async (symbol: string, newName: string, namesTaken: RenameServices['namesTaken']) =>
+      await renameSymbol(
+        { projectPath: project, scriptPath: join(project, 'told.gd'), symbol, newName, newScriptPath: null },
+        { namesTaken, ...NO_LANGUAGE_SERVER },
+      );
+    const silent: RenameServices['namesTaken'] = async () => await Promise.resolve({});
+    for (const name of ['constructor', 'toString', 'hasOwnProperty', '__proto__']) {
+      const outcome = await ask('Told', name, silent);
+      assert.ok(outcome.ok, `${name} is free when the engine names nothing: ${JSON.stringify(outcome)}`);
+    }
+    const named = await ask(
+      'Told',
+      'constructor',
+      async () => await Promise.resolve({ constructor: { as: ['a native class'], declaredBy: null } }),
+    );
+    assert.ok(!named.ok, 'an engine that does name it is believed');
+    assert.match(JSON.stringify(named), /constructor is a native class/);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** A file or folder whose name begins with two dots is inside the project, and a real escape is not. */
+function testAPathNamedWithTwoLeadingDotsIsInsideTheProject(): void {
+  const project = join(realpathSync(tmpdir()), 'gdharness-dots-project');
+  assert.equal(resourcePathOf(project, join(project, '..game.gd')), 'res://..game.gd');
+  assert.equal(resourcePathOf(project, join(project, '..art', 'hero.png')), 'res://..art/hero.png');
+  assert.equal(resourcePathOf(project, join(project, 'a', '..b')), 'res://a/..b');
+  assert.equal(resourcePathOf(project, join(project, '..', 'escaped.gd')), null, 'the parent is outside');
+  assert.equal(resourcePathOf(project, join(`${project}-sibling`, 'x.gd')), null, 'a sibling is outside');
+  assert.equal(resourcePathOf(project, dirname(project)), null, 'the parent itself');
+  assert.equal(resourcePathOf(project, project), null, 'the project itself');
+}
+
+/**
  * Language server answers for the rename fixture, shaped as Godot 4.7.2 gave them when measured:
  * - the references of the method's own declaration include the override's declaration and its
  *   call to super, and miss the override's own uses, which only an ask at one of them returns
@@ -83016,6 +83058,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARenamedClassChangesItsUsesAndLeavesItsWords,
   testALongLineIsQuotedAroundTheName,
   testARenameRefusesANameAlreadyTaken,
+  testANameOnEveryObjectIsReadOnlyFromTheEnginesAnswer,
+  testAPathNamedWithTwoLeadingDotsIsInsideTheProject,
   testAMemberRenameFollowsWhatTheLanguageServerResolves,
   testAUseUnderACommentEndingInAFullStopIsRenamed,
   testADocLinkWrappedAcrossLinesIsRenamedWhole,

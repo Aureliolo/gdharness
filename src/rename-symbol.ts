@@ -49,6 +49,12 @@ export interface NameTaken {
   readonly declaredBy: string | null;
 }
 
+/** What the engine answered for [param name], and undefined when it did not, whatever the name is. */
+function answerFor(answers: Readonly<Record<string, NameTaken>>, name: string): NameTaken | undefined {
+  // A name such as `constructor` is on every plain object, so an answer without it must not find one.
+  return Object.hasOwn(answers, name) ? answers[name] : undefined;
+}
+
 export interface RenameServices {
   /** Throws when the engine cannot be asked. */
   namesTaken(names: readonly string[], base: string | null): Promise<Record<string, NameTaken>>;
@@ -105,7 +111,7 @@ const WHAT: Record<DeclarationKind, string> = {
 /** [param absolute] as the `res://` path the walk spells it with, or null outside the project. */
 export function resourcePathOf(projectPath: string, absolute: string): string | null {
   const inside = relative(onDiskSpelling(projectPath), onDiskSpelling(absolute));
-  if (inside === '' || inside.startsWith('..') || /^[A-Za-z]:/.test(inside)) {
+  if (inside === '' || inside === '..' || /^\.\.[\\/]/.test(inside) || /^[A-Za-z]:/.test(inside)) {
     return null;
   }
   return `res://${inside.replace(/\\/g, '/')}`;
@@ -228,7 +234,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
     for (const place of usedAsIdentifier(scripts, newName, 10)) {
       conflicts.push(`${newName} is already used in code at ${place}`);
     }
-    const taken = (await services.namesTaken([newName], null))[newName];
+    const taken = answerFor(await services.namesTaken([newName], null), newName);
     if (taken !== undefined && taken.as.length > 0) {
       conflicts.push(`${newName} is ${taken.as.join(' and ')}`);
     }
@@ -267,7 +273,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
     }
     const native = graph.nativeBase(root);
     const taken = await services.namesTaken([symbol, newName], native);
-    const engineOwned = taken[symbol]?.declaredBy ?? null;
+    const engineOwned = answerFor(taken, symbol)?.declaredBy ?? null;
     if (engineOwned !== null) {
       return {
         ok: false,
@@ -275,7 +281,7 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
       };
     }
     const conflicts: string[] = [];
-    const newOwner = taken[newName]?.declaredBy ?? null;
+    const newOwner = answerFor(taken, newName)?.declaredBy ?? null;
     if (newOwner !== null) {
       conflicts.push(`${newName} is declared by the engine's ${newOwner}, which this class inherits from`);
     }
