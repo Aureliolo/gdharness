@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { ChildProcess as UnstartedProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
@@ -16093,11 +16092,9 @@ async function testALauncherSpecIsReadBackAsSentAndAnAnswerByItsFirstLine(): Pro
     desktop: 'desk',
     noActivate: true,
   };
-  // Only the stdin of a child is written to, so an unstarted one with a pipe in its place will do.
-  const child = new UnstartedProcess();
+  // Only the stdin of a child is written to, so a pipe in its place will do.
   const pipe = new PassThrough();
-  Object.defineProperty(child, 'stdin', { value: pipe });
-  sendSpec(child, sent);
+  sendSpec({ stdin: pipe }, sent);
   const written = await pipedText(pipe);
   const received = async (body: string): Promise<SentSpec> => {
     const real = Object.getOwnPropertyDescriptor(process, 'stdin');
@@ -19813,9 +19810,10 @@ function testAGameOnAnotherRuntimeAddonSaysSo(): void {
   );
   assert.doesNotMatch(restartable, /\bupgrade\b/, `a current project is not sent to upgrade: ${restartable}`);
   const unknownProject = note({ version: '1.1.20', digest: 'an older digest' }, undefined) ?? '';
-  assert.match(
-    unknownProject,
-    /The game reported no project, so what it loads when it next starts is not known\. Run {2}npx -y gdharness@\S+ upgrade {2}in a shell in its project directory/,
+  assert.ok(
+    unknownProject.includes(
+      `The game reported no project, so what it loads when it next starts is not known. Run  ${runLine(currentRunner(), SERVER_VERSION, 'upgrade')}  in a shell in its project directory`,
+    ),
     unknownProject,
   );
   assert.doesNotMatch(

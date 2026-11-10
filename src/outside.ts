@@ -112,7 +112,7 @@ export function withChanges(
 }
 
 /** Hands [param spec] to [param child] down its stdin, which is then closed. */
-export function sendSpec(child: ChildProcess, spec: SentSpec): void {
+export function sendSpec(child: Pick<ChildProcess, 'stdin'>, spec: SentSpec): void {
   child.stdin?.end(JSON.stringify(spec), 'utf8');
 }
 
