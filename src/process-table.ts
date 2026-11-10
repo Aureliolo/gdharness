@@ -372,8 +372,8 @@ const TABLE = new CompiledHelper('process table', 'gdharness-processes', SOURCE)
 export class ProcessTableUnbuilt extends Error {}
 
 /** Compiles the table unless it is there. A server starting up passes [param wait] false. */
-export function ensureProcessTable(directory = tmpdir(), wait = true): Promise<string | null> {
-  return TABLE.ensure(directory, HELPER_COMPILE_MS, wait);
+export function ensureProcessTable(wait = true): Promise<string | null> {
+  return TABLE.ensure(tmpdir(), HELPER_COMPILE_MS, wait);
 }
 
 /**

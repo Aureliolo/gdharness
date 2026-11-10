@@ -59,20 +59,22 @@ export function portFromEnv(variable: string, fallback: number): number {
  * Nothing holds it between here and the editor starting, which is a race with no better answer:
  * the alternative is the editor binding a port this server never learns.
  */
-export async function freePort(preferred: number, host = '127.0.0.1'): Promise<number> {
-  const asked = await bindable(preferred, host);
+export async function freePort(preferred: number): Promise<number> {
+  const asked = await bindable(preferred);
   if (asked !== null) {
     return asked;
   }
-  const spare = await bindable(0, host);
+  const spare = await bindable(0);
   if (spare === null) {
-    throw new Refusal(`No port could be bound on ${host}.`);
+    throw new Refusal(`No port could be bound on ${LOOPBACK}.`);
   }
   return spare;
 }
 
+const LOOPBACK = '127.0.0.1';
+
 /** The port that was bound and then let go, or null when it could not be taken. */
-function bindable(port: number, host: string): Promise<number | null> {
+function bindable(port: number): Promise<number | null> {
   return new Promise((resolve) => {
     const probe = createServer();
     probe.once('error', () => {
@@ -85,6 +87,6 @@ function bindable(port: number, host: string): Promise<number | null> {
         resolve(taken);
       });
     });
-    probe.listen(port, host);
+    probe.listen(port, LOOPBACK);
   });
 }

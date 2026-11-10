@@ -369,15 +369,6 @@ export function ancestorsIn(tree: ProcessTree, pid: number, root: number): numbe
   return chain;
 }
 
-/**
- * The processes whose parent is [param pid] right now, or undefined when the platform will not say,
- * with [param since] as [method descendantsIn] takes it.
- */
-export async function childrenOf(pid: number, since?: number): Promise<number[] | undefined> {
-  const tree = await processTree();
-  return tree === undefined ? undefined : childrenIn(tree, pid, since);
-}
-
 /** What a command line says a process is: the executable it runs and the project it was pointed at. */
 export interface CommandLineRead {
   /** The executable's own name, without its directory. Empty when the line is. */

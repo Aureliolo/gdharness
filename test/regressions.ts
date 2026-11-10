@@ -309,7 +309,6 @@ import { acceptsConnections, notListeningNote } from '../src/port-probe.js';
 import { freePort } from '../src/ports.js';
 import {
   ancestorsIn,
-  childrenOf,
   descendantsIn,
   editorsOfProjectIn,
   linuxStartEarliest,
@@ -46111,10 +46110,14 @@ async function testTheProcessTableAgreesWithWmi(): Promise<void> {
  * for the platform that forgets rather than the one that remembers.
  */
 async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
+  const descendantsNow = async (pid: number, since?: number): Promise<number[] | undefined> => {
+    const tree = await processTree();
+    return tree === undefined ? undefined : descendantsIn(tree, pid, since);
+  };
   const probe = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   try {
     assert.ok(typeof probe.pid === 'number');
-    const listed = await childrenOf(process.pid);
+    const listed = await descendantsNow(process.pid);
     assert.ok(
       listed !== undefined,
       `this platform has to list a process's children, and did not: ${whyTheProcessTreeFailed() ?? 'no reason recorded'}`,
@@ -46171,7 +46174,7 @@ async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
     child = Number(printed.trim());
     await met.meet(child);
     assert.ok(child > 0 && alive(child), 'the grandchild is there to be listed');
-    const alive_ = await childrenOf(parent.pid);
+    const alive_ = await descendantsNow(parent.pid);
     assert.deepEqual(alive_, [child], `listed under the living parent: ${JSON.stringify(alive_)}`);
     // Read while it lives, as a run's start is known after it ends: once gone, an orphan of an
     // earlier holder of its number is listed under it too unless held to when it began.
@@ -46183,7 +46186,7 @@ async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
       'the parent should have ended',
     );
     assert.ok(alive(child), 'the orphan is still there');
-    const afterwards = await childrenOf(parent.pid, began);
+    const afterwards = await descendantsNow(parent.pid, began);
     assert.ok(afterwards !== undefined, 'the platform still answers about a number that is gone');
     if (process.platform === 'win32') {
       assert.deepEqual(

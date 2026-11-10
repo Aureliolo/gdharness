@@ -11,20 +11,22 @@
 
 import { connect } from 'node:net';
 
+const ANSWER_WITHIN_MS = 2000;
+
 /**
  * Whether something on this machine accepts a connection on [param port], or null when it neither
- * accepted nor refused within [param withinMs]. On loopback the kernel accepts for a listener before
+ * accepted nor refused within two seconds. On loopback the kernel accepts for a listener before
  * the program does, so a listener answers at once however loaded the machine is, and a port with
  * nothing on it is refused at once.
  */
-export function acceptsConnections(port: number, withinMs = 2000): Promise<boolean | null> {
+export function acceptsConnections(port: number): Promise<boolean | null> {
   return new Promise((resolve) => {
     const socket = connect({ host: '127.0.0.1', port });
     const settle = (answer: boolean | null): void => {
       socket.destroy();
       resolve(answer);
     };
-    socket.setTimeout(withinMs, () => {
+    socket.setTimeout(ANSWER_WITHIN_MS, () => {
       settle(null);
     });
     socket.once('connect', () => {
