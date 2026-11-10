@@ -28,7 +28,6 @@ import {
 } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, normalize, relative } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { fileURLToPath } from 'node:url';
 import { McpServer, ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 import { type StdioServerHandle, serveStdio } from '@modelcontextprotocol/server/stdio';
 import { alive } from './alive.js';
@@ -372,6 +371,7 @@ import {
   installedRuntimeDigest,
   RUNTIME_SCRIPT,
   shippedListedRunner,
+  shippedOperationsScript,
   shippedRuntimeDigest,
 } from './setup.js';
 import { runHidden, spawnHidden } from './spawn.js';
@@ -476,8 +476,6 @@ const FAILED_BUDGET = 1_000_000;
  * JSON-RPC message, which can come near to doubling it, so this sits well inside.
  */
 const ANSWER_BUDGET = 4_000_000;
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /** How long a server runs before the lifecycle log asks which process started it. */
 const PARENT_ASKED_AFTER_MS = 5_000;
@@ -4133,7 +4131,7 @@ type ClassRebuild = { ok: true; listed: string[] } | { ok: false; outcome: Headl
 class GodotServer {
   private stdio: StdioServerHandle | null = null;
   private readonly locator = new GodotLocator();
-  private readonly operationsScript = join(__dirname, 'godot', 'operations', 'godot_operations.gd');
+  private readonly operationsScript = shippedOperationsScript();
   /** The options of each platform's presets, by engine and platform, read once in an editor. */
   private readonly exportOptionsRead = new Map<string, ExportOptions>();
   /** By project, the stale classes the last class cache rebuild left out, one per line. */
