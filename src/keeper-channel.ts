@@ -19,6 +19,7 @@ import { connect, createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
+import { errorMessage } from './errors.js';
 import type { DebugAnswer, DebugRequest } from './game-debugger.js';
 import { isRecord } from './records.js';
 
@@ -42,10 +43,7 @@ function endedOrWhyNot(end: () => KeeperAnswer): string {
   try {
     return end();
   } catch (error) {
-    return `could not end it: ${error instanceof Error ? error.message : String(error)}`.replaceAll(
-      '\n',
-      ' ',
-    );
+    return `could not end it: ${errorText(error)}`;
   }
 }
 
@@ -84,7 +82,6 @@ function debugRequestOf(asked: unknown): DebugRequest | null {
     case 'pause':
     case 'stack':
     case 'output':
-    case 'state':
       return { op };
     case 'resume': {
       const resumed = RESUMED_HOW.find((one) => one === how);
@@ -100,7 +97,7 @@ function debugRequestOf(asked: unknown): DebugRequest | null {
 }
 
 function errorText(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).replaceAll('\n', ' ');
+  return errorMessage(error).replaceAll('\n', ' ');
 }
 
 /**

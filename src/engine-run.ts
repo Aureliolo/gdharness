@@ -6,7 +6,7 @@
  * a boot that warns once per resource, was ended by Node and answered as an engine fault.
  */
 
-import { readFileSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import { join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -18,6 +18,7 @@ import {
   HIDDEN_DESKTOP,
   helperExit,
   helperFailure,
+  helperPid,
   throughHelper,
 } from './desktop.js';
 import { inASlot, nameSlotEngineOf, onTheSlot } from './engine-slots.js';
@@ -206,12 +207,7 @@ function runStarted(
       if (files === null) {
         return child.pid;
       }
-      try {
-        const written = Number(readFileSync(files.pid, 'utf8').trim());
-        return Number.isInteger(written) && written > 0 ? written : undefined;
-      } catch {
-        return undefined;
-      }
+      return helperPid(files.pid);
     };
     // The lock names this process, and what the engine starts runs on its slot only when it names
     // the engine too.

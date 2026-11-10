@@ -69,12 +69,16 @@ export function withNearestFiles(
   return `${said}. None of the project's ${files.length} .${extension} files is named like it.`;
 }
 
-/** Up to three of [param names] closest to [param word], closest first. Case is ignored. */
+/**
+ * Three of [param names] closest to [param word], closest first, and every further name that only
+ * adds to the word, since cutting at three named three corners of `corner_radius` and left out the
+ * fourth. Case is ignored. The engine's `GdhRead.nearest` keeps the same names.
+ */
 export function nearest(word: string, names: readonly string[]): string[] {
   const wanted = word.toLowerCase();
   const score = (name: string): number => similarity(name.toLowerCase(), wanted);
-  return names
+  const close = names
     .filter((name) => score(name) >= 0.5)
-    .toSorted((one, other) => score(other) - score(one))
-    .slice(0, 3);
+    .toSorted((one, other) => score(other) - score(one));
+  return [...close.slice(0, 3), ...close.slice(3).filter((name) => name.toLowerCase().startsWith(wanted))];
 }

@@ -10,7 +10,6 @@ import {
   fstatSync,
   openSync,
   readdirSync,
-  readFileSync,
   readSync,
   rmSync,
   statSync,
@@ -29,6 +28,7 @@ import {
   HIDDEN_DESKTOP,
   helperExit,
   helperFailure,
+  helperPid,
   helperStep,
   throughHelper,
 } from './desktop.js';
@@ -519,12 +519,7 @@ async function engineWatchedOnce(
     if (helper === null) {
       return child.pid;
     }
-    try {
-      const pid = Number(readFileSync(helper.pid, 'utf8').trim());
-      return Number.isInteger(pid) && pid > 0 ? pid : undefined;
-    } catch {
-      return undefined;
-    }
+    return helperPid(helper.pid);
   };
   // Named in the lock as well, since the lock names this process, and what the engine starts runs on
   // its slot only when the lock names the engine.

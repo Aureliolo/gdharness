@@ -14,7 +14,9 @@ import { connect, type Socket } from 'node:net';
 import { join, resolve } from 'node:path';
 import { alive } from './alive.js';
 import { EngineUsageError } from './engine-launch.js';
+import { errorMessage } from './errors.js';
 import { DEFAULT_LSP_PORT, GodotLSPClient } from './lsp_client.js';
+import { portFromEnvOrNull, portIn } from './ports.js';
 import { oneShotOptionOf, startTimesOf } from './process-children.js';
 import { isRecord } from './records.js';
 
@@ -135,15 +137,14 @@ export interface LspPortChoice {
  */
 export function lspPortChoices(
   named: number | undefined,
-  variable: string | undefined,
+  variable: number | null,
   editors: readonly EditorRecord[],
 ): LspPortChoice[] {
   if (named !== undefined) {
     return [{ port: named, from: '--port' }];
   }
-  const fromVariable = Number(variable);
-  if (variable !== undefined && variable !== '' && Number.isInteger(fromVariable) && fromVariable > 0) {
-    return [{ port: fromVariable, from: 'GDHARNESS_LSP_PORT' }];
+  if (variable !== null) {
+    return [{ port: variable, from: 'GDHARNESS_LSP_PORT' }];
   }
   const choices = editors.map((editor) => ({
     port: editor.lspPort,
@@ -174,7 +175,7 @@ async function probe(port: number, projectPath: string): Promise<Probe> {
     await client.initialize(projectPath);
     return { serves: true };
   } catch (error) {
-    return { serves: false, why: error instanceof Error ? error.message : String(error) };
+    return { serves: false, why: errorMessage(error) };
   } finally {
     await client.disconnect().catch(() => undefined);
   }
@@ -187,6 +188,11 @@ export interface LspOptions {
   readonly waitSeconds: number;
 }
 
+/** The seconds [param raw] spells in plain decimal digits, or null when it spells anything else. */
+function secondsIn(raw: string): number | null {
+  return /^\d+(?:\.\d+)?$/u.test(raw) ? Number(raw) : null;
+}
+
 /** `gdharness lsp [project] [--port N] [--wait S]` read from [param args], relative to [param cwd]. */
 export function lspOptionsOf(args: readonly string[], cwd: string): LspOptions {
   let named: string | undefined;
@@ -195,11 +201,11 @@ export function lspOptionsOf(args: readonly string[], cwd: string): LspOptions {
   for (let at = 0; at < args.length; at += 1) {
     const arg = args[at] ?? '';
     if (arg === '--port' || arg === '--wait') {
-      const value = Number(args[at + 1]);
-      const whole = arg === '--port' ? Number.isInteger(value) && value > 0 && value < 65536 : value >= 0;
-      if (args[at + 1] === undefined || !whole) {
+      const given = args[at + 1];
+      const value = given === undefined ? null : arg === '--port' ? portIn(given) : secondsIn(given);
+      if (given === undefined || value === null) {
         throw new EngineUsageError(
-          `${arg} takes ${arg === '--port' ? 'a port, 1 to 65535' : 'a number of seconds'}, not ${args[at + 1] ?? 'nothing'}.`,
+          `${arg} takes ${arg === '--port' ? 'a port, 1 to 65535' : 'a number of seconds'}, not ${given ?? 'nothing'}.`,
         );
       }
       if (arg === '--port') {
@@ -237,6 +243,7 @@ function note(message: string): void {
  * served in time.
  */
 export async function runLspBridge(options: LspOptions): Promise<number> {
+  const fromVariable = portFromEnvOrNull('GDHARNESS_LSP_PORT');
   const deadline = Date.now() + options.waitSeconds * 1000;
   const said = new Set<string>();
   const sayOnce = (message: string): void => {
@@ -257,7 +264,7 @@ export async function runLspBridge(options: LspOptions): Promise<number> {
     }
     const choices = lspPortChoices(
       options.port,
-      process.env['GDHARNESS_LSP_PORT'],
+      fromVariable,
       liveEditorRecords(records, startedAt, oneShotOf),
     );
     last = [];

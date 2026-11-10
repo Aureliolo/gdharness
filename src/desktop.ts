@@ -388,6 +388,16 @@ export function helperFailure(file: string): string | null {
   }
 }
 
+/** The pid the helper wrote to [param file] for the process it started, or undefined before it has. */
+export function helperPid(file: string): number | undefined {
+  try {
+    const written = Number(readFileSync(file, 'utf8').trim());
+    return Number.isInteger(written) && written > 0 ? written : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** The files a helper is handed and writes, all in a directory of the caller's own. */
 export interface HelperFiles {
   /** What to start, read by the helper as it starts. */

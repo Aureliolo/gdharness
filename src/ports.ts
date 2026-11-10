@@ -26,11 +26,17 @@ export function portFromEnvOrNull(variable: string): number | null {
     return null;
   }
 
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > 65535 || String(parsed) !== raw) {
+  const parsed = portIn(raw);
+  if (parsed === null) {
     throw new Refusal(`${variable} is "${raw}", not a port between 1 and 65535.`);
   }
   return parsed;
+}
+
+/** The port [param raw] spells in plain decimal digits, or null when it spells anything else. */
+export function portIn(raw: string): number | null {
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= 65535 && String(parsed) === raw ? parsed : null;
 }
 
 /** The port in this variable, or the fallback when it is unset. */

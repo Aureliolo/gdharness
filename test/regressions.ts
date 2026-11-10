@@ -273,7 +273,7 @@ import {
   lspPortChoices,
   removeLeftRecords,
 } from '../src/lsp-bridge.js';
-import { withNearestFiles } from '../src/nearest.js';
+import { nearest as nearestNames, withNearestFiles } from '../src/nearest.js';
 import {
   exportedBuild,
   isSameDirectory,
@@ -18372,6 +18372,159 @@ async function testTheKeeperAnswersItsDebuggersQuestions(): Promise<void> {
     });
   } finally {
     garbled.close();
+  }
+}
+
+/** What the listener at [param address] says to [param pieces] written one after another, to the connection's end. */
+async function saidToPieces(address: string, pieces: readonly string[]): Promise<string> {
+  return await new Promise<string>((answer, reject) => {
+    let said = '';
+    const socket = createConnection(address);
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error(`the listener did not answer ${JSON.stringify(pieces)} within 5 s`));
+    }, 5_000);
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk: string) => {
+      said += chunk;
+    });
+    socket.on('error', reject);
+    socket.on('close', () => {
+      clearTimeout(timer);
+      answer(said);
+    });
+    socket.on('connect', () => {
+      void (async () => {
+        for (const piece of pieces) {
+          socket.write(piece);
+          await delay(50);
+        }
+      })();
+    });
+  });
+}
+
+/**
+ * The keeper's listener answers the first line of a connection and nothing after it, whatever
+ * arrives and however it is cut.
+ *
+ * A line in two pieces is waited for, two lines at once are answered once, and a line that is not a
+ * stop, or is a debugger request that cannot be read, is refused with why rather than ending the
+ * keeper. The listener is the real one, and a stop that throws what has no text is still answered.
+ */
+async function testTheKeepersListenerAnswersTheFirstLineOnly(): Promise<void> {
+  let stops = 0;
+  const requests: unknown[] = [];
+  const listening = await listenForTheServer(
+    () => {
+      stops += 1;
+      return 'signalled';
+    },
+    (request) => {
+      requests.push(request);
+      return Promise.resolve({ paused: true });
+    },
+  );
+  assert.ok(listening !== null, 'the keeper listens');
+  try {
+    assert.equal(
+      await saidToPieces(listening.address, ['sto', 'p\n']),
+      'signalled\n',
+      'a stop in two pieces',
+    );
+    assert.equal(stops, 1, 'is one stop');
+    assert.equal(
+      await saidToPieces(listening.address, ['stop\nstop\n']),
+      'signalled\n',
+      'two lines at once get one answer',
+    );
+    assert.equal(stops, 2, 'and one stop');
+    assert.equal(await saidToPieces(listening.address, ['go away\n']), 'unknown\n', 'a line nothing takes');
+    assert.equal(
+      await saidToPieces(listening.address, ['debug {"op":"pause"}\n']),
+      '{"paused":true}\n',
+      'a debugger request reaches the debugger',
+    );
+    assert.deepEqual(requests, [{ op: 'pause' }], 'as the request it is');
+    assert.match(
+      await saidToPieces(listening.address, ['debug {"op":"breakpoint","script":1}\n']),
+      /^\{"refused":"The debugger takes no request like \{\\"op\\":\\"breakpoint\\",\\"script\\":1\}\.?/u,
+      'a request of the wrong shape',
+    );
+    assert.match(
+      await saidToPieces(listening.address, ['debug {"op":"state"}\n']),
+      /^\{"refused":"The debugger takes no request like /u,
+      'and one nothing sends',
+    );
+    assert.match(
+      await saidToPieces(listening.address, ['debug {not json\n']),
+      /^\{"refused":"The debugger could not answer: /u,
+      'and JSON that does not parse',
+    );
+    assert.deepEqual(requests, [{ op: 'pause' }], 'none of the refused ones reached the debugger');
+  } finally {
+    listening.close();
+  }
+
+  const symbolic = await listenForTheServer(() => {
+    // An object with no `toString`, which `String` cannot turn into text.
+    throw Object.create(null);
+  }, null);
+  assert.ok(symbolic !== null, 'a second keeper listens');
+  try {
+    assert.match(
+      await saidToPieces(symbolic.address, ['stop\n']),
+      /^could not end it: Unknown error\n$/u,
+      'a stop that throws what has no text is answered rather than ending the keeper',
+    );
+    assert.match(
+      await saidToPieces(symbolic.address, ['debug {"op":"pause"}\n']),
+      /^\{"refused":"This run has no debugger\."\}\n$/u,
+      'and a run with no debugger says so',
+    );
+  } finally {
+    symbolic.close();
+  }
+}
+
+/**
+ * The launcher says why a run could not be started, in one line, whichever step failed.
+ *
+ * A command that does not exist fails the keeper's start, and a transcript in a folder that is not
+ * there ends the keeper before it says anything. Each is read back from the real launcher and
+ * keeper, run as the server runs them.
+ */
+function testTheLauncherSaysWhyARunDidNotStart(): void {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-launch-failures-'));
+  try {
+    const launched = (command: string, transcript: string): string => {
+      const spec = {
+        command,
+        args: [],
+        envChanges: {},
+        run: { transcript, startedAt: Date.now(), projectPath: scratch },
+      };
+      const ran = spawnSyncHidden(process.execPath, [resolve('build', 'keeper.js'), 'launch'], {
+        encoding: 'utf8',
+        input: JSON.stringify(spec),
+        timeout: 60_000,
+      });
+      return ran.stdout;
+    };
+    const missing = launched(join(scratch, 'no-such-program'), join(scratch, 'run.log'));
+    assert.match(
+      missing,
+      /^error [^\r\n]*no-such-program[^\r\n]*\r?\n$/u,
+      `a command that is not there: ${missing}`,
+    );
+    const cut = launched(process.execPath, join(scratch, 'no-such-folder', 'run.log'));
+    assert.match(
+      cut,
+      /^error the keeper ended before it said anything: .+\r?\n$/u,
+      `a keeper that ends first says why on one line: ${cut}`,
+    );
+  } finally {
+    sweep(scratch);
   }
 }
 
@@ -54966,23 +55119,21 @@ function testTheLspCommandFindsTheEditorsPort(): void {
       'only the records provably left behind are deleted',
     );
 
-    assert.deepEqual(lspPortChoices(7001, '7002', records), [{ port: 7001, from: '--port' }]);
-    assert.deepEqual(lspPortChoices(undefined, '7002', records), [
-      { port: 7002, from: 'GDHARNESS_LSP_PORT' },
-    ]);
+    assert.deepEqual(lspPortChoices(7001, 7002, records), [{ port: 7001, from: '--port' }]);
+    assert.deepEqual(lspPortChoices(undefined, 7002, records), [{ port: 7002, from: 'GDHARNESS_LSP_PORT' }]);
     const recorded = [
       { file: 'a', pid: 102, lspPort: 6102, writtenAtMs: 9000 },
       { file: 'b', pid: 101, lspPort: DEFAULT_LSP_PORT, writtenAtMs: 5000 },
     ];
     assert.deepEqual(
-      lspPortChoices(undefined, 'soon', recorded),
+      lspPortChoices(undefined, null, recorded),
       [
         { port: 6102, from: 'the editor with pid 102' },
         { port: DEFAULT_LSP_PORT, from: 'the editor with pid 101' },
       ],
-      'a variable that names no port is passed over, and the default is not tried twice',
+      'no variable leaves the editors, and the default is not tried twice',
     );
-    assert.deepEqual(lspPortChoices(undefined, '', []), [
+    assert.deepEqual(lspPortChoices(undefined, null, []), [
       { port: DEFAULT_LSP_PORT, from: "Godot's default" },
     ]);
 
@@ -55000,7 +55151,12 @@ function testTheLspCommandFindsTheEditorsPort(): void {
     for (const [args, said] of [
       [['--port', '70000'], /^--port takes a port, 1 to 65535, not 70000\.$/],
       [['--port'], /^--port takes a port, 1 to 65535, not nothing\.$/],
+      [['--port', '0x1F90'], /^--port takes a port, 1 to 65535, not 0x1F90\.$/],
+      [['--port', '1e3'], /^--port takes a port, 1 to 65535, not 1e3\.$/],
+      [['--port', '7002.0'], /^--port takes a port, 1 to 65535, not 7002\.0\.$/],
       [['--wait', '-1'], /^--wait takes a number of seconds, not -1\.$/],
+      [['--wait', ''], /^--wait takes a number of seconds, not \.$/],
+      [['--wait', 'Infinity'], /^--wait takes a number of seconds, not Infinity\.$/],
       [['--verbose'], /^Unknown option --verbose\. gdharness lsp takes --port N and --wait S\.$/],
       [[project, 'other'], /^gdharness lsp takes one project, and was given .+ and other\.$/],
       [
@@ -65650,6 +65806,47 @@ function testAMisspeltExtensionIsOfferedTheFileOfThatName(): void {
     withNearestFiles('Script file does not exist: res://ai/brainn.gd', 'res://ai/brainn.gd', scripts, beside),
     'Script file does not exist: res://ai/brainn.gd. The nearest .gd file is res://ai/brain.gd.',
     'with none of that name, the nearest of its extension',
+  );
+}
+
+/**
+ * The names a refusal offers are three of the closest, and every further one that only adds to the
+ * word, as the engine's `GdhRead.nearest` keeps them.
+ */
+function testTheNearestNamesKeepEveryOneThatOnlyAddsToTheWord(): void {
+  const corners = [
+    'corner_radius_top_left',
+    'corner_radius_top_right',
+    'corner_radius_bottom_left',
+    'corner_radius_bottom_right',
+  ];
+  assert.deepEqual(
+    nearestNames('corner_radius', corners).toSorted(),
+    corners.toSorted(),
+    'four names that only add to the word are all offered',
+  );
+  const unrelated = ['menu_a', 'menu_b', 'menu_c', 'menu_d', 'menu'];
+  assert.deepEqual(
+    nearestNames('menux', unrelated),
+    ['menu', 'menu_a', 'menu_b'],
+    'names that do not begin with the word are cut at three',
+  );
+  assert.deepEqual(
+    nearestNames('Corner_Radius', ['CORNER_RADIUS_A', 'zzz']),
+    ['CORNER_RADIUS_A'],
+    'case is ignored and a name too far off is left out',
+  );
+  assert.deepEqual(nearestNames('a', ['a', 'ab']), ['a'], 'a one-letter word matches only itself');
+  assert.deepEqual(nearestNames('menu', []), [], 'no names offer none');
+  assert.equal(
+    withNearestFiles(
+      'Script file does not exist: res://ui/menu.gd',
+      'res://ui/menu.gd',
+      ['res://ui/menu_a.gd', 'res://ui/menu_b.gd', 'res://ui/menu_c.gd', 'res://ui/menu_d.gd'],
+      [],
+    ),
+    'Script file does not exist: res://ui/menu.gd. The nearest .gd files are res://ui/menu_a.gd, res://ui/menu_b.gd, res://ui/menu_c.gd, res://ui/menu_d.gd.',
+    'a refusal names all four files that add to the word',
   );
 }
 
@@ -80799,6 +80996,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheEditorIsOfferedWhereItCanAnswer,
   testASettingTakesWhatAPropertyTakes,
   testAMisspeltExtensionIsOfferedTheFileOfThatName,
+  testTheNearestNamesKeepEveryOneThatOnlyAddsToTheWord,
   testASettingsWriteKeepsEveryOtherLine,
   testAnElementIsToldWhatItsTypeTakes,
   testAWriteSaysWhatElseItChanged,
@@ -81106,6 +81304,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATouchReachesTheGameAsAFinger,
   testAHeadlessGameSaysItHasNoWindow,
   testTheKeeperAnswersAStop,
+  testTheKeepersListenerAnswersTheFirstLineOnly,
+  testTheLauncherSaysWhyARunDidNotStart,
   testTheKeeperAnswersItsDebuggersQuestions,
   testAKeptGamesStackAndValuesRead,
   testAPauseAnswersWithTheGamesOwnScript,
