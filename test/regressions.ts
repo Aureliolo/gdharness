@@ -399,7 +399,7 @@ import {
   sweepAbandonedScratch,
   untilDiscarded,
 } from '../src/scratch.js';
-import { type CheckScript, originsOf, withoutListed } from '../src/script-origins.js';
+import { type CheckScript, originsOf, unresolvedClassIn, withoutListed } from '../src/script-origins.js';
 import {
   callersOf,
   frameFunctionsFor,
@@ -10841,6 +10841,48 @@ function testEveryPromptAsksForCallsTheToolsTake(): void {
   }
 }
 
+/** Nobody is at the terminal unless both ends are one, and the answer is a boolean either way. */
+async function testInteractiveIsABooleanWhateverTheStreamsAre(): Promise<void> {
+  const { interactive, Ask } = await import('../src/prompt.js');
+  const held = (stream: NodeJS.ReadStream | NodeJS.WriteStream): PropertyDescriptor | undefined =>
+    Object.getOwnPropertyDescriptor(stream, 'isTTY');
+  const heldIn = held(process.stdin);
+  const heldOut = held(process.stdout);
+  const set = (stream: NodeJS.ReadStream | NodeJS.WriteStream, value: boolean | undefined): void => {
+    Object.defineProperty(stream, 'isTTY', { value, configurable: true, writable: true });
+  };
+  const restore = (
+    stream: NodeJS.ReadStream | NodeJS.WriteStream,
+    was: PropertyDescriptor | undefined,
+  ): void => {
+    if (was === undefined) {
+      Reflect.deleteProperty(stream, 'isTTY');
+    } else {
+      Object.defineProperty(stream, 'isTTY', was);
+    }
+  };
+  try {
+    set(process.stdin, undefined);
+    set(process.stdout, true);
+    assert.strictEqual(interactive(), false, 'a pipe on stdin leaves isTTY undefined, and that is false');
+    set(process.stdin, true);
+    set(process.stdout, undefined);
+    assert.strictEqual(interactive(), false, 'a pipe on stdout is false too');
+    set(process.stdout, false);
+    assert.strictEqual(interactive(), false);
+    set(process.stdout, true);
+    assert.strictEqual(interactive(), true, 'both ends at a terminal');
+    set(process.stdin, undefined);
+    const ask = new Ask();
+    assert.strictEqual(await ask.confirm('Write it?', true), true, 'nobody to ask takes the default');
+    assert.strictEqual(await ask.confirm('Write it?', false), false, 'whichever way it points');
+    ask.close();
+  } finally {
+    restore(process.stdin, heldIn);
+    restore(process.stdout, heldOut);
+  }
+}
+
 /**
  * The prompts as a client gets them: listed by name, rendered with the values given and nothing for
  * the optional ones left out, and refused with the reason when an argument is missing or unknown.
@@ -11090,6 +11132,70 @@ function testProjectGodotStringEscapes(): void {
       d: String.raw`\u00zz \U110000`,
       e: String.raw`kept \"`,
     },
+  );
+}
+
+/** Indentation inside a multi-line string is content, so a later line comes back as it was written. */
+function testProjectGodotKeepsIndentInsideMultilineStrings(): void {
+  const parsed = parseProjectGodot(
+    '[application]\nconfig/description="first\n    indented\n\n  [not a section]\nkey=1"\nrun/x=2\n',
+  );
+  assert.equal(
+    get(parsed, 'application', 'config/description'),
+    'first\n    indented\n\n  [not a section]\nkey=1',
+    'each later line keeps its leading whitespace',
+  );
+  assert.equal(get(parsed, 'application', 'run/x'), 2, 'the key after the string is still read');
+  assert.equal(parsed['  [not a section]'], undefined, 'and a bracketed line in the string opens no section');
+
+  const crlf = parseProjectGodot('[a]\r\nk="one\r\n\ttwo"\r\nafter=3\r\n');
+  assert.equal(get(crlf, 'a', 'k'), 'one\n\ttwo', 'a CRLF file reads the same, tab kept');
+  assert.equal(get(crlf, 'a', 'after'), 3);
+}
+
+/** A key Godot quoted reads without its quotes, and a quoted `=` does not end it. */
+function testProjectGodotReadsQuotedKeys(): void {
+  const parsed = parseProjectGodot(
+    [
+      '[input]',
+      '"move left"={',
+      '"deadzone": 0.5',
+      '}',
+      '"a=b"={',
+      '"deadzone": 0.25',
+      '}',
+      'jump=1',
+      String.raw`"say \"hi\""=2`,
+      '"Größe" = 3',
+      'plain="x=y"',
+    ].join('\n'),
+  )['input'];
+  assert.deepEqual(
+    { ...parsed },
+    {
+      'move left': '{\n"deadzone": 0.5\n}',
+      'a=b': '{\n"deadzone": 0.25\n}',
+      jump: 1,
+      'say "hi"': 2,
+      Größe: 3,
+      plain: 'x=y',
+    },
+  );
+  assert.deepEqual(
+    [...settingKeys('[input]\n"move left"=1\n').keys()],
+    ['input/move left'],
+    'the name a caller sets again has no quotes',
+  );
+}
+
+/** A float Godot wrote with an exponent is a number, and one past a double stays text. */
+function testProjectGodotReadsExponentFloats(): void {
+  const physics = parseProjectGodot(
+    '[physics]\na=1e-05\nb=1.5e+10\nc=1.0\nd=inf\ne=-0.5\nf=2E3\ng=-4.5E-2\nh=1e999\ni=1e\n',
+  )['physics'];
+  assert.deepEqual(
+    { ...physics },
+    { a: 0.00001, b: 15_000_000_000, c: 1, d: 'inf', e: -0.5, f: 2000, g: -0.045, h: '1e999', i: '1e' },
   );
 }
 
@@ -62232,6 +62338,16 @@ async function testGdUnitRunner(): Promise<void> {
   }
 }
 
+/** A class the engine could not resolve is named whatever letters its name holds. */
+function testAnUnresolvedClassIsNamedWhateverLettersItHolds(): void {
+  const said = (name: string): string => `Could not resolve class "${name}", because of a parser error.`;
+  assert.equal(unresolvedClassIn(said('Pattern')), 'Pattern');
+  assert.equal(unresolvedClassIn(said('Größe')), 'Größe', 'a name outside ASCII');
+  assert.equal(unresolvedClassIn(said('_Ünder9')), '_Ünder9', 'a leading underscore, a digit after a letter');
+  assert.equal(unresolvedClassIn(said('9Lives')), null, 'a digit cannot start a name');
+  assert.equal(unresolvedClassIn('Could not resolve class "", because of a parser error.'), null);
+}
+
 /**
  * #915: a test run says how far it has got, and keeps what it finished when it is cut off.
  *
@@ -83365,6 +83481,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunOfAnotherProjectOutlivesItsServer,
   testTheResourcesReadOnlyTheProject,
   testGdUnitRunner,
+  testAnUnresolvedClassIsNamedWhateverLettersItHolds,
   testTheShippedRunnerRunsAFileOfSuites,
   testAnEngineRunIsReadCaseByCase,
   testAnEngineRunsStartAndSetUpAreReadApart,
@@ -83453,6 +83570,9 @@ const TESTS: (() => void | Promise<void>)[] = [
 
   testProjectGodotMultilineValues,
   testProjectGodotStringEscapes,
+  testProjectGodotKeepsIndentInsideMultilineStrings,
+  testProjectGodotReadsQuotedKeys,
+  testProjectGodotReadsExponentFloats,
   testLettingGoOfTheAdapterSendsItNothing,
   testAVariablesReadSaysWhatItCouldNotRead,
   testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer,
@@ -83534,6 +83654,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnArgumentScopedInWordsIsScopedInItsSchema,
   testEveryToolTellsAClientWhatItCanChange,
   testEveryPromptAsksForCallsTheToolsTake,
+  testInteractiveIsABooleanWhateverTheStreamsAre,
   testAPromptIsRenderedWithWhatWasGiven,
   testAResourcePathCompletesToTheProjectsFiles,
   testTheServerTellsAClientHowToStart,

@@ -302,23 +302,50 @@ export function parseProjectGodot(content: string): Record<string, Record<string
       continue;
     }
 
-    const eqIndex = line.indexOf('=');
-    if (eqIndex === -1) {
+    const named = splitKeyAndValue(line);
+    if (named === null) {
       continue;
     }
 
-    const key = line.slice(0, eqIndex).trim();
-    let rawValue = line.slice(eqIndex + 1).trim();
+    const key = named.key;
+    let rawValue = named.value;
 
+    // Raw, because Godot writes a string's line breaks as they are and its indentation is content.
     while (index + 1 < lines.length && !isValueComplete(rawValue)) {
       index += 1;
-      rawValue += `\n${(lines[index] ?? '').trim()}`;
+      rawValue += `\n${lines[index] ?? ''}`;
     }
 
     section[key] = parseIniLikeValue(rawValue);
   }
 
   return result;
+}
+
+/**
+ * A line's key and the text after its `=`, or null for a line with no `=`. Godot quotes a key
+ * holding a space, `=`, `;`, `[`, `]`, a quote or a character outside ASCII, so a key opening with
+ * a quote ends at its closing quote and not at the first `=` inside it.
+ */
+function splitKeyAndValue(line: string): { key: string; value: string } | null {
+  if (line.startsWith('"')) {
+    for (let at = 1; at < line.length; at += 1) {
+      if (line[at] === '\\') {
+        at += 1;
+      } else if (line[at] === '"') {
+        const rest = line.slice(at + 1).trimStart();
+        if (rest.startsWith('=')) {
+          return { key: godotStringText(line.slice(1, at)), value: rest.slice(1).trim() };
+        }
+        break;
+      }
+    }
+  }
+  const eqIndex = line.indexOf('=');
+  if (eqIndex === -1) {
+    return null;
+  }
+  return { key: line.slice(0, eqIndex).trim(), value: line.slice(eqIndex + 1).trim() };
 }
 
 function parseIniLikeValue(value: string): IniValue {
@@ -341,7 +368,8 @@ function parseIniLikeValue(value: string): IniValue {
     return Number.isSafeInteger(parsed) ? parsed : value;
   }
 
-  if (/^-?\d*\.\d+$/.test(value)) {
+  // Godot writes a small or large float with an exponent, as 1e-05 or 1.5e+10.
+  if (/^-?(?:\d*\.\d+(?:[eE][+-]?\d+)?|\d+[eE][+-]?\d+)$/.test(value)) {
     const parsed = Number.parseFloat(value);
     return Number.isFinite(parsed) ? parsed : value;
   }

@@ -11,7 +11,8 @@ import { createInterface, type Interface } from 'node:readline/promises';
 
 /** Whether there is somebody at a terminal to answer. */
 export function interactive(): boolean {
-  return process.stdin.isTTY && process.stdout.isTTY;
+  // isTTY is undefined, not false, on a pipe.
+  return process.stdin.isTTY === true && process.stdout.isTTY === true;
 }
 
 export class Ask {
