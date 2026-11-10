@@ -50597,8 +50597,17 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   );
   assert.doesNotMatch(failing.shown.join('\n'), /unrelated|Godot Engine/, 'the failure, not the whole run');
 
+  // No suite opened, as an engine handed none prints: one that opened a suite it was not handed
+  // is a fault of its own.
   const nothing = judgeEngine(
-    readRun(cannedRun([], 'PASSED', 0)),
+    readRun(
+      [
+        'Godot Engine v4.7.2.stable.official - https://godotengine.org',
+        'Executed test suites: (0/0)',
+        'Executed test cases : (0/0)',
+        ' Exit code: 0',
+      ].join('\r\n'),
+    ),
     { suites: [], expected: { errors: {}, warnings: {} } },
     clean,
   );
@@ -50641,6 +50650,172 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
  * quit(5). A crash inside the engine's report on its call queue overflowing is named as the
  * overflow, from the frames of the build that has them or from the line only that report prints.
  */
+/**
+ * The judge names what went wrong where no reading of the handed suites reaches it: a suite the
+ * engine ran unasked, a row tried again, a case the engine ended in, a line of a size that stalled
+ * the reader, and a project error quoting the engine's leak report.
+ */
+function testAJudgedRunNamesWhatNoHandedSuiteShows(): void {
+  const clean = { code: 0, signal: null, ended: null };
+  const header = 'Godot Engine v4.7.2.stable.official - https://godotengine.org';
+  const handed = (cases: readonly string[], expected: Record<string, readonly string[]> = {}) => ({
+    suites: [{ path: S_TEST, cases }],
+    expected: { errors: { [S_TEST]: expected }, warnings: {} },
+  });
+
+  const other = 'res://tests/other_test.gd';
+  const closed = (verdict: string): string =>
+    `Statistics: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | ${verdict} 5ms`;
+  const unasked = [
+    header,
+    `Run Test Suite: ${S_TEST}`,
+    caseLine(S_TEST, 'test_a', 'STARTED'),
+    caseLine(S_TEST, 'test_a', 'PASSED', '5ms'),
+    closed('PASSED'),
+    `Run Test Suite: ${other}`,
+    caseLine(other, 'test_b', 'STARTED'),
+    caseLine(other, 'test_b', 'FAILED', '5ms'),
+    closed('FAILED'),
+    '',
+    'Executed test suites: (2/2)',
+    'Executed test cases : (2/2)',
+    ' Exit code: 100',
+  ].join('\r\n');
+  const ranUnasked = judgeEngine(readRun(unasked), handed(['test_a']), { ...clean, code: 100 });
+  assert.deepEqual(
+    ranUnasked.faults,
+    [`${other} ran here, which gdharness did not hand this engine, so its plan of the suites was wrong`],
+    'a suite nothing handed the engine fails the run it ran in',
+  );
+  assert.equal(ranUnasked.passed, false);
+  assert.deepEqual(ranUnasked.passedSuites, [S_TEST], 'and the suite that was handed still passed');
+
+  const row = 'test_p:0 (1)';
+  const retried = readRun(
+    cannedRun([
+      caseLine(S_TEST, row, 'STARTED'),
+      caseLine(S_TEST, row, 'FAILED (retry 1)', '3ms'),
+      caseLine(S_TEST, row, 'STARTED'),
+      caseLine(S_TEST, row, 'PASSED', '3ms'),
+    ]),
+  );
+  assert.deepEqual(
+    retried.suites.get(S_TEST)?.cases.map((ran) => [ran.row, ran.verdict]),
+    [
+      [0, 'FAILED'],
+      [0, 'PASSED'],
+    ],
+    'both tries of the row are read',
+  );
+  const dealtRows = [{ path: S_TEST, cases: ['test_p'], rows: { test_p: { only: [0] } } }];
+  assert.deepEqual(
+    rowsAcross([{ handed: dealtRows, printed: retried }]),
+    [],
+    'a row one engine tried twice ran in one engine',
+  );
+  assert.deepEqual(
+    rowsAcross([
+      { handed: dealtRows, printed: retried },
+      { handed: dealtRows, printed: retried },
+    ]).map((fault) => fault.fault),
+    [`${S_TEST} > test_p ran row 0 in more than one engine`],
+    'and a row two engines ran is still said',
+  );
+
+  const endedIn = (...printed: string[]): string =>
+    [header, `Run Test Suite: ${S_TEST}`, caseLine(S_TEST, 'test_a', 'STARTED'), ...printed].join('\r\n');
+  const killed = { code: null, signal: 'SIGSEGV', ended: null };
+  const ended = [
+    'the engine was ended by SIGSEGV',
+    'the run never printed its summary',
+    `${S_TEST} never finished`,
+  ];
+  assert.deepEqual(
+    judgeEngine(
+      readRun(endedIn('ERROR: the store is closed')),
+      handed(['test_a'], { test_a: ['the store is closed', 'said later'] }),
+      killed,
+    ).faults,
+    ended,
+    'a case the engine ended in printed what it declares, and owes nothing it had yet to print',
+  );
+  assert.deepEqual(
+    judgeEngine(readRun(endedIn('ERROR: nobody declared this')), handed(['test_a']), killed).faults,
+    [
+      ...ended,
+      `an engine error in ${S_TEST} > test_a: nobody declared this. If the suite prints it on purpose, list its text under "test_a" in the suite's GDHARNESS_EXPECTED_ERRORS`,
+    ],
+    'and an error it does not declare is still said',
+  );
+
+  const long = (line: string): { printed: ReturnType<typeof readRun>; ms: number } => {
+    const began = performance.now();
+    const printed = readRun(
+      cannedRun([caseLine(S_TEST, 'test_a', 'STARTED'), line, caseLine(S_TEST, 'test_a', 'PASSED', '5ms')]),
+    );
+    return { printed, ms: performance.now() - began };
+  };
+  // Seconds where each took the better part of a minute, and far inside them on any machine.
+  // Blanks with a letter after them: the pattern that stalled tried every blank as the text's end.
+  const spaced = `said${' '.repeat(200_000)}x`;
+  const blanks = long(`ERROR: ${spaced}   `);
+  assert.deepEqual(
+    blanks.printed.errors.map((error) => [error.text === spaced, error.text.length, error.during]),
+    [[true, spaced.length, 'test_a']],
+    'an error is read whole, without the blanks after it',
+  );
+  assert.ok(blanks.ms < 5000, `a line of 200,000 blanks is read in ${blanks.ms.toFixed(0)} ms`);
+  const warned = long(`WARNING: ${spaced}   `);
+  assert.deepEqual(
+    warned.printed.errors.map((error) => [error.text === spaced, error.warning]),
+    [[true, true]],
+    'and a warning as an error is',
+  );
+  assert.ok(warned.ms < 5000, `a warning of 200,000 blanks is read in ${warned.ms.toFixed(0)} ms`);
+  const paths = long(`${'res://a.gd > '.repeat(20_000)}x`);
+  assert.deepEqual(
+    paths.printed.suites.get(S_TEST)?.cases.map((ran) => ran.name),
+    ['test_a'],
+    'a line naming a script many times and closing on no verdict is no case',
+  );
+  assert.ok(paths.ms < 5000, `a line naming a script 20,000 times is read in ${paths.ms.toFixed(0)} ms`);
+  assert.deepEqual(
+    readRun(
+      cannedRun([
+        caseLine(S_TEST, 'test PASSED once', 'STARTED'),
+        `  ${S_TEST} > test PASSED once FAILED (retry 2) 1min 2s 3ms   `,
+      ]),
+    )
+      .suites.get(S_TEST)
+      ?.cases.map((ran) => [ran.name, ran.verdict, ran.seconds]),
+    [['test PASSED once', 'FAILED', 62.003]],
+    'a case line is read from its end, so a name holding a verdict is the name',
+  );
+
+  const quoting = 'the editor said: 2 resources still in use at exit';
+  const leak = 'ERROR: 2 resources still in use at exit (run with --verbose for details).';
+  const quoted = (after: readonly string[]): string =>
+    [
+      cannedRun([
+        caseLine(S_TEST, 'test_a', 'STARTED'),
+        `ERROR: ${quoting}`,
+        caseLine(S_TEST, 'test_a', 'PASSED', '5ms'),
+      ]),
+      ...after,
+    ].join('\r\n');
+  assert.deepEqual(
+    judgeEngine(readRun(quoted([])), handed(['test_a'], { test_a: [quoting] }), clean).faults,
+    [],
+    "a project's error quoting the engine's report is the error its case declares",
+  );
+  const leaked = judgeEngine(readRun(quoted([leak])), handed(['test_a'], { test_a: [quoting] }), clean);
+  assert.deepEqual(
+    leaked.faults.map((fault) => fault.slice(0, 60 + leak.length)),
+    [`the engine exited holding what it should have freed: ${leak}`.slice(0, 60 + leak.length)],
+    "and the engine's own line is still what it held",
+  );
+}
+
 function testACrashIsReadFromTheCrashHandlersReport(): void {
   const handed = {
     suites: [{ path: S_TEST, cases: ['test_a', 'test_b'] }],
@@ -50681,6 +50856,18 @@ function testACrashIsReadFromTheCrashHandlersReport(): void {
       `the engine crashed ${during}, its crash handler reporting signal 11, with 2.5 GB of memory free as it ended`,
     ),
     inTheReport.join('\n'),
+  );
+  // The report is the crash, whatever code reached the judge: one cut to its low byte can read 0.
+  const exited0 = { code: 0, signal: null, ended: null };
+  const reportedBesideZero = judgeEngine(readRun(ran(...report(official, queueFrames))), handed, exited0);
+  assert.ok(
+    reportedBesideZero.faults.includes(`the engine crashed ${during}, its crash handler reporting signal 11`),
+    reportedBesideZero.faults.join('\n'),
+  );
+  assert.deepEqual(
+    judgeCompile(readRun([COMPILED_SAID, ...report(official, queueFrames)].join('\r\n')), exited0),
+    ['the engine crashed, its crash handler reporting signal 11'],
+    'and a compile check that crashed after compiling is no clean one',
   );
   assert.ok(
     inTheReport.includes(`${overflow}, and the engine crashed reporting the overflow`),
@@ -81159,6 +81346,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineRunsStartAndSetUpAreReadApart,
   testAnEngineMayBeSilentAsLongAsWhatItRuns,
   testAnEngineRunIsJudgedOnEverythingItPrinted,
+  testAJudgedRunNamesWhatNoHandedSuiteShows,
   testGdUnitFailingOnPushErrorsIsSaid,
   testACrashIsReadFromTheCrashHandlersReport,
   testARowSkippedForItsDataIsNoPass,

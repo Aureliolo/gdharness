@@ -274,7 +274,7 @@ It takes its slot only once memory has room, so it holds no slot from anybody el
   except [before a driver switch](#errors-before-a-driver-switch).
 - An error a suite declares that it did not print.
 - A suite that never started, never finished, or finished without running every case it declares.
-- A case that ran without being planned.
+- A case that ran without being planned, or a suite the engine ran without being handed it.
 - A suite that reports a failure while all its cases passed, which is a failing `before` or `after`.
 - A run that printed no summary or ran no case, or a script gdUnit4 could not load.
 - A script under the folders searched for suites that declares `test_` functions but extends
@@ -286,6 +286,7 @@ It takes its slot only once memory has room, so it holds no slot from anybody el
 - Objects, resources, memory pages or a server's RIDs still held as the engine exits
   ([leaks at exit](#leaks-at-exit)).
 - An exit code other than 0, named by its meaning ([exit codes](#exit-codes)).
+- A crash report from the engine's crash handler, whatever code the engine exited with.
 - Orphan nodes ([orphan nodes](#orphan-nodes)).
 - An engine that printed nothing at all.
 - An engine ended for its silence or its deadline, or because an autoload did not start.
