@@ -60956,7 +60956,10 @@ async function runReadingProbe(
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-reading-'));
   try {
     cpSync(join('src', 'godot', 'operations'), join(project, 'operations'), { recursive: true });
-    writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\n\nconfig/name="Reading"\n');
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\n\nconfig/name="Reading"\n',
+    );
     for (const [path, content] of Object.entries({ ...files, 'probe.gd': probe })) {
       writeFileSync(join(project, path), content);
     }
@@ -60965,7 +60968,7 @@ async function runReadingProbe(
     const answered = lines.find((line) => line.startsWith('@@'));
     assert.ok(answered !== undefined, `the probe answered: ${lines.join(' | ')}`);
     return {
-      answer: JSON.parse(answered.slice(2)) as Record<string, unknown>,
+      answer: asObject(JSON.parse(answered.slice(2)), 'the probe answer'),
       errors: ran.log.all.filter((entry) => entry.source === 'stderr').map((entry) => entry.text),
     };
   } finally {
@@ -61038,6 +61041,11 @@ func _init() -> void:
 		R.as_int("9223372036854775808", 3), R.as_int("-9223372036854775808"), R.as_int("-9223372036854775809", 2),
 		R.as_int("12abc", 9), R.as_int(" 42 "), R.as_int("1.9"),
 	]
+	# Spelt as text, since JSON numbers read back in JavaScript lose the end of the 64-bit range.
+	var spelt: Array = []
+	for number: int in out["asInt"]:
+		spelt.append(str(number))
+	out["asInt"] = spelt
 	out["asBool"] = [
 		R.as_bool("false", true), R.as_bool("0", true), R.as_bool(0.000001), R.as_bool("true"), R.as_bool("FALSE", true),
 		R.as_bool("maybe", true), R.as_bool(NAN, true), R.as_bool(""), R.as_bool("2"),
@@ -61066,7 +61074,10 @@ func _init() -> void:
 `;
   const { answer, errors } = await runReadingProbe(godotPath, {}, probe);
   const at = (key: string): unknown => answer[key];
-  const walked = at('singleSweep') as [string, number, number][];
+  const walked = asArray(at('singleSweep'), 'the sweep').map((entry) => {
+    const [written, held, short] = asArray(entry, 'a sweep entry');
+    return [asString(written), asNumber(held), asNumber(short)] as const;
+  });
   // Every answer is judged before any is reported, so one run names each answer that is wrong.
   const expected: Record<string, unknown> = {
     none: [],
@@ -61087,7 +61098,20 @@ func _init() -> void:
     commas: 'X. Body has no Arm Left. Its children are "A, B", C.',
     plain: 'X. The root, Main, has no Gone. Its children are Body, My Node.',
     asInt: [
-      1000, 7, 5, 6, 8, 0, 9007199254740991, 9223372036854775807, 3, -9223372036854775808, 2, 9, 42, 1,
+      '1000',
+      '7',
+      '5',
+      '6',
+      '8',
+      '0',
+      '9007199254740991',
+      '9223372036854775807',
+      '3',
+      '-9223372036854775808',
+      '2',
+      '9',
+      '42',
+      '1',
     ],
     asBool: [false, false, true, true, false, true, true, false, true],
     asFloat: [5, 1000, 6, 0.5],
@@ -61197,7 +61221,10 @@ async function testTheErrorsOfAScriptBeforeAChangeAreLeftOutOfTheAnswer(): Promi
   }
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-aside-'));
   try {
-    writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\n\nconfig/name="Aside"\n');
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\n\nconfig/name="Aside"\n',
+    );
     writeFileSync(
       join(project, 'unmended.gd'),
       'extends Node\n\n\nfunc _ready() -> void:\n\tmend_before_the_change()\n',
@@ -61240,7 +61267,10 @@ async function testTheAnswerFileKeepsAFloatAsItWas(): Promise<void> {
   }
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-answer-floats-'));
   try {
-    writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\n\nconfig/name="Floats"\n');
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\n\nconfig/name="Floats"\n',
+    );
     writeFileSync(
       join(project, 'floats.gd'),
       'extends Resource\n\n@export var tiny: float = 5.0\n@export var huge: float = 5.0\n' +
@@ -61259,7 +61289,7 @@ async function testTheAnswerFileKeepsAFloatAsItWas(): Promise<void> {
       project,
     );
     assert.ok(outcome.ok, JSON.stringify(outcome));
-    const read = outcome.payload['properties'] as Record<string, unknown>;
+    const read = asObject(outcome.payload['properties'], 'the properties');
     // The engine reads 1e-37 from the file a step below the nearest double, so the tiny one is
     // compared by ratio.
     assert.ok(
