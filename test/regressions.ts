@@ -17815,6 +17815,32 @@ function testASuccessorIsTheEngineStartedAsTheGameExited(): void {
     null,
     'the exited process is not its own successor',
   );
+  // `ps` prints no quotes, so the engine's folder runs to the first option.
+  const spaced = '/home/me/.local/share/Steam/steamapps/common/Godot Engine/godot.x11.opt.tools.64';
+  const spacedRun = { ...restarted, command: `${spaced} --path /p -- --restarted` };
+  assert.deepEqual(
+    successorAmong([spacedRun], 11, spaced, notBefore, exitedAt, 0),
+    spacedRun,
+    'an engine in a folder with a space is found',
+  );
+  assert.equal(
+    successorAmong(
+      [{ ...spacedRun, command: '/opt/Godot Engine/other --path /p' }],
+      11,
+      spaced,
+      notBefore,
+      exitedAt,
+      0,
+    ),
+    null,
+    'while another program in such a folder is not',
+  );
+  const quoted = { ...restarted, command: '"C:\\Program Files\\Godot Engine\\Godot_v4.exe" --path /p' };
+  assert.deepEqual(
+    successorAmong([quoted], 11, 'C:\\Program Files\\Godot Engine\\Godot_v4.exe', notBefore, exitedAt, 0),
+    quoted,
+    'a quoted line is read to its closing quote',
+  );
   const cut = { ...restarted, startedAt: exitedAt - RESTARTED_WITHIN_MS - 900 };
   assert.equal(successorAmong([cut], 11, engine, notBefore, exitedAt, 0), null, 'to the millisecond');
   assert.deepEqual(
