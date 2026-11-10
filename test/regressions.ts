@@ -29564,6 +29564,43 @@ async function testThePowerShellHelperGoesWithItsProcess(): Promise<void> {
 }
 
 /**
+ * A helper's ended predecessor cannot spoil its answers, and a start slower than a budget cannot
+ * use that budget up. Run on stand-in helpers under Bun, since the real one is PowerShell: the
+ * module's `spawn.ts` is replaced before it loads, and the script refuses to ask if it was not.
+ */
+function testWindowsAskKeepsEachHelpersAnswersApartAndDoesNotChargeAStart(): void {
+  const standIn = join('test', 'support', 'windows-ask-stand-in.ts');
+  assert.ok(existsSync(standIn), 'the stand-in script exists');
+  const run = spawnSyncHidden(process.execPath, [standIn], { encoding: 'utf8', timeout: 60_000 });
+  assert.equal(run.status, 0, `the stand-in run ends cleanly: ${run.stderr}`);
+  const out = JSON.parse(run.stdout.trim().split('\n').at(-1) ?? '{}') as Record<string, unknown>;
+  assert.equal(out['warm'], 'answered warm', 'the first helper answers its first question');
+  assert.equal(out['tailFirstEnded'], true, 'a question that outlasts its budget ends a helper that has answered');
+  assert.equal(out['tailSecondStarted'], true, 'and the question behind it gets a new helper');
+  assert.equal(out['tailFirst'], 'PowerShell did not answer within 100ms');
+  assert.equal(
+    out['tailSecond'],
+    'answered right',
+    'the ended helper\'s unfinished answer does not swallow the new helper\'s',
+  );
+  // The first question's own budget runs out before the helper has started, and that one is
+  // refused. The helper is kept, so every question after it is answered.
+  assert.deepEqual(
+    out['slowStart'],
+    [
+      'PowerShell did not answer within 300ms',
+      ...Array.from({ length: 4 }, () => 'answered ready'),
+    ],
+    'a helper still starting answers the questions after the one that outlasted its budget',
+  );
+  assert.equal(out['slowStartHelpers'], 1, 'and is not ended and replaced for them');
+  assert.equal(out['quiet'], 'PowerShell did not answer within 100ms');
+  assert.equal(out['quietEnded'], true, 'a helper that has answered and then goes quiet is still ended');
+  assert.equal(out['quietNext'], 'answered back', 'and replaced');
+  assert.equal(out['quietHelpers'], 2);
+}
+
+/**
  * The sentence about which calls need a projectPath is generated, and names every call that does
  * not take one: a tool that declares none, and an op whose tool's `projectPath` belongs to other
  * ops.
@@ -85216,6 +85253,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheProjectPathSentenceNamesEveryCallThatTakesNone,
   testAListingFailureSaysWhichFailureItWas,
   testThePowerShellHelperGoesWithItsProcess,
+  testWindowsAskKeepsEachHelpersAnswersApartAndDoesNotChargeAStart,
   testEveryArgumentInTheReferenceIsDescribed,
   testTheHeadlessListNamesEveryHeadlessTool,
   testTheReferencePrintsEveryShapeOfType,
