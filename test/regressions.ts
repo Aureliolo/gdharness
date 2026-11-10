@@ -72552,7 +72552,8 @@ const connectionLines = (file: string): string[] =>
  * with none are untouched.
  */
 async function testAWriteKeepsConnectionsWhoseSignalOrNodeIsMissing(): Promise<void> {
-  const header = '[gd_scene format=3]\n\n[node name="Root" type="Node"]\n\n[node name="B" type="Button" parent="."]\n\n';
+  const header =
+    '[gd_scene format=3]\n\n[node name="Root" type="Node"]\n\n[node name="B" type="Button" parent="."]\n\n';
   const lines = {
     signal: '[connection signal="no_such_signal" from="B" to="." method="on_b"]',
     source: '[connection signal="pressed" from="Ghost" to="." method="on_b"]',
@@ -72684,7 +72685,11 @@ async function testAWriteJudgesAFileReferenceAsTheEngineLoadsIt(): Promise<void>
             properties: { position: [1, 2] },
           }),
         ) ?? '';
-      assert.match(refused, /^Nothing was written: res:\/\/levels\/lost\.tscn names nowhere\.gd, which is not there/, refused);
+      assert.match(
+        refused,
+        /^Nothing was written: res:\/\/levels\/lost\.tscn names nowhere\.gd, which is not there/,
+        refused,
+      );
       assert.equal(fileOf('levels/lost.tscn'), before);
     },
   );
@@ -72719,7 +72724,11 @@ async function testABinarySceneNamingAGoneFileIsRefusedAWrite(): Promise<void> {
             properties: { position: [1, 2] },
           }),
         ) ?? '';
-      assert.match(refused, /^Nothing was written: res:\/\/bin\.scn names res:\/\/dep\.tres, which is not there/, refused);
+      assert.match(
+        refused,
+        /^Nothing was written: res:\/\/bin\.scn names res:\/\/dep\.tres, which is not there/,
+        refused,
+      );
       assert.ok(readFileSync(join(project, 'bin.scn')).equals(before), 'and the file is as it was');
     },
   );
@@ -72729,15 +72738,20 @@ async function testABinarySceneNamingAGoneFileIsRefusedAWrite(): Promise<void> {
  * Runs [script], a SceneTree script, in a project holding the editor addon and [files], and answers
  * the JSON it prints after RESULT.
  */
-function runASceneProbe(label: string, files: Record<string, string>, script: string): Record<string, unknown> {
+function runASceneProbe(label: string, files: Record<string, string>, script: string): unknown {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
     throw new Error(`${label}: GODOT_PATH names no existing file.`);
   }
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-scene-probe-'));
   try {
-    cpSync('src/godot/addons/gdharness_editor', join(project, 'addons', 'gdharness_editor'), { recursive: true });
-    writeFileSync(join(project, 'project.godot'), 'config_version=5\n\n[application]\n\nconfig/name="SceneProbe"\n');
+    cpSync('src/godot/addons/gdharness_editor', join(project, 'addons', 'gdharness_editor'), {
+      recursive: true,
+    });
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[application]\n\nconfig/name="SceneProbe"\n',
+    );
     writeFileSync(join(project, 'probe.gd'), script);
     for (const [file, content] of Object.entries(files)) {
       writeFileSync(join(project, file), content);
@@ -72748,7 +72762,8 @@ function runASceneProbe(label: string, files: Record<string, string>, script: st
     });
     const printed = /^RESULT (.+)$/m.exec(run.stdout)?.[1];
     assert.ok(printed, `${label}: the probe printed no result:\n${run.stdout}\n${run.stderr}`);
-    return JSON.parse(printed) as Record<string, unknown>;
+    const parsed: unknown = JSON.parse(printed);
+    return parsed;
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -72787,15 +72802,14 @@ function testAWriteRefusesAFileChangedSinceItWasRead(): void {
       '',
     ].join('\n'),
   );
-  assert.deepEqual(result['opened'], {}, JSON.stringify(result));
-  const answer = result['answer'] as Record<string, unknown>;
-  assert.equal(answer['ok'], false, JSON.stringify(result));
+  assert.deepEqual(get(result, 'opened'), {}, JSON.stringify(result));
+  assert.equal(get(result, 'answer', 'ok'), false, JSON.stringify(result));
   assert.match(
-    text(answer['error']),
+    text(get(result, 'answer', 'error')),
     /^Nothing was written: res:\/\/late\.tscn changed on disk after it was read/,
     JSON.stringify(result),
   );
-  const after = text(result['after']);
+  const after = text(get(result, 'after'));
   assert.ok(after.includes('name="Late"'), `their change is still in the file:\n${after}`);
   assert.ok(!after.includes('position = Vector2(7, 8)'), `and ours is not written:\n${after}`);
 }
@@ -72835,10 +72849,18 @@ function testTheCachedSceneHoldsTheUniqueIdsTheFileKeeps(): void {
       '',
     ].join('\n'),
   );
-  assert.deepEqual([result['opened'], result['answer']], [{}, {}], JSON.stringify(result));
-  assert.deepEqual(result['file'], [1111, 2222], `the file keeps the id of the node it replaced: ${JSON.stringify(result)}`);
-  assert.deepEqual(result['cached'], result['file'], `and the cached copy holds the same: ${JSON.stringify(result)}`);
-  assert.equal(result['same'], true, 'in the object that was held');
+  assert.deepEqual([get(result, 'opened'), get(result, 'answer')], [{}, {}], JSON.stringify(result));
+  assert.deepEqual(
+    get(result, 'file'),
+    [1111, 2222],
+    `the file keeps the id of the node it replaced: ${JSON.stringify(result)}`,
+  );
+  assert.deepEqual(
+    get(result, 'cached'),
+    get(result, 'file'),
+    `and the cached copy holds the same: ${JSON.stringify(result)}`,
+  );
+  assert.equal(get(result, 'same'), true, 'in the object that was held');
 }
 
 /**
