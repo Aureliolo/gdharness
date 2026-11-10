@@ -303,6 +303,7 @@ import {
   writeEditorRunNote,
   writeLatestRun,
 } from './run-record.js';
+import { currentRunner, runLine } from './runner.js';
 import {
   ANNOUNCE_BUDGET_MS,
   announcedSince,
@@ -359,7 +360,6 @@ import type {
 } from './server-types.js';
 import {
   DEBUG_MODE,
-  gdharnessCommand,
   runtimeAddonUnknown,
   runtimeMismatch,
   SERVER_VERSION,
@@ -5043,7 +5043,7 @@ class GodotServer {
             `The project's gdharness addons are ${moved}, older than this ${SERVER_VERSION} server. ` +
             'Restarting the editor would load that older addon code again, and reconnecting would start ' +
             'this same server version again, so neither brings the two into step. Tell the ' +
-            `user, and offer to run  ${gdharnessCommand(SERVER_VERSION, this.ownProject === null ? 'upgrade' : `upgrade "${this.ownProject}"`)}  ` +
+            `user, and offer to run  ${runLine(currentRunner(), SERVER_VERSION, this.ownProject === null ? 'upgrade' : `upgrade "${this.ownProject}"`)}  ` +
             "in a shell, which replaces the addons with this server's. Ask first, since it changes " +
             'files in their project. editor_launch restart then loads them.',
         },
@@ -11060,7 +11060,7 @@ class GodotServer {
     }
     if (!hasSuitesScene(projectPath)) {
       return refused(`The project has no ${SUITES_SCENE}, which the tests addon of this release ships.`, [
-        `Run  ${gdharnessCommand(SERVER_VERSION, `upgrade "${projectPath}"`)}  in a shell, which brings the addons into step with this server`,
+        `Run  ${runLine(currentRunner(), SERVER_VERSION, `upgrade "${projectPath}"`)}  in a shell, which brings the addons into step with this server`,
       ]);
     }
     const unusable = gdUnit4Unusable(projectPath);

@@ -371,6 +371,7 @@ import {
   writeLatestRun,
   writeRunRecord,
 } from '../src/run-record.js';
+import { currentRunner, runLine } from '../src/runner.js';
 import {
   ANNOUNCE_BUDGET_MS,
   announcedSince,
@@ -6159,7 +6160,7 @@ async function testAProjectUpgradedUnderTheServerIsSaid(): Promise<void> {
     assert.ok(
       said.includes(
         JSON.stringify(
-          `offer to run  npx -y gdharness@${SERVER_VERSION} upgrade "${project}"  in a shell`,
+          `offer to run  ${runLine(currentRunner(), SERVER_VERSION, `upgrade "${project}"`)}  in a shell`,
         ).slice(1, -1),
       ),
       `naming the remedy that works, as the command to type: ${said}`,
@@ -6169,6 +6170,11 @@ async function testAProjectUpgradedUnderTheServerIsSaid(): Promise<void> {
     await behind.stop();
     sweep(project);
   }
+}
+
+/** The command a runner is typed as before `gdharness@`, which is the one running this server. */
+function runnerPrefix(): string {
+  return runLine(currentRunner(), '0', '').split(' gdharness@')[0] ?? '';
 }
 
 /**
@@ -6182,9 +6188,15 @@ function testAStaleNoteKnowsWhatARestartLoads(): void {
   const onDiskOld = addonMismatch('1.1.0', '1.1.5', 'old-digest', 'new-digest', 'old-digest');
   assert.ok(
     (onDiskOld ?? '').includes(
-      'run  npx -y gdharness@1.1.5 upgrade  in a shell in the project directory, which installs the 1.1.5 addons',
+      `run  ${runLine(currentRunner(), '1.1.5', 'upgrade')}  in a shell in the project directory, which installs the 1.1.5 addons`,
     ),
     String(onDiskOld),
+  );
+  // Whoever runs the server is the one told how to run it, so a Bun user is never sent to npx.
+  assert.equal(
+    (onDiskOld ?? '').includes('npx'),
+    currentRunner() === 'npx',
+    `the command names the runner running the server: ${String(onDiskOld)}`,
   );
   const onDiskNew = addonMismatch('1.1.0', '1.1.5', 'old-digest', 'new-digest', 'new-digest');
   assert.match(onDiskNew ?? '', /Restart it with editor_launch restart/, String(onDiskNew));
@@ -8548,7 +8560,7 @@ function testEditorOpenOptionsRefuseEachMisuse(): void {
  */
 async function testAnEditorOfAnotherReleaseIsAskedNothing(): Promise<void> {
   const version = SERVER_VERSION.replaceAll('.', '\\.');
-  const upgrade = `npx -y gdharness@${SERVER_VERSION} upgrade`;
+  const upgrade = runLine(currentRunner(), SERVER_VERSION, 'upgrade');
   await anAddonLackingAnOp(
     { addon_version: '1.0.0', addon_digest: 'another' },
     async (read, _, call, invoked, server) => {
@@ -9882,7 +9894,7 @@ async function testANoEditorRefusalSaysWhetherOneCanConnect(): Promise<void> {
         // went looking for one called setup.
         assert.ok(
           create.includes(
-            `No gdharness tool installs the addon: run  npx -y gdharness@${SERVER_VERSION} setup "${projectPath}" --no-connect  in a shell`,
+            `No gdharness tool installs the addon: run  ${runLine(currentRunner(), SERVER_VERSION, `setup "${projectPath}" --no-connect`)}  in a shell`,
           ),
           create,
         );
@@ -10086,7 +10098,9 @@ async function testAnOpenRefusesAnotherReleasesAddon(): Promise<void> {
           older,
         );
         assert.ok(
-          older.includes(`Run  npx -y gdharness@${SERVER_VERSION} upgrade "${projectPath}"  in a shell`),
+          older.includes(
+            `Run  ${runLine(currentRunner(), SERVER_VERSION, `upgrade "${projectPath}"`)}  in a shell`,
+          ),
           older,
         );
 
@@ -10215,7 +10229,7 @@ async function testEditorStatusOnAProjectWithNoAddonIsFinal(): Promise<void> {
     );
     assert.match(
       String(asArray(get(bare, 'editor', 'editorCannotConnect', 'remedies'))[0]),
-      /^No gdharness tool installs the addon: run {2}npx -y gdharness@/,
+      new RegExp(`^No gdharness tool installs the addon: run {2}${runnerPrefix()} gdharness@`),
       JSON.stringify(bare),
     );
 
@@ -18913,7 +18927,7 @@ function testAGameOnAnotherRuntimeAddonSaysSo(): void {
   );
   assert.ok(
     older.includes(
-      `run  npx -y gdharness@${SERVER_VERSION} upgrade "${where}"  in a shell, which installs the ${SERVER_VERSION} addons`,
+      `run  ${runLine(currentRunner(), SERVER_VERSION, `upgrade "${where}"`)}  in a shell, which installs the ${SERVER_VERSION} addons`,
     ),
     `a project holding the old addon is told to upgrade, by its own path: ${older}`,
   );
@@ -18930,7 +18944,7 @@ function testAGameOnAnotherRuntimeAddonSaysSo(): void {
     /is running a runtime addon with no version marker, while this server ships /,
     unmarked,
   );
-  assert.match(unmarked, /npx -y gdharness@\S+ upgrade "/, unmarked);
+  assert.match(unmarked, new RegExp(`${runnerPrefix()} gdharness@\\S+ upgrade "`), unmarked);
 
   const rebuilt = note({ version: SERVER_VERSION, digest: 'another build' }, shipped) ?? '';
   assert.match(
@@ -24709,7 +24723,7 @@ async function testAnEditorOnTheShippedCodeIsNotCalledStale(): Promise<void> {
   const oldOnDisk = await statusFor('0'.repeat(64), '0'.repeat(64));
   assert.match(
     text(get(oldOnDisk, 'editor', 'staleNote')),
-    /npx -y gdharness@\S+ upgrade {2}in a shell in the project directory/,
+    new RegExp(`${runnerPrefix()} gdharness@\\S+ upgrade {2}in a shell in the project directory`),
     `old addons on disk are named as what a restart would load: ${JSON.stringify(oldOnDisk)}`,
   );
   const newOnDisk = await statusFor('0'.repeat(64), shipped);
@@ -40373,7 +40387,7 @@ async function testAStartRefusesAnotherBuildOfItsRuntimeAddon(): Promise<void> {
       behind,
     );
     const upgraded = new RegExp(
-      `Run {2}npx -y gdharness@${SERVER_VERSION.replaceAll('.', '\\.')} upgrade "([^"]+)" {2}in a shell`,
+      `Run {2}${runnerPrefix()} gdharness@${SERVER_VERSION.replaceAll('.', '\\.')} upgrade "([^"]+)" {2}in a shell`,
     ).exec(behind);
     assert.ok(upgraded, `and names the upgrade, since the project's own addon is the other build: ${behind}`);
     assert.equal(realpathSync(upgraded[1] ?? ''), realpathSync(project), `of this project: ${behind}`);

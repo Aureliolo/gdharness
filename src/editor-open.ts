@@ -19,8 +19,9 @@ import { launchOutsideTheTree } from './outside.js';
 import { freePort, portFromEnvOrNull } from './ports.js';
 import { editorsOfProjectIn, processTree, startTimesOf } from './process-children.js';
 import { type RestartNote, restartOwed, restartSettled } from './restart-note.js';
+import { currentRunner, runLine } from './runner.js';
 import { runtimeDirectory } from './runtime-client.js';
-import { gdharnessCommand, SERVER_VERSION } from './server-version.js';
+import { SERVER_VERSION } from './server-version.js';
 import {
   inspectProject,
   installedAddonVersion,
@@ -73,7 +74,7 @@ export function editorAddonMissing(projectPath: string): { why: string; remedies
           'Or enable it under Project Settings, Plugins, in an editor opened by hand',
         ]
       : [
-          `No gdharness tool installs the addon: run  ${gdharnessCommand(SERVER_VERSION, `setup "${projectPath}" --no-connect`)}  in a shell, which installs and enables the addons and writes no harness configuration`,
+          `No gdharness tool installs the addon: run  ${runLine(currentRunner(), SERVER_VERSION, `setup "${projectPath}" --no-connect`)}  in a shell, which installs and enables the addons and writes no harness configuration`,
         ],
   };
 }
@@ -128,7 +129,7 @@ function addonOfAnotherRelease(
       version !== null && isNewer(version, SERVER_VERSION)
         ? [`This server is the older half: reconnect it in your harness so it spawns ${version}`]
         : [
-            `Run  ${gdharnessCommand(SERVER_VERSION, `upgrade "${projectPath}"`)}  in a shell, which installs this server's addons, then ${which === 'editor' ? 'open' : 'start'} again`,
+            `Run  ${runLine(currentRunner(), SERVER_VERSION, `upgrade "${projectPath}"`)}  in a shell, which installs this server's addons, then ${which === 'editor' ? 'open' : 'start'} again`,
           ],
   };
 }
