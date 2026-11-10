@@ -52356,6 +52356,31 @@ async function testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded(): Promis
 }
 
 /**
+ * A restart between two readings leaves the work done before it out of the new count. The first
+ * stretch after it counts by the clock, so a second of work in the old count is not credited to a
+ * tenth of a second in the new one.
+ */
+function testARestartedCountDoesNotTakeWorkFromBeforeTheRestart(): void {
+  const pid = 7;
+  const sample = (at: number, machine: number, processor: number): Sample => ({
+    at,
+    machine,
+    processors: new Map([[pid, processor]]),
+  });
+  const spent = new Spent(0, sample(0, 0, 0), pid, 4);
+  spent.counted(sample(1, 1.1, 1), pid);
+  spent.restart(1.9);
+  spent.counted(sample(2, 2.2, 2), pid);
+  assert.equal(spent.byWork, 0);
+  assert.ok(Math.abs(spent.byClock - 0.1) < 1e-9, String(spent.byClock));
+  // The readings after that are compared with each other again.
+  spent.counted(sample(12, 2.2 + 10 * 4 * 0.5, 2), pid);
+  assert.ok(Math.abs(spent.byClock - 0.1) < 1e-9, `a stuck engine in a crowded machine gains nothing: ${spent.byClock}`);
+  spent.counted(sample(22, 2.2 + 10 * 4 * 0.5 + 10 * 4 * 0.5 + 2.5, 4.5), pid);
+  assert.equal(spent.byWork, 2.5, 'and a crowded stretch counts the engine own work');
+}
+
+/**
  * A process started by an engine on a slot runs one engine on that slot, named in GODOT_ENGINE_HELD,
  * only while the slot's holder is the nearest process above it running another executable. A game
  * an editor plays inherits the editor's environment and runs the editor's executable, so it takes a
@@ -82434,6 +82459,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testGatesInTheQueueKeepTheirSlots,
   testAnEngineOnASlotLendsItToWhatItStarts,
   testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded,
+  testARestartedCountDoesNotTakeWorkFromBeforeTheRestart,
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testASuiteDeclarationCanNameAClassConstant,
   testAHiddenEditorStartsOnAnEmptyScriptReference,
