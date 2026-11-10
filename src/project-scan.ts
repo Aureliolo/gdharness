@@ -17,6 +17,11 @@ function skipped(name: string): boolean {
   return name.startsWith('.') || SKIPPED.has(name);
 }
 
+/** The extension of a file name without its dot, lower case, empty for a name with none such as `gd`. */
+function extensionOf(name: string): string {
+  return extname(name).slice(1).toLowerCase();
+}
+
 /** Written into each addon gdharness installs, so it can be told from one the project wrote. */
 export const VERSION_MARKER = '.gdharness-version';
 
@@ -107,7 +112,7 @@ export function projectStructure(projectPath: string): ProjectStructure {
       if (entry.isDirectory()) {
         visit(join(directory, entry.name));
       } else if (entry.isFile()) {
-        const extension = entry.name.split('.').pop()?.toLowerCase() ?? '';
+        const extension = extensionOf(entry.name);
         if (SIDECAR_EXTENSIONS.has(extension)) {
           continue;
         }
@@ -248,7 +253,7 @@ export function scriptsWithoutUid(projectPath: string): string[] {
       if (!entry.isFile()) {
         continue;
       }
-      const extension = entry.name.split('.').pop()?.toLowerCase() ?? '';
+      const extension = extensionOf(entry.name);
       if (CARRIES_A_UID.has(extension) && !existsSync(join(directory, `${entry.name}.uid`))) {
         found.push(spelled);
       }
@@ -418,7 +423,7 @@ export function projectTexts(projectPath: string): ProjectText[] {
         visit(absolute, `${spelled}/`);
         continue;
       }
-      const extension = entry.name.includes('.') ? (entry.name.split('.').pop()?.toLowerCase() ?? '') : '';
+      const extension = extensionOf(entry.name);
       if (!entry.isFile() || BINARY_EXTENSIONS.has(extension)) {
         continue;
       }
@@ -454,7 +459,7 @@ export function ignoredTexts(projectPath: string): ProjectText[] {
         visit(absolute, `${spelled}/`, under);
         continue;
       }
-      const extension = entry.name.includes('.') ? (entry.name.split('.').pop()?.toLowerCase() ?? '') : '';
+      const extension = extensionOf(entry.name);
       if (!under || !entry.isFile() || BINARY_EXTENSIONS.has(extension) || entry.name === '.gdignore') {
         continue;
       }
@@ -511,8 +516,22 @@ function compiledQuery(query: string, caseSensitive: boolean): RegExp {
   }
 }
 
+/**
+ * [param place] below [param projectPath] with forward slashes. Taken from the two paths rather
+ * than by cutting a length off the front, so a project path written with a trailing separator,
+ * in the other slash or with `..` in it names the same files.
+ */
+function resPathBelow(projectPath: string, place: string): string {
+  return relative(projectPath, place).split(sep).join('/');
+}
+
 /** Where the query occurs in the project's text files, as res:// paths with line numbers. */
 export function searchProject(projectPath: string, options: SearchOptions): SearchResult {
+  if (options.query === '') {
+    throw new Error(
+      'The query is empty, and an empty query matches every line of every file. Give the text to find.',
+    );
+  }
   const extensions =
     options.fileTypes === undefined
       ? null
@@ -535,7 +554,7 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
   const met = new Set<string>();
 
   const searchFile = (entryPath: string, name: string): void => {
-    const extension = name.includes('.') ? (name.split('.').pop()?.toLowerCase() ?? '') : '';
+    const extension = extensionOf(name);
     if (extension !== '') {
       met.add(extension);
     }
@@ -579,18 +598,19 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
       result.summary.files_with_matches += 1;
     }
     if (matches.length > 0) {
-      const relativePath = entryPath.slice(projectPath.length + 1).replace(/\\/g, '/');
-      result.results.push({ file: `res://${relativePath}`, matches });
+      result.results.push({ file: `res://${resPathBelow(projectPath, entryPath)}`, matches });
     }
   };
   const visit = (directory: string, named = false): void => {
     if (!named && steppedOver(directory)) {
       if (gdignored(directory)) {
-        notSearched.push(`res://${directory.slice(projectPath.length + 1).replace(/\\/g, '/')}/`);
+        notSearched.push(`res://${resPathBelow(projectPath, directory)}/`);
       }
       return;
     }
-    for (const entry of entriesOf(directory)) {
+    // By name, so the matches a search cut at its limit shows are the same on every file system
+    // rather than whichever the directory lists first.
+    for (const entry of entriesOf(directory).toSorted((a, b) => (a.name < b.name ? -1 : 1))) {
       if (skipped(entry.name)) {
         continue;
       }

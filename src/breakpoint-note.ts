@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import type { HeldBreakpoint } from './dap_client.js';
 import { errorMessage } from './errors.js';
-import { realAsFarAsItExists } from './paths.js';
+import { realAsFarAsItExists, relativeWithin } from './paths.js';
 import { isRecord } from './records.js';
 import { writeWhole } from './whole-file.js';
 
@@ -104,6 +104,6 @@ export function readBreakpointNote(projectPath: string): HeldBreakpoint[] {
 }
 
 function withinProject(projectPath: string, scriptPath: string): boolean {
-  const rel = relative(projectPath, scriptPath);
-  return rel !== '' && !rel.startsWith('..') && !isAbsolute(rel);
+  const rel = relativeWithin(projectPath, scriptPath);
+  return rel !== null && rel !== '';
 }

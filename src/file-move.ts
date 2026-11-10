@@ -21,8 +21,9 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, extname, join, relative } from 'node:path';
+import { basename, dirname, extname, join } from 'node:path';
 import { bytesOf, entriesOf } from './listed-reads.js';
+import { relativeWithin } from './paths.js';
 import { ignoredTexts, projectTexts, VERSION_MARKER } from './project-scan.js';
 import {
   ClassGraph,
@@ -174,14 +175,11 @@ function binaryResources(projectPath: string): string[] {
  * tell the two apart, and the rename reads as a move to where the file already is.
  */
 function targetPathOf(projectPath: string, absolute: string): string | null {
-  const inside = relative(
+  const inside = relativeWithin(
     onDiskSpelling(projectPath),
     join(onDiskSpelling(dirname(absolute)), basename(absolute)),
   );
-  if (inside === '' || inside === '..' || /^\.\.[\\/]/.test(inside) || /^[A-Za-z]:/.test(inside)) {
-    return null;
-  }
-  return `res://${inside.replace(/\\/g, '/')}`;
+  return inside === null || inside === '' ? null : `res://${inside}`;
 }
 
 export function planFileMove(projectPath: string, absoluteFrom: string, absoluteTo: string): MoveOutcome {
@@ -414,13 +412,20 @@ export function applyFileMove(outcome: Extract<MoveOutcome, { ok: true }>): void
   }
   const undo: (() => void)[] = [];
   const rename = (source: string, target: string): void => {
-    const created = mkdirSync(dirname(target), { recursive: true });
-    if (created !== undefined) {
+    // Found by walking up from the target rather than from what mkdirSync answers, which Bun on
+    // Windows spells with a `\\?\` prefix that no path built from the target compares equal to.
+    let created: string | null = null;
+    for (let at = dirname(target); !existsSync(at); at = dirname(at)) {
+      created = at;
+    }
+    mkdirSync(dirname(target), { recursive: true });
+    if (created !== null) {
+      const top = created;
       // Pushed first, so it runs after the rename is put back and finds the directories empty.
       undo.push(() => {
-        for (let at = dirname(target); !relative(created, at).startsWith('..'); at = dirname(at)) {
+        for (let at = dirname(target); ; at = dirname(at)) {
           rmdirSync(at);
-          if (relative(created, at) === '') break;
+          if (at === top) break;
         }
       });
     }

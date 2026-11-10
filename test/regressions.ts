@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import { ChildProcess as UnstartedProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
@@ -25,6 +26,8 @@ import {
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { PassThrough, Readable } from 'node:stream';
+import { text as pipedText } from 'node:stream/consumers';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
@@ -134,6 +137,7 @@ import {
   KEPT_RUN_DIRECTORIES,
   macMemoryLevel,
   memoryRoomOf,
+  resPathOf,
   roomFor,
   sweepRunDirectories,
   watchedEngine,
@@ -204,7 +208,7 @@ import {
   Spent,
   STARVED,
 } from '../src/engine-spent.js';
-import { errorCode, errorMessage, Refusal } from '../src/errors.js';
+import { errorCode, errorMessage, Refusal, toError } from '../src/errors.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { FrameReader, OversizedStreamError, frame as wireFrame } from '../src/framing.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
@@ -302,11 +306,13 @@ import {
   removeLeftRecords,
 } from '../src/lsp-bridge.js';
 import { nearest as nearestNames, withNearestFiles } from '../src/nearest.js';
+import { readLaunched, receivedSpec, type SentSpec, sendSpec, withChanges } from '../src/outside.js';
 import {
   exportedBuild,
   isSameDirectory,
   isWithinRoot,
   realAsFarAsItExists,
+  relativeWithin,
   resolveWithinProject,
 } from '../src/paths.js';
 import { keepPipelineCache, seedPipelineCache } from '../src/pipeline-cache.js';
@@ -314,7 +320,6 @@ import { acceptsConnections, notListeningNote } from '../src/port-probe.js';
 import { freePort } from '../src/ports.js';
 import {
   ancestorsIn,
-  childrenOf,
   descendantsIn,
   editorsOfProjectIn,
   linuxStartEarliest,
@@ -334,6 +339,7 @@ import {
   type SearchOptions,
   type SearchResult,
   SHOWN_OF_A_LINE,
+  scriptsWithoutUid,
   searchProject,
   VERSION_MARKER,
 } from '../src/project-scan.js';
@@ -546,10 +552,12 @@ import {
   type Unit,
   unitsOf,
   windowedSaid,
+  writeJson,
 } from '../src/suite-plan.js';
 import {
   acrossSaid,
   engineSaid,
+  importEnd,
   importFault,
   importNeeded,
   MemoryGate,
@@ -6233,7 +6241,16 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
     servers.push(started);
     return started;
   };
-  const free = await reservePort();
+  // Held until the server meant for it starts. The two servers before it take whichever port the
+  // kernel offers, and the kernel offers a port this process reserved and let go.
+  const keptFree = createServer();
+  const free = await listenOnAReservedPort(keptFree);
+  const letGo = (listener: Server): Promise<void> =>
+    new Promise<void>((settle) => {
+      listener.close(() => {
+        settle();
+      });
+    });
   try {
     writeFileSync(
       join(project, 'project.godot'),
@@ -6294,7 +6311,9 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
     assert.equal(get(other, 'bridgeHandover'), undefined, JSON.stringify(other));
     assert.notEqual(get(other, 'port'), wanted, `it moved at once: ${JSON.stringify(other)}`);
     assert.match(text(get(other, 'portNote')), /was held by another process/, JSON.stringify(other));
+    assert.notEqual(get(other, 'port'), free, `the kept port was not offered: ${JSON.stringify(other)}`);
 
+    await letGo(keptFree);
     const settled = spawn(free);
     await settled.initialize('regression-test');
     const plain = get(
@@ -6323,11 +6342,10 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
     for (const started of servers) {
       await started.stop();
     }
-    await new Promise<void>((settle) => {
-      holder.close(() => {
-        settle();
-      });
-    });
+    await letGo(holder);
+    if (keptFree.listening) {
+      await letGo(keptFree);
+    }
     sweep(project);
   }
 }
@@ -8568,6 +8586,38 @@ async function testEditorOpenRefusesAnAddonThatCannotConnect(): Promise<void> {
   }
 }
 
+/** An open under way elsewhere, or an engine that will not start, is refused with the reason. */
+async function testEditorOpenRefusesAnOpenUnderWayAndAnEngineThatWillNotStart(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-open-'));
+  try {
+    installAddons(project);
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[editor_plugins]\n\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+    );
+    const options = { projectPath: project, start: { hidden: false, silent: true, until: null } };
+    noteRestartBegun({
+      projectPath: project,
+      editorPid: null,
+      ports: { lsp: 6005, dap: 6006 },
+      quitAt: new Date().toISOString(),
+      byPid: process.pid,
+    });
+    const underway = await openTheEditor(options, 'unused-engine', 'unused-holder');
+    assert.ok('refused' in underway, JSON.stringify(underway));
+    assert.match(
+      'refused' in underway ? underway.refused : '',
+      /A restart of this project's editor is under way/,
+    );
+    rmSync(restartNotePath(project), { force: true });
+    const unstarted = await openTheEditor(options, join(project, 'no-such-engine'), 'unused-holder');
+    assert.ok('refused' in unstarted, JSON.stringify(unstarted));
+    assert.match('refused' in unstarted ? unstarted.refused : '', /^Could not start the editor: .+/);
+  } finally {
+    sweep(project);
+  }
+}
+
 /** Each way `gdharness editor` can be misspelt is refused with a sentence naming the fault. */
 function testEditorOpenOptionsRefuseEachMisuse(): void {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-open-'));
@@ -10689,6 +10739,70 @@ function testAPipelineCacheIsCarriedToTheNextRun(): void {
 }
 
 /**
+ * One project is one kept cache however its folder is spelled, and a copy a keep left unfinished
+ * is swept once it is old, while one a keep is still building is left.
+ */
+function testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept(): void {
+  const scratch = mkdtempSync(join(tmpdir(), 'gdharness-pipelines-'));
+  try {
+    const home = join(scratch, 'home');
+    const project = join(scratch, 'my game');
+    const linked = join(scratch, 'linked');
+    const godot = join(scratch, 'godot.exe');
+    mkdirSync(project);
+    symlinkSync(project, linked, 'junction');
+    writeFileSync(godot, 'engine');
+    const where = join('Godot', 'app_userdata', 'Game', 'shader_cache');
+    const left = join(scratch, 'left', 'user');
+    mkdirSync(join(left, where), { recursive: true });
+    writeFileSync(join(left, where, 'pipelines.cache'), 'x'.repeat(50));
+    keepPipelineCache(left, project, godot, home);
+
+    const spellings = [
+      linked,
+      `${project}${sep}`,
+      join(project, '..', 'my game'),
+      ...(process.platform === 'win32' ? [project.toUpperCase(), project.replaceAll('\\', '/')] : []),
+    ];
+    for (const spelled of spellings) {
+      const user = join(scratch, 'seeded', 'user');
+      rmSync(join(scratch, 'seeded'), { recursive: true, force: true });
+      mkdirSync(user, { recursive: true });
+      seedPipelineCache(user, spelled, godot, home);
+      assert.equal(
+        existsSync(join(user, where, 'pipelines.cache'))
+          ? readFileSync(join(user, where, 'pipelines.cache'), 'utf8').length
+          : null,
+        50,
+        `a run given the project as ${spelled} is seeded`,
+      );
+    }
+
+    const kept = join(home, 'pipeline-caches');
+    const [key] = readdirSync(kept);
+    assert.ok(key !== undefined);
+    const stale = join(kept, `${key}.4242.1700000000000`);
+    const building = join(kept, `${key}.4243.1700000000001`);
+    for (const folder of [stale, building]) {
+      mkdirSync(join(folder, 'shader_cache'), { recursive: true });
+    }
+    const longAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    utimesSync(stale, longAgo, longAgo);
+    const more = join(scratch, 'more', 'user');
+    mkdirSync(join(more, where), { recursive: true });
+    writeFileSync(join(more, where, 'pipelines.cache'), 'x'.repeat(80));
+    keepPipelineCache(more, project, godot, home);
+    assert.deepEqual(
+      readdirSync(kept).toSorted(),
+      [key, basename(building)].toSorted(),
+      'the old unfinished copy is swept, the recent one and the kept cache stay',
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
  * A test run's engine starts with the pipeline cache the last run's engine left in its user://. A
  * stand-in shell writes a cache into the user folder its environment names, and the next run's
  * stand-in says whether it found one there before it started.
@@ -11419,6 +11533,94 @@ function testProjectPathsAreContained(): void {
 }
 
 /**
+ * A file of the project named through another spelling of its folder is a file of the project: a
+ * `\\?\` prefix, a link above the project, the other slash, the other letter case, a `..` step and
+ * a folder with a space. A neighbour with the same start is still outside.
+ */
+function testAFileInsideTheProjectIsContainedWhateverWayItsFolderIsSpelled(): void {
+  const holding = realpathSync(mkdtempSync(join(tmpdir(), 'gdharness-spelled-')));
+  try {
+    const real = join(holding, 'real');
+    const project = join(real, 'my game');
+    mkdirSync(join(project, 'scenes'), { recursive: true });
+    mkdirSync(`${project}-beside`, { recursive: true });
+    writeFileSync(join(project, 'scenes', 'main.tscn'), '');
+    const link = join(holding, 'link');
+    symlinkSync(real, link, 'junction');
+    const onWindows = process.platform === 'win32';
+    const spellings = [
+      join(link, 'my game', 'scenes', 'main.tscn'),
+      join(project, 'scenes', '..', 'scenes', 'main.tscn'),
+      ...(onWindows
+        ? [
+            `${project.replaceAll('\\', '/')}/scenes/main.tscn`,
+            `\\\\?\\${join(project, 'scenes', 'main.tscn')}`,
+            join(project, 'scenes', 'main.tscn').toUpperCase(),
+            join(project, 'scenes', 'main.tscn').toLowerCase(),
+          ]
+        : []),
+    ];
+    // The project itself given through the link, and as written.
+    for (const given of [project, join(link, 'my game')]) {
+      for (const spelled of spellings) {
+        const answer = resolveWithinProject(given, spelled);
+        assert.deepEqual(
+          // A Windows path keeps the case it was given in, so only the letters are compared loosely.
+          answer.ok ? answer.relativePath.toLowerCase() : answer.reason,
+          'scenes/main.tscn',
+          `${spelled} inside ${given}`,
+        );
+      }
+    }
+    const beside = resolveWithinProject(project, join(`${project}-beside`, 'main.tscn'));
+    assert.equal(beside.ok, false, 'a sibling folder sharing the start of the name is outside');
+    const above = resolveWithinProject(project, join(link, 'my game', '..', 'main.tscn'));
+    assert.equal(above.ok, false, 'a file one step above the project is outside');
+
+    // The one containment rule every caller shares: a folder that merely starts with two dots is
+    // inside, a step up, a sibling and another share or drive are outside.
+    const root = join(holding, 'my game');
+    assert.deepEqual(
+      [
+        relativeWithin(root, join(root, '..config', 'a.gd')),
+        relativeWithin(root, join(root, 'a', 'b.gd')),
+        relativeWithin(root, root),
+        relativeWithin(root, `${root}${sep}`),
+        relativeWithin(root, join(root, '..', 'a.gd')),
+        relativeWithin(root, `${root}-beside${sep}a.gd`),
+        ...(onWindows
+          ? [
+              relativeWithin(root, '\\\\server\\share\\a.gd'),
+              relativeWithin(root, 'D:\\a.gd'),
+              relativeWithin(root.toUpperCase(), join(root, 'x.gd').toLowerCase()),
+            ]
+          : []),
+      ],
+      ['..config/a.gd', 'a/b.gd', '', '', null, null, ...(onWindows ? [null, null, 'x.gd'] : [])],
+    );
+    assert.equal(
+      resourcePathOf(project, join(project, '..config', 'a.gd')),
+      'res://..config/a.gd',
+      'a project folder named with two leading dots is inside the project',
+    );
+    assert.equal(
+      resPathOf(join('..config', 'a.gd'), project, holding),
+      'res://..config/a.gd',
+      'a launch entry in a folder named with two leading dots is inside the project',
+    );
+    assert.throws(
+      () => resPathOf(join('..', 'a.gd'), project, holding),
+      EngineUsageError,
+      'and one a step up is not',
+    );
+    assert.equal(resourcePathOf(project, project), null, 'the project folder is no file of it');
+    assert.equal(resourcePathOf(project, `${project}-beside${sep}a.gd`), null, 'nor is a sibling');
+  } finally {
+    sweep(holding);
+  }
+}
+
+/**
  * The same, through the tools, because the check is only worth anything where it is called.
  *
  * Every argument below is documented as a path inside the project and is read as one: the
@@ -11704,7 +11906,7 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
       maxResults: 100,
     });
     assert.deepEqual(
-      found.results.map((entry) => entry.file).toSorted(),
+      found.results.map((entry) => entry.file),
       ['res://addons/auto_reload/theirs.gd', 'res://scripts/hero.gd'],
       'the search should read the project and nothing standing beside it',
     );
@@ -11820,7 +12022,7 @@ function testASearchReadsWhatItSaysItReads(): void {
 
     const everywhere = search('GameState');
     assert.deepEqual(
-      everywhere.results.map((entry) => entry.file).toSorted(),
+      everywhere.results.map((entry) => entry.file),
       ['res://Hero.cs', 'res://project.godot'],
       `every text file is read, and a binary one is not: ${JSON.stringify(everywhere)}`,
     );
@@ -11864,6 +12066,11 @@ function testASearchReadsWhatItSaysItReads(): void {
     writeFileSync(join(sandbox, 'zz_vendor', '.gdignore'), '');
     const cut = search('GameState', { maxResults: 1 });
     assert.equal(cut.summary.truncated, true, 'and one more than the limit is cut');
+    assert.deepEqual(
+      cut.results.map((entry) => entry.file),
+      ['res://Hero.cs'],
+      'a cut search shows the first file by name, whichever order the file system lists them in',
+    );
     // Cut in what it answers, not in what it counts or where it looked.
     assert.deepEqual(
       [
@@ -11978,6 +12185,83 @@ function testASearchReadsWhatItSaysItReads(): void {
       undefined,
       `a type that matched files is no note, found or not: ${JSON.stringify(matched)}`,
     );
+    // Names that order differently by letter case and by character code, which a Windows listing
+    // does and a Linux one does not.
+    writeFileSync(join(sandbox, 'alpha.txt'), 'cutword\n');
+    writeFileSync(join(sandbox, 'Zed.txt'), 'cutword\n');
+    assert.deepEqual(
+      search('cutword', { maxResults: 1 }).results.map((entry) => entry.file),
+      ['res://Zed.txt'],
+      'a cut search shows the same file on every file system',
+    );
+  } finally {
+    sweep(sandbox);
+  }
+}
+
+/**
+ * A project path spelled with a trailing separator, in the other slash or with a `..` in it names
+ * the same res:// files, a file named like an extension is no file of that kind, and a search
+ * needs something to look for.
+ */
+function testASearchNamesFilesWhateverWayTheProjectPathIsSpelled(): void {
+  const sandbox = mkdtempSync(join(tmpdir(), 'gdharness-spelled-'));
+  try {
+    const project = join(sandbox, 'my proj');
+    mkdirSync(join(project, 'scripts'), { recursive: true });
+    mkdirSync(join(project, 'kit'), { recursive: true });
+    writeFileSync(join(project, 'scripts', 'hero.gd'), '# findable\n');
+    writeFileSync(join(project, 'kit', '.gdignore'), '');
+    const options = { query: 'findable', regex: false, caseSensitive: false, maxResults: 100 };
+    const forward = project.replaceAll('\\', '/');
+    const spellings = [
+      project,
+      `${project}${sep}`,
+      `${forward}/`,
+      forward,
+      join(project, 'scripts', '..'),
+      join(project, 'scripts', '..') + sep,
+      project.toLowerCase() === project ? project.toUpperCase() : project.toLowerCase(),
+    ];
+    for (const spelled of spellings) {
+      if (!existsSync(spelled)) {
+        continue;
+      }
+      const found = searchProject(spelled, options);
+      assert.deepEqual(
+        [found.results.map((entry) => entry.file), found.not_searched],
+        [['res://scripts/hero.gd'], ['res://kit/']],
+        `a project spelled ${JSON.stringify(spelled)}`,
+      );
+      const within = searchProject(spelled, { ...options, within: join(project, 'scripts') });
+      assert.deepEqual(
+        within.results.map((entry) => entry.file),
+        ['res://scripts/hero.gd'],
+        `a place within a project spelled ${JSON.stringify(spelled)}`,
+      );
+    }
+
+    assert.throws(
+      () => searchProject(project, { ...options, query: '' }),
+      /empty query matches every line/u,
+      'an empty query is refused rather than matching every line',
+    );
+    assert.throws(
+      () => searchProject(project, { ...options, query: '', regex: true }),
+      /empty query matches every line/u,
+      'and so is an empty expression',
+    );
+
+    // Names that are an extension and nothing more, which are files of no kind.
+    for (const name of ['gd', 'shader', 'png', 'tscn']) {
+      writeFileSync(join(project, name), '');
+    }
+    assert.deepEqual(
+      projectStructure(project),
+      { scenes: 0, scripts: 1, assets: 0, other: 4 },
+      'a file named gd, shader, png or tscn counts as other',
+    );
+    assert.deepEqual(scriptsWithoutUid(project), ['scripts/hero.gd'], 'and wants no uid file');
   } finally {
     sweep(sandbox);
   }
@@ -15375,6 +15659,111 @@ async function testALaunchIsOutsideTheServersTree(): Promise<void> {
     await met.end();
     sweep(scratch);
   }
+}
+
+/**
+ * What the launcher is sent and what it answers are read strictly: a spec comes back as it was
+ * sent, a malformed one is refused whole, a variable is set or taken away by name, and the first
+ * line a launcher prints is its answer.
+ */
+async function testALauncherSpecIsReadBackAsSentAndAnAnswerByItsFirstLine(): Promise<void> {
+  const sent: SentSpec = {
+    command: 'godot',
+    args: ['--path', 'my game'],
+    envChanges: { KEPT: 'a', GONE: null },
+    run: {
+      transcript: 'out.log',
+      startedAt: 5,
+      projectPath: 'p',
+      servedBy: 'q',
+      profile: 'prof',
+      breakpoints: ['res://a.gd:3'],
+      debugged: false,
+      slot: { lock: 'l', from: 1, by: 'k' },
+    },
+    desktop: 'desk',
+    noActivate: true,
+  };
+  // Only the stdin of a child is written to, so an unstarted one with a pipe in its place will do.
+  const child = new UnstartedProcess();
+  const pipe = new PassThrough();
+  Object.defineProperty(child, 'stdin', { value: pipe });
+  sendSpec(child, sent);
+  const written = await pipedText(pipe);
+  const received = async (body: string): Promise<SentSpec> => {
+    const real = Object.getOwnPropertyDescriptor(process, 'stdin');
+    Object.defineProperty(process, 'stdin', { value: Readable.from([body]), configurable: true });
+    try {
+      return await receivedSpec();
+    } finally {
+      if (real !== undefined) {
+        Object.defineProperty(process, 'stdin', real);
+      }
+    }
+  };
+  assert.deepEqual(await received(written), sent, 'a spec comes back as it was sent');
+  assert.deepEqual(
+    await received(JSON.stringify({ command: 'x', args: [], envChanges: {} })),
+    { command: 'x', args: [], envChanges: {} },
+    'a spec with only the required parts has no others made up',
+  );
+  const base = { command: 'x', args: [], envChanges: {} };
+  for (const [name, spoiled] of [
+    ['no command', { ...base, command: undefined }],
+    ['a command that is a number', { ...base, command: 3 }],
+    ['an argument that is a number', { ...base, args: ['a', 4] }],
+    ['arguments that are a string', { ...base, args: 'a' }],
+    ['an environment change that is a number', { ...base, envChanges: { A: 1 } }],
+    ['an environment that is a list', { ...base, envChanges: [] }],
+    ['a run with no transcript', { ...base, run: { startedAt: 1, projectPath: 'p' } }],
+    ['a run started at a string', { ...base, run: { transcript: 't', startedAt: '1', projectPath: 'p' } }],
+    [
+      'a run with a half slot',
+      { ...base, run: { transcript: 't', startedAt: 1, projectPath: 'p', slot: { lock: 'l' } } },
+    ],
+    [
+      'breakpoints that are not text',
+      { ...base, run: { transcript: 't', startedAt: 1, projectPath: 'p', breakpoints: [1] } },
+    ],
+    ['a desktop that is a number', { ...base, desktop: 7 }],
+    ['a noActivate that is a string', { ...base, noActivate: 'yes' }],
+  ] as const) {
+    await assert.rejects(
+      received(JSON.stringify(spoiled)),
+      /is not a spec a server sends/u,
+      `${name} is refused`,
+    );
+  }
+  await assert.rejects(received('[]'), /is not a spec a server sends/u, 'a list is no spec');
+
+  const env = { KEPT: 'old', GONE: 'x', OTHER: 'y' };
+  assert.deepEqual(
+    withChanges(env, { KEPT: 'new', GONE: null, ADDED: 'z' }),
+    { KEPT: 'new', OTHER: 'y', ADDED: 'z' },
+    'a change sets or removes a variable and leaves the rest',
+  );
+  assert.deepEqual(
+    env,
+    { KEPT: 'old', GONE: 'x', OTHER: 'y' },
+    'and the environment it was given is not touched',
+  );
+  assert.deepEqual(withChanges(env, {}), env, 'no change is the same environment');
+
+  assert.deepEqual(readLaunched('pid 12\n'), { pid: 12 });
+  assert.deepEqual(
+    readLaunched('\n  \n  pid 7  \nmore\n'),
+    { pid: 7 },
+    'blank lines before the answer are skipped',
+  );
+  assert.deepEqual(readLaunched('error no such file\n'), { error: 'no such file' });
+  assert.deepEqual(readLaunched(''), { error: 'the launcher said nothing' });
+  assert.deepEqual(readLaunched('  \n'), { error: 'the launcher said nothing' });
+  assert.deepEqual(
+    readLaunched('warning: x\npid 9\n'),
+    { error: 'warning: x' },
+    'the first line is the answer, so a line before the pid is an error naming it',
+  );
+  assert.deepEqual(readLaunched('pid abc'), { error: 'pid abc' }, 'a pid that is no number is an error');
 }
 
 /**
@@ -46015,6 +46404,42 @@ function testACommandLineIsReadTheWayTheEngineReadsIt(): void {
     null,
     'a --path with nothing after it names nothing',
   );
+  // A scene given by a plain path after the directory is the engine's argument, not part of the
+  // directory, whether Windows quoted the directory or not.
+  assert.equal(
+    readCommandLine('godot.exe --path "C:\\my game" scenes/main.tscn').projectPath,
+    'C:\\my game',
+    'a quoted directory is the one word the quotes ended',
+  );
+  assert.equal(readCommandLine('godot.exe --path C:\\game main.tscn --verbose').projectPath, 'C:\\game');
+  assert.equal(
+    readCommandLine('godot.exe --path "C:\\my game" level_one').projectPath,
+    'C:\\my game',
+    'a word that names no file still ends a quoted directory',
+  );
+  assert.equal(
+    readCommandLine('/opt/godot/Godot --path /home/me/My Project main.tscn --verbose').projectPath,
+    '/home/me/My Project',
+    'an unquoted list still runs on across a space to the scene',
+  );
+  // A relative directory names no project, since the folder the process started in is not on the line.
+  for (const given of ['.', '..', 'game', 'my game', './game', '..\\game']) {
+    assert.equal(
+      readCommandLine(`godot -e --path ${given}`).projectPath,
+      null,
+      `${given} is relative to a folder the command line does not hold`,
+    );
+  }
+  assert.deepEqual(
+    editorsOfProjectIn(
+      parseProcessTable(
+        '100 1 godot -e --path .\n101 1 godot -e --path /srv/game\n102 1 godot -e --path "C:\\my game"',
+      ),
+      '/srv/game',
+    ),
+    [101],
+    'an editor started with a relative path is not taken for one of whatever folder this server is in',
+  );
 
   const table = parseProcessTable(
     [
@@ -46279,10 +46704,14 @@ async function testTheProcessTableAgreesWithWmi(): Promise<void> {
  * for the platform that forgets rather than the one that remembers.
  */
 async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
+  const descendantsNow = async (pid: number, since?: number): Promise<number[] | undefined> => {
+    const tree = await processTree();
+    return tree === undefined ? undefined : descendantsIn(tree, pid, since);
+  };
   const probe = spawnHidden(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
   try {
     assert.ok(typeof probe.pid === 'number');
-    const listed = await childrenOf(process.pid);
+    const listed = await descendantsNow(process.pid);
     assert.ok(
       listed !== undefined,
       `this platform has to list a process's children, and did not: ${whyTheProcessTreeFailed() ?? 'no reason recorded'}`,
@@ -46339,7 +46768,7 @@ async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
     child = Number(printed.trim());
     await met.meet(child);
     assert.ok(child > 0 && alive(child), 'the grandchild is there to be listed');
-    const alive_ = await childrenOf(parent.pid);
+    const alive_ = await descendantsNow(parent.pid);
     assert.deepEqual(alive_, [child], `listed under the living parent: ${JSON.stringify(alive_)}`);
     // Read while it lives, as a run's start is known after it ends: once gone, an orphan of an
     // earlier holder of its number is listed under it too unless held to when it began.
@@ -46351,7 +46780,7 @@ async function testChildrenAreListedWhileTheParentLives(): Promise<void> {
       'the parent should have ended',
     );
     assert.ok(alive(child), 'the orphan is still there');
-    const afterwards = await childrenOf(parent.pid, began);
+    const afterwards = await descendantsNow(parent.pid, began);
     assert.ok(afterwards !== undefined, 'the platform still answers about a number that is gone');
     if (process.platform === 'win32') {
       assert.deepEqual(
@@ -52000,6 +52429,18 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   const imported = (lines: readonly string[]): string =>
     ['Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org', ...lines].join('\n');
   assert.equal(importFault(readRun(imported(['[ 100% ] first_scan_filesystem']))), null, 'a clean import');
+  assert.equal(importEnd({ code: 0, signal: null, ended: null }), null, 'an import engine that exited 0');
+  assert.equal(
+    importEnd({ code: null, signal: 'SIGKILL', ended: null }),
+    'the engine was ended by SIGKILL',
+    'one ended by a signal has no exit code, and did not exit 0',
+  );
+  assert.equal(importEnd({ code: null, signal: null, ended: null }), 'the engine was ended by a signal');
+  assert.equal(importEnd({ code: 101, signal: null, ended: null }), `the engine exited ${exitNamed(101)}`);
+  assert.equal(
+    importEnd({ code: 0, signal: null, ended: 'it printed nothing for 300 s' }),
+    'it printed nothing for 300 s',
+  );
   assert.equal(
     importFault(readRun(imported(['WARNING: res://dot.svg: the image is larger than it can import']))),
     'it printed an engine warning, the first warning "res://dot.svg: the image is larger than it can import"',
@@ -52321,8 +52762,17 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   );
   assert.doesNotMatch(failing.shown.join('\n'), /unrelated|Godot Engine/, 'the failure, not the whole run');
 
+  // No suite opened, as an engine handed none prints: one that opened a suite it was not handed
+  // is a fault of its own.
   const nothing = judgeEngine(
-    readRun(cannedRun([], 'PASSED', 0)),
+    readRun(
+      [
+        'Godot Engine v4.7.2.stable.official - https://godotengine.org',
+        'Executed test suites: (0/0)',
+        'Executed test cases : (0/0)',
+        ' Exit code: 0',
+      ].join('\r\n'),
+    ),
     { suites: [], expected: { errors: {}, warnings: {} } },
     clean,
   );
@@ -52365,6 +52815,172 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
  * quit(5). A crash inside the engine's report on its call queue overflowing is named as the
  * overflow, from the frames of the build that has them or from the line only that report prints.
  */
+/**
+ * The judge names what went wrong where no reading of the handed suites reaches it: a suite the
+ * engine ran unasked, a row tried again, a case the engine ended in, a line of a size that stalled
+ * the reader, and a project error quoting the engine's leak report.
+ */
+function testAJudgedRunNamesWhatNoHandedSuiteShows(): void {
+  const clean = { code: 0, signal: null, ended: null };
+  const header = 'Godot Engine v4.7.2.stable.official - https://godotengine.org';
+  const handed = (cases: readonly string[], expected: Record<string, readonly string[]> = {}) => ({
+    suites: [{ path: S_TEST, cases }],
+    expected: { errors: { [S_TEST]: expected }, warnings: {} },
+  });
+
+  const other = 'res://tests/other_test.gd';
+  const closed = (verdict: string): string =>
+    `Statistics: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | ${verdict} 5ms`;
+  const unasked = [
+    header,
+    `Run Test Suite: ${S_TEST}`,
+    caseLine(S_TEST, 'test_a', 'STARTED'),
+    caseLine(S_TEST, 'test_a', 'PASSED', '5ms'),
+    closed('PASSED'),
+    `Run Test Suite: ${other}`,
+    caseLine(other, 'test_b', 'STARTED'),
+    caseLine(other, 'test_b', 'FAILED', '5ms'),
+    closed('FAILED'),
+    '',
+    'Executed test suites: (2/2)',
+    'Executed test cases : (2/2)',
+    ' Exit code: 100',
+  ].join('\r\n');
+  const ranUnasked = judgeEngine(readRun(unasked), handed(['test_a']), { ...clean, code: 100 });
+  assert.deepEqual(
+    ranUnasked.faults,
+    [`${other} ran here, which gdharness did not hand this engine, so its plan of the suites was wrong`],
+    'a suite nothing handed the engine fails the run it ran in',
+  );
+  assert.equal(ranUnasked.passed, false);
+  assert.deepEqual(ranUnasked.passedSuites, [S_TEST], 'and the suite that was handed still passed');
+
+  const row = 'test_p:0 (1)';
+  const retried = readRun(
+    cannedRun([
+      caseLine(S_TEST, row, 'STARTED'),
+      caseLine(S_TEST, row, 'FAILED (retry 1)', '3ms'),
+      caseLine(S_TEST, row, 'STARTED'),
+      caseLine(S_TEST, row, 'PASSED', '3ms'),
+    ]),
+  );
+  assert.deepEqual(
+    retried.suites.get(S_TEST)?.cases.map((ran) => [ran.row, ran.verdict]),
+    [
+      [0, 'FAILED'],
+      [0, 'PASSED'],
+    ],
+    'both tries of the row are read',
+  );
+  const dealtRows = [{ path: S_TEST, cases: ['test_p'], rows: { test_p: { only: [0] } } }];
+  assert.deepEqual(
+    rowsAcross([{ handed: dealtRows, printed: retried }]),
+    [],
+    'a row one engine tried twice ran in one engine',
+  );
+  assert.deepEqual(
+    rowsAcross([
+      { handed: dealtRows, printed: retried },
+      { handed: dealtRows, printed: retried },
+    ]).map((fault) => fault.fault),
+    [`${S_TEST} > test_p ran row 0 in more than one engine`],
+    'and a row two engines ran is still said',
+  );
+
+  const endedIn = (...printed: string[]): string =>
+    [header, `Run Test Suite: ${S_TEST}`, caseLine(S_TEST, 'test_a', 'STARTED'), ...printed].join('\r\n');
+  const killed = { code: null, signal: 'SIGSEGV', ended: null };
+  const ended = [
+    'the engine was ended by SIGSEGV',
+    'the run never printed its summary',
+    `${S_TEST} never finished`,
+  ];
+  assert.deepEqual(
+    judgeEngine(
+      readRun(endedIn('ERROR: the store is closed')),
+      handed(['test_a'], { test_a: ['the store is closed', 'said later'] }),
+      killed,
+    ).faults,
+    ended,
+    'a case the engine ended in printed what it declares, and owes nothing it had yet to print',
+  );
+  assert.deepEqual(
+    judgeEngine(readRun(endedIn('ERROR: nobody declared this')), handed(['test_a']), killed).faults,
+    [
+      ...ended,
+      `an engine error in ${S_TEST} > test_a: nobody declared this. If the suite prints it on purpose, list its text under "test_a" in the suite's GDHARNESS_EXPECTED_ERRORS`,
+    ],
+    'and an error it does not declare is still said',
+  );
+
+  const long = (line: string): { printed: ReturnType<typeof readRun>; ms: number } => {
+    const began = performance.now();
+    const printed = readRun(
+      cannedRun([caseLine(S_TEST, 'test_a', 'STARTED'), line, caseLine(S_TEST, 'test_a', 'PASSED', '5ms')]),
+    );
+    return { printed, ms: performance.now() - began };
+  };
+  // Seconds where each took the better part of a minute, and far inside them on any machine.
+  // Blanks with a letter after them: the pattern that stalled tried every blank as the text's end.
+  const spaced = `said${' '.repeat(200_000)}x`;
+  const blanks = long(`ERROR: ${spaced}   `);
+  assert.deepEqual(
+    blanks.printed.errors.map((error) => [error.text === spaced, error.text.length, error.during]),
+    [[true, spaced.length, 'test_a']],
+    'an error is read whole, without the blanks after it',
+  );
+  assert.ok(blanks.ms < 5000, `a line of 200,000 blanks is read in ${blanks.ms.toFixed(0)} ms`);
+  const warned = long(`WARNING: ${spaced}   `);
+  assert.deepEqual(
+    warned.printed.errors.map((error) => [error.text === spaced, error.warning]),
+    [[true, true]],
+    'and a warning as an error is',
+  );
+  assert.ok(warned.ms < 5000, `a warning of 200,000 blanks is read in ${warned.ms.toFixed(0)} ms`);
+  const paths = long(`${'res://a.gd > '.repeat(20_000)}x`);
+  assert.deepEqual(
+    paths.printed.suites.get(S_TEST)?.cases.map((ran) => ran.name),
+    ['test_a'],
+    'a line naming a script many times and closing on no verdict is no case',
+  );
+  assert.ok(paths.ms < 5000, `a line naming a script 20,000 times is read in ${paths.ms.toFixed(0)} ms`);
+  assert.deepEqual(
+    readRun(
+      cannedRun([
+        caseLine(S_TEST, 'test PASSED once', 'STARTED'),
+        `  ${S_TEST} > test PASSED once FAILED (retry 2) 1min 2s 3ms   `,
+      ]),
+    )
+      .suites.get(S_TEST)
+      ?.cases.map((ran) => [ran.name, ran.verdict, ran.seconds]),
+    [['test PASSED once', 'FAILED', 62.003]],
+    'a case line is read from its end, so a name holding a verdict is the name',
+  );
+
+  const quoting = 'the editor said: 2 resources still in use at exit';
+  const leak = 'ERROR: 2 resources still in use at exit (run with --verbose for details).';
+  const quoted = (after: readonly string[]): string =>
+    [
+      cannedRun([
+        caseLine(S_TEST, 'test_a', 'STARTED'),
+        `ERROR: ${quoting}`,
+        caseLine(S_TEST, 'test_a', 'PASSED', '5ms'),
+      ]),
+      ...after,
+    ].join('\r\n');
+  assert.deepEqual(
+    judgeEngine(readRun(quoted([])), handed(['test_a'], { test_a: [quoting] }), clean).faults,
+    [],
+    "a project's error quoting the engine's report is the error its case declares",
+  );
+  const leaked = judgeEngine(readRun(quoted([leak])), handed(['test_a'], { test_a: [quoting] }), clean);
+  assert.deepEqual(
+    leaked.faults.map((fault) => fault.slice(0, 60 + leak.length)),
+    [`the engine exited holding what it should have freed: ${leak}`.slice(0, 60 + leak.length)],
+    "and the engine's own line is still what it held",
+  );
+}
+
 function testACrashIsReadFromTheCrashHandlersReport(): void {
   const handed = {
     suites: [{ path: S_TEST, cases: ['test_a', 'test_b'] }],
@@ -52405,6 +53021,18 @@ function testACrashIsReadFromTheCrashHandlersReport(): void {
       `the engine crashed ${during}, its crash handler reporting signal 11, with 2.5 GB of memory free as it ended`,
     ),
     inTheReport.join('\n'),
+  );
+  // The report is the crash, whatever code reached the judge: one cut to its low byte can read 0.
+  const exited0 = { code: 0, signal: null, ended: null };
+  const reportedBesideZero = judgeEngine(readRun(ran(...report(official, queueFrames))), handed, exited0);
+  assert.ok(
+    reportedBesideZero.faults.includes(`the engine crashed ${during}, its crash handler reporting signal 11`),
+    reportedBesideZero.faults.join('\n'),
+  );
+  assert.deepEqual(
+    judgeCompile(readRun([COMPILED_SAID, ...report(official, queueFrames)].join('\r\n')), exited0),
+    ['the engine crashed, its crash handler reporting signal 11'],
+    'and a compile check that crashed after compiling is no clean one',
   );
   assert.ok(
     inTheReport.includes(`${overflow}, and the engine crashed reporting the overflow`),
@@ -55784,6 +56412,11 @@ function testTheTestCommandReadsItsOwnOptions(): void {
       [['--cores', '0'], /whole number above 0/],
       [['--bogus'], /Unknown option --bogus/],
       [['--engines'], /--engines needs a value/],
+      // An empty value read as the directory the command ran in, for a path that was a variable
+      // holding nothing.
+      [['--result', ''], /--result needs a value/],
+      [['--times', ''], /--times needs a value/],
+      [['--slots', ''], /--slots needs a value/],
       [['--engines', '0'], /whole number above 0/],
       [['--order', 'sideways'], /reversed or a whole number/],
       [['../elsewhere.gd'], /is not inside the project/],
@@ -55794,6 +56427,46 @@ function testTheTestCommandReadsItsOwnOptions(): void {
         String(args),
       );
     }
+    const outside = join(project, 'outside');
+    mkdirSync(outside);
+    const said = (args: readonly string[]): string => {
+      try {
+        testOptionsOf(args, outside);
+      } catch (error) {
+        return error instanceof EngineUsageError ? error.message : String(error);
+      }
+      return 'read';
+    };
+    assert.equal(
+      said([]),
+      `Not a Godot project: ${outside} holds no project.godot. Run from the project directory, or name it on the command line.`,
+    );
+    assert.equal(
+      said(['elsewhere', 'tests/a_test.gd']),
+      `Not a Godot project: neither ${join(outside, 'elsewhere')} nor ${outside} holds a project.godot. Name the project directory first, or run from it.`,
+      'a project path that names no project is named in the refusal',
+    );
+    assert.equal(said(['..', 'tests/a_test.gd']), 'read', 'and the project beside it is read');
+
+    const timesFile = join(project, 'times.json');
+    writeFileSync(
+      timesFile,
+      '{"res://a.gd": {"seconds": 1e999, "cases": {}},' +
+        ' "res://b.gd": {"seconds": -3, "cases": {}},' +
+        ' "res://c.gd": {"seconds": 2, "cases": {"test_x": 1.5, "test_y": -1, "test_z": 1e999},' +
+        ' "rows": {"test_x": [0.5, 1], "test_y": [1, -1], "test_z": [1e999]}}}',
+    );
+    assert.deepEqual(
+      readTimes(timesFile),
+      { 'res://c.gd': { seconds: 2, cases: { test_x: 1.5 }, rows: { test_x: [0.5, 1] } } },
+      'a time no run could have measured is not dealt by',
+    );
+    assert.equal(
+      writeJson(join(timesFile, 'kept.json'), {}),
+      false,
+      'a file asked for under a file is answered as not written, where the run went on to its verdict',
+    );
+
     const refused = spawnSyncHidden(process.execPath, ['build/cli.js', 'test', '--bogus'], {
       encoding: 'utf8',
       cwd: process.cwd(),
@@ -57922,6 +58595,153 @@ function testATestRunTimesStartAndSetUpApartFromItsCases(): void {
       /^Before its first suite the engine spent \d+\.\d s starting, \d+\.\d s of it compiling the suites together\.$/m,
       ran.said,
     );
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
+/**
+ * A run of one case of a suite says nothing of the cases it left out, so it keeps no pass for the
+ * suite: kept, the next `--changed-only` run skipped a case no run had ever passed. A failing case
+ * still drops the pass its suite had.
+ */
+function testARunOfSomeCasesKeepsNoPassForTheSuite(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  try {
+    const keptFile = join(project, '.godot', 'gdharness', 'suite-passed.json');
+    const kept = (): Record<string, unknown> =>
+      existsSync(keptFile) ? asObject(JSON.parse(readFileSync(keptFile, 'utf8')), 'suite-passed.json') : {};
+    const suite = 'res://tests/ok_test.gd';
+
+    const oneCase = test('tests/ok_test.gd:test_one');
+    assert.equal(oneCase.status, 0, oneCase.said);
+    assert.match(oneCase.said, /^Passed: 1 case in 1 suite across 1 engine, /m, oneCase.said);
+    assert.deepEqual(Object.keys(kept()), [], 'one case of two passing is no pass of the suite');
+
+    const whole = test('tests/ok_test.gd', '--changed-only');
+    assert.equal(whole.status, 0, whole.said);
+    assert.match(
+      whole.said,
+      /^Passed: 2 cases in 1 suite across 1 engine, /m,
+      `the case the first run left out is run: ${whole.said}`,
+    );
+    const keptWhole = kept();
+    assert.deepEqual(Object.keys(keptWhole), [suite], 'every case passing is a pass of the suite');
+
+    const otherCase = test('tests/ok_test.gd:test_two');
+    assert.equal(otherCase.status, 0, otherCase.said);
+    assert.match(otherCase.said, /^Passed: 1 case in 1 suite across 1 engine, /m, otherCase.said);
+    assert.deepEqual(kept(), keptWhole, 'a later pass of one case leaves the pass kept for the suite');
+    const unchanged = test('tests/ok_test.gd', '--changed-only');
+    assert.equal(unchanged.status, 0, unchanged.said);
+    assert.match(unchanged.said, /^Nothing has changed since every suite last passed\.$/m, unchanged.said);
+
+    // The case fails on a file the suite never loads, so the suite's own script is as it passed.
+    writeTree(project, {
+      'tests/switch_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_steady() -> void:',
+        '\tassert_int(1).is_equal(1)',
+        '',
+        '',
+        'func test_switched() -> void:',
+        '\tassert_bool(FileAccess.file_exists("res://switch_fails.txt")).is_false()',
+        '',
+      ].join('\n'),
+    });
+    const switched = 'res://tests/switch_test.gd';
+    const before = test('tests/switch_test.gd');
+    assert.equal(before.status, 0, before.said);
+    assert.deepEqual(Object.keys(kept()).toSorted(), [suite, switched], before.said);
+    writeTree(project, { 'switch_fails.txt': '' });
+    const failing = test('tests/switch_test.gd:test_switched');
+    assert.equal(failing.status, 1, failing.said);
+    assert.match(failing.said, /test_switched/, failing.said);
+    assert.ok(
+      !Object.keys(kept()).includes(switched),
+      `a failing case drops the pass its suite had: ${JSON.stringify(Object.keys(kept()))}`,
+    );
+    assert.ok(Object.keys(kept()).includes(suite), 'and leaves the other suites kept');
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
+/**
+ * A result file holds the run that wrote it and no other. A run refused before any engine started
+ * left the result of the run before, which a gate read as a pass, and a result that could not be
+ * written was dropped while the run exited 0.
+ */
+function testAResultFileHoldsTheRunThatWroteIt(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  try {
+    const state = join(project, '.godot', 'gdharness');
+    const resultFile = join(checkouts, 'result.json');
+    const lastRun = join(state, 'last-run.json');
+
+    const passing = test('tests/ok_test.gd', '--result', resultFile);
+    assert.equal(passing.status, 0, passing.said);
+    assert.equal(readRunResult(resultFile).passed, true, 'a passing run says so in its result');
+
+    const nowhere = test('--tests', 'nowhere', '--result', resultFile);
+    assert.equal(nowhere.status, 2, nowhere.said);
+    assert.ok(
+      nowhere.said.includes(`Nothing at res://nowhere in the project at ${project}.`),
+      `a directory that is not there is said to be missing, not empty of suites: ${nowhere.said}`,
+    );
+    for (const file of [resultFile, lastRun]) {
+      const refused = readRunResult(file);
+      assert.equal(refused.passed, false, `${file} no longer holds the run before`);
+      assert.deepEqual(refused.problems, [`Nothing at res://nowhere in the project at ${project}.`], file);
+    }
+
+    const blocked = join(checkouts, 'blocked');
+    mkdirSync(blocked);
+    const unwritten = test('tests/ok_test.gd', '--result', blocked);
+    assert.match(unwritten.said, /^Passed: 2 cases in 1 suite across 1 engine, /m, unwritten.said);
+    assert.ok(
+      unwritten.said.includes(
+        `The result could not be written to ${blocked}, which holds an earlier run's or nothing, so this run exits 1.`,
+      ),
+      unwritten.said,
+    );
+    assert.equal(unwritten.status, 1, 'a run whose result is not where it was asked for fails');
+    assert.equal(readRunResult(lastRun).passed, true, "the project's own result file is still written");
+
+    const timesBlocked = join(checkouts, 'times');
+    mkdirSync(timesBlocked);
+    const untimed = test('tests/ok_test.gd', '--times', timesBlocked);
+    assert.equal(untimed.status, 0, untimed.said);
+    assert.ok(
+      untimed.said.includes(
+        `The times could not be written to ${timesBlocked}, so the next run is dealt by what that file held before.`,
+      ),
+      untimed.said,
+    );
+
+    // A directory where the passes are kept, so the run cannot drop or add one.
+    const passedFile = join(state, 'suite-passed.json');
+    rmSync(passedFile);
+    mkdirSync(passedFile);
+    const unkept = test('tests/ok_test.gd');
+    rmSync(passedFile, { recursive: true });
+    const unkeptSaid = `what passed could not be written to ${passedFile}, which still keeps a suite that failed here as passed for a --changed-only run`;
+    assert.equal(unkept.status, 1, unkept.said);
+    assert.ok(unkept.said.includes(`--- what this run keeps for the next:\n  ${unkeptSaid}`), unkept.said);
+    assert.match(unkept.said, /^Failed: 1 problem, listed above\. Ran 2 cases in 1 suite /m, unkept.said);
+    const unkeptResult = readRunResult(lastRun);
+    assert.equal(unkeptResult.passed, false, 'the result says the run failed');
+    assert.deepEqual(unkeptResult.problems, [unkeptSaid], 'with the problem the output lists');
   } finally {
     sweep(project, slots, checkouts);
   }
@@ -64329,6 +65149,14 @@ function testProcessorTimeIsReadOffEveryClockFormat(): void {
   // used no processor time at all.
   assert.equal(secondsFromClock(''), undefined);
   assert.equal(secondsFromClock('not a clock'), undefined);
+  for (const printed of ['-', ':', '-:', '1-', ':12', '1:2:3:4', ' ', '1:-2', '0:1e1']) {
+    assert.equal(secondsFromClock(printed), undefined, `${JSON.stringify(printed)} is no clock`);
+  }
+  // A fraction of a second, with the point of the C locale and the comma of another.
+  assert.equal(secondsFromClock('0:00.05'), 0.05);
+  assert.equal(secondsFromClock('0:01,23'), 1.23);
+  assert.equal(secondsFromClock('1-00:00:00'), 86_400);
+  assert.equal(secondsFromClock(' 00:12'), 12, 'a clock padded by the column is read');
 }
 
 /**
@@ -71405,18 +72233,6 @@ async function testANameOnEveryObjectIsReadOnlyFromTheEnginesAnswer(): Promise<v
   }
 }
 
-/** A file or folder whose name begins with two dots is inside the project, and a real escape is not. */
-function testAPathNamedWithTwoLeadingDotsIsInsideTheProject(): void {
-  const project = join(realpathSync(tmpdir()), 'gdharness-dots-project');
-  assert.equal(resourcePathOf(project, join(project, '..game.gd')), 'res://..game.gd');
-  assert.equal(resourcePathOf(project, join(project, '..art', 'hero.png')), 'res://..art/hero.png');
-  assert.equal(resourcePathOf(project, join(project, 'a', '..b')), 'res://a/..b');
-  assert.equal(resourcePathOf(project, join(project, '..', 'escaped.gd')), null, 'the parent is outside');
-  assert.equal(resourcePathOf(project, join(`${project}-sibling`, 'x.gd')), null, 'a sibling is outside');
-  assert.equal(resourcePathOf(project, dirname(project)), null, 'the parent itself');
-  assert.equal(resourcePathOf(project, project), null, 'the project itself');
-}
-
 /**
  * Language server answers for the rename fixture, shaped as Godot 4.7.2 gave them when measured:
  * - the references of the method's own declaration include the override's declaration and its
@@ -72610,6 +73426,12 @@ function testAThrownNonErrorReadsAsTheFallback(): void {
   assert.equal(errorMessage(new Error('')), 'Unknown error');
   assert.equal(errorCode(Object.assign(new Error('x'), { code: 'EEXIST' })), 'EEXIST');
   assert.equal(errorCode({ code: 'EEXIST' }), undefined);
+  const own = new Error('kept');
+  assert.equal(toError(own), own, 'an Error passes through with its own stack');
+  const wrapped = toError({ code: 1 });
+  assert.equal(wrapped.message, 'Unknown error');
+  assert.deepEqual(wrapped.cause, { code: 1 }, 'the thrown value is kept on cause');
+  assert.equal(toError('plain').message, 'plain');
 }
 
 /** A target whose name starts with two dots is inside the project, and is judged as any other name. */
@@ -83221,7 +84043,6 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALongLineIsQuotedAroundTheName,
   testARenameRefusesANameAlreadyTaken,
   testANameOnEveryObjectIsReadOnlyFromTheEnginesAnswer,
-  testAPathNamedWithTwoLeadingDotsIsInsideTheProject,
   testAMemberRenameFollowsWhatTheLanguageServerResolves,
   testAUseUnderACommentEndingInAFullStopIsRenamed,
   testADocLinkWrappedAcrossLinesIsRenamedWhole,
@@ -83387,6 +84208,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testStaleClassesAreReadFromDisk,
   testTheProjectWalksAgreeAboutWhatIsInIt,
   testASearchReadsWhatItSaysItReads,
+  testASearchNamesFilesWhateverWayTheProjectPathIsSpelled,
   testClassesAnEditorIsNotHolding,
   testAScanThatHasNotStartedIsNotFinished,
   testARescanWaitsOutTheEditorsImport,
@@ -83394,6 +84216,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARescanWaitsForItsScanToComplete,
   testARescanCountsNoSlowAnswerAsScanning,
   testALaunchIsOutsideTheServersTree,
+  testALauncherSpecIsReadBackAsSentAndAnAnswerByItsFirstLine,
   testAWindowsCommandLineReadsBackAsItsArguments,
   testARunOnItsOwnDesktopIsThere,
   testARunThatQuitsAtOnceOnItsOwnDesktopEnds,
@@ -83696,6 +84519,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineRunsStartAndSetUpAreReadApart,
   testAnEngineMayBeSilentAsLongAsWhatItRuns,
   testAnEngineRunIsJudgedOnEverythingItPrinted,
+  testAJudgedRunNamesWhatNoHandedSuiteShows,
   testGdUnitFailingOnPushErrorsIsSaid,
   testACrashIsReadFromTheCrashHandlersReport,
   testARowSkippedForItsDataIsNoPass,
@@ -83735,6 +84559,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASpreadBenchGathersTheTableItPlaysAlone,
   testASuiteRunHasNoSoundWhicheverWayItStarts,
   testTheTestCommandRunsAndJudgesAProject,
+  testARunOfSomeCasesKeepsNoPassForTheSuite,
+  testAResultFileHoldsTheRunThatWroteIt,
   testTheTestCommandDealsAndReportsARun,
   testATestRunTimesStartAndSetUpApartFromItsCases,
   testATestRunsLimitsEndAHungOrChattyEngine,
@@ -83820,6 +84646,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryGreetingFieldIsRequired,
   testTheRestartTimeoutReadsWholeDigitsOnly,
   testEditorOpenRefusesAnAddonThatCannotConnect,
+  testEditorOpenRefusesAnOpenUnderWayAndAnEngineThatWillNotStart,
   testEditorOpenOptionsRefuseEachMisuse,
   testAnEditorOfAnotherReleaseIsAskedNothing,
   testACurrentAddonLackingAnOpSaysAScriptFailedToLoad,
@@ -83848,6 +84675,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testFramingCeilingFailsLoudly,
   testDictionariesHaveNothingBehindThem,
   testProjectPathsAreContained,
+  testAFileInsideTheProjectIsContainedWhateverWayItsFolderIsSpelled,
   testToolAndOpLookupsCannotReachThePrototype,
   testArgumentsOfTheWrongTypeAreRefused,
   testAnArgumentMeantForAnotherOpIsRefused,
@@ -83859,6 +84687,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEditorStatusOnAProjectWithNoAddonIsFinal,
   testEveryArgumentNamesOpsItsToolHas,
   testAPipelineCacheIsCarriedToTheNextRun,
+  testAPipelineCacheIsKeptPerFolderAndLeftoversAreSwept,
   testATestRunsEngineStartsWithTheLastRunsPipelineCache,
   testAnArgumentScopedInWordsIsScopedInItsSchema,
   testEveryToolTellsAClientWhatItCanChange,

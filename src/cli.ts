@@ -64,7 +64,7 @@ import {
 } from './setup.js';
 import { everySkillDirectory, removeSkill, skillDirectories, writeSkill } from './skill.js';
 import { runSpreadCommand, spreadOptionsOf } from './spread-run.js';
-import { runTestCommand, testOptionsOf, wholeTreeSaid } from './suite-run.js';
+import { runTestCommand, testOptionsOf, wholeTreeSaid, writeRefusedResult } from './suite-run.js';
 import { getLocalVersion } from './version.js';
 import { prepareWholeExits } from './whole-exit.js';
 
@@ -966,8 +966,15 @@ async function test(): Promise<void> {
     }
     return;
   }
-  const godotPath = options.godotPath ?? (await engine(options.projectPath)).godotPath;
-  process.exitCode = await runTestCommand(options, godotPath);
+  const startedAt = Date.now();
+  try {
+    const godotPath = options.godotPath ?? (await engine(options.projectPath)).godotPath;
+    process.exitCode = await runTestCommand(options, godotPath);
+  } catch (error) {
+    // The run before this one is still in the result files, and reads as this one's to a gate.
+    writeRefusedResult(options, startedAt, error);
+    throw error;
+  }
 }
 
 /** `gdharness spread`, whose options are its own, read by {@link spreadOptionsOf}. */
