@@ -526,8 +526,13 @@ function loaderAmong(
 ): { name: string; path: string; exists: boolean } | null {
   let byName: { name: string; path: string; exists: boolean } | null = null;
   for (const [entry, path] of named) {
-    if (entry === RUNTIME_AUTOLOAD.name || path === RUNTIME_AUTOLOAD.path || path === RUNTIME_SCRIPT) {
+    if (entry === RUNTIME_AUTOLOAD.name) {
       continue;
+    }
+    // Under any other name these are still ours: a second entry beside them would bring the runtime
+    // up twice, and the script of an uninstalled addon is a missing script the entry still names.
+    if (path === RUNTIME_AUTOLOAD.path || path === RUNTIME_SCRIPT) {
+      return { name: entry, path, exists: existsSync(join(projectPath, path)) };
     }
     let source: string | null = null;
     try {
@@ -539,9 +544,12 @@ function loaderAmong(
     if (source?.includes(RUNTIME_SCRIPT)) {
       return { name: entry, path, exists: true };
     }
-    byName ??= path.toLowerCase().includes('gdharness')
-      ? { name: entry, path, exists: source !== null }
-      : null;
+    // The filename guess is for a file that is gone. A file that is there and does not name the
+    // runtime script is the project's own, whatever it is called.
+    byName ??=
+      source === null && path.toLowerCase().includes('gdharness')
+        ? { name: entry, path, exists: false }
+        : null;
   }
   return byName;
 }

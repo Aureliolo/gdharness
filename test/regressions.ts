@@ -480,10 +480,12 @@ import {
   ADDONS,
   autoloadIsOurs,
   editorUpgradeNote,
+  inspectProject,
   installAddons,
   installedEditorDigest,
   installedRuntimeDigest,
   loaderState,
+  type ProjectReport,
   QUIET_SCENES_SETTING,
   RUNTIME_AUTOLOAD,
   RUNTIME_SCRIPT,
@@ -12646,7 +12648,10 @@ function testAnAutoloadNamingAFileThatIsNotThere(): void {
     // The positive: put the loader back and the loader line is clean, so the sentence above is
     // this check and not the whole command going quiet.
     mkdirSync(join(project, 'tools'), { recursive: true });
-    writeFileSync(join(project, 'tools', 'gdharness_loader.gd'), 'extends Node\n');
+    writeFileSync(
+      join(project, 'tools', 'gdharness_loader.gd'),
+      `extends Node\nconst RUNTIME = "res://${RUNTIME_SCRIPT}"\n`,
+    );
     const restored: unknown = JSON.parse(doctor('--json').stdout);
     assert.equal(get(get(restored, 'runtimeLoaderAutoload'), 'exists'), true, 'restored, the file is there');
     assert.doesNotMatch(
@@ -12662,6 +12667,94 @@ function testAnAutoloadNamingAFileThatIsNotThere(): void {
   } finally {
     sweep(project);
   }
+}
+
+/**
+ * A throwaway project holding [param projectGodot] and [param files], inspected and swept. The
+ * class cache is written so that its absence is not among the problems.
+ */
+function inspectedFrom(projectGodot: string, files: Record<string, string> = {}): ProjectReport {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-inspect-'));
+  try {
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    writeFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'list=Array[Dictionary]([])\n');
+    writeFileSync(join(project, 'project.godot'), projectGodot);
+    for (const [path, content] of Object.entries(files)) {
+      mkdirSync(dirname(join(project, path)), { recursive: true });
+      writeFileSync(join(project, path), content);
+    }
+    return inspectProject(project);
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * Whether the runtime counts as registered is read from the autoloads by what each one names, in
+ * every shape project.godot takes: no section, the entry, a commented one, a name holding the word,
+ * Windows line ends, and the section last. An entry under another name that names the addon's
+ * script or the shipped loader is ours, and a file that merely has gdharness in its name is not.
+ */
+function testTheRuntimeAutoloadIsFoundByWhatItNames(): void {
+  const head = 'config_version=5\n\n';
+  const loader = `res://${RUNTIME_AUTOLOAD.path}`;
+  const registered = (report: ProjectReport): [boolean, string | null, string | null] => [
+    report.runtimeAutoload,
+    report.runtimeAutoloadPath,
+    report.runtimeLoaderAutoload?.name ?? null,
+  ];
+  assert.deepEqual(registered(inspectedFrom(`${head}[application]\nconfig/name="X"\n`)), [false, null, null]);
+  assert.deepEqual(
+    registered(inspectedFrom(`${head}[autoload]\n\n${RUNTIME_AUTOLOAD.name}="*${loader}"\n\n[display]\n`)),
+    [true, loader, null],
+    'the entry itself is read, with the section followed by another',
+  );
+  assert.deepEqual(
+    registered(inspectedFrom(`${head}[autoload]\n\n;${RUNTIME_AUTOLOAD.name}="*${loader}"\n`)),
+    [false, null, null],
+    'a commented entry registers nothing',
+  );
+  assert.deepEqual(
+    registered(
+      inspectedFrom(`${head}[autoload]\n\nGdharnessNotes="*res://tools/notes.gd"\n`, {
+        'tools/notes.gd': 'extends Node\n',
+      }),
+    ),
+    [false, null, null],
+    'an autoload whose name holds the word is not the runtime',
+  );
+  assert.deepEqual(
+    registered(
+      inspectedFrom(`${head}[autoload]\n\nOther="*res://tools/gdharness_notes.gd"\n`, {
+        'tools/gdharness_notes.gd': 'extends Node\n',
+      }),
+    ),
+    [false, null, null],
+    'nor is a script of the project that only has gdharness in its filename',
+  );
+  assert.deepEqual(
+    registered(
+      inspectedFrom(`${head}[autoload]\n\nBoot="*res://${RUNTIME_SCRIPT}"\n`.replaceAll('\n', '\r\n')),
+    ),
+    [true, null, 'Boot'],
+    'the addon script under another name is ours, in a file with Windows line ends',
+  );
+  assert.deepEqual(
+    registered(
+      inspectedFrom(`${head}[autoload]\n\nBoot="*${loader}"\n`, {
+        [RUNTIME_AUTOLOAD.path]: readFileSync(shippedLoader(), 'utf8'),
+      }),
+    ),
+    [true, null, 'Boot'],
+    'the shipped loader under another name is ours, as the last section of the file',
+  );
+  const gone = inspectedFrom(`${head}[autoload]\n\nBoot="*res://${RUNTIME_SCRIPT}"\n`);
+  assert.equal(gone.runtimeLoaderAutoload?.exists, false, 'and says its file is not there when it is not');
+  assert.deepEqual(
+    registered(inspectedFrom(`${head}[autoload]\n\nLoad="*res://tools/gdharness_loader.gd"\n`)),
+    [true, null, 'Load'],
+    'a loader known only by its name, with its file gone, is still taken for one',
+  );
 }
 
 /**
@@ -83236,6 +83329,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALocatorAsksAgainWhenTheEngineAppearsOrGoes,
   testAnAutoloadGitWillNotCarry,
   testAnAutoloadNamingAFileThatIsNotThere,
+  testTheRuntimeAutoloadIsFoundByWhatItNames,
   testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome,
   testTheReleaseButtonOffersWhatBothDocumentsDescribe,
   testVersionOrdering,
