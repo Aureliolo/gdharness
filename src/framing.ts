@@ -70,10 +70,6 @@ export class FrameReader {
   private buffer: Buffer = Buffer.alloc(0);
   private resyncing = false;
 
-  get buffered(): number {
-    return this.buffer.length;
-  }
-
   /**
    * Adds a chunk and returns the frames it completed, in order. Throws OversizedStreamError
    * when the peer announces or accumulates more than the ceiling. The reader is unusable
