@@ -811,6 +811,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       new Set(across.map((fault) => fault.suite)),
       new SuiteInputs(scripts, always),
       suitesBegan,
+      declared,
     );
     return report(
       ran,
@@ -962,6 +963,9 @@ function readPassed(file: string): Record<string, PassedSuite> {
  * them may have caused, or when [param inputs] reads one of its inputs as changed after the suites
  * began at [param began], since the suite may have run on what was there before. A suite whose
  * script is gone from [param projectPath] is dropped too.
+ *
+ * A suite the engines were handed only some of the cases [param declared] gives it has not passed
+ * as a whole. A pass of those cases leaves what was kept for it as it was, and a failure drops it.
  */
 function recordPassed(
   file: string,
@@ -970,6 +974,7 @@ function recordPassed(
   failedAcross: ReadonlySet<string>,
   inputs: SuiteInputs,
   began: number,
+  declared: CasesBySuite,
 ): void {
   const passed = readPassed(file);
   for (const path of Object.keys(passed)) {
@@ -995,7 +1000,19 @@ function recordPassed(
       reached.set(path, into);
     }
   }
+  const handed = new Map<string, Set<string>>();
+  for (const suite of ran.flatMap((engine) => engine.plan.suites)) {
+    const cases = handed.get(suite.path) ?? new Set<string>();
+    for (const func of suite.cases) {
+      cases.add(func);
+    }
+    handed.set(suite.path, cases);
+  }
   for (const path of new Set([...reached.keys(), ...failedSomewhere])) {
+    const ranWhole = (declared.get(path) ?? []).every((func) => handed.get(path)?.has(func) ?? false);
+    if (!ranWhole && !failedSomewhere.has(path)) {
+      continue;
+    }
     const loaded = reached.get(path);
     const kept =
       failedSomewhere.has(path) || loaded === undefined

@@ -55888,6 +55888,79 @@ function testATestRunTimesStartAndSetUpApartFromItsCases(): void {
 }
 
 /**
+ * A run of one case of a suite says nothing of the cases it left out, so it keeps no pass for the
+ * suite: kept, the next `--changed-only` run skipped a case no run had ever passed. A failing case
+ * still drops the pass its suite had.
+ */
+async function testARunOfSomeCasesKeepsNoPassForTheSuite(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  try {
+    const keptFile = join(project, '.godot', 'gdharness', 'suite-passed.json');
+    const kept = (): Record<string, unknown> =>
+      existsSync(keptFile) ? asObject(JSON.parse(readFileSync(keptFile, 'utf8')), 'suite-passed.json') : {};
+    const suite = 'res://tests/ok_test.gd';
+
+    const oneCase = test('tests/ok_test.gd:test_one');
+    assert.equal(oneCase.status, 0, oneCase.said);
+    assert.match(oneCase.said, /^Passed: 1 case in 1 suite across 1 engine, /m, oneCase.said);
+    assert.deepEqual(Object.keys(kept()), [], 'one case of two passing is no pass of the suite');
+
+    const whole = test('tests/ok_test.gd', '--changed-only');
+    assert.equal(whole.status, 0, whole.said);
+    assert.match(
+      whole.said,
+      /^Passed: 2 cases in 1 suite across 1 engine, /m,
+      `the case the first run left out is run: ${whole.said}`,
+    );
+    const keptWhole = kept();
+    assert.deepEqual(Object.keys(keptWhole), [suite], 'every case passing is a pass of the suite');
+
+    const otherCase = test('tests/ok_test.gd:test_two');
+    assert.equal(otherCase.status, 0, otherCase.said);
+    assert.match(otherCase.said, /^Passed: 1 case in 1 suite across 1 engine, /m, otherCase.said);
+    assert.deepEqual(kept(), keptWhole, 'a later pass of one case leaves the pass kept for the suite');
+    const unchanged = test('tests/ok_test.gd', '--changed-only');
+    assert.equal(unchanged.status, 0, unchanged.said);
+    assert.match(unchanged.said, /^Nothing has changed since every suite last passed\.$/m, unchanged.said);
+
+    // The case fails on a file the suite never loads, so the suite's own script is as it passed.
+    writeTree(project, {
+      'tests/switch_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        '',
+        'func test_steady() -> void:',
+        '\tassert_int(1).is_equal(1)',
+        '',
+        '',
+        'func test_switched() -> void:',
+        '\tassert_bool(FileAccess.file_exists("res://switch_fails.txt")).is_false()',
+        '',
+      ].join('\n'),
+    });
+    const switched = 'res://tests/switch_test.gd';
+    const before = test('tests/switch_test.gd');
+    assert.equal(before.status, 0, before.said);
+    assert.deepEqual(Object.keys(kept()).toSorted(), [suite, switched], before.said);
+    writeTree(project, { 'switch_fails.txt': '' });
+    const failing = test('tests/switch_test.gd:test_switched');
+    assert.equal(failing.status, 1, failing.said);
+    assert.match(failing.said, /test_switched/, failing.said);
+    assert.ok(
+      !Object.keys(kept()).includes(switched),
+      `a failing case drops the pass its suite had: ${JSON.stringify(Object.keys(kept()))}`,
+    );
+    assert.ok(Object.keys(kept()).includes(suite), 'and leaves the other suites kept');
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
+/**
  * The test command's windows, results, deals, engines and slots, on a project of their own: one
  * regression holding every case of the command ran near its deadline on a loaded runner.
  */
@@ -80983,6 +81056,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASpreadBenchGathersTheTableItPlaysAlone,
   testASuiteRunHasNoSoundWhicheverWayItStarts,
   testTheTestCommandRunsAndJudgesAProject,
+  testARunOfSomeCasesKeepsNoPassForTheSuite,
   testTheTestCommandDealsAndReportsARun,
   testATestRunTimesStartAndSetUpApartFromItsCases,
   testATestRunsLimitsEndAHungOrChattyEngine,
