@@ -71499,20 +71499,133 @@ function testAMoveWritesEveryFileOrNone(): void {
     assert.equal(read('scenes/main.tscn'), MOVE_FIXTURE['scenes/main.tscn'], 'nothing was written');
     assert.ok(existsSync(join(project, 'scenes', 'hero.tscn')));
 
-    // A file where the target's directory has to be, which fails the move after the rewrites.
-    writeFileSync(join(project, 'blocked'), 'a file where a directory has to be');
+    // A read-only script whose own text changes, which fails the move after the rewrites.
+    writeFileSync(join(project, 'scenes', 'hero.gd'), 'extends Node\n\nconst SELF := preload("res://scenes/hero.gd")\n');
     const blocked = planFileMove(
+      project,
+      join(project, 'scenes', 'hero.gd'),
+      join(project, 'actors', 'deep', 'hero.gd'),
+    );
+    assert.ok(blocked.ok, JSON.stringify(blocked));
+    chmodSync(join(project, 'scenes', 'hero.gd'), 0o444);
+    try {
+      assert.throws(
+        () => {
+          applyFileMove(blocked);
+        },
+        /EPERM|EACCES/,
+        'the write into the read-only file fails',
+      );
+    } finally {
+      chmodSync(join(project, 'scenes', 'hero.gd'), 0o666);
+    }
+    assert.equal(read('scenes/main.tscn'), MOVE_FIXTURE['scenes/main.tscn'], 'the rewrites were put back');
+    assert.ok(existsSync(join(project, 'scenes', 'hero.gd')), 'and the file is where it was');
+    assert.ok(!existsSync(join(project, 'actors')), 'the directories made for it are gone');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** A move that fails halfway leaves no staging file behind. */
+function testAFailedMoveLeavesNoStagingFile(): void {
+  const project = moveProject();
+  try {
+    const outcome = planFileMove(
+      project,
+      join(project, 'scenes', 'hero.tscn'),
+      join(project, 'actors', 'hero.tscn'),
+    );
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    assert.ok(outcome.inPlace.some((rewrite) => rewrite.path === 'res://game.gd'));
+    chmodSync(join(project, 'game.gd'), 0o444);
+    try {
+      assert.throws(
+        () => {
+          applyFileMove(outcome);
+        },
+        /EPERM|EACCES/,
+      );
+    } finally {
+      chmodSync(join(project, 'game.gd'), 0o666);
+    }
+    const left = readdirSync(project, { recursive: true }).map(String);
+    assert.deepEqual(
+      left.filter((path) => path.endsWith('.gdharness-move')),
+      [],
+    );
+    assert.ok(left.includes('game.gd'), 'the move ran far enough to rewrite and fail');
+    assert.ok(!existsSync(join(project, 'actors')));
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** A plan refuses what it already knows the writes cannot do, and names why. */
+function testAMovePlanRefusesATargetTheWritesCannotUse(): void {
+  const project = moveProject();
+  try {
+    writeFileSync(join(project, 'blocked'), 'a file where a directory has to be');
+    const below = planFileMove(
       project,
       join(project, 'scenes', 'hero.tscn'),
       join(project, 'blocked', 'hero.tscn'),
     );
-    assert.ok(blocked.ok, JSON.stringify(blocked));
-    assert.ok(blocked.inPlace.length > 0, 'the rewrites come first, so there is something to put back');
-    assert.throws(() => {
-      applyFileMove(blocked);
-    });
-    assert.equal(read('scenes/main.tscn'), MOVE_FIXTURE['scenes/main.tscn'], 'the rewrites were put back');
-    assert.equal(read('scenes/hero.tscn'), MOVE_FIXTURE['scenes/hero.tscn'], 'and the file is where it was');
+    assert.ok(!below.ok);
+    assert.match(below.reason, /res:\/\/blocked is a file, so res:\/\/blocked\/hero\.tscn cannot go below it/);
+
+    writeFileSync(join(project, 'art', 'new.png.import'), 'an orphan sidecar');
+    const sidecar = planFileMove(
+      project,
+      join(project, 'art', 'hero.png'),
+      join(project, 'art', 'new.png'),
+    );
+    assert.ok(!sidecar.ok);
+    assert.match(sidecar.reason, /res:\/\/art\/new\.png\.import already exists/);
+
+    mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+    writeFileSync(join(project, 'addons', 'gdharness_editor', '.gdharness-version'), '1.0.0\n');
+    const addons = planFileMove(project, join(project, 'addons'), join(project, 'vendor'));
+    assert.ok(!addons.ok);
+    assert.match(addons.reason, /res:\/\/addons holds res:\/\/addons\/gdharness_editor/);
+    assert.ok(existsSync(join(project, 'addons', 'gdharness_editor')));
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** A rewritten file is refused when a byte outside the edit is not UTF-8, since it would be replaced. */
+function testAMoveRefusesToRewriteAFileThatIsNotUtf8(): void {
+  const project = moveProject();
+  try {
+    const latin = Buffer.concat([
+      Buffer.from('extends Node\n# caf', 'ascii'),
+      Buffer.from([0xe9]),
+      Buffer.from('\nconst HERO := preload("res://scenes/hero.tscn")\n', 'ascii'),
+    ]);
+    writeFileSync(join(project, 'menu.gd'), latin);
+    const outcome = planFileMove(
+      project,
+      join(project, 'scenes', 'hero.tscn'),
+      join(project, 'actors', 'hero.tscn'),
+    );
+    assert.ok(!outcome.ok);
+    assert.match(outcome.reason, /res:\/\/menu\.gd is not valid UTF-8/);
+    assert.deepEqual(readFileSync(join(project, 'menu.gd')), latin);
+    assert.ok(existsSync(join(project, 'scenes', 'hero.tscn')));
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** A target whose name starts with two dots is inside the project, and is judged as any other name. */
+function testAMoveTargetNamedWithTwoLeadingDotsIsInsideTheProject(): void {
+  const project = moveProject();
+  try {
+    const outcome = planFileMove(project, join(project, 'game.gd'), join(project, '..game.gd'));
+    assert.ok(!outcome.ok);
+    assert.doesNotMatch(outcome.reason, /newPath must be a path inside the project/);
+    assert.match(outcome.reason, /res:\/\/\.\.game\.gd is under \.\.game\.gd/);
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -81736,6 +81849,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMovedDirectoryTakesEverythingInIt,
   testAMoveThatCannotBeMadeIsRefused,
   testAMoveWritesEveryFileOrNone,
+  testAFailedMoveLeavesNoStagingFile,
+  testAMovePlanRefusesATargetTheWritesCannotUse,
+  testAMoveRefusesToRewriteAFileThatIsNotUtf8,
+  testAMoveTargetNamedWithTwoLeadingDotsIsInsideTheProject,
   testAMoveCanChangeOnlyTheCase,
   testARenameWithNoEditorLeavesTheCacheAndTheScriptsRight,
   testAMoveWithNoEditorLeavesTheProjectLoading,

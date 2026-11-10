@@ -11,7 +11,16 @@
  * rewrite, so it is answered instead. It still finds a file that has a UID.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { basename, dirname, extname, join, relative } from 'node:path';
 import { bytesOf, entriesOf } from './listed-reads.js';
 import { ignoredTexts, projectTexts, VERSION_MARKER } from './project-scan.js';
@@ -113,6 +122,29 @@ function installedAddonOf(projectPath: string, path: string): string | null {
     : null;
 }
 
+/** The addon gdharness installed that [param path], a directory, holds, or null. */
+function holdingAddonOf(projectPath: string, path: string): string | null {
+  if (path !== 'res://addons') {
+    return null;
+  }
+  const held = entriesOf(join(projectPath, 'addons')).find(
+    (entry) => entry.isDirectory() && existsSync(join(projectPath, 'addons', entry.name, VERSION_MARKER)),
+  );
+  return held === undefined ? null : `res://addons/${held.name}`;
+}
+
+/** The nearest part of [param absolute]'s parent chain that exists and is a file, or null. */
+function fileInTheWay(absolute: string): string | null {
+  for (let at = dirname(absolute); ; at = dirname(at)) {
+    if (existsSync(at)) {
+      return statSync(at).isDirectory() ? null : at;
+    }
+    if (dirname(at) === at) {
+      return null;
+    }
+  }
+}
+
 /** Every .scn and .res in the project the engine sees. */
 function binaryResources(projectPath: string): string[] {
   const found: string[] = [];
@@ -146,7 +178,7 @@ function targetPathOf(projectPath: string, absolute: string): string | null {
     onDiskSpelling(projectPath),
     join(onDiskSpelling(dirname(absolute)), basename(absolute)),
   );
-  if (inside === '' || inside.startsWith('..') || /^[A-Za-z]:/.test(inside)) {
+  if (inside === '' || inside === '..' || /^\.\.[\\/]/.test(inside) || /^[A-Za-z]:/.test(inside)) {
     return null;
   }
   return `res://${inside.replace(/\\/g, '/')}`;
@@ -190,11 +222,25 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
       reason: `${from} is inside ${addon}, which gdharness installs and upgrades in place, so it stays there.`,
     };
   }
+  const holding = holdingAddonOf(projectPath, from);
+  if (holding !== null) {
+    return {
+      ok: false,
+      reason: `${from} holds ${holding}, which gdharness installs and upgrades in place, so it stays there.`,
+    };
+  }
   if (isDirectory && to.startsWith(`${from}/`)) {
     return { ok: false, reason: `${from} cannot be moved into itself.` };
   }
   if (existsSync(absoluteTo) && !sameFile(absoluteFrom, absoluteTo)) {
     return { ok: false, reason: `${to} already exists, so nothing was moved there.` };
+  }
+  const blocker = fileInTheWay(absoluteTo);
+  if (blocker !== null) {
+    return {
+      ok: false,
+      reason: `${resourcePathOf(projectPath, blocker) ?? blocker} is a file, so ${to} cannot go below it: pick a newPath whose parents are directories.`,
+    };
   }
   const unseen = unseenByTheEngine(projectPath, to);
   if (unseen !== null) {
@@ -232,6 +278,13 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
     }
   }
 
+  for (const [source, target] of moves) {
+    const taken = join(projectPath, target.slice('res://'.length));
+    if (existsSync(taken) && !sameFile(join(projectPath, source.slice('res://'.length)), taken)) {
+      return { ok: false, reason: `${target} already exists, so nothing was moved there.` };
+    }
+  }
+
   const texts = projectTexts(projectPath);
   const scripts = scriptsOf(texts);
   let plan = planMove(
@@ -261,6 +314,15 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
   }
   const afterwards = (path: string): string => moves.get(path) ?? path;
   const rewrites = rewritesOf(plan, texts, null);
+  // A rewrite is written as UTF-8 text, so a file holding any other byte would lose it silently.
+  for (const rewrite of rewrites) {
+    if (!readFileSync(rewrite.absolute).equals(Buffer.from(rewrite.before, 'utf8'))) {
+      return {
+        ok: false,
+        reason: `${rewrite.path} is not valid UTF-8, so rewriting it would change bytes outside the edit: save it as UTF-8 and move again.`,
+      };
+    }
+  }
   // Each file named where a caller finds it once the move is made, as under changed.
   const mentions = asWritten([...plan.mentions, ...binaries], rewrites).map((mention) => ({
     ...mention,
@@ -352,15 +414,26 @@ export function applyFileMove(outcome: Extract<MoveOutcome, { ok: true }>): void
   }
   const undo: (() => void)[] = [];
   const rename = (source: string, target: string): void => {
-    mkdirSync(dirname(target), { recursive: true });
+    const created = mkdirSync(dirname(target), { recursive: true });
+    if (created !== undefined) {
+      // Pushed first, so it runs after the rename is put back and finds the directories empty.
+      undo.push(() => {
+        for (let at = dirname(target); !relative(created, at).startsWith('..'); at = dirname(at)) {
+          rmdirSync(at);
+          if (relative(created, at) === '') break;
+        }
+      });
+    }
     renameSync(source, target);
     undo.push(() => {
       renameSync(target, source);
     });
   };
+  const staged: string[] = [];
   try {
     for (const rewrite of outcome.inPlace) {
       const staging = `${rewrite.absolute}.gdharness-move`;
+      staged.push(staging);
       writeFileSync(staging, rewrite.after, 'utf8');
       renameSync(staging, rewrite.absolute);
       undo.push(() => {
@@ -385,6 +458,9 @@ export function applyFileMove(outcome: Extract<MoveOutcome, { ok: true }>): void
       }
     }
   } catch (error) {
+    for (const staging of staged) {
+      rmSync(staging, { force: true });
+    }
     for (const step of undo.reverse()) {
       try {
         step();
