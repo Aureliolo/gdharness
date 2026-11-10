@@ -23,6 +23,7 @@ import {
   removeToml,
   removeYaml,
   type TomlEntry,
+  tomlHas,
   writeToml,
   writeYaml,
 } from './config-formats.js';
@@ -1196,7 +1197,7 @@ export function connect(harness: Harness, projectPath: string, launch: Launch): 
   const held = existsSync(path) ? readFileSync(path, 'utf8') : '';
 
   if (harness.toml !== undefined) {
-    const already = held.includes(harness.toml.identity ?? harness.toml.header);
+    const already = tomlHas(held, harness.toml);
     return put(harness, path, writeToml(held, harness.toml, launch), already);
   }
   if (harness.yaml !== undefined) {

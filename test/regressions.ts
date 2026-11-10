@@ -74,6 +74,15 @@ import {
   withAddonClassesCounted,
 } from '../src/class-cache.js';
 import { classNotePath, readClassNote } from '../src/class-note.js';
+import {
+  parsedYamlHas,
+  removeToml,
+  removeYaml,
+  type TomlEntry,
+  tomlHas,
+  writeToml,
+  writeYaml,
+} from '../src/config-formats.js';
 import { type CutTestRun, cutTestRunNote, keepCutTestRun, takeCutTestRun } from '../src/cut-test-run.js';
 import { GodotDAPClient, type HeldBreakpoint, handleDAPTool } from '../src/dap_client.js';
 import {
@@ -54582,6 +54591,150 @@ function testPinnedToolsInstallOutsideTheTemporaryFolder(): void {
   );
 }
 
+const ENTRY_LAUNCH = { command: 'npx', args: ['-y', 'gdharness@9.9.9'], env: {} };
+const TABLE_ENTRY: TomlEntry = {
+  header: '[mcp_servers.gdharness]',
+  block: (launch) =>
+    `[mcp_servers.gdharness]\ncommand = "${launch.command}"\nargs = ["-y", "gdharness@9.9.9"]`,
+};
+const ARRAY_ENTRY: TomlEntry = {
+  header: '[[mcp.providers]]',
+  identity: 'name = "gdharness"',
+  block: () => '[[mcp.providers]]\nname = "gdharness"\ncommand = "npx"',
+  enable: { header: '[mcp]', line: 'enabled = true' },
+};
+
+function parseToml(source: string): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(Bun.TOML.parse(source)));
+}
+
+function tablesNamed(source: string, header: string): number {
+  return source.split('\n').filter((line) => line.trim() === header).length;
+}
+
+// The reader's comments, blank lines and strings are theirs, whatever form our entry was in.
+function testATomlEntryIsReplacedInPlaceWhateverFormTheFileHoldsIt(): void {
+  const fresh = writeToml('', TABLE_ENTRY, ENTRY_LAUNCH);
+  assert.deepEqual(parseToml(fresh), {
+    mcp_servers: { gdharness: { command: 'npx', args: ['-y', 'gdharness@9.9.9'] } },
+  });
+
+  const old = '"gdharness@1.0.0"';
+  for (const [said, header] of [
+    ['a header with a trailing comment', `[mcp_servers.gdharness] # pinned by hand`],
+    ['a header with spaces inside', '[ mcp_servers . gdharness ]'],
+    ['a plain header', '[mcp_servers.gdharness]'],
+  ] as const) {
+    const before = `# top\n${header}\ncommand = "npx"\nargs = ["-y", ${old}]\n\n# Mine: do not touch.\n[mcp_servers.mine]\ncommand = "mine"\n`;
+    const written = writeToml(before, TABLE_ENTRY, ENTRY_LAUNCH);
+    assert.equal(tablesNamed(written, '[mcp_servers.gdharness]'), 1, `${said}: one table of ours`);
+    assert.match(written, /gdharness@9\.9\.9/, `${said}: the new pin`);
+    assert.doesNotMatch(written, /gdharness@1\.0\.0/, `${said}: the old pin is gone`);
+    assert.match(written, /^# top\n/, `${said}: the comment above`);
+    assert.match(
+      written,
+      /\n\n# Mine: do not touch\.\n\[mcp_servers\.mine]\n/,
+      `${said}: their comment and blank line`,
+    );
+    assert.equal(parseToml(written)['mcp_servers'] !== undefined, true, `${said}: it parses`);
+    const removed = removeToml(written, TABLE_ENTRY);
+    assert.equal(
+      removed,
+      '# top\n\n# Mine: do not touch.\n[mcp_servers.mine]\ncommand = "mine"\n',
+      `${said}: removal`,
+    );
+  }
+
+  const withSubTable =
+    '[mcp_servers.gdharness]\ncommand = "npx"\n\n[mcp_servers.gdharness.env]\nGODOT_PATH = "/old"\n\n[other]\nx = 1\n';
+  const replaced = writeToml(withSubTable, TABLE_ENTRY, ENTRY_LAUNCH);
+  assert.equal(
+    replaced,
+    `${TABLE_ENTRY.block(ENTRY_LAUNCH)}\n\n[other]\nx = 1\n`,
+    'a sub-table goes with its table',
+  );
+  assert.equal(removeToml(withSubTable, TABLE_ENTRY), '[other]\nx = 1\n', 'and leaves nothing behind');
+
+  const twice = `${fresh}\n${fresh.replace('9.9.9', '1.0.0')}`;
+  assert.equal(
+    tablesNamed(writeToml(twice, TABLE_ENTRY, ENTRY_LAUNCH), '[mcp_servers.gdharness]'),
+    1,
+    'two become one',
+  );
+  assert.equal(removeToml(twice, TABLE_ENTRY), '', 'and both come out');
+
+  const crlf = '# mine\r\n[a]\r\nx = 1\r\n';
+  const crlfWritten = writeToml(crlf, TABLE_ENTRY, ENTRY_LAUNCH);
+  assert.equal(crlfWritten.replace(/\r\n/g, '').includes('\n'), false, 'only Windows line ends');
+  assert.equal(removeToml(crlfWritten, TABLE_ENTRY), crlf, 'and back to the file as it was');
+
+  const multiline = 'notes = """\nfirst\n\n\nsecond\n"""\n\n[mcp_servers.gdharness]\ncommand = "npx"\n';
+  assert.equal(
+    removeToml(multiline, TABLE_ENTRY),
+    'notes = """\nfirst\n\n\nsecond\n"""\n',
+    'a multi-line string keeps its blank lines',
+  );
+
+  const continued = '[mcp_servers.gdharness]\ncommand = "npx"\nargs = [\n  "-y",\n[1, 2],\n]\n\n[z]\n';
+  assert.equal(
+    removeToml(continued, TABLE_ENTRY),
+    '[z]\n',
+    'a continuation line starting with a bracket is not a header',
+  );
+}
+
+function testATomlEntryWrittenAsKeysIsRefusedNotDuplicated(): void {
+  for (const [said, before] of [
+    ['dotted keys', 'mcp_servers.gdharness.command = "npx"\n'],
+    ['an inline table', '[mcp_servers]\ngdharness = { command = "npx" }\n'],
+  ] as const) {
+    assert.throws(() => writeToml(before, TABLE_ENTRY, ENTRY_LAUNCH), Refusal, `${said}: write`);
+    assert.throws(() => removeToml(before, TABLE_ENTRY), Refusal, `${said}: remove`);
+    assert.equal(tomlHas(before, TABLE_ENTRY), false, `${said}: not a header block`);
+  }
+}
+
+function testATomlEnableTableKeepsTheByteOrderMarkAndRootKeys(): void {
+  const bom = '﻿';
+  const written = writeToml(`${bom}model = "x"\n\n[agent]\nname = "a"\n`, ARRAY_ENTRY, ENTRY_LAUNCH);
+  assert.equal(
+    written.startsWith(`${bom}model = "x"`),
+    true,
+    'the mark stays first and the root key stays root',
+  );
+  assert.equal(written.indexOf(bom, 1), -1, 'and appears once');
+  assert.deepEqual(parseToml(written.slice(1))['mcp'], {
+    enabled: true,
+    providers: [{ name: 'gdharness', command: 'npx' }],
+  });
+  assert.equal(parseToml(written.slice(1))['model'], 'x');
+  const again = writeToml(written, ARRAY_ENTRY, ENTRY_LAUNCH);
+  assert.equal(again, written, 'a second write changes nothing');
+}
+
+function testAYamlConfigWeCannotReadIsRefusedAndOneWithEmptyKeysIsWritten(): void {
+  const path = ['mcp', 'servers', 'gdharness'];
+  const empty = writeYaml('mcp:\n', path, { command: 'npx' });
+  assert.match(empty, /gdharness:\n\s+command: npx/, 'a key with nothing under it is filled');
+  const comment = writeYaml('mcp:\n  servers:\n    # theirs\n', path, { command: 'npx' });
+  assert.match(comment, /gdharness:/, 'and so is one holding only a comment');
+  for (const broken of ['mcp:\n  servers: {}\nmcp:\n  servers: {}\n', 'a: 1\n---\nb: 2\n']) {
+    assert.throws(() => writeYaml(broken, path, {}), Refusal, 'write');
+    assert.throws(() => removeYaml(broken, path), Refusal, 'remove');
+    assert.equal(parsedYamlHas(broken, path), false, 'and it holds nothing of ours');
+  }
+  const crlf = '﻿# mine\r\nmodel: x\r\n';
+  const written = writeYaml(crlf, path, { command: 'npx' });
+  assert.equal(written.startsWith('﻿# mine\r\n'), true, 'the mark and the comment stay');
+  assert.equal(written.replace(/\r\n/g, '').includes('\n'), false, 'line ends stay Windows');
+  const removed = removeYaml(written, path);
+  assert.equal(
+    removed,
+    '﻿# mine\r\nmodel: x\r\nmcp: {}\r\n',
+    'and removal keeps the mark, comment and line ends',
+  );
+}
+
 async function testEveryEngineWaitsForAMachineSlot(): Promise<void> {
   const machine = (env: NodeJS.ProcessEnv, platform: NodeJS.Platform, processors = 32) => ({
     env,
@@ -81383,6 +81536,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryLongCallIsHeardFrom,
   testEveryEngineWaitsForAMachineSlot,
   testPinnedToolsInstallOutsideTheTemporaryFolder,
+  testATomlEntryIsReplacedInPlaceWhateverFormTheFileHoldsIt,
+  testATomlEntryWrittenAsKeysIsRefusedNotDuplicated,
+  testATomlEnableTableKeepsTheByteOrderMarkAndRootKeys,
+  testAYamlConfigWeCannotReadIsRefusedAndOneWithEmptyKeysIsWritten,
   testTheTestHelpersWaitStepAndPress,
   testASpreadBenchGathersTheTableItPlaysAlone,
   testASuiteRunHasNoSoundWhicheverWayItStarts,
