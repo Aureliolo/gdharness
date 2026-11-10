@@ -2915,6 +2915,71 @@ function testAFrameReadHalfwayAddsNothingToTheTotals(): void {
 }
 
 /**
+ * A call site is given the numbers of the function it is written in, and not of another function
+ * of the same name in another class of the script. The path the profile spells with another case
+ * than the project's listing is the same script.
+ */
+function testACallSiteTakesTheNumbersOfItsOwnFunction(): void {
+  const source = [
+    'class_name Outer',
+    'func run():',
+    '\thelper()',
+    'func helper():',
+    '\tpass',
+    'class Inner:',
+    '\tfunc run():',
+    '\t\tpass',
+    '\tfunc other():',
+    '\t\thelper()',
+    '',
+  ].join('\n');
+  const totals = (script: string, withOuterRun: boolean): ProfileTotals => ({
+    startedAt: 1,
+    lastFrameAt: 2,
+    frames: 1,
+    complete: false,
+    unreadable: 0,
+    functions: {
+      ...(withOuterRun
+        ? { [`${script}::3::Outer.run`]: { calls: 1, selfSeconds: 0.001, totalSeconds: 0.002 } }
+        : {}),
+      [`${script}::5::Outer.helper`]: { calls: 1, selfSeconds: 0.001, totalSeconds: 0.001 },
+      [`${script}::8::Outer.Inner.run`]: { calls: 900, selfSeconds: 5, totalSeconds: 5 },
+    },
+  });
+  const sites = (given: ProfileTotals): (number | string | null | undefined)[][] =>
+    callersOf(given, 'helper', [['res://o.gd', source]]).sites.map((one) => [
+      one.line,
+      one.within,
+      one.withinCalls,
+    ]);
+  assert.deepEqual(
+    sites(totals('res://o.gd', true)),
+    [
+      [3, 'run', 1],
+      [10, 'other', undefined],
+    ],
+    'the site in the outer run reads the outer run, and one in a function with no row reads none',
+  );
+  assert.deepEqual(
+    sites(totals('res://o.gd', false)),
+    [
+      [3, 'run', undefined],
+      [10, 'other', undefined],
+    ],
+    'an outer run that made no counted call is not given the inner one',
+  );
+  assert.deepEqual(
+    sites(totals('res://O.gd', true)),
+    [
+      [3, 'run', 1],
+      [10, 'other', undefined],
+    ],
+    'a path spelled in another case is the same script',
+  );
+}
+
+/**
  * A game's own reals are shown as the engine holds them. A 32-bit one is the fewest digits that read
  * back as the same float32, since the double it widens to carries digits the engine never printed. A
  * negative zero and a float past 1e21 keep their sign and their exponent, and a packed array says
@@ -83280,6 +83345,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheDebuggerNamesTheErrorsItsCallsRaise,
   testTheProfilerReadsWhatTheEngineSends,
   testAFrameReadHalfwayAddsNothingToTheTotals,
+  testACallSiteTakesTheNumbersOfItsOwnFunction,
   testARealIsShownAsTheEngineHoldsIt,
   testACommandCarriesANumberAsItIs,
   testABadLengthKeepsTheMessagesBeforeIt,
