@@ -55835,6 +55835,39 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       { seconds: 3, cases: { test_only: 1 }, rows: { test_only: [1] } },
       'every engine holding it having finished, a case with fewer rows is timed as it is now',
     );
+    const plainRun = readRun(
+      [
+        `Run Test Suite: ${lone_.path}`,
+        caseLine(lone_.path, 'test_only', 'PASSED', '12s 0ms'),
+        'Statistics: 1 test cases | PASSED 12s 500ms',
+      ].join('\n'),
+    );
+    const noLongerRows = timesAfter(rowTimes, [lone_], [plainRun], declaredNow);
+    assert.deepEqual(
+      noLongerRows[lone_.path],
+      { seconds: 12.5, cases: { test_only: 12 } },
+      'a case that ran with no row is not parameterised now, and keeps no rows',
+    );
+    assert.deepEqual(
+      unitsOf([lone_], noLongerRows).map((unit) => unit.row),
+      [undefined],
+      'so it is dealt whole, to one engine',
+    );
+    assert.deepEqual(
+      timesAfter({}, [lone_], [plainRun], declaredNow)[lone_.path],
+      { seconds: 12.5, cases: { test_only: 12 } },
+      'with no times before it is timed whole',
+    );
+    assert.deepEqual(
+      timesAfter(noLongerRows, [lone_], [rowRun(lone_.path, [[0, '1s 0ms']])], declaredNow)[lone_.path],
+      { seconds: 3, cases: { test_only: 1 }, rows: { test_only: [1] } },
+      'and a case that gained rows is timed by them',
+    );
+    assert.deepEqual(
+      timesAfter(rowTimes, [], [], () => null),
+      {},
+      'a suite renamed away is forgotten, with its rows',
+    );
     assert.deepEqual(
       timesAfter(
         rowTimes,

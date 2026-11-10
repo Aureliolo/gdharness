@@ -449,9 +449,13 @@ export function timesAfter(
     const rows: Record<string, number[]> = {};
     for (const func of suite?.cases ?? []) {
       const measuredRows = entry.rows.get(func);
+      // A case that ran and printed no row is not parameterised now, whatever it was. Its old rows
+      // would deal it out over engines that each run nothing.
       const keptRows =
         measuredRows === undefined
-          ? times[path]?.rows?.[func]
+          ? entry.cases.has(func)
+            ? undefined
+            : times[path]?.rows?.[func]
           : rowsAfter(times[path]?.rows?.[func], measuredRows, cutShort.has(`${path}:${func}`));
       if (keptRows !== undefined) {
         rows[func] = keptRows.map(round);
