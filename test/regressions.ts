@@ -479,12 +479,14 @@ import {
 import {
   ADDONS,
   autoloadIsOurs,
+  BIND_ADDRESS_SETTING,
   editorUpgradeNote,
   inspectProject,
   installAddons,
   installedEditorDigest,
   installedRuntimeDigest,
   loaderState,
+  PORT_SETTING,
   type ProjectReport,
   QUIET_SCENES_SETTING,
   RUNTIME_AUTOLOAD,
@@ -29145,6 +29147,28 @@ function testTheSkillNamesTheSettingThatServesAScriptRun(): void {
     /ProjectSettings\.get_setting\(QUIET_SCENES_SETTING[^\n]*\n\s*if not _profiled_from_start and not quiet_scene_in\(/,
     'and the server start should be the thing that consults it',
   );
+}
+
+/**
+ * The bind address and the port the skill names are the settings the addon reads, and the addon
+ * reads each where it listens. A renamed setting would leave the skill sending a caller to one that
+ * nothing consults.
+ */
+function testTheSkillNamesTheBindAddressAndPortTheAddonReads(): void {
+  const addon = readFileSync('src/godot/addons/gdharness_runtime/runtime_autoload.gd', 'utf8');
+  const declared = (constant: string): string | undefined =>
+    new RegExp(`${constant}\\s*:\\s*String\\s*=\\s*"([^"]+)"`).exec(addon)?.[1];
+  assert.equal(BIND_ADDRESS_SETTING, declared('BIND_ADDRESS_SETTING'), 'the bind address setting');
+  assert.equal(PORT_SETTING, declared('PORT_SETTING'), 'and the port setting');
+  assert.match(
+    addon,
+    /ProjectSettings\.get_setting\(\s*BIND_ADDRESS_SETTING/,
+    'the bind address is consulted',
+  );
+  assert.match(addon, /ProjectSettings\.get_setting\(PORT_SETTING/, 'and so is the port');
+  const skill = skillFiles('0.0.0').get('SKILL.md') ?? '';
+  assert.ok(skill.includes(BIND_ADDRESS_SETTING), 'the skill names the bind address setting');
+  assert.ok(skill.includes(PORT_SETTING), 'and the port setting');
 }
 
 /**
@@ -83542,6 +83566,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheReferencePrintsEveryShapeOfType,
   testTheSkillNamesEverySettingTheAddonsRead,
   testTheSkillNamesTheSettingThatServesAScriptRun,
+  testTheSkillNamesTheBindAddressAndPortTheAddonReads,
   testAQuietSceneIsNotServed,
   testTheSkillWritesNoEscapedBackticks,
   testAnAuditThatCouldNotAskIsNotAnAuditThatPassed,
