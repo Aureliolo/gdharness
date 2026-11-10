@@ -25772,6 +25772,155 @@ function testTheRegistryIsHttpsOrNpm(): void {
 }
 
 /**
+ * A mirror's address keeps its own query and loses its fragment, and the document's path goes on
+ * the address's path rather than on the end of its text.
+ */
+function testAMirrorWithAQueryOrFragmentStillNamesTheDocument(): void {
+  const at = (named: string): string => registryFor({ GDHARNESS_REGISTRY: named });
+  assert.equal(at('https://npm.inside.example/?token=abc'), 'https://npm.inside.example/gdharness/latest?token=abc');
+  assert.equal(at('https://npm.inside.example/#frag'), 'https://npm.inside.example/gdharness/latest');
+  assert.equal(at('https://npm.inside.example/npm/?a=1'), 'https://npm.inside.example/npm/gdharness/latest?a=1');
+  assert.equal(at('https://npm.inside.example/npm//'), 'https://npm.inside.example/npm/gdharness/latest');
+  assert.equal(at('https://npm.inside.example:8443'), 'https://npm.inside.example:8443/gdharness/latest');
+}
+
+/**
+ * Versions are ordered as semantic versions are: two prereleases of one version by their
+ * identifiers, and a leading `v` is not a major version of 0.
+ */
+function testPrereleasesAndALeadingVOrderAsSemanticVersionsDo(): void {
+  const newer: [string, string][] = [
+    ['1.3.10', '1.3.9'],
+    ['v1.3.10', '1.3.9'],
+    ['1.3.10', 'v1.3.9'],
+    ['v2.0.0', 'v1.9.9'],
+    ['1.0.0-rc.2', '1.0.0-rc.1'],
+    ['1.0.0-rc.10', '1.0.0-rc.9'],
+    ['1.0.0-beta', '1.0.0-alpha'],
+    ['1.0.0-rc.1', '1.0.0-rc'],
+    ['1.0.0-alpha.beta', '1.0.0-alpha.1'],
+    ['1.0.0', '1.0.0-rc.1'],
+    ['0.1.0', 'dev'],
+    [' 1.3.10', '1.3.9'],
+  ];
+  for (const [candidate, current] of newer) {
+    assert.equal(isNewer(candidate, current), true, `${candidate} is newer than ${current}`);
+    assert.equal(isNewer(current, candidate), false, `and ${current} is not newer than ${candidate}`);
+  }
+  for (const same of [
+    ['1.0.0-rc.1', '1.0.0-rc.1'],
+    ['1.2.3+b2', '1.2.3+b1'],
+    ['v1.2.3', '1.2.3'],
+  ] as const) {
+    assert.equal(isNewer(same[0], same[1]), false, `${same[0]} is not newer than ${same[1]}`);
+  }
+}
+
+/**
+ * The update check keeps its answer in the folder every other tool keeps its cache in, makes no
+ * folder when it is off, and does not trust an answer dated ahead of the clock.
+ */
+async function testTheUpdateCheckKeepsItsCacheWithTheOthersAndDistrustsAFutureAnswer(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-update-folder-'));
+  try {
+    const environment = {
+      XDG_CACHE_HOME: join(root, 'xdg'),
+      LOCALAPPDATA: join(root, 'local'),
+      HOME: join(root, 'home'),
+      GDHARNESS_NO_UPDATE_CHECK: '',
+    };
+    assert.equal(
+      cacheFile(environment),
+      join(cacheHome(environment), 'update-check.json'),
+      'the file is in the folder the cache owner names, with both variables set',
+    );
+    const off = { ...environment, XDG_CACHE_HOME: join(root, 'off-xdg'), GDHARNESS_NO_UPDATE_CHECK: '1' };
+    const quiet = new UpdateCheck('0.1.0', off, () => Promise.resolve(null));
+    quiet.refresh();
+    assert.equal(existsSync(join(root, 'off-xdg')), false, 'a check that is off makes no cache folder');
+    assert.equal(quiet.notice(), null);
+
+    // An answer dated a year ahead is asked about again, and a clock set back does the same.
+    let asks = 0;
+    const down = (): Promise<string | null> => {
+      asks += 1;
+      return Promise.resolve(null);
+    };
+    const settle = (): Promise<void> => new Promise((done) => setTimeout(done, 0));
+    const now = Date.now();
+    writeFileSync(cacheFile(environment), JSON.stringify({ checkedAt: now + 365 * 24 * 3600_000, latest: '99.9.9' }));
+    const check = new UpdateCheck('0.1.0', environment, down);
+    check.refresh(now);
+    await settle();
+    assert.equal(asks, 1, 'the first ask is made');
+    assert.equal(check.notice(now)?.latest, '99.9.9', 'and the kept one is still named while the registry is down');
+    check.refresh(now + 3 * 3600_000);
+    await settle();
+    assert.equal(asks, 2, 'asked again once the retry window has passed, not only at the answer\'s date');
+
+    // A good answer taken now, then the clock set back two hours: the next look asks again.
+    let lookups = 0;
+    const good = new UpdateCheck('0.1.0', environment, () => {
+      lookups += 1;
+      return Promise.resolve('99.9.9');
+    });
+    good.refresh(Date.now());
+    await settle();
+    good.refresh(Date.now() - 2 * 3600_000);
+    await settle();
+    assert.equal(lookups, 2, 'a clock set back two hours does not hold the asking off until it catches up');
+
+    // The same after a failure, whose retry window is dated by the clock that was set back.
+    asks = 0;
+    const failing = new UpdateCheck('0.1.0', { ...environment, XDG_CACHE_HOME: join(root, 'other') }, down);
+    failing.refresh(now);
+    await settle();
+    failing.refresh(now - 2 * 3600_000);
+    await settle();
+    assert.equal(asks, 2, 'a retry window dated by a clock set back is not waited out');
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
+ * A registry that answers nothing is asked again on a window that doubles, and never inside it.
+ * Counted with a registry that answers null, and then one that rejects.
+ */
+async function testARegistryThatIsDownIsAskedOnADoublingWindow(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-update-retry-'));
+  try {
+    const environment = { XDG_CACHE_HOME: root, GDHARNESS_NO_UPDATE_CHECK: '' };
+    const settle = (): Promise<void> => new Promise((done) => setTimeout(done, 0));
+    for (const failure of [
+      (): Promise<string | null> => Promise.resolve(null),
+      (): Promise<string | null> => Promise.reject(new Error('the registry is down')),
+    ]) {
+      let asks = 0;
+      const check = new UpdateCheck('0.1.0', environment, () => {
+        asks += 1;
+        return failure();
+      });
+      const base = Date.now() + 10 * 24 * 3600_000;
+      const at = async (seconds: number): Promise<number> => {
+        check.refresh(base + seconds * 1000);
+        await settle();
+        return asks;
+      };
+      assert.equal(await at(0), 1, 'the first ask is made');
+      assert.equal(await at(29), 1, 'nothing is asked inside the first window of thirty seconds');
+      assert.equal(await at(30), 2, 'and the second is asked as it ends');
+      assert.equal(await at(89), 2, 'the window then doubles, so nothing is asked inside sixty seconds');
+      assert.equal(await at(90), 3, 'and the third is asked as that ends');
+      assert.equal(await at(90 + 119), 3, 'and the next window is one hundred and twenty seconds');
+      assert.equal(await at(90 + 120), 4);
+    }
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
  * The update notice reaches the agent, once, and says what to do about it.
  *
  * Driven off a seeded cache rather than the registry: the point is the answer a tool carries, and
@@ -85728,6 +85877,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFreshServerAsksRatherThanInheritingAnAnswer,
   testTheUpdateWindowTracksHowOftenThisShips,
   testTheRegistryIsHttpsOrNpm,
+  testAMirrorWithAQueryOrFragmentStillNamesTheDocument,
+  testPrereleasesAndALeadingVOrderAsSemanticVersionsDo,
+  testTheUpdateCheckKeepsItsCacheWithTheOthersAndDistrustsAFutureAnswer,
+  testARegistryThatIsDownIsAskedOnADoublingWindow,
 ];
 
 /**
