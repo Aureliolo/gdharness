@@ -57,10 +57,12 @@ export function argumentShape(schema: Readonly<Record<string, unknown>>): string
  */
 export function headlessSection(): string[] {
   const everyOp = new Map<string, string[]>();
-  for (const table of [HEADLESS_OPERATIONS, ENGINE_PASSES]) {
-    for (const [tool, ops] of Object.entries(table)) {
-      everyOp.set(tool, [...(everyOp.get(tool) ?? []), ...Object.keys(ops)]);
-    }
+  const tables = [
+    ...Object.entries(HEADLESS_OPERATIONS).map(([tool, ops]): [string, string[]] => [tool, Object.keys(ops)]),
+    ...Object.entries(ENGINE_PASSES).map(([tool, ops]): [string, string[]] => [tool, [...ops]]),
+  ];
+  for (const [tool, ops] of tables) {
+    everyOp.set(tool, [...(everyOp.get(tool) ?? []), ...ops]);
   }
   const byTool = [
     ...[...everyOp].map(([tool, ops]) => `\`${tool}\` (${ops.join(', ')})`),

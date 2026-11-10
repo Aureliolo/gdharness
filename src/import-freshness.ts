@@ -8,9 +8,10 @@
  */
 
 import { createHash } from 'node:crypto';
-import { type Dirent, existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { type Dirent, existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { VERSION_MARKER } from './project-scan.js';
+import { importRecord } from './reimport.js';
 
 /** One file whose import is behind it, by its `res://` path, with why. */
 export interface StaleImport {
@@ -63,7 +64,7 @@ const IMPORTABLE = new Set(IMPORTABLE_EXTENSIONS);
  * hashes only what changed since. The judgement is still the content's: a file rewritten byte
  * for byte is current, as the editor, which compares the hash, takes it to be.
  */
-const hashes = new Map<string, { size: number; mtimeMs: number; md5: string }>();
+const hashes = new Map<string, { size: number; mtimeMs: number; ctimeMs: number; md5: string }>();
 
 function md5Of(file: string): string | null {
   let stats: ReturnType<typeof statSync>;
@@ -73,7 +74,14 @@ function md5Of(file: string): string | null {
     return null;
   }
   const known = hashes.get(file);
-  if (known !== undefined && known.size === stats.size && known.mtimeMs === stats.mtimeMs) {
+  // The change time too, which a write moves and a program setting the modification time back does
+  // not, so a file rewritten at the same size inside one clock step is read again.
+  if (
+    known !== undefined &&
+    known.size === stats.size &&
+    known.mtimeMs === stats.mtimeMs &&
+    known.ctimeMs === stats.ctimeMs
+  ) {
     return known.md5;
   }
   let md5: string;
@@ -82,7 +90,7 @@ function md5Of(file: string): string | null {
   } catch {
     return null;
   }
-  hashes.set(file, { size: stats.size, mtimeMs: stats.mtimeMs, md5 });
+  hashes.set(file, { size: stats.size, mtimeMs: stats.mtimeMs, ctimeMs: stats.ctimeMs, md5 });
   return md5;
 }
 
@@ -241,16 +249,10 @@ function behind(
   if (source !== '' && source !== resPath) {
     return `its import file was written for ${source}`;
   }
-  const name = resPath.slice(resPath.lastIndexOf('/') + 1);
-  const record = join(
-    projectPath,
-    '.godot',
-    'imported',
-    `${name}-${createHash('md5').update(resPath, 'utf8').digest('hex')}.md5`,
-  );
   let recorded = '';
   try {
-    recorded = /^source_md5="([0-9a-f]*)"/m.exec(readFileSync(record, 'utf8'))?.[1] ?? '';
+    recorded =
+      /^source_md5="([0-9a-f]*)"/m.exec(readFileSync(importRecord(projectPath, resPath), 'utf8'))?.[1] ?? '';
   } catch {
     recorded = '';
   }
@@ -259,6 +261,25 @@ function behind(
   }
   const current = md5Of(onDisk(projectPath, resPath));
   return current === null || current === recorded ? null : 'the source changed after it was imported';
+}
+
+/** What [param entry] of [param directory] is, a link taken as what it points at. */
+function kindOf(directory: string, entry: Dirent): 'directory' | 'file' | 'other' {
+  if (entry.isDirectory()) {
+    return 'directory';
+  }
+  if (entry.isFile()) {
+    return 'file';
+  }
+  if (!entry.isSymbolicLink()) {
+    return 'other';
+  }
+  try {
+    const target = statSync(join(directory, entry.name));
+    return target.isDirectory() ? 'directory' : target.isFile() ? 'file' : 'other';
+  } catch {
+    return 'other';
+  }
 }
 
 /**
@@ -271,49 +292,55 @@ function behind(
 export function staleImports(projectPath: string): StaleImport[] {
   const stale: StaleImport[] = [];
   const importedFrom = importedSidecarMd5s(projectPath);
+  // The folders entered, by what a link resolves to, since the engine follows links and a link back
+  // up the tree would otherwise be walked for good.
+  const entered = new Set<string>();
   const visit = (directory: string, resDirectory: string): void => {
     if (existsSync(join(directory, '.gdignore')) || existsSync(join(directory, VERSION_MARKER))) {
       return;
     }
     let entries: Dirent[];
     try {
+      const real = realpathSync(directory);
+      if (entered.has(real)) {
+        return;
+      }
+      entered.add(real);
       entries = readdirSync(directory, { withFileTypes: true });
     } catch {
       return;
     }
-    const names = new Set(entries.map((entry) => entry.name));
     for (const entry of entries) {
       if (entry.name.startsWith('.')) {
         continue;
       }
       const resPath = `${resDirectory}${entry.name}`;
-      if (entry.isDirectory()) {
+      const kind = kindOf(directory, entry);
+      if (kind === 'directory') {
         visit(join(directory, entry.name), `${resPath}/`);
         continue;
       }
-      if (!entry.isFile()) {
+      if (kind !== 'file' || entry.name.endsWith('.import')) {
         continue;
       }
-      if (entry.name.endsWith('.import')) {
-        const source = resPath.slice(0, -'.import'.length);
-        if (!names.has(entry.name.slice(0, -'.import'.length))) {
-          continue;
-        }
-        const sidecarFile = join(directory, entry.name);
+      // The sidecar is asked of the file system, which spells names as it opens them: Windows and
+      // macOS open `Hero.png.import` and `hero.png.import` as one file.
+      const sidecarFile = join(directory, `${entry.name}.import`);
+      if (existsSync(sidecarFile)) {
         let sidecar: string;
         try {
           sidecar = readFileSync(sidecarFile, 'utf8');
         } catch {
           continue;
         }
-        const reason = behind(projectPath, source, sidecarFile, sidecar, importedFrom);
+        const reason = behind(projectPath, resPath, sidecarFile, sidecar, importedFrom);
         if (reason !== null) {
-          stale.push({ path: source, reason });
+          stale.push({ path: resPath, reason });
         }
         continue;
       }
       const extension = entry.name.slice(entry.name.lastIndexOf('.') + 1).toLowerCase();
-      if (IMPORTABLE.has(extension) && !names.has(`${entry.name}.import`)) {
+      if (IMPORTABLE.has(extension)) {
         stale.push({ path: resPath, reason: 'it has not been imported' });
       }
     }
