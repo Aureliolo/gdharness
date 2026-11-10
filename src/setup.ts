@@ -675,9 +675,25 @@ export function worktreeAddonVersion(projectPath: string): string | null | undef
     if (statOf(join(projectPath, 'project.godot')) === undefined) {
       return undefined;
     }
-    return marker === null ? null : marker.toString('utf8').trim();
+    const said = marker?.toString('utf8').trim() ?? '';
+    return said === '' ? null : said;
   }
   return undefined;
+}
+
+/**
+ * Whether the addon installed in the project is the code this server ships. The two addons whose
+ * digest is marked at install are held to it, as the server holds the editor and a game, so that
+ * doctor and the server answer alike. The others have only the version to go by.
+ */
+function addonIsCurrent(projectPath: string, name: string, version: string | null): boolean {
+  if (name === ADDONS[0] || name === ADDONS[2]) {
+    return installedEditorDigest(projectPath) === shippedEditorDigest();
+  }
+  if (name === RUNTIME_ADDON) {
+    return installedRuntimeDigest(projectPath) === shippedRuntimeDigest();
+  }
+  return version === SERVER_VERSION;
 }
 
 /** What holds and what does not, read from the project directory alone. */
@@ -685,13 +701,14 @@ export function inspectProject(projectPath: string): ProjectReport {
   const problems: string[] = [];
   const addons = ADDONS.map((name): AddonState => {
     const directory = join(projectPath, 'addons', name);
-    const marker = join(directory, VERSION_MARKER);
     const installed = existsSync(directory);
-    const version = existsSync(marker) ? readFileSync(marker, 'utf8').trim() : null;
-    const current = version === SERVER_VERSION;
+    const version = versionMarker(projectPath, name);
+    const current = addonIsCurrent(projectPath, name, version);
     if (installed && !current) {
       problems.push(
-        `addons/${name} is ${version ?? 'of an unknown version'}, this gdharness is ${SERVER_VERSION}. Run gdharness setup`,
+        version === SERVER_VERSION
+          ? `addons/${name} is not the ${SERVER_VERSION} code this gdharness ships. Run gdharness setup`
+          : `addons/${name} is ${version ?? 'of an unknown version'}, this gdharness is ${SERVER_VERSION}. Run gdharness setup`,
       );
     }
     return { name, installed, version, current };

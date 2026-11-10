@@ -12786,6 +12786,71 @@ function testAnAutoloadNamedByUidIsResolvedOrReported(): void {
 }
 
 /**
+ * Doctor calls an addon current by the same rule the server holds an editor and a game to: the
+ * code it was installed with. A version marker left behind by an upgrade that changed no addon code
+ * is no fault, and a missing digest marker, as a failed install leaves, is one. An empty version
+ * marker reads as no marker in every reader.
+ */
+function testDoctorJudgesAddonsByTheirCodeAndNotTheirVersionMarker(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-current-'));
+  const addonProblems = (): string[] =>
+    inspectProject(project).problems.filter((problem) => problem.startsWith('addons/'));
+  const currentFlags = (): boolean[] => inspectProject(project).addons.map((addon) => addon.current);
+  try {
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    writeFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'list=Array[Dictionary]([])\n');
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    installAddons(project);
+    assert.deepEqual(currentFlags(), [true, true, true, true], 'a whole install is current');
+    assert.deepEqual(addonProblems(), []);
+
+    for (const name of ADDONS) {
+      writeFileSync(join(project, 'addons', name, '.gdharness-version'), '0.0.1\n');
+    }
+    assert.deepEqual(
+      currentFlags(),
+      [true, true, true, false],
+      'an old version marker over the same code is current for every addon the digest covers',
+    );
+    assert.deepEqual(addonProblems(), [
+      `addons/gdharness_tests is 0.0.1, this gdharness is ${SERVER_VERSION}. Run gdharness setup`,
+    ]);
+
+    for (const name of ['gdharness_tests', 'gdharness_editor', 'auto_reload']) {
+      writeFileSync(join(project, 'addons', name, '.gdharness-version'), `${SERVER_VERSION}\n`);
+    }
+    rmSync(join(project, 'addons', 'gdharness_editor', '.gdharness-digest'));
+    assert.deepEqual(
+      currentFlags(),
+      [false, true, false, true],
+      'a missing digest marker is not current, for the editor plugins it covers',
+    );
+    assert.deepEqual(addonProblems(), [
+      `addons/gdharness_editor is not the ${SERVER_VERSION} code this gdharness ships. Run gdharness setup`,
+      `addons/auto_reload is not the ${SERVER_VERSION} code this gdharness ships. Run gdharness setup`,
+    ]);
+
+    writeFileSync(join(project, 'addons', 'gdharness_tests', '.gdharness-version'), '\n');
+    assert.deepEqual(
+      inspectProject(project).addons.map((addon) => addon.version),
+      [SERVER_VERSION, '0.0.1', SERVER_VERSION, null],
+      'an empty version marker is no version',
+    );
+    assert.equal(worktreeAddonVersion(project), SERVER_VERSION, 'the editor addon is the one asked');
+    rmSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
+    assert.equal(worktreeAddonVersion(project), '0.0.1', 'and the next one when it is gone');
+    writeFileSync(join(project, 'addons', 'gdharness_runtime', '.gdharness-version'), '\n');
+    assert.equal(
+      worktreeAddonVersion(project),
+      null,
+      'an empty marker is an unmarked copy, not an empty version',
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * Which changelog section a change is listed under, by the files it touched.
  *
  * The split exists because a pull request title says what changed and not how far it reaches. Two
@@ -63274,7 +63339,7 @@ function testCommandLineSetup(): void {
     mkdirSync(guard, { recursive: true });
     writeFileSync(
       join(guard, 'gdharness_loader.gd'),
-      'extends Node\n\n\nfunc _ready() -> void:\n\tif OS.has_feature("template"):\n\t\treturn\n',
+      `extends Node\n\n\nfunc _ready() -> void:\n\tif OS.has_feature("template"):\n\t\treturn\n\tload("res://${RUNTIME_SCRIPT}")\n`,
     );
     const project = join(projectDir, 'project.godot');
     writeFileSync(
@@ -63528,7 +63593,10 @@ function testCommandLineSetup(): void {
       `setup for the loader case:\n${reinstalled.stdout}${reinstalled.stderr}`,
     );
     mkdirSync(guard, { recursive: true });
-    writeFileSync(join(guard, 'gdharness_loader.gd'), 'extends Node\n');
+    writeFileSync(
+      join(guard, 'gdharness_loader.gd'),
+      `extends Node\nconst RUNTIME = "res://${RUNTIME_SCRIPT}"\n`,
+    );
     writeFileSync(
       project,
       readFileSync(project, 'utf8').replace(loaderEntry, 'GdharnessLoader="*res://boot/gdharness_loader.gd"'),
@@ -83359,6 +83427,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnAutoloadNamingAFileThatIsNotThere,
   testTheRuntimeAutoloadIsFoundByWhatItNames,
   testAnAutoloadNamedByUidIsResolvedOrReported,
+  testDoctorJudgesAddonsByTheirCodeAndNotTheirVersionMarker,
   testEveryGdscriptIsUnderTheGatesAndEveryGateHasSome,
   testTheReleaseButtonOffersWhatBothDocumentsDescribe,
   testVersionOrdering,
