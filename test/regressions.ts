@@ -338,6 +338,7 @@ import {
   VERSION_MARKER,
 } from '../src/project-scan.js';
 import { PROMPT_SPECS } from '../src/prompts.js';
+import { forceNextImport, importRecord } from '../src/reimport.js';
 import { applyRewrites, NOT_INHERITED, RESOLVED_ELSEWHERE, type Rewrite } from '../src/rename.js';
 import {
   LEFT_ALONE_ANSWER_LINES,
@@ -28248,6 +28249,58 @@ async function testAnImportThatCouldNotCopyAnExtensionRunsAgain(): Promise<void>
     /^The first import could not load a\.dll and b\.dll: on Windows/,
     String(both.extensionNote),
   );
+}
+
+/**
+ * Forcing a reimport does three things to one resource and touches nothing else: it takes the
+ * failed-import line out of the sidecar, moves the sidecar's time on by two seconds and removes the
+ * record of the import's hashes. Each is read back, with a second resource beside it as the closest
+ * thing that must stay as it is.
+ */
+function testForcingAReimportTouchesOnlyThatResource(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-force-import-'));
+  try {
+    const imported = join(project, '.godot', 'imported');
+    mkdirSync(imported, { recursive: true });
+    const sidecarOf = (name: string): string => join(project, `${name}.import`);
+    const fixed = new Date(1_700_000_000_000);
+    for (const name of ['good.png', 'other.png']) {
+      writeFileSync(sidecarOf(name), 'valid=false\r\n[remap]\r\nimporter="texture"\r\nvalid=false\r\n');
+      utimesSync(sidecarOf(name), fixed, fixed);
+      writeFileSync(importRecord(project, `res://${name}`), 'source_md5="abc"\n');
+    }
+
+    forceNextImport(project, 'res://good.png');
+
+    assert.equal(
+      readFileSync(sidecarOf('good.png'), 'utf8'),
+      '[remap]\r\nimporter="texture"\r\nvalid=false\r\n',
+      'only the first line, which stops the pass, goes',
+    );
+    assert.equal(
+      statSync(sidecarOf('good.png')).mtimeMs - fixed.getTime(),
+      2000,
+      "the sidecar's time moves on by two seconds",
+    );
+    assert.equal(existsSync(importRecord(project, 'res://good.png')), false, 'the hash record is removed');
+
+    assert.equal(
+      readFileSync(sidecarOf('other.png'), 'utf8'),
+      'valid=false\r\n[remap]\r\nimporter="texture"\r\nvalid=false\r\n',
+      'another resource keeps its sidecar',
+    );
+    assert.equal(statSync(sidecarOf('other.png')).mtimeMs, fixed.getTime(), 'and its time');
+    assert.equal(existsSync(importRecord(project, 'res://other.png')), true, 'and its record');
+
+    forceNextImport(project, 'res://never.png');
+    assert.deepEqual(
+      readdirSync(imported).toSorted(),
+      [basename(importRecord(project, 'res://other.png'))],
+      'a resource never imported is left for the pass to import, and nothing is made for it',
+    );
+  } finally {
+    sweep(project);
+  }
 }
 
 /**
@@ -83450,6 +83503,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeepersScratchFoldersAreSweptWhenItIsGone,
   testADiagnosticTheFileContradictsIsNamed,
   testAnImportThatCouldNotCopyAnExtensionRunsAgain,
+  testForcingAReimportTouchesOnlyThatResource,
   testAnImportOrExportOverAStaleDocCacheRunsAgain,
   testACrashIsBlamedOnlyOnTheCacheOfTheEnginesOwnVersion,
   testAStaleEnumMemberIsNamed,
