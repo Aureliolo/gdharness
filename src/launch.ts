@@ -350,7 +350,7 @@ export function startedAs(commandLine: string): { hidden: boolean; silent: boole
  * out. Windows reports a command line as the one string it was started with. The other platforms'
  * readings arrive as words joined by spaces and have no quotes to take out.
  */
-function commandLineWords(line: string): string[] {
+export function commandLineWords(line: string): string[] {
   const words: string[] = [];
   let word = '';
   let inWord = false;
@@ -462,9 +462,27 @@ export const RESERVED_VARIABLE_PREFIX = 'GDHARNESS_';
 export function environmentFor(
   options: { savesIn?: string; env?: Readonly<Record<string, string>>; runtimeDirectory: string },
   variables: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
 ): NodeJS.ProcessEnv {
-  const base = options.savesIn === undefined ? { ...variables } : userDataIn(options.savesIn, variables);
-  return { ...base, ...options.env, GDHARNESS_RUNTIME_DIR: options.runtimeDirectory };
+  const environment =
+    options.savesIn === undefined ? { ...variables } : userDataIn(options.savesIn, variables);
+  const set = (name: string, value: string): void => {
+    // Windows compares names without case while a copied object does not, so a variable named in
+    // another case would reach the child beside the one it was meant to replace.
+    if (platform === 'win32') {
+      for (const spelt of Object.keys(environment)) {
+        if (spelt !== name && spelt.toLowerCase() === name.toLowerCase()) {
+          delete environment[spelt];
+        }
+      }
+    }
+    environment[name] = value;
+  };
+  for (const [name, value] of Object.entries(options.env ?? {})) {
+    set(name, value);
+  }
+  set('GDHARNESS_RUNTIME_DIR', options.runtimeDirectory);
+  return environment;
 }
 
 /** What a run is told when its saves could not be moved, which is the half nothing said. */

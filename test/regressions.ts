@@ -233,6 +233,7 @@ import {
 } from '../src/headless.js';
 import { EDITOR_READS, HEADLESS_OPERATIONS, HEADLESS_TOOLS } from '../src/headless-operations.js';
 import { IMPORTABLE_EXTENSIONS, staleImports } from '../src/import-freshness.js';
+import { defectReport, defectSignature, withoutMachinePaths } from '../src/issues.js';
 import { RENDERED_AWAY_NOTE, type ScriptError } from '../src/junit.js';
 import { askTheKeepersDebugger, askTheKeeperToStop, listenForTheServer } from '../src/keeper-channel.js';
 import {
@@ -12201,6 +12202,58 @@ function testARunsEnvironmentIsBuiltInOrder(): void {
 }
 
 /**
+ * Windows compares variable names without case and an object does not, so a name given in another
+ * case has to replace the server's own rather than reach the child beside it.
+ */
+function testAVariableInAnotherCaseReplacesTheServersOwn(): void {
+  const theirs = { APPDATA: 'C:/Users/somebody/AppData/Roaming', TEMP: 'C:/Temp', Path: 'C:/Windows' };
+  const runtime = 'C:/runtime';
+
+  const recased = environmentFor(
+    { env: { temp: 'D:/work', PATH: 'D:/bin' }, runtimeDirectory: runtime },
+    theirs,
+    'win32',
+  );
+  assert.deepEqual(
+    recased,
+    {
+      APPDATA: 'C:/Users/somebody/AppData/Roaming',
+      temp: 'D:/work',
+      PATH: 'D:/bin',
+      GDHARNESS_RUNTIME_DIR: runtime,
+    },
+    'a variable named in another case replaces the server variable of that name on Windows',
+  );
+
+  const saves = environmentFor(
+    { savesIn: 'D:/saves', env: { AppData: 'D:/mine' }, runtimeDirectory: runtime },
+    theirs,
+    'win32',
+  );
+  assert.deepEqual(
+    Object.entries(saves).filter(([name]) => name.toLowerCase() === 'appdata'),
+    [['AppData', 'D:/mine']],
+    'a caller naming AppData beside moved saves leaves one of it, the caller',
+  );
+  assert.equal(saves['XDG_DATA_HOME'], 'D:/saves', 'and the moved saves stay on Linux');
+
+  const shouted = environmentFor(
+    { env: { gdharness_runtime_dir: 'D:/elsewhere' }, runtimeDirectory: runtime },
+    theirs,
+    'win32',
+  );
+  assert.deepEqual(
+    Object.entries(shouted).filter(([name]) => name.toLowerCase() === 'gdharness_runtime_dir'),
+    [['GDHARNESS_RUNTIME_DIR', runtime]],
+    'and the runtime directory is the server, whatever case the caller spells it in',
+  );
+
+  const posix = environmentFor({ env: { temp: 'D:/work' }, runtimeDirectory: runtime }, theirs, 'linux');
+  assert.equal(posix['TEMP'], 'C:/Temp', 'where names are case-sensitive both stay');
+  assert.equal(posix['temp'], 'D:/work', 'as two variables');
+}
+
+/**
  * The engine, handed that environment, puts `user://` where it was told to.
  *
  * The fixture above checks the variables are set and says nothing about whether the engine reads
@@ -13392,12 +13445,161 @@ async function testTheLifecycleLogSaysHowAServerEnded(): Promise<void> {
       ['probe'],
       'and the next line starts a fresh one',
     );
+
+    // A field may not stand in for the line's own pid, version or event, and an unwritable log
+    // never throws out of the server.
+    process.env['GDHARNESS_RUNTIME_DIR'] = runtime;
+    try {
+      writeLifecycle('real', { pid: 1, version: '0.0.0', event: 'forged', project: 'p' });
+      const real = linesOf(process.pid).at(-1);
+      assert.deepEqual(
+        [get(real, 'event'), get(real, 'pid'), get(real, 'version') === '0.0.0', get(real, 'project')],
+        ['real', process.pid, false, 'p'],
+        `the line's own fields win and a free one is kept: ${JSON.stringify(real)}`,
+      );
+      const blocker = join(runtime, 'not-a-folder');
+      writeFileSync(blocker, '');
+      process.env['GDHARNESS_RUNTIME_DIR'] = join(blocker, 'inside');
+      assert.doesNotThrow(() => {
+        writeLifecycle('unwritable');
+      }, 'a log that cannot be written is not thrown');
+    } finally {
+      if (kept === undefined) {
+        delete process.env['GDHARNESS_RUNTIME_DIR'];
+      } else {
+        process.env['GDHARNESS_RUNTIME_DIR'] = kept;
+      }
+    }
   } finally {
     for (const server of servers) {
       await server.stop();
     }
     sweep(runtime);
   }
+}
+
+/**
+ * A defect report goes into a public tracker, so no folder above a project, no project folder and
+ * no home folder reaches it, whatever the folder is called or how its path is spelt.
+ */
+function testADefectReportHidesTheFoldersOfTheMachine(): void {
+  const made = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-redaction-'));
+  const keptHome = { USERPROFILE: process.env['USERPROFILE'], HOME: process.env['HOME'] };
+  const fakeHome = join(made, 'Users', 'Jane Doe');
+  try {
+    const plain = join(made, 'janedoe', 'secret-game');
+    const spaced = join(made, 'Jane Doe', 'secret game');
+    for (const project of [plain, spaced]) {
+      mkdirSync(join(project, 'scenes'), { recursive: true });
+      writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    }
+    mkdirSync(fakeHome, { recursive: true });
+    process.env['USERPROFILE'] = fakeHome;
+    process.env['HOME'] = fakeHome;
+    assert.equal(homedir(), fakeHome, 'the fixture moved the home folder');
+    const slashes = (path: string): string => path.replaceAll('\\', '/');
+    const scene = (project: string): string => join(project, 'scenes', 'a.tscn');
+
+    for (const [label, project] of [
+      ['without a space', plain],
+      ['with a space', spaced],
+    ] as const) {
+      assert.equal(
+        withoutMachinePaths(`ENOENT: open '${scene(project)}'`),
+        `ENOENT: open '<project>${sep}scenes${sep}a.tscn'`,
+        `a quoted file in a project ${label}`,
+      );
+      assert.equal(
+        withoutMachinePaths(`ENOENT: open ${scene(project)}`),
+        `ENOENT: open <project>${sep}scenes${sep}a.tscn`,
+        `a file at the end of the line in a project ${label}`,
+      );
+      assert.equal(
+        withoutMachinePaths(`ENOENT: scandir '${project}'`),
+        "ENOENT: scandir '<project>'",
+        `the project folder itself, ${label}`,
+      );
+      assert.equal(
+        withoutMachinePaths(`cannot list ${project}.`),
+        'cannot list <project>.',
+        `the project folder before a full stop, ${label}`,
+      );
+      assert.equal(
+        withoutMachinePaths(`ENOENT: open '${slashes(scene(project))}'`),
+        `ENOENT: open '<project>/scenes/a.tscn'`,
+        `a forward-slash spelling, ${label}`,
+      );
+    }
+
+    const outside = join(made, 'elsewhere', 'notes.txt');
+    assert.equal(
+      withoutMachinePaths(`copy ${scene(spaced)} to '${outside}'`),
+      `copy <project>${sep}scenes${sep}a.tscn to '${outside}'`,
+      'two paths in one line are each read for themselves',
+    );
+
+    const cache = join(fakeHome, '.cache', 'thing.json');
+    assert.equal(
+      withoutMachinePaths(`EBUSY: read ${cache}`),
+      `EBUSY: read ~${sep}.cache${sep}thing.json`,
+      'a home folder with a space',
+    );
+    assert.equal(
+      withoutMachinePaths(`EBUSY: read '${cache}'`),
+      `EBUSY: read '~${sep}.cache${sep}thing.json'`,
+      'and the same quoted',
+    );
+    assert.equal(
+      withoutMachinePaths(`${fakeHome}2${sep}x`),
+      `${fakeHome}2${sep}x`,
+      'a folder that only begins like the home folder is kept',
+    );
+    if (process.platform === 'win32') {
+      assert.equal(
+        withoutMachinePaths(`EBUSY: read ${slashes(cache)}`),
+        'EBUSY: read ~/.cache/thing.json',
+        'the home folder spelt with forward slashes',
+      );
+    }
+
+    const report = defectReport('gdharness test', new Error(`ENOENT: open '${scene(spaced)}'`));
+    const body = new URL(/(https:\/\/github\.com\/\S+)/u.exec(report)?.[1] ?? 'about:blank').searchParams.get(
+      'body',
+    );
+    for (const [what, said] of [
+      ['the report', report],
+      ['the link body', body ?? ''],
+    ] as const) {
+      assert.ok(
+        said.includes(`<project>${sep}scenes${sep}a.tscn`),
+        `${what} names the file inside the project`,
+      );
+      assert.ok(
+        !said.includes('Jane Doe') && !said.includes('secret game') && !said.includes(made),
+        `${what} names none of the folders`,
+      );
+    }
+  } finally {
+    for (const [name, value] of Object.entries(keptHome)) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+    rmSync(made, { recursive: true, force: true });
+  }
+
+  assert.equal(
+    defectSignature('editor_scene op=open', 'ENOENT: C:\\Users\\Ana Maria\\game\\main.tscn line 42'),
+    defectSignature('editor_scene op=open', 'ENOENT: C:\\Users\\Bo Li\\game\\main.tscn line 7'),
+    'one defect on two machines signs the same when a folder holds a space',
+  );
+  assert.notEqual(
+    defectSignature('editor_scene op=open', 'ENOENT: C:\\Users\\Ana Maria\\game\\main.tscn line 42'),
+    defectSignature('editor_scene op=open', 'EBUSY: C:\\Users\\Ana Maria\\game\\main.tscn line 42'),
+    'and two different failures still differ',
+  );
 }
 
 /**
@@ -80847,6 +81049,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testACallWaitsForTheEditorThisServerOpened,
   testEditorOutputChecksTheProjectItIsGiven,
   testTheLifecycleLogSaysHowAServerEnded,
+  testADefectReportHidesTheFoldersOfTheMachine,
   testAnEditorStartedByAnEditorSaysSo,
   testStalenessIsTheEditorCodeNotTheVersion,
   testAnEditorOnTheShippedCodeIsNotCalledStale,
@@ -80917,6 +81120,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARuntimeThatCameAndWentIsSaidToHave,
   testARunCanBeGivenItsOwnEnvironment,
   testARunsEnvironmentIsBuiltInOrder,
+  testAVariableInAnotherCaseReplacesTheServersOwn,
   testATestRunKeepsOutOfThePlayersSaves,
   testTheEngineWritesItsSavesWhereItWasTold,
   testParametersReachTheEngine,
