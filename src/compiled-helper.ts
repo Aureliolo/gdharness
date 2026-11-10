@@ -18,9 +18,10 @@ import {
   writeSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
+import { errorCode, errorMessage } from './errors.js';
 import { spawnHidden } from './spawn.js';
 
 /**
@@ -66,6 +67,9 @@ export class CompiledHelper {
    * again: 35 seconds to a game's announcement where the start after it took five.
    */
   async ensure(directory = tmpdir(), budgetMs = HELPER_COMPILE_MS, wait = true): Promise<string | null> {
+    if (!isAbsolute(directory)) {
+      return `the ${this.named} cannot be compiled into ${directory}, which is not an absolute folder`;
+    }
     const assembly = this.assembly(directory);
     const lock = `${assembly}.compiling`;
     const until = Date.now() + budgetMs;
@@ -79,8 +83,12 @@ export class CompiledHelper {
         writeSync(held, String(process.pid));
         closeSync(held);
         mine = true;
-      } catch {
-        // Another process is compiling it.
+      } catch (error) {
+        // Only an existing lock means another process is compiling it. Anything else, such as a
+        // folder that is not there, would otherwise wait out the whole budget with nothing tried.
+        if (errorCode(error) !== 'EEXIST') {
+          return `the ${this.named} cannot be compiled into ${directory}: ${errorMessage(error)}`;
+        }
       }
       if (mine) {
         try {

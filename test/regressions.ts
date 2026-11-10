@@ -15303,6 +15303,30 @@ async function testTheDesktopHelperIsCompiledOnce(): Promise<void> {
   }
 }
 
+// A folder the compile cannot use is said at once, not waited out and blamed on the compile.
+async function testAHelperFolderThatCannotBeUsedIsReportedAtOnce(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-helper-folder-'));
+  try {
+    for (const [said, directory, wait] of [
+      ['a folder that is not there', join(root, 'missing'), true],
+      ['the same without waiting', join(root, 'missing'), false],
+      ['a relative folder', join('undefined', 'temp'), true],
+    ] as const) {
+      const started = Date.now();
+      const answer = await ensureHelperCompiled(directory, 30_000, wait);
+      assert.match(
+        answer ?? '',
+        /^the desktop helper cannot be compiled into /,
+        `${said}: ${String(answer)}`,
+      );
+      assert.ok(Date.now() - started < 5_000, `${said}: it did not wait out the budget`);
+    }
+    assert.equal(existsSync(join(root, 'missing')), false, 'and made no folder');
+  } finally {
+    sweep(root);
+  }
+}
+
 /**
  * Every start `src/spawn.ts` offers as hidden is hidden, under Bun, which runs the suites and the
  * scripts, and under Node, which runs the server. So is each start in the prelude a test hands to
@@ -82247,6 +82271,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testALaunchWithoutActivationSaysSo,
   testEveryHiddenStartIsStartedHidden,
   testTheDesktopHelperIsCompiledOnce,
+  testAHelperFolderThatCannotBeUsedIsReportedAtOnce,
   testARunOutlivesItsServersTree,
   testASuccessorIsTheEngineStartedAsTheGameExited,
   testARunFollowsTheGamesRestart,
