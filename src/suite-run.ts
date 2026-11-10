@@ -270,7 +270,7 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
       switches.add(arg);
     } else if (VALUED.has(arg)) {
       const value = args[at + 1];
-      if (value === undefined || value.startsWith('--')) {
+      if (value === undefined || value === '' || value.startsWith('--')) {
         throw new EngineUsageError(`${arg} needs a value.`);
       }
       valued.set(arg, [...(valued.get(arg) ?? []), value]);
@@ -285,7 +285,9 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
   const projectPath = projectNamed ? firstPath : resolve(cwd);
   if (!existsSync(join(projectPath, 'project.godot'))) {
     throw new EngineUsageError(
-      `Not a Godot project: ${projectPath} holds no project.godot. Run from the project directory, or name it on the command line.`,
+      firstPath === null || firstPath === projectPath
+        ? `Not a Godot project: ${projectPath} holds no project.godot. Run from the project directory, or name it on the command line.`
+        : `Not a Godot project: neither ${firstPath} nor ${projectPath} holds a project.godot. Name the project directory first, or run from it.`,
     );
   }
   const last = (flag: string): string | undefined => valued.get(flag)?.at(-1);
@@ -345,6 +347,10 @@ function searchedRoots(options: TestOptions): readonly string[] {
 function selectedSuites(scripts: ProjectScripts, options: TestOptions): DeclaredSuite[] {
   const roots = rootsOf(options);
   if (options.selected.length === 0) {
+    const missing = roots.find((root) => !existsSync(join(options.projectPath, root.slice('res://'.length))));
+    if (missing !== undefined) {
+      throw new EngineUsageError(`Nothing at ${missing} in the project at ${options.projectPath}.`);
+    }
     const found = scripts.suitesUnder(roots);
     if (found.length === 0) {
       throw new EngineUsageError(
@@ -580,14 +586,14 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       const imported = await importProject(launch);
       if (imported !== null) {
         logs.keep();
-        writeEarlyResult(
+        const unwritten = writeEarlyResult(
           { resultFile: options.resultFile, lastRunFile, engines: options.engines },
           startedAt,
           [`the import failed: ${imported}`],
           logs.shown,
         );
         console.log(`The import failed, so no suite ran: ${imported}`);
-        return 1;
+        return exitAfter(1, unwritten);
       }
     }
     // After the import, which writes the .import and .uid files beside what a suite loads.
@@ -622,20 +628,20 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         } else {
           logs.keep();
         }
-        writeEarlyResult(
+        const unwritten = writeEarlyResult(
           { resultFile: options.resultFile, lastRunFile, engines: options.engines },
           startedAt,
           problems,
           problems.length === 0 ? null : logs.shown,
         );
         if (problems.length === 0) {
-          return 0;
+          return exitAfter(0, unwritten);
         }
         printCompiled(compiled, logs);
         printUncollected(uncollected);
         console.log('');
         console.log(`Failed: ${plural(problems.length, 'problem')}, listed above.`);
-        return 1;
+        return exitAfter(1, unwritten);
       }
     }
     const times = readTimes(timesFile);
@@ -787,7 +793,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       }
       ran = again;
     }
-    writeJson(
+    const timesKept = writeJson(
       timesFile,
       timesAfter(
         readTimes(timesFile),
@@ -803,20 +809,27 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         ),
       ),
     );
+    if (!timesKept) {
+      console.log(
+        `The times could not be written to ${timesFile}, so the next run is dealt by what that file held before.`,
+      );
+    }
     const across = rowsAcross(ran.map((engine) => ({ handed: engine.plan.suites, printed: engine.printed })));
-    recordPassed(
+    const passKept = recordPassed(
       passedFile,
       options.projectPath,
       ran,
       new Set(across.map((fault) => fault.suite)),
       new SuiteInputs(scripts, always),
       suitesBegan,
+      declared,
     );
     return report(
       ran,
       await compiling,
       across.map((fault) => fault.fault),
       uncollected,
+      passKept ? [] : [unkeptSaid(passedFile)],
       startedAt,
       logs,
       options.printOutput,
@@ -962,6 +975,11 @@ function readPassed(file: string): Record<string, PassedSuite> {
  * them may have caused, or when [param inputs] reads one of its inputs as changed after the suites
  * began at [param began], since the suite may have run on what was there before. A suite whose
  * script is gone from [param projectPath] is dropped too.
+ *
+ * A suite the engines were handed only some of the cases [param declared] gives it has not passed
+ * as a whole. A pass of those cases leaves what was kept for it as it was, and a failure drops it.
+ *
+ * Answers whether [param file] was written.
  */
 function recordPassed(
   file: string,
@@ -970,7 +988,8 @@ function recordPassed(
   failedAcross: ReadonlySet<string>,
   inputs: SuiteInputs,
   began: number,
-): void {
+  declared: CasesBySuite,
+): boolean {
   const passed = readPassed(file);
   for (const path of Object.keys(passed)) {
     if (!existsSync(join(projectPath, path.slice('res://'.length)))) {
@@ -995,7 +1014,19 @@ function recordPassed(
       reached.set(path, into);
     }
   }
+  const handed = new Map<string, Set<string>>();
+  for (const suite of ran.flatMap((engine) => engine.plan.suites)) {
+    const cases = handed.get(suite.path) ?? new Set<string>();
+    for (const func of suite.cases) {
+      cases.add(func);
+    }
+    handed.set(suite.path, cases);
+  }
   for (const path of new Set([...reached.keys(), ...failedSomewhere])) {
+    const ranWhole = (declared.get(path) ?? []).every((func) => handed.get(path)?.has(func) ?? false);
+    if (!ranWhole && !failedSomewhere.has(path)) {
+      continue;
+    }
     const loaded = reached.get(path);
     const kept =
       failedSomewhere.has(path) || loaded === undefined
@@ -1009,7 +1040,15 @@ function recordPassed(
       delete passed[path];
     }
   }
-  writeJson(file, passed);
+  return writeJson(file, passed);
+}
+
+/**
+ * The problem of a run that could not write what passed to [param file]. The file still holds the
+ * passes before this run, so a suite that failed here would be left out of a `--changed-only` run.
+ */
+function unkeptSaid(file: string): string {
+  return `what passed could not be written to ${file}, which still keeps a suite that failed here as passed for a --changed-only run`;
 }
 
 /**
@@ -1289,8 +1328,9 @@ async function importProject(launch: Launch): Promise<string | null> {
       log,
       launch.silenceFloorSeconds,
     );
-    if (ended.ended !== null || ended.code !== 0) {
-      return `${ended.ended ?? `the engine exited ${exitNamed(ended.code ?? 0)}`}, and everything it printed is in ${launch.logs.named(log)}`;
+    const end = importEnd(ended);
+    if (end !== null) {
+      return `${end}, and everything it printed is in ${launch.logs.named(log)}`;
     }
     // Godot's import exits 0 whatever it printed, and a suite run on a failed import reads what
     // the import left behind.
@@ -1305,6 +1345,20 @@ async function importProject(launch: Launch): Promise<string | null> {
   } finally {
     launch.slots.release(lock);
   }
+}
+
+/**
+ * What an import failed on when its engine ended as [param ended], or null when the engine exited 0
+ * of its own accord. One ended by a signal has no exit code, and is not one that exited 0.
+ */
+export function importEnd(ended: EngineEnd): string | null {
+  if (ended.ended !== null) {
+    return ended.ended;
+  }
+  if (ended.code === null) {
+    return `the engine was ended by ${ended.signal ?? 'a signal'}`;
+  }
+  return ended.code === 0 ? null : `the engine exited ${exitNamed(ended.code)}`;
 }
 
 /**
@@ -1538,6 +1592,7 @@ function report(
   compiled: Compiled,
   across: readonly string[],
   uncollected: readonly string[],
+  unkept: readonly string[],
   startedAt: number,
   logs: RunLogs,
   printOutput: boolean,
@@ -1597,6 +1652,13 @@ function report(
   }
   printCompiled(compiled, logs);
   printUncollected(uncollected);
+  if (unkept.length > 0) {
+    console.log('');
+    console.log('--- what this run keeps for the next:');
+    for (const fault of unkept) {
+      console.log(`  ${fault}`);
+    }
+  }
   const cases = ran.reduce(
     (sum, engine) => sum + [...engine.printed.suites.values()].reduce((n, s) => n + s.cases.length, 0),
     0,
@@ -1641,14 +1703,14 @@ function report(
   }
   const totals = `${plural(cases, 'case')} in ${plural(suites, 'suite')} ${acrossSaid(ran)}, ${took.toFixed(1)} s. The longest engine took ${longest.toFixed(1)} s.`;
   console.log('');
-  const passed =
-    failed.length === 0 && compiled.faults.length === 0 && across.length === 0 && uncollected.length === 0;
+  const outside = [...across, ...uncollected, ...unkept];
+  const passed = failed.length === 0 && compiled.faults.length === 0 && outside.length === 0;
   if (passed) {
     rmSync(logs.directory, { recursive: true, force: true });
   } else {
     logs.keep();
   }
-  writeResult(targets, {
+  const unwritten = writeResult(targets, {
     passed,
     seconds: took,
     problems: [
@@ -1656,8 +1718,7 @@ function report(
         engine.verdict.faults.map((fault) => `engine ${String(engine.index)}: ${fault}`),
       ),
       ...compiled.faults.map((fault) => `${COMPILE_CHECK}: ${fault}`),
-      ...across,
-      ...uncollected,
+      ...outside,
     ],
     suites: closed,
     engines: ran.map((engine) => ({
@@ -1680,11 +1741,11 @@ function report(
   });
   if (passed) {
     console.log(`Passed: ${totals}`);
-    return 0;
+    return exitAfter(0, unwritten);
   }
   const problems = failed.reduce(
     (sum, engine) => sum + engine.verdict.faults.length,
-    compiled.faults.length + across.length + uncollected.length,
+    compiled.faults.length + outside.length,
   );
   console.log(`Failed: ${plural(problems, 'problem')}, listed above. Ran ${totals}`);
   console.log(
@@ -1695,7 +1756,7 @@ function report(
       `That is a copy beside the main checkout. The run wrote them under ${logs.directory} in this worktree, and they go with it when the worktree is removed.`,
     );
   }
-  return 1;
+  return exitAfter(1, unwritten);
 }
 
 /**
@@ -1708,14 +1769,14 @@ export function startsSaid(starts: readonly EngineStart[]): string {
   return `Before ${one ? 'its' : 'their'} first suite the ${one ? 'engine' : 'engines'} spent ${seconds(starts.map((start) => start.seconds))} starting, ${seconds(starts.map((start) => start.compiledSeconds))} of it compiling the suites together.`;
 }
 
-/** Writes a result for a run that started no engine to [param file], when the run was asked for one. */
+/** Writes the result of a run that started no suite engine, and answers the files it could not write. */
 function writeEarlyResult(
   targets: Pick<ResultTargets, 'resultFile' | 'lastRunFile' | 'engines'>,
   startedAt: number,
   problems: readonly string[],
   logs: string | null,
-): void {
-  writeResult(targets, {
+): string[] {
+  return writeResult(targets, {
     passed: problems.length === 0,
     seconds: (Date.now() - startedAt) / 1000,
     problems,
@@ -1756,12 +1817,47 @@ function mostAtOnce(ran: readonly Pick<EngineRan, 'began' | 'seconds'>[]): numbe
   return most;
 }
 
-/** Writes [param result] to the last run's file, and to --result's when it was given. */
-function writeResult(targets: Pick<ResultTargets, 'resultFile' | 'lastRunFile'>, result: RunResult): void {
-  writeJson(targets.lastRunFile, result);
-  if (targets.resultFile !== null) {
-    writeJson(targets.resultFile, result);
+/**
+ * Writes [param result] to the last run's file, and to --result's when it was given. Answers the
+ * files it could not write, which still hold an earlier run's result.
+ */
+function writeResult(
+  targets: Pick<ResultTargets, 'resultFile' | 'lastRunFile'>,
+  result: RunResult,
+): string[] {
+  const files = [targets.lastRunFile, ...(targets.resultFile === null ? [] : [targets.resultFile])];
+  return files.filter((file) => !writeJson(file, result));
+}
+
+/**
+ * The exit code of a run that came to [param code], once it has said which result files in
+ * [param unwritten] it could not write. Such a run fails: whatever reads the file next would take
+ * the earlier run's result in it for this one's.
+ */
+function exitAfter(code: number, unwritten: readonly string[]): number {
+  for (const file of unwritten) {
+    console.log(
+      `The result could not be written to ${file}, which holds an earlier run's or nothing, so this run exits 1.`,
+    );
   }
+  return unwritten.length > 0 ? 1 : code;
+}
+
+/**
+ * Writes the result of a run that [param error] ended before any engine started, so the files do
+ * not go on holding the run before it.
+ */
+export function writeRefusedResult(options: TestOptions, startedAt: number, error: unknown): void {
+  writeEarlyResult(
+    {
+      resultFile: options.resultFile,
+      lastRunFile: join(homeOf(options.projectPath), '.godot', 'gdharness', LAST_RUN_FILE),
+      engines: options.engines,
+    },
+    startedAt,
+    [error instanceof Error ? error.message : String(error)],
+    null,
+  );
 }
 
 /** Lists [param uncollected], the scripts declaring cases gdUnit4 never runs, under a heading of their own. */

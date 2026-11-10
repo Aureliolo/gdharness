@@ -333,12 +333,12 @@ export function readTimes(file: string): SuiteTimes {
 /** [param kept] as one suite's time, or null for a suite whose entry is not that shape. */
 function suiteTimeOf(kept: unknown): SuiteTime | null {
   const { seconds, cases, rows }: Record<string, unknown> = isRecord(kept) ? kept : {};
-  if (typeof seconds !== 'number' || !isRecord(cases)) {
+  if (!isSeconds(seconds) || !isRecord(cases)) {
     return null;
   }
   const caseSeconds = Object.fromEntries(
     Object.entries(cases).flatMap(([name, spent]): [string, number][] =>
-      typeof spent === 'number' ? [[name, spent]] : [],
+      isSeconds(spent) ? [[name, spent]] : [],
     ),
   );
   const rowSeconds = Object.fromEntries(
@@ -350,17 +350,30 @@ function suiteTimeOf(kept: unknown): SuiteTime | null {
 }
 
 function isNumberList(value: unknown): value is number[] {
-  return Array.isArray(value) && value.every((one) => typeof one === 'number');
+  return Array.isArray(value) && value.every(isSeconds);
+}
+
+/**
+ * Whether [param value] is a time a run could have measured. JSON reads `1e999` as a number too,
+ * and a deal by an endless time hands no engine anything, while one below zero hands one engine
+ * everything.
+ */
+function isSeconds(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0;
 }
 
 /**
  * Writes [param value] as JSON to [param file] whole, since another game's tools read these files
- * while a run writes them. A write a reader held off leaves the earlier file, which only costs a
- * plan made from older times.
+ * while a run writes them, and answers whether it did. A write a reader held off, or one to a place
+ * no file can be made in, leaves what was there.
  */
-export function writeJson(file: string, value: unknown): void {
-  mkdirSync(dirname(file), { recursive: true });
-  writeWhole(file, `${JSON.stringify(value, null, 1)}\n`);
+export function writeJson(file: string, value: unknown): boolean {
+  try {
+    mkdirSync(dirname(file), { recursive: true });
+  } catch {
+    return false;
+  }
+  return writeWhole(file, `${JSON.stringify(value, null, 1)}\n`);
 }
 
 /**
