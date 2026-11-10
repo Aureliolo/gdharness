@@ -11591,7 +11591,7 @@ function testTheProjectWalksAgreeAboutWhatIsInIt(): void {
       maxResults: 100,
     });
     assert.deepEqual(
-      found.results.map((entry) => entry.file).toSorted(),
+      found.results.map((entry) => entry.file),
       ['res://addons/auto_reload/theirs.gd', 'res://scripts/hero.gd'],
       'the search should read the project and nothing standing beside it',
     );
@@ -11707,7 +11707,7 @@ function testASearchReadsWhatItSaysItReads(): void {
 
     const everywhere = search('GameState');
     assert.deepEqual(
-      everywhere.results.map((entry) => entry.file).toSorted(),
+      everywhere.results.map((entry) => entry.file),
       ['res://Hero.cs', 'res://project.godot'],
       `every text file is read, and a binary one is not: ${JSON.stringify(everywhere)}`,
     );
@@ -11751,6 +11751,11 @@ function testASearchReadsWhatItSaysItReads(): void {
     writeFileSync(join(sandbox, 'zz_vendor', '.gdignore'), '');
     const cut = search('GameState', { maxResults: 1 });
     assert.equal(cut.summary.truncated, true, 'and one more than the limit is cut');
+    assert.deepEqual(
+      cut.results.map((entry) => entry.file),
+      ['res://Hero.cs'],
+      'a cut search shows the first file by name, whichever order the file system lists them in',
+    );
     // Cut in what it answers, not in what it counts or where it looked.
     assert.deepEqual(
       [
@@ -11864,6 +11869,15 @@ function testASearchReadsWhatItSaysItReads(): void {
       matched.note,
       undefined,
       `a type that matched files is no note, found or not: ${JSON.stringify(matched)}`,
+    );
+    // Names that order differently by letter case and by character code, which a Windows listing
+    // does and a Linux one does not.
+    writeFileSync(join(sandbox, 'alpha.txt'), 'cutword\n');
+    writeFileSync(join(sandbox, 'Zed.txt'), 'cutword\n');
+    assert.deepEqual(
+      search('cutword', { maxResults: 1 }).results.map((entry) => entry.file),
+      ['res://Zed.txt'],
+      'a cut search shows the same file on every file system',
     );
   } finally {
     sweep(sandbox);

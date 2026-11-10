@@ -608,7 +608,9 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
       }
       return;
     }
-    for (const entry of entriesOf(directory)) {
+    // By name, so the matches a search cut at its limit shows are the same on every file system
+    // rather than whichever the directory lists first.
+    for (const entry of entriesOf(directory).toSorted((a, b) => (a.name < b.name ? -1 : 1))) {
       if (skipped(entry.name)) {
         continue;
       }
