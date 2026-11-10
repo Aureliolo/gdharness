@@ -52,9 +52,7 @@ function withoutComments(text: string): string {
     .replace(/"(?:[^"\\]|\\.)*"|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (match) =>
       match.startsWith('"') ? match : '',
     )
-    .replace(/"(?:[^"\\]|\\.)*"|,(\s*[\]}])/g, (match, closing: string | undefined) =>
-      closing === undefined ? match : closing,
-    );
+    .replace(/"(?:[^"\\]|\\.)*"|,(\s*[\]}])/g, (match, closing: string | undefined) => closing ?? match);
 }
 
 /**

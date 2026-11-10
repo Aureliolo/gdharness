@@ -5764,21 +5764,33 @@ function testEveryNoteIsReplacedWholeAndNeverRewrittenInPlace(): void {
   let count = 0;
   const script = join(project, 'a.gd');
   const notes: [string, string, () => void][] = [
-    ['boot note', bootNotePath(project), () => writeBootNote(project, MAIN_SCENE, 1_000 + count)],
+    [
+      'boot note',
+      bootNotePath(project),
+      () => {
+        writeBootNote(project, MAIN_SCENE, 1_000 + count);
+      },
+    ],
     [
       'breakpoint note',
       breakpointNotePath(project),
-      () => writeBreakpointNote(project, [{ scriptPath: script, lines: [count + 1] }]),
+      () => {
+        writeBreakpointNote(project, [{ scriptPath: script, lines: [count + 1] }]);
+      },
     ],
     [
       'bridge announcement',
       announcementPath(project),
-      () => announceBridge(project, { host: '127.0.0.1', port: 6_000 + count, version: '1.0.0' }),
+      () => {
+        announceBridge(project, { host: '127.0.0.1', port: 6_000 + count, version: '1.0.0' });
+      },
     ],
     [
       'cut run',
       join(project, '.godot', 'gdharness-reports', 'cut-run.json'),
-      () => keepCutTestRun(project, { cutAt: `t${count}`, paths: ['res://t'] }),
+      () => {
+        keepCutTestRun(project, { cutAt: `t${count}`, paths: ['res://t'] });
+      },
     ],
   ];
   try {

@@ -166,7 +166,7 @@ function testMacAppBundlesAreFoundByTheirProgram() {
     assert.deepEqual(
       scanDirectoryForGodotBinaries(dir, 'darwin')
         .map((path) => relative(dir, path).replaceAll('\\', '/'))
-        .sort(),
+        .toSorted(),
       ['Godot_mono.app/Contents/MacOS/Godot', 'Godot_v4.4.1.app/Contents/MacOS/Godot'],
       'a bundle with a program is listed by the program, one without is not',
     );

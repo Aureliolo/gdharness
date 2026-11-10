@@ -14,7 +14,7 @@ import { writeWhole } from './whole-file.js';
  * hours. Held in memory alone, every replacement offered that editor the rescan again until it saw
  * the loss for itself.
  */
-export interface ClassNote {
+interface ClassNote {
   /** The classes the cache held after the last rebuild a server ran. */
   readonly rebuiltWith: readonly string[];
   /**

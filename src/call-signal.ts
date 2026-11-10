@@ -41,7 +41,7 @@ export function stillGoingSaid(tool: string, op: string | null, elapsedMs: numbe
 }
 
 /** What a call says, and how often, when it has said nothing else for that long. */
-export interface StillGoing {
+interface StillGoing {
   readonly everyMs: number;
   readonly said: (elapsedMs: number) => string;
 }
