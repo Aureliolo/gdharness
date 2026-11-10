@@ -140,7 +140,8 @@ func _answer(operation: String, params: Dictionary, answer_path: String) -> void
 		quit(1)
 		return
 	# Keys in the order they were put in, which for a map read is the order the resource keeps.
-	var written: bool = answer.store_string(JSON.stringify(payload, "", false))
+	# Full precision, since the default spelling stops at 14 decimals and writes 1e-37 as 0.0.
+	var written: bool = answer.store_string(JSON.stringify(payload, "", false, true))
 	answer.close()
 	if not written:
 		_log.error("Could not write the answer to " + answer_path)
@@ -285,11 +286,11 @@ func _run(operation: String, params: Dictionary) -> Dictionary:
 		"get_script_info":
 			payload = GdhGdscriptAnalysis.new(_log).get_gdscript_info(params)
 		"names_taken":
-			payload = GdhRenameChecks.new(_log).names_taken(params)
+			payload = GdhRenameChecks.new().names_taken(params)
 		"check_scripts":
-			payload = GdhScriptCheck.new(_log).check_scripts(params)
+			payload = GdhScriptCheck.new().check_scripts(params)
 		"check_warnings":
-			payload = GdhScriptCheck.new(_log).check_warnings(params)
+			payload = GdhScriptCheck.new().check_warnings(params)
 
 		# Plugins and input
 		"list_plugins":
