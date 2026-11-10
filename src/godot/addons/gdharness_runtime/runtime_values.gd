@@ -291,10 +291,7 @@ static func no_action(action: String) -> String:
 		action, engine if action.begins_with("ui_") else own
 	)
 	if not close.is_empty():
-		return (
-			"%s. The nearest %s %s."
-			% [said, "is" if close.size() == 1 else "are", ", ".join(close)]
-		)
+		return "%s. The nearest %s." % [said, GdhRead.are_named(close)]
 	if own.is_empty():
 		return (
 			"%s. The project defines no actions of its own, and the engine's are the ui_ ones."

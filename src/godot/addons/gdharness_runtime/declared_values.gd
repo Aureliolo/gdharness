@@ -194,7 +194,7 @@ static func enum_refusal(
 	var close: PackedStringArray = GdhRead.nearest(word, named)
 	if close.is_empty():
 		return said + "."
-	return said + ". The nearest %s %s." % ["is" if close.size() == 1 else "are", ", ".join(close)]
+	return said + ". The nearest %s." % GdhRead.are_named(close)
 
 
 ## Why [param word], given as argument [param index] of [param called] for the enum [param named],
@@ -212,7 +212,7 @@ static func enum_argument_refusal(
 	var close: PackedStringArray = GdhRead.nearest(word, PackedStringArray(choices.keys()))
 	if close.is_empty():
 		return said + "."
-	return said + ". The nearest %s %s." % ["is" if close.size() == 1 else "are", ", ".join(close)]
+	return said + ". The nearest %s." % GdhRead.are_named(close)
 
 
 ## Why [param value], given as argument [param index] for the enum [param named], is none of its
@@ -572,11 +572,7 @@ static func not_held(
 	if names.is_empty() or names.has(str(value)):
 		return said + ": the engine changed or refused the value, so nothing was written."
 	var close: PackedStringArray = GdhRead.nearest(str(value), names)
-	var nearest: String = (
-		"%s %s" % ["is" if close.size() == 1 else "are", ", ".join(close)]
-		if not close.is_empty()
-		else ""
-	)
+	var nearest: String = GdhRead.are_named(close) if not close.is_empty() else ""
 	if bus:
 		# Not "holds Master after it was set": the getter answers the first bus for any name the
 		# layout lacks, and nothing was kept.

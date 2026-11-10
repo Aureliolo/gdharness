@@ -405,7 +405,7 @@ static func _header_refusal(named: String, base: String) -> String:
 		close = GdhRead.nearest(base, ClassDB.get_class_list())
 	if close.is_empty():
 		return said + "."
-	return said + ". The nearest %s %s." % ["is" if close.size() == 1 else "are", ", ".join(close)]
+	return said + ". The nearest %s." % GdhRead.are_named(close)
 
 
 ## Why [param template] cannot be written on [param base], or "". Each template's code calls

@@ -494,10 +494,7 @@ func call_method(params: Dictionary) -> Dictionary:
 					(
 						""
 						if close.is_empty()
-						else (
-							", and the nearest %s %s"
-							% ["is" if close.size() == 1 else "are", ", ".join(close)]
-						)
+						else ", and the nearest %s" % GdhRead.are_named(close)
 					),
 				]
 			)

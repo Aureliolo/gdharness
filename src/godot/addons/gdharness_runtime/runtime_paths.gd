@@ -636,10 +636,11 @@ static func _key_in(map: Dictionary, named: String) -> Array:
 static func key_written(named: String) -> String:
 	if named.length() < 2 or not named.begins_with('"') or not named.ends_with('"'):
 		return named
-	var reader: JSON = JSON.new()
-	if reader.parse(named) != OK or not reader.data is String:
+	var parsed: Variant = GdhRead.json_or_null(named)
+	if not parsed is String:
 		return named
-	return reader.data
+	var text: String = parsed
+	return text
 
 
 ## [param key] written as a step that names it: in double quotes when it holds what a bare step
@@ -713,8 +714,7 @@ static func arguments_of(named: String) -> Dictionary:
 	)
 	if inside.is_empty():
 		return { "args": [] }
-	var reader: JSON = JSON.new()
-	var parsed: Variant = reader.data if reader.parse("[%s]" % inside) == OK else null
+	var parsed: Variant = GdhRead.json_or_null("[%s]" % inside)
 	if not parsed is Array:
 		return { "message": _not_literals(named) }
 	var args: Array = []
@@ -850,10 +850,7 @@ static func with_methods_offered(said: String, object: Object, method: String) -
 			every.append(name)
 	var close: PackedStringArray = GdhRead.nearest(method, PackedStringArray(every))
 	if not close.is_empty():
-		return (
-			"%s The nearest it has %s %s"
-			% [GdhRead.ended(said), "is" if close.size() == 1 else "are", ", ".join(close)]
-		)
+		return GdhRead.nearest_told(said, close)
 	if own.is_empty():
 		return said
 	own.sort()
@@ -1055,7 +1052,7 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 		return "%s has no key %s. It is keyed by %s%s" % [called_as, named, ", ".join(some), rest]
 	if composite(holder):
 		var kind: String = type_string(typeof(holder))
-		var sort: String = ("an " if kind.left(1) in ["A", "E", "I", "O", "U"] else "a ") + kind
+		var sort: String = GdhRead.with_article(kind)
 		var has: String = ", ".join(GdhSerialisation.components_of(holder))
 		if not container_call.is_empty():
 			var calls: Array = value_calls(holder)
