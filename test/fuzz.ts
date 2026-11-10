@@ -166,6 +166,35 @@ function junkNeverEscapesTheContract(): void {
   );
 }
 
+/** A block with a body but no usable length, or a body of the wrong length, costs only itself. */
+function messagesAfterAFaultyBlockStillArrive(): void {
+  const faulty = fc.constantFrom(
+    'Content-Length: -7\r\n\r\n{"a":1}',
+    'Content-Type: x\r\n\r\n{"a":1}',
+    'Content-Length: nope\r\n\r\n{"a":1}',
+    'Content-Length: 9\r\n\r\n{"s":"é"}',
+    'Content-Length: 3\r\n\r\n{"a":1}',
+  );
+  fc.assert(
+    fc.property(
+      fc.array(faulty, { minLength: 1, maxLength: 3 }),
+      fc.array(jsonValue, { minLength: 1, maxLength: 5 }),
+      cuts,
+      (faults, messages, points) => {
+        const wire = Buffer.concat([
+          ...faults.map((text) => Buffer.from(text, 'utf8')),
+          ...messages.map(frame),
+        ]);
+        const values = received(new FrameReader(), chunked(wire, points))
+          .filter((found) => found.kind === 'message')
+          .map((found) => found.value);
+        assert.deepEqual(values.slice(-messages.length), messages.map(carried));
+      },
+    ),
+    { numRuns: 300 },
+  );
+}
+
 function theCeilingHoldsOnBothSides(): void {
   const announced = new FrameReader();
   assert.throws(
@@ -785,6 +814,7 @@ function junkIsNeverAReport(): void {
 framesRoundTripUnderAnyChunking();
 everyHeaderSpellingIsRead();
 junkNeverEscapesTheContract();
+messagesAfterAFaultyBlockStillArrive();
 theCeilingHoldsOnBothSides();
 projectFileNeverThrowsOrPollutes();
 projectFilesRoundTrip();
