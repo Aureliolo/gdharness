@@ -10,7 +10,7 @@
 import { createHash } from 'node:crypto';
 import { type Dirent, existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { VERSION_MARKER } from './project-scan.js';
+import { installedByUs } from './project-scan.js';
 import { importRecord } from './reimport.js';
 
 /** One file whose import is behind it, by its `res://` path, with why. */
@@ -296,7 +296,7 @@ export function staleImports(projectPath: string): StaleImport[] {
   // up the tree would otherwise be walked for good.
   const entered = new Set<string>();
   const visit = (directory: string, resDirectory: string): void => {
-    if (existsSync(join(directory, '.gdignore')) || existsSync(join(directory, VERSION_MARKER))) {
+    if (existsSync(join(directory, '.gdignore')) || installedByUs(directory)) {
       return;
     }
     let entries: Dirent[];

@@ -42,7 +42,8 @@ function gdignored(directory: string): boolean {
   return existsSync(join(directory, '.gdignore'));
 }
 
-function installedByUs(directory: string): boolean {
+/** Whether gdharness installed the addon in [param directory], which it marks with its version. */
+export function installedByUs(directory: string): boolean {
   return existsSync(join(directory, VERSION_MARKER));
 }
 
