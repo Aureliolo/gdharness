@@ -157,7 +157,12 @@ function shownFloat(float: number): string {
   if (!Number.isFinite(float)) {
     return float > 0 ? 'inf' : '-inf';
   }
-  return Number.isInteger(float) ? `${String(float)}.0` : String(float);
+  if (Object.is(float, -0)) {
+    return '-0.0';
+  }
+  const text = String(float);
+  // Past 1e21 the text is already in exponent form, which `.0` would spoil.
+  return Number.isInteger(float) && !text.includes('e') ? `${text}.0` : text;
 }
 
 /**
@@ -180,7 +185,10 @@ export function shownValue(value: GodotValue, typeHint = '', inside = false): st
   if (isList(value)) {
     const shown = value.slice(0, ELEMENTS_SHOWN).map((each) => shownValue(each, '', true));
     const more = value.length - shown.length;
-    return `[${shown.join(', ')}${more > 0 ? `, and ${more} more` : ''}]`;
+    const text = `[${shown.join(', ')}${more > 0 ? `, and ${more} more` : ''}]`;
+    // Inside another container a packed array reads like any list unless it says what it is.
+    const packed = inside ? containerTypeOf(value) : undefined;
+    return packed?.startsWith('Packed') === true ? `${packed}(${text})` : text;
   }
   if (value.kind === 'dictionary' && 'entries' in value) {
     const shown = value.entries
