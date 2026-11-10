@@ -204,7 +204,7 @@ import {
   Spent,
   STARVED,
 } from '../src/engine-spent.js';
-import { errorCode, errorMessage, Refusal } from '../src/errors.js';
+import { errorCode, errorMessage, Refusal, toError } from '../src/errors.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { FrameReader, OversizedStreamError, frame as wireFrame } from '../src/framing.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
@@ -8505,6 +8505,38 @@ async function testEditorOpenRefusesAnAddonThatCannotConnect(): Promise<void> {
     const another = await openTheEditor({ projectPath: project, start }, 'unused-engine', 'unused-holder');
     assert.ok('refused' in another, JSON.stringify(another));
     assert.match('refused' in another ? another.refused : '', /would be asked nothing but to quit/);
+  } finally {
+    sweep(project);
+  }
+}
+
+/** An open under way elsewhere, or an engine that will not start, is refused with the reason. */
+async function testEditorOpenRefusesAnOpenUnderWayAndAnEngineThatWillNotStart(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-open-'));
+  try {
+    installAddons(project);
+    writeFileSync(
+      join(project, 'project.godot'),
+      'config_version=5\n\n[editor_plugins]\n\nenabled=PackedStringArray("res://addons/gdharness_editor/plugin.cfg")\n',
+    );
+    const options = { projectPath: project, start: { hidden: false, silent: true, until: null } };
+    noteRestartBegun({
+      projectPath: project,
+      editorPid: null,
+      ports: { lsp: 6005, dap: 6006 },
+      quitAt: new Date().toISOString(),
+      byPid: process.pid,
+    });
+    const underway = await openTheEditor(options, 'unused-engine', 'unused-holder');
+    assert.ok('refused' in underway, JSON.stringify(underway));
+    assert.match(
+      'refused' in underway ? underway.refused : '',
+      /A restart of this project's editor is under way/,
+    );
+    rmSync(restartNotePath(project), { force: true });
+    const unstarted = await openTheEditor(options, join(project, 'no-such-engine'), 'unused-holder');
+    assert.ok('refused' in unstarted, JSON.stringify(unstarted));
+    assert.match('refused' in unstarted ? unstarted.refused : '', /^Could not start the editor: .+/);
   } finally {
     sweep(project);
   }
@@ -72290,6 +72322,12 @@ function testAThrownNonErrorReadsAsTheFallback(): void {
   assert.equal(errorMessage(new Error('')), 'Unknown error');
   assert.equal(errorCode(Object.assign(new Error('x'), { code: 'EEXIST' })), 'EEXIST');
   assert.equal(errorCode({ code: 'EEXIST' }), undefined);
+  const own = new Error('kept');
+  assert.equal(toError(own), own, 'an Error passes through with its own stack');
+  const wrapped = toError({ code: 1 });
+  assert.equal(wrapped.message, 'Unknown error');
+  assert.deepEqual(wrapped.cause, { code: 1 }, 'the thrown value is kept on cause');
+  assert.equal(toError('plain').message, 'plain');
 }
 
 /** A target whose name starts with two dots is inside the project, and is judged as any other name. */
@@ -83091,6 +83129,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEveryGreetingFieldIsRequired,
   testTheRestartTimeoutReadsWholeDigitsOnly,
   testEditorOpenRefusesAnAddonThatCannotConnect,
+  testEditorOpenRefusesAnOpenUnderWayAndAnEngineThatWillNotStart,
   testEditorOpenOptionsRefuseEachMisuse,
   testAnEditorOfAnotherReleaseIsAskedNothing,
   testACurrentAddonLackingAnOpSaysAScriptFailedToLoad,
