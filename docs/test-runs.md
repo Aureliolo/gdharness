@@ -127,6 +127,14 @@ output can still read it there. It holds:
 `log` and `logs` are null once a passing run has removed them. A run that failed its import, or had
 nothing left to run under `--changed-only`, writes empty `suites` and `engines`.
 
+### Refused runs and unwritten results
+
+A run refused before any engine started, such as one naming a suite that is not there, writes a
+failed result with empty `suites` and `engines`. Its refusal is its one problem.
+
+A run that cannot write a result file says which and exits 1, whatever its suites did. The file
+would otherwise hold an earlier run's result.
+
 A case's own time, as gdUnit4 prints it, runs from its `before_test()` to its `after_test()`. An
 engine's start and a suite's load and `before()` are in the fields above, never in a case's time.
 The run's closing lines also say what each engine spent starting.
@@ -526,6 +534,10 @@ run with nothing to run then takes no engine slot and waits for none.
 A suite is recorded as passed only when its engine raised nothing outside any suite and none of
 its inputs changed while it ran. The suites that passed are kept with their inputs in
 `.godot/gdharness/suite-passed.json`, beside the times.
+
+A run of chosen cases, such as `suite.gd:test_one`, records no pass for the suite, since the rest
+of its cases did not run. A failing case still removes the pass its suite had. A run that cannot
+write that file fails, because the file would go on keeping a suite that failed as passed.
 
 ### A suite's inputs
 

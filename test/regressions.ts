@@ -514,10 +514,12 @@ import {
   type Unit,
   unitsOf,
   windowedSaid,
+  writeJson,
 } from '../src/suite-plan.js';
 import {
   acrossSaid,
   engineSaid,
+  importEnd,
   importFault,
   importNeeded,
   MemoryGate,
@@ -50262,6 +50264,18 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   const imported = (lines: readonly string[]): string =>
     ['Godot Engine v4.7.2.stable.official.ed1daf0bf - https://godotengine.org', ...lines].join('\n');
   assert.equal(importFault(readRun(imported(['[ 100% ] first_scan_filesystem']))), null, 'a clean import');
+  assert.equal(importEnd({ code: 0, signal: null, ended: null }), null, 'an import engine that exited 0');
+  assert.equal(
+    importEnd({ code: null, signal: 'SIGKILL', ended: null }),
+    'the engine was ended by SIGKILL',
+    'one ended by a signal has no exit code, and did not exit 0',
+  );
+  assert.equal(importEnd({ code: null, signal: null, ended: null }), 'the engine was ended by a signal');
+  assert.equal(importEnd({ code: 101, signal: null, ended: null }), `the engine exited ${exitNamed(101)}`);
+  assert.equal(
+    importEnd({ code: 0, signal: null, ended: 'it printed nothing for 300 s' }),
+    'it printed nothing for 300 s',
+  );
   assert.equal(
     importFault(readRun(imported(['WARNING: res://dot.svg: the image is larger than it can import']))),
     'it printed an engine warning, the first warning "res://dot.svg: the image is larger than it can import"',
@@ -53946,6 +53960,11 @@ function testTheTestCommandReadsItsOwnOptions(): void {
       [['--cores', '0'], /whole number above 0/],
       [['--bogus'], /Unknown option --bogus/],
       [['--engines'], /--engines needs a value/],
+      // An empty value read as the directory the command ran in, for a path that was a variable
+      // holding nothing.
+      [['--result', ''], /--result needs a value/],
+      [['--times', ''], /--times needs a value/],
+      [['--slots', ''], /--slots needs a value/],
       [['--engines', '0'], /whole number above 0/],
       [['--order', 'sideways'], /reversed or a whole number/],
       [['../elsewhere.gd'], /is not inside the project/],
@@ -53956,6 +53975,46 @@ function testTheTestCommandReadsItsOwnOptions(): void {
         String(args),
       );
     }
+    const outside = join(project, 'outside');
+    mkdirSync(outside);
+    const said = (args: readonly string[]): string => {
+      try {
+        testOptionsOf(args, outside);
+      } catch (error) {
+        return error instanceof EngineUsageError ? error.message : String(error);
+      }
+      return 'read';
+    };
+    assert.equal(
+      said([]),
+      `Not a Godot project: ${outside} holds no project.godot. Run from the project directory, or name it on the command line.`,
+    );
+    assert.equal(
+      said(['elsewhere', 'tests/a_test.gd']),
+      `Not a Godot project: neither ${join(outside, 'elsewhere')} nor ${outside} holds a project.godot. Name the project directory first, or run from it.`,
+      'a project path that names no project is named in the refusal',
+    );
+    assert.equal(said(['..', 'tests/a_test.gd']), 'read', 'and the project beside it is read');
+
+    const timesFile = join(project, 'times.json');
+    writeFileSync(
+      timesFile,
+      '{"res://a.gd": {"seconds": 1e999, "cases": {}},' +
+        ' "res://b.gd": {"seconds": -3, "cases": {}},' +
+        ' "res://c.gd": {"seconds": 2, "cases": {"test_x": 1.5, "test_y": -1, "test_z": 1e999},' +
+        ' "rows": {"test_x": [0.5, 1], "test_y": [1, -1], "test_z": [1e999]}}}',
+    );
+    assert.deepEqual(
+      readTimes(timesFile),
+      { 'res://c.gd': { seconds: 2, cases: { test_x: 1.5 }, rows: { test_x: [0.5, 1] } } },
+      'a time no run could have measured is not dealt by',
+    );
+    assert.equal(
+      writeJson(join(timesFile, 'kept.json'), {}),
+      false,
+      'a file asked for under a file is answered as not written, where the run went on to its verdict',
+    );
+
     const refused = spawnSyncHidden(process.execPath, ['build/cli.js', 'test', '--bogus'], {
       encoding: 'utf8',
       cwd: process.cwd(),
@@ -55892,7 +55951,7 @@ function testATestRunTimesStartAndSetUpApartFromItsCases(): void {
  * suite: kept, the next `--changed-only` run skipped a case no run had ever passed. A failing case
  * still drops the pass its suite had.
  */
-async function testARunOfSomeCasesKeepsNoPassForTheSuite(): Promise<void> {
+function testARunOfSomeCasesKeepsNoPassForTheSuite(): void {
   const engines = commandTestEngines();
   if (engines === null) {
     return;
@@ -55955,6 +56014,80 @@ async function testARunOfSomeCasesKeepsNoPassForTheSuite(): Promise<void> {
       `a failing case drops the pass its suite had: ${JSON.stringify(Object.keys(kept()))}`,
     );
     assert.ok(Object.keys(kept()).includes(suite), 'and leaves the other suites kept');
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
+/**
+ * A result file holds the run that wrote it and no other. A run refused before any engine started
+ * left the result of the run before, which a gate read as a pass, and a result that could not be
+ * written was dropped while the run exited 0.
+ */
+function testAResultFileHoldsTheRunThatWroteIt(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  try {
+    const state = join(project, '.godot', 'gdharness');
+    const resultFile = join(checkouts, 'result.json');
+    const lastRun = join(state, 'last-run.json');
+
+    const passing = test('tests/ok_test.gd', '--result', resultFile);
+    assert.equal(passing.status, 0, passing.said);
+    assert.equal(readRunResult(resultFile).passed, true, 'a passing run says so in its result');
+
+    const nowhere = test('--tests', 'nowhere', '--result', resultFile);
+    assert.equal(nowhere.status, 2, nowhere.said);
+    assert.ok(
+      nowhere.said.includes(`Nothing at res://nowhere in the project at ${project}.`),
+      `a directory that is not there is said to be missing, not empty of suites: ${nowhere.said}`,
+    );
+    for (const file of [resultFile, lastRun]) {
+      const refused = readRunResult(file);
+      assert.equal(refused.passed, false, `${file} no longer holds the run before`);
+      assert.deepEqual(refused.problems, [`Nothing at res://nowhere in the project at ${project}.`], file);
+    }
+
+    const blocked = join(checkouts, 'blocked');
+    mkdirSync(blocked);
+    const unwritten = test('tests/ok_test.gd', '--result', blocked);
+    assert.match(unwritten.said, /^Passed: 2 cases in 1 suite across 1 engine, /m, unwritten.said);
+    assert.ok(
+      unwritten.said.includes(
+        `The result could not be written to ${blocked}, which holds an earlier run's or nothing, so this run exits 1.`,
+      ),
+      unwritten.said,
+    );
+    assert.equal(unwritten.status, 1, 'a run whose result is not where it was asked for fails');
+    assert.equal(readRunResult(lastRun).passed, true, "the project's own result file is still written");
+
+    const timesBlocked = join(checkouts, 'times');
+    mkdirSync(timesBlocked);
+    const untimed = test('tests/ok_test.gd', '--times', timesBlocked);
+    assert.equal(untimed.status, 0, untimed.said);
+    assert.ok(
+      untimed.said.includes(
+        `The times could not be written to ${timesBlocked}, so the next run is dealt by what that file held before.`,
+      ),
+      untimed.said,
+    );
+
+    // A directory where the passes are kept, so the run cannot drop or add one.
+    const passedFile = join(state, 'suite-passed.json');
+    rmSync(passedFile);
+    mkdirSync(passedFile);
+    const unkept = test('tests/ok_test.gd');
+    rmSync(passedFile, { recursive: true });
+    const unkeptSaid = `what passed could not be written to ${passedFile}, which still keeps a suite that failed here as passed for a --changed-only run`;
+    assert.equal(unkept.status, 1, unkept.said);
+    assert.ok(unkept.said.includes(`--- what this run keeps for the next:\n  ${unkeptSaid}`), unkept.said);
+    assert.match(unkept.said, /^Failed: 1 problem, listed above\. Ran 2 cases in 1 suite /m, unkept.said);
+    const unkeptResult = readRunResult(lastRun);
+    assert.equal(unkeptResult.passed, false, 'the result says the run failed');
+    assert.deepEqual(unkeptResult.problems, [unkeptSaid], 'with the problem the output lists');
   } finally {
     sweep(project, slots, checkouts);
   }
@@ -81057,6 +81190,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASuiteRunHasNoSoundWhicheverWayItStarts,
   testTheTestCommandRunsAndJudgesAProject,
   testARunOfSomeCasesKeepsNoPassForTheSuite,
+  testAResultFileHoldsTheRunThatWroteIt,
   testTheTestCommandDealsAndReportsARun,
   testATestRunTimesStartAndSetUpApartFromItsCases,
   testATestRunsLimitsEndAHungOrChattyEngine,
