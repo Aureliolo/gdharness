@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
+import { ChildProcess as UnstartedProcess } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import {
@@ -25,6 +26,8 @@ import {
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
 import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
 import { basename, delimiter, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { PassThrough, Readable } from 'node:stream';
+import { text as pipedText } from 'node:stream/consumers';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { stripVTControlCharacters } from 'node:util';
@@ -296,6 +299,7 @@ import {
   removeLeftRecords,
 } from '../src/lsp-bridge.js';
 import { nearest as nearestNames, withNearestFiles } from '../src/nearest.js';
+import { readLaunched, receivedSpec, type SentSpec, sendSpec, withChanges } from '../src/outside.js';
 import {
   exportedBuild,
   isSameDirectory,
@@ -15279,6 +15283,111 @@ async function testALaunchIsOutsideTheServersTree(): Promise<void> {
     await met.end();
     sweep(scratch);
   }
+}
+
+/**
+ * What the launcher is sent and what it answers are read strictly: a spec comes back as it was
+ * sent, a malformed one is refused whole, a variable is set or taken away by name, and the first
+ * line a launcher prints is its answer.
+ */
+async function testALauncherSpecIsReadBackAsSentAndAnAnswerByItsFirstLine(): Promise<void> {
+  const sent: SentSpec = {
+    command: 'godot',
+    args: ['--path', 'my game'],
+    envChanges: { KEPT: 'a', GONE: null },
+    run: {
+      transcript: 'out.log',
+      startedAt: 5,
+      projectPath: 'p',
+      servedBy: 'q',
+      profile: 'prof',
+      breakpoints: ['res://a.gd:3'],
+      debugged: false,
+      slot: { lock: 'l', from: 1, by: 'k' },
+    },
+    desktop: 'desk',
+    noActivate: true,
+  };
+  // Only the stdin of a child is written to, so an unstarted one with a pipe in its place will do.
+  const child = new UnstartedProcess();
+  const pipe = new PassThrough();
+  Object.defineProperty(child, 'stdin', { value: pipe });
+  sendSpec(child, sent);
+  const written = await pipedText(pipe);
+  const received = async (body: string): Promise<SentSpec> => {
+    const real = Object.getOwnPropertyDescriptor(process, 'stdin');
+    Object.defineProperty(process, 'stdin', { value: Readable.from([body]), configurable: true });
+    try {
+      return await receivedSpec();
+    } finally {
+      if (real !== undefined) {
+        Object.defineProperty(process, 'stdin', real);
+      }
+    }
+  };
+  assert.deepEqual(await received(written), sent, 'a spec comes back as it was sent');
+  assert.deepEqual(
+    await received(JSON.stringify({ command: 'x', args: [], envChanges: {} })),
+    { command: 'x', args: [], envChanges: {} },
+    'a spec with only the required parts has no others made up',
+  );
+  const base = { command: 'x', args: [], envChanges: {} };
+  for (const [name, spoiled] of [
+    ['no command', { ...base, command: undefined }],
+    ['a command that is a number', { ...base, command: 3 }],
+    ['an argument that is a number', { ...base, args: ['a', 4] }],
+    ['arguments that are a string', { ...base, args: 'a' }],
+    ['an environment change that is a number', { ...base, envChanges: { A: 1 } }],
+    ['an environment that is a list', { ...base, envChanges: [] }],
+    ['a run with no transcript', { ...base, run: { startedAt: 1, projectPath: 'p' } }],
+    ['a run started at a string', { ...base, run: { transcript: 't', startedAt: '1', projectPath: 'p' } }],
+    [
+      'a run with a half slot',
+      { ...base, run: { transcript: 't', startedAt: 1, projectPath: 'p', slot: { lock: 'l' } } },
+    ],
+    [
+      'breakpoints that are not text',
+      { ...base, run: { transcript: 't', startedAt: 1, projectPath: 'p', breakpoints: [1] } },
+    ],
+    ['a desktop that is a number', { ...base, desktop: 7 }],
+    ['a noActivate that is a string', { ...base, noActivate: 'yes' }],
+  ] as const) {
+    await assert.rejects(
+      received(JSON.stringify(spoiled)),
+      /is not a spec a server sends/u,
+      `${name} is refused`,
+    );
+  }
+  await assert.rejects(received('[]'), /is not a spec a server sends/u, 'a list is no spec');
+
+  const env = { KEPT: 'old', GONE: 'x', OTHER: 'y' };
+  assert.deepEqual(
+    withChanges(env, { KEPT: 'new', GONE: null, ADDED: 'z' }),
+    { KEPT: 'new', OTHER: 'y', ADDED: 'z' },
+    'a change sets or removes a variable and leaves the rest',
+  );
+  assert.deepEqual(
+    env,
+    { KEPT: 'old', GONE: 'x', OTHER: 'y' },
+    'and the environment it was given is not touched',
+  );
+  assert.deepEqual(withChanges(env, {}), env, 'no change is the same environment');
+
+  assert.deepEqual(readLaunched('pid 12\n'), { pid: 12 });
+  assert.deepEqual(
+    readLaunched('\n  \n  pid 7  \nmore\n'),
+    { pid: 7 },
+    'blank lines before the answer are skipped',
+  );
+  assert.deepEqual(readLaunched('error no such file\n'), { error: 'no such file' });
+  assert.deepEqual(readLaunched(''), { error: 'the launcher said nothing' });
+  assert.deepEqual(readLaunched('  \n'), { error: 'the launcher said nothing' });
+  assert.deepEqual(
+    readLaunched('warning: x\npid 9\n'),
+    { error: 'warning: x' },
+    'the first line is the answer, so a line before the pid is an error naming it',
+  );
+  assert.deepEqual(readLaunched('pid abc'), { error: 'pid abc' }, 'a pid that is no number is an error');
 }
 
 /**
@@ -82564,6 +82673,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARescanWaitsForItsScanToComplete,
   testARescanCountsNoSlowAnswerAsScanning,
   testALaunchIsOutsideTheServersTree,
+  testALauncherSpecIsReadBackAsSentAndAnAnswerByItsFirstLine,
   testAWindowsCommandLineReadsBackAsItsArguments,
   testARunOnItsOwnDesktopIsThere,
   testARunThatQuitsAtOnceOnItsOwnDesktopEnds,
