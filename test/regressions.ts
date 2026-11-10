@@ -56674,6 +56674,18 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
       0,
       'an engine that never started',
     );
+    // An engine ended part way through a line, as the run ends one whose autoload did not start,
+    // leaves that line torn. What it recorded whole still counts.
+    const torn = join(project, 'torn.jsonl');
+    writeFileSync(
+      torn,
+      `${readFileSync(record, 'utf8')}{"began":"res://tests/c_test.gd","resident":["res://ga`,
+    );
+    assert.deepEqual(
+      Object.fromEntries(reachedBySuite(torn)),
+      Object.fromEntries(recorded),
+      'a torn last line',
+    );
   } finally {
     sweep(project);
   }
