@@ -64415,8 +64415,7 @@ func _init() -> void:
     ties25: ['aab', 'bab', 'cab'],
     ties25reversed: ['zab', 'yab', 'wab'],
     offeredNone: 'res://t.tres holds no type Label. It has none',
-    offeredFar:
-      'S has no signal qwxz. It has sig000, sig001, sig002, sig003, sig004, sig005, sig006, sig007, sig008, sig009, sig010, sig011 and 18 more',
+    offeredFar: `S has no signal qwxz. It has ${Array.from({ length: 30 }, (_, index) => `sig${String(index).padStart(3, '0')}`).join(', ')}`,
     caseText: 'N has no property text. The nearest it has is Text',
     caseVisible: 'N has no property visible. The nearest it has is Visible',
     spaced: 'X. Body has no " Body". Its children are Player.',

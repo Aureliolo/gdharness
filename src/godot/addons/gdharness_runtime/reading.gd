@@ -306,18 +306,14 @@ static func nearest_told(said: String, close: PackedStringArray) -> String:
 
 
 ## [param said], the refusal for [param word], which is not among [param names], with those nearest
-## it when any are, or else the first [constant NAMED_CHILDREN] of them, so the caller has a name to
-## send instead.
+## it when any are, or else every one of them, so the caller has the name to send instead.
 static func offered(said: String, word: String, names: Array) -> String:
 	var every: PackedStringArray = PackedStringArray(names)
 	var close: PackedStringArray = nearest(word, every)
 	if every.is_empty():
 		return "%s It has none" % ended(said)
 	if close.is_empty():
-		var shown: String = ", ".join(every.slice(0, NAMED_CHILDREN))
-		if every.size() > NAMED_CHILDREN:
-			shown += " and %d more" % (every.size() - NAMED_CHILDREN)
-		return "%s It has %s" % [ended(said), shown]
+		return "%s It has %s" % [ended(said), ", ".join(every)]
 	return nearest_told(said, close)
 
 
