@@ -46,7 +46,12 @@ import {
   writeBootNote,
 } from '../src/boot-note.js';
 import { breakpointNotePath, readBreakpointNote, writeBreakpointNote } from '../src/breakpoint-note.js';
-import { announcementPath, BRIDGE_ANNOUNCE_PROTOCOL, readAnnouncement } from '../src/bridge-announce.js';
+import {
+  announceBridge,
+  announcementPath,
+  BRIDGE_ANNOUNCE_PROTOCOL,
+  readAnnouncement,
+} from '../src/bridge-announce.js';
 import { toolHome } from '../src/cache-home.js';
 import { callProgress, stillGoingSaid, withCallSignal } from '../src/call-signal.js';
 import {
@@ -5388,6 +5393,82 @@ function testTheBreakpointNoteIsTheProjects(): void {
   } finally {
     sweep(project);
     sweep(elsewhere);
+  }
+}
+
+// A reader landing on a note mid-write would meet half a file, so each rewrite replaces the file
+// rather than the bytes in it. A hard link to the old file keeps the old bytes only if it did.
+function testEveryNoteIsReplacedWholeAndNeverRewrittenInPlace(): void {
+  const project = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-notes-')));
+  let count = 0;
+  const script = join(project, 'a.gd');
+  const notes: [string, string, () => void][] = [
+    ['boot note', bootNotePath(project), () => writeBootNote(project, MAIN_SCENE, 1_000 + count)],
+    [
+      'breakpoint note',
+      breakpointNotePath(project),
+      () => writeBreakpointNote(project, [{ scriptPath: script, lines: [count + 1] }]),
+    ],
+    [
+      'bridge announcement',
+      announcementPath(project),
+      () => announceBridge(project, { host: '127.0.0.1', port: 6_000 + count, version: '1.0.0' }),
+    ],
+    [
+      'cut run',
+      join(project, '.godot', 'gdharness-reports', 'cut-run.json'),
+      () => keepCutTestRun(project, { cutAt: `t${count}`, paths: ['res://t'] }),
+    ],
+  ];
+  try {
+    for (const [said, path, write] of notes) {
+      count += 1;
+      write();
+      const first = readFileSync(path, 'utf8');
+      linkSync(path, `${path}.link`);
+      count += 1;
+      write();
+      const second = readFileSync(path, 'utf8');
+      assert.notEqual(second, first, `${said}: the second write landed`);
+      assert.equal(
+        readFileSync(`${path}.link`, 'utf8'),
+        first,
+        `${said}: the old file was replaced, not rewritten`,
+      );
+      assert.deepEqual(
+        readdirSync(dirname(path)).filter((name) => name.endsWith('.partial')),
+        [],
+        `${said}: no partial file is left`,
+      );
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+// A script path that climbs out of the project is refused whichever separator the note spells it with.
+function testABreakpointNoteWithBackslashesCannotLeaveTheProject(): void {
+  const project = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-breakpoints-')));
+  try {
+    mkdirSync(join(project, '.godot'), { recursive: true });
+    writeFileSync(
+      breakpointNotePath(project),
+      JSON.stringify({
+        breakpoints: [
+          { script: '..\\outside.gd', lines: [1] },
+          { script: 'core\\..\\..\\outside.gd', lines: [3] },
+          { script: 'core/../../outside.gd', lines: [2] },
+          { script: 'core/../inside.gd', lines: [4] },
+        ],
+      }),
+    );
+    assert.deepEqual(
+      readBreakpointNote(project),
+      [{ scriptPath: join(project, 'inside.gd'), lines: [4] }],
+      'only the path that stays inside is taken on',
+    );
+  } finally {
+    sweep(project);
   }
 }
 
@@ -81624,6 +81705,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAContinueByAnotherClientIsKnownHere,
   testBreakpointsAreSentAgainBeforeAPlay,
   testTheBreakpointNoteIsTheProjects,
+  testEveryNoteIsReplacedWholeAndNeverRewrittenInPlace,
+  testABreakpointNoteWithBackslashesCannotLeaveTheProject,
   testABreakpointRefusalNamesTheEditor,
   testABreakpointSetHereKeepsTheEditorsOwn,
   testAnEditorThatClearsBreakpointsIsSaidSo,
