@@ -76706,12 +76706,16 @@ async function testABinarySceneNamingAGoneFileIsRefusedAWrite(): Promise<void> {
 
 /**
  * Runs [script], a SceneTree script, in a project holding the editor addon and [files], and answers
- * the JSON it prints after RESULT.
+ * the JSON it prints after RESULT, or null when there is no engine to run it on.
  */
 function runASceneProbe(label: string, files: Record<string, string>, script: string): unknown {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
-    throw new Error(`${label}: GODOT_PATH names no existing file.`);
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error(`${label}: GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.`);
+    }
+    console.log(`${label} regression skipped (Godot not found)`);
+    return null;
   }
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-scene-probe-'));
   try {
@@ -76772,6 +76776,9 @@ function testAWriteRefusesAFileChangedSinceItWasRead(): void {
       '',
     ].join('\n'),
   );
+  if (result === null) {
+    return;
+  }
   assert.deepEqual(get(result, 'opened'), {}, JSON.stringify(result));
   assert.equal(get(result, 'answer', 'ok'), false, JSON.stringify(result));
   assert.match(
@@ -76819,6 +76826,9 @@ function testTheCachedSceneHoldsTheUniqueIdsTheFileKeeps(): void {
       '',
     ].join('\n'),
   );
+  if (result === null) {
+    return;
+  }
   assert.deepEqual([get(result, 'opened'), get(result, 'answer')], [{}, {}], JSON.stringify(result));
   assert.deepEqual(
     get(result, 'file'),
