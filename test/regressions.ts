@@ -327,6 +327,7 @@ import {
   type SearchOptions,
   type SearchResult,
   SHOWN_OF_A_LINE,
+  scriptsWithoutUid,
   searchProject,
   VERSION_MARKER,
 } from '../src/project-scan.js';
@@ -11710,6 +11711,74 @@ function testASearchReadsWhatItSaysItReads(): void {
       undefined,
       `a type that matched files is no note, found or not: ${JSON.stringify(matched)}`,
     );
+  } finally {
+    sweep(sandbox);
+  }
+}
+
+/**
+ * A project path spelled with a trailing separator, in the other slash or with a `..` in it names
+ * the same res:// files, a file named like an extension is no file of that kind, and a search
+ * needs something to look for.
+ */
+function testASearchNamesFilesWhateverWayTheProjectPathIsSpelled(): void {
+  const sandbox = mkdtempSync(join(tmpdir(), 'gdharness-spelled-'));
+  try {
+    const project = join(sandbox, 'my proj');
+    mkdirSync(join(project, 'scripts'), { recursive: true });
+    mkdirSync(join(project, 'kit'), { recursive: true });
+    writeFileSync(join(project, 'scripts', 'hero.gd'), '# findable\n');
+    writeFileSync(join(project, 'kit', '.gdignore'), '');
+    const options = { query: 'findable', regex: false, caseSensitive: false, maxResults: 100 };
+    const forward = project.replaceAll('\\', '/');
+    const spellings = [
+      project,
+      `${project}${sep}`,
+      `${forward}/`,
+      forward,
+      join(project, 'scripts', '..'),
+      join(project, 'scripts', '..') + sep,
+      project.toLowerCase() === project ? project.toUpperCase() : project.toLowerCase(),
+    ];
+    for (const spelled of spellings) {
+      if (!existsSync(spelled)) {
+        continue;
+      }
+      const found = searchProject(spelled, options);
+      assert.deepEqual(
+        [found.results.map((entry) => entry.file), found.not_searched],
+        [['res://scripts/hero.gd'], ['res://kit/']],
+        `a project spelled ${JSON.stringify(spelled)}`,
+      );
+      const within = searchProject(spelled, { ...options, within: join(project, 'scripts') });
+      assert.deepEqual(
+        within.results.map((entry) => entry.file),
+        ['res://scripts/hero.gd'],
+        `a place within a project spelled ${JSON.stringify(spelled)}`,
+      );
+    }
+
+    assert.throws(
+      () => searchProject(project, { ...options, query: '' }),
+      /empty query matches every line/u,
+      'an empty query is refused rather than matching every line',
+    );
+    assert.throws(
+      () => searchProject(project, { ...options, query: '', regex: true }),
+      /empty query matches every line/u,
+      'and so is an empty expression',
+    );
+
+    // Names that are an extension and nothing more, which are files of no kind.
+    for (const name of ['gd', 'shader', 'png', 'tscn']) {
+      writeFileSync(join(project, name), '');
+    }
+    assert.deepEqual(
+      projectStructure(project),
+      { scenes: 0, scripts: 1, assets: 0, other: 4 },
+      'a file named gd, shader, png or tscn counts as other',
+    );
+    assert.deepEqual(scriptsWithoutUid(project), ['scripts/hero.gd'], 'and wants no uid file');
   } finally {
     sweep(sandbox);
   }
@@ -82271,6 +82340,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testStaleClassesAreReadFromDisk,
   testTheProjectWalksAgreeAboutWhatIsInIt,
   testASearchReadsWhatItSaysItReads,
+  testASearchNamesFilesWhateverWayTheProjectPathIsSpelled,
   testClassesAnEditorIsNotHolding,
   testAScanThatHasNotStartedIsNotFinished,
   testARescanWaitsOutTheEditorsImport,
