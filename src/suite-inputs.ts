@@ -114,6 +114,19 @@ export interface SuiteReached {
 }
 
 /**
+ * One line of an engine's record, or nothing for a line that does not parse. An engine ended part
+ * way through writing, as a run ends one whose autoload did not start, leaves its last line torn.
+ */
+function recordOf(line: string): Record<string, unknown> {
+  try {
+    const parsed: unknown = JSON.parse(line);
+    return isRecord(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
  * Every suite the engine's record at [param file] names that ended, with what was recorded for it.
  * No file, from an engine that never started, names none.
  */
@@ -130,8 +143,7 @@ export function reachedBySuite(file: string): Map<string, SuiteReached> {
     if (line.trim() === '') {
       continue;
     }
-    const parsed: unknown = JSON.parse(line);
-    const recorded: Record<string, unknown> = isRecord(parsed) ? parsed : {};
+    const recorded = recordOf(line);
     const { began, suite } = recorded;
     if (recorded['autoloads'] === true) {
       autoloads = paths(recorded['reached']);
