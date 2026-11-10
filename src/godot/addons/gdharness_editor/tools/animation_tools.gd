@@ -228,7 +228,7 @@ func _animated(player: AnimationPlayer, track_path: String) -> Node:
 ## The animations of an AnimationPlayer, or one of them whole. A track comes back in the shape
 ## add_track takes, so one read here can be written to another animation as it stands.
 func read_animations(args: Dictionary) -> Dictionary:
-	var scene_path: String = GdhSceneFile.res_path("", str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var player_node_path: String = str(args.get("playerNodePath", "."))
 	var animation_name: String = str(args.get("animationName", ""))
 	if scene_path.strip_edges() == "res://":
@@ -253,7 +253,7 @@ func _read_in(scene: GdhSceneFile, answer: Dictionary) -> Dictionary:
 
 ## The states and transitions of a state machine in an AnimationTree.
 func read_animation_states(args: Dictionary) -> Dictionary:
-	var scene_path: String = GdhSceneFile.res_path("", str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var anim_tree_path: String = str(args.get("animTreePath", ""))
 	var state_machine_path: String = str(args.get("stateMachinePath", ""))
 	if scene_path.strip_edges() == "res://":
@@ -280,7 +280,7 @@ func read_animation_states(args: Dictionary) -> Dictionary:
 # create_animation
 # =============================================================================
 func create_animation(args: Dictionary) -> Dictionary:
-	var scene_path: String = GdhSceneFile.res_path("", str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var player_node_path: String = str(args.get("playerNodePath", "."))
 	var animation_name: String = str(args.get("animationName", ""))
 	var loop_mode_name: String = str(args.get("loopMode", "none"))
@@ -462,7 +462,7 @@ func _animation_at(scene_path: String, player_node_path: String, animation_name:
 ## Changes the length, loop mode or step of an animation, naming any key a shorter length leaves
 ## past the end.
 func set_animation(args: Dictionary) -> Dictionary:
-	var scene_path: String = GdhSceneFile.res_path("", str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var player_node_path: String = str(args.get("playerNodePath", "."))
 	var animation_name: String = str(args.get("animationName", ""))
 	var loop_mode_name: String = str(args.get("loopMode", ""))
@@ -529,7 +529,7 @@ func set_animation(args: Dictionary) -> Dictionary:
 ## the scene's trees that plays it, since a state naming an animation the player lacks plays nothing
 ## and says so only in the editor's log.
 func rename_animation(args: Dictionary) -> Dictionary:
-	var scene_path: String = GdhSceneFile.res_path("", str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var player_node_path: String = str(args.get("playerNodePath", "."))
 	var animation_name: String = str(args.get("animationName", ""))
 	var new_name: String = str(args.get("newName", "")).strip_edges()
@@ -616,7 +616,7 @@ func rename_animation(args: Dictionary) -> Dictionary:
 ## Removes an animation, clearing the player's autoplay when it named it and naming the states of
 ## the scene's trees left playing nothing.
 func remove_animation(args: Dictionary) -> Dictionary:
-	var scene_path: String = GdhSceneFile.res_path("", str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var player_node_path: String = str(args.get("playerNodePath", "."))
 	var animation_name: String = str(args.get("animationName", ""))
 	if scene_path.strip_edges() == "res://":

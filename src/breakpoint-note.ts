@@ -1,9 +1,10 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative } from 'node:path';
 import type { HeldBreakpoint } from './dap_client.js';
 import { errorMessage } from './errors.js';
 import { realAsFarAsItExists } from './paths.js';
 import { isRecord } from './records.js';
+import { writeWhole } from './whole-file.js';
 
 /**
  * The breakpoints set through this server, written down in the project.
@@ -53,7 +54,9 @@ export function writeBreakpointNote(projectPath: string, held: readonly HeldBrea
       })),
     };
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, `${JSON.stringify(note, null, 2)}\n`, 'utf8');
+    if (!writeWhole(path, `${JSON.stringify(note, null, 2)}\n`)) {
+      console.error(`[SERVER] Could not record the breakpoints at ${path}.`);
+    }
   } catch (error) {
     console.error(`[SERVER] Could not record the breakpoints at ${path}: ${errorMessage(error)}`);
   }
@@ -78,7 +81,11 @@ export function readBreakpointNote(projectPath: string): HeldBreakpoint[] {
         continue;
       }
       const { script, lines: listed } = entry;
-      if (typeof script !== 'string' || isAbsolute(script) || script.split('/').includes('..')) {
+      if (
+        typeof script !== 'string' ||
+        isAbsolute(script) ||
+        !withinProject(projectPath, join(projectPath, script))
+      ) {
         continue;
       }
       const lines = Array.isArray(listed)

@@ -54,8 +54,8 @@ export const HEADLESS_OPERATIONS: Readonly<Record<string, Readonly<Record<string
  * that boot rather than a script asking the engine nicely. Still headless, so the reference lists
  * them with the rest.
  */
-export const ENGINE_PASSES: Readonly<Record<string, Readonly<Record<string, string>>>> = dictionary({
-  project_import: dictionary({ refresh_uids: 'import', reimport: 'import' }),
+export const ENGINE_PASSES: Readonly<Record<string, readonly string[]>> = dictionary({
+  project_import: ['refresh_uids', 'reimport'],
 });
 
 /** The engine operation `project_dependencies` sends for each `direction`. */

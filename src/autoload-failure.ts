@@ -42,7 +42,9 @@ export function scriptsAutoloaded(projectPath: string): Map<string, string> {
       for (const named of readFileSync(scene, 'utf8').matchAll(
         /^\[ext_resource\b[^\]]*\btype="Script"[^\]]*\bpath="(res:\/\/[^"]+)"/gm,
       )) {
-        scripts.set(named[1] ?? '', name);
+        for (const script of named.slice(1, 2)) {
+          scripts.set(script, name);
+        }
       }
     } catch {
       // A scene that cannot be read names no script here, and the engine says why it did not load.

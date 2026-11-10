@@ -132,7 +132,7 @@ export class GodotLocator {
   }
 
   /** The sentence for a locator that found nothing, and what to do about it. */
-  static refusal(located: { readonly ok: false; readonly named: string | null; readonly reason?: string }): {
+  static refusal(located: Extract<Located, { readonly ok: false }>): {
     readonly message: string;
     readonly advice: readonly string[];
   } {
@@ -146,7 +146,7 @@ export class GodotLocator {
       };
     }
     return {
-      message: `GODOT_PATH is set to ${located.named}, which ${located.reason ?? 'does not answer'}.`,
+      message: `GODOT_PATH is set to ${located.named}, which ${located.reason}.`,
       advice: [
         'Point GODOT_PATH at a Godot 4.7 or newer executable that answers --version',
         'Or unset it, and the usual install locations are searched instead',
@@ -156,13 +156,14 @@ export class GodotLocator {
 
   /** Why [param path] is not an engine that answers, or null because it is. */
   private async whyNot(path: string): Promise<string | null> {
+    // Asked of the file system each time and never remembered, because an engine installed after the
+    // server started, or deleted since it was found, changes the answer.
+    if (path !== 'godot' && !existsSync(path)) {
+      return 'does not exist';
+    }
     const known = this.answered.get(path);
     if (known !== undefined) {
       return known;
-    }
-    if (path !== 'godot' && !existsSync(path)) {
-      this.answered.set(path, 'does not exist');
-      return 'does not exist';
     }
     let crashed = '';
     for (let started = 1; started <= VERSION_STARTS; started += 1) {

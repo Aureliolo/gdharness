@@ -484,7 +484,6 @@ function testAnAnnouncementIsReadOnlyFromTheProcessThatWroteIt(): void {
   );
   assert.equal(serverBehind(announced, written + 60_000), null, 'a process that took the number afterwards');
   assert.equal(serverBehind(announced, undefined), null, 'a pid nobody holds');
-  assert.equal(serverBehind(null, written), null, 'no announcement');
 }
 
 /**

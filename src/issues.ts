@@ -18,9 +18,10 @@
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import process from 'node:process';
 import { errorMessage } from './errors.js';
+import { currentRunner } from './runner.js';
 import { SERVER_VERSION } from './server-version.js';
 
 const NEW_ISSUE = 'https://github.com/Aureliolo/gdharness/issues/new';
@@ -58,10 +59,7 @@ export function feedbackNotice(every: number): string {
 
 /** Whichever runtime is actually running this, since either one can be. */
 function runtime(): string {
-  // Bun's own types declare versions.bun as always present, which it is not under Node.
-  const versions: Readonly<Record<string, string | undefined>> = process.versions;
-  const bun = versions['bun'];
-  return bun === undefined ? `node ${process.versions.node}` : `bun ${bun}`;
+  return currentRunner() === 'bunx' ? `bun ${process.versions.bun}` : `node ${process.versions.node}`;
 }
 
 /**
@@ -75,41 +73,71 @@ export function defectSignature(where: string, message: string): string {
   const normalised = `${where}\n${message}`
     .toLowerCase()
     .replaceAll('\\', '/')
-    .replaceAll(/(?:[a-z]:)?(?:\/+[\w.-]+){2,}/gu, '<path>')
+    // A folder may hold a space ("Ana Maria"), so only the last segment ends at one.
+    .replaceAll(/(?:[a-z]:)?(?:\/+[\w.-]+(?: +[\w.-]+)*(?=\/))+\/+[\w.-]+/gu, '<path>')
     .replaceAll(/\d+/gu, '0');
   return createHash('sha256').update(normalised).digest('hex').slice(0, 8);
 }
 
-/** An absolute path in an error message, up to the space or quote that ends it. */
-const ABSOLUTE_PATH = /(?:[A-Za-z]:[\\/]|(?<=^|[\s'"(=])\/)[^\s'"`]*/gu;
+/** Where an absolute path begins in an error message: a drive letter, or a slash after a break. */
+const PATH_START = /[A-Za-z]:[\\/]|(?<=^|[\s'"(=])\//gu;
+
+/** A path ends at a quote or a line end, and never past this many characters. */
+const PATH_REACH = 1024;
 
 /**
  * [param message] with each absolute path's folders up to its project written as `<project>`, and
  * the home folder as `~`. A report goes into a public tracker, where the files it names help and
  * the folders above them only show the machine's layout and the project's name.
+ *
+ * A folder name may hold a space, so a path is not cut at white space. Each place a folder could
+ * end is tried instead, longest first, and the project folder itself counts.
  */
 export function withoutMachinePaths(message: string): string {
   const home = homedir();
-  const fold = (text: string): string => (process.platform === 'win32' ? text.toLowerCase() : text);
-  return message.replaceAll(ABSOLUTE_PATH, (path) => {
-    const project = projectAbove(path);
-    if (project !== null) {
-      return `<project>${path.slice(project.length)}`;
+  let out = '';
+  let from = 0;
+  for (const start of message.matchAll(PATH_START)) {
+    if (start.index < from) {
+      continue;
     }
-    return home !== '' && fold(path).startsWith(fold(home)) ? `~${path.slice(home.length)}` : path;
-  });
-}
-
-/** The folder holding a `project.godot` at or above [param path], or null when none does. */
-function projectAbove(path: string): string | null {
-  for (let at = dirname(path); ; at = dirname(at)) {
-    if (existsSync(join(at, 'project.godot'))) {
-      return at;
-    }
-    if (dirname(at) === at) {
-      return null;
+    const folderEnd = projectEndFrom(message, start.index, start[0].length);
+    if (folderEnd !== null) {
+      out += `${message.slice(from, start.index)}<project>`;
+      from = folderEnd;
+    } else if (home !== '' && startsWithFolder(message, start.index, home)) {
+      out += `${message.slice(from, start.index)}~`;
+      from = start.index + home.length;
     }
   }
+  return out + message.slice(from);
+}
+
+/** [param text] at [param at] begins with the folder [param folder], whichever slash it is spelt with. */
+function startsWithFolder(text: string, at: number, folder: string): boolean {
+  const alike = (value: string): string =>
+    process.platform === 'win32' ? value.replaceAll('\\', '/').toLowerCase() : value;
+  const end = at + folder.length;
+  return alike(text.slice(at, end)) === alike(folder) && !/[\w-]/u.test(text.charAt(end));
+}
+
+/**
+ * Where the folder holding a `project.godot` ends, for the path starting at [param start], or null
+ * when none of its folders is a project. The deepest project wins.
+ */
+function projectEndFrom(text: string, start: number, prefix: number): number | null {
+  const reach = Math.min(start + PATH_REACH, text.length);
+  const stop = text.slice(start, reach).search(/['"`\r\n]/u);
+  const limit = stop === -1 ? reach : start + stop;
+  for (let end = limit; end >= start + prefix; end -= 1) {
+    if (end !== limit && !/[\\/\s.,:;)\]]/u.test(text.charAt(end))) {
+      continue;
+    }
+    if (existsSync(join(text.slice(start, end), 'project.godot'))) {
+      return end;
+    }
+  }
+  return null;
 }
 
 /** What the report says about the machine, in the order the issue template asks for it. */

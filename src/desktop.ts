@@ -190,16 +190,14 @@ public static class GdharnessDesktop {
   public static int RunSpec(string specFile) {
     string[] lines = File.ReadAllLines(specFile);
     Func<int, string> field = delegate(int index) { return Encoding.UTF8.GetString(Convert.FromBase64String(lines[index])); };
-    string affinity = lines.Length > 7 ? field(7) : "";
-    string exitFile = lines.Length > 8 ? field(8) : "";
-    bool endsWithThis = lines.Length > 9 && field(9) == "1";
+    string affinity = field(7);
+    string exitFile = field(8);
+    bool endsWithThis = field(9) == "1";
     return Run(field(0), field(1), field(2), field(3) == "1", field(4), field(5), field(6), affinity.Length == 0 ? 0UL : ulong.Parse(affinity), exitFile, endsWithThis);
   }
 
   static void Step(string stepFile, string step) {
-    if (stepFile.Length > 0) {
-      File.WriteAllText(stepFile, step);
-    }
+    File.WriteAllText(stepFile, step);
   }
 
   // With an affinity, the process starts suspended and is held to those processors before its
@@ -385,6 +383,16 @@ export function helperFailure(file: string): string | null {
     return said === '' ? null : said;
   } catch {
     return null;
+  }
+}
+
+/** The pid the helper wrote to [param file] for the process it started, or undefined before it has. */
+export function helperPid(file: string): number | undefined {
+  try {
+    const written = Number(readFileSync(file, 'utf8').trim());
+    return Number.isInteger(written) && written > 0 ? written : undefined;
+  } catch {
+    return undefined;
   }
 }
 

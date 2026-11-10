@@ -1,7 +1,8 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { ANNOUNCE_BUDGET_MS } from './runtime-client.js';
 import { asParams } from './tool-args.js';
+import { readWhole, writeWhole } from './whole-file.js';
 
 /**
  * How long the last games of a project took to announce, noted where the bridge file is: in the
@@ -25,9 +26,18 @@ export function bootNotePath(projectPath: string): string {
 /** The key a start naming no scene notes its boot under: the project's main scene, whichever it is. */
 export const MAIN_SCENE = '';
 
+/** The scenes in a note's text, or none when there is no note or it does not parse. */
+function scenesIn(text: string | null): Record<string, unknown> {
+  try {
+    return text === null ? {} : asParams(asParams(JSON.parse(text))['scenes']);
+  } catch {
+    return {};
+  }
+}
+
 function readScenes(projectPath: string): Record<string, unknown> {
   try {
-    return asParams(asParams(JSON.parse(readFileSync(bootNotePath(projectPath), 'utf8')))['scenes']);
+    return scenesIn(readWhole(bootNotePath(projectPath)));
   } catch {
     return {};
   }
@@ -41,8 +51,8 @@ function readScenes(projectPath: string): Record<string, unknown> {
  */
 const BOOTS_KEPT = 5;
 
-function bootsOf(projectPath: string, scene: string): number[] {
-  const kept = asParams(readScenes(projectPath)[scene])['boots'];
+function bootsOf(scenes: Record<string, unknown>, scene: string): number[] {
+  const kept = asParams(scenes[scene])['boots'];
   return Array.isArray(kept)
     ? kept.filter((one): one is number => typeof one === 'number' && Number.isFinite(one) && one > 0)
     : [];
@@ -53,7 +63,7 @@ function bootsOf(projectPath: string, scene: string): number[] {
  * start, or null when none has.
  */
 export function readBootNote(projectPath: string, scene: string): number | null {
-  const boots = bootsOf(projectPath, scene);
+  const boots = bootsOf(readScenes(projectPath), scene);
   return boots.length === 0 ? null : Math.max(...boots);
 }
 
@@ -62,14 +72,17 @@ export function writeBootNote(projectPath: string, scene: string, announcedAfter
   try {
     const path = bootNotePath(projectPath);
     mkdirSync(dirname(path), { recursive: true });
+    // A note that is held shut throws here and is left alone, since writing over it would drop
+    // every other scene's boots.
+    const held = scenesIn(readWhole(path));
     const scenes = {
-      ...readScenes(projectPath),
+      ...held,
       [scene]: {
-        boots: [...bootsOf(projectPath, scene), Math.round(announcedAfterMs)].slice(-BOOTS_KEPT),
+        boots: [...bootsOf(held, scene), Math.round(announcedAfterMs)].slice(-BOOTS_KEPT),
         at: new Date().toISOString(),
       },
     };
-    writeFileSync(path, JSON.stringify({ scenes }, null, 2), 'utf8');
+    writeWhole(path, JSON.stringify({ scenes }, null, 2));
   } catch {
     // A project that cannot be written into gets the usual budget next time, which is what it had.
   }
@@ -95,9 +108,9 @@ export function halfAsLongAgain(lastBootMs: number): number {
  * the last boot took when that is more, up to the ceiling. Never less than the usual, so a
  * project whose last game announced in a second is not given a second.
  */
-export function waitSizedTo(lastBootMs: number | null, usual: number = ANNOUNCE_BUDGET_MS): number {
+export function waitSizedTo(lastBootMs: number | null): number {
   if (lastBootMs === null) {
-    return usual;
+    return ANNOUNCE_BUDGET_MS;
   }
-  return Math.min(LONGEST_SIZED_WAIT_MS, Math.max(usual, halfAsLongAgain(lastBootMs)));
+  return Math.min(LONGEST_SIZED_WAIT_MS, Math.max(ANNOUNCE_BUDGET_MS, halfAsLongAgain(lastBootMs)));
 }

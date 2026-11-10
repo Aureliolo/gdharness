@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
+import { commandLineWords } from './launch.js';
 import { isSameDirectory } from './paths.js';
 import { askProcessTable, ProcessTableUnbuilt } from './process-table.js';
 import { runHidden as run } from './spawn.js';
@@ -289,7 +290,7 @@ function linked(tree: ProcessTree, child: number, parent: number, since?: number
  * since anything can be called conhost.exe.
  */
 function isConsoleHost(listed: ListedProcess): boolean {
-  const executable = commandWords(listed.command)[0];
+  const executable = commandLineWords(listed.command)[0];
   if (executable === undefined) {
     return false;
   }
@@ -466,7 +467,7 @@ export function editorsOfProjectIn(tree: ProcessTree, projectPath: string): numb
  * spaces in it onto the game it plays, and how the engine reads it back.
  */
 export function readCommandLine(command: string): CommandLineRead {
-  const all = commandWords(command);
+  const all = commandLineWords(command);
   const separator = all.findIndex((word) => word === '--' || word === '++');
   const words = separator === -1 ? all : all.slice(0, separator);
   const executable = words[0] === undefined ? '' : basename(words[0].replaceAll('\\', '/'));
@@ -502,33 +503,6 @@ export async function oneShotOptionOf(pid: number): Promise<string | null | unde
     return undefined;
   }
   return readCommandLine(listed.command).oneShot;
-}
-
-/** [param command] split into its words, with double quotes grouping and removed. */
-function commandWords(command: string): string[] {
-  const words: string[] = [];
-  let word = '';
-  let quoted = false;
-  let started = false;
-  for (const char of command) {
-    if (char === '"') {
-      quoted = !quoted;
-      started = true;
-    } else if (!quoted && /\s/.test(char)) {
-      if (started) {
-        words.push(word);
-        word = '';
-        started = false;
-      }
-    } else {
-      word += char;
-      started = true;
-    }
-  }
-  if (started) {
-    words.push(word);
-  }
-  return words;
 }
 
 function listWindows(): Promise<string> {

@@ -195,7 +195,7 @@ static func _no_state(sm: AnimationNodeStateMachine, state_name: String) -> Stri
 ## The state machine [param args] names, as [scene, machine, files, refusal, tree]: the machine is
 ## null and the refusal says why when the scene, the tree or the machine is not there.
 func _machine_at(args: Dictionary) -> Array:
-	var scene_path: String = GdhSceneFile.res_path("", str(args.get("scenePath", "")))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
 	var anim_tree_path: String = str(args.get("animTreePath", ""))
 	if scene_path.strip_edges() == "res://":
 		return [null, null, {}, { "ok": false, "error": "Missing scenePath" }]

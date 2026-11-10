@@ -25,7 +25,7 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
-import { errorMessage } from './errors.js';
+import { errorCode, errorMessage } from './errors.js';
 import { isSameDirectory, realAsFarAsItExists } from './paths.js';
 import { type CommandLineRead, linuxStartTimes, readCommandLine } from './process-children.js';
 import { askProcessTable } from './process-table.js';
@@ -216,7 +216,7 @@ export function openTranscript(startedAt: number): { path: string; fd: number } 
     try {
       return { path, fd: openSync(path, 'wx') };
     } catch (error) {
-      if (!(error instanceof Error && 'code' in error && error.code === 'EEXIST')) {
+      if (errorCode(error) !== 'EEXIST') {
         throw error;
       }
     }

@@ -16,7 +16,6 @@ import { availableParallelism } from 'node:os';
 import { join, resolve } from 'node:path';
 import process from 'node:process';
 import {
-  CONTROL_SEQUENCE,
   coresNamed,
   type EngineLaunch,
   EngineUsageError,
@@ -35,6 +34,7 @@ import {
   wholeFlag,
 } from './engine-launch.js';
 import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
+import { CONTROL_SEQUENCE } from './game-log.js';
 import { readLog } from './log-read.js';
 import { isRecord } from './records.js';
 import { SHARE_SCRIPT } from './setup.js';

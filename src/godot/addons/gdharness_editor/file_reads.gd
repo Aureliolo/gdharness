@@ -18,6 +18,8 @@ const EXT_RESOURCE: String = "^\\[ext_resource [^\\]]*\\]"
 const NODE_HEADING: String = "^\\[node [^\\]]*\\]"
 const INSTANCE: String = 'instance=ExtResource\\(\\s*"([^"]+)"\\s*\\)'
 
+static var _unique_id_pattern: RegEx = RegEx.create_from_string(" unique_id=(\\d+)")
+
 
 ## The nodes of [param scene_path] as {name, type, path, children}, with instanceOf and
 ## editableChildren on a node that instances another scene and its stored properties when
@@ -387,12 +389,16 @@ static func _unique_ids(scene_path: String, count: int) -> Array[int]:
 	if not scene_path.ends_with(".tscn") or not FileAccess.file_exists(scene_path):
 		return ids
 	var read: Array[int] = []
-	var pattern: RegEx = RegEx.create_from_string(" unique_id=(\\d+)")
 	for line: String in FileAccess.get_file_as_string(scene_path).split("\n"):
 		if line.begins_with("[node "):
-			var found: RegExMatch = pattern.search(line)
-			read.append(int(found.get_string(1)) if found != null else -1)
+			read.append(unique_id_of(line))
 	return read if read.size() == count else ids
+
+
+## The unique_id a text scene's entry [param line] gives its node, or -1 where it gives none.
+static func unique_id_of(line: String) -> int:
+	var found: RegExMatch = _unique_id_pattern.search(line)
+	return int(found.get_string(1)) if found != null else -1
 
 
 ## Whether entry [param index] of [param state] only sets values on a node another file makes.
