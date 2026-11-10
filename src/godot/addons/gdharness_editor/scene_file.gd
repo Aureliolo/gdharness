@@ -461,8 +461,11 @@ func held_connections() -> Array[Dictionary]:
 
 
 ## The connections in [param state] the engine did not make on [member root]: Object.connect
-## refuses a callable that binds or unbinds arguments unless its target has the method, so the scene
-## loads without them, in the editor as well, and every save drops them.
+## refuses a callable that binds or unbinds arguments unless its target has the method, and a
+## connection from a signal its source lacks, or between nodes the scene lacks, is skipped. The scene
+## loads without them, in the editor as well, and every save drops them. Each answers its [code]kind[/code]:
+## "method", "signal" or "node", and an end the scene lacks has its [code]sourceGone[/code] or
+## [code]targetGone[/code] set, its path then staying as the file gave it.
 func _unmade_connections(state: SceneState) -> Array[Dictionary]:
 	var unmade: Array[Dictionary] = []
 	for index: int in state.get_connection_count():
@@ -472,28 +475,36 @@ func _unmade_connections(state: SceneState) -> Array[Dictionary]:
 		var method: StringName = state.get_connection_method(index)
 		var source: Node = root.get_node_or_null(from)
 		var target: Node = root.get_node_or_null(to)
-		if source == null or target == null or not source.has_signal(signal_name):
-			continue
-		var made: bool = false
-		for conn: Dictionary in source.get_signal_connection_list(signal_name):
-			var callable: Callable = conn.get("callable", Callable())
-			if callable.get_object() == target and callable.get_method() == method:
-				made = true
-				break
-		if not made:
-			unmade.append(
-				{
-					"source": source,
-					"target": target,
-					"from": str(from),
-					"signal": str(signal_name),
-					"to": str(to),
-					"method": str(method),
-					"flags": state.get_connection_flags(index),
-					"binds": state.get_connection_binds(index),
-					"unbinds": state.get_connection_unbinds(index),
-				}
-			)
+		var kind: String = "method"
+		if source == null or target == null:
+			kind = "node"
+		elif not source.has_signal(signal_name):
+			kind = "signal"
+		else:
+			var made: bool = false
+			for conn: Dictionary in source.get_signal_connection_list(signal_name):
+				var callable: Callable = conn.get("callable", Callable())
+				if callable.get_object() == target and callable.get_method() == method:
+					made = true
+					break
+			if made:
+				continue
+		unmade.append(
+			{
+				"kind": kind,
+				"source": source,
+				"target": target,
+				"sourceGone": source == null,
+				"targetGone": target == null,
+				"from": str(from),
+				"signal": str(signal_name),
+				"to": str(to),
+				"method": str(method),
+				"flags": state.get_connection_flags(index),
+				"binds": state.get_connection_binds(index),
+				"unbinds": state.get_connection_unbinds(index),
+			}
+		)
 	return unmade
 
 
@@ -518,20 +529,36 @@ func _unmade_lines() -> PackedStringArray:
 	var still: Array[Dictionary] = []
 	for held: Dictionary in _unmade:
 		var ends: Array[Node] = []
+		var paths: Array[String] = []
+		var kept: bool = true
 		for end: String in ["source", "target"]:
+			if held[end + "Gone"]:
+				# No node to follow, so the path stays as the file gave it.
+				ends.append(null)
+				paths.append(str(held["from" if end == "source" else "to"]))
+				continue
 			var held_end: Variant = held[end]
 			if not is_instance_valid(held_end) or not held_end is Node:
-				continue
+				kept = false
+				break
 			var node: Node = held_end
-			if node == root or root.is_ancestor_of(node):
-				ends.append(node)
-		if ends.size() < 2:
+			if node != root and not root.is_ancestor_of(node):
+				kept = false
+				break
+			ends.append(node)
+			paths.append(path_of(node))
+		if not kept:
 			continue
-		var from: String = path_of(ends[0])
-		var to: String = path_of(ends[1])
+		var from: String = paths[0]
+		var to: String = paths[1]
 		var line: String = (
 			'[connection signal="%s" from="%s" to="%s" method="%s"'
-			% [held["signal"], from, to, held["method"]]
+			% [
+				str(held["signal"]).c_escape(),
+				from.c_escape(),
+				to.c_escape(),
+				str(held["method"]).c_escape(),
+			]
 		)
 		var flags: int = held["flags"]
 		if flags != Object.CONNECT_PERSIST:
@@ -546,18 +573,30 @@ func _unmade_lines() -> PackedStringArray:
 			line += " binds= " + var_to_str(binds)
 			var _binding: bool = bound.append("binds " + var_to_str(binds))
 		var _added: bool = lines.append(line + "]")
+		var named_from: String = str(ends[0].name) if ends[0] == root else from
 		var named_to: String = str(ends[1].name) if ends[1] == root else to
 		held["said"] = (
-			"%s.%s to %s.%s with %s"
+			"%s.%s to %s.%s%s"
 			% [
-				str(ends[0].name) if ends[0] == root else from,
+				named_from,
 				held["signal"],
 				named_to,
 				held["method"],
-				" and ".join(bound),
+				"" if bound.is_empty() else " with " + " and ".join(bound),
 			]
 		)
-		held["lacks"] = "%s has no method %s" % [named_to, held["method"]]
+		match str(held["kind"]):
+			"method":
+				held["lacks"] = "%s has no method %s" % [named_to, held["method"]]
+			"signal":
+				held["lacks"] = "%s has no signal %s" % [named_from, held["signal"]]
+			_:
+				var absent: PackedStringArray = []
+				if held["sourceGone"]:
+					var _source_named: bool = absent.append(from)
+				if held["targetGone"]:
+					var _target_named: bool = absent.append(to)
+				held["lacks"] = "%s is not in the scene" % " and ".join(absent)
 		still.append(held)
 	_unmade = still
 	return lines
@@ -581,11 +620,31 @@ func _unmade_named() -> String:
 
 
 func _unmade_remedy() -> String:
-	return (
-		"The engine connects a signal that binds or unbinds arguments only to a method its target "
-		+ "has: add the method to the target's script, or scene_signal disconnect takes the "
-		+ "connection out."
-	)
+	var said: PackedStringArray = []
+	if _unmade.any(func(held: Dictionary) -> bool: return held["kind"] == "method"):
+		var _method: bool = said.append(
+			(
+				"The engine connects a signal that binds or unbinds arguments only to a method its "
+				+ "target has: add the method to the target's script, or scene_signal disconnect "
+				+ "takes the connection out."
+			)
+		)
+	if _unmade.any(func(held: Dictionary) -> bool: return held["kind"] != "method"):
+		var _other: bool = said.append(
+			(
+				"The engine connects only a signal its source declares, between nodes the scene "
+				+ "has: add the signal or the node, or scene_signal disconnect takes the connection "
+				+ "out."
+			)
+		)
+	return " ".join(said)
+
+
+## What the connections [method _unmade_lines] kept wait for, to do anything.
+func _unmade_waits() -> String:
+	if _unmade.all(func(held: Dictionary) -> bool: return held["kind"] == "method"):
+		return "the method exists"
+	return "what they name exists"
 
 
 ## Adds [param lines] to the file just saved, answering "" or why they could not be added.
@@ -604,14 +663,14 @@ func _keep_unmade(lines: PackedStringArray) -> String:
 	file.close()
 	refresh(path)
 	unmade_note = (
-		"%s holds %s. This write kept %s as the file held %s, and %s nothing until the method "
-		+ "exists. %s"
+		"%s holds %s. This write kept %s as the file held %s, and %s nothing until %s. %s"
 	) % [
 		path,
 		_unmade_named(),
 		"it" if _unmade.size() == 1 else "them",
 		"it" if _unmade.size() == 1 else "them",
 		"it does" if _unmade.size() == 1 else "they do",
+		_unmade_waits(),
 		_unmade_remedy(),
 	]
 	return ""

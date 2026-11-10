@@ -72469,6 +72469,173 @@ async function testAWriteWithNoEditorGoesThroughAHeadlessEngine(): Promise<void>
   }
 }
 
+/** What a case of scene writes through a headless engine needs: a project, a call and the files. */
+interface SceneWriteProject {
+  call: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>;
+  written: (name: string, args: Record<string, unknown>) => Promise<unknown>;
+  fileOf: (file: string) => string;
+  put: (file: string, content: string | Buffer) => void;
+  project: string;
+}
+
+/** Runs [run] against a headless server over a project holding [files], or skips without Godot. */
+async function withASceneProject(
+  label: string,
+  files: Record<string, string>,
+  run: (scenes: SceneWriteProject) => Promise<void>,
+): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log(`${label} regression skipped (Godot not found)`);
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-scene-write-'));
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-scene-write-rt-'));
+  const put = (file: string, content: string | Buffer): void => {
+    mkdirSync(dirname(join(project, file)), { recursive: true });
+    writeFileSync(join(project, file), content);
+  };
+  put('project.godot', 'config_version=5\n\n[application]\n\nconfig/name="SceneWrite"\n');
+  for (const [file, content] of Object.entries(files)) {
+    put(file, content);
+  }
+  const server = new ServerProcess({
+    env: {
+      GODOT_PATH: godotPath,
+      GDHARNESS_PROJECT: project,
+      GDHARNESS_BRIDGE_PORT: String(await reservePort()),
+      GDHARNESS_LSP_PORT: String(await reservePort()),
+      GDHARNESS_RUNTIME_DIR: runtimeDir,
+    },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+    await server.request('tools/call', { name, arguments: { projectPath: project, ...args } }, 240_000);
+  try {
+    const imported = await runImport(godotPath, project);
+    assert.ok(imported.ok, `the fixture's first import failed: ${JSON.stringify(imported)}`);
+    await server.initialize('scene-write');
+    await run({
+      call,
+      written: async (name, args) => {
+        const answer = await call(name, args);
+        const payload = parseTextContent(answer);
+        assert.match(
+          text(get(payload, 'writtenBy')),
+          /^a headless engine, since no editor serves this project$/,
+          `${name} ${String(args['op'])}: ${textOf(answer) ?? JSON.stringify(answer)}`,
+        );
+        return payload;
+      },
+      fileOf: (file) => readFileSync(join(project, file), 'utf8'),
+      put,
+      project,
+    });
+  } finally {
+    await server.stop();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(runtimeDir, { recursive: true, force: true });
+  }
+}
+
+const connectionLines = (file: string): string[] =>
+  file
+    .split('\n')
+    .filter((line) => line.startsWith('[connection'))
+    .toSorted();
+
+/**
+ * A write keeps every connection the file held that the engine could not make, whether for a
+ * signal the source lacks or a node the scene lacks, and says so. One the engine makes and a scene
+ * with none are untouched.
+ */
+async function testAWriteKeepsConnectionsWhoseSignalOrNodeIsMissing(): Promise<void> {
+  const header = '[gd_scene format=3]\n\n[node name="Root" type="Node"]\n\n[node name="B" type="Button" parent="."]\n\n';
+  const lines = {
+    signal: '[connection signal="no_such_signal" from="B" to="." method="on_b"]',
+    source: '[connection signal="pressed" from="Ghost" to="." method="on_b"]',
+    target: '[connection signal="pressed" from="B" to="Vanished" method="on_b"]',
+    whole: '[connection signal="pressed" from="B" to="." method="on_b"]',
+  };
+  await withASceneProject(
+    'write keeps unmade connections',
+    {
+      'lost.tscn': `${header}${Object.values(lines).join('\n')}\n`,
+      'whole.tscn': `${header}${lines.whole}\n`,
+      'none.tscn': header,
+    },
+    async ({ written, fileOf }) => {
+      const set = (scenePath: string): Promise<unknown> =>
+        written('scene_node', { op: 'set', scenePath, nodePath: 'B', properties: { text: 'x' } });
+      const lost = await set('lost.tscn');
+      assert.deepEqual(
+        connectionLines(fileOf('lost.tscn')),
+        Object.values(lines).toSorted(),
+        `every connection is kept:\n${fileOf('lost.tscn')}`,
+      );
+      assert.match(fileOf('lost.tscn'), /text = "x"/, 'and the set was written');
+      const note = text(get(lost, 'unmadeConnections'));
+      for (const said of [
+        'B.no_such_signal to Root.on_b',
+        'B has no signal no_such_signal',
+        'Ghost is not in the scene',
+        'Vanished is not in the scene',
+      ]) {
+        assert.ok(note.includes(said), `the answer names ${said}: ${note}`);
+      }
+      assert.ok(!note.includes('B.pressed to Root.on_b'), `and not the whole connection: ${note}`);
+      assert.ok(note.includes('until what they name exists'), note);
+      const whole = await set('whole.tscn');
+      assert.deepEqual(connectionLines(fileOf('whole.tscn')), [lines.whole]);
+      assert.equal(get(whole, 'unmadeConnections'), undefined, JSON.stringify(whole));
+      const none = await set('none.tscn');
+      assert.deepEqual(connectionLines(fileOf('none.tscn')), []);
+      assert.equal(get(none, 'unmadeConnections'), undefined, JSON.stringify(none));
+    },
+  );
+}
+
+/**
+ * A connection a write keeps is written with the escapes the engine's saver uses, so a quote, a
+ * backslash and a line break in its names read back as the same names.
+ */
+async function testAKeptConnectionIsWrittenWithTheEnginesEscapes(): Promise<void> {
+  const kept = [
+    '[connection signal="pressed" from="a\\\\b" to="." method="nope" binds= [1]]',
+    '[connection signal="no_such" from="Plain" to="." method="q\\"b\\\\c\\nd"]',
+  ];
+  await withASceneProject(
+    'kept connection escapes',
+    {
+      'escapes.tscn':
+        '[gd_scene format=3]\n\n[node name="Root" type="Node"]\n\n[node name="a\\\\b" type="Button" parent="."]\n\n' +
+        `[node name="Plain" type="Button" parent="."]\n\n${kept.join('\n')}\n`,
+    },
+    async ({ written, fileOf }) => {
+      await written('scene_node', {
+        op: 'set',
+        scenePath: 'escapes.tscn',
+        nodePath: 'Plain',
+        properties: { text: 'x' },
+      });
+      assert.deepEqual(connectionLines(fileOf('escapes.tscn')), kept.toSorted(), fileOf('escapes.tscn'));
+      await written('scene_node', {
+        op: 'set',
+        scenePath: 'escapes.tscn',
+        nodePath: 'Plain',
+        properties: { text: 'y' },
+      });
+      assert.deepEqual(
+        connectionLines(fileOf('escapes.tscn')),
+        kept.toSorted(),
+        `and a second write finds them again:\n${fileOf('escapes.tscn')}`,
+      );
+    },
+  );
+}
+
 /**
  * A headless write leaves out what an editor's save leaves out: a property a script that is not a
  * tool initialises through a function, which the file does not set.
@@ -80541,6 +80708,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMoveWithNoEditorLeavesTheProjectLoading,
   testAReadWithNoEditorAnswersFromTheFile,
   testAWriteWithNoEditorGoesThroughAHeadlessEngine,
+  testAWriteKeepsConnectionsWhoseSignalOrNodeIsMissing,
+  testAKeptConnectionIsWrittenWithTheEnginesEscapes,
   testAHeadlessWriteLeavesOutWhatAnEditorWould,
   testAnAnimationsKeysAndLengthAreWrittenWithNoEditor,
   testAnAnimationIsRenamedAndRemovedWithNoEditor,
