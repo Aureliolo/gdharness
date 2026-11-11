@@ -1168,7 +1168,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         items: { type: 'string' },
         ops: ['set'],
         description:
-          'set: properties whose line this scene\'s file drops, as the inspector\'s revert arrow drops it, keyed as in properties: "modulate", "material/shader_parameter/tint". Each then holds what the scene the node comes from gives it, else what its script, class or shader declares. One the file holds no line for is refused, naming the lines it does hold. So is one another scene gives, which only that scene can unset.',
+          'set: properties whose line this scene\'s file drops, keyed as in properties: "modulate", "material/shader_parameter/tint". Each then holds what the scene the node comes from gives it, else what its script, class or shader declares. One the file holds no line for is refused, naming the lines it does hold. So is one another scene gives, which only that scene can unset. An editor with a renderer saves every shader parameter, so its next save of the scene writes an unset one back at the shader\'s default.',
       },
       editableChildren: {
         type: 'boolean',
@@ -1681,7 +1681,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         items: { type: 'string' },
         ops: ['modify'],
         description:
-          'modify: properties whose line the file drops, as the inspector\'s revert arrow drops it, keyed as in properties: "shader_parameter/tint", "next_pass/render_priority". Each then holds what its script, class or shader declares. One the file holds no line for is refused, naming the lines it does hold.',
+          'modify: properties whose line the file drops, keyed as in properties: "shader_parameter/tint", "next_pass/render_priority". Each then holds what its script, class or shader declares. One the file holds no line for is refused, naming the lines it does hold. An editor with a renderer saves every shader parameter, so its next save of the resource writes an unset one back at the shader\'s default.',
       },
       script: {
         type: 'string',
