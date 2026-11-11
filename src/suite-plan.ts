@@ -315,8 +315,7 @@ export class ProjectScripts {
       ...new Set(
         paths.flatMap((path) => {
           const root = path.replace(/\/+$/, '');
-          return path.endsWith('.gd') ||
-            !this.notSearched.some((folder) => this.holds(root, folder) && !within(root, folder))
+          return path.endsWith('.gd') || !this.notSearched.some((folder) => this.holds(root, folder))
             ? [path]
             : this.suitesUnder([root]).map((suite) => suite.path);
         }),

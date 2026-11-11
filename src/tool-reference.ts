@@ -140,9 +140,6 @@ function whatItCanChange(tool: ToolSpec): string {
   const destroying = Object.entries(tool.operations ?? {})
     .filter(([, op]) => op.effect === 'destructive')
     .map(([name]) => `\`${name}\``);
-  if (destroying.length === 0) {
-    return 'Adds or starts things, and overwrites and removes nothing itself.';
-  }
   return `Can overwrite, remove or end what is there, through ${listed(destroying)}.`;
 }
 
