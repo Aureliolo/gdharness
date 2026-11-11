@@ -58674,10 +58674,11 @@ function testASuiteDependsOnEveryFileItsScriptsAndResourcesNameInAnySpelling(): 
 }
 
 /**
- * A suite reading a computed path depends on files in a folder holding a `.gdignore` and in a folder
- * a link leads to, since a script reads the disk and not the engine's file system.
+ * A suite reading a computed path depends on the files in a folder a link leads to, and not on a
+ * folder holding a `.gdignore`, which the engine leaves out and where exports are written as suites
+ * run. A suite reading data kept there names the folder with `--reach-also`.
  */
-function testAComputedReadDependsOnFoldersTheEngineIgnoresAndLinksLeadTo(): void {
+function testAComputedReadFollowsLinksAndSkipsWhatTheEngineIgnores(): void {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-ignored-'));
   const elsewhere = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-linked-'));
   try {
@@ -58688,22 +58689,25 @@ function testAComputedReadDependsOnFoldersTheEngineIgnoresAndLinksLeadTo(): void
     });
     writeTree(elsewhere, { 'shared.json': '1\n' });
     symlinkSync(elsewhere, join(project, 'linked'), 'junction');
-    symlinkSync(project, join(project, 'raw', 'back'), 'junction');
+    symlinkSync(project, join(elsewhere, 'back'), 'junction');
     const print = (): string => new SuiteInputs(new ProjectScripts(project), ['1']).printOf([EVERY_FILE]);
-    for (const [file, how] of [
-      [join(project, 'raw', 'a.json'), 'a folder holding a .gdignore'],
-      [join(elsewhere, 'shared.json'), 'a folder a link leads to'],
-    ] as const) {
-      const before = print();
-      writeFileSync(file, 'changed\n');
-      assert.notEqual(print(), before, `a file in ${how} is read by a computed path`);
-    }
+    const before = print();
+    writeFileSync(join(elsewhere, 'shared.json'), 'changed\n');
+    const linked = print();
+    assert.notEqual(linked, before, 'a file in a folder a link leads to is read by a computed path');
+    writeFileSync(join(project, 'raw', 'a.json'), 'changed\n');
+    assert.equal(print(), linked, 'and a file in a folder holding a .gdignore is not');
     const names: string[] = [];
     walkSeen(project, (under) => names.push(under));
     assert.deepEqual(
       names,
-      ['linked/shared.json', 'project.godot', 'raw/.gdignore', 'raw/a.json'],
+      ['linked/shared.json', 'project.godot'],
       'and a link back up the tree is not walked again',
+    );
+    assert.deepEqual(
+      reachedAlsoSaid([join(project, 'raw')]),
+      ['.gdignore\n\na.json\nchanged\n'],
+      'a folder named with --reach-also is read whole, .gdignore or not',
     );
   } finally {
     sweep(project, elsewhere);
@@ -58711,8 +58715,9 @@ function testAComputedReadDependsOnFoldersTheEngineIgnoresAndLinksLeadTo(): void
 }
 
 /**
- * A file another process holds shut, as an export does with the package it is writing, reads as
- * changed now, whether a computed read walks to it or a read names it. It never fails the run.
+ * A file another process holds shut reads as changed now, whether a computed read walks to it, a
+ * read names it or `--reach-also` names it. It never fails the run. One an export is writing under
+ * a `.gdignore` is never opened.
  */
 async function testAFileHeldShutReadsAsChangedNow(): Promise<void> {
   if (process.platform !== 'win32') {
@@ -58720,13 +58725,15 @@ async function testAFileHeldShutReadsAsChangedNow(): Promise<void> {
     return;
   }
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-'));
-  const held = join(project, 'export', 'game.pck.tmp');
+  const held = join(project, 'saves', 'slot.tmp');
+  const exporting = join(project, 'export', 'game.pck.tmp');
   writeTree(project, {
     'project.godot': 'config_version=5\n',
+    'saves/slot.tmp': 'partial',
     'export/.gdignore': '',
     'export/game.pck.tmp': 'partial',
   });
-  const holding = `$f = [System.IO.File]::Open('${held}', 'Open', 'ReadWrite', 'None'); [Console]::Out.WriteLine('held'); Start-Sleep -Seconds 60`;
+  const holding = `$a = [System.IO.File]::Open('${held}', 'Open', 'ReadWrite', 'None'); $b = [System.IO.File]::Open('${exporting}', 'Open', 'ReadWrite', 'None'); [Console]::Out.WriteLine('held'); Start-Sleep -Seconds 60`;
   const holder = spawnHidden(
     'powershell.exe',
     ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(holding, 'utf16le').toString('base64')],
@@ -58745,23 +58752,29 @@ async function testAFileHeldShutReadsAsChangedNow(): Promise<void> {
     });
     assert.throws(() => readFileSync(held), /EBUSY/, 'the file is held shut');
     const began = Date.now();
-    const walked: [string, number][] = [];
+    const walked: [string, string, number][] = [];
     walkSeen(project, (under, bytes, modified) => {
-      if (under === 'export/game.pck.tmp') {
-        walked.push([bytes.toString(), modified]);
-      }
+      walked.push([under, bytes.toString(), modified]);
     });
-    const [only] = walked;
-    assert.ok(only !== undefined && walked.length === 1, 'the walk passes the held file');
-    assert.equal(only[0], 'unopened', 'with no content it could read');
-    assert.ok(only[1] >= began, `as modified now: ${String(only[1])} against ${String(began)}`);
+    assert.deepEqual(
+      walked.map(([under, bytes]) => [under, bytes]),
+      [
+        ['project.godot', 'config_version=5\n'],
+        ['saves/slot.tmp', 'unopened'],
+      ],
+      'the walk passes the held file with no content it could read, and leaves the export alone',
+    );
+    const slot = walked[1]?.[2] ?? 0;
+    assert.ok(slot >= began, `as modified now: ${String(slot)} against ${String(began)}`);
     const inputs = new SuiteInputs(new ProjectScripts(project), ['1']);
     assert.equal(inputs.modifiedAfter([EVERY_FILE], began - 1), true, 'a computed read counts it as changed');
     assert.equal(
-      inputs.modifiedAfter(['res://export/game.pck.tmp'], began - 1),
+      inputs.modifiedAfter(['res://saves/slot.tmp'], began - 1),
       true,
       'and so does a read naming it',
     );
+    const [named] = reachedAlsoSaid([held]);
+    assert.match(named ?? '', /^unopened at \d+$/, 'and so does --reach-also');
   } finally {
     holder.kill();
     await new Promise((settle) => {
@@ -88058,7 +88071,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeptScriptReferenceOfNoBytesIsMadeAgainNotPlaced,
   testASuitesInputsAreWhatItsEngineLoaded,
   testASuiteDependsOnEveryFileItsScriptsAndResourcesNameInAnySpelling,
-  testAComputedReadDependsOnFoldersTheEngineIgnoresAndLinksLeadTo,
+  testAComputedReadFollowsLinksAndSkipsWhatTheEngineIgnores,
   testAFileHeldShutReadsAsChangedNow,
   testAnInputChangedDuringARunIsSeenWhateverItsTimeStamp,
   testAReadsCallersAreThoseThatCanReachIt,

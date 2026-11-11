@@ -48,6 +48,7 @@ import { CONTROL_SEQUENCE } from './game-log.js';
 import { staleImports } from './import-freshness.js';
 import { hiddenWindowFlags, wholeFlag } from './launch.js';
 import { freeLibraryCopies, seedExtensionList, unlistedExtensions } from './library-copies.js';
+import { cannotOpen } from './listed-reads.js';
 import { prependTo, readLog } from './log-read.js';
 import { commandProjectRefusal, isGodotProject } from './paths.js';
 import { isRecord, isStringList } from './records.js';
@@ -1071,22 +1072,33 @@ export function engineSaid(godotPath: string): string {
 /**
  * The files at [param paths] a run was told its suites depend on, by what each holds and never by
  * where it lies. A game names one in a cache outside its checkouts, which sit at different depths,
- * and the same pins key the same suites in each.
+ * and the same pins key the same suites in each. A file another process holds shut reads as a key
+ * no later run can match, since what it will hold is not known yet.
  */
 export function reachedAlsoSaid(paths: readonly string[]): string[] {
+  const textOf = (file: string): string => {
+    try {
+      return readFileSync(file, 'latin1');
+    } catch (error) {
+      if (!cannotOpen(error)) {
+        throw error;
+      }
+      return `unopened at ${String(Date.now())}`;
+    }
+  };
   return paths.map((path) => {
     if (!existsSync(path)) {
       return 'missing';
     }
     if (!statSync(path).isDirectory()) {
-      return readFileSync(path, 'latin1');
+      return textOf(path);
     }
     // A folder is every file under it, each with where it lies.
     return readdirSync(path, { recursive: true, withFileTypes: true })
       .filter((entry) => entry.isFile())
       .map((entry) => join(entry.parentPath, entry.name))
       .toSorted()
-      .map((file) => `${relative(path, file).split(sep).join('/')}\n${readFileSync(file, 'latin1')}`)
+      .map((file) => `${relative(path, file).split(sep).join('/')}\n${textOf(file)}`)
       .join('\n');
   });
 }
