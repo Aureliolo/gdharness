@@ -35,6 +35,15 @@ export function statOf(file: string): Stats | undefined {
 }
 
 /**
+ * Whether [param error] says a file that is there cannot be opened now: another process holds it
+ * shut (EBUSY), it is being deleted (EPERM), or reading it is denied (EACCES).
+ */
+export function cannotOpen(error: unknown): boolean {
+  const code = errorCode(error);
+  return code === 'EBUSY' || code === 'EPERM' || code === 'EACCES';
+}
+
+/**
  * The bytes of [param file] and when it was modified, both read from one open of it, or null when
  * it has gone. An open file stays readable when another process removes it.
  */

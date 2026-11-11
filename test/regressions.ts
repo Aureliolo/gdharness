@@ -58711,6 +58711,71 @@ function testAComputedReadDependsOnFoldersTheEngineIgnoresAndLinksLeadTo(): void
 }
 
 /**
+ * A file another process holds shut, as an export does with the package it is writing, reads as
+ * changed now, whether a computed read walks to it or a read names it. It never fails the run.
+ */
+async function testAFileHeldShutReadsAsChangedNow(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held-file regression skipped: only Windows holds a file shut against readers');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-'));
+  const held = join(project, 'export', 'game.pck.tmp');
+  writeTree(project, {
+    'project.godot': 'config_version=5\n',
+    'export/.gdignore': '',
+    'export/game.pck.tmp': 'partial',
+  });
+  const holding = `$f = [System.IO.File]::Open('${held}', 'Open', 'ReadWrite', 'None'); [Console]::Out.WriteLine('held'); Start-Sleep -Seconds 60`;
+  const holder = spawnHidden(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(holding, 'utf16le').toString('base64')],
+    { stdio: ['ignore', 'pipe', 'ignore'] },
+  );
+  try {
+    await new Promise<void>((settle, fail) => {
+      holder.stdout.on('data', (chunk: Buffer) => {
+        if (chunk.toString().includes('held')) {
+          settle();
+        }
+      });
+      holder.once('exit', () => {
+        fail(new Error('the holder ended before it held the file'));
+      });
+    });
+    assert.throws(() => readFileSync(held), /EBUSY/, 'the file is held shut');
+    const began = Date.now();
+    const walked: [string, number][] = [];
+    walkSeen(project, (under, bytes, modified) => {
+      if (under === 'export/game.pck.tmp') {
+        walked.push([bytes.toString(), modified]);
+      }
+    });
+    const [only] = walked;
+    assert.ok(only !== undefined && walked.length === 1, 'the walk passes the held file');
+    assert.equal(only[0], 'unopened', 'with no content it could read');
+    assert.ok(only[1] >= began, `as modified now: ${String(only[1])} against ${String(began)}`);
+    const inputs = new SuiteInputs(new ProjectScripts(project), ['1']);
+    assert.equal(inputs.modifiedAfter([EVERY_FILE], began - 1), true, 'a computed read counts it as changed');
+    assert.equal(
+      inputs.modifiedAfter(['res://export/game.pck.tmp'], began - 1),
+      true,
+      'and so does a read naming it',
+    );
+  } finally {
+    holder.kill();
+    await new Promise((settle) => {
+      if (holder.exitCode !== null) {
+        settle(null);
+      } else {
+        holder.once('exit', settle);
+      }
+    });
+    sweep(project);
+  }
+}
+
+/**
  * An input replaced with a copy that keeps its old modification time, and an input deleted, count as
  * changed since a moment, so a pass recorded on a state the suite did not run on is not kept.
  */
@@ -87994,6 +88059,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASuitesInputsAreWhatItsEngineLoaded,
   testASuiteDependsOnEveryFileItsScriptsAndResourcesNameInAnySpelling,
   testAComputedReadDependsOnFoldersTheEngineIgnoresAndLinksLeadTo,
+  testAFileHeldShutReadsAsChangedNow,
   testAnInputChangedDuringARunIsSeenWhateverItsTimeStamp,
   testAReadsCallersAreThoseThatCanReachIt,
   testAFileGoneBetweenTheListingAndTheReadIsPassedOver,

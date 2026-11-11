@@ -20,7 +20,7 @@ import { dirname, join, posix } from 'node:path';
 import { classesNamedIn } from './class-cache.js';
 import { regionsOf } from './gdscript-source.js';
 import { isLibraryCopy } from './library-copies.js';
-import { bytesOf, contentOf, entriesOf, statOf } from './listed-reads.js';
+import { bytesOf, cannotOpen, contentOf, entriesOf, statOf } from './listed-reads.js';
 import { projectFiles } from './project-scan.js';
 import { isRecord } from './records.js';
 import { parseProjectGodot } from './resources.js';
@@ -49,6 +49,9 @@ const CACHE_HELD = 'cache:';
  * that folder at run time may have read.
  */
 const TREE = 'tree:';
+
+/** What stands for the content of a file that is there and cannot be opened. Never a digest. */
+const UNOPENED = 'unopened';
 
 /** A suite that passed, with what its verdict depended on and their print as they stood then. */
 export interface PassedSuite {
@@ -381,7 +384,15 @@ export class SuiteInputs {
         .toSorted();
       return { digest: inside.join('\n'), follows: [], also: [], modified };
     }
-    const bytes = bytesOf(file);
+    let bytes: Buffer | null;
+    try {
+      bytes = bytesOf(file);
+    } catch (error) {
+      if (!cannotOpen(error)) {
+        throw error;
+      }
+      return { digest: UNOPENED, follows: [], also: [], modified: Date.now() };
+    }
     if (bytes === null) {
       return missing;
     }
@@ -1139,11 +1150,23 @@ function joinedString(expression: string, named: (name: string) => string | unde
  * Calls [param seen] with each file under [param root] that a script can read, its path from the
  * root with forward slashes, its bytes and when it was modified: no hidden folder and none of the
  * copies an engine makes of a library it loads. A file gone between the listing and the read is
- * passed over.
+ * passed over. One that cannot be opened, such as a package an export is still writing, is passed as
+ * modified now, because what it will hold is not known yet.
  */
 export function walkSeen(root: string, seen: (under: string, bytes: Buffer, modified: number) => void): void {
   namesSeen(root, (under, file, folder) => {
-    const content = folder ? null : contentOf(file);
+    if (folder) {
+      return;
+    }
+    let content: { bytes: Buffer; modified: number } | null;
+    try {
+      content = contentOf(file);
+    } catch (error) {
+      if (!cannotOpen(error)) {
+        throw error;
+      }
+      content = { bytes: Buffer.from(UNOPENED), modified: Date.now() };
+    }
     if (content !== null) {
       seen(under, content.bytes, content.modified);
     }
