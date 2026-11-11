@@ -661,6 +661,7 @@ const PRINTED_ACTUAL = new RegExp(
 const QUOTED_EQUALITY = new RegExp(
   `^Expecting(?: error message)?:\\n '([\\s\\S]*)'\\n but was\\n '([\\s\\S]*)'(?:${IGNORING_CASE})?\\n\\tat `,
 );
+const DETAIL_LOCATION = new RegExp(`\\tat (${LOCATION})`, 'g');
 const COLOUR = new RegExp(`${ESCAPE}\\[([0-9;]*)m`, 'g');
 
 /** How gdUnit4 spells a character it marks, read back into the character. */
@@ -760,22 +761,43 @@ export function withActualsPrinted<Case extends { readonly detail: string | null
   // Each printed diff belongs to one failure, and both are in the order the run met them. The same
   // assertion line failing twice merges alike when the values differ only where the marks were, so
   // a diff offered to every failure it matched gave both the first one's value.
-  const used = new Set<number>();
+  // Diffs wait under the assertion location they end on, so a report looks only at the diffs of the
+  // locations it names. Walking every diff for every report is quadratic in the failures.
+  const waiting = new Map<string, (typeof diffs)[number][]>();
+  for (const diff of diffs) {
+    const queue = waiting.get(diff.at);
+    if (queue === undefined) {
+      waiting.set(diff.at, [diff]);
+    } else {
+      queue.push(diff);
+    }
+  }
   return failed.map((entry) => {
     if (entry.detail === null) {
       return entry;
     }
     let detail = entry.detail;
     let recovered = false;
-    for (const [index, diff] of diffs.entries()) {
-      if (used.has(index)) {
+    const named = new Set([...detail.matchAll(DETAIL_LOCATION)].map((match) => match[1] ?? ''));
+    for (const at of named) {
+      const queue = waiting.get(at);
+      if (queue === undefined) {
         continue;
       }
-      const wrong = ` but was\n '${diff.merged.replaceAll('\r', '')}'${diff.suffix}\n\tat ${diff.at}`;
-      if (detail.includes(wrong)) {
-        detail = detail.replace(wrong, () => ` but was\n '${diff.actual}'${diff.suffix}\n\tat ${diff.at}`);
-        recovered = true;
-        used.add(index);
+      // One diff belongs to one report. Taking the first that matches and stopping keeps a report from
+      // also taking the next diff when its own value holds all of the expected string.
+      for (let index = 0; index < queue.length; index += 1) {
+        const diff = queue[index];
+        if (diff === undefined) {
+          continue;
+        }
+        const wrong = ` but was\n '${diff.merged.replaceAll('\r', '')}'${diff.suffix}\n\tat ${diff.at}`;
+        if (detail.includes(wrong)) {
+          detail = detail.replace(wrong, () => ` but was\n '${diff.actual}'${diff.suffix}\n\tat ${diff.at}`);
+          recovered = true;
+          queue.splice(index, 1);
+          break;
+        }
       }
     }
     const quoted = QUOTED_EQUALITY.exec(detail);

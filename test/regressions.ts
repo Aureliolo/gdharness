@@ -265,7 +265,7 @@ import { EDITOR_READS, HEADLESS_OPERATIONS, HEADLESS_TOOLS } from '../src/headle
 import { idleClosed, idleSettled, portsIn } from '../src/idle-close.js';
 import { IMPORTABLE_EXTENSIONS, importedIntoTheProject, staleImports } from '../src/import-freshness.js';
 import { defectReport, defectSignature, withoutMachinePaths } from '../src/issues.js';
-import { RENDERED_AWAY_NOTE, type ScriptError } from '../src/junit.js';
+import { RENDERED_AWAY_NOTE, type ScriptError, withActualsPrinted } from '../src/junit.js';
 import { askTheKeepersDebugger, askTheKeeperToStop, listenForTheServer } from '../src/keeper-channel.js';
 import {
   editorArguments,
@@ -1324,6 +1324,96 @@ function testALongUnfinishedLineIsHeldInLinearTime(): void {
   assert.equal(log.all.length, 1, 'one line');
   assert.equal(log.all[0]?.text.length, 2048 * 4096, 'whole');
   assert.ok(took < 1500, `8 MB in 4 KB reads took ${Math.round(took)} ms`);
+}
+
+/** The runner's character diff of a failing string, with the marks gdUnit4 puts on it. */
+function printedStringDiffs(
+  values: readonly {
+    readonly at: string;
+    readonly parts: readonly (readonly [string, 'kept' | 'missing' | 'added'])[];
+  }[],
+): string {
+  const esc = String.fromCharCode(0x1b);
+  const blue = `${esc}[38;2;30;144;255m`;
+  const marked = (background: string, chars: string): string =>
+    `${esc}[48;2;${background}m${esc}[38;2;255;255;255m${chars}${esc}[0m${blue}${esc}[48;2;${background}m${esc}[0m${blue}`;
+  return values
+    .map(({ at, parts }) => {
+      const body = parts
+        .map(([chars, mark]) =>
+          mark === 'kept' ? chars : marked(mark === 'missing' ? '38;0;0' : '0;38;0', chars),
+        )
+        .join('');
+      return ` but was\n '${blue}${body}${esc}[0m'${esc}[0m${esc}[38;2;173;216;230m\tat ${at}${esc}[0m`;
+    })
+    .join('\n');
+}
+
+/** A failing string equality as the report writes it: both strings merged. */
+function mergedStringFailure(expected: string, merged: string, at: string): { detail: string } {
+  return { detail: `Expecting:\n '${expected}'\n but was\n '${merged}'\n\tat ${at}` };
+}
+
+/**
+ * Values are read back from the console in time in proportion to the failures, and one line failing
+ * twice gives each failure its own value.
+ */
+function testPrintedValuesAreReadBackInLinearTimeAndEachToItsOwnFailure(): void {
+  const readBack = (count: number): { took: number; empty: number } => {
+    const locations = Array.from(
+      { length: count },
+      (_, index) => `'test_n${index}' in res://test/words_test.gd:${index + 1}`,
+    );
+    const failures = locations.map((at) => mergedStringFailure('abc', 'abc', at));
+    const printed = printedStringDiffs(locations.map((at) => ({ at, parts: [['abc', 'missing']] })));
+    const began = performance.now();
+    const read = withActualsPrinted(failures, printed);
+    return {
+      took: performance.now() - began,
+      empty: read.filter((one) => one.detail.includes(" but was\n ''\n")).length,
+    };
+  };
+  const base = readBack(500);
+  assert.equal(base.empty, 500, 'every failure gets the empty value the console shows');
+  const large = readBack(6000);
+  assert.equal(large.empty, 6000, 'and so does every one of a large run');
+  // A linear read of twelve times the failures takes about twelve times as long. A quadratic one takes
+  // a hundred and forty-four times as long, which was over forty seconds at eight thousand.
+  assert.ok(
+    large.took < 40 * base.took + 1000,
+    `6000 failures took ${Math.round(large.took)} ms against ${Math.round(base.took)} ms for 500`,
+  );
+
+  const at = "'test_each' in res://test/each_test.gd:7";
+  const printed = printedStringDiffs([
+    {
+      at,
+      parts: [
+        ['ab', 'kept'],
+        ['c', 'added'],
+      ],
+    },
+    {
+      at,
+      parts: [
+        ['a', 'kept'],
+        ['b', 'missing'],
+        ['c', 'added'],
+      ],
+    },
+  ]);
+  const twice = mergedStringFailure('ab', 'abc', at);
+  const [first, second] = withActualsPrinted([twice, twice], printed);
+  assert.equal(
+    first?.detail,
+    `Expecting:\n 'ab'\n but was\n 'abc'\n\tat ${at}`,
+    'the first failure takes the first value the console printed',
+  );
+  assert.equal(
+    second?.detail,
+    `Expecting:\n 'ab'\n but was\n 'ac'\n\tat ${at}`,
+    'and the second the second, without a note that no copy was printed',
+  );
 }
 
 /**
@@ -85041,6 +85131,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnErrorOfSeveralLinesIsOneEntry,
   testAMarkTakesOnlyTheErrorOfItsFile,
   testALongUnfinishedLineIsHeldInLinearTime,
+  testPrintedValuesAreReadBackInLinearTimeAndEachToItsOwnFailure,
   testTheDebuggerNamesTheErrorsItsCallsRaise,
   testTheProfilerReadsWhatTheEngineSends,
   testAFrameReadHalfwayAddsNothingToTheTotals,
