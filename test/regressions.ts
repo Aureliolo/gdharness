@@ -9363,6 +9363,68 @@ async function testAnEditorOfAnotherReleaseIsAskedNothing(): Promise<void> {
 }
 
 /**
+ * A rename or a move written while the editor is of another release says the files are written and
+ * why the editor did not take them.
+ *
+ * The editor's rescan is refused with plain text, and the answer was a defect report that never
+ * said the files had changed.
+ */
+async function testAWriteBesideAnEditorOfAnotherReleaseIsSaidToBeWritten(): Promise<void> {
+  if (!resolveGodotPath()) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('write beside another release skipped (Godot not found)');
+    return;
+  }
+  await anAddonLackingAnOp(
+    { addon_version: '1.0.0', addon_digest: 'another' },
+    async (_, project, __, invoked, server) => {
+      const ask = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+        const answered = await server.request(
+          'tools/call',
+          { name, arguments: { projectPath: project, ...args } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        assert.notEqual(get(answered, 'result', 'isError'), true, textOf(answered) ?? '');
+        return parseTextContent(answered);
+      };
+      writeFileSync(join(project, 'hero.gd'), 'class_name Hero\nextends Node\n');
+      writeFileSync(join(project, 'user.gd'), 'extends Node\n\nvar hero: Hero\n');
+      const renamed = await ask('script_edit', {
+        op: 'rename',
+        scriptPath: 'hero.gd',
+        symbol: 'Hero',
+        newName: 'Champion',
+      });
+      const shown = JSON.stringify(renamed);
+      assert.deepEqual([get(renamed, 'written'), get(renamed, 'ok')], [true, false], shown);
+      assert.match(readFileSync(join(project, 'user.gd'), 'utf8'), /var hero: Champion/, 'the files are written');
+      assert.match(text(get(renamed, 'editor', 'rescanRefused')), /^The editor is running the 1\.0\.0 addon/, shown);
+      assert.match(text(get(renamed, 'note')), /The rename was written/, shown);
+      assert.match(text(get(renamed, 'note')), /did not take the written files/, shown);
+
+      writeFileSync(join(project, 'item.tres'), '[gd_resource type="Resource" format=3]\n');
+      const moved = await ask('resource_edit', {
+        op: 'move',
+        resourcePath: 'res://item.tres',
+        newPath: 'res://kept/item.tres',
+      });
+      const movedShown = JSON.stringify(moved);
+      assert.deepEqual([get(moved, 'written'), get(moved, 'ok')], [true, false], movedShown);
+      assert.ok(existsSync(join(project, 'kept', 'item.tres')), 'the file is where it was moved');
+      assert.match(
+        text(get(moved, 'editor', 'rescanRefused')),
+        /^The editor is running the 1\.0\.0 addon/,
+        movedShown,
+      );
+      assert.match(text(get(moved, 'note')), /The move was made/, movedShown);
+      assert.deepEqual(invoked, [], 'and the editor was sent nothing');
+    },
+  );
+}
+
+/**
  * An addon of this server's own build lacking a command is not called older. A script of the
  * addon that failed to compile in the editor leaves the commands it holds unregistered, and the
  * refusal sent the caller to restart into the same failure. Found when an addon script was edited
@@ -87812,6 +87874,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEditorOpenRefusesAnOpenUnderWayAndAnEngineThatWillNotStart,
   testEditorOpenOptionsRefuseEachMisuse,
   testAnEditorOfAnotherReleaseIsAskedNothing,
+  testAWriteBesideAnEditorOfAnotherReleaseIsSaidToBeWritten,
   testACurrentAddonLackingAnOpSaysAScriptFailedToLoad,
   testAServerEndsWithAnEditorStillOnTheBridge,
   testABadPortIsReported,

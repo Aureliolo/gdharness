@@ -16413,17 +16413,23 @@ class GodotServer {
     names: { gone: readonly string[]; oldClass: string | null; newClass: string | null },
   ): Promise<{ ok: boolean; report: Record<string, unknown> }> {
     const { gone, oldClass, newClass } = names;
-    const scanned = asParams(
-      JSON.parse(
-        (
-          await this.handleRescanFilesystem({
-            projectPath,
-            timeoutMs: 60000,
-            updateFiles: [...gone, ...changed],
-          })
-        ).content[0]?.text ?? '{}',
-      ),
-    );
+    const rescan = await this.handleRescanFilesystem({
+      projectPath,
+      timeoutMs: 60000,
+      updateFiles: [...gone, ...changed],
+    });
+    if (rescan.isError === true) {
+      // The refusal is plain text. The files are written whatever the editor did with them.
+      const why = rescan.content[0]?.text ?? 'The editor gave no reason.';
+      return {
+        ok: false,
+        report: {
+          editor: { rescanRefused: why },
+          note: `The editor did not take the written files, so they were not scanned, reloaded or compiled there: ${why}`,
+        },
+      };
+    }
+    const scanned = asParams(JSON.parse(rescan.content[0]?.text ?? '{}'));
     // The scan reloads the scripts naming a class it brought in, in the order it finds them, so one
     // it reloaded before the script it inherits from failed and is tried again here in order.
     const reloadedByTheScan = new Set((readArray(scanned, 'dependentsReloaded') ?? []).map(String));
