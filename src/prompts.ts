@@ -7,11 +7,14 @@
 
 import {
   type GetPromptResult,
+  type McpServer,
   type Prompt,
   ProtocolError,
   ProtocolErrorCode,
 } from '@modelcontextprotocol/server';
-import type { ProtocolServer } from './server-types.js';
+
+/** The low-level protocol server handlers are registered on, as McpServer exposes it. */
+export type ProtocolServer = McpServer['server'];
 
 /** One call a prompt asks for: the tool, its op, the arguments to pass, and what it is for. */
 interface PromptStep {

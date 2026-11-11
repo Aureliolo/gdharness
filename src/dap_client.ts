@@ -1,12 +1,11 @@
 import { createConnection, type Socket } from 'node:net';
 import { setTimeout as delay } from 'node:timers/promises';
-import { answerJson } from './answer-json.js';
+import { answerJson, type ToolResponse } from './answer-json.js';
 import { errorMessage, Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { EVALUATE_MS } from './game-debugger.js';
 import { portFromEnv } from './ports.js';
 import { isRecord } from './records.js';
-import type { ToolResponse } from './server-types.js';
 
 /** What an editor serves the debug adapter on when nothing has moved it. */
 export const DEFAULT_DAP_PORT = 6006;

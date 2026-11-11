@@ -36,7 +36,7 @@ import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { counterpart, pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
 import { alive, exitOf } from '../src/alive.js';
-import { answerJson } from '../src/answer-json.js';
+import { answerJson, type ToolResponse } from '../src/answer-json.js';
 import { scriptsAutoloaded } from '../src/autoload-failure.js';
 import {
   bootNotePath,
@@ -242,6 +242,7 @@ import {
   withoutTrailingSeparator,
 } from '../src/godot-bridge.js';
 import { GodotLocator, type Located, VERSION_STARTS, versionStartOf } from '../src/godot-path.js';
+import type { GodotProcess } from '../src/godot-process.js';
 import {
   containerTypeOf,
   DebuggerStream,
@@ -494,7 +495,6 @@ import {
   writtenBeside,
 } from '../src/server.js';
 import { serverInstructions } from '../src/server-instructions.js';
-import type { GodotProcess, ToolResponse } from '../src/server-types.js';
 import {
   addonMismatch,
   runtimeAddonUnknown,
