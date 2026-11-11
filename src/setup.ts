@@ -711,18 +711,11 @@ function addonIsCurrent(projectPath: string, name: string, version: string | nul
 export function inspectProject(projectPath: string): ProjectReport {
   const problems: string[] = [];
   const addons = ADDONS.map((name): AddonState => {
-    const directory = join(projectPath, 'addons', name);
-    const installed = existsSync(directory);
-    const version = versionMarker(projectPath, name);
-    const current = addonIsCurrent(projectPath, name, version);
-    if (installed && !current) {
-      problems.push(
-        version === SERVER_VERSION
-          ? `addons/${name} is not the ${SERVER_VERSION} code this gdharness ships. Run gdharness setup`
-          : `addons/${name} is ${version ?? 'of an unknown version'}, this gdharness is ${SERVER_VERSION}. Run gdharness setup`,
-      );
+    const state = addonState(projectPath, name);
+    if (state.installed && !state.current) {
+      problems.push(staleAddonProblem(name, state.version));
     }
-    return { name, installed, version, current };
+    return state;
   });
   // One line for every addon missing, because a project without gdharness lacks all four at once
   // and four lines with one remedy read as four faults.
@@ -745,27 +738,96 @@ export function inspectProject(projectPath: string): ProjectReport {
       `the ${disabled.join(' and ')} plugins are not enabled in project.godot. Run gdharness setup`,
     );
   }
+  const runtimeAutoloadPath = registeredRuntimePath(projectPath, settings);
+  const autoloadProblem = runtimeAutoloadProblem(projectPath, runtimeAutoloadPath);
+  if (autoloadProblem !== null) {
+    problems.push(autoloadProblem);
+  }
+  const { runtimeLoaderAutoload, ignoredAutoloads } = checkAutoloads(projectPath, settings, addons, problems);
+  // Whether the runtime is brought up at all, which is the question the name asks. It used to mean
+  // "is there an entry called GdharnessRuntime", so a project bringing it up through a loader was
+  // told its runtime was not registered while the runtime was answering queries. A false answer of
+  // exactly the shape this project keeps finding: well formed, confident, and about something
+  // other than what the reader takes it for.
+  const runtimeAutoload = runtimeAutoloadPath !== null || runtimeLoaderAutoload !== null;
+
+  const cached = cachedClasses(projectPath);
+  const staleClasses = cached === null ? [] : staleAgainst(cached, projectPath);
+  if (cached === null) {
+    problems.push(
+      'no class cache (.godot/global_script_class_cache.cfg), so the engine knows no class_name. Run gdharness classes, or open the editor',
+    );
+  } else if (staleClasses.length > 0) {
+    problems.push(
+      `the class cache does not list ${staleClasses.join(', ')}. Run project_import refresh_classes or gdharness classes`,
+    );
+  }
+
+  return {
+    projectPath,
+    addons,
+    pluginsEnabled,
+    runtimeAutoload,
+    runtimeAutoloadPath,
+    runtimeLoaderAutoload,
+    staleClasses,
+    classCacheExists: cached !== null,
+    ignoredAutoloads,
+    problems,
+  };
+}
+
+function addonState(projectPath: string, name: string): AddonState {
+  const installed = existsSync(join(projectPath, 'addons', name));
+  const version = versionMarker(projectPath, name);
+  const current = addonIsCurrent(projectPath, name, version);
+  return { name, installed, version, current };
+}
+
+function staleAddonProblem(name: string, version: string | null): string {
+  return version === SERVER_VERSION
+    ? `addons/${name} is not the ${SERVER_VERSION} code this gdharness ships. Run gdharness setup`
+    : `addons/${name} is ${version ?? 'of an unknown version'}, this gdharness is ${SERVER_VERSION}. Run gdharness setup`;
+}
+
+/** Where the project's runtime autoload points, with a uid resolved to its path, or null for none. */
+function registeredRuntimePath(
+  projectPath: string,
+  settings: Record<string, Record<string, unknown>>,
+): string | null {
   const autoload = settings['autoload'];
   const registered = autoload === undefined ? undefined : readString(autoload, RUNTIME_AUTOLOAD.name);
   // The star is the enabled marker the editor writes, not part of the path.
   const registeredText = typeof registered === 'string' ? registered.replace(/^\*/, '') : null;
-  const runtimeAutoloadPath =
-    registeredText === null
-      ? null
-      : (uidTargets(projectPath, [registeredText]).get(registeredText) ?? registeredText);
+  return registeredText === null
+    ? null
+    : (uidTargets(projectPath, [registeredText]).get(registeredText) ?? registeredText);
+}
+
+/** What is wrong with the runtime autoload at [param runtimeAutoloadPath], or null when nothing is. */
+function runtimeAutoloadProblem(projectPath: string, runtimeAutoloadPath: string | null): string | null {
   if (runtimeAutoloadPath === `res://${RUNTIME_SCRIPT}`) {
-    problems.push(
-      `the ${RUNTIME_AUTOLOAD.name} autoload names the addon's own script, which a clone or an export without addons/ boots as a missing script. Run gdharness setup to point it at res://${RUNTIME_AUTOLOAD.path}, the loader it writes`,
-    );
-  } else if (
+    return `the ${RUNTIME_AUTOLOAD.name} autoload names the addon's own script, which a clone or an export without addons/ boots as a missing script. Run gdharness setup to point it at res://${RUNTIME_AUTOLOAD.path}, the loader it writes`;
+  }
+  if (
     runtimeAutoloadPath === `res://${RUNTIME_AUTOLOAD.path}` &&
     loaderState(projectPath) === 'differs'
   ) {
-    problems.push(
-      `res://${RUNTIME_AUTOLOAD.path} is not the loader this gdharness ships. Run gdharness setup to write it again`,
-    );
+    return `res://${RUNTIME_AUTOLOAD.path} is not the loader this gdharness ships. Run gdharness setup to write it again`;
   }
+  return null;
+}
 
+/** Adds to [param problems] what the project's autoloads get wrong, and answers the loader and the ignored ones. */
+function checkAutoloads(
+  projectPath: string,
+  settings: Record<string, Record<string, unknown>>,
+  addons: readonly AddonState[],
+  problems: string[],
+): {
+  runtimeLoaderAutoload: ReturnType<typeof loaderAmong>;
+  ignoredAutoloads: { name: string; path: string }[];
+} {
   // project.godot is committed and what it names may not be. A project that installs a file an
   // autoload names rather than committing it, the way it treats gdUnit4, carries a line pointing at
   // a file the next clone will not have: the game boots with a missing script and nothing in the
@@ -779,12 +841,6 @@ export function inspectProject(projectPath: string): ProjectReport {
     );
   }
   const runtimeLoaderAutoload = loaderAmong(projectPath, named);
-  // Whether the runtime is brought up at all, which is the question the name asks. It used to mean
-  // "is there an entry called GdharnessRuntime", so a project bringing it up through a loader was
-  // told its runtime was not registered while the runtime was answering queries. A false answer of
-  // exactly the shape this project keeps finding: well formed, confident, and about something
-  // other than what the reader takes it for.
-  const runtimeAutoload = runtimeAutoloadPath !== null || runtimeLoaderAutoload !== null;
   const tracked = trackedByGit(projectPath, [...named.values()]);
   const untracked = [...named.values()].filter((path) => tracked !== null && !tracked.has(path));
   const ignored = ignoredByGit(projectPath, untracked);
@@ -813,29 +869,5 @@ export function inspectProject(projectPath: string): ProjectReport {
       );
     }
   }
-
-  const cached = cachedClasses(projectPath);
-  const staleClasses = cached === null ? [] : staleAgainst(cached, projectPath);
-  if (cached === null) {
-    problems.push(
-      'no class cache (.godot/global_script_class_cache.cfg), so the engine knows no class_name. Run gdharness classes, or open the editor',
-    );
-  } else if (staleClasses.length > 0) {
-    problems.push(
-      `the class cache does not list ${staleClasses.join(', ')}. Run project_import refresh_classes or gdharness classes`,
-    );
-  }
-
-  return {
-    projectPath,
-    addons,
-    pluginsEnabled,
-    runtimeAutoload,
-    runtimeAutoloadPath,
-    runtimeLoaderAutoload,
-    staleClasses,
-    classCacheExists: cached !== null,
-    ignoredAutoloads,
-    problems,
-  };
+  return { runtimeLoaderAutoload, ignoredAutoloads };
 }

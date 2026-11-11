@@ -196,6 +196,35 @@ async function followOnWindows(
   return { successor, ended };
 }
 
+/** The processes `ps` printed as `pid args`, dated from /proc. */
+async function listedOnLinux(printed: string): Promise<ListedSuccessor[]> {
+  const listed: ListedSuccessor[] = [];
+  const commands = new Map<number, string>();
+  for (const line of printed.split('\n')) {
+    const fields = /^\s*(\d+)\s+(.*)$/.exec(line);
+    if (fields?.[1] !== undefined) {
+      commands.set(Number(fields[1]), (fields[2] ?? '').trim());
+    }
+  }
+  for (const [pid, startedAt] of await linuxStartTimes([...commands.keys()])) {
+    listed.push({ pid, startedAt, command: commands.get(pid) ?? '' });
+  }
+  return listed;
+}
+
+/** The processes `ps` printed as `pid lstart args`. */
+function listedOnMac(printed: string): ListedSuccessor[] {
+  const listed: ListedSuccessor[] = [];
+  for (const line of printed.split('\n')) {
+    const fields = /^\s*(\d+)\s+(\w+\s+\w+\s+\d+\s+[\d:]+\s+\d+)\s+(.*)$/.exec(line);
+    const startedAt = Date.parse(fields?.[2] ?? '');
+    if (fields?.[1] !== undefined && !Number.isNaN(startedAt)) {
+      listed.push({ pid: Number(fields[1]), startedAt, command: (fields[3] ?? '').trim() });
+    }
+  }
+  return listed;
+}
+
 async function followOnPosix(
   exitedPid: number,
   engine: string,
@@ -218,27 +247,7 @@ async function followOnPosix(
   } catch {
     return null;
   }
-  const listed: ListedSuccessor[] = [];
-  if (linux) {
-    const commands = new Map<number, string>();
-    for (const line of printed.split('\n')) {
-      const fields = /^\s*(\d+)\s+(.*)$/.exec(line);
-      if (fields?.[1] !== undefined) {
-        commands.set(Number(fields[1]), (fields[2] ?? '').trim());
-      }
-    }
-    for (const [pid, startedAt] of await linuxStartTimes([...commands.keys()])) {
-      listed.push({ pid, startedAt, command: commands.get(pid) ?? '' });
-    }
-  } else {
-    for (const line of printed.split('\n')) {
-      const fields = /^\s*(\d+)\s+(\w+\s+\w+\s+\d+\s+[\d:]+\s+\d+)\s+(.*)$/.exec(line);
-      const startedAt = Date.parse(fields?.[2] ?? '');
-      if (fields?.[1] !== undefined && !Number.isNaN(startedAt)) {
-        listed.push({ pid: Number(fields[1]), startedAt, command: (fields[3] ?? '').trim() });
-      }
-    }
-  }
+  const listed = linux ? await listedOnLinux(printed) : listedOnMac(printed);
   // Asked of the engines that started in time only, since each answer is a look at another process.
   const timely = listed.filter(
     (one) => successorAmong([one], exitedPid, engine, notBefore, exitedAt, early) !== null,
