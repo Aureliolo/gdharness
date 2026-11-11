@@ -70,6 +70,73 @@ function tagEnd(source: string, from: number): number {
   return -1;
 }
 
+/** The position after the first [param terminator] at or past [param at], or a failure with [param problem]. */
+function positionPast(source: string, at: number, terminator: string, problem: string): number {
+  const end = source.indexOf(terminator, at);
+  if (end === -1) {
+    throw new MalformedReportError(problem);
+  }
+  return end + terminator.length;
+}
+
+/**
+ * Reads the CDATA section, comment or declaration opening at `at`, adding CDATA to [param into]'s
+ * text. Returns the position after it, or null when a tag opens there instead.
+ */
+function skipNonElement(source: string, at: number, into: XmlElement): number | null {
+  if (source.startsWith('<![CDATA[', at)) {
+    const after = positionPast(source, at, ']]>', 'CDATA that never ends');
+    into.text += source.slice(at + '<![CDATA['.length, after - ']]>'.length);
+    return after;
+  }
+  if (source.startsWith('<!--', at)) {
+    return positionPast(source, at, '-->', 'A comment that never ends');
+  }
+  if (source.startsWith('<?', at) || source.startsWith('<!', at)) {
+    return positionPast(source, at, '>', 'A declaration that never ends');
+  }
+  return null;
+}
+
+/** The attributes in [param body] after its name, which is [param nameLength] characters long. */
+function attributesOf(body: string, tag: string, nameLength: number): Record<string, string> {
+  // A sticky regex resets its own position to zero on a miss, so the position is kept here.
+  const attributes: Record<string, string> = {};
+  let read = nameLength;
+  ATTRIBUTE.lastIndex = read;
+  let attribute = ATTRIBUTE.exec(body);
+  while (attribute) {
+    attributes[attribute[1] ?? ''] = decoded(attribute[2] ?? attribute[3] ?? '');
+    read = ATTRIBUTE.lastIndex;
+    attribute = ATTRIBUTE.exec(body);
+  }
+  if (body.slice(read).trim() !== '') {
+    throw new MalformedReportError(`Unreadable attributes in <${tag}>`);
+  }
+  return attributes;
+}
+
+/** The element a start tag opens, given the text between `<` and `>`. */
+function elementOpenedBy(tag: string): XmlElement {
+  const body = tag.endsWith('/') ? tag.slice(0, -1) : tag;
+  const nameMatch = /^([^\s/>]+)/.exec(body);
+  if (!nameMatch?.[1]) {
+    throw new MalformedReportError(`A tag with no name: <${tag}>`);
+  }
+  const attributes = attributesOf(body, tag, nameMatch[0].length);
+  return { name: nameMatch[1], attributes, children: [], text: '' };
+}
+
+/** Checks that the end tag [param tag] closes the innermost open element, then closes it. */
+function closeElement(tag: string, open: XmlElement[]): void {
+  const closing = tag.slice(1).trim();
+  const element = open.at(-1) ?? { name: '' };
+  if (open.length === 1 || element.name !== closing) {
+    throw new MalformedReportError(`</${closing}> closes <${element.name || 'nothing'}>`);
+  }
+  open.pop();
+}
+
 /** The elements of a document, as a tree under one synthetic root. */
 function parseXml(source: string): XmlElement {
   const root: XmlElement = { name: '', attributes: {}, children: [], text: '' };
@@ -80,36 +147,15 @@ function parseXml(source: string): XmlElement {
 
   while (at < source.length) {
     const next = source.indexOf('<', at);
+    current().text += decoded(source.slice(at, next === -1 ? source.length : next));
     if (next === -1) {
-      current().text += decoded(source.slice(at));
       break;
     }
-    current().text += decoded(source.slice(at, next));
     at = next;
 
-    if (source.startsWith('<![CDATA[', at)) {
-      const end = source.indexOf(']]>', at);
-      if (end === -1) {
-        throw new MalformedReportError('CDATA that never ends');
-      }
-      current().text += source.slice(at + '<![CDATA['.length, end);
-      at = end + ']]>'.length;
-      continue;
-    }
-    if (source.startsWith('<!--', at)) {
-      const end = source.indexOf('-->', at);
-      if (end === -1) {
-        throw new MalformedReportError('A comment that never ends');
-      }
-      at = end + '-->'.length;
-      continue;
-    }
-    if (source.startsWith('<?', at) || source.startsWith('<!', at)) {
-      const end = source.indexOf('>', at);
-      if (end === -1) {
-        throw new MalformedReportError('A declaration that never ends');
-      }
-      at = end + 1;
+    const after = skipNonElement(source, at, current());
+    if (after !== null) {
+      at = after;
       continue;
     }
 
@@ -121,38 +167,13 @@ function parseXml(source: string): XmlElement {
     at = end + 1;
 
     if (tag.startsWith('/')) {
-      const closing = tag.slice(1).trim();
-      const element = current();
-      if (element === root || element.name !== closing) {
-        throw new MalformedReportError(`</${closing}> closes <${element.name || 'nothing'}>`);
-      }
-      open.pop();
+      closeElement(tag, open);
       continue;
     }
 
-    const selfClosing = tag.endsWith('/');
-    const body = selfClosing ? tag.slice(0, -1) : tag;
-    const nameMatch = /^([^\s/>]+)/.exec(body);
-    if (!nameMatch?.[1]) {
-      throw new MalformedReportError(`A tag with no name: <${tag}>`);
-    }
-    // A sticky regex resets its own position to zero on a miss, so the position is kept here.
-    const attributes: Record<string, string> = {};
-    let read = nameMatch[0].length;
-    ATTRIBUTE.lastIndex = read;
-    let attribute = ATTRIBUTE.exec(body);
-    while (attribute) {
-      attributes[attribute[1] ?? ''] = decoded(attribute[2] ?? attribute[3] ?? '');
-      read = ATTRIBUTE.lastIndex;
-      attribute = ATTRIBUTE.exec(body);
-    }
-    if (body.slice(read).trim() !== '') {
-      throw new MalformedReportError(`Unreadable attributes in <${tag}>`);
-    }
-
-    const element: XmlElement = { name: nameMatch[1], attributes, children: [], text: '' };
+    const element = elementOpenedBy(tag);
     current().children.push(element);
-    if (!selfClosing) {
+    if (!tag.endsWith('/')) {
       open.push(element);
     }
   }
@@ -340,37 +361,54 @@ export function ignoredLeftOut(
   const unmatched: string[] = [];
   for (const entry of ignored) {
     const row = rowNamed(entry);
-    if (row !== null) {
-      const rows = declaring(declared, row.suite, row.test).filter((one) =>
-        rowsIgnored.has(`${one.path} > ${one.test}:${String(row.row)}`),
-      );
-      if (rows.length === 0) {
-        unmatched.push(entry);
-      }
-      for (const one of rows) {
-        leftOut.add(`${suiteNameOf(one.path)}:${one.test}:${String(row.row)}`);
-      }
-      continue;
-    }
-    const bare = entry.replace('res://', '');
-    const at = bare.lastIndexOf(':');
-    const suiteNamed = at === -1 ? bare : bare.slice(0, at);
-    const testNamed = at === -1 ? null : bare.slice(at + 1);
-    const named = declaring(declared, suiteNamed, testNamed);
-    if (named.length === 0) {
+    const found =
+      row === null
+        ? addCasesLeftOut(leftOut, report, declared, entry)
+        : addRowsLeftOut(leftOut, declared, rowsIgnored, row);
+    if (!found) {
       unmatched.push(entry);
-      continue;
-    }
-    for (const { path, test } of named) {
-      const reported = report.suites
-        .filter((ran) => ran.path === path || (ran.path === null && ran.name === suiteNameOf(path)))
-        .some((ran) => ran.cases.some((one) => isCaseOrRow(one.name, test)));
-      if (!reported) {
-        leftOut.add(`${suiteNameOf(path)}:${test}`);
-      }
     }
   }
   return { leftOut: [...leftOut].toSorted(), unmatched };
+}
+
+/** Adds the rows the runner left out for one row entry to [param leftOut]. False when it left out none. */
+function addRowsLeftOut(
+  leftOut: Set<string>,
+  declared: DeclaredSuites,
+  rowsIgnored: ReadonlySet<string>,
+  row: { suite: string; test: string; row: number },
+): boolean {
+  const rows = declaring(declared, row.suite, row.test).filter((one) =>
+    rowsIgnored.has(`${one.path} > ${one.test}:${String(row.row)}`),
+  );
+  for (const one of rows) {
+    leftOut.add(`${suiteNameOf(one.path)}:${one.test}:${String(row.row)}`);
+  }
+  return rows.length > 0;
+}
+
+/** Adds the cases one suite or case entry names that the report lacks to [param leftOut]. False when it names no declared case. */
+function addCasesLeftOut(
+  leftOut: Set<string>,
+  report: TestReport,
+  declared: DeclaredSuites,
+  entry: string,
+): boolean {
+  const bare = entry.replace('res://', '');
+  const at = bare.lastIndexOf(':');
+  const suiteNamed = at === -1 ? bare : bare.slice(0, at);
+  const testNamed = at === -1 ? null : bare.slice(at + 1);
+  const named = declaring(declared, suiteNamed, testNamed);
+  for (const { path, test } of named) {
+    const reported = report.suites
+      .filter((ran) => ran.path === path || (ran.path === null && ran.name === suiteNameOf(path)))
+      .some((ran) => ran.cases.some((one) => isCaseOrRow(one.name, test)));
+    if (!reported) {
+      leftOut.add(`${suiteNameOf(path)}:${test}`);
+    }
+  }
+  return named.length > 0;
 }
 
 /**
@@ -798,7 +836,7 @@ export function withActualsPrinted<Case extends { readonly detail: string | null
   // a diff offered to every failure it matched gave both the first one's value.
   // Diffs wait under the assertion location they end on, so a report looks only at the diffs of the
   // locations it names. Walking every diff for every report is quadratic in the failures.
-  const waiting = new Map<string, (typeof diffs)[number][]>();
+  const waiting = new Map<string, PrintedDiff[]>();
   for (const diff of diffs) {
     const queue = waiting.get(diff.at);
     if (queue === undefined) {
@@ -811,48 +849,88 @@ export function withActualsPrinted<Case extends { readonly detail: string | null
     if (entry.detail === null) {
       return entry;
     }
-    let detail = entry.detail;
-    let recovered = false;
-    const named = new Set([...detail.matchAll(DETAIL_LOCATION)].map((match) => match[1] ?? ''));
-    for (const at of named) {
-      const queue = waiting.get(at);
-      if (queue === undefined) {
-        continue;
-      }
-      // One diff belongs to one report. Taking the first that matches and stopping keeps a report from
-      // also taking the next diff when its own value holds all of the expected string.
-      for (let index = 0; index < queue.length; index += 1) {
-        const diff = queue[index];
-        if (diff === undefined) {
-          continue;
-        }
-        const wrong = ` but was\n '${diff.merged.replaceAll('\r', '')}'${diff.suffix}\n\tat ${diff.at}`;
-        if (detail.includes(wrong)) {
-          detail = detail.replace(wrong, () => ` but was\n '${diff.actual}'${diff.suffix}\n\tat ${diff.at}`);
-          recovered = true;
-          queue.splice(index, 1);
-          break;
-        }
-      }
-    }
-    const quoted = QUOTED_EQUALITY.exec(detail);
-    if (quoted !== null) {
-      const alike = quoted[1] === quoted[2];
-      const note = recovered
-        ? alike
-          ? RENDERED_AWAY_NOTE
-          : null
-        : alike
-          ? BOTH_SIDES_ALIKE_NOTE
-          : VALUE_NOT_RECOVERED_NOTE;
-      detail = note === null ? detail : `${detail}\n${note}`;
-    }
-    if (quoted !== null && masked(quoted[1] ?? '', quoted[2] ?? '')) {
-      const end = quoted[0].length - '\n\tat '.length;
-      detail = detail.slice(0, end).replaceAll(MASKED_BRACKET, '[') + detail.slice(end);
-    }
+    const recovery = recoverActuals(entry.detail, waiting);
+    const detail = annotatedEquality(recovery.detail, recovery.recovered);
     return detail === entry.detail ? entry : { ...entry, detail };
   });
+}
+
+/** One failing string's diff as the console printed it, with the value read back from it. */
+interface PrintedDiff {
+  readonly suffix: string;
+  readonly at: string;
+  readonly merged: string;
+  readonly actual: string;
+}
+
+/**
+ * [param detail] with the first waiting diff of each assertion location it names put back as its
+ * value. [param recovered] says whether any was.
+ */
+function recoverActuals(
+  detail: string,
+  waiting: ReadonlyMap<string, PrintedDiff[]>,
+): { detail: string; recovered: boolean } {
+  let recoveredDetail = detail;
+  let recovered = false;
+  const named = new Set([...detail.matchAll(DETAIL_LOCATION)].map((match) => match[1] ?? ''));
+  for (const at of named) {
+    const queue = waiting.get(at);
+    const taken = queue === undefined ? null : takeMatchingDiff(queue, recoveredDetail);
+    if (taken !== null) {
+      recoveredDetail = taken;
+      recovered = true;
+    }
+  }
+  return { detail: recoveredDetail, recovered };
+}
+
+/**
+ * [param detail] with the first diff of [param queue] whose merged value it holds put back as its
+ * actual one, and that diff removed from the queue. Null when none matches.
+ */
+function takeMatchingDiff(queue: PrintedDiff[], detail: string): string | null {
+  // One diff belongs to one report. Taking the first that matches and stopping keeps a report from
+  // also taking the next diff when its own value holds all of the expected string.
+  const index = queue.findIndex((diff) => detail.includes(wrongValueOf(diff)));
+  const diff = queue[index];
+  if (diff === undefined) {
+    return null;
+  }
+  queue.splice(index, 1);
+  return detail.replace(
+    wrongValueOf(diff),
+    () => ` but was\n '${diff.actual}'${diff.suffix}\n\tat ${diff.at}`,
+  );
+}
+
+/** How a report spells a failing string's value: the merge of both sides. */
+function wrongValueOf(diff: PrintedDiff): string {
+  return ` but was\n '${diff.merged.replaceAll('\r', '')}'${diff.suffix}\n\tat ${diff.at}`;
+}
+
+/**
+ * [param detail] with the note that fits its string equality, when it holds one: whether the value
+ * was [param recovered] and whether the two sides print alike decide which.
+ */
+function annotatedEquality(detail: string, recovered: boolean): string {
+  const quoted = QUOTED_EQUALITY.exec(detail);
+  if (quoted === null) {
+    return detail;
+  }
+  const alike = quoted[1] === quoted[2];
+  let note: string | null;
+  if (recovered) {
+    note = alike ? RENDERED_AWAY_NOTE : null;
+  } else {
+    note = alike ? BOTH_SIDES_ALIKE_NOTE : VALUE_NOT_RECOVERED_NOTE;
+  }
+  const noted = note === null ? detail : `${detail}\n${note}`;
+  if (!masked(quoted[1] ?? '', quoted[2] ?? '')) {
+    return noted;
+  }
+  const end = quoted[0].length - '\n\tat '.length;
+  return noted.slice(0, end).replaceAll(MASKED_BRACKET, '[') + noted.slice(end);
 }
 
 /** A report standing for every identical one in its case, with how many there were when several. */
