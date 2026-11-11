@@ -18,6 +18,7 @@ const GdhSceneSharing = preload("scene_sharing.gd")
 const GdhScriptPaths = preload("script_paths.gd")
 const GdhSerialisation = preload("../serialisation.gd")
 const GdhTilesetTools = preload("tileset_tools.gd")
+const GdhUnset = preload("../unset_values.gd")
 
 var _editor_plugin: EditorPlugin = null
 var _values: GdhSerialisation = GdhSerialisation.new()
@@ -1395,8 +1396,10 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var adding: Array = GdhGroups.asked(args, "addGroups")
 	var removing: Array = GdhGroups.asked(args, "removeGroups")
 	var placeholder: Variant = args.get("placeholder")
+	var unsetting: Array[String] = GdhUnset.asked(args)
 	if (
 		properties.is_empty()
+		and unsetting.is_empty()
 		and editable == null
 		and placeholder == null
 		and adding.is_empty()
@@ -1405,7 +1408,10 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 		return {
 			"ok": false,
 			"error":
-			"set takes properties, editableChildren, placeholder, addGroups or removeGroups.",
+			(
+				"set takes properties, unset, editableChildren, placeholder, addGroups or "
+				+ "removeGroups."
+			),
 		}
 
 	var opened: Array = _open(scene_path, true)
@@ -1494,6 +1500,11 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var ungrouped: String = GdhGroups.change(scene, node, adding, removing)
 	if not ungrouped.is_empty():
 		return scene.refuse(ungrouped)
+	var reverted: Dictionary = {}
+	var followed: Array[String] = []
+	var unrefused: String = _unset_on(scene, node, unsetting, properties, reverted, followed)
+	if not unrefused.is_empty():
+		return scene.refuse(unrefused)
 
 	var held: Dictionary = {}
 	var removed: Array[String] = _properties.metadata_removed.duplicate()
@@ -1502,9 +1513,11 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 			held[str(key)] = _readable(node, _properties.read_at(node, str(key)))
 	var new_path: String = scene.path_of(node)
 	var answer: Dictionary = { "ok": true, "nodePath": new_path, "properties": held }
+	if not reverted.is_empty():
+		answer["unset"] = reverted
 	_properties.note_write(answer, node)
 	var shared: Dictionary = {}
-	for key: Variant in properties:
+	for key: Variant in properties.keys() + unsetting:
 		var holders: Array[Dictionary] = GdhSceneSharing.holders(scene, node, str(key))
 		if not holders.is_empty():
 			shared[str(key)] = holders
@@ -1540,7 +1553,7 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	var id: int = node.get_instance_id()
 	var written: Dictionary = scene.write(
 		func(saved: Node) -> String:
-			var unkept: String = _kept(scene, saved, node, properties.keys())
+			var unkept: String = _kept(scene, saved, node, properties.keys() + unsetting)
 			if unkept.is_empty():
 				unkept = GdhGroups.unkept(saved.get_node(new_path), adding, removing)
 			if unkept.is_empty() and editable != null:
@@ -1570,9 +1583,67 @@ func set_node_properties(args: Dictionary) -> Dictionary:
 	_note_put_back(answer, scene, id, new_path)
 	_note_loads_as(answer, scene, new_path)
 	_note_left_out(answer, scene.written_pack, new_path, named, unsaved, source)
+	if not followed.is_empty() and not source.is_empty():
+		answer["unsetNote"] = (
+			"%s now %s what %s gives this node, and a change there reaches it."
+			% [", ".join(followed), "holds" if followed.size() == 1 else "hold", source]
+		)
 	if new_path != old_path:
 		answer.merge(GdhKin.follow(scene_path, old_path, new_path, carried))
 	return answer
+
+
+## Takes each of [param paths] on [param node] back to what it holds when no line of this file sets
+## it, or answers why not with nothing taken back. A value of the node's own goes back to what the
+## scene it comes from gives, or its default, and its path is put in [param followed]. Each path
+## goes into [param reverted] as the node reads it then. [param given] is what the call sets.
+func _unset_on(
+	scene: GdhSceneFile,
+	node: Node,
+	paths: Array[String],
+	given: Dictionary,
+	reverted: Dictionary,
+	followed: Array[String],
+) -> String:
+	var at: String = scene.path_of(node)
+	var places: Array[Array] = []
+	for path: String in paths:
+		var place: Array = GdhUnset.place_of(node, path, given)
+		if place[0] == null:
+			return str(place[1])
+		var leaf: String = place[1]
+		if place[0] == node:
+			var here: Dictionary = scene.set_here(node)
+			if here.has(leaf):
+				places.append([node, leaf, scene.unset_value(node, leaf)])
+				followed.append(path)
+				continue
+			var source: String = scene.values_from(node, at)
+			var elsewhere: Variant = scene.unset_value(node, leaf)
+			if (
+				not source.is_empty()
+				and not GdhSame.same(elsewhere, GdhHeadlessCheck.default_of(node, leaf))
+			):
+				return (
+					(
+						"%s holds no line for %s on %s: its value comes from %s, so it is unset "
+						+ "there, with scene_node set on that scene."
+					)
+					% [scene.path, path, at, source]
+				)
+			return GdhUnset.not_stored(path, leaf, scene.path, here.keys())
+		var resource: Resource = place[0]
+		if not GdhUnset.resource_stores(scene.path, resource, null, leaf):
+			var lines: Array = GdhUnset.resource_lines(scene.path, resource, null)
+			return GdhUnset.not_stored(path, leaf, scene.path, lines)
+		places.append([resource, leaf, GdhUnset.resource_default(resource, leaf)])
+	scene.asked(node, paths)
+	for place: Array in places:
+		var holder: Object = place[0]
+		holder.set(str(place[1]), place[2])
+	for path: String in paths:
+		reverted[path] = _readable(node, _properties.read_at(node, path))
+	return ""
 
 
 ## Puts under loadsAs in [param answer] each value given that the file holds and the script of the

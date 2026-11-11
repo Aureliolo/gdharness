@@ -254,6 +254,7 @@ import {
   editorsOfProjectIn,
   oneShotOptionOf,
   type ProcessTree,
+  plainEngineOf,
   processTree,
   readCommandLine,
   startTimesOf,
@@ -300,6 +301,7 @@ import {
   readLatestRun,
   readRunRecord,
   runningAs,
+  sameRun,
   stillTheAnnouncedGame,
   sweepTranscripts,
   whyNotStillTheRecordedRun,
@@ -338,6 +340,7 @@ import {
 } from './script-origins.js';
 import {
   callersOf,
+  isEngineMethod,
   PROFILE_FROM_START,
   type ProfileMark,
   type ProfileTotals,
@@ -368,7 +371,7 @@ import {
   shippedOperationsScript,
   shippedRuntimeDigest,
 } from './setup.js';
-import { runHidden, spawnHidden } from './spawn.js';
+import { spawnHidden } from './spawn.js';
 import {
   declaringAdvice,
   failedOnPushErrors,
@@ -906,7 +909,7 @@ function followTheRestart(run: GodotProcess): boolean {
   const record = readRunRecord(run.projectPath);
   const from = record?.restartedFrom ?? [];
   const at = from.findIndex((one) => one.pid === run.pid);
-  if (record === null || record.startedAt !== run.startedAt || record.pid === run.pid || at === -1) {
+  if (record === null || !sameRun(run, record) || record.pid === run.pid || at === -1) {
     return false;
   }
   for (const [index, one] of from.slice(at).entries()) {
@@ -1503,9 +1506,30 @@ interface ChildrenEnded {
 
 /** [param executable] and, when it is the console wrapper, the engine it starts. */
 function engineNamesOf(executable: string): string[] {
-  return CONSOLE_WRAPPER.test(executable)
-    ? [executable, executable.replace(CONSOLE_WRAPPER, '$1')]
-    : [executable];
+  const plain = plainEngineOf(executable);
+  return plain === executable ? [executable] : [executable, plain];
+}
+
+/**
+ * The answer to a failure nothing models: the report to send. The engine's version is whatever
+ * [param locator] learned earlier, because asking on the failure path would start a subprocess at
+ * the worst possible moment.
+ */
+export function unmodelledAnswer(
+  where: string,
+  error: unknown,
+  seenBefore: number,
+  locator: GodotLocator,
+): ToolResponse {
+  return {
+    content: [
+      {
+        type: 'text',
+        text: defectReport(where, error, { seenBefore, godotVersion: locator.ownVersion() ?? undefined }),
+      },
+    ],
+    isError: true,
+  };
 }
 
 /**
@@ -3482,7 +3506,7 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
   }
   if (table.superCallers > 0) {
     notes.push(
-      `${table.superCallers === 1 ? 'One function calls' : `${table.superCallers} functions call`} through super, marked selfIncludesSuper: the engine takes every other call out of the caller's self time, and not a super call, so ${table.superCallers === 1 ? 'its' : 'their'} selfMs holds the overridden function's time, which that function's own row counts again. Self time therefore cannot be added along an override chain, and scriptMs counts the time under a super call once more for each level above it.`,
+      `${table.superCallers === 1 ? 'One function calls' : `${table.superCallers} functions call`} through super, marked selfIncludesSuper: the engine takes a call to another script function or an engine method out of the caller's self time, but not a super call, so ${table.superCallers === 1 ? 'its' : 'their'} selfMs holds the overridden function's time, which that function's own row counts again. Self time therefore cannot be added along an override chain, and scriptMs counts the time under a super call once more for each level above it.`,
     );
   }
   if (table.overheadDominated > 0 && table.perCallUs !== null) {
@@ -3502,6 +3526,11 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
     );
   }
   notes.push(...cappedNotes(totals));
+  if (totals.engineCalls !== true) {
+    notes.push(
+      "Calls through engine methods, such as callv, stay in the caller's selfMs, so scriptMs can count that work twice. editor_run start with profile: true and engineCalls: true times them apart, as engineMs.",
+    );
+  }
   if (totals.unreadable > 0) {
     notes.push(
       `${totals.unreadable} message${totals.unreadable === 1 ? '' : 's'} from the game could not be read, so the totals have that many gaps.`,
@@ -3591,6 +3620,12 @@ function cappedNotes(totals: ProfileTotals): string[] {
     if (unrun > 0) {
       notes.push(
         `${unrun === 1 ? 'One' : String(unrun)} of the ${most} ${unrun === 1 ? 'is a function' : 'are functions'} counted as never called: the engine lists every function it has compiled, run or not, busiest first, so where the time runs out they take places that functions run too quickly to measure could have had.`,
+      );
+    }
+    const engineMethods = totals.totalEngineMethods ?? 0;
+    if (engineMethods > 0) {
+      notes.push(
+        `${engineMethods === 1 ? 'One' : String(engineMethods)} of the ${most} ${engineMethods === 1 ? 'is an engine method' : 'are engine methods'} the scripts called, which ${engineMethods === 1 ? 'is no row' : 'are no rows'}: that time is the callers' engineMs.`,
       );
     }
   } else if (most !== undefined && !totals.complete && (totals.cappedFrames ?? 0) > 0) {
@@ -4080,7 +4115,9 @@ function ownArguments(params: unknown): OperationParams {
 type Checked<T> = { ok: true; value: T } | { ok: false; response: ToolResponse };
 
 /** The engine a call runs, and what the answer says of it when it is not this server's. */
-type EngineChoice = { ok: true; value: string; note: string | null } | { ok: false; response: ToolResponse };
+type EngineChoice =
+  | { ok: true; value: string; version: string; note: string | null }
+  | { ok: false; response: ToolResponse };
 
 /** What a run was asked to carry: where its saves go, and any variables of its own. */
 interface RunEnvironment {
@@ -4150,15 +4187,6 @@ class GodotServer {
   private callsSinceNotice = 0;
   private callsSinceFeedback = 0;
   private readonly defectsSeen = new DefectsSeen();
-  /**
-   * The engine's version, from the last time anything here asked it.
-   *
-   * Kept because a defect report has a field for it and was filling it in with "not known at the
-   * point this failed" every time: nothing passed it, and asking on the failure path would start a
-   * subprocess at the worst possible moment. Whatever was learned earlier in the session is the
-   * right answer for a report about that session.
-   */
-  private lastGodotVersion: string | null = null;
   private lspClient: GodotLSPClient | null = null;
   private dapClient: GodotDAPClient | null = null;
   /** The adapter connection and editor the owner check last passed for. See [adapterBelongsElsewhere]. */
@@ -4992,18 +5020,7 @@ class GodotServer {
       const where = op === '' ? tool : `${tool} op=${op}`;
       console.error(`[SERVER] Unmodelled failure in ${where}:`, error);
       const seenBefore = this.defectsSeen.before(where, errorMessage(error));
-      return {
-        content: [
-          {
-            type: 'text',
-            text: defectReport(where, error, {
-              seenBefore,
-              godotVersion: this.lastGodotVersion ?? undefined,
-            }),
-          },
-        ],
-        isError: true,
-      };
+      return unmodelledAnswer(where, error, seenBefore, this.locator);
     }
   }
 
@@ -5979,7 +5996,7 @@ class GodotServer {
    * The engine for [param projectPath], or the refusal to send when there is none.
    *
    * A project other than this server's own runs the engine its own harness config names, when that
-   * names one that exists. A second checkout of a game, pinned to an older engine, ran its suites on
+   * names one. A record that is no engine is refused. A second checkout of a game, pinned to an older engine, ran its suites on
    * this server's newer one and printed errors only the newer engine has, with nothing naming it.
    * The note names the engine whenever it is not this server's.
    */
@@ -5990,21 +6007,26 @@ class GodotServer {
         ? null
         : recordedEnginePath(projectPath);
     if (theirs !== null && !(located.ok && isSameDirectory(theirs, located.path))) {
-      const version = await this.versionOf(theirs);
+      const judged = await this.locator.judge(theirs);
+      if (!judged.ok) {
+        const refusal = GodotLocator.refusal(judged, { config: projectPath ?? theirs });
+        return { ok: false, response: this.createErrorResponse(refusal.message, [...refusal.advice]) };
+      }
       return {
         ok: true,
-        value: theirs,
-        note: `This ran ${version === null ? 'the engine' : `Godot ${version}`} at ${theirs}, which the harness config of ${projectPath} names, rather than this server's ${located.ok ? `engine at ${located.path}` : 'GODOT_PATH, which names none'}.`,
+        value: judged.path,
+        version: judged.version,
+        note: `This ran Godot ${judged.version} at ${judged.path}, which the harness config of ${projectPath} names, rather than this server's ${located.ok ? `engine at ${located.path}` : 'GODOT_PATH, which names none'}.`,
       };
     }
     if (!located.ok) {
       const refusal = GodotLocator.refusal(located);
       return { ok: false, response: this.createErrorResponse(refusal.message, [...refusal.advice]) };
     }
-    return { ok: true, value: located.path, note: null };
+    return { ok: true, value: located.path, version: located.version, note: null };
   }
 
-  /** The engine a run names with godot in place of this server's, checked to answer --version. */
+  /** The engine a run names with godot in place of this server's, judged like any other. */
   private async otherEngine(path: string): Promise<EngineChoice> {
     if (!isAbsolute(path)) {
       return {
@@ -6012,17 +6034,17 @@ class GodotServer {
         response: this.createErrorResponse(`godot must be an absolute path, not "${path}".`),
       };
     }
-    const version = existsSync(path) ? await this.versionOf(path) : null;
-    if (version === null) {
-      return {
-        ok: false,
-        response: this.createErrorResponse(
-          `godot names ${path}, which ${existsSync(path) ? 'does not answer --version' : 'does not exist'}.`,
-          ['Point godot at a Godot editor binary', "Or leave it out to run on this server's engine"],
-        ),
-      };
+    const judged = await this.locator.judge(path);
+    if (!judged.ok) {
+      const refusal = GodotLocator.refusal(judged, { argument: 'godot' });
+      return { ok: false, response: this.createErrorResponse(refusal.message, [...refusal.advice]) };
     }
-    return { ok: true, value: path, note: `This ran Godot ${version} at ${path}, which godot names.` };
+    return {
+      ok: true,
+      value: judged.path,
+      version: judged.version,
+      note: `This ran Godot ${judged.version} at ${judged.path}, which godot names.`,
+    };
   }
 
   /** The project the call names, checked to be one. */
@@ -7269,8 +7291,7 @@ class GodotServer {
       name: typeof name === 'string' && name !== '' ? name : basename(project.value.path),
       path: project.value.path,
       mainScene: typeof mainScene === 'string' && mainScene !== '' ? mainScene : null,
-      godotVersion:
-        engine.note === null ? await this.godotVersion(engine.value) : await this.versionOf(engine.value),
+      godotVersion: engine.version,
       engineNote: engine.note ?? undefined,
       structure: projectStructure(project.value.path),
     };
@@ -8817,25 +8838,6 @@ class GodotServer {
     });
   }
 
-  private async godotVersion(godotPath: string): Promise<string | null> {
-    const version = await this.versionOf(godotPath);
-    if (version !== null) {
-      this.lastGodotVersion = version;
-    }
-    return version;
-  }
-
-  /** What [param godotPath] says its version is, without taking it for this server's engine. */
-  private async versionOf(godotPath: string): Promise<string | null> {
-    try {
-      const { stdout } = await runHidden(godotPath, ['--version'], { timeout: 10000 });
-      return stdout.trim();
-    } catch (error) {
-      this.logDebug(`Godot did not answer --version: ${errorMessage(error)}`);
-      return null;
-    }
-  }
-
   // -------------------------------------------------------------------------------------------
   // script
   // -------------------------------------------------------------------------------------------
@@ -10243,7 +10245,7 @@ class GodotServer {
       },
       godot: {
         path: located.ok ? located.path : null,
-        version: located.ok ? await this.godotVersion(located.path) : null,
+        version: located.ok ? located.version : null,
         // Why there is none, when GODOT_PATH names something: a null path beside a null version
         // reads as a machine with no engine, and a variable pointing at the wrong file is not that.
         problem: located.ok ? undefined : GodotLocator.refusal(located).message,
@@ -11137,6 +11139,13 @@ class GodotServer {
         'An exported build is started without the debugger, because a release build quits on --remote-debug. A profile needs the debugger, so leave out executable to profile the project.',
       );
     }
+    const engineCalls = readBoolean(args, 'engineCalls') === true;
+    if (engineCalls && readBoolean(args, 'profile') !== true) {
+      return this.createErrorResponse(
+        "engineCalls times the profiler's calls through engine methods, so it works only with profile: true.",
+        ['editor_run start with profile: true and engineCalls: true, or without engineCalls'],
+      );
+    }
     const own = readStringArray(args, 'args') ?? [];
     const given =
       suites.value === null ? own : [...own, ...suitesSceneArgs(project.value.path, suites.value)];
@@ -11328,6 +11337,7 @@ class GodotServer {
         runtimeWaitMs,
         ended,
         profiled,
+        engineCalls,
       );
     }
 
@@ -11356,6 +11366,7 @@ class GodotServer {
       onTheHiddenDesktop ? HIDDEN_DESKTOP : undefined,
       profiled,
       exported === null,
+      engineCalls,
     );
     if ('error' in started) {
       return this.createErrorResponse(`The game could not be started: ${started.error}`, [
@@ -11686,6 +11697,7 @@ class GodotServer {
     runtimeWaitMs: AnnounceBudget,
     ended: EndedRun | null,
     profiled: boolean,
+    engineCalls: boolean,
   ): Promise<ToolResponse> {
     const log = new GameLog();
     // Each step before the play says how long it took, since a start that sat nine seconds between
@@ -11736,6 +11748,7 @@ class GodotServer {
       const armed = await this.handleViaBridge('profile_start', {
         arm: true,
         frameFunctions: profileFrameFunctions(projectPath),
+        engineCalls,
       });
       if (armed.isError === true) {
         slot.release();
@@ -12604,6 +12617,7 @@ class GodotServer {
     desktop: string | undefined,
     profiled: boolean,
     debugged: boolean,
+    engineCalls: boolean,
   ): Promise<GodotProcess | { error: string }> {
     // In one of the machine's engine slots, like every engine started for a call. The keeper takes
     // the lock over once it has handed the game's pid back, and gives it back when the run ends,
@@ -12638,6 +12652,7 @@ class GodotServer {
           projectPath,
           ...this.servedBy(),
           ...(profile === undefined ? {} : { profile }),
+          ...(profile !== undefined && engineCalls ? { engineCalls } : {}),
           ...(debugged ? { breakpoints: this.breakpointsForAGame(projectPath) } : { debugged: false }),
           slot: { lock: slot.lock, from: slot.from, by: `a game of ${projectPath} editor_run started` },
         },
@@ -13661,27 +13676,34 @@ class GodotServer {
       });
     }
     const functions = asParams(held['functions']);
+    const complete = readBoolean(held, 'complete') === true;
+    const engineMethods = Object.keys(functions).filter(isEngineMethod).length;
     const totals: ProfileTotals | null =
       readBoolean(held, 'profiled') === true
         ? {
             startedAt: 0,
             lastFrameAt: null,
             frames: readNonNegativeNumber(held, 'frames') ?? 0,
-            complete: readBoolean(held, 'complete') === true,
+            complete,
             unreadable: 0,
             ...playedCap(held),
+            engineCalls: readBoolean(held, 'engineCalls') === true,
+            ...(complete && engineMethods > 0 ? { totalEngineMethods: engineMethods } : {}),
             functions: Object.fromEntries(
-              Object.entries(functions).map(([signature, sum]) => {
-                const [calls, self, total] = Array.isArray(sum) ? (sum as unknown[]) : [];
-                return [
-                  signature,
-                  {
-                    calls: Number(calls ?? 0),
-                    selfSeconds: Number(self ?? 0),
-                    totalSeconds: Number(total ?? 0),
-                  },
-                ];
-              }),
+              Object.entries(functions)
+                .filter(([signature]) => !isEngineMethod(signature))
+                .map(([signature, sum]) => {
+                  const [calls, self, total, internal] = Array.isArray(sum) ? (sum as unknown[]) : [];
+                  return [
+                    signature,
+                    {
+                      calls: Number(calls ?? 0),
+                      selfSeconds: Number(self ?? 0),
+                      totalSeconds: Number(total ?? 0),
+                      engineSeconds: Number(internal ?? 0),
+                    },
+                  ];
+                }),
             ),
           }
         : null;
@@ -13945,9 +13967,10 @@ class GodotServer {
         return true;
       }
       const record = run.projectPath === null ? null : readRunRecord(run.projectPath);
+      const ours = record !== null && record.pid === run.pid && sameRun(run, record);
       if (
         record !== null &&
-        record.pid === run.pid &&
+        ours &&
         (record.exitCode !== undefined || record.exitSignal !== undefined || record.exitNotTold === true)
       ) {
         run.exitCode = record.exitCode ?? null;
@@ -13959,17 +13982,12 @@ class GodotServer {
         return true;
       }
       // The keeper looking for a process the game restarted itself into, which takes a listing.
-      if (record !== null && record.pid === run.pid && record.endingAt !== undefined) {
+      if (record !== null && ours && record.endingAt !== undefined) {
         until = Math.max(until, record.endingAt + SUCCESSOR_SOUGHT_WITHIN_MS);
       }
       // A keeper still alive is on its way to writing the exit, however late it heard of it. One that
       // has gone will write nothing, and the run is settled as the two seconds say.
-      if (
-        record !== null &&
-        record.pid === run.pid &&
-        record.keeperPid !== undefined &&
-        alive(record.keeperPid)
-      ) {
+      if (record !== null && ours && record.keeperPid !== undefined && alive(record.keeperPid)) {
         until = Math.max(until, asked + SUCCESSOR_SOUGHT_WITHIN_MS);
       }
       if (Date.now() >= until) {

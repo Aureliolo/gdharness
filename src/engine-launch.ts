@@ -12,7 +12,6 @@ import {
   readdirSync,
   readSync,
   rmSync,
-  statSync,
   writeFileSync,
   writeSync,
 } from 'node:fs';
@@ -70,15 +69,9 @@ export function plural(count: number, noun: string): string {
   return `${String(count)} ${noun}${count === 1 ? '' : 's'}`;
 }
 
+/** The engine `--godot` names, made whole against [param cwd]. The locator judges it. */
 export function godotNamed(value: string | undefined, cwd: string): string | null {
-  if (value === undefined) {
-    return null;
-  }
-  const path = resolve(cwd, value);
-  if (!existsSync(path) || statSync(path).isDirectory()) {
-    throw new EngineUsageError(`--godot names ${path}, which is not an engine executable.`);
-  }
-  return path;
+  return value === undefined ? null : resolve(cwd, value);
 }
 
 export function coresNamed(value: string | undefined): number | null {
@@ -93,12 +86,26 @@ export function coresNamed(value: string | undefined): number | null {
   return cores;
 }
 
+/**
+ * The version [param text] says, or null. It is the first line that is two or three numbers joined
+ * by dots and then dotted words, the first starting with a letter, as `--version` prints it.
+ */
+export function versionPrinted(text: string): string | null {
+  for (const line of text.split(/\r?\n/u)) {
+    const version = line.trim();
+    if (/^\d+\.\d+(?:\.\d+)?\.[A-Za-z][\w-]*(?:\.[\w-]+)*$/u.test(version)) {
+      return version;
+    }
+  }
+  return null;
+}
+
 export function versionNamed(value: string | undefined): string | null {
   if (value === undefined) {
     return null;
   }
   const version = value.replace(/^v/, '');
-  if (!/^\d+\.\d+(?:\.\d+)?(?:\.[\w-]+)*$/.test(version)) {
+  if (!/^\d+\.\d+(?:\.\d+)?$/u.test(version) && versionPrinted(version) !== version) {
     throw new EngineUsageError(
       `--godot-version takes a version such as 4.7.2 or 4.7.2.stable, not ${value}.`,
     );

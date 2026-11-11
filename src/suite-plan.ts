@@ -107,6 +107,51 @@ interface Link {
   readonly via: readonly string[];
 }
 
+/** What a script extends: a script, or an inner class of one, or the name of a class the project does not declare. */
+type Base = (Link & { name?: never }) | { name: string };
+
+/** The constants a suite declares along its chain, undefined for one nothing has declared yet. */
+interface SuiteConstants {
+  said: boolean | undefined;
+  together: boolean | undefined;
+  accessible: boolean | undefined;
+  /** Whether a script of the chain drives a scene, which gives the suite a window unless it says otherwise. */
+  guessed: boolean;
+}
+
+/** The case functions [param body] declares. */
+function caseFunctionsIn(body: ClassBody): string[] {
+  return body.declarations
+    .filter((one) => one.kind === 'func')
+    .map((one) => one.name)
+    .filter((func) => func.startsWith(CASE_PREFIX));
+}
+
+/** The suite [param path] is, with [param cases] and [param declared] read along its chain, or null with no case. */
+function suiteDeclared(
+  path: string,
+  cases: ReadonlySet<string>,
+  declared: SuiteConstants,
+): DeclaredSuite | null {
+  const { said, together, accessible, guessed } = declared;
+  if (cases.size === 0) {
+    return null;
+  }
+  if (accessible === true && said === false) {
+    throw new Refusal(
+      `${path} declares ${ACCESSIBILITY} true and ${NEEDS_WINDOW} false. Godot builds the accessibility tree only with a window. Remove ${NEEDS_WINDOW}, since ${ACCESSIBILITY} already gives the suite one.`,
+    );
+  }
+  return {
+    path,
+    cases: [...cases].toSorted(),
+    windowed: accessible === true || (said ?? guessed),
+    headless: said === false,
+    together: together === true,
+    accessible: accessible === true,
+  };
+}
+
 /** The project's scripts by `res://` path, and its global classes by name, read once. */
 export class ProjectScripts {
   readonly sources = new Map<string, string>();
@@ -241,10 +286,12 @@ export class ProjectScripts {
     const cases = new Set<string>();
     // The nearest script in the chain to declare it decides, as the nearest declaration of a constant
     // is the one GDScript reads.
-    let said: boolean | undefined;
-    let together: boolean | undefined;
-    let accessible: boolean | undefined;
-    let guessed = false;
+    const declared: SuiteConstants = {
+      said: undefined,
+      together: undefined,
+      accessible: undefined,
+      guessed: false,
+    };
     const seen = new Set<string>();
     let at: Link = { path, via: [] };
     while (!seen.has(`${at.path}.${at.via.join('.')}`)) {
@@ -254,41 +301,16 @@ export class ProjectScripts {
       if (read === undefined || body === undefined) {
         return null;
       }
-      for (const func of body.declarations.filter((one) => one.kind === 'func').map((one) => one.name)) {
-        if (func.startsWith(CASE_PREFIX)) {
-          cases.add(func);
-        }
+      for (const func of caseFunctionsIn(body)) {
+        cases.add(func);
       }
-      said ??= this.declared(path, at.path, read.code, NEEDS_WINDOW);
-      together ??= this.declared(path, at.path, read.code, TOGETHER);
-      accessible ??= this.declared(path, at.path, read.code, ACCESSIBILITY);
-      guessed ||= this.guessWindow && SCENE_RUNNER.test(read.code);
+      this.readConstants(path, at.path, read.code, declared);
       const base = this.baseOf(at.path, body.extendsAs);
       if (base === null) {
         return null;
       }
-      // By name, or by the script declaring it: gdUnit4's own class is a global class of the project.
-      if (
-        'name' in base
-          ? base.name === SUITE_BASE
-          : base.via.length === 0 && base.path === this.classes.get(SUITE_BASE)
-      ) {
-        if (cases.size === 0) {
-          return null;
-        }
-        if (accessible === true && said === false) {
-          throw new Refusal(
-            `${path} declares ${ACCESSIBILITY} true and ${NEEDS_WINDOW} false. Godot builds the accessibility tree only with a window. Remove ${NEEDS_WINDOW}, since ${ACCESSIBILITY} already gives the suite one.`,
-          );
-        }
-        return {
-          path,
-          cases: [...cases].toSorted(),
-          windowed: accessible === true || (said ?? guessed),
-          headless: said === false,
-          together: together === true,
-          accessible: accessible === true,
-        };
+      if (this.isSuiteBase(base)) {
+        return suiteDeclared(path, cases, declared);
       }
       if ('name' in base) {
         return null;
@@ -296,6 +318,22 @@ export class ProjectScripts {
       at = base;
     }
     return null;
+  }
+
+  /** Takes what the script at [param at] declares of the suite's constants, those already decided kept. */
+  private readConstants(suite: string, at: string, code: string, into: SuiteConstants): void {
+    into.said ??= this.declared(suite, at, code, NEEDS_WINDOW);
+    into.together ??= this.declared(suite, at, code, TOGETHER);
+    into.accessible ??= this.declared(suite, at, code, ACCESSIBILITY);
+    into.guessed ||= this.guessWindow && SCENE_RUNNER.test(code);
+  }
+
+  /** Whether [param base] is gdUnit4's suite class, by name or by the script declaring it. */
+  private isSuiteBase(base: Base): boolean {
+    // gdUnit4's own class is a global class of the project.
+    return 'name' in base
+      ? base.name === SUITE_BASE
+      : base.via.length === 0 && base.path === this.classes.get(SUITE_BASE);
   }
 
   /** The class body [param via] names inside [param body], or undefined when there is none. */
@@ -312,7 +350,7 @@ export class ProjectScripts {
    * of one when the name is dotted, as `Outer.Inner` is, or the name of a class the project does not
    * declare.
    */
-  baseOf(script: string, extendsAs: string | null): (Link & { name?: never }) | { name: string } | null {
+  baseOf(script: string, extendsAs: string | null): Base | null {
     if (extendsAs === null) {
       return null;
     }
@@ -477,6 +515,28 @@ export function timesAfter(
   now: (path: string) => DeclaredSuite | null,
   cutShort: ReadonlySet<string> = new Set(),
 ): Record<string, SuiteTime> {
+  const next = timesStillDeclared(times, now);
+  const declared = new Map(suites.map((suite) => [suite.path, suite]));
+  for (const [path, entry] of timesMeasured(runs, declared)) {
+    next[path] = suiteTimeAfter(times[path], declared.get(path)?.cases ?? [], entry, (func) =>
+      cutShort.has(`${path}:${func}`),
+    );
+  }
+  return next;
+}
+
+/** What one suite's runs measured: each case's seconds, each parameterised case's rows, and the time outside the cases. */
+interface Measured {
+  readonly cases: Map<string, number>;
+  readonly rows: Map<string, Map<number, number>>;
+  around: number;
+}
+
+/** [param times] without the suites [param now] no longer finds, and without the cases a suite no longer declares. */
+function timesStillDeclared(
+  times: SuiteTimes,
+  now: (path: string) => DeclaredSuite | null,
+): Record<string, SuiteTime> {
   const next: Record<string, SuiteTime> = {};
   for (const [path, time] of Object.entries(times)) {
     const suite = now(path);
@@ -498,11 +558,15 @@ export function timesAfter(
       ...(Object.keys(rows).length > 0 ? { rows } : {}),
     };
   }
-  const declared = new Map(suites.map((suite) => [suite.path, suite]));
-  const measured = new Map<
-    string,
-    { cases: Map<string, number>; rows: Map<string, Map<number, number>>; around: number }
-  >();
+  return next;
+}
+
+/** What [param runs] measured of each suite in [param declared] they closed. */
+function timesMeasured(
+  runs: readonly RunPrinted[],
+  declared: ReadonlyMap<string, DeclaredSuite>,
+): Map<string, Measured> {
+  const measured = new Map<string, Measured>();
   for (const run of runs) {
     for (const printed of run.suites.values()) {
       if (printed.closed === null || !declared.has(printed.path)) {
@@ -513,57 +577,72 @@ export function timesAfter(
         rows: new Map<string, Map<number, number>>(),
         around: 0,
       };
-      const own = new Map<string, number>();
-      for (const ran of printed.cases) {
-        own.set(ran.func, (own.get(ran.func) ?? 0) + ran.seconds);
-        if (ran.row !== null) {
-          const rows = entry.rows.get(ran.func) ?? new Map<number, number>();
-          rows.set(ran.row, ran.seconds);
-          entry.rows.set(ran.func, rows);
-        }
-      }
-      const inCases = [...own.values()].reduce((sum, seconds) => sum + seconds, 0);
-      entry.around = Math.max(entry.around, printed.closed.seconds - inCases);
-      // Added rather than set: a case dealt by its rows ran some of them in each of several engines.
-      for (const [func, seconds] of own) {
-        entry.cases.set(func, (entry.cases.get(func) ?? 0) + seconds);
-      }
+      addPrinted(entry, printed.cases, printed.closed.seconds);
       measured.set(printed.path, entry);
     }
   }
-  for (const [path, entry] of measured) {
-    const suite = declared.get(path);
-    const cases: Record<string, number> = {};
-    const rows: Record<string, number[]> = {};
-    for (const func of suite?.cases ?? []) {
-      const measuredRows = entry.rows.get(func);
-      // A case that ran and printed no row is not parameterised now, whatever it was. Its old rows
-      // would deal it out over engines that each run nothing.
-      const keptRows =
-        measuredRows === undefined
-          ? entry.cases.has(func)
-            ? undefined
-            : times[path]?.rows?.[func]
-          : rowsAfter(times[path]?.rows?.[func], measuredRows, cutShort.has(`${path}:${func}`));
-      if (keptRows !== undefined) {
-        rows[func] = keptRows.map(round);
-      }
-      const seconds =
-        measuredRows === undefined || keptRows === undefined
-          ? (entry.cases.get(func) ?? times[path]?.cases[func])
-          : keptRows.reduce((sum, row) => sum + row, 0);
-      if (seconds !== undefined) {
-        cases[func] = round(seconds);
-      }
+  return measured;
+}
+
+/** Puts one printed suite, which took [param closedSeconds] in all, into [param entry]. */
+function addPrinted(
+  entry: Measured,
+  printed: readonly { func: string; row: number | null; seconds: number }[],
+  closedSeconds: number,
+): void {
+  const own = new Map<string, number>();
+  for (const ran of printed) {
+    own.set(ran.func, (own.get(ran.func) ?? 0) + ran.seconds);
+    if (ran.row !== null) {
+      const rows = entry.rows.get(ran.func) ?? new Map<number, number>();
+      rows.set(ran.row, ran.seconds);
+      entry.rows.set(ran.func, rows);
     }
-    const inCases = Object.values(cases).reduce((sum, seconds) => sum + seconds, 0);
-    next[path] = {
-      seconds: round(entry.around + inCases),
-      cases,
-      ...(Object.keys(rows).length > 0 ? { rows } : {}),
-    };
   }
-  return next;
+  const inCases = [...own.values()].reduce((sum, seconds) => sum + seconds, 0);
+  entry.around = Math.max(entry.around, closedSeconds - inCases);
+  // Added rather than set: a case dealt by its rows ran some of them in each of several engines.
+  for (const [func, seconds] of own) {
+    entry.cases.set(func, (entry.cases.get(func) ?? 0) + seconds);
+  }
+}
+
+/** A suite's time kept in [param before], with what [param entry] measured of its [param declaredCases] put in. */
+function suiteTimeAfter(
+  before: SuiteTime | undefined,
+  declaredCases: readonly string[],
+  entry: Measured,
+  cutShort: (func: string) => boolean,
+): SuiteTime {
+  const cases: Record<string, number> = {};
+  const rows: Record<string, number[]> = {};
+  for (const func of declaredCases) {
+    const measuredRows = entry.rows.get(func);
+    // A case that ran and printed no row is not parameterised now, whatever it was. Its old rows
+    // would deal it out over engines that each run nothing.
+    const keptRows =
+      measuredRows === undefined
+        ? entry.cases.has(func)
+          ? undefined
+          : before?.rows?.[func]
+        : rowsAfter(before?.rows?.[func], measuredRows, cutShort(func));
+    if (keptRows !== undefined) {
+      rows[func] = keptRows.map(round);
+    }
+    const seconds =
+      measuredRows === undefined || keptRows === undefined
+        ? (entry.cases.get(func) ?? before?.cases[func])
+        : keptRows.reduce((sum, row) => sum + row, 0);
+    if (seconds !== undefined) {
+      cases[func] = round(seconds);
+    }
+  }
+  const inCases = Object.values(cases).reduce((sum, seconds) => sum + seconds, 0);
+  return {
+    seconds: round(entry.around + inCases),
+    cases,
+    ...(Object.keys(rows).length > 0 ? { rows } : {}),
+  };
 }
 
 /**

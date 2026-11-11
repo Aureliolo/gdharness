@@ -9,9 +9,17 @@
  */
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { basename, join, resolve, sep } from 'node:path';
 
 import fc from 'fast-check';
 
@@ -21,6 +29,16 @@ import { GameLog } from '../src/game-log.js';
 import { MalformedReportError, parseJUnit } from '../src/junit.js';
 import { isWithinRoot, resolveWithinProject } from '../src/paths.js';
 import { parseProjectGodot } from '../src/resources.js';
+import {
+  amendRunRecord,
+  clearRunRecord,
+  everyRunRecord,
+  type RunRecord,
+  readRunRecord,
+  recordRunEnded,
+  sweepTranscripts,
+  writeRunRecord,
+} from '../src/run-record.js';
 import { sweep } from './support/sweep.js';
 import { buildZip, DEFLATED, STORED, type ZipEntrySpec } from './support/zip.js';
 
@@ -533,12 +551,12 @@ const DEVICE_NAMES = new Set([
 ]);
 
 const plainName = fc.stringMatching(/^[a-z]{1,4}$/).filter((name) => !DEVICE_NAMES.has(name));
-const directories = fc.array(plainName, { maxLength: 2 });
+const directoryNames = fc.array(plainName, { maxLength: 2 });
 
 /** Files end in .txt and directories never do, so no archive can name one as the other. */
 const fileEntry: fc.Arbitrary<ZipEntrySpec> = fc
   .tuple(
-    directories,
+    directoryNames,
     plainName,
     fc.string({ unit: 'binary', maxLength: 300 }),
     fc.constantFrom(STORED, DEFLATED),
@@ -565,6 +583,159 @@ function filesUnder(dir: string): string[] {
   return readdirSync(dir, { recursive: true, withFileTypes: true })
     .filter((entry) => entry.isFile())
     .map((entry) => join(entry.parentPath, entry.name));
+}
+
+/**
+ * Runs whose pids and starts repeat, on two projects and two runtime directories.
+ *
+ * The model keeps one note per project and directory, replaced whole by a start, left alone by an
+ * amend or an ending that is another run's, and told apart by transcript alone. A note reads back
+ * as the model's, the first directory first.
+ */
+function aRunNoteHoldsOnlyItsOwnRun(): void {
+  const aRun = fc.record({
+    pid: fc.constantFrom(1111, 2222),
+    startedAt: fc.constantFrom(1000, 2000),
+    name: fc.constantFrom('run-1000.log', 'run-1000-1.log', 'run-2000.log'),
+  });
+  const aStep = fc.record({
+    kind: fc.constantFrom('start', 'amend', 'end', 'clear', 'sweep'),
+    directory: fc.constantFrom(0, 1),
+    project: fc.constantFrom(0, 1),
+    run: aRun,
+    restarted: fc.boolean(),
+    looking: fc.boolean(),
+  });
+  const normal = <Note extends RunRecord | null>(note: Note): Note | RunRecord =>
+    note?.endedAt === undefined ? note : { ...note, endedAt: 0 };
+  // A note as text with its fields in a fixed order, since a note read back orders them its own way.
+  const keyed = (note: RunRecord): string =>
+    JSON.stringify(Object.entries(normal(note)).toSorted(([one], [other]) => one.localeCompare(other)));
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  fc.assert(
+    fc.property(fc.array(aStep, { maxLength: 14 }), (steps) => {
+      inTemp((root) => {
+        const directories = [join(root, 'a'), join(root, 'b')] as const;
+        const projects = [join(root, 'project-0'), join(root, 'project-1')] as const;
+        const notes: (RunRecord | null)[][] = [
+          [null, null],
+          [null, null],
+        ];
+        const files: Set<string>[] = [new Set(), new Set()];
+        const noteOf = (directory: number, project: number): RunRecord | null =>
+          notes[directory]?.[project] ?? null;
+        const setNote = (directory: number, project: number, note: RunRecord | null): void => {
+          const row = notes[directory];
+          if (row !== undefined) {
+            row[project] = note;
+          }
+        };
+        try {
+          for (const step of steps) {
+            const directory = directories[step.directory];
+            const project = projects[step.project];
+            process.env['GDHARNESS_RUNTIME_DIR'] = step.kind === 'sweep' ? directories[0] : directory;
+            const runs = join(directory, 'runs');
+            const base: RunRecord = {
+              pid: step.run.pid,
+              transcript: join(runs, step.run.name),
+              startedAt: step.run.startedAt,
+              startedBy: step.run.startedAt,
+              projectPath: project,
+              arguments: [],
+              command: 'godot',
+            };
+            const said: RunRecord = {
+              ...base,
+              ...(step.restarted ? { pid: 3333, restartedFrom: [{ pid: step.run.pid, endedAt: 7 }] } : {}),
+              ...(step.looking ? { endingAt: 5000 } : {}),
+            };
+            const there = noteOf(step.directory, step.project);
+            const own = there === null || there.transcript === said.transcript;
+            if (step.kind === 'start') {
+              mkdirSync(runs, { recursive: true });
+              writeFileSync(base.transcript, '');
+              files[step.directory]?.add(step.run.name);
+              writeRunRecord(base);
+              setNote(step.directory, step.project, base);
+            } else if (step.kind === 'amend') {
+              assert.equal(amendRunRecord(said), own, 'an amend writes unless the note is another run');
+              if (own) {
+                setNote(step.directory, step.project, said);
+              }
+            } else if (step.kind === 'end') {
+              assert.equal(recordRunEnded(said, { exitCode: 0, exitSignal: null }), own);
+              if (own) {
+                const { endingAt: _looked, ...kept } = said;
+                setNote(step.directory, step.project, { ...kept, exitCode: 0, endedAt: 0 });
+              }
+            } else if (step.kind === 'clear') {
+              clearRunRecord(project, directories);
+              setNote(0, step.project, null);
+              setNote(1, step.project, null);
+            } else {
+              sweepTranscripts(24 * 60 * 60 * 1000, Date.now() + 2 * 24 * 60 * 60 * 1000);
+              const noted = new Set(
+                [0, 1].flatMap((which) => {
+                  const note = noteOf(0, which);
+                  return note === null ? [] : [basename(note.transcript)];
+                }),
+              );
+              files[0] = new Set([...(files[0] ?? [])].filter((name) => noted.has(name)));
+              const left = existsSync(join(directories[0], 'runs'))
+                ? readdirSync(join(directories[0], 'runs')).filter((entry) => entry.endsWith('.log'))
+                : [];
+              assert.deepEqual(
+                left.toSorted(),
+                [...files[0]].toSorted(),
+                'the sweep keeps what a note names',
+              );
+              const other = existsSync(join(directories[1], 'runs'))
+                ? readdirSync(join(directories[1], 'runs')).filter((entry) => entry.endsWith('.log'))
+                : [];
+              assert.deepEqual(
+                other.toSorted(),
+                [...(files[1] ?? [])].toSorted(),
+                'and leaves the other directory',
+              );
+            }
+            for (const which of [0, 1]) {
+              const wanted = noteOf(0, which) ?? noteOf(1, which);
+              assert.deepEqual(normal(readRunRecord(projects[which] ?? '', directories)), normal(wanted));
+            }
+            const every = [0, 1]
+              .flatMap((d) => [0, 1].map((p) => noteOf(d, p)))
+              .filter((note) => note !== null);
+            const listed = everyRunRecord(directories);
+            assert.deepEqual(
+              listed.map(keyed).toSorted(),
+              every.map(keyed).toSorted(),
+              'every note is listed',
+            );
+            for (let index = 1; index < listed.length; index += 1) {
+              assert.ok(
+                (listed[index - 1]?.startedAt ?? 0) >= (listed[index]?.startedAt ?? 0),
+                'newest first',
+              );
+            }
+            for (const note of listed) {
+              assert.ok(
+                note.endedAt === undefined || note.endingAt === undefined,
+                'an ended run is not ending',
+              );
+            }
+          }
+        } finally {
+          if (had === undefined) {
+            delete process.env['GDHARNESS_RUNTIME_DIR'];
+          } else {
+            process.env['GDHARNESS_RUNTIME_DIR'] = had;
+          }
+        }
+      });
+    }),
+    { numRuns: 60 },
+  );
 }
 
 function archivesRoundTrip(): void {
@@ -838,6 +1009,7 @@ projectFilesRoundTrip();
 anyPathIsJudgedWithoutThrowing();
 segmentsAreJudgedByWhereTheyLand();
 absoluteFormsAreRefusedEverywhere();
+aRunNoteHoldsOnlyItsOwnRun();
 archivesRoundTrip();
 hostileEntriesWriteNothing();
 bytesThatAreNotAnArchiveWriteNothing();

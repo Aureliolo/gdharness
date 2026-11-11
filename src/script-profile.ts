@@ -36,7 +36,11 @@ interface FunctionTotals {
   readonly calls: number;
   readonly selfSeconds: number;
   readonly totalSeconds: number;
+  /** Its calls through engine methods, which the engine keeps out of its self time. Absent is 0. */
+  readonly engineSeconds?: number;
 }
+
+type FunctionSums = { -readonly [Key in keyof FunctionTotals]-?: FunctionTotals[Key] };
 
 /** What a profile holds, as it is written to disk and handed between processes. */
 export interface ProfileTotals {
@@ -62,6 +66,16 @@ export interface ProfileTotals {
   readonly frameFunctions?: number;
   readonly cappedFrames?: number;
   readonly totalCapped?: boolean;
+  /**
+   * Whether the profiler was switched on with native calls timed, which is what gives a function an
+   * engineMs. Absent from a file written before the choice existed, which reads as not timed.
+   */
+  readonly engineCalls?: boolean;
+  /**
+   * How many places in the engine's totals held an engine method a script called, which is no row
+   * here. Absent when none did.
+   */
+  readonly totalEngineMethods?: number;
   /**
    * How many messages the game's debugger queue dropped, as the engine reported them, which can
    * hold a frame or the totals themselves.
@@ -116,7 +130,8 @@ function isFunctionTotals(value: unknown): value is FunctionTotals {
     isRecord(value) &&
     typeof value['calls'] === 'number' &&
     typeof value['selfSeconds'] === 'number' &&
-    typeof value['totalSeconds'] === 'number'
+    typeof value['totalSeconds'] === 'number' &&
+    (value['engineSeconds'] === undefined || typeof value['engineSeconds'] === 'number')
   );
 }
 
@@ -145,7 +160,16 @@ function profileTotalsOf(value: unknown): ProfileTotals | null {
     summed[signature] = totals;
   }
   // The parts a file can be without, each taken where it has its type and left out where it has not.
-  const { frameFunctions, cappedFrames, totalCapped, dropped, firstFrame, lastFrame } = value;
+  const {
+    frameFunctions,
+    cappedFrames,
+    totalCapped,
+    engineCalls,
+    totalEngineMethods,
+    dropped,
+    firstFrame,
+    lastFrame,
+  } = value;
   return {
     startedAt,
     lastFrameAt,
@@ -156,6 +180,8 @@ function profileTotalsOf(value: unknown): ProfileTotals | null {
     ...(typeof frameFunctions === 'number' ? { frameFunctions } : {}),
     ...(typeof cappedFrames === 'number' ? { cappedFrames } : {}),
     ...(typeof totalCapped === 'boolean' ? { totalCapped } : {}),
+    ...(typeof engineCalls === 'boolean' ? { engineCalls } : {}),
+    ...(typeof totalEngineMethods === 'number' ? { totalEngineMethods } : {}),
     ...(typeof dropped === 'number' ? { dropped } : {}),
     ...(typeof firstFrame === 'number' ? { firstFrame } : {}),
     ...(typeof lastFrame === 'number' ? { lastFrame } : {}),
@@ -221,9 +247,33 @@ export const PROFILE_FROM_START = 'GDHARNESS_PROFILE_FROM_START';
 
 const PROFILER_SWITCH = 'profiler:servers';
 
-/** The command that switches the profiler on, as the editor sends it: `[true, [count, native]]`. */
-export function profilerOn(frameFunctions: number): Uint8Array {
-  return framedCommand(PROFILER_SWITCH, [true, [frameFunctions, false]]);
+/**
+ * The command that switches the profiler on, as the editor sends it: `[true, [count, native]]`.
+ *
+ * With [param engineCalls], native calls are timed, and only then does the engine take a call
+ * through a method bind (`callv`, `emit_signal`, any `Node` method on a typed value) out of the
+ * caller's self time. Off, that time stays in the caller's self, along with any script function the
+ * engine called back. It is off unless asked for, because the engine reads an object's class after
+ * a dynamic call to `free()` has destroyed it, which crashes a game on Linux and macOS.
+ */
+export function profilerOn(frameFunctions: number, engineCalls = false): Uint8Array {
+  return framedCommand(PROFILER_SWITCH, profilerOnData(frameFunctions, engineCalls));
+}
+
+function profilerOnData(frameFunctions: number, engineCalls: boolean): SentValue[] {
+  return [true, [frameFunctions, engineCalls]];
+}
+
+/**
+ * Whether [param signature] is one of the engine methods a script function called, which the engine
+ * lists after that function as `path::0::Class.method` once native calls are profiled. Its time
+ * holds any script function the engine called back, which has its own row, and it is already the
+ * caller's internal time. The compiler's own functions at line 0 are named `@implicit_new` and
+ * `@static_initializer`.
+ */
+export function isEngineMethod(signature: string): boolean {
+  const { line, function: name } = signatureParts(signature);
+  return line === 0 && signature.split('::').length >= 3 && !bareName(name).startsWith('@');
 }
 
 /**
@@ -245,7 +295,7 @@ const DROPPED_COUNT = /(\d+) messages were dropped/;
 /** Sums a run's profile frames into totals per function. */
 export class ProfileAggregate {
   private readonly names = new Map<number, string>();
-  private totals = new Map<string, { calls: number; selfSeconds: number; totalSeconds: number }>();
+  private totals = new Map<string, FunctionSums>();
   private complete = false;
   private frames = 0;
   private lastFrameAt: number | null = null;
@@ -254,13 +304,16 @@ export class ProfileAggregate {
   private unreadable = 0;
   private cappedFrames = 0;
   private totalCapped = false;
+  private totalEngineMethods = 0;
   private dropped = 0;
   private readonly startedAt: number;
   private readonly frameFunctions: number;
+  private readonly engineCalls: boolean;
 
-  constructor(startedAt: number, frameFunctions: number) {
+  constructor(startedAt: number, frameFunctions: number, engineCalls = false) {
     this.startedAt = startedAt;
     this.frameFunctions = frameFunctions;
+    this.engineCalls = engineCalls;
   }
 
   /** Takes one message from the game. Anything that is not the profiler's is left alone. */
@@ -270,54 +323,77 @@ export class ProfileAggregate {
       return;
     }
     if (received.message === 'error' && received.data[7] === QUEUE_OVERFLOW) {
-      // Sent once the queue has room again, with how many went since the last such report.
-      const said = typeof received.data[8] === 'string' ? DROPPED_COUNT.exec(received.data[8]) : null;
-      this.dropped += said === null ? 1 : Number(said[1]);
+      this.takeOverflow(received.data);
     } else if (received.message === 'servers:function_signature') {
-      const [name, id] = received.data;
-      if (typeof name === 'string' && typeof id === 'number') {
-        this.names.set(id, name);
-      }
+      this.takeSignature(received.data);
     } else if (received.message === 'servers:profile_frame') {
-      const carried = this.addFrame(received.data, this.totals);
-      if (carried === null) {
-        this.unreadable += 1;
-      } else {
-        this.frames += 1;
-        this.lastFrameAt = now;
-        this.cappedFrames += carried >= this.frameFunctions ? 1 : 0;
-        const numbered = received.data[0];
-        if (typeof numbered === 'number') {
-          this.firstFrame ??= numbered;
-          this.lastFrame = numbered;
-        }
-      }
+      this.takeFrame(received.data, now);
     } else if (received.message === 'servers:profile_total') {
-      // The engine's own count since the profiler started, so it replaces the frames' sum rather
-      // than adding to it: it is what the frames add up to, with nothing lost between them.
-      const whole = new Map<string, { calls: number; selfSeconds: number; totalSeconds: number }>();
-      const carried = this.addFrame(received.data, whole);
-      if (carried === null) {
-        this.unreadable += 1;
-      } else {
-        this.totals = whole;
-        this.complete = true;
-        this.lastFrameAt = now;
-        this.totalCapped = carried >= this.frameFunctions;
-      }
+      this.takeTotal(received.data, now);
     }
+  }
+
+  /** Sent once the queue has room again, with how many went since the last such report. */
+  private takeOverflow(data: readonly GodotValue[]): void {
+    const said = typeof data[8] === 'string' ? DROPPED_COUNT.exec(data[8]) : null;
+    this.dropped += said === null ? 1 : Number(said[1]);
+  }
+
+  private takeSignature(data: readonly GodotValue[]): void {
+    const [name, id] = data;
+    if (typeof name === 'string' && typeof id === 'number') {
+      this.names.set(id, name);
+    }
+  }
+
+  private takeFrame(data: readonly GodotValue[], now: number): void {
+    const added = this.addFrame(data, this.totals);
+    if (added === null) {
+      this.unreadable += 1;
+      return;
+    }
+    this.frames += 1;
+    this.lastFrameAt = now;
+    this.cappedFrames += added.carried >= this.frameFunctions ? 1 : 0;
+    const numbered = data[0];
+    if (typeof numbered === 'number') {
+      this.firstFrame ??= numbered;
+      this.lastFrame = numbered;
+    }
+  }
+
+  private takeTotal(data: readonly GodotValue[], now: number): void {
+    // The engine's own count since the profiler started, so it replaces the frames' sum rather
+    // than adding to it: it is what the frames add up to, with nothing lost between them.
+    const whole = new Map<string, FunctionSums>();
+    const added = this.addFrame(data, whole);
+    if (added === null) {
+      this.unreadable += 1;
+      return;
+    }
+    // Apart from engine time: GDScript clears a function's engine calls at each frame's end, so its
+    // totals hold only those since the last frame, and the frames hold the rest.
+    for (const [name, sum] of whole) {
+      sum.engineSeconds += this.totals.get(name)?.engineSeconds ?? 0;
+    }
+    this.totals = whole;
+    this.complete = true;
+    this.lastFrameAt = now;
+    this.totalCapped = added.carried >= this.frameFunctions;
+    this.totalEngineMethods = added.engineMethods;
   }
 
   /**
    * Adds one frame's functions into [param into], reading past the servers' section to reach them,
-   * and answers how many it carried, or null for a frame that could not be read.
+   * and answers how many it carried and how many of those were engine methods, or null for a frame
+   * that could not be read.
    */
   private addFrame(
     data: readonly GodotValue[],
-    into: Map<string, { calls: number; selfSeconds: number; totalSeconds: number }>,
-  ): number | null {
+    into: Map<string, FunctionSums>,
+  ): { readonly carried: number; readonly engineMethods: number } | null {
     // Read in full before anything is added, so a frame that fails halfway leaves [param into] as it was.
-    const read: [string, number, number, number][] = [];
+    const read: [string, number, number, number, number][] = [];
     let at = 6;
     const servers = data[at];
     if (typeof servers !== 'number') {
@@ -337,25 +413,32 @@ export class ProfileAggregate {
     }
     at += 1;
     for (let index = 0; index < values; index += 5) {
-      const [id, calls, self, total] = data.slice(at + index, at + index + 4);
+      const [id, calls, self, total, internal] = data.slice(at + index, at + index + 5);
       if (
         typeof id !== 'number' ||
         typeof calls !== 'number' ||
         typeof self !== 'number' ||
-        typeof total !== 'number'
+        typeof total !== 'number' ||
+        typeof internal !== 'number'
       ) {
         return null;
       }
-      read.push([this.names.get(id) ?? `${UNNAMED_PREFIX}${id}`, calls, self, total]);
+      read.push([this.names.get(id) ?? `${UNNAMED_PREFIX}${id}`, calls, self, total, internal]);
     }
-    for (const [name, calls, self, total] of read) {
-      const sum = into.get(name) ?? { calls: 0, selfSeconds: 0, totalSeconds: 0 };
+    let engineMethods = 0;
+    for (const [name, calls, self, total, internal] of read) {
+      if (isEngineMethod(name)) {
+        engineMethods += 1;
+        continue;
+      }
+      const sum = into.get(name) ?? { calls: 0, selfSeconds: 0, totalSeconds: 0, engineSeconds: 0 };
       sum.calls += calls;
       sum.selfSeconds += self;
       sum.totalSeconds += total;
+      sum.engineSeconds += internal;
       into.set(name, sum);
     }
-    return values / 5;
+    return { carried: values / 5, engineMethods };
   }
 
   snapshot(): ProfileTotals {
@@ -369,6 +452,8 @@ export class ProfileAggregate {
       frameFunctions: this.frameFunctions,
       cappedFrames: this.cappedFrames,
       totalCapped: this.totalCapped,
+      engineCalls: this.engineCalls,
+      ...(this.totalEngineMethods > 0 ? { totalEngineMethods: this.totalEngineMethods } : {}),
       ...(this.dropped > 0 ? { dropped: this.dropped } : {}),
       ...(this.firstFrame === null || this.lastFrame === null
         ? {}
@@ -389,10 +474,19 @@ interface ProfiledFunction {
   readonly selfMs: number;
   readonly totalMs: number;
   /**
+   * Its calls through engine methods, which are not in selfMs. They hold any script function the
+   * engine called back, such as through `callv` or `emit_signal`, which that function's row counts
+   * again. Along a chain of them, such as a `callv` reaching a function that calls `callv` again,
+   * the engine files the chain's engine calls under one of its functions (measured at 4.7.2): one
+   * row's engineMs holds another's, which has none, and would count them twice but for being kept
+   * to totalMs less selfMs.
+   */
+  readonly engineMs?: number;
+  /**
    * True for a function that calls through `super`, whose selfMs then holds what that call took.
-   * The engine takes every other call a script function makes out of its self time, but its opcode
-   * for a super call (`OPCODE_CALL_SELF_BASE` in `gdscript_vm.cpp` at 4.7.2) is not timed, so the
-   * overridden function's time is in its own row and again in this one.
+   * The engine takes a call to another script function or an engine method out of the caller's self
+   * time, but its opcode for a super call (`OPCODE_CALL_SELF_BASE` in `gdscript_vm.cpp` at 4.7.2)
+   * is not timed, so the overridden function's time is in its own row and again in this one.
    */
   readonly selfIncludesSuper?: true;
   /**
@@ -567,28 +661,7 @@ export function totalsSince(
   if (now.frames < mark.frames || now.startedAt !== mark.startedAt) {
     return null;
   }
-  let shrunk = 0;
-  const functions: Record<string, FunctionTotals> = {};
-  for (const [signature, sum] of Object.entries(now.functions)) {
-    const before = mark.functions[signature];
-    if (isCalibration(signature) || before === undefined) {
-      functions[signature] = sum;
-      continue;
-    }
-    const added = {
-      calls: sum.calls - before.calls,
-      selfSeconds: sum.selfSeconds - before.selfSeconds,
-      totalSeconds: sum.totalSeconds - before.totalSeconds,
-    };
-    if (added.calls < 0 || added.selfSeconds < 0 || added.totalSeconds < 0) {
-      shrunk += 1;
-    } else if (added.calls > 0) {
-      functions[signature] = added;
-    }
-  }
-  shrunk += Object.keys(mark.functions).filter(
-    (signature) => now.functions[signature] === undefined && (mark.functions[signature]?.calls ?? 0) > 0,
-  ).length;
+  const { functions, shrunk } = functionsSince(now.functions, mark.functions);
   const { dropped: droppedInAll, firstFrame: _first, lastFrame: _last, ...kept } = now;
   const dropped = (droppedInAll ?? 0) - (mark.dropped ?? 0);
   return {
@@ -604,6 +677,37 @@ export function totalsSince(
     },
     shrunk,
   };
+}
+
+/** What [param now] adds to [param before] per function, and how many functions read less than they did. */
+function functionsSince(
+  now: Readonly<Record<string, FunctionTotals>>,
+  before: Readonly<Record<string, FunctionTotals>>,
+): { functions: Record<string, FunctionTotals>; shrunk: number } {
+  let shrunk = 0;
+  const functions: Record<string, FunctionTotals> = {};
+  for (const [signature, sum] of Object.entries(now)) {
+    const marked = before[signature];
+    if (isCalibration(signature) || marked === undefined) {
+      functions[signature] = sum;
+      continue;
+    }
+    const added = {
+      calls: sum.calls - marked.calls,
+      selfSeconds: sum.selfSeconds - marked.selfSeconds,
+      totalSeconds: sum.totalSeconds - marked.totalSeconds,
+      engineSeconds: (sum.engineSeconds ?? 0) - (marked.engineSeconds ?? 0),
+    };
+    if (added.calls < 0 || added.selfSeconds < 0 || added.totalSeconds < 0 || added.engineSeconds < 0) {
+      shrunk += 1;
+    } else if (added.calls > 0) {
+      functions[signature] = added;
+    }
+  }
+  shrunk += Object.keys(before).filter(
+    (signature) => now[signature] === undefined && (before[signature]?.calls ?? 0) > 0,
+  ).length;
+  return { functions, shrunk };
 }
 
 /**
@@ -649,6 +753,8 @@ function rowsOf(totals: ProfileTotals, sourceOf: SourceOf): ProfiledFunction[] {
       const parts = signatureParts(signature);
       const code = codeOfScript(parts.script);
       const property = propertyOf(parts.function);
+      // At most what its calls took, since the engine counts a call made under one of them twice.
+      const engineMs = ms(Math.min(sum.engineSeconds ?? 0, Math.max(0, sum.totalSeconds - sum.selfSeconds)));
       return {
         script: parts.script,
         function: parts.function,
@@ -656,6 +762,7 @@ function rowsOf(totals: ProfileTotals, sourceOf: SourceOf): ProfiledFunction[] {
         calls: sum.calls,
         selfMs: ms(sum.selfSeconds),
         totalMs: ms(sum.totalSeconds),
+        ...(engineMs > 0 ? { engineMs } : {}),
         ...(code !== null && bodyCallsSuper(code, parts.line, parts.function.endsWith('(lambda)'))
           ? { selfIncludesSuper: true as const }
           : {}),
@@ -746,6 +853,21 @@ function rowOfSite(
   });
 }
 
+/** The numbers of the function a call site is in, left out when the profile has no row for it. */
+function withinNumbersOf(
+  within: ProfiledFunction | undefined,
+): Pick<ProfiledCallSite, 'withinCalls' | 'withinSelfMs' | 'withinTotalMs' | 'withinSelfIncludesSuper'> {
+  if (within === undefined) {
+    return {};
+  }
+  return {
+    withinCalls: within.calls,
+    withinSelfMs: within.selfMs,
+    withinTotalMs: within.totalMs,
+    ...(within.selfIncludesSuper === true ? { withinSelfIncludesSuper: true as const } : {}),
+  };
+}
+
 /** How many places a callers answer lists before saying how many more there were. */
 const CALL_SITES = 40;
 
@@ -793,32 +915,18 @@ export function callersOf(
   const otherClasses = new Set<string>();
   if (asked !== null) {
     for (const [, source] of listed) {
-      for (const declared of classNamesOf(source)) {
-        if (declared !== asked) {
-          otherClasses.add(declared);
-        }
+      for (const declared of classNamesOf(source).filter((one) => one !== asked)) {
+        otherClasses.add(declared);
       }
     }
   }
-  const sites: ProfiledCallSite[] = [];
-  for (const [script, source] of listed) {
-    for (const site of callSitesOf(source, bare, otherClasses, property)) {
+  const sites = listed.flatMap(([script, source]) =>
+    callSitesOf(source, bare, otherClasses, property).map((site) => {
       const within =
         site.within === null ? undefined : rowOfSite(rows, script, source, site.line, site.within);
-      sites.push({
-        script,
-        ...site,
-        ...(within === undefined
-          ? {}
-          : {
-              withinCalls: within.calls,
-              withinSelfMs: within.selfMs,
-              withinTotalMs: within.totalMs,
-              ...(within.selfIncludesSuper === true ? { withinSelfIncludesSuper: true as const } : {}),
-            }),
-      });
-    }
-  }
+      return { script, ...site, ...withinNumbersOf(within) };
+    }),
+  );
   sites.sort(
     (a, b) =>
       (b.withinTotalMs ?? -1) - (a.withinTotalMs ?? -1) ||
@@ -841,17 +949,22 @@ export class ProfileObserver implements DebugObserver {
   private aggregate: ProfileAggregate | null = null;
   private readonly changed: (totals: ProfileTotals) => void;
   private readonly frameFunctions: number;
+  private readonly engineCalls: boolean;
 
-  /** Asking for at most [param frameFunctions] functions a frame. See `frameFunctionsFor`. */
-  constructor(changed: (totals: ProfileTotals) => void, frameFunctions: number) {
+  /**
+   * Asking for at most [param frameFunctions] functions a frame. See `frameFunctionsFor`. Native
+   * calls are timed only where [param engineCalls] says so.
+   */
+  constructor(changed: (totals: ProfileTotals) => void, frameFunctions: number, engineCalls = false) {
     this.changed = changed;
     this.frameFunctions = frameFunctions;
+    this.engineCalls = engineCalls;
   }
 
   connected(send: (message: string, data: readonly SentValue[]) => void): void {
-    const aggregate = new ProfileAggregate(Date.now(), this.frameFunctions);
+    const aggregate = new ProfileAggregate(Date.now(), this.frameFunctions, this.engineCalls);
     this.aggregate = aggregate;
-    send(PROFILER_SWITCH, [true, [this.frameFunctions, false]]);
+    send(PROFILER_SWITCH, profilerOnData(this.frameFunctions, this.engineCalls));
     this.changed(aggregate.snapshot());
   }
 

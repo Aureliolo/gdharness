@@ -1619,7 +1619,7 @@ func _settled(packed: PackedScene) -> Array:
 		for found: Array in stray:
 			var node: Node = found[0]
 			var name: String = found[1]
-			var wanted: Variant = found[3] if found[2] else _unset_value(node, name)
+			var wanted: Variant = found[3] if found[2] else unset_value(node, name)
 			var held: Variant = node.get(name)
 			GdhHeadlessCheck.restore(node, name, wanted)
 			if GdhHeadlessCheck.kept_by_engine(node, name, wanted, held):
@@ -1842,7 +1842,7 @@ func _stray_text(node: Node, name: String) -> String:
 ## What [param node] would load with for [param name] if this file did not set it: what the scenes
 ## it comes from store, followed down through every scene instanced or inherited, else its script's
 ## or class's default. Read from their files, since instancing them would run their scripts.
-func _unset_value(node: Node, name: String) -> Variant:
+func unset_value(node: Node, name: String) -> Variant:
 	var base: SceneState = _state.get_base_scene_state() if _state != null else null
 	if node == root or _base_paths.has(path_of(node)):
 		return _value_in(base, path_of(node), node, name)
