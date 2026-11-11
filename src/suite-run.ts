@@ -598,6 +598,9 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     }
     // After the import, which writes the .import and .uid files beside what a suite loads.
     const suitesBegan = Date.now();
+    // Read again from here, since a script edited during the import is loaded as it is now, and
+    // one edited from here on is newer than suitesBegan, which keeps its pass unrecorded.
+    const loaded = new ProjectScripts(options.projectPath);
     const always = [
       getLocalVersion(),
       readFileSync(shippedListedRunner(), 'utf8'),
@@ -605,9 +608,11 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       ...reachedAlsoSaid(options.reachAlso),
     ];
     const everySuite = suites;
-    const compileKept = options.changedOnly ? { file: join(state, COMPILED_FILE), scripts, always } : null;
+    const compileKept = options.changedOnly
+      ? { file: join(state, COMPILED_FILE), scripts: loaded, always }
+      : null;
     if (options.changedOnly) {
-      const inputs = new SuiteInputs(scripts, always);
+      const inputs = new SuiteInputs(loaded, always);
       const passedBefore = readPassed(passedFile);
       const unchanged = suites.filter((suite) => {
         const passed = passedBefore[suite.path];
@@ -799,7 +804,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         readTimes(timesFile),
         wholeSuites,
         ran.map((engine) => engine.printed),
-        (path) => scripts.suite(path),
+        (path) => loaded.suite(path),
         new Set(
           ran.flatMap((engine) =>
             engine.plan.suites
@@ -820,7 +825,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       options.projectPath,
       ran,
       new Set(across.map((fault) => fault.suite)),
-      new SuiteInputs(scripts, always),
+      new SuiteInputs(loaded, always),
       suitesBegan,
       declared,
     );

@@ -60448,6 +60448,72 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
 }
 
 /**
+ * A suite an editor plugin rewrites during the import keeps its pass against what the new text
+ * loads, so a change to a file only the new text names runs it again.
+ */
+async function testAScriptEditedDuringTheImportIsFollowedAsTheEngineLoadedIt(): Promise<void> {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  const word = (said: string): string =>
+    `[gd_resource type="Resource" format=3]\n\n[resource]\nmetadata/word = "${said}"\n`;
+  const edits = [
+    '@tool',
+    'extends EditorPlugin',
+    '',
+    '',
+    'func _enter_tree() -> void:',
+    '\tif not FileAccess.file_exists("res://edit_once"):',
+    '\t\treturn',
+    '\tvar suite: FileAccess = FileAccess.open("res://tests/edited_test.gd", FileAccess.WRITE)',
+    '\tsuite.store_string(',
+    '\t\t"extends GdUnitTestSuite\\n\\nconst WORD: Resource = preload(\\"res://data/word.tres\\")\\n\\n"',
+    '\t\t+ "func test_edited() -> void:\\n\\tassert_bool(WORD != null).is_true()\\n"',
+    '\t)',
+    '\tsuite.close()',
+    '\tvar _removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path("res://edit_once"))',
+    '',
+  ].join('\n');
+  try {
+    writeTree(project, {
+      'project.godot': `${readFileSync(join(project, 'project.godot'), 'utf8')}\n[editor_plugins]\n\nenabled=PackedStringArray("res://addons/edits/plugin.cfg")\n`,
+      'addons/edits/plugin.cfg':
+        '[plugin]\n\nname="edits"\ndescription="Rewrites a suite once."\nauthor="gdharness"\nversion="1"\nscript="plugin.gd"\n',
+      'addons/edits/plugin.gd': edits,
+      'data/word.tres': word('one'),
+      edit_once: '',
+      'tests/edited_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_edited() -> void:\n\tassert_bool(true).is_true()\n',
+    });
+    const first = test('tests/edited_test.gd', '--changed-only', '--import');
+    assert.equal(first.status, 0, first.said);
+    assert.equal(
+      existsSync(join(project, 'edit_once')),
+      false,
+      `the plugin ran in the import: ${first.said}`,
+    );
+    assert.match(
+      readFileSync(join(project, 'tests', 'edited_test.gd'), 'utf8'),
+      /preload\("res:\/\/data\/word\.tres"\)/,
+      'and rewrote the suite',
+    );
+    assert.match(first.said, /^Passed: 1 case in 1 suite across 1 engine, /m, first.said);
+    writeFileSync(join(project, 'data', 'word.tres'), word('two'));
+    const again = test('tests/edited_test.gd', '--changed-only');
+    assert.equal(again.status, 0, again.said);
+    assert.match(
+      again.said,
+      /^Passed: 1 case in 1 suite across 1 engine, /m,
+      `a change to what the rewritten suite loads runs it again: ${again.said}`,
+    );
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
+/**
  * A case's time is its own: a suite whose script holds the engine 300 ms as it compiles and whose
  * before() holds it 400 ms more still has its first case timed at what the case took. The result
  * puts the compile under the engine's start and the before() under the suite, and so does the line
@@ -87088,6 +87154,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASpreadBenchGathersTheTableItPlaysAlone,
   testASuiteRunHasNoSoundWhicheverWayItStarts,
   testTheTestCommandRunsAndJudgesAProject,
+  testAScriptEditedDuringTheImportIsFollowedAsTheEngineLoadedIt,
   testARunOfSomeCasesKeepsNoPassForTheSuite,
   testAResultFileHoldsTheRunThatWroteIt,
   testTheTestCommandDealsAndReportsARun,
