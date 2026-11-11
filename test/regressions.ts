@@ -265,7 +265,20 @@ import { EDITOR_READS, HEADLESS_OPERATIONS, HEADLESS_TOOLS } from '../src/headle
 import { idleClosed, idleSettled, portsIn } from '../src/idle-close.js';
 import { IMPORTABLE_EXTENSIONS, importedIntoTheProject, staleImports } from '../src/import-freshness.js';
 import { defectReport, defectSignature, withoutMachinePaths } from '../src/issues.js';
-import { RENDERED_AWAY_NOTE, type ScriptError } from '../src/junit.js';
+import {
+  failedCases,
+  finishesASuite,
+  hookFailuresPrinted,
+  ignoredForTheRunner,
+  ignoredLeftOut,
+  ignoredYetRan,
+  MalformedReportError,
+  orphansPrinted,
+  parseJUnit,
+  RENDERED_AWAY_NOTE,
+  type ScriptError,
+  withActualsPrinted,
+} from '../src/junit.js';
 import { askTheKeepersDebugger, askTheKeeperToStop, listenForTheServer } from '../src/keeper-channel.js';
 import {
   editorArguments,
@@ -1375,6 +1388,264 @@ function testALongUnfinishedLineIsHeldInLinearTime(): void {
   assert.equal(log.all.length, 1, 'one line');
   assert.equal(log.all[0]?.text.length, 2048 * 4096, 'whole');
   assert.ok(took < 1500, `8 MB in 4 KB reads took ${Math.round(took)} ms`);
+}
+
+/** The runner's character diff of a failing string, with the marks gdUnit4 puts on it. */
+function printedStringDiffs(
+  values: readonly {
+    readonly at: string;
+    readonly parts: readonly (readonly [string, 'kept' | 'missing' | 'added'])[];
+  }[],
+): string {
+  const esc = String.fromCharCode(0x1b);
+  const blue = `${esc}[38;2;30;144;255m`;
+  const marked = (background: string, chars: string): string =>
+    `${esc}[48;2;${background}m${esc}[38;2;255;255;255m${chars}${esc}[0m${blue}${esc}[48;2;${background}m${esc}[0m${blue}`;
+  return values
+    .map(({ at, parts }) => {
+      const body = parts
+        .map(([chars, mark]) =>
+          mark === 'kept' ? chars : marked(mark === 'missing' ? '38;0;0' : '0;38;0', chars),
+        )
+        .join('');
+      return ` but was\n '${blue}${body}${esc}[0m'${esc}[0m${esc}[38;2;173;216;230m\tat ${at}${esc}[0m`;
+    })
+    .join('\n');
+}
+
+/** A failing string equality as the report writes it: both strings merged. */
+function mergedStringFailure(expected: string, merged: string, at: string): { detail: string } {
+  return { detail: `Expecting:\n '${expected}'\n but was\n '${merged}'\n\tat ${at}` };
+}
+
+/** How long [run] takes, in milliseconds. */
+function timedMs(run: () => void): number {
+  const began = performance.now();
+  run();
+  return performance.now() - began;
+}
+
+/**
+ * The runner's console lines are read in time in proportion to their length, and only its own
+ * statistics lines count orphans.
+ */
+function testConsoleLinesOfTheTestRunnerAreReadInLinearTime(): void {
+  const hookLine = (blanks: number): string[] => [
+    'finalize() Report:',
+    `${' '.repeat(blanks)}x`,
+    "Expecting: 'true' but is 'false'\tat 'before' in res://test/hooked_test.gd:5",
+  ];
+  assert.deepEqual(
+    orphansPrinted([
+      'Run Test Suite: res://test/home_test.gd',
+      'the home took in 12 orphans today',
+      'Statistics: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED',
+      'Overall Summary: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans |',
+    ]),
+    { total: 0, suites: [] },
+    'a line the game prints with a count and the word is not the suite statistics',
+  );
+  const hookBase = timedMs(() => hookFailuresPrinted(hookLine(200)));
+  const hooks = hookFailuresPrinted(hookLine(4000));
+  assert.deepEqual(
+    hooks.map((one) => [
+      one.hook,
+      one.path,
+      one.line,
+      one.message.endsWith("Expecting: 'true' but is 'false'"),
+    ]),
+    [['before', 'res://test/hooked_test.gd', 5, true]],
+    'a hook failure is read with a padded line above it',
+  );
+  const hookTook = timedMs(() => hookFailuresPrinted(hookLine(4000)));
+  assert.ok(
+    hookTook < 40 * hookBase + 500,
+    `4000 blanks took ${Math.round(hookTook)} ms against ${Math.round(hookBase)} ms`,
+  );
+
+  const statistics = (count: string): string =>
+    `Statistics: ${count} test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED`;
+  const digits = '1'.repeat(60_000);
+  const orphanBase = timedMs(() =>
+    orphansPrinted(['Run Test Suite: res://t/a_test.gd', `Statistics: ${'1'.repeat(200)}`]),
+  );
+  const orphanTook = timedMs(() =>
+    orphansPrinted(['Run Test Suite: res://t/a_test.gd', `Statistics: ${digits}`]),
+  );
+  assert.ok(
+    orphanTook < 40 * orphanBase + 500,
+    `a number of 60,000 digits took ${Math.round(orphanTook)} ms in orphansPrinted`,
+  );
+  const countedBase = timedMs(() => finishesASuite(statistics('1'.repeat(200))));
+  const countedTook = timedMs(() => finishesASuite(digits));
+  assert.ok(
+    countedTook < 40 * countedBase + 500,
+    `a number of 60,000 digits took ${Math.round(countedTook)} ms in finishesASuite`,
+  );
+  assert.equal(finishesASuite(statistics('3')), true, 'and a statistics line still ends a suite');
+
+  const same = Array.from(
+    { length: 100_000 },
+    (_, index) => `gdharness orphans: res://t/a_test.gd > test_${index} left 1: Node`,
+  );
+  const lines = [
+    'Run Test Suite: res://t/a_test.gd',
+    ...same,
+    'Statistics: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 2 orphans |	WARNING',
+  ];
+  const began = performance.now();
+  const named = orphansPrinted(lines);
+  const namedTook = performance.now() - began;
+  assert.equal(named.suites[0]?.left.length, 100_000, 'every case that left nodes is named');
+  assert.ok(namedTook < 2000, `100,000 named cases took ${Math.round(namedTook)} ms`);
+}
+
+/** A report is read whole or refused, and an ignore entry or a path is read the way gdUnit4 writes it. */
+function testAReportIsReadWholeOrRefusedAndRowsAreKnown(): void {
+  const suite = (name: string, body: string, attributes = ''): string =>
+    `<testsuite name="${name}" package="t"${attributes}>${body}</testsuite>`;
+  const failing = (name: string): string =>
+    `<testcase name="${name}"><failure message="m"><![CDATA[boom]]></failure></testcase>`;
+  const nested = parseJUnit(`<testsuites>${suite('outer', suite('inner', failing('x')))}</testsuites>`);
+  assert.deepEqual(
+    nested.suites.map((one) => [one.name, one.cases.map((entry) => entry.name)]),
+    [
+      ['inner', ['x']],
+      ['outer', []],
+    ],
+    'a suite inside a suite is read with its cases',
+  );
+  assert.equal(nested.failures, 1, 'and its failure is counted');
+  const two = parseJUnit(`${suite('a', failing('x'))}${suite('b', failing('y'))}`);
+  assert.equal(two.failures, 2, 'two root suites are both read');
+  assert.throws(
+    () => parseJUnit(`<testsuites>${failing('lost')}</testsuites>`),
+    MalformedReportError,
+    'a case outside any suite is refused',
+  );
+  for (const attributes of [' failures="one"', ' errors="2.5"', ' time="-1.5"', ' tests="-3"', ' time=""']) {
+    assert.throws(
+      () => parseJUnit(suite('s', '', attributes)),
+      MalformedReportError,
+      `${attributes} is refused`,
+    );
+  }
+  assert.equal(parseJUnit(suite('s', '', ' time="0.073"')).time, 0.073, 'while a fractional time is read');
+
+  const wordy =
+    '<testsuite name="one_test" package="t"><testcase name="test_one"><failure message="m"><![CDATA[\nExpecting:\n \'abc\'\n but was\n \'abc\'\n\tat \'test_one\' in res://t/one_test.gd:5\n]]></failure></testcase></testsuite>';
+  const at = "'test_one' in res://t/one_test.gd:5";
+  const diff = printedStringDiffs([{ at, parts: [['abc', 'missing']] }]);
+  for (const ends of ['\n', '\r\n']) {
+    const [only] = failedCases(parseJUnit(wordy.replaceAll('\n', ends)), diff);
+    assert.ok(
+      only?.detail?.includes(" but was\n ''\n"),
+      `${JSON.stringify(ends)} line ends give the value found: ${JSON.stringify(only?.detail)}`,
+    );
+  }
+
+  assert.deepEqual(
+    [' package=""', ' package="."'].map(
+      (attributes) =>
+        parseJUnit(`<testsuite name="sums_test"${attributes}/>`).suites.map((one) => one.path)[0],
+    ),
+    ['res://sums_test.gd', 'res://sums_test.gd'],
+    'a suite at the project root has its path',
+  );
+
+  const report = parseJUnit(
+    `<testsuites>${suite('ledger_test', '<testcase name="test_sum"/><testcase name="test_rate:0 (1, 2)"/><testcase name="test_rate:1 (3, 4)"/>')}</testsuites>`,
+  );
+  const declared = [{ path: 'res://t/ledger_test.gd', cases: ['test_rate', 'test_sum'] }];
+  assert.deepEqual(
+    ['test_rate', 'ledger_test:test_rate'].map((entry) => ignoredYetRan(report, [entry]).length),
+    [1, 1],
+    'an ignore entry naming a case that ran as rows is said to have run',
+  );
+  assert.deepEqual(
+    ignoredLeftOut(report, ['ledger_test:test_rate'], declared),
+    { leftOut: [], unmatched: [] },
+    'and a spelling with the suite leaves nothing out',
+  );
+  assert.deepEqual(
+    ignoredForTheRunner(
+      ['ledger_test:test_rate:1 (a:b:3 c)', 'ledger_test:test_sum:2 (3, 4)'],
+      [{ path: 'res://t/ledger_test.gd', cases: ['test_rate', 'test_sum'] }],
+    ),
+    ['res://t/ledger_test.gd:test_rate:1', 'res://t/ledger_test.gd:test_sum:2'],
+    'a row passed back with parameters holding a colon is handed to the runner',
+  );
+
+  const emoji = '\u{1F600}'.repeat(15_000);
+  const [cut] = failedCases(
+    parseJUnit(
+      suite('s', `<testcase name="x"><failure message="m"><![CDATA[x${emoji}]]></failure></testcase>`),
+    ),
+    '',
+  );
+  assert.ok(cut?.detail?.isWellFormed(), 'a detail cut at its limit does not end on half a character');
+}
+
+/**
+ * Values are read back from the console in time in proportion to the failures, and one line failing
+ * twice gives each failure its own value.
+ */
+function testPrintedValuesAreReadBackInLinearTimeAndEachToItsOwnFailure(): void {
+  const readBack = (count: number): { took: number; empty: number } => {
+    const locations = Array.from(
+      { length: count },
+      (_, index) => `'test_n${index}' in res://test/words_test.gd:${index + 1}`,
+    );
+    const failures = locations.map((at) => mergedStringFailure('abc', 'abc', at));
+    const printed = printedStringDiffs(locations.map((at) => ({ at, parts: [['abc', 'missing']] })));
+    const began = performance.now();
+    const read = withActualsPrinted(failures, printed);
+    return {
+      took: performance.now() - began,
+      empty: read.filter((one) => one.detail.includes(" but was\n ''\n")).length,
+    };
+  };
+  const base = readBack(500);
+  assert.equal(base.empty, 500, 'every failure gets the empty value the console shows');
+  const large = readBack(6000);
+  assert.equal(large.empty, 6000, 'and so does every one of a large run');
+  // A linear read of twelve times the failures takes about twelve times as long. A quadratic one takes
+  // a hundred and forty-four times as long, which was over forty seconds at eight thousand.
+  assert.ok(
+    large.took < 40 * base.took + 1000,
+    `6000 failures took ${Math.round(large.took)} ms against ${Math.round(base.took)} ms for 500`,
+  );
+
+  const at = "'test_each' in res://test/each_test.gd:7";
+  const printed = printedStringDiffs([
+    {
+      at,
+      parts: [
+        ['ab', 'kept'],
+        ['c', 'added'],
+      ],
+    },
+    {
+      at,
+      parts: [
+        ['a', 'kept'],
+        ['b', 'missing'],
+        ['c', 'added'],
+      ],
+    },
+  ]);
+  const twice = mergedStringFailure('ab', 'abc', at);
+  const [first, second] = withActualsPrinted([twice, twice], printed);
+  assert.equal(
+    first?.detail,
+    `Expecting:\n 'ab'\n but was\n 'abc'\n\tat ${at}`,
+    'the first failure takes the first value the console printed',
+  );
+  assert.equal(
+    second?.detail,
+    `Expecting:\n 'ab'\n but was\n 'ac'\n\tat ${at}`,
+    'and the second the second, without a note that no copy was printed',
+  );
 }
 
 /**
@@ -86151,6 +86422,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnErrorOfSeveralLinesIsOneEntry,
   testAMarkTakesOnlyTheErrorOfItsFile,
   testALongUnfinishedLineIsHeldInLinearTime,
+  testConsoleLinesOfTheTestRunnerAreReadInLinearTime,
+  testAReportIsReadWholeOrRefusedAndRowsAreKnown,
+  testPrintedValuesAreReadBackInLinearTimeAndEachToItsOwnFailure,
   testTheDebuggerNamesTheErrorsItsCallsRaise,
   testTheProfilerReadsWhatTheEngineSends,
   testAFrameReadHalfwayAddsNothingToTheTotals,

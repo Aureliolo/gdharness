@@ -131,7 +131,7 @@ function testMalformedReportsAreRefused(): void {
     '',
     '<testsuites>',
     '<testsuites><testsuite name="t"></testsuites>',
-    '<testsuites><testcase name="orphan"/></testsuites><extra>',
+    '<testsuites><testcase name="orphan"/></testsuites>',
     '<testsuites><testsuite name="t" tests=1></testsuite></testsuites>',
     '<nothing/>',
     '<testsuites><![CDATA[never closed</testsuites>',
