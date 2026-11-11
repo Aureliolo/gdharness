@@ -34948,7 +34948,7 @@ function testASettingTheEditorDroppedIsNamed(): void {
     [['debug/gdscript/warnings/return_value_discarded', 0]],
     'the key that went is named, with the section it was in and the value it held',
   );
-  assert.ok(before.has('root/config_version'), 'a key outside any section is read as one too');
+  assert.ok(before.has('config_version'), 'a key outside any section is read as one too, by its name alone');
   assert.deepEqual(
     [...after].filter(([key]) => !before.has(key)),
     [],
