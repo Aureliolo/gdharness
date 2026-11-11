@@ -20,6 +20,9 @@
  */
 export class Refusal extends Error {}
 
+/** A command line `test` or `spread` cannot act on, which the CLI answers with exit code 2. */
+export class EngineUsageError extends Refusal {}
+
 /**
  * The sentence to show a caller. `fallback` is what a throw with no usable message reads as.
  * Objects and symbols are deliberately not stringified: "[object Object]" tells a reader

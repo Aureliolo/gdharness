@@ -11,7 +11,7 @@ import { DEFAULT_DAP_PORT } from './dap_client.js';
 import { HIDDEN_DESKTOP } from './desktop.js';
 import { placeEmptyScriptDocs } from './doc-cache.js';
 import { clearEditorLog, editorLogPath, writeEditorLogNote } from './editor-log.js';
-import { EngineUsageError } from './engine-launch.js';
+import { EngineUsageError } from './errors.js';
 import { type EditorPorts, editorArguments, OPENED_BY_A_SERVER, startedAs, waitFromEnv } from './launch.js';
 import { freeLibraryCopies } from './library-copies.js';
 import { DEFAULT_LSP_PORT } from './lsp_client.js';

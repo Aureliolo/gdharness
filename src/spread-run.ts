@@ -18,7 +18,6 @@ import process from 'node:process';
 import {
   coresNamed,
   type EngineLaunch,
-  EngineUsageError,
   godotNamed,
   heldRunSaid,
   inTurns,
@@ -34,6 +33,7 @@ import {
   wholeFlag,
 } from './engine-launch.js';
 import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
+import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE } from './game-log.js';
 import { readLog } from './log-read.js';
 import { isRecord } from './records.js';

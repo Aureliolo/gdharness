@@ -128,7 +128,6 @@ import {
   openTheEditor,
 } from '../src/editor-open.js';
 import {
-  EngineUsageError,
   endingWithRunner,
   heldRunSaid,
   heldToCores,
@@ -207,7 +206,7 @@ import {
   Spent,
   STARVED,
 } from '../src/engine-spent.js';
-import { errorCode, errorMessage, Refusal, toError } from '../src/errors.js';
+import { EngineUsageError, errorCode, errorMessage, Refusal, toError } from '../src/errors.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { FrameReader, OversizedStreamError, frame as wireFrame } from '../src/framing.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';

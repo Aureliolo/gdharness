@@ -35,7 +35,7 @@ import {
 import { diedAsItStarted, startedUntilItRuns } from './engine-run.js';
 import { nameSlotEngineOf, onTheSlot } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
-import { errorCode, errorMessage, Refusal } from './errors.js';
+import { EngineUsageError, errorCode, errorMessage } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
 import { LOG_LIMIT_BYTES, readLog } from './log-read.js';
 import { relativeWithin } from './paths.js';
@@ -44,9 +44,6 @@ import { belowNormal } from './priority.js';
 import { askProcessTable } from './process-table.js';
 import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
 import { type EngineEnd, type RunPrinted, readRun } from './suite-judge.js';
-
-/** A command line `test` or `spread` cannot act on, which the CLI answers with exit code 2. */
-export class EngineUsageError extends Refusal {}
 
 /** Most engines a run starts, whatever the machine has. */
 export const MOST_ENGINES = 4;

@@ -62,7 +62,7 @@ import { alive } from './alive.js';
 import { cacheHome } from './cache-home.js';
 import { callProgress, callSignal, callSlotWaits } from './call-signal.js';
 import { helperPid } from './desktop.js';
-import { EngineUsageError } from './engine-launch.js';
+import { EngineUsageError } from './errors.js';
 import {
   ancestorsIn,
   type ProcessTree,

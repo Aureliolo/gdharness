@@ -26,7 +26,6 @@ import { cachedClasses, staleAgainst } from './class-cache.js';
 import {
   coresNamed,
   type EngineLaunch,
-  EngineUsageError,
   godotNamed,
   heldRunSaid,
   homeOf,
@@ -45,6 +44,7 @@ import {
 } from './engine-launch.js';
 import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
 import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
+import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE } from './game-log.js';
 import { staleImports } from './import-freshness.js';
 import { hiddenWindowFlags } from './launch.js';
