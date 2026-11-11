@@ -61788,8 +61788,8 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
         ),
         shared.said,
       );
-      // A suite asking for the accessibility tree runs with it on. Asking for a window alone builds
-      // no tree, so the same case fails there.
+      // A suite asking for the accessibility tree runs with it on. On Linux a window alone builds no
+      // tree, so the same case fails there. A GitHub Windows runner built it for a window alone.
       writeTree(project, {
         'tests/tree_test.gd': accessibilityTreeSuite('GDHARNESS_ACCESSIBILITY'),
         'tests/bare_test.gd': accessibilityTreeSuite('GDHARNESS_NEEDS_WINDOW'),
@@ -61798,8 +61798,11 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
       assert.equal(tree.status, 0, tree.said);
       assert.match(tree.said, /^Passed: 1 case in 1 suite/m, tree.said);
       const bare = test('tests/bare_test.gd');
-      assert.equal(bare.status, 1, `a window alone builds no tree: ${bare.said}`);
-      assert.match(bare.said, /no accessibility element/, bare.said);
+      assert.match(bare.said, /in 1 suite over 1 engine, with a window\./, bare.said);
+      if (process.platform === 'linux') {
+        assert.equal(bare.status, 1, `a window alone builds no tree: ${bare.said}`);
+        assert.match(bare.said, /no accessibility element/, bare.said);
+      }
       rmSync(join(project, 'tests', 'tree_test.gd'));
       rmSync(join(project, 'tests', 'bare_test.gd'));
     } else {
@@ -62725,7 +62728,7 @@ async function testAnEngineStartedDirectlyIsToldByItsWholeExitCode(): Promise<vo
   const ran = await runEngine(cmd, crashing);
   assert.equal(ran.failure, null, howItEnded(ran));
   assert.equal(ran.exitCode, 0xc0000005, howItEnded(ran));
-  assert.match(howItEnded(ran), /0xC0000005, an access violation/);
+  assert.match(howItEnded(ran), /0xC0000005, a crash on an access violation/);
 }
 
 /**
@@ -63470,9 +63473,11 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-project-test-judged-'));
   try {
     writeTree(project, {
-      // File logging off, which the engine's own log file would otherwise follow.
+      // File logging off, which the engine's own log file would otherwise follow. The Compatibility
+      // renderer, because Metal under Forward+ on a GitHub macOS runner prints "timeout waiting for
+      // fence" in most windowed runs, which fails the windowed suites here (docs/test-runs.md).
       'project.godot':
-        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Judged"\n\n[debug]\n\nfile_logging/enable_file_logging=false\n',
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Judged"\n\n[debug]\n\nfile_logging/enable_file_logging=false\n\n[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
       'tests/base_suite.gd':
         'class_name JudgedBaseSuite\nextends GdUnitTestSuite\n\n\nfunc test_shared() -> void:\n\tassert_bool(true).is_true()\n',
       'tests/derived_test.gd':
@@ -63822,7 +63827,9 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
               JSON.stringify(shown),
             );
             // A suite asking for the accessibility tree gets a window with the tree on, and its case
-            // sees the element the tree made for a Control. Asking for a window alone builds no tree.
+            // sees the element the tree made for a Control. A window alone starts the engine without
+            // the flag. Only Linux shows that the flag is what builds the tree, since a GitHub
+            // Windows runner built it for a window alone.
             writeTree(project, {
               'tree/tree_test.gd': accessibilityTreeSuite('GDHARNESS_ACCESSIBILITY'),
               'bare/bare_test.gd': accessibilityTreeSuite('GDHARNESS_NEEDS_WINDOW'),
@@ -63846,11 +63853,15 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
               await call('project_test', { projectPath: project, path: 'bare' }, ENGINE_CALL_TIMEOUT_MS * 3),
               'bare',
             );
-            assert.deepEqual(
-              [get(bare, 'passed'), get(bare, 'windowed')],
-              [false, true],
-              `a window alone builds no tree: ${JSON.stringify(bare)}`,
-            );
+            assert.equal(get(bare, 'windowed'), true, JSON.stringify(bare));
+            assert.doesNotMatch(text(get(bare, 'windowNote')), /--accessibility/, JSON.stringify(bare));
+            if (process.platform === 'linux') {
+              assert.equal(
+                get(bare, 'passed'),
+                false,
+                `a window alone builds no tree: ${JSON.stringify(bare)}`,
+              );
+            }
             rmSync(join(project, 'tree'), { recursive: true, force: true });
             rmSync(join(project, 'bare'), { recursive: true, force: true });
           }
