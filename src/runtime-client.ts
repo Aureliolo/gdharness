@@ -443,13 +443,15 @@ export function strangersAmong(
   );
 }
 
-function announcedIn(directory: string): Announced[] {
-  if (!existsSync(directory)) {
-    return [];
-  }
-  const found: Announced[] = [];
+type ListedAnnouncement = { file: string; pid: number; running: boolean };
+
+/** The announcement files of a directory, with the running ones also timed for judging. */
+function listAnnouncements(directory: string): {
+  candidates: { file: string; pid: number; writtenAt: number }[];
+  entries: ListedAnnouncement[];
+} {
   const candidates: { file: string; pid: number; writtenAt: number }[] = [];
-  const entries: { file: string; pid: number; running: boolean }[] = [];
+  const entries: ListedAnnouncement[] = [];
   for (const entry of readdirSync(directory)) {
     const report = ERROR_REPORT_PATTERN.exec(entry);
     if (report) {
@@ -464,47 +466,37 @@ function announcedIn(directory: string): Announced[] {
     const pid = Number.parseInt(match[1] ?? '', 10);
     const running = alive(pid);
     entries.push({ file, pid, running });
-    if (running) {
-      try {
-        candidates.push({ file, pid, writtenAt: statSync(file).mtimeMs });
-      } catch {
-        // Taken by another reader between the listing and this. The parse below says rubbish.
-      }
-    }
-  }
-  const strangers = strangersAmong(candidates, Date.now());
-  for (const { file, pid, running } of entries) {
-    // A number answering to a signal is not the game unless the process behind it is the one that
-    // wrote the file. One that is not is swept as a game that has gone, which is what it is.
-    const departed = !running || strangers.has(file);
-    const announced: Announced = departed ? { kind: 'rubbish' } : parseAnnouncement(file, pid);
-    if (announced.kind === 'rubbish') {
-      // A file that will not parse under a live number is one being written: the game opens it
-      // empty and fills it in the same instant, and a look between the two reads nothing. The
-      // next look reads it whole, and a sweep here takes an announcement the game has made and
-      // will not make again, so its run is never found under any wait.
-      if (!departed) {
-        continue;
-      }
-      // A game that announced and whose process has since gone, remembered before the file naming
-      // it is removed. The sweep is what destroys the evidence: afterwards a refusal can only say
-      // nothing is running, which is the same sentence a project with no addon gets and a project
-      // nobody started gets. The one that matters is the game that was there and died, and it is
-      // the only one of the three the caller has to act on.
-      wentAway(file, pid);
-      try {
-        unlinkSync(file);
-      } catch {
-        // Another reader may have cleaned it first, which is the same outcome.
-      }
-      verdicts.delete(file);
+    if (!running) {
       continue;
     }
-    found.push(announced);
+    try {
+      candidates.push({ file, pid, writtenAt: statSync(file).mtimeMs });
+    } catch {
+      // Taken by another reader between the listing and this. The parse below says rubbish.
+    }
   }
-  // A verdict about a file this directory no longer holds goes with the file, so a machine playing
-  // games all day does not keep one per game it ever saw: a game that quits removes its own
-  // announcement, and that removal is not a sweep.
+  return { candidates, entries };
+}
+
+function sweepDeparted(file: string, pid: number): void {
+  // A game that announced and whose process has since gone, remembered before the file naming
+  // it is removed. The sweep is what destroys the evidence: afterwards a refusal can only say
+  // nothing is running, which is the same sentence a project with no addon gets and a project
+  // nobody started gets. The one that matters is the game that was there and died, and it is
+  // the only one of the three the caller has to act on.
+  wentAway(file, pid);
+  try {
+    unlinkSync(file);
+  } catch {
+    // Another reader may have cleaned it first, which is the same outcome.
+  }
+  verdicts.delete(file);
+}
+
+/** A verdict about a file this directory no longer holds goes with the file. */
+function forgetVanishedVerdicts(directory: string, entries: readonly ListedAnnouncement[]): void {
+  // A machine playing games all day does not keep one verdict per game it ever saw: a game that
+  // quits removes its own announcement, and that removal is not a sweep.
   const held = new Set(entries.map((one) => one.file));
   const here = join(directory, '.');
   for (const file of verdicts.keys()) {
@@ -512,6 +504,33 @@ function announcedIn(directory: string): Announced[] {
       verdicts.delete(file);
     }
   }
+}
+
+function announcedIn(directory: string): Announced[] {
+  if (!existsSync(directory)) {
+    return [];
+  }
+  const found: Announced[] = [];
+  const { candidates, entries } = listAnnouncements(directory);
+  const strangers = strangersAmong(candidates, Date.now());
+  for (const { file, pid, running } of entries) {
+    // A number answering to a signal is not the game unless the process behind it is the one that
+    // wrote the file. One that is not is swept as a game that has gone, which is what it is.
+    const departed = !running || strangers.has(file);
+    const announced: Announced = departed ? { kind: 'rubbish' } : parseAnnouncement(file, pid);
+    if (announced.kind !== 'rubbish') {
+      found.push(announced);
+      continue;
+    }
+    // A file that will not parse under a live number is one being written: the game opens it
+    // empty and fills it in the same instant, and a look between the two reads nothing. The
+    // next look reads it whole, and a sweep here takes an announcement the game has made and
+    // will not make again, so its run is never found under any wait.
+    if (departed) {
+      sweepDeparted(file, pid);
+    }
+  }
+  forgetVanishedVerdicts(directory, entries);
   return found;
 }
 
@@ -758,83 +777,100 @@ export function chooseRuntime(
   pid?: number,
 ): RuntimeChoice {
   if (pid !== undefined) {
-    const named = endpoints.find((endpoint) => endpoint.pid === pid);
-    if (named !== undefined) {
-      if (projectPath !== undefined && !isSameDirectory(named.project.path, projectPath)) {
-        const running =
-          named.project.path === '' ? 'announced no project path' : `is running ${named.project.path}`;
-        return {
-          problem: `The game with pid ${pid} ${running}, not ${resolve(projectPath)}. Running: ${endpoints.map(describe).join('; ')}.`,
-        };
-      }
-      return { endpoint: named };
-    }
-    const tooNewToo = unspoken.find((game) => game.pid === pid);
-    if (tooNewToo !== undefined) {
-      return { problem: tooNew([tooNewToo]) };
-    }
-    if (endpoints.length > 0) {
-      return {
-        problem: `No running game has pid ${pid}. Running: ${endpoints.map(describe).join('; ')}. editor_status lists them under runtimes as they come and go.`,
-      };
-    }
-    // A pid nobody is running, with games announcing a protocol this server cannot read, is not
-    // "no game is running": that sentence is certainly false here and sends the reader to start a
-    // second game beside the ones already going. The pid is gone either way, and what to do about
-    // the games that are there is the same thing it is when no pid was named.
-    if (unspoken.length > 0) {
-      return { problem: `No game reachable from here has pid ${pid}. ${tooNew(unspoken)}` };
-    }
-    return {
-      problem: `No game with the runtime addon is running, so there is none with pid ${pid}. Start one with editor_run, or play the project from the editor with the addon enabled.`,
-    };
+    return chooseByPid(endpoints, pid, projectPath, unspoken);
   }
   if (endpoints.length === 0) {
-    if (unspoken.length > 0) {
-      return { problem: tooNew(unspoken) };
-    }
-    // A game that was here and went is a different answer from one that never started, and the
-    // caller can only act on the first: the game crashed or was ended, and its output is worth
-    // reading. Without this both are the same sentence, which is what a downstream run hit on a
-    // game that announced on a port and died seconds later.
-    const went = announcedAndGone(projectPath);
-    const first = went[0];
-    if (first !== undefined) {
-      const ago = Math.max(1, Math.round((Date.now() - first.noticedAt) / 1000));
-      // The most recent is the one whose output is worth reading, and the rest are counted so that
-      // a game which has crashed three times this minute is not reported as one that crashed once.
-      const others = went.length - 1;
-      const earlier =
-        others === 0 ? '' : ` ${others} earlier ${others === 1 ? 'one' : 'ones'} went the same way.`;
+    return unspoken.length > 0 ? { problem: tooNew(unspoken) } : nothingRunning(projectPath);
+  }
+  if (projectPath !== undefined) {
+    return chooseByProject(endpoints, resolve(projectPath));
+  }
+  if (endpoints.length === 1 && endpoints[0]) {
+    return { endpoint: endpoints[0] };
+  }
+  return chooseAmongSeveral(endpoints);
+}
+
+function chooseByPid(
+  endpoints: readonly RuntimeEndpoint[],
+  pid: number,
+  projectPath: string | undefined,
+  unspoken: readonly UnspokenRuntime[],
+): RuntimeChoice {
+  const named = endpoints.find((endpoint) => endpoint.pid === pid);
+  if (named !== undefined) {
+    if (projectPath !== undefined && !isSameDirectory(named.project.path, projectPath)) {
+      const running =
+        named.project.path === '' ? 'announced no project path' : `is running ${named.project.path}`;
       return {
-        problem:
-          `A game with the runtime addon announced itself and its process is gone: pid ${first.pid}` +
-          `${first.project === '' ? '' : ` for ${first.project}`}, noticed ${ago}s ago.${earlier}` +
-          ' It quit or was ended rather than never starting, so editor_output has what it printed' +
-          ' on the way, including whatever it broke on. Start another with editor_run once you have read it.',
+        problem: `The game with pid ${pid} ${running}, not ${resolve(projectPath)}. Running: ${endpoints.map(describe).join('; ')}.`,
       };
     }
+    return { endpoint: named };
+  }
+  const tooNewToo = unspoken.find((game) => game.pid === pid);
+  if (tooNewToo !== undefined) {
+    return { problem: tooNew([tooNewToo]) };
+  }
+  if (endpoints.length > 0) {
+    return {
+      problem: `No running game has pid ${pid}. Running: ${endpoints.map(describe).join('; ')}. editor_status lists them under runtimes as they come and go.`,
+    };
+  }
+  // A pid nobody is running, with games announcing a protocol this server cannot read, is not
+  // "no game is running": that sentence is certainly false here and sends the reader to start a
+  // second game beside the ones already going. The pid is gone either way, and what to do about
+  // the games that are there is the same thing it is when no pid was named.
+  if (unspoken.length > 0) {
+    return { problem: `No game reachable from here has pid ${pid}. ${tooNew(unspoken)}` };
+  }
+  return {
+    problem: `No game with the runtime addon is running, so there is none with pid ${pid}. Start one with editor_run, or play the project from the editor with the addon enabled.`,
+  };
+}
+
+function nothingRunning(projectPath: string | undefined): RuntimeChoice {
+  // A game that was here and went is a different answer from one that never started, and the
+  // caller can only act on the first: the game crashed or was ended, and its output is worth
+  // reading. Without this both are the same sentence, which is what a downstream run hit on a
+  // game that announced on a port and died seconds later.
+  const went = announcedAndGone(projectPath);
+  const first = went[0];
+  if (first === undefined) {
     return {
       problem:
         'No game with the runtime addon is running. Start one with editor_run, or play the project from the editor with the addon enabled.',
     };
   }
-  if (projectPath !== undefined) {
-    const wanted = resolve(projectPath);
-    const matching = endpoints.filter((endpoint) => isSameDirectory(endpoint.project.path, wanted));
-    if (matching.length === 0) {
-      return {
-        problem: `No running game is from ${wanted}. Running: ${endpoints.map(describe).join('; ')}.`,
-      };
-    }
-    if (matching.length === 1 && matching[0]) {
-      return { endpoint: matching[0] };
-    }
-    return { problem: severalFrom(wanted, matching) };
+  const ago = Math.max(1, Math.round((Date.now() - first.noticedAt) / 1000));
+  // The most recent is the one whose output is worth reading, and the rest are counted so that
+  // a game which has crashed three times this minute is not reported as one that crashed once.
+  const others = went.length - 1;
+  const earlier =
+    others === 0 ? '' : ` ${others} earlier ${others === 1 ? 'one' : 'ones'} went the same way.`;
+  return {
+    problem:
+      `A game with the runtime addon announced itself and its process is gone: pid ${first.pid}` +
+      `${first.project === '' ? '' : ` for ${first.project}`}, noticed ${ago}s ago.${earlier}` +
+      ' It quit or was ended rather than never starting, so editor_output has what it printed' +
+      ' on the way, including whatever it broke on. Start another with editor_run once you have read it.',
+  };
+}
+
+function chooseByProject(endpoints: readonly RuntimeEndpoint[], wanted: string): RuntimeChoice {
+  const matching = endpoints.filter((endpoint) => isSameDirectory(endpoint.project.path, wanted));
+  if (matching.length === 0) {
+    return {
+      problem: `No running game is from ${wanted}. Running: ${endpoints.map(describe).join('; ')}.`,
+    };
   }
-  if (endpoints.length === 1 && endpoints[0]) {
-    return { endpoint: endpoints[0] };
+  if (matching.length === 1 && matching[0]) {
+    return { endpoint: matching[0] };
   }
+  return { problem: severalFrom(wanted, matching) };
+}
+
+function chooseAmongSeveral(endpoints: readonly RuntimeEndpoint[]): RuntimeChoice {
   // A bench and its workers are several games and one project, and the refusal used to lead with
   // `projectPath`, which lands on the refusal above rather than on a game: the one argument that
   // works came second and behind a condition the reader had to check for themselves.
@@ -1000,6 +1036,95 @@ function waitForAPlace(game: string, granted: (giveBack: () => void) => void): v
   }
 }
 
+function lateRecordOf(command: string, sentAt: number, reply: RuntimeReply): LateAnswer {
+  return reply.ok || reply.reason === 'error'
+    ? { state: 'answered', command, sentAt, answeredAt: Date.now(), reply }
+    : { state: 'never', command, sentAt, why: reply.message };
+}
+
+function unansweredMessage(game: string, command: string, timeoutMs: number, welcomed: boolean): string {
+  return welcomed
+    ? `The game (${game}) has the request and did not answer '${command}' within ${timeoutMs}ms.`
+    : `The game (${game}) did not answer '${command}' within ${timeoutMs}ms and had not taken the request: its frame has not ended since it was sent, which a long frame or a breakpoint does, and the request runs when it does.`;
+}
+
+/** The answer for a request whose wait ran out on a game that has it, and which stays listened for. */
+function stillRunningReply(kept: boolean, id: number, still: string): RuntimeReply {
+  if (!kept) {
+    return {
+      ok: false,
+      reason: 'busy',
+      stillWithTheGame: true,
+      message: `${still} Nothing was cancelled: the game runs it when it gets to it, and what it answers then is not kept, so ask again once the game answers. A game held at a breakpoint instead is one debug_state stack answers about.`,
+    };
+  }
+  return {
+    ok: false,
+    reason: 'busy',
+    requestId: id,
+    message: `${still} Nothing was cancelled: a call that takes longer than the wait goes on and does everything it was asked, so read the state back rather than repeating it. runtime_invoke op result with requestId ${id} answers with its reply once it comes. A game held at a breakpoint instead is one debug_state stack answers about.`,
+  };
+}
+
+function parseMessage(line: string): Record<string, unknown> | undefined {
+  try {
+    return asParams(JSON.parse(line));
+  } catch {
+    return undefined;
+  }
+}
+
+/** The failure for a first line that is not a welcome in the protocol this server speaks. */
+function protocolRefusal(
+  message: Record<string, unknown>,
+  game: string,
+): Extract<RuntimeReply, { ok: false }> | undefined {
+  const spoken = readString(message, 'type') === 'welcome' ? readNumber(message, 'protocol') : undefined;
+  if (spoken === RUNTIME_PROTOCOL) {
+    return undefined;
+  }
+  return {
+    ok: false,
+    reason: 'protocol',
+    message: `The game (${game}) speaks runtime protocol ${spoken ?? 'unknown'} and this server speaks ${RUNTIME_PROTOCOL}. Reinstall the runtime addon into the project.`,
+  };
+}
+
+/** The reply a line carries for request [param id], or undefined for one that is somebody else's. */
+function replyTo(
+  message: Record<string, unknown>,
+  id: number,
+  endpoint: RuntimeEndpoint,
+): RuntimeReply | undefined {
+  if (message['id'] !== id) {
+    return undefined;
+  }
+  if (readString(message, 'type') === 'error') {
+    return { ok: false, reason: 'error', message: readString(message, 'message') ?? 'unknown error' };
+  }
+  return { ok: true, payload: message, endpoint };
+}
+
+/** The failure for a socket error that is not a refusal to be dialled again. */
+function connectionFailure(
+  error: NodeJS.ErrnoException,
+  game: string,
+  answered: boolean,
+): Extract<RuntimeReply, { ok: false }> {
+  if (error.code === 'ECONNREFUSED' && !answered) {
+    return {
+      ok: false,
+      reason: 'refused',
+      message: `The game (${game}) has ended: its port refused the connection and its process is gone.`,
+    };
+  }
+  return {
+    ok: false,
+    reason: 'refused',
+    message: `The game (${game}) is running but nothing answered on its port: ${error.code ?? error.message}. It may still be starting or be shutting down.`,
+  };
+}
+
 /**
  * One request to one game, answered by the reply that carries its id.
  *
@@ -1040,6 +1165,18 @@ export function runtimeRequest(
       giveBackThePlace = null;
     };
     let lateTimer: NodeJS.Timeout | null = null;
+    const finishLate = (reply: RuntimeReply): void => {
+      if (lateTimer !== null) {
+        clearTimeout(lateTimer);
+      }
+      socket?.destroy();
+      late = false;
+      if (typeof afterTheWait === 'function') {
+        afterTheWait(reply);
+        return;
+      }
+      keepLate(id, lateRecordOf(command, sentAt, reply));
+    };
     const finish = (reply: RuntimeReply): void => {
       taken();
       if (redial !== null) {
@@ -1047,21 +1184,7 @@ export function runtimeRequest(
         redial = null;
       }
       if (late) {
-        if (lateTimer !== null) {
-          clearTimeout(lateTimer);
-        }
-        socket?.destroy();
-        late = false;
-        if (typeof afterTheWait === 'function') {
-          afterTheWait(reply);
-          return;
-        }
-        keepLate(
-          id,
-          reply.ok || reply.reason === 'error'
-            ? { state: 'answered', command, sentAt, answeredAt: Date.now(), reply }
-            : { state: 'never', command, sentAt, why: reply.message },
-        );
+        finishLate(reply);
         return;
       }
       if (done) {
@@ -1079,9 +1202,7 @@ export function runtimeRequest(
         finish(notSent(describe(endpoint), command, timeoutMs, refusals, socket !== null));
         return;
       }
-      const still = welcomed
-        ? `The game (${describe(endpoint)}) has the request and did not answer '${command}' within ${timeoutMs}ms.`
-        : `The game (${describe(endpoint)}) did not answer '${command}' within ${timeoutMs}ms and had not taken the request: its frame has not ended since it was sent, which a long frame or a breakpoint does, and the request runs when it does.`;
+      const still = unansweredMessage(describe(endpoint), command, timeoutMs, welcomed);
       if (afterTheWait === 'drop') {
         finish({
           ok: false,
@@ -1105,22 +1226,32 @@ export function runtimeRequest(
       }, LATE_ANSWER_MS);
       lateTimer.unref();
       socket.unref();
-      if (afterTheWait !== 'keep') {
-        settle({
-          ok: false,
-          reason: 'busy',
-          stillWithTheGame: true,
-          message: `${still} Nothing was cancelled: the game runs it when it gets to it, and what it answers then is not kept, so ask again once the game answers. A game held at a breakpoint instead is one debug_state stack answers about.`,
-        });
-        return;
-      }
-      settle({
-        ok: false,
-        reason: 'busy',
-        requestId: id,
-        message: `${still} Nothing was cancelled: a call that takes longer than the wait goes on and does everything it was asked, so read the state back rather than repeating it. runtime_invoke op result with requestId ${id} answers with its reply once it comes. A game held at a breakpoint instead is one debug_state stack answers about.`,
-      });
+      settle(stillRunningReply(afterTheWait === 'keep', id, still));
     }, timeoutMs);
+
+    // True once the rest of the buffer is not to be read.
+    const handleLine = (line: string): boolean => {
+      const message = parseMessage(line);
+      if (message === undefined) {
+        return false;
+      }
+      if (!welcomed) {
+        welcomed = true;
+        taken();
+        const refusal = protocolRefusal(message, describe(endpoint));
+        if (refusal === undefined) {
+          return false;
+        }
+        finish(refusal);
+        return true;
+      }
+      const reply = replyTo(message, id, endpoint);
+      if (reply === undefined) {
+        return false;
+      }
+      finish(reply);
+      return !reply.ok;
+    };
 
     const open = (): void => {
       const opened = createConnection({ port: endpoint.port, host: dialAddress(endpoint.address) });
@@ -1142,72 +1273,27 @@ export function runtimeRequest(
           const line = buffered.slice(0, newline).trim();
           buffered = buffered.slice(newline + 1);
           newline = buffered.indexOf('\n');
-          if (line === '') {
-            continue;
-          }
-          let message: Record<string, unknown>;
-          try {
-            message = asParams(JSON.parse(line));
-          } catch {
-            continue;
-          }
-          if (!welcomed) {
-            welcomed = true;
-            taken();
-            const spoken =
-              readString(message, 'type') === 'welcome' ? readNumber(message, 'protocol') : undefined;
-            if (spoken !== RUNTIME_PROTOCOL) {
-              finish({
-                ok: false,
-                reason: 'protocol',
-                message: `The game (${describe(endpoint)}) speaks runtime protocol ${spoken ?? 'unknown'} and this server speaks ${RUNTIME_PROTOCOL}. Reinstall the runtime addon into the project.`,
-              });
-              return;
-            }
-            continue;
-          }
-          if (message['id'] !== id) {
-            continue;
-          }
-          if (readString(message, 'type') === 'error') {
-            finish({
-              ok: false,
-              reason: 'error',
-              message: readString(message, 'message') ?? 'unknown error',
-            });
+          if (handleLine(line)) {
             return;
           }
-          finish({ ok: true, payload: message, endpoint });
         }
       });
       opened.on('error', (error: NodeJS.ErrnoException) => {
         if (socket !== opened) {
           return;
         }
-        if (error.code === 'ECONNREFUSED' && !done) {
-          if (alive(endpoint.pid)) {
-            // A refused connection carried nothing, so dialling again cannot run anything twice.
-            refusals += 1;
-            socket = null;
-            opened.destroy();
-            redial = setTimeout(() => {
-              redial = null;
-              open();
-            }, REDIAL_MS);
-            return;
-          }
-          finish({
-            ok: false,
-            reason: 'refused',
-            message: `The game (${describe(endpoint)}) has ended: its port refused the connection and its process is gone.`,
-          });
+        if (error.code === 'ECONNREFUSED' && !done && alive(endpoint.pid)) {
+          // A refused connection carried nothing, so dialling again cannot run anything twice.
+          refusals += 1;
+          socket = null;
+          opened.destroy();
+          redial = setTimeout(() => {
+            redial = null;
+            open();
+          }, REDIAL_MS);
           return;
         }
-        finish({
-          ok: false,
-          reason: 'refused',
-          message: `The game (${describe(endpoint)}) is running but nothing answered on its port: ${error.code ?? error.message}. It may still be starting or be shutting down.`,
-        });
+        finish(connectionFailure(error, describe(endpoint), done));
       });
       opened.on('close', () => {
         if (socket !== opened) {
