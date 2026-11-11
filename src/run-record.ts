@@ -469,6 +469,18 @@ function recordAt(path: string): RunRecord | null {
     startedAt,
     startedBy,
     projectPath,
+    ...namedFields(fields),
+    arguments: args.filter((value): value is string => typeof value === 'string'),
+    command,
+    ...endFields(fields),
+  };
+}
+
+/** The fields of a note that say who served the run, each present only when it holds something. */
+function namedFields(
+  fields: Record<string, unknown>,
+): Pick<RunRecord, 'servedBy' | 'keeper' | 'keeperPid' | 'profile'> {
+  return {
     ...(typeof fields['servedBy'] === 'string' && fields['servedBy'] !== ''
       ? { servedBy: fields['servedBy'] }
       : {}),
@@ -481,8 +493,14 @@ function recordAt(path: string): RunRecord | null {
     ...(typeof fields['profile'] === 'string' && fields['profile'] !== ''
       ? { profile: fields['profile'] }
       : {}),
-    arguments: args.filter((value): value is string => typeof value === 'string'),
-    command,
+  };
+}
+
+/** The fields of a note that say how the run ended, each present only when the note holds it. */
+function endFields(
+  fields: Record<string, unknown>,
+): Pick<RunRecord, 'exitCode' | 'exitSignal' | 'endedAt' | 'exitNotTold' | 'restartedFrom' | 'endingAt'> {
+  return {
     ...(typeof fields['exitCode'] === 'number' ? { exitCode: fields['exitCode'] } : {}),
     ...(typeof fields['exitSignal'] === 'string' ? { exitSignal: fields['exitSignal'] } : {}),
     ...(typeof fields['endedAt'] === 'number' ? { endedAt: fields['endedAt'] } : {}),
@@ -512,6 +530,37 @@ function restartedFromAt(value: unknown): RestartedFrom[] {
   ];
 }
 
+async function runningAsOnWindows(pid: number): Promise<RunningAs> {
+  const read = await readWindowsCommandLine(pid);
+  const answer = 'answer' in read ? read.answer : null;
+  const withLine = answer === null ? null : await commandLineOfAnswer(pid, answer);
+  if (withLine !== null) {
+    return withLine;
+  }
+  // An empty answer from the query above is not "nothing is there": a process owned by another
+  // user, or one this server cannot open, keeps its command line and hands back nothing at all.
+  // tasklist still names the executable, and that is the difference between a weaker check and
+  // no check, so it is asked before this gives up.
+  const image = await windowsImage(pid);
+  const unread = 'unread' in read ? read.unread : 'Windows gave an empty command line';
+  return 'image' in image
+    ? { kind: 'image', text: image.image, unread }
+    : { kind: 'none', text: '', unread: `${unread}, and tasklist ${image.why}` };
+}
+
+/** The command line in [param answer], or null when it holds none. */
+async function commandLineOfAnswer(pid: number, answer: string): Promise<RunningAs | null> {
+  // The creation time is the first line and the command line is the rest, because the query
+  // that reads one reads the other for free and this runs before every signal.
+  const [, ...rest] = answer.split('\n');
+  const line = rest.join('\n').trim();
+  const began = await processStartOf(pid, answer);
+  if (line === '') {
+    return null;
+  }
+  return { kind: 'commandLine', text: line, ...(began === null ? {} : { startedAt: began }) };
+}
+
 /**
  * What the operating system says is running under [param pid], and how much of it it would say.
  *
@@ -521,27 +570,7 @@ function restartedFromAt(value: unknown): RestartedFrom[] {
  */
 export async function runningAs(pid: number): Promise<RunningAs | null> {
   if (process.platform === 'win32') {
-    const read = await readWindowsCommandLine(pid);
-    const answer = 'answer' in read ? read.answer : null;
-    if (answer !== null) {
-      // The creation time is the first line and the command line is the rest, because the query
-      // that reads one reads the other for free and this runs before every signal.
-      const [, ...rest] = answer.split('\n');
-      const line = rest.join('\n').trim();
-      const began = await processStartOf(pid, answer);
-      if (line !== '') {
-        return { kind: 'commandLine', text: line, ...(began === null ? {} : { startedAt: began }) };
-      }
-    }
-    // An empty answer from the query above is not "nothing is there": a process owned by another
-    // user, or one this server cannot open, keeps its command line and hands back nothing at all.
-    // tasklist still names the executable, and that is the difference between a weaker check and
-    // no check, so it is asked before this gives up.
-    const image = await windowsImage(pid);
-    const unread = 'unread' in read ? read.unread : 'Windows gave an empty command line';
-    return 'image' in image
-      ? { kind: 'image', text: image.image, unread }
-      : { kind: 'none', text: '', unread: `${unread}, and tasklist ${image.why}` };
+    return await runningAsOnWindows(pid);
   }
   try {
     const began = await processStartOf(pid, null);
@@ -854,20 +883,29 @@ export function whyNotTheRun(
       ? null
       : `the operating system named only its executable and not its command line (${running.unread ?? 'no reason given'}), which is not enough to signal it on`;
   }
-  // Compared as a path where the line names one, rather than searched for as text: a game restarting
-  // itself names the project as `ProjectSettings.globalize_path` gives it, with forward slashes and
-  // one at the end on Windows, and was refused as a process of another project. Searched for, a
-  // project's path is found inside the path of every project whose name begins with it.
-  const spelt = (path: string): string => {
-    const forward = path.replaceAll('\\', '/').replace(/\/+$/, '');
-    return process.platform === 'win32' ? forward.toLowerCase() : forward;
-  };
-  const named = readCommandLine(running.text).projectPath;
-  const names =
-    named === null
-      ? spelt(said).includes(spelt(record.projectPath))
-      : spelt(named) === spelt(record.projectPath);
-  return names ? null : `that process's command line does not name ${record.projectPath}`;
+  return namesTheProject(running.text, record.projectPath)
+    ? null
+    : `that process's command line does not name ${record.projectPath}`;
+}
+
+/** [param path] with forward slashes, no trailing slash, and lower case where the file system ignores case. */
+function spelt(path: string): string {
+  const forward = path.replaceAll('\\', '/').replace(/\/+$/, '');
+  return process.platform === 'win32' ? forward.toLowerCase() : forward;
+}
+
+/**
+ * Whether [param commandLine] names [param projectPath]. Compared as a path where the line names
+ * one, rather than searched for as text: a game restarting itself names the project as
+ * `ProjectSettings.globalize_path` gives it, with forward slashes and one at the end on Windows, and
+ * was refused as a process of another project. Searched for, a project's path is found inside the
+ * path of every project whose name begins with it.
+ */
+function namesTheProject(commandLine: string, projectPath: string): boolean {
+  const named = readCommandLine(commandLine).projectPath;
+  return named === null
+    ? spelt(commandLine).includes(spelt(projectPath))
+    : spelt(named) === spelt(projectPath);
 }
 
 /** Whether [param pid] is still the game that announced itself for [param projectPath]: see `judgeAnnouncedGame`. */

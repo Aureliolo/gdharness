@@ -45,14 +45,8 @@ const NOT_AN_ENGINE =
  * the engine's name. Newest first so that the most recently installed build is the one tried.
  */
 export function scanDirectoryForGodotBinaries(directory: string, platform: NodeJS.Platform): string[] {
-  if (!directory || !existsSync(directory)) {
-    return [];
-  }
-
-  let entries: string[];
-  try {
-    entries = readdirSync(directory);
-  } catch {
+  const entries = entriesIn(directory);
+  if (entries === null) {
     return [];
   }
 
@@ -78,24 +72,41 @@ export function scanDirectoryForGodotBinaries(directory: string, platform: NodeJ
     ) {
       continue;
     }
-    const fullPath = join(directory, name);
-    try {
-      const stat = statSync(fullPath);
-      if (bundle) {
-        const executable = join(fullPath, 'Contents', 'MacOS', 'Godot');
-        if (stat.isDirectory() && existsSync(executable)) {
-          matches.push({ path: executable, mtime: stat.mtimeMs });
-        }
-      } else if (stat.isFile()) {
-        matches.push({ path: fullPath, mtime: stat.mtimeMs });
-      }
-    } catch {
-      // An entry that cannot be stat'd is not a binary this can run.
+    const binary = binaryAt(join(directory, name), bundle);
+    if (binary !== null) {
+      matches.push(binary);
     }
   }
 
   matches.sort((a, b) => b.mtime - a.mtime);
   return matches.map((m) => m.path);
+}
+
+/** The names in [param directory], or null when there is no such directory or it cannot be read. */
+function entriesIn(directory: string): string[] | null {
+  if (!directory || !existsSync(directory)) {
+    return null;
+  }
+  try {
+    return readdirSync(directory);
+  } catch {
+    return null;
+  }
+}
+
+/** The program at [param fullPath], or inside it for a macOS bundle, with its age, or null when there is none. */
+function binaryAt(fullPath: string, bundle: boolean): { path: string; mtime: number } | null {
+  try {
+    const stat = statSync(fullPath);
+    if (bundle) {
+      const executable = join(fullPath, 'Contents', 'MacOS', 'Godot');
+      return stat.isDirectory() && existsSync(executable) ? { path: executable, mtime: stat.mtimeMs } : null;
+    }
+    return stat.isFile() ? { path: fullPath, mtime: stat.mtimeMs } : null;
+  } catch {
+    // An entry that cannot be stat'd is not a binary this can run.
+    return null;
+  }
 }
 
 /** The install paths worth trying by name, before any directory is read. */
