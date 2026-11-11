@@ -660,6 +660,7 @@ import { inTurnFor, writeLockOf } from '../src/write-turns.js';
 import { withHome } from './support/cli-home.js';
 import { containedEngine } from './support/contained-engine.js';
 import { endEnginesUnder } from './support/engines.js';
+import { FAILED_TOP_UP } from './support/failed-top-up.js';
 import { greeting } from './support/greeting.js';
 import { HIDDEN_SPAWN_PRELUDE } from './support/hidden-spawn.js';
 import { asArray, asNumber, asObject, asString, get, plainFloats, text } from './support/json.js';
@@ -8135,6 +8136,25 @@ async function testATestServerTakesNoRealEditorsPort(): Promise<void> {
   } finally {
     await server.stop();
   }
+  // The suite's own pool stays full, so the failing top-ups run in a script with a pool of its own.
+  const ran = spawnSyncHidden(process.execPath, [FAILED_TOP_UP], { encoding: 'utf8', timeout: 60_000 });
+  assert.equal(ran.status, 0, `the failed top-up script ends cleanly: ${ran.stderr}`);
+  const parsed: unknown = JSON.parse(ran.stdout.trim().split('\n').at(-1) ?? '{}');
+  assert.ok(isRecord(parsed), `the script printed its result: ${ran.stdout}`);
+  const told = parsed;
+  assert.equal(told['unhandled'], 0, `a failed background top-up ends no run: ${ran.stdout}`);
+  const taken = told['taken'];
+  assert.ok(Array.isArray(taken) && taken.length === 24, `the pool gave its 24 numbers: ${ran.stdout}`);
+  assert.ok(
+    taken.every((port) => typeof port === 'number' && port >= PORT_BAND.first && port <= PORT_BAND.last),
+    `and each from the band: ${ran.stdout}`,
+  );
+  assert.match(
+    String(told['said']),
+    /top-up failed: port 1120 /,
+    'an empty pool names the top-up that failed',
+  );
+  assert.equal(told['next'], 1121, 'and a kept failure rejects no later reservation');
 }
 
 /**

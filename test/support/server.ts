@@ -224,20 +224,33 @@ export async function unheldPort(
 const sparePorts: number[] = [];
 const SPARE_PORTS = 24;
 
-async function topUpSparePorts(): Promise<void> {
+async function topUpSparePorts(offer: () => Promise<number> = unheldPort): Promise<void> {
   while (sparePorts.length < SPARE_PORTS) {
-    sparePorts.push(await reservePort());
+    sparePorts.push(await reservePort(offer));
   }
 }
 
 await topUpSparePorts();
 
-function sparePort(): number {
+/** The message of the last top-up that failed in the background, which an empty pool reports. */
+let failedTopUp: string | undefined;
+
+/**
+ * A bridge port from the pool, which a top-up then refills in the background. A top-up that fails is
+ * kept and not thrown, since the pool is a head start and every reservation proves its own number.
+ * [offer] stands in for the band.
+ */
+export function sparePort(offer: () => Promise<number> = unheldPort): number {
   const port = sparePorts.shift();
   if (port === undefined) {
-    throw new Error('no reserved port left for a test server; more were started at once than are kept');
+    const kept = failedTopUp === undefined ? '' : `, or a top-up failed: ${failedTopUp}`;
+    throw new Error(
+      `no reserved port left for a test server; more were started at once than are kept${kept}`,
+    );
   }
-  void topUpSparePorts();
+  void topUpSparePorts(offer).catch((error: unknown) => {
+    failedTopUp = error instanceof Error ? error.message : String(error);
+  });
   return port;
 }
 
