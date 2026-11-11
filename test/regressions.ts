@@ -568,6 +568,7 @@ import {
   type Unit,
   unitsOf,
   windowedSaid,
+  windowNeedsOf,
   writeJson,
 } from '../src/suite-plan.js';
 import {
@@ -727,6 +728,29 @@ function windowedRunRefused(): string | null {
     return 'no display for a windowed run';
   }
   return null;
+}
+
+/**
+ * A suite declaring [param constant] true whose one case passes only where the engine builds the
+ * accessibility tree: a Control in the tree has an accessibility element two frames on.
+ */
+function accessibilityTreeSuite(constant: string): string {
+  return [
+    'extends GdUnitTestSuite',
+    '',
+    `const ${constant}: bool = true`,
+    '',
+    '',
+    'func test_tree() -> void:',
+    '\tvar shown: Control = auto_free(Control.new())',
+    '\tget_tree().root.add_child(shown)',
+    '\tawait get_tree().process_frame',
+    '\tawait get_tree().process_frame',
+    '\tassert_bool(shown.get_accessibility_element().is_valid()) \\',
+    '\t\t.override_failure_message("no accessibility element for a Control in the tree") \\',
+    '\t\t.is_true()',
+    '',
+  ].join('\n');
 }
 
 function resolveGodotPath(): string | null {
@@ -55264,6 +55288,84 @@ function testASuiteIsFoundUnderAnySpellingOfItsPath(): void {
  * list, which holds the inherited ones. A suite costing more than the split goes out case by case,
  * except one needing a window, since those all share the one windowed engine.
  */
+/**
+ * A suite declaring GDHARNESS_ACCESSIBILITY, itself, through a base or through a class's constant,
+ * is dealt to the windowed engine, which alone starts with the tree on. One that also says it runs
+ * headless is refused, since the tree needs a window.
+ */
+function testASuiteAskingForTheAccessibilityTreeGetsAWindowWithItOn(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-tree-'));
+  const cases = (...names: string[]): string =>
+    names.map((name) => `\nfunc ${name}() -> void:\n\tpass\n`).join('');
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'addons/gdUnit4/src/GdUnitTestSuite.gd': 'class_name GdUnitTestSuite\nextends Node\n',
+      'shared.gd': 'class_name Shared\nextends RefCounted\nconst TREE: bool = true\n',
+      'tests/tree_test.gd': `extends GdUnitTestSuite\nconst GDHARNESS_ACCESSIBILITY: bool = true\n${cases('test_t')}`,
+      'tests/tree_child_test.gd': `extends "res://tests/tree_test.gd"\n${cases('test_c')}`,
+      'tests/shared_test.gd': `extends GdUnitTestSuite\nconst GDHARNESS_ACCESSIBILITY: bool = Shared.TREE\n${cases('test_s')}`,
+      'tests/off_test.gd': `extends "res://tests/tree_test.gd"\nconst GDHARNESS_ACCESSIBILITY := false\n${cases('test_o')}`,
+      'tests/plain_test.gd': `extends GdUnitTestSuite\n${cases('test_p', 'test_q')}`,
+    });
+    const scripts = new ProjectScripts(project);
+    const found = scripts.suitesUnder(['res://tests']);
+    assert.deepEqual(
+      found.map((suite) => [suite.path, suite.windowed, suite.accessible, suite.headless]),
+      [
+        ['res://tests/off_test.gd', false, false, false],
+        ['res://tests/plain_test.gd', false, false, false],
+        ['res://tests/shared_test.gd', true, true, false],
+        ['res://tests/tree_child_test.gd', true, true, false],
+        ['res://tests/tree_test.gd', true, true, false],
+      ],
+      'the tree asked for by the suite, by a base and by a class constant, and given a window; the nearest false turns it off',
+    );
+    assert.deepEqual(windowNeedsOf(scripts, ['res://tests']).accessible, [
+      'res://tests/shared_test.gd',
+      'res://tests/tree_child_test.gd',
+      'res://tests/tree_test.gd',
+    ]);
+    const declared = new Map(found.map((suite) => [suite.path, suite.cases]));
+    const plans = dealt(unitsOf(found, {}), declared, 4);
+    assert.deepEqual(
+      plans.map((plan) => [
+        plan.windowed,
+        plan.accessible,
+        plan.suites.map((suite) => suite.path).toSorted(),
+      ]),
+      [
+        [
+          true,
+          true,
+          ['res://tests/shared_test.gd', 'res://tests/tree_child_test.gd', 'res://tests/tree_test.gd'],
+        ],
+        ...plans
+          .filter((plan) => !plan.windowed)
+          .map((plan) => [false, false, plan.suites.map((suite) => suite.path).toSorted()]),
+      ],
+      'only the windowed engine starts with the tree on',
+    );
+    assert.ok(
+      plans.some((plan) => !plan.windowed),
+      'and the other suites go to a headless one',
+    );
+
+    writeTree(project, {
+      'tests/both_test.gd': `extends GdUnitTestSuite\nconst GDHARNESS_ACCESSIBILITY: bool = true\nconst GDHARNESS_NEEDS_WINDOW: bool = false\n${cases('test_b')}`,
+    });
+    assert.throws(
+      () => new ProjectScripts(project).suite('res://tests/both_test.gd'),
+      (error: unknown) =>
+        error instanceof Refusal &&
+        error.message ===
+          'res://tests/both_test.gd declares GDHARNESS_ACCESSIBILITY true and GDHARNESS_NEEDS_WINDOW false, and Godot builds the accessibility tree only with a window. Leave GDHARNESS_NEEDS_WINDOW out, since GDHARNESS_ACCESSIBILITY gives the suite a window.',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
 async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-suites-'));
   const cases = (...names: string[]): string =>
@@ -55397,6 +55499,7 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       windowed,
       headless,
       together,
+      accessible: false,
     });
     // Past the split and with a case timed row by row, kept whole when it says its cases belong
     // together, and dealt out case by case and row by row when it does not.
@@ -55609,6 +55712,7 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       cost,
       timed: true,
       windowed: isWindowed,
+      accessible: false,
       headless: isHeadless,
     });
     const quick = [
@@ -60081,6 +60185,20 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
         ),
         shared.said,
       );
+      // A suite asking for the accessibility tree runs with it on. Asking for a window alone builds
+      // no tree, so the same case fails there.
+      writeTree(project, {
+        'tests/tree_test.gd': accessibilityTreeSuite('GDHARNESS_ACCESSIBILITY'),
+        'tests/bare_test.gd': accessibilityTreeSuite('GDHARNESS_NEEDS_WINDOW'),
+      });
+      const tree = test('tests/tree_test.gd');
+      assert.equal(tree.status, 0, tree.said);
+      assert.match(tree.said, /^Passed: 1 case in 1 suite/m, tree.said);
+      const bare = test('tests/bare_test.gd');
+      assert.equal(bare.status, 1, `a window alone builds no tree: ${bare.said}`);
+      assert.match(bare.said, /no accessibility element/, bare.said);
+      rmSync(join(project, 'tests', 'tree_test.gd'));
+      rmSync(join(project, 'tests', 'bare_test.gd'));
     } else {
       console.log(`test command windowed case skipped: ${windowed}`);
     }
@@ -62076,7 +62194,7 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
             'win',
           );
           const why =
-            'A suite needs one when it declares const GDHARNESS_NEEDS_WINDOW: bool = true, or calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares it false and runs headless.';
+            'A suite needs one when it declares const GDHARNESS_NEEDS_WINDOW: bool = true or const GDHARNESS_ACCESSIBILITY: bool = true, or calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares GDHARNESS_NEEDS_WINDOW false and runs headless.';
           if (noDisplay) {
             // Headless, where the case asserting a window fails, and the answer says why.
             assert.deepEqual(
@@ -62100,6 +62218,38 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
               ],
               JSON.stringify(shown),
             );
+            // A suite asking for the accessibility tree gets a window with the tree on, and its case
+            // sees the element the tree made for a Control. Asking for a window alone builds no tree.
+            writeTree(project, {
+              'tree/tree_test.gd': accessibilityTreeSuite('GDHARNESS_ACCESSIBILITY'),
+              'bare/bare_test.gd': accessibilityTreeSuite('GDHARNESS_NEEDS_WINDOW'),
+            });
+            const tree = jsonOf(
+              await call('project_test', { projectPath: project, path: 'tree' }, ENGINE_CALL_TIMEOUT_MS * 3),
+              'tree',
+            );
+            assert.deepEqual(
+              [get(tree, 'passed'), get(tree, 'tests'), get(tree, 'windowed')],
+              [true, 1, true],
+              JSON.stringify(tree),
+            );
+            assert.ok(
+              text(get(tree, 'windowNote')).includes(
+                ' The engine also ran with --accessibility always, since res://tree/tree_test.gd declares GDHARNESS_ACCESSIBILITY.',
+              ),
+              JSON.stringify(tree),
+            );
+            const bare = jsonOf(
+              await call('project_test', { projectPath: project, path: 'bare' }, ENGINE_CALL_TIMEOUT_MS * 3),
+              'bare',
+            );
+            assert.deepEqual(
+              [get(bare, 'passed'), get(bare, 'windowed')],
+              [false, true],
+              `a window alone builds no tree: ${JSON.stringify(bare)}`,
+            );
+            rmSync(join(project, 'tree'), { recursive: true, force: true });
+            rmSync(join(project, 'bare'), { recursive: true, force: true });
           }
         } else {
           console.log(`project_test windowed case skipped: ${windowRefused}`);
@@ -85984,6 +86134,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARestartedCountDoesNotTakeWorkFromBeforeTheRestart,
   testASuiteIsFoundUnderAnySpellingOfItsPath,
   testSuitesAreFoundAndDealtByWhatTheyCost,
+  testASuiteAskingForTheAccessibilityTreeGetsAWindowWithItOn,
   testASuiteDeclarationCanNameAClassConstant,
   testAHiddenEditorStartsOnAnEmptyScriptReference,
   testAKeptScriptReferenceOfNoBytesIsMadeAgainNotPlaced,

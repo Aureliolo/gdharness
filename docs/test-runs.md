@@ -440,6 +440,14 @@ A project whose scene runner suites pass headless turns the guess off for every 
 `gdharness/tests/scene_runner_needs_window=false` in `project.godot`. Then only a suite declaring
 `true` gets a window.
 
+### The accessibility tree
+
+Godot builds the accessibility tree only for a screen reader or with `--accessibility always`. A
+suite declaring `const GDHARNESS_ACCESSIBILITY: bool = true` gets a window and an engine started
+with that flag, in `gdharness test` and `project_test` alike. It is read like the window constant,
+from the suite or a script it extends, or from a class constant. A suite declaring it beside
+`GDHARNESS_NEEDS_WINDOW` false is refused.
+
 ### The windowed engine
 
 All the windowed suites go to one windowed engine, which starts first, counts toward `--engines`

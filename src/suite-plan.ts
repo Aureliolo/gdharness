@@ -25,6 +25,11 @@ const CASE_PREFIX = 'test_';
 const NEEDS_WINDOW = 'GDHARNESS_NEEDS_WINDOW';
 /** A suite saying its cases share work, such as a memoised setup, and belong in one engine. */
 const TOGETHER = 'GDHARNESS_TOGETHER';
+/**
+ * A suite saying it needs the accessibility tree. Godot builds the tree only for a screen reader or
+ * with `--accessibility always`, and only with a window, so such a suite runs windowed with it on.
+ */
+const ACCESSIBILITY = 'GDHARNESS_ACCESSIBILITY';
 
 /** The value a script gives the constant [param name], as written, or undefined when it declares none. */
 function constantIn(code: string, name: string): string | undefined {
@@ -83,6 +88,8 @@ export interface DeclaredSuite {
    * spreading it, 394 s whole against 612 s dealt out in one measured project.
    */
   readonly together: boolean;
+  /** Whether it says it needs the accessibility tree, which also gives it a window. */
+  readonly accessible: boolean;
 }
 
 /** One script as read for discovery. */
@@ -228,6 +235,7 @@ export class ProjectScripts {
     // is the one GDScript reads.
     let said: boolean | undefined;
     let together: boolean | undefined;
+    let accessible: boolean | undefined;
     let guessed = false;
     const seen = new Set<string>();
     let at = path;
@@ -242,6 +250,7 @@ export class ProjectScripts {
       }
       said ??= this.declared(path, at, read.code, NEEDS_WINDOW);
       together ??= this.declared(path, at, read.code, TOGETHER);
+      accessible ??= this.declared(path, at, read.code, ACCESSIBILITY);
       guessed ||= this.guessWindow && SCENE_RUNNER.test(read.code);
       const base = this.base(at);
       if (base === null) {
@@ -249,15 +258,22 @@ export class ProjectScripts {
       }
       // By name, or by the script declaring it: gdUnit4's own class is a global class of the project.
       if ('name' in base ? base.name === SUITE_BASE : base.path === this.classes.get(SUITE_BASE)) {
-        return cases.size > 0
-          ? {
-              path,
-              cases: [...cases].toSorted(),
-              windowed: said ?? guessed,
-              headless: said === false,
-              together: together === true,
-            }
-          : null;
+        if (cases.size === 0) {
+          return null;
+        }
+        if (accessible === true && said === false) {
+          throw new Refusal(
+            `${path} declares ${ACCESSIBILITY} true and ${NEEDS_WINDOW} false, and Godot builds the accessibility tree only with a window. Leave ${NEEDS_WINDOW} out, since ${ACCESSIBILITY} gives the suite a window.`,
+          );
+        }
+        return {
+          path,
+          cases: [...cases].toSorted(),
+          windowed: accessible === true || (said ?? guessed),
+          headless: said === false,
+          together: together === true,
+          accessible: accessible === true,
+        };
       }
       if ('name' in base) {
         return null;
@@ -561,6 +577,8 @@ export interface Unit {
   /** Whether every case in it has a time of its own, rather than [member cost] being a guess. */
   readonly timed: boolean;
   readonly windowed: boolean;
+  /** Whether it is a suite that needs the accessibility tree, which only a windowed unit is. */
+  readonly accessible: boolean;
   readonly headless: boolean;
 }
 
@@ -605,6 +623,7 @@ export function unitsOf(
       cost: whole,
       timed: suite.cases.every(timedCase),
       windowed: suite.windowed,
+      accessible: suite.accessible,
       headless: suite.headless,
     };
     if (suite.windowed || suite.together || whole <= splitPast) {
@@ -620,6 +639,7 @@ export function unitsOf(
             cost: around + costOf(func),
             timed: timedCase(func),
             windowed: false,
+            accessible: false,
             headless: suite.headless,
           },
         ];
@@ -631,6 +651,7 @@ export function unitsOf(
         cost: around + seconds,
         timed: true,
         windowed: false,
+        accessible: false,
         headless: suite.headless,
       }));
     });
@@ -645,6 +666,8 @@ export interface EnginePlan {
   readonly skipping: readonly string[];
   readonly cost: number;
   readonly windowed: boolean;
+  /** Whether it starts with the accessibility tree on, for a suite among it that needs it. */
+  readonly accessible: boolean;
   /**
    * The slot it runs in. The engines of one lane run one after another without giving the slot
    * back, which is how a headless engine follows the windowed one.
@@ -870,18 +893,20 @@ function planOf(
     skipping,
     cost: bin.reduce((sum, unit) => sum + unit.cost, 0),
     windowed,
+    accessible: bin.some((unit) => unit.accessible),
     lane,
   };
 }
 
 /**
  * The suites under [param paths], files or directories as `res://` paths, that gdharness test deals
- * to its windowed engine, and those among them saying they run headless, each sorted by path.
+ * to its windowed engine, those among them saying they run headless, and those needing the
+ * accessibility tree, each sorted by path.
  */
 export function windowNeedsOf(
   scripts: ProjectScripts,
   paths: readonly string[],
-): { readonly needing: string[]; readonly headless: string[] } {
+): { readonly needing: string[]; readonly headless: string[]; readonly accessible: string[] } {
   const suites = new Map(
     paths
       .flatMap((path) => (path.endsWith('.gd') ? (scripts.suite(path) ?? []) : scripts.suitesUnder([path])))
@@ -891,6 +916,7 @@ export function windowNeedsOf(
   return {
     needing: sorted.filter((suite) => suite.windowed).map((suite) => suite.path),
     headless: sorted.filter((suite) => suite.headless).map((suite) => suite.path),
+    accessible: sorted.filter((suite) => suite.accessible).map((suite) => suite.path),
   };
 }
 

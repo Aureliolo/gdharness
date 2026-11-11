@@ -1499,6 +1499,7 @@ async function runEngine(
     ...display,
     '--audio-driver',
     'Dummy',
+    ...(plan.accessible ? ['--accessibility', 'always'] : []),
     '--path',
     launch.projectPath,
     ...(launch.verbose ? ['--verbose'] : []),

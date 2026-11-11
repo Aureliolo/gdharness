@@ -3806,18 +3806,30 @@ function elsewhereIn(projectPath: string, asked: string): string {
  * the run had one, beside [param sharing], those that say they run headless and shared it, or, when
  * the run had none, that the machine has no display.
  */
-function windowNoteFor(needing: readonly string[], sharing: readonly string[] | null): string {
+function windowNoteFor(
+  needing: readonly string[],
+  sharing: readonly string[] | null,
+  accessible: readonly string[],
+): string {
   const one = needing.length === 1;
   const why =
-    'A suite needs one when it declares const GDHARNESS_NEEDS_WINDOW: bool = true, or calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares it false and runs headless.';
+    'A suite needs one when it declares const GDHARNESS_NEEDS_WINDOW: bool = true or const GDHARNESS_ACCESSIBILITY: bool = true, or calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares GDHARNESS_NEEDS_WINDOW false and runs headless.';
   if (sharing === null) {
-    return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}, and this machine has no display, so the run was headless and input events went nowhere. ${why} Run under xvfb-run to give it a display.`;
+    const noTree =
+      accessible.length === 0
+        ? ''
+        : ` No accessibility tree was built, so what ${named(accessible)} ${accessible.length === 1 ? 'checks' : 'check'} in it never ran.`;
+    return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}, and this machine has no display, so the run was headless and input events went nowhere.${noTree} ${why} Run under xvfb-run to give it a display.`;
   }
+  const tree =
+    accessible.length === 0
+      ? ''
+      : ` The engine also ran with --accessibility always, since ${named(accessible)} ${accessible.length === 1 ? 'declares' : 'declare'} GDHARNESS_ACCESSIBILITY.`;
   const shared =
     sharing.length === 0
       ? ''
       : ` ${named(sharing)} ${sharing.length === 1 ? 'says it runs' : 'say they run'} headless and ran with the window too, since the run is one engine: run ${sharing.length === 1 ? 'it' : 'them'} without the windowed suites to run ${sharing.length === 1 ? 'it' : 'them'} headless.`;
-  return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}, so the run had one: the engine ran without --headless, at the size project.godot gives its viewport, with no sound${process.platform === 'win32' ? ', on a desktop of its own, where its window neither shows nor takes the keyboard' : ''}. ${why}${shared}`;
+  return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}, so the run had one: the engine ran without --headless, at the size project.godot gives its viewport, with no sound${process.platform === 'win32' ? ', on a desktop of its own, where its window neither shows nor takes the keyboard' : ''}.${tree} ${why}${shared}`;
 }
 
 /**
@@ -7963,6 +7975,7 @@ class GodotServer {
     const leftOut = new Set(readStringArray(args, 'ignore') ?? []);
     const needs = windowNeedsOf(scripts, selection.value?.suites ?? asked);
     const needing = needs.needing.filter((path) => !leftOut.has(basename(path, '.gd')));
+    const accessible = needs.accessible.filter((path) => !leftOut.has(basename(path, '.gd')));
     const noDisplay = resolveHeadless(undefined, { platform: process.platform, variables: process.env });
     const windowed = needing.length > 0 && !noDisplay;
     const engine = await this.engine(project.value.path);
@@ -8036,7 +8049,9 @@ class GodotServer {
     const viewport = windowed ? viewportOf(project.value.path) : null;
     const sharing = needs.headless.filter((path) => !leftOut.has(basename(path, '.gd')));
     const windowSaid =
-      needing.length === 0 ? {} : { windowed, windowNote: windowNoteFor(needing, windowed ? sharing : null) };
+      needing.length === 0
+        ? {}
+        : { windowed, windowNote: windowNoteFor(needing, windowed ? sharing : null, accessible) };
     const cmdArgs = [
       // The engine as gdharness test starts it: windowed at the project's viewport size, and
       // either way with no sound, since a suite can read the driver off the command line.
@@ -8047,6 +8062,7 @@ class GodotServer {
         : ['--headless']),
       '--audio-driver',
       'Dummy',
+      ...(windowed && accessible.length > 0 ? ['--accessibility', 'always'] : []),
       '--path',
       project.value.path,
       // Before the script, where the engine reads its own options rather than handing them on.
