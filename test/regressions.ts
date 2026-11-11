@@ -14173,6 +14173,62 @@ function testTheCommandLineJudgesAConfigsEngine(): void {
 }
 
 /**
+ * `gdharness spread` judges the engine `--godot` names before it plays anything. A folder and a
+ * program that is no engine are refused as usage errors with the judge's reason.
+ */
+function testTheSpreadCommandJudgesTheEngineItIsGiven(): void {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spread-engine-'));
+  try {
+    const project = join(root, 'game');
+    mkdirSync(project);
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    writeFileSync(join(project, 'bench.tscn'), '[gd_scene format=3]\n\n[node name="Bench" type="Node"]\n');
+    const folder = join(root, 'folder');
+    mkdirSync(folder);
+    const printed = spawnSyncHidden(process.execPath, ['--version'], { encoding: 'utf8' }).stdout.trim();
+    for (const [godot, said] of [
+      [folder, `--godot names ${folder}, which is a folder, not a program.`],
+      [
+        process.execPath,
+        `--godot names ${process.execPath}, which is not a Godot engine: --version printed ${JSON.stringify(printed)}.`,
+      ],
+    ] as const) {
+      const ran = spawnSyncHidden(
+        process.execPath,
+        [join(process.cwd(), 'build', 'cli.js'), 'spread', project, 'bench.tscn', '--godot', godot],
+        { encoding: 'utf8', cwd: root, timeout: 60000, env: withHome(process.env, join(root, 'home')) },
+      );
+      assert.equal(ran.status, 2, `${ran.stdout}${ran.stderr}`);
+      assert.ok(ran.stderr.includes(said), ran.stderr);
+    }
+  } finally {
+    sweep(root);
+  }
+}
+
+/** The versions `--godot-version` takes are the shape an engine prints, with or without a `v`. */
+function testAGodotVersionFlagTakesTheShapeAnEnginePrints(): void {
+  for (const [given, taken] of [
+    ['4.7.2', '4.7.2'],
+    ['4.7.2.stable', '4.7.2.stable'],
+    ['4.7.2.stable.official.abc123', '4.7.2.stable.official.abc123'],
+    ['v4.7.2', '4.7.2'],
+  ] as const) {
+    assert.equal(versionNamed(given), taken, `${given} is taken`);
+  }
+  for (const given of ['4.7.2.1', '4.x']) {
+    assert.throws(
+      () => versionNamed(given),
+      (error: unknown) =>
+        error instanceof Error &&
+        error.message === `--godot-version takes a version such as 4.7.2 or 4.7.2.stable, not ${given}.`,
+      `${given} is refused with the usage text`,
+    );
+  }
+  assert.equal(versionNamed(undefined), null, 'and none given is none');
+}
+
+/**
  * An autoload naming a file the repository does not carry.
  *
  * project.godot is committed and what it names may not be. `setup` registers the runtime addon by
@@ -88375,6 +88431,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAConsoleWrapperIsJudgedAsThePlainProgram,
   testADefectReportNamesTheEngineItLearned,
   testTheCommandLineJudgesAConfigsEngine,
+  testTheSpreadCommandJudgesTheEngineItIsGiven,
+  testAGodotVersionFlagTakesTheShapeAnEnginePrints,
   testAnAutoloadGitWillNotCarry,
   testAnAutoloadNamingAFileThatIsNotThere,
   testTheRuntimeAutoloadIsFoundByWhatItNames,
