@@ -57713,9 +57713,15 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
     const scripts = new ProjectScripts(project);
     const inputs = new SuiteInputs(scripts, ['1']);
     const kept = inputs.inputsOf(suite);
+    // Setting a time back is itself a change to a file, so it is done before the moment the run began.
+    const aged = new Date(Date.now() - 60_000);
+    utimesSync(join(project, 'data', 'icon.png'), aged, aged);
+    utimesSync(join(project, 'helper.gd'), aged, aged);
+    const settled = Date.now() + 25;
+    while (Date.now() < settled) {
+      // The file system's clock moves past the last change.
+    }
     const began = Date.now();
-    utimesSync(join(project, 'data', 'icon.png'), new Date(began - 60_000), new Date(began - 60_000));
-    utimesSync(join(project, 'helper.gd'), new Date(began - 60_000), new Date(began - 60_000));
     assert.equal(new SuiteInputs(scripts, ['1']).modifiedAfter(kept, began), false, 'nothing since');
     utimesSync(join(project, 'data', 'icon.png'), new Date(began + 5000), new Date(began + 5000));
     assert.equal(new SuiteInputs(scripts, ['1']).modifiedAfter(kept, began), true, 'one input since');
@@ -57942,6 +57948,48 @@ function testAComputedReadDependsOnFoldersTheEngineIgnoresAndLinksLeadTo(): void
     );
   } finally {
     sweep(project, elsewhere);
+  }
+}
+
+/**
+ * An input replaced with a copy that keeps its old modification time, and an input deleted, count as
+ * changed since a moment, so a pass recorded on a state the suite did not run on is not kept.
+ */
+function testAnInputChangedDuringARunIsSeenWhateverItsTimeStamp(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-during-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      's.gd': 'extends Node\nconst T = preload("res://t.tres")\nconst U = preload("res://u.tres")\n',
+      't.tres': 'one\n',
+      'u.tres': 'two\n',
+    });
+    const longAgo = new Date(Date.now() - 86_400_000);
+    for (const name of ['project.godot', 's.gd', 't.tres', 'u.tres']) {
+      utimesSync(join(project, name), longAgo, longAgo);
+    }
+    const inputs = (): SuiteInputs => new SuiteInputs(new ProjectScripts(project), ['1']);
+    const named = inputs().inputsOf(['res://s.gd']);
+    const since = Date.now();
+    while (Date.now() < since + 25) {
+      // The file system's clock moves on before anything is changed.
+    }
+    assert.equal(inputs().modifiedAfter(named, since), false, 'nothing is changed since');
+    writeFileSync(join(project, 't.tres'), 'new!\n');
+    utimesSync(join(project, 't.tres'), longAgo, longAgo);
+    assert.equal(
+      inputs().modifiedAfter(named, since),
+      true,
+      'a file replaced with the old modification time is changed',
+    );
+    const after = Date.now();
+    while (Date.now() < after + 25) {
+      // As above.
+    }
+    rmSync(join(project, 'u.tres'));
+    assert.equal(inputs().modifiedAfter(named, after), true, 'and a file deleted is');
+  } finally {
+    sweep(project);
   }
 }
 
@@ -86941,6 +86989,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASuitesInputsAreWhatItsEngineLoaded,
   testASuiteDependsOnEveryFileItsScriptsAndResourcesNameInAnySpelling,
   testAComputedReadDependsOnFoldersTheEngineIgnoresAndLinksLeadTo,
+  testAnInputChangedDuringARunIsSeenWhateverItsTimeStamp,
   testAReadsCallersAreThoseThatCanReachIt,
   testAFileGoneBetweenTheListingAndTheReadIsPassedOver,
   testTheCompileCheckAndUnattributedFaultsAreJudged,

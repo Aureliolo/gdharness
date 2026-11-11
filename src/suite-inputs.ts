@@ -16,7 +16,7 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { join, posix } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 import { classesNamedIn } from './class-cache.js';
 import { regionsOf } from './gdscript-source.js';
 import { isLibraryCopy } from './library-copies.js';
@@ -359,17 +359,27 @@ export class SuiteInputs {
 
   private readAnew(path: string): Read {
     const file = join(this.scripts.projectPath, path.slice('res://'.length));
-    const missing: Read = { digest: 'missing', follows: [], also: [], modified: 0 };
+    // The engine rewrites its extension list itself, so a change to it is read from its bytes alone.
+    const guarded = path !== EXTENSION_LIST;
+    // A file gone moves its folder's time, which is how a deletion during a run is seen.
+    const missing: Read = {
+      digest: 'missing',
+      follows: [],
+      also: [],
+      modified: guarded ? (statOf(dirname(file))?.mtimeMs ?? 0) : 0,
+    };
     const stat = statOf(file);
     if (stat === undefined) {
       return missing;
     }
+    // The change time cannot be set back, so a copy that keeps the old modification time shows in it.
+    const modified = guarded ? Math.max(stat.mtimeMs, stat.ctimeMs) : 0;
     if (stat.isDirectory()) {
       const inside = entriesOf(file)
         .map((entry) => entry.name)
         .filter((name) => !name.startsWith('.'))
         .toSorted();
-      return { digest: inside.join('\n'), follows: [], also: [], modified: stat.mtimeMs };
+      return { digest: inside.join('\n'), follows: [], also: [], modified };
     }
     const bytes = bytesOf(file);
     if (bytes === null) {
@@ -401,7 +411,7 @@ export class SuiteInputs {
       digest,
       follows: follows.map(inputPath).filter((named): named is string => named !== null && named !== path),
       also: also.map(inputPath).filter((named): named is string => named !== null),
-      modified: stat.mtimeMs,
+      modified,
     };
   }
 
