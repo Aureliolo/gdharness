@@ -7440,6 +7440,14 @@ async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Edito
     }
     const whole = await call('editor_run', { op: 'profile', limit: 100 });
     assert.equal(get(whole, 'complete'), true, `the totals arrived: ${JSON.stringify(whole)}`);
+    // _ready adds its nodes in the game's first frame, and the engine's totals hold only the engine
+    // calls since the last frame, so this is the frames' engine time kept past the totals.
+    const ready = asArray(get(whole, 'functions')).find((one) => get(one, 'function') === '_ready');
+    assert.ok(
+      asNumber(get(ready, 'engineMs'), `_ready's add_child calls are engine time: ${JSON.stringify(whole)}`) >
+        0,
+      JSON.stringify(whole),
+    );
     assert.ok(
       gone >= 0 && gone < 2000,
       `the game left ${gone}ms after it was asked to, so the editor answered its word that the totals were sent`,
