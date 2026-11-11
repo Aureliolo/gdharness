@@ -24478,6 +24478,74 @@ async function testAGameThatDoesNotWelcomeIsRefused(): Promise<void> {
 }
 
 /**
+ * A game whose welcome names another protocol, or none, is refused with what it said it speaks.
+ *
+ * The stand-in answers every request well, so the only thing wrong with it is its welcome. The one
+ * that welcomes with this server's protocol is the positive, answered with what it said.
+ */
+async function testAGameWelcomingAnotherProtocolIsRefused(): Promise<void> {
+  const ask = async (welcome: Record<string, unknown>): Promise<unknown> => {
+    const game = createServer((socket) => {
+      socket.setEncoding('utf8');
+      socket.write(`${JSON.stringify(welcome)}\n`);
+      let buffered = '';
+      socket.on('data', (chunk: string) => {
+        buffered += chunk;
+        for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
+          const asked: unknown = JSON.parse(buffered.slice(0, at));
+          buffered = buffered.slice(at + 1);
+          socket.write(`${JSON.stringify({ id: get(asked, 'id'), type: 'pong' })}\n`);
+        }
+      });
+      socket.on('error', () => {});
+    });
+    try {
+      await listenOnAReservedPort(game);
+      const endpoint: RuntimeEndpoint = {
+        pid: process.pid,
+        port: portOf(game),
+        address: '127.0.0.1',
+        project: { name: 'Welcoming', path: tmpdir() },
+        file: join(tmpdir(), `runtime-${process.pid}.json`),
+        addon: { version: SERVER_VERSION, digest: shippedRuntimeDigest() },
+      };
+      return await runtimeRequest(endpoint, 'ping', {}, 5_000);
+    } finally {
+      await new Promise<void>((done) => {
+        game.close(() => {
+          done();
+        });
+      });
+    }
+  };
+
+  const spoken = RUNTIME_PROTOCOL + 1;
+  const matching = await ask({ type: 'welcome', protocol: RUNTIME_PROTOCOL });
+  assert.equal(
+    get(matching, 'ok'),
+    true,
+    `a game welcoming in this protocol is answered: ${JSON.stringify(matching)}`,
+  );
+  const other = await ask({ type: 'welcome', protocol: spoken });
+  assert.equal(get(other, 'ok'), false, JSON.stringify(other));
+  assert.equal(get(other, 'reason'), 'protocol', JSON.stringify(other));
+  assert.match(
+    text(get(other, 'message')),
+    new RegExp(
+      `speaks runtime protocol ${spoken} and this server speaks ${RUNTIME_PROTOCOL}\\. Reinstall the runtime addon into the project\\.$`,
+    ),
+    JSON.stringify(other),
+  );
+  const silent = await ask({ type: 'welcome' });
+  assert.equal(get(silent, 'reason'), 'protocol', JSON.stringify(silent));
+  assert.match(
+    text(get(silent, 'message')),
+    new RegExp(`speaks runtime protocol unknown and this server speaks ${RUNTIME_PROTOCOL}\\. Reinstall`),
+    JSON.stringify(silent),
+  );
+}
+
+/**
  * A game that binds every interface is reached on loopback.
  *
  * The announcement names the address the game bound, and a project may set that to every interface.
@@ -87956,6 +88024,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testRuntimeConnectedIsAboutThisProjectsGames,
   testACallBesideAnotherOnTheGameSaysSo,
   testAGameThatDoesNotWelcomeIsRefused,
+  testAGameWelcomingAnotherProtocolIsRefused,
   testAGameOnEveryInterfaceIsReached,
   testACaptureTheWaitRanOutOnKeepsItsFolder,
   testAnEditorCaptureIsHeldToTheCapturePlaceRules,
