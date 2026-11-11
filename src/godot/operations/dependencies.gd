@@ -255,133 +255,17 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 
 	_log.info("Finding usages of: " + resource_path)
 
-	var class_name_declared: String = _declared_class_name(resource_path)
-	var by_class: RegEx = null
-	if not class_name_declared.is_empty():
-		by_class = GdhPatterns.compiled("\\b" + _regex_escaped(class_name_declared) + "\\b")
-	# The script of an autoload is used wherever code names the autoload, and asked what uses it,
-	# the answer was its line in project.godot alone, beside the scripts calling it.
-	var autoload_named: String = ""
-	var autoloads: Dictionary = autoloads_declared()
-	for name: String in autoloads:
-		if str(autoloads[name]) == resource_path:
-			autoload_named = name
-	var by_autoload: RegEx = null
-	if not autoload_named.is_empty():
-		by_autoload = GdhPatterns.compiled("\\b" + _regex_escaped(autoload_named) + "\\b")
-	var target: Dictionary = {
-		"path": resource_path,
-		"uid": str(GdhResourceFiles.uid_of(resource_path).get("uid", "")) if exists else "",
-	}
-
+	var sought: GdhSought = _sought(resource_path, exists)
 	var all_files: Array[String] = _usage_files(file_types)
-
 	var usages: Array[Dictionary] = []
-	var by_kind: Dictionary = {}
-	var total: int = 0
-	var in_code: int = 0
 	var shares_uid: Array[String] = []
-	var target_uid: String = target["uid"]
-
 	for file_path: String in all_files:
 		# Its own sidecar names it as the file it was imported from, which is not a use of it.
 		if file_path == resource_path or file_path == resource_path + ".import":
 			continue
-		var file: FileAccess = FileAccess.open(file_path, FileAccess.READ)
-		if not file:
-			continue
-		var text: String = file.get_as_text()
-		file.close()
-		var lines: PackedStringArray = text.split("\n")
-		# A class is used by name only in a script's code. In a scene or a resource the same word is
-		# a node's name or a caption, and each was counted as a use of the class. A shader has no
-		# use for one at all.
-		var code: bool = file_path.get_extension() == "gd"
-		# In a shader # opens a directive, so an #include was answered as a comment, and its
-		# comments are // and /* */.
-		var shader_lines: PackedStringArray = []
-		if file_path.get_extension() in SHADER_KINDS:
-			shader_lines = _shader_code(text).split("\n")
-
-		var references: Array[Dictionary] = []
-		for i: int in range(lines.size()):
-			var line: String = lines[i]
-			# A file declaring the target's uid as its own is not using it: a resource copied with
-			# its header claims the same uid, and its header line was answered as a use by path.
-			if not target_uid.is_empty() and _own_uid(line, i, file_path) == target_uid:
-				shares_uid.append(file_path)
-				continue
-			var by_its_path: bool = _names_target(line, file_path, target)
-			var by_its_name: bool = false
-			var name_in_comment: bool = false
-			if not by_its_path and code and by_class != null:
-				# Strings are text, so a class named in one is not a use of it.
-				by_its_name = by_class.search(_code_of(line)) != null
-				name_in_comment = not by_its_name and by_class.search(_comment_of(line)) != null
-			var by_its_autoload: bool = false
-			if not by_its_path and not by_its_name and code and by_autoload != null:
-				by_its_autoload = by_autoload.search(_code_of(line)) != null
-				if not by_its_autoload and not name_in_comment:
-					name_in_comment = by_autoload.search(_comment_of(line)) != null
-			if not by_its_path and not by_its_name and not by_its_autoload and not name_in_comment:
-				continue
-			var trimmed: String = line.strip_edges()
-			var kind: String = ""
-			var extra: Dictionary = {}
-			var loaded: String = (
-				_loaded_by_uid(line) if trimmed.begins_with("[ext_resource") else ""
-			)
-			var written: RegExMatch = GdhPatterns.compiled('path="([^"]+)"').search(line)
-			var written_path: String = (
-				"" if written == null else _resolved(written.get_string(1), file_path)
-			)
-			# A mention in a comment is not a use, and both were answered as one. The question a
-			# reverse walk is asked is whether anything still uses a class, and a project that
-			# documents itself names its collaborators in `##` links: four references to one class,
-			# three of them prose, all counted as code. The more carefully a project is documented
-			# the worse that ratio gets. `##` and `#` are kept apart because renaming the class
-			# breaks Godot's generated documentation and leaves the prose merely stale.
-			if code and trimmed.begins_with("##"):
-				kind = "doc"
-			elif (code and trimmed.begins_with("#")) or name_in_comment:
-				kind = "comment"
-			elif (
-				not shader_lines.is_empty()
-				and not _names_target(shader_lines[i], file_path, target)
-			):
-				kind = "comment"
-			elif by_its_path and not loaded.is_empty() and loaded != target["path"]:
-				# The engine loads the file the uid names, so the path written here is used by
-				# nothing.
-				kind = "stale_path"
-				extra["loads"] = loaded
-			elif by_its_path:
-				kind = _path_reference_kind(line, file_path)
-				if not loaded.is_empty() and written_path != loaded:
-					extra["stale_path"] = written_path
-				var unknown_uid: String = (
-					_unknown_uid_of(line) if trimmed.begins_with("[ext_resource") else ""
-				)
-				if not unknown_uid.is_empty():
-					extra["unknown_uid"] = unknown_uid
-			elif by_its_autoload:
-				kind = "autoload"
-			else:
-				kind = (
-					"extends"
-					if GdhPatterns.without_annotations(line).begins_with("extends ")
-					else "class_name"
-				)
-			var found: Dictionary = { "line": i + 1, "kind": kind, "text": trimmed }
-			found.merge(extra)
-			references.append(found)
-			by_kind[kind] = GdhRead.as_int(by_kind.get(kind, 0)) + 1
-			if not kind in ["doc", "comment", "stale_path"]:
-				in_code += 1
-
+		var references: Array[Dictionary] = _references_in(file_path, sought, shares_uid)
 		if not references.is_empty():
 			usages.append({ "file": file_path, "references": references })
-			total += references.size()
 
 	if not exists and usages.is_empty():
 		return _log.failure(
@@ -394,29 +278,181 @@ func find_resource_usages(params: Dictionary) -> Dictionary:
 			)
 		)
 	var declared: Variant = null
-	if not class_name_declared.is_empty():
-		declared = class_name_declared
+	if not sought.class_named.is_empty():
+		declared = sought.class_named
 	var answer: Dictionary = {
 		"resource_path": resource_path,
 		"exists": exists,
 		"class_name": declared,
 		"usages": usages,
-		"summary":
-		{
-			"files_searched": all_files.size(),
-			"files_with_usages": usages.size(),
-			"total": total,
-			# The arithmetic done here rather than left to the caller, because the caller who most
-			# needs it is the one asking whether a class is dead, and that caller reads one number.
-			"in_code": in_code,
-			"by_kind": by_kind,
-		},
+		"summary": _usage_summary(all_files.size(), usages),
 	}
-	if not autoload_named.is_empty():
-		answer["autoload"] = autoload_named
+	if not sought.autoload_named.is_empty():
+		answer["autoload"] = sought.autoload_named
 	if not shares_uid.is_empty():
 		answer["shares_uid"] = shares_uid
 	return answer
+
+
+## What [param resource_path] is looked for by: its path and uid, the class it declares and the
+## autoload that names it.
+func _sought(resource_path: String, exists: bool) -> GdhSought:
+	var sought: GdhSought = GdhSought.new()
+	sought.target = {
+		"path": resource_path,
+		"uid": str(GdhResourceFiles.uid_of(resource_path).get("uid", "")) if exists else "",
+	}
+	sought.class_named = _declared_class_name(resource_path)
+	if not sought.class_named.is_empty():
+		sought.by_class = GdhPatterns.compiled(
+			"\\b" + _regex_escaped(sought.class_named) + "\\b"
+		)
+	# The script of an autoload is used wherever code names the autoload, and asked what uses it,
+	# the answer was its line in project.godot alone, beside the scripts calling it.
+	var autoloads: Dictionary = autoloads_declared()
+	for name: String in autoloads:
+		if str(autoloads[name]) == resource_path:
+			sought.autoload_named = name
+	if not sought.autoload_named.is_empty():
+		sought.by_autoload = GdhPatterns.compiled(
+			"\\b" + _regex_escaped(sought.autoload_named) + "\\b"
+		)
+	return sought
+
+
+## The lines of [param file_path] that refer to what [param sought] names. A file that declares
+## the target's uid as its own goes to [param shares_uid] instead.
+func _references_in(
+	file_path: String, sought: GdhSought, shares_uid: Array[String]
+) -> Array[Dictionary]:
+	var references: Array[Dictionary] = []
+	var file: FileAccess = FileAccess.open(file_path, FileAccess.READ)
+	if not file:
+		return references
+	var text: String = file.get_as_text()
+	file.close()
+	var lines: PackedStringArray = text.split("\n")
+	# In a shader # opens a directive, so an #include was answered as a comment, and its
+	# comments are // and /* */.
+	var shader_lines: PackedStringArray = []
+	if file_path.get_extension() in SHADER_KINDS:
+		shader_lines = _shader_code(text).split("\n")
+	var target_uid: String = sought.target["uid"]
+	for i: int in range(lines.size()):
+		var line: String = lines[i]
+		# A file declaring the target's uid as its own is not using it: a resource copied with
+		# its header claims the same uid, and its header line was answered as a use by path.
+		if not target_uid.is_empty() and _own_uid(line, i, file_path) == target_uid:
+			shares_uid.append(file_path)
+			continue
+		var shader_line: Variant = null
+		if not shader_lines.is_empty():
+			shader_line = shader_lines[i]
+		var found: Dictionary = _reference_on(line, file_path, shader_line, sought)
+		if not found.is_empty():
+			found["line"] = i + 1
+			references.append(found)
+	return references
+
+
+## The reference [param line] of [param file_path] makes to what [param sought] names, or an empty
+## dictionary for none. [param shader_line] is the line with a shader's comments taken out, or
+## null outside a shader.
+func _reference_on(
+	line: String, file_path: String, shader_line: Variant, sought: GdhSought
+) -> Dictionary:
+	# A class is used by name only in a script's code. In a scene or a resource the same word is
+	# a node's name or a caption, and each was counted as a use of the class. A shader has no
+	# use for one at all.
+	var code: bool = file_path.get_extension() == "gd"
+	var by_its_path: bool = _names_target(line, file_path, sought.target)
+	var by_its_name: bool = false
+	var name_in_comment: bool = false
+	if not by_its_path and code and sought.by_class != null:
+		# Strings are text, so a class named in one is not a use of it.
+		by_its_name = sought.by_class.search(_code_of(line)) != null
+		name_in_comment = not by_its_name and sought.by_class.search(_comment_of(line)) != null
+	var by_its_autoload: bool = false
+	if not by_its_path and not by_its_name and code and sought.by_autoload != null:
+		by_its_autoload = sought.by_autoload.search(_code_of(line)) != null
+		if not by_its_autoload and not name_in_comment:
+			name_in_comment = sought.by_autoload.search(_comment_of(line)) != null
+	if not by_its_path and not by_its_name and not by_its_autoload and not name_in_comment:
+		return {}
+	var trimmed: String = line.strip_edges()
+	var found: Dictionary = { "line": 0, "kind": "", "text": trimmed }
+	# A mention in a comment is not a use, and both were answered as one. The question a
+	# reverse walk is asked is whether anything still uses a class, and a project that
+	# documents itself names its collaborators in `##` links: four references to one class,
+	# three of them prose, all counted as code. The more carefully a project is documented
+	# the worse that ratio gets. `##` and `#` are kept apart because renaming the class
+	# breaks Godot's generated documentation and leaves the prose merely stale.
+	if code and trimmed.begins_with("##"):
+		found["kind"] = "doc"
+	elif (code and trimmed.begins_with("#")) or name_in_comment:
+		found["kind"] = "comment"
+	elif shader_line != null and not _names_target(str(shader_line), file_path, sought.target):
+		found["kind"] = "comment"
+	elif by_its_path:
+		_path_reference_into(found, line, file_path, sought.target)
+	elif by_its_autoload:
+		found["kind"] = "autoload"
+	else:
+		found["kind"] = (
+			"extends"
+			if GdhPatterns.without_annotations(line).begins_with("extends ")
+			else "class_name"
+		)
+	return found
+
+
+## Sets the kind of [param found], a reference by path on [param line], and what the line's uid
+## says beside it.
+func _path_reference_into(
+	found: Dictionary, line: String, file_path: String, target: Dictionary
+) -> void:
+	var entry: bool = line.strip_edges().begins_with("[ext_resource")
+	var loaded: String = _loaded_by_uid(line) if entry else ""
+	if not loaded.is_empty() and loaded != target["path"]:
+		# The engine loads the file the uid names, so the path written here is used by nothing.
+		found["kind"] = "stale_path"
+		found["loads"] = loaded
+		return
+	found["kind"] = _path_reference_kind(line, file_path)
+	var written: RegExMatch = GdhPatterns.compiled('path="([^"]+)"').search(line)
+	var written_path: String = (
+		"" if written == null else _resolved(written.get_string(1), file_path)
+	)
+	if not loaded.is_empty() and written_path != loaded:
+		found["stale_path"] = written_path
+	var unknown_uid: String = _unknown_uid_of(line) if entry else ""
+	if not unknown_uid.is_empty():
+		found["unknown_uid"] = unknown_uid
+
+
+## The counts over [param usages]: files searched and with usages, references in all, those in
+## code and those of each kind.
+static func _usage_summary(files_searched: int, usages: Array[Dictionary]) -> Dictionary:
+	var by_kind: Dictionary = {}
+	var total: int = 0
+	var in_code: int = 0
+	for usage: Dictionary in usages:
+		var references: Array[Dictionary] = usage["references"]
+		total += references.size()
+		for found: Dictionary in references:
+			var kind: String = found["kind"]
+			by_kind[kind] = GdhRead.as_int(by_kind.get(kind, 0)) + 1
+			if not kind in ["doc", "comment", "stale_path"]:
+				in_code += 1
+	return {
+		"files_searched": files_searched,
+		"files_with_usages": usages.size(),
+		"total": total,
+		# The arithmetic done here rather than left to the caller, because the caller who most
+		# needs it is the one asking whether a class is dead, and that caller reads one number.
+		"in_code": in_code,
+		"by_kind": by_kind,
+	}
 
 
 # The uid [param line], line [param index] of [param file_path], declares as the file's own: a
@@ -794,18 +830,23 @@ func _references(path: String, walk: GdhDependencyWalk) -> Array[Dictionary]:
 					named_by["unknown_uid"] = unknown[dep_path]
 				_name(deps, path, dep_path, named_by)
 
-		# A script uses another by its class_name as surely as by a preload, and only the reverse
-		# walk looked for that: asked what a script depends on, the answer left out the script it
-		# typed a variable with, while asking what used that script named this one. An autoload's
-		# global name is the same kind of use, of the script registered under it.
 		if path.get_extension() == "gd":
-			var classes: Dictionary = classes_declared()
-			for used: String in classes_used_in(content, classes):
-				_name(deps, path, str(classes[used]), { "by_class": used })
-			var autoloads: Dictionary = autoloads_declared()
-			for used: String in classes_used_in(content, autoloads):
-				_name(deps, path, str(autoloads[used]), { "by_autoload": used })
+			_name_globals(deps, path, content)
 	return deps
+
+
+## Adds to [param deps] the scripts [param content], the code of the script at [param path], uses
+## by a class or autoload name. A script uses another by its class_name as surely as by a preload,
+## and only the reverse walk looked for that: asked what a script depends on, the answer left out
+## the script it typed a variable with, while asking what used that script named this one. An
+## autoload's global name is the same kind of use, of the script registered under it.
+func _name_globals(deps: Array[Dictionary], path: String, content: String) -> void:
+	var classes: Dictionary = classes_declared()
+	for used: String in classes_used_in(content, classes):
+		_name(deps, path, str(classes[used]), { "by_class": used })
+	var autoloads: Dictionary = autoloads_declared()
+	for used: String in classes_used_in(content, autoloads):
+		_name(deps, path, str(autoloads[used]), { "by_autoload": used })
 
 
 # Adds [param dep_path] to [param deps], what [param path] depends on, once however many times it
@@ -1049,3 +1090,14 @@ class GdhDependencyWalk:
 		max_depth = p_max_depth
 		include_built_in = p_include_built_in
 		circular_references = p_circular_references
+
+
+## What a reverse walk looks for: a file's path and uid, the class it declares and the autoload
+## that names it, with a pattern for each name.
+class GdhSought:
+	## The file's path and its uid, empty for a file that is gone.
+	var target: Dictionary = {}
+	var class_named: String = ""
+	var by_class: RegEx = null
+	var autoload_named: String = ""
+	var by_autoload: RegEx = null

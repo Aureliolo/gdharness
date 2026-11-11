@@ -115,46 +115,16 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 	var in_file: bool = GdhProjectFile.sets(setting_path)
 
 	var wanted: int = _wanted_type(setting_path, old_value if had_value else null)
-	# A value of fields or a colour's html code is fitted as a property write fits it, so a value
-	# one of them takes the other takes too. A number is left to the check below, which refuses one
-	# the setting would cut where fitting it would cut it.
-	var final_value: Variant = _values.deserialize_value(value)
-	if final_value is Dictionary or (wanted == TYPE_COLOR and final_value is String):
-		final_value = _values.fitted(value, wanted)
-	# An enum setting takes the name the editor's menu shows, as a property write does.
-	if wanted == TYPE_INT and final_value is String:
-		var declared: Dictionary = _declared(setting_path)
-		if GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE)) == PROPERTY_HINT_ENUM:
-			var by_name: Array = GdhDeclared.enum_by_name(
-				ProjectSettings, declared, str(final_value), "ProjectSettings"
-			)
-			if by_name[0]:
-				final_value = by_name[1]
-			elif not str(by_name[1]).is_empty():
-				return _log.failure(str(by_name[1]))
-	if wanted > TYPE_NIL and final_value != null and typeof(final_value) != wanted:
-		if not _converts_faithfully(final_value, wanted):
-			return _log.failure(_cannot_hold(setting_path, wanted, final_value))
-		final_value = type_convert(final_value, wanted)
-	# JSON carries every number as a float and a new setting has no declared type to fit one to, so
-	# a whole number was saved as 800.0 beside an answer saying 800.
-	if not had_value and wanted == TYPE_NIL and final_value is float:
-		var number: float = final_value
-		if number == floorf(number) and absf(number) < 9.0e15:
-			final_value = int(number)
-	# A tag that could not be built is still the dictionary it arrived as, and a setting nothing
-	# declares took it as one: the file was given the tag key by key, beside an answer of success.
-	if final_value is Dictionary:
-		var held: Dictionary = final_value
-		if held.has("_type"):
-			return _log.failure(_unbuilt(setting_path, held))
+	var fitted: Array = _fitted_value(setting_path, value, wanted)
+	if fitted[0] and not had_value and wanted == TYPE_NIL:
+		fitted[1] = _whole_if_whole(fitted[1])
 	# A typed list or map is written back with its type, since a script reading the setting into a
 	# typed variable fails on an untyped one: gdUnit4's session hooks failed every test run.
-	if had_value:
-		var typed: Array = _typed_like(old_value, final_value, setting_path)
-		if not typed[0]:
-			return _log.failure(str(typed[1]))
-		final_value = typed[1]
+	if fitted[0] and had_value:
+		fitted = _typed_like(old_value, fitted[1], setting_path)
+	if not fitted[0]:
+		return _log.failure(str(fitted[1]))
+	var final_value: Variant = fitted[1]
 
 	var answer: Dictionary = {
 		"setting_path": setting_path,
@@ -165,15 +135,7 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 		"saved": true,
 	}
 	if not laid.is_empty():
-		var read: Variant = _values.serialize_value(laid["value"])
-		answer["overridden_in"] = { "file": laid["file"], "value": read }
-		answer["overriddenNote"] = (
-			(
-				"A run on this machine still reads %s for it from %s, which a run lays over "
-				+ "project.godot and the editor does not."
-			)
-			% [JSON.stringify(read), laid["file"]]
-		)
+		_note_laid_over(answer, laid)
 	# The same value in the same type is no change, and the file is left alone: a save rewrites it
 	# whole. The type is compared as well, so an int setting the file holds as 50.0 is still put
 	# right.
@@ -190,19 +152,105 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 			)
 		return answer
 
-	var near: PackedStringArray = []
 	if not had_value:
-		near = _settings_near(setting_path)
-	if not near.is_empty():
-		answer["note"] = (
-			(
-				"No setting %s existed, so this wrote a new one, which the engine reads only where"
-				+ " something asks for it by that name. The nearest %s %s."
-			)
-			% [setting_path, "setting is" if near.size() == 1 else "settings are", ", ".join(near)]
+		_note_near(answer, setting_path)
+	_note_missing(answer, setting_path, final_value)
+	ProjectSettings.set_setting(setting_path, final_value)
+	var err: Error = GdhProjectFile.save([setting_path])
+	if err != OK:
+		return _log.failure("Failed to save project.godot: " + error_string(err))
+	_note_overrides(answer, setting_path)
+	return answer
+
+
+## [code][true, value][/code] with [param value] fitted to the type [param wanted], or
+## [code][false, refusal][/code] for a value the setting cannot hold as given.
+func _fitted_value(setting_path: String, value: Variant, wanted: int) -> Array:
+	# A value of fields or a colour's html code is fitted as a property write fits it, so a value
+	# one of them takes the other takes too. A number is left to the check below, which refuses one
+	# the setting would cut where fitting it would cut it.
+	var final_value: Variant = _values.deserialize_value(value)
+	if final_value is Dictionary or (wanted == TYPE_COLOR and final_value is String):
+		final_value = _values.fitted(value, wanted)
+	# An enum setting takes the name the editor's menu shows, as a property write does.
+	if wanted == TYPE_INT and final_value is String:
+		var by_name: Array = _enum_named(setting_path, str(final_value))
+		if by_name[0]:
+			final_value = by_name[1]
+		elif not str(by_name[1]).is_empty():
+			return [false, by_name[1]]
+	if wanted > TYPE_NIL and final_value != null and typeof(final_value) != wanted:
+		if not _converts_faithfully(final_value, wanted):
+			return [false, _cannot_hold(setting_path, wanted, final_value)]
+		final_value = type_convert(final_value, wanted)
+	# A tag that could not be built is still the dictionary it arrived as, and a setting nothing
+	# declares took it as one: the file was given the tag key by key, beside an answer of success.
+	if final_value is Dictionary:
+		var held: Dictionary = final_value
+		if held.has("_type"):
+			return [false, _unbuilt(setting_path, held)]
+	return [true, final_value]
+
+
+## The enum value [param named] stands for in the setting's menu, as
+## [method GdhDeclared.enum_by_name] answers it. [code][false, ""][/code] for a setting that is no
+## enum.
+func _enum_named(setting_path: String, named: String) -> Array:
+	var declared: Dictionary = _declared(setting_path)
+	if GdhRead.as_int(declared.get("hint", PROPERTY_HINT_NONE)) != PROPERTY_HINT_ENUM:
+		return [false, ""]
+	return GdhDeclared.enum_by_name(ProjectSettings, declared, named, "ProjectSettings")
+
+
+## [param value] as an int when it is a whole float. JSON carries every number as a float and a
+## new setting has no declared type to fit one to, so a whole number was saved as 800.0 beside an
+## answer saying 800.
+static func _whole_if_whole(value: Variant) -> Variant:
+	if not value is float:
+		return value
+	var number: float = value
+	if number == floorf(number) and absf(number) < 9.0e15:
+		return int(number)
+	return value
+
+
+## Notes in [param answer] the value a run reads from the override file [param laid] names.
+func _note_laid_over(answer: Dictionary, laid: Dictionary) -> void:
+	var read: Variant = _values.serialize_value(laid["value"])
+	answer["overridden_in"] = { "file": laid["file"], "value": read }
+	answer["overriddenNote"] = (
+		(
+			"A run on this machine still reads %s for it from %s, which a run lays over "
+			+ "project.godot and the editor does not."
 		)
-	# Written as given, since a file can be made after the setting names it, as an import makes a
-	# translation.
+		% [JSON.stringify(read), laid["file"]]
+	)
+
+
+## Notes in [param answer] the settings named nearest a new one, which may be the one meant.
+func _note_near(answer: Dictionary, setting_path: String) -> void:
+	var near: PackedStringArray = _settings_near(setting_path)
+	if near.is_empty():
+		return
+	answer["note"] = (
+		(
+			"No setting %s existed, so this wrote a new one, which the engine reads only where"
+			+ " something asks for it by that name. The nearest %s %s."
+		)
+		% [setting_path, "setting is" if near.size() == 1 else "settings are", ", ".join(near)]
+	)
+
+
+## Adds [param said] to the note in [param answer], after any note already there.
+static func _add_note(answer: Dictionary, said: String) -> void:
+	answer["note"] = (str(answer["note"]) + " " if answer.has("note") else "") + said
+
+
+## Notes in [param answer] the files [param final_value] names that are not there, and what makes
+## each. The value is written as given, since a file can be made after the setting names it, as an
+## import makes a translation.
+func _note_missing(answer: Dictionary, setting_path: String, final_value: Variant) -> void:
+	var translating: bool = setting_path == "internationalization/locale/translations"
 	var missing: Array[String] = _missing_files(final_value)
 	if not missing.is_empty():
 		answer["missing_files"] = missing
@@ -219,54 +267,50 @@ func set_project_setting(params: Dictionary) -> Dictionary:
 				". project_import reimport makes the translation files from " + ", ".join(made)
 			)
 		var resources: Array[String] = []
-		var translating: bool = setting_path == "internationalization/locale/translations"
 		for path: String in missing:
 			var kind: String = path.get_extension()
 			if kind == "res" or (kind == "tres" and not translating):
 				resources.append(path)
 		if not resources.is_empty():
 			said += ". resource_edit create makes " + ", ".join(resources)
-		answer["note"] = (str(answer["note"]) + " " if answer.has("note") else "") + said + "."
-	if setting_path == "internationalization/locale/translations":
+		_add_note(answer, said + ".")
+	if translating:
 		var untranslated: String = text_translations_line(final_value)
 		if not untranslated.is_empty():
-			answer["note"] = (
-				(str(answer["note"]) + " " if answer.has("note") else "")
-				+ untranslated
-				+ ". resource_edit create writes a Translation to a .res path."
+			_add_note(
+				answer,
+				untranslated + ". resource_edit create writes a Translation to a .res path."
 			)
-	ProjectSettings.set_setting(setting_path, final_value)
-	var err: Error = GdhProjectFile.save([setting_path])
-	if err != OK:
-		return _log.failure("Failed to save project.godot: " + error_string(err))
-	# An override still replaces what was written wherever its feature is, and a write of the base
-	# value read as if it reached every build.
+
+
+## Notes in [param answer] the feature overrides of [param setting_path]. An override still
+## replaces what was written wherever its feature is, and a write of the base value read as if it
+## reached every build.
+func _note_overrides(answer: Dictionary, setting_path: String) -> void:
 	var overrides: Dictionary = GdhSettingReads.overrides_of(setting_path, _values)
-	if not overrides.is_empty():
-		answer["overrides"] = overrides
-		var parts: Array[String] = []
-		for feature: Variant in overrides:
-			parts.append(
-				(
-					"one with the feature %s reads %s from %s.%s"
-					% [feature, JSON.stringify(overrides[feature]), setting_path, feature]
-				)
-			)
-		answer["overridesNote"] = (
+	if overrides.is_empty():
+		return
+	answer["overrides"] = overrides
+	var parts: Array[String] = []
+	for feature: Variant in overrides:
+		parts.append(
 			(
-				"Not every build reads what was written: %s. Set or unset an override to change "
-				+ "what its builds read."
+				"one with the feature %s reads %s from %s.%s"
+				% [feature, JSON.stringify(overrides[feature]), setting_path, feature]
 			)
-			% "; ".join(parts)
 		)
-	return answer
+	answer["overridesNote"] = (
+		(
+			"Not every build reads what was written: %s. Set or unset an override to change "
+			+ "what its builds read."
+		)
+		% "; ".join(parts)
+	)
 
 
 ## Whether the engine loads what [param setting_path] names as it boots, and so prints an error for
-## a
-## file that is not there. Measured on a headless boot: the icon, the bus layout and a setting only
-## a
-## tool reads print nothing.
+## a file that is not there. Measured on a headless boot: the icon, the bus layout and a setting
+## only a tool reads print nothing.
 static func _loaded_at_boot(setting_path: String) -> bool:
 	return setting_path.begins_with("autoload/") or setting_path in BOOT_LOADED
 
