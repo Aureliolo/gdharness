@@ -57909,6 +57909,43 @@ function testASuiteDependsOnEveryFileItsScriptsAndResourcesNameInAnySpelling(): 
 }
 
 /**
+ * A suite reading a computed path depends on files in a folder holding a `.gdignore` and in a folder
+ * a link leads to, since a script reads the disk and not the engine's file system.
+ */
+function testAComputedReadDependsOnFoldersTheEngineIgnoresAndLinksLeadTo(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-ignored-'));
+  const elsewhere = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-linked-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'raw/.gdignore': '',
+      'raw/a.json': '1\n',
+    });
+    writeTree(elsewhere, { 'shared.json': '1\n' });
+    symlinkSync(elsewhere, join(project, 'linked'), 'junction');
+    symlinkSync(project, join(project, 'raw', 'back'), 'junction');
+    const print = (): string => new SuiteInputs(new ProjectScripts(project), ['1']).printOf([EVERY_FILE]);
+    for (const [file, how] of [
+      [join(project, 'raw', 'a.json'), 'a folder holding a .gdignore'],
+      [join(elsewhere, 'shared.json'), 'a folder a link leads to'],
+    ] as const) {
+      const before = print();
+      writeFileSync(file, 'changed\n');
+      assert.notEqual(print(), before, `a file in ${how} is read by a computed path`);
+    }
+    const names: string[] = [];
+    walkSeen(project, (under) => names.push(under));
+    assert.deepEqual(
+      names,
+      ['linked/shared.json', 'project.godot', 'raw/.gdignore', 'raw/a.json'],
+      'and a link back up the tree is not walked again',
+    );
+  } finally {
+    sweep(project, elsewhere);
+  }
+}
+
+/**
  * A walk over a project passes over a file or folder removed after it was listed, as an engine on
  * Windows removes the copy of a library it loads, and a suite's print leaves such copies out.
  */
@@ -86903,6 +86940,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeptScriptReferenceOfNoBytesIsMadeAgainNotPlaced,
   testASuitesInputsAreWhatItsEngineLoaded,
   testASuiteDependsOnEveryFileItsScriptsAndResourcesNameInAnySpelling,
+  testAComputedReadDependsOnFoldersTheEngineIgnoresAndLinksLeadTo,
   testAReadsCallersAreThoseThatCanReachIt,
   testAFileGoneBetweenTheListingAndTheReadIsPassedOver,
   testTheCompileCheckAndUnattributedFaultsAreJudged,

@@ -15,7 +15,7 @@
  */
 
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { join, posix } from 'node:path';
 import { classesNamedIn } from './class-cache.js';
 import { regionsOf } from './gdscript-source.js';
@@ -1126,10 +1126,10 @@ function joinedString(expression: string, named: (name: string) => string | unde
 }
 
 /**
- * Calls [param seen] with each file under [param root] that Godot's file system sees, its path from
- * the root with forward slashes, its bytes and when it was modified: no hidden folder, no folder
- * holding a `.gdignore`, and none of the copies an engine makes of a library it loads. A file gone
- * between the listing and the read is passed over.
+ * Calls [param seen] with each file under [param root] that a script can read, its path from the
+ * root with forward slashes, its bytes and when it was modified: no hidden folder and none of the
+ * copies an engine makes of a library it loads. A file gone between the listing and the read is
+ * passed over.
  */
 export function walkSeen(root: string, seen: (under: string, bytes: Buffer, modified: number) => void): void {
   namesSeen(root, (under, file, folder) => {
@@ -1142,29 +1142,37 @@ export function walkSeen(root: string, seen: (under: string, bytes: Buffer, modi
 
 /**
  * Every file and folder under [param root] that [method walkSeen] would walk, in its order, by where
- * it lies under the root, a folder ending in a slash. A folder holding a `.gdignore` is named, since
- * a listing sees it, but nothing in it is.
+ * it lies under the root, a folder ending in a slash. A folder holding a `.gdignore` is walked too,
+ * since the engine leaves it out of its file system and a script still reads it from the disk. A
+ * link to a folder or a file is followed, once per folder on the way down so a loop ends.
  */
 function namesSeen(root: string, seen: (under: string, file: string, folder: boolean) => void): void {
-  const walk = (directory: string, under: string): void => {
-    if (existsSync(join(directory, '.gdignore'))) {
-      return;
+  const realOf = (path: string): string | null => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return null;
     }
-    const entries = entriesOf(directory).toSorted((a, b) => a.name.localeCompare(b.name));
+  };
+  const walk = (directory: string, under: string, above: ReadonlySet<string>): void => {
+    // Sorted by code unit, because a locale's order puts the same names differently from one machine to the next.
+    const entries = entriesOf(directory).toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     const names = entries.map((entry) => entry.name);
     for (const entry of entries) {
       const file = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        if (!entry.name.startsWith('.')) {
+      const linked = entry.isSymbolicLink() ? statOf(file) : undefined;
+      if (linked?.isDirectory() ?? entry.isDirectory()) {
+        const real = realOf(file);
+        if (!entry.name.startsWith('.') && real !== null && !above.has(real)) {
           seen(`${under}${entry.name}/`, file, true);
-          walk(file, `${under}${entry.name}/`);
+          walk(file, `${under}${entry.name}/`, new Set([...above, real]));
         }
-      } else if (entry.isFile() && !isLibraryCopy(entry.name, names)) {
+      } else if ((linked?.isFile() ?? entry.isFile()) && !isLibraryCopy(entry.name, names)) {
         seen(`${under}${entry.name}`, file, false);
       }
     }
   };
-  walk(root, '');
+  walk(root, '', new Set([realOf(root) ?? root]));
 }
 
 /** The extensions the engine loads into every run of [param projectPath]. */
