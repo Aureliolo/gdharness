@@ -136,7 +136,7 @@ export interface HeldBreakpoint {
 }
 
 /** A file whose breakpoints the adapter would not take back, and what it said. */
-export interface RefusedBreakpoint {
+interface RefusedBreakpoint {
   readonly scriptPath: string;
   readonly reason: string;
 }

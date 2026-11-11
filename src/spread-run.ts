@@ -61,7 +61,7 @@ const VALUED = new Set([
   '--cores',
 ]);
 
-export interface SpreadOptions {
+interface SpreadOptions {
   readonly projectPath: string;
   /** The bench's scene, as a `res://` path. */
   readonly scene: string;

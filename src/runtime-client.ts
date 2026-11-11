@@ -233,7 +233,7 @@ function dialAddress(address: string): string {
 }
 
 /** What a sweep of the announcement directories found: games to talk to, and games too new. */
-export interface RuntimesAnnounced {
+interface RuntimesAnnounced {
   readonly running: RuntimeEndpoint[];
   readonly unspoken: UnspokenRuntime[];
 }
@@ -591,7 +591,7 @@ const LOOK_EVERY_MS = 50;
 export const ANNOUNCE_BUDGET_MS = 5_000;
 
 /** How the wait below is bounded: how long, where to look, and when to stop early. */
-export interface WaitingForRuntime {
+interface WaitingForRuntime {
   readonly budgetMs?: number;
   readonly directories?: readonly string[];
   /** Answered on every look. True ends the wait: a game held at a breakpoint is not booting. */
@@ -648,7 +648,7 @@ export async function announcedSince(
   }
 }
 
-export type RuntimeChoice = { endpoint: RuntimeEndpoint } | { problem: string };
+type RuntimeChoice = { endpoint: RuntimeEndpoint } | { problem: string };
 
 function describe(endpoint: RuntimeEndpoint): string {
   return `pid ${endpoint.pid} on ${endpoint.address}:${endpoint.port} (${endpoint.project.name || 'unnamed'} at ${endpoint.project.path})`;
@@ -847,7 +847,7 @@ export function chooseRuntime(
   };
 }
 
-export type RuntimeReply =
+type RuntimeReply =
   | { readonly ok: true; readonly payload: Record<string, unknown>; readonly endpoint: RuntimeEndpoint }
   | {
       readonly ok: false;
@@ -864,7 +864,7 @@ export type RuntimeReply =
  * the request's id for `lateAnswer`. A function is called with the reply when it comes, or with the
  * failure once the late wait ends, for work that has to outlive the wait without being collected.
  */
-export type AfterTheWait = 'drop' | 'keep' | ((reply: RuntimeReply) => void);
+type AfterTheWait = 'drop' | 'keep' | ((reply: RuntimeReply) => void);
 
 let nextRequestId = 1;
 
@@ -881,7 +881,7 @@ const LATE_ANSWER_MS = 30 * 60_000;
 const LATE_KEPT = 50;
 
 /** What became of a request the wait ran out on, kept under its id for `lateAnswer`. */
-export type LateAnswer =
+type LateAnswer =
   | { readonly state: 'waiting'; readonly command: string; readonly sentAt: number }
   | {
       readonly state: 'answered';

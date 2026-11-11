@@ -14,7 +14,7 @@ import { installedByUs } from './project-scan.js';
 import { importRecord } from './reimport.js';
 
 /** One file whose import is behind it, by its `res://` path, with why. */
-export interface StaleImport {
+interface StaleImport {
   readonly path: string;
   readonly reason: string;
 }

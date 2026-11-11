@@ -40,7 +40,7 @@ export function waitFromEnv(variable: string, fallback: number): number {
   return Number.isSafeInteger(override) && override > 0 ? override : fallback;
 }
 
-export interface LaunchHost {
+interface LaunchHost {
   readonly platform: NodeJS.Platform;
   readonly variables: NodeJS.ProcessEnv;
 }

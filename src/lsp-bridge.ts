@@ -29,7 +29,7 @@ const HOST = '127.0.0.1';
 const LOOK_AGAIN_MS = 500;
 
 /** The ports one editor of the project says it serves. */
-export interface EditorRecord {
+interface EditorRecord {
   readonly file: string;
   readonly pid: number;
   readonly lspPort: number;
@@ -124,7 +124,7 @@ export function removeLeftRecords(
 }
 
 /** Where `gdharness lsp` looks for the language server, in order. */
-export interface LspPortChoice {
+interface LspPortChoice {
   readonly port: number;
   readonly from: string;
 }
@@ -181,7 +181,7 @@ async function probe(port: number, projectPath: string): Promise<Probe> {
 }
 
 /** Options of `gdharness lsp`. */
-export interface LspOptions {
+interface LspOptions {
   readonly projectPath: string;
   readonly port: number | undefined;
   readonly waitSeconds: number;

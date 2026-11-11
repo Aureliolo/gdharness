@@ -97,7 +97,7 @@ import {
 } from './suite-plan.js';
 import { getLocalVersion } from './version.js';
 
-export interface TestOptions {
+interface TestOptions {
   readonly projectPath: string;
   /** The suites, directories and `suite.gd:test_case` cases named, or none for every suite. */
   readonly selected: readonly string[];

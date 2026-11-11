@@ -97,13 +97,13 @@ export const SLOT_COUNT_VARIABLE = 'GODOT_ENGINE_SLOT_COUNT';
 const PROCESSORS_A_SLOT = 2;
 
 /** Where the slots are and how many there are. */
-export interface SlotsChosen {
+interface SlotsChosen {
   readonly directory: string;
   readonly count: number;
 }
 
 /** What the machine says, handed in so every branch can be asked about without its machine. */
-export interface SlotsMachine {
+interface SlotsMachine {
   readonly env: NodeJS.ProcessEnv;
   readonly platform: NodeJS.Platform;
   readonly processors: number;
@@ -261,7 +261,7 @@ export const SLOT_YIELD_MS = 5000;
 const MEMORY_TAKER = 'memory';
 
 /** A taker waiting for one of the machine's slots, as its mark names it. */
-export interface SlotWaiter {
+interface SlotWaiter {
   readonly mark: string;
   readonly taker: SlotTaker;
   /** When it began to wait, in milliseconds since the epoch. */
@@ -433,7 +433,7 @@ const SEATED_SUFFIX = '.seated';
 type SlotLimit = 'gate' | 'kept' | 'games' | 'starved';
 
 /** The slot numbers a take may try, in order, and what holds it to them when something does. */
-export type SlotsDrawn =
+type SlotsDrawn =
   | {
       readonly numbers: readonly number[];
       readonly limit?: Exclude<SlotLimit, 'starved'>;
@@ -501,13 +501,13 @@ export function starvedSaid(claim: StarvedClaim): string {
 }
 
 /** What takes a slot, as its environment says: see {@link slotsDrawnOn}. */
-export type SlotTaker = 'gate' | 'timing' | 'tier' | 'other';
+type SlotTaker = 'gate' | 'timing' | 'tier' | 'other';
 
 /**
  * The machine's queue as a take reads it: whether a live gate is in it, and `spare` when the
  * queue says some of the gates' free slots are ones no queued gate can take now ({@link SPARE_FILE}).
  */
-export type GateQueue = 'none' | 'queued' | 'spare';
+type GateQueue = 'none' | 'queued' | 'spare';
 
 /**
  * The slot numbers of [param count] a take by [param taker] may try now, in the order it tries
@@ -698,7 +698,7 @@ export interface SlotHolder {
 }
 
 /** An engine a lock names beside its holder. */
-export interface SlotEngine {
+interface SlotEngine {
   readonly pid: number;
   readonly started: number;
 }

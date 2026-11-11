@@ -27,7 +27,7 @@ interface PromptStep {
   readonly why: string;
 }
 
-export interface PromptSpec {
+interface PromptSpec {
   readonly name: string;
   readonly title: string;
   readonly description: string;

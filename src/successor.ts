@@ -31,7 +31,7 @@ const LIST_WITHIN_MS = 15_000;
 const POLL_MS = 250;
 
 /** A process listed as a candidate for the one a game restarted itself into. */
-export interface ListedSuccessor {
+interface ListedSuccessor {
   readonly pid: number;
   /** When it started, in milliseconds. Up to a second early on POSIX, which dates no finer. */
   readonly startedAt: number;

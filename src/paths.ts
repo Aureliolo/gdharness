@@ -37,7 +37,7 @@ const RESOURCE_SCHEME = 'res://';
  */
 const OTHER_SCHEME = /^[a-zA-Z][a-zA-Z\d+.-]+:\/\//;
 
-export type Containment =
+type Containment =
   | {
       readonly ok: true;
       /** Absolute, for this process to open. */

@@ -243,7 +243,7 @@ export async function openEditorProcess(
 }
 
 /** `gdharness editor open [project] [--hidden] [--silent] [--until PID]`, read. */
-export interface EditorOpenOptions {
+interface EditorOpenOptions {
   readonly projectPath: string;
   readonly start: EditorStart;
 }
@@ -302,7 +302,7 @@ export function editorOpenOptionsOf(args: readonly string[], cwd: string): Edito
  * What `gdharness editor open` did: an editor opened, one already running, or a refusal. An editor
  * opened to quit with a process says under [param unheld] why nothing will close it, when nothing will.
  */
-export type EditorOpenOutcome =
+type EditorOpenOutcome =
   | { readonly opened: number; readonly unheld: string | null }
   | { readonly running: number }
   | { readonly refused: string };

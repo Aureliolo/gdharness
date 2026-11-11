@@ -264,7 +264,7 @@ export function writeRunRecord(record: RunRecord): void {
  * which play, and a note read on that alone gave a later play the console and start time of an
  * earlier one.
  */
-export interface EditorRunNote {
+interface EditorRunNote {
   readonly projectPath: string;
   readonly transcript: string;
   readonly startedAt: number;
@@ -731,7 +731,7 @@ export async function couldStillBeTheRecordedRun(record: RunRecord): Promise<boo
 }
 
 /** What the operating system will say about a process, and how much of it. */
-export interface RunningAs {
+interface RunningAs {
   /** `none` is Windows naming nothing at all, with why under `unread`. */
   readonly kind: 'image' | 'commandLine' | 'none';
   readonly text: string;

@@ -57,7 +57,7 @@ function initializeTimeoutMs(): number {
  * How long a request is given, references and initialize apart from the rest, and how long a
  * port the connected editor names is waited on to start listening.
  */
-export interface LSPTimeouts {
+interface LSPTimeouts {
   readonly requestMs: number;
   readonly referencesMs: number;
   readonly initializeMs: number;

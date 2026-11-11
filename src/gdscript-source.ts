@@ -534,7 +534,7 @@ function afterHeader(text: string, from: number): number {
 }
 
 /** Why a line holding code is one the engine never stops on. */
-export type NoStop =
+type NoStop =
   | { readonly kind: 'declaration' | 'else' }
   | { readonly kind: 'continuation'; readonly of: number };
 

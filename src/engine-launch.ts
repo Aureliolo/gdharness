@@ -219,7 +219,7 @@ export function roomForAnother(available: number, starting: number): boolean {
 }
 
 /** The memory the machine can give engines, how the line on room words it, and why a reading failed. */
-export interface MemoryRoom {
+interface MemoryRoom {
   readonly bytes: number;
   readonly said: string;
   readonly unread?: string;
