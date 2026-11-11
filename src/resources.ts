@@ -230,6 +230,12 @@ function scanValue(value: string): { depth: number; inString: boolean } {
 type IniValue = string | number | boolean | null;
 
 /**
+ * The section of the keys above a file's first header, named as Godot's ConfigFile names it, so a
+ * `[root]` header opens a section of its own.
+ */
+const TOP_LEVEL = '';
+
+/**
  * Every `section/key` a project.godot names, for comparing one reading of it against another.
  *
  * Keys and not values, because what is being looked for is a line that has gone. Godot writes only
@@ -242,7 +248,7 @@ export function settingKeys(content: string): Map<string, IniValue> {
   const named = new Map<string, IniValue>();
   for (const [section, entries] of Object.entries(parseProjectGodot(content))) {
     for (const [key, value] of Object.entries(entries)) {
-      named.set(`${section}/${key}`, value);
+      named.set(section === TOP_LEVEL ? key : `${section}/${key}`, value);
     }
   }
   return named;
@@ -292,7 +298,7 @@ export function parseProjectGodot(content: string): Record<string, Record<string
   // Held rather than looked up again per key, so the section a value lands in is the one the
   // header created and not whatever indexing the record a second time happens to return.
   let section: Record<string, IniValue> = emptyRecord();
-  result['root'] = section;
+  result[TOP_LEVEL] = section;
 
   const lines = content.split(/\r?\n/);
   for (let index = 0; index < lines.length; index += 1) {

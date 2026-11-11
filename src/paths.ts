@@ -133,6 +133,37 @@ export function keptInside(given: string): { file: string; inner: string | undef
 }
 
 /**
+ * Why [param projectPath] holds no Godot project, as the end of a sentence naming it, or null when
+ * it holds one. A project is a project.godot file. A folder of that name is not one, and every read
+ * of it as the project's settings fails.
+ */
+export function notAGodotProject(projectPath: string): string | null {
+  let found: ReturnType<typeof statSync>;
+  try {
+    found = statSync(join(projectPath, 'project.godot'), { throwIfNoEntry: false });
+  } catch (error) {
+    return `has a project.godot that cannot be read (${error instanceof Error ? error.message : String(error)})`;
+  }
+  if (found === undefined) {
+    return 'holds no project.godot';
+  }
+  return found.isFile() ? null : 'holds a folder named project.godot where the project file belongs';
+}
+
+/** Whether [param projectPath] holds a Godot project. */
+export function isGodotProject(projectPath: string): boolean {
+  return notAGodotProject(projectPath) === null;
+}
+
+/** The refusal for a command run on [param projectPath], or null when it holds a Godot project. */
+export function commandProjectRefusal(projectPath: string): string | null {
+  const why = notAGodotProject(projectPath);
+  return why === null
+    ? null
+    : `Not a Godot project: ${projectPath} ${why}. Run from the project directory, or name it on the command line.`;
+}
+
+/**
  * Whether [param path] is a file on this machine's own disks. A network path is not asked about,
  * since a share that does not answer holds the call for as long as the network takes to give up.
  */

@@ -9,12 +9,13 @@
  * Godot binds one language server a machine by default and the editor holding it may be another
  * project's.
  */
-import { existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
+import { readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { connect, type Socket } from 'node:net';
 import { join, resolve } from 'node:path';
 import { alive } from './alive.js';
 import { EngineUsageError, errorMessage } from './errors.js';
 import { DEFAULT_LSP_PORT, GodotLSPClient } from './lsp_client.js';
+import { commandProjectRefusal } from './paths.js';
 import { portFromEnvOrNull, portIn } from './ports.js';
 import { oneShotOptionOf, startTimesOf } from './process-children.js';
 import { isRecord } from './records.js';
@@ -222,10 +223,9 @@ export function lspOptionsOf(args: readonly string[], cwd: string): LspOptions {
     }
   }
   const projectPath = resolve(cwd, named ?? '.');
-  if (!existsSync(join(projectPath, 'project.godot'))) {
-    throw new EngineUsageError(
-      `Not a Godot project: ${projectPath} holds no project.godot. Run from the project directory, or name it on the command line.`,
-    );
+  const refused = commandProjectRefusal(projectPath);
+  if (refused !== null) {
+    throw new EngineUsageError(refused);
   }
   return { projectPath, port, waitSeconds };
 }

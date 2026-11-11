@@ -246,7 +246,7 @@ function projectFileNeverThrowsOrPollutes(): void {
       const parsed = parseProjectGodot(lines.join(eol));
 
       assert.equal(Object.getPrototypeOf(parsed), null);
-      assert.ok(Object.hasOwn(parsed, 'root'));
+      assert.ok(Object.hasOwn(parsed, ''));
       for (const section of Object.values(parsed)) {
         assert.equal(Object.getPrototypeOf(section), null);
         for (const value of Object.values(section)) {
@@ -277,7 +277,7 @@ interface WrittenValue {
 }
 
 const identifier = fc.stringMatching(/^[A-Za-z_][A-Za-z0-9_]{0,11}$/);
-const sectionName = fc.stringMatching(/^[a-z_][a-z0-9_.]{0,11}$/).filter((name) => name !== 'root');
+const sectionName = fc.oneof(fc.constant('root'), fc.stringMatching(/^[a-z_][a-z0-9_.]{0,11}$/));
 const settingKey = fc.stringMatching(/^[a-z_][a-z0-9_/]{0,15}$/);
 
 const writtenValue: fc.Arbitrary<WrittenValue> = fc.oneof(
@@ -331,10 +331,10 @@ const writtenProject: fc.Arbitrary<WrittenProject> = fc
     fc.constantFrom('\n', '\r\n'),
     fc.array(noise, { minLength: 40, maxLength: 40 }),
   )
-  .map(([rootSettings, sections, equals, eol, noiseLines]) => {
+  .map(([topLevelSettings, sections, equals, eol, noiseLines]) => {
     const lines: string[] = [];
-    const root: Record<string, IniValue> = {};
-    const expected: Record<string, Record<string, IniValue>> = { root };
+    const topLevel: Record<string, IniValue> = {};
+    const expected: Record<string, Record<string, IniValue>> = { '': topLevel };
     let noiseAt = 0;
     const filler = (): string => noiseLines[noiseAt++ % noiseLines.length] ?? '';
 
@@ -351,7 +351,7 @@ const writtenProject: fc.Arbitrary<WrittenProject> = fc
       }
     };
 
-    write(root, rootSettings);
+    write(topLevel, topLevelSettings);
     for (const [name, pairs] of sections) {
       const section: Record<string, IniValue> = {};
       // The same for a section named `__proto__`, which the pattern allows too.
@@ -383,13 +383,13 @@ function projectFilesRoundTrip(): void {
   );
 
   // Held on purpose rather than left to the generator, which found it once in a great many runs:
-  // a setting named `__proto__` reads back as a key of that name, in the root and in a section,
+  // a setting named `__proto__` reads back as a key of that name, at the top and in a section,
   // and so does a section named that.
   const named = plain(parseProjectGodot('__proto__=1\n[a]\n__proto__="x"\n[__proto__]\nb=2\n'));
   assert.deepEqual(
     named,
     Object.fromEntries([
-      ['root', Object.fromEntries([['__proto__', 1]])],
+      ['', Object.fromEntries([['__proto__', 1]])],
       ['a', Object.fromEntries([['__proto__', 'x']])],
       ['__proto__', { b: 2 }],
     ]),
