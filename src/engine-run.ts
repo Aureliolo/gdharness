@@ -156,6 +156,81 @@ export async function runEngine(
   }
 }
 
+/** How an engine is started: directly, or through the helper that gives it a desktop of its own. */
+interface Launch {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly env: NodeJS.ProcessEnv;
+  readonly files: HelperFiles | null;
+}
+
+function launchOf(
+  executable: string,
+  args: readonly string[],
+  lock: string,
+  desktop: RunOptions['desktop'],
+): Launch {
+  const env = onTheSlot(process.env, lock);
+  if (desktop === undefined) {
+    return { command: executable, args, env, files: null };
+  }
+  const at = (name: string): string => join(desktop.scratch, name);
+  const files: HelperFiles = {
+    spec: at('spec'),
+    pid: at('pid'),
+    error: at('error'),
+    stop: '',
+    step: at('step'),
+    exit: at('exit'),
+  };
+  // A start after one that crashed must not read that one's files.
+  for (const file of [files.pid, files.error, files.step, files.exit]) {
+    rmSync(file, { force: true });
+  }
+  const wrapper = throughHelper(
+    { desktop: HIDDEN_DESKTOP, directory: desktop.directory, endsWithHelper: true },
+    executable,
+    args,
+    files,
+  );
+  return {
+    command: wrapper.command,
+    args: wrapper.args,
+    env: { ...env, [DESKTOP_VARIABLE]: HIDDEN_DESKTOP },
+    files,
+  };
+}
+
+/** What the run's handlers share while it lasts. */
+interface RunState {
+  pid: number | undefined;
+  failure: string | null;
+  closed: boolean;
+}
+
+/** Ends the run once its engine has used more than [param timeout] allows. */
+async function killPastTimeout(
+  child: { kill(): boolean },
+  timeout: { readonly ms: number; readonly said: string },
+  sample: () => Promise<Sample>,
+  state: RunState,
+  noticeEngine: () => void,
+): Promise<void> {
+  const spent = new Spent(nowSeconds(), await sample(), state.pid);
+  while (!state.closed) {
+    await delay(MEASURE_MS);
+    noticeEngine();
+    spent.counted(await sample(), state.pid);
+    const at = nowSeconds();
+    const past = spent.past(timeout.ms / 1000, at);
+    if (past !== null) {
+      state.failure ??= `it ran past its ${timeout.said}${countedBy(spent, past, at)}`;
+      child.kill();
+      return;
+    }
+  }
+}
+
 /**
  * Settles on `close` rather than `exit`: the streams can still hold the run's last lines when
  * `exit` fires, and those are the lines a verdict is read from. Node emits `close` after a failed
@@ -170,36 +245,7 @@ function runStarted(
 ): Promise<EngineRun> {
   return new Promise((resolve) => {
     const log = new GameLog();
-    let failure: string | null = null;
-    let command = executable;
-    let spawned: readonly string[] = args;
-    let env = onTheSlot(process.env, lock);
-    let files: HelperFiles | null = null;
-    const { desktop } = options;
-    if (desktop !== undefined) {
-      const at = (name: string): string => join(desktop.scratch, name);
-      files = {
-        spec: at('spec'),
-        pid: at('pid'),
-        error: at('error'),
-        stop: '',
-        step: at('step'),
-        exit: at('exit'),
-      };
-      // A start after one that crashed must not read that one's files.
-      for (const file of [files.pid, files.error, files.step, files.exit]) {
-        rmSync(file, { force: true });
-      }
-      const wrapper = throughHelper(
-        { desktop: HIDDEN_DESKTOP, directory: desktop.directory, endsWithHelper: true },
-        executable,
-        args,
-        files,
-      );
-      command = wrapper.command;
-      spawned = wrapper.args;
-      env = { ...env, [DESKTOP_VARIABLE]: HIDDEN_DESKTOP };
-    }
+    const { command, args: spawned, env, files } = launchOf(executable, args, lock, options.desktop);
     const child = spawnHidden(command, spawned, {
       stdio: ['ignore', 'pipe', 'pipe'],
       env,
@@ -208,12 +254,7 @@ function runStarted(
     belowNormal(child);
     const whole = holdExit(child.pid);
     // The engine itself, which on the hidden desktop the helper starts and writes down.
-    const engineAt = (): number | undefined => {
-      if (files === null) {
-        return child.pid;
-      }
-      return helperPid(files.pid);
-    };
+    const engineAt = (): number | undefined => (files === null ? child.pid : helperPid(files.pid));
     // The lock names this process, and what the engine starts runs on its slot only when it names
     // the engine too.
     if (child.pid !== undefined && files === null) {
@@ -225,65 +266,51 @@ function runStarted(
     child.stderr.on('data', (chunk: Buffer) => {
       log.append('stderr', chunk);
     });
-    const closed = { now: false };
-    const { timeout } = options;
-    let pid = engineAt();
+    const state: RunState = { pid: engineAt(), failure: null, closed: false };
     const found = (engine: number): void => {
       watching(engine, true);
       if (files !== null) {
         void nameSlotEngineOf(lock, process.pid, engine);
       }
     };
-    if (pid !== undefined) {
-      found(pid);
+    const noticeEngine = (): void => {
+      if (state.pid !== undefined) {
+        return;
+      }
+      state.pid = engineAt();
+      if (state.pid !== undefined) {
+        found(state.pid);
+      }
+    };
+    if (state.pid !== undefined) {
+      found(state.pid);
     }
+    const { timeout } = options;
     if (timeout !== undefined && child.pid !== undefined) {
-      const sample = options.sample ?? sampled;
-      void (async () => {
-        const spent = new Spent(nowSeconds(), await sample(), pid);
-        while (!closed.now) {
-          await delay(MEASURE_MS);
-          if (pid === undefined) {
-            pid = engineAt();
-            if (pid !== undefined) {
-              found(pid);
-            }
-          }
-          spent.counted(await sample(), pid);
-          const at = nowSeconds();
-          const past = spent.past(timeout.ms / 1000, at);
-          if (past !== null) {
-            failure ??= `it ran past its ${timeout.said}${countedBy(spent, past, at)}`;
-            child.kill();
-            return;
-          }
-        }
-      })();
+      void killPastTimeout(child, timeout, options.sample ?? sampled, state, noticeEngine);
     }
     child.on('error', (error) => {
-      failure ??=
+      state.failure ??=
         error.name === 'AbortError' ? 'the call was cancelled' : `it could not be started: ${error.message}`;
     });
     child.on('close', (code, closedBy) => {
-      closed.now = true;
-      if (pid !== undefined) {
-        watching(pid, false);
+      state.closed = true;
+      if (state.pid !== undefined) {
+        watching(state.pid, false);
       }
       log.finish();
       // A process that never started has a libuv error number where its exit code would be.
       const started = child.pid !== undefined;
       const told = started ? whole(code) : null;
-      if (files !== null) {
-        const helperSaid = helperFailure(files.error);
-        if (helperSaid !== null) {
-          failure ??= `it could not be started on a desktop of its own: ${helperSaid}`;
-        }
+      const helperSaid = files === null ? null : helperFailure(files.error);
+      if (helperSaid !== null) {
+        state.failure ??= `it could not be started on a desktop of its own: ${helperSaid}`;
       }
       resolve({
         log,
         exitCode: files === null ? told : helperExit(files.exit, told),
         exitSignal: closedBy,
-        failure,
+        failure: state.failure,
       });
     });
   });
