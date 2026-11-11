@@ -27,6 +27,7 @@ import { errorMessage } from './errors.js';
 import { GameLog } from './game-log.js';
 import { belowNormal } from './priority.js';
 import { spawnHidden } from './spawn.js';
+import { windowsStatusOf } from './suite-judge.js';
 import { holdExit } from './whole-exit.js';
 
 export interface EngineRun {
@@ -286,22 +287,10 @@ function runStarted(
 }
 
 /**
- * Windows ends a process that raised an exception it did not handle with the exception's status
- * as its exit code, a number from 0xC0000000 up that says nothing in decimal. A runtime that keeps
- * only the low byte, as Bun does, turns an access violation into a plain 5.
+ * [param code] for a sentence: `exit code 3`, or `exit code 0xC0000005, an access violation, so it
+ * crashed`. A runtime that keeps only the low byte, as Bun does, turns an access violation into a
+ * plain 5.
  */
-const WINDOWS_STATUSES: ReadonlyMap<number, string> = new Map([
-  [0xc0000005, 'an access violation, so it crashed'],
-  [0xc000001d, 'an illegal instruction, so it crashed'],
-  [0xc0000094, 'an integer division by zero, so it crashed'],
-  [0xc00000fd, 'a stack overflow, so it crashed'],
-  [0xc0000135, 'a library it needs was not found, so it never started'],
-  [0xc000013a, 'its console was closed or sent Ctrl+C'],
-  [0xc0000374, 'a corrupted heap, so it crashed'],
-  [0xc0000409, 'a stack buffer overrun or a fast fail, so it crashed'],
-]);
-
-/** [param code] for a sentence: `exit code 3`, or `exit code 0xC0000005, an access violation, so it crashed`. */
 export function exitCodeText(code: number | null): string {
   if (code === null) {
     return 'exit code unknown';
@@ -309,8 +298,7 @@ export function exitCodeText(code: number | null): string {
   if (code < 0xc0000000) {
     return `exit code ${code}`;
   }
-  const hex = `0x${code.toString(16).toUpperCase()}`;
-  return `exit code ${hex}, ${WINDOWS_STATUSES.get(code) ?? 'a Windows error status'}`;
+  return `exit code 0x${code.toString(16).toUpperCase()}, ${windowsStatusOf(code)?.meaning ?? 'a Windows error status'}`;
 }
 
 /** How [param run] ended, for a sentence: `exit code 3`, `ended by SIGTERM`, or this server's reason. */

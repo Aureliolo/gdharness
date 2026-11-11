@@ -214,11 +214,14 @@ import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
 import {
   ALREADY_HELD,
   answersTo,
+  CRASH_HEADER,
+  caseLineOf,
   foldedRepeats,
   forAnswer,
   GameLog,
   type LogEntry,
   raisedMark,
+  suiteOpenedBy,
 } from '../src/game-log.js';
 import {
   callSitesOf,
@@ -277,6 +280,7 @@ import {
   parseJUnit,
   RENDERED_AWAY_NOTE,
   type ScriptError,
+  suitesPrinted,
   withActualsPrinted,
 } from '../src/junit.js';
 import { askTheKeepersDebugger, askTheKeeperToStop, listenForTheServer } from '../src/keeper-channel.js';
@@ -564,11 +568,13 @@ import {
   judgeCompile,
   judgeEngine,
   type RowShare,
+  readExpected,
   readRun,
   rowsAcross,
   secondsOf,
   uncollectedSaid,
   versionFault,
+  withNestedErrors,
 } from '../src/suite-judge.js';
 import {
   type DeclaredSuite,
@@ -37361,7 +37367,7 @@ async function testAnEngineThatCrashesAsItStartsIsStartedAgain(): Promise<void> 
   assert.deepEqual([always.starts, always.waits], [ENGINE_STARTS, [500, 1000]], 'up to its starts in all');
   assert.equal(
     howItEnded(always.ran),
-    'exit code 0xC06D007F, a Windows error status, and printed nothing on any of its 3 starts',
+    'exit code 0xC06D007F, a procedure it needs was not found, so it never started, and printed nothing on any of its 3 starts',
   );
   const failed = await sequence([run(1, printed('ERROR: no such scene'))]);
   assert.deepEqual(
@@ -53648,7 +53654,11 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   // An engine that printed nothing says so, and one that died on a Windows exception says how much
   // memory was free as it ended, which tells a machine that ran out from a fault in the engine.
   const mute = judgeEngine(readRun('\n\n'), handed(['test_a']), clean).faults;
-  assert.ok(mute.includes('the engine printed nothing at all'), mute.join('\n'));
+  assert.deepEqual(
+    mute,
+    ['the engine printed nothing at all', 'the run never printed its summary', `${S_TEST} never started`],
+    'a silent engine says so, and that no summary came and no suite started',
+  );
   const crashed = judgeEngine(readRun(rows([1, 1, 1])), declaredRows, {
     code: 0xc0000005,
     signal: null,
@@ -54558,6 +54568,391 @@ function testARowSkippedForItsDataIsNoPass(): void {
   );
   const onPurpose = judgeEngine(readRun(declaredRun('not yet')), handed, clean);
   assert.deepEqual([onPurpose.faults, onPurpose.passedSuites], [[], [S_TEST]], 'a case skipped on purpose');
+
+  // The reason belongs to the case it is printed under. After the suite's statistics line no case is
+  // open, so the same lines are no one's skip, and the line is read as the stray it is.
+  const afterClose = readRun(
+    [
+      `Run Test Suite: ${S_TEST}`,
+      caseLine(S_TEST, 'test_a', 'STARTED'),
+      caseLine(S_TEST, 'test_a', 'PASSED', '0ms'),
+      'Statistics: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED 1ms',
+      `  Reason: '${typo}'`,
+      "  The test data set at index (0) does not match the expected test parameters: a, b\n'",
+      'ERROR: said after the close',
+    ].join('\n'),
+  );
+  assert.deepEqual(
+    [afterClose.unrunnable, afterClose.mismatched, afterClose.errors.map((error) => error.suite)],
+    [[], [], [null]],
+    'a skip reason printed after the suite closed',
+  );
+  const twoRows = readRun(
+    [
+      `Run Test Suite: ${S_TEST}`,
+      caseLine(S_TEST, 'test_p:0 (1)', 'PASSED', '0ms'),
+      '  The test data set at index (0) does not match the expected test parameters:',
+      `  Reason: '${typo}'`,
+      '',
+      caseLine(S_TEST, 'test_p:1 (2)', 'PASSED', '0ms'),
+      '  The test data set at index (1) does not match the expected test parameters:',
+      '',
+    ].join('\n'),
+  );
+  assert.deepEqual(
+    [twoRows.mismatched.map((one) => one.name), twoRows.unrunnable],
+    [['test_p:0 (1)', 'test_p:1 (2)'], []],
+    'a reason line inside a skipped row is part of that row and starts no skip of its own',
+  );
+}
+
+/**
+ * The console lines of gdUnit4 and the engine's crash handler are known once, and every reader of
+ * one answers alike: the judge, the progress reader and the game log.
+ */
+function testEveryReaderOfTheConsoleKnowsALineAlike(): void {
+  const clean = { code: 0, signal: null, ended: null };
+  const lines: readonly [string, string, string | null][] = [
+    ['  res://tests/s_test.gd > test_a FAILED 5ms', 'test_a', 'FAILED'],
+    ['  res://tests/s_test.gd > test_a:1 (x, y) FAILED (retry 2) 1min 2s 30ms', 'test_a:1 (x, y)', 'FAILED'],
+    ['  res://tests/s_test.gd > test_a FLAKY (2 retries) 9ms', 'test_a', 'FLAKY'],
+    ['  res://tests/s_test.gd > test_a WARNING 5ms', 'test_a', 'WARNING'],
+    ['  res://tests/s_test.gd > test_a ERROR 5ms', 'test_a', null],
+    ['  res://tests/S_Test.cs > test_a FAILED 5ms', 'test_a', null],
+  ];
+  for (const [line, name, verdict] of lines) {
+    const read = caseLineOf(line);
+    assert.deepEqual(
+      [read?.name, read?.verdict ?? null],
+      verdict === null ? [undefined, null] : [name, verdict],
+      `the case line ${line}`,
+    );
+    const judged = readRun(`Run Test Suite: ${S_TEST}\n${line}\n`).suites.get(S_TEST)?.cases ?? [];
+    assert.deepEqual(
+      judged.map((one) => one.verdict),
+      verdict === null ? [] : [verdict],
+      `the judge reads ${line} as the shared reader does`,
+    );
+    const progress = suitesPrinted([
+      `Run Test Suite: ${S_TEST}`,
+      line,
+      'Statistics: 1 test cases | 0 errors | 1 failures | 0 flaky | 0 skipped | 0 orphans | FAILED 5ms',
+    ]).finished[0]?.failed;
+    assert.deepEqual(
+      progress,
+      verdict === 'FAILED' ? [name] : [],
+      `the progress reader reads ${line} as the shared reader does`,
+    );
+    const log = new GameLog();
+    log.append('stderr', `ERROR: bad\n${line}\n`);
+    assert.deepEqual(
+      log.all[0]?.detail ?? [],
+      verdict === null ? [line.trim()] : [],
+      `the game log takes ${line} as detail of the error above it only when it is no case line`,
+    );
+  }
+
+  const coloured = '\u001b[38;2;0;206;209mRun Test Suite: \u001b[0mres://my tests/ticket_test.gd';
+  assert.equal(
+    suiteOpenedBy(coloured),
+    null,
+    'a line holding the colour codes is not stripped by the reader',
+  );
+  assert.deepEqual(
+    [
+      suiteOpenedBy('Run Test Suite: res://my tests/ticket_test.gd'),
+      suiteOpenedBy('Run Test Suite: res://a.cs'),
+    ],
+    ['res://my tests/ticket_test.gd', null],
+    'a suite path holding a space, and a script that is no GDScript',
+  );
+  assert.deepEqual(
+    [...readRun(`${coloured}\n`).suites.keys()],
+    ['res://my tests/ticket_test.gd'],
+    'the judge opens the suite of a line the progress reader opens',
+  );
+  assert.deepEqual(
+    suitesPrinted([
+      'prefix Run Test Suite: res://a_test.gd',
+      'Statistics: 0 test cases | 0 errors | 0 failures',
+    ]).finished.map((suite) => suite.path),
+    ['res://a_test.gd'],
+    'and the progress reader opens the suite of a line after other text, which the judge does too',
+  );
+  assert.deepEqual([...readRun('x Run Test Suite: res://a_test.gd\n').suites.keys()], ['res://a_test.gd']);
+
+  const handed = { suites: [{ path: S_TEST, cases: ['test_a'] }], expected: { errors: {}, warnings: {} } };
+  for (const header of [
+    'CrashHandlerException: Program crashed with signal 11',
+    'handle_crash: Program crashed with signal 11',
+  ]) {
+    const crashed = judgeEngine(readRun(`${header}\nbacktrace\n`), handed, clean).faults[0];
+    assert.equal(
+      crashed,
+      'the engine crashed, its crash handler reporting signal 11',
+      `the judge knows ${header}`,
+    );
+    const log = new GameLog();
+    log.append('stderr', `${header}\n  frame 1\n`);
+    assert.deepEqual(
+      [log.all.length, log.all[0]?.severity, log.all[0]?.detail],
+      [1, 'error', ['frame 1']],
+      `the game log knows ${header}`,
+    );
+  }
+  assert.ok(CRASH_HEADER.test('handle_crash: Program crashed'), 'a handler naming no signal');
+  assert.ok(!CRASH_HEADER.test('segfault_handler: Program crashed'), 'and no other handler');
+  const other = new GameLog();
+  other.append('stderr', 'segfault_handler: Program crashed with signal 11\n');
+  assert.equal(other.count('error'), 0, 'the game log and the judge agree on a handler neither knows');
+  assert.ok(
+    !judgeEngine(readRun('segfault_handler: Program crashed with signal 11\n'), handed, clean).faults.some(
+      (fault) => fault.includes('crash handler'),
+    ),
+  );
+}
+
+/**
+ * A Windows exit status is named once. The judge names it in hex with its name, and a sentence about
+ * an engine that ended with it says what it means, whichever side of the pair knew it first.
+ */
+function testAWindowsExitStatusIsNamedTheSameEverywhere(): void {
+  const statuses: readonly [number, string, string][] = [
+    [0xc0000005, 'STATUS_ACCESS_VIOLATION', 'an access violation, so it crashed'],
+    [0xc00000fd, 'STATUS_STACK_OVERFLOW', 'a stack overflow, so it crashed'],
+    [0xc0000374, 'STATUS_HEAP_CORRUPTION', 'a corrupted heap, so it crashed'],
+    [0xc0000017, 'STATUS_NO_MEMORY', 'no memory left, so it crashed'],
+    [0xc0000142, 'STATUS_DLL_INIT_FAILED', 'a library it needs failed to start, so it never started'],
+    [
+      0xc06d007e,
+      'a module that could not be found (VcppException)',
+      'a module it needs was not found, so it never started',
+    ],
+  ];
+  for (const [code, name, meaning] of statuses) {
+    const hex = `0x${code.toString(16).toUpperCase()}`;
+    assert.equal(exitNamed(code), `${hex} (${name})`, `the judge names ${hex}`);
+    assert.equal(exitNamed(code | 0), `${hex} (${name})`, `and ${hex} signed`);
+    assert.equal(
+      howItEnded({ exitCode: code, exitSignal: null, failure: null }),
+      `exit code ${hex}, ${meaning}`,
+      `a sentence about the run names ${hex}`,
+    );
+  }
+  assert.equal(exitNamed(0xc0000123), '3221225763', 'a status neither names is left as a number');
+  assert.equal(
+    howItEnded({ exitCode: 0xc0000123, exitSignal: null, failure: null }),
+    'exit code 0xC0000123, a Windows error status',
+  );
+}
+
+/**
+ * How an engine's end is told: by the signal that ended it, by what stopped it, by the orphans the
+ * runner named and by the version it printed, in the run and in the compile check alike.
+ */
+function testAnEnginesEndIsJudgedByItsSignalItsOrphansAndItsVersion(): void {
+  const handed = {
+    suites: [{ path: S_TEST, cases: ['test_a'] }],
+    expected: { errors: {}, warnings: {} },
+  };
+  const passing = [caseLine(S_TEST, 'test_a', 'STARTED'), caseLine(S_TEST, 'test_a', 'PASSED', '5ms')];
+  const printed = readRun(cannedRun(passing, 'PASSED', 1));
+  const judged = (end: Partial<{ code: number | null; signal: string | null; ended: string | null }>) =>
+    judgeEngine(printed, handed, { code: null, signal: null, ended: null, ...end });
+  assert.deepEqual(judged({ signal: 'SIGSEGV' }).faults, ['the engine was ended by SIGSEGV']);
+  assert.deepEqual(judged({}).faults, ['the engine was ended by a signal'], 'a signal that is not named');
+  assert.deepEqual(
+    judgeEngine(printed, handed, { code: null, signal: 'SIGSEGV', ended: null, freeBytes: 2.5 * 1024 ** 3 })
+      .faults,
+    ['the engine was ended by SIGSEGV, with 2.5 GB of memory free as it ended'],
+  );
+  assert.deepEqual(
+    judged({ signal: 'SIGKILL', ended: 'it printed nothing for 30 s, so it was ended' }).faults,
+    ['it printed nothing for 30 s, so it was ended'],
+    'what gdharness ended it for is said instead of the signal that followed',
+  );
+  assert.deepEqual(judged({ code: 0 }).faults, [], 'an engine that exited 0 after passing');
+
+  const orphan =
+    'gdharness orphans: res://tests/s_test.gd > test_a left 2: Timer, Node "Board" of res://board.gd';
+  const leaking = readRun(cannedRun([...passing, orphan], 'PASSED', 1));
+  const left = judgeEngine(leaking, handed, { code: 101, signal: null, ended: null });
+  assert.deepEqual(
+    [left.faults, left.passedSuites, left.passed],
+    [
+      [
+        `${S_TEST} > test_a left 2 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: Timer, Node "Board" of res://board.gd. Free each one, or make it with auto_free(), which frees it once the case is over.`,
+      ],
+      [],
+      false,
+    ],
+    'the orphans the runner named explain gdUnit4 ending on 101, so the exit adds no fault',
+  );
+  assert.deepEqual(
+    judged({ code: 101 }).faults,
+    ["the engine exited 101 (gdUnit4's code for orphan nodes left behind)"],
+    'a 101 with no orphan named is a fault of its own',
+  );
+  assert.deepEqual(
+    judged({ code: 100 }).faults,
+    ["the engine exited 100 (gdUnit4's code for a case that failed or errored)"],
+    'and so is a 100 with no case failed',
+  );
+
+  const version = (said: string | null) =>
+    judgeEngine(
+      readRun(
+        said === null
+          ? cannedRun(passing, 'PASSED', 1).split('\r\n').slice(1).join('\r\n')
+          : cannedRun(passing, 'PASSED', 1).replace('v4.7.2.stable.official', `v${said}`),
+      ),
+      { ...handed, godotVersion: '4.7.2' },
+      { code: 0, signal: null, ended: null },
+    ).faults;
+  assert.deepEqual(version('4.7.2.stable.official'), [], 'a build of the version asked for');
+  assert.deepEqual(version('4.6.1.stable.official'), [
+    'the engine that ran is Godot 4.6.1.stable.official, not the 4.7.2 --godot-version asks for',
+  ]);
+  assert.deepEqual(version(null), [
+    'the engine printed no version as it started, so it cannot be told to be Godot 4.7.2',
+  ]);
+
+  const compiled = (lines: readonly string[]) => readRun(`${lines.join('\n')}\n`);
+  const compiledOk = [COMPILED_SAID];
+  const none = { code: 0, signal: null, ended: null };
+  assert.deepEqual(judgeCompile(compiled(compiledOk), none), [], 'a clean compile');
+  assert.deepEqual(judgeCompile(compiled(compiledOk), { code: null, signal: 'SIGKILL', ended: null }), [
+    'the engine was ended by SIGKILL',
+  ]);
+  assert.deepEqual(judgeCompile(compiled(compiledOk), { code: null, signal: null, ended: null }), [
+    'the engine was ended by a signal',
+  ]);
+  assert.deepEqual(judgeCompile(compiled(compiledOk), { code: 0xc0000005, signal: null, ended: null }), [
+    'the engine exited 0xC0000005 (STATUS_ACCESS_VIOLATION)',
+  ]);
+  assert.deepEqual(
+    judgeCompile(compiled(compiledOk), { code: 3, signal: null, ended: 'it ran past its limit' }),
+    ['it ran past its limit'],
+    'what ended it is said instead of its code',
+  );
+  assert.deepEqual(
+    judgeCompile(compiled(['CrashHandlerException: Program crashed with signal 11', COMPILED_SAID]), none),
+    ['the engine crashed, its crash handler reporting signal 11'],
+    'a crash report beside an exit of 0',
+  );
+  assert.deepEqual(judgeCompile(compiled([]), none), ['it never said it had compiled them']);
+  assert.deepEqual(judgeCompile(compiled([...compiledOk, 'ERROR: boom']), none), ['an engine error: boom']);
+  assert.deepEqual(
+    judgeCompile(compiled([...compiledOk, 'WARNING: 4 ObjectDB instances were leaked at exit.']), none),
+    [
+      'the engine exited holding what it should have freed: WARNING: 4 ObjectDB instances were leaked at exit.',
+    ],
+    'what the engine held at exit',
+  );
+}
+
+/**
+ * The errors Godot raised while printing another reach the verdict from the log of the streams, and
+ * the errors a suite declares are read from the file the runner wrote.
+ */
+function testNestedErrorsAndDeclaredErrorsAreRead(): void {
+  const entry = (severity: LogEntry['severity'], said: string, index: number): LogEntry => ({
+    index,
+    severity,
+    source: 'stderr',
+    text: said,
+    detail: [],
+  });
+  const nested = 'While attempting to print an error, another error was printed:';
+  const printed = readRun(
+    cannedRun(
+      [caseLine(S_TEST, 'test_a', 'STARTED'), caseLine(S_TEST, 'test_a', 'PASSED', '5ms')],
+      'PASSED',
+      1,
+    ),
+  );
+  assert.equal(withNestedErrors(printed, []), printed, 'a log with none leaves the run as it was');
+  assert.equal(
+    withNestedErrors(printed, [entry('info', nested, 0), entry('info', 'Stack overflow', 1)]),
+    printed,
+    'a pair whose second entry is no error',
+  );
+  const joined = withNestedErrors(printed, [
+    entry('info', nested, 0),
+    entry('error', 'Stack overflow', 1),
+    entry('info', 'something else', 2),
+    entry('error', 'not nested', 3),
+    entry('info', ` ${nested} `, 4),
+    entry('error', 'Second overflow', 5),
+  ]);
+  assert.deepEqual(
+    joined.errors.map((error) => [error.text, error.suite, error.during, error.warning, error.at]),
+    [
+      ['Stack overflow', null, null, false, printed.lines.length],
+      ['Second overflow', null, null, false, printed.lines.length],
+    ],
+    'each pair adds one error that belongs to no suite',
+  );
+  const verdict = judgeEngine(
+    joined,
+    { suites: [{ path: S_TEST, cases: ['test_a'] }], expected: { errors: {}, warnings: {} } },
+    { code: 0, signal: null, ended: null },
+  );
+  assert.deepEqual(
+    [verdict.faults, verdict.unattributed],
+    [
+      [
+        'an engine error outside every suite: Stack overflow',
+        'an engine error outside every suite: Second overflow',
+      ],
+      true,
+    ],
+    'and fails the run',
+  );
+
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-expected-'));
+  try {
+    const written = (name: string, body: string): string => {
+      const file = join(directory, name);
+      writeFileSync(file, body);
+      return file;
+    };
+    assert.deepEqual(
+      readExpected(
+        written(
+          'good.json',
+          JSON.stringify({
+            errors: { [S_TEST]: { test_a: ['one', 'two'], test_b: ['x'] } },
+            warnings: { [S_TEST]: { test_a: ['careful'] }, 'res://other.gd': {} },
+          }),
+        ),
+      ),
+      {
+        errors: { [S_TEST]: { test_a: ['one', 'two'], test_b: ['x'] } },
+        warnings: { [S_TEST]: { test_a: ['careful'] }, 'res://other.gd': {} },
+      },
+      'the errors and warnings each suite declares, by function',
+    );
+    assert.deepEqual(
+      readExpected(
+        written(
+          'odd.json',
+          JSON.stringify({
+            errors: { [S_TEST]: { test_a: 'not a list', test_b: [1, 2], test_c: ['kept'] }, 'res://x.gd': 5 },
+            warnings: [],
+          }),
+        ),
+      ),
+      { errors: { [S_TEST]: { test_c: ['kept'] }, 'res://x.gd': {} }, warnings: {} },
+      'a part that is not the shape the runner writes declares nothing',
+    );
+    const nothing = { errors: {}, warnings: {} };
+    assert.deepEqual(readExpected(written('broken.json', '{"errors": ')), nothing, 'a file cut short');
+    assert.deepEqual(readExpected(written('array.json', '[1]')), nothing, 'a file that is no object');
+    assert.deepEqual(readExpected(join(directory, 'missing.json')), nothing, 'no file');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -57102,9 +57497,10 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
         ended: null,
       },
     );
-    assert.ok(
-      !shrunk.faults.some((fault) => fault.includes('closed without running')),
-      `and one dealt rows the case no longer has is not faulted for running none: ${shrunk.faults.join(' | ')}`,
+    assert.deepEqual(
+      shrunk.faults,
+      ['the run never printed its summary'],
+      'one dealt rows the case no longer has is faulted for the missing summary and not for running none',
     );
   } finally {
     sweep(project);
@@ -87110,6 +87506,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testGdUnitFailingOnPushErrorsIsSaid,
   testACrashIsReadFromTheCrashHandlersReport,
   testARowSkippedForItsDataIsNoPass,
+  testEveryReaderOfTheConsoleKnowsALineAlike,
+  testAWindowsExitStatusIsNamedTheSameEverywhere,
+  testAnEnginesEndIsJudgedByItsSignalItsOrphansAndItsVersion,
+  testNestedErrorsAndDeclaredErrorsAreRead,
   testTheScriptsGodotNeverFreesAreFound,
   testAnExportAnnotationHoldingACallIsFound,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
