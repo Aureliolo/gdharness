@@ -36743,6 +36743,21 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
       await refused({ op: 'run', preset: 'Tux', outputPath: 'build/tux.x86_64', pack: true }),
       /^A pack is written as a \.pck or a \.zip, and build\/tux\.x86_64 is neither/,
     );
+    // A refused run has made nothing, and one that goes ahead still makes the folder it needs.
+    assert.match(
+      await refused({ op: 'run', preset: 'Tux', outputPath: 'fresh/a/tux.pck', pack: true, debug: true }),
+      /^A pack is exported as a release/,
+    );
+    assert.match(
+      await refused({ op: 'run', preset: 'Tux', outputPath: 'fresh/b/tux.x86_64', pack: true }),
+      /^A pack is written as a \.pck or a \.zip/,
+    );
+    assert.equal(existsSync(join(project, 'fresh')), false, 'neither refusal left a folder');
+    const made = parseTextContent(
+      await call({ op: 'run', preset: 'Tux', outputPath: 'made/new/tux.pck', pack: true }),
+    );
+    assert.equal(get(made, 'exported'), true, JSON.stringify(made));
+    assert.ok(existsSync(join(project, 'made', 'new', 'tux.pck')), 'an accepted run makes its folder');
 
     const last = parseTextContent(await call({ op: 'remove_preset', preset: 'Droid' }));
     assert.deepEqual(

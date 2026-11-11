@@ -7670,21 +7670,6 @@ class GodotServer {
       return engine.response;
     }
 
-    // Godot's command-line exporter does not create the directory it is told to write into, where
-    // the editor's own export dialog does, and what it says when it is missing is "The given export
-    // path doesn't exist", which reads as a wrong path in the preset and sends the caller to check
-    // the preset. The tool was handed the path and has already contained it inside the project, so
-    // it knows exactly which directory it is about to need. Reported for the first export of two
-    // separate projects, each of which lost the same five minutes to the same message.
-    const folder = dirname(output.absolutePath);
-    try {
-      mkdirSync(folder, { recursive: true });
-    } catch (error) {
-      return this.createErrorResponse(
-        `Cannot create ${dirname(output.relativePath)} to export into: ${errorMessage(error)}`,
-      );
-    }
-
     const debug = readBoolean(args, 'debug') ?? false;
     const pack = readBoolean(args, 'pack') ?? false;
     // Godot's command line exports a pack as a release whatever else it is told.
@@ -7699,6 +7684,20 @@ class GodotServer {
       return this.createErrorResponse(
         `A pack is written as a .pck or a .zip, and ${output.relativePath} is neither: the exporter picks the format by the extension.`,
         ['Give outputPath ending in .pck, or .zip for a zip of the resources'],
+      );
+    }
+    // Godot's command-line exporter does not create the directory it is told to write into, where
+    // the editor's own export dialog does, and what it says when it is missing is "The given export
+    // path doesn't exist", which reads as a wrong path in the preset and sends the caller to check
+    // the preset. The tool was handed the path and has already contained it inside the project, so
+    // it knows exactly which directory it is about to need. Made only once nothing else refuses the
+    // call, so a refused call leaves no folder behind.
+    const folder = dirname(output.absolutePath);
+    try {
+      mkdirSync(folder, { recursive: true });
+    } catch (error) {
+      return this.createErrorResponse(
+        `Cannot create ${dirname(output.relativePath)} to export into: ${errorMessage(error)}`,
       );
     }
     // The export's own scan imports what changed only by the editor's cache, so in a checkout
