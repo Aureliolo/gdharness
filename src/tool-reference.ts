@@ -233,7 +233,11 @@ function toolSection(tool: ToolSpec): string[] {
 }
 
 /** The bullet for op [param op] of [param tool], with what it needs and what else it takes. */
-function operationLine(tool: ToolSpec, op: string, spec: { summary: string; requires: readonly string[] }): string {
+function operationLine(
+  tool: ToolSpec,
+  op: string,
+  spec: { summary: string; requires: readonly string[] },
+): string {
   const needs = [...tool.requires, ...spec.requires];
   const isDefault = tool.defaultOperation === op ? ' (default)' : '';
   const wants = needs.length > 0 ? ` Needs: ${needs.map((name) => `\`${name}\``).join(', ')}.` : '';

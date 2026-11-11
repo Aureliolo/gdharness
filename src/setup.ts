@@ -809,10 +809,7 @@ function runtimeAutoloadProblem(projectPath: string, runtimeAutoloadPath: string
   if (runtimeAutoloadPath === `res://${RUNTIME_SCRIPT}`) {
     return `the ${RUNTIME_AUTOLOAD.name} autoload names the addon's own script, which a clone or an export without addons/ boots as a missing script. Run gdharness setup to point it at res://${RUNTIME_AUTOLOAD.path}, the loader it writes`;
   }
-  if (
-    runtimeAutoloadPath === `res://${RUNTIME_AUTOLOAD.path}` &&
-    loaderState(projectPath) === 'differs'
-  ) {
+  if (runtimeAutoloadPath === `res://${RUNTIME_AUTOLOAD.path}` && loaderState(projectPath) === 'differs') {
     return `res://${RUNTIME_AUTOLOAD.path} is not the loader this gdharness ships. Run gdharness setup to write it again`;
   }
   return null;

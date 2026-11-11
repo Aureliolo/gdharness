@@ -141,7 +141,11 @@ export function eachScript(projectPath: string, each: (script: string, source: s
   visitScripts(projectPath, '', each);
 }
 
-function visitScripts(directory: string, prefix: string, each: (script: string, source: string) => void): void {
+function visitScripts(
+  directory: string,
+  prefix: string,
+  each: (script: string, source: string) => void,
+): void {
   if (existsSync(join(directory, '.gdignore'))) {
     return;
   }

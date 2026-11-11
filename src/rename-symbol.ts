@@ -341,7 +341,10 @@ async function memberRenameStep(context: RenameContext): Promise<Planned | Refus
     return nameTaken(symbol, newName, conflicts);
   }
 
-  const family = kind === 'func' ? overridingFamily(graph, root, symbol) : [{ file: declaringPath, offset: declaration.offset }];
+  const family =
+    kind === 'func'
+      ? overridingFamily(graph, root, symbol)
+      : [{ file: declaringPath, offset: declaration.offset }];
   const took: LanguageServerTook = { references: { asked: 0, ms: 0 }, definitions: { asked: 0, ms: 0 } };
   const heirFiles = new Set([...graph.descendants(root)].map(fileOf));
   const resolved = await resolvedOrRefused(context, { family, took, heirFiles });
