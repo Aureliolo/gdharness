@@ -60451,7 +60451,7 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
  * A suite an editor plugin rewrites during the import keeps its pass against what the new text
  * loads, so a change to a file only the new text names runs it again.
  */
-async function testAScriptEditedDuringTheImportIsFollowedAsTheEngineLoadedIt(): Promise<void> {
+function testAScriptEditedDuringTheImportIsFollowedAsTheEngineLoadedIt(): void {
   const engines = commandTestEngines();
   if (engines === null) {
     return;
