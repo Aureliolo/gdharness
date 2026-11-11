@@ -7,6 +7,7 @@ import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type ChildProcess, spawnHidden } from '../../src/spawn.js';
 import { isRecord, type JsonRpcMessage, parseJsonLines } from './json-rpc.js';
+import { slotsSaid } from './slots.js';
 import { fixtureNow, sweep } from './sweep.js';
 
 /** A runtime directory nothing else on this machine is using. */
@@ -421,7 +422,11 @@ export class ServerProcess {
     const response = new Promise<JsonRpcMessage>((resolve, reject) => {
       const timer = setTimeout(() => {
         settle();
-        reject(new Error(`No response to ${method} (id ${id}) within ${timeoutMs} ms.\n${this.stderr}`));
+        reject(
+          new Error(
+            `No response to ${method} (id ${id}) within ${timeoutMs} ms.\n${slotsSaid()}\n${this.stderr}`,
+          ),
+        );
       }, timeoutMs);
       timer.unref();
       const settle = (): void => {
