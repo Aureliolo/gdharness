@@ -5207,7 +5207,10 @@ class GodotServer {
       // question nobody asked: a caller who wrote `get` wants to know what `get` takes, not the
       // twenty arguments the other ten ops between them accept.
       const asked = readString(args, 'op');
-      const knownOp = asked !== undefined && spec.operations?.[asked] !== undefined ? asked : null;
+      const knownOp =
+        asked !== undefined && spec.operations !== undefined && Object.hasOwn(spec.operations, asked)
+          ? asked
+          : null;
       const wanted = knownOp === null ? [...known] : [...argumentsOf(spec, knownOp), 'op'];
       // Each with what it takes, because the name alone hides the second form: a session that
       // guessed `suites` for a list of suite files was told `path` and not that path takes one.

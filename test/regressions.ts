@@ -68078,6 +68078,18 @@ async function testAnUnknownArgumentSaysWhichServerSaysSo(): Promise<void> {
       /^project_settings get does not take project_path, no_such_key\. project_path is spelled projectPath\. It takes: /,
       snaked,
     );
+    // A word every object inherits is no op, so the refusal is not worded for one.
+    for (const inherited of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+      const said =
+        textOf(
+          await server.request('tools/call', {
+            name: 'project_settings',
+            arguments: { projectPath: '/p', op: inherited, nosuchargument: 1 },
+          }),
+        ) ?? '';
+      assert.match(said, /^project_settings does not take nosuchargument\. It takes: /, said);
+      assert.match(said, /\bop \(get, set[^)]*\)/, `${inherited} is not an op, so the ops are listed: ${said}`);
+    }
   } finally {
     await server.stop();
   }
