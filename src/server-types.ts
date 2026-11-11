@@ -241,13 +241,6 @@ export interface SpawnedGame extends GodotProcess {
 }
 
 /**
- * Tool arguments as they arrive over MCP: keys chosen by the caller, values not yet checked.
- * `unknown` rather than `any` so that every read has to say what it expects the value to be.
- * The readers in `tool-args.ts` are where that happens.
- */
-export type OperationParams = Record<string, unknown>;
-
-/**
  * One block of a tool result. `text` carries JSON or prose; `data` plus `mimeType` carry a
  * base64 payload, which is how a screenshot comes back. An image declares `text` as absent so
  * that reading the first block's text needs no narrowing.

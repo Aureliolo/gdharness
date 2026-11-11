@@ -352,7 +352,6 @@ import type {
   EndedThrough,
   GodotProcess,
   MCPToolDefinition,
-  OperationParams,
   ProtocolServer,
   SpawnedGame,
   ToolResponse,
@@ -406,6 +405,7 @@ import {
 } from './test-selection.js';
 import {
   asParams,
+  type OperationParams,
   readArray,
   readBoolean,
   readNonEmptyString,

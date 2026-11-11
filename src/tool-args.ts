@@ -1,5 +1,11 @@
 import { isRecord } from './records.js';
-import type { OperationParams } from './server-types.js';
+
+/**
+ * Tool arguments as they arrive over MCP: keys chosen by the caller, values not yet checked.
+ * `unknown` rather than `any` so that every read has to say what it expects the value to be.
+ * The readers below are where that happens.
+ */
+export type OperationParams = Record<string, unknown>;
 
 /**
  * Readers for tool arguments.
