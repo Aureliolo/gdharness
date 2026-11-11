@@ -589,6 +589,7 @@ import {
   wholeTreeSaid,
 } from '../src/suite-run.js';
 import { listenerAmong } from '../src/tcp-listeners.js';
+import { scriptsWithoutCases, selectTests, suiteFilesUnder } from '../src/test-selection.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -600,7 +601,6 @@ import {
   toolSpec,
 } from '../src/tool-definitions.js';
 import { argumentShape, headlessSection, namedType, renderToolsMarkdown } from '../src/tool-reference.js';
-import { scriptsWithoutCases, selectTests, suiteFilesUnder } from '../src/test-selection.js';
 import {
   encodedUidCache,
   mendBeforeStart,
@@ -18511,10 +18511,10 @@ function testASidecarWithNoFileDeclaresNoUid(): void {
     const said: string[] = [];
     const write = process.stderr.write.bind(process.stderr);
     writeFileSync(cache, encodedUidCache(entries));
-    process.stderr.write = ((text: string): boolean => {
-      said.push(text);
+    process.stderr.write = (line: string): boolean => {
+      said.push(line);
       return true;
-    }) as typeof process.stderr.write;
+    };
     try {
       mendBeforeStart(['--path', project], undefined);
     } finally {
@@ -55942,7 +55942,7 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       'a case that ran with no row is not parameterised now, and keeps no rows',
     );
     assert.deepEqual(
-      unitsOf([lone_], noLongerRows).map((unit) => unit.row),
+      unitsOf([lone_], noLongerRows).map((planned) => planned.row),
       [undefined],
       'so it is dealt whole, to one engine',
     );
