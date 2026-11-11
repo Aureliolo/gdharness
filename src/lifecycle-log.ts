@@ -12,7 +12,7 @@
 import { appendFileSync, mkdirSync, renameSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import process from 'node:process';
-import { runtimeDirectory } from './runtime-client.js';
+import { runtimeDirectory } from './runtime-directories.js';
 import { SERVER_VERSION } from './server-version.js';
 
 /** Where the lines go. */

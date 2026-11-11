@@ -408,14 +408,13 @@ import {
   RUNTIME_PROTOCOL,
   type RuntimeEndpoint,
   reportAlreadyInTranscript,
-  runtimeDirectories,
-  runtimeDirectory,
   runtimeRequest,
   runtimesAnnounced,
   STARTED_AFTER_ANNOUNCING_MS,
   strangersAmong,
   untilJudged,
 } from '../src/runtime-client.js';
+import { runtimeDirectories, runtimeDirectory } from '../src/runtime-directories.js';
 import {
   discard,
   discardWith,

@@ -20,7 +20,7 @@ import { freePort, portFromEnvOrNull } from './ports.js';
 import { editorsOfProjectIn, processTree, startTimesOf } from './process-children.js';
 import { type RestartNote, restartOwed, restartSettled } from './restart-note.js';
 import { currentRunner, runLine } from './runner.js';
-import { runtimeDirectory } from './runtime-client.js';
+import { runtimeDirectory } from './runtime-directories.js';
 import { SERVER_VERSION } from './server-version.js';
 import {
   inspectProject,

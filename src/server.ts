@@ -316,12 +316,12 @@ import {
   RUNTIME_PROTOCOL,
   type RuntimeEndpoint,
   reportAlreadyInTranscript,
-  runtimeDirectory,
   runtimeRequest,
   runtimesAnnounced,
   type UnspokenRuntime,
   whichHalfIsBehind,
 } from './runtime-client.js';
+import { runtimeDirectory } from './runtime-directories.js';
 import { discard, scratchDirectory, sweepAbandonedScratch } from './scratch.js';
 import {
   checkWithEngine,
