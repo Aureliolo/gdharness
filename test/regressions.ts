@@ -324,9 +324,12 @@ import {
 import { nearest as nearestNames, withNearestFiles } from '../src/nearest.js';
 import { readLaunched, receivedSpec, type SentSpec, sendSpec, withChanges } from '../src/outside.js';
 import {
+  commandProjectRefusal,
   exportedBuild,
+  isGodotProject,
   isSameDirectory,
   isWithinRoot,
+  notAGodotProject,
   realAsFarAsItExists,
   relativeWithin,
   resolveWithinProject,
@@ -11105,6 +11108,45 @@ async function testEditorStatusOnAProjectWithNoAddonIsFinal(): Promise<void> {
  * screen read was named in the schema, sent by every caller who wanted the top of a panel, and
  * thrown away, so two hundred lines came back with truncated saying false.
  */
+/** A folder named project.godot is no project, and every entry point refuses it as one. */
+async function testAFolderNamedProjectGodotIsNoProject(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-folder-project-'));
+  try {
+    const folder = join(root, 'folder');
+    const empty = join(root, 'empty');
+    const real = join(root, 'real');
+    mkdirSync(join(folder, 'project.godot'), { recursive: true });
+    mkdirSync(empty);
+    mkdirSync(real);
+    writeFileSync(join(real, 'project.godot'), 'config_version=5\n');
+    const folderWhy = 'holds a folder named project.godot where the project file belongs';
+    assert.deepEqual(
+      [notAGodotProject(folder), notAGodotProject(empty), notAGodotProject(real)],
+      [folderWhy, 'holds no project.godot', null],
+    );
+    assert.deepEqual([isGodotProject(folder), isGodotProject(real)], [false, true]);
+    const refusal = `Not a Godot project: ${folder} ${folderWhy}. Run from the project directory, or name it on the command line.`;
+    assert.equal(commandProjectRefusal(folder), refusal);
+    assert.equal(commandProjectRefusal(real), null);
+
+    await withStdioServer(async (call) => {
+      const said = await call('project_info', { projectPath: folder });
+      assert.ok(said.startsWith(`Not a Godot project: ${folder} ${folderWhy}.`), said);
+      const known = await call('project_info', { projectPath: real });
+      assert.doesNotMatch(known, /Not a Godot project/, known);
+    });
+
+    const ran = spawnSyncHidden(process.execPath, [join(process.cwd(), 'build', 'cli.js'), 'test'], {
+      cwd: folder,
+      encoding: 'utf8',
+    });
+    assert.equal(ran.status, 2, `${ran.stdout}${ran.stderr}`);
+    assert.ok(`${ran.stdout}${ran.stderr}`.includes(refusal), `${ran.stdout}${ran.stderr}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
   await withStdioServer(async (call) => {
     assert.match(
@@ -12117,6 +12159,25 @@ function testProjectGodotReadsQuotedKeys(): void {
     [...settingKeys('[input]\n"move left"=1\n').keys()],
     ['input/move left'],
     'the name a caller sets again has no quotes',
+  );
+}
+
+/** The keys above the first header are their own section, apart from one a file calls `[root]`. */
+function testProjectGodotKeepsTopLevelKeysApartFromARootSection(): void {
+  const file = 'config_version=5\n\n[root]\nconfig_version=9\nx=1\n\n[a]\nx=2\n';
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(parseProjectGodot(file)).map(([name, keys]) => [name, { ...keys }])),
+    { '': { config_version: 5 }, root: { config_version: 9, x: 1 }, a: { x: 2 } },
+  );
+  assert.deepEqual(
+    [...settingKeys(file)],
+    [
+      ['config_version', 5],
+      ['root/config_version', 9],
+      ['root/x', 1],
+      ['a/x', 2],
+    ],
+    'a top-level key is named alone, as Godot names it',
   );
 }
 
@@ -34889,7 +34950,7 @@ function testASettingTheEditorDroppedIsNamed(): void {
     [['debug/gdscript/warnings/return_value_discarded', 0]],
     'the key that went is named, with the section it was in and the value it held',
   );
-  assert.ok(before.has('root/config_version'), 'a key outside any section is read as one too');
+  assert.ok(before.has('config_version'), 'a key outside any section is read as one too, by its name alone');
   assert.deepEqual(
     [...after].filter(([key]) => !before.has(key)),
     [],
@@ -59134,10 +59195,11 @@ function testASuiteDependsOnEveryFileItsScriptsAndResourcesNameInAnySpelling(): 
 }
 
 /**
- * A suite reading a computed path depends on files in a folder holding a `.gdignore` and in a folder
- * a link leads to, since a script reads the disk and not the engine's file system.
+ * A suite reading a computed path depends on the files in a folder a link leads to, and not on a
+ * folder holding a `.gdignore`, which the engine leaves out and where exports are written as suites
+ * run. A suite reading data kept there names the folder with `--reach-also`.
  */
-function testAComputedReadDependsOnFoldersTheEngineIgnoresAndLinksLeadTo(): void {
+function testAComputedReadFollowsLinksAndSkipsWhatTheEngineIgnores(): void {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-ignored-'));
   const elsewhere = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-linked-'));
   try {
@@ -59148,25 +59210,102 @@ function testAComputedReadDependsOnFoldersTheEngineIgnoresAndLinksLeadTo(): void
     });
     writeTree(elsewhere, { 'shared.json': '1\n' });
     symlinkSync(elsewhere, join(project, 'linked'), 'junction');
-    symlinkSync(project, join(project, 'raw', 'back'), 'junction');
+    symlinkSync(project, join(elsewhere, 'back'), 'junction');
     const print = (): string => new SuiteInputs(new ProjectScripts(project), ['1']).printOf([EVERY_FILE]);
-    for (const [file, how] of [
-      [join(project, 'raw', 'a.json'), 'a folder holding a .gdignore'],
-      [join(elsewhere, 'shared.json'), 'a folder a link leads to'],
-    ] as const) {
-      const before = print();
-      writeFileSync(file, 'changed\n');
-      assert.notEqual(print(), before, `a file in ${how} is read by a computed path`);
-    }
+    const before = print();
+    writeFileSync(join(elsewhere, 'shared.json'), 'changed\n');
+    const linked = print();
+    assert.notEqual(linked, before, 'a file in a folder a link leads to is read by a computed path');
+    writeFileSync(join(project, 'raw', 'a.json'), 'changed\n');
+    assert.equal(print(), linked, 'and a file in a folder holding a .gdignore is not');
     const names: string[] = [];
     walkSeen(project, (under) => names.push(under));
     assert.deepEqual(
       names,
-      ['linked/shared.json', 'project.godot', 'raw/.gdignore', 'raw/a.json'],
+      ['linked/shared.json', 'project.godot'],
       'and a link back up the tree is not walked again',
+    );
+    assert.deepEqual(
+      reachedAlsoSaid([join(project, 'raw')]),
+      ['.gdignore\n\na.json\nchanged\n'],
+      'a folder named with --reach-also is read whole, .gdignore or not',
     );
   } finally {
     sweep(project, elsewhere);
+  }
+}
+
+/**
+ * A file another process holds shut reads as changed now, whether a computed read walks to it, a
+ * read names it or `--reach-also` names it. It never fails the run. One an export is writing under
+ * a `.gdignore` is never opened.
+ */
+async function testAFileHeldShutReadsAsChangedNow(): Promise<void> {
+  if (process.platform !== 'win32') {
+    console.log('held-file regression skipped: only Windows holds a file shut against readers');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-held-'));
+  const held = join(project, 'saves', 'slot.tmp');
+  const exporting = join(project, 'export', 'game.pck.tmp');
+  writeTree(project, {
+    'project.godot': 'config_version=5\n',
+    'saves/slot.tmp': 'partial',
+    'export/.gdignore': '',
+    'export/game.pck.tmp': 'partial',
+  });
+  const holding = `$a = [System.IO.File]::Open('${held}', 'Open', 'ReadWrite', 'None'); $b = [System.IO.File]::Open('${exporting}', 'Open', 'ReadWrite', 'None'); [Console]::Out.WriteLine('held'); Start-Sleep -Seconds 60`;
+  const holder = spawnHidden(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(holding, 'utf16le').toString('base64')],
+    { stdio: ['ignore', 'pipe', 'ignore'] },
+  );
+  try {
+    await new Promise<void>((settle, fail) => {
+      holder.stdout.on('data', (chunk: Buffer) => {
+        if (chunk.toString().includes('held')) {
+          settle();
+        }
+      });
+      holder.once('exit', () => {
+        fail(new Error('the holder ended before it held the file'));
+      });
+    });
+    assert.throws(() => readFileSync(held), /EBUSY/, 'the file is held shut');
+    const began = Date.now();
+    const walked: [string, string, number][] = [];
+    walkSeen(project, (under, bytes, modified) => {
+      walked.push([under, bytes.toString(), modified]);
+    });
+    assert.deepEqual(
+      walked.map(([under, bytes]) => [under, bytes]),
+      [
+        ['project.godot', 'config_version=5\n'],
+        ['saves/slot.tmp', 'unopened'],
+      ],
+      'the walk passes the held file with no content it could read, and leaves the export alone',
+    );
+    const slot = walked[1]?.[2] ?? 0;
+    assert.ok(slot >= began, `as modified now: ${String(slot)} against ${String(began)}`);
+    const inputs = new SuiteInputs(new ProjectScripts(project), ['1']);
+    assert.equal(inputs.modifiedAfter([EVERY_FILE], began - 1), true, 'a computed read counts it as changed');
+    assert.equal(
+      inputs.modifiedAfter(['res://saves/slot.tmp'], began - 1),
+      true,
+      'and so does a read naming it',
+    );
+    const [named] = reachedAlsoSaid([held]);
+    assert.match(named ?? '', /^unopened at \d+$/, 'and so does --reach-also');
+  } finally {
+    holder.kill();
+    await new Promise((settle) => {
+      if (holder.exitCode !== null) {
+        settle(null);
+      } else {
+        holder.once('exit', settle);
+      }
+    });
+    sweep(project);
   }
 }
 
@@ -88458,7 +88597,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeptScriptReferenceOfNoBytesIsMadeAgainNotPlaced,
   testASuitesInputsAreWhatItsEngineLoaded,
   testASuiteDependsOnEveryFileItsScriptsAndResourcesNameInAnySpelling,
-  testAComputedReadDependsOnFoldersTheEngineIgnoresAndLinksLeadTo,
+  testAComputedReadFollowsLinksAndSkipsWhatTheEngineIgnores,
+  testAFileHeldShutReadsAsChangedNow,
   testAnInputChangedDuringARunIsSeenWhateverItsTimeStamp,
   testAReadsCallersAreThoseThatCanReachIt,
   testAFileGoneBetweenTheListingAndTheReadIsPassedOver,
@@ -88534,6 +88674,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testProjectGodotKeepsIndentInsideMultilineStrings,
   testProjectGodotReadsQuotedKeys,
   testProjectGodotReadsExponentFloats,
+  testProjectGodotKeepsTopLevelKeysApartFromARootSection,
   testLettingGoOfTheAdapterSendsItNothing,
   testAVariablesReadSaysWhatItCouldNotRead,
   testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer,
@@ -88607,6 +88748,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testToolAndOpLookupsCannotReachThePrototype,
   testArgumentsOfTheWrongTypeAreRefused,
   testAnArgumentMeantForAnotherOpIsRefused,
+  testAFolderNamedProjectGodotIsNoProject,
   testANoEditorRefusalSaysWhetherOneCanConnect,
   testAnOpenRefusesAnotherReleasesAddon,
   testAStartRefusesAnotherReleasesRuntimeAddon,

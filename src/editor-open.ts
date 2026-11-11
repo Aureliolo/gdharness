@@ -3,7 +3,7 @@
  * editor opened from the command line is the one the server would have opened: on the same ports,
  * with its console paired to its pid, and under the same turn, so two opens at once make one editor.
  */
-import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
@@ -16,6 +16,7 @@ import { type EditorPorts, editorArguments, OPENED_BY_A_SERVER, startedAs, waitF
 import { freeLibraryCopies } from './library-copies.js';
 import { DEFAULT_LSP_PORT } from './lsp_client.js';
 import { launchOutsideTheTree } from './outside.js';
+import { commandProjectRefusal, isGodotProject } from './paths.js';
 import { freePort, portFromEnvOrNull } from './ports.js';
 import { editorsOfProjectIn, processTree, startTimesOf } from './process-children.js';
 import { type RestartNote, restartOwed, restartSettled } from './restart-note.js';
@@ -58,7 +59,7 @@ export function restartUnderway(note: RestartNote, now = Date.now()): boolean {
  * null when the addon is installed and enabled, or there is no project there to read.
  */
 export function editorAddonMissing(projectPath: string): { why: string; remedies: string[] } | null {
-  if (!existsSync(join(projectPath, 'project.godot'))) {
+  if (!isGodotProject(projectPath)) {
     return null;
   }
   const report = inspectProject(projectPath);
@@ -285,10 +286,9 @@ export function editorOpenOptionsOf(args: readonly string[], cwd: string): Edito
     }
   }
   const projectPath = resolve(cwd, named ?? '.');
-  if (!existsSync(join(projectPath, 'project.godot'))) {
-    throw new EngineUsageError(
-      `Not a Godot project: ${projectPath} holds no project.godot. Run from the project directory, or name it on the command line.`,
-    );
+  const refused = commandProjectRefusal(projectPath);
+  if (refused !== null) {
+    throw new EngineUsageError(refused);
   }
   if (until !== null && !alive(until)) {
     throw new EngineUsageError(

@@ -233,9 +233,11 @@ import { nearest, withNearestFiles } from './nearest.js';
 import { launchOutsideTheTree } from './outside.js';
 import {
   exportedBuild,
+  isGodotProject,
   isSameDirectory,
   isWithinRoot,
   keptInside,
+  notAGodotProject,
   realAsFarAsItExists,
   resolveWithinProject,
 } from './paths.js';
@@ -4842,7 +4844,7 @@ class GodotServer {
       // Only a project, since it becomes the root the godot:// resources are read under: any
       // directory named here, the root of a drive included, was taken as one.
       const project = args['projectPath'];
-      if (typeof project === 'string' && existsSync(join(project, 'project.godot'))) {
+      if (typeof project === 'string' && isGodotProject(project)) {
         this.lastProjectPath = project;
       }
       // Started here and not waited for: whatever it learns lands on a later call, and a
@@ -6031,10 +6033,11 @@ class GodotServer {
       return { ok: false, response: this.createErrorResponse('projectPath is required.') };
     }
     const file = join(path, 'project.godot');
-    if (!existsSync(file)) {
+    const why = notAGodotProject(path);
+    if (why !== null) {
       return {
         ok: false,
-        response: this.createErrorResponse(`Not a Godot project: ${path}`, [
+        response: this.createErrorResponse(`Not a Godot project: ${path} ${why}.`, [
           'Point projectPath at the directory holding project.godot',
         ]),
       };
@@ -13558,7 +13561,7 @@ class GodotServer {
     const projectPath = run.projectPath;
     // The profile outlives the project it was taken in: a git worktree removed after its run leaves
     // the run's note and profile behind, and reading the project then threw.
-    const projectGone = projectPath !== null && !existsSync(join(projectPath, 'project.godot'));
+    const projectGone = projectPath !== null && !isGodotProject(projectPath);
     if (projectGone && callersName !== undefined) {
       return this.createErrorResponse(
         `callersOf reads the project's scripts, and the run's project at ${projectPath} has no project.godot any more.`,

@@ -28,7 +28,7 @@ import {
   writeYaml,
 } from './config-formats.js';
 import { Refusal } from './errors.js';
-import { isSameDirectory } from './paths.js';
+import { isGodotProject, isSameDirectory } from './paths.js';
 import { isRecord } from './records.js';
 import { currentRunner, type Runner, spawnFor } from './runner.js';
 
@@ -928,7 +928,7 @@ export function mainCheckoutOf(projectPath: string): string | null {
     return null;
   }
   const main = join(dirname(common), relative(top, resolve(projectPath)));
-  return isSameDirectory(main, projectPath) || !existsSync(join(main, 'project.godot')) ? null : main;
+  return isSameDirectory(main, projectPath) || !isGodotProject(main) ? null : main;
 }
 
 /**
@@ -961,7 +961,7 @@ export function worktreeCheckoutsOf(projectPath: string): string[] {
     }
     const checkout = dirname(resolve(listed, name, readFileSync(pointer, 'utf8').trim()));
     const project = join(checkout, below);
-    return existsSync(join(project, 'project.godot')) ? [project] : [];
+    return isGodotProject(project) ? [project] : [];
   });
 }
 
