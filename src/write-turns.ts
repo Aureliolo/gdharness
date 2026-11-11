@@ -58,7 +58,7 @@ export async function inTurnFor<T>(projectPath: string, file: string, write: () 
   }
   if (!(await giveBack(lock))) {
     throw new Error(
-      `The write to ${file} finished, but its turn could not be given back: remove ${lock} so later writes to it can run.`,
+      `The write to ${file} finished, but its lock file ${lock} could not be removed. Remove it so later writes to ${file} can run.`,
     );
   }
   return result;

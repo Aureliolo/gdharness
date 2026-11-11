@@ -278,7 +278,7 @@ export class ProjectScripts {
         }
         if (accessible === true && said === false) {
           throw new Refusal(
-            `${path} declares ${ACCESSIBILITY} true and ${NEEDS_WINDOW} false, and Godot builds the accessibility tree only with a window. Leave ${NEEDS_WINDOW} out, since ${ACCESSIBILITY} gives the suite a window.`,
+            `${path} declares ${ACCESSIBILITY} true and ${NEEDS_WINDOW} false. Godot builds the accessibility tree only with a window. Remove ${NEEDS_WINDOW}, since ${ACCESSIBILITY} already gives the suite one.`,
           );
         }
         return {

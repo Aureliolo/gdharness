@@ -547,41 +547,32 @@ export interface EngineVerdict {
  * large is the operating system saying the process was ended.
  */
 const WINDOWS_STATUSES: ReadonlyMap<number, { name: string; meaning: string }> = new Map([
-  [0xc0000005, { name: 'STATUS_ACCESS_VIOLATION', meaning: 'an access violation, so it crashed' }],
-  [0xc0000017, { name: 'STATUS_NO_MEMORY', meaning: 'no memory left, so it crashed' }],
-  [0xc000001d, { name: 'STATUS_ILLEGAL_INSTRUCTION', meaning: 'an illegal instruction, so it crashed' }],
-  [
-    0xc0000094,
-    { name: 'STATUS_INTEGER_DIVIDE_BY_ZERO', meaning: 'an integer division by zero, so it crashed' },
-  ],
-  [0xc00000fd, { name: 'STATUS_STACK_OVERFLOW', meaning: 'a stack overflow, so it crashed' }],
-  [0xc000012d, { name: 'STATUS_COMMITMENT_LIMIT', meaning: 'the commit limit reached, so it crashed' }],
-  [
-    0xc0000135,
-    { name: 'STATUS_DLL_NOT_FOUND', meaning: 'a library it needs was not found, so it never started' },
-  ],
+  [0xc0000005, { name: 'STATUS_ACCESS_VIOLATION', meaning: 'a crash on an access violation' }],
+  [0xc0000017, { name: 'STATUS_NO_MEMORY', meaning: 'a crash with no memory left' }],
+  [0xc000001d, { name: 'STATUS_ILLEGAL_INSTRUCTION', meaning: 'a crash on an illegal instruction' }],
+  [0xc0000094, { name: 'STATUS_INTEGER_DIVIDE_BY_ZERO', meaning: 'a crash on an integer division by zero' }],
+  [0xc00000fd, { name: 'STATUS_STACK_OVERFLOW', meaning: 'a crash on a stack overflow' }],
+  [0xc000012d, { name: 'STATUS_COMMITMENT_LIMIT', meaning: 'a crash at the commit limit' }],
+  [0xc0000135, { name: 'STATUS_DLL_NOT_FOUND', meaning: 'a start that failed on a missing library' }],
   [0xc000013a, { name: 'STATUS_CONTROL_C_EXIT', meaning: 'its console was closed or sent Ctrl+C' }],
-  [
-    0xc0000142,
-    { name: 'STATUS_DLL_INIT_FAILED', meaning: 'a library it needs failed to start, so it never started' },
-  ],
-  [0xc0000374, { name: 'STATUS_HEAP_CORRUPTION', meaning: 'a corrupted heap, so it crashed' }],
+  [0xc0000142, { name: 'STATUS_DLL_INIT_FAILED', meaning: 'a start that failed in a library it needs' }],
+  [0xc0000374, { name: 'STATUS_HEAP_CORRUPTION', meaning: 'a crash on a corrupted heap' }],
   [
     0xc0000409,
-    { name: 'STATUS_STACK_BUFFER_OVERRUN', meaning: 'a stack buffer overrun or a fast fail, so it crashed' },
+    { name: 'STATUS_STACK_BUFFER_OVERRUN', meaning: 'a crash on a stack buffer overrun or a fast fail' },
   ],
   [
     0xc06d007e,
     {
       name: 'a module that could not be found (VcppException)',
-      meaning: 'a module it needs was not found, so it never started',
+      meaning: 'a start that failed on a missing module',
     },
   ],
   [
     0xc06d007f,
     {
       name: 'a procedure that could not be found (VcppException)',
-      meaning: 'a procedure it needs was not found, so it never started',
+      meaning: 'a start that failed on a missing procedure',
     },
   ],
 ]);

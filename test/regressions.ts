@@ -19652,7 +19652,7 @@ function testACrashWithNoReportIsAnError(): void {
 
   const violation = entered(0xc0000005, null);
   assert.deepEqual(errorsOf(violation), [
-    'The engine ended with exit code 0xC0000005, an access violation, so it crashed. It printed no crash report.',
+    'The engine ended with exit code 0xC0000005, a crash on an access violation. It printed no crash report.',
   ]);
   enterASilentCrash({ exitCode: 0xc0000005, exitSignal: null, log: violation });
   assert.equal(violation.count('error'), 1, 'entered once, however often a verdict is read');
@@ -19702,7 +19702,7 @@ function testARuntimeCallAfterOurRunEndedSaysSo(): void {
   const crashed = ourRunEnded({ ...base, exitCode: 0xc0000005, endedAt: 10_000 }, 15_000);
   assert.match(
     crashed,
-    /, and it exited by itself with exit code 0xC0000005, an access violation, so it crashed\. editor_output/,
+    /, and it exited by itself with exit code 0xC0000005, a crash on an access violation\. editor_output/,
     crashed,
   );
   const signalled = ourRunEnded({ ...base, exitSignal: 'SIGKILL', endedAt: 10_000 }, 10_000);
@@ -29951,7 +29951,7 @@ async function testAnImportOrExportOverAStaleDocCacheRunsAgain(): Promise<void> 
   const crashed = docCacheCrash(ran(0xc0000005), before, rewritten, 'export') ?? '';
   assert.ok(
     crashed.startsWith(
-      `The first export ended badly (exit code 0xC0000005, an access violation, so it crashed) after rebuilding the editor's class reference cache, ${cache}. `,
+      `The first export ended badly (exit code 0xC0000005, a crash on an access violation) after rebuilding the editor's class reference cache, ${cache}. `,
     ) && crashed.endsWith('So the export was run again, and this answer is from that second run.'),
     crashed || 'a crash that rewrote the cache gave no note',
   );
@@ -37269,9 +37269,9 @@ async function testAnEngineRunSaysHowItEnded(): Promise<void> {
       ended(null),
     ],
     [
-      'exit code 0xC0000005, an access violation, so it crashed',
-      'exit code 0xC00000FD, a stack overflow, so it crashed',
-      'exit code 0xC0000135, a library it needs was not found, so it never started',
+      'exit code 0xC0000005, a crash on an access violation',
+      'exit code 0xC00000FD, a crash on a stack overflow',
+      'exit code 0xC0000135, a start that failed on a missing library',
       'exit code 0xC0000001, a Windows error status',
       'exit code 3221225471',
       'exit code unknown',
@@ -37365,7 +37365,7 @@ async function testAnEngineThatCrashesAsItStartsIsStartedAgain(): Promise<void> 
   assert.deepEqual([always.starts, always.waits], [ENGINE_STARTS, [500, 1000]], 'up to its starts in all');
   assert.equal(
     howItEnded(always.ran),
-    'exit code 0xC06D007F, a procedure it needs was not found, so it never started, and printed nothing on any of its 3 starts',
+    'exit code 0xC06D007F, a start that failed on a missing procedure, and printed nothing on any of its 3 starts',
   );
   const failed = await sequence([run(1, printed('ERROR: no such scene'))]);
   assert.deepEqual(
@@ -54719,15 +54719,15 @@ function testEveryReaderOfTheConsoleKnowsALineAlike(): void {
  */
 function testAWindowsExitStatusIsNamedTheSameEverywhere(): void {
   const statuses: readonly [number, string, string][] = [
-    [0xc0000005, 'STATUS_ACCESS_VIOLATION', 'an access violation, so it crashed'],
-    [0xc00000fd, 'STATUS_STACK_OVERFLOW', 'a stack overflow, so it crashed'],
-    [0xc0000374, 'STATUS_HEAP_CORRUPTION', 'a corrupted heap, so it crashed'],
-    [0xc0000017, 'STATUS_NO_MEMORY', 'no memory left, so it crashed'],
-    [0xc0000142, 'STATUS_DLL_INIT_FAILED', 'a library it needs failed to start, so it never started'],
+    [0xc0000005, 'STATUS_ACCESS_VIOLATION', 'a crash on an access violation'],
+    [0xc00000fd, 'STATUS_STACK_OVERFLOW', 'a crash on a stack overflow'],
+    [0xc0000374, 'STATUS_HEAP_CORRUPTION', 'a crash on a corrupted heap'],
+    [0xc0000017, 'STATUS_NO_MEMORY', 'a crash with no memory left'],
+    [0xc0000142, 'STATUS_DLL_INIT_FAILED', 'a start that failed in a library it needs'],
     [
       0xc06d007e,
       'a module that could not be found (VcppException)',
-      'a module it needs was not found, so it never started',
+      'a start that failed on a missing module',
     ],
   ];
   for (const [code, name, meaning] of statuses) {
@@ -56428,7 +56428,7 @@ function testASuiteAskingForTheAccessibilityTreeGetsAWindowWithItOn(): void {
       (error: unknown) =>
         error instanceof Refusal &&
         error.message ===
-          'res://tests/both_test.gd declares GDHARNESS_ACCESSIBILITY true and GDHARNESS_NEEDS_WINDOW false, and Godot builds the accessibility tree only with a window. Leave GDHARNESS_NEEDS_WINDOW out, since GDHARNESS_ACCESSIBILITY gives the suite a window.',
+          'res://tests/both_test.gd declares GDHARNESS_ACCESSIBILITY true and GDHARNESS_NEEDS_WINDOW false. Godot builds the accessibility tree only with a window. Remove GDHARNESS_NEEDS_WINDOW, since GDHARNESS_ACCESSIBILITY already gives the suite one.',
     );
   } finally {
     rmSync(project, { recursive: true, force: true });
@@ -75007,7 +75007,11 @@ async function testAClassRenameLeavesKeysInheritedMembersAndParameters(): Promis
         .join(' | ');
     for (const needle of ['table', '\tTold = 2']) {
       const line = lineOf('keys.gd', needle);
-      assert.match(why('keys.gd', line), /a dictionary key written as \{Told = \.\.\.\}/, `keys.gd:${line}`);
+      assert.match(
+        why('keys.gd', line),
+        /\{Told = \.\.\.\} writes the string "Told" as a dictionary key, not the class/,
+        `keys.gd:${line}`,
+      );
     }
     assert.match(
       why('heir.gd', 4),
@@ -83476,7 +83480,9 @@ async function testAWriteReportsATurnItCouldNotGiveBack(): Promise<void> {
         return Promise.resolve('written');
       }),
       (error: unknown) =>
-        error instanceof Error && error.message.includes(lock) && error.message.includes('given back'),
+        error instanceof Error &&
+        error.message.includes(`lock file ${lock} could not be removed`) &&
+        error.message.includes(`later writes to ${file}`),
       'a turn that cannot be given back is named, with the lock to remove',
     );
     rmSync(lock, { recursive: true, force: true });

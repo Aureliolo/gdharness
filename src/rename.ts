@@ -586,10 +586,10 @@ export function planClassRename(args: ClassRenameArguments): Plan {
       return `this script declares something of its own named ${oldName}, so which uses mean the class cannot be told from the text`;
     }
     if (inherits(script)) {
-      return `a class this script inherits from declares something named ${oldName}, which a bare name here means rather than the class`;
+      return `a class this script inherits from declares something named ${oldName}, so a bare ${oldName} here means that, not the class`;
     }
     if (isWrittenKey(script.text, occurrence.offset, oldName)) {
-      return `a dictionary key written as {${oldName} = ...}, which is the string "${oldName}" rather than the class`;
+      return `{${oldName} = ...} writes the string "${oldName}" as a dictionary key, not the class`;
     }
     if (occurrence.afterDot) {
       return `after a dot, a member of something else rather than the class`;
