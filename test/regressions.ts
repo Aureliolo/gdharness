@@ -55538,6 +55538,12 @@ function testSuitePassesKeyAlikeInEveryCheckout(): void {
       gate.slice(1, 2),
       'while a pin that differs keys apart',
     );
+    // A folder is keyed by the files in it, where it used to end the run.
+    const folder = join(checkouts[1] ?? '', 'tools');
+    const [before] = reachedAlsoSaid([folder]);
+    assert.ok(before?.includes('versions.json\n{"godot": "4.8"}'), `a folder is every file in it: ${before}`);
+    writeFileSync(join(folder, 'extra.json'), '{}');
+    assert.notEqual(reachedAlsoSaid([folder])[0], before, 'and a file added to it keys apart');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -57592,6 +57598,11 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
       '.godot/extension_list.cfg': 'res://ext/native.gdextension\n',
       'ext/native.gdextension': '[configuration]\nentry_symbol = "init"\n',
     });
+    // What the engine reads at start, which every suite depends on and these cases leave aside.
+    const readAtStart = (path: string): boolean =>
+      ['res://project', 'res://ext', 'res://override', 'res://.godot'].some((start) =>
+        path.startsWith(start),
+      );
     const inputsOf = (reached: readonly string[]): string[] =>
       new SuiteInputs(new ProjectScripts(project), ['1']).inputsOf(reached);
     const printOf = (reached: readonly string[], always: readonly string[] = ['1']): string => {
@@ -57609,16 +57620,18 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
     assert.deepEqual(
       inputsOf(suite),
       [
+        'res://.godot/extension_list.cfg',
         'res://addons/gdUnit4/',
         'res://data/icon.png',
         'res://data/table.tres',
         'res://ext/native.gdextension',
         'res://game.gd',
         'res://helper.gd',
+        'res://override.cfg',
         'res://project.godot',
         'res://tests/a_test.gd',
       ],
-      'the class it names, what that preloads and what that names, its addon whole, the project and its extension, and nothing outside the project files',
+      'the class it names, what that preloads and what that names, its addon whole, the project, its overrides, its extensions and their list, and nothing outside the project files',
     );
     assert.deepEqual(
       inputsOf(['res://reader.gd']).filter((path) => path.startsWith('res://data') || path === EVERY_FILE),
@@ -57629,16 +57642,12 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
     assert.deepEqual(inputsOf(['res://computed.gd']), [EVERY_FILE], 'a file read by a computed path');
     assert.deepEqual(inputsOf(['res://by_uid.gd']), [EVERY_FILE], 'and a preload by uid');
     assert.deepEqual(
-      inputsOf(['res://checker.gd']).filter(
-        (path) => !path.startsWith('res://project') && !path.startsWith('res://ext'),
-      ),
+      inputsOf(['res://checker.gd']).filter((path) => !readAtStart(path)),
       [EVERY_NAME, 'res://checker.gd'],
       'a check or listing by a computed path, as the names alone',
     );
     assert.deepEqual(
-      inputsOf(['res://joined.gd']).filter(
-        (path) => !path.startsWith('res://project') && !path.startsWith('res://ext'),
-      ),
+      inputsOf(['res://joined.gd']).filter((path) => !readAtStart(path)),
       ['res://joined.gd', 'res://paths.gd', 'tree:res://data/'],
       'a path joined onto an inherited constant built from literals, read as that folder whole',
     );
@@ -57646,8 +57655,7 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
       inputsOf(['res://formatted.gd']).includes('tree:res://levels/'),
       'and a path formatted into a literal, as the folder it begins in',
     );
-    const own = (script: string): string[] =>
-      inputsOf([script]).filter((path) => !path.startsWith('res://project') && !path.startsWith('res://ext'));
+    const own = (script: string): string[] => inputsOf([script]).filter((path) => !readAtStart(path));
     assert.deepEqual(
       own('res://held.gd'),
       ['res://held.gd', 'tree:res://data/'],
@@ -57681,9 +57689,7 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
       'a parameter left to its default',
     );
     assert.deepEqual(
-      inputsOf(['res://saves.gd']).filter(
-        (path) => !path.startsWith('res://project') && !path.startsWith('res://ext'),
-      ),
+      inputsOf(['res://saves.gd']).filter((path) => !readAtStart(path)),
       ['res://saves.gd', 'res://store.gd'],
       "no file for a path joined onto another class's user:// constant",
     );
@@ -57784,9 +57790,15 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
     const scripts = new ProjectScripts(project);
     const inputs = new SuiteInputs(scripts, ['1']);
     const kept = inputs.inputsOf(suite);
+    // Setting a time back is itself a change to a file, so it is done before the moment the run began.
+    const aged = new Date(Date.now() - 60_000);
+    utimesSync(join(project, 'data', 'icon.png'), aged, aged);
+    utimesSync(join(project, 'helper.gd'), aged, aged);
+    const settled = Date.now() + 25;
+    while (Date.now() < settled) {
+      // The file system's clock moves past the last change.
+    }
     const began = Date.now();
-    utimesSync(join(project, 'data', 'icon.png'), new Date(began - 60_000), new Date(began - 60_000));
-    utimesSync(join(project, 'helper.gd'), new Date(began - 60_000), new Date(began - 60_000));
     assert.equal(new SuiteInputs(scripts, ['1']).modifiedAfter(kept, began), false, 'nothing since');
     utimesSync(join(project, 'data', 'icon.png'), new Date(began + 5000), new Date(began + 5000));
     assert.equal(new SuiteInputs(scripts, ['1']).modifiedAfter(kept, began), true, 'one input since');
@@ -57875,6 +57887,184 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
       Object.fromEntries(recorded),
       'a torn last line',
     );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A suite depends on every file a script, scene, shader or resource names, by whichever spelling the
+ * engine takes: a constant of another script, a sum of strings, a path with a space, a binary
+ * resource, an included shader, an import's materials, a base given to an inner class, a class
+ * declared in lower case, a file opened by a parser, and the settings the engine reads at start.
+ */
+function testASuiteDependsOnEveryFileItsScriptsAndResourcesNameInAnySpelling(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-named-'));
+  try {
+    const script = (body: string): string => `extends Node\n${body}\n`;
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'paths.gd': 'class_name Paths\nextends RefCounted\nconst TABLE = "res://data/t.tres"\n',
+      'data/t.tres': '[gd_resource type="Resource" format=3]\n',
+      'data/inner.tres': '[gd_resource type="Resource" format=3]\n',
+      's_dotted.gd': script('const T = preload(Paths.TABLE)'),
+      's_sum.gd': script('const T = preload("res://data/" + "t.tres")'),
+      's_local.gd': script('const P = "res://data/t.tres"\nconst T = preload(P)'),
+      's_literal.gd': script('const T = preload("res://data/t.tres")'),
+      's_function.gd': script('func f() -> void:\n\tload("res://data/t.tres")'),
+      's_chain.gd': script('const T = preload("res://chain.tres")'),
+      'chain.tres': '[ext_resource type="Resource" path="res://data/t.tres" id="1"]\n',
+      's_space.gd': script('const T = preload("res://scene.tscn")'),
+      'scene.tscn': '[ext_resource type="Texture2D" path="res://my art/icon.png" id="1"]\n',
+      'my art/icon.png': 'a',
+      's_shader.gd': script('const T = preload("res://shaders/main.gdshader")'),
+      'shaders/main.gdshader': 'shader_type canvas_item;\n#include "res://shaders/inc.gdshaderinc"\n',
+      'shaders/inc.gdshaderinc': 'const float A = 1.0;\n',
+      's_res.gd': script('const T = preload("res://pack.res")'),
+      'pack.res': 'RSRC\0\0res://data/inner.tres\0\0',
+      's_import.gd': script('const T = preload("res://model.glb")'),
+      'model.glb': 'glb',
+      'model.glb.import': '[params]\nmaterials/use_external/path="res://mats/m.tres"\n',
+      'mats/m.tres': '[gd_resource type="Material" format=3]\n',
+      's_inner.gd': script('class Inner extends "res://base.gd":\n\tpass'),
+      'base.gd': 'extends RefCounted\n',
+      's_lower.gd': script('func f() -> void:\n\thelper_thing.new()'),
+      'helper_thing.gd': 'class_name helper_thing\nextends RefCounted\n',
+      's_xml.gd': script('func f() -> void:\n\tvar parser := XMLParser.new()\n\tparser.open("res://x.xml")'),
+      'x.xml': '<a/>',
+      's_nothing.gd': script('func f() -> int:\n\treturn 1'),
+    });
+    const printOf = (reached: string): string => {
+      const inputs = new SuiteInputs(new ProjectScripts(project), ['1']);
+      return inputs.printOf(inputs.inputsOf([reached]));
+    };
+    const moves = (reached: string, file: string, content: string): boolean => {
+      const before = printOf(reached);
+      writeTree(project, { [file]: content });
+      return printOf(reached) !== before;
+    };
+    const rules: [string, string, string, string][] = [
+      ['s_literal', 'data/t.tres', '1', 'a literal preload'],
+      ['s_local', 'data/t.tres', '2', 'a preload of a constant of the same script'],
+      ['s_dotted', 'data/t.tres', '3', 'a preload of a constant of another script'],
+      ['s_sum', 'data/t.tres', '4', 'a preload of a sum of strings'],
+      ['s_function', 'data/t.tres', '5', 'a load in a function'],
+      ['s_chain', 'data/t.tres', '6', 'a resource that names another resource'],
+      ['s_space', 'my art/icon.png', '7', 'a path with a space in a scene'],
+      ['s_shader', 'shaders/inc.gdshaderinc', '8', 'an included shader'],
+      ['s_res', 'data/inner.tres', '9', 'a path in a binary resource'],
+      ['s_import', 'mats/m.tres', '10', "an import's external material"],
+      ['s_inner', 'base.gd', '11', 'a base given to an inner class'],
+      ['s_lower', 'helper_thing.gd', '12', 'a class declared in lower case'],
+      ['s_xml', 'x.xml', '13', 'a file opened by a parser'],
+    ];
+    assert.deepEqual(
+      rules
+        .filter(([suite, file, edit]) => !moves(`res://${suite}.gd`, file, `${edit}\n`))
+        .map(([, file, , how]) => `${how}: ${file} is not an input`),
+      [],
+      'every file a script or resource names moves the print of a suite reaching it',
+    );
+    assert.equal(
+      moves('res://s_nothing.gd', 'data/t.tres', 'other\n'),
+      false,
+      'and a script naming no file does not depend on one',
+    );
+    for (const settings of ['override.cfg', '.godot/extension_list.cfg']) {
+      assert.equal(
+        moves('res://s_nothing.gd', settings, '[x]\n'),
+        true,
+        `${settings} read at start is an input`,
+      );
+    }
+    const base = join(project, 'case_probe');
+    writeTree(project, { 'case_probe/low.gd': script('const T = preload("res://data/t.tres")') });
+    if (existsSync(join(base, 'LOW.gd'))) {
+      assert.equal(
+        moves('res://case_probe/LOW.gd', 'data/t.tres', 'cased\n'),
+        true,
+        'a script named in another letter case still names what it preloads',
+      );
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A suite reading a computed path depends on files in a folder holding a `.gdignore` and in a folder
+ * a link leads to, since a script reads the disk and not the engine's file system.
+ */
+function testAComputedReadDependsOnFoldersTheEngineIgnoresAndLinksLeadTo(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-ignored-'));
+  const elsewhere = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-linked-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'raw/.gdignore': '',
+      'raw/a.json': '1\n',
+    });
+    writeTree(elsewhere, { 'shared.json': '1\n' });
+    symlinkSync(elsewhere, join(project, 'linked'), 'junction');
+    symlinkSync(project, join(project, 'raw', 'back'), 'junction');
+    const print = (): string => new SuiteInputs(new ProjectScripts(project), ['1']).printOf([EVERY_FILE]);
+    for (const [file, how] of [
+      [join(project, 'raw', 'a.json'), 'a folder holding a .gdignore'],
+      [join(elsewhere, 'shared.json'), 'a folder a link leads to'],
+    ] as const) {
+      const before = print();
+      writeFileSync(file, 'changed\n');
+      assert.notEqual(print(), before, `a file in ${how} is read by a computed path`);
+    }
+    const names: string[] = [];
+    walkSeen(project, (under) => names.push(under));
+    assert.deepEqual(
+      names,
+      ['linked/shared.json', 'project.godot', 'raw/.gdignore', 'raw/a.json'],
+      'and a link back up the tree is not walked again',
+    );
+  } finally {
+    sweep(project, elsewhere);
+  }
+}
+
+/**
+ * An input replaced with a copy that keeps its old modification time, and an input deleted, count as
+ * changed since a moment, so a pass recorded on a state the suite did not run on is not kept.
+ */
+function testAnInputChangedDuringARunIsSeenWhateverItsTimeStamp(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-during-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      's.gd': 'extends Node\nconst T = preload("res://t.tres")\nconst U = preload("res://u.tres")\n',
+      't.tres': 'one\n',
+      'u.tres': 'two\n',
+    });
+    const longAgo = new Date(Date.now() - 86_400_000);
+    for (const name of ['project.godot', 's.gd', 't.tres', 'u.tres']) {
+      utimesSync(join(project, name), longAgo, longAgo);
+    }
+    const inputs = (): SuiteInputs => new SuiteInputs(new ProjectScripts(project), ['1']);
+    const named = inputs().inputsOf(['res://s.gd']);
+    const since = Date.now();
+    while (Date.now() < since + 25) {
+      // The file system's clock moves on before anything is changed.
+    }
+    assert.equal(inputs().modifiedAfter(named, since), false, 'nothing is changed since');
+    writeFileSync(join(project, 't.tres'), 'new!\n');
+    utimesSync(join(project, 't.tres'), longAgo, longAgo);
+    assert.equal(
+      inputs().modifiedAfter(named, since),
+      true,
+      'a file replaced with the old modification time is changed',
+    );
+    const after = Date.now();
+    while (Date.now() < after + 25) {
+      // As above.
+    }
+    rmSync(join(project, 'u.tres'));
+    assert.equal(inputs().modifiedAfter(named, after), true, 'and a file deleted is');
   } finally {
     sweep(project);
   }
@@ -86875,6 +87065,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHiddenEditorStartsOnAnEmptyScriptReference,
   testAKeptScriptReferenceOfNoBytesIsMadeAgainNotPlaced,
   testASuitesInputsAreWhatItsEngineLoaded,
+  testASuiteDependsOnEveryFileItsScriptsAndResourcesNameInAnySpelling,
+  testAComputedReadDependsOnFoldersTheEngineIgnoresAndLinksLeadTo,
+  testAnInputChangedDuringARunIsSeenWhateverItsTimeStamp,
   testAReadsCallersAreThoseThatCanReachIt,
   testAFileGoneBetweenTheListingAndTheReadIsPassedOver,
   testTheCompileCheckAndUnattributedFaultsAreJudged,

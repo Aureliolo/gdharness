@@ -312,10 +312,7 @@ export class ProjectScripts {
    * of one when the name is dotted, as `Outer.Inner` is, or the name of a class the project does not
    * declare.
    */
-  private baseOf(
-    script: string,
-    extendsAs: string | null,
-  ): (Link & { name?: never }) | { name: string } | null {
+  baseOf(script: string, extendsAs: string | null): (Link & { name?: never }) | { name: string } | null {
     if (extendsAs === null) {
       return null;
     }

@@ -809,6 +809,23 @@ function junkIsNeverAReport(): void {
     }),
     { numRuns: 1000 },
   );
+  // Random text almost never holds a suite element, so the reading of one is held apart: a report
+  // with a suite in it is read as that suite whatever plain text lies inside it.
+  fc.assert(
+    fc.property(
+      fc.string({ maxLength: 80 }).filter((text) => !text.includes('<') && !text.includes('&')),
+      (inner) => {
+        const report = parseJUnit(
+          `<testsuites><testsuite name="s" package="t">${inner}</testsuite></testsuites>`,
+        );
+        assert.deepEqual(
+          report.suites.map((suite) => [suite.name, suite.path, suite.cases.length]),
+          [['s', 'res://t/s.gd', 0]],
+        );
+      },
+    ),
+    { numRuns: 200 },
+  );
 }
 
 framesRoundTripUnderAnyChunking();
