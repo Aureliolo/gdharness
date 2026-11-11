@@ -270,42 +270,58 @@ export class ProfileAggregate {
       return;
     }
     if (received.message === 'error' && received.data[7] === QUEUE_OVERFLOW) {
-      // Sent once the queue has room again, with how many went since the last such report.
-      const said = typeof received.data[8] === 'string' ? DROPPED_COUNT.exec(received.data[8]) : null;
-      this.dropped += said === null ? 1 : Number(said[1]);
+      this.takeOverflow(received.data);
     } else if (received.message === 'servers:function_signature') {
-      const [name, id] = received.data;
-      if (typeof name === 'string' && typeof id === 'number') {
-        this.names.set(id, name);
-      }
+      this.takeSignature(received.data);
     } else if (received.message === 'servers:profile_frame') {
-      const carried = this.addFrame(received.data, this.totals);
-      if (carried === null) {
-        this.unreadable += 1;
-      } else {
-        this.frames += 1;
-        this.lastFrameAt = now;
-        this.cappedFrames += carried >= this.frameFunctions ? 1 : 0;
-        const numbered = received.data[0];
-        if (typeof numbered === 'number') {
-          this.firstFrame ??= numbered;
-          this.lastFrame = numbered;
-        }
-      }
+      this.takeFrame(received.data, now);
     } else if (received.message === 'servers:profile_total') {
-      // The engine's own count since the profiler started, so it replaces the frames' sum rather
-      // than adding to it: it is what the frames add up to, with nothing lost between them.
-      const whole = new Map<string, { calls: number; selfSeconds: number; totalSeconds: number }>();
-      const carried = this.addFrame(received.data, whole);
-      if (carried === null) {
-        this.unreadable += 1;
-      } else {
-        this.totals = whole;
-        this.complete = true;
-        this.lastFrameAt = now;
-        this.totalCapped = carried >= this.frameFunctions;
-      }
+      this.takeTotal(received.data, now);
     }
+  }
+
+  /** Sent once the queue has room again, with how many went since the last such report. */
+  private takeOverflow(data: readonly GodotValue[]): void {
+    const said = typeof data[8] === 'string' ? DROPPED_COUNT.exec(data[8]) : null;
+    this.dropped += said === null ? 1 : Number(said[1]);
+  }
+
+  private takeSignature(data: readonly GodotValue[]): void {
+    const [name, id] = data;
+    if (typeof name === 'string' && typeof id === 'number') {
+      this.names.set(id, name);
+    }
+  }
+
+  private takeFrame(data: readonly GodotValue[], now: number): void {
+    const carried = this.addFrame(data, this.totals);
+    if (carried === null) {
+      this.unreadable += 1;
+      return;
+    }
+    this.frames += 1;
+    this.lastFrameAt = now;
+    this.cappedFrames += carried >= this.frameFunctions ? 1 : 0;
+    const numbered = data[0];
+    if (typeof numbered === 'number') {
+      this.firstFrame ??= numbered;
+      this.lastFrame = numbered;
+    }
+  }
+
+  private takeTotal(data: readonly GodotValue[], now: number): void {
+    // The engine's own count since the profiler started, so it replaces the frames' sum rather
+    // than adding to it: it is what the frames add up to, with nothing lost between them.
+    const whole = new Map<string, { calls: number; selfSeconds: number; totalSeconds: number }>();
+    const carried = this.addFrame(data, whole);
+    if (carried === null) {
+      this.unreadable += 1;
+      return;
+    }
+    this.totals = whole;
+    this.complete = true;
+    this.lastFrameAt = now;
+    this.totalCapped = carried >= this.frameFunctions;
   }
 
   /**
@@ -567,28 +583,7 @@ export function totalsSince(
   if (now.frames < mark.frames || now.startedAt !== mark.startedAt) {
     return null;
   }
-  let shrunk = 0;
-  const functions: Record<string, FunctionTotals> = {};
-  for (const [signature, sum] of Object.entries(now.functions)) {
-    const before = mark.functions[signature];
-    if (isCalibration(signature) || before === undefined) {
-      functions[signature] = sum;
-      continue;
-    }
-    const added = {
-      calls: sum.calls - before.calls,
-      selfSeconds: sum.selfSeconds - before.selfSeconds,
-      totalSeconds: sum.totalSeconds - before.totalSeconds,
-    };
-    if (added.calls < 0 || added.selfSeconds < 0 || added.totalSeconds < 0) {
-      shrunk += 1;
-    } else if (added.calls > 0) {
-      functions[signature] = added;
-    }
-  }
-  shrunk += Object.keys(mark.functions).filter(
-    (signature) => now.functions[signature] === undefined && (mark.functions[signature]?.calls ?? 0) > 0,
-  ).length;
+  const { functions, shrunk } = functionsSince(now.functions, mark.functions);
   const { dropped: droppedInAll, firstFrame: _first, lastFrame: _last, ...kept } = now;
   const dropped = (droppedInAll ?? 0) - (mark.dropped ?? 0);
   return {
@@ -604,6 +599,36 @@ export function totalsSince(
     },
     shrunk,
   };
+}
+
+/** What [param now] adds to [param before] per function, and how many functions read less than they did. */
+function functionsSince(
+  now: Readonly<Record<string, FunctionTotals>>,
+  before: Readonly<Record<string, FunctionTotals>>,
+): { functions: Record<string, FunctionTotals>; shrunk: number } {
+  let shrunk = 0;
+  const functions: Record<string, FunctionTotals> = {};
+  for (const [signature, sum] of Object.entries(now)) {
+    const marked = before[signature];
+    if (isCalibration(signature) || marked === undefined) {
+      functions[signature] = sum;
+      continue;
+    }
+    const added = {
+      calls: sum.calls - marked.calls,
+      selfSeconds: sum.selfSeconds - marked.selfSeconds,
+      totalSeconds: sum.totalSeconds - marked.totalSeconds,
+    };
+    if (added.calls < 0 || added.selfSeconds < 0 || added.totalSeconds < 0) {
+      shrunk += 1;
+    } else if (added.calls > 0) {
+      functions[signature] = added;
+    }
+  }
+  shrunk += Object.keys(before).filter(
+    (signature) => now[signature] === undefined && (before[signature]?.calls ?? 0) > 0,
+  ).length;
+  return { functions, shrunk };
 }
 
 /**
@@ -746,6 +771,21 @@ function rowOfSite(
   });
 }
 
+/** The numbers of the function a call site is in, left out when the profile has no row for it. */
+function withinNumbersOf(
+  within: ProfiledFunction | undefined,
+): Pick<ProfiledCallSite, 'withinCalls' | 'withinSelfMs' | 'withinTotalMs' | 'withinSelfIncludesSuper'> {
+  if (within === undefined) {
+    return {};
+  }
+  return {
+    withinCalls: within.calls,
+    withinSelfMs: within.selfMs,
+    withinTotalMs: within.totalMs,
+    ...(within.selfIncludesSuper === true ? { withinSelfIncludesSuper: true as const } : {}),
+  };
+}
+
 /** How many places a callers answer lists before saying how many more there were. */
 const CALL_SITES = 40;
 
@@ -793,32 +833,18 @@ export function callersOf(
   const otherClasses = new Set<string>();
   if (asked !== null) {
     for (const [, source] of listed) {
-      for (const declared of classNamesOf(source)) {
-        if (declared !== asked) {
-          otherClasses.add(declared);
-        }
+      for (const declared of classNamesOf(source).filter((one) => one !== asked)) {
+        otherClasses.add(declared);
       }
     }
   }
-  const sites: ProfiledCallSite[] = [];
-  for (const [script, source] of listed) {
-    for (const site of callSitesOf(source, bare, otherClasses, property)) {
+  const sites = listed.flatMap(([script, source]) =>
+    callSitesOf(source, bare, otherClasses, property).map((site) => {
       const within =
         site.within === null ? undefined : rowOfSite(rows, script, source, site.line, site.within);
-      sites.push({
-        script,
-        ...site,
-        ...(within === undefined
-          ? {}
-          : {
-              withinCalls: within.calls,
-              withinSelfMs: within.selfMs,
-              withinTotalMs: within.totalMs,
-              ...(within.selfIncludesSuper === true ? { withinSelfIncludesSuper: true as const } : {}),
-            }),
-      });
-    }
-  }
+      return { script, ...site, ...withinNumbersOf(within) };
+    }),
+  );
   sites.sort(
     (a, b) =>
       (b.withinTotalMs ?? -1) - (a.withinTotalMs ?? -1) ||
