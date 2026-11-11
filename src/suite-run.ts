@@ -1625,11 +1625,7 @@ function report(
       console.log(
         `--- what engine ${String(engine.index)} printed, running ${named(engine.plan.suites.map((suite) => suite.path))}:`,
       );
-      console.log(
-        existsSync(engine.log)
-          ? readLog(engine.log).replace(CONTROL_SEQUENCE, '').trimEnd()
-          : '(no log was written)',
-      );
+      console.log(readLog(engine.log).replace(CONTROL_SEQUENCE, '').trimEnd());
     }
   }
   const failed = ran.filter((engine) => !engine.verdict.passed);
@@ -1641,13 +1637,8 @@ function report(
       console.log(`  ${fault}`);
     }
     // At the top of the kept log, so the file says why on its own, even when the engine printed nothing.
-    if (existsSync(engine.log)) {
-      const verdict = [
-        `gdharness: ${heading.slice(4)}`,
-        ...engine.verdict.faults.map((fault) => `  ${fault}`),
-      ];
-      prependTo(engine.log, `${verdict.join('\n')}\n---\n`);
-    }
+    const verdict = [`gdharness: ${heading.slice(4)}`, ...engine.verdict.faults.map((fault) => `  ${fault}`)];
+    prependTo(engine.log, `${verdict.join('\n')}\n---\n`);
     if (engine.verdict.shown.length > 0) {
       console.log('');
       for (const line of engine.verdict.shown) {
