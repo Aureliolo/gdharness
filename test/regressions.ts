@@ -266,9 +266,15 @@ import { idleClosed, idleSettled, portsIn } from '../src/idle-close.js';
 import { IMPORTABLE_EXTENSIONS, importedIntoTheProject, staleImports } from '../src/import-freshness.js';
 import { defectReport, defectSignature, withoutMachinePaths } from '../src/issues.js';
 import {
+  failedCases,
   finishesASuite,
   hookFailuresPrinted,
+  ignoredForTheRunner,
+  ignoredLeftOut,
+  ignoredYetRan,
+  MalformedReportError,
   orphansPrinted,
+  parseJUnit,
   RENDERED_AWAY_NOTE,
   type ScriptError,
   withActualsPrinted,
@@ -1441,6 +1447,92 @@ function testConsoleLinesOfTheTestRunnerAreReadInLinearTime(): void {
   const namedTook = performance.now() - began;
   assert.equal(named.suites[0]?.left.length, 100_000, 'every case that left nodes is named');
   assert.ok(namedTook < 2000, `100,000 named cases took ${Math.round(namedTook)} ms`);
+}
+
+/** A report is read whole or refused, and an ignore entry or a path is read the way gdUnit4 writes it. */
+function testAReportIsReadWholeOrRefusedAndRowsAreKnown(): void {
+  const suite = (name: string, body: string, attributes = ''): string =>
+    `<testsuite name="${name}" package="t"${attributes}>${body}</testsuite>`;
+  const failing = (name: string): string =>
+    `<testcase name="${name}"><failure message="m"><![CDATA[boom]]></failure></testcase>`;
+  const nested = parseJUnit(`<testsuites>${suite('outer', suite('inner', failing('x')))}</testsuites>`);
+  assert.deepEqual(
+    nested.suites.map((one) => [one.name, one.cases.map((entry) => entry.name)]),
+    [
+      ['inner', ['x']],
+      ['outer', []],
+    ],
+    'a suite inside a suite is read with its cases',
+  );
+  assert.equal(nested.failures, 1, 'and its failure is counted');
+  const two = parseJUnit(`${suite('a', failing('x'))}${suite('b', failing('y'))}`);
+  assert.equal(two.failures, 2, 'two root suites are both read');
+  assert.throws(
+    () => parseJUnit(`<testsuites>${failing('lost')}</testsuites>`),
+    MalformedReportError,
+    'a case outside any suite is refused',
+  );
+  for (const attributes of [' failures="one"', ' errors="2.5"', ' time="-1.5"', ' tests="-3"', ' time=""']) {
+    assert.throws(
+      () => parseJUnit(suite('s', '', attributes)),
+      MalformedReportError,
+      `${attributes} is refused`,
+    );
+  }
+  assert.equal(parseJUnit(suite('s', '', ' time="0.073"')).time, 0.073, 'while a fractional time is read');
+
+  const wordy =
+    '<testsuite name="one_test" package="t"><testcase name="test_one"><failure message="m"><![CDATA[\nExpecting:\n \'abc\'\n but was\n \'abc\'\n\tat \'test_one\' in res://t/one_test.gd:5\n]]></failure></testcase></testsuite>';
+  const at = "'test_one' in res://t/one_test.gd:5";
+  const diff = printedStringDiffs([{ at, parts: [['abc', 'missing']] }]);
+  for (const ends of ['\n', '\r\n']) {
+    const [only] = failedCases(parseJUnit(wordy.replaceAll('\n', ends)), diff);
+    assert.ok(
+      only?.detail?.includes(" but was\n ''\n"),
+      `${JSON.stringify(ends)} line ends give the value found: ${JSON.stringify(only?.detail)}`,
+    );
+  }
+
+  assert.deepEqual(
+    [' package=""', ' package="."'].map(
+      (attributes) =>
+        parseJUnit(`<testsuite name="sums_test"${attributes}/>`).suites.map((one) => one.path)[0],
+    ),
+    ['res://sums_test.gd', 'res://sums_test.gd'],
+    'a suite at the project root has its path',
+  );
+
+  const report = parseJUnit(
+    `<testsuites>${suite('ledger_test', '<testcase name="test_sum"/><testcase name="test_rate:0 (1, 2)"/><testcase name="test_rate:1 (3, 4)"/>')}</testsuites>`,
+  );
+  const declared = [{ path: 'res://t/ledger_test.gd', cases: ['test_rate', 'test_sum'] }];
+  assert.deepEqual(
+    ['test_rate', 'ledger_test:test_rate'].map((entry) => ignoredYetRan(report, [entry]).length),
+    [1, 1],
+    'an ignore entry naming a case that ran as rows is said to have run',
+  );
+  assert.deepEqual(
+    ignoredLeftOut(report, ['ledger_test:test_rate'], declared),
+    { leftOut: [], unmatched: [] },
+    'and a spelling with the suite leaves nothing out',
+  );
+  assert.deepEqual(
+    ignoredForTheRunner(
+      ['ledger_test:test_rate:1 (a:b:3 c)', 'ledger_test:test_sum:2 (3, 4)'],
+      [{ path: 'res://t/ledger_test.gd', cases: ['test_rate', 'test_sum'] }],
+    ),
+    ['res://t/ledger_test.gd:test_rate:1', 'res://t/ledger_test.gd:test_sum:2'],
+    'a row passed back with parameters holding a colon is handed to the runner',
+  );
+
+  const emoji = '\u{1F600}'.repeat(15_000);
+  const [cut] = failedCases(
+    parseJUnit(
+      suite('s', `<testcase name="x"><failure message="m"><![CDATA[x${emoji}]]></failure></testcase>`),
+    ),
+    '',
+  );
+  assert.ok(cut?.detail?.isWellFormed(), 'a detail cut at its limit does not end on half a character');
 }
 
 /**
@@ -85221,6 +85313,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAMarkTakesOnlyTheErrorOfItsFile,
   testALongUnfinishedLineIsHeldInLinearTime,
   testConsoleLinesOfTheTestRunnerAreReadInLinearTime,
+  testAReportIsReadWholeOrRefusedAndRowsAreKnown,
   testPrintedValuesAreReadBackInLinearTimeAndEachToItsOwnFailure,
   testTheDebuggerNamesTheErrorsItsCallsRaise,
   testTheProfilerReadsWhatTheEngineSends,

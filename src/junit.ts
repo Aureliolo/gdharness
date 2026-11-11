@@ -32,7 +32,7 @@ function decoded(text: string): string {
       const code = entity.startsWith('#x')
         ? Number.parseInt(entity.slice(2), 16)
         : Number.parseInt(entity.slice(1), 10);
-      if (!Number.isInteger(code) || code < 0 || code > 0x10ffff) {
+      if (!Number.isInteger(code) || code > 0x10ffff) {
         throw new MalformedReportError(`Not a character: ${whole}`);
       }
       return String.fromCodePoint(code);
@@ -74,13 +74,7 @@ function parseXml(source: string): XmlElement {
   const open: XmlElement[] = [root];
   let at = 0;
 
-  const current = (): XmlElement => {
-    const element = open.at(-1);
-    if (element === undefined) {
-      throw new MalformedReportError('A close tag with nothing open');
-    }
-    return element;
-  };
+  const current = (): XmlElement => open.at(-1) ?? root;
 
   while (at < source.length) {
     const next = source.indexOf('<', at);
@@ -222,8 +216,20 @@ export interface TestReport {
 }
 
 function count(attributes: Readonly<Record<string, string>>, name: string): number {
-  const value = Number(attributes[name] ?? '0');
-  return Number.isFinite(value) ? value : 0;
+  const raw = attributes[name];
+  if (raw === undefined) {
+    return 0;
+  }
+  const value = raw.trim() === '' ? Number.NaN : Number(raw);
+  if (!Number.isFinite(value) || value < 0 || (name !== 'time' && !Number.isInteger(value))) {
+    throw new MalformedReportError(`${name}="${raw}" is not ${name === 'time' ? 'a time' : 'a count'}`);
+  }
+  return value;
+}
+
+/** Whether a reported case is [param test], or one row of it, which gdUnit4 names `test:N (values)`. */
+function isCaseOrRow(reported: string, test: string): boolean {
+  return reported === test || (reported.startsWith(test) && /^\W/.test(reported.slice(test.length)));
 }
 
 /** An entry of a run's ignore list that named a case the run went on to run. */
@@ -252,9 +258,8 @@ export function ignoredYetRan(report: TestReport, ignored: readonly string[]): I
     for (const suite of report.suites) {
       const suiteMatches =
         suiteNamed === null || suite.name === suiteNamed || (suite.path ?? '').includes(suiteNamed);
-      const ran = suiteMatches ? suite.cases.find((one) => one.name === testNamed) : undefined;
-      if (ran !== undefined) {
-        found.push({ entry, ran: `${suite.name}:${ran.name}` });
+      if (suiteMatches && suite.cases.some((one) => isCaseOrRow(one.name, testNamed))) {
+        found.push({ entry, ran: `${suite.name}:${testNamed}` });
       }
     }
   }
@@ -273,7 +278,7 @@ const IGNORED_ROW_LINE = /^gdharness ignored (res:\/\/.+?\.gd > [^:\s]+:\d+)\s*$
  * name a failure was reported under can be passed back as it came.
  */
 function rowNamed(entry: string): { suite: string; test: string; row: number } | null {
-  const named = /^(.+):([A-Za-z_]\w*):(\d+)(?:\s.*)?$/.exec(entry.replace('res://', ''));
+  const named = /^(.+?):([A-Za-z_]\w*):(\d+)(?:\s.*)?$/.exec(entry.replace('res://', ''));
   return named === null ? null : { suite: named[1] ?? '', test: named[2] ?? '', row: Number(named[3]) };
 }
 
@@ -357,9 +362,7 @@ export function ignoredLeftOut(
     for (const { path, test } of named) {
       const reported = report.suites
         .filter((ran) => ran.path === path || (ran.path === null && ran.name === suiteNameOf(path)))
-        .some((ran) =>
-          ran.cases.some((one) => one.name === test || new RegExp(`^${test}\\W`).test(one.name)),
-        );
+        .some((ran) => ran.cases.some((one) => isCaseOrRow(one.name, test)));
       if (!reported) {
         leftOut.add(`${suiteNameOf(path)}:${test}`);
       }
@@ -438,17 +441,43 @@ function failedAnAssertion(entry: TestCase): boolean {
 function pathOf(suite: XmlElement): string | null {
   const directory = suite.attributes['package'];
   const name = suite.attributes['name'];
-  return directory && name ? `res://${directory}/${name}.gd` : null;
+  if (!name || directory === undefined) {
+    return null;
+  }
+  return directory === '' || directory === '.' ? `res://${name}.gd` : `res://${directory}/${name}.gd`;
+}
+
+/**
+ * Every `testsuite` under [param element], at any depth and in document order. A case outside a
+ * suite is refused, since reading around it would answer a run with fewer tests than it held.
+ */
+function suitesUnder(root: XmlElement): XmlElement[] {
+  const found: XmlElement[] = [];
+  // A stack rather than recursion, so a deeply nested document cannot overflow the call stack.
+  const pending: Array<{ element: XmlElement; inSuite: boolean }> = [{ element: root, inSuite: false }];
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    if (next.element.name === 'testcase' && !next.inSuite) {
+      throw new MalformedReportError('A <testcase> outside any <testsuite>');
+    }
+    const isSuite = next.element.name === 'testsuite';
+    if (isSuite) {
+      found.push(next.element);
+    }
+    for (const child of next.element.children.toReversed()) {
+      pending.push({ element: child, inSuite: next.inSuite || isSuite });
+    }
+  }
+  return found;
 }
 
 export function parseJUnit(xml: string): TestReport {
-  const document = parseXml(xml);
-  const top = document.children.find((child) => child.name === 'testsuites' || child.name === 'testsuite');
-  if (top === undefined) {
+  // An XML parser folds every line end to a line feed, and a report that passed through Windows tools
+  // otherwise kept carriage returns inside the values the console is compared against.
+  const document = parseXml(xml.replace(/\r\n?/g, '\n'));
+  if (!document.children.some((child) => child.name === 'testsuites' || child.name === 'testsuite')) {
     throw new MalformedReportError('No <testsuites> or <testsuite> in the report');
   }
-  const suiteElements =
-    top.name === 'testsuite' ? [top] : top.children.filter((child) => child.name === 'testsuite');
+  const suiteElements = suitesUnder(document);
   // Sorted by where each suite is, because gdUnit4 runs and writes them in the order the directory
   // lists them, which is the file system's: one project gave the same suites in one order on
   // Windows and the other on Linux.
@@ -858,11 +887,17 @@ export const MOST_REPORTS_SHOWN = 20;
 /** The most characters of one report's detail an answer carries. The rest are counted. */
 export const LONGEST_DETAIL = 20_000;
 
+/** The first [param length] code units of [param text], without half of a surrogate pair at the end. */
+function wholeCharacters(text: string, length: number): string {
+  const cut = text.slice(0, length);
+  return cut.isWellFormed() ? cut : cut.slice(0, -1);
+}
+
 function shortened(detail: string | null): string | null {
   if (detail === null || detail.length <= LONGEST_DETAIL) {
     return detail;
   }
-  return `${detail.slice(0, LONGEST_DETAIL)}\n[${detail.length - LONGEST_DETAIL} more characters left out]`;
+  return `${wholeCharacters(detail, LONGEST_DETAIL)}\n[${detail.length - LONGEST_DETAIL} more characters left out]`;
 }
 
 /** [param reports] with identical ones folded into the first, which says how many there were. */
@@ -951,7 +986,11 @@ export function failedWithin(
       return entry;
     }
     const { detail: _detail, reports: _reports, reportsLeftOut: _left, ...named } = entry;
-    return { ...named, message: entry.message?.slice(0, 500) ?? null, detail: null };
+    return {
+      ...named,
+      message: entry.message === null ? null : wholeCharacters(entry.message, 500),
+      detail: null,
+    };
   });
   return { failed: kept, briefed: failed.length - whole.size };
 }
