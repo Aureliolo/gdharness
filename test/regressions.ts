@@ -81679,20 +81679,25 @@ async function testAWholeFileWriteAnswersAtOnceWhereTheTargetRefusesAndSweepsDea
       [false, true],
       `a folder answers false at once: ${String(asFolder.ms)} ms`,
     );
-    const locked = join(folder, 'read-only.json');
-    writeFileSync(locked, 'old');
-    chmodSync(locked, 0o444);
-    const asLocked = timed(() => writeWhole(locked, 'new'));
-    chmodSync(locked, 0o666);
-    assert.deepEqual(
-      [asLocked.answer, asLocked.ms < 500],
-      [false, true],
-      `a read-only file answers false at once: ${String(asLocked.ms)} ms`,
-    );
-    assert.equal(readFileSync(locked, 'utf8'), 'old', 'and keeps its text');
+    // Only Windows refuses a rename over a read-only file, so elsewhere there is nothing to refuse.
+    const refusedNames = ['a-directory', 'note.json'];
+    if (process.platform === 'win32') {
+      const locked = join(folder, 'read-only.json');
+      writeFileSync(locked, 'old');
+      chmodSync(locked, 0o444);
+      const asLocked = timed(() => writeWhole(locked, 'new'));
+      chmodSync(locked, 0o666);
+      assert.deepEqual(
+        [asLocked.answer, asLocked.ms < 500],
+        [false, true],
+        `a read-only file answers false at once: ${String(asLocked.ms)} ms`,
+      );
+      assert.equal(readFileSync(locked, 'utf8'), 'old', 'and keeps its text');
+      refusedNames.push('read-only.json');
+    }
     assert.deepEqual(
       readdirSync(folder).toSorted(),
-      ['a-directory', 'note.json', 'read-only.json'],
+      refusedNames.toSorted(),
       'no refused write leaves a partial file',
     );
 
