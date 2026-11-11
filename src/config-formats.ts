@@ -100,23 +100,31 @@ function scanValue(text: string, state: ScanState): string {
       return text.slice(0, index);
     }
     if (char === '"' || char === "'") {
-      const triple = char.repeat(3);
-      if (text.startsWith(triple, index)) {
-        state.multi = triple;
-        index += 3;
-      } else {
-        index = endOfQuoted(text, index);
-      }
+      index = afterOpeningQuote(text, index, state);
       continue;
     }
-    if (char === '[' || char === '{') {
-      state.depth += 1;
-    } else if (char === ']' || char === '}') {
-      state.depth = Math.max(0, state.depth - 1);
-    }
+    countBracket(char, state);
     index += 1;
   }
   return text;
+}
+
+function countBracket(char: string, state: ScanState): void {
+  if (char === '[' || char === '{') {
+    state.depth += 1;
+  } else if (char === ']' || char === '}') {
+    state.depth = Math.max(0, state.depth - 1);
+  }
+}
+
+/** Where scanning goes on after the quote at [param index]: past a whole string, or into a multi-line one. */
+function afterOpeningQuote(text: string, index: number, state: ScanState): number {
+  const triple = (text[index] ?? '').repeat(3);
+  if (text.startsWith(triple, index)) {
+    state.multi = triple;
+    return index + 3;
+  }
+  return endOfQuoted(text, index);
 }
 
 /** Reads a dotted key from `start`, answering its parts and where it ended. */
@@ -216,26 +224,39 @@ function findBlocks(infos: readonly LineInfo[], entry: TomlEntry): Range[] {
     if (head === undefined || head.array !== wanted.array || !samePath(head.path, wanted.path)) {
       continue;
     }
-    while (scan < infos.length) {
-      const next = infos[scan]?.header;
-      if (
-        next !== undefined &&
-        !(next.path.length > wanted.path.length && startsWithPath(next.path, wanted.path))
-      ) {
-        break;
-      }
-      scan += 1;
-    }
-    let to = scan;
-    while (to > from + 1 && infos[to - 1]?.code === '' && infos[to - 1]?.inValue === false) {
-      to -= 1;
-    }
+    scan = endOfTable(infos, scan, wanted);
+    const to = withoutTrailingBlanks(infos, from, scan);
     const body = infos.slice(from + 1, to).map((info) => info.code);
     if (entry.identity === undefined || body.includes(entry.identity)) {
       found.push({ from, to });
     }
   }
   return found;
+}
+
+/** The line of the next header from [param scan] that is not a sub-table of [param wanted], or the end. */
+function endOfTable(infos: readonly LineInfo[], scan: number, wanted: Header): number {
+  let end = scan;
+  while (end < infos.length) {
+    const next = infos[end]?.header;
+    if (
+      next !== undefined &&
+      !(next.path.length > wanted.path.length && startsWithPath(next.path, wanted.path))
+    ) {
+      break;
+    }
+    end += 1;
+  }
+  return end;
+}
+
+/** [param end] moved up past the blank lines that are not part of a value, but never above [param from]. */
+function withoutTrailingBlanks(infos: readonly LineInfo[], from: number, end: number): number {
+  let to = end;
+  while (to > from + 1 && infos[to - 1]?.code === '' && infos[to - 1]?.inValue === false) {
+    to -= 1;
+  }
+  return to;
 }
 
 interface Text {
@@ -305,38 +326,46 @@ export function writeToml(existing: string, entry: TomlEntry, launch: TomlLaunch
   const found = findBlocks(infos, entry);
   const block = entry.block(launch).split('\n');
 
-  let next: string[];
-  if (found.length === 0) {
-    next = [...lines, ...(lines.length > 0 ? [''] : []), ...block];
-  } else {
-    next = [];
-    let cursor = 0;
-    found.forEach((range, count) => {
-      next.push(...lines.slice(cursor, range.from), ...(count === 0 ? block : []));
-      cursor = range.to;
-    });
-    next.push(...lines.slice(cursor));
-  }
+  const next = withBlock(lines, found, block);
+  addEnableTable(next, entry.enable);
+  return joinText(text, next);
+}
 
-  const enable = entry.enable;
+/** [param lines] with the first of [param found] replaced by [param block] and the others dropped, or [param block] appended. */
+function withBlock(lines: readonly string[], found: readonly Range[], block: readonly string[]): string[] {
+  if (found.length === 0) {
+    return [...lines, ...(lines.length > 0 ? [''] : []), ...block];
+  }
+  const next: string[] = [];
+  let cursor = 0;
+  found.forEach((range, count) => {
+    next.push(...lines.slice(cursor, range.from), ...(count === 0 ? block : []));
+    cursor = range.to;
+  });
+  next.push(...lines.slice(cursor));
+  return next;
+}
+
+/** Puts the table the harness needs into [param next] when [param enable] names one that is missing. */
+function addEnableTable(next: string[], enable: TomlEntry['enable']): void {
   const enableHeader = enable === undefined ? undefined : headerOf(enable.header);
   if (
-    enable !== undefined &&
-    enableHeader !== undefined &&
-    !scanToml(next).some((info) => info.header !== undefined && samePath(info.header.path, enableHeader.path))
+    enable === undefined ||
+    enableHeader === undefined ||
+    scanToml(next).some((info) => info.header !== undefined && samePath(info.header.path, enableHeader.path))
   ) {
-    // Above the first table, never above a root key, which the new table would swallow.
-    let at = scanToml(next).findIndex((info) => info.header !== undefined);
-    at = at < 0 ? next.length : at;
-    while (at > 0 && (next[at - 1] ?? '').trim().startsWith('#')) {
-      at -= 1;
-    }
-    next.splice(at, 0, enable.header, enable.line, ...(at < next.length ? [''] : []));
-    if (at > 0 && (next[at - 1] ?? '').trim() !== '') {
-      next.splice(at, 0, '');
-    }
+    return;
   }
-  return joinText(text, next);
+  // Above the first table, never above a root key, which the new table would swallow.
+  let at = scanToml(next).findIndex((info) => info.header !== undefined);
+  at = at < 0 ? next.length : at;
+  while (at > 0 && (next[at - 1] ?? '').trim().startsWith('#')) {
+    at -= 1;
+  }
+  next.splice(at, 0, enable.header, enable.line, ...(at < next.length ? [''] : []));
+  if (at > 0 && (next[at - 1] ?? '').trim() !== '') {
+    next.splice(at, 0, '');
+  }
 }
 
 /** The TOML file without our entry, and without the blank line it left behind. */

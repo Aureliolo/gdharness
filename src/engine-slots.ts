@@ -284,33 +284,41 @@ export function slotWaiters(directory: string): SlotWaiter[] {
   }
   const found: SlotWaiter[] = [];
   for (const mark of names.toSorted()) {
-    let content: string | null;
-    let madeAt: number;
-    try {
-      content = readWhole(join(marks, mark));
-      madeAt = statSync(join(marks, mark)).mtimeMs;
-    } catch {
-      continue;
+    const waiter = waiterOfMark(marks, mark);
+    if (waiter !== null) {
+      found.push(waiter);
     }
-    const holder = content === null ? null : holderOf(content);
-    if (content === null || holder === null || !alive(holder.pid)) {
-      continue;
-    }
-    const parsed: unknown = JSON.parse(content);
-    const { taker, since }: Record<string, unknown> = isRecord(parsed) ? parsed : {};
-    if (taker === MEMORY_TAKER) {
-      continue;
-    }
-    found.push({
-      mark,
-      taker: taker === 'gate' || taker === 'timing' || taker === 'tier' ? taker : 'other',
-      // In whole milliseconds, as a take's own clock reads: a file's time has a fraction, so a mark
-      // made in the millisecond a take began read as made after it, and the take went first.
-      since: Math.floor(typeof since === 'number' && Number.isFinite(since) ? since * 1000 : madeAt),
-      game: holder.game === true,
-    });
   }
   return found;
+}
+
+/** The live waiter the mark file [param mark] in [param marks] names, or null when it names none. */
+function waiterOfMark(marks: string, mark: string): SlotWaiter | null {
+  let content: string | null;
+  let madeAt: number;
+  try {
+    content = readWhole(join(marks, mark));
+    madeAt = statSync(join(marks, mark)).mtimeMs;
+  } catch {
+    return null;
+  }
+  const holder = content === null ? null : holderOf(content);
+  if (content === null || holder === null || !alive(holder.pid)) {
+    return null;
+  }
+  const parsed: unknown = JSON.parse(content);
+  const { taker, since }: Record<string, unknown> = isRecord(parsed) ? parsed : {};
+  if (taker === MEMORY_TAKER) {
+    return null;
+  }
+  return {
+    mark,
+    taker: taker === 'gate' || taker === 'timing' || taker === 'tier' ? taker : 'other',
+    // In whole milliseconds, as a take's own clock reads: a file's time has a fraction, so a mark
+    // made in the millisecond a take began read as made after it, and the take went first.
+    since: Math.floor(typeof since === 'number' && Number.isFinite(since) ? since * 1000 : madeAt),
+    game: holder.game === true,
+  };
 }
 
 /**
@@ -844,34 +852,13 @@ export class EngineSlots {
           blocked?.();
         }
         const now = Date.now();
-        if (waiting !== undefined) {
-          if (now - said >= WAIT_SAID_MS) {
-            said = now;
-            waiting(now - began);
-          }
-        } else if (
-          this.say !== undefined &&
-          this.held.size === 0 &&
-          now - began >= COMMAND_WAIT_SAID_MS &&
-          now - this.saidAt >= WAIT_SAID_MS
-        ) {
-          this.saidAt = now;
-          this.say(slotWaitSaid(now - began, this.count, this.directory, this.holders(), this.drawn));
-        }
+        said = this.sayWaiting(now, began, said, waiting);
         if (changes === undefined) {
           // Looked at again once watched, since a slot given back before the watch began says nothing.
           changes = new FolderChanges(this.directory);
           continue;
         }
-        // Woken for the next line as well as for the next look, so it comes when it is due: said only
-        // at a look, the line due two seconds in came near three, as the first look read a holder's
-        // start for 1.9 s on a loaded machine and the next came a second after that.
-        const sayAt =
-          waiting !== undefined
-            ? said + WAIT_SAID_MS
-            : this.say !== undefined && this.held.size === 0
-              ? Math.max(began + COMMAND_WAIT_SAID_MS, this.saidAt + WAIT_SAID_MS)
-              : Number.POSITIVE_INFINITY;
+        const sayAt = this.nextSayAt(began, said, waiting !== undefined);
         await changes.next(Math.max(0, Math.min(SLOT_LOOK_MS, sayAt - Date.now())), SLOT_SETTLE_MS, signal);
       }
     } finally {
@@ -880,6 +867,51 @@ export class EngineSlots {
         this.waitEnded(mark);
       }
     }
+  }
+
+  /**
+   * Says how long a take has waited, to its own listener or to the command's output, when one is
+   * due. Answers when the listener last heard, which a take with a listener of its own keeps.
+   */
+  private sayWaiting(
+    now: number,
+    began: number,
+    said: number,
+    waiting: ((waitedMs: number) => void) | undefined,
+  ): number {
+    if (waiting !== undefined) {
+      if (now - said < WAIT_SAID_MS) {
+        return said;
+      }
+      waiting(now - began);
+      return now;
+    }
+    if (
+      this.say !== undefined &&
+      this.held.size === 0 &&
+      now - began >= COMMAND_WAIT_SAID_MS &&
+      now - this.saidAt >= WAIT_SAID_MS
+    ) {
+      this.saidAt = now;
+      this.say(slotWaitSaid(now - began, this.count, this.directory, this.holders(), this.drawn));
+    }
+    return said;
+  }
+
+  /**
+   * When the next line is due. A wait is woken for the next line as well as for the next look, so it
+   * comes when it is due: said only at a look, the line due two seconds in came near three, as the
+   * first look read a holder's start for 1.9 s on a loaded machine and the next came a second after
+   * that.
+   */
+  private nextSayAt(began: number, said: number, hasListener: boolean): number {
+    if (hasListener) {
+      return said + WAIT_SAID_MS;
+    }
+    if (this.say !== undefined && this.held.size === 0) {
+      return Math.max(began + COMMAND_WAIT_SAID_MS, this.saidAt + WAIT_SAID_MS);
+    }
+    return Number.POSITIVE_INFINITY;
   }
 
   /**
@@ -901,9 +933,7 @@ export class EngineSlots {
       return inherited;
     }
     const taker = this.taker();
-    const claim = taker === 'other' ? await this.starvedOut() : null;
-    if (claim !== null) {
-      this.drawn = { numbers: [], limit: 'starved', heldFor: starvedSaid(claim) };
+    if (await this.starvedOutFor(taker)) {
       return null;
     }
     const aged = taker === 'other' && !game && waitedMs >= ONE_OFF_AGED_MS;
@@ -914,41 +944,13 @@ export class EngineSlots {
       taker,
       taker === 'other' && !aged ? forAGame(await queued(), game) : 'none',
     );
-    if (game && this.drawn.limit === 'kept') {
-      const kept = this.count - Math.max(1, this.count - keptSlotsOf(this.count));
-      const games = await this.heldByGames(Array.from({ length: kept }, (_, at) => this.count - kept + at));
-      if (games.length >= gamesKeptOf(kept)) {
-        this.drawn = { numbers: games, limit: 'games' };
-        return null;
-      }
+    if (game && this.drawn.limit === 'kept' && (await this.gamesFillTheKeptSlots())) {
+      return null;
     }
-    let tried = this.drawn.numbers;
-    if (taker !== 'timing') {
-      const placed = line ?? new SlotLine(taker, game);
-      const now = Date.now();
-      const waiting = slotWaiters(this.directory);
-      for (const mark of this.passedOver.keys()) {
-        if (!waiting.some((one) => one.mark === mark)) {
-          this.passedOver.delete(mark);
-        }
-      }
-      const ahead = placed
-        .ahead(waiting)
-        .filter((one) => now - (this.passedOver.get(one.mark) ?? now) < SLOT_YIELD_MS);
-      const claims = await this.claimedAhead(ahead, queued);
-      for (const mark of claims.values()) {
-        if (!this.passedOver.has(mark)) {
-          this.passedOver.set(mark, now);
-        }
-      }
-      tried = placed.admitted(tried, new Set(claims.keys()));
-      const left = placed
-        .leaves()
-        .filter((slot) => this.drawn.numbers.includes(slot) && !tried.includes(slot));
-      if (left.length > 0) {
-        this.drawn = { ...this.drawn, left };
-      }
-    }
+    const tried =
+      taker === 'timing'
+        ? this.drawn.numbers
+        : await this.leftAfterThoseAhead(line ?? new SlotLine(taker, game), queued);
     const holder: SlotHolder = game ? { ...this.holder, game: true } : this.holder;
     for (const slot of tried) {
       const lock = join(this.directory, `${String(slot)}.lock`);
@@ -958,6 +960,57 @@ export class EngineSlots {
       }
     }
     return null;
+  }
+
+  /** Whether a taker of one-off kind is starved out, which it then records as why it drew nothing. */
+  private async starvedOutFor(taker: SlotTaker): Promise<boolean> {
+    const claim = taker === 'other' ? await this.starvedOut() : null;
+    if (claim === null) {
+      return false;
+    }
+    this.drawn = { numbers: [], limit: 'starved', heldFor: starvedSaid(claim) };
+    return true;
+  }
+
+  /** Whether the games already hold as many of the kept slots as they may, which it then records. */
+  private async gamesFillTheKeptSlots(): Promise<boolean> {
+    const kept = this.count - Math.max(1, this.count - keptSlotsOf(this.count));
+    const games = await this.heldByGames(Array.from({ length: kept }, (_, at) => this.count - kept + at));
+    if (games.length < gamesKeptOf(kept)) {
+      return false;
+    }
+    this.drawn = { numbers: games, limit: 'games' };
+    return true;
+  }
+
+  /**
+   * The slots of the last draw that [param placed] may try, once the free ones the takers ahead of it
+   * take first are left to them. It records the slots it left for them in the draw.
+   */
+  private async leftAfterThoseAhead(placed: SlotLine, queued: () => Promise<GateQueue>): Promise<number[]> {
+    const drawnBefore = this.drawn.numbers;
+    const now = Date.now();
+    const waiting = slotWaiters(this.directory);
+    for (const mark of this.passedOver.keys()) {
+      if (!waiting.some((one) => one.mark === mark)) {
+        this.passedOver.delete(mark);
+      }
+    }
+    const ahead = placed
+      .ahead(waiting)
+      .filter((one) => now - (this.passedOver.get(one.mark) ?? now) < SLOT_YIELD_MS);
+    const claims = await this.claimedAhead(ahead, queued);
+    for (const mark of claims.values()) {
+      if (!this.passedOver.has(mark)) {
+        this.passedOver.set(mark, now);
+      }
+    }
+    const tried = placed.admitted(drawnBefore, new Set(claims.keys()));
+    const left = placed.leaves().filter((slot) => this.drawn.numbers.includes(slot) && !tried.includes(slot));
+    if (left.length > 0) {
+      this.drawn = { ...this.drawn, left };
+    }
+    return tried;
   }
 
   /**

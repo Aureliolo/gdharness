@@ -187,60 +187,75 @@ export async function processorSecondsOf(pids: readonly number[]): Promise<Map<n
   const found = new Map<number, number>();
   try {
     if (process.platform === 'win32') {
-      const said = await askProcessTable(`ProcessorSecondsOf('${pids.join(',')}')`, ASK_TIMEOUT_MS);
-      for (const line of said.split(/\r?\n/)) {
-        const [pid, seconds] = line.trim().split(' ').map(Number);
-        if (pid !== undefined && seconds !== undefined && Number.isFinite(pid) && Number.isFinite(seconds)) {
-          found.set(pid, seconds);
-        }
-      }
+      await readWindowsSeconds(pids, found);
     } else if (process.platform === 'linux') {
-      const ticks = await ticksASecond();
-      for (const pid of pids) {
-        try {
-          // The fields after the command, which is in brackets and may hold spaces of its own.
-          const fields = (
-            readFileSync(`/proc/${String(pid)}/stat`, 'utf8')
-              .split(')')
-              .pop() ?? ''
-          )
-            .trim()
-            .split(/\s+/);
-          const used = Number(fields[11]) + Number(fields[12]);
-          if (Number.isFinite(used)) {
-            found.set(pid, used / ticks);
-          }
-        } catch {
-          // Gone between the listing and the read.
-        }
-      }
+      await readProcSeconds(pids, found);
     } else {
-      // ps exits 1 when any pid it was given has gone, and still prints the rest. One it cannot
-      // take at all leaves it printing nothing, so each is then asked alone.
-      const asked = (some: readonly number[]): Promise<string> =>
-        run('ps', ['-o', 'pid=,time=', '-p', some.join(',')], { timeout: ASK_TIMEOUT_MS }).then(
-          (done) => done.stdout,
-          (error: unknown) => {
-            const printed = error instanceof Error && 'stdout' in error ? error.stdout : undefined;
-            return typeof printed === 'string' ? printed : '';
-          },
-        );
-      let stdout = await asked(pids);
-      if (stdout.trim() === '' && pids.length > 1) {
-        stdout = (await Promise.all(pids.map((pid) => asked([pid])))).join('\n');
-      }
-      for (const line of stdout.split('\n')) {
-        const [pid, time] = line.trim().split(/\s+/);
-        const seconds = time === undefined ? undefined : secondsFromClock(time);
-        if (pid !== undefined && seconds !== undefined) {
-          found.set(Number(pid), seconds);
-        }
-      }
+      await readPsSeconds(pids, found);
     }
   } catch {
     // Unread, so the stretch counts by the clock.
   }
   return found;
+}
+
+async function readWindowsSeconds(pids: readonly number[], found: Map<number, number>): Promise<void> {
+  const said = await askProcessTable(`ProcessorSecondsOf('${pids.join(',')}')`, ASK_TIMEOUT_MS);
+  for (const line of said.split(/\r?\n/)) {
+    const [pid, seconds] = line.trim().split(' ').map(Number);
+    if (pid !== undefined && seconds !== undefined && Number.isFinite(pid) && Number.isFinite(seconds)) {
+      found.set(pid, seconds);
+    }
+  }
+}
+
+async function readProcSeconds(pids: readonly number[], found: Map<number, number>): Promise<void> {
+  const ticks = await ticksASecond();
+  for (const pid of pids) {
+    try {
+      // The fields after the command, which is in brackets and may hold spaces of its own.
+      const fields = (
+        readFileSync(`/proc/${String(pid)}/stat`, 'utf8')
+          .split(')')
+          .pop() ?? ''
+      )
+        .trim()
+        .split(/\s+/);
+      const used = Number(fields[11]) + Number(fields[12]);
+      if (Number.isFinite(used)) {
+        found.set(pid, used / ticks);
+      }
+    } catch {
+      // Gone between the listing and the read.
+    }
+  }
+}
+
+/** What `ps` printed for [param some], also when it exited 1 because one of them had gone. */
+function askedPs(some: readonly number[]): Promise<string> {
+  return run('ps', ['-o', 'pid=,time=', '-p', some.join(',')], { timeout: ASK_TIMEOUT_MS }).then(
+    (done) => done.stdout,
+    (error: unknown) => {
+      const printed = error instanceof Error && 'stdout' in error ? error.stdout : undefined;
+      return typeof printed === 'string' ? printed : '';
+    },
+  );
+}
+
+async function readPsSeconds(pids: readonly number[], found: Map<number, number>): Promise<void> {
+  // ps exits 1 when any pid it was given has gone, and still prints the rest. One it cannot
+  // take at all leaves it printing nothing, so each is then asked alone.
+  let stdout = await askedPs(pids);
+  if (stdout.trim() === '' && pids.length > 1) {
+    stdout = (await Promise.all(pids.map((pid) => askedPs([pid])))).join('\n');
+  }
+  for (const line of stdout.split('\n')) {
+    const [pid, time] = line.trim().split(/\s+/);
+    const seconds = time === undefined ? undefined : secondsFromClock(time);
+    if (pid !== undefined && seconds !== undefined) {
+      found.set(Number(pid), seconds);
+    }
+  }
 }
 
 let ticks: Promise<number> | null = null;

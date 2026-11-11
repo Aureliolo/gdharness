@@ -77,25 +77,29 @@ export async function originsOf(
     const checked = await check(path);
     const own = checked.errors.filter((error) => error.path === path);
     if (own.length === 0) {
-      unconfirmed.push({
-        path,
-        declares: name,
-        why:
-          checked.failure === null
-            ? "the engine's check of it found no error"
-            : `the engine's check of it did not finish (${checked.failure})`,
-      });
+      unconfirmed.push({ path, declares: name, why: whyNothingFound(checked.failure) });
       continue;
     }
     for (const error of own) {
       origins.push({ ...error, declares: name });
-      const deeper = unresolvedClassIn(error.message);
-      if (deeper !== null) {
-        waiting.push(deeper);
-      }
+      queueDeeperClass(error, waiting);
     }
   }
   return { origins, unconfirmed };
+}
+
+function whyNothingFound(failure: string | null): string {
+  return failure === null
+    ? "the engine's check of it found no error"
+    : `the engine's check of it did not finish (${failure})`;
+}
+
+/** Adds the class [param error] says could not be resolved, which is the next one to follow. */
+function queueDeeperClass(error: ScriptError, waiting: string[]): void {
+  const deeper = unresolvedClassIn(error.message);
+  if (deeper !== null) {
+    waiting.push(deeper);
+  }
 }
 
 const RELOADED_AT = /GDScript::reload \((res:\/\/.+):(\d+)\)$/;

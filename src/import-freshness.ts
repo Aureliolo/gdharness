@@ -159,8 +159,22 @@ function onDisk(projectPath: string, resPath: string): string {
  * filesystem cache under `.godot/editor`, read as `import_pipeline.gd` reads it, or empty without one.
  */
 function importedSidecarMd5s(projectPath: string): Map<string, string> {
-  const found = new Map<string, string>();
   const editor = join(projectPath, '.godot', 'editor');
+  const newest = newestFilesystemCache(editor);
+  if (newest < 0) {
+    return new Map<string, string>();
+  }
+  let text: string;
+  try {
+    text = readFileSync(join(editor, `filesystem_cache${newest}`), 'utf8');
+  } catch {
+    return new Map<string, string>();
+  }
+  return sidecarMd5sIn(text);
+}
+
+/** The highest number a `filesystem_cache<number>` file in [param editor] carries, or -1 without one. */
+function newestFilesystemCache(editor: string): number {
   let newest = -1;
   try {
     for (const name of readdirSync(editor)) {
@@ -170,17 +184,13 @@ function importedSidecarMd5s(projectPath: string): Map<string, string> {
       }
     }
   } catch {
-    return found;
+    return -1;
   }
-  if (newest < 0) {
-    return found;
-  }
-  let text: string;
-  try {
-    text = readFileSync(join(editor, `filesystem_cache${newest}`), 'utf8');
-  } catch {
-    return found;
-  }
+  return newest;
+}
+
+function sidecarMd5sIn(text: string): Map<string, string> {
+  const found = new Map<string, string>();
   // The first line is the import settings version. Then a "::<dir>::<time>" line opens each
   // directory, and each file line has nine "::" fields, the eighth "<>"-separated with the
   // sidecar's md5 sixth.
@@ -199,13 +209,19 @@ function importedSidecarMd5s(projectPath: string): Map<string, string> {
       }
       continue;
     }
-    const slices = fields.length < 9 ? [] : (fields[7] ?? '').split('<>');
-    const md5 = slices[5];
-    if (slices.length >= 7 && md5 !== undefined && md5 !== '') {
+    const md5 = sidecarMd5Of(fields);
+    if (md5 !== undefined) {
       found.set(`${directory}${directory.endsWith('/') ? '' : '/'}${fields[0]}`, md5);
     }
   }
   return found;
+}
+
+/** The sidecar's md5 in the fields of a file line, or undefined when the line has none. */
+function sidecarMd5Of(fields: readonly string[]): string | undefined {
+  const slices = fields.length < 9 ? [] : (fields[7] ?? '').split('<>');
+  const md5 = slices[5];
+  return slices.length >= 7 && md5 !== undefined && md5 !== '' ? md5 : undefined;
 }
 
 /**
@@ -234,13 +250,9 @@ function behind(
   }
   const deps = sectionOf(sidecar, 'deps');
   const outputs = listed(deps.get('dest_files'));
-  if (remap.get('valid') !== 'false') {
-    if (!remap.has('uid')) {
-      return 'its import file has no uid, which the import writes';
-    }
-    if (outputs.length === 0 && ![...remap.keys()].some((key) => key.startsWith('path'))) {
-      return 'its import file names no imported output, as one written before the engine imports from it does';
-    }
+  const incomplete = incompleteSidecar(remap, outputs);
+  if (incomplete !== null) {
+    return incomplete;
   }
   if (outputs.some((output) => !existsSync(onDisk(projectPath, output)))) {
     return 'its imported output is not on disk';
@@ -249,18 +261,37 @@ function behind(
   if (source !== '' && source !== resPath) {
     return `its import file was written for ${source}`;
   }
-  let recorded = '';
-  try {
-    recorded =
-      /^source_md5="([0-9a-f]*)"/m.exec(readFileSync(importRecord(projectPath, resPath), 'utf8'))?.[1] ?? '';
-  } catch {
-    recorded = '';
-  }
+  const recorded = recordedSourceMd5(projectPath, resPath);
   if (recorded === '') {
     return 'its import recorded no hash of its source';
   }
   const current = md5Of(onDisk(projectPath, resPath));
   return current === null || current === recorded ? null : 'the source changed after it was imported';
+}
+
+/** What a valid import file lacks, or null when it holds a uid and an output. */
+function incompleteSidecar(remap: ReadonlyMap<string, string>, outputs: readonly string[]): string | null {
+  if (remap.get('valid') === 'false') {
+    return null;
+  }
+  if (!remap.has('uid')) {
+    return 'its import file has no uid, which the import writes';
+  }
+  if (outputs.length === 0 && ![...remap.keys()].some((key) => key.startsWith('path'))) {
+    return 'its import file names no imported output, as one written before the engine imports from it does';
+  }
+  return null;
+}
+
+/** The hash of the source the import of [param resPath] recorded, or an empty string without one. */
+function recordedSourceMd5(projectPath: string, resPath: string): string {
+  try {
+    return (
+      /^source_md5="([0-9a-f]*)"/m.exec(readFileSync(importRecord(projectPath, resPath), 'utf8'))?.[1] ?? ''
+    );
+  } catch {
+    return '';
+  }
 }
 
 /** What [param entry] of [param directory] is, a link taken as what it points at. */
@@ -295,56 +326,80 @@ export function staleImports(projectPath: string): StaleImport[] {
   // The folders entered, by what a link resolves to, since the engine follows links and a link back
   // up the tree would otherwise be walked for good.
   const entered = new Set<string>();
-  const visit = (directory: string, resDirectory: string): void => {
-    if (existsSync(join(directory, '.gdignore')) || installedByUs(directory)) {
-      return;
-    }
-    let entries: Dirent[];
-    try {
-      const real = realpathSync(directory);
-      if (entered.has(real)) {
-        return;
-      }
-      entered.add(real);
-      entries = readdirSync(directory, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (entry.name.startsWith('.')) {
-        continue;
-      }
-      const resPath = `${resDirectory}${entry.name}`;
-      const kind = kindOf(directory, entry);
-      if (kind === 'directory') {
-        visit(join(directory, entry.name), `${resPath}/`);
-        continue;
-      }
-      if (kind !== 'file' || entry.name.endsWith('.import')) {
-        continue;
-      }
-      // The sidecar is asked of the file system, which spells names as it opens them: Windows and
-      // macOS open `Hero.png.import` and `hero.png.import` as one file.
-      const sidecarFile = join(directory, `${entry.name}.import`);
-      if (existsSync(sidecarFile)) {
-        let sidecar: string;
-        try {
-          sidecar = readFileSync(sidecarFile, 'utf8');
-        } catch {
-          continue;
-        }
-        const reason = behind(projectPath, resPath, sidecarFile, sidecar, importedFrom);
-        if (reason !== null) {
-          stale.push({ path: resPath, reason });
-        }
-        continue;
-      }
-      const extension = entry.name.slice(entry.name.lastIndexOf('.') + 1).toLowerCase();
-      if (IMPORTABLE.has(extension)) {
-        stale.push({ path: resPath, reason: 'it has not been imported' });
-      }
-    }
-  };
-  visit(projectPath, 'res://');
+  collectStale({ projectPath, importedFrom, entered, stale }, projectPath, 'res://');
   return stale.toSorted((one, other) => one.path.localeCompare(other.path));
+}
+
+/** What a walk of the project carries from folder to folder. */
+interface Walk {
+  readonly projectPath: string;
+  readonly importedFrom: ReadonlyMap<string, string>;
+  readonly entered: Set<string>;
+  readonly stale: StaleImport[];
+}
+
+function collectStale(walk: Walk, directory: string, resDirectory: string): void {
+  const entries = entriesToWalk(directory, walk.entered);
+  if (entries === null) {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.name.startsWith('.')) {
+      continue;
+    }
+    const resPath = `${resDirectory}${entry.name}`;
+    const kind = kindOf(directory, entry);
+    if (kind === 'directory') {
+      collectStale(walk, join(directory, entry.name), `${resPath}/`);
+      continue;
+    }
+    if (kind !== 'file' || entry.name.endsWith('.import')) {
+      continue;
+    }
+    const reason = staleReasonOfFile(walk.projectPath, directory, entry.name, resPath, walk.importedFrom);
+    if (reason !== null) {
+      walk.stale.push({ path: resPath, reason });
+    }
+  }
+}
+
+/** The entries of [param directory], or null when the walk leaves it out, enters it again or cannot read it. */
+function entriesToWalk(directory: string, entered: Set<string>): Dirent[] | null {
+  if (existsSync(join(directory, '.gdignore')) || installedByUs(directory)) {
+    return null;
+  }
+  try {
+    const real = realpathSync(directory);
+    if (entered.has(real)) {
+      return null;
+    }
+    entered.add(real);
+    return readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+}
+
+/** Why the file [param name] in [param directory] is behind its import, or null when it is not. */
+function staleReasonOfFile(
+  projectPath: string,
+  directory: string,
+  name: string,
+  resPath: string,
+  importedFrom: ReadonlyMap<string, string>,
+): string | null {
+  // The sidecar is asked of the file system, which spells names as it opens them: Windows and
+  // macOS open `Hero.png.import` and `hero.png.import` as one file.
+  const sidecarFile = join(directory, `${name}.import`);
+  if (existsSync(sidecarFile)) {
+    let sidecar: string;
+    try {
+      sidecar = readFileSync(sidecarFile, 'utf8');
+    } catch {
+      return null;
+    }
+    return behind(projectPath, resPath, sidecarFile, sidecar, importedFrom);
+  }
+  const extension = name.slice(name.lastIndexOf('.') + 1).toLowerCase();
+  return IMPORTABLE.has(extension) ? 'it has not been imported' : null;
 }
