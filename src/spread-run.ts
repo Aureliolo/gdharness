@@ -90,43 +90,8 @@ export interface ArmPlayed {
 export function spreadOptionsOf(args: readonly string[], cwd: string): SpreadOptions {
   const dashes = args.indexOf('--');
   const own = dashes === -1 ? args : args.slice(0, dashes);
-  const valued = new Map<string, string>();
-  const positional: string[] = [];
-  for (let at = 0; at < own.length; at += 1) {
-    const arg = own[at] ?? '';
-    if (!arg.startsWith('--')) {
-      positional.push(arg);
-    } else if (VALUED.has(arg)) {
-      const value = own[at + 1];
-      if (value === undefined || value === '' || value.startsWith('--')) {
-        throw new EngineUsageError(`${arg} needs a value.`);
-      }
-      valued.set(arg, value);
-      at += 1;
-    } else {
-      throw new EngineUsageError(`Unknown option ${arg} for gdharness spread. Run gdharness help.`);
-    }
-  }
-  const first = positional[0];
-  const named = first === undefined ? null : resolve(cwd, first);
-  const projectNamed = named !== null && isGodotProject(named);
-  const projectPath = projectNamed ? named : resolve(cwd);
-  const refused = commandProjectRefusal(projectPath);
-  if (refused !== null) {
-    throw new EngineUsageError(refused);
-  }
-  const scenes = positional.slice(projectNamed ? 1 : 0);
-  if (scenes.length !== 1) {
-    throw new EngineUsageError(
-      scenes.length === 0
-        ? 'gdharness spread needs the scene of the bench to play.'
-        : `gdharness spread plays one scene, and was given ${String(scenes.length)}: ${scenes.join(', ')}.`,
-    );
-  }
-  const scene = resPathOf(scenes[0] ?? '', projectPath, cwd);
-  if (!statSync(join(projectPath, scene.slice('res://'.length)), { throwIfNoEntry: false })?.isFile()) {
-    throw new EngineUsageError(`Nothing at ${scene} in the project at ${projectPath}.`);
-  }
+  const { valued, positional } = ownFlagsOf(own);
+  const { projectPath, scene } = projectAndSceneOf(positional, cwd);
   const benchArguments = dashes === -1 ? [] : args.slice(dashes + 1);
   const ours = benchArguments.find((arg) => arg.startsWith('--gdh-share'));
   if (ours !== undefined) {
@@ -147,6 +112,56 @@ export function spreadOptionsOf(args: readonly string[], cwd: string): SpreadOpt
     cores: coresNamed(valued.get('--cores')),
     benchArguments,
   };
+}
+
+/** Splits [param own] into the value each valued option takes and what is left over. */
+function ownFlagsOf(own: readonly string[]): { valued: Map<string, string>; positional: string[] } {
+  const valued = new Map<string, string>();
+  const positional: string[] = [];
+  for (let at = 0; at < own.length; at += 1) {
+    const arg = own[at] ?? '';
+    if (!arg.startsWith('--')) {
+      positional.push(arg);
+    } else if (VALUED.has(arg)) {
+      const value = own[at + 1];
+      if (value === undefined || value === '' || value.startsWith('--')) {
+        throw new EngineUsageError(`${arg} needs a value.`);
+      }
+      valued.set(arg, value);
+      at += 1;
+    } else {
+      throw new EngineUsageError(`Unknown option ${arg} for gdharness spread. Run gdharness help.`);
+    }
+  }
+  return { valued, positional };
+}
+
+/** The project and the bench's scene [param positional] names, which must both exist. */
+function projectAndSceneOf(
+  positional: readonly string[],
+  cwd: string,
+): { projectPath: string; scene: string } {
+  const first = positional[0];
+  const named = first === undefined ? null : resolve(cwd, first);
+  const projectNamed = named !== null && isGodotProject(named);
+  const projectPath = projectNamed ? named : resolve(cwd);
+  const refused = commandProjectRefusal(projectPath);
+  if (refused !== null) {
+    throw new EngineUsageError(refused);
+  }
+  const scenes = positional.slice(projectNamed ? 1 : 0);
+  if (scenes.length !== 1) {
+    throw new EngineUsageError(
+      scenes.length === 0
+        ? 'gdharness spread needs the scene of the bench to play.'
+        : `gdharness spread plays one scene, and was given ${String(scenes.length)}: ${scenes.join(', ')}.`,
+    );
+  }
+  const scene = resPathOf(scenes[0] ?? '', projectPath, cwd);
+  if (!statSync(join(projectPath, scene.slice('res://'.length)), { throwIfNoEntry: false })?.isFile()) {
+    throw new EngineUsageError(`Nothing at ${scene} in the project at ${projectPath}.`);
+  }
+  return { projectPath, scene };
 }
 
 /** The arms a worker's [param text], one JSON line each, says it played. Null for a line it cannot read. */
@@ -276,18 +291,7 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
   process.once('SIGINT', interrupted);
   process.once('SIGTERM', interrupted);
   try {
-    let workers = options.workers;
-    if (workers === null) {
-      const memory = await memoryAvailable();
-      const processors = options.cores ?? availableParallelism();
-      const room = roomFor(slotCount, processors, memory.bytes, memory.said);
-      workers = room.engines;
-      console.log(
-        `${options.scene} over ${plural(workers, 'worker')}${room.held === undefined ? '' : `, since ${room.held}`}.`,
-      );
-    } else {
-      console.log(`${options.scene} over ${plural(workers, 'worker')}.`);
-    }
+    const workers = await workerCountFor(options, slotCount);
     const engine = (name: string, share: string): Promise<EngineLeft> =>
       enginePlayed(launch, slots, options, runDirectory, name, [
         ...options.benchArguments,
@@ -324,7 +328,7 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
     const faults = left.flatMap((worker) => engineFaults(worker, options.godotVersion));
     const arms = left.map((_, index) => {
       const file = join(shareDirectory, `worker-${String(index)}.arms`);
-      return existsSync(file) ? armsPlayed(readFileSync(file, 'utf8')) : [];
+      return armsInFile(file);
     });
     faults.push(...shareFaults(arms));
     if (faults.length > 0) {
@@ -334,11 +338,7 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
     console.log(readLog(gather.log).replace(CONTROL_SEQUENCE, '').trimEnd());
     const gatherFaults = engineFaults(gather, options.godotVersion);
     const gatheredFile = join(shareDirectory, 'gathered.arms');
-    const gathered = new Set(
-      (existsSync(gatheredFile) ? (armsPlayed(readFileSync(gatheredFile, 'utf8')) ?? []) : []).map(
-        (arm) => arm.arm,
-      ),
-    );
+    const gathered = new Set((armsInFile(gatheredFile) ?? []).map((arm) => arm.arm));
     const ungathered = (arms[0] ?? []).filter((arm) => !gathered.has(arm.arm)).map((arm) => arm.arm);
     if (ungathered.length > 0) {
       gatherFaults.push(
@@ -360,6 +360,26 @@ export async function runSpreadCommand(options: SpreadOptions, godotPath: string
     process.off('SIGINT', interrupted);
     process.off('SIGTERM', interrupted);
   }
+}
+
+/** The arms a worker left in [param file], none when it left no file, or null for a line that cannot be read. */
+function armsInFile(file: string): ArmPlayed[] | null {
+  return existsSync(file) ? armsPlayed(readFileSync(file, 'utf8')) : [];
+}
+
+/** The workers the run uses: the number asked for, or as many as the machine has room for. */
+async function workerCountFor(options: SpreadOptions, slotCount: number): Promise<number> {
+  if (options.workers !== null) {
+    console.log(`${options.scene} over ${plural(options.workers, 'worker')}.`);
+    return options.workers;
+  }
+  const memory = await memoryAvailable();
+  const processors = options.cores ?? availableParallelism();
+  const room = roomFor(slotCount, processors, memory.bytes, memory.said);
+  console.log(
+    `${options.scene} over ${plural(room.engines, 'worker')}${room.held === undefined ? '' : `, since ${room.held}`}.`,
+  );
+  return room.engines;
 }
 
 /** One engine of the run, the scene with [param benchArguments], in a slot of its own. */

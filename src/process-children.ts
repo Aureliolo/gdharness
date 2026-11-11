@@ -418,6 +418,11 @@ const ONE_SHOT_OPTIONS: readonly string[] = [
  */
 export const CONSOLE_WRAPPER = /_console(\.exe)?$/i;
 
+/** The program [param executable] starts when it is a console wrapper, else [param executable] itself. */
+export function plainEngineOf(executable: string): string {
+  return executable.replace(CONSOLE_WRAPPER, '$1');
+}
+
 /**
  * The editors of [param projectPath] in [param tree], read off their command lines: a Godot
  * executable given `--path` on the project and the editor flag, without an option that makes it

@@ -37,6 +37,11 @@ interface OutsideSpec {
      */
     readonly profile?: string;
     /**
+     * Whether the keeper switches the profiler on with native calls timed. Meaningful only with
+     * [member profile], and false when absent.
+     */
+    readonly engineCalls?: boolean;
+    /**
      * The breakpoints the game starts with, as `res://path:line`. The keeper is its debugger, for
      * the same reason it is a profiled run's.
      */
@@ -146,7 +151,8 @@ function runOf(value: unknown): NonNullable<OutsideSpec['run']> | null {
   if (!isRecord(value)) {
     return null;
   }
-  const { transcript, startedAt, projectPath, servedBy, profile, breakpoints, debugged, slot } = value;
+  const { transcript, startedAt, projectPath, servedBy, profile, engineCalls, breakpoints, debugged, slot } =
+    value;
   const held = slot === undefined ? undefined : slotOf(slot);
   if (
     typeof transcript !== 'string' ||
@@ -154,6 +160,7 @@ function runOf(value: unknown): NonNullable<OutsideSpec['run']> | null {
     typeof projectPath !== 'string' ||
     (servedBy !== undefined && typeof servedBy !== 'string') ||
     (profile !== undefined && typeof profile !== 'string') ||
+    (engineCalls !== undefined && typeof engineCalls !== 'boolean') ||
     (breakpoints !== undefined && !isStringList(breakpoints)) ||
     (debugged !== undefined && typeof debugged !== 'boolean') ||
     held === null
@@ -166,6 +173,7 @@ function runOf(value: unknown): NonNullable<OutsideSpec['run']> | null {
     projectPath,
     ...(servedBy === undefined ? {} : { servedBy }),
     ...(profile === undefined ? {} : { profile }),
+    ...(engineCalls === undefined ? {} : { engineCalls }),
     ...(breakpoints === undefined ? {} : { breakpoints }),
     ...(debugged === undefined ? {} : { debugged }),
     ...(held === undefined ? {} : { slot: held }),

@@ -41,7 +41,13 @@ import {
 } from './outside.js';
 import { belowNormal } from './priority.js';
 import { startTimesOf } from './process-children.js';
-import { type RestartedFrom, type RunRecord, recordRunEnded, writeRunRecord } from './run-record.js';
+import {
+  amendRunRecord,
+  type RestartedFrom,
+  type RunRecord,
+  recordRunEnded,
+  writeRunRecord,
+} from './run-record.js';
 import { discard, scratchDirectory } from './scratch.js';
 import {
   ProfileObserver,
@@ -189,7 +195,11 @@ const LAST_WRITE_TRIES = 5;
  * most every `PROFILE_WRITE_MS` while frames arrive, and once more as the game exits, so a server
  * reading the file mid-run is at most that far behind and one reading it after the exit has the lot.
  */
-function profiledBy(path: string, projectPath: string): { observer: ProfileObserver; finish: () => void } {
+function profiledBy(
+  path: string,
+  projectPath: string,
+  engineCalls: boolean,
+): { observer: ProfileObserver; finish: () => void } {
   let latest: ProfileTotals | null = null;
   let timer: NodeJS.Timeout | null = null;
   // A write a reader held off past its wait is tried again later rather than dropped: the totals it
@@ -200,15 +210,19 @@ function profiledBy(path: string, projectPath: string): { observer: ProfileObser
       timer = setTimeout(write, PROFILE_WRITE_MS);
     }
   };
-  const observer = new ProfileObserver((totals) => {
-    const first = latest === null;
-    latest = totals;
-    if (first) {
-      write();
-    } else {
-      timer ??= setTimeout(write, PROFILE_WRITE_MS);
-    }
-  }, profileFrameFunctions(projectPath));
+  const observer = new ProfileObserver(
+    (totals) => {
+      const first = latest === null;
+      latest = totals;
+      if (first) {
+        write();
+      } else {
+        timer ??= setTimeout(write, PROFILE_WRITE_MS);
+      }
+    },
+    profileFrameFunctions(projectPath),
+    engineCalls,
+  );
   writeProfileFile(path, { connected: false, listeningSince: Date.now() });
   return {
     observer,
@@ -335,12 +349,25 @@ function writeNoteIfItCan(record: Parameters<typeof writeRunRecord>[0]): void {
   }
 }
 
+/**
+ * What the run says after its start, written only where no later run's note is, and never fatal for
+ * the same reason the start's is not.
+ */
+function amendNoteIfItCan(record: RunRecord): void {
+  try {
+    amendRunRecord(record);
+  } catch {
+    // The note then stays as the last write left it.
+  }
+}
+
 async function keep(): Promise<void> {
   const spec = await receivedSpec();
   const run = spec.run;
   // The game's debugger, opened before the game so it is listening when the game dials it: the
   // engine dials once, as it starts, and runs with no debugger if nobody answers.
-  const profiled = run?.profile === undefined ? null : profiledBy(run.profile, run.projectPath);
+  const profiled =
+    run?.profile === undefined ? null : profiledBy(run.profile, run.projectPath, run.engineCalls === true);
   const debuggerPeer =
     run === undefined || run.debugged === false
       ? null
@@ -431,7 +458,7 @@ async function keep(): Promise<void> {
       debuggerPeer === null ? null : (request) => debuggerPeer.ask(request),
     );
     if (listening !== null) {
-      writeNoteIfItCan({ ...record, keeper: listening.address });
+      amendNoteIfItCan({ ...record, keeper: listening.address });
     }
   }
   // Nobody reads this once the launcher has gone, and a write to a pipe with no reader is an error.
@@ -464,7 +491,7 @@ async function keep(): Promise<void> {
   let note: RunRecord | null =
     record === null ? null : listening === null ? record : { ...record, keeper: listening.address };
   if (note !== null) {
-    writeNoteIfItCan({ ...note, endingAt: exitedAt });
+    amendNoteIfItCan({ ...note, endingAt: exitedAt });
   }
   // The game's restart, if it made one, is not this process's child, so the handle is no way to end it.
   end = () => 'gone';
@@ -499,7 +526,7 @@ async function keep(): Promise<void> {
       startedBy: next.startedAt,
       restartedFrom: [...(note.restartedFrom ?? []), before],
     };
-    writeNoteIfItCan(note);
+    amendNoteIfItCan(note);
     if (slot !== undefined) {
       nameSlotEngine(slot.lock, process.pid, { pid: next.pid, started: next.startedAt });
     }
@@ -521,19 +548,23 @@ async function keep(): Promise<void> {
     signal = null;
     notTold = ended.code === null;
     exitedAt = Date.now();
-    writeNoteIfItCan({ ...note, endingAt: exitedAt });
+    amendNoteIfItCan({ ...note, endingAt: exitedAt });
     looked =
       restartSaid(exitNotes, next.pid) === false
         ? null
         : followSuccessor(next.pid, spec.command, next.startedAt, exitedAt, run?.transcript);
   }
   // After the profile, so a server told the run ended reads the profile it ended with.
-  if (run !== undefined) {
-    recordRunEnded(run.projectPath, carried, {
-      exitCode: code,
-      exitSignal: code === null ? signal : null,
-      notTold,
-    });
+  if (note !== null) {
+    try {
+      recordRunEnded(note, {
+        exitCode: code,
+        exitSignal: code === null ? signal : null,
+        notTold,
+      });
+    } catch {
+      // The run then has no recorded end, which every reader handles.
+    }
   }
   if (slot !== undefined) {
     giveBackSlot(slot.lock, process.pid);

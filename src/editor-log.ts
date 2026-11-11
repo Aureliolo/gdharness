@@ -232,46 +232,59 @@ function foldProgress(text: string): string {
   for (const raw of text.split('\n')) {
     // The engine colours the task name on its standard output, and the bar is the same line under it.
     const line = raw.replace(/\r$/, '').replace(CONTROL_SEQUENCE, '');
-    const step = PROGRESS_STEP.exec(line);
-    if (step !== null) {
-      const [, percent = '', name = '', said = ''] = step;
-      const started = /^Started (.*)$/.exec(said);
-      if (started !== null) {
-        const task: Task = { name, label: started[1] ?? '', percent, done: false };
-        open.set(name, task);
-        out.push(task);
-        continue;
-      }
-      const task = open.get(name);
-      if (task !== undefined) {
-        task.percent = percent;
-        if (said.trim() !== '') {
-          task.last = said.trim();
-        }
-        continue;
-      }
+    if (!takesProgressStep(line, open, out) && !takesProgressDone(line, open)) {
+      out.push(raw);
     }
-    const finished = PROGRESS_DONE.exec(line);
-    const task = finished === null ? undefined : open.get(finished[1] ?? '');
-    if (task !== undefined) {
-      task.done = true;
-      open.delete(task.name);
-      continue;
-    }
-    out.push(raw);
   }
-  return out
-    .map((entry) => {
-      if (typeof entry === 'string') {
-        return entry;
-      }
-      if (entry.done) {
-        return `[ DONE ] ${entry.name} | ${entry.label}`;
-      }
-      const last = entry.last === undefined ? '' : `, and the last step it named was "${entry.last}"`;
-      return `[ ${entry.percent}% ] ${entry.name} | ${entry.label}, which has not finished${last}`;
-    })
-    .join('\n');
+  return out.map(progressLine).join('\n');
+}
+
+/** Whether [param line] started a task or stepped one that is open, which it then records. */
+function takesProgressStep(line: string, open: Map<string, Task>, out: (string | Task)[]): boolean {
+  const step = PROGRESS_STEP.exec(line);
+  if (step === null) {
+    return false;
+  }
+  const [, percent = '', name = '', said = ''] = step;
+  const started = /^Started (.*)$/.exec(said);
+  if (started !== null) {
+    const task: Task = { name, label: started[1] ?? '', percent, done: false };
+    open.set(name, task);
+    out.push(task);
+    return true;
+  }
+  const task = open.get(name);
+  if (task === undefined) {
+    return false;
+  }
+  task.percent = percent;
+  if (said.trim() !== '') {
+    task.last = said.trim();
+  }
+  return true;
+}
+
+/** Whether [param line] finished a task that is open, which it then closes. */
+function takesProgressDone(line: string, open: Map<string, Task>): boolean {
+  const finished = PROGRESS_DONE.exec(line);
+  const task = finished === null ? undefined : open.get(finished[1] ?? '');
+  if (task === undefined) {
+    return false;
+  }
+  task.done = true;
+  open.delete(task.name);
+  return true;
+}
+
+function progressLine(entry: string | Task): string {
+  if (typeof entry === 'string') {
+    return entry;
+  }
+  if (entry.done) {
+    return `[ DONE ] ${entry.name} | ${entry.label}`;
+  }
+  const last = entry.last === undefined ? '' : `, and the last step it named was "${entry.last}"`;
+  return `[ ${entry.percent}% ] ${entry.name} | ${entry.label}, which has not finished${last}`;
 }
 
 /**
@@ -416,15 +429,7 @@ export function bursts(
   before: number,
   keep?: (entry: LogEntry) => boolean,
 ): readonly Repeated[] {
-  const shapes = new Map<string, { readonly indices: number[]; readonly values: string[][] }>();
-  const shaped = entries.map((entry) => shapeOf(entry.text));
-  for (const [at, entry] of entries.entries()) {
-    const key = `${entry.severity}\u0000${shaped[at]?.shape ?? entry.text}`;
-    const group = shapes.get(key) ?? { indices: [], values: [] };
-    group.indices.push(at);
-    group.values.push(shaped[at]?.values ?? []);
-    shapes.set(key, group);
-  }
+  const shapes = groupedByShape(entries);
   const collapsed = new Set<number>();
   for (const group of shapes.values()) {
     if (group.indices.length > 1) {
@@ -440,10 +445,7 @@ export function bursts(
       continue;
     }
     const entry = entries[first];
-    if (entry === undefined) {
-      continue;
-    }
-    if (keep !== undefined && !group.indices.some((at) => entries[at] !== undefined && keep(entries[at]))) {
+    if (entry === undefined || !hasKept(entries, group.indices, keep)) {
       continue;
     }
     repeated.push({
@@ -458,6 +460,31 @@ export function bursts(
   return repeated.toSorted((one, other) => other.count - one.count);
 }
 
+/** The entries that share a severity and a shape, with where each stands and what filled its slots. */
+function groupedByShape(
+  entries: readonly LogEntry[],
+): Map<string, { readonly indices: number[]; readonly values: string[][] }> {
+  const shapes = new Map<string, { readonly indices: number[]; readonly values: string[][] }>();
+  const shaped = entries.map((entry) => shapeOf(entry.text));
+  for (const [at, entry] of entries.entries()) {
+    const key = `${entry.severity}\u0000${shaped[at]?.shape ?? entry.text}`;
+    const group = shapes.get(key) ?? { indices: [], values: [] };
+    group.indices.push(at);
+    group.values.push(shaped[at]?.values ?? []);
+    shapes.set(key, group);
+  }
+  return shapes;
+}
+
+/** Whether [param keep] is absent or accepts one of the entries at [param indices]. */
+function hasKept(
+  entries: readonly LogEntry[],
+  indices: readonly number[],
+  keep: ((entry: LogEntry) => boolean) | undefined,
+): boolean {
+  return keep === undefined || indices.some((at) => entries[at] !== undefined && keep(entries[at]));
+}
+
 function slotsOf(values: readonly (readonly string[])[], count: number): readonly Slot[] {
   const width = Math.max(0, ...values.map((row) => row.length));
   const distinct: string[][] = [];
@@ -466,22 +493,23 @@ function slotsOf(values: readonly (readonly string[])[], count: number): readonl
   }
   const slots: Slot[] = [];
   for (let at = 0; at < width; at += 1) {
-    const seen = distinct[at] ?? [];
     const partner = theSlotItMovesWith(values, distinct, at);
-    const paired = partner === undefined ? {} : { movesWith: partner };
-    if (seen.length === count) {
-      slots.push({ distinct: seen.length, allDifferent: true, ...paired });
-      continue;
-    }
-    const some = seen.slice(0, NAMED_VALUES);
-    slots.push({
-      distinct: seen.length,
-      some,
-      ...(seen.length > some.length ? { more: seen.length - some.length } : {}),
-      ...paired,
-    });
+    slots.push(slotOf(distinct[at] ?? [], count, partner === undefined ? {} : { movesWith: partner }));
   }
   return slots;
+}
+
+function slotOf(seen: readonly string[], count: number, paired: { readonly movesWith?: number }): Slot {
+  if (seen.length === count) {
+    return { distinct: seen.length, allDifferent: true, ...paired };
+  }
+  const some = seen.slice(0, NAMED_VALUES);
+  return {
+    distinct: seen.length,
+    some,
+    ...(seen.length > some.length ? { more: seen.length - some.length } : {}),
+    ...paired,
+  };
 }
 
 /**
@@ -506,28 +534,30 @@ function theSlotItMovesWith(
     if ((distinct[other] ?? []).length !== mine.length) {
       continue;
     }
-    const goesWith = new Map<string, string>();
-    let oneForOne = true;
-    for (const row of values) {
-      const theirs = row[other];
-      const ours = row[at];
-      if (theirs === undefined || ours === undefined) {
-        oneForOne = false;
-        break;
-      }
-      const already = goesWith.get(theirs);
-      if (already === undefined) {
-        goesWith.set(theirs, ours);
-      } else if (already !== ours) {
-        oneForOne = false;
-        break;
-      }
-    }
-    if (oneForOne) {
+    if (goesOneForOne(values, other, at)) {
       return other;
     }
   }
   return undefined;
+}
+
+/** Whether every row has a value in both slots and the value at [param other] fixes the one at [param at]. */
+function goesOneForOne(values: readonly (readonly string[])[], other: number, at: number): boolean {
+  const goesWith = new Map<string, string>();
+  for (const row of values) {
+    const theirs = row[other];
+    const ours = row[at];
+    if (theirs === undefined || ours === undefined) {
+      return false;
+    }
+    const already = goesWith.get(theirs);
+    if (already === undefined) {
+      goesWith.set(theirs, ours);
+    } else if (already !== ours) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**

@@ -2334,6 +2334,56 @@ async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor)
 }
 
 /**
+ * An unset through the editor drops a built-in ShaderMaterial's parameter line, the null one and
+ * one at a value, as the inspector's revert arrow does. The editor's renderer runs headless here
+ * and gives a parameter it was never given null, which its save wrote as a line.
+ */
+async function testAShaderParameterIsUnsetInTheEditor({ call, refusal, project }: Editor): Promise<void> {
+  mkdirSync(join(project, 'unset'), { recursive: true });
+  writeFileSync(
+    join(project, 'unset', 'frost.gdshader'),
+    'shader_type canvas_item;\n\nuniform vec4 tint : source_color = vec4(0.86, 0.92, 0.98, 1.0);\nuniform float amount = 0.5;\n',
+  );
+  writeFileSync(
+    join(project, 'unset', 'frost.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="Shader" path="res://unset/frost.gdshader" id="1_shader"]\n\n' +
+      '[sub_resource type="ShaderMaterial" id="ShaderMaterial_1"]\nshader = ExtResource("1_shader")\n' +
+      'shader_parameter/tint = null\nshader_parameter/amount = 0.25\n\n' +
+      '[node name="Frost" type="Sprite2D"]\nmaterial = SubResource("ShaderMaterial_1")\n',
+  );
+  const scene = { projectPath: project, scenePath: 'res://unset/frost.tscn', op: 'set', nodePath: '.' };
+  const parameters = (): string[] =>
+    fileText(project, 'unset/frost.tscn')
+      .split('\n')
+      .filter((line) => line.startsWith('shader_parameter/'));
+  try {
+    await call('editor_rescan', { projectPath: project });
+    const unset = await call('scene_node', {
+      ...scene,
+      unset: ['material/shader_parameter/tint', 'material/shader_parameter/amount'],
+    });
+    assert.deepEqual(
+      [get(unset, 'writtenBy'), get(unset, 'unset')],
+      ['the editor', { 'material/shader_parameter/tint': null, 'material/shader_parameter/amount': null }],
+      text(unset),
+    );
+    assert.deepEqual(parameters(), [], fileText(project, 'unset/frost.tscn'));
+    assert.match(
+      fileText(project, 'unset/frost.tscn'),
+      /\[sub_resource type="ShaderMaterial" id="[^"]+"\]\nshader = ExtResource\(/,
+      'the material keeps its shader',
+    );
+    assert.equal(
+      await refusal('scene_node', { ...scene, unset: ['material/shader_parameter/amount'] }),
+      'The editor answered scene_node set with an error: res://unset/frost.tscn holds no line for material/shader_parameter/amount, so there is nothing to unset. It sets material/shader.',
+    );
+  } finally {
+    rmSync(join(project, 'unset'), { recursive: true, force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
+}
+
+/**
  * A rename in a scene open in a tab, whose player plays a library kept in a file of its own. The
  * editor holds that library for the tab, the same copy the write edits, so a write that is then
  * refused puts its tracks back, and one that goes through saves them with the scene.
@@ -7340,7 +7390,7 @@ async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Edito
     }
   };
   try {
-    const started = await play({ profile: true });
+    const started = await play({ profile: true, engineCalls: true });
     assert.match(
       String(get(started, 'profile', 'totals')),
       /^On from the game's start, through the editor's debugger session\./,
@@ -7351,8 +7401,8 @@ async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Edito
     // from the engine's default, rather than the addon's own fallback or the engine's buffer size.
     const held = await hook(project, { op: 'profile_held' });
     assert.deepEqual(
-      [get(held, 'profiled'), get(held, 'frameFunctions')],
-      [true, frameFunctionsFor(queuedMessagesOf(readFileSync(join(project, 'project.godot'), 'utf8')))],
+      [get(held, 'profiled'), get(held, 'frameFunctions'), get(held, 'engineCalls')],
+      [true, frameFunctionsFor(queuedMessagesOf(readFileSync(join(project, 'project.godot'), 'utf8'))), true],
       `the profiler went on with the cap the server asked for: ${JSON.stringify(held)}`,
     );
     await twice(25);
@@ -7390,6 +7440,14 @@ async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Edito
     }
     const whole = await call('editor_run', { op: 'profile', limit: 100 });
     assert.equal(get(whole, 'complete'), true, `the totals arrived: ${JSON.stringify(whole)}`);
+    // _ready adds its nodes in the game's first frame, and the engine's totals hold only the engine
+    // calls since the last frame, so this is the frames' engine time kept past the totals.
+    const ready = asArray(get(whole, 'functions')).find((one) => get(one, 'function') === '_ready');
+    assert.ok(
+      asNumber(get(ready, 'engineMs'), `_ready's add_child calls are engine time: ${JSON.stringify(whole)}`) >
+        0,
+      JSON.stringify(whole),
+    );
     assert.ok(
       gone >= 0 && gone < 2000,
       `the game left ${gone}ms after it was asked to, so the editor answered its word that the totals were sent`,
@@ -7417,6 +7475,15 @@ async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Edito
     );
     await twice(10);
     assert.equal(await callsOfTwice(10), 10, 'only the calls after the profiler went on');
+    // Switched on by asking, native calls are not timed: no row has engineMs, and the note says how
+    // to get it.
+    const untimed = await call('editor_run', { op: 'profile', limit: 100 });
+    assert.deepEqual(
+      asArray(get(untimed, 'functions')).filter((one) => get(one, 'engineMs') !== undefined),
+      [],
+      `no row has engineMs without engineCalls: ${JSON.stringify(untimed)}`,
+    );
+    assert.match(String(get(untimed, 'note')), /engineCalls: true/, JSON.stringify(untimed));
   } finally {
     await attempt('editor_run', { op: 'stop' });
   }
@@ -8276,6 +8343,7 @@ async function main(): Promise<void> {
     ['testAMethodScriptEditAddsIsSeenByTheEditor', testAMethodScriptEditAddsIsSeenByTheEditor],
     ['testAScenesInstancedAndPlaced', testAScenesInstancedAndPlaced],
     ['testASceneKeepsItsOwnValuesInTheEditor', testASceneKeepsItsOwnValuesInTheEditor],
+    ['testAShaderParameterIsUnsetInTheEditor', testAShaderParameterIsUnsetInTheEditor],
     ['testAMovedNodeKeepsItsPathsInTheEditor', testAMovedNodeKeepsItsPathsInTheEditor],
     ['testAnEnumMemberAddedToAHeldTypeIsPickedUp', testAnEnumMemberAddedToAHeldTypeIsPickedUp],
     [

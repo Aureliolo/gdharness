@@ -101,31 +101,53 @@ function projectArgument(at: number): string {
  * pinned to whatever it was set up with a year ago. A git worktree with no such record falls back
  * to the one its main checkout's configuration names.
  */
-async function engine(projectPath?: string): Promise<HeadlessEngine> {
-  const located = await new GodotLocator().find();
+async function engine(projectPath?: string, flag?: string): Promise<HeadlessEngine> {
+  const locator = new GodotLocator();
+  const headless = (godotPath: string): HeadlessEngine => ({
+    godotPath,
+    script: shippedOperationsScript(),
+    debug: DEBUG_MODE,
+  });
+  const refused = (refusal: { message: string; advice: readonly string[] }): UsageError =>
+    new UsageError(`${refusal.message} ${refusal.advice.join('. ')}.`);
+  if (flag !== undefined) {
+    const named = await locator.judge(flag);
+    if (!named.ok) {
+      throw refused(GodotLocator.refusal(named, { argument: '--godot' }));
+    }
+    return headless(named.path);
+  }
+  const located = await locator.find();
   if (located.ok) {
-    return { godotPath: located.path, script: shippedOperationsScript(), debug: DEBUG_MODE };
+    return headless(located.path);
   }
   // The recorded engine is for a machine where nothing is set and nothing is where it usually is.
   // A GODOT_PATH that names something broken is not that: falling back past it would run some
   // other engine in silence under a variable somebody set on purpose.
   const recorded =
     located.named === null && projectPath !== undefined ? recordedEnginePath(projectPath) : null;
-  if (recorded !== null) {
-    return { godotPath: recorded, script: shippedOperationsScript(), debug: DEBUG_MODE };
+  if (recorded !== null && projectPath !== undefined) {
+    const judged = await locator.judge(recorded);
+    if (!judged.ok) {
+      throw refused(GodotLocator.refusal(judged, { config: projectPath }));
+    }
+    return headless(judged.path);
   }
   const mainCheckout =
     located.named === null && projectPath !== undefined ? mainCheckoutOf(projectPath) : null;
   const theirs = mainCheckout === null ? null : recordedEnginePath(mainCheckout);
   if (mainCheckout === null || theirs === null) {
-    const refusal = GodotLocator.refusal(located);
-    throw new UsageError(`${refusal.message} ${refusal.advice.join('. ')}.`);
+    throw refused(GodotLocator.refusal(located));
+  }
+  const judged = await locator.judge(theirs);
+  if (!judged.ok) {
+    throw refused(GodotLocator.refusal(judged, { config: mainCheckout }));
   }
   // Said, because it is an engine this project's own files do not name.
   console.error(
-    `engine: ${theirs}, which the harness config of ${mainCheckout} names. This project is a git worktree of it`,
+    `engine: ${judged.path}, which the harness config of ${mainCheckout} names. This project is a git worktree of it`,
   );
-  return { godotPath: theirs, script: shippedOperationsScript(), debug: DEBUG_MODE };
+  return headless(judged.path);
 }
 
 /** The outcome as a line for a person, and a throw when the engine refused. */
@@ -966,7 +988,7 @@ async function test(): Promise<void> {
   }
   const startedAt = Date.now();
   try {
-    const godotPath = options.godotPath ?? (await engine(options.projectPath)).godotPath;
+    const godotPath = (await engine(options.projectPath, options.godotPath ?? undefined)).godotPath;
     process.exitCode = await runTestCommand(options, godotPath);
   } catch (error) {
     // The run before this one is still in the result files, and reads as this one's to a gate.
@@ -978,7 +1000,7 @@ async function test(): Promise<void> {
 /** `gdharness spread`, whose options are its own, read by {@link spreadOptionsOf}. */
 async function spread(): Promise<void> {
   const options = spreadOptionsOf(args.slice(1), process.cwd());
-  const godotPath = options.godotPath ?? (await engine(options.projectPath)).godotPath;
+  const godotPath = (await engine(options.projectPath, options.godotPath ?? undefined)).godotPath;
   process.exitCode = await runSpreadCommand(options, godotPath);
 }
 

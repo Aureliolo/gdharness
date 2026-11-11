@@ -1301,6 +1301,8 @@ export function importFault(printed: RunPrinted): string | null {
  * runs nothing, and a cache that lacks a class a script declares fails every suite reaching it. A
  * project with no extension list loads none of its extensions, so every script using a class one
  * adds fails to compile: setup writes the class cache without importing, which leaves exactly that.
+ * A suite loading a file whose import is behind it runs against the old import and passes on what
+ * the file no longer holds.
  */
 export function importNeeded(projectPath: string): string | null {
   const cached = cachedClasses(projectPath);
@@ -1314,6 +1316,14 @@ export function importNeeded(projectPath: string): string | null {
   const uncached = staleAgainst(cached, projectPath).toSorted();
   if (uncached.length > 0) {
     return `The class cache does not list ${named(uncached)} where the scripts declare ${uncached.length === 1 ? 'it' : 'them'}, so the project is imported first.`;
+  }
+  const behind = staleImports(projectPath);
+  const [only] = behind;
+  if (only !== undefined && behind.length === 1) {
+    return `The import of ${only.path} is out of date, since ${only.reason}, so the project is imported first.`;
+  }
+  if (behind.length > 1) {
+    return `The imports of ${named(behind.map((one) => one.path).toSorted())} are out of date, so the project is imported first.`;
   }
   return null;
 }

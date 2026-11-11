@@ -138,6 +138,8 @@ import {
   resPathOf,
   roomFor,
   sweepRunDirectories,
+  versionNamed,
+  versionPrinted,
   watchedEngine,
   windowsCommitLeft,
 } from '../src/engine-launch.js';
@@ -241,7 +243,14 @@ import {
   theEditorHasComeBack,
   withoutTrailingSeparator,
 } from '../src/godot-bridge.js';
-import { GodotLocator, type Located, VERSION_STARTS, versionStartOf } from '../src/godot-path.js';
+import {
+  GodotLocator,
+  type Judged,
+  type Located,
+  VERSION_ANSWER_MS,
+  VERSION_STARTS,
+  versionStartOf,
+} from '../src/godot-path.js';
 import type { GodotProcess } from '../src/godot-process.js';
 import {
   containerTypeOf,
@@ -375,6 +384,7 @@ import {
 import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
 import { noteRestartBegun, restartNotePath, restartOwed } from '../src/restart-note.js';
 import {
+  amendRunRecord,
   clearRunRecord,
   couldStillBeTheRecordedRun,
   judgeAnnouncedGame,
@@ -384,6 +394,7 @@ import {
   openTranscript,
   profileMarkPath,
   profilePath,
+  type RunRecord,
   readLatestRun,
   readRunRecord,
   readWindowsCommandLine,
@@ -492,6 +503,7 @@ import {
   timedOutVerdict,
   transcriptNote,
   uidsLeftNote,
+  unmodelledAnswer,
   withoutUidUnder,
   withPreviousCut,
   withUidsMissing,
@@ -790,6 +802,55 @@ function accessibilityTreeSuite(constant: string): string {
     '\t\t.is_true()',
     '',
   ].join('\n');
+}
+
+let standInEngineBuilt: string | null = null;
+
+/**
+ * A program a server accepts as an engine without a real Godot. It prints a Godot version for
+ * `--version`. A script named first is run, which is how a fixture holds a process open. Any other
+ * arguments end it with exit 1 at once, as a program that does not know the engine's flags would.
+ * Compiled once per run into the OS temp folder, because the locator starts
+ * a path with no shell and a script would not start.
+ */
+function standInEngine(): string {
+  if (standInEngineBuilt !== null) {
+    return standInEngineBuilt;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-stand-in-engine-'));
+  const source = join(directory, 'stand-in.ts');
+  const program = join(directory, process.platform === 'win32' ? 'godot-stand-in.exe' : 'godot-stand-in');
+  writeFileSync(
+    source,
+    [
+      "import { existsSync } from 'node:fs';",
+      "if (process.argv.includes('--version')) {",
+      "  process.stdout.write('4.7.2.stable.custom_build\\n');",
+      '  process.exit(0);',
+      '}',
+      'const script = process.argv[2];',
+      "if (script !== undefined && script.endsWith('.js') && existsSync(script)) {",
+      '  await import(script);',
+      '} else {',
+      "  process.stderr.write('stand-in engine: it runs nothing\\n');",
+      '  process.exit(1);',
+      '}',
+      '',
+    ].join('\n'),
+  );
+  const built = spawnSyncHidden(process.execPath, ['build', '--compile', source, '--outfile', program], {
+    encoding: 'utf8',
+  });
+  assert.equal(built.status, 0, `the stand-in engine is compiled: ${built.stdout}${built.stderr}`);
+  process.once('exit', () => {
+    try {
+      rmSync(directory, { recursive: true, force: true });
+    } catch {
+      // A stand-in still running holds its file, so the folder is left for the temp sweep.
+    }
+  });
+  standInEngineBuilt = program;
+  return program;
 }
 
 function resolveGodotPath(): string | null {
@@ -2047,6 +2108,11 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     'its length, little-endian',
   );
   assert.deepEqual(decodeVariant(command.subarray(4)), ['profiler:servers', 1, [true, [1536, false]]]);
+  assert.deepEqual(decodeVariant(profilerOn(1536, true).subarray(4)), [
+    'profiler:servers',
+    1,
+    [true, [1536, true]],
+  ]);
 
   // The most functions a frame may carry, kept below the game's debugger queue, which drops the
   // messages naming functions past its size: the engine's default queue, and a project's own.
@@ -2204,6 +2270,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     frames: 3,
     complete: true,
     unreadable: 0,
+    engineCalls: true,
     functions,
   });
   const table = profiledFunctions(
@@ -2244,6 +2311,16 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     answer({ totals: totals({}) })['note'],
     undefined,
     'the engine’s own totals need nothing said',
+  );
+  assert.match(
+    say({ totals: { ...totals({}), engineCalls: false } }),
+    /^Calls through engine methods, such as callv, stay in the caller's selfMs.*engineCalls: true/,
+    'a profile without timed native calls says where the callv time went and how to time it apart',
+  );
+  assert.match(
+    say({ totals: (({ engineCalls: _off, ...rest }) => rest)(totals({})) }),
+    /engineCalls: true/,
+    'a profile written without the field reads as untimed',
   );
   // Where the frames begin and whether any between them went missing, from the game's own numbers.
   // A run without the runtime addon on a loaded runner summed 12 of its scene's 30 frames, and
@@ -2843,7 +2920,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   );
   assert.match(
     String(answer({ totals: overridden, sourceOf: overrideSource })['note']),
-    /^5 functions call through super, marked selfIncludesSuper: the engine takes every other call out of the caller's self time, and not a super call, so their selfMs holds the overridden function's time, which that function's own row counts again\. Self time therefore cannot be added along an override chain, and scriptMs counts the time under a super call once more for each level above it\.$/,
+    /^5 functions call through super, marked selfIncludesSuper: the engine takes a call to another script function or an engine method out of the caller's self time, but not a super call, so their selfMs holds the overridden function's time, which that function's own row counts again\. Self time therefore cannot be added along an override chain, and scriptMs counts the time under a super call once more for each level above it\.$/,
   );
   assert.match(
     String(answer({ totals: overrideRows([[6, '_begin_match']]), sourceOf: overrideSource })['note']),
@@ -3258,12 +3335,12 @@ function testAFrameReadHalfwayAddsNothingToTheTotals(): void {
     thread: 1,
     data: [number, 0, 0, 0, 0, 0, 0, rows.length, ...rows],
   });
-  aggregate.take(frame(9, [7, 1, 0.25, 0.25, 0]), 1001);
+  aggregate.take(frame(9, [7, 1, 0.25, 0.3, 0.05]), 1001);
   aggregate.take(frame(10, [7, 2, 0.5, 0.5, 0, 'not a number', 1, 0.1, 0.1, 0]), 1002);
   const read = aggregate.snapshot();
   assert.deepEqual(
     [read.frames, read.unreadable, read.functions['#7']],
-    [1, 1, { calls: 1, selfSeconds: 0.25, totalSeconds: 0.25 }],
+    [1, 1, { calls: 1, selfSeconds: 0.25, totalSeconds: 0.3, engineSeconds: 0.05 }],
     JSON.stringify(read),
   );
 }
@@ -6961,7 +7038,7 @@ async function testAnEditorStillArrivingIsNotOpenedBeside(): Promise<void> {
 
   const port = await reservePort();
   const server = new ServerProcess({
-    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: process.execPath },
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: standInEngine() },
   });
   let standIn: ChildProcess | null = null;
   try {
@@ -7062,9 +7139,9 @@ function aProjectToOpen(prefix: string): { project: string; engine: string; hold
   mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
   const engine = join(project, `godot-standin${process.platform === 'win32' ? '.exe' : ''}`);
   try {
-    linkSync(process.execPath, engine);
+    linkSync(standInEngine(), engine);
   } catch {
-    cpSync(process.execPath, engine);
+    cpSync(standInEngine(), engine);
   }
   const hold = join(project, 'hold.js');
   writeFileSync(hold, 'setTimeout(() => {}, 120000);\n');
@@ -7507,7 +7584,7 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
       env: {
         GDHARNESS_PROJECT: project,
         GDHARNESS_BRIDGE_PORT: String(port),
-        GODOT_PATH: process.execPath,
+        GODOT_PATH: standInEngine(),
         GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '20000',
       },
     });
@@ -7710,7 +7787,7 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
   // The engine is a stand-in that exits at once, so a launch guard that fails to refuse starts
   // nothing that outlives the case.
   const server = new ServerProcess({
-    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: process.execPath },
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: standInEngine() },
   });
   let uninformed: ServerProcess | null = null;
   const settings =
@@ -9130,7 +9207,7 @@ async function testARestartWaitsForTheOldEditorToGo(): Promise<void> {
     env: {
       GDHARNESS_BRIDGE_PORT: String(port),
       GDHARNESS_PROJECT: project,
-      GODOT_PATH: process.execPath,
+      GODOT_PATH: standInEngine(),
       GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '2000',
     },
   });
@@ -11423,7 +11500,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 159;
+const READ_IN_WORDS = 162;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -12572,7 +12649,7 @@ async function testToolsRefusePathsOutsideTheProject(): Promise<void> {
           'a godot:// URI with an encoded traversal should be refused',
         );
       },
-      { GODOT_PATH: process.execPath },
+      { GODOT_PATH: standInEngine() },
     );
   } finally {
     sweep(sandbox);
@@ -13455,9 +13532,19 @@ async function testAnEngineThatDoesNotAnswerIsNamed(): Promise<void> {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-no-engine-'));
   writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
 
+  const folder = mkdtempSync(join(tmpdir(), 'gdharness-engine-folder-'));
+  // The program running this case is a real one that exits 0 on --version and is no engine.
+  const printedByThis = (await runHidden(process.execPath, ['--version'])).stdout.trim();
+  const quotedPrint = JSON.stringify(printedByThis).replaceAll(/[.*+?^${}()|[\]\\]/gu, '\\$&');
   for (const [label, path, reason] of [
     ['a path that is not there', missing, /does not exist/],
     ['a file that is not an engine', notAnEngine, /does not answer --version/],
+    ['a folder', folder, /is a folder, not a program/],
+    [
+      'a program that is no engine',
+      process.execPath,
+      new RegExp(`is not a Godot engine: --version printed ${quotedPrint}`, 'u'),
+    ],
   ] as const) {
     const server = new ServerProcess({ env: { GODOT_PATH: path } });
     try {
@@ -13497,7 +13584,7 @@ async function testAnEngineThatDoesNotAnswerIsNamed(): Promise<void> {
       await server.stop();
     }
   }
-  sweep(project);
+  sweep(project, folder);
 }
 
 /**
@@ -13550,23 +13637,38 @@ async function testAnEngineThatCrashesAtStartIsAskedAgain(): Promise<void> {
   const failure = (fields: Record<string, unknown>): Error =>
     Object.assign(new Error('Command failed'), fields);
   const startCrash = failure({ code: 0xc06d007f, signal: null, stdout: '', stderr: '' });
+  const version = '4.7.2.stable.official.0123456789';
   const located = async (
     answers: readonly (Error | null)[],
-  ): Promise<{ found: Located; starts: number; waits: number[] }> => {
+  ): Promise<{ found: Located; judged: Judged; starts: number; waits: number[] }> => {
     let starts = 0;
     const waits: number[] = [];
-    const locator = new GodotLocator(
-      () => {
+    const locator = new GodotLocator({
+      start: () => {
         const answer = answers[Math.min(starts, answers.length - 1)] ?? null;
         starts += 1;
-        return answer === null ? Promise.resolve() : Promise.reject(answer);
+        return answer === null ? Promise.resolve({ stdout: `${version}\n` }) : Promise.reject(answer);
       },
-      (ms) => {
+      sleep: (ms) => {
         waits.push(ms);
         return Promise.resolve();
       },
-    );
-    return { found: await locator.find(), starts, waits };
+    });
+    const found = await locator.find();
+    const startsToFind = starts;
+    // The same path judged directly on a locator of its own, from the same script of answers.
+    starts = 0;
+    const alone = new GodotLocator({
+      start: () => {
+        const answer = answers[Math.min(starts, answers.length - 1)] ?? null;
+        starts += 1;
+        return answer === null ? Promise.resolve({ stdout: `${version}\n` }) : Promise.reject(answer);
+      },
+      sleep: () => Promise.resolve(),
+    });
+    const judged = await alone.judge(path);
+    assert.equal(starts, startsToFind, 'find and judge start the path as often as each other');
+    return { found, judged, starts: startsToFind, waits };
   };
   try {
     process.env['GODOT_PATH'] = path;
@@ -13574,20 +13676,25 @@ async function testAnEngineThatCrashesAtStartIsAskedAgain(): Promise<void> {
     const recovered = await located([startCrash, null]);
     assert.deepEqual(
       recovered.found,
-      { ok: true, path },
+      { ok: true, path, version },
       'an engine that crashed once and then answered is found',
     );
+    assert.deepEqual(recovered.judged, { ok: true, path, version }, 'and judged');
     assert.equal(recovered.starts, 2, 'after a second start');
     assert.deepEqual(recovered.waits, [500], 'with a wait between them');
 
     const silent = await located([failure({ code: 1, signal: null, stdout: '', stderr: '' }), null]);
-    assert.deepEqual(silent.found, { ok: true, path }, 'a failing exit that printed nothing is a crash too');
+    assert.deepEqual(
+      silent.found,
+      { ok: true, path, version },
+      'a failing exit that printed nothing is a crash too',
+    );
 
     const signalled = await located([
       failure({ code: null, signal: 'SIGSEGV', stdout: '', stderr: '' }),
       null,
     ]);
-    assert.deepEqual(signalled.found, { ok: true, path }, 'and so is a signal');
+    assert.deepEqual(signalled.found, { ok: true, path, version }, 'and so is a signal');
 
     const refused = await located([
       failure({ code: 2, signal: null, stdout: '', stderr: 'unknown option --version\n' }),
@@ -13617,16 +13724,16 @@ async function testAnEngineThatCrashesAtStartIsAskedAgain(): Promise<void> {
 
     let starts = 0;
     const waits: number[] = [];
-    const crashing = new GodotLocator(
-      async () => {
+    const crashing = new GodotLocator({
+      start: async () => {
         starts += 1;
         return await Promise.reject(startCrash);
       },
-      (ms) => {
+      sleep: (ms) => {
         waits.push(ms);
         return Promise.resolve();
       },
-    );
+    });
     const crashed = await crashing.find();
     assert.equal(starts, VERSION_STARTS, 'an engine that crashes every time is started as often as allowed');
     assert.deepEqual(waits, [500, 1000, 2000, 4000], 'with longer waits between');
@@ -13644,7 +13751,7 @@ async function testAnEngineThatCrashesAtStartIsAskedAgain(): Promise<void> {
     assert.equal(starts, 2 * VERSION_STARTS, 'a path that only crashed is asked again by the next find');
     const together = await Promise.all([crashing.find(), crashing.find()]);
     assert.equal(starts, 3 * VERSION_STARTS, 'two finds at once share one search');
-    assert.equal(together[0], together[1], 'and its answer');
+    assert.deepEqual(together[0], together[1], 'and its answer');
 
     const signed = versionStartOf(failure({ code: 0xc06d007f | 0, signal: null, stdout: '', stderr: '' }));
     assert.deepEqual(
@@ -13691,20 +13798,21 @@ async function testALocatorAsksAgainWhenTheEngineAppearsOrGoes(): Promise<void> 
   const path = join(root, 'godot.exe');
   const missing = { ok: false, named: path, reason: 'does not exist' } as const;
   let starts = 0;
-  const locator = new GodotLocator(
-    () => {
+  const version = '4.7.2.stable.official.0123456789';
+  const locator = new GodotLocator({
+    start: () => {
       starts += 1;
-      return Promise.resolve();
+      return Promise.resolve({ stdout: `${version}\n` });
     },
-    () => Promise.resolve(),
-  );
+    sleep: () => Promise.resolve(),
+  });
   try {
     process.env['GODOT_PATH'] = path;
     assert.deepEqual(await locator.find(), missing, 'before the engine is installed');
     assert.equal(starts, 0, 'nothing was started');
     writeFileSync(path, '');
-    assert.deepEqual(await locator.find(), { ok: true, path }, 'once it is installed');
-    assert.deepEqual(await locator.find(), { ok: true, path }, 'and again');
+    assert.deepEqual(await locator.find(), { ok: true, path, version }, 'once it is installed');
+    assert.deepEqual(await locator.find(), { ok: true, path, version }, 'and again');
     assert.equal(starts, 1, 'the engine answered once');
     rmSync(path);
     assert.deepEqual(await locator.find(), missing, 'after it is deleted');
@@ -13721,6 +13829,421 @@ async function testALocatorAsksAgainWhenTheEngineAppearsOrGoes(): Promise<void> 
     }
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+/**
+ * Whether a path is an engine is answered one way, for every caller: it exists, is a file, and
+ * prints a Godot version for `--version`.
+ *
+ * Five judges answered differently. A program that exits 0 on `--version` passed as an engine, a
+ * folder was told as a sentence about PATH, a missing file and a folder were started, and the
+ * version was read by a second start that dropped it after one crash. Here a folder and a missing
+ * file are refused without a start, a real program that is no engine is refused quoting what it
+ * printed, the version comes from the start that judged the path, and a bare `godot` is asked on
+ * every call since only the system can look it up.
+ */
+async function testAPathIsJudgedAnEngineOneWay(): Promise<void> {
+  const before = process.env['GODOT_PATH'];
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-judge-'));
+  const version = '4.7.2.stable.official.0123456789';
+  const quick = (): Promise<void> => Promise.resolve();
+  try {
+    const folder = join(root, 'folder');
+    mkdirSync(folder);
+    const missing = join(root, 'missing.exe');
+    let counted = 0;
+    const counting = new GodotLocator({
+      start: () => {
+        counted += 1;
+        return Promise.resolve({ stdout: `${version}\n` });
+      },
+      sleep: quick,
+    });
+    for (const [path, reason] of [
+      [folder, 'is a folder, not a program'],
+      [missing, 'does not exist'],
+    ] as const) {
+      assert.deepEqual(await counting.judge(path), { ok: false, named: path, reason }, reason);
+      process.env['GODOT_PATH'] = path;
+      assert.deepEqual(await counting.find(), { ok: false, named: path, reason }, `${reason}, as GODOT_PATH`);
+    }
+    assert.equal(counted, 0, 'neither was started');
+
+    // A real program that exits 0 on --version and is no engine, by the default start.
+    const printed = (await runHidden(process.execPath, ['--version'])).stdout.trim();
+    assert.deepEqual(
+      await new GodotLocator().judge(process.execPath),
+      {
+        ok: false,
+        named: process.execPath,
+        reason: `is not a Godot engine: --version printed ${JSON.stringify(printed)}`,
+      },
+      'a program that exits 0 is refused with what it printed',
+    );
+    const file = join(root, 'godot.exe');
+    writeFileSync(file, 'a');
+    const silent = await new GodotLocator({
+      start: () => Promise.resolve({ stdout: '' }),
+      sleep: quick,
+    }).judge(file);
+    assert.ok(
+      !silent.ok && silent.reason.startsWith('is not a Godot engine'),
+      `and so is one that prints nothing: ${JSON.stringify(silent)}`,
+    );
+
+    // The shape of a version, once, for the judge and the flag.
+    assert.equal(versionPrinted('4.7.2\n'), null, 'three numbers alone are not an engine version');
+    assert.equal(versionPrinted(`${version}\r\n`), version, 'a full version with its carriage return is');
+    assert.equal(versionPrinted(`a warning\n${version}\n`), version, 'a line before it is passed over');
+    assert.equal(versionNamed('4.7.2'), '4.7.2', 'the flag takes numbers alone');
+    assert.equal(versionNamed(version), version, 'and what an engine prints');
+
+    // One start for two calls, a second once the file is another build.
+    let starts = 0;
+    const answering = new GodotLocator({
+      start: () => {
+        starts += 1;
+        return Promise.resolve({ stdout: `${version}\n` });
+      },
+      sleep: quick,
+    });
+    const answered = { ok: true, path: file, version } as const;
+    assert.deepEqual(await answering.judge(file), answered, 'the version is the one printed');
+    assert.deepEqual(await answering.judge(file), answered, 'and the same again');
+    assert.equal(starts, 1, 'from one start');
+    writeFileSync(file, 'a longer file');
+    assert.deepEqual(await answering.judge(file), answered, 'a rewritten file is judged again');
+    assert.equal(starts, 2, 'by a second start');
+    assert.equal(answering.ownVersion(), null, 'a judge alone is no engine of this server');
+    process.env['GODOT_PATH'] = file;
+    assert.deepEqual(await answering.find(), answered, 'the search answers with the version');
+    assert.equal(answering.ownVersion(), version, 'which is read back without a start');
+    assert.equal(starts, 2, 'the build was already judged');
+
+    // A bare godot is looked up by the system alone, so neither its refusal nor its answer is kept.
+    const notFound = Object.assign(new Error('spawn godot ENOENT'), { code: 'ENOENT' });
+    const first = '4.7.2.stable.official.aaaaaaaaaa';
+    const second = '4.7.3.stable.official.bbbbbbbbbb';
+    const script: (() => Promise<{ stdout: string }>)[] = [
+      () => Promise.reject(notFound),
+      () => Promise.resolve({ stdout: `${first}\n` }),
+      () => Promise.resolve({ stdout: `${second}\n` }),
+    ];
+    let bareStarts = 0;
+    const bare = new GodotLocator({
+      start: () => {
+        const next = script[bareStarts];
+        bareStarts += 1;
+        return next === undefined ? Promise.reject(notFound) : next();
+      },
+      sleep: quick,
+    });
+    process.env['GODOT_PATH'] = 'godot';
+    const refused = await bare.find();
+    assert.ok(
+      !refused.ok && 'reason' in refused && refused.reason.startsWith('does not answer --version'),
+      `a bare name that cannot be started is refused: ${JSON.stringify(refused)}`,
+    );
+    assert.deepEqual(await bare.find(), { ok: true, path: 'godot', version: first }, 'then answers');
+    assert.deepEqual(await bare.find(), { ok: true, path: 'godot', version: second }, 'and is asked again');
+    assert.equal(bareStarts, 3, 'once per call');
+  } finally {
+    if (before === undefined) {
+      delete process.env['GODOT_PATH'];
+    } else {
+      process.env['GODOT_PATH'] = before;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A start that never ends is ended at its limit, refused once, and asked again by the next call.
+ *
+ * The default start set no limit, so one hung program held every caller sharing the search. A kill
+ * reads as a crash to the retry rule, so a hung program was also started five times. A hang is
+ * neither retried nor remembered, since a slow start on a loaded machine would otherwise refuse a
+ * working engine for the server's life.
+ */
+async function testAStartThatHangsIsEndedAndAskedAgain(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-hung-engine-'));
+  try {
+    const file = join(root, 'godot.exe');
+    writeFileSync(file, 'a');
+    const hung = Object.assign(new Error('Command failed'), {
+      killed: true,
+      signal: 'SIGTERM',
+      code: null,
+      stdout: '',
+      stderr: '',
+    });
+    let starts = 0;
+    const limits: number[] = [];
+    const hanging = new GodotLocator({
+      start: (_path, limitMs) => {
+        starts += 1;
+        limits.push(limitMs);
+        return Promise.reject(hung);
+      },
+      sleep: () => Promise.resolve(),
+    });
+    const reason = `was still running ${String(VERSION_ANSWER_MS / 1000)} seconds after its --version start`;
+    assert.deepEqual(await hanging.judge(file), { ok: false, named: file, reason }, 'a hang is refused');
+    assert.equal(starts, 1, 'after one start');
+    assert.deepEqual(limits, [VERSION_ANSWER_MS], 'given the limit');
+    await hanging.judge(file);
+    assert.equal(starts, 2, 'and asked again by the next call');
+
+    // The stand-in of a server answering before its engine does, through the default start.
+    let engine = process.env['ComSpec'] ?? 'C:\\Windows\\System32\\cmd.exe';
+    if (process.platform !== 'win32') {
+      engine = join(root, 'godot');
+      writeFileSync(engine, '#!/bin/sh\nread line\n', { mode: 0o755 });
+    }
+    const startedAt = Date.now();
+    const real = await new GodotLocator({ answerMs: 300 }).judge(engine);
+    assert.ok(Date.now() - startedAt < 10_000, 'the default start ends a program that does not answer');
+    assert.deepEqual(
+      real,
+      { ok: false, named: engine, reason: 'was still running 300 ms after its --version start' },
+      'and refuses it as hung',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A console wrapper is judged as the plain program beside it, wherever the path comes from.
+ *
+ * The wrapper starts the plain program as its child and forwards the console to it, so a run's
+ * process id was the wrapper's and the engine its child. Only the search swapped them. A refusal
+ * still names the path as it was set, since it would otherwise say GODOT_PATH holds a path it does
+ * not.
+ */
+async function testAConsoleWrapperIsJudgedAsThePlainProgram(): Promise<void> {
+  const before = process.env['GODOT_PATH'];
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-wrapper-'));
+  const version = '4.7.2.stable.official.0123456789';
+  try {
+    const plain = join(root, 'godot.exe');
+    const wrapper = join(root, 'godot_console.exe');
+    writeFileSync(plain, 'a');
+    writeFileSync(wrapper, 'b');
+    const alone = join(root, 'alone');
+    mkdirSync(alone);
+    const lonely = join(alone, 'godot_console.exe');
+    writeFileSync(lonely, 'c');
+    const started: string[] = [];
+    const locatorOn = (platform: NodeJS.Platform): GodotLocator =>
+      new GodotLocator({
+        start: (path) => {
+          started.push(path);
+          return Promise.resolve({ stdout: `${version}\n` });
+        },
+        sleep: () => Promise.resolve(),
+        platform,
+      });
+    process.env['GODOT_PATH'] = wrapper;
+    const windows = locatorOn('win32');
+    assert.deepEqual(
+      await windows.judge(wrapper),
+      { ok: true, path: plain, version },
+      'judged as the plain one',
+    );
+    assert.deepEqual(await windows.find(), { ok: true, path: plain, version }, 'and found as it');
+    assert.deepEqual([...new Set(started)], [plain], 'and the wrapper was never started');
+
+    started.length = 0;
+    assert.deepEqual(
+      await locatorOn('linux').judge(wrapper),
+      { ok: true, path: wrapper, version },
+      'off Windows it is judged as itself',
+    );
+    assert.deepEqual(started, [wrapper], 'and started');
+    assert.deepEqual(
+      await locatorOn('win32').judge(lonely),
+      { ok: true, path: lonely, version },
+      'with no plain program beside it, the wrapper is judged as itself',
+    );
+
+    const refusing = new GodotLocator({
+      start: () =>
+        Promise.reject(Object.assign(new Error('Command failed'), { code: 2, stdout: 'no', stderr: '' })),
+      sleep: () => Promise.resolve(),
+      platform: 'win32',
+    });
+    const refused = await refusing.find();
+    assert.ok(
+      !refused.ok && refused.named === wrapper,
+      `a refusal names the path as GODOT_PATH holds it: ${JSON.stringify(refused)}`,
+    );
+    assert.ok(
+      'reason' in refused &&
+        refused.reason.startsWith(`is Godot's console wrapper, and the engine beside it, ${plain}, `),
+      JSON.stringify(refused),
+    );
+    assert.ok(GodotLocator.refusal(refused).message.startsWith(`GODOT_PATH is set to ${wrapper}, which `));
+  } finally {
+    if (before === undefined) {
+      delete process.env['GODOT_PATH'];
+    } else {
+      process.env['GODOT_PATH'] = before;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A defect report carries the engine version its server last learned.
+ *
+ * Whatever failure nothing models, the report has a field for the version, and asking the engine
+ * on the failure path would start a subprocess at the worst moment. It is read from the locator
+ * that answered earlier. No live failure is relied on here: a failure standing for "unmodelled"
+ * stops being one when it is modelled, and the case would pass on another refusal. The function
+ * that writes the report is handed a locator instead, and its `Where` line is asserted beside the
+ * version, so a report about another failure fails the case.
+ */
+async function testADefectReportNamesTheEngineItLearned(): Promise<void> {
+  const before = process.env['GODOT_PATH'];
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-defect-engine-'));
+  const version = '4.7.2.stable.official.0123456789';
+  try {
+    const file = join(root, 'godot.exe');
+    writeFileSync(file, 'a');
+    const locator = new GodotLocator({
+      start: () => Promise.resolve({ stdout: `${version}\n` }),
+      sleep: () => Promise.resolve(),
+    });
+    const reportOf = (): string => {
+      const answer = unmodelledAnswer('project_info', new Error('EISDIR: illegal operation'), 0, locator);
+      assert.equal(answer.isError, true, 'the answer is an error');
+      return text(get(answer.content[0], 'text'));
+    };
+    assert.match(reportOf(), /Godot +not known at the point this failed/, 'before the engine has answered');
+    process.env['GODOT_PATH'] = file;
+    assert.equal((await locator.find()).ok, true, 'the engine answers');
+    const report = reportOf();
+    assert.match(report, /Where +project_info\b/, 'the report is about the failure it was handed');
+    assert.match(
+      report,
+      new RegExp(`Godot +${version.replaceAll('.', '\\.')}`, 'u'),
+      'and holds the version',
+    );
+  } finally {
+    if (before === undefined) {
+      delete process.env['GODOT_PATH'];
+    } else {
+      process.env['GODOT_PATH'] = before;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The command line refuses a harness config's engine that is no engine, and names the config.
+ *
+ * The record was taken for an engine on its file existing, so a config naming a program that
+ * answers anything was run. Here the config names a real program that is no engine, with no
+ * GODOT_PATH, nothing on PATH and a home with no engine in it.
+ */
+function testTheCommandLineJudgesAConfigsEngine(): void {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cli-record-'));
+  try {
+    const project = join(root, 'game');
+    mkdirSync(project);
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    writeFileSync(
+      join(project, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: { gdharness: { command: 'npx', env: { GODOT_PATH: process.execPath } } },
+      }),
+    );
+    const empty = join(root, 'empty');
+    mkdirSync(empty);
+    const env = withHome(process.env, join(root, 'home'));
+    delete env['GODOT_PATH'];
+    for (const key of Object.keys(env)) {
+      if (key.toLowerCase() === 'path') {
+        env[key] = empty;
+      }
+    }
+    const ran = spawnSyncHidden(
+      process.execPath,
+      [join(process.cwd(), 'build', 'cli.js'), 'classes', project],
+      {
+        encoding: 'utf8',
+        cwd: root,
+        timeout: 60000,
+        env,
+      },
+    );
+    assert.equal(ran.status, 2, `${ran.stdout}${ran.stderr}`);
+    assert.ok(
+      ran.stderr.includes(
+        `The harness config of ${project} names ${process.execPath} under GODOT_PATH, which is not a Godot engine`,
+      ),
+      ran.stderr,
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
+ * `gdharness spread` judges the engine `--godot` names before it plays anything. A folder and a
+ * program that is no engine are refused as usage errors with the judge's reason.
+ */
+function testTheSpreadCommandJudgesTheEngineItIsGiven(): void {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spread-engine-'));
+  try {
+    const project = join(root, 'game');
+    mkdirSync(project);
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    writeFileSync(join(project, 'bench.tscn'), '[gd_scene format=3]\n\n[node name="Bench" type="Node"]\n');
+    const folder = join(root, 'folder');
+    mkdirSync(folder);
+    const printed = spawnSyncHidden(process.execPath, ['--version'], { encoding: 'utf8' }).stdout.trim();
+    for (const [godot, said] of [
+      [folder, `--godot names ${folder}, which is a folder, not a program.`],
+      [
+        process.execPath,
+        `--godot names ${process.execPath}, which is not a Godot engine: --version printed ${JSON.stringify(printed)}.`,
+      ],
+    ] as const) {
+      const ran = spawnSyncHidden(
+        process.execPath,
+        [join(process.cwd(), 'build', 'cli.js'), 'spread', project, 'bench.tscn', '--godot', godot],
+        { encoding: 'utf8', cwd: root, timeout: 60000, env: withHome(process.env, join(root, 'home')) },
+      );
+      assert.equal(ran.status, 2, `${ran.stdout}${ran.stderr}`);
+      assert.ok(ran.stderr.includes(said), ran.stderr);
+    }
+  } finally {
+    sweep(root);
+  }
+}
+
+/** The versions `--godot-version` takes are the shape an engine prints, with or without a `v`. */
+function testAGodotVersionFlagTakesTheShapeAnEnginePrints(): void {
+  for (const [given, taken] of [
+    ['4.7.2', '4.7.2'],
+    ['4.7.2.stable', '4.7.2.stable'],
+    ['4.7.2.stable.official.abc123', '4.7.2.stable.official.abc123'],
+    ['v4.7.2', '4.7.2'],
+  ] as const) {
+    assert.equal(versionNamed(given), taken, `${given} is taken`);
+  }
+  for (const given of ['4.7.2.1', '4.x']) {
+    assert.throws(
+      () => versionNamed(given),
+      (error: unknown) =>
+        error instanceof Error &&
+        error.message === `--godot-version takes a version such as 4.7.2 or 4.7.2.stable, not ${given}.`,
+      `${given} is refused with the usage text`,
+    );
+  }
+  assert.equal(versionNamed(undefined), null, 'and none given is none');
 }
 
 /**
@@ -16024,7 +16547,7 @@ async function testEditorOutputChecksTheProjectItIsGiven(): Promise<void> {
     );
     writeFileSync(join(directory, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
   }
-  const server = new ServerProcess({ env: { GODOT_PATH: process.execPath, GDHARNESS_PROJECT: project } });
+  const server = new ServerProcess({ env: { GODOT_PATH: standInEngine(), GDHARNESS_PROJECT: project } });
   const output = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
     await server.request('tools/call', { name: 'editor_output', arguments: args });
   try {
@@ -16308,7 +16831,7 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
  */
 async function testALaunchedEditorsConsoleIsReadBeforeItConnects(): Promise<void> {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-console-early-'));
-  const server = new ServerProcess({ env: { GODOT_PATH: process.execPath, GDHARNESS_PROJECT: project } });
+  const server = new ServerProcess({ env: { GODOT_PATH: standInEngine(), GDHARNESS_PROJECT: project } });
   const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
     textOf(await server.request('tools/call', { name, arguments: args })) ?? '';
   try {
@@ -16506,7 +17029,7 @@ async function testAGoneEditorsConsoleIsStillRead(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-console-gone-'));
   const port = await reservePort();
   const server = new ServerProcess({
-    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: process.execPath },
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: standInEngine() },
   });
   let later: ServerProcess | null = null;
   let editor: WebSocket | null = null;
@@ -16633,7 +17156,7 @@ async function testAGoneEditorsConsoleIsStillRead(): Promise<void> {
     await server.stop();
 
     // A server that opened nothing reads the note the launch left.
-    later = new ServerProcess({ env: { GDHARNESS_PROJECT: project, GODOT_PATH: process.execPath } });
+    later = new ServerProcess({ env: { GDHARNESS_PROJECT: project, GODOT_PATH: standInEngine() } });
     await later.initialize('regression-test');
     const fresh = await consoleOf(later);
     assert.deepEqual(
@@ -18187,6 +18710,17 @@ async function testARunCanBeStartedOnAnotherEngine(): Promise<void> {
     const missing = join(dirname(other), 'none', basename(other));
     const absent = textOf(await run({ op: 'start', godot: missing })) ?? '';
     assert.ok(absent.includes(`godot names ${missing}, which does not exist.`), absent);
+    const folder = dirname(other);
+    const inFolder = textOf(await run({ op: 'start', godot: folder })) ?? '';
+    assert.ok(inFolder.includes(`godot names ${folder}, which is a folder, not a program.`), inFolder);
+    const printed = (await runHidden(process.execPath, ['--version'])).stdout.trim();
+    const noEngine = textOf(await run({ op: 'start', godot: process.execPath })) ?? '';
+    assert.ok(
+      noEngine.includes(
+        `godot names ${process.execPath}, which is not a Godot engine: --version printed ${JSON.stringify(printed)}.`,
+      ),
+      noEngine,
+    );
   } finally {
     await games.end();
     await server.stop();
@@ -20375,7 +20909,7 @@ async function aStartLeaves(protocol: number): Promise<void> {
       {
         GDHARNESS_RUNTIME_DIR: announcements,
         GDHARNESS_PROJECT: project,
-        GODOT_PATH: process.execPath,
+        GODOT_PATH: standInEngine(),
       },
     );
 
@@ -24195,10 +24729,12 @@ async function testARelativeEnginePathIsMadeWhole(): Promise<void> {
     } else {
       process.chdir(dirname(resolve(before)));
       process.env['GODOT_PATH'] = basename(before);
+      const version = versionPrinted((await runHidden(resolve(before), ['--version'])).stdout);
+      assert.notEqual(version, null, 'the engine prints a version');
       const found = await new GodotLocator().find();
       assert.deepEqual(
         found,
-        { ok: true, path: resolve(before) },
+        { ok: true, path: resolve(before), version },
         'an engine named relatively is found whole',
       );
       // Setup writes the path it found into the harness config, so an absolute one comes back as
@@ -24207,7 +24743,7 @@ async function testARelativeEnginePathIsMadeWhole(): Promise<void> {
       process.env['GODOT_PATH'] = forward;
       assert.deepEqual(
         await new GodotLocator().find(),
-        { ok: true, path: forward },
+        { ok: true, path: forward, version },
         'an absolute engine path is kept as written',
       );
     }
@@ -24474,6 +25010,74 @@ async function testAGameThatDoesNotWelcomeIsRefused(): Promise<void> {
     text(get(unwelcomed, 'message')),
     new RegExp(`speaks runtime protocol unknown and this server speaks ${RUNTIME_PROTOCOL}\\. Reinstall`),
     JSON.stringify(unwelcomed),
+  );
+}
+
+/**
+ * A game whose welcome names another protocol, or none, is refused with what it said it speaks.
+ *
+ * The stand-in answers every request well, so the only thing wrong with it is its welcome. The one
+ * that welcomes with this server's protocol is the positive, answered with what it said.
+ */
+async function testAGameWelcomingAnotherProtocolIsRefused(): Promise<void> {
+  const ask = async (welcome: Record<string, unknown>): Promise<unknown> => {
+    const game = createServer((socket) => {
+      socket.setEncoding('utf8');
+      socket.write(`${JSON.stringify(welcome)}\n`);
+      let buffered = '';
+      socket.on('data', (chunk: string) => {
+        buffered += chunk;
+        for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
+          const asked: unknown = JSON.parse(buffered.slice(0, at));
+          buffered = buffered.slice(at + 1);
+          socket.write(`${JSON.stringify({ id: get(asked, 'id'), type: 'pong' })}\n`);
+        }
+      });
+      socket.on('error', () => {});
+    });
+    try {
+      await listenOnAReservedPort(game);
+      const endpoint: RuntimeEndpoint = {
+        pid: process.pid,
+        port: portOf(game),
+        address: '127.0.0.1',
+        project: { name: 'Welcoming', path: tmpdir() },
+        file: join(tmpdir(), `runtime-${process.pid}.json`),
+        addon: { version: SERVER_VERSION, digest: shippedRuntimeDigest() },
+      };
+      return await runtimeRequest(endpoint, 'ping', {}, 5_000);
+    } finally {
+      await new Promise<void>((done) => {
+        game.close(() => {
+          done();
+        });
+      });
+    }
+  };
+
+  const spoken = RUNTIME_PROTOCOL + 1;
+  const matching = await ask({ type: 'welcome', protocol: RUNTIME_PROTOCOL });
+  assert.equal(
+    get(matching, 'ok'),
+    true,
+    `a game welcoming in this protocol is answered: ${JSON.stringify(matching)}`,
+  );
+  const other = await ask({ type: 'welcome', protocol: spoken });
+  assert.equal(get(other, 'ok'), false, JSON.stringify(other));
+  assert.equal(get(other, 'reason'), 'protocol', JSON.stringify(other));
+  assert.match(
+    text(get(other, 'message')),
+    new RegExp(
+      `speaks runtime protocol ${spoken} and this server speaks ${RUNTIME_PROTOCOL}\\. Reinstall the runtime addon into the project\\.$`,
+    ),
+    JSON.stringify(other),
+  );
+  const silent = await ask({ type: 'welcome' });
+  assert.equal(get(silent, 'reason'), 'protocol', JSON.stringify(silent));
+  assert.match(
+    text(get(silent, 'message')),
+    new RegExp(`speaks runtime protocol unknown and this server speaks ${RUNTIME_PROTOCOL}\\. Reinstall`),
+    JSON.stringify(silent),
   );
 }
 
@@ -25438,7 +26042,7 @@ async function testATestServerWritesWhereNoRealRunIs(): Promise<void> {
   // Read rather than removed: something of this machine's may be running, and a fixture that
   // cleared it would be doing the very thing it is here to prove cannot happen.
   const before = existsSync(shared) ? readFileSync(shared, 'utf8') : null;
-  const server = new ServerProcess({ env: { GODOT_PATH: process.execPath } });
+  const server = new ServerProcess({ env: { GODOT_PATH: standInEngine() } });
   try {
     writeFileSync(
       join(project, 'project.godot'),
@@ -25525,7 +26129,7 @@ async function testAStartStopsWaitingForAGameThatIsOver(): Promise<void> {
         assert.match(String(get(runtime, 'note')), /no longer running/, JSON.stringify(runtime));
         assert.ok(waited < 8_000, `the answer should not wait out the budget: ${waited}ms`);
       },
-      { GODOT_PATH: process.execPath, GDHARNESS_RUNTIME_DIR: runtimeDir },
+      { GODOT_PATH: standInEngine(), GDHARNESS_RUNTIME_DIR: runtimeDir },
     );
   } finally {
     sweep(project);
@@ -27926,7 +28530,7 @@ async function testWhatALaunchedEditorDroppedIsReadAsItArrives(): Promise<void> 
     const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-launch-dropped-'));
     const port = await reservePort();
     const server = new ServerProcess({
-      env: { GDHARNESS_BRIDGE_PORT: String(port), GDHARNESS_PROJECT: project, GODOT_PATH: process.execPath },
+      env: { GDHARNESS_BRIDGE_PORT: String(port), GDHARNESS_PROJECT: project, GODOT_PATH: standInEngine() },
     });
     let editor: WebSocket | null = null;
     try {
@@ -33925,9 +34529,10 @@ function testStaleImportsWalkLinksAndSpellingsAsTheFileSystemDoes(): void {
  * Issue #1425: a server configured for one checkout of a game ran `project_test` on a second
  * checkout pinned to an older engine, and its suites ran on the server's newer engine with nothing
  * naming it. Here the second project's config names a link to the same Godot under another name,
- * and its suite asserts the executable it runs in. A third names an empty file, so an operation
- * that ran on the server's engine would succeed where the project's engine cannot start. The
- * server's own project names that empty file too, and is still run on the server's engine.
+ * and its suite asserts the executable it runs in. A third names an empty file, which is no engine,
+ * so a call on it is refused naming the config and the file, where one run on the server's engine
+ * would succeed. The server's own project names that empty file too, and is still run on the
+ * server's engine.
  */
 async function testAnotherCheckoutRunsTheEngineItsConfigNames(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -33999,20 +34604,25 @@ async function testAnotherCheckoutRunsTheEngineItsConfigNames(): Promise<void> {
           `on the server's engine: ${JSON.stringify(ownInfo)}`,
         );
 
-        const refused = await answer('project_info', { projectPath: unstartable, include: ['classes'] });
+        const refused = await request(
+          'tools/call',
+          { name: 'project_info', arguments: { projectPath: unstartable, include: ['classes'] } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const refusedText = asArray(get(refused, 'result', 'content'))
+          .map((block) => String(get(block, 'text')))
+          .join('\n');
         assert.equal(
-          typeof get(refused, 'classes', 'error'),
-          'string',
-          `the section ran on the empty file and failed: ${JSON.stringify(refused)}`,
+          get(refused, 'result', 'isError'),
+          true,
+          `a record that is no engine is refused: ${refusedText}`,
         );
-        const said = text(get(refused, 'engineNote'));
         assert.ok(
-          said.startsWith(
-            `This ran the engine at ${join(unstartable, 'engine', empty)}, which the harness config of ${unstartable} names, rather than this server's engine at `,
+          refusedText.includes(
+            `The harness config of ${unstartable} names ${join(unstartable, 'engine', empty)} under GODOT_PATH, which `,
           ),
-          said,
+          refusedText,
         );
-        assert.equal(get(refused, 'classes', 'engineNote'), undefined, 'named once, not in the section');
 
         const tested = await answer('project_test', { projectPath: pinned, path: 'res://test' });
         assert.equal(
@@ -35457,7 +36067,7 @@ async function withAPlayingEditor(
     env: {
       GDHARNESS_BRIDGE_PORT: String(port),
       GDHARNESS_RUNTIME_DIR: runtimeDir,
-      GODOT_PATH: options.engine ?? process.execPath,
+      GODOT_PATH: options.engine ?? standInEngine(),
       // The server's own account of a start, kept in its stderr for the fixture that fails on
       // how long one took: without it a start that sat nine seconds on a played game left
       // nothing behind to say where the time went.
@@ -39534,7 +40144,7 @@ async function testARunGivenEngineFlagsIsStartedHere(): Promise<void> {
         malformed.said,
       );
       // Another engine is the server's own stand-in here, and the editor still plays only on its own.
-      const onAnother = await run({ godot: process.execPath });
+      const onAnother = await run({ godot: standInEngine() });
       assert.equal(get(onAnother.answer, 'through'), 'gdharness', onAnother.said);
       assert.match(
         text(get(onAnother.answer, 'message')),
@@ -48740,19 +49350,16 @@ async function testAStopTakesTheEndedGamesAnnouncementDown(): Promise<void> {
 }
 
 /**
- * A stop takes the announcement down by the number the game announced under, which is not always
- * the run's own.
+ * A GODOT_PATH naming the Windows console build starts the engine beside it, so the run holds the
+ * engine's own process and a stop ends the game it plays.
  *
- * The Windows console build is a wrapper: the run holds the wrapper's process and the engine is
- * its child, so the announcement is written under a number the run does not hold. A stop that
- * took announcements down by the run's number alone left this one to the sweep, which is the gap
- * the number can come round in. Measured before this was written: the engine was listed under the
- * wrapper, and gone two seconds after the wrapper was killed, so the file is the stop's to take.
+ * The console build is a wrapper whose child is the engine. Held as the run, it would put the
+ * game's announcement under a number the run does not hold, and a stop by the run's number would
+ * leave that file to the sweep.
  *
- * Only where that build is, beside the engine the tier was given. Elsewhere the run's number and
- * the announced one are the same process and the case above holds it.
+ * Only where that build is, beside the engine the tier was given.
  */
-async function testAStopTakesTheWrappedEnginesAnnouncementDown(): Promise<void> {
+async function testAConsoleWrapperRunsAsTheEngineBesideIt(): Promise<void> {
   const godotPath = resolveGodotPath();
   const wrapper = godotPath === null ? null : godotPath.replace(/\.exe$/i, '_console.exe');
   if (
@@ -48793,10 +49400,10 @@ async function testAStopTakesTheWrappedEnginesAnnouncementDown(): Promise<void> 
         assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
         const runPid = asNumber(get(started, 'pid'), 'the run holds a process');
         const gamePid = asNumber(get(started, 'runtime', 'pid'), 'the game announced under a number');
-        assert.notEqual(
+        assert.equal(
           runPid,
           gamePid,
-          'the console build holds the wrapper, and the engine announces as its child',
+          'the run holds the engine beside the console build, which announces under its own number',
         );
         const announcement = join(runtimeDir, `runtime-${gamePid}.json`);
         assert.ok(existsSync(announcement), 'the announcement is there for the stop to take');
@@ -49394,13 +50001,14 @@ function testRunNotesAreKeptPerProject(): void {
       command: 'godot',
     });
     writeRunRecord(note(shop, 22520, shopLog));
-    writeRunRecord(note(bench, 31337, benchLog));
+    const benchNote = note(bench, 31337, benchLog);
+    writeRunRecord(benchNote);
     assert.equal(readRunRecord(shop)?.pid, 22520, 'the shop run is still its note after the bench started');
     assert.equal(readRunRecord(bench)?.pid, 31337, 'and the bench has its own');
     // The same project spelled the way an editor reports it, with forward slashes.
     assert.equal(readRunRecord(shop.replaceAll('\\', '/'))?.pid, 22520, 'whichever way the path is spelled');
 
-    recordRunEnded(bench, 31337, { exitCode: 0, exitSignal: null });
+    recordRunEnded(benchNote, { exitCode: 0, exitSignal: null });
     assert.equal(readRunRecord(bench)?.exitCode, 0, "the bench's ending goes into the bench's note");
     assert.equal(readRunRecord(shop)?.exitCode, undefined, 'and not into the shop run');
 
@@ -49440,6 +50048,521 @@ function testRunNotesAreKeptPerProject(): void {
 }
 
 /**
+ * A keeper writes into its own run's note and into no later run's.
+ *
+ * The keeper rewrote its note as it listened, as the game exited and as it restarted, whatever the
+ * project's note held by then, so a run started after it was ended on paper by the run before. A
+ * keeper holds a sleeping process while a later run's note is written, and the process is ended: the
+ * later note must read whole afterwards. The same is asked of the guarded write directly, where a
+ * restart changes the pid and a missing note is written. A keeper whose game restarts itself after the
+ * later note is written covers the listening, restart and ending writes of one that follows a
+ * successor, and needs the engine.
+ */
+async function testAKeeperLeavesALaterRunsNoteAlone(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-later-note-'));
+  const runtime = join(scratch, 'runtime');
+  const project = join(scratch, 'project');
+  const met = new MetProcesses();
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  process.env['GDHARNESS_RUNTIME_DIR'] = runtime;
+  const launch = (
+    command: string,
+    args: readonly string[],
+    transcript: string,
+    projectPath: string,
+  ): number => {
+    const answer = join(scratch, `launched-${basename(transcript)}.json`);
+    const launcher = join(scratch, `launch-${basename(transcript)}.mjs`);
+    const spec = {
+      command,
+      args,
+      run: { transcript, startedAt: Date.now(), projectPath, debugged: false },
+    };
+    writeFileSync(
+      launcher,
+      [
+        `import { writeFileSync } from 'node:fs';`,
+        `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
+        `const launched = await launchOutsideTheTree(${JSON.stringify(spec)}, process.execPath, ${JSON.stringify(resolve('build', 'keeper.js'))});`,
+        `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
+      ].join('\n'),
+    );
+    const ran = spawnSyncHidden(process.execPath, [launcher], {
+      encoding: 'utf8',
+      timeout: 60_000,
+      env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
+    });
+    const said: unknown = existsSync(answer) ? JSON.parse(readFileSync(answer, 'utf8')) : null;
+    const pid = get(said, 'pid');
+    assert.ok(
+      typeof pid === 'number',
+      `the launch answers with the pid: ${JSON.stringify(said)} ${ran.stderr}`,
+    );
+    return pid;
+  };
+  const keeperGone = async (keeperPid: number): Promise<void> => {
+    for (let waited = 0; waited < 60_000 && isAlive(keeperPid); waited += 250) {
+      await delay(250);
+    }
+    assert.ok(!isAlive(keeperPid), 'the keeper ended with its run');
+  };
+  try {
+    mkdirSync(project, { recursive: true });
+    const runs = join(runtime, 'runs');
+    mkdirSync(runs, { recursive: true });
+    const startedAt = Date.now();
+    const pid = launch(
+      process.execPath,
+      ['-e', 'setTimeout(() => {}, 60000)'],
+      join(runs, 'run-1.log'),
+      project,
+    );
+    await met.meet(pid);
+    const first = readRunRecord(project, [runtime]);
+    assert.ok(first !== null, 'the keeper wrote its run');
+    assert.equal(first.pid, pid, 'the note names the run before the next one');
+    assert.ok(first.keeper !== undefined && first.keeperPid !== undefined, 'and the keeper that listens');
+    const { keeper: _listens, keeperPid: _holds, ...bare } = first;
+    const later = { ...bare, pid: 2222, transcript: join(runs, 'run-2.log'), startedAt: startedAt + 1 };
+    writeFileSync(runRecordPath(project, runtime), JSON.stringify(later), 'utf8');
+    const second = readRunRecord(project, [runtime]);
+    assert.ok(second?.pid === 2222, 'the later run is the note');
+    process.kill(pid);
+    await keeperGone(first.keeperPid);
+    assert.deepEqual(readRunRecord(project, [runtime]), second, "the later run's note is whole");
+
+    // The guarded write: a restart moves the pid and keeps the transcript, so the run is told by
+    // the transcript.
+    const restarted = { ...first, pid: 3333, restartedFrom: [{ pid, endedAt: 4000 }] };
+    assert.equal(
+      amendRunRecord(restarted),
+      false,
+      "a restart of the earlier run leaves the later run's note",
+    );
+    assert.deepEqual(readRunRecord(project, [runtime]), second, 'and the note reads whole');
+    writeFileSync(runRecordPath(project, runtime), JSON.stringify(first), 'utf8');
+    assert.equal(amendRunRecord(restarted), true, 'a restart of the run the note is of is written');
+    assert.equal(readRunRecord(project, [runtime])?.pid, 3333, 'and the note reads with the new pid');
+    clearRunRecord(project, [runtime]);
+    assert.equal(amendRunRecord({ ...first, endingAt: 5000 }), true, 'a cleared note is written again');
+    assert.equal(readRunRecord(project, [runtime])?.endingAt, 5000, 'with what the keeper said');
+    clearRunRecord(project, [runtime]);
+
+    // A game that restarts itself after the later run's note is written.
+    const godotPath = resolveGodotPath();
+    if (!godotPath) {
+      if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+        throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+      }
+      console.log('restarting keeper regression skipped (Godot not found)');
+      return;
+    }
+    const game = join(scratch, 'game');
+    mkdirSync(game);
+    writeFileSync(
+      join(game, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Later"\n' +
+        'run/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(game, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    writeFileSync(
+      join(game, 'main.gd'),
+      [
+        'extends Node',
+        '',
+        '',
+        'func _process(_delta: float) -> void:',
+        '\tif "--restarted" in OS.get_cmdline_user_args():',
+        '\t\tif not FileAccess.file_exists("res://successor_up"):',
+        '\t\t\tvar mark := FileAccess.open("res://successor_up.part", FileAccess.WRITE)',
+        '\t\t\tmark.store_string(str(OS.get_process_id()))',
+        '\t\t\tmark.close()',
+        '\t\t\tDirAccess.rename_absolute(',
+        '\t\t\t\tProjectSettings.globalize_path("res://successor_up.part"),',
+        '\t\t\t\tProjectSettings.globalize_path("res://successor_up")',
+        '\t\t\t)',
+        '\t\tif FileAccess.file_exists("res://quit_now"):',
+        '\t\t\tget_tree().quit()',
+        '\t\treturn',
+        '\tif FileAccess.file_exists("res://go"):',
+        '\t\tvar again: PackedStringArray = [',
+        '\t\t\t"--headless", "--path", ProjectSettings.globalize_path("res://"), "--", "--restarted"',
+        '\t\t]',
+        '\t\tOS.set_restart_on_exit(true, again)',
+        '\t\tget_tree().quit()',
+        '',
+      ].join('\n'),
+    );
+    const gamePid = launch(godotPath, ['--headless', '--path', game], join(runs, 'run-3.log'), game);
+    await met.meet(gamePid);
+    const running = readRunRecord(game, [runtime]);
+    assert.ok(running?.keeper !== undefined, 'the keeper of the restarting game listens');
+    const { keeper: _address, ...unlistened } = running;
+    const newer = {
+      ...unlistened,
+      pid: 4444,
+      transcript: join(runs, 'run-4.log'),
+      startedAt: Date.now() + 1,
+    };
+    writeFileSync(runRecordPath(game, runtime), JSON.stringify(newer), 'utf8');
+    const newest = readRunRecord(game, [runtime]);
+    writeFileSync(join(game, 'go'), '');
+    const mark = join(game, 'successor_up');
+    for (let waited = 0; waited < 60_000 && !existsSync(mark); waited += 250) {
+      await delay(250);
+    }
+    assert.ok(existsSync(mark), 'the game restarted itself');
+    await met.meet(Number(readFileSync(mark, 'utf8')));
+    // Long enough for the keeper to have found the successor and written what it found.
+    await delay(4_000);
+    writeFileSync(join(game, 'quit_now'), '');
+    await keeperGone(running.keeperPid ?? 0);
+    assert.deepEqual(
+      readRunRecord(game, [runtime]),
+      newest,
+      "the later run's note is whole after the restart",
+    );
+  } finally {
+    await met.end();
+    if (had === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = had;
+    }
+    sweep(scratch);
+  }
+}
+
+/**
+ * An ending goes into the note of the run that ended, which is told by its transcript.
+ *
+ * A pid comes round again, and two servers can start runs of one project in one millisecond, so
+ * neither the pid nor the start tells two runs apart. Only the transcript, opened for one run alone,
+ * does.
+ */
+function testAnEndingGoesToItsOwnRunAlone(): void {
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-own-ending-'));
+  const project = join(runtime, 'project');
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  process.env['GDHARNESS_RUNTIME_DIR'] = runtime;
+  try {
+    const noted = (startedAt: number, name: string): RunRecord => ({
+      pid: 4242,
+      transcript: join(runtime, 'runs', name),
+      startedAt,
+      startedBy: startedAt,
+      projectPath: project,
+      arguments: ['--headless'],
+      command: 'godot',
+    });
+    const first = noted(1000, 'run-1000.log');
+    const second = noted(2000, 'run-2000.log');
+    writeRunRecord(first);
+    writeRunRecord(second);
+    assert.equal(recordRunEnded(first, { exitCode: 3, exitSignal: null }), false, 'the pid is not the run');
+    const read = readRunRecord(project);
+    assert.equal(read?.startedAt, 2000, 'the later run is still the note');
+    assert.deepEqual(
+      [read.exitCode, read.endedAt],
+      [undefined, undefined],
+      "and the earlier run's ending is not in it",
+    );
+
+    const tied = noted(1000, 'run-1000-1.log');
+    writeRunRecord(first);
+    writeRunRecord(tied);
+    const before = readRunRecord(project);
+    assert.equal(recordRunEnded(first, { exitCode: 3, exitSignal: null }), false, 'nor are pid and start');
+    assert.deepEqual(readRunRecord(project), before, 'the later note is whole');
+    assert.equal(before?.transcript, tied.transcript, 'and it is the second run');
+
+    const looking = { ...tied, endingAt: 5000 };
+    assert.equal(
+      recordRunEnded(looking, { exitCode: 0, exitSignal: null }),
+      true,
+      'its own ending is written',
+    );
+    const ended = readRunRecord(project);
+    assert.equal(ended?.exitCode, 0, 'with its code');
+    assert.ok(typeof ended.endedAt === 'number', 'and the moment');
+    assert.equal(ended.endingAt, undefined, 'and no longer looking for a successor');
+
+    clearRunRecord(project);
+    assert.equal(
+      recordRunEnded(tied, { exitCode: 0, exitSignal: null }),
+      true,
+      'an ending after a clear lands',
+    );
+    const after = readRunRecord(project);
+    assert.equal(after?.exitCode, 0, 'as the code of the note written');
+    assert.ok(typeof after.endedAt === 'number', 'with its moment');
+  } finally {
+    if (had === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = had;
+    }
+    sweep(runtime);
+  }
+}
+
+/**
+ * The exit a server reads is its own run's, and the restart it follows is too.
+ *
+ * Run A's note names a live process. Run B then takes the note over with the same pid and an exit
+ * code, which is B's. A server asked about A must not answer B's code. And a run whose keeper wrote
+ * a restart is followed only where the note names A's transcript: a note of another run with the same
+ * start that names A's pid among its restarts is not a restart of A.
+ */
+async function testAnotherRunsExitIsNotThisRuns(): Promise<void> {
+  const ended: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  assert.ok(ended.pid > 0, 'the fixture needs a process that has been and gone');
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-another-exit-'));
+  const project = join(runtimeDir, 'project');
+  const runs = join(runtimeDir, 'runs');
+  mkdirSync(runs, { recursive: true });
+  const where = runRecordPath(project, runtimeDir);
+  const standIns: ReturnType<typeof spawnHidden>[] = [];
+  const standIn = (): ReturnType<typeof spawnHidden> => {
+    // The long spelling of the eval flag, since `-e` is how the engine is told to come up as an editor.
+    const one = spawnHidden(
+      process.execPath,
+      ['--eval', 'setInterval(() => {}, 1000)', '--', '--path', project],
+      {
+        stdio: 'ignore',
+      },
+    );
+    standIns.push(one);
+    return one;
+  };
+  try {
+    const live = standIn();
+    const pid = live.pid ?? 0;
+    assert.ok(pid > 0, 'the stand-in should have started');
+    const began = (await startTimesOf([pid])).get(pid);
+    assert.ok(began !== undefined, 'the platform should date the stand-in');
+    const startedAt = Date.now() - 10_000;
+    const noteA = {
+      pid,
+      transcript: join(runs, 'run-1.log'),
+      startedAt,
+      startedBy: began,
+      projectPath: project,
+      arguments: ['--headless', '--path', project],
+      command: process.execPath,
+    };
+    writeFileSync(noteA.transcript, 'run A\n');
+    writeFileSync(join(runs, 'run-2.log'), 'run B\n');
+    writeFileSync(where, JSON.stringify(noteA), 'utf8');
+    await withStdioServer(
+      async (call) => {
+        const going: unknown = jsonOf(await call('editor_output', {}), 'editor_output');
+        assert.deepEqual(
+          [get(going, 'running'), get(going, 'pid')],
+          [true, pid],
+          `run A is adopted while it runs: ${JSON.stringify(going)}`,
+        );
+        writeFileSync(
+          where,
+          JSON.stringify({ ...noteA, transcript: join(runs, 'run-2.log'), exitCode: 3, endedAt: Date.now() }),
+          'utf8',
+        );
+        live.kill();
+        await new Promise((settle) => live.once('close', settle));
+        const gone: unknown = jsonOf(await call('editor_output', {}), 'editor_output');
+        assert.deepEqual(
+          [get(gone, 'running'), get(gone, 'exitCode'), get(gone, 'endedUnwatched')],
+          [false, null, true],
+          `run B's code is not run A's: ${JSON.stringify(gone)}`,
+        );
+      },
+      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    );
+
+    // Another run with the same start names A's pid among its restarts.
+    const successor = standIn();
+    const successorPid = successor.pid ?? 0;
+    const successorBegan = (await startTimesOf([successorPid])).get(successorPid);
+    assert.ok(successorBegan !== undefined, 'the platform should date the second stand-in');
+    const noteGone = { ...noteA, pid: ended.pid, startedBy: startedAt };
+    writeFileSync(where, JSON.stringify(noteGone), 'utf8');
+    await withStdioServer(
+      async (call) => {
+        const answered = delay(1_000).then(() => {
+          writeFileSync(
+            where,
+            JSON.stringify({
+              ...noteGone,
+              pid: successorPid,
+              startedBy: successorBegan,
+              transcript: join(runs, `run-${String(startedAt)}-1.log`),
+              restartedFrom: [{ pid: ended.pid, exitCode: 0, endedAt: Date.now() }],
+            }),
+            'utf8',
+          );
+        });
+        const output: unknown = jsonOf(await call('editor_output', {}), 'editor_output');
+        await answered;
+        assert.deepEqual(
+          [get(output, 'running'), get(output, 'pid')],
+          [false, ended.pid],
+          `another run's restart is not this run's: ${JSON.stringify(output)}`,
+        );
+      },
+      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    );
+  } finally {
+    for (const one of standIns) {
+      one.kill();
+    }
+    sweep(runtimeDir);
+  }
+}
+
+/**
+ * A server waiting for its run's exit does not wait on a later run's keeper or search.
+ *
+ * Run B takes the note over with the pid of run A, and says it is still looking for a successor or
+ * names a keeper that is alive. Both extend the wait for an exit to as long as a search takes, and
+ * run A's wait would take them for its own.
+ */
+async function testALaterRunsKeeperIsNotWaitedFor(): Promise<void> {
+  const ended: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  assert.ok(ended.pid > 0, 'the fixture needs a process that has been and gone');
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-later-keeper-'));
+  const project = join(runtimeDir, 'project');
+  const runs = join(runtimeDir, 'runs');
+  mkdirSync(runs, { recursive: true });
+  const where = runRecordPath(project, runtimeDir);
+  try {
+    const startedAt = Date.now() - 10_000;
+    const noteA = {
+      pid: ended.pid,
+      transcript: join(runs, 'run-1.log'),
+      startedAt,
+      startedBy: startedAt,
+      projectPath: project,
+      arguments: ['--headless', '--path', project],
+      command: process.execPath,
+    };
+    writeFileSync(noteA.transcript, 'run A\n');
+    writeFileSync(join(runs, 'run-2.log'), 'run B\n');
+    // This process is the live keeper of run B.
+    const later = [
+      { name: 'still looking for a successor', extra: () => ({ endingAt: Date.now() }) },
+      { name: 'a keeper that is alive', extra: () => ({ keeperPid: process.pid }) },
+    ];
+    for (const one of later) {
+      writeFileSync(where, JSON.stringify(noteA), 'utf8');
+      await withStdioServer(
+        async (call) => {
+          const answered = delay(1_000).then(() => {
+            writeFileSync(
+              where,
+              JSON.stringify({ ...noteA, transcript: join(runs, 'run-2.log'), ...one.extra() }),
+              'utf8',
+            );
+          });
+          const asked = Date.now();
+          const output: unknown = jsonOf(await call('editor_output', {}), 'editor_output');
+          const took = Date.now() - asked;
+          await answered;
+          assert.deepEqual(
+            [get(output, 'running'), get(output, 'endedUnwatched')],
+            [false, true],
+            `run A is settled as ended with nothing recorded, ${one.name} in run B: ${JSON.stringify(output)}`,
+          );
+          assert.ok(took < 10_000, `without waiting on run B, ${one.name}: ${String(took)}ms`);
+        },
+        { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+      );
+    }
+  } finally {
+    sweep(runtimeDir);
+  }
+}
+
+/**
+ * A sweep keeps the files a note names however the note and the listing spell the folder.
+ *
+ * The note's paths and the folder's entries were compared as text, so a runtime folder spelt in
+ * another case (Windows) or reached through a link kept nothing a note named.
+ */
+function testASweepKeepsWhatANoteNamesUnderAnySpelling(): void {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-sweep-spelling-'));
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  try {
+    const project = join(scratch, 'project');
+    const threeDays = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    // The runtime folder is read as [spelling], and the note names its files as [named] spells them.
+    const sweepFrom = (spelling: string, real: string, named = real): void => {
+      const runs = join(real, 'runs');
+      mkdirSync(runs, { recursive: true });
+      const transcript = join(runs, 'run-1.log');
+      const profile = profilePath(transcript);
+      const stray = join(runs, 'run-9.log');
+      for (const file of [transcript, profile, stray]) {
+        writeFileSync(file, '');
+        utimesSync(file, threeDays, threeDays);
+      }
+      process.env['GDHARNESS_RUNTIME_DIR'] = spelling;
+      const noted = join(named, 'runs', 'run-1.log');
+      writeRunRecord({
+        pid: 4242,
+        transcript: noted,
+        startedAt: Date.now(),
+        startedBy: Date.now(),
+        projectPath: project,
+        profile: profilePath(noted),
+        arguments: [],
+        command: 'godot',
+      });
+      sweepTranscripts(24 * 60 * 60 * 1000, Date.now() + 2 * 24 * 60 * 60 * 1000);
+      assert.deepEqual(
+        [existsSync(transcript), existsSync(profile), existsSync(stray)],
+        [true, true, false],
+        `the files a note names are kept and a stray one is swept, through ${spelling} named as ${named}`,
+      );
+    };
+    const flipped = (path: string): string => {
+      const letter = path.charAt(0);
+      return (letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase()) + path.slice(1);
+    };
+    const respelt = join(scratch, 'respelt');
+    mkdirSync(respelt);
+    if (process.platform === 'win32') {
+      sweepFrom(flipped(respelt), respelt);
+      const named = join(scratch, 'named');
+      mkdirSync(named);
+      sweepFrom(named, named, flipped(named));
+    } else {
+      console.log('respelt drive letter case skipped (Windows only)');
+    }
+    const real = join(scratch, 'real');
+    mkdirSync(real);
+    const link = join(scratch, 'link');
+    symlinkSync(real, link, 'junction');
+    sweepFrom(link, real);
+    const read = join(scratch, 'read');
+    mkdirSync(read);
+    const through = join(scratch, 'through');
+    symlinkSync(read, through, 'junction');
+    sweepFrom(read, read, through);
+  } finally {
+    if (had === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = had;
+    }
+    sweep(scratch);
+  }
+}
+
+/**
  * What a run ended with outlives the server that watched it end.
  *
  * A run is spawned detached so a reconnect cannot take it, and the next server reads the note on
@@ -49449,7 +50572,8 @@ function testRunNotesAreKeptPerProject(): void {
  * whose exit code "was never collected", which is true of the reading and false of the run.
  *
  * A later run of the same project replaces the note, so the half that matters as much is the one
- * where the pid is not the note's: writing an ending into it would end the later run on paper.
+ * where the transcript is not the note's: writing an ending into it would end the later run on
+ * paper. That is the half where the note is a later run's.
  */
 function testAnExitCodeOutlivesTheServerThatSawIt(): void {
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-ending-'));
@@ -49457,7 +50581,7 @@ function testAnExitCodeOutlivesTheServerThatSawIt(): void {
   const had = process.env['GDHARNESS_RUNTIME_DIR'];
   process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
   try {
-    writeRunRecord({
+    const run = {
       pid: 4242,
       transcript: join(runtimeDir, 'run.log'),
       startedAt: Date.now(),
@@ -49465,10 +50589,12 @@ function testAnExitCodeOutlivesTheServerThatSawIt(): void {
       projectPath: project,
       arguments: ['--headless'],
       command: 'godot',
-    });
+    };
+    writeRunRecord(run);
     assert.equal(readRunRecord(project)?.exitCode, undefined, 'a run still going has no ending to report');
 
-    recordRunEnded(project, 9999, { exitCode: 3, exitSignal: null });
+    const another = { ...run, pid: 9999, transcript: join(runtimeDir, 'run-another.log') };
+    assert.equal(recordRunEnded(another, { exitCode: 3, exitSignal: null }), false, 'it wrote nothing');
     assert.equal(
       readRunRecord(project)?.exitCode,
       undefined,
@@ -49476,7 +50602,7 @@ function testAnExitCodeOutlivesTheServerThatSawIt(): void {
     );
 
     const before = Date.now();
-    recordRunEnded(project, 4242, { exitCode: 3, exitSignal: null });
+    recordRunEnded(run, { exitCode: 3, exitSignal: null });
     const after = readRunRecord(project);
     assert.ok(after !== null, 'the note should still be there to read');
     assert.equal(after.exitCode, 3, 'the code its own server saw is kept for whoever reads next');
@@ -50549,7 +51675,7 @@ async function benchThroughAStart(
       async (call) => {
         answer = await call('editor_run', { op: 'start', projectPath: mine, headless: true });
       },
-      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: mine, GODOT_PATH: process.execPath },
+      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: mine, GODOT_PATH: standInEngine() },
     );
 
     // Waited on up to three seconds for one more line rather than read once after a quarter of one:
@@ -50938,7 +52064,7 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
           "a call naming another project leaves the server's own as the one read",
         );
       },
-      { GDHARNESS_PROJECT: ours, GODOT_PATH: process.execPath },
+      { GDHARNESS_PROJECT: ours, GODOT_PATH: standInEngine() },
     );
 
     await withStdioServer(
@@ -50957,7 +52083,7 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
           `a directory with no project.godot is no root: ${underRoot}`,
         );
       },
-      { GODOT_PATH: process.execPath },
+      { GODOT_PATH: standInEngine() },
     );
   } finally {
     sweep(root);
@@ -51832,7 +52958,7 @@ async function testARunNoteIsNeverReadHalfWritten(): Promise<void> {
         'for (const end = Date.now() + 60000; Date.now() < end && !existsSync(stop); rewrites += 1) {\n' +
         '  const startedAt = record.startedAt + rewrites;\n' +
         '  writeRunRecord({ ...record, startedAt });\n' +
-        '  recordRunEnded(record.projectPath, record.pid, { exitCode: 0, exitSignal: null });\n' +
+        '  recordRunEnded({ ...record, startedAt }, { exitCode: 0, exitSignal: null });\n' +
         '  writeEditorRunNote({ projectPath: record.projectPath, transcript: record.transcript, startedAt });\n' +
         '  writeLatestRun(record.projectPath, { projectPath: record.projectPath, pid: record.pid, startedAt });\n' +
         "  if (rewrites === 0) console.log('rewriting');\n" +
@@ -52516,10 +53642,15 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
           String(get(burst, 'note')),
         )?.[1];
       const unrun = unrunSaid === undefined ? 0 : unrunSaid === 'One' ? 1 : Number(unrunSaid);
-      const placed = burstRows.length + asNumber(get(burst, 'runtimeAddonFunctions')) + unrun;
+      const methodsSaid =
+        /(?:^|\. )(One|\d+) of the 1536 (?:is an engine method|are engine methods) the scripts called/.exec(
+          String(get(burst, 'note')),
+        )?.[1];
+      const methodPlaces = methodsSaid === undefined ? 0 : methodsSaid === 'One' ? 1 : Number(methodsSaid);
+      const placed = burstRows.length + asNumber(get(burst, 'runtimeAddonFunctions')) + unrun + methodPlaces;
       assert.ok(
         burstRows.length > 0 && placed >= most - 2 && placed <= most,
-        `the totals' ${String(most)} places are all accounted for: ${burstRows.length} rows, ${String(get(burst, 'runtimeAddonFunctions'))} addon functions, ${String(unrun)} never called; note: ${String(get(burst, 'note'))}, ${burstShown}`,
+        `the totals' ${String(most)} places are all accounted for: ${burstRows.length} rows, ${String(get(burst, 'runtimeAddonFunctions'))} addon functions, ${String(unrun)} never called, ${String(methodPlaces)} engine methods; note: ${String(get(burst, 'note'))}, ${burstShown}`,
       );
       // A sentence of the note rather than its start: the notes before it depend on timing, and on a
       // fast runner a runtime function called a dozen times in two microseconds is mostly overhead.
@@ -52693,6 +53824,378 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         [[12, 'each_frame']],
         after,
       );
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
+ * A call through an engine method leaves the caller's self time and is given apart, as engineMs.
+ *
+ * `outer` reaches `inner` through `callv` on a typed variable, the shape of a dispatch table. The
+ * engine takes such a call out of the caller's self time only when it profiles native calls, and
+ * lists each engine method the script called as a row of its own whose time holds the script it
+ * reached. Read as a script function, that row counts `inner` a second time.
+ *
+ * Three runs: one that quits, read from the engine's totals, and one read while it plays, from the
+ * frames summed. Only the frames carry every engine method's row, since GDScript clears them at
+ * each frame's end and its totals hold those since the last frame alone. The third reaches outer
+ * through callv in turn, and the engine files both calls under outer.
+ */
+async function testACallThroughAnEngineMethodLeavesTheCallersSelfTime(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('engine method profile regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-profiled-native-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-profiled-native-rt-'));
+  try {
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      { recursive: true },
+    );
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Native"\n' +
+        '\n[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    writeFileSync(
+      join(project, 'dispatch.gd'),
+      [
+        'extends Node',
+        '',
+        '',
+        'func inner() -> int:',
+        '\tvar sum := 0',
+        '\tfor i in 400000:',
+        '\t\tsum += i % 7',
+        '\treturn sum',
+        '',
+        '',
+        // Typed, so the compiler calls callv by its method bind. On self it would be a dynamic call,
+        // which the engine times whatever it profiles.
+        'func outer() -> int:',
+        '\tvar target: Object = self',
+        '\treturn target.callv(&"inner", [])',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar sum := 0',
+        '\tfor round in 10:',
+        '\t\tsum += outer()',
+        '\tprint(sum)',
+        '\tget_tree().quit()',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'dispatch.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://dispatch.gd" id="1"]\n\n' +
+        '[node name="Dispatch" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    writeFileSync(
+      join(project, 'looped.gd'),
+      [
+        'extends "res://dispatch.gd"',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tpass',
+        '',
+        '',
+        'func _process(_delta: float) -> void:',
+        '\touter()',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'looped.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://looped.gd" id="1"]\n\n' +
+        '[node name="Looped" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    // outer reached through callv in turn: the engine files outer's own callv under relay's too.
+    writeFileSync(
+      join(project, 'relayed.gd'),
+      [
+        'extends "res://dispatch.gd"',
+        '',
+        '',
+        'func relay() -> Variant:',
+        '\tvar target: Object = self',
+        '\treturn target.callv(&"outer", [])',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tfor round in 5:',
+        '\t\trelay()',
+        '\tget_tree().quit()',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'relayed.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://relayed.gd" id="1"]\n\n' +
+        '[node name="Relayed" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    // What both runs must answer: inner's work once, as its own self time and as outer's engine time.
+    const judged = (answered: string, outerCalls: number | null): void => {
+      const profile: unknown = JSON.parse(answered);
+      const rows = asArray(get(profile, 'functions'));
+      const row = (name: string): unknown => rows.find((one) => get(one, 'function') === name);
+      const inner = row('inner');
+      const outer = row('outer');
+      if (outerCalls !== null) {
+        assert.deepEqual([get(inner, 'calls'), get(outer, 'calls')], [outerCalls, outerCalls], answered);
+      }
+      const innerSelf = asNumber(get(inner, 'selfMs'), `inner has a self time: ${answered}`);
+      const outerSelf = asNumber(get(outer, 'selfMs'), `outer has a self time: ${answered}`);
+      const outerEngine = asNumber(get(outer, 'engineMs'), `outer has engine time: ${answered}`);
+      assert.ok(innerSelf > 20, `inner did the work: ${answered}`);
+      assert.ok(
+        outerSelf < innerSelf / 5,
+        `outer's self time is its own, without the call through callv: ${answered}`,
+      );
+      assert.ok(
+        outerEngine >= innerSelf * 0.9,
+        `outer's call through callv is its engine time, inner's work included: ${answered}`,
+      );
+      assert.equal(get(inner, 'engineMs'), undefined, `inner calls no engine method: ${answered}`);
+      assert.deepEqual(
+        rows.map((one) => String(get(one, 'function'))).filter((name) => /callv|get_tree|quit/.test(name)),
+        [],
+        `no engine method is a row: ${answered}`,
+      );
+      const scriptMs = asNumber(get(profile, 'scriptMs'), `the profile sums its script time: ${answered}`);
+      assert.ok(scriptMs < innerSelf * 1.5, `scriptMs counts inner's work once: ${answered}`);
+    };
+    const server = new ServerProcess({
+      env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    });
+    try {
+      await server.initialize('regression-test');
+      const call = async (args: Record<string, unknown>): Promise<string> =>
+        textOf(
+          await server.request('tools/call', { name: 'editor_run', arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+        ) ?? '';
+      const started = await call({
+        op: 'start',
+        projectPath: project,
+        scene: 'dispatch.tscn',
+        headless: true,
+        profile: true,
+        engineCalls: true,
+        runtimeWaitMs: 0,
+      });
+      assert.match(started, /"started": true/, started);
+      const waited = await call({ op: 'wait', timeoutMs: 60_000 });
+      assert.match(waited, /"running": false/, `the run ended: ${waited}`);
+      const answered = await call({ op: 'profile', limit: 100 });
+      assert.equal(get(JSON.parse(answered), 'complete'), true, answered);
+      judged(answered, 10);
+
+      const looped = await call({
+        op: 'start',
+        projectPath: project,
+        scene: 'looped.tscn',
+        headless: true,
+        profile: true,
+        engineCalls: true,
+        runtimeWaitMs: 60_000,
+      });
+      assert.match(looped, /"started": true/, looped);
+      let playing = '';
+      const deadline = Date.now() + 60_000;
+      while (Date.now() < deadline) {
+        playing = await call({ op: 'profile', limit: 100 });
+        if (Number(get(JSON.parse(playing), 'frames')) >= 20) {
+          break;
+        }
+        await delay(250);
+      }
+      assert.equal(get(JSON.parse(playing), 'complete'), false, `read while it plays: ${playing}`);
+      judged(playing, null);
+      const stopped = await call({ op: 'stop' });
+      assert.match(stopped, /"stopped": true/, stopped);
+
+      const relayedStart = await call({
+        op: 'start',
+        projectPath: project,
+        scene: 'relayed.tscn',
+        headless: true,
+        profile: true,
+        engineCalls: true,
+        runtimeWaitMs: 0,
+      });
+      assert.match(relayedStart, /"started": true/, relayedStart);
+      const relayedWait = await call({ op: 'wait', timeoutMs: 60_000 });
+      assert.match(relayedWait, /"running": false/, `the run ended: ${relayedWait}`);
+      const relayed = await call({ op: 'profile', limit: 100 });
+      const relayedRows = asArray(get(JSON.parse(relayed), 'functions'));
+      const relayedInner = asNumber(
+        get(
+          relayedRows.find((one) => get(one, 'function') === 'inner'),
+          'selfMs',
+        ),
+        `inner did the work: ${relayed}`,
+      );
+      // The engine filed both calls through callv under outer, twice what its own took. No row's
+      // engine time is more than its calls took, and none counts inner's work twice.
+      const overstated = relayedRows.filter(
+        (one) =>
+          Number(get(one, 'engineMs') ?? 0) > Number(get(one, 'totalMs')) - Number(get(one, 'selfMs')) + 0.01,
+      );
+      assert.deepEqual(overstated, [], `no engine time beyond what the calls took: ${relayed}`);
+      assert.ok(
+        relayedRows.every((one) => Number(get(one, 'engineMs') ?? 0) < relayedInner * 1.5),
+        `inner's work is in no row's engine time twice: ${relayed}`,
+      );
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
+ * A profiled run times no native calls unless the start asks for them with engineCalls.
+ *
+ * With the engine timing them, a dynamic call to free() has the engine read the freed object's
+ * class afterwards, which crashes a game on Linux and macOS. Windows survives that read, so the
+ * scene that frees objects through an untyped call guards the default and does not reproduce the
+ * crash.
+ *
+ * - engineCalls without profile is refused, naming profile: true.
+ * - a default profiled run carries no engineMs on any row, and its note names engineCalls.
+ * - a profiled run whose script frees objects through an untyped call ends cleanly.
+ */
+async function testAProfiledRunTimesNoNativeCallsUnlessAsked(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('native call opt-in regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-profiled-optin-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-profiled-optin-rt-'));
+  try {
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      { recursive: true },
+    );
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="OptIn"\n' +
+        '\n[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    const scene = (name: string, body: string[]): void => {
+      writeFileSync(join(project, `${name}.gd`), ['extends Node', '', '', ...body, ''].join('\n'));
+      writeFileSync(
+        join(project, `${name}.tscn`),
+        `[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://${name}.gd" id="1"]\n\n[node name="Run" type="Node"]\nscript = ExtResource("1")\n`,
+      );
+    };
+    scene('dispatch', [
+      'func inner() -> int:',
+      '\tvar sum := 0',
+      '\tfor i in 400000:',
+      '\t\tsum += i % 7',
+      '\treturn sum',
+      '',
+      '',
+      // Typed, so the compiler calls callv by its method bind, which only a native-timing profiler
+      // takes out of the caller's self time.
+      'func outer() -> int:',
+      '\tvar target: Object = self',
+      '\treturn int(target.callv(&"inner", []))',
+      '',
+      '',
+      'func _ready() -> void:',
+      '\tfor round in 5:',
+      '\t\touter()',
+      '\tget_tree().quit()',
+    ]);
+    scene('freeing', [
+      'func _ready() -> void:',
+      '\tfor i in 2000:',
+      '\t\tvar o: Variant = Node.new()',
+      '\t\to.free()',
+      '\tprint("freed")',
+      '\tget_tree().quit()',
+    ]);
+    const server = new ServerProcess({
+      env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    });
+    try {
+      await server.initialize('regression-test');
+      const ask = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+        await server.request('tools/call', { name: 'editor_run', arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+      const call = async (args: Record<string, unknown>): Promise<string> => textOf(await ask(args)) ?? '';
+
+      const refused = await ask({
+        op: 'start',
+        projectPath: project,
+        scene: 'dispatch.tscn',
+        headless: true,
+        engineCalls: true,
+      });
+      const refusal = textOf(refused) ?? '';
+      assert.equal(get(refused.result, 'isError'), true, `engineCalls alone is refused: ${refusal}`);
+      assert.match(refusal, /profile: true/, `the refusal names what makes it work: ${refusal}`);
+
+      const started = await call({
+        op: 'start',
+        projectPath: project,
+        scene: 'dispatch.tscn',
+        headless: true,
+        profile: true,
+        runtimeWaitMs: 0,
+      });
+      assert.match(started, /"started": true/, started);
+      const waited = await call({ op: 'wait', timeoutMs: 60_000 });
+      assert.match(waited, /"running": false/, `the run ended: ${waited}`);
+      const answered = await call({ op: 'profile', limit: 100 });
+      const profile: unknown = JSON.parse(answered);
+      assert.equal(get(profile, 'complete'), true, answered);
+      const rows = asArray(get(profile, 'functions'));
+      assert.ok(rows.length > 0, `the run has rows: ${answered}`);
+      assert.deepEqual(
+        rows.filter((one) => get(one, 'engineMs') !== undefined),
+        [],
+        `no row carries engineMs without engineCalls: ${answered}`,
+      );
+      assert.match(
+        String(get(profile, 'note')),
+        /callv, stay in the caller's selfMs.*engineCalls: true/,
+        `the note names engineCalls: ${answered}`,
+      );
+
+      const freed = await call({
+        op: 'start',
+        projectPath: project,
+        scene: 'freeing.tscn',
+        headless: true,
+        profile: true,
+        runtimeWaitMs: 0,
+      });
+      assert.match(freed, /"started": true/, freed);
+      const freedWait = await call({ op: 'wait', timeoutMs: 60_000 });
+      assert.match(freedWait, /"running": false/, `the run ended: ${freedWait}`);
+      assert.equal(get(JSON.parse(freedWait), 'exitCode'), 0, `it ended cleanly: ${freedWait}`);
+      assert.match(freedWait, /freed/, `the script reached its end: ${freedWait}`);
     } finally {
       await server.stop();
     }
@@ -61749,10 +63252,17 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
     );
     const noEngine = test('--godot', join(project, 'no-godot.exe'), 'tests/ok_test.gd');
     assert.equal(noEngine.status, 2, noEngine.said);
-    assert.match(
+    assert.ok(
+      noEngine.said.includes(`--godot names ${join(project, 'no-godot.exe')}, which does not exist.`),
       noEngine.said,
-      /--godot names .*no-godot\.exe, which is not an engine executable\./,
-      noEngine.said,
+    );
+    const folderEngine = test('--godot', join(project, 'tests'), 'tests/ok_test.gd');
+    assert.equal(folderEngine.status, 2, folderEngine.said);
+    assert.ok(
+      folderEngine.said.includes(
+        `--godot names ${join(project, 'tests')}, which is a folder, not a program.`,
+      ),
+      folderEngine.said,
     );
 
     // An autoload that cannot start makes every suite after it meaningless, so the run ends there
@@ -63084,6 +64594,24 @@ function testATestRunImportsWhatSetupLeftUnimported(): void {
     );
     writeFileSync(cache, cacheOf({ SharedThing: 'res://kit/thing.gd', SharedOther: 'res://kit/other.gd' }));
     assert.equal(importNeeded(project), null, 'current again');
+    writeImported(project, 'cull.glsl', '#[compute]\n', { importer: 'glsl' });
+    writeImported(project, 'wool.glsl', '#[compute]\n', { importer: 'glsl' });
+    assert.equal(importNeeded(project), null, 'imported files as their imports left them');
+    writeFileSync(join(project, 'cull.glsl'), '#[compute]\nbroken\n');
+    assert.equal(
+      importNeeded(project),
+      'The import of res://cull.glsl is out of date, since the source changed after it was imported, so the project is imported first.',
+      'a source changed after its import',
+    );
+    writeFileSync(join(project, 'wool.glsl'), '#[compute]\nbroken\n');
+    assert.equal(
+      importNeeded(project),
+      'The imports of res://cull.glsl, res://wool.glsl are out of date, so the project is imported first.',
+      'two sources changed after their imports',
+    );
+    writeImported(project, 'cull.glsl', '#[compute]\nbroken\n', { importer: 'glsl' });
+    writeImported(project, 'wool.glsl', '#[compute]\nbroken\n', { importer: 'glsl' });
+    assert.equal(importNeeded(project), null, 'imported again');
     rmSync(list);
     rmSync(join(project, 'native'), { recursive: true });
     assert.equal(importNeeded(project), null, 'no extension list is needed with no extension');
@@ -82475,6 +84003,224 @@ async function testAnInstanceKeepsItsOwnValuesWithNoEditor(): Promise<void> {
   });
 }
 
+/** The lines of the section of [file] whose header starts with [head], up to the next header. */
+const linesUnder = (file: string, head: string): string[] => {
+  const lines = file.split('\n');
+  const at = lines.findIndex((line) => line.startsWith(head));
+  assert.ok(at >= 0, `no section starts with ${head} in:\n${file}`);
+  const end = lines.findIndex((line, index) => index > at && line.startsWith('['));
+  return lines.slice(at + 1, end < 0 ? undefined : end).filter((line) => line !== '');
+};
+
+/** A shader whose two uniforms declare defaults, for the unset cases. */
+const FROST_SHADER =
+  'shader_type canvas_item;\n\nuniform vec4 tint : source_color = vec4(0.86, 0.92, 0.98, 1.0);\nuniform float amount = 0.5;\n';
+
+/**
+ * scene_node set unset drops a stored line as the inspector's revert arrow does, so the value is
+ * what the scene the node comes from, its script, class or shader declares. A shader parameter
+ * stored as null could not be written away, and writing the default stored it as a value.
+ */
+async function testASceneNodeUnsetDropsTheStoredLine(): Promise<void> {
+  const files = {
+    'frost.gdshader': FROST_SHADER,
+    'crate.gd': 'extends Sprite2D\n\n@export var speed: float = 4.0\n@export var label: String = "crate"\n',
+    'base.tscn':
+      '[gd_scene format=3]\n\n[node name="Base" type="Node2D"]\nrotation = 1.0\nmodulate = Color(1, 0, 0, 1)\n',
+    'main.tscn':
+      '[gd_scene format=3]\n\n' +
+      '[ext_resource type="Shader" path="res://frost.gdshader" id="1_shader"]\n' +
+      '[ext_resource type="PackedScene" path="res://base.tscn" id="3_base"]\n\n' +
+      '[sub_resource type="ShaderMaterial" id="ShaderMaterial_1"]\nshader = ExtResource("1_shader")\n' +
+      'shader_parameter/tint = null\nshader_parameter/amount = 0.25\n\n' +
+      '[node name="Main" type="Node2D"]\n\n' +
+      '[node name="Frost" type="Sprite2D" parent="."]\nmodulate = Color(0, 1, 0, 1)\nmaterial = SubResource("ShaderMaterial_1")\n\n' +
+      '[node name="Crate" parent="." instance=ExtResource("3_base")]\nmodulate = Color(0, 0, 1, 1)\n',
+    // Apart, since any write saves the whole scene as the packer does, which drops a line holding
+    // the default or a null shader parameter.
+    'scripted.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://crate.gd" id="1_script"]\n\n' +
+      '[node name="Scripted" type="Sprite2D"]\nscript = ExtResource("1_script")\nspeed = 4.0\nlabel = "moved"\n',
+  };
+  await withASceneProject('scene node unset', files, async ({ call, written, fileOf }) => {
+    const set = (nodePath: string, unset: string[], scenePath = 'main.tscn'): Record<string, unknown> => ({
+      op: 'set',
+      scenePath,
+      nodePath,
+      unset,
+    });
+    const read = async (nodePath: string, scenePath = 'main.tscn'): Promise<unknown> =>
+      parseTextContent(await call('scene_node', { op: 'get', scenePath, nodePath, includeDefaults: true }));
+
+    // A script variable stored at its default and one stored away from it.
+    const scripted = await written('scene_node', set('.', ['speed', 'label'], 'scripted.tscn'));
+    assert.deepEqual(get(scripted, 'unset'), { speed: 4, label: 'crate' }, JSON.stringify(scripted));
+    assert.equal(get(scripted, 'unsetNote'), undefined, 'a node this scene makes follows no other scene');
+    assert.deepEqual(
+      linesUnder(fileOf('scripted.tscn'), '[node name="Scripted"').map((line) => line.split(' = ')[0]),
+      ['script'],
+      fileOf('scripted.tscn'),
+    );
+    const scriptedRead = await read('.', 'scripted.tscn');
+    assert.deepEqual(
+      [get(scriptedRead, 'properties', 'speed'), get(scriptedRead, 'properties', 'label')],
+      [4, 'crate'],
+      JSON.stringify(scriptedRead),
+    );
+
+    // The shader parameter stored as null, the one stored at a value, and a plain engine property.
+    const frost = await written(
+      'scene_node',
+      set('Frost', ['material/shader_parameter/tint', 'material/shader_parameter/amount', 'modulate']),
+    );
+    assert.deepEqual(
+      get(frost, 'unset'),
+      {
+        'material/shader_parameter/tint': null,
+        'material/shader_parameter/amount': null,
+        modulate: { _type: 'Color', r: 1, g: 1, b: 1, a: 1 },
+      },
+      `each is answered as the node reads it now: ${JSON.stringify(frost)}`,
+    );
+    const after = fileOf('main.tscn');
+    assert.deepEqual(
+      linesUnder(after, '[sub_resource type="ShaderMaterial"').filter(
+        (line) => !line.startsWith('shader = '),
+      ),
+      [],
+      `the material keeps its shader and no parameter line: ${after}`,
+    );
+    assert.match(after, /\[sub_resource type="ShaderMaterial" id="[^"]+"\]\nshader = ExtResource\(/);
+    assert.deepEqual(
+      linesUnder(after, '[node name="Frost"').map((line) => line.split(' = ')[0]),
+      ['material'],
+      `Frost keeps only its material: ${after}`,
+    );
+    const frostRead = await read('Frost');
+    // A headless engine's renderer gives a uniform no default, so the shader's own reads as null.
+    assert.deepEqual(
+      [get(frostRead, 'setHere'), get(frostRead, 'properties', 'modulate')],
+      [['material'], { _type: 'Color', r: 1, g: 1, b: 1, a: 1 }],
+      JSON.stringify(frostRead),
+    );
+
+    // A value this scene keeps on an instance goes back to what the instanced scene gives.
+    const crate = await written('scene_node', set('Crate', ['modulate']));
+    const red = { _type: 'Color', r: 1, g: 0, b: 0, a: 1 };
+    assert.deepEqual(
+      [get(crate, 'unset'), get(crate, 'unsetNote')],
+      [
+        { modulate: red },
+        'modulate now holds what res://base.tscn gives this node, and a change there reaches it.',
+      ],
+      JSON.stringify(crate),
+    );
+    assert.deepEqual(linesUnder(fileOf('main.tscn'), '[node name="Crate"'), [], fileOf('main.tscn'));
+    const crateRead = await read('Crate');
+    assert.deepEqual(
+      [get(crateRead, 'properties', 'modulate'), get(crateRead, 'valuesFrom')],
+      [red, 'res://base.tscn'],
+      JSON.stringify(crateRead),
+    );
+
+    // A path naming no line is refused with the lines there are, and the file is left as it was.
+    const kept = fileOf('main.tscn');
+    assert.equal(
+      textOf(await call('scene_node', set('Frost', ['material/shader_parameter/tint']))),
+      'res://main.tscn holds no line for material/shader_parameter/tint, so there is nothing to unset. It sets material/shader.',
+    );
+    assert.equal(
+      textOf(await call('scene_node', set('Frost', ['modulate']))),
+      'res://main.tscn holds no line for modulate, so there is nothing to unset. It sets material.',
+    );
+    // A value another scene gives is that scene's to unset.
+    assert.equal(
+      textOf(await call('scene_node', set('Crate', ['rotation']))),
+      'res://main.tscn holds no line for rotation on Crate: its value comes from res://base.tscn, so it is unset there, with scene_node set on that scene.',
+    );
+    assert.equal(fileOf('main.tscn'), kept, 'and no refusal changed the file');
+  });
+}
+
+/**
+ * resource_edit modify unset drops a stored line of a .tres file, so the value is what the shader,
+ * the script or the class declares.
+ */
+async function testAResourceUnsetDropsTheStoredLine(): Promise<void> {
+  const files = {
+    'frost.gdshader': FROST_SHADER,
+    'item.gd': 'extends Resource\n\n@export var hp: int = 10\n',
+    'frost.tres':
+      '[gd_resource type="ShaderMaterial" format=3]\n\n' +
+      '[ext_resource type="Shader" path="res://frost.gdshader" id="1_shader"]\n\n' +
+      '[resource]\nresource_name = "Frost"\nshader = ExtResource("1_shader")\n' +
+      'shader_parameter/tint = null\nshader_parameter/amount = 0.25\n',
+    'item.tres':
+      '[gd_resource type="Resource" script_class="" format=3]\n\n' +
+      '[ext_resource type="Script" path="res://item.gd" id="1_script"]\n\n' +
+      '[resource]\nscript = ExtResource("1_script")\nhp = 3\n',
+  };
+  await withASceneProject('resource unset', files, async ({ call, written, fileOf }) => {
+    const modify = (resourcePath: string, unset: string[]): Record<string, unknown> => ({
+      op: 'modify',
+      resourcePath,
+      unset,
+    });
+    const read = async (resourcePath: string): Promise<unknown> =>
+      parseTextContent(await call('resource_edit', { op: 'read', resourcePath, includeDefaults: true }));
+
+    const frost = await written(
+      'resource_edit',
+      modify('res://frost.tres', ['shader_parameter/tint', 'shader_parameter/amount', 'resource_name']),
+    );
+    assert.deepEqual(
+      [get(frost, 'unset'), get(frost, 'notStored'), get(frost, 'alsoSaved')],
+      [
+        { 'shader_parameter/tint': null, 'shader_parameter/amount': null, resource_name: '' },
+        undefined,
+        undefined,
+      ],
+      JSON.stringify(frost),
+    );
+    assert.deepEqual(
+      linesUnder(fileOf('frost.tres'), '[resource]').map((line) => line.split(' = ')[0]),
+      ['shader'],
+      fileOf('frost.tres'),
+    );
+    const frostRead = await read('res://frost.tres');
+    // A headless engine's renderer gives a uniform no default, so the shader's own reads as null.
+    assert.deepEqual(
+      [
+        get(frostRead, 'properties', 'resource_name'),
+        get(frostRead, 'properties', 'shader_parameter/tint'),
+        get(frostRead, 'properties', 'shader_parameter/amount'),
+      ],
+      ['', null, null],
+      JSON.stringify(frostRead),
+    );
+
+    const item = await written('resource_edit', modify('res://item.tres', ['hp']));
+    assert.deepEqual(get(item, 'unset'), { hp: 10 }, JSON.stringify(item));
+    assert.deepEqual(
+      linesUnder(fileOf('item.tres'), '[resource]').map((line) => line.split(' = ')[0]),
+      ['script'],
+      fileOf('item.tres'),
+    );
+    assert.equal(get(await read('res://item.tres'), 'properties', 'hp'), 10);
+
+    const kept = fileOf('frost.tres');
+    assert.equal(
+      textOf(await call('resource_edit', modify('res://frost.tres', ['resource_name']))),
+      'res://frost.tres holds no line for resource_name, so there is nothing to unset. It sets shader.',
+    );
+    assert.equal(
+      textOf(await call('resource_edit', { op: 'modify', resourcePath: 'res://frost.tres' })),
+      'modify takes properties, unset or both.',
+    );
+    assert.equal(fileOf('frost.tres'), kept, 'and no refusal changed the file');
+  });
+}
+
 /**
  * Editable children opened and closed with no editor: an instance nested in an editable one opened
  * in turn, which instances are editable read back through an inherited scene and an instancing one,
@@ -82643,7 +84389,7 @@ async function testEditableChildrenAreOpenedAndClosedWithNoEditor(): Promise<voi
     }
     assert.equal(
       textOf(await call('scene_node', { op: 'set', scenePath: 'main.tscn', nodePath: 'Crate1' })),
-      'set takes properties, editableChildren, placeholder, addGroups or removeGroups.',
+      'set takes properties, unset, editableChildren, placeholder, addGroups or removeGroups.',
     );
 
     const shallow = get(
@@ -87593,6 +89339,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testA3DLevelIsReadAsItIsWritten,
   testAnInheritedSceneIsMadeWithNoEditor,
   testAnInstanceKeepsItsOwnValuesWithNoEditor,
+  testASceneNodeUnsetDropsTheStoredLine,
+  testAResourceUnsetDropsTheStoredLine,
   testEditableChildrenAreOpenedAndClosedWithNoEditor,
   testAnInheritedSceneFindsItsBaseAsTheEngineDoes,
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,
@@ -87834,7 +89582,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testChildrenAreListedWhileTheParentLives,
   testAStopCanEndWhatTheGameStarted,
   testAStopTakesTheEndedGamesAnnouncementDown,
-  testAStopTakesTheWrappedEnginesAnnouncementDown,
+  testAConsoleWrapperRunsAsTheEngineBesideIt,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
   testAHeldScratchDirectoryGoesOnceLetGo,
@@ -87895,6 +89643,13 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineThatDoesNotAnswerIsNamed,
   testAnEngineThatCrashesAtStartIsAskedAgain,
   testALocatorAsksAgainWhenTheEngineAppearsOrGoes,
+  testAPathIsJudgedAnEngineOneWay,
+  testAStartThatHangsIsEndedAndAskedAgain,
+  testAConsoleWrapperIsJudgedAsThePlainProgram,
+  testADefectReportNamesTheEngineItLearned,
+  testTheCommandLineJudgesAConfigsEngine,
+  testTheSpreadCommandJudgesTheEngineItIsGiven,
+  testAGodotVersionFlagTakesTheShapeAnEnginePrints,
   testAnAutoloadGitWillNotCarry,
   testAnAutoloadNamingAFileThatIsNotThere,
   testTheRuntimeAutoloadIsFoundByWhatItNames,
@@ -87956,6 +89711,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testRuntimeConnectedIsAboutThisProjectsGames,
   testACallBesideAnotherOnTheGameSaysSo,
   testAGameThatDoesNotWelcomeIsRefused,
+  testAGameWelcomingAnotherProtocolIsRefused,
   testAGameOnEveryInterfaceIsReached,
   testACaptureTheWaitRanOutOnKeepsItsFolder,
   testAnEditorCaptureIsHeldToTheCapturePlaceRules,
@@ -88011,6 +89767,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheLoaderPassesAGamesOwnLint,
   testAFailedRunsLogsOutlastTheNextRun,
   testAnExitCodeOutlivesTheServerThatSawIt,
+  testAKeeperLeavesALaterRunsNoteAlone,
+  testAnEndingGoesToItsOwnRunAlone,
+  testAnotherRunsExitIsNotThisRuns,
+  testALaterRunsKeeperIsNotWaitedFor,
+  testASweepKeepsWhatANoteNamesUnderAnySpelling,
   testRunNotesAreKeptPerProject,
   testTwoRunsStartedInOneMillisecondKeepTheirOwnFiles,
   testAStopThatSignalsNothingSaysSo,
@@ -88128,6 +89889,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunNoteIsNeverReadHalfWritten,
   testAKeeperHoldsARunWhoseNoteItCannotWrite,
   testAProfiledRunNamesWhereItsTimeWent,
+  testACallThroughAnEngineMethodLeavesTheCallersSelfTime,
+  testAProfiledRunTimesNoNativeCallsUnlessAsked,
   testSuitesPlayInASceneTheProfilerSees,
   testAProfileSinceAMarkAnswersForOneAction,
   testAProfileFromTheStartWaitsForTheProfiler,

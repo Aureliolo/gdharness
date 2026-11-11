@@ -401,7 +401,21 @@ export class SuiteInputs {
     const also = [`${path}.import`, `${path}.uid`].filter((beside) =>
       existsSync(join(this.scripts.projectPath, beside.slice('res://'.length))),
     );
+    const reached = this.reachedFrom(path, bytes);
+    return {
+      digest,
+      follows: reached.follows
+        .map(inputPath)
+        .filter((named): named is string => named !== null && named !== path),
+      also: [...also, ...reached.also].map(inputPath).filter((named): named is string => named !== null),
+      modified,
+    };
+  }
+
+  /** What the file at [param path], read as [param bytes], names: files it needs, and files and folders it only reads. */
+  private reachedFrom(path: string, bytes: Buffer): { follows: string[]; also: string[] } {
     const follows: string[] = [];
+    const also: string[] = [];
     if (TEXT_RESOURCE.test(path)) {
       const binary = BINARY_RESOURCE.test(path);
       for (const found of bytes.toString('latin1').matchAll(binary ? BINARY_RES_LITERAL : RES_LITERAL)) {
@@ -418,12 +432,7 @@ export class SuiteInputs {
         also.push(...reaches.also);
       }
     }
-    return {
-      digest,
-      follows: follows.map(inputPath).filter((named): named is string => named !== null && named !== path),
-      also: also.map(inputPath).filter((named): named is string => named !== null),
-      modified,
-    };
+    return { follows, also };
   }
 
   /**
@@ -433,8 +442,24 @@ export class SuiteInputs {
   private scriptReaches(asked: string): { follows: string[]; also: string[] } | null {
     const path = this.spelledAsRead(asked);
     const text = this.textOf(path);
+    const preloaded = this.preloadsIn(text, path);
+    if (preloaded === null) {
+      return null;
+    }
+    const read = this.readsIn(text, path);
+    if (read === null) {
+      return null;
+    }
+    const loaded = this.loadsIn(text, path);
+    return {
+      follows: [...preloaded, ...loaded.follows, ...this.basesAndClassesOf(path)],
+      also: [...read, ...loaded.also],
+    };
+  }
+
+  /** The scripts and resources the `preload` calls in [param text] name, or null for one worked out at run time. */
+  private preloadsIn(text: string, path: string): string[] | null {
     const follows: string[] = [];
-    const also: string[] = [];
     for (const found of text.matchAll(PRELOAD)) {
       const [argument = ''] = argumentsAt(text, found.index + found[0].length);
       const literal = STRING_ARGUMENT.exec(argument);
@@ -446,26 +471,36 @@ export class SuiteInputs {
         });
         return null;
       }
-      follows.push(
-        named.startsWith('res://') ? named : `res://${posix.join(posix.dirname(path.slice(6)), named)}`,
-      );
+      follows.push(resolvedFrom(path, named));
     }
+    return follows;
+  }
+
+  /** What the file reads in [param text] take in, or null for one whose path is worked out at run time. */
+  private readsIn(text: string, path: string): string[] | null {
+    const also: string[] = [];
     for (const found of text.matchAll(FILE_READ)) {
       const [first, second] = argumentsAt(text, found.index + found[0].length);
       if (first === undefined || (found[0].startsWith('FileAccess.open') && WRITE_ONLY.test(second ?? ''))) {
         continue;
       }
       const read = readUnder(this.heldPaths(first, path, found.index, 0));
-      if (read === null) {
-        if (!NAMES_READ.test(found[0])) {
-          this.unfollowed.set(path, { line: lineAt(text, found.index), argument: first });
-          return null;
-        }
+      if (read !== null) {
+        also.push(...read);
+      } else if (NAMES_READ.test(found[0])) {
         also.push(EVERY_NAME);
-        continue;
+      } else {
+        this.unfollowed.set(path, { line: lineAt(text, found.index), argument: first });
+        return null;
       }
-      also.push(...read);
     }
+    return also;
+  }
+
+  /** What the `load` calls in [param text] follow, and what a load the cache can answer takes in. */
+  private loadsIn(text: string, path: string): { follows: string[]; also: string[] } {
+    const follows: string[] = [];
+    const also: string[] = [];
     for (const found of text.matchAll(RESOURCE_LOAD)) {
       const [first = ''] = argumentsAt(text, found.index + found[0].length);
       const literal = STRING_ARGUMENT.exec(first);
@@ -475,11 +510,15 @@ export class SuiteInputs {
         const start = sharedStart(this.heldPaths(first, path, found.index, 0) ?? []);
         also.push(`${CACHE_HELD}${start.startsWith('res://') ? start : ''}`);
       } else {
-        follows.push(
-          named.startsWith('res://') ? named : `res://${posix.join(posix.dirname(path.slice(6)), named)}`,
-        );
+        follows.push(resolvedFrom(path, named));
       }
     }
+    return { follows, also };
+  }
+
+  /** The scripts the script at [param path] extends, and those of the global classes it names. */
+  private basesAndClassesOf(path: string): string[] {
+    const follows: string[] = [];
     // The script's own base and the base of each class inside it, resolved as a suite is.
     const pending = [this.scripts.script(path)?.body];
     for (let body = pending.pop(); body !== undefined; body = pending.pop()) {
@@ -499,7 +538,7 @@ export class SuiteInputs {
         follows.push(declaring);
       }
     }
-    return { follows, also };
+    return follows;
   }
 
   /**
@@ -644,15 +683,7 @@ export class SuiteInputs {
     const body = text.slice(declared.index, after.exec(text)?.index ?? text.length);
     const parameters = argumentsAt(text, declared.index + declared[0].length);
     const index = parameters.findIndex((parameter) => /^\w+/.exec(parameter)?.[0] === name);
-    // A lambda taking the name, or another `var` of it such as a match binding, may be what is read.
-    const lambdas = [...body.slice(declared[0].length).matchAll(/\bfunc\b[ \t]*\w*[ \t]*\(/g)];
-    const shadowed =
-      lambdas.some((lambda) =>
-        argumentsAt(body, declared[0].length + lambda.index + lambda[0].length).some(
-          (parameter) => /^\w+/.exec(parameter)?.[0] === name,
-        ),
-      ) || [...body.matchAll(new RegExp(`\\bvar[ \\t]+${name}\\b`, 'g'))].length > (index === -1 ? 1 : 0);
-    if (shadowed) {
+    if (isShadowed(name, body, declared[0].length, index !== -1)) {
       return null;
     }
     if (index !== -1) {
@@ -720,37 +751,67 @@ export class SuiteInputs {
       if (byName.test(text)) {
         return null;
       }
-      const code = this.codeOf(caller);
-      for (const found of code.matchAll(used)) {
-        if (DECLARING.test(code.slice(Math.max(0, found.index - 40), found.index))) {
-          continue;
-        }
-        if (!this.mayBeOnLine(receiverBefore(code, found.index), caller, line)) {
-          continue;
-        }
-        const opened = /^[ \t]*\(/.exec(code.slice(found.index + found[0].length));
-        if (opened === null) {
-          return null;
-        }
-        const given = argumentsAt(text, found.index + found[0].length + opened[0].length);
-        if (given.length < declared.least || given.length > declared.most) {
-          continue;
-        }
-        calls += 1;
-        const argument = given[index];
-        const passed =
-          argument === undefined
-            ? declared.fallback === undefined
-              ? null
-              : this.heldPaths(declared.fallback.trim(), declared.path, declared.at, 0)
-            : this.heldPaths(argument, caller, found.index, 0);
-        if (passed === null) {
-          return null;
-        }
-        held.push(...passed);
+      const passed = this.passedBy(caller, { used, line, index, declared });
+      if (passed === null) {
+        return null;
       }
+      held.push(...passed.held);
+      calls += passed.calls;
     }
     return calls === 0 ? null : held;
+  }
+
+  /**
+   * What the calls in the script [param caller] that may reach the function pass for the parameter
+   * at the index [param find] gives, with how many there are, or null when one passes what cannot be known.
+   */
+  private passedBy(
+    caller: string,
+    find: { used: RegExp; line: ReadonlySet<string>; index: number; declared: Declared },
+  ): { held: Held[]; calls: number } | null {
+    const { used, line, index, declared } = find;
+    const text = this.textOf(caller);
+    const code = this.codeOf(caller);
+    const held: Held[] = [];
+    let calls = 0;
+    for (const found of code.matchAll(used)) {
+      if (
+        DECLARING.test(code.slice(Math.max(0, found.index - 40), found.index)) ||
+        !this.mayBeOnLine(receiverBefore(code, found.index), caller, line)
+      ) {
+        continue;
+      }
+      const opened = /^[ \t]*\(/.exec(code.slice(found.index + found[0].length));
+      if (opened === null) {
+        return null;
+      }
+      const given = argumentsAt(text, found.index + found[0].length + opened[0].length);
+      if (given.length < declared.least || given.length > declared.most) {
+        continue;
+      }
+      calls += 1;
+      const passed = this.heldForArgument(given[index], caller, found.index, declared);
+      if (passed === null) {
+        return null;
+      }
+      held.push(...passed);
+    }
+    return { held, calls };
+  }
+
+  /** What a call passes as [param argument], or the parameter's default when it passes none. */
+  private heldForArgument(
+    argument: string | undefined,
+    caller: string,
+    at: number,
+    declared: Declared,
+  ): Held[] | null {
+    if (argument !== undefined) {
+      return this.heldPaths(argument, caller, at, 0);
+    }
+    return declared.fallback === undefined
+      ? null
+      : this.heldPaths(declared.fallback.trim(), declared.path, declared.at, 0);
   }
 
   /**
@@ -1073,22 +1134,13 @@ function argumentsAt(text: string, at: number): string[] {
   const found: string[] = [];
   let depth = 0;
   let start = at;
-  let quote: string | null = null;
   for (let index = at; index < text.length; index += 1) {
     const character = text[index] ?? '';
-    if (quote !== null) {
-      if (character === '\\') {
-        index += 1;
-      } else if (character === quote) {
-        quote = null;
-      }
-    } else if (character === '"' || character === "'") {
-      quote = character;
-    } else if ('([{'.includes(character)) {
-      depth += 1;
-    } else if (')]}'.includes(character) && depth > 0) {
-      depth -= 1;
-    } else if (character === ')' || (character === ',' && depth === 0)) {
+    if (character === '"' || character === "'") {
+      index = stringEnd(text, index);
+    } else if (depthAfter(character, depth) !== depth) {
+      depth = depthAfter(character, depth);
+    } else if (endsArgument(character, depth)) {
       found.push(text.slice(start, index).trim());
       start = index + 1;
       if (character === ')') {
@@ -1097,6 +1149,54 @@ function argumentsAt(text: string, at: number): string[] {
     }
   }
   return found.length === 1 && found[0] === '' ? [] : found;
+}
+
+/** Whether [param character] ends an argument: the call's closing bracket, or a comma outside any bracket. */
+function endsArgument(character: string, depth: number): boolean {
+  return character === ')' || (character === ',' && depth === 0);
+}
+
+/** How deep in brackets [param depth] is after [param character]: an unmatched closer leaves it at 0. */
+function depthAfter(character: string, depth: number): number {
+  if ('([{'.includes(character)) {
+    return depth + 1;
+  }
+  return ')]}'.includes(character) && depth > 0 ? depth - 1 : depth;
+}
+
+/** The index of the quote closing the string opened at [param open] in [param text], or past its end when none does. */
+function stringEnd(text: string, open: number): number {
+  const quote = text[open];
+  for (let index = open + 1; index < text.length; index += 1) {
+    if (text[index] === '\\') {
+      index += 1;
+    } else if (text[index] === quote) {
+      return index;
+    }
+  }
+  return text.length;
+}
+
+/**
+ * Whether [param name] in the function [param body], whose declaration is [param head] characters
+ * long, may be something other than the local or parameter it is looked up as. A parameter has no
+ * `var` of its own, where a local has exactly one.
+ */
+function isShadowed(name: string, body: string, head: number, isParameter: boolean): boolean {
+  // A lambda taking the name, or another `var` of it such as a match binding, may be what is read.
+  const lambdas = [...body.slice(head).matchAll(/\bfunc\b[ \t]*\w*[ \t]*\(/g)];
+  return (
+    lambdas.some((lambda) =>
+      argumentsAt(body, head + lambda.index + lambda[0].length).some(
+        (parameter) => /^\w+/.exec(parameter)?.[0] === name,
+      ),
+    ) || [...body.matchAll(new RegExp(`\\bvar[ \\t]+${name}\\b`, 'g'))].length > (isParameter ? 0 : 1)
+  );
+}
+
+/** [param named], written in the script at [param path], as a `res://` path. */
+function resolvedFrom(path: string, named: string): string {
+  return named.startsWith('res://') ? named : `res://${posix.join(posix.dirname(path.slice(6)), named)}`;
 }
 
 /** The line, counted from 1, of [param at] in [param text]. */
@@ -1182,34 +1282,62 @@ export function walkSeen(root: string, seen: (under: string, bytes: Buffer, modi
  * a loop ends.
  */
 function namesSeen(root: string, seen: (under: string, file: string, folder: boolean) => void): void {
-  const realOf = (path: string): string | null => {
-    try {
-      return realpathSync(path);
-    } catch {
-      return null;
-    }
-  };
-  const walk = (directory: string, under: string, above: ReadonlySet<string>): void => {
-    // Sorted by code unit, because a locale's order puts the same names differently from one machine to the next.
-    const entries = entriesOf(directory).toSorted((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-    const names = entries.map((entry) => entry.name);
-    for (const entry of entries) {
-      const file = join(directory, entry.name);
-      const linked = entry.isSymbolicLink() ? statOf(file) : undefined;
-      if (linked?.isDirectory() ?? entry.isDirectory()) {
-        const real = realOf(file);
-        if (!entry.name.startsWith('.') && real !== null && !above.has(real)) {
-          seen(`${under}${entry.name}/`, file, true);
-          if (!existsSync(join(file, '.gdignore'))) {
-            walk(file, `${under}${entry.name}/`, new Set([...above, real]));
-          }
+  walkNames(root, '', new Set([realPathOf(root) ?? root]), seen);
+}
+
+/** [method namesSeen] below [param directory], [param above] being the real paths of the folders on the way down. */
+function walkNames(
+  directory: string,
+  under: string,
+  above: ReadonlySet<string>,
+  seen: (under: string, file: string, folder: boolean) => void,
+): void {
+  // Sorted by code unit, because a locale's order puts the same names differently from one machine to the next.
+  const entries = entriesOf(directory).toSorted((a, b) => codeUnitOrder(a.name, b.name));
+  const names = entries.map((entry) => entry.name);
+  for (const entry of entries) {
+    const file = join(directory, entry.name);
+    const kind = entryKindOf(entry, file, names);
+    if (kind === 'file') {
+      seen(`${under}${entry.name}`, file, false);
+    } else if (kind === 'folder') {
+      const real = realPathOf(file);
+      if (!entry.name.startsWith('.') && real !== null && !above.has(real)) {
+        seen(`${under}${entry.name}/`, file, true);
+        if (!existsSync(join(file, '.gdignore'))) {
+          walkNames(file, `${under}${entry.name}/`, new Set([...above, real]), seen);
         }
-      } else if ((linked?.isFile() ?? entry.isFile()) && !isLibraryCopy(entry.name, names)) {
-        seen(`${under}${entry.name}`, file, false);
       }
     }
-  };
-  walk(root, '', new Set([realOf(root) ?? root]));
+  }
+}
+
+function codeUnitOrder(a: string, b: string): number {
+  if (a === b) {
+    return 0;
+  }
+  return a < b ? -1 : 1;
+}
+
+function realPathOf(path: string): string | null {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
+/** Whether [param entry] is a folder or a file a listing sees, a link counting as what it points to. */
+function entryKindOf(
+  entry: ReturnType<typeof entriesOf>[number],
+  file: string,
+  names: readonly string[],
+): 'file' | 'folder' | null {
+  const linked = entry.isSymbolicLink() ? statOf(file) : undefined;
+  if (linked?.isDirectory() ?? entry.isDirectory()) {
+    return 'folder';
+  }
+  return (linked?.isFile() ?? entry.isFile()) && !isLibraryCopy(entry.name, names) ? 'file' : null;
 }
 
 /** The extensions the engine loads into every run of [param projectPath]. */

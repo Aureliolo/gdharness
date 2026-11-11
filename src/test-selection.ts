@@ -146,6 +146,75 @@ function suitesUnder(projectPath: string, scripts: ProjectScripts, asked: readon
   ];
 }
 
+interface DeclaredCase {
+  readonly suite: string;
+  readonly test: string;
+}
+
+function nameOfSuite(suite: string): string {
+  return basename(suite, '.gd');
+}
+
+/** The suite and the case a `tests` entry names, the suite null when it names only a case. */
+function splitEntry(spelled: string): { suiteNamed: string | null; test: string } {
+  // The colon of res:// is not the one between a suite and its case.
+  const at = spelled.lastIndexOf(':');
+  const suiteNamed = at === -1 || spelled.slice(at).startsWith('://') ? null : spelled.slice(0, at);
+  return { suiteNamed, test: suiteNamed === null ? spelled : spelled.slice(at + 1) };
+}
+
+/** The cases spelled nearest to the one asked for, in the way the entry spelled it. */
+function nearCases(found: {
+  readonly test: string;
+  readonly suiteNamed: string | null;
+  readonly declared: readonly DeclaredCase[];
+  readonly inSuite: readonly DeclaredCase[];
+}): string[] {
+  const { test, suiteNamed, declared, inSuite } = found;
+  // Compared without the test_ every case starts with, or the suite name before it: shared by
+  // every name offered, they made each one near whatever was asked.
+  const bare = (name: string): string => name.replace(/^test_/, '');
+  const spell = (one: DeclaredCase): string =>
+    suiteNamed === null ? one.test : `${nameOfSuite(one.suite)}:${one.test}`;
+  return [
+    ...new Set([
+      ...nearest(bare(test), [...new Set(inSuite.map((one) => bare(one.test)))]).flatMap((name) =>
+        inSuite.filter((one) => bare(one.test) === name).map(spell),
+      ),
+      // The case asked for, in a suite other than the one named.
+      ...(suiteNamed === null ? [] : declared.filter((one) => one.test === test).map(spell)),
+    ]),
+  ];
+}
+
+/** Why no case matched [param spelled], with the nearest names or the cases there are. */
+function noCaseReason(found: {
+  readonly asked: readonly string[];
+  readonly spelled: string;
+  readonly test: string;
+  readonly suiteNamed: string | null;
+  readonly declared: readonly DeclaredCase[];
+  /** The declared cases of the suite named, or all of them when none was. */
+  readonly inSuite: readonly DeclaredCase[];
+}): string {
+  const { asked, spelled, declared } = found;
+  const said = `No suite under ${asked.join(', ')} has a case ${spelled}`;
+  if (declared.length === 0) {
+    return `${said}: none of them declares a func test_ at the top level.`;
+  }
+  const close = nearCases(found);
+  if (close.length > 0) {
+    return `${said}. The nearest ${close.length === 1 ? 'is' : 'are'} ${close.join(', ')}.`;
+  }
+  return `${said}. The cases there are ${casesListed(declared)}.`;
+}
+
+/** The first twelve of [param declared] as "suite:test", with how many more there are. */
+function casesListed(declared: readonly DeclaredCase[]): string {
+  const written = declared.map((one) => `${nameOfSuite(one.suite)}:${one.test}`);
+  return `${written.slice(0, 12).join(', ')}${written.length > 12 ? `, and ${written.length - 12} more` : ''}`;
+}
+
 /**
  * What [param given], the run's `tests` argument, selects among the suites under [param asked], or
  * why it selects nothing: each entry is "test_name" or "suite:test_name", the suite by its file
@@ -167,7 +236,6 @@ export function selectTests(
   const declared = suitesUnder(projectPath, scripts, asked).flatMap((suite) =>
     casesIn(scripts, suite).map((test) => ({ suite, test })),
   );
-  const nameOf = (suite: string): string => basename(suite, '.gd');
   const selected: SelectedTest[] = [];
   for (const [index, entry] of entries.entries()) {
     if (typeof entry !== 'string' || entry.trim() === '') {
@@ -177,56 +245,30 @@ export function selectTests(
       };
     }
     const spelled = entry.trim();
-    // The colon of res:// is not the one between a suite and its case.
-    const at = spelled.lastIndexOf(':');
-    const suiteNamed = at === -1 || spelled.slice(at).startsWith('://') ? null : spelled.slice(0, at);
-    const test = suiteNamed === null ? spelled : spelled.slice(at + 1);
+    const { suiteNamed, test } = splitEntry(spelled);
     const suitePath = suiteNamed?.startsWith('res://') === true ? scripts.spelled(suiteNamed) : null;
-    const matches = declared.filter(
-      (one) =>
-        one.test === test &&
-        (suiteNamed === null || one.suite === suitePath || nameOf(one.suite) === suiteNamed),
-    );
+    const inSuite =
+      suiteNamed === null
+        ? declared
+        : declared.filter((one) => one.suite === suitePath || nameOfSuite(one.suite) === suiteNamed);
+    const matches = inSuite.filter((one) => one.test === test);
     if (matches.length === 0) {
-      const said = `No suite under ${asked.join(', ')} has a case ${spelled}`;
-      if (declared.length === 0) {
-        return { ok: false, reason: `${said}: none of them declares a func test_ at the top level.` };
-      }
-      const written = declared.map((one) => `${nameOf(one.suite)}:${one.test}`);
-      // Compared without the test_ every case starts with, or the suite name before it: shared by
-      // every name offered, they made each one near whatever was asked.
-      const bare = (name: string): string => name.replace(/^test_/, '');
-      const inSuite =
-        suiteNamed === null
-          ? declared
-          : declared.filter((one) => one.suite === suitePath || nameOf(one.suite) === suiteNamed);
-      const spell = (one: { suite: string; test: string }): string =>
-        suiteNamed === null ? one.test : `${nameOf(one.suite)}:${one.test}`;
-      const close = [
-        ...new Set([
-          ...nearest(bare(test), [...new Set(inSuite.map((one) => bare(one.test)))]).flatMap((name) =>
-            inSuite.filter((one) => bare(one.test) === name).map(spell),
-          ),
-          // The case asked for, in a suite other than the one named.
-          ...(suiteNamed === null ? [] : declared.filter((one) => one.test === test).map(spell)),
-        ]),
-      ];
-      return {
-        ok: false,
-        reason:
-          close.length > 0
-            ? `${said}. The nearest ${close.length === 1 ? 'is' : 'are'} ${close.join(', ')}.`
-            : `${said}. The cases there are ${written.slice(0, 12).join(', ')}${written.length > 12 ? `, and ${written.length - 12} more` : ''}.`,
-      };
+      return { ok: false, reason: noCaseReason({ asked, spelled, test, suiteNamed, declared, inSuite }) };
     }
-    for (const one of matches) {
-      selected.push({ entry: spelled, ...one });
-    }
+    selected.push(...matches.map((one) => ({ entry: spelled, ...one })));
   }
   const suites = [...new Set(selected.map((one) => one.suite))];
+  return { ok: true, value: { suites, ignore: unselectedIn(suites, declared, selected), selected } };
+}
+
+/** The cases of [param suites] that [param selected] leaves out, as "suite:test". */
+function unselectedIn(
+  suites: readonly string[],
+  declared: readonly DeclaredCase[],
+  selected: readonly SelectedTest[],
+): string[] {
   const chosen = new Set(selected.map((one) => `${one.suite}:${one.test}`));
-  const ignore = declared
+  return declared
     .filter((one) => suites.includes(one.suite) && !chosen.has(`${one.suite}:${one.test}`))
     .map((one) => `${one.suite}:${one.test}`);
-  return { ok: true, value: { suites, ignore, selected } };
 }
