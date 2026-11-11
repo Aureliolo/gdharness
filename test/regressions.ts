@@ -138,6 +138,8 @@ import {
   resPathOf,
   roomFor,
   sweepRunDirectories,
+  versionNamed,
+  versionPrinted,
   watchedEngine,
   windowsCommitLeft,
 } from '../src/engine-launch.js';
@@ -241,7 +243,14 @@ import {
   theEditorHasComeBack,
   withoutTrailingSeparator,
 } from '../src/godot-bridge.js';
-import { GodotLocator, type Located, VERSION_STARTS, versionStartOf } from '../src/godot-path.js';
+import {
+  GodotLocator,
+  type Judged,
+  type Located,
+  VERSION_ANSWER_MS,
+  VERSION_STARTS,
+  versionStartOf,
+} from '../src/godot-path.js';
 import type { GodotProcess } from '../src/godot-process.js';
 import {
   containerTypeOf,
@@ -494,6 +503,7 @@ import {
   timedOutVerdict,
   transcriptNote,
   uidsLeftNote,
+  unmodelledAnswer,
   withoutUidUnder,
   withPreviousCut,
   withUidsMissing,
@@ -792,6 +802,55 @@ function accessibilityTreeSuite(constant: string): string {
     '\t\t.is_true()',
     '',
   ].join('\n');
+}
+
+let standInEngineBuilt: string | null = null;
+
+/**
+ * A program a server accepts as an engine without a real Godot. It prints a Godot version for
+ * `--version`. A script named first is run, which is how a fixture holds a process open. Any other
+ * arguments end it with exit 1 at once, as a program that does not know the engine's flags would.
+ * Compiled once per run into the OS temp folder, because the locator starts
+ * a path with no shell and a script would not start.
+ */
+function standInEngine(): string {
+  if (standInEngineBuilt !== null) {
+    return standInEngineBuilt;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-stand-in-engine-'));
+  const source = join(directory, 'stand-in.ts');
+  const program = join(directory, process.platform === 'win32' ? 'godot-stand-in.exe' : 'godot-stand-in');
+  writeFileSync(
+    source,
+    [
+      "import { existsSync } from 'node:fs';",
+      "if (process.argv.includes('--version')) {",
+      "  process.stdout.write('4.7.2.stable.custom_build\\n');",
+      '  process.exit(0);',
+      '}',
+      'const script = process.argv[2];',
+      "if (script !== undefined && script.endsWith('.js') && existsSync(script)) {",
+      '  await import(script);',
+      '} else {',
+      "  process.stderr.write('stand-in engine: it runs nothing\\n');",
+      '  process.exit(1);',
+      '}',
+      '',
+    ].join('\n'),
+  );
+  const built = spawnSyncHidden(process.execPath, ['build', '--compile', source, '--outfile', program], {
+    encoding: 'utf8',
+  });
+  assert.equal(built.status, 0, `the stand-in engine is compiled: ${built.stdout}${built.stderr}`);
+  process.once('exit', () => {
+    try {
+      rmSync(directory, { recursive: true, force: true });
+    } catch {
+      // A stand-in still running holds its file, so the folder is left for the temp sweep.
+    }
+  });
+  standInEngineBuilt = program;
+  return program;
 }
 
 function resolveGodotPath(): string | null {
@@ -6963,7 +7022,7 @@ async function testAnEditorStillArrivingIsNotOpenedBeside(): Promise<void> {
 
   const port = await reservePort();
   const server = new ServerProcess({
-    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: process.execPath },
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: standInEngine() },
   });
   let standIn: ChildProcess | null = null;
   try {
@@ -7064,9 +7123,9 @@ function aProjectToOpen(prefix: string): { project: string; engine: string; hold
   mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
   const engine = join(project, `godot-standin${process.platform === 'win32' ? '.exe' : ''}`);
   try {
-    linkSync(process.execPath, engine);
+    linkSync(standInEngine(), engine);
   } catch {
-    cpSync(process.execPath, engine);
+    cpSync(standInEngine(), engine);
   }
   const hold = join(project, 'hold.js');
   writeFileSync(hold, 'setTimeout(() => {}, 120000);\n');
@@ -7509,7 +7568,7 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
       env: {
         GDHARNESS_PROJECT: project,
         GDHARNESS_BRIDGE_PORT: String(port),
-        GODOT_PATH: process.execPath,
+        GODOT_PATH: standInEngine(),
         GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '20000',
       },
     });
@@ -7712,7 +7771,7 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
   // The engine is a stand-in that exits at once, so a launch guard that fails to refuse starts
   // nothing that outlives the case.
   const server = new ServerProcess({
-    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: process.execPath },
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: standInEngine() },
   });
   let uninformed: ServerProcess | null = null;
   const settings =
@@ -9132,7 +9191,7 @@ async function testARestartWaitsForTheOldEditorToGo(): Promise<void> {
     env: {
       GDHARNESS_BRIDGE_PORT: String(port),
       GDHARNESS_PROJECT: project,
-      GODOT_PATH: process.execPath,
+      GODOT_PATH: standInEngine(),
       GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '2000',
     },
   });
@@ -12574,7 +12633,7 @@ async function testToolsRefusePathsOutsideTheProject(): Promise<void> {
           'a godot:// URI with an encoded traversal should be refused',
         );
       },
-      { GODOT_PATH: process.execPath },
+      { GODOT_PATH: standInEngine() },
     );
   } finally {
     sweep(sandbox);
@@ -13457,9 +13516,19 @@ async function testAnEngineThatDoesNotAnswerIsNamed(): Promise<void> {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-no-engine-'));
   writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
 
+  const folder = mkdtempSync(join(tmpdir(), 'gdharness-engine-folder-'));
+  // The program running this case is a real one that exits 0 on --version and is no engine.
+  const printedByThis = (await runHidden(process.execPath, ['--version'])).stdout.trim();
+  const quotedPrint = JSON.stringify(printedByThis).replaceAll(/[.*+?^${}()|[\]\\]/gu, '\\$&');
   for (const [label, path, reason] of [
     ['a path that is not there', missing, /does not exist/],
     ['a file that is not an engine', notAnEngine, /does not answer --version/],
+    ['a folder', folder, /is a folder, not a program/],
+    [
+      'a program that is no engine',
+      process.execPath,
+      new RegExp(`is not a Godot engine: --version printed ${quotedPrint}`, 'u'),
+    ],
   ] as const) {
     const server = new ServerProcess({ env: { GODOT_PATH: path } });
     try {
@@ -13499,7 +13568,7 @@ async function testAnEngineThatDoesNotAnswerIsNamed(): Promise<void> {
       await server.stop();
     }
   }
-  sweep(project);
+  sweep(project, folder);
 }
 
 /**
@@ -13552,23 +13621,38 @@ async function testAnEngineThatCrashesAtStartIsAskedAgain(): Promise<void> {
   const failure = (fields: Record<string, unknown>): Error =>
     Object.assign(new Error('Command failed'), fields);
   const startCrash = failure({ code: 0xc06d007f, signal: null, stdout: '', stderr: '' });
+  const version = '4.7.2.stable.official.0123456789';
   const located = async (
     answers: readonly (Error | null)[],
-  ): Promise<{ found: Located; starts: number; waits: number[] }> => {
+  ): Promise<{ found: Located; judged: Judged; starts: number; waits: number[] }> => {
     let starts = 0;
     const waits: number[] = [];
-    const locator = new GodotLocator(
-      () => {
+    const locator = new GodotLocator({
+      start: () => {
         const answer = answers[Math.min(starts, answers.length - 1)] ?? null;
         starts += 1;
-        return answer === null ? Promise.resolve() : Promise.reject(answer);
+        return answer === null ? Promise.resolve({ stdout: `${version}\n` }) : Promise.reject(answer);
       },
-      (ms) => {
+      sleep: (ms) => {
         waits.push(ms);
         return Promise.resolve();
       },
-    );
-    return { found: await locator.find(), starts, waits };
+    });
+    const found = await locator.find();
+    const startsToFind = starts;
+    // The same path judged directly on a locator of its own, from the same script of answers.
+    starts = 0;
+    const alone = new GodotLocator({
+      start: () => {
+        const answer = answers[Math.min(starts, answers.length - 1)] ?? null;
+        starts += 1;
+        return answer === null ? Promise.resolve({ stdout: `${version}\n` }) : Promise.reject(answer);
+      },
+      sleep: () => Promise.resolve(),
+    });
+    const judged = await alone.judge(path);
+    assert.equal(starts, startsToFind, 'find and judge start the path as often as each other');
+    return { found, judged, starts: startsToFind, waits };
   };
   try {
     process.env['GODOT_PATH'] = path;
@@ -13576,20 +13660,25 @@ async function testAnEngineThatCrashesAtStartIsAskedAgain(): Promise<void> {
     const recovered = await located([startCrash, null]);
     assert.deepEqual(
       recovered.found,
-      { ok: true, path },
+      { ok: true, path, version },
       'an engine that crashed once and then answered is found',
     );
+    assert.deepEqual(recovered.judged, { ok: true, path, version }, 'and judged');
     assert.equal(recovered.starts, 2, 'after a second start');
     assert.deepEqual(recovered.waits, [500], 'with a wait between them');
 
     const silent = await located([failure({ code: 1, signal: null, stdout: '', stderr: '' }), null]);
-    assert.deepEqual(silent.found, { ok: true, path }, 'a failing exit that printed nothing is a crash too');
+    assert.deepEqual(
+      silent.found,
+      { ok: true, path, version },
+      'a failing exit that printed nothing is a crash too',
+    );
 
     const signalled = await located([
       failure({ code: null, signal: 'SIGSEGV', stdout: '', stderr: '' }),
       null,
     ]);
-    assert.deepEqual(signalled.found, { ok: true, path }, 'and so is a signal');
+    assert.deepEqual(signalled.found, { ok: true, path, version }, 'and so is a signal');
 
     const refused = await located([
       failure({ code: 2, signal: null, stdout: '', stderr: 'unknown option --version\n' }),
@@ -13619,16 +13708,16 @@ async function testAnEngineThatCrashesAtStartIsAskedAgain(): Promise<void> {
 
     let starts = 0;
     const waits: number[] = [];
-    const crashing = new GodotLocator(
-      async () => {
+    const crashing = new GodotLocator({
+      start: async () => {
         starts += 1;
         return await Promise.reject(startCrash);
       },
-      (ms) => {
+      sleep: (ms) => {
         waits.push(ms);
         return Promise.resolve();
       },
-    );
+    });
     const crashed = await crashing.find();
     assert.equal(starts, VERSION_STARTS, 'an engine that crashes every time is started as often as allowed');
     assert.deepEqual(waits, [500, 1000, 2000, 4000], 'with longer waits between');
@@ -13646,7 +13735,7 @@ async function testAnEngineThatCrashesAtStartIsAskedAgain(): Promise<void> {
     assert.equal(starts, 2 * VERSION_STARTS, 'a path that only crashed is asked again by the next find');
     const together = await Promise.all([crashing.find(), crashing.find()]);
     assert.equal(starts, 3 * VERSION_STARTS, 'two finds at once share one search');
-    assert.equal(together[0], together[1], 'and its answer');
+    assert.deepEqual(together[0], together[1], 'and its answer');
 
     const signed = versionStartOf(failure({ code: 0xc06d007f | 0, signal: null, stdout: '', stderr: '' }));
     assert.deepEqual(
@@ -13693,20 +13782,21 @@ async function testALocatorAsksAgainWhenTheEngineAppearsOrGoes(): Promise<void> 
   const path = join(root, 'godot.exe');
   const missing = { ok: false, named: path, reason: 'does not exist' } as const;
   let starts = 0;
-  const locator = new GodotLocator(
-    () => {
+  const version = '4.7.2.stable.official.0123456789';
+  const locator = new GodotLocator({
+    start: () => {
       starts += 1;
-      return Promise.resolve();
+      return Promise.resolve({ stdout: `${version}\n` });
     },
-    () => Promise.resolve(),
-  );
+    sleep: () => Promise.resolve(),
+  });
   try {
     process.env['GODOT_PATH'] = path;
     assert.deepEqual(await locator.find(), missing, 'before the engine is installed');
     assert.equal(starts, 0, 'nothing was started');
     writeFileSync(path, '');
-    assert.deepEqual(await locator.find(), { ok: true, path }, 'once it is installed');
-    assert.deepEqual(await locator.find(), { ok: true, path }, 'and again');
+    assert.deepEqual(await locator.find(), { ok: true, path, version }, 'once it is installed');
+    assert.deepEqual(await locator.find(), { ok: true, path, version }, 'and again');
     assert.equal(starts, 1, 'the engine answered once');
     rmSync(path);
     assert.deepEqual(await locator.find(), missing, 'after it is deleted');
@@ -13723,6 +13813,421 @@ async function testALocatorAsksAgainWhenTheEngineAppearsOrGoes(): Promise<void> 
     }
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+/**
+ * Whether a path is an engine is answered one way, for every caller: it exists, is a file, and
+ * prints a Godot version for `--version`.
+ *
+ * Five judges answered differently. A program that exits 0 on `--version` passed as an engine, a
+ * folder was told as a sentence about PATH, a missing file and a folder were started, and the
+ * version was read by a second start that dropped it after one crash. Here a folder and a missing
+ * file are refused without a start, a real program that is no engine is refused quoting what it
+ * printed, the version comes from the start that judged the path, and a bare `godot` is asked on
+ * every call since only the system can look it up.
+ */
+async function testAPathIsJudgedAnEngineOneWay(): Promise<void> {
+  const before = process.env['GODOT_PATH'];
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-judge-'));
+  const version = '4.7.2.stable.official.0123456789';
+  const quick = (): Promise<void> => Promise.resolve();
+  try {
+    const folder = join(root, 'folder');
+    mkdirSync(folder);
+    const missing = join(root, 'missing.exe');
+    let counted = 0;
+    const counting = new GodotLocator({
+      start: () => {
+        counted += 1;
+        return Promise.resolve({ stdout: `${version}\n` });
+      },
+      sleep: quick,
+    });
+    for (const [path, reason] of [
+      [folder, 'is a folder, not a program'],
+      [missing, 'does not exist'],
+    ] as const) {
+      assert.deepEqual(await counting.judge(path), { ok: false, named: path, reason }, reason);
+      process.env['GODOT_PATH'] = path;
+      assert.deepEqual(await counting.find(), { ok: false, named: path, reason }, `${reason}, as GODOT_PATH`);
+    }
+    assert.equal(counted, 0, 'neither was started');
+
+    // A real program that exits 0 on --version and is no engine, by the default start.
+    const printed = (await runHidden(process.execPath, ['--version'])).stdout.trim();
+    assert.deepEqual(
+      await new GodotLocator().judge(process.execPath),
+      {
+        ok: false,
+        named: process.execPath,
+        reason: `is not a Godot engine: --version printed ${JSON.stringify(printed)}`,
+      },
+      'a program that exits 0 is refused with what it printed',
+    );
+    const file = join(root, 'godot.exe');
+    writeFileSync(file, 'a');
+    const silent = await new GodotLocator({
+      start: () => Promise.resolve({ stdout: '' }),
+      sleep: quick,
+    }).judge(file);
+    assert.ok(
+      !silent.ok && silent.reason.startsWith('is not a Godot engine'),
+      `and so is one that prints nothing: ${JSON.stringify(silent)}`,
+    );
+
+    // The shape of a version, once, for the judge and the flag.
+    assert.equal(versionPrinted('4.7.2\n'), null, 'three numbers alone are not an engine version');
+    assert.equal(versionPrinted(`${version}\r\n`), version, 'a full version with its carriage return is');
+    assert.equal(versionPrinted(`a warning\n${version}\n`), version, 'a line before it is passed over');
+    assert.equal(versionNamed('4.7.2'), '4.7.2', 'the flag takes numbers alone');
+    assert.equal(versionNamed(version), version, 'and what an engine prints');
+
+    // One start for two calls, a second once the file is another build.
+    let starts = 0;
+    const answering = new GodotLocator({
+      start: () => {
+        starts += 1;
+        return Promise.resolve({ stdout: `${version}\n` });
+      },
+      sleep: quick,
+    });
+    const answered = { ok: true, path: file, version } as const;
+    assert.deepEqual(await answering.judge(file), answered, 'the version is the one printed');
+    assert.deepEqual(await answering.judge(file), answered, 'and the same again');
+    assert.equal(starts, 1, 'from one start');
+    writeFileSync(file, 'a longer file');
+    assert.deepEqual(await answering.judge(file), answered, 'a rewritten file is judged again');
+    assert.equal(starts, 2, 'by a second start');
+    assert.equal(answering.ownVersion(), null, 'a judge alone is no engine of this server');
+    process.env['GODOT_PATH'] = file;
+    assert.deepEqual(await answering.find(), answered, 'the search answers with the version');
+    assert.equal(answering.ownVersion(), version, 'which is read back without a start');
+    assert.equal(starts, 2, 'the build was already judged');
+
+    // A bare godot is looked up by the system alone, so neither its refusal nor its answer is kept.
+    const notFound = Object.assign(new Error('spawn godot ENOENT'), { code: 'ENOENT' });
+    const first = '4.7.2.stable.official.aaaaaaaaaa';
+    const second = '4.7.3.stable.official.bbbbbbbbbb';
+    const script: (() => Promise<{ stdout: string }>)[] = [
+      () => Promise.reject(notFound),
+      () => Promise.resolve({ stdout: `${first}\n` }),
+      () => Promise.resolve({ stdout: `${second}\n` }),
+    ];
+    let bareStarts = 0;
+    const bare = new GodotLocator({
+      start: () => {
+        const next = script[bareStarts];
+        bareStarts += 1;
+        return next === undefined ? Promise.reject(notFound) : next();
+      },
+      sleep: quick,
+    });
+    process.env['GODOT_PATH'] = 'godot';
+    const refused = await bare.find();
+    assert.ok(
+      !refused.ok && 'reason' in refused && refused.reason.startsWith('does not answer --version'),
+      `a bare name that cannot be started is refused: ${JSON.stringify(refused)}`,
+    );
+    assert.deepEqual(await bare.find(), { ok: true, path: 'godot', version: first }, 'then answers');
+    assert.deepEqual(await bare.find(), { ok: true, path: 'godot', version: second }, 'and is asked again');
+    assert.equal(bareStarts, 3, 'once per call');
+  } finally {
+    if (before === undefined) {
+      delete process.env['GODOT_PATH'];
+    } else {
+      process.env['GODOT_PATH'] = before;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A start that never ends is ended at its limit, refused once, and asked again by the next call.
+ *
+ * The default start set no limit, so one hung program held every caller sharing the search. A kill
+ * reads as a crash to the retry rule, so a hung program was also started five times. A hang is
+ * neither retried nor remembered, since a slow start on a loaded machine would otherwise refuse a
+ * working engine for the server's life.
+ */
+async function testAStartThatHangsIsEndedAndAskedAgain(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-hung-engine-'));
+  try {
+    const file = join(root, 'godot.exe');
+    writeFileSync(file, 'a');
+    const hung = Object.assign(new Error('Command failed'), {
+      killed: true,
+      signal: 'SIGTERM',
+      code: null,
+      stdout: '',
+      stderr: '',
+    });
+    let starts = 0;
+    const limits: number[] = [];
+    const hanging = new GodotLocator({
+      start: (_path, limitMs) => {
+        starts += 1;
+        limits.push(limitMs);
+        return Promise.reject(hung);
+      },
+      sleep: () => Promise.resolve(),
+    });
+    const reason = `was still running ${String(VERSION_ANSWER_MS / 1000)} seconds after its --version start`;
+    assert.deepEqual(await hanging.judge(file), { ok: false, named: file, reason }, 'a hang is refused');
+    assert.equal(starts, 1, 'after one start');
+    assert.deepEqual(limits, [VERSION_ANSWER_MS], 'given the limit');
+    await hanging.judge(file);
+    assert.equal(starts, 2, 'and asked again by the next call');
+
+    // The stand-in of a server answering before its engine does, through the default start.
+    let engine = process.env['ComSpec'] ?? 'C:\\Windows\\System32\\cmd.exe';
+    if (process.platform !== 'win32') {
+      engine = join(root, 'godot');
+      writeFileSync(engine, '#!/bin/sh\nread line\n', { mode: 0o755 });
+    }
+    const startedAt = Date.now();
+    const real = await new GodotLocator({ answerMs: 300 }).judge(engine);
+    assert.ok(Date.now() - startedAt < 10_000, 'the default start ends a program that does not answer');
+    assert.deepEqual(
+      real,
+      { ok: false, named: engine, reason: 'was still running 300 ms after its --version start' },
+      'and refuses it as hung',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A console wrapper is judged as the plain program beside it, wherever the path comes from.
+ *
+ * The wrapper starts the plain program as its child and forwards the console to it, so a run's
+ * process id was the wrapper's and the engine its child. Only the search swapped them. A refusal
+ * still names the path as it was set, since it would otherwise say GODOT_PATH holds a path it does
+ * not.
+ */
+async function testAConsoleWrapperIsJudgedAsThePlainProgram(): Promise<void> {
+  const before = process.env['GODOT_PATH'];
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-wrapper-'));
+  const version = '4.7.2.stable.official.0123456789';
+  try {
+    const plain = join(root, 'godot.exe');
+    const wrapper = join(root, 'godot_console.exe');
+    writeFileSync(plain, 'a');
+    writeFileSync(wrapper, 'b');
+    const alone = join(root, 'alone');
+    mkdirSync(alone);
+    const lonely = join(alone, 'godot_console.exe');
+    writeFileSync(lonely, 'c');
+    const started: string[] = [];
+    const locatorOn = (platform: NodeJS.Platform): GodotLocator =>
+      new GodotLocator({
+        start: (path) => {
+          started.push(path);
+          return Promise.resolve({ stdout: `${version}\n` });
+        },
+        sleep: () => Promise.resolve(),
+        platform,
+      });
+    process.env['GODOT_PATH'] = wrapper;
+    const windows = locatorOn('win32');
+    assert.deepEqual(
+      await windows.judge(wrapper),
+      { ok: true, path: plain, version },
+      'judged as the plain one',
+    );
+    assert.deepEqual(await windows.find(), { ok: true, path: plain, version }, 'and found as it');
+    assert.deepEqual([...new Set(started)], [plain], 'and the wrapper was never started');
+
+    started.length = 0;
+    assert.deepEqual(
+      await locatorOn('linux').judge(wrapper),
+      { ok: true, path: wrapper, version },
+      'off Windows it is judged as itself',
+    );
+    assert.deepEqual(started, [wrapper], 'and started');
+    assert.deepEqual(
+      await locatorOn('win32').judge(lonely),
+      { ok: true, path: lonely, version },
+      'with no plain program beside it, the wrapper is judged as itself',
+    );
+
+    const refusing = new GodotLocator({
+      start: () =>
+        Promise.reject(Object.assign(new Error('Command failed'), { code: 2, stdout: 'no', stderr: '' })),
+      sleep: () => Promise.resolve(),
+      platform: 'win32',
+    });
+    const refused = await refusing.find();
+    assert.ok(
+      !refused.ok && refused.named === wrapper,
+      `a refusal names the path as GODOT_PATH holds it: ${JSON.stringify(refused)}`,
+    );
+    assert.ok(
+      'reason' in refused &&
+        refused.reason.startsWith(`is Godot's console wrapper, and the engine beside it, ${plain}, `),
+      JSON.stringify(refused),
+    );
+    assert.ok(GodotLocator.refusal(refused).message.startsWith(`GODOT_PATH is set to ${wrapper}, which `));
+  } finally {
+    if (before === undefined) {
+      delete process.env['GODOT_PATH'];
+    } else {
+      process.env['GODOT_PATH'] = before;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A defect report carries the engine version its server last learned.
+ *
+ * Whatever failure nothing models, the report has a field for the version, and asking the engine
+ * on the failure path would start a subprocess at the worst moment. It is read from the locator
+ * that answered earlier. No live failure is relied on here: a failure standing for "unmodelled"
+ * stops being one when it is modelled, and the case would pass on another refusal. The function
+ * that writes the report is handed a locator instead, and its `Where` line is asserted beside the
+ * version, so a report about another failure fails the case.
+ */
+async function testADefectReportNamesTheEngineItLearned(): Promise<void> {
+  const before = process.env['GODOT_PATH'];
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-defect-engine-'));
+  const version = '4.7.2.stable.official.0123456789';
+  try {
+    const file = join(root, 'godot.exe');
+    writeFileSync(file, 'a');
+    const locator = new GodotLocator({
+      start: () => Promise.resolve({ stdout: `${version}\n` }),
+      sleep: () => Promise.resolve(),
+    });
+    const reportOf = (): string => {
+      const answer = unmodelledAnswer('project_info', new Error('EISDIR: illegal operation'), 0, locator);
+      assert.equal(answer.isError, true, 'the answer is an error');
+      return text(get(answer.content[0], 'text'));
+    };
+    assert.match(reportOf(), /Godot +not known at the point this failed/, 'before the engine has answered');
+    process.env['GODOT_PATH'] = file;
+    assert.equal((await locator.find()).ok, true, 'the engine answers');
+    const report = reportOf();
+    assert.match(report, /Where +project_info\b/, 'the report is about the failure it was handed');
+    assert.match(
+      report,
+      new RegExp(`Godot +${version.replaceAll('.', '\\.')}`, 'u'),
+      'and holds the version',
+    );
+  } finally {
+    if (before === undefined) {
+      delete process.env['GODOT_PATH'];
+    } else {
+      process.env['GODOT_PATH'] = before;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The command line refuses a harness config's engine that is no engine, and names the config.
+ *
+ * The record was taken for an engine on its file existing, so a config naming a program that
+ * answers anything was run. Here the config names a real program that is no engine, with no
+ * GODOT_PATH, nothing on PATH and a home with no engine in it.
+ */
+function testTheCommandLineJudgesAConfigsEngine(): void {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-cli-record-'));
+  try {
+    const project = join(root, 'game');
+    mkdirSync(project);
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    writeFileSync(
+      join(project, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: { gdharness: { command: 'npx', env: { GODOT_PATH: process.execPath } } },
+      }),
+    );
+    const empty = join(root, 'empty');
+    mkdirSync(empty);
+    const env = withHome(process.env, join(root, 'home'));
+    delete env['GODOT_PATH'];
+    for (const key of Object.keys(env)) {
+      if (key.toLowerCase() === 'path') {
+        env[key] = empty;
+      }
+    }
+    const ran = spawnSyncHidden(
+      process.execPath,
+      [join(process.cwd(), 'build', 'cli.js'), 'classes', project],
+      {
+        encoding: 'utf8',
+        cwd: root,
+        timeout: 60000,
+        env,
+      },
+    );
+    assert.equal(ran.status, 2, `${ran.stdout}${ran.stderr}`);
+    assert.ok(
+      ran.stderr.includes(
+        `The harness config of ${project} names ${process.execPath} under GODOT_PATH, which is not a Godot engine`,
+      ),
+      ran.stderr,
+    );
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
+ * `gdharness spread` judges the engine `--godot` names before it plays anything. A folder and a
+ * program that is no engine are refused as usage errors with the judge's reason.
+ */
+function testTheSpreadCommandJudgesTheEngineItIsGiven(): void {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spread-engine-'));
+  try {
+    const project = join(root, 'game');
+    mkdirSync(project);
+    writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+    writeFileSync(join(project, 'bench.tscn'), '[gd_scene format=3]\n\n[node name="Bench" type="Node"]\n');
+    const folder = join(root, 'folder');
+    mkdirSync(folder);
+    const printed = spawnSyncHidden(process.execPath, ['--version'], { encoding: 'utf8' }).stdout.trim();
+    for (const [godot, said] of [
+      [folder, `--godot names ${folder}, which is a folder, not a program.`],
+      [
+        process.execPath,
+        `--godot names ${process.execPath}, which is not a Godot engine: --version printed ${JSON.stringify(printed)}.`,
+      ],
+    ] as const) {
+      const ran = spawnSyncHidden(
+        process.execPath,
+        [join(process.cwd(), 'build', 'cli.js'), 'spread', project, 'bench.tscn', '--godot', godot],
+        { encoding: 'utf8', cwd: root, timeout: 60000, env: withHome(process.env, join(root, 'home')) },
+      );
+      assert.equal(ran.status, 2, `${ran.stdout}${ran.stderr}`);
+      assert.ok(ran.stderr.includes(said), ran.stderr);
+    }
+  } finally {
+    sweep(root);
+  }
+}
+
+/** The versions `--godot-version` takes are the shape an engine prints, with or without a `v`. */
+function testAGodotVersionFlagTakesTheShapeAnEnginePrints(): void {
+  for (const [given, taken] of [
+    ['4.7.2', '4.7.2'],
+    ['4.7.2.stable', '4.7.2.stable'],
+    ['4.7.2.stable.official.abc123', '4.7.2.stable.official.abc123'],
+    ['v4.7.2', '4.7.2'],
+  ] as const) {
+    assert.equal(versionNamed(given), taken, `${given} is taken`);
+  }
+  for (const given of ['4.7.2.1', '4.x']) {
+    assert.throws(
+      () => versionNamed(given),
+      (error: unknown) =>
+        error instanceof Error &&
+        error.message === `--godot-version takes a version such as 4.7.2 or 4.7.2.stable, not ${given}.`,
+      `${given} is refused with the usage text`,
+    );
+  }
+  assert.equal(versionNamed(undefined), null, 'and none given is none');
 }
 
 /**
@@ -16026,7 +16531,7 @@ async function testEditorOutputChecksTheProjectItIsGiven(): Promise<void> {
     );
     writeFileSync(join(directory, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
   }
-  const server = new ServerProcess({ env: { GODOT_PATH: process.execPath, GDHARNESS_PROJECT: project } });
+  const server = new ServerProcess({ env: { GODOT_PATH: standInEngine(), GDHARNESS_PROJECT: project } });
   const output = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
     await server.request('tools/call', { name: 'editor_output', arguments: args });
   try {
@@ -16310,7 +16815,7 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
  */
 async function testALaunchedEditorsConsoleIsReadBeforeItConnects(): Promise<void> {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-console-early-'));
-  const server = new ServerProcess({ env: { GODOT_PATH: process.execPath, GDHARNESS_PROJECT: project } });
+  const server = new ServerProcess({ env: { GODOT_PATH: standInEngine(), GDHARNESS_PROJECT: project } });
   const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
     textOf(await server.request('tools/call', { name, arguments: args })) ?? '';
   try {
@@ -16508,7 +17013,7 @@ async function testAGoneEditorsConsoleIsStillRead(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-console-gone-'));
   const port = await reservePort();
   const server = new ServerProcess({
-    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: process.execPath },
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: standInEngine() },
   });
   let later: ServerProcess | null = null;
   let editor: WebSocket | null = null;
@@ -16635,7 +17140,7 @@ async function testAGoneEditorsConsoleIsStillRead(): Promise<void> {
     await server.stop();
 
     // A server that opened nothing reads the note the launch left.
-    later = new ServerProcess({ env: { GDHARNESS_PROJECT: project, GODOT_PATH: process.execPath } });
+    later = new ServerProcess({ env: { GDHARNESS_PROJECT: project, GODOT_PATH: standInEngine() } });
     await later.initialize('regression-test');
     const fresh = await consoleOf(later);
     assert.deepEqual(
@@ -18189,6 +18694,17 @@ async function testARunCanBeStartedOnAnotherEngine(): Promise<void> {
     const missing = join(dirname(other), 'none', basename(other));
     const absent = textOf(await run({ op: 'start', godot: missing })) ?? '';
     assert.ok(absent.includes(`godot names ${missing}, which does not exist.`), absent);
+    const folder = dirname(other);
+    const inFolder = textOf(await run({ op: 'start', godot: folder })) ?? '';
+    assert.ok(inFolder.includes(`godot names ${folder}, which is a folder, not a program.`), inFolder);
+    const printed = (await runHidden(process.execPath, ['--version'])).stdout.trim();
+    const noEngine = textOf(await run({ op: 'start', godot: process.execPath })) ?? '';
+    assert.ok(
+      noEngine.includes(
+        `godot names ${process.execPath}, which is not a Godot engine: --version printed ${JSON.stringify(printed)}.`,
+      ),
+      noEngine,
+    );
   } finally {
     await games.end();
     await server.stop();
@@ -20377,7 +20893,7 @@ async function aStartLeaves(protocol: number): Promise<void> {
       {
         GDHARNESS_RUNTIME_DIR: announcements,
         GDHARNESS_PROJECT: project,
-        GODOT_PATH: process.execPath,
+        GODOT_PATH: standInEngine(),
       },
     );
 
@@ -24197,10 +24713,12 @@ async function testARelativeEnginePathIsMadeWhole(): Promise<void> {
     } else {
       process.chdir(dirname(resolve(before)));
       process.env['GODOT_PATH'] = basename(before);
+      const version = versionPrinted((await runHidden(resolve(before), ['--version'])).stdout);
+      assert.notEqual(version, null, 'the engine prints a version');
       const found = await new GodotLocator().find();
       assert.deepEqual(
         found,
-        { ok: true, path: resolve(before) },
+        { ok: true, path: resolve(before), version },
         'an engine named relatively is found whole',
       );
       // Setup writes the path it found into the harness config, so an absolute one comes back as
@@ -24209,7 +24727,7 @@ async function testARelativeEnginePathIsMadeWhole(): Promise<void> {
       process.env['GODOT_PATH'] = forward;
       assert.deepEqual(
         await new GodotLocator().find(),
-        { ok: true, path: forward },
+        { ok: true, path: forward, version },
         'an absolute engine path is kept as written',
       );
     }
@@ -25440,7 +25958,7 @@ async function testATestServerWritesWhereNoRealRunIs(): Promise<void> {
   // Read rather than removed: something of this machine's may be running, and a fixture that
   // cleared it would be doing the very thing it is here to prove cannot happen.
   const before = existsSync(shared) ? readFileSync(shared, 'utf8') : null;
-  const server = new ServerProcess({ env: { GODOT_PATH: process.execPath } });
+  const server = new ServerProcess({ env: { GODOT_PATH: standInEngine() } });
   try {
     writeFileSync(
       join(project, 'project.godot'),
@@ -25527,7 +26045,7 @@ async function testAStartStopsWaitingForAGameThatIsOver(): Promise<void> {
         assert.match(String(get(runtime, 'note')), /no longer running/, JSON.stringify(runtime));
         assert.ok(waited < 8_000, `the answer should not wait out the budget: ${waited}ms`);
       },
-      { GODOT_PATH: process.execPath, GDHARNESS_RUNTIME_DIR: runtimeDir },
+      { GODOT_PATH: standInEngine(), GDHARNESS_RUNTIME_DIR: runtimeDir },
     );
   } finally {
     sweep(project);
@@ -27928,7 +28446,7 @@ async function testWhatALaunchedEditorDroppedIsReadAsItArrives(): Promise<void> 
     const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-launch-dropped-'));
     const port = await reservePort();
     const server = new ServerProcess({
-      env: { GDHARNESS_BRIDGE_PORT: String(port), GDHARNESS_PROJECT: project, GODOT_PATH: process.execPath },
+      env: { GDHARNESS_BRIDGE_PORT: String(port), GDHARNESS_PROJECT: project, GODOT_PATH: standInEngine() },
     });
     let editor: WebSocket | null = null;
     try {
@@ -33927,9 +34445,10 @@ function testStaleImportsWalkLinksAndSpellingsAsTheFileSystemDoes(): void {
  * Issue #1425: a server configured for one checkout of a game ran `project_test` on a second
  * checkout pinned to an older engine, and its suites ran on the server's newer engine with nothing
  * naming it. Here the second project's config names a link to the same Godot under another name,
- * and its suite asserts the executable it runs in. A third names an empty file, so an operation
- * that ran on the server's engine would succeed where the project's engine cannot start. The
- * server's own project names that empty file too, and is still run on the server's engine.
+ * and its suite asserts the executable it runs in. A third names an empty file, which is no engine,
+ * so a call on it is refused naming the config and the file, where one run on the server's engine
+ * would succeed. The server's own project names that empty file too, and is still run on the
+ * server's engine.
  */
 async function testAnotherCheckoutRunsTheEngineItsConfigNames(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -34001,20 +34520,25 @@ async function testAnotherCheckoutRunsTheEngineItsConfigNames(): Promise<void> {
           `on the server's engine: ${JSON.stringify(ownInfo)}`,
         );
 
-        const refused = await answer('project_info', { projectPath: unstartable, include: ['classes'] });
+        const refused = await request(
+          'tools/call',
+          { name: 'project_info', arguments: { projectPath: unstartable, include: ['classes'] } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        const refusedText = asArray(get(refused, 'result', 'content'))
+          .map((block) => String(get(block, 'text')))
+          .join('\n');
         assert.equal(
-          typeof get(refused, 'classes', 'error'),
-          'string',
-          `the section ran on the empty file and failed: ${JSON.stringify(refused)}`,
+          get(refused, 'result', 'isError'),
+          true,
+          `a record that is no engine is refused: ${refusedText}`,
         );
-        const said = text(get(refused, 'engineNote'));
         assert.ok(
-          said.startsWith(
-            `This ran the engine at ${join(unstartable, 'engine', empty)}, which the harness config of ${unstartable} names, rather than this server's engine at `,
+          refusedText.includes(
+            `The harness config of ${unstartable} names ${join(unstartable, 'engine', empty)} under GODOT_PATH, which `,
           ),
-          said,
+          refusedText,
         );
-        assert.equal(get(refused, 'classes', 'engineNote'), undefined, 'named once, not in the section');
 
         const tested = await answer('project_test', { projectPath: pinned, path: 'res://test' });
         assert.equal(
@@ -35459,7 +35983,7 @@ async function withAPlayingEditor(
     env: {
       GDHARNESS_BRIDGE_PORT: String(port),
       GDHARNESS_RUNTIME_DIR: runtimeDir,
-      GODOT_PATH: options.engine ?? process.execPath,
+      GODOT_PATH: options.engine ?? standInEngine(),
       // The server's own account of a start, kept in its stderr for the fixture that fails on
       // how long one took: without it a start that sat nine seconds on a played game left
       // nothing behind to say where the time went.
@@ -39536,7 +40060,7 @@ async function testARunGivenEngineFlagsIsStartedHere(): Promise<void> {
         malformed.said,
       );
       // Another engine is the server's own stand-in here, and the editor still plays only on its own.
-      const onAnother = await run({ godot: process.execPath });
+      const onAnother = await run({ godot: standInEngine() });
       assert.equal(get(onAnother.answer, 'through'), 'gdharness', onAnother.said);
       assert.match(
         text(get(onAnother.answer, 'message')),
@@ -48742,19 +49266,16 @@ async function testAStopTakesTheEndedGamesAnnouncementDown(): Promise<void> {
 }
 
 /**
- * A stop takes the announcement down by the number the game announced under, which is not always
- * the run's own.
+ * A GODOT_PATH naming the Windows console build starts the engine beside it, so the run holds the
+ * engine's own process and a stop ends the game it plays.
  *
- * The Windows console build is a wrapper: the run holds the wrapper's process and the engine is
- * its child, so the announcement is written under a number the run does not hold. A stop that
- * took announcements down by the run's number alone left this one to the sweep, which is the gap
- * the number can come round in. Measured before this was written: the engine was listed under the
- * wrapper, and gone two seconds after the wrapper was killed, so the file is the stop's to take.
+ * The console build is a wrapper whose child is the engine. Held as the run, it would put the
+ * game's announcement under a number the run does not hold, and a stop by the run's number would
+ * leave that file to the sweep.
  *
- * Only where that build is, beside the engine the tier was given. Elsewhere the run's number and
- * the announced one are the same process and the case above holds it.
+ * Only where that build is, beside the engine the tier was given.
  */
-async function testAStopTakesTheWrappedEnginesAnnouncementDown(): Promise<void> {
+async function testAConsoleWrapperRunsAsTheEngineBesideIt(): Promise<void> {
   const godotPath = resolveGodotPath();
   const wrapper = godotPath === null ? null : godotPath.replace(/\.exe$/i, '_console.exe');
   if (
@@ -48795,10 +49316,10 @@ async function testAStopTakesTheWrappedEnginesAnnouncementDown(): Promise<void> 
         assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
         const runPid = asNumber(get(started, 'pid'), 'the run holds a process');
         const gamePid = asNumber(get(started, 'runtime', 'pid'), 'the game announced under a number');
-        assert.notEqual(
+        assert.equal(
           runPid,
           gamePid,
-          'the console build holds the wrapper, and the engine announces as its child',
+          'the run holds the engine beside the console build, which announces under its own number',
         );
         const announcement = join(runtimeDir, `runtime-${gamePid}.json`);
         assert.ok(existsSync(announcement), 'the announcement is there for the stop to take');
@@ -51070,7 +51591,7 @@ async function benchThroughAStart(
       async (call) => {
         answer = await call('editor_run', { op: 'start', projectPath: mine, headless: true });
       },
-      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: mine, GODOT_PATH: process.execPath },
+      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: mine, GODOT_PATH: standInEngine() },
     );
 
     // Waited on up to three seconds for one more line rather than read once after a quarter of one:
@@ -51459,7 +51980,7 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
           "a call naming another project leaves the server's own as the one read",
         );
       },
-      { GDHARNESS_PROJECT: ours, GODOT_PATH: process.execPath },
+      { GDHARNESS_PROJECT: ours, GODOT_PATH: standInEngine() },
     );
 
     await withStdioServer(
@@ -51478,7 +51999,7 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
           `a directory with no project.godot is no root: ${underRoot}`,
         );
       },
-      { GODOT_PATH: process.execPath },
+      { GODOT_PATH: standInEngine() },
     );
   } finally {
     sweep(root);
@@ -62270,10 +62791,17 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
     );
     const noEngine = test('--godot', join(project, 'no-godot.exe'), 'tests/ok_test.gd');
     assert.equal(noEngine.status, 2, noEngine.said);
-    assert.match(
+    assert.ok(
+      noEngine.said.includes(`--godot names ${join(project, 'no-godot.exe')}, which does not exist.`),
       noEngine.said,
-      /--godot names .*no-godot\.exe, which is not an engine executable\./,
-      noEngine.said,
+    );
+    const folderEngine = test('--godot', join(project, 'tests'), 'tests/ok_test.gd');
+    assert.equal(folderEngine.status, 2, folderEngine.said);
+    assert.ok(
+      folderEngine.said.includes(
+        `--godot names ${join(project, 'tests')}, which is a folder, not a program.`,
+      ),
+      folderEngine.said,
     );
 
     // An autoload that cannot start makes every suite after it meaningless, so the run ends there
@@ -88575,7 +89103,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testChildrenAreListedWhileTheParentLives,
   testAStopCanEndWhatTheGameStarted,
   testAStopTakesTheEndedGamesAnnouncementDown,
-  testAStopTakesTheWrappedEnginesAnnouncementDown,
+  testAConsoleWrapperRunsAsTheEngineBesideIt,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
   testAHeldScratchDirectoryGoesOnceLetGo,
@@ -88636,6 +89164,13 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineThatDoesNotAnswerIsNamed,
   testAnEngineThatCrashesAtStartIsAskedAgain,
   testALocatorAsksAgainWhenTheEngineAppearsOrGoes,
+  testAPathIsJudgedAnEngineOneWay,
+  testAStartThatHangsIsEndedAndAskedAgain,
+  testAConsoleWrapperIsJudgedAsThePlainProgram,
+  testADefectReportNamesTheEngineItLearned,
+  testTheCommandLineJudgesAConfigsEngine,
+  testTheSpreadCommandJudgesTheEngineItIsGiven,
+  testAGodotVersionFlagTakesTheShapeAnEnginePrints,
   testAnAutoloadGitWillNotCarry,
   testAnAutoloadNamingAFileThatIsNotThere,
   testTheRuntimeAutoloadIsFoundByWhatItNames,
