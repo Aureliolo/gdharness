@@ -260,6 +260,7 @@ export const REGRESSION_SECONDS: Readonly<
     testAStateMachineWrittenWithNoEditorRunsAsWritten: 16,
     testAStopGoesThroughTheKeeper: 16,
     testATestRunWhoseAutoloadDidNotCompileStops: 16,
+    testAnEngineReadsAClassListMendedOfAGoneScript: 16,
     testAnOrphanIsNamedWithTheCaseThatLeftIt: 16,
     testAnotherCheckoutRunsTheEngineItsConfigNames: 16,
     testParametersReachTheEngine: 16,

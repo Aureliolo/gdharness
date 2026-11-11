@@ -646,6 +646,7 @@ import { argumentShape, headlessSection, namedType, renderToolsMarkdown } from '
 import {
   encodedUidCache,
   mendBeforeStart,
+  mendClassList,
   mendUidCache,
   type UidEntry,
   uidCacheEntries,
@@ -19679,6 +19680,240 @@ function testAStartMendsOnlyTheProjectItsOwnArgumentsName(): void {
     assert.deepEqual(readFileSync(cache), encodedUidCache([]), 'one before it is mended, so the case ran');
   } finally {
     rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** A class list as Godot writes it: `list=[`, the entries joined by `, `, then `]` and a newline. */
+function godotClassList(classes: readonly (readonly [name: string, base: string, path: string])[]): string {
+  const entries = classes.map(
+    ([name, base, path]) =>
+      `{\n"base": &"${base}",\n"class": &"${name}",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"GDScript",\n"path": "${path}"\n}`,
+  );
+  return `list=[${entries.join(', ')}]\n`;
+}
+
+/** What [param run] writes on stderr, a call at a time. */
+function stderrOf(run: () => void): string[] {
+  const said: string[] = [];
+  const write = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (line: string): boolean => {
+    said.push(line);
+    return true;
+  };
+  try {
+    run();
+  } finally {
+    process.stderr.write = write;
+  }
+  return said;
+}
+
+/** A scratch project holding [param list] as its class list, and the path of that list. */
+function projectWithClassList(prefix: string, files: Record<string, string>, list: string | null): string {
+  const project = mkdtempSync(join(tmpdir(), prefix));
+  writeTree(project, { 'project.godot': 'config_version=5\n', ...files });
+  mkdirSync(join(project, '.godot'));
+  if (list !== null) {
+    writeFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), list);
+  }
+  return project;
+}
+
+/**
+ * A class list entry whose script is gone is dropped before an engine starts, and the run says which.
+ *
+ * A list copied from another checkout names scripts this one lacks, and compiling every script
+ * together then failed on `Could not find script for class`. The others stay in the order they stood,
+ * and the file is written as Godot writes it, so the engine and the editor read it unchanged.
+ */
+function testAClassListEntryWhoseFileIsGoneIsDropped(): void {
+  const project = projectWithClassList(
+    'gdharness-class-list-',
+    { 'game/kept.gd': 'class_name Kept\nextends Node\n', 'game/also.gd': 'class_name Also\nextends Node\n' },
+    godotClassList([
+      ['Kept', 'Node', 'res://game/kept.gd'],
+      ['Recording', 'Node', 'res://game/recording.gd'],
+      ['Also', 'Node', 'res://game/also.gd'],
+    ]),
+  );
+  try {
+    const list = join(project, '.godot', 'global_script_class_cache.cfg');
+    const said = stderrOf(() => {
+      mendBeforeStart(['--path', project], undefined);
+    });
+    assert.equal(
+      readFileSync(list, 'utf8'),
+      godotClassList([
+        ['Kept', 'Node', 'res://game/kept.gd'],
+        ['Also', 'Node', 'res://game/also.gd'],
+      ]),
+    );
+    assert.deepEqual(said, [
+      `class list: dropped what names a file gone from ${list}: Recording at res://game/recording.gd\n`,
+    ]);
+    assert.deepEqual(readdirSync(join(project, '.godot')), ['global_script_class_cache.cfg']);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A class list with nothing gone is left byte for byte and nothing is said, and so is one not in
+ * Godot's form. An entry whose file is there stays even when the file declares another class, because
+ * the engine resolves the name to that file and loads a script typed with it without complaint.
+ */
+function testASoundClassListIsLeftByteForByte(): void {
+  const sound = godotClassList([
+    ['Kept', 'Node', 'res://game/kept.gd'],
+    ['Renamed', 'Node', 'res://game/kept.gd'],
+  ]);
+  const project = projectWithClassList(
+    'gdharness-class-sound-',
+    { 'game/kept.gd': 'class_name Kept\n' },
+    sound,
+  );
+  try {
+    const list = join(project, '.godot', 'global_script_class_cache.cfg');
+    const said = stderrOf(() => {
+      mendBeforeStart(['--path', project], undefined);
+    });
+    assert.deepEqual(said, []);
+    assert.equal(readFileSync(list, 'utf8'), sound);
+    assert.deepEqual(mendClassList(project), []);
+
+    const foreign = `; edited by hand\n${godotClassList([['Gone', 'Node', 'res://game/gone.gd']])}`;
+    writeFileSync(list, foreign);
+    assert.deepEqual(mendClassList(project), [], 'a list not in Godot form is not rewritten');
+    assert.equal(readFileSync(list, 'utf8'), foreign);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** Every entry gone leaves `list=[]`, which Godot writes for no classes, and an empty list is left. */
+function testAClassListWithEveryFileGoneOrNoEntriesIsMended(): void {
+  const project = projectWithClassList(
+    'gdharness-class-all-',
+    {},
+    godotClassList([
+      ['One', 'Node', 'res://one.gd'],
+      ['Two', 'RefCounted', 'res://deep/two.gd'],
+    ]),
+  );
+  try {
+    const list = join(project, '.godot', 'global_script_class_cache.cfg');
+    assert.deepEqual(mendClassList(project), [
+      ['One', 'res://one.gd'],
+      ['Two', 'res://deep/two.gd'],
+    ]);
+    assert.equal(readFileSync(list, 'utf8'), 'list=[]\n');
+    assert.deepEqual(mendClassList(project), [], 'a second mend finds nothing');
+    assert.equal(readFileSync(list, 'utf8'), 'list=[]\n');
+    const said = stderrOf(() => {
+      mendBeforeStart(['--path', project], undefined);
+    });
+    assert.deepEqual(said, []);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A list that cannot be rewritten, as when a running editor holds it on Windows, is left as it was
+ * and the reason is said. A directory where the new list is written cannot be written over on any
+ * platform.
+ */
+function testAClassListThatCannotBeRewrittenIsLeftAndSaid(): void {
+  const listed = godotClassList([['Gone', 'Node', 'res://gone.gd']]);
+  const project = projectWithClassList('gdharness-class-held-', {}, listed);
+  try {
+    const list = join(project, '.godot', 'global_script_class_cache.cfg');
+    mkdirSync(`${list}.${String(process.pid)}.mending`);
+    const said = stderrOf(() => {
+      mendBeforeStart(['--path', project], undefined);
+    });
+    assert.equal(readFileSync(list, 'utf8'), listed);
+    assert.equal(said.length, 1, said.join(''));
+    assert.match(said[0] ?? '', /^class list: could not rewrite .*, which names files gone: .+\n$/);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/** No list is made where there is none, and a project the arguments do not name is not touched. */
+function testAStartMendsNoClassListWhereThereIsNoneOrNoProjectIsNamed(): void {
+  const listed = godotClassList([['Gone', 'Node', 'res://gone.gd']]);
+  const without = projectWithClassList('gdharness-class-none-', {}, null);
+  const named = projectWithClassList('gdharness-class-path-', {}, listed);
+  try {
+    const said = stderrOf(() => {
+      mendBeforeStart(['--path', without], undefined);
+    });
+    assert.deepEqual(said, []);
+    assert.deepEqual(readdirSync(join(without, '.godot')), [], 'nothing is created');
+    assert.deepEqual(mendClassList(without), []);
+
+    const list = join(named, '.godot', 'global_script_class_cache.cfg');
+    const started = (...args: string[]): void => {
+      spawnSyncHidden(process.execPath, ['-e', '0', ...args], { encoding: 'utf8', timeout: 60000 });
+    };
+    started('--', '--path', named);
+    assert.equal(readFileSync(list, 'utf8'), listed, "a --path after the bare -- is the game's");
+    spawnSyncHidden(process.execPath, ['-e', '0'], { cwd: named });
+    assert.equal(readFileSync(list, 'utf8'), listed, 'a command naming no project leaves it alone');
+    started('--path', named);
+    assert.equal(readFileSync(list, 'utf8'), 'list=[]\n', 'one before it is mended, so the case ran');
+  } finally {
+    rmSync(without, { recursive: true, force: true });
+    rmSync(named, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The engine compiling every script together passes on a list copied from a checkout with a script
+ * this one lacks, and the classes that remain still resolve. An entry whose file is there but
+ * declares another class is kept, and the engine loads a script typed with it.
+ */
+function testAnEngineReadsAClassListMendedOfAGoneScript(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  try {
+    writeTree(project, {
+      'game/kept.gd': 'class_name KeptThing\nextends Node\n',
+      'game/uses.gd': 'class_name UsesThing\nextends Node\n\nvar kept: KeptThing = null\n',
+    });
+    const first = test('tests/ok_test.gd');
+    assert.equal(first.status, 0, first.said);
+    const list = join(project, '.godot', 'global_script_class_cache.cfg');
+    const written = readFileSync(list, 'utf8');
+    assert.match(written, /"class": &"KeptThing"/, written);
+    assert.ok(written.startsWith('list=[') && written.endsWith(']\n'), written);
+    const copied = written.replace(
+      'list=[',
+      `list=[${godotClassList([
+        ['Recording', 'Node', 'res://game/recording.gd'],
+        ['Renamed', 'Node', 'res://game/kept.gd'],
+      ]).slice('list=['.length, -2)}, `,
+    );
+    writeFileSync(list, copied);
+    writeTree(project, { 'game/typed.gd': 'extends Node\n\nvar other: Renamed = null\n' });
+    const second = test('tests/ok_test.gd');
+    assert.equal(second.status, 0, second.said);
+    assert.match(
+      second.said,
+      /^class list: dropped what names a file gone from .*: Recording at res:\/\/game\/recording\.gd$/m,
+      second.said,
+    );
+    assert.doesNotMatch(second.said, /Could not find script|compiling every script together/, second.said);
+    const mended = readFileSync(list, 'utf8');
+    assert.doesNotMatch(mended, /Recording/, mended);
+    assert.match(mended, /"class": &"KeptThing"[\s\S]*"class": &"UsesThing"/, mended);
+    assert.match(mended, /"class": &"Renamed"/, 'an entry whose file is there stays');
+  } finally {
+    sweep(project, slots, checkouts);
   }
 }
 
@@ -90024,6 +90259,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEditorWritesItsConsoleWhereTheServerLooks,
   testAUidCacheNamingAFileGoneIsMended,
   testAStartMendsOnlyTheProjectItsOwnArgumentsName,
+  testAClassListEntryWhoseFileIsGoneIsDropped,
+  testASoundClassListIsLeftByteForByte,
+  testAClassListWithEveryFileGoneOrNoEntriesIsMended,
+  testAClassListThatCannotBeRewrittenIsLeftAndSaid,
+  testAStartMendsNoClassListWhereThereIsNoneOrNoProjectIsNamed,
+  testAnEngineReadsAClassListMendedOfAGoneScript,
   testASidecarWithNoFileDeclaresNoUid,
   testAMovedAutoloadBootsFromWhereItIs,
   testACancelledCallEndsTheEngineItStarted,
