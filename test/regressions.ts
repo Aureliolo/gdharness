@@ -63084,6 +63084,24 @@ function testATestRunImportsWhatSetupLeftUnimported(): void {
     );
     writeFileSync(cache, cacheOf({ SharedThing: 'res://kit/thing.gd', SharedOther: 'res://kit/other.gd' }));
     assert.equal(importNeeded(project), null, 'current again');
+    writeImported(project, 'cull.glsl', '#[compute]\n', { importer: 'glsl' });
+    writeImported(project, 'wool.glsl', '#[compute]\n', { importer: 'glsl' });
+    assert.equal(importNeeded(project), null, 'imported files as their imports left them');
+    writeFileSync(join(project, 'cull.glsl'), '#[compute]\nbroken\n');
+    assert.equal(
+      importNeeded(project),
+      'The import of res://cull.glsl is out of date, since the source changed after it was imported, so the project is imported first.',
+      'a source changed after its import',
+    );
+    writeFileSync(join(project, 'wool.glsl'), '#[compute]\nbroken\n');
+    assert.equal(
+      importNeeded(project),
+      'The imports of res://cull.glsl, res://wool.glsl are out of date, so the project is imported first.',
+      'two sources changed after their imports',
+    );
+    writeImported(project, 'cull.glsl', '#[compute]\nbroken\n', { importer: 'glsl' });
+    writeImported(project, 'wool.glsl', '#[compute]\nbroken\n', { importer: 'glsl' });
+    assert.equal(importNeeded(project), null, 'imported again');
     rmSync(list);
     rmSync(join(project, 'native'), { recursive: true });
     assert.equal(importNeeded(project), null, 'no extension list is needed with no extension');

@@ -48,7 +48,7 @@ when the command line itself is wrong.
 - `--tests DIR`: where to look for suites, `tests` and `test` by default. May be given more than
   once.
 - `--import`: import the project in an engine of its own before the suites. Without it, a project
-  is still imported first [when no suite could run in it](#when-a-run-imports-first).
+  is still imported first [when it is out of date](#when-a-run-imports-first).
 - `--order reversed` or `--order SEED`: every suite in one engine, in reverse order of path or
   shuffled by a number. It finds suites that depend on the order they run in.
 
@@ -78,13 +78,15 @@ when the command line itself is wrong.
 
 ## When a run imports first
 
-Without `--import`, a project is still imported first when no suite could run in it as it stands.
-That is when one of these holds:
+Without `--import`, a project is still imported first when a suite would run against what it no
+longer holds. That is when one of these holds:
 
 - It has no class cache.
 - It holds a `.gdextension` and no `.godot/extension_list.cfg`. `gdharness setup` leaves it so,
   since it writes the class cache without importing.
 - The cache does not list a class a script declares where the script declares it.
+- An imported file's import is behind it, as after the file changed. `project_import status` names
+  the same files.
 
 ## The pipeline cache
 
