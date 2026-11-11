@@ -44,7 +44,7 @@ export interface Surviving {
 }
 
 /** What a scratch directory is for, which is the first part of its name. */
-export type ScratchKind =
+type ScratchKind =
   | 'answers'
   | 'desktop'
   | 'editor-capture'

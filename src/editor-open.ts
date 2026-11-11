@@ -11,7 +11,7 @@ import { DEFAULT_DAP_PORT } from './dap_client.js';
 import { HIDDEN_DESKTOP } from './desktop.js';
 import { placeEmptyScriptDocs } from './doc-cache.js';
 import { clearEditorLog, editorLogPath, writeEditorLogNote } from './editor-log.js';
-import { EngineUsageError } from './engine-launch.js';
+import { EngineUsageError } from './errors.js';
 import { type EditorPorts, editorArguments, OPENED_BY_A_SERVER, startedAs, waitFromEnv } from './launch.js';
 import { freeLibraryCopies } from './library-copies.js';
 import { DEFAULT_LSP_PORT } from './lsp_client.js';
@@ -20,7 +20,7 @@ import { freePort, portFromEnvOrNull } from './ports.js';
 import { editorsOfProjectIn, processTree, startTimesOf } from './process-children.js';
 import { type RestartNote, restartOwed, restartSettled } from './restart-note.js';
 import { currentRunner, runLine } from './runner.js';
-import { runtimeDirectory } from './runtime-client.js';
+import { runtimeDirectory } from './runtime-directories.js';
 import { SERVER_VERSION } from './server-version.js';
 import {
   inspectProject,
@@ -243,7 +243,7 @@ export async function openEditorProcess(
 }
 
 /** `gdharness editor open [project] [--hidden] [--silent] [--until PID]`, read. */
-export interface EditorOpenOptions {
+interface EditorOpenOptions {
   readonly projectPath: string;
   readonly start: EditorStart;
 }
@@ -302,7 +302,7 @@ export function editorOpenOptionsOf(args: readonly string[], cwd: string): Edito
  * What `gdharness editor open` did: an editor opened, one already running, or a refusal. An editor
  * opened to quit with a process says under [param unheld] why nothing will close it, when nothing will.
  */
-export type EditorOpenOutcome =
+type EditorOpenOutcome =
   | { readonly opened: number; readonly unheld: string | null }
   | { readonly running: number }
   | { readonly refused: string };

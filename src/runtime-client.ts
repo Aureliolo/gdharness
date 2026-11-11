@@ -14,13 +14,12 @@
 
 import { existsSync, readdirSync, readFileSync, statSync, unlinkSync } from 'node:fs';
 import { createConnection, type Socket } from 'node:net';
-import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
-import { envValue } from './launch.js';
 import { isSameDirectory, realAsFarAsItExists } from './paths.js';
 import { startTimesOf } from './process-children.js';
+import { runtimeDirectories } from './runtime-directories.js';
 import { asParams, readNumber, readParams, readString } from './tool-args.js';
 
 /** The protocol version the addon has to speak. Bumped whenever a reply or request changes. */
@@ -57,49 +56,6 @@ export interface RuntimeEndpoint {
 interface LoadedAddon {
   readonly version: string;
   readonly digest: string;
-}
-
-/**
- * Where this server announces and looks first. The addon derives the same path with the same
- * precedence, so the two only meet if this stays in step with `_announcement_directory` in the
- * runtime autoload: an explicit override, the per-user runtime directory where the platform has
- * one, and otherwise the temporary directory.
- */
-export function runtimeDirectory(variables: NodeJS.ProcessEnv = process.env): string {
-  const explicit = envValue('GDHARNESS_RUNTIME_DIR', variables);
-  if (explicit) {
-    return explicit;
-  }
-  const perUser = envValue('XDG_RUNTIME_DIR', variables);
-  return join(perUser ?? tmpdir(), 'gdharness');
-}
-
-/**
- * Every directory a game on this machine could have announced itself in.
- *
- * Deriving the path the same way on both sides is not enough, because the two sides do not share
- * an environment. A game is started by the editor, the editor by whoever opened it, and this
- * server by the harness: an editor launched without TMP or TEMP set puts its games in the
- * Windows directory's Temp while this server, started with them set, watches the user's. Measured
- * on Windows, where it cost a session: the game announced in C:\Windows\Temp\gdharness and the
- * server created and swept an empty C:\Users\<name>\AppData\Local\Temp\gdharness beside it,
- * and answered that no game was running while one was.
- *
- * `editor_launch` now passes the first of these down, so an editor this server opened puts its
- * games where this server looks. The rest are for the editor it did not open, which is most of
- * them: a fallback list beats a silent empty answer, and a stale announcement is already handled
- * by the process check.
- */
-export function runtimeDirectories(variables: NodeJS.ProcessEnv = process.env): string[] {
-  const candidates = [runtimeDirectory(variables)];
-  const fallbacks =
-    process.platform === 'win32'
-      ? [envValue('SystemRoot', variables) ?? envValue('windir', variables) ?? 'C:\\Windows']
-      : ['/tmp', '/var/tmp'];
-  for (const base of fallbacks) {
-    candidates.push(join(base, process.platform === 'win32' ? 'Temp' : '', 'gdharness'));
-  }
-  return [...new Set(candidates.map((path) => resolve(path)))];
 }
 
 /**
@@ -277,7 +233,7 @@ function dialAddress(address: string): string {
 }
 
 /** What a sweep of the announcement directories found: games to talk to, and games too new. */
-export interface RuntimesAnnounced {
+interface RuntimesAnnounced {
   readonly running: RuntimeEndpoint[];
   readonly unspoken: UnspokenRuntime[];
 }
@@ -617,12 +573,12 @@ export async function announcementEnded(
  * announcement, which goes the moment the game does: the report is what the run's last errors are
  * read from, and the server reading the run may not look until after the game has gone.
  */
-function sweepErrorReport(path: string, pid: number, now = Date.now()): void {
+function sweepErrorReport(path: string, pid: number): void {
   if (alive(pid)) {
     return;
   }
   try {
-    if (now - statSync(path).mtimeMs >= ERROR_REPORT_KEEP_MS) {
+    if (Date.now() - statSync(path).mtimeMs >= ERROR_REPORT_KEEP_MS) {
       unlinkSync(path);
     }
   } catch {
@@ -635,7 +591,7 @@ const LOOK_EVERY_MS = 50;
 export const ANNOUNCE_BUDGET_MS = 5_000;
 
 /** How the wait below is bounded: how long, where to look, and when to stop early. */
-export interface WaitingForRuntime {
+interface WaitingForRuntime {
   readonly budgetMs?: number;
   readonly directories?: readonly string[];
   /** Answered on every look. True ends the wait: a game held at a breakpoint is not booting. */
@@ -692,7 +648,7 @@ export async function announcedSince(
   }
 }
 
-export type RuntimeChoice = { endpoint: RuntimeEndpoint } | { problem: string };
+type RuntimeChoice = { endpoint: RuntimeEndpoint } | { problem: string };
 
 function describe(endpoint: RuntimeEndpoint): string {
   return `pid ${endpoint.pid} on ${endpoint.address}:${endpoint.port} (${endpoint.project.name || 'unnamed'} at ${endpoint.project.path})`;
@@ -891,7 +847,7 @@ export function chooseRuntime(
   };
 }
 
-export type RuntimeReply =
+type RuntimeReply =
   | { readonly ok: true; readonly payload: Record<string, unknown>; readonly endpoint: RuntimeEndpoint }
   | {
       readonly ok: false;
@@ -908,7 +864,7 @@ export type RuntimeReply =
  * the request's id for `lateAnswer`. A function is called with the reply when it comes, or with the
  * failure once the late wait ends, for work that has to outlive the wait without being collected.
  */
-export type AfterTheWait = 'drop' | 'keep' | ((reply: RuntimeReply) => void);
+type AfterTheWait = 'drop' | 'keep' | ((reply: RuntimeReply) => void);
 
 let nextRequestId = 1;
 
@@ -925,7 +881,7 @@ const LATE_ANSWER_MS = 30 * 60_000;
 const LATE_KEPT = 50;
 
 /** What became of a request the wait ran out on, kept under its id for `lateAnswer`. */
-export type LateAnswer =
+type LateAnswer =
   | { readonly state: 'waiting'; readonly command: string; readonly sentAt: number }
   | {
       readonly state: 'answered';

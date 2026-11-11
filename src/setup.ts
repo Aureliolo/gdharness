@@ -305,7 +305,7 @@ export function gdUnit4Unusable(projectPath: string): { missing: boolean; reason
   return null;
 }
 
-export interface InstalledAddon {
+interface InstalledAddon {
   readonly name: string;
   readonly path: string;
   readonly replaced: boolean;

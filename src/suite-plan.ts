@@ -278,7 +278,7 @@ export class ProjectScripts {
         }
         if (accessible === true && said === false) {
           throw new Refusal(
-            `${path} declares ${ACCESSIBILITY} true and ${NEEDS_WINDOW} false, and Godot builds the accessibility tree only with a window. Leave ${NEEDS_WINDOW} out, since ${ACCESSIBILITY} gives the suite a window.`,
+            `${path} declares ${ACCESSIBILITY} true and ${NEEDS_WINDOW} false. Godot builds the accessibility tree only with a window. Remove ${NEEDS_WINDOW}, since ${ACCESSIBILITY} already gives the suite one.`,
           );
         }
         return {
@@ -389,7 +389,7 @@ export class ProjectScripts {
 }
 
 /** What one suite cost the last time it ran: the whole of it, and each case. */
-export interface SuiteTime {
+interface SuiteTime {
   /** Its cases and its hooks together, as it costs when it runs whole. */
   readonly seconds: number;
   /** Each case function's own time, the rows of a parameterised one together. */

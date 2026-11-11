@@ -36,7 +36,7 @@ import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { counterpart, pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
 import { alive, exitOf } from '../src/alive.js';
-import { answerJson } from '../src/answer-json.js';
+import { answerJson, type ToolResponse } from '../src/answer-json.js';
 import { scriptsAutoloaded } from '../src/autoload-failure.js';
 import {
   bootNotePath,
@@ -128,7 +128,6 @@ import {
   openTheEditor,
 } from '../src/editor-open.js';
 import {
-  EngineUsageError,
   endingWithRunner,
   heldRunSaid,
   heldToCores,
@@ -207,7 +206,7 @@ import {
   Spent,
   STARVED,
 } from '../src/engine-spent.js';
-import { errorCode, errorMessage, Refusal, toError } from '../src/errors.js';
+import { EngineUsageError, errorCode, errorMessage, Refusal, toError } from '../src/errors.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { FrameReader, OversizedStreamError, frame as wireFrame } from '../src/framing.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
@@ -243,6 +242,7 @@ import {
   withoutTrailingSeparator,
 } from '../src/godot-bridge.js';
 import { GodotLocator, type Located, VERSION_STARTS, versionStartOf } from '../src/godot-path.js';
+import type { GodotProcess } from '../src/godot-process.js';
 import {
   containerTypeOf,
   DebuggerStream,
@@ -387,8 +387,8 @@ import {
   recordRunEnded,
   runningAs,
   runRecordPath,
-  stillTheRecordedRun,
   sweepTranscripts,
+  whyNotStillTheRecordedRun,
   whyNotTheRun,
   writeEditorRunNote,
   writeLatestRun,
@@ -409,14 +409,13 @@ import {
   RUNTIME_PROTOCOL,
   type RuntimeEndpoint,
   reportAlreadyInTranscript,
-  runtimeDirectories,
-  runtimeDirectory,
   runtimeRequest,
   runtimesAnnounced,
   STARTED_AFTER_ANNOUNCING_MS,
   strangersAmong,
   untilJudged,
 } from '../src/runtime-client.js';
+import { runtimeDirectories, runtimeDirectory } from '../src/runtime-directories.js';
 import {
   discard,
   discardWith,
@@ -496,7 +495,6 @@ import {
   writtenBeside,
 } from '../src/server.js';
 import { serverInstructions } from '../src/server-instructions.js';
-import type { GodotProcess, ToolResponse } from '../src/server-types.js';
 import {
   addonMismatch,
   runtimeAddonUnknown,
@@ -19828,7 +19826,7 @@ function testACrashWithNoReportIsAnError(): void {
 
   const violation = entered(0xc0000005, null);
   assert.deepEqual(errorsOf(violation), [
-    'The engine ended with exit code 0xC0000005, an access violation, so it crashed. It printed no crash report.',
+    'The engine ended with exit code 0xC0000005, a crash on an access violation. It printed no crash report.',
   ]);
   enterASilentCrash({ exitCode: 0xc0000005, exitSignal: null, log: violation });
   assert.equal(violation.count('error'), 1, 'entered once, however often a verdict is read');
@@ -19878,7 +19876,7 @@ function testARuntimeCallAfterOurRunEndedSaysSo(): void {
   const crashed = ourRunEnded({ ...base, exitCode: 0xc0000005, endedAt: 10_000 }, 15_000);
   assert.match(
     crashed,
-    /, and it exited by itself with exit code 0xC0000005, an access violation, so it crashed\. editor_output/,
+    /, and it exited by itself with exit code 0xC0000005, a crash on an access violation\. editor_output/,
     crashed,
   );
   const signalled = ourRunEnded({ ...base, exitSignal: 'SIGKILL', endedAt: 10_000 }, 10_000);
@@ -30162,7 +30160,7 @@ async function testAnImportOrExportOverAStaleDocCacheRunsAgain(): Promise<void> 
   const crashed = docCacheCrash(ran(0xc0000005), before, rewritten, 'export') ?? '';
   assert.ok(
     crashed.startsWith(
-      `The first export ended badly (exit code 0xC0000005, an access violation, so it crashed) after rebuilding the editor's class reference cache, ${cache}. `,
+      `The first export ended badly (exit code 0xC0000005, a crash on an access violation) after rebuilding the editor's class reference cache, ${cache}. `,
     ) && crashed.endsWith('So the export was run again, and this answer is from that second run.'),
     crashed || 'a crash that rewrote the cache gave no note',
   );
@@ -37495,9 +37493,9 @@ async function testAnEngineRunSaysHowItEnded(): Promise<void> {
       ended(null),
     ],
     [
-      'exit code 0xC0000005, an access violation, so it crashed',
-      'exit code 0xC00000FD, a stack overflow, so it crashed',
-      'exit code 0xC0000135, a library it needs was not found, so it never started',
+      'exit code 0xC0000005, a crash on an access violation',
+      'exit code 0xC00000FD, a crash on a stack overflow',
+      'exit code 0xC0000135, a start that failed on a missing library',
       'exit code 0xC0000001, a Windows error status',
       'exit code 3221225471',
       'exit code unknown',
@@ -37591,7 +37589,7 @@ async function testAnEngineThatCrashesAsItStartsIsStartedAgain(): Promise<void> 
   assert.deepEqual([always.starts, always.waits], [ENGINE_STARTS, [500, 1000]], 'up to its starts in all');
   assert.equal(
     howItEnded(always.ran),
-    'exit code 0xC06D007F, a procedure it needs was not found, so it never started, and printed nothing on any of its 3 starts',
+    'exit code 0xC06D007F, a start that failed on a missing procedure, and printed nothing on any of its 3 starts',
   );
   const failed = await sequence([run(1, printed('ERROR: no such scene'))]);
   assert.deepEqual(
@@ -49451,6 +49449,9 @@ function testAnExitCodeOutlivesTheServerThatSawIt(): void {
  * fixture that mocked the asking would pass on all three without any of them working.
  */
 async function testAPidIsNotAnIdentity(): Promise<void> {
+  const stillTheRecordedRun = async (
+    record: Parameters<typeof whyNotStillTheRecordedRun>[0],
+  ): Promise<boolean> => (await whyNotStillTheRecordedRun(record)) === null;
   const marker = join(tmpdir(), `gdharness-identity-${process.pid}`);
   // Something that stays up and carries a word of ours on its command line, which is what a real
   // run has: the engine's path and the project it was pointed at.
@@ -54942,15 +54943,15 @@ function testEveryReaderOfTheConsoleKnowsALineAlike(): void {
  */
 function testAWindowsExitStatusIsNamedTheSameEverywhere(): void {
   const statuses: readonly [number, string, string][] = [
-    [0xc0000005, 'STATUS_ACCESS_VIOLATION', 'an access violation, so it crashed'],
-    [0xc00000fd, 'STATUS_STACK_OVERFLOW', 'a stack overflow, so it crashed'],
-    [0xc0000374, 'STATUS_HEAP_CORRUPTION', 'a corrupted heap, so it crashed'],
-    [0xc0000017, 'STATUS_NO_MEMORY', 'no memory left, so it crashed'],
-    [0xc0000142, 'STATUS_DLL_INIT_FAILED', 'a library it needs failed to start, so it never started'],
+    [0xc0000005, 'STATUS_ACCESS_VIOLATION', 'a crash on an access violation'],
+    [0xc00000fd, 'STATUS_STACK_OVERFLOW', 'a crash on a stack overflow'],
+    [0xc0000374, 'STATUS_HEAP_CORRUPTION', 'a crash on a corrupted heap'],
+    [0xc0000017, 'STATUS_NO_MEMORY', 'a crash with no memory left'],
+    [0xc0000142, 'STATUS_DLL_INIT_FAILED', 'a start that failed in a library it needs'],
     [
       0xc06d007e,
       'a module that could not be found (VcppException)',
-      'a module it needs was not found, so it never started',
+      'a start that failed on a missing module',
     ],
   ];
   for (const [code, name, meaning] of statuses) {
@@ -56651,7 +56652,7 @@ function testASuiteAskingForTheAccessibilityTreeGetsAWindowWithItOn(): void {
       (error: unknown) =>
         error instanceof Refusal &&
         error.message ===
-          'res://tests/both_test.gd declares GDHARNESS_ACCESSIBILITY true and GDHARNESS_NEEDS_WINDOW false, and Godot builds the accessibility tree only with a window. Leave GDHARNESS_NEEDS_WINDOW out, since GDHARNESS_ACCESSIBILITY gives the suite a window.',
+          'res://tests/both_test.gd declares GDHARNESS_ACCESSIBILITY true and GDHARNESS_NEEDS_WINDOW false. Godot builds the accessibility tree only with a window. Remove GDHARNESS_NEEDS_WINDOW, since GDHARNESS_ACCESSIBILITY already gives the suite one.',
     );
   } finally {
     rmSync(project, { recursive: true, force: true });
@@ -71468,6 +71469,12 @@ function testTheNearestNamesKeepEveryOneThatOnlyAddsToTheWord(): void {
   );
   assert.deepEqual(nearestNames('a', ['a', 'ab']), ['a'], 'a one-letter word matches only itself');
   assert.deepEqual(nearestNames('menu', []), [], 'no names offer none');
+  // The picks the engine's GdhRead.nearest is held to, so both halves offer the same names.
+  const attacks = Array.from({ length: 300 }, (_, at) => `attack_${String(at).padStart(3, '0')}`);
+  assert.deepEqual(nearestNames('attack', attacks), attacks.slice(0, 12), 'at most twelve are offered');
+  const ties = 'abcdefghijklmnopqrstuvwyz'.split('').map((letter) => `${letter}ab`);
+  assert.deepEqual(nearestNames('xab', ties), ['aab', 'bab', 'cab'], 'equally near names keep their order');
+  assert.deepEqual(nearestNames('xab', ties.toReversed()), ['zab', 'yab', 'wab'], 'whichever it is');
   assert.equal(
     withNearestFiles(
       'Script file does not exist: res://ui/menu.gd',
@@ -75220,6 +75227,94 @@ async function testARenamedClassChangesItsUsesAndLeavesItsWords(): Promise<void>
     assert.match(loud, /# Told, because it is the whole of what Loud says\./, 'the comment keeps its word');
     assert.match(readFileSync(join(project, 'data.tres'), 'utf8'), /script_class="Phrasing"/);
     assert.equal(readFileSync(join(project, 'shadow.gd'), 'utf8'), RENAME_FIXTURE['shadow.gd']);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A class rename leaves a name that does not mean the class: a dictionary key written bare, a
+ * member a script inherits, and a parameter. A call's argument and a list's entry are the class.
+ */
+async function testAClassRenameLeavesKeysInheritedMembersAndParameters(): Promise<void> {
+  const project = renameProject();
+  const files: Record<string, string> = {
+    'keys.gd': [
+      'extends Node',
+      '',
+      'var table := {Told = 1, other = 2}',
+      'var later := {',
+      '\tother = 1,',
+      '\tTold = 2,',
+      '}',
+      'var listed := [1, Told == null]',
+      'var named := str(Told)',
+      '',
+    ].join('\n'),
+    'holder.gd': ['extends Node', '', 'const Told := 7', ''].join('\n'),
+    'heir.gd': ['extends "res://holder.gd"', '', 'func f() -> int:', '\treturn Told + 1', ''].join('\n'),
+    'params.gd': [
+      'extends Node',
+      '',
+      'func h(Told: int) -> int:',
+      '\treturn Told + 1',
+      '',
+      '',
+      'var lam := func(a: int, Told: int) -> int: return a + Told',
+      '',
+    ].join('\n'),
+  };
+  const lineOf = (file: string, needle: string): number =>
+    (files[file] ?? '').split('\n').findIndex((line) => line.includes(needle)) + 1;
+  try {
+    for (const [name, body] of Object.entries(files)) {
+      writeFileSync(join(project, name), body);
+    }
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'told.gd'),
+        symbol: 'Told',
+        newName: 'Phrasing',
+        newScriptPath: null,
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(outcome.ok, `the rename was refused: ${JSON.stringify(outcome)}`);
+    const { changed, left } = renameReadings(outcome.report);
+    const ours = (lines: readonly string[]): string[] =>
+      lines.filter((one) => Object.keys(files).some((file) => one.startsWith(`res://${file}:`)));
+    assert.deepEqual(
+      ours(changed),
+      [`res://keys.gd:${lineOf('keys.gd', 'listed')}`, `res://keys.gd:${lineOf('keys.gd', 'named')}`],
+      'a list entry and a call argument are the class',
+    );
+    const why = (file: string, line: number): string =>
+      asArray(get(outcome.report, 'leftAlone'))
+        .filter((one) => get(one, 'file') === `res://${file}` && get(one, 'line') === line)
+        .map((one) => text(get(one, 'why')))
+        .join(' | ');
+    for (const needle of ['table', '\tTold = 2']) {
+      const line = lineOf('keys.gd', needle);
+      assert.match(
+        why('keys.gd', line),
+        /\{Told = \.\.\.\} writes the string "Told" as a dictionary key, not the class/,
+        `keys.gd:${line}`,
+      );
+    }
+    assert.match(
+      why('heir.gd', 4),
+      /a class this script inherits from declares something named Told/,
+      'an inherited constant is left',
+    );
+    for (const line of [3, 4, 7]) {
+      assert.match(
+        why('params.gd', line),
+        /this script declares something of its own named Told/,
+        `a parameter, a function's or a lambda's, is left: params.gd:${String(line)}`,
+      );
+    }
+    assert.ok(left.includes('res://holder.gd:3:code'), `the constant itself is left: ${left.join(', ')}`);
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -83674,7 +83769,9 @@ async function testAWriteReportsATurnItCouldNotGiveBack(): Promise<void> {
         return Promise.resolve('written');
       }),
       (error: unknown) =>
-        error instanceof Error && error.message.includes(lock) && error.message.includes('given back'),
+        error instanceof Error &&
+        error.message.includes(`lock file ${lock} could not be removed`) &&
+        error.message.includes(`later writes to ${file}`),
       'a turn that cannot be given back is named, with the lock to remove',
     );
     rmSync(lock, { recursive: true, force: true });
@@ -87290,6 +87387,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARescanAsTheEditorOpensFindsNothingMissing,
   testAScriptIsReadTheWayItsTokenizerReadsIt,
   testARenamedClassChangesItsUsesAndLeavesItsWords,
+  testAClassRenameLeavesKeysInheritedMembersAndParameters,
   testALongLineIsQuotedAroundTheName,
   testARenameRefusesANameAlreadyTaken,
   testANameOnEveryObjectIsReadOnlyFromTheEnginesAnswer,

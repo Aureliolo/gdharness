@@ -34,7 +34,7 @@ import {
 } from './rename.js';
 import { parseProjectGodot } from './resources.js';
 
-export interface RenameRequest {
+interface RenameRequest {
   readonly projectPath: string;
   /** The declaring script, absolute. */
   readonly scriptPath: string;
@@ -780,7 +780,7 @@ function quotedAround(text: string, terms: readonly string[]): string {
 }
 
 /** The left-alone lists for the answer, and how many occurrences each holds. */
-export interface LeftAlone {
+interface LeftAlone {
   readonly lists: Record<string, unknown>;
   readonly detail: LeftAloneDetail | null;
   readonly counts: { readonly quoted: number; readonly inProse: number; readonly otherSymbols: number };

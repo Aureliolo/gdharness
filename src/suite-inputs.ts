@@ -109,7 +109,7 @@ interface Read {
 }
 
 /** What an engine recorded for one suite. */
-export interface SuiteReached {
+interface SuiteReached {
   /** Loaded before the engine's first suite was handed to the runner: the autoloads and theirs. */
   readonly autoloads: readonly string[];
   /** Asked for while the suite ran, and compiled then without a loader being asked. */
@@ -924,7 +924,7 @@ interface Unfollowed {
 }
 
 /** A script whose reads make every suite reaching it depend on every file. */
-export interface WholeTreeRead extends Unfollowed {
+interface WholeTreeRead extends Unfollowed {
   readonly path: string;
   readonly suites: number;
 }

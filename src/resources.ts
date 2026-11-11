@@ -5,7 +5,7 @@ import { emptyRecord } from './dictionary.js';
 import { Refusal } from './errors.js';
 import { isWithinRoot, resolveWithinProject } from './paths.js';
 import { projectFiles } from './project-scan.js';
-import type { ProtocolServer } from './server-types.js';
+import type { ProtocolServer } from './prompts.js';
 
 const STATIC_RESOURCES = [
   {

@@ -82,7 +82,7 @@ interface SelectedTest {
   readonly test: string;
 }
 
-export interface TestSelection {
+interface TestSelection {
   /** The suite files to add, as res:// paths. */
   readonly suites: readonly string[];
   /** The cases of those suites to leave out, as gdUnit4's `res://suite.gd:test_name`. */

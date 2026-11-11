@@ -82,7 +82,7 @@ const MAX_RETRY_MS = 60 * 60 * 1000;
 /** Semantic versions only: anything else is a registry answering something this cannot judge. */
 const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
-export interface UpdateNotice {
+interface UpdateNotice {
   readonly current: string;
   readonly latest: string;
   readonly releaseNotes: string;
