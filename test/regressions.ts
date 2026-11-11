@@ -49758,6 +49758,69 @@ async function testAnotherRunsExitIsNotThisRuns(): Promise<void> {
 }
 
 /**
+ * A server waiting for its run's exit does not wait on a later run's keeper or search.
+ *
+ * Run B takes the note over with the pid of run A, and says it is still looking for a successor or
+ * names a keeper that is alive. Both extend the wait for an exit to as long as a search takes, and
+ * run A's wait would take them for its own.
+ */
+async function testALaterRunsKeeperIsNotWaitedFor(): Promise<void> {
+  const ended: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  assert.ok(ended.pid > 0, 'the fixture needs a process that has been and gone');
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-later-keeper-'));
+  const project = join(runtimeDir, 'project');
+  const runs = join(runtimeDir, 'runs');
+  mkdirSync(runs, { recursive: true });
+  const where = runRecordPath(project, runtimeDir);
+  try {
+    const startedAt = Date.now() - 10_000;
+    const noteA = {
+      pid: ended.pid,
+      transcript: join(runs, 'run-1.log'),
+      startedAt,
+      startedBy: startedAt,
+      projectPath: project,
+      arguments: ['--headless', '--path', project],
+      command: process.execPath,
+    };
+    writeFileSync(noteA.transcript, 'run A\n');
+    writeFileSync(join(runs, 'run-2.log'), 'run B\n');
+    // This process is the live keeper of run B.
+    const later = [
+      { name: 'still looking for a successor', extra: () => ({ endingAt: Date.now() }) },
+      { name: 'a keeper that is alive', extra: () => ({ keeperPid: process.pid }) },
+    ];
+    for (const one of later) {
+      writeFileSync(where, JSON.stringify(noteA), 'utf8');
+      await withStdioServer(
+        async (call) => {
+          const answered = delay(1_000).then(() => {
+            writeFileSync(
+              where,
+              JSON.stringify({ ...noteA, transcript: join(runs, 'run-2.log'), ...one.extra() }),
+              'utf8',
+            );
+          });
+          const asked = Date.now();
+          const output: unknown = jsonOf(await call('editor_output', {}), 'editor_output');
+          const took = Date.now() - asked;
+          await answered;
+          assert.deepEqual(
+            [get(output, 'running'), get(output, 'endedUnwatched')],
+            [false, true],
+            `run A is settled as ended with nothing recorded, ${one.name} in run B: ${JSON.stringify(output)}`,
+          );
+          assert.ok(took < 10_000, `without waiting on run B, ${one.name}: ${String(took)}ms`);
+        },
+        { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+      );
+    }
+  } finally {
+    sweep(runtimeDir);
+  }
+}
+
+/**
  * A sweep keeps the files a note names however the note and the listing spell the folder.
  *
  * The note's paths and the folder's entries were compared as text, so a runtime folder spelt in
@@ -49769,7 +49832,8 @@ function testASweepKeepsWhatANoteNamesUnderAnySpelling(): void {
   try {
     const project = join(scratch, 'project');
     const threeDays = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
-    const sweepFrom = (spelling: string, real: string): void => {
+    // The runtime folder is read as [spelling], and the note names its files as [named] spells them.
+    const sweepFrom = (spelling: string, real: string, named = real): void => {
       const runs = join(real, 'runs');
       mkdirSync(runs, { recursive: true });
       const transcript = join(runs, 'run-1.log');
@@ -49780,13 +49844,14 @@ function testASweepKeepsWhatANoteNamesUnderAnySpelling(): void {
         utimesSync(file, threeDays, threeDays);
       }
       process.env['GDHARNESS_RUNTIME_DIR'] = spelling;
+      const noted = join(named, 'runs', 'run-1.log');
       writeRunRecord({
         pid: 4242,
-        transcript,
+        transcript: noted,
         startedAt: Date.now(),
         startedBy: Date.now(),
         projectPath: project,
-        profile,
+        profile: profilePath(noted),
         arguments: [],
         command: 'godot',
       });
@@ -49794,7 +49859,7 @@ function testASweepKeepsWhatANoteNamesUnderAnySpelling(): void {
       assert.deepEqual(
         [existsSync(transcript), existsSync(profile), existsSync(stray)],
         [true, true, false],
-        `the files a note names are kept and a stray one is swept, through ${spelling}`,
+        `the files a note names are kept and a stray one is swept, through ${spelling} named as ${named}`,
       );
     };
     const flipped = (path: string): string => {
@@ -49805,6 +49870,9 @@ function testASweepKeepsWhatANoteNamesUnderAnySpelling(): void {
     mkdirSync(respelt);
     if (process.platform === 'win32') {
       sweepFrom(flipped(respelt), respelt);
+      const named = join(scratch, 'named');
+      mkdirSync(named);
+      sweepFrom(named, named, flipped(named));
     } else {
       console.log('respelt drive letter case skipped (Windows only)');
     }
@@ -49813,6 +49881,11 @@ function testASweepKeepsWhatANoteNamesUnderAnySpelling(): void {
     const link = join(scratch, 'link');
     symlinkSync(real, link, 'junction');
     sweepFrom(link, real);
+    const read = join(scratch, 'read');
+    mkdirSync(read);
+    const through = join(scratch, 'through');
+    symlinkSync(read, through, 'junction');
+    sweepFrom(read, read, through);
   } finally {
     if (had === undefined) {
       delete process.env['GDHARNESS_RUNTIME_DIR'];
@@ -88323,6 +88396,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeeperLeavesALaterRunsNoteAlone,
   testAnEndingGoesToItsOwnRunAlone,
   testAnotherRunsExitIsNotThisRuns,
+  testALaterRunsKeeperIsNotWaitedFor,
   testASweepKeepsWhatANoteNamesUnderAnySpelling,
   testRunNotesAreKeptPerProject,
   testTwoRunsStartedInOneMillisecondKeepTheirOwnFiles,
