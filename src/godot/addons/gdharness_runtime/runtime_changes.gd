@@ -544,9 +544,9 @@ func call_method(params: Dictionary) -> Dictionary:
 	# A method that awaits hands back its state at the first await and its value only when it ends,
 	# so the answer waits for the value. One that takes longer than the server waits is collected by
 	# its requestId like any slow call.
-	var state: Object = _awaiting(result)
-	var awaited: bool = state != null
+	var awaited: bool = _awaiting(result)
 	if awaited:
+		var state: Object = result
 		result = await Signal(state, &"completed")
 	var elapsed: int = Time.get_ticks_usec() - began
 
@@ -576,14 +576,13 @@ func call_method(params: Dictionary) -> Dictionary:
 	return answer
 
 
-## The state a method that awaits handed back as [param result], or null for any other result.
-static func _awaiting(result: Variant) -> Object:
+## Whether [param result] is the state a method that awaits hands back. It answers a flag, since
+## the engine refuses a script function that returns the state itself.
+static func _awaiting(result: Variant) -> bool:
 	if not result is Object:
-		return null
+		return false
 	var state: Object = result
-	if state == null or state.get_class() != "GDScriptFunctionState":
-		return null
-	return state
+	return state != null and state.get_class() == "GDScriptFunctionState"
 
 
 ## Why [param named] on [param holder] is not a method to call, or "" when it is one. The method a
