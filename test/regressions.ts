@@ -50952,6 +50952,29 @@ async function testAPidIsNotAnIdentity(): Promise<void> {
       `this platform should say when pid ${pid} started; it said ${String(began)}`,
     );
 
+    // macOS's ps prints lstart in the words of the caller's locale, which Date.parse cannot read.
+    const locale = { all: process.env['LC_ALL'], lang: process.env['LANG'] };
+    process.env['LC_ALL'] = 'de_DE.UTF-8';
+    process.env['LANG'] = 'de_DE.UTF-8';
+    try {
+      assert.equal(
+        (await runningAs(pid))?.startedAt,
+        began,
+        'and says it the same way under a locale whose dates are not in English',
+      );
+    } finally {
+      for (const [name, value] of [
+        ['LC_ALL', locale.all],
+        ['LANG', locale.lang],
+      ] as const) {
+        if (value === undefined) {
+          delete process.env[name];
+        } else {
+          process.env[name] = value;
+        }
+      }
+    }
+
     assert.equal(
       await stillTheRecordedRun(record),
       true,

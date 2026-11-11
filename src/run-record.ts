@@ -27,7 +27,7 @@ import { mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync } from
 import { basename, join, resolve } from 'node:path';
 import { errorCode, errorMessage } from './errors.js';
 import { isSameDirectory, realAsFarAsItExists } from './paths.js';
-import { type CommandLineRead, linuxStartTimes, readCommandLine } from './process-children.js';
+import { type CommandLineRead, readCommandLine, startTimesOf } from './process-children.js';
 import { askProcessTable } from './process-table.js';
 import { isRecord } from './records.js';
 import { STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
@@ -715,18 +715,7 @@ async function processStartOf(pid: number, windowsAnswer: string | null): Promis
     const when = first === '' ? Number.NaN : Number(first);
     return Number.isInteger(when) && when > 0 ? when : null;
   }
-  if (process.platform === 'linux') {
-    return (await linuxStartTimes([pid])).get(pid) ?? null;
-  }
-  try {
-    const said = (
-      await runHidden('ps', ['-p', String(pid), '-o', 'lstart='], { timeout: 15_000 })
-    ).stdout.trim();
-    const when = Date.parse(said);
-    return said === '' || Number.isNaN(when) ? null : when;
-  } catch {
-    return null;
-  }
+  return (await startTimesOf([pid])).get(pid) ?? null;
 }
 
 /** The executable's name alone, from the one tool every Windows has, or why it did not give one. */
