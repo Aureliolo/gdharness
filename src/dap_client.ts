@@ -154,6 +154,20 @@ interface ToolArgs {
   expression?: unknown;
 }
 
+// Refused rather than answered empty: no scopes is what a frame with nothing in it says, and a
+// frame that is not there has not been read at all.
+function frameToRead(frames: DAPArrayItem[], frameId: number | undefined): DAPArrayItem {
+  const stackFrame = frameId === undefined ? frames[0] : frames.find((each) => each['id'] === frameId);
+  if (stackFrame !== undefined) {
+    return stackFrame;
+  }
+  throw new ReadRefusal(
+    frames.length === 0
+      ? 'The adapter gave no stack, so there is no frame to read variables from'
+      : `The stack the adapter gives now has no frame ${String(frameId)}. Its frames are ${frames.map((each) => String(each['id'])).join(', ')}. Read the stack again for the frames the game is at now`,
+  );
+}
+
 export class GodotDAPClient {
   private socket: Socket | null = null;
   private connected = false;
@@ -249,30 +263,7 @@ export class GodotDAPClient {
         this.reader = new FrameReader();
 
         socket.on('data', (chunk: Buffer) => {
-          let frames: ReturnType<FrameReader['push']>;
-          try {
-            frames = this.reader.push(chunk);
-          } catch (error) {
-            if (error instanceof OversizedStreamError) {
-              this.failOversizedStream(error.message);
-              return;
-            }
-            throw error;
-          }
-          for (const received of frames) {
-            if (received.kind === 'malformed') {
-              console.error(
-                `[GodotDAP] Discarding a ${received.byteLength} byte message that is not JSON: ${received.reason}`,
-              );
-              continue;
-            }
-            const message = receivedMessageOf(received.value);
-            if (message === null) {
-              console.error('[GodotDAP] Discarding a message that is not a request, a response or an event');
-              continue;
-            }
-            this.handleMessage(message);
-          }
+          this.receiveChunk(chunk);
         });
 
         socket.on('error', (error: Error) => {
@@ -298,6 +289,40 @@ export class GodotDAPClient {
       socket.once('connect', handleConnect);
       socket.once('error', handleError);
     });
+  }
+
+  private receiveChunk(chunk: Buffer): void {
+    const frames = this.framesOf(chunk);
+    if (frames === null) {
+      return;
+    }
+    for (const received of frames) {
+      if (received.kind === 'malformed') {
+        console.error(
+          `[GodotDAP] Discarding a ${received.byteLength} byte message that is not JSON: ${received.reason}`,
+        );
+        continue;
+      }
+      const message = receivedMessageOf(received.value);
+      if (message === null) {
+        console.error('[GodotDAP] Discarding a message that is not a request, a response or an event');
+        continue;
+      }
+      this.handleMessage(message);
+    }
+  }
+
+  /** The frames a chunk completes, or null when the stream was oversized and has been failed. */
+  private framesOf(chunk: Buffer): ReturnType<FrameReader['push']> | null {
+    try {
+      return this.reader.push(chunk);
+    } catch (error) {
+      if (error instanceof OversizedStreamError) {
+        this.failOversizedStream(error.message);
+        return null;
+      }
+      throw error;
+    }
   }
 
   /**
@@ -429,102 +454,120 @@ export class GodotDAPClient {
   }
 
   private handleEvent(event: ReceivedMessage): void {
-    const eventName = event.event;
-    if (eventName === 'output') {
-      const body = event.body;
-      const outputText = typeof body?.['output'] === 'string' ? body['output'] : '';
-
-      if (outputText.length > 0) {
-        const lines = outputText.split(/\r?\n/).filter((line: string) => line.length > 0);
-        this.outputBuffer.push(...lines);
-        // Handed on as it arrives, as well as buffered for whoever polls. The buffer is pulled,
-        // so anything built on it only advances when somebody asks, and a file written that way
-        // cannot be tailed: measured downstream, an editor-played run's transcript sat at 411
-        // bytes for a minute of a live run and grew the instant a poll was made. A watch on a file
-        // that only moves when polled makes the watcher do the thing the watch replaces.
-        if (this.onOutput !== null) {
-          for (const line of lines) {
-            try {
-              this.onOutput(line);
-            } catch {
-              // A sink that throws is the caller's problem and must not cost the buffer its line.
-            }
-          }
-        }
-      }
-
-      if (this.outputBuffer.length > this.maxOutputLines) {
-        this.outputDropped += this.outputBuffer.length - this.maxOutputLines;
-        this.outputBuffer = this.outputBuffer.slice(this.outputBuffer.length - this.maxOutputLines);
-      }
-      return;
-    }
-
-    if (eventName === 'stopped') {
-      const body = event.body;
-      const threadId = body?.['threadId'];
-      if (typeof threadId === 'number') {
-        this.lastThreadId = threadId;
-      }
-      this.halt = {
-        reason: said(body, 'reason'),
-        description: said(body, 'description'),
-        text: said(body, 'text'),
-      };
-      this.holdKnown = true;
-      this.stops += 1;
-      return;
-    }
-
-    // Sent to every connection when the game is let go, whoever let it go: measured on 4.7.2
-    // with a second client sending `continue` while the session that had been told of the stop
-    // looked on, and the editor's own debugger resumes the game through the same path. Without
-    // this that session went on answering held about a game that was running, since the one other
-    // thing that cleared it was its own `continue` request.
-    if (eventName === 'continued') {
-      this.halt = null;
-      this.holdKnown = true;
-      return;
-    }
-
-    // A breakpoint toggled anywhere, by anybody: the editor's gutter, another client, or this
-    // side's own request echoed back. With syncing on, a session opening is told the whole set
-    // this way. What is removed by somebody else is not held here either, since the alternative
-    // is putting a breakpoint back that the user just clicked off.
-    if (eventName === 'breakpoint') {
-      const body = event.body;
-      const breakpoint = body?.['breakpoint'];
-      const source = isRecord(breakpoint) ? breakpoint['source'] : undefined;
-      const path = isRecord(source) ? source['path'] : undefined;
-      const line = isRecord(breakpoint) ? breakpoint['line'] : undefined;
-      if (typeof path !== 'string' || typeof line !== 'number') {
+    switch (event.event ?? '') {
+      case 'output':
+        this.handleOutputEvent(event);
         return;
-      }
-      const key = fileKey(path);
-      if (!this.spelled.has(key)) {
-        this.spelled.set(key, path);
-      }
-      if (said(body, 'reason') === 'removed') {
-        this.inEditor.get(key)?.delete(line);
-        const held = this.breakpoints.get(key);
-        if (held?.delete(line) === true) {
-          if (held.size === 0) {
-            this.breakpoints.delete(key);
-          }
-          this.onBreakpointsChanged?.(this.breakpointsHeld());
-        }
+      case 'stopped':
+        this.handleStoppedEvent(event);
         return;
-      }
-      const known = this.inEditor.get(key) ?? new Set<number>();
-      known.add(line);
-      this.inEditor.set(key, known);
-      return;
+      case 'continued':
+        // Sent to every connection when the game is let go, whoever let it go: measured on 4.7.2
+        // with a second client sending `continue` while the session that had been told of the stop
+        // looked on, and the editor's own debugger resumes the game through the same path. Without
+        // this that session went on answering held about a game that was running, since the one other
+        // thing that cleared it was its own `continue` request.
+        this.halt = null;
+        this.holdKnown = true;
+        return;
+      case 'breakpoint':
+        this.handleBreakpointEvent(event);
+        return;
+      case 'terminated':
+      case 'exited':
+        this.attached = false;
+        this.halt = null;
+        return;
+      default:
+        break;
+    }
+  }
+
+  private handleOutputEvent(event: ReceivedMessage): void {
+    const body = event.body;
+    const outputText = typeof body?.['output'] === 'string' ? body['output'] : '';
+
+    if (outputText.length > 0) {
+      const lines = outputText.split(/\r?\n/).filter((line: string) => line.length > 0);
+      this.outputBuffer.push(...lines);
+      // Handed on as it arrives, as well as buffered for whoever polls. The buffer is pulled,
+      // so anything built on it only advances when somebody asks, and a file written that way
+      // cannot be tailed: measured downstream, an editor-played run's transcript sat at 411
+      // bytes for a minute of a live run and grew the instant a poll was made. A watch on a file
+      // that only moves when polled makes the watcher do the thing the watch replaces.
+      this.passOutputOn(lines);
     }
 
-    if (eventName === 'terminated' || eventName === 'exited') {
-      this.attached = false;
-      this.halt = null;
+    if (this.outputBuffer.length > this.maxOutputLines) {
+      this.outputDropped += this.outputBuffer.length - this.maxOutputLines;
+      this.outputBuffer = this.outputBuffer.slice(this.outputBuffer.length - this.maxOutputLines);
     }
+  }
+
+  private passOutputOn(lines: readonly string[]): void {
+    if (this.onOutput === null) {
+      return;
+    }
+    for (const line of lines) {
+      try {
+        this.onOutput(line);
+      } catch {
+        // A sink that throws is the caller's problem and must not cost the buffer its line.
+      }
+    }
+  }
+
+  private handleStoppedEvent(event: ReceivedMessage): void {
+    const body = event.body;
+    const threadId = body?.['threadId'];
+    if (typeof threadId === 'number') {
+      this.lastThreadId = threadId;
+    }
+    this.halt = {
+      reason: said(body, 'reason'),
+      description: said(body, 'description'),
+      text: said(body, 'text'),
+    };
+    this.holdKnown = true;
+    this.stops += 1;
+  }
+
+  // A breakpoint toggled anywhere, by anybody: the editor's gutter, another client, or this
+  // side's own request echoed back. With syncing on, a session opening is told the whole set
+  // this way. What is removed by somebody else is not held here either, since the alternative
+  // is putting a breakpoint back that the user just clicked off.
+  private handleBreakpointEvent(event: ReceivedMessage): void {
+    const body = event.body;
+    const breakpoint = body?.['breakpoint'];
+    const source = isRecord(breakpoint) ? breakpoint['source'] : undefined;
+    const path = isRecord(source) ? source['path'] : undefined;
+    const line = isRecord(breakpoint) ? breakpoint['line'] : undefined;
+    if (typeof path !== 'string' || typeof line !== 'number') {
+      return;
+    }
+    const key = fileKey(path);
+    if (!this.spelled.has(key)) {
+      this.spelled.set(key, path);
+    }
+    if (said(body, 'reason') === 'removed') {
+      this.forgetBreakpointHeld(key, line);
+      return;
+    }
+    const known = this.inEditor.get(key) ?? new Set<number>();
+    known.add(line);
+    this.inEditor.set(key, known);
+  }
+
+  private forgetBreakpointHeld(key: string, line: number): void {
+    this.inEditor.get(key)?.delete(line);
+    const held = this.breakpoints.get(key);
+    if (held?.delete(line) !== true) {
+      return;
+    }
+    if (held.size === 0) {
+      this.breakpoints.delete(key);
+    }
+    this.onBreakpointsChanged?.(this.breakpointsHeld());
   }
 
   async initialize(): Promise<DAPBody> {
@@ -918,19 +961,25 @@ export class GodotDAPClient {
     deadline: number,
   ): Promise<DAPArrayItem[] | null> {
     while (Date.now() < deadline) {
-      try {
-        const answered = (
-          await this.sendRequest('variables', { variablesReference }, VARIABLES_POLL_TIMEOUT_MS)
-        )['variables'];
-        if (Array.isArray(answered)) {
-          return answered.filter(isRecord);
-        }
-      } catch {
-        // Refused or unanswered: the dump is still coming.
+      const variables = await this.askForVariables(variablesReference);
+      if (variables !== null) {
+        return variables;
       }
       await delay(200);
     }
     return null;
+  }
+
+  private async askForVariables(variablesReference: number): Promise<DAPArrayItem[] | null> {
+    try {
+      const answered = (
+        await this.sendRequest('variables', { variablesReference }, VARIABLES_POLL_TIMEOUT_MS)
+      )['variables'];
+      return Array.isArray(answered) ? answered.filter(isRecord) : null;
+    } catch {
+      // Refused or unanswered: the dump is still coming.
+      return null;
+    }
   }
 
   /**
@@ -949,32 +998,10 @@ export class GodotDAPClient {
     this.refuseUnreadable();
     await this.attach();
     const frames = await this.getStackTrace();
-    const stackFrame = frameId === undefined ? frames[0] : frames.find((each) => each['id'] === frameId);
-    // Refused rather than answered empty: no scopes is what a frame with nothing in it says, and a
-    // frame that is not there has not been read at all.
-    if (stackFrame === undefined) {
-      throw new ReadRefusal(
-        frames.length === 0
-          ? 'The adapter gave no stack, so there is no frame to read variables from'
-          : `The stack the adapter gives now has no frame ${String(frameId)}. Its frames are ${frames.map((each) => String(each['id'])).join(', ')}. Read the stack again for the frames the game is at now`,
-      );
-    }
+    const stackFrame = frameToRead(frames, frameId);
 
     const deadline = Date.now() + this.scopesPatienceMs;
-    let scopes: DAPArrayItem[] = [];
-    while (scopes.length === 0 && Date.now() < deadline) {
-      try {
-        const answered = (await this.sendRequest('scopes', { frameId: stackFrame['id'] }))['scopes'];
-        const listed = Array.isArray(answered) ? answered.filter(isRecord) : [];
-        if (listed.length > 0) {
-          scopes = listed;
-          break;
-        }
-      } catch {
-        // "unknown", which is what a half-filled frame answers. Asking again is the whole fix.
-      }
-      await delay(200);
-    }
+    const scopes = await this.scopesWhenReady(stackFrame['id'], deadline);
     if (scopes.length === 0) {
       throw new ReadRefusal(
         `The scopes of frame ${String(stackFrame['id'])} did not arrive from the game within ${this.scopesPatienceMs / 1000}s. They come from the game through the editor, so a busy machine can take longer: ask again`,
@@ -993,6 +1020,23 @@ export class GodotDAPClient {
       });
     }
     return named;
+  }
+
+  /** The scopes of a frame once listed, or none when the deadline passes first. */
+  private async scopesWhenReady(frameId: unknown, deadline: number): Promise<DAPArrayItem[]> {
+    while (Date.now() < deadline) {
+      try {
+        const answered = (await this.sendRequest('scopes', { frameId }))['scopes'];
+        const listed = Array.isArray(answered) ? answered.filter(isRecord) : [];
+        if (listed.length > 0) {
+          return listed;
+        }
+      } catch {
+        // "unknown", which is what a half-filled frame answers. Asking again is the whole fix.
+      }
+      await delay(200);
+    }
+    return [];
   }
 
   /**
@@ -1135,6 +1179,125 @@ export class GodotDAPClient {
   }
 }
 
+type DAPToolHandler = (client: GodotDAPClient, args: ToolArgs, toolName: string) => Promise<ToolResponse>;
+
+function textResponse(text: string): ToolResponse {
+  return { content: [{ type: 'text', text }] };
+}
+
+function frameIdOf(args: ToolArgs): number | undefined {
+  return typeof args.frameId === 'number' ? args.frameId : undefined;
+}
+
+function breakpointTarget(args: ToolArgs, toolName: string): { scriptPath: string; line: number } {
+  if (typeof args.scriptPath !== 'string' || typeof args.line !== 'number') {
+    throw new Refusal(`${toolName} requires { scriptPath: string, line: number }`);
+  }
+  return { scriptPath: args.scriptPath, line: args.line };
+}
+
+async function stepAnswer(client: GodotDAPClient, toolName: string): Promise<ToolResponse> {
+  const heldAgain = await client.step(toolName === 'dap_step_into' ? 'stepIn' : 'next');
+  const answer = heldAgain
+    ? { stepped: true, heldAgain, stack: await client.getStackTrace() }
+    : {
+        stepped: true,
+        heldAgain,
+        note: `The game had not stopped again ${client.stepPatienceMs / 1000}s after the step: the step is still running, it went on without stopping anywhere, or the game was not held when it was asked. debug_state stack answers once it stops.`,
+      };
+  return textResponse(answerJson(answer));
+}
+
+async function variablesAnswer(client: GodotDAPClient, args: ToolArgs): Promise<ToolResponse> {
+  const scopes = await client.getScopes(frameIdOf(args));
+  const missing = scopes.filter((scope) => scope.variables === null).map((scope) => scope.name);
+  const answer =
+    missing.length === 0
+      ? { scopes }
+      : {
+          scopes,
+          valuesMissing: missing,
+          note: `The values of ${missing.join(', ')} did not arrive from the game within ${client.scopesPatienceMs / 1000}s, so they are unknown rather than empty. Ask again.`,
+        };
+  return textResponse(answerJson(answer));
+}
+
+async function evaluateAnswer(client: GodotDAPClient, args: ToolArgs): Promise<ToolResponse> {
+  const expression = typeof args.expression === 'string' ? args.expression : '';
+  const evaluated = await client.evaluate(expression, frameIdOf(args));
+  // The engine says why an expression failed in an error the editor's debugger shows and the
+  // adapter never passes on, so a failure and a null value answer alike here.
+  const nil = evaluated.type === 'Nil' || evaluated.value === 'null' || evaluated.value === '<null>';
+  return textResponse(
+    answerJson({
+      frame: evaluated.frame,
+      expression,
+      value: evaluated.value,
+      ...(evaluated.type === undefined ? {} : { type: evaluated.type }),
+      ...(nil
+        ? {
+            note: "null is also what an expression comes to when it does not parse or fails as it runs. For a game the editor plays, why reaches only the editor's Debugger panel, so this cannot say which it was.",
+          }
+        : {}),
+    }),
+  );
+}
+
+const DAP_TOOL_HANDLERS = new Map<string, DAPToolHandler>([
+  // JSON like every other answer: a caller that reads one tool with a parser should not
+  // have to read this one with a regex.
+  [
+    'dap_get_output',
+    (client) => Promise.resolve(textResponse(JSON.stringify(client.outputSoFar(), null, 2))),
+  ],
+  [
+    'dap_set_breakpoint',
+    async (client, args, toolName) => {
+      const target = breakpointTarget(args, toolName);
+      return textResponse(answerJson(await client.setBreakpoint(target.scriptPath, target.line)));
+    },
+  ],
+  [
+    'dap_remove_breakpoint',
+    async (client, args, toolName) => {
+      const target = breakpointTarget(args, toolName);
+      return textResponse(answerJson(await client.removeBreakpoint(target.scriptPath, target.line)));
+    },
+  ],
+  // JSON like every other answer, and with the stack after the step rather than a sentence
+  // about it: where the game is now is the thing the next call is decided on.
+  [
+    'dap_continue',
+    async (client) => {
+      await client.continue();
+      return textResponse(JSON.stringify({ continued: true }, null, 2));
+    },
+  ],
+  ['dap_step_over', (client, _args, toolName) => stepAnswer(client, toolName)],
+  ['dap_step_into', (client, _args, toolName) => stepAnswer(client, toolName)],
+  [
+    'dap_get_stack_trace',
+    async (client) => {
+      return textResponse(answerJson(await client.getStackTrace()));
+    },
+  ],
+  ['dap_get_variables', (client, args) => variablesAnswer(client, args)],
+  ['dap_evaluate', (client, args) => evaluateAnswer(client, args)],
+]);
+
+// A breakpoint is set on the editor's adapter with no game running, so a refusal there is
+// about the editor or the file and never about a game: "start one with editor_run" sent a
+// caller whose script the adapter could not find to start a game that would not have helped.
+function refusalCure(error: unknown, toolName: string): string {
+  if (error instanceof ReadRefusal) {
+    return '';
+  }
+  if (toolName === 'dap_set_breakpoint' || toolName === 'dap_remove_breakpoint') {
+    return 'Breakpoints need the editor open, not a running game: editor_status says whether one is connected, and the path is the script as the project spells it.';
+  }
+  return 'The debug tools answer for a game the editor is playing: start one with editor_run.';
+}
+
 export async function handleDAPTool(
   client: GodotDAPClient,
   toolName: string,
@@ -1143,124 +1306,16 @@ export async function handleDAPTool(
   const safeArgs: ToolArgs = args && typeof args === 'object' ? args : {};
 
   try {
-    switch (toolName) {
-      // JSON like every other answer: a caller that reads one tool with a parser should not
-      // have to read this one with a regex.
-      case 'dap_get_output': {
-        return {
-          content: [{ type: 'text', text: JSON.stringify(client.outputSoFar(), null, 2) }],
-        };
-      }
-
-      case 'dap_set_breakpoint': {
-        if (typeof safeArgs.scriptPath !== 'string' || typeof safeArgs.line !== 'number') {
-          throw new Refusal('dap_set_breakpoint requires { scriptPath: string, line: number }');
-        }
-
-        const result = await client.setBreakpoint(safeArgs.scriptPath, safeArgs.line);
-        return {
-          content: [{ type: 'text', text: answerJson(result) }],
-        };
-      }
-
-      case 'dap_remove_breakpoint': {
-        if (typeof safeArgs.scriptPath !== 'string' || typeof safeArgs.line !== 'number') {
-          throw new Refusal('dap_remove_breakpoint requires { scriptPath: string, line: number }');
-        }
-
-        const result = await client.removeBreakpoint(safeArgs.scriptPath, safeArgs.line);
-        return {
-          content: [{ type: 'text', text: answerJson(result) }],
-        };
-      }
-
-      // JSON like every other answer, and with the stack after the step rather than a sentence
-      // about it: where the game is now is the thing the next call is decided on.
-      case 'dap_continue': {
-        await client.continue();
-        return { content: [{ type: 'text', text: JSON.stringify({ continued: true }, null, 2) }] };
-      }
-
-      case 'dap_step_over':
-      case 'dap_step_into': {
-        const heldAgain = await client.step(toolName === 'dap_step_into' ? 'stepIn' : 'next');
-        const answer = heldAgain
-          ? { stepped: true, heldAgain, stack: await client.getStackTrace() }
-          : {
-              stepped: true,
-              heldAgain,
-              note: `The game had not stopped again ${client.stepPatienceMs / 1000}s after the step: the step is still running, it went on without stopping anywhere, or the game was not held when it was asked. debug_state stack answers once it stops.`,
-            };
-        return { content: [{ type: 'text', text: answerJson(answer) }] };
-      }
-
-      case 'dap_get_stack_trace': {
-        const stack = await client.getStackTrace();
-        return {
-          content: [{ type: 'text', text: answerJson(stack) }],
-        };
-      }
-
-      case 'dap_get_variables': {
-        const frameId = typeof safeArgs.frameId === 'number' ? safeArgs.frameId : undefined;
-        const scopes = await client.getScopes(frameId);
-        const missing = scopes.filter((scope) => scope.variables === null).map((scope) => scope.name);
-        const answer =
-          missing.length === 0
-            ? { scopes }
-            : {
-                scopes,
-                valuesMissing: missing,
-                note: `The values of ${missing.join(', ')} did not arrive from the game within ${client.scopesPatienceMs / 1000}s, so they are unknown rather than empty. Ask again.`,
-              };
-        return {
-          content: [{ type: 'text', text: answerJson(answer) }],
-        };
-      }
-
-      case 'dap_evaluate': {
-        const frameId = typeof safeArgs.frameId === 'number' ? safeArgs.frameId : undefined;
-        const expression = typeof safeArgs.expression === 'string' ? safeArgs.expression : '';
-        const evaluated = await client.evaluate(expression, frameId);
-        // The engine says why an expression failed in an error the editor's debugger shows and the
-        // adapter never passes on, so a failure and a null value answer alike here.
-        const nil = evaluated.type === 'Nil' || evaluated.value === 'null' || evaluated.value === '<null>';
-        return {
-          content: [
-            {
-              type: 'text',
-              text: answerJson({
-                frame: evaluated.frame,
-                expression,
-                value: evaluated.value,
-                ...(evaluated.type === undefined ? {} : { type: evaluated.type }),
-                ...(nil
-                  ? {
-                      note: "null is also what an expression comes to when it does not parse or fails as it runs. For a game the editor plays, why reaches only the editor's Debugger panel, so this cannot say which it was.",
-                    }
-                  : {}),
-              }),
-            },
-          ],
-        };
-      }
-
-      default:
-        // Not a refusal: the caller never names a DAP tool, this server does, so one it does not
-        // know is a routing table that disagrees with itself.
-        throw new Error(`Unknown DAP tool: ${toolName}`);
+    const handler = DAP_TOOL_HANDLERS.get(toolName);
+    if (handler === undefined) {
+      // Not a refusal: the caller never names a DAP tool, this server does, so one it does not
+      // know is a routing table that disagrees with itself.
+      throw new Error(`Unknown DAP tool: ${toolName}`);
     }
+    return await handler(client, safeArgs, toolName);
   } catch (error) {
     const message = errorMessage(error);
-    // A breakpoint is set on the editor's adapter with no game running, so a refusal there is
-    // about the editor or the file and never about a game: "start one with editor_run" sent a
-    // caller whose script the adapter could not find to start a game that would not have helped.
-    const cure =
-      error instanceof ReadRefusal
-        ? ''
-        : toolName === 'dap_set_breakpoint' || toolName === 'dap_remove_breakpoint'
-          ? 'Breakpoints need the editor open, not a running game: editor_status says whether one is connected, and the path is the script as the project spells it.'
-          : 'The debug tools answer for a game the editor is playing: start one with editor_run.';
+    const cure = refusalCure(error, toolName);
     return {
       // Marked as the failure it is: without this a caller reads a sentence about what went
       // wrong as the answer to what it asked, which is the one thing a tool must never do.
