@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, posix } from 'node:path';
 import { declaredClassOf, eachScript } from './class-cache.js';
 import { Refusal } from './errors.js';
-import { codeOf, shapeOf } from './gdscript-source.js';
+import { type ClassBody, codeOf, shapeOf } from './gdscript-source.js';
 import { isRecord } from './records.js';
 import { parseProjectGodot } from './resources.js';
 import type { HandedSuite, RowShare, RunPrinted } from './suite-judge.js';
@@ -98,6 +98,13 @@ interface ReadScript {
   readonly extendsAs: string | null;
   readonly funcs: readonly string[];
   readonly code: string;
+  readonly body: ClassBody;
+}
+
+/** A script, or an inner class in it reached by the names in [param via], outermost first. */
+interface Link {
+  readonly path: string;
+  readonly via: readonly string[];
 }
 
 /** The project's scripts by `res://` path, and its global classes by name, read once. */
@@ -154,6 +161,7 @@ export class ProjectScripts {
       extendsAs: shape.body.extendsAs,
       funcs: shape.body.declarations.filter((d) => d.kind === 'func').map((d) => d.name),
       code: codeOf(source),
+      body: shape.body,
     };
     this.read.set(path, read);
     return read;
@@ -238,26 +246,33 @@ export class ProjectScripts {
     let accessible: boolean | undefined;
     let guessed = false;
     const seen = new Set<string>();
-    let at = path;
-    while (!seen.has(at)) {
-      seen.add(at);
-      const read = this.script(at);
-      if (read === undefined) {
+    let at: Link = { path, via: [] };
+    while (!seen.has(`${at.path}.${at.via.join('.')}`)) {
+      seen.add(`${at.path}.${at.via.join('.')}`);
+      const read = this.script(at.path);
+      const body = read === undefined ? undefined : this.bodyOf(read.body, at.via);
+      if (read === undefined || body === undefined) {
         return null;
       }
-      for (const func of read.funcs.filter((name) => name.startsWith(CASE_PREFIX))) {
-        cases.add(func);
+      for (const func of body.declarations.filter((one) => one.kind === 'func').map((one) => one.name)) {
+        if (func.startsWith(CASE_PREFIX)) {
+          cases.add(func);
+        }
       }
-      said ??= this.declared(path, at, read.code, NEEDS_WINDOW);
-      together ??= this.declared(path, at, read.code, TOGETHER);
-      accessible ??= this.declared(path, at, read.code, ACCESSIBILITY);
+      said ??= this.declared(path, at.path, read.code, NEEDS_WINDOW);
+      together ??= this.declared(path, at.path, read.code, TOGETHER);
+      accessible ??= this.declared(path, at.path, read.code, ACCESSIBILITY);
       guessed ||= this.guessWindow && SCENE_RUNNER.test(read.code);
-      const base = this.base(at);
+      const base = this.baseOf(at.path, body.extendsAs);
       if (base === null) {
         return null;
       }
       // By name, or by the script declaring it: gdUnit4's own class is a global class of the project.
-      if ('name' in base ? base.name === SUITE_BASE : base.path === this.classes.get(SUITE_BASE)) {
+      if (
+        'name' in base
+          ? base.name === SUITE_BASE
+          : base.via.length === 0 && base.path === this.classes.get(SUITE_BASE)
+      ) {
         if (cases.size === 0) {
           return null;
         }
@@ -278,9 +293,45 @@ export class ProjectScripts {
       if ('name' in base) {
         return null;
       }
-      at = base.path;
+      at = base;
     }
     return null;
+  }
+
+  /** The class body [param via] names inside [param body], or undefined when there is none. */
+  private bodyOf(body: ClassBody, via: readonly string[]): ClassBody | undefined {
+    let found: ClassBody | undefined = body;
+    for (const name of via) {
+      found = found?.inner.find((one) => one.name === name);
+    }
+    return found;
+  }
+
+  /**
+   * What the class of [param script] extending [param extendsAs] extends: a script, or an inner class
+   * of one when the name is dotted, as `Outer.Inner` is, or the name of a class the project does not
+   * declare.
+   */
+  private baseOf(
+    script: string,
+    extendsAs: string | null,
+  ): (Link & { name?: never }) | { name: string } | null {
+    if (extendsAs === null) {
+      return null;
+    }
+    const quote = extendsAs[0];
+    if (quote === '"' || quote === "'") {
+      const target = extendsAs.slice(1, -1);
+      return {
+        path: target.startsWith('res://')
+          ? target
+          : `res://${posix.join(posix.dirname(script.slice(6)), target)}`,
+        via: [],
+      };
+    }
+    const [name = extendsAs, ...via] = extendsAs.split('.');
+    const declaring = this.classes.get(name);
+    return declaring === undefined ? { name: extendsAs } : { path: declaring, via };
   }
 
   /**
