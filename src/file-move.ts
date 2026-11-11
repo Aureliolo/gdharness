@@ -180,83 +180,91 @@ function targetPathOf(projectPath: string, absolute: string): string | null {
   return inside === null || inside === '' ? null : `res://${inside}`;
 }
 
-export function planFileMove(projectPath: string, absoluteFrom: string, absoluteTo: string): MoveOutcome {
+/** A move that can go ahead, or the reason it cannot. */
+type CheckedMove = { from: string; to: string; isDirectory: boolean } | { reason: string };
+
+function checkedMove(projectPath: string, absoluteFrom: string, absoluteTo: string): CheckedMove {
   const from = resourcePathOf(projectPath, absoluteFrom);
   const to = targetPathOf(projectPath, absoluteTo);
   if (from === null) {
-    return {
-      ok: false,
-      reason: 'The project directory itself cannot be moved. Give a file or a directory in it.',
-    };
+    return { reason: 'The project directory itself cannot be moved. Give a file or a directory in it.' };
   }
   if (to === null) {
-    return { ok: false, reason: `newPath must be a path inside the project, and ${absoluteTo} is not.` };
+    return { reason: `newPath must be a path inside the project, and ${absoluteTo} is not.` };
   }
   if (!existsSync(absoluteFrom)) {
-    return { ok: false, reason: `There is nothing at ${from} to move.` };
+    return { reason: `There is nothing at ${from} to move.` };
   }
   if (from === to) {
-    return { ok: false, reason: `${from} is already there, so there is nothing to move.` };
+    return { reason: `${from} is already there, so there is nothing to move.` };
   }
   const isDirectory = statSync(absoluteFrom).isDirectory();
+  const reason =
+    keptInPlaceReason(projectPath, from) ??
+    destinationReason(projectPath, { from, to, absoluteFrom, absoluteTo, isDirectory }) ??
+    (isDirectory ? null : fileMoveReason(projectPath, from, to));
+  return reason === null ? { from, to, isDirectory } : { reason };
+}
+
+/** Why [param from] stays where it is, because the engine or gdharness owns it there, or null. */
+function keptInPlaceReason(projectPath: string, from: string): string | null {
   if (from === 'res://project.godot') {
-    return {
-      ok: false,
-      reason: `${from} belongs to the engine where it is: it marks the project's root, so the project is wherever it sits.`,
-    };
+    return `${from} belongs to the engine where it is: it marks the project's root, so the project is wherever it sits.`;
   }
   if (from === 'res://.godot' || from.startsWith('res://.godot/')) {
-    return {
-      ok: false,
-      reason: `${from} belongs to the engine where it is: .godot is the engine's own cache, which it rebuilds from the project's files.`,
-    };
+    return `${from} belongs to the engine where it is: .godot is the engine's own cache, which it rebuilds from the project's files.`;
   }
   const addon = installedAddonOf(projectPath, from);
   if (addon !== null) {
-    return {
-      ok: false,
-      reason: `${from} is inside ${addon}, which gdharness installs and upgrades in place, so it stays there.`,
-    };
+    return `${from} is inside ${addon}, which gdharness installs and upgrades in place, so it stays there.`;
   }
   const holding = holdingAddonOf(projectPath, from);
   if (holding !== null) {
-    return {
-      ok: false,
-      reason: `${from} holds ${holding}, which gdharness installs and upgrades in place, so it stays there.`,
-    };
+    return `${from} holds ${holding}, which gdharness installs and upgrades in place, so it stays there.`;
   }
+  return null;
+}
+
+/** Why nothing can be moved to [param move].to, or null. */
+function destinationReason(
+  projectPath: string,
+  move: { from: string; to: string; absoluteFrom: string; absoluteTo: string; isDirectory: boolean },
+): string | null {
+  const { from, to, absoluteFrom, absoluteTo, isDirectory } = move;
   if (isDirectory && to.startsWith(`${from}/`)) {
-    return { ok: false, reason: `${from} cannot be moved into itself.` };
+    return `${from} cannot be moved into itself.`;
   }
   if (existsSync(absoluteTo) && !sameFile(absoluteFrom, absoluteTo)) {
-    return { ok: false, reason: `${to} already exists, so nothing was moved there.` };
+    return `${to} already exists, so nothing was moved there.`;
   }
   const blocker = fileInTheWay(absoluteTo);
   if (blocker !== null) {
-    return {
-      ok: false,
-      reason: `${resourcePathOf(projectPath, blocker) ?? blocker} is a file, so ${to} cannot go below it: pick a newPath whose parents are directories.`,
-    };
+    return `${resourcePathOf(projectPath, blocker) ?? blocker} is a file, so ${to} cannot go below it: pick a newPath whose parents are directories.`;
   }
   const unseen = unseenByTheEngine(projectPath, to);
-  if (unseen !== null) {
-    return { ok: false, reason: `${unseen}, so nothing there could load what was moved.` };
-  }
-  if (!isDirectory) {
-    const owner = SIDECARS.map((sidecar) =>
-      from.endsWith(sidecar) ? from.slice(0, -sidecar.length) : null,
-    ).find((path) => path !== null && existsSync(join(projectPath, path.slice('res://'.length))));
-    if (owner !== undefined && owner !== null) {
-      return { ok: false, reason: `${from} belongs to ${owner} and moves with it: move ${owner} instead.` };
-    }
-    if (extname(from).toLowerCase() !== extname(to).toLowerCase()) {
-      return {
-        ok: false,
-        reason: `${from} would become ${to}, and the engine picks how to read a file by its extension: give newPath the extension it has, ${extname(from) || 'none'}.`,
-      };
-    }
-  }
+  return unseen === null ? null : `${unseen}, so nothing there could load what was moved.`;
+}
 
+/** Why the file [param from] cannot become [param to], when it moves with another file or changes extension. */
+function fileMoveReason(projectPath: string, from: string, to: string): string | null {
+  const owner = SIDECARS.map((sidecar) =>
+    from.endsWith(sidecar) ? from.slice(0, -sidecar.length) : null,
+  ).find((path) => path !== null && existsSync(join(projectPath, path.slice('res://'.length))));
+  if (owner !== undefined && owner !== null) {
+    return `${from} belongs to ${owner} and moves with it: move ${owner} instead.`;
+  }
+  if (extname(from).toLowerCase() !== extname(to).toLowerCase()) {
+    return `${from} would become ${to}, and the engine picks how to read a file by its extension: give newPath the extension it has, ${extname(from) || 'none'}.`;
+  }
+  return null;
+}
+
+/** Every file that moves, from its `res://` path to where it goes. */
+function movesOf(
+  projectPath: string,
+  move: { from: string; to: string; absoluteFrom: string; isDirectory: boolean },
+): Map<string, string> {
+  const { from, to, absoluteFrom, isDirectory } = move;
   const moves = new Map<string, string>();
   if (isDirectory) {
     for (const file of filesUnder(absoluteFrom)) {
@@ -273,12 +281,49 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
       }
     }
   }
+  return moves;
+}
 
+/** The reason a file of [param moves] would land on one that is already there, or null. */
+function collisionReason(projectPath: string, moves: ReadonlyMap<string, string>): string | null {
   for (const [source, target] of moves) {
     const taken = join(projectPath, target.slice('res://'.length));
     if (existsSync(taken) && !sameFile(join(projectPath, source.slice('res://'.length)), taken)) {
-      return { ok: false, reason: `${target} already exists, so nothing was moved there.` };
+      return `${target} already exists, so nothing was moved there.`;
     }
+  }
+  return null;
+}
+
+/** A mention for each binary resource that names a file of [param moves]. */
+function binaryMentions(projectPath: string, moves: ReadonlyMap<string, string>): Mention[] {
+  const binaries: Mention[] = [];
+  for (const path of binaryResources(projectPath)) {
+    const bytes = bytesOf(join(projectPath, path.slice('res://'.length)));
+    const names = bytes === null ? undefined : [...moves.keys()].find((moving) => bytes.includes(moving));
+    if (names !== undefined) {
+      binaries.push({
+        file: path,
+        line: 0,
+        kind: 'binary',
+        text: names,
+        why: 'saved in binary, which this cannot rewrite: the engine still finds a moved file by its UID when it has one, and loses one that has none',
+      });
+    }
+  }
+  return binaries;
+}
+
+export function planFileMove(projectPath: string, absoluteFrom: string, absoluteTo: string): MoveOutcome {
+  const checked = checkedMove(projectPath, absoluteFrom, absoluteTo);
+  if ('reason' in checked) {
+    return { ok: false, reason: checked.reason };
+  }
+  const { from, to, isDirectory } = checked;
+  const moves = movesOf(projectPath, { from, to, absoluteFrom, isDirectory });
+  const collision = collisionReason(projectPath, moves);
+  if (collision !== null) {
+    return { ok: false, reason: collision };
   }
 
   const texts = projectTexts(projectPath);
@@ -294,20 +339,7 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
     { edits: [], mentions: [] },
   );
   plan = mentionIgnored(plan, ignoredTexts(projectPath), null, [from]);
-  const binaries: Mention[] = [];
-  for (const path of binaryResources(projectPath)) {
-    const bytes = bytesOf(join(projectPath, path.slice('res://'.length)));
-    const names = bytes === null ? undefined : [...moves.keys()].find((moving) => bytes.includes(moving));
-    if (names !== undefined) {
-      binaries.push({
-        file: path,
-        line: 0,
-        kind: 'binary',
-        text: names,
-        why: 'saved in binary, which this cannot rewrite: the engine still finds a moved file by its UID when it has one, and loses one that has none',
-      });
-    }
-  }
+  const binaries = binaryMentions(projectPath, moves);
   const afterwards = (path: string): string => moves.get(path) ?? path;
   const rewrites = rewritesOf(plan, texts, null);
   // A rewrite is written as UTF-8 text, so a file holding any other byte would lose it silently.
@@ -388,6 +420,44 @@ export function planFileMove(projectPath: string, absoluteFrom: string, absolute
  * never saw it. A write that fails part of the way puts back everything already done.
  */
 export function applyFileMove(outcome: Extract<MoveOutcome, { ok: true }>): void {
+  checkUnchangedOnDisk(outcome);
+  const undo: (() => void)[] = [];
+  const staged: string[] = [];
+  try {
+    for (const rewrite of outcome.inPlace) {
+      const staging = `${rewrite.absolute}.gdharness-move`;
+      staged.push(staging);
+      writeFileSync(staging, rewrite.after, 'utf8');
+      renameSync(staging, rewrite.absolute);
+      undo.push(() => {
+        writeFileSync(rewrite.absolute, rewrite.before, 'utf8');
+      });
+    }
+    // A directory in one rename, so its empty directories and the case of its name go with it,
+    // and then the files in it whose text changed are written where they now are.
+    if (outcome.directory !== null) {
+      renameNoting(outcome.directory.absoluteFrom, outcome.directory.absoluteTo, undo);
+    }
+    for (const file of outcome.moved) {
+      if (outcome.directory === null) {
+        renameNoting(file.absoluteFrom, file.absoluteTo, undo);
+      }
+      if (file.text !== null) {
+        const { before, after } = file.text;
+        writeFileSync(file.absoluteTo, after, 'utf8');
+        undo.push(() => {
+          writeFileSync(file.absoluteTo, before, 'utf8');
+        });
+      }
+    }
+  } catch (error) {
+    rollBack(staged, undo);
+    throw error;
+  }
+}
+
+/** Refuses to write when the plan no longer matches the disk. */
+function checkUnchangedOnDisk(outcome: Extract<MoveOutcome, { ok: true }>): void {
   for (const rewrite of outcome.inPlace) {
     if (readFileSync(rewrite.absolute, 'utf8') !== rewrite.before) {
       throw new Error(
@@ -408,70 +478,44 @@ export function applyFileMove(outcome: Extract<MoveOutcome, { ok: true }>): void
       throw new Error(`${file.to} already exists, so nothing was written`);
     }
   }
-  const undo: (() => void)[] = [];
-  const rename = (source: string, target: string): void => {
-    // Found by walking up from the target rather than from what mkdirSync answers, which Bun on
-    // Windows spells with a `\\?\` prefix that no path built from the target compares equal to.
-    let created: string | null = null;
-    for (let at = dirname(target); !existsSync(at); at = dirname(at)) {
-      created = at;
-    }
-    mkdirSync(dirname(target), { recursive: true });
-    if (created !== null) {
-      const top = created;
-      // Pushed first, so it runs after the rename is put back and finds the directories empty.
-      undo.push(() => {
-        for (let at = dirname(target); ; at = dirname(at)) {
-          rmdirSync(at);
-          if (at === top) break;
-        }
-      });
-    }
-    renameSync(source, target);
+}
+
+/** Renames [param source] to [param target], creating its parents, and adds to [param undo] how to put it all back. */
+function renameNoting(source: string, target: string, undo: (() => void)[]): void {
+  // Found by walking up from the target rather than from what mkdirSync answers, which Bun on
+  // Windows spells with a `\\?\` prefix that no path built from the target compares equal to.
+  let created: string | null = null;
+  for (let at = dirname(target); !existsSync(at); at = dirname(at)) {
+    created = at;
+  }
+  mkdirSync(dirname(target), { recursive: true });
+  if (created !== null) {
+    const top = created;
+    // Pushed first, so it runs after the rename is put back and finds the directories empty.
     undo.push(() => {
-      renameSync(target, source);
+      for (let at = dirname(target); ; at = dirname(at)) {
+        rmdirSync(at);
+        if (at === top) break;
+      }
     });
-  };
-  const staged: string[] = [];
-  try {
-    for (const rewrite of outcome.inPlace) {
-      const staging = `${rewrite.absolute}.gdharness-move`;
-      staged.push(staging);
-      writeFileSync(staging, rewrite.after, 'utf8');
-      renameSync(staging, rewrite.absolute);
-      undo.push(() => {
-        writeFileSync(rewrite.absolute, rewrite.before, 'utf8');
-      });
+  }
+  renameSync(source, target);
+  undo.push(() => {
+    renameSync(target, source);
+  });
+}
+
+/** Removes the staging files and runs [param undo] last to first. */
+function rollBack(staged: readonly string[], undo: (() => void)[]): void {
+  for (const staging of staged) {
+    rmSync(staging, { force: true });
+  }
+  for (const step of undo.reverse()) {
+    try {
+      step();
+    } catch {
+      // Putting back is best done for every file, so one that will not go back does not stop the
+      // rest. The error below says the move failed, which is the thing to act on.
     }
-    // A directory in one rename, so its empty directories and the case of its name go with it,
-    // and then the files in it whose text changed are written where they now are.
-    if (outcome.directory !== null) {
-      rename(outcome.directory.absoluteFrom, outcome.directory.absoluteTo);
-    }
-    for (const file of outcome.moved) {
-      if (outcome.directory === null) {
-        rename(file.absoluteFrom, file.absoluteTo);
-      }
-      if (file.text !== null) {
-        const { before, after } = file.text;
-        writeFileSync(file.absoluteTo, after, 'utf8');
-        undo.push(() => {
-          writeFileSync(file.absoluteTo, before, 'utf8');
-        });
-      }
-    }
-  } catch (error) {
-    for (const staging of staged) {
-      rmSync(staging, { force: true });
-    }
-    for (const step of undo.reverse()) {
-      try {
-        step();
-      } catch {
-        // Putting back is best done for every file, so one that will not go back does not stop the
-        // rest. The error below says the move failed, which is the thing to act on.
-      }
-    }
-    throw error;
   }
 }
