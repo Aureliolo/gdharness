@@ -37,6 +37,7 @@ import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE } from './game-log.js';
 import { wholeFlag } from './launch.js';
 import { readLog } from './log-read.js';
+import { commandProjectRefusal, isGodotProject } from './paths.js';
 import { isRecord } from './records.js';
 import { SHARE_SCRIPT } from './setup.js';
 import { type EngineEnd, exitNamed, readRun, versionFault } from './suite-judge.js';
@@ -108,12 +109,11 @@ export function spreadOptionsOf(args: readonly string[], cwd: string): SpreadOpt
   }
   const first = positional[0];
   const named = first === undefined ? null : resolve(cwd, first);
-  const projectNamed = named !== null && existsSync(join(named, 'project.godot'));
+  const projectNamed = named !== null && isGodotProject(named);
   const projectPath = projectNamed ? named : resolve(cwd);
-  if (!existsSync(join(projectPath, 'project.godot'))) {
-    throw new EngineUsageError(
-      `Not a Godot project: ${projectPath} holds no project.godot. Run from the project directory, or name it on the command line.`,
-    );
+  const refused = commandProjectRefusal(projectPath);
+  if (refused !== null) {
+    throw new EngineUsageError(refused);
   }
   const scenes = positional.slice(projectNamed ? 1 : 0);
   if (scenes.length !== 1) {

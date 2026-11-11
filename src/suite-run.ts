@@ -49,6 +49,7 @@ import { staleImports } from './import-freshness.js';
 import { hiddenWindowFlags, wholeFlag } from './launch.js';
 import { freeLibraryCopies, seedExtensionList, unlistedExtensions } from './library-copies.js';
 import { prependTo, readLog } from './log-read.js';
+import { commandProjectRefusal, isGodotProject } from './paths.js';
 import { isRecord, isStringList } from './records.js';
 import { forceNextImport } from './reimport.js';
 import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
@@ -280,12 +281,13 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
   }
   const first = positional[0];
   const firstPath = first === undefined ? null : resolve(cwd, first);
-  const projectNamed = firstPath !== null && existsSync(join(firstPath, 'project.godot'));
+  const projectNamed = firstPath !== null && isGodotProject(firstPath);
   const projectPath = projectNamed ? firstPath : resolve(cwd);
-  if (!existsSync(join(projectPath, 'project.godot'))) {
+  const refused = commandProjectRefusal(projectPath);
+  if (refused !== null) {
     throw new EngineUsageError(
       firstPath === null || firstPath === projectPath
-        ? `Not a Godot project: ${projectPath} holds no project.godot. Run from the project directory, or name it on the command line.`
+        ? refused
         : `Not a Godot project: neither ${firstPath} nor ${projectPath} holds a project.godot. Name the project directory first, or run from it.`,
     );
   }

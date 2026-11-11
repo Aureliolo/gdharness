@@ -324,9 +324,12 @@ import {
 import { nearest as nearestNames, withNearestFiles } from '../src/nearest.js';
 import { readLaunched, receivedSpec, type SentSpec, sendSpec, withChanges } from '../src/outside.js';
 import {
+  commandProjectRefusal,
   exportedBuild,
+  isGodotProject,
   isSameDirectory,
   isWithinRoot,
+  notAGodotProject,
   realAsFarAsItExists,
   relativeWithin,
   resolveWithinProject,
@@ -11103,6 +11106,45 @@ async function testEditorStatusOnAProjectWithNoAddonIsFinal(): Promise<void> {
  * screen read was named in the schema, sent by every caller who wanted the top of a panel, and
  * thrown away, so two hundred lines came back with truncated saying false.
  */
+/** A folder named project.godot is no project, and every entry point refuses it as one. */
+async function testAFolderNamedProjectGodotIsNoProject(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-folder-project-'));
+  try {
+    const folder = join(root, 'folder');
+    const empty = join(root, 'empty');
+    const real = join(root, 'real');
+    mkdirSync(join(folder, 'project.godot'), { recursive: true });
+    mkdirSync(empty);
+    mkdirSync(real);
+    writeFileSync(join(real, 'project.godot'), 'config_version=5\n');
+    const folderWhy = 'holds a folder named project.godot where the project file belongs';
+    assert.deepEqual(
+      [notAGodotProject(folder), notAGodotProject(empty), notAGodotProject(real)],
+      [folderWhy, 'holds no project.godot', null],
+    );
+    assert.deepEqual([isGodotProject(folder), isGodotProject(real)], [false, true]);
+    const refusal = `Not a Godot project: ${folder} ${folderWhy}. Run from the project directory, or name it on the command line.`;
+    assert.equal(commandProjectRefusal(folder), refusal);
+    assert.equal(commandProjectRefusal(real), null);
+
+    await withStdioServer(async (call) => {
+      const said = await call('project_info', { projectPath: folder });
+      assert.ok(said.startsWith(`Not a Godot project: ${folder} ${folderWhy}.`), said);
+      const known = await call('project_info', { projectPath: real });
+      assert.doesNotMatch(known, /Not a Godot project/, known);
+    });
+
+    const ran = spawnSyncHidden(process.execPath, [join(process.cwd(), 'build', 'cli.js'), 'test'], {
+      cwd: folder,
+      encoding: 'utf8',
+    });
+    assert.equal(ran.status, 2, `${ran.stdout}${ran.stderr}`);
+    assert.ok(`${ran.stdout}${ran.stderr}`.includes(refusal), `${ran.stdout}${ran.stderr}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 async function testAnArgumentMeantForAnotherOpIsRefused(): Promise<void> {
   await withStdioServer(async (call) => {
     assert.match(
@@ -88101,6 +88143,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testToolAndOpLookupsCannotReachThePrototype,
   testArgumentsOfTheWrongTypeAreRefused,
   testAnArgumentMeantForAnotherOpIsRefused,
+  testAFolderNamedProjectGodotIsNoProject,
   testANoEditorRefusalSaysWhetherOneCanConnect,
   testAnOpenRefusesAnotherReleasesAddon,
   testAStartRefusesAnotherReleasesRuntimeAddon,

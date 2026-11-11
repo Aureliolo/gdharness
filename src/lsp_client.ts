@@ -1,14 +1,14 @@
-import { existsSync, realpathSync } from 'node:fs';
+import { realpathSync } from 'node:fs';
 import { readFile, realpath } from 'node:fs/promises';
 import { createConnection, type Socket } from 'node:net';
-import { dirname, extname, join, resolve } from 'node:path';
+import { dirname, extname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { answerJson, type ToolResponse } from './answer-json.js';
 import { Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { waitFromEnv } from './launch.js';
-import { isSameDirectory, isWithinRoot, resolveWithinProject } from './paths.js';
+import { isSameDirectory, isWithinRoot, notAGodotProject, resolveWithinProject } from './paths.js';
 import { portFromEnv } from './ports.js';
 import { isRecord } from './records.js';
 
@@ -1173,9 +1173,10 @@ async function resolveLSPPaths(
   } catch {
     throw new ArgumentRefusal(`Project path does not exist: ${requestedProjectPath}`);
   }
-  if (!existsSync(join(projectPath, 'project.godot'))) {
+  const why = notAGodotProject(projectPath);
+  if (why !== null) {
     throw new ArgumentRefusal(
-      `Not a Godot project: ${projectPath}. Point projectPath at the directory holding project.godot.`,
+      `Not a Godot project: ${projectPath} ${why}. Point projectPath at the directory holding project.godot.`,
     );
   }
 

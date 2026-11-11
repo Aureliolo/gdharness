@@ -38,7 +38,7 @@ import { type HeadlessEngine, type HeadlessOutcome, runOperation } from './headl
 import { defectReport } from './issues.js';
 import { lspOptionsOf, runLspBridge } from './lsp-bridge.js';
 import { nearest } from './nearest.js';
-import { isSameDirectory } from './paths.js';
+import { commandProjectRefusal, isSameDirectory } from './paths.js';
 import { editorsOfProjectIn, processTree } from './process-children.js';
 import { Ask, interactive } from './prompt.js';
 import { DEBUG_MODE } from './server-version.js';
@@ -88,10 +88,9 @@ function projectArgument(at: number): string {
   // guide tells people to run.
   const named = args.slice(at).find((value) => !value.startsWith('--'));
   const projectPath = resolve(named ?? '.');
-  if (!existsSync(join(projectPath, 'project.godot'))) {
-    throw new UsageError(
-      `Not a Godot project: ${projectPath} holds no project.godot. Run from the project directory, or name it on the command line.`,
-    );
+  const refused = commandProjectRefusal(projectPath);
+  if (refused !== null) {
+    throw new UsageError(refused);
   }
   return projectPath;
 }
