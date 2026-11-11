@@ -51149,9 +51149,10 @@ async function testAPidIsNotAnIdentity(): Promise<void> {
     );
 
     // macOS's ps prints lstart in the words of the caller's locale, which Date.parse cannot read.
+    // Russian, because no month of it is spelt as in English: German fails only in four months.
     const locale = { all: process.env['LC_ALL'], lang: process.env['LANG'] };
-    process.env['LC_ALL'] = 'de_DE.UTF-8';
-    process.env['LANG'] = 'de_DE.UTF-8';
+    process.env['LC_ALL'] = 'ru_RU.UTF-8';
+    process.env['LANG'] = 'ru_RU.UTF-8';
     try {
       assert.equal(
         (await runningAs(pid))?.startedAt,
