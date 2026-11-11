@@ -29,7 +29,7 @@ import { errorMessage } from './errors.js';
 export type UidEntry = readonly [id: bigint, path: string];
 
 /** What setting a cache right came to: each entry pointed at its file's new place, and each dropped. */
-export interface UidMend {
+interface UidMend {
   readonly moved: readonly (readonly [id: bigint, from: string, to: string])[];
   readonly dropped: readonly UidEntry[];
 }

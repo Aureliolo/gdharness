@@ -389,7 +389,7 @@ export class ProjectScripts {
 }
 
 /** What one suite cost the last time it ran: the whole of it, and each case. */
-export interface SuiteTime {
+interface SuiteTime {
   /** Its cases and its hooks together, as it costs when it runs whole. */
   readonly seconds: number;
   /** Each case function's own time, the rows of a parameterised one together. */

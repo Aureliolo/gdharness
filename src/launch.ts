@@ -4,6 +4,20 @@
  * process is not visible from any tool's response.
  */
 
+import { EngineUsageError } from './errors.js';
+
+/** [param value] as a whole number above 0, null when [param flag] was not given. */
+export function wholeFlag(value: string | undefined, flag: string): number | null {
+  if (value === undefined) {
+    return null;
+  }
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 1) {
+    throw new EngineUsageError(`${flag} takes a whole number above 0, not ${value}.`);
+  }
+  return number;
+}
+
 /**
  * An environment variable's value, with the empty string read as unset.
  *
@@ -26,7 +40,7 @@ export function waitFromEnv(variable: string, fallback: number): number {
   return Number.isSafeInteger(override) && override > 0 ? override : fallback;
 }
 
-export interface LaunchHost {
+interface LaunchHost {
   readonly platform: NodeJS.Platform;
   readonly variables: NodeJS.ProcessEnv;
 }

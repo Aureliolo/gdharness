@@ -11,7 +11,7 @@ import { basename, dirname, isAbsolute, join } from 'node:path';
 import { readWhole } from './whole-file.js';
 
 /** What freeing a project's library copies did, for the debug log. */
-export interface FreedCopies {
+interface FreedCopies {
   /** The copies an engine still had mapped, renamed aside so the next engine can make its own. */
   readonly setAside: readonly string[];
   /** Copies and leftovers no engine held any more, deleted. */

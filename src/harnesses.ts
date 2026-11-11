@@ -1083,7 +1083,7 @@ export interface Written {
 }
 
 /** What an upgrade managed to do to the harness configs it found. */
-export interface Repinned {
+interface Repinned {
   /** The launch lines it replaced, one per config that held something else. */
   readonly moved: readonly string[];
   /** How many configs it wrote, whether or not the line inside them changed. */

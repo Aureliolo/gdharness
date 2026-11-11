@@ -332,7 +332,7 @@ function repeatedCycle(frames: readonly Frame[], from: number): { period: number
 }
 
 /** An entry on its way out: the same fields, with `detail` there only when it says something. */
-export type ReportedEntry = Omit<LogEntry, 'detail'> & {
+type ReportedEntry = Omit<LogEntry, 'detail'> & {
   readonly detail?: readonly string[];
   /** The project script, line and function the entry points at, when it names one. */
   readonly script?: string;

@@ -63,7 +63,7 @@ export function declaredClasses(projectPath: string): Map<string, string> {
 }
 
 /** A `class_name` a project script declares, with what it extends and whether it is abstract. */
-export interface DeclaredClass {
+interface DeclaredClass {
   readonly path: string;
   /**
    * The class it extends: a project class, an engine class, or as written when it names neither,
@@ -548,7 +548,7 @@ export function unknownTypeIn(message: string): string | null {
 }
 
 /** A class the project declares that a diagnostic says cannot be resolved, and where to look. */
-export interface UnloadedType {
+interface UnloadedType {
   readonly type: string;
   readonly declaredIn: string;
   /** Whether the cache a launched game reads already lists it, which decides the remedy. */

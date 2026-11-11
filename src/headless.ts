@@ -23,7 +23,7 @@ import { isRecord } from './records.js';
 import { forceNextImport } from './reimport.js';
 import { discard, scratchDirectory } from './scratch.js';
 import { notCompiledIn } from './script-origins.js';
-import type { OperationParams } from './server-types.js';
+import type { OperationParams } from './tool-args.js';
 
 export interface HeadlessEngine {
   readonly godotPath: string;

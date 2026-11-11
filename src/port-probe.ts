@@ -39,7 +39,7 @@ export function acceptsConnections(port: number): Promise<boolean | null> {
 }
 
 /** One of the editor's servers: the port it names, and whether anything accepts connections there. */
-export interface ServedPort {
+interface ServedPort {
   readonly port: number;
   readonly listening: boolean | null;
 }

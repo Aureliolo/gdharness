@@ -54,7 +54,7 @@ export function installedByUs(directory: string): boolean {
 }
 
 /** File counts for a project, by kind. */
-export interface ProjectStructure {
+interface ProjectStructure {
   scenes: number;
   scripts: number;
   assets: number;

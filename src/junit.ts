@@ -235,7 +235,7 @@ function isCaseOrRow(reported: string, test: string): boolean {
 }
 
 /** An entry of a run's ignore list that named a case the run went on to run. */
-export interface IgnoreNotApplied {
+interface IgnoreNotApplied {
   readonly entry: string;
   /** The case that ran, as `suite_name:test_name`, which is the form that leaves it out. */
   readonly ran: string;
@@ -538,7 +538,7 @@ export function parseJUnit(xml: string): TestReport {
 }
 
 /** A hook's failure as the runner printed it, which is the only place its message is. */
-export interface HookFailure {
+interface HookFailure {
   /** The hook, `before` or `after`. */
   readonly hook: string;
   /** The suite's script. */
@@ -859,7 +859,7 @@ export function withActualsPrinted<Case extends { readonly detail: string | null
 type FoldedReport = CaseReport & { readonly times?: number };
 
 /** A failed case as the answer names it: its first report, and its reports when it has several. */
-export interface FailedCase {
+interface FailedCase {
   readonly suite: string;
   readonly name: string;
   readonly status: CaseStatus;
@@ -1066,7 +1066,7 @@ interface SuiteOrphans {
 }
 
 /** What a run left behind, counted per suite and in total. */
-export interface OrphanReport {
+interface OrphanReport {
   readonly total: number;
   readonly suites: readonly SuiteOrphans[];
 }
@@ -1138,7 +1138,7 @@ export function orphansPrinted(printed: readonly string[]): OrphanReport {
 }
 
 /** One suite the run finished, as its statistics line counted it, and the cases that did not pass. */
-export interface SuiteFinished {
+interface SuiteFinished {
   readonly path: string;
   readonly cases: number;
   readonly errors: number;

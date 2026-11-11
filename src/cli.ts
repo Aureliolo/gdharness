@@ -10,10 +10,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { serverServing } from './bridge-announce.js';
 import { editorOpenOptionsOf, holdTheEditors, openTheEditor } from './editor-open.js';
-import { EngineUsageError } from './engine-launch.js';
 import { inOneSlot, nameSlotTaker, sayWaitsTo } from './engine-slots.js';
 import { letWindowsReportCrashes } from './error-mode.js';
-import { Refusal } from './errors.js';
+import { EngineUsageError, Refusal } from './errors.js';
 import { GodotLocator } from './godot-path.js';
 import {
   type Candidate,

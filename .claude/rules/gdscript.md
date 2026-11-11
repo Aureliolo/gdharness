@@ -24,11 +24,8 @@ shape.
 
 ## Shared modules and packaging
 
-The modules listed in `scripts/sync-shared-gd.ts` (`reading.gd`, `serialisation.gd`,
-`value_shapes.gd`, `property_values.gd`, `property_paths.gd`, `declared_values.gd`,
-`same_values.gd`, `file_reads.gd`, `file_walk.gd`, `animation_reads.gd`, `setting_reads.gd` and
-`picture_saves.gd`) are edited in `src/godot/operations/` only. `bun run sync:gd` writes the copies
-inside the addons. A regression fails on a copy that has drifted.
+The modules listed in `scripts/sync-shared-gd.ts` are edited in `src/godot/operations/` only.
+`bun run sync:gd` writes the copies inside the addons. A regression fails on a copy that has drifted.
 
 Commit the `.gd.uid` Godot writes beside every new addon script. Add a new operations module to the
 list in `test/packaging-consistency.ts`. `test:packaging` checks both, on Linux and macOS only. From

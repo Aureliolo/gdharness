@@ -26,7 +26,6 @@ import { cachedClasses, staleAgainst } from './class-cache.js';
 import {
   coresNamed,
   type EngineLaunch,
-  EngineUsageError,
   godotNamed,
   heldRunSaid,
   homeOf,
@@ -41,13 +40,13 @@ import {
   sweepRunDirectories,
   versionNamed,
   watchedEngine,
-  wholeFlag,
 } from './engine-launch.js';
 import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
 import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
+import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE } from './game-log.js';
 import { staleImports } from './import-freshness.js';
-import { hiddenWindowFlags } from './launch.js';
+import { hiddenWindowFlags, wholeFlag } from './launch.js';
 import { freeLibraryCopies, seedExtensionList, unlistedExtensions } from './library-copies.js';
 import { prependTo, readLog } from './log-read.js';
 import { isRecord, isStringList } from './records.js';
@@ -98,7 +97,7 @@ import {
 } from './suite-plan.js';
 import { getLocalVersion } from './version.js';
 
-export interface TestOptions {
+interface TestOptions {
   readonly projectPath: string;
   /** The suites, directories and `suite.gd:test_case` cases named, or none for every suite. */
   readonly selected: readonly string[];
@@ -1625,11 +1624,7 @@ function report(
       console.log(
         `--- what engine ${String(engine.index)} printed, running ${named(engine.plan.suites.map((suite) => suite.path))}:`,
       );
-      console.log(
-        existsSync(engine.log)
-          ? readLog(engine.log).replace(CONTROL_SEQUENCE, '').trimEnd()
-          : '(no log was written)',
-      );
+      console.log(readLog(engine.log).replace(CONTROL_SEQUENCE, '').trimEnd());
     }
   }
   const failed = ran.filter((engine) => !engine.verdict.passed);
@@ -1641,13 +1636,8 @@ function report(
       console.log(`  ${fault}`);
     }
     // At the top of the kept log, so the file says why on its own, even when the engine printed nothing.
-    if (existsSync(engine.log)) {
-      const verdict = [
-        `gdharness: ${heading.slice(4)}`,
-        ...engine.verdict.faults.map((fault) => `  ${fault}`),
-      ];
-      prependTo(engine.log, `${verdict.join('\n')}\n---\n`);
-    }
+    const verdict = [`gdharness: ${heading.slice(4)}`, ...engine.verdict.faults.map((fault) => `  ${fault}`)];
+    prependTo(engine.log, `${verdict.join('\n')}\n---\n`);
     if (engine.verdict.shown.length > 0) {
       console.log('');
       for (const line of engine.verdict.shown) {

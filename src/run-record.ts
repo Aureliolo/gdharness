@@ -30,7 +30,8 @@ import { isSameDirectory, realAsFarAsItExists } from './paths.js';
 import { type CommandLineRead, linuxStartTimes, readCommandLine } from './process-children.js';
 import { askProcessTable } from './process-table.js';
 import { isRecord } from './records.js';
-import { runtimeDirectories, runtimeDirectory, STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
+import { STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
+import { runtimeDirectories, runtimeDirectory } from './runtime-directories.js';
 import { runHidden } from './spawn.js';
 import { tableListener } from './tcp-listeners.js';
 import { writeWhole } from './whole-file.js';
@@ -263,7 +264,7 @@ export function writeRunRecord(record: RunRecord): void {
  * which play, and a note read on that alone gave a later play the console and start time of an
  * earlier one.
  */
-export interface EditorRunNote {
+interface EditorRunNote {
   readonly projectPath: string;
   readonly transcript: string;
   readonly startedAt: number;
@@ -730,7 +731,7 @@ export async function couldStillBeTheRecordedRun(record: RunRecord): Promise<boo
 }
 
 /** What the operating system will say about a process, and how much of it. */
-export interface RunningAs {
+interface RunningAs {
   /** `none` is Windows naming nothing at all, with why under `unread`. */
   readonly kind: 'image' | 'commandLine' | 'none';
   readonly text: string;

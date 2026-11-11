@@ -30,7 +30,7 @@ import {
 import { shippedAddonsDirectory } from './setup.js';
 
 /** One frame of a held game's stack, innermost first. */
-export interface DebugFrame {
+interface DebugFrame {
   readonly id: number;
   readonly name: string;
   readonly line: number;

@@ -13,8 +13,7 @@ import { existsSync, readdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { connect, type Socket } from 'node:net';
 import { join, resolve } from 'node:path';
 import { alive } from './alive.js';
-import { EngineUsageError } from './engine-launch.js';
-import { errorMessage } from './errors.js';
+import { EngineUsageError, errorMessage } from './errors.js';
 import { DEFAULT_LSP_PORT, GodotLSPClient } from './lsp_client.js';
 import { portFromEnvOrNull, portIn } from './ports.js';
 import { oneShotOptionOf, startTimesOf } from './process-children.js';
@@ -30,7 +29,7 @@ const HOST = '127.0.0.1';
 const LOOK_AGAIN_MS = 500;
 
 /** The ports one editor of the project says it serves. */
-export interface EditorRecord {
+interface EditorRecord {
   readonly file: string;
   readonly pid: number;
   readonly lspPort: number;
@@ -125,7 +124,7 @@ export function removeLeftRecords(
 }
 
 /** Where `gdharness lsp` looks for the language server, in order. */
-export interface LspPortChoice {
+interface LspPortChoice {
   readonly port: number;
   readonly from: string;
 }
@@ -182,7 +181,7 @@ async function probe(port: number, projectPath: string): Promise<Probe> {
 }
 
 /** Options of `gdharness lsp`. */
-export interface LspOptions {
+interface LspOptions {
   readonly projectPath: string;
   readonly port: number | undefined;
   readonly waitSeconds: number;

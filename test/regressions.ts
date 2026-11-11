@@ -36,7 +36,7 @@ import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { counterpart, pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
 import { alive, exitOf } from '../src/alive.js';
-import { answerJson } from '../src/answer-json.js';
+import { answerJson, type ToolResponse } from '../src/answer-json.js';
 import { scriptsAutoloaded } from '../src/autoload-failure.js';
 import {
   bootNotePath,
@@ -128,7 +128,6 @@ import {
   openTheEditor,
 } from '../src/editor-open.js';
 import {
-  EngineUsageError,
   endingWithRunner,
   heldRunSaid,
   heldToCores,
@@ -207,7 +206,7 @@ import {
   Spent,
   STARVED,
 } from '../src/engine-spent.js';
-import { errorCode, errorMessage, Refusal, toError } from '../src/errors.js';
+import { EngineUsageError, errorCode, errorMessage, Refusal, toError } from '../src/errors.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { FrameReader, OversizedStreamError, frame as wireFrame } from '../src/framing.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
@@ -243,6 +242,7 @@ import {
   withoutTrailingSeparator,
 } from '../src/godot-bridge.js';
 import { GodotLocator, type Located, VERSION_STARTS, versionStartOf } from '../src/godot-path.js';
+import type { GodotProcess } from '../src/godot-process.js';
 import {
   containerTypeOf,
   DebuggerStream,
@@ -409,14 +409,13 @@ import {
   RUNTIME_PROTOCOL,
   type RuntimeEndpoint,
   reportAlreadyInTranscript,
-  runtimeDirectories,
-  runtimeDirectory,
   runtimeRequest,
   runtimesAnnounced,
   STARTED_AFTER_ANNOUNCING_MS,
   strangersAmong,
   untilJudged,
 } from '../src/runtime-client.js';
+import { runtimeDirectories, runtimeDirectory } from '../src/runtime-directories.js';
 import {
   discard,
   discardWith,
@@ -496,7 +495,6 @@ import {
   writtenBeside,
 } from '../src/server.js';
 import { serverInstructions } from '../src/server-instructions.js';
-import type { GodotProcess, ToolResponse } from '../src/server-types.js';
 import {
   addonMismatch,
   runtimeAddonUnknown,

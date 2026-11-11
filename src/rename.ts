@@ -509,7 +509,7 @@ function declaresItsOwn(script: Script, name: string, except: number | null): bo
     );
 }
 
-export interface ClassRenameArguments {
+interface ClassRenameArguments {
   readonly texts: readonly ProjectText[];
   readonly scripts: ReadonlyMap<string, Script>;
   readonly declaring: Script;
@@ -605,7 +605,7 @@ export interface Resolved {
   readonly offset: number;
 }
 
-export interface MemberRenameArguments {
+interface MemberRenameArguments {
   readonly texts: readonly ProjectText[];
   readonly scripts: ReadonlyMap<string, Script>;
   readonly graph: ClassGraph;
@@ -928,7 +928,7 @@ function planScenes(
   }
 }
 
-export interface MoveArguments {
+interface MoveArguments {
   readonly texts: readonly ProjectText[];
   readonly scripts: ReadonlyMap<string, Script>;
   /** Each file that moves, by its `res://` path, to where it goes. */

@@ -31,7 +31,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { McpServer, ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 import { type StdioServerHandle, serveStdio } from '@modelcontextprotocol/server/stdio';
 import { alive } from './alive.js';
-import { answerJson } from './answer-json.js';
+import { answerJson, type ToolResponse } from './answer-json.js';
 import { autoloadNotCompiled, scriptsAutoloaded } from './autoload-failure.js';
 import { halfAsLongAgain, MAIN_SCENE, readBootNote, waitSizedTo, writeBootNote } from './boot-note.js';
 import { readBreakpointNote, writeBreakpointNote } from './breakpoint-note.js';
@@ -161,6 +161,7 @@ import {
   theEditorHasComeBack,
 } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
+import type { EndedThrough, GodotProcess, SpawnedGame } from './godot-process.js';
 import { recordedEnginePath } from './harnesses.js';
 import {
   engineExtras,
@@ -268,7 +269,7 @@ import {
   steppedOverIn,
   underGdignore,
 } from './project-scan.js';
-import { setupPromptHandlers } from './prompts.js';
+import { type ProtocolServer, setupPromptHandlers } from './prompts.js';
 import { isRecord } from './records.js';
 import { applyRewrites } from './rename.js';
 import {
@@ -316,12 +317,12 @@ import {
   RUNTIME_PROTOCOL,
   type RuntimeEndpoint,
   reportAlreadyInTranscript,
-  runtimeDirectory,
   runtimeRequest,
   runtimesAnnounced,
   type UnspokenRuntime,
   whichHalfIsBehind,
 } from './runtime-client.js';
+import { runtimeDirectory } from './runtime-directories.js';
 import { discard, scratchDirectory, sweepAbandonedScratch } from './scratch.js';
 import {
   checkWithEngine,
@@ -348,15 +349,6 @@ import {
   writeProfileMark,
 } from './script-profile.js';
 import { serverInstructions } from './server-instructions.js';
-import type {
-  EndedThrough,
-  GodotProcess,
-  MCPToolDefinition,
-  OperationParams,
-  ProtocolServer,
-  SpawnedGame,
-  ToolResponse,
-} from './server-types.js';
 import {
   DEBUG_MODE,
   runtimeAddonUnknown,
@@ -406,6 +398,7 @@ import {
 } from './test-selection.js';
 import {
   asParams,
+  type OperationParams,
   readArray,
   readBoolean,
   readNonEmptyString,
@@ -420,6 +413,7 @@ import {
   argumentsOf,
   buildToolDefinitions,
   EXPORT_PLATFORMS,
+  type MCPToolDefinition,
   opTakes,
   type ProjectInfoSection,
   TOOL_SPECS,

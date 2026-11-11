@@ -1,4 +1,3 @@
-import type { McpServer, Tool } from '@modelcontextprotocol/server';
 import type { CallSlot } from './engine-slots.js';
 import type { GameLog } from './game-log.js';
 import type { EditorPlay, RestartedFrom } from './run-record.js';
@@ -239,36 +238,3 @@ export interface SpawnedGame extends GodotProcess {
   process: ChildProcess;
   throughEditor: false;
 }
-
-/**
- * Tool arguments as they arrive over MCP: keys chosen by the caller, values not yet checked.
- * `unknown` rather than `any` so that every read has to say what it expects the value to be.
- * The readers in `tool-args.ts` are where that happens.
- */
-export type OperationParams = Record<string, unknown>;
-
-/**
- * One block of a tool result. `text` carries JSON or prose; `data` plus `mimeType` carry a
- * base64 payload, which is how a screenshot comes back. An image declares `text` as absent so
- * that reading the first block's text needs no narrowing.
- */
-type ToolResponseContent =
-  | { type: 'text'; text: string }
-  | { type: 'image'; data: string; mimeType: string; text?: never };
-
-/**
- * What every tool handler returns. `isError` marks a handled failure, not a thrown one. A type
- * rather than an interface so that it satisfies the SDK's indexed result type as it is.
- *
- * No `structuredContent`: Claude Code hands the model that field alone when a result carries it,
- * so the prose an answer leads with and every notice appended after it would never be read.
- */
-export type ToolResponse = {
-  content: ToolResponseContent[];
-  isError?: boolean;
-};
-
-export type MCPToolDefinition = Tool;
-
-/** The low-level protocol server handlers are registered on, as McpServer exposes it. */
-export type ProtocolServer = McpServer['server'];

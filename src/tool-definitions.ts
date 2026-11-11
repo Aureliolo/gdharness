@@ -9,11 +9,12 @@
  * working one.
  */
 
-import type { JSONValue, ToolAnnotations } from '@modelcontextprotocol/server';
+import type { JSONValue, Tool, ToolAnnotations } from '@modelcontextprotocol/server';
 import { dictionary } from './dictionary.js';
 import { IDLE_CLOSE_MINUTES, IDLE_CLOSE_SETTING } from './idle-close.js';
 import { ENGINE_FLAGS, HIDDEN_WINDOW_FPS } from './launch.js';
-import type { MCPToolDefinition } from './server-types.js';
+
+export type MCPToolDefinition = Tool;
 
 type JsonSchema = Readonly<Record<string, JSONValue>>;
 

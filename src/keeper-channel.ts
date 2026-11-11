@@ -26,7 +26,7 @@ import { discard, scratchDirectory } from './scratch.js';
 const DEBUG_PREFIX = 'debug ';
 
 /** What the keeper did when asked: ended the game, or found it already gone. */
-export type KeeperAnswer = 'signalled' | 'gone';
+type KeeperAnswer = 'signalled' | 'gone';
 
 export interface KeeperListening {
   readonly address: string;
