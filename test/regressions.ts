@@ -588,7 +588,7 @@ import {
   testOptionsOf,
   wholeTreeSaid,
 } from '../src/suite-run.js';
-import { listenerAmong } from '../src/tcp-listeners.js';
+import { LAYOUTS, listenerAmong, rowsOf } from '../src/tcp-listeners.js';
 import { scriptsWithoutCases, selectTests, suiteFilesUnder } from '../src/test-selection.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
@@ -33768,6 +33768,60 @@ async function testWhoIsHoldingAPortIsAskable(): Promise<void> {
   assert.equal(listenerAmong(rows, 6006), 4321, 'a row with no state and no remote end is the listener');
   assert.equal(listenerAmong(rows, 7007), null, 'one with a remote end is a connection');
   assert.equal(listenerAmong(rows, 8008), 1234, 'and a row in the listening state comes first');
+  assert.equal(
+    listenerAmong(
+      [
+        { state: 2, localPort: 9009, remotePort: 0, pid: 111 },
+        { state: 2, localPort: 9009, remotePort: 0, pid: 222 },
+        { state: 2, localPort: 9009, remotePort: 0, pid: 111 },
+      ],
+      9009,
+    ),
+    null,
+    'two processes listening on one port are not told apart, and one process on two addresses is one',
+  );
+  assert.equal(
+    listenerAmong(
+      [
+        { state: 2, localPort: 9010, remotePort: 0, pid: 111 },
+        { state: 2, localPort: 9010, remotePort: 0, pid: 111 },
+      ],
+      9010,
+    ),
+    111,
+  );
+  // The table as Windows lays it out: a count, then rows of six DWORDs for IPv4 and fourteen for
+  // IPv6. A port is stored in network byte order in the low two bytes.
+  const stored = (port: number): number => ((port & 0xff) << 8) | (port >>> 8);
+  const [v4, v6] = LAYOUTS;
+  const v4Table = new Uint32Array(1 + v4.width);
+  v4Table[0] = 1;
+  v4Table[1 + v4.at.state] = 2;
+  v4Table[1 + v4.at.localPort] = stored(6006);
+  v4Table[1 + v4.at.remotePort] = stored(0);
+  v4Table[1 + v4.at.pid] = 4321;
+  assert.deepEqual(rowsOf(v4Table, v4.width, v4.at), [
+    { state: 2, localPort: 6006, remotePort: 0, pid: 4321 },
+  ]);
+  const v6Table = new Uint32Array(1 + 2 * v6.width);
+  v6Table[0] = 2;
+  for (const [row, [state, port, remote, pid]] of [
+    [2, 16006, 0, 5555],
+    [5, 16007, 443, 6666],
+  ].entries()) {
+    const base = 1 + row * v6.width;
+    // The address and scope fill the DWORDs between the fields, so a wrong index reads them.
+    v6Table.fill(0xdeadbeef, base, base + v6.width);
+    v6Table[base + v6.at.state] = state ?? 0;
+    v6Table[base + v6.at.localPort] = stored(port ?? 0);
+    v6Table[base + v6.at.remotePort] = stored(remote ?? 0);
+    v6Table[base + v6.at.pid] = pid ?? 0;
+  }
+  assert.deepEqual(rowsOf(v6Table, v6.width, v6.at), [
+    { state: 2, localPort: 16006, remotePort: 0, pid: 5555 },
+    { state: 5, localPort: 16007, remotePort: 443, pid: 6666 },
+  ]);
+  assert.deepEqual(rowsOf(v6Table.subarray(0, 1 + v6.width + 3), v6.width, v6.at).length, 1, 'a cut table');
 
   const port = await reservePort();
   assert.equal(await listeningPid(port), null, 'a port nobody is listening on has no holder to name');
