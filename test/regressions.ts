@@ -387,8 +387,8 @@ import {
   recordRunEnded,
   runningAs,
   runRecordPath,
-  stillTheRecordedRun,
   sweepTranscripts,
+  whyNotStillTheRecordedRun,
   whyNotTheRun,
   writeEditorRunNote,
   writeLatestRun,
@@ -49225,6 +49225,9 @@ function testAnExitCodeOutlivesTheServerThatSawIt(): void {
  * fixture that mocked the asking would pass on all three without any of them working.
  */
 async function testAPidIsNotAnIdentity(): Promise<void> {
+  const stillTheRecordedRun = async (
+    record: Parameters<typeof whyNotStillTheRecordedRun>[0],
+  ): Promise<boolean> => (await whyNotStillTheRecordedRun(record)) === null;
   const marker = join(tmpdir(), `gdharness-identity-${process.pid}`);
   // Something that stays up and carries a word of ours on its command line, which is what a real
   // run has: the engine's path and the project it was pointed at.

@@ -83,8 +83,8 @@ export interface RunRecord {
   /**
    * The engine this run was started with, so the pid can be shown to still mean this run.
    *
-   * A pid on its own is not an identity: see `stillTheRecordedRun`, which is what decides whether
-   * anything may be signalled.
+   * A pid on its own is not an identity: see `whyNotStillTheRecordedRun`, which is what decides
+   * whether anything may be signalled.
    */
   readonly command: string;
   /**
@@ -693,7 +693,8 @@ async function windowsImage(pid: number): Promise<{ image: string } | { why: str
 }
 
 /**
- * Whether the process under the record's pid is still the run the record describes.
+ * Why the process under the record's pid cannot be confirmed as the run the record describes, or
+ * null when it can.
  *
  * A pid is a number the operating system hands out again the moment it is free, so a record that
  * outlived its run names whatever came next. Signalling on the strength of that number alone is
@@ -708,11 +709,6 @@ async function windowsImage(pid: number): Promise<{ image: string } | { why: str
  * False when the operating system will not say. Not knowing is not the same as knowing it is
  * ours, and the caller that acts on this is the one that kills.
  */
-export async function stillTheRecordedRun(record: RunRecord): Promise<boolean> {
-  return (await whyNotStillTheRecordedRun(record)) === null;
-}
-
-/** Why the process under the record's pid cannot be confirmed as the run, or null when it can. */
 export async function whyNotStillTheRecordedRun(record: RunRecord): Promise<string | null> {
   return whyNotTheRun(record, await runningAs(record.pid), 'confirmed');
 }
