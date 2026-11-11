@@ -55467,6 +55467,12 @@ function testSuitePassesKeyAlikeInEveryCheckout(): void {
       gate.slice(1, 2),
       'while a pin that differs keys apart',
     );
+    // A folder is keyed by the files in it, where it used to end the run.
+    const folder = join(checkouts[1] ?? '', 'tools');
+    const [before] = reachedAlsoSaid([folder]);
+    assert.ok(before?.includes('versions.json\n{"godot": "4.8"}'), `a folder is every file in it: ${before}`);
+    writeFileSync(join(folder, 'extra.json'), '{}');
+    assert.notEqual(reachedAlsoSaid([folder])[0], before, 'and a file added to it keys apart');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

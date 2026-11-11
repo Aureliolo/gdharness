@@ -1068,7 +1068,21 @@ export function engineSaid(godotPath: string): string {
  * and the same pins key the same suites in each.
  */
 export function reachedAlsoSaid(paths: readonly string[]): string[] {
-  return paths.map((path) => (existsSync(path) ? readFileSync(path, 'latin1') : 'missing'));
+  return paths.map((path) => {
+    if (!existsSync(path)) {
+      return 'missing';
+    }
+    if (!statSync(path).isDirectory()) {
+      return readFileSync(path, 'latin1');
+    }
+    // A folder is every file under it, each with where it lies.
+    return readdirSync(path, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => join(entry.parentPath, entry.name))
+      .toSorted()
+      .map((file) => `${relative(path, file).split(sep).join('/')}\n${readFileSync(file, 'latin1')}`)
+      .join('\n');
+  });
 }
 
 /** What compiling every script together found wrong, and where its engine's log is. */
