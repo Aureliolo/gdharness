@@ -3526,6 +3526,11 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
     );
   }
   notes.push(...cappedNotes(totals));
+  if (totals.engineCalls !== true) {
+    notes.push(
+      "Calls through engine methods, such as callv, stay in the caller's selfMs, so scriptMs can count that work twice. editor_run start with profile: true and engineCalls: true times them apart, as engineMs.",
+    );
+  }
   if (totals.unreadable > 0) {
     notes.push(
       `${totals.unreadable} message${totals.unreadable === 1 ? '' : 's'} from the game could not be read, so the totals have that many gaps.`,
@@ -11134,6 +11139,13 @@ class GodotServer {
         'An exported build is started without the debugger, because a release build quits on --remote-debug. A profile needs the debugger, so leave out executable to profile the project.',
       );
     }
+    const engineCalls = readBoolean(args, 'engineCalls') === true;
+    if (engineCalls && readBoolean(args, 'profile') !== true) {
+      return this.createErrorResponse(
+        "engineCalls times the profiler's calls through engine methods, so it works only with profile: true.",
+        ['editor_run start with profile: true and engineCalls: true, or without engineCalls'],
+      );
+    }
     const own = readStringArray(args, 'args') ?? [];
     const given =
       suites.value === null ? own : [...own, ...suitesSceneArgs(project.value.path, suites.value)];
@@ -11325,6 +11337,7 @@ class GodotServer {
         runtimeWaitMs,
         ended,
         profiled,
+        engineCalls,
       );
     }
 
@@ -11353,6 +11366,7 @@ class GodotServer {
       onTheHiddenDesktop ? HIDDEN_DESKTOP : undefined,
       profiled,
       exported === null,
+      engineCalls,
     );
     if ('error' in started) {
       return this.createErrorResponse(`The game could not be started: ${started.error}`, [
@@ -11683,6 +11697,7 @@ class GodotServer {
     runtimeWaitMs: AnnounceBudget,
     ended: EndedRun | null,
     profiled: boolean,
+    engineCalls: boolean,
   ): Promise<ToolResponse> {
     const log = new GameLog();
     // Each step before the play says how long it took, since a start that sat nine seconds between
@@ -11733,6 +11748,7 @@ class GodotServer {
       const armed = await this.handleViaBridge('profile_start', {
         arm: true,
         frameFunctions: profileFrameFunctions(projectPath),
+        engineCalls,
       });
       if (armed.isError === true) {
         slot.release();
@@ -12601,6 +12617,7 @@ class GodotServer {
     desktop: string | undefined,
     profiled: boolean,
     debugged: boolean,
+    engineCalls: boolean,
   ): Promise<GodotProcess | { error: string }> {
     // In one of the machine's engine slots, like every engine started for a call. The keeper takes
     // the lock over once it has handed the game's pid back, and gives it back when the run ends,
@@ -12635,6 +12652,7 @@ class GodotServer {
           projectPath,
           ...this.servedBy(),
           ...(profile === undefined ? {} : { profile }),
+          ...(profile !== undefined && engineCalls ? { engineCalls } : {}),
           ...(debugged ? { breakpoints: this.breakpointsForAGame(projectPath) } : { debugged: false }),
           slot: { lock: slot.lock, from: slot.from, by: `a game of ${projectPath} editor_run started` },
         },
@@ -13669,6 +13687,7 @@ class GodotServer {
             complete,
             unreadable: 0,
             ...playedCap(held),
+            engineCalls: readBoolean(held, 'engineCalls') === true,
             ...(complete && engineMethods > 0 ? { totalEngineMethods: engineMethods } : {}),
             functions: Object.fromEntries(
               Object.entries(functions)

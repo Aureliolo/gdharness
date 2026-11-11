@@ -41,6 +41,9 @@ var _last_frame_msec: int = -1
 var _frames: int = 0
 var _complete: bool = false
 var _frame_functions: int = FRAME_FUNCTIONS
+## Whether native calls are timed, which the server asks for. Off by default, because the engine
+## reads an object's class after a dynamic call to free() has destroyed it.
+var _engine_calls: bool = false
 ## Frames that carried as many functions as were asked for, and whether the totals did.
 var _capped_frames: int = 0
 var _total_capped: bool = false
@@ -84,6 +87,7 @@ func profile_start(args: Dictionary) -> Dictionary:
 	_reset()
 	var asked: int = GdhRead.as_int(args.get("frameFunctions", FRAME_FUNCTIONS))
 	_frame_functions = asked if asked > 0 else FRAME_FUNCTIONS
+	_engine_calls = GdhRead.as_bool(args.get("engineCalls", false))
 	if GdhRead.as_bool(args.get("arm", false)):
 		_armed = true
 		# The game the editor starts next inherits the editor's environment, and this tells its
@@ -112,6 +116,7 @@ func profile_read(_args: Dictionary) -> Dictionary:
 		"frames": _frames,
 		"complete": _complete,
 		"frameFunctions": _frame_functions,
+		"engineCalls": _engine_calls,
 		"cappedFrames": _capped_frames,
 		"totalCapped": _total_capped,
 		"coveredMs": _last_frame_msec - _started_msec if _last_frame_msec >= 0 else 0,
@@ -184,8 +189,8 @@ func _switch_on(session_id: int) -> void:
 	_session = session_id
 	_started_msec = Time.get_ticks_msec()
 	var session: EditorDebuggerSession = _sessions.get_session(session_id)
-	# Native calls on, so a call through an engine method leaves the caller's self time.
-	session.toggle_profiler("servers", true, [_frame_functions, true])
+	# With native calls timed, a call through an engine method leaves the caller's self time.
+	session.toggle_profiler("servers", true, [_frame_functions, _engine_calls])
 
 
 ## A play that was asked to be profiled is switched on as it starts. Any other play drops what is

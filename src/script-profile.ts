@@ -67,6 +67,11 @@ export interface ProfileTotals {
   readonly cappedFrames?: number;
   readonly totalCapped?: boolean;
   /**
+   * Whether the profiler was switched on with native calls timed, which is what gives a function an
+   * engineMs. Absent from a file written before the choice existed, which reads as not timed.
+   */
+  readonly engineCalls?: boolean;
+  /**
    * How many places in the engine's totals held an engine method a script called, which is no row
    * here. Absent when none did.
    */
@@ -155,8 +160,16 @@ function profileTotalsOf(value: unknown): ProfileTotals | null {
     summed[signature] = totals;
   }
   // The parts a file can be without, each taken where it has its type and left out where it has not.
-  const { frameFunctions, cappedFrames, totalCapped, totalEngineMethods, dropped, firstFrame, lastFrame } =
-    value;
+  const {
+    frameFunctions,
+    cappedFrames,
+    totalCapped,
+    engineCalls,
+    totalEngineMethods,
+    dropped,
+    firstFrame,
+    lastFrame,
+  } = value;
   return {
     startedAt,
     lastFrameAt,
@@ -167,6 +180,7 @@ function profileTotalsOf(value: unknown): ProfileTotals | null {
     ...(typeof frameFunctions === 'number' ? { frameFunctions } : {}),
     ...(typeof cappedFrames === 'number' ? { cappedFrames } : {}),
     ...(typeof totalCapped === 'boolean' ? { totalCapped } : {}),
+    ...(typeof engineCalls === 'boolean' ? { engineCalls } : {}),
     ...(typeof totalEngineMethods === 'number' ? { totalEngineMethods } : {}),
     ...(typeof dropped === 'number' ? { dropped } : {}),
     ...(typeof firstFrame === 'number' ? { firstFrame } : {}),
@@ -236,16 +250,18 @@ const PROFILER_SWITCH = 'profiler:servers';
 /**
  * The command that switches the profiler on, as the editor sends it: `[true, [count, native]]`.
  *
- * Native calls on, because only then does the engine take a call through a method bind (`callv`,
- * `emit_signal`, any `Node` method on a typed value) out of the caller's self time. Off, that time
- * stays in the caller's self, along with any script function the engine called back.
+ * With [param engineCalls], native calls are timed, and only then does the engine take a call
+ * through a method bind (`callv`, `emit_signal`, any `Node` method on a typed value) out of the
+ * caller's self time. Off, that time stays in the caller's self, along with any script function the
+ * engine called back. It is off unless asked for, because the engine reads an object's class after
+ * a dynamic call to `free()` has destroyed it, which crashes a game on Linux and macOS.
  */
-export function profilerOn(frameFunctions: number): Uint8Array {
-  return framedCommand(PROFILER_SWITCH, profilerOnData(frameFunctions));
+export function profilerOn(frameFunctions: number, engineCalls = false): Uint8Array {
+  return framedCommand(PROFILER_SWITCH, profilerOnData(frameFunctions, engineCalls));
 }
 
-function profilerOnData(frameFunctions: number): SentValue[] {
-  return [true, [frameFunctions, true]];
+function profilerOnData(frameFunctions: number, engineCalls: boolean): SentValue[] {
+  return [true, [frameFunctions, engineCalls]];
 }
 
 /**
@@ -292,10 +308,12 @@ export class ProfileAggregate {
   private dropped = 0;
   private readonly startedAt: number;
   private readonly frameFunctions: number;
+  private readonly engineCalls: boolean;
 
-  constructor(startedAt: number, frameFunctions: number) {
+  constructor(startedAt: number, frameFunctions: number, engineCalls = false) {
     this.startedAt = startedAt;
     this.frameFunctions = frameFunctions;
+    this.engineCalls = engineCalls;
   }
 
   /** Takes one message from the game. Anything that is not the profiler's is left alone. */
@@ -434,6 +452,7 @@ export class ProfileAggregate {
       frameFunctions: this.frameFunctions,
       cappedFrames: this.cappedFrames,
       totalCapped: this.totalCapped,
+      engineCalls: this.engineCalls,
       ...(this.totalEngineMethods > 0 ? { totalEngineMethods: this.totalEngineMethods } : {}),
       ...(this.dropped > 0 ? { dropped: this.dropped } : {}),
       ...(this.firstFrame === null || this.lastFrame === null
@@ -930,17 +949,22 @@ export class ProfileObserver implements DebugObserver {
   private aggregate: ProfileAggregate | null = null;
   private readonly changed: (totals: ProfileTotals) => void;
   private readonly frameFunctions: number;
+  private readonly engineCalls: boolean;
 
-  /** Asking for at most [param frameFunctions] functions a frame. See `frameFunctionsFor`. */
-  constructor(changed: (totals: ProfileTotals) => void, frameFunctions: number) {
+  /**
+   * Asking for at most [param frameFunctions] functions a frame. See `frameFunctionsFor`. Native
+   * calls are timed only where [param engineCalls] says so.
+   */
+  constructor(changed: (totals: ProfileTotals) => void, frameFunctions: number, engineCalls = false) {
     this.changed = changed;
     this.frameFunctions = frameFunctions;
+    this.engineCalls = engineCalls;
   }
 
   connected(send: (message: string, data: readonly SentValue[]) => void): void {
-    const aggregate = new ProfileAggregate(Date.now(), this.frameFunctions);
+    const aggregate = new ProfileAggregate(Date.now(), this.frameFunctions, this.engineCalls);
     this.aggregate = aggregate;
-    send(PROFILER_SWITCH, profilerOnData(this.frameFunctions));
+    send(PROFILER_SWITCH, profilerOnData(this.frameFunctions, this.engineCalls));
     this.changed(aggregate.snapshot());
   }
 

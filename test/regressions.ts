@@ -2107,7 +2107,12 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     command.length - 4,
     'its length, little-endian',
   );
-  assert.deepEqual(decodeVariant(command.subarray(4)), ['profiler:servers', 1, [true, [1536, true]]]);
+  assert.deepEqual(decodeVariant(command.subarray(4)), ['profiler:servers', 1, [true, [1536, false]]]);
+  assert.deepEqual(decodeVariant(profilerOn(1536, true).subarray(4)), [
+    'profiler:servers',
+    1,
+    [true, [1536, true]],
+  ]);
 
   // The most functions a frame may carry, kept below the game's debugger queue, which drops the
   // messages naming functions past its size: the engine's default queue, and a project's own.
@@ -2265,6 +2270,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     frames: 3,
     complete: true,
     unreadable: 0,
+    engineCalls: true,
     functions,
   });
   const table = profiledFunctions(
@@ -2305,6 +2311,16 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     answer({ totals: totals({}) })['note'],
     undefined,
     'the engine’s own totals need nothing said',
+  );
+  assert.match(
+    say({ totals: { ...totals({}), engineCalls: false } }),
+    /^Calls through engine methods, such as callv, stay in the caller's selfMs.*engineCalls: true/,
+    'a profile without timed native calls says where the callv time went and how to time it apart',
+  );
+  assert.match(
+    say({ totals: (({ engineCalls: _off, ...rest }) => rest)(totals({})) }),
+    /engineCalls: true/,
+    'a profile written without the field reads as untimed',
   );
   // Where the frames begin and whether any between them went missing, from the game's own numbers.
   // A run without the runtime addon on a loaded runner summed 12 of its scene's 30 frames, and
@@ -53976,6 +53992,7 @@ async function testACallThroughAnEngineMethodLeavesTheCallersSelfTime(): Promise
         scene: 'dispatch.tscn',
         headless: true,
         profile: true,
+        engineCalls: true,
         runtimeWaitMs: 0,
       });
       assert.match(started, /"started": true/, started);
@@ -53991,6 +54008,7 @@ async function testACallThroughAnEngineMethodLeavesTheCallersSelfTime(): Promise
         scene: 'looped.tscn',
         headless: true,
         profile: true,
+        engineCalls: true,
         runtimeWaitMs: 60_000,
       });
       assert.match(looped, /"started": true/, looped);
@@ -54014,6 +54032,7 @@ async function testACallThroughAnEngineMethodLeavesTheCallersSelfTime(): Promise
         scene: 'relayed.tscn',
         headless: true,
         profile: true,
+        engineCalls: true,
         runtimeWaitMs: 0,
       });
       assert.match(relayedStart, /"started": true/, relayedStart);
@@ -54039,6 +54058,144 @@ async function testACallThroughAnEngineMethodLeavesTheCallersSelfTime(): Promise
         relayedRows.every((one) => Number(get(one, 'engineMs') ?? 0) < relayedInner * 1.5),
         `inner's work is in no row's engine time twice: ${relayed}`,
       );
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
+ * A profiled run times no native calls unless the start asks for them with engineCalls.
+ *
+ * With the engine timing them, a dynamic call to free() has the engine read the freed object's
+ * class afterwards, which crashes a game on Linux and macOS. Windows survives that read, so the
+ * scene that frees objects through an untyped call guards the default and does not reproduce the
+ * crash.
+ *
+ * - engineCalls without profile is refused, naming profile: true.
+ * - a default profiled run carries no engineMs on any row, and its note names engineCalls.
+ * - a profiled run whose script frees objects through an untyped call ends cleanly.
+ */
+async function testAProfiledRunTimesNoNativeCallsUnlessAsked(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('native call opt-in regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-profiled-optin-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-profiled-optin-rt-'));
+  try {
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      { recursive: true },
+    );
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="OptIn"\n' +
+        '\n[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    const scene = (name: string, body: string[]): void => {
+      writeFileSync(join(project, `${name}.gd`), ['extends Node', '', '', ...body, ''].join('\n'));
+      writeFileSync(
+        join(project, `${name}.tscn`),
+        `[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://${name}.gd" id="1"]\n\n[node name="Run" type="Node"]\nscript = ExtResource("1")\n`,
+      );
+    };
+    scene('dispatch', [
+      'func inner() -> int:',
+      '\tvar sum := 0',
+      '\tfor i in 400000:',
+      '\t\tsum += i % 7',
+      '\treturn sum',
+      '',
+      '',
+      // Typed, so the compiler calls callv by its method bind, which only a native-timing profiler
+      // takes out of the caller's self time.
+      'func outer() -> int:',
+      '\tvar target: Object = self',
+      '\treturn int(target.callv(&"inner", []))',
+      '',
+      '',
+      'func _ready() -> void:',
+      '\tfor round in 5:',
+      '\t\touter()',
+      '\tget_tree().quit()',
+    ]);
+    scene('freeing', [
+      'func _ready() -> void:',
+      '\tfor i in 2000:',
+      '\t\tvar o: Variant = Node.new()',
+      '\t\to.free()',
+      '\tprint("freed")',
+      '\tget_tree().quit()',
+    ]);
+    const server = new ServerProcess({
+      env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    });
+    try {
+      await server.initialize('regression-test');
+      const ask = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
+        await server.request('tools/call', { name: 'editor_run', arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+      const call = async (args: Record<string, unknown>): Promise<string> => textOf(await ask(args)) ?? '';
+
+      const refused = await ask({
+        op: 'start',
+        projectPath: project,
+        scene: 'dispatch.tscn',
+        headless: true,
+        engineCalls: true,
+      });
+      const refusal = textOf(refused) ?? '';
+      assert.equal(get(refused.result, 'isError'), true, `engineCalls alone is refused: ${refusal}`);
+      assert.match(refusal, /profile: true/, `the refusal names what makes it work: ${refusal}`);
+
+      const started = await call({
+        op: 'start',
+        projectPath: project,
+        scene: 'dispatch.tscn',
+        headless: true,
+        profile: true,
+        runtimeWaitMs: 0,
+      });
+      assert.match(started, /"started": true/, started);
+      const waited = await call({ op: 'wait', timeoutMs: 60_000 });
+      assert.match(waited, /"running": false/, `the run ended: ${waited}`);
+      const answered = await call({ op: 'profile', limit: 100 });
+      const profile: unknown = JSON.parse(answered);
+      assert.equal(get(profile, 'complete'), true, answered);
+      const rows = asArray(get(profile, 'functions'));
+      assert.ok(rows.length > 0, `the run has rows: ${answered}`);
+      assert.deepEqual(
+        rows.filter((one) => get(one, 'engineMs') !== undefined),
+        [],
+        `no row carries engineMs without engineCalls: ${answered}`,
+      );
+      assert.match(
+        String(get(profile, 'note')),
+        /callv, stay in the caller's selfMs.*engineCalls: true/,
+        `the note names engineCalls: ${answered}`,
+      );
+
+      const freed = await call({
+        op: 'start',
+        projectPath: project,
+        scene: 'freeing.tscn',
+        headless: true,
+        profile: true,
+        runtimeWaitMs: 0,
+      });
+      assert.match(freed, /"started": true/, freed);
+      const freedWait = await call({ op: 'wait', timeoutMs: 60_000 });
+      assert.match(freedWait, /"running": false/, `the run ended: ${freedWait}`);
+      assert.equal(get(JSON.parse(freedWait), 'exitCode'), 0, `it ended cleanly: ${freedWait}`);
+      assert.match(freedWait, /freed/, `the script reached its end: ${freedWait}`);
     } finally {
       await server.stop();
     }
@@ -89733,6 +89890,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAKeeperHoldsARunWhoseNoteItCannotWrite,
   testAProfiledRunNamesWhereItsTimeWent,
   testACallThroughAnEngineMethodLeavesTheCallersSelfTime,
+  testAProfiledRunTimesNoNativeCallsUnlessAsked,
   testSuitesPlayInASceneTheProfilerSees,
   testAProfileSinceAMarkAnswersForOneAction,
   testAProfileFromTheStartWaitsForTheProfiler,

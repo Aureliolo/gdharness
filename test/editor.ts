@@ -7390,7 +7390,7 @@ async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Edito
     }
   };
   try {
-    const started = await play({ profile: true });
+    const started = await play({ profile: true, engineCalls: true });
     assert.match(
       String(get(started, 'profile', 'totals')),
       /^On from the game's start, through the editor's debugger session\./,
@@ -7401,8 +7401,8 @@ async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Edito
     // from the engine's default, rather than the addon's own fallback or the engine's buffer size.
     const held = await hook(project, { op: 'profile_held' });
     assert.deepEqual(
-      [get(held, 'profiled'), get(held, 'frameFunctions')],
-      [true, frameFunctionsFor(queuedMessagesOf(readFileSync(join(project, 'project.godot'), 'utf8')))],
+      [get(held, 'profiled'), get(held, 'frameFunctions'), get(held, 'engineCalls')],
+      [true, frameFunctionsFor(queuedMessagesOf(readFileSync(join(project, 'project.godot'), 'utf8'))), true],
       `the profiler went on with the cap the server asked for: ${JSON.stringify(held)}`,
     );
     await twice(25);
@@ -7475,6 +7475,15 @@ async function testAPlayedGameIsProfiled({ call, attempt, play, project }: Edito
     );
     await twice(10);
     assert.equal(await callsOfTwice(10), 10, 'only the calls after the profiler went on');
+    // Switched on by asking, native calls are not timed: no row has engineMs, and the note says how
+    // to get it.
+    const untimed = await call('editor_run', { op: 'profile', limit: 100 });
+    assert.deepEqual(
+      asArray(get(untimed, 'functions')).filter((one) => get(one, 'engineMs') !== undefined),
+      [],
+      `no row has engineMs without engineCalls: ${JSON.stringify(untimed)}`,
+    );
+    assert.match(String(get(untimed, 'note')), /engineCalls: true/, JSON.stringify(untimed));
   } finally {
     await attempt('editor_run', { op: 'stop' });
   }

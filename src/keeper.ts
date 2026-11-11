@@ -195,7 +195,11 @@ const LAST_WRITE_TRIES = 5;
  * most every `PROFILE_WRITE_MS` while frames arrive, and once more as the game exits, so a server
  * reading the file mid-run is at most that far behind and one reading it after the exit has the lot.
  */
-function profiledBy(path: string, projectPath: string): { observer: ProfileObserver; finish: () => void } {
+function profiledBy(
+  path: string,
+  projectPath: string,
+  engineCalls: boolean,
+): { observer: ProfileObserver; finish: () => void } {
   let latest: ProfileTotals | null = null;
   let timer: NodeJS.Timeout | null = null;
   // A write a reader held off past its wait is tried again later rather than dropped: the totals it
@@ -206,15 +210,19 @@ function profiledBy(path: string, projectPath: string): { observer: ProfileObser
       timer = setTimeout(write, PROFILE_WRITE_MS);
     }
   };
-  const observer = new ProfileObserver((totals) => {
-    const first = latest === null;
-    latest = totals;
-    if (first) {
-      write();
-    } else {
-      timer ??= setTimeout(write, PROFILE_WRITE_MS);
-    }
-  }, profileFrameFunctions(projectPath));
+  const observer = new ProfileObserver(
+    (totals) => {
+      const first = latest === null;
+      latest = totals;
+      if (first) {
+        write();
+      } else {
+        timer ??= setTimeout(write, PROFILE_WRITE_MS);
+      }
+    },
+    profileFrameFunctions(projectPath),
+    engineCalls,
+  );
   writeProfileFile(path, { connected: false, listeningSince: Date.now() });
   return {
     observer,
@@ -358,7 +366,8 @@ async function keep(): Promise<void> {
   const run = spec.run;
   // The game's debugger, opened before the game so it is listening when the game dials it: the
   // engine dials once, as it starts, and runs with no debugger if nobody answers.
-  const profiled = run?.profile === undefined ? null : profiledBy(run.profile, run.projectPath);
+  const profiled =
+    run?.profile === undefined ? null : profiledBy(run.profile, run.projectPath, run.engineCalls === true);
   const debuggerPeer =
     run === undefined || run.debugged === false
       ? null
