@@ -56,14 +56,17 @@ export interface PassedSuite {
   readonly inputs: readonly string[];
 }
 
-const RES_LITERAL = /res:\/\/[^"'\s)\]<>]*/g;
-const PRELOAD = /\bpreload\(\s*(?:"([^"]*)"|'([^']*)'|([A-Za-z_]\w*))\s*\)/g;
+/** A path a text resource names: in quotes, where it may hold a space, or bare up to a delimiter. */
+const RES_LITERAL = /"(res:\/\/[^"\r\n]*)"|'(res:\/\/[^'\r\n]*)'|(res:\/\/[^"'\s)\]<>]*)/g;
+/** A path in a binary resource, which is stored as plain text between bytes that are not part of it. */
+const BINARY_RES_LITERAL = /res:\/\/[\w./-]+/g;
+const PRELOAD = /\bpreload\(/g;
 /**
  * A call reading a file or listing a folder by the path it is given, up to the start of that path.
  * `ResourceLoader.load` is left out: see [constant RESOURCE_LOAD].
  */
 const FILE_READ =
-  /(?:\b(?:FileAccess\.(?:open\w*|get_file_as_string|get_file_as_bytes|file_exists|get_md5|get_sha256|get_modified_time|get_size)|DirAccess\.(?:open|get_files_at|get_directories_at|dir_exists_absolute)|ResourceLoader\.(?:list_directory|exists)|Image\.load_from_file)|(?<!\bResourceLoader)\.(?:load|load_from_file|change_dir))\(/g;
+  /(?:\b(?:FileAccess\.(?:open\w*|get_file_as_string|get_file_as_bytes|file_exists|get_md5|get_sha256|get_modified_time|get_size)|DirAccess\.(?:open|get_files_at|get_directories_at|dir_exists_absolute)|ResourceLoader\.(?:list_directory|exists)|Image\.load_from_file)|(?<!\bResourceLoader)\.(?:load|load_from_file|change_dir|open|load_dynamic_font|append_from_file))\(/g;
 /** A call of [constant FILE_READ] whose answer depends on which files and folders exist alone. */
 const NAMES_READ =
   /^(?:FileAccess\.file_exists|DirAccess\.(?:open|get_files_at|get_directories_at|dir_exists_absolute)|ResourceLoader\.(?:list_directory|exists)|\.change_dir)\($/;
@@ -88,7 +91,12 @@ const WRITE_ONLY = /^FileAccess\.WRITE$/;
 /** The directory of the addon a path is in. */
 const ADDON = /^res:\/\/addons\/[^/]+\//;
 /** A text resource, whose dependencies are the paths it names. */
-const TEXT_RESOURCE = /\.(?:tscn|tres|gdextension)$/;
+const TEXT_RESOURCE = /\.(?:tscn|tres|gdextension|gdshader|gdshaderinc|import|res|scn)$/;
+const BINARY_RESOURCE = /\.(?:res|scn)$/;
+/** The settings that replace the project's own, read beside it before anything loads. */
+const OVERRIDE_CFG = 'res://override.cfg';
+/** The list of extensions the engine loads at start, which sits in the hidden folder inputs skip. */
+const EXTENSION_LIST = 'res://.godot/extension_list.cfg';
 
 interface Read {
   readonly digest: string;
@@ -174,6 +182,7 @@ export class SuiteInputs {
   private readonly unfollowed = new Map<string, Unfollowed>();
   private autoloadPaths: ReadonlyMap<string, string> | null = null;
   private scenes: readonly string[] | null = null;
+  private lowered: ReadonlyMap<string, string> | null = null;
   private readonly scripts: ProjectScripts;
   private readonly alwaysDigest: string;
   private readonly everywhere: string[];
@@ -186,7 +195,12 @@ export class SuiteInputs {
     this.scripts = scripts;
     this.alwaysDigest = createHash('sha256').update(always.join('\n')).digest('hex');
     // The engine reads project.godot and loads its extensions before any loader is asked.
-    this.everywhere = ['res://project.godot', ...extensionsOf(scripts.projectPath)];
+    this.everywhere = [
+      'res://project.godot',
+      OVERRIDE_CFG,
+      EXTENSION_LIST,
+      ...extensionsOf(scripts.projectPath),
+    ];
   }
 
   /**
@@ -368,7 +382,9 @@ export class SuiteInputs {
     );
     const follows: string[] = [];
     if (TEXT_RESOURCE.test(path)) {
-      for (const [named] of bytes.toString('latin1').matchAll(RES_LITERAL)) {
+      const binary = BINARY_RESOURCE.test(path);
+      for (const found of bytes.toString('latin1').matchAll(binary ? BINARY_RES_LITERAL : RES_LITERAL)) {
+        const named = found[1] ?? found[2] ?? found[3] ?? found[0];
         const target = join(this.scripts.projectPath, named.slice('res://'.length));
         (statOf(target)?.isDirectory() === true ? also : follows).push(named);
       }
@@ -393,15 +409,20 @@ export class SuiteInputs {
    * What the script at [param path] compiles with and what it reads by a path it names, or null when
    * it reads or preloads by a path worked out at run time.
    */
-  private scriptReaches(path: string): { follows: string[]; also: string[] } | null {
+  private scriptReaches(asked: string): { follows: string[]; also: string[] } | null {
+    const path = this.spelledAsRead(asked);
     const text = this.textOf(path);
-    const constants = this.constantsOf(path);
     const follows: string[] = [];
     const also: string[] = [];
     for (const found of text.matchAll(PRELOAD)) {
-      const named = found[1] ?? found[2] ?? constants.get(found[3] ?? '');
+      const [argument = ''] = argumentsAt(text, found.index + found[0].length);
+      const literal = STRING_ARGUMENT.exec(argument);
+      const named = literal !== null ? (literal[1] ?? literal[2]) : this.constantExpression(argument, path);
       if (named === undefined || named.startsWith('uid://')) {
-        this.unfollowed.set(path, { line: lineAt(text, found.index), argument: found[0] });
+        this.unfollowed.set(path, {
+          line: lineAt(text, found.index),
+          argument: `${found[0]}${argument})`,
+        });
         return null;
       }
       follows.push(
@@ -438,14 +459,43 @@ export class SuiteInputs {
         );
       }
     }
-    const base = this.scripts.base(path);
-    if (base !== null && 'path' in base) {
-      follows.push(base.path);
+    // The script's own base and the base of each class inside it, resolved as a suite is.
+    const pending = [this.scripts.script(path)?.body];
+    for (let body = pending.pop(); body !== undefined; body = pending.pop()) {
+      const base = this.scripts.baseOf(path, body.extendsAs);
+      if (base !== null && 'path' in base) {
+        follows.push(base.path);
+      }
+      pending.push(...body.inner);
     }
-    for (const name of classesNamedIn(this.scripts.script(path)?.code ?? '', this.scripts.classes)) {
+    const code = this.scripts.script(path)?.code ?? '';
+    for (const name of classesNamedIn(code, this.scripts.classes)) {
       follows.push(this.scripts.classes.get(name) ?? '');
     }
+    // `classesNamedIn` reads names that begin with a capital, and a class may be declared in lower case.
+    for (const [name, declaring] of this.scripts.classes) {
+      if (!/^[A-Z]/.test(name) && new RegExp(`\\b${name}\\b`).test(code)) {
+        follows.push(declaring);
+      }
+    }
     return { follows, also };
+  }
+
+  /**
+   * [param path] as the project's scripts spell it. A file system that ignores letter case opens a
+   * script by any spelling, while the scripts are kept by the one on disk.
+   */
+  private spelledAsRead(path: string): string {
+    if (this.scripts.sources.has(path)) {
+      return path;
+    }
+    this.lowered ??= new Map([...this.scripts.sources.keys()].map((key) => [key.toLowerCase(), key]));
+    return this.lowered.get(path.toLowerCase()) ?? path;
+  }
+
+  /** The string a constant, a class's constant or a sum of those and literals makes, or undefined. */
+  private constantExpression(expression: string, path: string): string | undefined {
+    return joinedString(expression, (part) => this.constantNamed(part, path));
   }
 
   /**
@@ -983,6 +1033,9 @@ function listed(inputs: ReadonlySet<string>): string[] {
 /** A recorded path as an input: the addon it is in, or null for one outside the project's files. */
 function inputPath(path: string): string | null {
   if (path === EVERY_FILE || path === EVERY_NAME || path.startsWith(CACHE_HELD) || path.startsWith(TREE)) {
+    return path;
+  }
+  if (path === EXTENSION_LIST) {
     return path;
   }
   if (!path.startsWith('res://') || path.startsWith('res://.godot/') || path === '') {
