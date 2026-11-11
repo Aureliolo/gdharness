@@ -576,41 +576,53 @@ function renderTools(): string {
     if (tool.answer !== undefined) {
       parts.push(`<p><strong>The answer:</strong> ${escaped(tool.answer)}</p>\n`);
     }
-
-    const operations = Object.entries(tool.operations ?? {});
-    if (operations.length > 0) {
-      parts.push('<table><thead><tr><th>op</th><th>what it does</th><th>needs</th></tr></thead><tbody>\n');
-      for (const [op, spec] of operations) {
-        const needs = [...tool.requires, ...spec.requires];
-        const isDefault = tool.defaultOperation === op ? ' <span class="tag">default</span>' : '';
-        parts.push(
-          `<tr><td><code>${escaped(op)}</code>${isDefault}</td><td>${escaped(spec.summary)}</td>` +
-            `<td>${needs.map((name) => `<code>${escaped(name)}</code>`).join(' ') || '&mdash;'}</td></tr>\n`,
-        );
-      }
-      parts.push('</tbody></table>\n');
-    } else if (tool.requires.length > 0) {
-      parts.push(
-        `<p class="needs">Needs ${tool.requires.map((name) => `<code>${escaped(name)}</code>`).join(', ')}.</p>\n`,
-      );
-    }
-
-    const parameters = Object.entries(tool.parameters).filter(([name]) => name !== 'projectPath');
-    if (parameters.length > 0) {
-      parts.push('<details><summary>Arguments</summary>\n<dl class="args">\n');
-      for (const [name, schema] of parameters) {
-        const type = argumentShape(schema);
-        const note = typeof schema['description'] === 'string' ? schema['description'] : '';
-        parts.push(
-          `<dt><code>${escaped(name)}</code> <span class="type">${escaped(type)}</span></dt>` +
-            `<dd>${escaped(note)}</dd>\n`,
-        );
-      }
-      parts.push('</dl>\n</details>\n');
-    }
-    parts.push('</section>\n');
+    parts.push(renderOperations(tool), renderArguments(tool), '</section>\n');
   }
   return parts.join('');
+}
+
+type ToolSpec = (typeof TOOL_SPECS)[number];
+
+/** The table of a tool's ops, or the line naming what a tool without ops needs, or nothing. */
+function renderOperations(tool: ToolSpec): string {
+  const operations = Object.entries(tool.operations ?? {});
+  if (operations.length === 0) {
+    return tool.requires.length > 0
+      ? `<p class="needs">Needs ${tool.requires.map((name) => `<code>${escaped(name)}</code>`).join(', ')}.</p>\n`
+      : '';
+  }
+  const rows = operations.map(([op, spec]) => {
+    const needs = [...tool.requires, ...spec.requires];
+    const isDefault = tool.defaultOperation === op ? ' <span class="tag">default</span>' : '';
+    return (
+      `<tr><td><code>${escaped(op)}</code>${isDefault}</td><td>${escaped(spec.summary)}</td>` +
+      `<td>${needs.map((name) => `<code>${escaped(name)}</code>`).join(' ') || '&mdash;'}</td></tr>\n`
+    );
+  });
+  return [
+    '<table><thead><tr><th>op</th><th>what it does</th><th>needs</th></tr></thead><tbody>\n',
+    ...rows,
+    '</tbody></table>\n',
+  ].join('');
+}
+
+/** A tool's arguments other than `projectPath`, or nothing for a tool with none. */
+function renderArguments(tool: ToolSpec): string {
+  const parameters = Object.entries(tool.parameters).filter(([name]) => name !== 'projectPath');
+  if (parameters.length === 0) {
+    return '';
+  }
+  const rows = parameters.map(([name, schema]) => {
+    const type = argumentShape(schema);
+    const note = typeof schema['description'] === 'string' ? schema['description'] : '';
+    return (
+      `<dt><code>${escaped(name)}</code> <span class="type">${escaped(type)}</span></dt>` +
+      `<dd>${escaped(note)}</dd>\n`
+    );
+  });
+  return ['<details><summary>Arguments</summary>\n<dl class="args">\n', ...rows, '</dl>\n</details>\n'].join(
+    '',
+  );
 }
 
 /**
@@ -840,18 +852,7 @@ function checkOutput(): void {
     anchors.set(name, anchorsIn(readFileSync(join(OUT, name), 'utf8')));
   }
 
-  const wrong: string[] = [];
-  for (const line of codeBlocks.flatMap((block) => block.split('\n'))) {
-    if (line.length > CODE_COLUMNS) {
-      wrong.push(`a code line is ${line.length} characters, ${CODE_COLUMNS} fit: ${line.slice(0, 56)}...`);
-    }
-    const drawn = drawingCharactersIn(line);
-    if (drawn.length > 0) {
-      wrong.push(
-        `a code line draws with ${drawn.join(' ')}, which the mono face has no glyphs for: ${line.slice(0, 40)}...`,
-      );
-    }
-  }
+  const wrong: string[] = codeBlocks.flatMap((block) => block.split('\n')).flatMap(codeLineProblems);
 
   for (const name of names.filter((file) => /\.(?:html|md|txt|css)$/.test(file))) {
     const text = readFileSync(join(OUT, name), 'utf8');
@@ -860,21 +861,9 @@ function checkOutput(): void {
     }
 
     for (const link of linksIn(text)) {
-      // Anything with a scheme, and anything protocol-relative, is somebody else's to serve.
-      if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(link)) {
-        continue;
-      }
-      const [target = '', fragment = ''] = link.split('#');
-      const file = target === '' ? name : target;
-      if (!published.has(file)) {
-        wrong.push(`${name} links to ${link}, and ${file} is not published`);
-        continue;
-      }
-      // Only a rendered page has ids to look for. A fragment into markdown is whatever anchor
-      // the reader's own renderer makes of a heading, which nothing here decides.
-      const known = anchors.get(file);
-      if (fragment !== '' && known !== undefined && !known.has(fragment)) {
-        wrong.push(`${name} links to ${link}, and ${file} has no id="${fragment}"`);
+      const problem = linkProblem(name, link, published, anchors);
+      if (problem !== null) {
+        wrong.push(problem);
       }
     }
   }
@@ -882,6 +871,45 @@ function checkOutput(): void {
   if (wrong.length > 0) {
     throw new Error(`the site would publish broken:\n  ${wrong.join('\n  ')}`);
   }
+}
+
+/** What is wrong with a code [param line], one entry per fault. */
+function codeLineProblems(line: string): string[] {
+  const wrong: string[] = [];
+  if (line.length > CODE_COLUMNS) {
+    wrong.push(`a code line is ${line.length} characters, ${CODE_COLUMNS} fit: ${line.slice(0, 56)}...`);
+  }
+  const drawn = drawingCharactersIn(line);
+  if (drawn.length > 0) {
+    wrong.push(
+      `a code line draws with ${drawn.join(' ')}, which the mono face has no glyphs for: ${line.slice(0, 40)}...`,
+    );
+  }
+  return wrong;
+}
+
+/** What is wrong with the [param link] in the page [param name], or null when it resolves. */
+function linkProblem(
+  name: string,
+  link: string,
+  published: ReadonlySet<string>,
+  anchors: ReadonlyMap<string, ReadonlySet<string>>,
+): string | null {
+  // Anything with a scheme, and anything protocol-relative, is somebody else's to serve.
+  if (/^(?:[a-z][a-z0-9+.-]*:|\/\/)/i.test(link)) {
+    return null;
+  }
+  const [target = '', fragment = ''] = link.split('#');
+  const file = target === '' ? name : target;
+  if (!published.has(file)) {
+    return `${name} links to ${link}, and ${file} is not published`;
+  }
+  // Only a rendered page has ids to look for. A fragment into markdown is whatever anchor
+  // the reader's own renderer makes of a heading, which nothing here decides.
+  const known = anchors.get(file);
+  return fragment !== '' && known !== undefined && !known.has(fragment)
+    ? `${name} links to ${link}, and ${file} has no id="${fragment}"`
+    : null;
 }
 
 try {

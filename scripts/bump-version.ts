@@ -75,6 +75,27 @@ async function writeText(filePath: string, content: string, dryRun: boolean): Pr
   }
 }
 
+function nextVersionFor(target: string, currentVersion: string): string {
+  if (target === 'major' || target === 'minor' || target === 'patch') {
+    return bumpVersion(currentVersion, target);
+  }
+  assertVersion(target);
+  return target;
+}
+
+/**
+ * The registry entry carries the npm version separately from the server's own, and a release
+ * that moved one without the other would point the registry at a version nobody published.
+ */
+function setRegistryPackageVersions(server: VersionedManifest, nextVersion: string): void {
+  const packages: unknown = server['packages'];
+  for (const entry of Array.isArray(packages) ? (packages as unknown[]) : []) {
+    if (isRecord(entry)) {
+      entry['version'] = nextVersion;
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const dryRun = args.includes('--dry-run') || args.includes('-d');
@@ -87,14 +108,7 @@ async function main(): Promise<void> {
 
   const pkg = await readManifest(PACKAGE_JSON_PATH);
   const currentVersion = pkg.version;
-  let nextVersion: string;
-
-  if (target === 'major' || target === 'minor' || target === 'patch') {
-    nextVersion = bumpVersion(currentVersion, target);
-  } else {
-    assertVersion(target);
-    nextVersion = target;
-  }
+  const nextVersion = nextVersionFor(target, currentVersion);
 
   assertVersion(nextVersion);
 
@@ -111,14 +125,7 @@ async function main(): Promise<void> {
 
   const server = await readManifest(SERVER_JSON_PATH);
   server.version = nextVersion;
-  // The registry entry carries the npm version separately from the server's own, and a release
-  // that moved one without the other would point the registry at a version nobody published.
-  const packages: unknown = server['packages'];
-  for (const entry of Array.isArray(packages) ? (packages as unknown[]) : []) {
-    if (isRecord(entry)) {
-      entry['version'] = nextVersion;
-    }
-  }
+  setRegistryPackageVersions(server, nextVersion);
   await writeText(SERVER_JSON_PATH, `${JSON.stringify(server, null, 2)}\n`, dryRun);
   changed.push('server.json');
 
