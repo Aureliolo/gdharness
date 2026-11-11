@@ -55102,6 +55102,24 @@ function testASuiteIsFoundUnderAnySpellingOfItsPath(): void {
         selected: [{ entry: 'test_a', suite: 'res://tests/a_test.gd', test: 'test_a' }],
       },
     });
+    assert.deepEqual(selectTests(project, ['res://tests'], []), {
+      ok: false,
+      reason: 'tests is an empty list: name a case, or leave tests out to run every one.',
+    });
+    assert.deepEqual(selectTests(project, ['res://tests'], ['test_a', ' ']), {
+      ok: false,
+      reason: 'tests[1] is not a case name: give "test_name" or "suite:test_name".',
+    });
+    assert.deepEqual(selectTests(project, ['res://tests/empty'], ['test_a']), {
+      ok: false,
+      reason:
+        'No suite under res://tests/empty has a case test_a: none of them declares a func test_ at the top level.',
+    });
+    assert.deepEqual(selectTests(project, ['res://tests/a_test.gd'], ['test_aa']), {
+      ok: false,
+      reason:
+        'No suite under res://tests/a_test.gd has a case test_aa. The cases there are a_test:test_a, a_test:test_ab.',
+    });
     if (process.platform === 'win32') {
       assert.deepEqual(
         suiteFilesUnder(project, ['res://Tests']),
@@ -58488,6 +58506,20 @@ function testSpreadRefusesAnEmptyValueAndASceneThatIsNoFile(): void {
     for (const flag of ['--slots', '--workers', '--slot-count', '--silence']) {
       assert.equal(refused('bench.tscn', flag, ''), `${flag} needs a value.`, `an empty ${flag}`);
     }
+    assert.equal(refused(), 'gdharness spread needs the scene of the bench to play.');
+    assert.equal(
+      refused('bench.tscn', 'benches/x.tscn'),
+      'gdharness spread plays one scene, and was given 2: bench.tscn, benches/x.tscn.',
+    );
+    assert.equal(
+      refused('bench.tscn', '--nope'),
+      'Unknown option --nope for gdharness spread. Run gdharness help.',
+    );
+    assert.equal(refused('bench.tscn', '--workers'), '--workers needs a value.');
+    assert.equal(
+      refused('bench.tscn', '--', '--gdh-share=1'),
+      "--gdh-share=1 is gdharness spread's own to hand each engine, so it cannot be given.",
+    );
     assert.match(refused('benches'), /^Nothing at res:\/\/benches /, 'a folder is no scene');
     assert.match(refused(''), /^Nothing at /, 'and an empty name is none');
   } finally {
