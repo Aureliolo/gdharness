@@ -530,7 +530,7 @@ import {
   spawnShown,
   spawnSyncHidden,
 } from '../src/spawn.js';
-import { type ArmPlayed, armsPlayed, shareFaults, shareOf } from '../src/spread-run.js';
+import { type ArmPlayed, armsPlayed, shareFaults, shareOf, spreadOptionsOf } from '../src/spread-run.js';
 import { followSuccessor, RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
 import { EVERY_FILE, EVERY_NAME, reachedBySuite, SuiteInputs, walkSeen } from '../src/suite-inputs.js';
 import {
@@ -58360,6 +58360,33 @@ function testTheTestHelpersWaitStepAndPress(): void {
 }
 
 /**
+ * `gdharness spread` reads its command line strictly: no empty value for a valued option, and a
+ * scene that is a file.
+ */
+function testSpreadRefusesAnEmptyValueAndASceneThatIsNoFile(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spread-options-'));
+  try {
+    writeTree(project, { 'project.godot': 'config_version=5\n', 'bench.tscn': '', 'benches/x.tscn': '' });
+    const refused = (...args: string[]): string => {
+      try {
+        spreadOptionsOf([project, ...args], project);
+      } catch (error) {
+        return errorMessage(error);
+      }
+      return 'accepted';
+    };
+    assert.equal(spreadOptionsOf([project, 'bench.tscn'], project).scene, 'res://bench.tscn');
+    for (const flag of ['--slots', '--workers', '--slot-count', '--silence']) {
+      assert.equal(refused('bench.tscn', flag, ''), `${flag} needs a value.`, `an empty ${flag}`);
+    }
+    assert.match(refused('benches'), /^Nothing at res:\/\/benches /, 'a folder is no scene');
+    assert.match(refused(''), /^Nothing at /, 'and an empty name is none');
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * `gdharness spread` against the same bench played on its own: the same table to the last digit,
  * floats included, from three workers and a gathering engine, none of which announces itself as
  * the game. Then each way a fan-out can half work, each refused before or after the gathering with
@@ -85644,6 +85671,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAYamlConfigWeCannotReadIsRefusedAndOneWithEmptyKeysIsWritten,
   testAConfigPinNamesOnlyGdharnessWhateverTheEditorWroteTheFileAs,
   testTheTestHelpersWaitStepAndPress,
+  testSpreadRefusesAnEmptyValueAndASceneThatIsNoFile,
   testASpreadBenchGathersTheTableItPlaysAlone,
   testASuiteRunHasNoSoundWhicheverWayItStarts,
   testTheTestCommandRunsAndJudgesAProject,
