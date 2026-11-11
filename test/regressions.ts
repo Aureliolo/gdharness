@@ -29895,6 +29895,48 @@ function testTheHeadlessListNamesEveryHeadlessTool(): void {
 }
 
 /**
+ * Under its heading a tool says what it can change, and each op is a line with its default mark and
+ * what it needs and takes.
+ *
+ * Read-only tools say they change nothing. A tool with destructive ops names exactly those ops.
+ */
+function testAToolSectionSaysWhatItChangesAndEachOpLineSaysWhatItTakes(): void {
+  const lines = renderToolsMarkdown().split('\n');
+  const section = (name: string): string[] => {
+    const at = lines.indexOf(`## ${name}`);
+    assert.ok(at >= 0, `${name} has a section`);
+    const end = lines.findIndex((line, index) => index > at && line.startsWith('## '));
+    return lines.slice(at, end === -1 ? undefined : end);
+  };
+  const classes = toolSpec('editor_classes');
+  const exported = toolSpec('project_export');
+  assert.ok(classes?.operations !== undefined && exported?.operations !== undefined);
+  assert.equal(section('editor_classes')[2], 'Changes nothing.');
+  const destructive = Object.entries(exported.operations)
+    .filter(([, op]) => op.effect === 'destructive')
+    .map(([name]) => `\`${name}\``);
+  assert.deepEqual(destructive, ['`run`', '`set_preset`', '`remove_preset`']);
+  assert.equal(
+    section('project_export')[2],
+    'Can overwrite, remove or end what is there, through `run`, `set_preset` and `remove_preset`.',
+  );
+  const query = classes.operations['query'];
+  assert.equal(classes.defaultOperation, 'query');
+  assert.ok(query !== undefined);
+  assert.equal(
+    section('editor_classes').find((line) => line.startsWith('- `op: query`')),
+    `- \`op: query\` (default): ${query.summary}. Needs: \`projectPath\`. Takes: \`filter\`, \`category\`, \`instantiableOnly\`.`,
+  );
+  const remove = exported.operations['remove_preset'];
+  assert.ok(remove !== undefined);
+  assert.equal(
+    section('project_export').find((line) => line.startsWith('- `op: remove_preset`')),
+    `- \`op: remove_preset\`: ${remove.summary}. Needs: \`projectPath\`, \`preset\`.`,
+    'an op that is not the default has no mark and no Takes when it takes nothing more',
+  );
+}
+
+/**
  * Every arm of the type the reference prints, including the one two arguments reach.
  *
  * `namedType` has three: a plain type, a union written as a list, and a fallback for an argument
@@ -85677,6 +85719,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testThePowerShellHelperGoesWithItsProcess,
   testEveryArgumentInTheReferenceIsDescribed,
   testTheHeadlessListNamesEveryHeadlessTool,
+  testAToolSectionSaysWhatItChangesAndEachOpLineSaysWhatItTakes,
   testTheReferencePrintsEveryShapeOfType,
   testTheSkillNamesEverySettingTheAddonsRead,
   testTheSkillNamesTheSettingThatServesAScriptRun,
