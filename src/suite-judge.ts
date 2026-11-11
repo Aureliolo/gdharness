@@ -18,7 +18,7 @@ import {
   WALK_STOPPED_SENTENCE,
   walkStoppedPartWay,
 } from './engine-leaks.js';
-import type { LogEntry } from './game-log.js';
+import { CRASH_HEADER, caseLineOf, GDUNIT_TIME, type LogEntry, suiteOpenedBy } from './game-log.js';
 import { type OrphansLeft, orphansLeftOn, orphansLeftSaid, scriptErrorsPrinted } from './junit.js';
 import { isRecord, isStringList } from './records.js';
 
@@ -133,18 +133,10 @@ interface MismatchedRow {
   readonly reason: string;
 }
 
-const SUITE_OPENED = /^Run Test Suite:\s*(res:\/\/.+?\.gd)\s*$/;
 // Printed by the runner in src/godot/tests/listed.gd, TIMING there.
 const STARTED_TIMING = /^gdharness timing: started (\d+) ms, compiled together (\d+) ms\s*$/;
-const SET_UP_TIMING = /^gdharness timing: (res:\/\/.+?\.(?:gd|cs)) loaded (\d+) ms, before (\d+) ms\s*$/;
-const TIME = String.raw`(?:\d+h )?(?:\d+min )?(?:\d+s )?\d+ms`;
-const CASE_HEAD = /^\s*res:\/\/.+?\.gd > (.+)$/;
-const CASE_TAIL = new RegExp(
-  String.raw` (STARTED|PASSED|FAILED|FLAKY|SKIPPED|WARNING)(?: \((?:retry \d+|\d+ retries)\))?(?: (${TIME}))?$`,
-);
-/** More characters than a case line's verdict, retries and time run to. */
-const CASE_TAIL_MOST = 96;
-const STATISTICS = new RegExp(String.raw`^Statistics:.*\|\s*([A-Z]+)(?:\s+\(.*?\))?\s+(${TIME})\s*$`);
+const SET_UP_TIMING = /^gdharness timing: (res:\/\/.+?\.gd) loaded (\d+) ms, before (\d+) ms\s*$/;
+const STATISTICS = new RegExp(String.raw`^Statistics:.*\|\s*([A-Z]+)(?:\s+\(.*?\))?\s+(${GDUNIT_TIME})\s*$`);
 // The text keeps its trailing blanks here and loses them where it is read: a pattern leaving them
 // out took a minute over one line of 200,000 blanks, with the watch on a silent engine stopped.
 const ERROR_LINE = /^\s*(?:SCRIPT |USER )?ERROR: (.*)$/;
@@ -155,18 +147,6 @@ const WARNING_LINE = /^\s*(?:SCRIPT |USER )?WARNING: (.*)$/;
  */
 const EXIT_LEAK_LINE = new RegExp(String.raw`^\s*(?:ERROR|WARNING): (?:\d+ )?(?:${EXIT_LEAK.source})`);
 
-/**
- * gdUnit4's line for a case in [param line], or null for any other line. Read from its end, and
- * its name from what is left: one pattern for the whole line tried every split of a long line
- * naming many scripts, and took thirteen seconds over 260,000 characters.
- */
-function caseLineOf(line: string): { name: string; verdict: string; time: string } | null {
-  const trimmed = line.trimEnd();
-  const tail = CASE_TAIL.exec(trimmed.slice(-CASE_TAIL_MOST));
-  const name =
-    tail === null ? undefined : CASE_HEAD.exec(trimmed.slice(0, trimmed.length - tail[0].length))?.[1];
-  return tail === null || name === undefined ? null : { name, verdict: tail[1] ?? '', time: tail[2] ?? '' };
-}
 const EXECUTED = /^Executed test cases\s*:\s*\((\d+)\//;
 // gdUnit4's reason for skipping a row whose data does not fit its case, printed under the row, which
 // it prints as PASSED first. The run's summary counts it skipped, and nothing else says it never ran.
@@ -236,59 +216,6 @@ function rowRuns(share: RowShare, row: number | null): boolean {
     : row === null || !share.besides.includes(row);
 }
 
-/**
- * Every row [param printed] says gdUnit4 skipped for data that does not fit its case, and every case
- * it skipped as unrunnable as declared, under the suite and the row or case printed last before the
- * reason.
- *
- * A row or case skipped this way never ran, and gdUnit4 calls the run passed: a case taking its rows
- * from a function returning a constant had all three skipped, a mix of fitting and misfitting rows
- * passes with only the misfits left out, and a case run alone whose parameter had a typo in its name
- * was answered passed.
- */
-function skippedAsDeclaredIn(printed: readonly string[]): {
-  mismatched: MismatchedRow[];
-  unrunnable: MismatchedRow[];
-} {
-  const lines = printed.flatMap((text) => stripVTControlCharacters(text).split(/\r?\n/));
-  const found: MismatchedRow[] = [];
-  const unrunnable: MismatchedRow[] = [];
-  let suite: string | null = null;
-  let lastCase: string | null = null;
-  for (let at = 0; at < lines.length; at += 1) {
-    const line = lines[at] ?? '';
-    const opened = SUITE_OPENED.exec(line)?.[1];
-    if (opened !== undefined) {
-      suite = opened;
-      lastCase = null;
-      continue;
-    }
-    const caseLine = caseLineOf(line);
-    if (caseLine !== null) {
-      lastCase = caseLine.verdict === 'STARTED' ? lastCase : caseLine.name;
-      continue;
-    }
-    if (suite === null || lastCase === null) {
-      continue;
-    }
-    const declared = UNRUNNABLE_CASE.exec(line)?.[1];
-    if (declared !== undefined) {
-      unrunnable.push({ suite, name: lastCase, reason: declared });
-      continue;
-    }
-    if (!MISMATCHED_ROW.test(line)) {
-      continue;
-    }
-    const parts = [line.trim()];
-    while (at + 1 < lines.length && !['', "'"].includes((lines[at + 1] ?? '').trim())) {
-      at += 1;
-      parts.push((lines[at] ?? '').trim());
-    }
-    found.push({ suite, name: lastCase, reason: parts.join(' ').replaceAll(/\[\/?color[^\]]*\]/g, '') });
-  }
-  return { mismatched: found, unrunnable };
-}
-
 /** [param printed], both streams in the order they came, read into suites, cases and errors. */
 export function readRun(printed: string): RunPrinted {
   const lines = stripVTControlCharacters(printed).replaceAll('\r\n', '\n').split('\n');
@@ -311,6 +238,10 @@ export function readRun(printed: string): RunPrinted {
   const orphansLeft: OrphansLeft[] = [];
   let engineVersion: string | null = null;
   let started: EngineStart | null = null;
+  const mismatched: MismatchedRow[] = [];
+  const unrunnable: MismatchedRow[] = [];
+  // The last line of a skip's reason, which no other reading of a skip looks into.
+  let reasonEnds = -1;
   for (const [at, line] of lines.entries()) {
     const banner: RegExpExecArray | null = engineVersion === null ? BANNER.exec(line) : null;
     if (banner !== null) {
@@ -345,10 +276,10 @@ export function readRun(printed: string): RunPrinted {
       leftOut.set(key, [...(leftOut.get(key) ?? []), row < 0 ? null : row]);
       continue;
     }
-    const opened = SUITE_OPENED.exec(line);
-    if (opened?.[1] !== undefined) {
+    const opened = suiteOpenedBy(line);
+    if (opened !== null) {
       settleAfterCase('after');
-      open = suites.get(opened[1]) ?? { path: opened[1], cases: [], closed: null, setUp: null };
+      open = suites.get(opened) ?? { path: opened, cases: [], closed: null, setUp: null };
       suites.set(open.path, open);
       during = 'before';
       lastCase = null;
@@ -382,6 +313,31 @@ export function readRun(printed: string): RunPrinted {
       during = null;
       lastCase = null;
       continue;
+    }
+    // A row or case gdUnit4 skips for how it is declared never ran, and it calls the run passed: a
+    // case taking its rows from a function returning a constant had all three skipped, and a case
+    // run alone whose parameter had a typo in its name was answered passed. The reason is printed
+    // under the case, so it is read while that suite is open.
+    if (open !== null && lastCase !== null && at > reasonEnds) {
+      const declared = UNRUNNABLE_CASE.exec(line)?.[1];
+      if (declared !== undefined) {
+        unrunnable.push({ suite: open.path, name: lastCase, reason: declared });
+        continue;
+      }
+      if (MISMATCHED_ROW.test(line)) {
+        reasonEnds = at;
+        const parts = [line.trim()];
+        while (!['', "'"].includes((lines[reasonEnds + 1] ?? '').trim())) {
+          reasonEnds += 1;
+          parts.push((lines[reasonEnds] ?? '').trim());
+        }
+        mismatched.push({
+          suite: open.path,
+          name: lastCase,
+          reason: parts.join(' ').replaceAll(/\[\/?color[^\]]*\]/g, ''),
+        });
+        continue;
+      }
     }
     const counted = EXECUTED.exec(line);
     if (counted?.[1] !== undefined) {
@@ -454,7 +410,8 @@ export function readRun(printed: string): RunPrinted {
     engineVersion,
     started,
     orphansLeft,
-    ...skippedAsDeclaredIn(lines),
+    mismatched,
+    unrunnable,
   };
 }
 
@@ -584,19 +541,55 @@ export interface EngineVerdict {
 }
 
 /**
- * Windows' exit statuses an engine dies with, by name. Godot's own exit codes are small, so a code
- * this large is the operating system saying the process was ended, and the number alone says
- * nothing to the person reading it.
+ * Windows' exit statuses an engine dies with, by name and by what each means. Windows ends a process
+ * that raised an exception it did not handle with the exception's status as its exit code, a number
+ * from 0xC0000000 up that says nothing in decimal. Godot's own exit codes are small, so a code this
+ * large is the operating system saying the process was ended.
  */
-const WINDOWS_EXITS: ReadonlyMap<number, string> = new Map([
-  [0xc0000005, 'STATUS_ACCESS_VIOLATION'],
-  [0xc0000017, 'STATUS_NO_MEMORY'],
-  [0xc000012d, 'STATUS_COMMITMENT_LIMIT'],
-  [0xc0000142, 'STATUS_DLL_INIT_FAILED'],
-  [0xc0000409, 'STATUS_STACK_BUFFER_OVERRUN'],
-  [0xc06d007e, 'a module that could not be found (VcppException)'],
-  [0xc06d007f, 'a procedure that could not be found (VcppException)'],
+const WINDOWS_STATUSES: ReadonlyMap<number, { name: string; meaning: string }> = new Map([
+  [0xc0000005, { name: 'STATUS_ACCESS_VIOLATION', meaning: 'an access violation, so it crashed' }],
+  [0xc0000017, { name: 'STATUS_NO_MEMORY', meaning: 'no memory left, so it crashed' }],
+  [0xc000001d, { name: 'STATUS_ILLEGAL_INSTRUCTION', meaning: 'an illegal instruction, so it crashed' }],
+  [
+    0xc0000094,
+    { name: 'STATUS_INTEGER_DIVIDE_BY_ZERO', meaning: 'an integer division by zero, so it crashed' },
+  ],
+  [0xc00000fd, { name: 'STATUS_STACK_OVERFLOW', meaning: 'a stack overflow, so it crashed' }],
+  [0xc000012d, { name: 'STATUS_COMMITMENT_LIMIT', meaning: 'the commit limit reached, so it crashed' }],
+  [
+    0xc0000135,
+    { name: 'STATUS_DLL_NOT_FOUND', meaning: 'a library it needs was not found, so it never started' },
+  ],
+  [0xc000013a, { name: 'STATUS_CONTROL_C_EXIT', meaning: 'its console was closed or sent Ctrl+C' }],
+  [
+    0xc0000142,
+    { name: 'STATUS_DLL_INIT_FAILED', meaning: 'a library it needs failed to start, so it never started' },
+  ],
+  [0xc0000374, { name: 'STATUS_HEAP_CORRUPTION', meaning: 'a corrupted heap, so it crashed' }],
+  [
+    0xc0000409,
+    { name: 'STATUS_STACK_BUFFER_OVERRUN', meaning: 'a stack buffer overrun or a fast fail, so it crashed' },
+  ],
+  [
+    0xc06d007e,
+    {
+      name: 'a module that could not be found (VcppException)',
+      meaning: 'a module it needs was not found, so it never started',
+    },
+  ],
+  [
+    0xc06d007f,
+    {
+      name: 'a procedure that could not be found (VcppException)',
+      meaning: 'a procedure it needs was not found, so it never started',
+    },
+  ],
 ]);
+
+/** What Windows' exit status [param code] means, or undefined when it is none the engine is known to die with. */
+export function windowsStatusOf(code: number): { name: string; meaning: string } | undefined {
+  return WINDOWS_STATUSES.get(code >>> 0);
+}
 const MEMORY_EXITS = new Set([0xc0000017, 0xc000012d]);
 
 /**
@@ -623,7 +616,7 @@ const GODOT_EXITS = new Set([1, 255]);
 /** The exit code as a person reads it: a Windows status by name and in hex, gdUnit4's by meaning. */
 export function exitNamed(code: number): string {
   const unsigned = code >>> 0;
-  const status = WINDOWS_EXITS.get(unsigned);
+  const status = windowsStatusOf(code)?.name;
   if (status !== undefined) {
     return `0x${unsigned.toString(16).toUpperCase()} (${status})`;
   }
@@ -702,9 +695,6 @@ export function rowsAcross(
   }
   return faults;
 }
-
-/** The line Godot's crash handler starts its report with, and the signal it names. */
-const CRASH_HEADER = /^(?:CrashHandlerException|handle_crash): Program crashed(?: with signal (\d+))?$/;
 
 /** The build a crash report names, as `Engine version: Godot Engine v... (<commit>)`. */
 const CRASH_BUILD = /^Engine version: .*\(([0-9a-f]{40})\)$/;

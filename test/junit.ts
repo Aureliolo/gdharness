@@ -999,7 +999,7 @@ function testFinishedSuitesAreReadOffTheConsole(): void {
     ' but was',
     " 1\tat 'test_fails' in res://test/my suites/b_test.gd:6",
     '  res://test/my suites/b_test.gd > test_errs:1 (a, b) STARTED',
-    '  res://test/my suites/b_test.gd > test_errs:1 (a, b) ERROR 5ms',
+    '  res://test/my suites/b_test.gd > test_errs:1 (a, b) FAILED 5ms',
     'Statistics: 2 test cases | 1 errors | 1 failures | 0 flaky | 0 skipped | 0 orphans | PASSED 2s 21ms',
     'Run Test Suite: res://test/c_test.gd',
     '  res://test/c_test.gd > test_long STARTED',

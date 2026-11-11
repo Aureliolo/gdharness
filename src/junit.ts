@@ -10,6 +10,8 @@
  * it off what the runner printed, because the exit code cannot say.
  */
 
+import { caseLineOf, suiteOpenedBy } from './game-log.js';
+
 export class MalformedReportError extends Error {
   constructor(message: string) {
     super(message);
@@ -1004,8 +1006,6 @@ export interface OrphanReport {
   readonly suites: readonly SuiteOrphans[];
 }
 
-// Up to the script's own extension rather than the first space, for the same reason.
-const RUNNING_SUITE = /Run Test Suite:\s*(res:\/\/.+?\.(?:gd|cs))(?=\s|$)/;
 const ORPHANS = /(\d+)\s+orphans/;
 const OVERALL = 'Overall Summary';
 
@@ -1035,9 +1035,9 @@ export function orphansPrinted(printed: readonly string[]): OrphanReport {
       named.set(left.suite, [...(named.get(left.suite) ?? []), left]);
       continue;
     }
-    const started = RUNNING_SUITE.exec(line);
-    if (started?.[1] !== undefined) {
-      running = started[1];
+    const started = suiteOpenedBy(line);
+    if (started !== null) {
+      running = started;
       continue;
     }
     const counted = ORPHANS.exec(line);
@@ -1076,7 +1076,6 @@ export interface SuiteFinished {
 }
 
 const SUITE_COUNTS = /(\d+)\s+test cases\s*\|\s*(\d+)\s+errors\s*\|\s*(\d+)\s+failures/;
-const CASE_FAILED = /^\s*res:\/\/.+?\.(?:gd|cs) > (.+?) (?:FAILED|ERROR)(?:\s|$)/;
 
 /** Whether [param line] is the statistics line gdUnit4 prints as a suite ends. */
 export function finishesASuite(line: string): boolean {
@@ -1099,18 +1098,18 @@ export function suitesPrinted(printed: readonly string[]): {
   let running: string | null = null;
   let failed: string[] = [];
   for (const line of printed) {
-    const started = RUNNING_SUITE.exec(line);
-    if (started?.[1] !== undefined) {
-      running = started[1];
+    const started = suiteOpenedBy(line);
+    if (started !== null) {
+      running = started;
       failed = [];
       continue;
     }
     if (running === null) {
       continue;
     }
-    const failing = CASE_FAILED.exec(line)?.[1];
-    if (failing !== undefined) {
-      failed.push(failing);
+    const ended = caseLineOf(line);
+    if (ended?.verdict === 'FAILED') {
+      failed.push(ended.name);
       continue;
     }
     const counted = finishesASuite(line) ? SUITE_COUNTS.exec(line) : null;
