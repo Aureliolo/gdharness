@@ -2,7 +2,7 @@ import { readlinkSync, realpathSync } from 'node:fs';
 import { basename } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from './alive.js';
-import { linuxStartEarliest, linuxStartTimes, readCommandLine } from './process-children.js';
+import { linuxStartEarliest, linuxStartTimes } from './process-children.js';
 import { loadingTheTable } from './process-table.js';
 import { runHidden, spawnHidden } from './spawn.js';
 
@@ -45,6 +45,16 @@ export interface Followed {
 }
 
 /**
+ * The file name of the program [param command] runs. `ps` prints no quotes, so a folder with a space
+ * in it, as Steam's `Godot Engine` is, runs on until the first option rather than to the first space.
+ */
+function executableOf(command: string): string {
+  const quoted = /^"([^"]*)"/.exec(command);
+  const program = quoted?.[1] ?? command.split(/\s+-/, 1)[0] ?? command;
+  return basename(program.trim().replaceAll('\\', '/'));
+}
+
+/**
  * The one process in [param listed] that [param exitedPid] restarted itself into as it exited, or
  * null when there is not exactly one: the engine [param engine] run again, started after
  * [param notBefore] (before the exited process existed, a number its orphans kept is not a link to
@@ -65,7 +75,7 @@ export function successorAmong(
   const found = listed.filter(
     (one) =>
       one.pid !== exitedPid &&
-      fold(readCommandLine(one.command).executable) === wanted &&
+      fold(executableOf(one.command)) === wanted &&
       one.startedAt + early >= notBefore &&
       one.startedAt + early >= exitedAt - RESTARTED_WITHIN_MS,
   );

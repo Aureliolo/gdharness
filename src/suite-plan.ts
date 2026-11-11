@@ -53,7 +53,13 @@ export const GUESS_WINDOW_SETTING = 'gdharness/tests/scene_runner_needs_window';
 
 /** [param path] at or inside the folder [param folder], both `res://` paths. */
 function within(path: string, folder: string): boolean {
-  return path === folder || path.startsWith(`${folder}/`);
+  const [one, other] = [path, folder].map(foldCase);
+  return one === other || (one ?? '').startsWith(`${other ?? ''}/`);
+}
+
+/** Windows finds a file under any letter case, so a path is compared there without one. */
+function foldCase(path: string): string {
+  return process.platform === 'win32' ? path.toLowerCase() : path;
 }
 
 export interface DeclaredSuite {
@@ -112,7 +118,9 @@ export class ProjectScripts {
     const listed = settings[section ?? ''];
     this.notSearched =
       typeof listed === 'string'
-        ? [...listed.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((found) => (found[1] ?? '').replace(/\/+$/, ''))
+        ? [...listed.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((found) =>
+            (found[1] ?? '').replace(/\/+$/, '').replace(/^(?!res:\/\/)/, 'res://'),
+          )
         : [];
     this.guessWindow = settings[key ?? ''] !== false;
     eachScript(projectPath, (script, source) => {
@@ -142,6 +150,20 @@ export class ProjectScripts {
     };
     this.read.set(path, read);
     return read;
+  }
+
+  /** [param path] as the project's own script map spells it, or as given when it holds no such script. */
+  spelled(path: string): string {
+    if (this.sources.has(path) || process.platform !== 'win32') {
+      return path;
+    }
+    const folded = foldCase(path);
+    return [...this.sources.keys()].find((key) => foldCase(key) === folded) ?? path;
+  }
+
+  /** Whether the script [param path] is inside the folder [param folder], both `res://` paths. */
+  holds(folder: string, path: string): boolean {
+    return path !== folder && within(path, folder);
   }
 
   /** The script [param path] extends, as a path in the project, the base class's name, or null. */
@@ -260,7 +282,10 @@ export class ProjectScripts {
    * of its cases run.
    */
   uncollectedUnder(roots: readonly string[]): { readonly path: string; readonly cases: readonly string[] }[] {
-    const named = roots.filter((root) => root.endsWith('.gd') && this.sources.has(root));
+    const named = roots
+      .filter((root) => root.endsWith('.gd'))
+      .map((root) => this.spelled(root))
+      .filter((root) => this.sources.has(root));
     return [...new Set([...named, ...this.searched(roots)])].flatMap((path) => {
       const cases = this.script(path)?.funcs.filter((name) => name.startsWith(CASE_PREFIX)) ?? [];
       return cases.length === 0 || this.suite(path) !== null ? [] : [{ path, cases: [...cases].toSorted() }];
@@ -273,7 +298,7 @@ export class ProjectScripts {
       .filter((path) =>
         trimmed.some(
           (root) =>
-            path.startsWith(`${root}/`) &&
+            this.holds(root, path) &&
             !this.notSearched.some((folder) => within(path, folder) && !within(root, folder)),
         ),
       )
@@ -290,8 +315,7 @@ export class ProjectScripts {
       ...new Set(
         paths.flatMap((path) => {
           const root = path.replace(/\/+$/, '');
-          return path.endsWith('.gd') ||
-            !this.notSearched.some((folder) => folder.startsWith(`${root}/`) && !within(root, folder))
+          return path.endsWith('.gd') || !this.notSearched.some((folder) => this.holds(root, folder))
             ? [path]
             : this.suitesUnder([root]).map((suite) => suite.path);
         }),
@@ -449,9 +473,13 @@ export function timesAfter(
     const rows: Record<string, number[]> = {};
     for (const func of suite?.cases ?? []) {
       const measuredRows = entry.rows.get(func);
+      // A case that ran and printed no row is not parameterised now, whatever it was. Its old rows
+      // would deal it out over engines that each run nothing.
       const keptRows =
         measuredRows === undefined
-          ? times[path]?.rows?.[func]
+          ? entry.cases.has(func)
+            ? undefined
+            : times[path]?.rows?.[func]
           : rowsAfter(times[path]?.rows?.[func], measuredRows, cutShort.has(`${path}:${func}`));
       if (keptRows !== undefined) {
         rows[func] = keptRows.map(round);

@@ -530,7 +530,7 @@ import {
   spawnShown,
   spawnSyncHidden,
 } from '../src/spawn.js';
-import { type ArmPlayed, armsPlayed, shareFaults, shareOf } from '../src/spread-run.js';
+import { type ArmPlayed, armsPlayed, shareFaults, shareOf, spreadOptionsOf } from '../src/spread-run.js';
 import { followSuccessor, RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
 import { EVERY_FILE, EVERY_NAME, reachedBySuite, SuiteInputs, walkSeen } from '../src/suite-inputs.js';
 import {
@@ -589,6 +589,7 @@ import {
   wholeTreeSaid,
 } from '../src/suite-run.js';
 import { listenerAmong } from '../src/tcp-listeners.js';
+import { scriptsWithoutCases, selectTests, suiteFilesUnder } from '../src/test-selection.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -600,7 +601,13 @@ import {
   toolSpec,
 } from '../src/tool-definitions.js';
 import { argumentShape, headlessSection, namedType, renderToolsMarkdown } from '../src/tool-reference.js';
-import { encodedUidCache, mendUidCache, type UidEntry, uidCacheEntries } from '../src/uid-cache.js';
+import {
+  encodedUidCache,
+  mendBeforeStart,
+  mendUidCache,
+  type UidEntry,
+  uidCacheEntries,
+} from '../src/uid-cache.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { holdExit, prepareWholeExits } from '../src/whole-exit.js';
 import { writeWhole } from '../src/whole-file.js';
@@ -17810,6 +17817,32 @@ function testASuccessorIsTheEngineStartedAsTheGameExited(): void {
     null,
     'the exited process is not its own successor',
   );
+  // `ps` prints no quotes, so the engine's folder runs to the first option.
+  const spaced = '/home/me/.local/share/Steam/steamapps/common/Godot Engine/godot.x11.opt.tools.64';
+  const spacedRun = { ...restarted, command: `${spaced} --path /p -- --restarted` };
+  assert.deepEqual(
+    successorAmong([spacedRun], 11, spaced, notBefore, exitedAt, 0),
+    spacedRun,
+    'an engine in a folder with a space is found',
+  );
+  assert.equal(
+    successorAmong(
+      [{ ...spacedRun, command: '/opt/Godot Engine/other --path /p' }],
+      11,
+      spaced,
+      notBefore,
+      exitedAt,
+      0,
+    ),
+    null,
+    'while another program in such a folder is not',
+  );
+  const quoted = { ...restarted, command: '"C:\\Program Files\\Godot Engine\\Godot_v4.exe" --path /p' };
+  assert.deepEqual(
+    successorAmong([quoted], 11, 'C:\\Program Files\\Godot Engine\\Godot_v4.exe', notBefore, exitedAt, 0),
+    quoted,
+    'a quoted line is read to its closing quote',
+  );
   const cut = { ...restarted, startedAt: exitedAt - RESTARTED_WITHIN_MS - 900 };
   assert.equal(successorAmong([cut], 11, engine, notBefore, exitedAt, 0), null, 'to the millisecond');
   assert.deepEqual(
@@ -18411,6 +18444,88 @@ function testAStartMendsOnlyTheProjectItsOwnArgumentsName(): void {
     assert.deepEqual(readFileSync(cache), stale, 'a --path after the bare -- is left alone');
     started('--path', project);
     assert.deepEqual(readFileSync(cache), encodedUidCache([]), 'one before it is mended, so the case ran');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A `.uid` or `.import` whose file is gone declares no uid, and what a mend did is said on stderr.
+ *
+ * The editor leaves a sidecar behind when a file is deleted outside it. Read as the file's own
+ * declaration, it moved an entry from a gone path to the same gone path on every start, and where
+ * the real file sat in a folder walked later, the orphan won and the entry named a path with nothing
+ * there.
+ */
+function testASidecarWithNoFileDeclaresNoUid(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-uid-orphan-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'gone.gd.uid': 'uid://1\n',
+      'old.png.import': '[remap]\n\nuid="uid://2"\n',
+      'a_stale/s.gd.uid': 'uid://3\n',
+      'm_new/s.gd': 'extends Node\n',
+      'm_new/s.gd.uid': 'uid://3\n',
+      'first/twin.gd': 'extends Node\n',
+      'first/twin.gd.uid': 'uid://4\n',
+      'second/twin.gd': 'extends Node\n',
+      'second/twin.gd.uid': 'uid://4\n',
+      'beside/kept.gd': 'extends Node\n',
+      'beside/kept.gd.uid': 'uid://5\n',
+    });
+    mkdirSync(join(project, '.godot'));
+    const cache = join(project, '.godot', 'uid_cache.bin');
+    // A digit in a uid text is its value plus 25, so uid://1 is 26n and uid://5 is 30n.
+    const entries: UidEntry[] = [
+      [26n, 'res://gone.gd'],
+      [27n, 'res://old.png'],
+      [28n, 'res://z_old/s.gd'],
+      [29n, 'res://elsewhere/twin.gd'],
+      [30n, 'res://beside/kept.gd'],
+    ];
+    writeFileSync(cache, encodedUidCache(entries));
+    assert.deepEqual(
+      mendUidCache(project),
+      {
+        moved: [
+          [28n, 'res://z_old/s.gd', 'res://m_new/s.gd'],
+          [29n, 'res://elsewhere/twin.gd', 'res://first/twin.gd'],
+        ],
+        dropped: [
+          [26n, 'res://gone.gd'],
+          [27n, 'res://old.png'],
+        ],
+      },
+      'only a sidecar beside its file declares, and of two files claiming one uid the first walked wins',
+    );
+    assert.deepEqual(
+      readFileSync(cache),
+      encodedUidCache([
+        [28n, 'res://m_new/s.gd'],
+        [29n, 'res://first/twin.gd'],
+        [30n, 'res://beside/kept.gd'],
+      ]),
+    );
+    assert.deepEqual(mendUidCache(project), { moved: [], dropped: [] }, 'a second mend finds nothing to do');
+
+    const said: string[] = [];
+    const write = process.stderr.write.bind(process.stderr);
+    writeFileSync(cache, encodedUidCache(entries));
+    process.stderr.write = (line: string): boolean => {
+      said.push(line);
+      return true;
+    };
+    try {
+      mendBeforeStart(['--path', project], undefined);
+    } finally {
+      process.stderr.write = write;
+    }
+    const where = join(project, '.godot', 'uid_cache.bin');
+    assert.deepEqual(said, [
+      `uid cache: moved what names a file gone in ${where}: res://z_old/s.gd to res://m_new/s.gd, res://elsewhere/twin.gd to res://first/twin.gd\n`,
+      `uid cache: dropped what names a file gone from ${where}: res://gone.gd, res://old.png\n`,
+    ]);
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -55076,6 +55191,72 @@ function writeTree(root: string, files: Readonly<Record<string, string>>): void 
 }
 
 /**
+ * A suite is found under any spelling of its path the file system accepts, and a folder under any
+ * trailing slash. Folders kept out of a search are named with or without `res://`.
+ *
+ * Windows opens `Tests/A_Test.gd` for `tests/a_test.gd`, and the script map is keyed as the disk spells
+ * it, so a suite asked for in another letter case read as holding no case.
+ */
+function testASuiteIsFoundUnderAnySpellingOfItsPath(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spelled-'));
+  const cases = (...names: string[]): string =>
+    names.map((name) => `\nfunc ${name}() -> void:\n\tpass\n`).join('');
+  try {
+    writeTree(project, {
+      'project.godot': [
+        'config_version=5',
+        '',
+        '[gdharness]',
+        '',
+        'tests/not_searched=PackedStringArray("tests/bench")',
+        '',
+      ].join('\n'),
+      'tests/a_test.gd': `extends GdUnitTestSuite\n${cases('test_a', 'test_ab')}`,
+      'tests/bench/b_test.gd': `extends GdUnitTestSuite\n${cases('test_bench')}`,
+    });
+    assert.deepEqual(new ProjectScripts(project).notSearched, ['res://tests/bench']);
+    assert.deepEqual(
+      new ProjectScripts(project).suitesUnder(['res://tests']).map((one) => one.path),
+      ['res://tests/a_test.gd'],
+      'a folder named without res:// is kept out of the search',
+    );
+    assert.deepEqual(suiteFilesUnder(project, ['res://tests']), [
+      'res://tests/a_test.gd',
+      'res://tests/bench/b_test.gd',
+    ]);
+    assert.deepEqual(
+      suiteFilesUnder(project, ['res://tests/']),
+      suiteFilesUnder(project, ['res://tests']),
+      'a trailing slash names the same folder',
+    );
+    const spelled = process.platform === 'win32' ? 'res://Tests/A_Test.gd' : 'res://tests/a_test.gd';
+    assert.deepEqual(scriptsWithoutCases(project, [spelled]), [], 'a suite with cases is not caseless');
+    assert.deepEqual(selectTests(project, [spelled], ['test_a']), {
+      ok: true,
+      value: {
+        suites: ['res://tests/a_test.gd'],
+        ignore: ['res://tests/a_test.gd:test_ab'],
+        selected: [{ entry: 'test_a', suite: 'res://tests/a_test.gd', test: 'test_a' }],
+      },
+    });
+    if (process.platform === 'win32') {
+      assert.deepEqual(
+        suiteFilesUnder(project, ['res://Tests']),
+        ['res://tests/a_test.gd', 'res://tests/bench/b_test.gd'],
+        'a folder in another letter case holds the suites the disk spells in its own',
+      );
+      assert.deepEqual(
+        new ProjectScripts(project).suitesUnder(['res://Tests']).map((one) => one.path),
+        ['res://tests/a_test.gd'],
+        'and the folders kept out stay out',
+      );
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * Suites are found from the scripts and dealt to engines by what their cases cost.
  *
  * A suite is a script whose chain of bases reaches gdUnit4's, by name, by path or relative path, and
@@ -55950,6 +56131,39 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       timesAfter(rowTimes, [lone_], [rowRun(lone_.path, [[0, '1s 0ms']])], declaredNow)[lone_.path],
       { seconds: 3, cases: { test_only: 1 }, rows: { test_only: [1] } },
       'every engine holding it having finished, a case with fewer rows is timed as it is now',
+    );
+    const plainRun = readRun(
+      [
+        `Run Test Suite: ${lone_.path}`,
+        caseLine(lone_.path, 'test_only', 'PASSED', '12s 0ms'),
+        'Statistics: 1 test cases | PASSED 12s 500ms',
+      ].join('\n'),
+    );
+    const noLongerRows = timesAfter(rowTimes, [lone_], [plainRun], declaredNow);
+    assert.deepEqual(
+      noLongerRows[lone_.path],
+      { seconds: 12.5, cases: { test_only: 12 } },
+      'a case that ran with no row is not parameterised now, and keeps no rows',
+    );
+    assert.deepEqual(
+      unitsOf([lone_], noLongerRows).map((planned) => planned.row),
+      [undefined],
+      'so it is dealt whole, to one engine',
+    );
+    assert.deepEqual(
+      timesAfter({}, [lone_], [plainRun], declaredNow)[lone_.path],
+      { seconds: 12.5, cases: { test_only: 12 } },
+      'with no times before it is timed whole',
+    );
+    assert.deepEqual(
+      timesAfter(noLongerRows, [lone_], [rowRun(lone_.path, [[0, '1s 0ms']])], declaredNow)[lone_.path],
+      { seconds: 3, cases: { test_only: 1 }, rows: { test_only: [1] } },
+      'and a case that gained rows is timed by them',
+    );
+    assert.deepEqual(
+      timesAfter(rowTimes, [], [], () => null),
+      {},
+      'a suite renamed away is forgotten, with its rows',
     );
     assert.deepEqual(
       timesAfter(
@@ -58346,6 +58560,33 @@ function testTheTestHelpersWaitStepAndPress(): void {
     );
   } finally {
     rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * `gdharness spread` reads its command line strictly: no empty value for a valued option, and a
+ * scene that is a file.
+ */
+function testSpreadRefusesAnEmptyValueAndASceneThatIsNoFile(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spread-options-'));
+  try {
+    writeTree(project, { 'project.godot': 'config_version=5\n', 'bench.tscn': '', 'benches/x.tscn': '' });
+    const refused = (...args: string[]): string => {
+      try {
+        spreadOptionsOf([project, ...args], project);
+      } catch (error) {
+        return errorMessage(error);
+      }
+      return 'accepted';
+    };
+    assert.equal(spreadOptionsOf([project, 'bench.tscn'], project).scene, 'res://bench.tscn');
+    for (const flag of ['--slots', '--workers', '--slot-count', '--silence']) {
+      assert.equal(refused('bench.tscn', flag, ''), `${flag} needs a value.`, `an empty ${flag}`);
+    }
+    assert.match(refused('benches'), /^Nothing at res:\/\/benches /, 'a folder is no scene');
+    assert.match(refused(''), /^Nothing at /, 'and an empty name is none');
+  } finally {
+    sweep(project);
   }
 }
 
@@ -85624,6 +85865,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEditorWritesItsConsoleWhereTheServerLooks,
   testAUidCacheNamingAFileGoneIsMended,
   testAStartMendsOnlyTheProjectItsOwnArgumentsName,
+  testASidecarWithNoFileDeclaresNoUid,
   testAMovedAutoloadBootsFromWhereItIs,
   testACancelledCallEndsTheEngineItStarted,
   testAnErrorReportOutlivesItsGameForAnHour,
@@ -85740,6 +85982,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineOnASlotLendsItToWhatItStarts,
   testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded,
   testARestartedCountDoesNotTakeWorkFromBeforeTheRestart,
+  testASuiteIsFoundUnderAnySpellingOfItsPath,
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testASuiteDeclarationCanNameAClassConstant,
   testAHiddenEditorStartsOnAnEmptyScriptReference,
@@ -85760,6 +86003,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAYamlConfigWeCannotReadIsRefusedAndOneWithEmptyKeysIsWritten,
   testAConfigPinNamesOnlyGdharnessWhateverTheEditorWroteTheFileAs,
   testTheTestHelpersWaitStepAndPress,
+  testSpreadRefusesAnEmptyValueAndASceneThatIsNoFile,
   testASpreadBenchGathersTheTableItPlaysAlone,
   testASuiteRunHasNoSoundWhicheverWayItStarts,
   testTheTestCommandRunsAndJudgesAProject,

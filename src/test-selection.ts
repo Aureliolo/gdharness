@@ -115,30 +115,33 @@ export function scriptsWithoutCases(projectPath: string, asked: readonly string[
     (path) =>
       path.endsWith('.gd') &&
       existsSync(join(projectPath, path.slice('res://'.length))) &&
-      casesIn(scripts, path).length === 0,
+      casesIn(scripts, scripts.spelled(path)).length === 0,
   );
 }
 
 /** The scripts under [param folders], res:// paths of directories in the project, that declare a case. */
 export function suiteFilesUnder(projectPath: string, folders: readonly string[]): string[] {
   const scripts = new ProjectScripts(projectPath);
-  return suitesUnder(projectPath, folders)
+  return suitesUnder(projectPath, scripts, folders)
     .filter((path) => casesIn(scripts, path).length > 0)
     .toSorted();
 }
 
-/** The suite files under [param asked], res:// paths of files or directories in the project. */
-function suitesUnder(projectPath: string, asked: readonly string[]): string[] {
-  const scripts = projectFiles(projectPath, ['.gd']).map((path) => `res://${path}`);
+/**
+ * The suite files under [param asked], res:// paths of files or directories in the project, spelled
+ * as the disk spells them, which a case-insensitive file system lets a caller get wrong.
+ */
+function suitesUnder(projectPath: string, scripts: ProjectScripts, asked: readonly string[]): string[] {
+  const files = projectFiles(projectPath, ['.gd']).map((path) => `res://${path}`);
   return [
     ...new Set(
-      asked.flatMap((path) =>
-        path.endsWith('.gd')
-          ? existsSync(join(projectPath, path.slice('res://'.length)))
-            ? [path]
-            : []
-          : scripts.filter((script) => script.startsWith(`${path}/`)),
-      ),
+      asked.flatMap((path) => {
+        if (path.endsWith('.gd')) {
+          return existsSync(join(projectPath, path.slice('res://'.length))) ? [scripts.spelled(path)] : [];
+        }
+        const folder = path.replace(/\/+$/, '');
+        return files.filter((file) => scripts.holds(folder, file));
+      }),
     ),
   ];
 }
@@ -161,7 +164,7 @@ export function selectTests(
     return { ok: false, reason: 'tests is an empty list: name a case, or leave tests out to run every one.' };
   }
   const scripts = new ProjectScripts(projectPath);
-  const declared = suitesUnder(projectPath, asked).flatMap((suite) =>
+  const declared = suitesUnder(projectPath, scripts, asked).flatMap((suite) =>
     casesIn(scripts, suite).map((test) => ({ suite, test })),
   );
   const nameOf = (suite: string): string => basename(suite, '.gd');
@@ -178,7 +181,7 @@ export function selectTests(
     const at = spelled.lastIndexOf(':');
     const suiteNamed = at === -1 || spelled.slice(at).startsWith('://') ? null : spelled.slice(0, at);
     const test = suiteNamed === null ? spelled : spelled.slice(at + 1);
-    const suitePath = suiteNamed?.startsWith('res://') === true ? suiteNamed : null;
+    const suitePath = suiteNamed?.startsWith('res://') === true ? scripts.spelled(suiteNamed) : null;
     const matches = declared.filter(
       (one) =>
         one.test === test &&

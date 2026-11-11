@@ -11,7 +11,7 @@
  * for the games.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
 import { join, resolve } from 'node:path';
 import process from 'node:process';
@@ -98,7 +98,7 @@ export function spreadOptionsOf(args: readonly string[], cwd: string): SpreadOpt
       positional.push(arg);
     } else if (VALUED.has(arg)) {
       const value = own[at + 1];
-      if (value === undefined || value.startsWith('--')) {
+      if (value === undefined || value === '' || value.startsWith('--')) {
         throw new EngineUsageError(`${arg} needs a value.`);
       }
       valued.set(arg, value);
@@ -125,7 +125,7 @@ export function spreadOptionsOf(args: readonly string[], cwd: string): SpreadOpt
     );
   }
   const scene = resPathOf(scenes[0] ?? '', projectPath, cwd);
-  if (!existsSync(join(projectPath, scene.slice('res://'.length)))) {
+  if (!statSync(join(projectPath, scene.slice('res://'.length)), { throwIfNoEntry: false })?.isFile()) {
     throw new EngineUsageError(`Nothing at ${scene} in the project at ${projectPath}.`);
   }
   const benchArguments = dashes === -1 ? [] : args.slice(dashes + 1);
