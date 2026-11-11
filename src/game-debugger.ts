@@ -91,6 +91,25 @@ export const RUNTIME_ADDON = 'res://addons/gdharness_runtime/';
 const RUNTIME_AUTOLOAD = `${RUNTIME_ADDON}runtime_autoload.gd`;
 let frameEnd: number | null = null;
 
+/**
+ * What ran out of a pause's walk through the addon, or null when it goes on and the step is paid
+ * for. A caller with a deadline is bound by the time alone, so only one without is bound by counts.
+ */
+function spentAddonBudget(
+  left: { frames: number; lines: number },
+  kind: 'frames' | 'lines',
+  until: number | undefined,
+): 'frames' | 'lines' | 'time' | null {
+  if (until !== undefined && Date.now() >= until) {
+    return 'time';
+  }
+  if (until === undefined && left[kind] === 0) {
+    return kind;
+  }
+  left[kind] -= 1;
+  return null;
+}
+
 /** Whether the frame [param frames] is stopped in belongs to the runtime addon. */
 function topIsTheAddon(frames: readonly DebugFrame[]): boolean {
   return frames[0]?.script.startsWith(RUNTIME_ADDON) ?? false;
@@ -182,23 +201,39 @@ export function shownValue(value: GodotValue, typeHint = '', inside = false): st
     return String(value);
   }
   if (isList(value)) {
-    const shown = value.slice(0, ELEMENTS_SHOWN).map((each) => shownValue(each, '', true));
-    const more = value.length - shown.length;
-    const text = `[${shown.join(', ')}${more > 0 ? `, and ${more} more` : ''}]`;
-    // Inside another container a packed array reads like any list unless it says what it is.
-    const packed = inside ? containerTypeOf(value) : undefined;
-    return packed?.startsWith('Packed') === true ? `${packed}(${text})` : text;
+    return shownList(value, inside);
   }
   if (value.kind === 'dictionary' && 'entries' in value) {
-    const shown = value.entries
-      .slice(0, ELEMENTS_SHOWN)
-      .map(([key, each]) => `${shownValue(key, '', true)}: ${shownValue(each, '', true)}`);
-    const more = value.entries.length - shown.length;
-    return `{${shown.join(', ')}${more > 0 ? `, and ${more} more` : ''}}`;
+    return shownDictionary(value.entries);
   }
   if (!('values' in value)) {
     return value.kind;
   }
+  return shownParts(value, typeHint, inside);
+}
+
+function shownList(value: readonly GodotValue[], inside: boolean): string {
+  const shown = value.slice(0, ELEMENTS_SHOWN).map((each) => shownValue(each, '', true));
+  const more = value.length - shown.length;
+  const text = `[${shown.join(', ')}${more > 0 ? `, and ${more} more` : ''}]`;
+  // Inside another container a packed array reads like any list unless it says what it is.
+  const packed = inside ? containerTypeOf(value) : undefined;
+  return packed?.startsWith('Packed') === true ? `${packed}(${text})` : text;
+}
+
+function shownDictionary(entries: readonly (readonly [GodotValue, GodotValue])[]): string {
+  const shown = entries
+    .slice(0, ELEMENTS_SHOWN)
+    .map(([key, each]) => `${shownValue(key, '', true)}: ${shownValue(each, '', true)}`);
+  const more = entries.length - shown.length;
+  return `{${shown.join(', ')}${more > 0 ? `, and ${more} more` : ''}}`;
+}
+
+function shownParts(
+  value: { readonly kind: string; readonly values: readonly (number | string)[] },
+  typeHint: string,
+  inside: boolean,
+): string {
   const [first] = value.values;
   switch (value.kind) {
     case 'Object':
@@ -231,6 +266,27 @@ function typeNamed(
   return (
     containerTypeOf(value) ?? (typeof type === 'number' ? (TYPE_NAMES[type] ?? String(type)) : 'Variant')
   );
+}
+
+interface ScopeBuilder {
+  readonly name: DebugScope['name'];
+  readonly variables: DebugVariable[];
+}
+
+/** Files one `stack_frame_var` message under the scope it names. */
+function addFrameValue(scopes: readonly ScopeBuilder[], data: readonly GodotValue[]): void {
+  const [name, scope, type, value, hint] = data;
+  const named = typeof name === 'string' ? name : shownValue(name ?? null);
+  // The compiler's own locals, such as the position a for loop keeps as @counter_pos, which no
+  // source names and no expression can read.
+  if (named.startsWith('@')) {
+    return;
+  }
+  scopes[typeof scope === 'number' ? scope : 0]?.variables.push({
+    name: named,
+    value: shownValue(value ?? null, typeof hint === 'string' ? hint : ''),
+    type: typeNamed(type, hint, value),
+  });
 }
 
 /** A held game's stack from a `stack_dump`: its size, then file, line and function per frame. */
@@ -431,39 +487,9 @@ export class GameDebugger {
       this.held = null;
       this.unreadable = null;
     } else if (received.message === 'output') {
-      const [strings] = received.data;
-      if (Array.isArray(strings)) {
-        for (const each of strings) {
-          if (typeof each === 'string') {
-            this.output.push(...each.split('\n'));
-          }
-        }
-        const over = this.output.length - OUTPUT_KEPT;
-        if (over > 0) {
-          this.output.splice(0, over);
-          this.outputDropped += over;
-        }
-      }
+      this.takeOutput(received.data);
     } else if (received.message === 'error') {
-      // An expression that does not parse or fails as it runs comes back as null, and the engine
-      // says why in an error raised from its Expression class, sent after the null.
-      const [, , , , file, , , error, described] = received.data;
-      const why = typeof described === 'string' && described !== '' ? described : error;
-      if (this.evaluating !== null && typeof why === 'string' && typeof file === 'string') {
-        this.raised(this.evaluating, why, file);
-        if (file.startsWith('res://')) {
-          this.loadedScripts.add(file);
-        }
-      }
-      if (file === RAISED_FROM['debug_state evaluate'] && typeof why === 'string') {
-        if (this.expressionErrors.length < 10) {
-          this.expressionErrors.push(why);
-        }
-      } else if (file === RAISED_FROM['debug_control pause'] && why === ALREADY_HELD) {
-        // A pause sent as the game stopped on a breakpoint reaches it held, and only a debugger
-        // sends one, so the error is this one's.
-        this.raised('debug_control pause', why, file);
-      }
+      this.takeError(received.data);
     }
     const at = this.waiters.findIndex((waiter) => waiter.wanted(received));
     if (at !== -1) {
@@ -475,6 +501,45 @@ export class GameDebugger {
       if (this.inbox.length > INBOX_KEPT) {
         this.inbox.shift();
       }
+    }
+  }
+
+  private takeOutput(data: readonly GodotValue[]): void {
+    const [strings] = data;
+    if (!Array.isArray(strings)) {
+      return;
+    }
+    for (const each of strings) {
+      if (typeof each === 'string') {
+        this.output.push(...each.split('\n'));
+      }
+    }
+    const over = this.output.length - OUTPUT_KEPT;
+    if (over > 0) {
+      this.output.splice(0, over);
+      this.outputDropped += over;
+    }
+  }
+
+  private takeError(data: readonly GodotValue[]): void {
+    // An expression that does not parse or fails as it runs comes back as null, and the engine
+    // says why in an error raised from its Expression class, sent after the null.
+    const [, , , , file, , , error, described] = data;
+    const why = typeof described === 'string' && described !== '' ? described : error;
+    if (this.evaluating !== null && typeof why === 'string' && typeof file === 'string') {
+      this.raised(this.evaluating, why, file);
+      if (file.startsWith('res://')) {
+        this.loadedScripts.add(file);
+      }
+    }
+    if (file === RAISED_FROM['debug_state evaluate'] && typeof why === 'string') {
+      if (this.expressionErrors.length < 10) {
+        this.expressionErrors.push(why);
+      }
+    } else if (file === RAISED_FROM['debug_control pause'] && why === ALREADY_HELD) {
+      // A pause sent as the game stopped on a breakpoint reaches it held, and only a debugger
+      // sends one, so the error is this one's.
+      this.raised('debug_control pause', why, file);
     }
   }
 
@@ -699,17 +764,17 @@ export class GameDebugger {
     { readonly frames: DebugFrame[] | null; readonly gaveUp?: 'frames' | 'lines' | 'time' } | 'lost'
   > {
     let frames = await this.stack();
-    let framesLeft = ADDON_FRAMES;
-    let linesLeft = ADDON_LINES;
+    const left = { frames: ADDON_FRAMES, lines: ADDON_LINES };
     while (frames !== null && this.held !== null && topIsTheAddon(frames)) {
-      if (until !== undefined && Date.now() >= until) {
-        return { frames, gaveUp: 'time' };
+      const inProcess = frames.some(
+        (frame) => frame.script === RUNTIME_AUTOLOAD && frame.name === '_process',
+      );
+      const kind = inProcess ? 'frames' : 'lines';
+      const gaveUp = spentAddonBudget(left, kind, until);
+      if (gaveUp !== null) {
+        return { frames, gaveUp };
       }
-      if (frames.some((frame) => frame.script === RUNTIME_AUTOLOAD && frame.name === '_process')) {
-        if (until === undefined && framesLeft === 0) {
-          return { frames, gaveUp: 'frames' };
-        }
-        framesLeft -= 1;
+      if (inProcess) {
         // Where it stops is looked at again: the frame end is stepped from, and a stop short of it,
         // on a breakpoint or an error in what the frame ran, is where the game is.
         const reached = await this.toTheFrameEnd();
@@ -719,10 +784,6 @@ export class GameDebugger {
         frames = reached;
         continue;
       }
-      if (until === undefined && linesLeft === 0) {
-        return { frames, gaveUp: 'lines' };
-      }
-      linesLeft -= 1;
       this.forget('debug_enter');
       this.send('step', [], this.held.thread);
       if ((await this.next(GameDebugger.named('debug_enter'), STEP_MS)) === null) {
@@ -772,36 +833,13 @@ export class GameDebugger {
       };
     }
     if (how === 'continue') {
-      this.forget('debug_exit');
-      const exited = this.next(
-        (received) =>
-          'message' in received && received.message === 'debug_exit' && received.thread === held.thread,
-        READ_MS,
-      );
-      this.send('continue', [], held.thread);
-      return (await exited) === null
-        ? { refused: `The game did not say it had gone on within ${READ_MS / 1000}s.` }
-        : { continued: true };
+      return await this.continueFrom(held);
     }
     const out = how === 'out' && held.hasStack ? await this.outOfAnEngineCall(held.thread) : 'called';
     if (out === 'inside') {
-      this.stoppedBy('Stepped');
-      return {
-        stepped: true,
-        heldAgain: true,
-        held: this.heldState(),
-        stack: (await this.stack()) ?? [],
-        note: `The function the engine called was stepped through for ${STEP_MS / 1000}s without returning, so the step out stopped inside it. debug_control step_out goes on from here.`,
-      };
+      return await this.steppedInside();
     }
-    let entered = out === 'stepped';
-    if (out === 'called') {
-      this.forget('debug_enter');
-      // Over and out count lines only at the depth they start from, which held where no script runs
-      // is none, so either would let the game run on for good. A step into stops at its next line.
-      this.send(held.hasStack ? how : 'step', [], held.thread);
-      entered = (await this.next(GameDebugger.named('debug_enter'), STEP_MS)) !== null;
-    }
+    const entered = out === 'called' ? await this.stepOnce(held, how) : out === 'stepped';
     if (!entered) {
       return {
         stepped: true,
@@ -840,6 +878,39 @@ export class GameDebugger {
     };
   }
 
+  private async continueFrom(held: Held): Promise<DebugAnswer> {
+    this.forget('debug_exit');
+    const exited = this.next(
+      (received) =>
+        'message' in received && received.message === 'debug_exit' && received.thread === held.thread,
+      READ_MS,
+    );
+    this.send('continue', [], held.thread);
+    return (await exited) === null
+      ? { refused: `The game did not say it had gone on within ${READ_MS / 1000}s.` }
+      : { continued: true };
+  }
+
+  private async steppedInside(): Promise<DebugAnswer> {
+    this.stoppedBy('Stepped');
+    return {
+      stepped: true,
+      heldAgain: true,
+      held: this.heldState(),
+      stack: (await this.stack()) ?? [],
+      note: `The function the engine called was stepped through for ${STEP_MS / 1000}s without returning, so the step out stopped inside it. debug_control step_out goes on from here.`,
+    };
+  }
+
+  /** Sends one step and whether the game stopped again within the step's wait. */
+  private async stepOnce(held: Held, how: 'next' | 'step' | 'out'): Promise<boolean> {
+    this.forget('debug_enter');
+    // Over and out count lines only at the depth they start from, which held where no script runs
+    // is none, so either would let the game run on for good. A step into stops at its next line.
+    this.send(held.hasStack ? how : 'step', [], held.thread);
+    return (await this.next(GameDebugger.named('debug_enter'), STEP_MS)) !== null;
+  }
+
   /**
    * Steps the held game out of a function the engine called, such as a _process, or answers `called`
    * when a script called the one it is held in. `stepped` once it stops outside that call, `inside`
@@ -857,30 +928,21 @@ export class GameDebugger {
     if (frames === null || start === undefined || frames.length > 1) {
       return 'called';
     }
-    const read = await this.variables(0);
-    const members = Array.isArray(read['scopes'])
-      ? (read['scopes'] as readonly DebugScope[]).find((scope) => scope.name === 'Members')
-      : undefined;
     // A static function has no instance to ask, and the engine lets the game go rather than evaluate
     // in it, so each call of one reads as the same call.
-    const asked = members?.variables.some((variable) => variable.name === 'self') === true;
+    const asked = await this.frameHasInstance(0);
     // Where a global class does not parse, the first evaluate of a run leaves the stack unreadable
     // until the next stop, which the first step below is, and the engine keeps the script it could
     // not load, so no later one does.
     const began = asked ? await this.whichCall(thread) : null;
     const until = Date.now() + STEP_MS;
     for (;;) {
-      this.forget('debug_enter');
-      this.send('next', [], thread);
-      if ((await this.next(GameDebugger.named('debug_enter'), Math.max(1, until - Date.now()))) === null) {
+      const now = await this.stepOverLine(thread, until);
+      if (now === 'lost') {
         return 'lost';
       }
-      const now = await this.stack();
-      const top = now?.[0];
-      if (now === null || top === undefined) {
-        return 'lost';
-      }
-      if (now.length > 1 || top.script !== start.script || top.name !== start.name) {
+      const [top] = now;
+      if (now.length > 1 || top?.script !== start.script || top.name !== start.name) {
         return 'stepped';
       }
       if (asked && (await this.whichCall(thread)) !== began) {
@@ -890,6 +952,26 @@ export class GameDebugger {
         return 'inside';
       }
     }
+  }
+
+  /** The stack after one step over a line, or `lost` when the game did not stop again or has none. */
+  private async stepOverLine(thread: number, until: number): Promise<DebugFrame[] | 'lost'> {
+    this.forget('debug_enter');
+    this.send('next', [], thread);
+    if ((await this.next(GameDebugger.named('debug_enter'), Math.max(1, until - Date.now()))) === null) {
+      return 'lost';
+    }
+    const now = await this.stack();
+    return now?.[0] === undefined ? 'lost' : now;
+  }
+
+  /** Whether the frame has an instance of its script, which a frame lists as `self` among its members. */
+  private async frameHasInstance(frame: number): Promise<boolean> {
+    const read = await this.variables(frame);
+    const members = Array.isArray(read['scopes'])
+      ? (read['scopes'] as readonly DebugScope[]).find((scope) => scope.name === 'Members')
+      : undefined;
+    return members?.variables.some((variable) => variable.name === 'self') === true;
   }
 
   /** Which call the held frame is in, as its instance and the engine's frame counts say. */
@@ -935,10 +1017,7 @@ export class GameDebugger {
     if (typeof count !== 'number') {
       return { refused: `The game did not send the frame's values within ${READ_MS / 1000}s.` };
     }
-    const scopes: { name: DebugScope['name']; variables: DebugVariable[] }[] = SCOPES.map((name) => ({
-      name,
-      variables: [],
-    }));
+    const scopes: ScopeBuilder[] = SCOPES.map((name) => ({ name, variables: [] }));
     for (let index = 0; index < count; index += 1) {
       const one = await this.next(GameDebugger.named('stack_frame_var'), READ_MS);
       if (one === null || !('data' in one)) {
@@ -948,18 +1027,7 @@ export class GameDebugger {
           note: `${count - index} of the frame's ${count} values did not arrive within ${READ_MS / 1000}s, so the scopes are not whole. Ask again.`,
         };
       }
-      const [name, scope, type, value, hint] = one.data;
-      const named = typeof name === 'string' ? name : shownValue(name ?? null);
-      // The compiler's own locals, such as the position a for loop keeps as @counter_pos, which no
-      // source names and no expression can read.
-      if (named.startsWith('@')) {
-        continue;
-      }
-      scopes[typeof scope === 'number' ? scope : 0]?.variables.push({
-        name: named,
-        value: shownValue(value ?? null, typeof hint === 'string' ? hint : ''),
-        type: typeNamed(type, hint, value),
-      });
+      addFrameValue(scopes, one.data);
     }
     return { held: this.heldState(), frame, scopes };
   }
