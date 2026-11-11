@@ -21,7 +21,7 @@ function similarity(one: string, other: string): number {
   return (2 * shared) / (ones.length + others.length);
 }
 
-/** How many files a refusal lists when none is near the one asked for, as `NAMED_CHILDREN` does. */
+/** How many names a refusal lists at most, near or not, as `NAMED_CHILDREN` does. */
 const LISTED_FILES = 12;
 
 /**
@@ -72,7 +72,8 @@ export function withNearestFiles(
 /**
  * Three of [param names] closest to [param word], closest first, and every further name that only
  * adds to the word, since cutting at three named three corners of `corner_radius` and left out the
- * fourth. Case is ignored. The engine's `GdhRead.nearest` keeps the same names.
+ * fourth, up to [constant LISTED_FILES] in all. Case is ignored, and equally near names keep the
+ * order given. The engine's `GdhRead.nearest` keeps the same names.
  */
 export function nearest(word: string, names: readonly string[]): string[] {
   const wanted = word.toLowerCase();
@@ -80,5 +81,6 @@ export function nearest(word: string, names: readonly string[]): string[] {
   const close = names
     .filter((name) => score(name) >= 0.5)
     .toSorted((one, other) => score(other) - score(one));
-  return [...close.slice(0, 3), ...close.slice(3).filter((name) => name.toLowerCase().startsWith(wanted))];
+  const extending = close.slice(3).filter((name) => name.toLowerCase().startsWith(wanted));
+  return [...close.slice(0, 3), ...extending].slice(0, LISTED_FILES);
 }

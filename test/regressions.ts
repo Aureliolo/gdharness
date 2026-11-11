@@ -71179,6 +71179,12 @@ function testTheNearestNamesKeepEveryOneThatOnlyAddsToTheWord(): void {
   );
   assert.deepEqual(nearestNames('a', ['a', 'ab']), ['a'], 'a one-letter word matches only itself');
   assert.deepEqual(nearestNames('menu', []), [], 'no names offer none');
+  // The picks the engine's GdhRead.nearest is held to, so both halves offer the same names.
+  const attacks = Array.from({ length: 300 }, (_, at) => `attack_${String(at).padStart(3, '0')}`);
+  assert.deepEqual(nearestNames('attack', attacks), attacks.slice(0, 12), 'at most twelve are offered');
+  const ties = 'abcdefghijklmnopqrstuvwyz'.split('').map((letter) => `${letter}ab`);
+  assert.deepEqual(nearestNames('xab', ties), ['aab', 'bab', 'cab'], 'equally near names keep their order');
+  assert.deepEqual(nearestNames('xab', ties.toReversed()), ['zab', 'yab', 'wab'], 'whichever it is');
   assert.equal(
     withNearestFiles(
       'Script file does not exist: res://ui/menu.gd',

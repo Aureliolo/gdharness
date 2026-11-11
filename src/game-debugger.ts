@@ -56,8 +56,7 @@ export type DebugRequest =
   | { readonly op: 'stack' }
   | { readonly op: 'variables'; readonly frame: number }
   | { readonly op: 'evaluate'; readonly frame: number; readonly expression: string }
-  | { readonly op: 'output' }
-  | { readonly op: 'state' };
+  | { readonly op: 'output' };
 
 /** An answer as it crosses the keeper's channel: a refusal says why under `refused`. */
 export type DebugAnswer = Readonly<Record<string, unknown>>;
@@ -538,9 +537,6 @@ export class GameDebugger {
         output: [...this.output],
         ...(this.outputDropped > 0 ? { notShown: this.outputDropped } : {}),
       };
-    }
-    if (request.op === 'state') {
-      return { connected: this.connection !== null && !this.ended, held: this.heldState() };
     }
     if (this.connection === null) {
       return {
