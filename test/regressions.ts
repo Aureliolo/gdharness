@@ -681,10 +681,18 @@ class FakeSocket extends EventEmitter {
   readonly sent: unknown[] = [];
   /** What the bridge closed it with, for a refusal whose code and reason are the answer. */
   closedWith: { code: number; reason: string } | null = null;
+  /** The state a close leaves it in: CLOSED at once, or CLOSING, as ws stays until the peer answers. */
+  private readonly afterClose: 2 | 3;
 
-  constructor(name: string) {
+  constructor(name: string, afterClose: 2 | 3 = 3) {
     super();
     this.name = name;
+    this.afterClose = afterClose;
+  }
+
+  terminate(): void {
+    this.readyState = 3;
+    this.emit('close', 1006, Buffer.from(''));
   }
 
   send(payload: unknown): void {
@@ -697,9 +705,11 @@ class FakeSocket extends EventEmitter {
     if (Buffer.byteLength(reason) > 123) {
       throw new RangeError('The message must not be greater than 123 bytes');
     }
-    this.readyState = 3;
+    this.readyState = this.afterClose;
     this.closedWith = { code, reason };
-    this.emit('close', code, Buffer.from(reason));
+    if (this.afterClose === 3) {
+      this.emit('close', code, Buffer.from(reason));
+    }
   }
 }
 
@@ -7656,6 +7666,120 @@ async function testATestServerTakesNoRealEditorsPort(): Promise<void> {
  * itself, in each state it passes through, because a server's status lands in that moment only by
  * chance.
  */
+/**
+ * A bridge stops within a few seconds while a socket that upgraded never answers its close, as an
+ * editor busy importing does. ws waits thirty seconds for the close frame on its own.
+ */
+async function testABridgeStopsPromptlyWithASilentEditor(): Promise<void> {
+  const bridge = createBridge(0, 1000, '127.0.0.1');
+  await bridge.start();
+  const client = createConnection(bridge.port, '127.0.0.1');
+  try {
+    await new Promise<void>((settle) => {
+      client.once('connect', () => {
+        settle();
+      });
+    });
+    const answered = new Promise<string>((settle) => {
+      client.once('data', (data: Buffer) => {
+        settle(data.toString().split('\r\n')[0] ?? '');
+      });
+    });
+    client.write(
+      'GET /godot HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
+        `Sec-WebSocket-Key: ${Buffer.from('the sample nonce').toString('base64')}\r\n` +
+        'Sec-WebSocket-Version: 13\r\n\r\n',
+    );
+    assert.equal(await answered, 'HTTP/1.1 101 Switching Protocols', 'the socket upgraded');
+    const began = performance.now();
+    await bridge.stop();
+    const took = performance.now() - began;
+    assert.ok(took < 5000, `stop() ended a silent socket within the grace: ${String(Math.round(took))} ms`);
+  } finally {
+    client.destroy();
+  }
+}
+
+/**
+ * godot_connected waits for the greeting to be taken. A gate's --import dialling the port is
+ * turned away once it greets, and raising the event for it cleared the server's note that the
+ * editor it closed is not coming back.
+ */
+async function testAProcessTurnedAwayRaisesNoConnection(): Promise<void> {
+  const raised = (bridge: ReturnType<typeof createBridge>): string[] => {
+    const seen: string[] = [];
+    bridge.on('godot_connected', () => {
+      seen.push(bridge.isConnected() ? 'connected' : 'not connected');
+    });
+    return seen;
+  };
+  const gate = createBridge(0, 1000, '127.0.0.1');
+  gate.identifyEditorsWith(() => Promise.resolve('--import'));
+  const gateSeen = raised(gate);
+  const importer = new FakeSocket('import');
+  connectFake(gate, importer);
+  importer.emit('message', Buffer.from(JSON.stringify(greeting(process.cwd(), { editor_pid: 7 }))));
+  await delay(50);
+  assert.equal(importer.closedWith?.code, 4002, JSON.stringify(importer.closedWith));
+  assert.deepEqual(gateSeen, [], 'no event for a process that was turned away');
+
+  const editor = createBridge(0, 1000, '127.0.0.1');
+  editor.identifyEditorsWith(() => Promise.resolve(undefined));
+  const editorSeen = raised(editor);
+  const real = new FakeSocket('editor');
+  connectFake(editor, real);
+  saysHello(real, process.cwd());
+  await delay(50);
+  assert.deepEqual(editorSeen, ['connected'], 'one event for an editor, once it is connected');
+}
+
+/**
+ * A socket turned away stays CLOSING until its peer answers, and a frame it sends then speaks for
+ * its own process. Applied to the live connection, a late greeting from another project's editor
+ * turned the live editor away.
+ */
+function testAFrameFromASocketBeingClosedLeavesTheLiveEditor(): void {
+  const bridge = createBridge(0, 1000, '127.0.0.1', 'X:/mine');
+  const theirs = new FakeSocket('theirs', 2);
+  connectFake(bridge, theirs);
+  saysHello(theirs, 'X:/theirs');
+  assert.equal(theirs.closedWith?.code, 4001, 'the other project is turned away');
+  const mine = new FakeSocket('mine', 2);
+  connectFake(bridge, mine);
+  saysHello(mine, 'X:/mine');
+  assert.equal(bridge.isConnected(), true, 'the editor of this project connects');
+  saysHello(theirs, 'X:/theirs');
+  assert.equal(mine.closedWith, null, `the live editor is left alone: ${JSON.stringify(mine.closedWith)}`);
+  assert.equal(bridge.isConnected(), true);
+}
+
+/** A tool_result whose fields are the wrong type refuses its call at once, naming the fields. */
+async function testAReplyOfTheWrongShapeIsRefusedAtOnce(): Promise<void> {
+  const bridge = createBridge(0, 20_000, '127.0.0.1');
+  const socket = new FakeSocket('editor');
+  connectFake(bridge, socket);
+  saysHello(socket, process.cwd());
+  const began = Date.now();
+  const outcome = bridge.invokeTool('scene_tree', {}).then(
+    () => 'answered',
+    (error: unknown) => errorMessage(error),
+  );
+  const asked = socket.sent
+    .map((payload) => JSON.parse(String(payload)) as unknown)
+    .find((payload) => get(payload, 'type') === 'tool_invoke');
+  const id = asString(get(asked, 'id'));
+  socket.emit(
+    'message',
+    Buffer.from(JSON.stringify({ type: 'tool_result', id, success: 'true', busy: 1, result: {} })),
+  );
+  assert.equal(
+    await outcome,
+    'The editor answered scene_tree with a reply gdharness cannot read: success is "true", not a boolean, busy is 1, not a boolean. Sending the call again gets the same reply.',
+  );
+  assert.ok(Date.now() - began < 5000, 'without waiting for the timeout');
+  assert.deepEqual(bridge.getStatus().pendingRequests, 0, 'and nothing is left waiting');
+}
+
 async function testABridgeOnNoPortSaysSo(): Promise<void> {
   const port = await reservePort();
   const holder = createServer();
@@ -85746,6 +85870,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASupersededServerStandsDown,
   testAPredecessorThatKeepsThePortIsNotWaitedOnForEver,
   testABridgeOnNoPortSaysSo,
+  testABridgeStopsPromptlyWithASilentEditor,
+  testAProcessTurnedAwayRaisesNoConnection,
+  testAFrameFromASocketBeingClosedLeavesTheLiveEditor,
+  testAReplyOfTheWrongShapeIsRefusedAtOnce,
   testATurnedAwayEditorLeavesTheServerUp,
   testATestServerTakesNoRealEditorsPort,
   testAProjectUpgradedUnderTheServerIsSaid,

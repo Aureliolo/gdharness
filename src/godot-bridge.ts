@@ -15,7 +15,31 @@ import { installedEditorDigest, shippedEditorDigest } from './setup.js';
 const DEFAULT_PORT = 6505;
 const DEFAULT_HOST = '127.0.0.1';
 const KEEPALIVE_INTERVAL_MS = 10_000;
+/** How long a socket asked to close has to answer before it is ended, as the language server's is. */
+const CLOSE_GRACE_MS = 1000;
 const SECOND_CONNECTION_CLOSE_CODE = 4000;
+
+/** How a tool_result's fields are typed, the optional ones being absent or of that type. */
+const REPLY_FIELDS: readonly (readonly [field: string, type: 'string' | 'boolean', optional: boolean])[] = [
+  ['id', 'string', false],
+  ['success', 'boolean', false],
+  ['error', 'string', true],
+  ['busy', 'boolean', true],
+  ['busyWith', 'string', true],
+  ['progress', 'string', true],
+  ['closing', 'boolean', true],
+];
+
+/** What is wrong with the fields of the tool_result [param message], one phrase a field. */
+function replyFaults(message: Readonly<Record<string, unknown>>): string[] {
+  return REPLY_FIELDS.flatMap(([field, type, optional]) => {
+    const value = message[field];
+    if (typeof value === type || (optional && value === undefined)) {
+      return [];
+    }
+    return [`${field} is ${value === undefined ? 'missing' : JSON.stringify(value)}, not a ${type}`];
+  });
+}
 
 /** The most a WebSocket close frame carries as its reason, in UTF-8 bytes. */
 const MOST_CLOSE_REASON_BYTES = 123;
@@ -593,7 +617,7 @@ export class GodotBridge extends EventEmitter {
     // port is the failure that costs a whole session to find, and silence is what hides it.
     if (this.socket) {
       try {
-        this.socket.close();
+        GodotBridge.closeWithin(this.socket);
       } catch (error) {
         this.log('debug', `Godot socket did not close cleanly: ${errorMessage(error)}`);
       }
@@ -604,7 +628,7 @@ export class GodotBridge extends EventEmitter {
       const godotWss = this.godotWss;
       for (const client of godotWss.clients) {
         try {
-          client.close();
+          GodotBridge.closeWithin(client);
         } catch (error) {
           this.log('debug', `Godot client did not close cleanly: ${errorMessage(error)}`);
         }
@@ -785,6 +809,24 @@ export class GodotBridge extends EventEmitter {
     }
   }
 
+  /**
+   * Asks [param socket] to close, and ends it if it has not answered within [constant CLOSE_GRACE_MS].
+   * An editor busy importing answers nothing, and `ws` would wait thirty seconds for its close frame,
+   * which held the server's exit as long.
+   */
+  private static closeWithin(socket: WebSocket): void {
+    socket.close();
+    if (socket.readyState === WebSocket.CLOSED) {
+      return;
+    }
+    const ended = setTimeout(() => {
+      socket.terminate();
+    }, CLOSE_GRACE_MS);
+    socket.once('close', () => {
+      clearTimeout(ended);
+    });
+  }
+
   private closeWebSocketServer(server: WebSocketServer): Promise<void> {
     return new Promise((resolve) => {
       let settled = false;
@@ -838,10 +880,16 @@ export class GodotBridge extends EventEmitter {
     };
 
     this.startKeepalive();
+    // godot_connected waits for the greeting: a process turned away once it greets, such as a
+    // gate's --import, is no editor that came.
     this.log('info', 'Godot editor connected');
-    this.emitBridgeEvent('godot_connected', { projectPath: this.connectionInfo.projectPath });
 
     nextSocket.on('message', (data) => {
+      // A socket already turned away or replaced can still deliver a frame while it closes, and it
+      // speaks for its own process, not the live one.
+      if (nextSocket !== this.socket) {
+        return;
+      }
       this.handleRawMessage(data);
     });
 
@@ -859,30 +907,22 @@ export class GodotBridge extends EventEmitter {
     });
   }
 
-  /**
-   * `ws` hands a frame over as one of three shapes, and only one of them survives a bare
-   * `toString()`: an array of chunks comma-joins into nonsense and an ArrayBuffer renders as
-   * "[object ArrayBuffer]". Both then fail to parse, so a payload large enough to be
-   * fragmented (a deep scene tree, a base64 screenshot) is dropped and its caller waits for
-   * the timeout. Which shape arrives depends on size, so the failure is intermittent.
-   */
-  private static rawDataToString(data: RawData): string {
-    if (Array.isArray(data)) return Buffer.concat(data).toString('utf8');
-    if (Buffer.isBuffer(data)) return data.toString('utf8');
-    return Buffer.from(data).toString('utf8');
-  }
-
   private handleRawMessage(data: RawData): void {
     let parsed: unknown;
 
     try {
-      parsed = JSON.parse(GodotBridge.rawDataToString(data));
+      // The server keeps ws's default binaryType, under which every message, however it was
+      // fragmented, arrives as one Buffer. The other shapes come only with another binaryType.
+      parsed = JSON.parse(Buffer.isBuffer(data) ? data.toString('utf8') : '');
     } catch (error) {
       this.log('error', `Invalid JSON from Godot: ${errorMessage(error)}`);
       return;
     }
 
     if (!this.isIncomingMessage(parsed)) {
+      if (this.refusedUnreadable(parsed)) {
+        return;
+      }
       this.log('warn', 'Ignoring unknown Godot message payload');
       return;
     }
@@ -1291,15 +1331,30 @@ export class GodotBridge extends EventEmitter {
       return typeof message['project_path'] === 'string';
     }
 
-    return (
-      typeof message['id'] === 'string' &&
-      typeof message['success'] === 'boolean' &&
-      (message['error'] === undefined || typeof message['error'] === 'string') &&
-      (message['busy'] === undefined || typeof message['busy'] === 'boolean') &&
-      (message['busyWith'] === undefined || typeof message['busyWith'] === 'string') &&
-      (message['progress'] === undefined || typeof message['progress'] === 'string') &&
-      (message['closing'] === undefined || typeof message['closing'] === 'boolean')
+    return replyFaults(message).length === 0;
+  }
+
+  /**
+   * Refuses the request a tool_result answers when the reply's fields are the wrong type, and
+   * answers whether it did. Dropped, the caller waited out its whole timeout and was told the
+   * editor was busy.
+   */
+  private refusedUnreadable(message: unknown): boolean {
+    if (!isRecord(message) || message['type'] !== 'tool_result' || typeof message['id'] !== 'string') {
+      return false;
+    }
+    const pending = this.pendingRequests.get(message['id']);
+    if (pending === undefined) {
+      return false;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingRequests.delete(message['id']);
+    pending.reject(
+      new Error(
+        `The editor answered ${pending.toolName} with a reply gdharness cannot read: ${replyFaults(message).join(', ')}. Sending the call again gets the same reply.`,
+      ),
     );
+    return true;
   }
 
   private log(level: 'debug' | 'info' | 'warn' | 'error', message: string): void {

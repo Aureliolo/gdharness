@@ -56,7 +56,8 @@ class StandIn extends EventEmitter {
   }
 }
 
-const SPAWN_SOURCE = String.raw`export function spawnHidden(command, args, options) { return globalThis.__standInSpawn(command, args, options); }`;
+const SPAWN_SOURCE =
+  'export function spawnHidden(command, args, options) { return globalThis.__standInSpawn(command, args, options); }';
 
 async function run(): Promise<void> {
   Object.defineProperty(process, 'platform', { value: 'win32' });
