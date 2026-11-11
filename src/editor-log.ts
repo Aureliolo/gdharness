@@ -119,7 +119,7 @@ export function writeEditorLogNote(projectPath: string, pid: number, processStar
 }
 
 /** Why there is no console to read, or null when there is one. */
-export type NoConsole =
+type NoConsole =
   | { readonly kind: 'not ours' }
   | { readonly kind: 'another editor'; readonly notedPid: number | null }
   | { readonly kind: 'not written' };
@@ -326,7 +326,7 @@ interface Slot {
 }
 
 /** A message shape several lines share, with what stood in its slots and what came before it. */
-export interface Repeated {
+interface Repeated {
   readonly shape: string;
   readonly count: number;
   readonly severity: Severity;

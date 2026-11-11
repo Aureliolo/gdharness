@@ -30,7 +30,8 @@ import { isSameDirectory, realAsFarAsItExists } from './paths.js';
 import { type CommandLineRead, linuxStartTimes, readCommandLine } from './process-children.js';
 import { askProcessTable } from './process-table.js';
 import { isRecord } from './records.js';
-import { runtimeDirectories, runtimeDirectory, STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
+import { STARTED_AFTER_ANNOUNCING_MS } from './runtime-client.js';
+import { runtimeDirectories, runtimeDirectory } from './runtime-directories.js';
 import { runHidden } from './spawn.js';
 import { tableListener } from './tcp-listeners.js';
 import { writeWhole } from './whole-file.js';
@@ -82,8 +83,8 @@ export interface RunRecord {
   /**
    * The engine this run was started with, so the pid can be shown to still mean this run.
    *
-   * A pid on its own is not an identity: see `stillTheRecordedRun`, which is what decides whether
-   * anything may be signalled.
+   * A pid on its own is not an identity: see `whyNotStillTheRecordedRun`, which is what decides
+   * whether anything may be signalled.
    */
   readonly command: string;
   /**
@@ -263,7 +264,7 @@ export function writeRunRecord(record: RunRecord): void {
  * which play, and a note read on that alone gave a later play the console and start time of an
  * earlier one.
  */
-export interface EditorRunNote {
+interface EditorRunNote {
   readonly projectPath: string;
   readonly transcript: string;
   readonly startedAt: number;
@@ -596,20 +597,26 @@ export async function listeningPid(port: number): Promise<number | null> {
 /**
  * The pid holding [param port] open for listening in [param printed], as `netstat -ano` prints
  * the table: protocol, local address, foreign address, state, pid, on IPv4 and on IPv6 alike,
- * with the port after the last colon of the address. Null when no line says so.
+ * with the port after the last colon of the address. Only an address a loopback client reaches
+ * counts: loopback itself or every address. Null when no line says so, or when two processes do.
  */
 export function listeningPidInNetstat(printed: string, port: number): number | null {
+  const holders = new Set<number>();
   for (const line of printed.split(/\r?\n/)) {
     const fields = /^\s*TCP\s+(\S+)\s+\S+\s+LISTENING\s+(\d+)\s*$/i.exec(line);
     if (fields === null) {
       continue;
     }
     const local = fields[1] ?? '';
-    if (Number(local.slice(local.lastIndexOf(':') + 1)) === port) {
-      return Number(fields[2]);
+    const at = local.lastIndexOf(':');
+    const host = local.slice(0, at).replace(/^\[(.*)\]$/, '$1');
+    const reached = host.startsWith('127.') || host === '::1' || host === '0.0.0.0' || host === '::';
+    if (reached && Number(local.slice(at + 1)) === port) {
+      holders.add(Number(fields[2]));
     }
   }
-  return null;
+  const [only] = holders;
+  return holders.size === 1 ? (only ?? null) : null;
 }
 
 /**
@@ -686,7 +693,8 @@ async function windowsImage(pid: number): Promise<{ image: string } | { why: str
 }
 
 /**
- * Whether the process under the record's pid is still the run the record describes.
+ * Why the process under the record's pid cannot be confirmed as the run the record describes, or
+ * null when it can.
  *
  * A pid is a number the operating system hands out again the moment it is free, so a record that
  * outlived its run names whatever came next. Signalling on the strength of that number alone is
@@ -701,11 +709,6 @@ async function windowsImage(pid: number): Promise<{ image: string } | { why: str
  * False when the operating system will not say. Not knowing is not the same as knowing it is
  * ours, and the caller that acts on this is the one that kills.
  */
-export async function stillTheRecordedRun(record: RunRecord): Promise<boolean> {
-  return (await whyNotStillTheRecordedRun(record)) === null;
-}
-
-/** Why the process under the record's pid cannot be confirmed as the run, or null when it can. */
 export async function whyNotStillTheRecordedRun(record: RunRecord): Promise<string | null> {
   return whyNotTheRun(record, await runningAs(record.pid), 'confirmed');
 }
@@ -724,7 +727,7 @@ export async function couldStillBeTheRecordedRun(record: RunRecord): Promise<boo
 }
 
 /** What the operating system will say about a process, and how much of it. */
-export interface RunningAs {
+interface RunningAs {
   /** `none` is Windows naming nothing at all, with why under `unread`. */
   readonly kind: 'image' | 'commandLine' | 'none';
   readonly text: string;

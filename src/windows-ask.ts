@@ -65,8 +65,16 @@ interface Asked {
   readonly timer: NodeJS.Timeout;
 }
 
+/**
+ * How long a helper that has answered nothing yet is given to start. A question's budget measures
+ * the question, so a start slower than the budget would otherwise end every helper before it could
+ * answer, and the next question would pay for another start.
+ */
+const START_ALLOWANCE_MS = 15_000;
+
 let helper: ChildProcessWithoutNullStreams | null = null;
-let buffered = '';
+let helperSpawnedAt = 0;
+let helperAnswered = false;
 let next = 1;
 /**
  * The question out now, and the ones waiting behind it. One at a time, because PowerShell answers
@@ -125,13 +133,18 @@ function running(): ChildProcessWithoutNullStreams {
     // fresh USERPROFILE left a Microsoft directory in the directory it was started in.
     { cwd: tmpdir() },
   );
-  buffered = '';
+  // Per helper: the unfinished end of an ended helper's answer must not join the next one's line.
+  let buffered = '';
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk: string) => {
     buffered += chunk;
     for (let end = buffered.indexOf('\n'); end !== -1; end = buffered.indexOf('\n')) {
-      answered(buffered.slice(0, end).trim());
+      const line = buffered.slice(0, end).trim();
       buffered = buffered.slice(end + 1);
+      if (helper === child) {
+        helperAnswered = true;
+        answered(line);
+      }
     }
   });
   child.stderr.resume();
@@ -159,6 +172,8 @@ function running(): ChildProcessWithoutNullStreams {
   held = true;
   holding(child, false);
   helper = child;
+  helperSpawnedAt = Date.now();
+  helperAnswered = false;
   return child;
 }
 
@@ -198,11 +213,13 @@ function sendNext(): void {
     out = null;
     question.reject(new WindowsAskFailure(`did not answer within ${question.withinMs}ms`));
     // Ended rather than waited on: a PowerShell stuck on one question answers none after it. The
-    // next question starts another.
-    if (helper === child) {
+    // next question starts another. Not while the helper is still starting, which a question's
+    // budget was never meant to cover: its late answer to this question is dropped by id.
+    const starting = !helperAnswered && Date.now() - helperSpawnedAt < START_ALLOWANCE_MS;
+    if (helper === child && !starting) {
       helper = null;
+      child.kill();
     }
-    child.kill();
     sendNext();
   }, question.withinMs);
   out = { id, question, timer };

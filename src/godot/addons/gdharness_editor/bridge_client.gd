@@ -29,6 +29,9 @@ const ELSEWHERE_CLOSE_CODE: int = 4001
 ## rather than an editor: dialling in again changes nothing for the rest of the run. Kept in step
 ## with `ONE_SHOT_CLOSE_CODE` in src/godot-bridge.ts.
 const ONE_SHOT_CLOSE_CODE: int = 4002
+## What a server closes with when another editor already holds its bridge. Kept in step with
+## `SECOND_CONNECTION_CLOSE_CODE` in src/godot-bridge.ts.
+const TAKEN_CLOSE_CODE: int = 4000
 ## Where Godot keeps the three ports an editor serves. None of them is per editor: the settings
 ## file is one for every editor of this engine version on the machine, so two open at once want the
 ## same three and the second one binds nothing. Read here and never written, for the reason
@@ -332,7 +335,14 @@ func announced_url() -> String:
 	var port: int = GdhRead.as_int(announcement.get("port", 0))
 	if port < 1 or port > 65535:
 		return ""
-	var host: String = str(announcement.get("host", "127.0.0.1"))
+	return server_address(str(announcement.get("host", "127.0.0.1")), port)
+
+
+## The bridge's address on [param host] and [param port]. An IPv6 host such as `::1` goes in
+## brackets, since its colons would otherwise read as the port.
+static func server_address(host: String, port: int) -> String:
+	if host.contains(":") and not host.begins_with("["):
+		return "ws://[%s]:%d/godot" % [host, port]
 	return "ws://%s:%d/godot" % [host, port]
 
 
@@ -592,26 +602,46 @@ func _handle_disconnect() -> void:
 		_schedule_reconnect()
 
 
-## Says so when the server turned this editor away as another project's.
+## Says so when the server turned this editor away, as another project's or as one too many.
 ##
 ## The fallback address is tried by every project whose own server has not run yet and so has
 ## announced nothing, which means any server holding it took the connection and served it. It is
 ## refused now, and the refusal is worth a person's attention rather than a quiet backoff: nothing
 ## about waiting reaches a server that is not this project's, and the answer is to start one.
 ##
-## Said once per address. This is a reconnect loop, and a line every few seconds for the rest of
-## the session is a line nobody reads.
+## Said once per refusal and address. This is a reconnect loop, and a line every few seconds for
+## the rest of the session is a line nobody reads.
 func _said_elsewhere() -> void:
-	if socket.get_close_code() != ELSEWHERE_CLOSE_CODE:
+	var code: int = socket.get_close_code()
+	var said: String = refusal_note(code, server_url, socket.get_close_reason())
+	var told: String = "%d %s" % [code, server_url]
+	if said == "" or _told_about_url == told:
 		return
-	if _told_about_url == server_url:
-		return
-	_told_about_url = server_url
-	var said: String = (
-		"[gdharness] %s is another project's server, so this editor is not connected: %s."
-		+ " Start this project's own server, or point it at one with GDHARNESS_BRIDGE_PORT."
-	)
-	push_warning(said % [server_url, socket.get_close_reason()])
+	_told_about_url = told
+	push_warning(said)
+
+
+## What to tell a person when the server at [param url] closed with [param code] and
+## [param reason], or an empty string for a close that waiting can mend.
+static func refusal_note(code: int, url: String, reason: String) -> String:
+	if code == ELSEWHERE_CLOSE_CODE:
+		return (
+			(
+				"[gdharness] %s is another project's server, so this editor is not connected: %s."
+				+ " Start this project's own server, or point it at one with GDHARNESS_BRIDGE_PORT."
+			)
+			% [url, reason]
+		)
+	if code == TAKEN_CLOSE_CODE:
+		return (
+			(
+				"[gdharness] %s already serves another editor, so this editor is not connected."
+				+ " It connects once that editor closes. Give this project its own server with"
+				+ " GDHARNESS_BRIDGE_PORT to use both at once."
+			)
+			% url
+		)
+	return ""
 
 
 func _schedule_reconnect() -> void:

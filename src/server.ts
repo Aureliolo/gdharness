@@ -31,7 +31,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { McpServer, ProtocolError, ProtocolErrorCode } from '@modelcontextprotocol/server';
 import { type StdioServerHandle, serveStdio } from '@modelcontextprotocol/server/stdio';
 import { alive } from './alive.js';
-import { answerJson } from './answer-json.js';
+import { answerJson, type ToolResponse } from './answer-json.js';
 import { autoloadNotCompiled, scriptsAutoloaded } from './autoload-failure.js';
 import { halfAsLongAgain, MAIN_SCENE, readBootNote, waitSizedTo, writeBootNote } from './boot-note.js';
 import { readBreakpointNote, writeBreakpointNote } from './breakpoint-note.js';
@@ -58,6 +58,7 @@ import {
   declaredClasses,
   declaredClassLines,
   declaredSince,
+  EXTERNAL_MEMBER,
   eachScript,
   externalMemberIn,
   failedReloadNote,
@@ -134,7 +135,7 @@ import {
   WALK_STOPPED_SENTENCE,
   walkStoppedPartWay,
 } from './engine-leaks.js';
-import { type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-run.js';
+import { CONSOLE_CLOSED, type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-run.js';
 import { type CallSlot, onTheSlot, slotEngineNamed, slotForCall } from './engine-slots.js';
 import { errorCode, errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
@@ -161,6 +162,7 @@ import {
   theEditorHasComeBack,
 } from './godot-bridge.js';
 import { GodotLocator } from './godot-path.js';
+import type { EndedThrough, GodotProcess, SpawnedGame } from './godot-process.js';
 import { recordedEnginePath } from './harnesses.js';
 import {
   engineExtras,
@@ -268,7 +270,7 @@ import {
   steppedOverIn,
   underGdignore,
 } from './project-scan.js';
-import { setupPromptHandlers } from './prompts.js';
+import { type ProtocolServer, setupPromptHandlers } from './prompts.js';
 import { isRecord } from './records.js';
 import { applyRewrites } from './rename.js';
 import {
@@ -316,12 +318,12 @@ import {
   RUNTIME_PROTOCOL,
   type RuntimeEndpoint,
   reportAlreadyInTranscript,
-  runtimeDirectory,
   runtimeRequest,
   runtimesAnnounced,
   type UnspokenRuntime,
   whichHalfIsBehind,
 } from './runtime-client.js';
+import { runtimeDirectory } from './runtime-directories.js';
 import { discard, scratchDirectory, sweepAbandonedScratch } from './scratch.js';
 import {
   checkWithEngine,
@@ -334,12 +336,11 @@ import {
 } from './script-origins.js';
 import {
   callersOf,
-  frameFunctionsFor,
   PROFILE_FROM_START,
   type ProfileMark,
   type ProfileTotals,
   profiledFunctions,
-  queuedMessagesOf,
+  profileFrameFunctions,
   readProfileFile,
   readProfileMark,
   type SourceOf,
@@ -348,15 +349,6 @@ import {
   writeProfileMark,
 } from './script-profile.js';
 import { serverInstructions } from './server-instructions.js';
-import type {
-  EndedThrough,
-  GodotProcess,
-  MCPToolDefinition,
-  OperationParams,
-  ProtocolServer,
-  SpawnedGame,
-  ToolResponse,
-} from './server-types.js';
 import {
   DEBUG_MODE,
   runtimeAddonUnknown,
@@ -406,6 +398,7 @@ import {
 } from './test-selection.js';
 import {
   asParams,
+  type OperationParams,
   readArray,
   readBoolean,
   readNonEmptyString,
@@ -420,6 +413,7 @@ import {
   argumentsOf,
   buildToolDefinitions,
   EXPORT_PLATFORMS,
+  type MCPToolDefinition,
   opTakes,
   type ProjectInfoSection,
   TOOL_SPECS,
@@ -631,6 +625,9 @@ function writtenFileRefusal(
   const directory = realAsFarAsItExists(dirname(path));
   if (!existsSync(directory)) {
     return `${argument}'s directory ${dirname(path)} does not exist. ${whatOpening} creates no directories.`;
+  }
+  if (!isDirectory(directory)) {
+    return `${argument}'s directory ${dirname(path)} is a file, not a directory. Name a path in a folder that exists.`;
   }
   const where = join(directory, basename(path));
   const inside = rule.projects.find(
@@ -954,9 +951,6 @@ function cleanVerdict(run: GodotProcess): boolean | undefined {
 
 /** Signals an engine ends on only when it crashes, as against the ones a stop sends. */
 const CRASH_SIGNALS: ReadonlySet<string> = new Set(['SIGSEGV', 'SIGBUS', 'SIGILL', 'SIGFPE', 'SIGABRT']);
-/** The Windows status of a console closed or sent Ctrl+C, which ends a process without a fault. */
-const CONSOLE_CLOSED = 0xc000013a;
-
 /**
  * An error entry for a run that ended in a crash its log holds no report of, entered once. Godot
  * on Windows can crash as it closes with nothing printed: measured, a game closed through the
@@ -1310,7 +1304,7 @@ export function ourRunEnded(
 type Ending = 'gone' | 'lingering' | 'refused' | 'unreached';
 
 /** What a stop answers about the run it was asked to end, apart from what that run had started. */
-export interface StopVerdict {
+interface StopVerdict {
   readonly stopped: boolean;
   readonly endedPid?: number | null;
   readonly notSignalled?: number | null;
@@ -1771,9 +1765,6 @@ function lineNothingStopsOn(absolutePath: string, relativePath: string, line: nu
   return `${at} ${why}${after}.`;
 }
 
-/** What the runtime addon prints once it is listening, which a run's output is read for. */
-const RUNTIME_LISTENING_LINE = '[gdharness] runtime listening on ';
-
 /**
  * What a start says about the runtime it waited for.
  *
@@ -1878,7 +1869,6 @@ function isOfType(value: unknown, kind: unknown): boolean {
 /** What arrived, in the words the refusal uses, so a caller can see the two side by side. */
 const VALUE_NAMES: Readonly<Record<string, string>> = {
   string: 'a string',
-  number: 'a number',
   boolean: 'a boolean',
   object: 'an object',
 };
@@ -1891,6 +1881,9 @@ function describeValue(value: unknown): string {
   // "depth as integer, not a number" names the type it has in common with what was wanted.
   if (typeof value === 'number') {
     return String(value);
+  }
+  if (value === null) {
+    return 'null';
   }
   return VALUE_NAMES[typeof value] ?? typeof value;
 }
@@ -2992,7 +2985,7 @@ export function autoloadNotCompiledNote(
 }
 
 /** One script error a run printed over and over: its text, where it was raised, and how often. */
-export interface RepeatedError {
+interface RepeatedError {
   readonly text: string;
   readonly where: string | null;
   readonly times: number;
@@ -3321,7 +3314,7 @@ export function profileOnStart(profiled: boolean, through: 'gdharness' | 'editor
 const PROFILER_ON_MS = 3000;
 
 /** What a profile is read from, for the answer to say what it covers. */
-export interface ProfileReading {
+interface ProfileReading {
   /** Who was the game's debugger: the process that keeps a run this server started, or the editor. */
   readonly through: 'gdharness' | 'editor';
   readonly running: boolean;
@@ -3337,19 +3330,6 @@ export interface ProfileReading {
   readonly sourceOf?: SourceOf;
   /** The function whose callers were asked for, and the project's scripts to find them in. */
   readonly callersOf?: { readonly name: string; readonly scripts: () => Iterable<readonly [string, string]> };
-}
-
-/** The most functions a frame of [param projectPath]'s game may carry. See `frameFunctionsFor`. */
-function profileFrameFunctions(projectPath: string | null): number {
-  let projectGodot: string | null = null;
-  if (projectPath !== null) {
-    try {
-      projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
-    } catch {
-      // The engine's default queue is what such a game runs with too.
-    }
-  }
-  return frameFunctionsFor(queuedMessagesOf(projectGodot));
 }
 
 /** The cap an editor addon's profile reports, none before a session has set one. */
@@ -3806,18 +3786,30 @@ function elsewhereIn(projectPath: string, asked: string): string {
  * the run had one, beside [param sharing], those that say they run headless and shared it, or, when
  * the run had none, that the machine has no display.
  */
-function windowNoteFor(needing: readonly string[], sharing: readonly string[] | null): string {
+function windowNoteFor(
+  needing: readonly string[],
+  sharing: readonly string[] | null,
+  accessible: readonly string[],
+): string {
   const one = needing.length === 1;
   const why =
-    'A suite needs one when it declares const GDHARNESS_NEEDS_WINDOW: bool = true, or calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares it false and runs headless.';
+    'A suite needs one when it declares GDHARNESS_NEEDS_WINDOW or GDHARNESS_ACCESSIBILITY as true. It needs one too when it calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares GDHARNESS_NEEDS_WINDOW false and runs headless.';
   if (sharing === null) {
-    return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}, and this machine has no display, so the run was headless and input events went nowhere. ${why} Run under xvfb-run to give it a display.`;
+    const noTree =
+      accessible.length === 0
+        ? ''
+        : ` No accessibility tree was built, so what ${named(accessible)} ${accessible.length === 1 ? 'checks' : 'check'} in it never ran.`;
+    return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}. This machine has no display, so the run was headless. Input events went nowhere.${noTree} ${why} Run under xvfb-run to give it a display.`;
   }
+  const tree =
+    accessible.length === 0
+      ? ''
+      : ` The engine also ran with --accessibility always, since ${named(accessible)} ${accessible.length === 1 ? 'declares' : 'declare'} GDHARNESS_ACCESSIBILITY.`;
   const shared =
     sharing.length === 0
       ? ''
       : ` ${named(sharing)} ${sharing.length === 1 ? 'says it runs' : 'say they run'} headless and ran with the window too, since the run is one engine: run ${sharing.length === 1 ? 'it' : 'them'} without the windowed suites to run ${sharing.length === 1 ? 'it' : 'them'} headless.`;
-  return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}, so the run had one: the engine ran without --headless, at the size project.godot gives its viewport, with no sound${process.platform === 'win32' ? ', on a desktop of its own, where its window neither shows nor takes the keyboard' : ''}. ${why}${shared}`;
+  return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}, so the run had one. The engine ran without --headless, at the size project.godot gives its viewport, with no sound.${process.platform === 'win32' ? ' Its window sat on a desktop of its own, so it neither showed nor took the keyboard.' : ''}${tree} ${why}${shared}`;
 }
 
 /**
@@ -3865,12 +3857,18 @@ export function testPathsIn(
     }
     resolved.push(location.relativePath.replace(/\/+$/, ''));
   }
-  const unique = [...new Set(resolved)];
-  const within = (path: string, directory: string): boolean => path.startsWith(`${directory}/`);
+  // Two spellings of one path are one suite on a file system that ignores case.
+  const folded = (path: string): string =>
+    process.platform === 'win32' || process.platform === 'darwin' ? path.toLowerCase() : path;
+  const unique = resolved.filter(
+    (path, at) => resolved.findIndex((one) => folded(one) === folded(path)) === at,
+  );
   return {
     ok: true,
     value: unique
-      .filter((path) => !unique.some((other) => other !== path && within(path, other)))
+      .filter(
+        (path) => !unique.some((other) => other !== path && folded(path).startsWith(`${folded(other)}/`)),
+      )
       .map((path) => `res://${path}`),
   };
 }
@@ -4037,9 +4035,6 @@ function asWarning(raised: string): string {
   return bare.startsWith(PARSE_ERROR) ? bare.slice(PARSE_ERROR.length) : bare;
 }
 
-/** A diagnostic naming only the member of another class it could not resolve. */
-const EXTERNAL_MEMBER = 'Could not resolve external class member "';
-
 function isDirectory(path: string): boolean {
   try {
     return statSync(path).isDirectory();
@@ -4166,8 +4161,8 @@ class GodotServer {
   private dapClient: GodotDAPClient | null = null;
   /** The adapter connection and editor the owner check last passed for. See [adapterBelongsElsewhere]. */
   private adapterPassed: { connection: object; editorPid: number } | null = null;
-  /** Which client has taken on the project's breakpoint note. See [dapHoldingBreakpointsOf]. */
-  private breakpointsSeededOn: GodotDAPClient | null = null;
+  /** Which client has taken on which project's breakpoint note. See [dapHoldingBreakpointsOf]. */
+  private breakpointsSeededOn: { readonly client: GodotDAPClient; readonly project: string } | null = null;
   private bridgeStartupError: string | null = null;
   private bridgeRetry: NodeJS.Timeout | null = null;
   private successorWatch: NodeJS.Timeout | null = null;
@@ -5185,7 +5180,10 @@ class GodotServer {
       // question nobody asked: a caller who wrote `get` wants to know what `get` takes, not the
       // twenty arguments the other ten ops between them accept.
       const asked = readString(args, 'op');
-      const knownOp = asked !== undefined && spec.operations?.[asked] !== undefined ? asked : null;
+      const knownOp =
+        asked !== undefined && spec.operations !== undefined && Object.hasOwn(spec.operations, asked)
+          ? asked
+          : null;
       const wanted = knownOp === null ? [...known] : [...argumentsOf(spec, knownOp), 'op'];
       // Each with what it takes, because the name alone hides the second form: a session that
       // guessed `suites` for a list of suite files was told `path` and not that path takes one.
@@ -7239,12 +7237,6 @@ class GodotServer {
    */
   private async handleProjectInfo(args: OperationParams): Promise<ToolResponse> {
     const include = readStringArray(args, 'include') ?? [];
-    const unknown = include.filter((name) => PROJECT_INFO_SECTIONS[name] === undefined);
-    if (unknown.length > 0) {
-      return this.createErrorResponse(
-        `project_info cannot include ${unknown.join(', ')}. Sections: ${Object.keys(PROJECT_INFO_SECTIONS).join(', ')}.`,
-      );
-    }
     // Read by the validation section alone, so without it they would change nothing and the answer
     // would not say so.
     const forValidation = ['preset', 'detail'].filter((name) => args[name] !== undefined);
@@ -7645,21 +7637,6 @@ class GodotServer {
       return engine.response;
     }
 
-    // Godot's command-line exporter does not create the directory it is told to write into, where
-    // the editor's own export dialog does, and what it says when it is missing is "The given export
-    // path doesn't exist", which reads as a wrong path in the preset and sends the caller to check
-    // the preset. The tool was handed the path and has already contained it inside the project, so
-    // it knows exactly which directory it is about to need. Reported for the first export of two
-    // separate projects, each of which lost the same five minutes to the same message.
-    const folder = dirname(output.absolutePath);
-    try {
-      mkdirSync(folder, { recursive: true });
-    } catch (error) {
-      return this.createErrorResponse(
-        `Cannot create ${dirname(output.relativePath)} to export into: ${errorMessage(error)}`,
-      );
-    }
-
     const debug = readBoolean(args, 'debug') ?? false;
     const pack = readBoolean(args, 'pack') ?? false;
     // Godot's command line exports a pack as a release whatever else it is told.
@@ -7674,6 +7651,20 @@ class GodotServer {
       return this.createErrorResponse(
         `A pack is written as a .pck or a .zip, and ${output.relativePath} is neither: the exporter picks the format by the extension.`,
         ['Give outputPath ending in .pck, or .zip for a zip of the resources'],
+      );
+    }
+    // Godot's command-line exporter does not create the directory it is told to write into, where
+    // the editor's own export dialog does, and what it says when it is missing is "The given export
+    // path doesn't exist", which reads as a wrong path in the preset and sends the caller to check
+    // the preset. The tool was handed the path and has already contained it inside the project, so
+    // it knows exactly which directory it is about to need. Made only once nothing else refuses the
+    // call, so a refused call leaves no folder behind.
+    const folder = dirname(output.absolutePath);
+    try {
+      mkdirSync(folder, { recursive: true });
+    } catch (error) {
+      return this.createErrorResponse(
+        `Cannot create ${dirname(output.relativePath)} to export into: ${errorMessage(error)}`,
       );
     }
     // The export's own scan imports what changed only by the editor's cache, so in a checkout
@@ -7963,6 +7954,7 @@ class GodotServer {
     const leftOut = new Set(readStringArray(args, 'ignore') ?? []);
     const needs = windowNeedsOf(scripts, selection.value?.suites ?? asked);
     const needing = needs.needing.filter((path) => !leftOut.has(basename(path, '.gd')));
+    const accessible = needs.accessible.filter((path) => !leftOut.has(basename(path, '.gd')));
     const noDisplay = resolveHeadless(undefined, { platform: process.platform, variables: process.env });
     const windowed = needing.length > 0 && !noDisplay;
     const engine = await this.engine(project.value.path);
@@ -8036,7 +8028,9 @@ class GodotServer {
     const viewport = windowed ? viewportOf(project.value.path) : null;
     const sharing = needs.headless.filter((path) => !leftOut.has(basename(path, '.gd')));
     const windowSaid =
-      needing.length === 0 ? {} : { windowed, windowNote: windowNoteFor(needing, windowed ? sharing : null) };
+      needing.length === 0
+        ? {}
+        : { windowed, windowNote: windowNoteFor(needing, windowed ? sharing : null, accessible) };
     const cmdArgs = [
       // The engine as gdharness test starts it: windowed at the project's viewport size, and
       // either way with no sound, since a suite can read the driver off the command line.
@@ -8047,6 +8041,7 @@ class GodotServer {
         : ['--headless']),
       '--audio-driver',
       'Dummy',
+      ...(windowed && accessible.length > 0 ? ['--accessibility', 'always'] : []),
       '--path',
       project.value.path,
       // Before the script, where the engine reads its own options rather than handing them on.
@@ -9657,15 +9652,23 @@ class GodotServer {
   /**
    * The adapter client, with the breakpoints noted in [projectPath] as well as its own.
    *
-   * Seeded once per client. What an earlier server set is taken on before this one's first
-   * breakpoint call and before its first play, and a client replaced because its editor moved is
-   * seeded again, since the set it held went with it.
+   * Seeded once per client and project. What an earlier server set is taken on before this one's
+   * first breakpoint call and before its first play, and a client replaced because its editor moved
+   * is seeded again, since the set it held went with it. A call naming another project lets go of
+   * the set held for the first and takes on the other's note, because a breakpoint is a line of one
+   * project's script. Each project's own set stays in its note.
    */
   private dapHoldingBreakpointsOf(projectPath: string): GodotDAPClient {
     const client = this.dap();
-    if (this.breakpointsSeededOn !== client) {
+    const project = realAsFarAsItExists(projectPath);
+    if (this.breakpointsSeededOn?.client !== client || this.breakpointsSeededOn.project !== project) {
+      for (const { scriptPath, lines } of client.breakpointsHeld()) {
+        for (const line of lines) {
+          client.forgetBreakpoint(scriptPath, line);
+        }
+      }
       client.holdBreakpoints(readBreakpointNote(projectPath));
-      this.breakpointsSeededOn = client;
+      this.breakpointsSeededOn = { client, project };
     }
     return client;
   }
@@ -11610,9 +11613,7 @@ class GodotServer {
       servesAProject: this.ownProject !== null,
       ...(going?.throughEditor === true ? { playingSeen: going.seenPlaying === true } : {}),
       runtimeCameUp:
-        going !== null &&
-        !running &&
-        going.log.all.some((entry) => entry.text.startsWith(RUNTIME_LISTENING_LINE)),
+        going !== null && !running && going.log.all.some((entry) => entry.text.startsWith(CONSOLE_BOUNDARY)),
     });
     // Listening is not answering: a game on another build's runtime addon is asked nothing, and a
     // start that says only that it listened leaves the caller to learn it from the first refusal.
@@ -12138,8 +12139,8 @@ class GodotServer {
    * Whether the editor reports its play over within the stop's wait. An answer that does not come
    * is waited past rather than taken as either.
    */
-  private async untilTheEditorStopsPlaying(withinMs = stopWaitMs()): Promise<boolean> {
-    const deadline = Date.now() + withinMs;
+  private async untilTheEditorStopsPlaying(): Promise<boolean> {
+    const deadline = Date.now() + stopWaitMs();
     for (;;) {
       if ((await this.editorPlayingState())?.playing === false) {
         return true;
@@ -12596,10 +12597,10 @@ class GodotServer {
     godotPath: string,
     cmdArgs: string[],
     projectPath: string,
-    env?: NodeJS.ProcessEnv,
-    desktop?: string,
-    profiled = false,
-    debugged = true,
+    env: NodeJS.ProcessEnv | undefined,
+    desktop: string | undefined,
+    profiled: boolean,
+    debugged: boolean,
   ): Promise<GodotProcess | { error: string }> {
     // In one of the machine's engine slots, like every engine started for a call. The keeper takes
     // the lock over once it has handed the game's pid back, and gives it back when the run ends,
@@ -13212,7 +13213,7 @@ class GodotServer {
         (one) =>
           one.servedBy !== undefined &&
           isSameDirectory(one.servedBy, project) &&
-          !(one.projectPath !== '' && isSameDirectory(one.projectPath, project)),
+          !isSameDirectory(one.projectPath, project),
       ) ?? null
     );
   }
@@ -13348,7 +13349,7 @@ class GodotServer {
     if (project === null) {
       return this.allAnnouncedForOurProject(announced);
     }
-    return announced.filter((one) => one.project.path !== '' && isSameDirectory(project, one.project.path));
+    return announced.filter((one) => isSameDirectory(project, one.project.path));
   }
 
   private allAnnouncedForOurProject<T extends { project: { path: string } }>(announced: readonly T[]): T[] {
@@ -13357,7 +13358,7 @@ class GodotServer {
     if (mine === null) {
       return [];
     }
-    return announced.filter((one) => one.project.path !== '' && isSameDirectory(mine, one.project.path));
+    return announced.filter((one) => isSameDirectory(mine, one.project.path));
   }
 
   /**
@@ -13408,7 +13409,7 @@ class GodotServer {
     // A note from a version that did not record the project. It cannot be shown to be this
     // server's, and the reason to keep reading it is the same reason it is not killed by pid
     // alone: the cost of being wrong lands on somebody else.
-    return project !== '' && isSameDirectory(mine, project);
+    return isSameDirectory(mine, project);
   }
 
   /**
@@ -13443,9 +13444,9 @@ class GodotServer {
     args: OperationParams,
     userArgs: readonly string[],
     scanned: ScanWait,
-    asked: RunEnvironment = {},
-    engineArgs: readonly string[] = [],
-    engineNote: string | null = null,
+    asked: RunEnvironment,
+    engineArgs: readonly string[],
+    engineNote: string | null,
   ): Promise<ToolResponse> {
     const frames = readPositiveNumber(args, 'frames') ?? 3;
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 60000;
@@ -14814,23 +14815,13 @@ class GodotServer {
     const projectPath = readNonEmptyString(args, 'projectPath') ?? '';
     const saveTo = readNonEmptyString(args, 'outputPath') ?? null;
     const sendsThePicture = readBoolean(args, 'inline') !== false;
-    if (!sendsThePicture && saveTo === null) {
-      return this.createErrorResponse(
-        'inline: false sends no picture back, so it needs outputPath to save one to.',
-        [
-          'Pass outputPath, an absolute path ending in .png outside the project',
-          'Or leave inline out to have the picture sent',
-        ],
-      );
-    }
-    if (saveTo !== null) {
-      const refusal = captureDestinationRefusal(saveTo, [
-        ...(projectPath === '' ? [] : [projectPath]),
-        ...(this.ownProject === null ? [] : [this.ownProject]),
-      ]);
-      if (refusal !== null) {
-        return this.createErrorResponse(refusal);
-      }
+    const placeRefused = this.captureTargetRefused(
+      saveTo,
+      sendsThePicture,
+      projectPath === '' ? [] : [projectPath],
+    );
+    if (placeRefused !== null) {
+      return placeRefused;
     }
     const folder = scratchDirectory('editor-capture');
     const picture = join(folder, 'capture.png');
@@ -14853,16 +14844,15 @@ class GodotServer {
           `Rejected capture file path outside the managed capture path: '${returned}'`,
         );
       }
-      if (saveTo !== null) {
-        try {
-          copyFileSync(picture, saveTo, constants.COPYFILE_EXCL);
-        } catch (error) {
-          return this.createErrorResponse(
-            `The capture was taken and could not be saved at ${saveTo}: ${errorMessage(error)}`,
-          );
-        }
+      const kept = this.captureSavedAndSent(
+        picture,
+        saveTo,
+        sendsThePicture,
+        readString(payload, 'jpegPath'),
+      );
+      if (!kept.ok) {
+        return kept.response;
       }
-      const sent = sendsThePicture ? pictureToSend(picture, readString(payload, 'jpegPath')) : null;
       const view = readString(payload, 'view') === '3d' ? '3D' : '2D';
       const drawnAt = payload['drawnAt'];
       const scaled = isRecord(drawnAt)
@@ -14872,24 +14862,77 @@ class GodotServer {
         payload['unsavedInEditor'] === true
           ? ". The picture includes the scene's unsaved changes in the editor"
           : '';
-      const how =
-        sent === null
-          ? '. Not sent, as inline: false asked'
-          : sent.mimeType === 'image/jpeg'
-            ? `. Sent as JPEG, ${kilobytes(sent.bytes)} against the PNG's ${kilobytes(sent.pngBytes)}${saveTo === null ? '' : ', and the saved PNG is lossless'}`
-            : '';
       return {
         content: [
           {
             type: 'text',
-            text: `The editor's ${view} view of ${readString(payload, 'scenePath') ?? 'the scene'}: ${String(readNumber(payload, 'width') ?? 0)}x${String(readNumber(payload, 'height') ?? 0)} png${scaled}${unsaved}${saveTo === null ? '' : `. Saved to ${saveTo}`}${how}`,
+            text: `The editor's ${view} view of ${readString(payload, 'scenePath') ?? 'the scene'}: ${String(readNumber(payload, 'width') ?? 0)}x${String(readNumber(payload, 'height') ?? 0)} png${scaled}${unsaved}${kept.said}`,
           },
-          ...(sent === null ? [] : [{ type: 'image' as const, data: sent.data, mimeType: sent.mimeType }]),
+          ...kept.images,
         ],
       };
     } finally {
       discard(folder);
     }
+  }
+
+  /** Why a capture may not go where it is asked, before anything is captured, or null. */
+  private captureTargetRefused(
+    saveTo: string | null,
+    sendsThePicture: boolean,
+    projects: readonly string[],
+  ): ToolResponse | null {
+    if (!sendsThePicture && saveTo === null) {
+      return this.createErrorResponse(
+        'inline: false sends no picture back, so it needs outputPath to save one to.',
+        [
+          'Pass outputPath, an absolute path ending in .png outside the project',
+          'Or leave inline out to have the picture sent',
+        ],
+      );
+    }
+    if (saveTo === null) {
+      return null;
+    }
+    const refusal = captureDestinationRefusal(saveTo, [
+      ...projects,
+      ...(this.ownProject === null ? [] : [this.ownProject]),
+    ]);
+    return refusal === null ? null : this.createErrorResponse(refusal);
+  }
+
+  /** A taken capture saved and sent as asked: the end of the answer's text and its picture blocks. */
+  private captureSavedAndSent(
+    picture: string,
+    saveTo: string | null,
+    sendsThePicture: boolean,
+    jpegPath: string | undefined,
+  ): { ok: true; said: string; images: ToolResponse['content'] } | { ok: false; response: ToolResponse } {
+    // Exclusive, so a file that appeared since the check is still not written over.
+    if (saveTo !== null) {
+      try {
+        copyFileSync(picture, saveTo, constants.COPYFILE_EXCL);
+      } catch (error) {
+        return {
+          ok: false,
+          response: this.createErrorResponse(
+            `The capture was taken and could not be saved at ${saveTo}: ${errorMessage(error)}`,
+          ),
+        };
+      }
+    }
+    const sent = sendsThePicture ? pictureToSend(picture, jpegPath) : null;
+    const how =
+      sent === null
+        ? '. Not sent, as inline: false asked'
+        : sent.mimeType === 'image/jpeg'
+          ? `. Sent as JPEG, ${kilobytes(sent.bytes)} against the PNG's ${kilobytes(sent.pngBytes)}${saveTo === null ? '' : ', and the saved PNG is lossless'}`
+          : '';
+    return {
+      ok: true,
+      said: `${saveTo === null ? '' : `. Saved to ${saveTo}`}${how}`,
+      images: sent === null ? [] : [{ type: 'image' as const, data: sent.data, mimeType: sent.mimeType }],
+    };
   }
 
   private async handleRescanFilesystem(args: OperationParams): Promise<ToolResponse> {
@@ -15349,7 +15392,7 @@ class GodotServer {
    */
   private async reloadInEditor(
     scripts: readonly NamingScript[],
-    projectPath = '',
+    projectPath: string,
   ): Promise<{
     reloaded: string[];
     notReloaded: NotReloaded[];
@@ -16377,17 +16420,23 @@ class GodotServer {
     names: { gone: readonly string[]; oldClass: string | null; newClass: string | null },
   ): Promise<{ ok: boolean; report: Record<string, unknown> }> {
     const { gone, oldClass, newClass } = names;
-    const scanned = asParams(
-      JSON.parse(
-        (
-          await this.handleRescanFilesystem({
-            projectPath,
-            timeoutMs: 60000,
-            updateFiles: [...gone, ...changed],
-          })
-        ).content[0]?.text ?? '{}',
-      ),
-    );
+    const rescan = await this.handleRescanFilesystem({
+      projectPath,
+      timeoutMs: 60000,
+      updateFiles: [...gone, ...changed],
+    });
+    if (rescan.isError === true) {
+      // The refusal is plain text. The files are written whatever the editor did with them.
+      const why = rescan.content[0]?.text ?? 'The editor gave no reason.';
+      return {
+        ok: false,
+        report: {
+          editor: { rescanRefused: why },
+          note: `The editor did not take the written files, so they were not scanned, reloaded or compiled there: ${why}`,
+        },
+      };
+    }
+    const scanned = asParams(JSON.parse(rescan.content[0]?.text ?? '{}'));
     // The scan reloads the scripts naming a class it brought in, in the order it finds them, so one
     // it reloaded before the script it inherits from failed and is tried again here in order.
     const reloadedByTheScan = new Set((readArray(scanned, 'dependentsReloaded') ?? []).map(String));
@@ -17222,23 +17271,11 @@ class GodotServer {
     // Checked before the game is asked, so a refused place costs no capture.
     const saveTo = expectsScreenshot && typeof outputPath === 'string' ? outputPath : null;
     const sendsThePicture = readBoolean(callArgs, 'inline') !== false;
-    if (expectsScreenshot && !sendsThePicture && saveTo === null) {
-      return this.createErrorResponse(
-        'inline: false sends no picture back, so it needs outputPath to save one to.',
-        [
-          'Pass outputPath, an absolute path ending in .png outside the project',
-          'Or leave inline out to have the picture sent',
-        ],
-      );
-    }
-    if (saveTo !== null) {
-      const refusal = captureDestinationRefusal(saveTo, [
-        choice.endpoint.project.path,
-        ...(this.ownProject === null ? [] : [this.ownProject]),
-      ]);
-      if (refusal !== null) {
-        return this.createErrorResponse(refusal);
-      }
+    const placeRefused = expectsScreenshot
+      ? this.captureTargetRefused(saveTo, sendsThePicture, [choice.endpoint.project.path])
+      : null;
+    if (placeRefused !== null) {
+      return placeRefused;
     }
     // The game is not asked: an answer from another release's runtime is that release's answer.
     const staleNote = this.runtimeStaleNote(choice.endpoint);
@@ -17319,31 +17356,23 @@ class GodotServer {
       const dimensions = `${readNumber(payload, 'width') ?? 0}x${readNumber(payload, 'height') ?? 0} ${
         readString(payload, 'format') ?? 'unknown'
       }`;
-      // Exclusive, so a file that appeared since the check is still not written over.
-      if (saveTo !== null) {
-        try {
-          copyFileSync(screenshotPath, saveTo, constants.COPYFILE_EXCL);
-        } catch (error) {
-          return this.createErrorResponse(
-            `The capture was taken and could not be saved at ${saveTo}: ${errorMessage(error)}`,
-          );
-        }
+      const kept = this.captureSavedAndSent(
+        screenshotPath,
+        saveTo,
+        sendsThePicture,
+        readString(payload, 'jpegPath'),
+      );
+      if (!kept.ok) {
+        return kept.response;
       }
       const ranWith = [...onGame.alongside];
-      const sent = sendsThePicture ? pictureToSend(screenshotPath, readString(payload, 'jpegPath')) : null;
-      const how =
-        sent === null
-          ? '. Not sent, as inline: false asked'
-          : sent.mimeType === 'image/jpeg'
-            ? `. Sent as JPEG, ${kilobytes(sent.bytes)} against the PNG's ${kilobytes(sent.pngBytes)}${saveTo === null ? '' : ', and the saved PNG is lossless'}`
-            : '';
       return {
         content: [
           {
             type: 'text',
-            text: `Screenshot captured: ${dimensions}${chosenAmongSeveral ? ` from pid ${own}, the game this server holds` : ''}${captureDetail(payload)}${saveTo === null ? '' : `. Saved to ${saveTo}`}${how}${ranWith.length === 0 ? '' : `\n\nRan alongside ${ranWith.join(', ')}. ${ALONGSIDE_NOTE}`}`,
+            text: `Screenshot captured: ${dimensions}${chosenAmongSeveral ? ` from pid ${own}, the game this server holds` : ''}${captureDetail(payload)}${kept.said}${ranWith.length === 0 ? '' : `\n\nRan alongside ${ranWith.join(', ')}. ${ALONGSIDE_NOTE}`}`,
           },
-          ...(sent === null ? [] : [{ type: 'image' as const, data: sent.data, mimeType: sent.mimeType }]),
+          ...kept.images,
         ],
       };
     } finally {

@@ -12,6 +12,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { emptyRecord } from './dictionary.js';
 import { type DebugObserver, RUNTIME_ADDON } from './game-debugger.js';
 import {
@@ -79,7 +80,7 @@ export interface ProfileTotals {
  * A profile file: the listener waiting for the game, or what it has summed since the game connected.
  * Told apart, because a game that never dialled and one that ran no script are different answers.
  */
-export type ProfileFile =
+type ProfileFile =
   | { readonly connected: false; readonly listeningSince: number }
   | (ProfileTotals & { readonly connected: true });
 
@@ -185,6 +186,19 @@ export function frameFunctionsFor(queued: number): number {
 export function queuedMessagesOf(projectGodot: string | null): number {
   const set = projectGodot === null ? undefined : parseProjectGodot(projectGodot)['network']?.[QUEUE_SETTING];
   return typeof set === 'number' && Number.isInteger(set) && set > 0 ? set : QUEUE_DEFAULT;
+}
+
+/** The most functions a frame of [param projectPath]'s game may carry, or the engine default's. */
+export function profileFrameFunctions(projectPath: string | null): number {
+  let projectGodot: string | null = null;
+  if (projectPath !== null) {
+    try {
+      projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
+    } catch {
+      // The engine's default queue is what such a game runs with too.
+    }
+  }
+  return frameFunctionsFor(queuedMessagesOf(projectGodot));
 }
 
 /**
@@ -364,7 +378,7 @@ export class ProfileAggregate {
 }
 
 /** A function as an answer carries it. */
-export interface ProfiledFunction {
+interface ProfiledFunction {
   readonly script: string;
   readonly function: string;
   /** The line of the function body's first statement, which is what the engine records. */
@@ -671,7 +685,7 @@ function placedLambda(row: ProfiledFunction, sourceOf: SourceOf): ProfiledFuncti
 }
 
 /** A place that names the function asked about, with the profile's row for the function it is in. */
-export interface ProfiledCallSite extends CallSite {
+interface ProfiledCallSite extends CallSite {
   readonly script: string;
   /** The profile's numbers for `within`, absent when it made no counted call. */
   readonly withinCalls?: number;

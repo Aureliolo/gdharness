@@ -36,7 +36,7 @@ function portOf(stored: number): number {
  * The rows of one table, given its DWORDs: the row count first, then [param width] DWORDs a row,
  * with each field at the index [param at] names.
  */
-function rowsOf(
+export function rowsOf(
   table: Uint32Array,
   width: number,
   at: {
@@ -60,16 +60,26 @@ function rowsOf(
   return rows;
 }
 
-/** The pid listening on [param port] among [param rows], a listening row before a row with no state. */
+/**
+ * The pid listening on [param port] among [param rows], a listening row before a row with no state.
+ * Null when the rows of the kind that counts name more than one process: a row carries no address,
+ * so nothing here says which of two listeners on different addresses is the one asked about.
+ */
 export function listenerAmong(rows: readonly Row[], port: number): number | null {
   const onPort = rows.filter((row) => row.localPort === port);
-  const listening = onPort.find((row) => row.state === LISTENING);
-  const unstated = onPort.find((row) => row.state === NO_STATE && row.remotePort === 0);
-  return (listening ?? unstated)?.pid ?? null;
+  const listening = onPort.filter((row) => row.state === LISTENING);
+  const holders = new Set(
+    (listening.length > 0
+      ? listening
+      : onPort.filter((row) => row.state === NO_STATE && row.remotePort === 0)
+    ).map((row) => row.pid),
+  );
+  const [only] = holders;
+  return holders.size === 1 ? (only ?? null) : null;
 }
 
 /** IPv4 rows are six DWORDs, IPv6 rows fourteen, with the fields in these places. */
-const LAYOUTS = [
+export const LAYOUTS = [
   { family: AF_INET, width: 6, at: { state: 0, localPort: 2, remotePort: 4, pid: 5 } },
   { family: AF_INET6, width: 14, at: { state: 12, localPort: 5, remotePort: 11, pid: 13 } },
 ] as const;

@@ -10,6 +10,8 @@
  * it off what the runner printed, because the exit code cannot say.
  */
 
+import { caseLineOf, suiteOpenedBy } from './game-log.js';
+
 export class MalformedReportError extends Error {
   constructor(message: string) {
     super(message);
@@ -32,7 +34,7 @@ function decoded(text: string): string {
       const code = entity.startsWith('#x')
         ? Number.parseInt(entity.slice(2), 16)
         : Number.parseInt(entity.slice(1), 10);
-      if (!Number.isInteger(code) || code < 0 || code > 0x10ffff) {
+      if (!Number.isInteger(code) || code > 0x10ffff) {
         throw new MalformedReportError(`Not a character: ${whole}`);
       }
       return String.fromCodePoint(code);
@@ -74,13 +76,7 @@ function parseXml(source: string): XmlElement {
   const open: XmlElement[] = [root];
   let at = 0;
 
-  const current = (): XmlElement => {
-    const element = open.at(-1);
-    if (element === undefined) {
-      throw new MalformedReportError('A close tag with nothing open');
-    }
-    return element;
-  };
+  const current = (): XmlElement => open.at(-1) ?? root;
 
   while (at < source.length) {
     const next = source.indexOf('<', at);
@@ -222,12 +218,24 @@ export interface TestReport {
 }
 
 function count(attributes: Readonly<Record<string, string>>, name: string): number {
-  const value = Number(attributes[name] ?? '0');
-  return Number.isFinite(value) ? value : 0;
+  const raw = attributes[name];
+  if (raw === undefined) {
+    return 0;
+  }
+  const value = raw.trim() === '' ? Number.NaN : Number(raw);
+  if (!Number.isFinite(value) || value < 0 || (name !== 'time' && !Number.isInteger(value))) {
+    throw new MalformedReportError(`${name}="${raw}" is not ${name === 'time' ? 'a time' : 'a count'}`);
+  }
+  return value;
+}
+
+/** Whether a reported case is [param test], or one row of it, which gdUnit4 names `test:N (values)`. */
+function isCaseOrRow(reported: string, test: string): boolean {
+  return reported === test || (reported.startsWith(test) && /^\W/.test(reported.slice(test.length)));
 }
 
 /** An entry of a run's ignore list that named a case the run went on to run. */
-export interface IgnoreNotApplied {
+interface IgnoreNotApplied {
   readonly entry: string;
   /** The case that ran, as `suite_name:test_name`, which is the form that leaves it out. */
   readonly ran: string;
@@ -252,9 +260,8 @@ export function ignoredYetRan(report: TestReport, ignored: readonly string[]): I
     for (const suite of report.suites) {
       const suiteMatches =
         suiteNamed === null || suite.name === suiteNamed || (suite.path ?? '').includes(suiteNamed);
-      const ran = suiteMatches ? suite.cases.find((one) => one.name === testNamed) : undefined;
-      if (ran !== undefined) {
-        found.push({ entry, ran: `${suite.name}:${ran.name}` });
+      if (suiteMatches && suite.cases.some((one) => isCaseOrRow(one.name, testNamed))) {
+        found.push({ entry, ran: `${suite.name}:${testNamed}` });
       }
     }
   }
@@ -273,7 +280,7 @@ const IGNORED_ROW_LINE = /^gdharness ignored (res:\/\/.+?\.gd > [^:\s]+:\d+)\s*$
  * name a failure was reported under can be passed back as it came.
  */
 function rowNamed(entry: string): { suite: string; test: string; row: number } | null {
-  const named = /^(.+):([A-Za-z_]\w*):(\d+)(?:\s.*)?$/.exec(entry.replace('res://', ''));
+  const named = /^(.+?):([A-Za-z_]\w*):(\d+)(?:\s.*)?$/.exec(entry.replace('res://', ''));
   return named === null ? null : { suite: named[1] ?? '', test: named[2] ?? '', row: Number(named[3]) };
 }
 
@@ -357,9 +364,7 @@ export function ignoredLeftOut(
     for (const { path, test } of named) {
       const reported = report.suites
         .filter((ran) => ran.path === path || (ran.path === null && ran.name === suiteNameOf(path)))
-        .some((ran) =>
-          ran.cases.some((one) => one.name === test || new RegExp(`^${test}\\W`).test(one.name)),
-        );
+        .some((ran) => ran.cases.some((one) => isCaseOrRow(one.name, test)));
       if (!reported) {
         leftOut.add(`${suiteNameOf(path)}:${test}`);
       }
@@ -438,17 +443,43 @@ function failedAnAssertion(entry: TestCase): boolean {
 function pathOf(suite: XmlElement): string | null {
   const directory = suite.attributes['package'];
   const name = suite.attributes['name'];
-  return directory && name ? `res://${directory}/${name}.gd` : null;
+  if (!name || directory === undefined) {
+    return null;
+  }
+  return directory === '' || directory === '.' ? `res://${name}.gd` : `res://${directory}/${name}.gd`;
+}
+
+/**
+ * Every `testsuite` under [param element], at any depth and in document order. A case outside a
+ * suite is refused, since reading around it would answer a run with fewer tests than it held.
+ */
+function suitesUnder(root: XmlElement): XmlElement[] {
+  const found: XmlElement[] = [];
+  // A stack rather than recursion, so a deeply nested document cannot overflow the call stack.
+  const pending: Array<{ element: XmlElement; inSuite: boolean }> = [{ element: root, inSuite: false }];
+  for (let next = pending.pop(); next !== undefined; next = pending.pop()) {
+    if (next.element.name === 'testcase' && !next.inSuite) {
+      throw new MalformedReportError('A <testcase> outside any <testsuite>');
+    }
+    const isSuite = next.element.name === 'testsuite';
+    if (isSuite) {
+      found.push(next.element);
+    }
+    for (const child of next.element.children.toReversed()) {
+      pending.push({ element: child, inSuite: next.inSuite || isSuite });
+    }
+  }
+  return found;
 }
 
 export function parseJUnit(xml: string): TestReport {
-  const document = parseXml(xml);
-  const top = document.children.find((child) => child.name === 'testsuites' || child.name === 'testsuite');
-  if (top === undefined) {
+  // An XML parser folds every line end to a line feed, and a report that passed through Windows tools
+  // otherwise kept carriage returns inside the values the console is compared against.
+  const document = parseXml(xml.replace(/\r\n?/g, '\n'));
+  if (!document.children.some((child) => child.name === 'testsuites' || child.name === 'testsuite')) {
     throw new MalformedReportError('No <testsuites> or <testsuite> in the report');
   }
-  const suiteElements =
-    top.name === 'testsuite' ? [top] : top.children.filter((child) => child.name === 'testsuite');
+  const suiteElements = suitesUnder(document);
   // Sorted by where each suite is, because gdUnit4 runs and writes them in the order the directory
   // lists them, which is the file system's: one project gave the same suites in one order on
   // Windows and the other on Linux.
@@ -507,7 +538,7 @@ export function parseJUnit(xml: string): TestReport {
 }
 
 /** A hook's failure as the runner printed it, which is the only place its message is. */
-export interface HookFailure {
+interface HookFailure {
   /** The hook, `before` or `after`. */
   readonly hook: string;
   /** The suite's script. */
@@ -518,7 +549,10 @@ export interface HookFailure {
 
 // Printed under the suite's `finalize()` report, the location after a tab on the message's last
 // line once colours are off: `  Expecting: 'true' but is 'false'	at 'before' in res://test/hooked_test.gd:5`.
-const HOOK_FAILURE = /^\s*(.*?)\s*\tat '(before|after)' in (res:\/\/.+?):(\d+)\s*$/;
+const HOOK_LOCATION = "\tat '";
+// Matched on the text after the tab. A pattern opening on a lazy message and white space tries every
+// split of a long run of blanks, which took seconds on a padded line.
+const HOOK_FAILURE = /^at '(before|after)' in (res:\/\/.+?):(\d+)\s*$/;
 const REPORT_HEADING = /\bfinalize\(\)\s+Report:\s*$/;
 const REPORT_END = /^\s*Statistics:/;
 
@@ -540,14 +574,15 @@ export function hookFailuresPrinted(printed: readonly string[]): HookFailure[] {
       above = null;
       return [];
     }
-    const found = HOOK_FAILURE.exec(line);
+    const tab = line.lastIndexOf(HOOK_LOCATION);
+    const found = tab === -1 ? null : HOOK_FAILURE.exec(line.slice(tab + 1));
     if (found === null) {
       above?.push(line.trim());
       return [];
     }
-    const message = [...(above ?? []), found[1] ?? ''].filter((part) => part !== '').join(' ');
+    const message = [...(above ?? []), line.slice(0, tab).trim()].filter((part) => part !== '').join(' ');
     above = [];
-    return [{ hook: found[2] ?? '', path: found[3] ?? '', line: Number(found[4]), message }];
+    return [{ hook: found[1] ?? '', path: found[2] ?? '', line: Number(found[3]), message }];
   });
 }
 
@@ -661,6 +696,7 @@ const PRINTED_ACTUAL = new RegExp(
 const QUOTED_EQUALITY = new RegExp(
   `^Expecting(?: error message)?:\\n '([\\s\\S]*)'\\n but was\\n '([\\s\\S]*)'(?:${IGNORING_CASE})?\\n\\tat `,
 );
+const DETAIL_LOCATION = new RegExp(`\\tat (${LOCATION})`, 'g');
 const COLOUR = new RegExp(`${ESCAPE}\\[([0-9;]*)m`, 'g');
 
 /** How gdUnit4 spells a character it marks, read back into the character. */
@@ -760,22 +796,43 @@ export function withActualsPrinted<Case extends { readonly detail: string | null
   // Each printed diff belongs to one failure, and both are in the order the run met them. The same
   // assertion line failing twice merges alike when the values differ only where the marks were, so
   // a diff offered to every failure it matched gave both the first one's value.
-  const used = new Set<number>();
+  // Diffs wait under the assertion location they end on, so a report looks only at the diffs of the
+  // locations it names. Walking every diff for every report is quadratic in the failures.
+  const waiting = new Map<string, (typeof diffs)[number][]>();
+  for (const diff of diffs) {
+    const queue = waiting.get(diff.at);
+    if (queue === undefined) {
+      waiting.set(diff.at, [diff]);
+    } else {
+      queue.push(diff);
+    }
+  }
   return failed.map((entry) => {
     if (entry.detail === null) {
       return entry;
     }
     let detail = entry.detail;
     let recovered = false;
-    for (const [index, diff] of diffs.entries()) {
-      if (used.has(index)) {
+    const named = new Set([...detail.matchAll(DETAIL_LOCATION)].map((match) => match[1] ?? ''));
+    for (const at of named) {
+      const queue = waiting.get(at);
+      if (queue === undefined) {
         continue;
       }
-      const wrong = ` but was\n '${diff.merged.replaceAll('\r', '')}'${diff.suffix}\n\tat ${diff.at}`;
-      if (detail.includes(wrong)) {
-        detail = detail.replace(wrong, () => ` but was\n '${diff.actual}'${diff.suffix}\n\tat ${diff.at}`);
-        recovered = true;
-        used.add(index);
+      // One diff belongs to one report. Taking the first that matches and stopping keeps a report from
+      // also taking the next diff when its own value holds all of the expected string.
+      for (let index = 0; index < queue.length; index += 1) {
+        const diff = queue[index];
+        if (diff === undefined) {
+          continue;
+        }
+        const wrong = ` but was\n '${diff.merged.replaceAll('\r', '')}'${diff.suffix}\n\tat ${diff.at}`;
+        if (detail.includes(wrong)) {
+          detail = detail.replace(wrong, () => ` but was\n '${diff.actual}'${diff.suffix}\n\tat ${diff.at}`);
+          recovered = true;
+          queue.splice(index, 1);
+          break;
+        }
       }
     }
     const quoted = QUOTED_EQUALITY.exec(detail);
@@ -802,7 +859,7 @@ export function withActualsPrinted<Case extends { readonly detail: string | null
 type FoldedReport = CaseReport & { readonly times?: number };
 
 /** A failed case as the answer names it: its first report, and its reports when it has several. */
-export interface FailedCase {
+interface FailedCase {
   readonly suite: string;
   readonly name: string;
   readonly status: CaseStatus;
@@ -832,11 +889,17 @@ export const MOST_REPORTS_SHOWN = 20;
 /** The most characters of one report's detail an answer carries. The rest are counted. */
 export const LONGEST_DETAIL = 20_000;
 
+/** The first [param length] code units of [param text], without half of a surrogate pair at the end. */
+function wholeCharacters(text: string, length: number): string {
+  const cut = text.slice(0, length);
+  return cut.isWellFormed() ? cut : cut.slice(0, -1);
+}
+
 function shortened(detail: string | null): string | null {
   if (detail === null || detail.length <= LONGEST_DETAIL) {
     return detail;
   }
-  return `${detail.slice(0, LONGEST_DETAIL)}\n[${detail.length - LONGEST_DETAIL} more characters left out]`;
+  return `${wholeCharacters(detail, LONGEST_DETAIL)}\n[${detail.length - LONGEST_DETAIL} more characters left out]`;
 }
 
 /** [param reports] with identical ones folded into the first, which says how many there were. */
@@ -925,7 +988,11 @@ export function failedWithin(
       return entry;
     }
     const { detail: _detail, reports: _reports, reportsLeftOut: _left, ...named } = entry;
-    return { ...named, message: entry.message?.slice(0, 500) ?? null, detail: null };
+    return {
+      ...named,
+      message: entry.message === null ? null : wholeCharacters(entry.message, 500),
+      detail: null,
+    };
   });
   return { failed: kept, briefed: failed.length - whole.size };
 }
@@ -999,14 +1066,14 @@ interface SuiteOrphans {
 }
 
 /** What a run left behind, counted per suite and in total. */
-export interface OrphanReport {
+interface OrphanReport {
   readonly total: number;
   readonly suites: readonly SuiteOrphans[];
 }
 
-// Up to the script's own extension rather than the first space, for the same reason.
-const RUNNING_SUITE = /Run Test Suite:\s*(res:\/\/.+?\.(?:gd|cs))(?=\s|$)/;
-const ORPHANS = /(\d+)\s+orphans/;
+// Hung on the bar before the count, since a count with nothing before it is tried from every digit
+// of a long number. It also keeps out a line the game prints itself, such as "took in 12 orphans".
+const ORPHANS = /\|\s*(\d+)\s+orphans/;
 const OVERALL = 'Overall Summary';
 
 /**
@@ -1032,12 +1099,17 @@ export function orphansPrinted(printed: readonly string[]): OrphanReport {
   for (const line of printed) {
     const left = orphansLeftOn(line);
     if (left !== null) {
-      named.set(left.suite, [...(named.get(left.suite) ?? []), left]);
+      const known = named.get(left.suite);
+      if (known === undefined) {
+        named.set(left.suite, [left]);
+      } else {
+        known.push(left);
+      }
       continue;
     }
-    const started = RUNNING_SUITE.exec(line);
-    if (started?.[1] !== undefined) {
-      running = started[1];
+    const started = suiteOpenedBy(line);
+    if (started !== null) {
+      running = started;
       continue;
     }
     const counted = ORPHANS.exec(line);
@@ -1066,7 +1138,7 @@ export function orphansPrinted(printed: readonly string[]): OrphanReport {
 }
 
 /** One suite the run finished, as its statistics line counted it, and the cases that did not pass. */
-export interface SuiteFinished {
+interface SuiteFinished {
   readonly path: string;
   readonly cases: number;
   readonly errors: number;
@@ -1075,8 +1147,8 @@ export interface SuiteFinished {
   readonly failed: readonly string[];
 }
 
-const SUITE_COUNTS = /(\d+)\s+test cases\s*\|\s*(\d+)\s+errors\s*\|\s*(\d+)\s+failures/;
-const CASE_FAILED = /^\s*res:\/\/.+?\.(?:gd|cs) > (.+?) (?:FAILED|ERROR)(?:\s|$)/;
+// The lookbehind keeps a long number from being tried from each of its digits.
+const SUITE_COUNTS = /(?<!\d)(\d+)\s+test cases\s*\|\s*(\d+)\s+errors\s*\|\s*(\d+)\s+failures/;
 
 /** Whether [param line] is the statistics line gdUnit4 prints as a suite ends. */
 export function finishesASuite(line: string): boolean {
@@ -1099,18 +1171,18 @@ export function suitesPrinted(printed: readonly string[]): {
   let running: string | null = null;
   let failed: string[] = [];
   for (const line of printed) {
-    const started = RUNNING_SUITE.exec(line);
-    if (started?.[1] !== undefined) {
-      running = started[1];
+    const started = suiteOpenedBy(line);
+    if (started !== null) {
+      running = started;
       failed = [];
       continue;
     }
     if (running === null) {
       continue;
     }
-    const failing = CASE_FAILED.exec(line)?.[1];
-    if (failing !== undefined) {
-      failed.push(failing);
+    const ended = caseLineOf(line);
+    if (ended?.verdict === 'FAILED') {
+      failed.push(ended.name);
       continue;
     }
     const counted = finishesASuite(line) ? SUITE_COUNTS.exec(line) : null;

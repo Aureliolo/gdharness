@@ -213,7 +213,7 @@ export class DefectsSeen {
 }
 
 /** What the caller knows about a defect that the report itself cannot work out. */
-export interface DefectContext {
+interface DefectContext {
   /** The engine's version, when whatever failed had already learned it. */
   readonly godotVersion?: string | undefined;
   /**

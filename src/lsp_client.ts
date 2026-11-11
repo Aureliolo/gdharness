@@ -4,14 +4,13 @@ import { createConnection, type Socket } from 'node:net';
 import { dirname, extname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { answerJson } from './answer-json.js';
+import { answerJson, type ToolResponse } from './answer-json.js';
 import { Refusal } from './errors.js';
 import { FrameReader, frame, OversizedStreamError } from './framing.js';
 import { waitFromEnv } from './launch.js';
 import { isSameDirectory, isWithinRoot, resolveWithinProject } from './paths.js';
 import { portFromEnv } from './ports.js';
 import { isRecord } from './records.js';
-import type { ToolResponse } from './server-types.js';
 
 /** What an editor serves the language server on when nothing has moved it. */
 export const DEFAULT_LSP_PORT = 6005;
@@ -58,7 +57,7 @@ function initializeTimeoutMs(): number {
  * How long a request is given, references and initialize apart from the rest, and how long a
  * port the connected editor names is waited on to start listening.
  */
-export interface LSPTimeouts {
+interface LSPTimeouts {
   readonly requestMs: number;
   readonly referencesMs: number;
   readonly initializeMs: number;

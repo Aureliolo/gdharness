@@ -739,7 +739,7 @@ func _script_run() -> bool:
 
 
 ## Where the announcement goes. The server derives the same path with the same precedence, so
-## the two only meet if this stays in step with `runtimeDirectory` in src/runtime-client.ts.
+## the two only meet if this stays in step with `runtimeDirectory` in src/runtime-directories.ts.
 func _announcement_directory() -> String:
 	var explicit: String = OS.get_environment("GDHARNESS_RUNTIME_DIR")
 	if not explicit.is_empty():

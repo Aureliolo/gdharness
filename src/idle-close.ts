@@ -27,7 +27,7 @@ export const IDLE_CLOSE_MINUTES = 10;
 const IDLE_RECORD = join('.godot', 'gdharness-editor-idle.json');
 
 /** What the editor wrote as it quit. */
-export interface IdleClosed {
+interface IdleClosed {
   readonly pid: number;
   readonly closedAt: string;
   readonly idleMinutes: number;

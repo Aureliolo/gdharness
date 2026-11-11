@@ -36,6 +36,16 @@ export function namedType(declared: unknown): string {
  */
 export function argumentShape(schema: Readonly<Record<string, unknown>>): string {
   const named = namedType(schema['type']);
+  const values = schema['enum'];
+  // Half the enums leave a value out of their description, and a caller cannot guess the spelling.
+  if (
+    named === 'string' &&
+    Array.isArray(values) &&
+    values.length > 0 &&
+    values.every((v) => typeof v === 'string')
+  ) {
+    return `one of ${values.join(', ')}`;
+  }
   const items = schema['items'];
   const held = isRecord(items) ? namedType(items['type']) : 'any';
   return named
@@ -140,9 +150,6 @@ function whatItCanChange(tool: ToolSpec): string {
   const destroying = Object.entries(tool.operations ?? {})
     .filter(([, op]) => op.effect === 'destructive')
     .map(([name]) => `\`${name}\``);
-  if (destroying.length === 0) {
-    return 'Adds or starts things, and overwrites and removes nothing itself.';
-  }
   return `Can overwrite, remove or end what is there, through ${listed(destroying)}.`;
 }
 

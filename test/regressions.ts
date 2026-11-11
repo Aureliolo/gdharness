@@ -36,7 +36,7 @@ import { serviceDidNotAnswer } from '../scripts/audit-production.js';
 import { counterpart, pullRequestNumbers, shipsToUsers } from '../scripts/release-notes.js';
 import { sharedCopies } from '../scripts/sync-shared-gd.js';
 import { alive, exitOf } from '../src/alive.js';
-import { answerJson } from '../src/answer-json.js';
+import { answerJson, type ToolResponse } from '../src/answer-json.js';
 import { scriptsAutoloaded } from '../src/autoload-failure.js';
 import {
   bootNotePath,
@@ -128,7 +128,6 @@ import {
   openTheEditor,
 } from '../src/editor-open.js';
 import {
-  EngineUsageError,
   endingWithRunner,
   heldRunSaid,
   heldToCores,
@@ -207,18 +206,21 @@ import {
   Spent,
   STARVED,
 } from '../src/engine-spent.js';
-import { errorCode, errorMessage, Refusal, toError } from '../src/errors.js';
+import { EngineUsageError, errorCode, errorMessage, Refusal, toError } from '../src/errors.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { FrameReader, OversizedStreamError, frame as wireFrame } from '../src/framing.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
 import {
   ALREADY_HELD,
   answersTo,
+  CRASH_HEADER,
+  caseLineOf,
   foldedRepeats,
   forAnswer,
   GameLog,
   type LogEntry,
   raisedMark,
+  suiteOpenedBy,
 } from '../src/game-log.js';
 import {
   callSitesOf,
@@ -240,6 +242,7 @@ import {
   withoutTrailingSeparator,
 } from '../src/godot-bridge.js';
 import { GodotLocator, type Located, VERSION_STARTS, versionStartOf } from '../src/godot-path.js';
+import type { GodotProcess } from '../src/godot-process.js';
 import {
   containerTypeOf,
   DebuggerStream,
@@ -265,7 +268,21 @@ import { EDITOR_READS, HEADLESS_OPERATIONS, HEADLESS_TOOLS } from '../src/headle
 import { idleClosed, idleSettled, portsIn } from '../src/idle-close.js';
 import { IMPORTABLE_EXTENSIONS, importedIntoTheProject, staleImports } from '../src/import-freshness.js';
 import { defectReport, defectSignature, withoutMachinePaths } from '../src/issues.js';
-import { RENDERED_AWAY_NOTE, type ScriptError } from '../src/junit.js';
+import {
+  failedCases,
+  finishesASuite,
+  hookFailuresPrinted,
+  ignoredForTheRunner,
+  ignoredLeftOut,
+  ignoredYetRan,
+  MalformedReportError,
+  orphansPrinted,
+  parseJUnit,
+  RENDERED_AWAY_NOTE,
+  type ScriptError,
+  suitesPrinted,
+  withActualsPrinted,
+} from '../src/junit.js';
 import { askTheKeepersDebugger, askTheKeeperToStop, listenForTheServer } from '../src/keeper-channel.js';
 import {
   editorArguments,
@@ -370,8 +387,8 @@ import {
   recordRunEnded,
   runningAs,
   runRecordPath,
-  stillTheRecordedRun,
   sweepTranscripts,
+  whyNotStillTheRecordedRun,
   whyNotTheRun,
   writeEditorRunNote,
   writeLatestRun,
@@ -392,14 +409,13 @@ import {
   RUNTIME_PROTOCOL,
   type RuntimeEndpoint,
   reportAlreadyInTranscript,
-  runtimeDirectories,
-  runtimeDirectory,
   runtimeRequest,
   runtimesAnnounced,
   STARTED_AFTER_ANNOUNCING_MS,
   strangersAmong,
   untilJudged,
 } from '../src/runtime-client.js';
+import { runtimeDirectories, runtimeDirectory } from '../src/runtime-directories.js';
 import {
   discard,
   discardWith,
@@ -479,7 +495,6 @@ import {
   writtenBeside,
 } from '../src/server.js';
 import { serverInstructions } from '../src/server-instructions.js';
-import type { GodotProcess, ToolResponse } from '../src/server-types.js';
 import {
   addonMismatch,
   runtimeAddonUnknown,
@@ -530,7 +545,16 @@ import {
   spawnShown,
   spawnSyncHidden,
 } from '../src/spawn.js';
-import { type ArmPlayed, armsPlayed, shareFaults, shareOf } from '../src/spread-run.js';
+import {
+  type ArmPlayed,
+  armsPlayed,
+  type EngineLeft,
+  engineFaults,
+  progressOf,
+  shareFaults,
+  shareOf,
+  spreadOptionsOf,
+} from '../src/spread-run.js';
 import { followSuccessor, RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
 import { EVERY_FILE, EVERY_NAME, reachedBySuite, SuiteInputs, walkSeen } from '../src/suite-inputs.js';
 import {
@@ -542,11 +566,13 @@ import {
   judgeCompile,
   judgeEngine,
   type RowShare,
+  readExpected,
   readRun,
   rowsAcross,
   secondsOf,
   uncollectedSaid,
   versionFault,
+  withNestedErrors,
 } from '../src/suite-judge.js';
 import {
   type DeclaredSuite,
@@ -568,6 +594,7 @@ import {
   type Unit,
   unitsOf,
   windowedSaid,
+  windowNeedsOf,
   writeJson,
 } from '../src/suite-plan.js';
 import {
@@ -588,7 +615,8 @@ import {
   testOptionsOf,
   wholeTreeSaid,
 } from '../src/suite-run.js';
-import { listenerAmong } from '../src/tcp-listeners.js';
+import { LAYOUTS, listenerAmong, rowsOf } from '../src/tcp-listeners.js';
+import { scriptsWithoutCases, selectTests, suiteFilesUnder } from '../src/test-selection.js';
 import { readNonNegativeNumber, readPositiveNumber } from '../src/tool-args.js';
 import {
   argumentsOf,
@@ -600,7 +628,13 @@ import {
   toolSpec,
 } from '../src/tool-definitions.js';
 import { argumentShape, headlessSection, namedType, renderToolsMarkdown } from '../src/tool-reference.js';
-import { encodedUidCache, mendUidCache, type UidEntry, uidCacheEntries } from '../src/uid-cache.js';
+import {
+  encodedUidCache,
+  mendBeforeStart,
+  mendUidCache,
+  type UidEntry,
+  uidCacheEntries,
+} from '../src/uid-cache.js';
 import { CACHE_MS, cacheFile, isNewer, registryFor, UpdateCheck } from '../src/update-check.js';
 import { holdExit, prepareWholeExits } from '../src/whole-exit.js';
 import { writeWhole } from '../src/whole-file.js';
@@ -634,6 +668,7 @@ import {
   sweep,
   sweepingFor,
 } from './support/sweep.js';
+import { WINDOWS_ASK_STAND_IN } from './support/windows-ask-stand-in.js';
 
 /**
  * Runs [param run] with a bridge port held by something else, handed to it to configure a server
@@ -672,10 +707,18 @@ class FakeSocket extends EventEmitter {
   readonly sent: unknown[] = [];
   /** What the bridge closed it with, for a refusal whose code and reason are the answer. */
   closedWith: { code: number; reason: string } | null = null;
+  /** The state a close leaves it in: CLOSED at once, or CLOSING, as ws stays until the peer answers. */
+  private readonly afterClose: 2 | 3;
 
-  constructor(name: string) {
+  constructor(name: string, afterClose: 2 | 3 = 3) {
     super();
     this.name = name;
+    this.afterClose = afterClose;
+  }
+
+  terminate(): void {
+    this.readyState = 3;
+    this.emit('close', 1006, Buffer.from(''));
   }
 
   send(payload: unknown): void {
@@ -688,9 +731,11 @@ class FakeSocket extends EventEmitter {
     if (Buffer.byteLength(reason) > 123) {
       throw new RangeError('The message must not be greater than 123 bytes');
     }
-    this.readyState = 3;
+    this.readyState = this.afterClose;
     this.closedWith = { code, reason };
-    this.emit('close', code, Buffer.from(reason));
+    if (this.afterClose === 3) {
+      this.emit('close', code, Buffer.from(reason));
+    }
   }
 }
 
@@ -719,6 +764,29 @@ function windowedRunRefused(): string | null {
     return 'no display for a windowed run';
   }
   return null;
+}
+
+/**
+ * A suite declaring [param constant] true whose one case passes only where the engine builds the
+ * accessibility tree: a Control in the tree has an accessibility element two frames on.
+ */
+function accessibilityTreeSuite(constant: string): string {
+  return [
+    'extends GdUnitTestSuite',
+    '',
+    `const ${constant}: bool = true`,
+    '',
+    '',
+    'func test_tree() -> void:',
+    '\tvar shown: Control = auto_free(Control.new())',
+    '\tget_tree().root.add_child(shown)',
+    '\tawait get_tree().process_frame',
+    '\tawait get_tree().process_frame',
+    '\tassert_bool(shown.get_accessibility_element().is_valid()) \\',
+    '\t\t.override_failure_message("no accessibility element for a Control in the tree") \\',
+    '\t\t.is_true()',
+    '',
+  ].join('\n');
 }
 
 function resolveGodotPath(): string | null {
@@ -1324,6 +1392,264 @@ function testALongUnfinishedLineIsHeldInLinearTime(): void {
   assert.equal(log.all.length, 1, 'one line');
   assert.equal(log.all[0]?.text.length, 2048 * 4096, 'whole');
   assert.ok(took < 1500, `8 MB in 4 KB reads took ${Math.round(took)} ms`);
+}
+
+/** The runner's character diff of a failing string, with the marks gdUnit4 puts on it. */
+function printedStringDiffs(
+  values: readonly {
+    readonly at: string;
+    readonly parts: readonly (readonly [string, 'kept' | 'missing' | 'added'])[];
+  }[],
+): string {
+  const esc = String.fromCharCode(0x1b);
+  const blue = `${esc}[38;2;30;144;255m`;
+  const marked = (background: string, chars: string): string =>
+    `${esc}[48;2;${background}m${esc}[38;2;255;255;255m${chars}${esc}[0m${blue}${esc}[48;2;${background}m${esc}[0m${blue}`;
+  return values
+    .map(({ at, parts }) => {
+      const body = parts
+        .map(([chars, mark]) =>
+          mark === 'kept' ? chars : marked(mark === 'missing' ? '38;0;0' : '0;38;0', chars),
+        )
+        .join('');
+      return ` but was\n '${blue}${body}${esc}[0m'${esc}[0m${esc}[38;2;173;216;230m\tat ${at}${esc}[0m`;
+    })
+    .join('\n');
+}
+
+/** A failing string equality as the report writes it: both strings merged. */
+function mergedStringFailure(expected: string, merged: string, at: string): { detail: string } {
+  return { detail: `Expecting:\n '${expected}'\n but was\n '${merged}'\n\tat ${at}` };
+}
+
+/** How long [run] takes, in milliseconds. */
+function timedMs(run: () => void): number {
+  const began = performance.now();
+  run();
+  return performance.now() - began;
+}
+
+/**
+ * The runner's console lines are read in time in proportion to their length, and only its own
+ * statistics lines count orphans.
+ */
+function testConsoleLinesOfTheTestRunnerAreReadInLinearTime(): void {
+  const hookLine = (blanks: number): string[] => [
+    'finalize() Report:',
+    `${' '.repeat(blanks)}x`,
+    "Expecting: 'true' but is 'false'\tat 'before' in res://test/hooked_test.gd:5",
+  ];
+  assert.deepEqual(
+    orphansPrinted([
+      'Run Test Suite: res://test/home_test.gd',
+      'the home took in 12 orphans today',
+      'Statistics: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED',
+      'Overall Summary: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans |',
+    ]),
+    { total: 0, suites: [] },
+    'a line the game prints with a count and the word is not the suite statistics',
+  );
+  const hookBase = timedMs(() => hookFailuresPrinted(hookLine(200)));
+  const hooks = hookFailuresPrinted(hookLine(4000));
+  assert.deepEqual(
+    hooks.map((one) => [
+      one.hook,
+      one.path,
+      one.line,
+      one.message.endsWith("Expecting: 'true' but is 'false'"),
+    ]),
+    [['before', 'res://test/hooked_test.gd', 5, true]],
+    'a hook failure is read with a padded line above it',
+  );
+  const hookTook = timedMs(() => hookFailuresPrinted(hookLine(4000)));
+  assert.ok(
+    hookTook < 40 * hookBase + 500,
+    `4000 blanks took ${Math.round(hookTook)} ms against ${Math.round(hookBase)} ms`,
+  );
+
+  const statistics = (count: string): string =>
+    `Statistics: ${count} test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED`;
+  const digits = '1'.repeat(60_000);
+  const orphanBase = timedMs(() =>
+    orphansPrinted(['Run Test Suite: res://t/a_test.gd', `Statistics: ${'1'.repeat(200)}`]),
+  );
+  const orphanTook = timedMs(() =>
+    orphansPrinted(['Run Test Suite: res://t/a_test.gd', `Statistics: ${digits}`]),
+  );
+  assert.ok(
+    orphanTook < 40 * orphanBase + 500,
+    `a number of 60,000 digits took ${Math.round(orphanTook)} ms in orphansPrinted`,
+  );
+  const countedBase = timedMs(() => finishesASuite(statistics('1'.repeat(200))));
+  const countedTook = timedMs(() => finishesASuite(digits));
+  assert.ok(
+    countedTook < 40 * countedBase + 500,
+    `a number of 60,000 digits took ${Math.round(countedTook)} ms in finishesASuite`,
+  );
+  assert.equal(finishesASuite(statistics('3')), true, 'and a statistics line still ends a suite');
+
+  const same = Array.from(
+    { length: 100_000 },
+    (_, index) => `gdharness orphans: res://t/a_test.gd > test_${index} left 1: Node`,
+  );
+  const lines = [
+    'Run Test Suite: res://t/a_test.gd',
+    ...same,
+    'Statistics: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 2 orphans |	WARNING',
+  ];
+  const began = performance.now();
+  const named = orphansPrinted(lines);
+  const namedTook = performance.now() - began;
+  assert.equal(named.suites[0]?.left.length, 100_000, 'every case that left nodes is named');
+  assert.ok(namedTook < 2000, `100,000 named cases took ${Math.round(namedTook)} ms`);
+}
+
+/** A report is read whole or refused, and an ignore entry or a path is read the way gdUnit4 writes it. */
+function testAReportIsReadWholeOrRefusedAndRowsAreKnown(): void {
+  const suite = (name: string, body: string, attributes = ''): string =>
+    `<testsuite name="${name}" package="t"${attributes}>${body}</testsuite>`;
+  const failing = (name: string): string =>
+    `<testcase name="${name}"><failure message="m"><![CDATA[boom]]></failure></testcase>`;
+  const nested = parseJUnit(`<testsuites>${suite('outer', suite('inner', failing('x')))}</testsuites>`);
+  assert.deepEqual(
+    nested.suites.map((one) => [one.name, one.cases.map((entry) => entry.name)]),
+    [
+      ['inner', ['x']],
+      ['outer', []],
+    ],
+    'a suite inside a suite is read with its cases',
+  );
+  assert.equal(nested.failures, 1, 'and its failure is counted');
+  const two = parseJUnit(`${suite('a', failing('x'))}${suite('b', failing('y'))}`);
+  assert.equal(two.failures, 2, 'two root suites are both read');
+  assert.throws(
+    () => parseJUnit(`<testsuites>${failing('lost')}</testsuites>`),
+    MalformedReportError,
+    'a case outside any suite is refused',
+  );
+  for (const attributes of [' failures="one"', ' errors="2.5"', ' time="-1.5"', ' tests="-3"', ' time=""']) {
+    assert.throws(
+      () => parseJUnit(suite('s', '', attributes)),
+      MalformedReportError,
+      `${attributes} is refused`,
+    );
+  }
+  assert.equal(parseJUnit(suite('s', '', ' time="0.073"')).time, 0.073, 'while a fractional time is read');
+
+  const wordy =
+    '<testsuite name="one_test" package="t"><testcase name="test_one"><failure message="m"><![CDATA[\nExpecting:\n \'abc\'\n but was\n \'abc\'\n\tat \'test_one\' in res://t/one_test.gd:5\n]]></failure></testcase></testsuite>';
+  const at = "'test_one' in res://t/one_test.gd:5";
+  const diff = printedStringDiffs([{ at, parts: [['abc', 'missing']] }]);
+  for (const ends of ['\n', '\r\n']) {
+    const [only] = failedCases(parseJUnit(wordy.replaceAll('\n', ends)), diff);
+    assert.ok(
+      only?.detail?.includes(" but was\n ''\n"),
+      `${JSON.stringify(ends)} line ends give the value found: ${JSON.stringify(only?.detail)}`,
+    );
+  }
+
+  assert.deepEqual(
+    [' package=""', ' package="."'].map(
+      (attributes) =>
+        parseJUnit(`<testsuite name="sums_test"${attributes}/>`).suites.map((one) => one.path)[0],
+    ),
+    ['res://sums_test.gd', 'res://sums_test.gd'],
+    'a suite at the project root has its path',
+  );
+
+  const report = parseJUnit(
+    `<testsuites>${suite('ledger_test', '<testcase name="test_sum"/><testcase name="test_rate:0 (1, 2)"/><testcase name="test_rate:1 (3, 4)"/>')}</testsuites>`,
+  );
+  const declared = [{ path: 'res://t/ledger_test.gd', cases: ['test_rate', 'test_sum'] }];
+  assert.deepEqual(
+    ['test_rate', 'ledger_test:test_rate'].map((entry) => ignoredYetRan(report, [entry]).length),
+    [1, 1],
+    'an ignore entry naming a case that ran as rows is said to have run',
+  );
+  assert.deepEqual(
+    ignoredLeftOut(report, ['ledger_test:test_rate'], declared),
+    { leftOut: [], unmatched: [] },
+    'and a spelling with the suite leaves nothing out',
+  );
+  assert.deepEqual(
+    ignoredForTheRunner(
+      ['ledger_test:test_rate:1 (a:b:3 c)', 'ledger_test:test_sum:2 (3, 4)'],
+      [{ path: 'res://t/ledger_test.gd', cases: ['test_rate', 'test_sum'] }],
+    ),
+    ['res://t/ledger_test.gd:test_rate:1', 'res://t/ledger_test.gd:test_sum:2'],
+    'a row passed back with parameters holding a colon is handed to the runner',
+  );
+
+  const emoji = '\u{1F600}'.repeat(15_000);
+  const [cut] = failedCases(
+    parseJUnit(
+      suite('s', `<testcase name="x"><failure message="m"><![CDATA[x${emoji}]]></failure></testcase>`),
+    ),
+    '',
+  );
+  assert.ok(cut?.detail?.isWellFormed(), 'a detail cut at its limit does not end on half a character');
+}
+
+/**
+ * Values are read back from the console in time in proportion to the failures, and one line failing
+ * twice gives each failure its own value.
+ */
+function testPrintedValuesAreReadBackInLinearTimeAndEachToItsOwnFailure(): void {
+  const readBack = (count: number): { took: number; empty: number } => {
+    const locations = Array.from(
+      { length: count },
+      (_, index) => `'test_n${index}' in res://test/words_test.gd:${index + 1}`,
+    );
+    const failures = locations.map((at) => mergedStringFailure('abc', 'abc', at));
+    const printed = printedStringDiffs(locations.map((at) => ({ at, parts: [['abc', 'missing']] })));
+    const began = performance.now();
+    const read = withActualsPrinted(failures, printed);
+    return {
+      took: performance.now() - began,
+      empty: read.filter((one) => one.detail.includes(" but was\n ''\n")).length,
+    };
+  };
+  const base = readBack(500);
+  assert.equal(base.empty, 500, 'every failure gets the empty value the console shows');
+  const large = readBack(6000);
+  assert.equal(large.empty, 6000, 'and so does every one of a large run');
+  // A linear read of twelve times the failures takes about twelve times as long. A quadratic one takes
+  // a hundred and forty-four times as long, which was over forty seconds at eight thousand.
+  assert.ok(
+    large.took < 40 * base.took + 1000,
+    `6000 failures took ${Math.round(large.took)} ms against ${Math.round(base.took)} ms for 500`,
+  );
+
+  const at = "'test_each' in res://test/each_test.gd:7";
+  const printed = printedStringDiffs([
+    {
+      at,
+      parts: [
+        ['ab', 'kept'],
+        ['c', 'added'],
+      ],
+    },
+    {
+      at,
+      parts: [
+        ['a', 'kept'],
+        ['b', 'missing'],
+        ['c', 'added'],
+      ],
+    },
+  ]);
+  const twice = mergedStringFailure('ab', 'abc', at);
+  const [first, second] = withActualsPrinted([twice, twice], printed);
+  assert.equal(
+    first?.detail,
+    `Expecting:\n 'ab'\n but was\n 'abc'\n\tat ${at}`,
+    'the first failure takes the first value the console printed',
+  );
+  assert.equal(
+    second?.detail,
+    `Expecting:\n 'ab'\n but was\n 'ac'\n\tat ${at}`,
+    'and the second the second, without a note that no copy was printed',
+  );
 }
 
 /**
@@ -5650,6 +5976,110 @@ async function testBreakpointsAreSentAgainBeforeAPlay(): Promise<void> {
 }
 
 /**
+ * Held breakpoints belong to the project that set them. A list or a game start naming another
+ * project answers that project's own note, in either order, and the first project's lines come
+ * back when it is named again.
+ */
+async function testHeldBreakpointsBelongToTheirProject(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('per-project breakpoint regression skipped (Godot not found)');
+    return;
+  }
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-held-per-project-rt-'));
+  const makeProject = (name: string): string => {
+    const path = mkdtempSync(join(tmpdir(), `gdharness-held-${name}-`));
+    writeFileSync(
+      join(path, 'project.godot'),
+      `; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Held${name}"\nrun/main_scene="res://main.tscn"\n`,
+    );
+    writeFileSync(
+      join(path, 'main.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tvar spent: int = 0\n\twhile true:\n\t\tspent += 1\n\t\tOS.delay_usec(1000)\n',
+    );
+    writeFileSync(
+      join(path, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    return path;
+  };
+  const a = makeProject('a');
+  const b = makeProject('b');
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: a },
+  });
+  const call = async (
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ said: string; answer: unknown }> => {
+    const answered = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+    const said = textOf(answered) ?? JSON.stringify(answered);
+    return { said, answer: get(answered, 'result', 'isError') === true ? null : parseTextContent(answered) };
+  };
+  const heldOn = async (projectPath: string): Promise<unknown> =>
+    get((await call('debug_breakpoint', { projectPath, op: 'list' })).answer, 'held');
+  let started = false;
+  try {
+    await server.initialize('regression-test');
+    const set = await call('debug_breakpoint', { projectPath: a, op: 'set', scriptPath: 'main.gd', line: 5 });
+    assert.deepEqual(get(set.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [5] }], set.said);
+    assert.deepEqual(await heldOn(b), [], "another project's list does not answer the first project's lines");
+    const second = await call('debug_breakpoint', {
+      projectPath: b,
+      op: 'set',
+      scriptPath: 'main.gd',
+      line: 7,
+    });
+    assert.deepEqual(get(second.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [7] }], second.said);
+    assert.deepEqual(
+      await heldOn(a),
+      [{ scriptPath: 'res://main.gd', lines: [5] }],
+      "the first project gets its own note back, not the second's",
+    );
+    assert.deepEqual(
+      await heldOn(b),
+      [{ scriptPath: 'res://main.gd', lines: [7] }],
+      'and the second keeps its own in the other order',
+    );
+    // A game on the second project is handed the second project's lines and none of the first's.
+    const again = await call('debug_breakpoint', {
+      projectPath: a,
+      op: 'set',
+      scriptPath: 'main.gd',
+      line: 6,
+    });
+    assert.deepEqual(get(again.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [5, 6] }], again.said);
+    const start = await call('editor_run', {
+      projectPath: b,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 1000,
+    });
+    started = true;
+    assert.equal(get(start.answer, 'started'), true, start.said);
+    assert.deepEqual(
+      get(start.answer, 'breakpoints'),
+      [{ scriptPath: 'res://main.gd', lines: [7] }],
+      `a game started on one project is handed its own lines and none of another's: ${start.said}`,
+    );
+  } finally {
+    if (started) {
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    }
+    await server.stop();
+    sweep(a, b, runtimeDir);
+  }
+}
+
+/**
  * Setting a breakpoint here never takes away the ones set in the editor by hand, and a breakpoint
  * of this side's clicked off there is not held here either.
  *
@@ -7624,6 +8054,152 @@ async function testATestServerTakesNoRealEditorsPort(): Promise<void> {
  * itself, in each state it passes through, because a server's status lands in that moment only by
  * chance.
  */
+/**
+ * A bridge stops within a few seconds while a socket that upgraded never answers its close, as an
+ * editor busy importing does. ws waits thirty seconds for the close frame on its own.
+ */
+async function testABridgeStopsPromptlyWithASilentEditor(): Promise<void> {
+  const bridge = createBridge(0, 1000, '127.0.0.1');
+  await bridge.start();
+  const client = createConnection(bridge.port, '127.0.0.1');
+  try {
+    await new Promise<void>((settle) => {
+      client.once('connect', () => {
+        settle();
+      });
+    });
+    const answered = new Promise<string>((settle) => {
+      client.once('data', (data: Buffer) => {
+        settle(data.toString().split('\r\n')[0] ?? '');
+      });
+    });
+    client.write(
+      'GET /godot HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
+        `Sec-WebSocket-Key: ${Buffer.from('the sample nonce').toString('base64')}\r\n` +
+        'Sec-WebSocket-Version: 13\r\n\r\n',
+    );
+    assert.equal(await answered, 'HTTP/1.1 101 Switching Protocols', 'the socket upgraded');
+    const began = performance.now();
+    await bridge.stop();
+    const took = performance.now() - began;
+    assert.ok(took < 5000, `stop() ended a silent socket within the grace: ${String(Math.round(took))} ms`);
+  } finally {
+    client.destroy();
+  }
+}
+
+/** A bridge told to listen on an IPv6 host upgrades an editor asking for /godot, as on any other. */
+async function testABridgeOnAnIpv6HostTakesItsEditors(): Promise<void> {
+  const bridge = createBridge(0, 1000, '::1');
+  await bridge.start();
+  const client = createConnection(bridge.port, '::1');
+  try {
+    await new Promise<void>((settle) => {
+      client.once('connect', () => {
+        settle();
+      });
+    });
+    const answered = new Promise<string>((settle) => {
+      client.once('data', (data: Buffer) => {
+        settle(data.toString().split('\r\n')[0] ?? '');
+      });
+      client.once('close', () => {
+        settle('closed with no answer');
+      });
+    });
+    client.write(
+      `GET /godot HTTP/1.1\r\nHost: [::1]:${String(bridge.port)}\r\nUpgrade: websocket\r\n` +
+        'Connection: Upgrade\r\n' +
+        `Sec-WebSocket-Key: ${Buffer.from('the sample nonce').toString('base64')}\r\n` +
+        'Sec-WebSocket-Version: 13\r\n\r\n',
+    );
+    assert.equal(await answered, 'HTTP/1.1 101 Switching Protocols', 'an editor on ::1 is upgraded');
+  } finally {
+    client.destroy();
+    await bridge.stop();
+  }
+}
+
+/**
+ * godot_connected waits for the greeting to be taken. A gate's --import dialling the port is
+ * turned away once it greets, and raising the event for it cleared the server's note that the
+ * editor it closed is not coming back.
+ */
+async function testAProcessTurnedAwayRaisesNoConnection(): Promise<void> {
+  const raised = (bridge: ReturnType<typeof createBridge>): string[] => {
+    const seen: string[] = [];
+    bridge.on('godot_connected', () => {
+      seen.push(bridge.isConnected() ? 'connected' : 'not connected');
+    });
+    return seen;
+  };
+  const gate = createBridge(0, 1000, '127.0.0.1');
+  gate.identifyEditorsWith(() => Promise.resolve('--import'));
+  const gateSeen = raised(gate);
+  const importer = new FakeSocket('import');
+  connectFake(gate, importer);
+  importer.emit('message', Buffer.from(JSON.stringify(greeting(process.cwd(), { editor_pid: 7 }))));
+  await delay(50);
+  assert.equal(importer.closedWith?.code, 4002, JSON.stringify(importer.closedWith));
+  assert.deepEqual(gateSeen, [], 'no event for a process that was turned away');
+
+  const editor = createBridge(0, 1000, '127.0.0.1');
+  editor.identifyEditorsWith(() => Promise.resolve(undefined));
+  const editorSeen = raised(editor);
+  const real = new FakeSocket('editor');
+  connectFake(editor, real);
+  saysHello(real, process.cwd());
+  await delay(50);
+  assert.deepEqual(editorSeen, ['connected'], 'one event for an editor, once it is connected');
+}
+
+/**
+ * A socket turned away stays CLOSING until its peer answers, and a frame it sends then speaks for
+ * its own process. Applied to the live connection, a late greeting from another project's editor
+ * turned the live editor away.
+ */
+function testAFrameFromASocketBeingClosedLeavesTheLiveEditor(): void {
+  const bridge = createBridge(0, 1000, '127.0.0.1', 'X:/mine');
+  const theirs = new FakeSocket('theirs', 2);
+  connectFake(bridge, theirs);
+  saysHello(theirs, 'X:/theirs');
+  assert.equal(theirs.closedWith?.code, 4001, 'the other project is turned away');
+  const mine = new FakeSocket('mine', 2);
+  connectFake(bridge, mine);
+  saysHello(mine, 'X:/mine');
+  assert.equal(bridge.isConnected(), true, 'the editor of this project connects');
+  saysHello(theirs, 'X:/theirs');
+  assert.equal(mine.closedWith, null, `the live editor is left alone: ${JSON.stringify(mine.closedWith)}`);
+  assert.equal(bridge.isConnected(), true);
+}
+
+/** A tool_result whose fields are the wrong type refuses its call at once, naming the fields. */
+async function testAReplyOfTheWrongShapeIsRefusedAtOnce(): Promise<void> {
+  const bridge = createBridge(0, 20_000, '127.0.0.1');
+  const socket = new FakeSocket('editor');
+  connectFake(bridge, socket);
+  saysHello(socket, process.cwd());
+  const began = Date.now();
+  const outcome = bridge.invokeTool('scene_tree', {}).then(
+    () => 'answered',
+    (error: unknown) => errorMessage(error),
+  );
+  const asked = socket.sent
+    .map((payload) => JSON.parse(String(payload)) as unknown)
+    .find((payload) => get(payload, 'type') === 'tool_invoke');
+  const id = asString(get(asked, 'id'));
+  socket.emit(
+    'message',
+    Buffer.from(JSON.stringify({ type: 'tool_result', id, success: 'true', busy: 1, result: {} })),
+  );
+  assert.equal(
+    await outcome,
+    'The editor answered scene_tree with a reply gdharness cannot read: success is "true", not a boolean, busy is 1, not a boolean. Sending the call again gets the same reply.',
+  );
+  assert.ok(Date.now() - began < 5000, 'without waiting for the timeout');
+  assert.deepEqual(bridge.getStatus().pendingRequests, 0, 'and nothing is left waiting');
+}
+
 async function testABridgeOnNoPortSaysSo(): Promise<void> {
   const port = await reservePort();
   const holder = createServer();
@@ -8801,6 +9377,76 @@ async function testAnEditorOfAnotherReleaseIsAskedNothing(): Promise<void> {
     );
     assert.deepEqual(invoked, []);
   });
+}
+
+/**
+ * A rename or a move written while the editor is of another release says the files are written and
+ * why the editor did not take them.
+ *
+ * The editor's rescan is refused with plain text, and the answer was a defect report that never
+ * said the files had changed.
+ */
+async function testAWriteBesideAnEditorOfAnotherReleaseIsSaidToBeWritten(): Promise<void> {
+  if (!resolveGodotPath()) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('write beside another release skipped (Godot not found)');
+    return;
+  }
+  await anAddonLackingAnOp(
+    { addon_version: '1.0.0', addon_digest: 'another' },
+    async (_, project, __, invoked, server) => {
+      const ask = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+        const answered = await server.request(
+          'tools/call',
+          { name, arguments: { projectPath: project, ...args } },
+          ENGINE_CALL_TIMEOUT_MS,
+        );
+        assert.notEqual(get(answered, 'result', 'isError'), true, textOf(answered) ?? '');
+        return parseTextContent(answered);
+      };
+      writeFileSync(join(project, 'hero.gd'), 'class_name Hero\nextends Node\n');
+      writeFileSync(join(project, 'user.gd'), 'extends Node\n\nvar hero: Hero\n');
+      const renamed = await ask('script_edit', {
+        op: 'rename',
+        scriptPath: 'hero.gd',
+        symbol: 'Hero',
+        newName: 'Champion',
+      });
+      const shown = JSON.stringify(renamed);
+      assert.deepEqual([get(renamed, 'written'), get(renamed, 'ok')], [true, false], shown);
+      assert.match(
+        readFileSync(join(project, 'user.gd'), 'utf8'),
+        /var hero: Champion/,
+        'the files are written',
+      );
+      assert.match(
+        text(get(renamed, 'editor', 'rescanRefused')),
+        /^The editor is running the 1\.0\.0 addon/,
+        shown,
+      );
+      assert.match(text(get(renamed, 'note')), /The rename was written/, shown);
+      assert.match(text(get(renamed, 'note')), /did not take the written files/, shown);
+
+      writeFileSync(join(project, 'item.tres'), '[gd_resource type="Resource" format=3]\n');
+      const moved = await ask('resource_edit', {
+        op: 'move',
+        resourcePath: 'res://item.tres',
+        newPath: 'res://kept/item.tres',
+      });
+      const movedShown = JSON.stringify(moved);
+      assert.deepEqual([get(moved, 'written'), get(moved, 'ok')], [true, false], movedShown);
+      assert.ok(existsSync(join(project, 'kept', 'item.tres')), 'the file is where it was moved');
+      assert.match(
+        text(get(moved, 'editor', 'rescanRefused')),
+        /^The editor is running the 1\.0\.0 addon/,
+        movedShown,
+      );
+      assert.match(text(get(moved, 'note')), /The move was made/, movedShown);
+      assert.deepEqual(invoked, [], 'and the editor was sent nothing');
+    },
+  );
 }
 
 /**
@@ -17809,6 +18455,32 @@ function testASuccessorIsTheEngineStartedAsTheGameExited(): void {
     null,
     'the exited process is not its own successor',
   );
+  // `ps` prints no quotes, so the engine's folder runs to the first option.
+  const spaced = '/home/me/.local/share/Steam/steamapps/common/Godot Engine/godot.x11.opt.tools.64';
+  const spacedRun = { ...restarted, command: `${spaced} --path /p -- --restarted` };
+  assert.deepEqual(
+    successorAmong([spacedRun], 11, spaced, notBefore, exitedAt, 0),
+    spacedRun,
+    'an engine in a folder with a space is found',
+  );
+  assert.equal(
+    successorAmong(
+      [{ ...spacedRun, command: '/opt/Godot Engine/other --path /p' }],
+      11,
+      spaced,
+      notBefore,
+      exitedAt,
+      0,
+    ),
+    null,
+    'while another program in such a folder is not',
+  );
+  const quoted = { ...restarted, command: '"C:\\Program Files\\Godot Engine\\Godot_v4.exe" --path /p' };
+  assert.deepEqual(
+    successorAmong([quoted], 11, 'C:\\Program Files\\Godot Engine\\Godot_v4.exe', notBefore, exitedAt, 0),
+    quoted,
+    'a quoted line is read to its closing quote',
+  );
   const cut = { ...restarted, startedAt: exitedAt - RESTARTED_WITHIN_MS - 900 };
   assert.equal(successorAmong([cut], 11, engine, notBefore, exitedAt, 0), null, 'to the millisecond');
   assert.deepEqual(
@@ -18416,6 +19088,111 @@ function testAStartMendsOnlyTheProjectItsOwnArgumentsName(): void {
 }
 
 /**
+ * A `.uid` or `.import` whose file is gone declares no uid, and what a mend did is said on stderr.
+ *
+ * The editor leaves a sidecar behind when a file is deleted outside it. Read as the file's own
+ * declaration, it moved an entry from a gone path to the same gone path on every start, and where
+ * the real file sat in a folder walked later, the orphan won and the entry named a path with nothing
+ * there.
+ */
+function testASidecarWithNoFileDeclaresNoUid(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-uid-orphan-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'gone.gd.uid': 'uid://1\n',
+      'old.png.import': '[remap]\n\nuid="uid://2"\n',
+      'a_stale/s.gd.uid': 'uid://3\n',
+      'm_new/s.gd': 'extends Node\n',
+      'm_new/s.gd.uid': 'uid://3\n',
+      'first/twin.gd': 'extends Node\n',
+      'first/twin.gd.uid': 'uid://4\n',
+      'second/twin.gd': 'extends Node\n',
+      'second/twin.gd.uid': 'uid://4\n',
+      'beside/kept.gd': 'extends Node\n',
+      'beside/kept.gd.uid': 'uid://5\n',
+    });
+    mkdirSync(join(project, '.godot'));
+    const cache = join(project, '.godot', 'uid_cache.bin');
+    // A digit in a uid text is its value plus 25, so uid://1 is 26n and uid://5 is 30n.
+    const entries: UidEntry[] = [
+      [26n, 'res://gone.gd'],
+      [27n, 'res://old.png'],
+      [28n, 'res://z_old/s.gd'],
+      [29n, 'res://elsewhere/twin.gd'],
+      [30n, 'res://beside/kept.gd'],
+    ];
+    writeFileSync(cache, encodedUidCache(entries));
+    assert.deepEqual(
+      mendUidCache(project),
+      {
+        moved: [
+          [28n, 'res://z_old/s.gd', 'res://m_new/s.gd'],
+          [29n, 'res://elsewhere/twin.gd', 'res://first/twin.gd'],
+        ],
+        dropped: [
+          [26n, 'res://gone.gd'],
+          [27n, 'res://old.png'],
+        ],
+      },
+      'only a sidecar beside its file declares, and of two files claiming one uid the first walked wins',
+    );
+    assert.deepEqual(
+      readFileSync(cache),
+      encodedUidCache([
+        [28n, 'res://m_new/s.gd'],
+        [29n, 'res://first/twin.gd'],
+        [30n, 'res://beside/kept.gd'],
+      ]),
+    );
+    assert.deepEqual(mendUidCache(project), { moved: [], dropped: [] }, 'a second mend finds nothing to do');
+
+    const said: string[] = [];
+    const write = process.stderr.write.bind(process.stderr);
+    writeFileSync(cache, encodedUidCache(entries));
+    process.stderr.write = (line: string): boolean => {
+      said.push(line);
+      return true;
+    };
+    try {
+      mendBeforeStart(['--path', project], undefined);
+    } finally {
+      process.stderr.write = write;
+    }
+    const where = join(project, '.godot', 'uid_cache.bin');
+    assert.deepEqual(said, [
+      `uid cache: moved what names a file gone in ${where}: res://z_old/s.gd to res://m_new/s.gd, res://elsewhere/twin.gd to res://first/twin.gd\n`,
+      `uid cache: dropped what names a file gone from ${where}: res://gone.gd, res://old.png\n`,
+    ]);
+
+    // A directory where the new cache is written cannot be written over, on every platform. The
+    // cache is then left as it was and the reason is said.
+    const stale = encodedUidCache(entries);
+    writeFileSync(cache, stale);
+    mkdirSync(`${cache}.${String(process.pid)}.mending`);
+    const failed: string[] = [];
+    process.stderr.write = (line: string): boolean => {
+      failed.push(line);
+      return true;
+    };
+    try {
+      mendBeforeStart(['--path', project], undefined);
+    } finally {
+      process.stderr.write = write;
+    }
+    assert.equal(failed.length, 1, failed.join(''));
+    assert.ok(
+      failed[0]?.startsWith(`uid cache: could not rewrite ${where}, which names files gone: `),
+      failed.join(''),
+    );
+    assert.ok(failed[0]?.endsWith('\n'));
+    assert.deepEqual(readFileSync(cache), stale, 'and the cache is left as it was');
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * An autoload named by its uid boots from where its script now is after the script moves.
  *
  * Reported by a downstream game: the script and its `.uid` moved to another folder, and the boot
@@ -18945,6 +19722,19 @@ function testAPidPicksOneOfSeveralGames(): void {
   for (const pid of [61, 62]) {
     assert.match(unnamed, new RegExp(`pid ${pid} on `), unnamed);
   }
+  // Nor is a pathless game the game of the folder this server started in, asked by path or by pid.
+  const here = resolve('.');
+  const byPath = text(get(chooseRuntime([pathless(61)], here), 'problem'));
+  assert.match(byPath, /^No running game is from /, `a pathless game is not this folder's: ${byPath}`);
+  const byPid = text(get(chooseRuntime([pathless(61)], here, [], 61), 'problem'));
+  assert.match(
+    byPid,
+    /^The game with pid 61 announced no project path, not /,
+    `nor when its pid is named: ${byPid}`,
+  );
+  assert.equal(isSameDirectory('', here), false, 'an empty path names no directory');
+  assert.equal(isSameDirectory(here, ''), false, 'on either side');
+  assert.equal(isSameDirectory('.', here), true, 'while a relative path still resolves');
 
   // Two projects is the other side of that, where projectPath is worth offering because it does
   // narrow, and pid still settles it outright.
@@ -19036,7 +19826,7 @@ function testACrashWithNoReportIsAnError(): void {
 
   const violation = entered(0xc0000005, null);
   assert.deepEqual(errorsOf(violation), [
-    'The engine ended with exit code 0xC0000005, an access violation, so it crashed. It printed no crash report.',
+    'The engine ended with exit code 0xC0000005, a crash on an access violation. It printed no crash report.',
   ]);
   enterASilentCrash({ exitCode: 0xc0000005, exitSignal: null, log: violation });
   assert.equal(violation.count('error'), 1, 'entered once, however often a verdict is read');
@@ -19086,7 +19876,7 @@ function testARuntimeCallAfterOurRunEndedSaysSo(): void {
   const crashed = ourRunEnded({ ...base, exitCode: 0xc0000005, endedAt: 10_000 }, 15_000);
   assert.match(
     crashed,
-    /, and it exited by itself with exit code 0xC0000005, an access violation, so it crashed\. editor_output/,
+    /, and it exited by itself with exit code 0xC0000005, a crash on an access violation\. editor_output/,
     crashed,
   );
   const signalled = ourRunEnded({ ...base, exitSignal: 'SIGKILL', endedAt: 10_000 }, 10_000);
@@ -24138,6 +24928,41 @@ async function testACaptureTheWaitRanOutOnKeepsItsFolder(): Promise<void> {
 }
 
 /**
+ * The editor's capture is held to the same place rules as the game's: no picture back needs a place
+ * to save, and the place may not be under a file. Both are refused before the editor is asked.
+ */
+async function testAnEditorCaptureIsHeldToTheCapturePlaceRules(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-capture-place-'));
+  const outside = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-capture-out-'));
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  writeFileSync(join(outside, 'taken.png'), 'x');
+  const server = new ServerProcess({ env: { GDHARNESS_PROJECT: project } });
+  try {
+    await server.initialize('regression-test');
+    const said = async (args: Record<string, unknown>): Promise<string> =>
+      textOf(
+        await server.request('tools/call', {
+          name: 'editor_capture',
+          arguments: { projectPath: project, scenePath: 'sample.tscn', ...args },
+        }),
+      ) ?? '';
+    assert.match(
+      await said({ inline: false }),
+      /^inline: false sends no picture back, so it needs outputPath to save one to\./,
+    );
+    assert.match(
+      await said({ outputPath: join(outside, 'taken.png', 'view.png') }),
+      /is a file, not a directory/,
+    );
+    assert.match(await said({ outputPath: join(outside, 'taken.png') }), /already exists/);
+    assert.match(await said({ outputPath: join(project, 'view.png') }), /is inside the project/);
+  } finally {
+    await server.stop();
+    sweep(project, outside);
+  }
+}
+
+/**
  * A capture answers with the JPEG the game wrote beside its PNG when that is the smaller, and with
  * no picture at all when inline is false.
  *
@@ -25768,6 +26593,168 @@ function testTheRegistryIsHttpsOrNpm(): void {
   );
   for (const wrong of ['http://npm.inside.example', 'file:///etc/passwd', 'npm.inside.example', '::']) {
     assert.equal(registryFor({ GDHARNESS_REGISTRY: wrong }), npm, `${wrong} falls back to npm`);
+  }
+}
+
+/**
+ * A mirror's address keeps its own query and loses its fragment, and the document's path goes on
+ * the address's path rather than on the end of its text.
+ */
+function testAMirrorWithAQueryOrFragmentStillNamesTheDocument(): void {
+  const at = (named: string): string => registryFor({ GDHARNESS_REGISTRY: named });
+  assert.equal(
+    at('https://npm.inside.example/?token=abc'),
+    'https://npm.inside.example/gdharness/latest?token=abc',
+  );
+  assert.equal(at('https://npm.inside.example/#frag'), 'https://npm.inside.example/gdharness/latest');
+  assert.equal(
+    at('https://npm.inside.example/npm/?a=1'),
+    'https://npm.inside.example/npm/gdharness/latest?a=1',
+  );
+  assert.equal(at('https://npm.inside.example/npm//'), 'https://npm.inside.example/npm/gdharness/latest');
+  assert.equal(at('https://npm.inside.example:8443'), 'https://npm.inside.example:8443/gdharness/latest');
+}
+
+/**
+ * Versions are ordered as semantic versions are: two prereleases of one version by their
+ * identifiers, and a leading `v` is not a major version of 0.
+ */
+function testPrereleasesAndALeadingVOrderAsSemanticVersionsDo(): void {
+  const newer: [string, string][] = [
+    ['1.3.10', '1.3.9'],
+    ['v1.3.10', '1.3.9'],
+    ['1.3.10', 'v1.3.9'],
+    ['v2.0.0', 'v1.9.9'],
+    ['1.0.0-rc.2', '1.0.0-rc.1'],
+    ['1.0.0-rc.10', '1.0.0-rc.9'],
+    ['1.0.0-beta', '1.0.0-alpha'],
+    ['1.0.0-rc.1', '1.0.0-rc'],
+    ['1.0.0-alpha.beta', '1.0.0-alpha.1'],
+    ['1.0.0', '1.0.0-rc.1'],
+    ['0.1.0', 'dev'],
+    [' 1.3.10', '1.3.9'],
+  ];
+  for (const [candidate, current] of newer) {
+    assert.equal(isNewer(candidate, current), true, `${candidate} is newer than ${current}`);
+    assert.equal(isNewer(current, candidate), false, `and ${current} is not newer than ${candidate}`);
+  }
+  for (const same of [
+    ['1.0.0-rc.1', '1.0.0-rc.1'],
+    ['1.2.3+b2', '1.2.3+b1'],
+    ['v1.2.3', '1.2.3'],
+  ] as const) {
+    assert.equal(isNewer(same[0], same[1]), false, `${same[0]} is not newer than ${same[1]}`);
+  }
+}
+
+/**
+ * The update check keeps its answer in the folder every other tool keeps its cache in, makes no
+ * folder when it is off, and does not trust an answer dated ahead of the clock.
+ */
+async function testTheUpdateCheckKeepsItsCacheWithTheOthersAndDistrustsAFutureAnswer(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-update-folder-'));
+  try {
+    const environment = {
+      XDG_CACHE_HOME: join(root, 'xdg'),
+      LOCALAPPDATA: join(root, 'local'),
+      HOME: join(root, 'home'),
+      GDHARNESS_NO_UPDATE_CHECK: '',
+    };
+    assert.equal(
+      cacheFile(environment),
+      join(cacheHome(environment), 'update-check.json'),
+      'the file is in the folder the cache owner names, with both variables set',
+    );
+    const off = { ...environment, XDG_CACHE_HOME: join(root, 'off-xdg'), GDHARNESS_NO_UPDATE_CHECK: '1' };
+    const quiet = new UpdateCheck('0.1.0', off, () => Promise.resolve(null));
+    quiet.refresh();
+    assert.equal(existsSync(join(root, 'off-xdg')), false, 'a check that is off makes no cache folder');
+    assert.equal(quiet.notice(), null);
+
+    // An answer dated a year ahead is asked about again, and a clock set back does the same.
+    let asks = 0;
+    const down = (): Promise<string | null> => {
+      asks += 1;
+      return Promise.resolve(null);
+    };
+    const settle = (): Promise<void> => new Promise((done) => setTimeout(done, 0));
+    const now = Date.now();
+    writeFileSync(
+      cacheFile(environment),
+      JSON.stringify({ checkedAt: now + 365 * 24 * 3600_000, latest: '99.9.9' }),
+    );
+    const check = new UpdateCheck('0.1.0', environment, down);
+    check.refresh(now);
+    await settle();
+    assert.equal(asks, 1, 'the first ask is made');
+    assert.equal(
+      check.notice(now)?.latest,
+      '99.9.9',
+      'and the kept one is still named while the registry is down',
+    );
+    check.refresh(now + 3 * 3600_000);
+    await settle();
+    assert.equal(asks, 2, "asked again once the retry window has passed, not only at the answer's date");
+
+    // A good answer taken now, then the clock set back two hours: the next look asks again.
+    let lookups = 0;
+    const good = new UpdateCheck('0.1.0', environment, () => {
+      lookups += 1;
+      return Promise.resolve('99.9.9');
+    });
+    good.refresh(Date.now());
+    await settle();
+    good.refresh(Date.now() - 2 * 3600_000);
+    await settle();
+    assert.equal(lookups, 2, 'a clock set back two hours does not hold the asking off until it catches up');
+
+    // The same after a failure, whose retry window is dated by the clock that was set back.
+    asks = 0;
+    const failing = new UpdateCheck('0.1.0', { ...environment, XDG_CACHE_HOME: join(root, 'other') }, down);
+    failing.refresh(now);
+    await settle();
+    failing.refresh(now - 2 * 3600_000);
+    await settle();
+    assert.equal(asks, 2, 'a retry window dated by a clock set back is not waited out');
+  } finally {
+    sweep(root);
+  }
+}
+
+/**
+ * A registry that answers nothing is asked again on a window that doubles, and never inside it.
+ * Counted with a registry that answers null, and then one that rejects.
+ */
+async function testARegistryThatIsDownIsAskedOnADoublingWindow(): Promise<void> {
+  const root = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-update-retry-'));
+  try {
+    const environment = { XDG_CACHE_HOME: root, GDHARNESS_NO_UPDATE_CHECK: '' };
+    const settle = (): Promise<void> => new Promise((done) => setTimeout(done, 0));
+    for (const failure of [
+      (): Promise<string | null> => Promise.resolve(null),
+      (): Promise<string | null> => Promise.reject(new Error('the registry is down')),
+    ]) {
+      let asks = 0;
+      const check = new UpdateCheck('0.1.0', environment, () => {
+        asks += 1;
+        return failure();
+      });
+      const base = Date.now() + 10 * 24 * 3600_000;
+      const at = async (seconds: number): Promise<number> => {
+        check.refresh(base + seconds * 1000);
+        await settle();
+        return asks;
+      };
+      assert.equal(await at(0), 1, 'the first ask is made');
+      assert.equal(await at(29), 1, 'nothing is asked inside the first window of thirty seconds');
+      assert.equal(await at(30), 2, 'and the second is asked as it ends');
+      assert.equal(await at(89), 2, 'the window then doubles, so nothing is asked inside sixty seconds');
+      assert.equal(await at(90), 3, 'and the third is asked as that ends');
+      assert.equal(await at(90 + 119), 3, 'and the next window is one hundred and twenty seconds');
+      assert.equal(await at(90 + 120), 4);
+    }
+  } finally {
+    sweep(root);
   }
 }
 
@@ -29173,7 +30160,7 @@ async function testAnImportOrExportOverAStaleDocCacheRunsAgain(): Promise<void> 
   const crashed = docCacheCrash(ran(0xc0000005), before, rewritten, 'export') ?? '';
   assert.ok(
     crashed.startsWith(
-      `The first export ended badly (exit code 0xC0000005, an access violation, so it crashed) after rebuilding the editor's class reference cache, ${cache}. `,
+      `The first export ended badly (exit code 0xC0000005, a crash on an access violation) after rebuilding the editor's class reference cache, ${cache}. `,
     ) && crashed.endsWith('So the export was run again, and this answer is from that second run.'),
     crashed || 'a crash that rewrote the cache gave no note',
   );
@@ -29564,6 +30551,47 @@ async function testThePowerShellHelperGoesWithItsProcess(): Promise<void> {
 }
 
 /**
+ * A helper's ended predecessor cannot spoil its answers, and a start slower than a budget cannot
+ * use that budget up. Run on stand-in helpers under Bun, since the real one is PowerShell: the
+ * module's `spawn.ts` is replaced before it loads, and the script refuses to ask if it was not.
+ */
+function testWindowsAskKeepsEachHelpersAnswersApartAndDoesNotChargeAStart(): void {
+  const run = spawnSyncHidden(process.execPath, [WINDOWS_ASK_STAND_IN], {
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
+  assert.equal(run.status, 0, `the stand-in run ends cleanly: ${run.stderr}`);
+  const parsed: unknown = JSON.parse(run.stdout.trim().split('\n').at(-1) ?? '{}');
+  assert.ok(isRecord(parsed), `the stand-in run printed its result: ${run.stdout}`);
+  const out = parsed;
+  assert.equal(out['warm'], 'answered warm', 'the first helper answers its first question');
+  assert.equal(
+    out['tailFirstEnded'],
+    true,
+    'a question that outlasts its budget ends a helper that has answered',
+  );
+  assert.equal(out['tailSecondStarted'], true, 'and the question behind it gets a new helper');
+  assert.equal(out['tailFirst'], 'PowerShell did not answer within 100ms');
+  assert.equal(
+    out['tailSecond'],
+    'answered right',
+    "the ended helper's unfinished answer does not swallow the new helper's",
+  );
+  // The first question's own budget runs out before the helper has started, and that one is
+  // refused. The helper is kept, so every question after it is answered.
+  assert.deepEqual(
+    out['slowStart'],
+    ['PowerShell did not answer within 300ms', ...Array.from({ length: 4 }, () => 'answered ready')],
+    'a helper still starting answers the questions after the one that outlasted its budget',
+  );
+  assert.equal(out['slowStartHelpers'], 1, 'and is not ended and replaced for them');
+  assert.equal(out['quiet'], 'PowerShell did not answer within 100ms');
+  assert.equal(out['quietEnded'], true, 'a helper that has answered and then goes quiet is still ended');
+  assert.equal(out['quietNext'], 'answered back', 'and replaced');
+  assert.equal(out['quietHelpers'], 2);
+}
+
+/**
  * The sentence about which calls need a projectPath is generated, and names every call that does
  * not take one: a tool that declares none, and an op whose tool's `projectPath` belongs to other
  * ops.
@@ -29748,6 +30776,48 @@ function testTheHeadlessListNamesEveryHeadlessTool(): void {
 }
 
 /**
+ * Under its heading a tool says what it can change, and each op is a line with its default mark and
+ * what it needs and takes.
+ *
+ * Read-only tools say they change nothing. A tool with destructive ops names exactly those ops.
+ */
+function testAToolSectionSaysWhatItChangesAndEachOpLineSaysWhatItTakes(): void {
+  const lines = renderToolsMarkdown().split('\n');
+  const section = (name: string): string[] => {
+    const at = lines.indexOf(`## ${name}`);
+    assert.ok(at >= 0, `${name} has a section`);
+    const end = lines.findIndex((line, index) => index > at && line.startsWith('## '));
+    return lines.slice(at, end === -1 ? undefined : end);
+  };
+  const classes = toolSpec('editor_classes');
+  const exported = toolSpec('project_export');
+  assert.ok(classes?.operations !== undefined && exported?.operations !== undefined);
+  assert.equal(section('editor_classes')[2], 'Changes nothing.');
+  const destructive = Object.entries(exported.operations)
+    .filter(([, op]) => op.effect === 'destructive')
+    .map(([name]) => `\`${name}\``);
+  assert.deepEqual(destructive, ['`run`', '`set_preset`', '`remove_preset`']);
+  assert.equal(
+    section('project_export')[2],
+    'Can overwrite, remove or end what is there, through `run`, `set_preset` and `remove_preset`.',
+  );
+  const query = classes.operations['query'];
+  assert.equal(classes.defaultOperation, 'query');
+  assert.ok(query !== undefined);
+  assert.equal(
+    section('editor_classes').find((line) => line.startsWith('- `op: query`')),
+    `- \`op: query\` (default): ${query.summary}. Needs: \`projectPath\`. Takes: \`filter\`, \`category\`, \`instantiableOnly\`.`,
+  );
+  const remove = exported.operations['remove_preset'];
+  assert.ok(remove !== undefined);
+  assert.equal(
+    section('project_export').find((line) => line.startsWith('- `op: remove_preset`')),
+    `- \`op: remove_preset\`: ${remove.summary}. Needs: \`projectPath\`, \`preset\`.`,
+    'an op that is not the default has no mark and no Takes when it takes nothing more',
+  );
+}
+
+/**
  * Every arm of the type the reference prints, including the one two arguments reach.
  *
  * `namedType` has three: a plain type, a union written as a list, and a fallback for an argument
@@ -29777,6 +30847,19 @@ function testTheReferencePrintsEveryShapeOfType(): void {
     'an array of any values says no more than it knows',
   );
   assert.equal(argumentShape({ type: 'integer' }), 'integer');
+  assert.equal(
+    argumentShape({ type: 'string', enum: ['node', 'physics2d'] }),
+    'one of node, physics2d',
+    'a string with a fixed set names every value',
+  );
+  assert.equal(argumentShape({ type: 'string', enum: [] }), 'string', 'an empty set is a plain string');
+  const classes = renderToolsMarkdown()
+    .split('\n')
+    .filter((line) => line.startsWith('- `category` (one of '));
+  assert.ok(
+    classes.some((line) => line.includes('physics2d')),
+    'and the rendered reference lists the values of editor_classes category',
+  );
   assert.equal(argumentShape({}), 'any');
 
   const markdown = renderToolsMarkdown();
@@ -33642,6 +34725,32 @@ async function testWhoIsHoldingAPortIsAskable(): Promise<void> {
   assert.equal(listeningPidInNetstat(table, 135), 1234);
   assert.equal(listeningPidInNetstat(table, 6007), null, 'a port nobody listens on names nobody');
   assert.equal(listeningPidInNetstat(table, 600), null, 'and a port that is a prefix of one is not it');
+  const holders = (...listeners: (readonly [string, number])[]): number | null =>
+    listeningPidInNetstat(
+      listeners
+        .map(
+          ([address, pid]) => `  TCP    ${address.padEnd(23)}0.0.0.0:0              LISTENING       ${pid}`,
+        )
+        .join('\r\n'),
+      6006,
+    );
+  assert.equal(
+    holders(['192.168.1.5:6006', 1111], ['127.0.0.1:6006', 2222]),
+    2222,
+    'a listener on another network address is not the one a loopback client reaches',
+  );
+  assert.equal(holders(['[::1]:6006', 3333]), 3333, 'IPv6 loopback is reached');
+  assert.equal(holders(['192.168.1.5:6006', 1111]), null, 'and nothing else on that port is');
+  assert.equal(
+    holders(['127.0.0.1:6006', 2222], ['[::1]:6006', 3333]),
+    null,
+    'two loopback holders are not told apart',
+  );
+  assert.equal(
+    holders(['127.0.0.1:6006', 2222], ['[::]:6006', 2222]),
+    2222,
+    'one process on two addresses is still one holder',
+  );
   // A Windows 11 preview build gives some listeners the state 0, which netstat leaves out.
   const rows = [
     { state: 5, localPort: 6006, remotePort: 51000, pid: 4321 },
@@ -33653,6 +34762,60 @@ async function testWhoIsHoldingAPortIsAskable(): Promise<void> {
   assert.equal(listenerAmong(rows, 6006), 4321, 'a row with no state and no remote end is the listener');
   assert.equal(listenerAmong(rows, 7007), null, 'one with a remote end is a connection');
   assert.equal(listenerAmong(rows, 8008), 1234, 'and a row in the listening state comes first');
+  assert.equal(
+    listenerAmong(
+      [
+        { state: 2, localPort: 9009, remotePort: 0, pid: 111 },
+        { state: 2, localPort: 9009, remotePort: 0, pid: 222 },
+        { state: 2, localPort: 9009, remotePort: 0, pid: 111 },
+      ],
+      9009,
+    ),
+    null,
+    'two processes listening on one port are not told apart, and one process on two addresses is one',
+  );
+  assert.equal(
+    listenerAmong(
+      [
+        { state: 2, localPort: 9010, remotePort: 0, pid: 111 },
+        { state: 2, localPort: 9010, remotePort: 0, pid: 111 },
+      ],
+      9010,
+    ),
+    111,
+  );
+  // The table as Windows lays it out: a count, then rows of six DWORDs for IPv4 and fourteen for
+  // IPv6. A port is stored in network byte order in the low two bytes.
+  const stored = (port: number): number => ((port & 0xff) << 8) | (port >>> 8);
+  const [v4, v6] = LAYOUTS;
+  const v4Table = new Uint32Array(1 + v4.width);
+  v4Table[0] = 1;
+  v4Table[1 + v4.at.state] = 2;
+  v4Table[1 + v4.at.localPort] = stored(6006);
+  v4Table[1 + v4.at.remotePort] = stored(0);
+  v4Table[1 + v4.at.pid] = 4321;
+  assert.deepEqual(rowsOf(v4Table, v4.width, v4.at), [
+    { state: 2, localPort: 6006, remotePort: 0, pid: 4321 },
+  ]);
+  const v6Table = new Uint32Array(1 + 2 * v6.width);
+  v6Table[0] = 2;
+  for (const [row, [state, port, remote, pid]] of [
+    [2, 16006, 0, 5555],
+    [5, 16007, 443, 6666],
+  ].entries()) {
+    const base = 1 + row * v6.width;
+    // The address and scope fill the DWORDs between the fields, so a wrong index reads them.
+    v6Table.fill(0xdeadbeef, base, base + v6.width);
+    v6Table[base + v6.at.state] = state ?? 0;
+    v6Table[base + v6.at.localPort] = stored(port ?? 0);
+    v6Table[base + v6.at.remotePort] = stored(remote ?? 0);
+    v6Table[base + v6.at.pid] = pid ?? 0;
+  }
+  assert.deepEqual(rowsOf(v6Table, v6.width, v6.at), [
+    { state: 2, localPort: 16006, remotePort: 0, pid: 5555 },
+    { state: 5, localPort: 16007, remotePort: 443, pid: 6666 },
+  ]);
+  assert.deepEqual(rowsOf(v6Table.subarray(0, 1 + v6.width + 3), v6.width, v6.at).length, 1, 'a cut table');
 
   const port = await reservePort();
   assert.equal(await listeningPid(port), null, 'a port nobody is listening on has no holder to name');
@@ -35702,6 +36865,21 @@ async function testAPresetIsSetRemovedAndPacked(): Promise<void> {
       await refused({ op: 'run', preset: 'Tux', outputPath: 'build/tux.x86_64', pack: true }),
       /^A pack is written as a \.pck or a \.zip, and build\/tux\.x86_64 is neither/,
     );
+    // A refused run has made nothing, and one that goes ahead still makes the folder it needs.
+    assert.match(
+      await refused({ op: 'run', preset: 'Tux', outputPath: 'fresh/a/tux.pck', pack: true, debug: true }),
+      /^A pack is exported as a release/,
+    );
+    assert.match(
+      await refused({ op: 'run', preset: 'Tux', outputPath: 'fresh/b/tux.x86_64', pack: true }),
+      /^A pack is written as a \.pck or a \.zip/,
+    );
+    assert.equal(existsSync(join(project, 'fresh')), false, 'neither refusal left a folder');
+    const made = parseTextContent(
+      await call({ op: 'run', preset: 'Tux', outputPath: 'made/new/tux.pck', pack: true }),
+    );
+    assert.equal(get(made, 'exported'), true, JSON.stringify(made));
+    assert.ok(existsSync(join(project, 'made', 'new', 'tux.pck')), 'an accepted run makes its folder');
 
     const last = parseTextContent(await call({ op: 'remove_preset', preset: 'Droid' }));
     assert.deepEqual(
@@ -36315,9 +37493,9 @@ async function testAnEngineRunSaysHowItEnded(): Promise<void> {
       ended(null),
     ],
     [
-      'exit code 0xC0000005, an access violation, so it crashed',
-      'exit code 0xC00000FD, a stack overflow, so it crashed',
-      'exit code 0xC0000135, a library it needs was not found, so it never started',
+      'exit code 0xC0000005, a crash on an access violation',
+      'exit code 0xC00000FD, a crash on a stack overflow',
+      'exit code 0xC0000135, a start that failed on a missing library',
       'exit code 0xC0000001, a Windows error status',
       'exit code 3221225471',
       'exit code unknown',
@@ -36411,7 +37589,7 @@ async function testAnEngineThatCrashesAsItStartsIsStartedAgain(): Promise<void> 
   assert.deepEqual([always.starts, always.waits], [ENGINE_STARTS, [500, 1000]], 'up to its starts in all');
   assert.equal(
     howItEnded(always.ran),
-    'exit code 0xC06D007F, a Windows error status, and printed nothing on any of its 3 starts',
+    'exit code 0xC06D007F, a start that failed on a missing procedure, and printed nothing on any of its 3 starts',
   );
   const failed = await sequence([run(1, printed('ERROR: no such scene'))]);
   assert.deepEqual(
@@ -48271,6 +49449,9 @@ function testAnExitCodeOutlivesTheServerThatSawIt(): void {
  * fixture that mocked the asking would pass on all three without any of them working.
  */
 async function testAPidIsNotAnIdentity(): Promise<void> {
+  const stillTheRecordedRun = async (
+    record: Parameters<typeof whyNotStillTheRecordedRun>[0],
+  ): Promise<boolean> => (await whyNotStillTheRecordedRun(record)) === null;
   const marker = join(tmpdir(), `gdharness-identity-${process.pid}`);
   // Something that stays up and carries a word of ours on its command line, which is what a real
   // run has: the engine's path and the project it was pointed at.
@@ -52698,7 +53879,11 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   // An engine that printed nothing says so, and one that died on a Windows exception says how much
   // memory was free as it ended, which tells a machine that ran out from a fault in the engine.
   const mute = judgeEngine(readRun('\n\n'), handed(['test_a']), clean).faults;
-  assert.ok(mute.includes('the engine printed nothing at all'), mute.join('\n'));
+  assert.deepEqual(
+    mute,
+    ['the engine printed nothing at all', 'the run never printed its summary', `${S_TEST} never started`],
+    'a silent engine says so, and that no summary came and no suite started',
+  );
   const crashed = judgeEngine(readRun(rows([1, 1, 1])), declaredRows, {
     code: 0xc0000005,
     signal: null,
@@ -53608,6 +54793,391 @@ function testARowSkippedForItsDataIsNoPass(): void {
   );
   const onPurpose = judgeEngine(readRun(declaredRun('not yet')), handed, clean);
   assert.deepEqual([onPurpose.faults, onPurpose.passedSuites], [[], [S_TEST]], 'a case skipped on purpose');
+
+  // The reason belongs to the case it is printed under. After the suite's statistics line no case is
+  // open, so the same lines are no one's skip, and the line is read as the stray it is.
+  const afterClose = readRun(
+    [
+      `Run Test Suite: ${S_TEST}`,
+      caseLine(S_TEST, 'test_a', 'STARTED'),
+      caseLine(S_TEST, 'test_a', 'PASSED', '0ms'),
+      'Statistics: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED 1ms',
+      `  Reason: '${typo}'`,
+      "  The test data set at index (0) does not match the expected test parameters: a, b\n'",
+      'ERROR: said after the close',
+    ].join('\n'),
+  );
+  assert.deepEqual(
+    [afterClose.unrunnable, afterClose.mismatched, afterClose.errors.map((error) => error.suite)],
+    [[], [], [null]],
+    'a skip reason printed after the suite closed',
+  );
+  const twoRows = readRun(
+    [
+      `Run Test Suite: ${S_TEST}`,
+      caseLine(S_TEST, 'test_p:0 (1)', 'PASSED', '0ms'),
+      '  The test data set at index (0) does not match the expected test parameters:',
+      `  Reason: '${typo}'`,
+      '',
+      caseLine(S_TEST, 'test_p:1 (2)', 'PASSED', '0ms'),
+      '  The test data set at index (1) does not match the expected test parameters:',
+      '',
+    ].join('\n'),
+  );
+  assert.deepEqual(
+    [twoRows.mismatched.map((one) => one.name), twoRows.unrunnable],
+    [['test_p:0 (1)', 'test_p:1 (2)'], []],
+    'a reason line inside a skipped row is part of that row and starts no skip of its own',
+  );
+}
+
+/**
+ * The console lines of gdUnit4 and the engine's crash handler are known once, and every reader of
+ * one answers alike: the judge, the progress reader and the game log.
+ */
+function testEveryReaderOfTheConsoleKnowsALineAlike(): void {
+  const clean = { code: 0, signal: null, ended: null };
+  const lines: readonly [string, string, string | null][] = [
+    ['  res://tests/s_test.gd > test_a FAILED 5ms', 'test_a', 'FAILED'],
+    ['  res://tests/s_test.gd > test_a:1 (x, y) FAILED (retry 2) 1min 2s 30ms', 'test_a:1 (x, y)', 'FAILED'],
+    ['  res://tests/s_test.gd > test_a FLAKY (2 retries) 9ms', 'test_a', 'FLAKY'],
+    ['  res://tests/s_test.gd > test_a WARNING 5ms', 'test_a', 'WARNING'],
+    ['  res://tests/s_test.gd > test_a ERROR 5ms', 'test_a', null],
+    ['  res://tests/S_Test.cs > test_a FAILED 5ms', 'test_a', null],
+  ];
+  for (const [line, name, verdict] of lines) {
+    const read = caseLineOf(line);
+    assert.deepEqual(
+      [read?.name, read?.verdict ?? null],
+      verdict === null ? [undefined, null] : [name, verdict],
+      `the case line ${line}`,
+    );
+    const judged = readRun(`Run Test Suite: ${S_TEST}\n${line}\n`).suites.get(S_TEST)?.cases ?? [];
+    assert.deepEqual(
+      judged.map((one) => one.verdict),
+      verdict === null ? [] : [verdict],
+      `the judge reads ${line} as the shared reader does`,
+    );
+    const progress = suitesPrinted([
+      `Run Test Suite: ${S_TEST}`,
+      line,
+      'Statistics: 1 test cases | 0 errors | 1 failures | 0 flaky | 0 skipped | 0 orphans | FAILED 5ms',
+    ]).finished[0]?.failed;
+    assert.deepEqual(
+      progress,
+      verdict === 'FAILED' ? [name] : [],
+      `the progress reader reads ${line} as the shared reader does`,
+    );
+    const log = new GameLog();
+    log.append('stderr', `ERROR: bad\n${line}\n`);
+    assert.deepEqual(
+      log.all[0]?.detail ?? [],
+      verdict === null ? [line.trim()] : [],
+      `the game log takes ${line} as detail of the error above it only when it is no case line`,
+    );
+  }
+
+  const coloured = '\u001b[38;2;0;206;209mRun Test Suite: \u001b[0mres://my tests/ticket_test.gd';
+  assert.equal(
+    suiteOpenedBy(coloured),
+    null,
+    'a line holding the colour codes is not stripped by the reader',
+  );
+  assert.deepEqual(
+    [
+      suiteOpenedBy('Run Test Suite: res://my tests/ticket_test.gd'),
+      suiteOpenedBy('Run Test Suite: res://a.cs'),
+    ],
+    ['res://my tests/ticket_test.gd', null],
+    'a suite path holding a space, and a script that is no GDScript',
+  );
+  assert.deepEqual(
+    [...readRun(`${coloured}\n`).suites.keys()],
+    ['res://my tests/ticket_test.gd'],
+    'the judge opens the suite of a line the progress reader opens',
+  );
+  assert.deepEqual(
+    suitesPrinted([
+      'prefix Run Test Suite: res://a_test.gd',
+      'Statistics: 0 test cases | 0 errors | 0 failures',
+    ]).finished.map((suite) => suite.path),
+    ['res://a_test.gd'],
+    'and the progress reader opens the suite of a line after other text, which the judge does too',
+  );
+  assert.deepEqual([...readRun('x Run Test Suite: res://a_test.gd\n').suites.keys()], ['res://a_test.gd']);
+
+  const handed = { suites: [{ path: S_TEST, cases: ['test_a'] }], expected: { errors: {}, warnings: {} } };
+  for (const header of [
+    'CrashHandlerException: Program crashed with signal 11',
+    'handle_crash: Program crashed with signal 11',
+  ]) {
+    const crashed = judgeEngine(readRun(`${header}\nbacktrace\n`), handed, clean).faults[0];
+    assert.equal(
+      crashed,
+      'the engine crashed, its crash handler reporting signal 11',
+      `the judge knows ${header}`,
+    );
+    const log = new GameLog();
+    log.append('stderr', `${header}\n  frame 1\n`);
+    assert.deepEqual(
+      [log.all.length, log.all[0]?.severity, log.all[0]?.detail],
+      [1, 'error', ['frame 1']],
+      `the game log knows ${header}`,
+    );
+  }
+  assert.ok(CRASH_HEADER.test('handle_crash: Program crashed'), 'a handler naming no signal');
+  assert.ok(!CRASH_HEADER.test('segfault_handler: Program crashed'), 'and no other handler');
+  const other = new GameLog();
+  other.append('stderr', 'segfault_handler: Program crashed with signal 11\n');
+  assert.equal(other.count('error'), 0, 'the game log and the judge agree on a handler neither knows');
+  assert.ok(
+    !judgeEngine(readRun('segfault_handler: Program crashed with signal 11\n'), handed, clean).faults.some(
+      (fault) => fault.includes('crash handler'),
+    ),
+  );
+}
+
+/**
+ * A Windows exit status is named once. The judge names it in hex with its name, and a sentence about
+ * an engine that ended with it says what it means, whichever side of the pair knew it first.
+ */
+function testAWindowsExitStatusIsNamedTheSameEverywhere(): void {
+  const statuses: readonly [number, string, string][] = [
+    [0xc0000005, 'STATUS_ACCESS_VIOLATION', 'a crash on an access violation'],
+    [0xc00000fd, 'STATUS_STACK_OVERFLOW', 'a crash on a stack overflow'],
+    [0xc0000374, 'STATUS_HEAP_CORRUPTION', 'a crash on a corrupted heap'],
+    [0xc0000017, 'STATUS_NO_MEMORY', 'a crash with no memory left'],
+    [0xc0000142, 'STATUS_DLL_INIT_FAILED', 'a start that failed in a library it needs'],
+    [
+      0xc06d007e,
+      'a module that could not be found (VcppException)',
+      'a start that failed on a missing module',
+    ],
+  ];
+  for (const [code, name, meaning] of statuses) {
+    const hex = `0x${code.toString(16).toUpperCase()}`;
+    assert.equal(exitNamed(code), `${hex} (${name})`, `the judge names ${hex}`);
+    assert.equal(exitNamed(code | 0), `${hex} (${name})`, `and ${hex} signed`);
+    assert.equal(
+      howItEnded({ exitCode: code, exitSignal: null, failure: null }),
+      `exit code ${hex}, ${meaning}`,
+      `a sentence about the run names ${hex}`,
+    );
+  }
+  assert.equal(exitNamed(0xc0000123), '3221225763', 'a status neither names is left as a number');
+  assert.equal(
+    howItEnded({ exitCode: 0xc0000123, exitSignal: null, failure: null }),
+    'exit code 0xC0000123, a Windows error status',
+  );
+}
+
+/**
+ * How an engine's end is told: by the signal that ended it, by what stopped it, by the orphans the
+ * runner named and by the version it printed, in the run and in the compile check alike.
+ */
+function testAnEnginesEndIsJudgedByItsSignalItsOrphansAndItsVersion(): void {
+  const handed = {
+    suites: [{ path: S_TEST, cases: ['test_a'] }],
+    expected: { errors: {}, warnings: {} },
+  };
+  const passing = [caseLine(S_TEST, 'test_a', 'STARTED'), caseLine(S_TEST, 'test_a', 'PASSED', '5ms')];
+  const printed = readRun(cannedRun(passing, 'PASSED', 1));
+  const judged = (end: Partial<{ code: number | null; signal: string | null; ended: string | null }>) =>
+    judgeEngine(printed, handed, { code: null, signal: null, ended: null, ...end });
+  assert.deepEqual(judged({ signal: 'SIGSEGV' }).faults, ['the engine was ended by SIGSEGV']);
+  assert.deepEqual(judged({}).faults, ['the engine was ended by a signal'], 'a signal that is not named');
+  assert.deepEqual(
+    judgeEngine(printed, handed, { code: null, signal: 'SIGSEGV', ended: null, freeBytes: 2.5 * 1024 ** 3 })
+      .faults,
+    ['the engine was ended by SIGSEGV, with 2.5 GB of memory free as it ended'],
+  );
+  assert.deepEqual(
+    judged({ signal: 'SIGKILL', ended: 'it printed nothing for 30 s, so it was ended' }).faults,
+    ['it printed nothing for 30 s, so it was ended'],
+    'what gdharness ended it for is said instead of the signal that followed',
+  );
+  assert.deepEqual(judged({ code: 0 }).faults, [], 'an engine that exited 0 after passing');
+
+  const orphan =
+    'gdharness orphans: res://tests/s_test.gd > test_a left 2: Timer, Node "Board" of res://board.gd';
+  const leaking = readRun(cannedRun([...passing, orphan], 'PASSED', 1));
+  const left = judgeEngine(leaking, handed, { code: 101, signal: null, ended: null });
+  assert.deepEqual(
+    [left.faults, left.passedSuites, left.passed],
+    [
+      [
+        `${S_TEST} > test_a left 2 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: Timer, Node "Board" of res://board.gd. Free each one, or make it with auto_free(), which frees it once the case is over.`,
+      ],
+      [],
+      false,
+    ],
+    'the orphans the runner named explain gdUnit4 ending on 101, so the exit adds no fault',
+  );
+  assert.deepEqual(
+    judged({ code: 101 }).faults,
+    ["the engine exited 101 (gdUnit4's code for orphan nodes left behind)"],
+    'a 101 with no orphan named is a fault of its own',
+  );
+  assert.deepEqual(
+    judged({ code: 100 }).faults,
+    ["the engine exited 100 (gdUnit4's code for a case that failed or errored)"],
+    'and so is a 100 with no case failed',
+  );
+
+  const version = (said: string | null) =>
+    judgeEngine(
+      readRun(
+        said === null
+          ? cannedRun(passing, 'PASSED', 1).split('\r\n').slice(1).join('\r\n')
+          : cannedRun(passing, 'PASSED', 1).replace('v4.7.2.stable.official', `v${said}`),
+      ),
+      { ...handed, godotVersion: '4.7.2' },
+      { code: 0, signal: null, ended: null },
+    ).faults;
+  assert.deepEqual(version('4.7.2.stable.official'), [], 'a build of the version asked for');
+  assert.deepEqual(version('4.6.1.stable.official'), [
+    'the engine that ran is Godot 4.6.1.stable.official, not the 4.7.2 --godot-version asks for',
+  ]);
+  assert.deepEqual(version(null), [
+    'the engine printed no version as it started, so it cannot be told to be Godot 4.7.2',
+  ]);
+
+  const compiled = (lines: readonly string[]) => readRun(`${lines.join('\n')}\n`);
+  const compiledOk = [COMPILED_SAID];
+  const none = { code: 0, signal: null, ended: null };
+  assert.deepEqual(judgeCompile(compiled(compiledOk), none), [], 'a clean compile');
+  assert.deepEqual(judgeCompile(compiled(compiledOk), { code: null, signal: 'SIGKILL', ended: null }), [
+    'the engine was ended by SIGKILL',
+  ]);
+  assert.deepEqual(judgeCompile(compiled(compiledOk), { code: null, signal: null, ended: null }), [
+    'the engine was ended by a signal',
+  ]);
+  assert.deepEqual(judgeCompile(compiled(compiledOk), { code: 0xc0000005, signal: null, ended: null }), [
+    'the engine exited 0xC0000005 (STATUS_ACCESS_VIOLATION)',
+  ]);
+  assert.deepEqual(
+    judgeCompile(compiled(compiledOk), { code: 3, signal: null, ended: 'it ran past its limit' }),
+    ['it ran past its limit'],
+    'what ended it is said instead of its code',
+  );
+  assert.deepEqual(
+    judgeCompile(compiled(['CrashHandlerException: Program crashed with signal 11', COMPILED_SAID]), none),
+    ['the engine crashed, its crash handler reporting signal 11'],
+    'a crash report beside an exit of 0',
+  );
+  assert.deepEqual(judgeCompile(compiled([]), none), ['it never said it had compiled them']);
+  assert.deepEqual(judgeCompile(compiled([...compiledOk, 'ERROR: boom']), none), ['an engine error: boom']);
+  assert.deepEqual(
+    judgeCompile(compiled([...compiledOk, 'WARNING: 4 ObjectDB instances were leaked at exit.']), none),
+    [
+      'the engine exited holding what it should have freed: WARNING: 4 ObjectDB instances were leaked at exit.',
+    ],
+    'what the engine held at exit',
+  );
+}
+
+/**
+ * The errors Godot raised while printing another reach the verdict from the log of the streams, and
+ * the errors a suite declares are read from the file the runner wrote.
+ */
+function testNestedErrorsAndDeclaredErrorsAreRead(): void {
+  const entry = (severity: LogEntry['severity'], said: string, index: number): LogEntry => ({
+    index,
+    severity,
+    source: 'stderr',
+    text: said,
+    detail: [],
+  });
+  const nested = 'While attempting to print an error, another error was printed:';
+  const printed = readRun(
+    cannedRun(
+      [caseLine(S_TEST, 'test_a', 'STARTED'), caseLine(S_TEST, 'test_a', 'PASSED', '5ms')],
+      'PASSED',
+      1,
+    ),
+  );
+  assert.equal(withNestedErrors(printed, []), printed, 'a log with none leaves the run as it was');
+  assert.equal(
+    withNestedErrors(printed, [entry('info', nested, 0), entry('info', 'Stack overflow', 1)]),
+    printed,
+    'a pair whose second entry is no error',
+  );
+  const joined = withNestedErrors(printed, [
+    entry('info', nested, 0),
+    entry('error', 'Stack overflow', 1),
+    entry('info', 'something else', 2),
+    entry('error', 'not nested', 3),
+    entry('info', ` ${nested} `, 4),
+    entry('error', 'Second overflow', 5),
+  ]);
+  assert.deepEqual(
+    joined.errors.map((error) => [error.text, error.suite, error.during, error.warning, error.at]),
+    [
+      ['Stack overflow', null, null, false, printed.lines.length],
+      ['Second overflow', null, null, false, printed.lines.length],
+    ],
+    'each pair adds one error that belongs to no suite',
+  );
+  const verdict = judgeEngine(
+    joined,
+    { suites: [{ path: S_TEST, cases: ['test_a'] }], expected: { errors: {}, warnings: {} } },
+    { code: 0, signal: null, ended: null },
+  );
+  assert.deepEqual(
+    [verdict.faults, verdict.unattributed],
+    [
+      [
+        'an engine error outside every suite: Stack overflow',
+        'an engine error outside every suite: Second overflow',
+      ],
+      true,
+    ],
+    'and fails the run',
+  );
+
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-expected-'));
+  try {
+    const written = (name: string, body: string): string => {
+      const file = join(directory, name);
+      writeFileSync(file, body);
+      return file;
+    };
+    assert.deepEqual(
+      readExpected(
+        written(
+          'good.json',
+          JSON.stringify({
+            errors: { [S_TEST]: { test_a: ['one', 'two'], test_b: ['x'] } },
+            warnings: { [S_TEST]: { test_a: ['careful'] }, 'res://other.gd': {} },
+          }),
+        ),
+      ),
+      {
+        errors: { [S_TEST]: { test_a: ['one', 'two'], test_b: ['x'] } },
+        warnings: { [S_TEST]: { test_a: ['careful'] }, 'res://other.gd': {} },
+      },
+      'the errors and warnings each suite declares, by function',
+    );
+    assert.deepEqual(
+      readExpected(
+        written(
+          'odd.json',
+          JSON.stringify({
+            errors: { [S_TEST]: { test_a: 'not a list', test_b: [1, 2], test_c: ['kept'] }, 'res://x.gd': 5 },
+            warnings: [],
+          }),
+        ),
+      ),
+      { errors: { [S_TEST]: { test_c: ['kept'] }, 'res://x.gd': {} }, warnings: {} },
+      'a part that is not the shape the runner writes declares nothing',
+    );
+    const nothing = { errors: {}, warnings: {} };
+    assert.deepEqual(readExpected(written('broken.json', '{"errors": ')), nothing, 'a file cut short');
+    assert.deepEqual(readExpected(written('array.json', '[1]')), nothing, 'a file that is no object');
+    assert.deepEqual(readExpected(join(directory, 'missing.json')), nothing, 'no file');
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -54588,6 +56158,12 @@ function testSuitePassesKeyAlikeInEveryCheckout(): void {
       gate.slice(1, 2),
       'while a pin that differs keys apart',
     );
+    // A folder is keyed by the files in it, where it used to end the run.
+    const folder = join(checkouts[1] ?? '', 'tools');
+    const [before] = reachedAlsoSaid([folder]);
+    assert.ok(before?.includes('versions.json\n{"godot": "4.8"}'), `a folder is every file in it: ${before}`);
+    writeFileSync(join(folder, 'extra.json'), '{}');
+    assert.notEqual(reachedAlsoSaid([folder])[0], before, 'and a file added to it keys apart');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -54872,6 +56448,132 @@ function writeTree(root: string, files: Readonly<Record<string, string>>): void 
 }
 
 /**
+ * A suite is found under any spelling of its path the file system accepts, and a folder under any
+ * trailing slash. Folders kept out of a search are named with or without `res://`.
+ *
+ * Windows opens `Tests/A_Test.gd` for `tests/a_test.gd`, and the script map is keyed as the disk spells
+ * it, so a suite asked for in another letter case read as holding no case.
+ */
+function testASuiteIsFoundUnderAnySpellingOfItsPath(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spelled-'));
+  const cases = (...names: string[]): string =>
+    names.map((name) => `\nfunc ${name}() -> void:\n\tpass\n`).join('');
+  try {
+    writeTree(project, {
+      'project.godot': [
+        'config_version=5',
+        '',
+        '[gdharness]',
+        '',
+        'tests/not_searched=PackedStringArray("tests/bench")',
+        '',
+      ].join('\n'),
+      'tests/a_test.gd': `extends GdUnitTestSuite\n${cases('test_a', 'test_ab')}`,
+      'tests/bench/b_test.gd': `extends GdUnitTestSuite\n${cases('test_bench')}`,
+    });
+    assert.deepEqual(new ProjectScripts(project).notSearched, ['res://tests/bench']);
+    assert.deepEqual(
+      new ProjectScripts(project).suitesUnder(['res://tests']).map((one) => one.path),
+      ['res://tests/a_test.gd'],
+      'a folder named without res:// is kept out of the search',
+    );
+    assert.deepEqual(suiteFilesUnder(project, ['res://tests']), [
+      'res://tests/a_test.gd',
+      'res://tests/bench/b_test.gd',
+    ]);
+    assert.deepEqual(
+      suiteFilesUnder(project, ['res://tests/']),
+      suiteFilesUnder(project, ['res://tests']),
+      'a trailing slash names the same folder',
+    );
+    const spelled = process.platform === 'win32' ? 'res://Tests/A_Test.gd' : 'res://tests/a_test.gd';
+    assert.deepEqual(scriptsWithoutCases(project, [spelled]), [], 'a suite with cases is not caseless');
+    assert.deepEqual(selectTests(project, [spelled], ['test_a']), {
+      ok: true,
+      value: {
+        suites: ['res://tests/a_test.gd'],
+        ignore: ['res://tests/a_test.gd:test_ab'],
+        selected: [{ entry: 'test_a', suite: 'res://tests/a_test.gd', test: 'test_a' }],
+      },
+    });
+    assert.deepEqual(selectTests(project, ['res://tests'], []), {
+      ok: false,
+      reason: 'tests is an empty list: name a case, or leave tests out to run every one.',
+    });
+    assert.deepEqual(selectTests(project, ['res://tests'], ['test_a', ' ']), {
+      ok: false,
+      reason: 'tests[1] is not a case name: give "test_name" or "suite:test_name".',
+    });
+    assert.deepEqual(selectTests(project, ['res://tests/empty'], ['test_a']), {
+      ok: false,
+      reason:
+        'No suite under res://tests/empty has a case test_a: none of them declares a func test_ at the top level.',
+    });
+    assert.deepEqual(selectTests(project, ['res://tests/a_test.gd'], ['test_aa']), {
+      ok: false,
+      reason:
+        'No suite under res://tests/a_test.gd has a case test_aa. The cases there are a_test:test_a, a_test:test_ab.',
+    });
+    if (process.platform === 'win32') {
+      assert.deepEqual(
+        suiteFilesUnder(project, ['res://Tests']),
+        ['res://tests/a_test.gd', 'res://tests/bench/b_test.gd'],
+        'a folder in another letter case holds the suites the disk spells in its own',
+      );
+      assert.deepEqual(
+        new ProjectScripts(project).suitesUnder(['res://Tests']).map((one) => one.path),
+        ['res://tests/a_test.gd'],
+        'and the folders kept out stay out',
+      );
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A script extending an inner class of another script is a suite when that inner class is one.
+ *
+ * `extends Outer.InnerSuite` was read as `extends Outer`, so a suite built on an inner base suite was
+ * called no suite, and a script extending an inner helper of a suite class was called a suite with
+ * cases it does not run.
+ */
+function testAnInnerClassBaseIsFollowedToTheInnerClass(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-inner-base-'));
+  const cases = (...names: string[]): string =>
+    names.map((name) => `\nfunc ${name}() -> void:\n\tpass\n`).join('');
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'tests/inner_base.gd': `class_name Outer\nextends RefCounted\n\nclass InnerSuite extends GdUnitTestSuite:\n\tfunc test_from_inner() -> void:\n\t\tpass\n\nclass Deeper extends InnerSuite:\n\tpass\n`,
+      'tests/inner_test.gd': `extends Outer.InnerSuite\n${cases('test_mine')}`,
+      'tests/holder.gd': `class_name SuiteHolder\nextends GdUnitTestSuite\n\nclass Helper extends RefCounted:\n\tpass\n${cases('test_holder')}`,
+      'tests/helper_child.gd': `extends SuiteHolder.Helper\n${cases('test_not_run')}`,
+      'tests/missing_test.gd': `extends Outer.NoSuchClass\n${cases('test_lost')}`,
+    });
+    const scripts = new ProjectScripts(project);
+    assert.deepEqual(
+      scripts.suitesUnder(['res://tests']).map((one) => [one.path, one.cases]),
+      [
+        ['res://tests/holder.gd', ['test_holder']],
+        ['res://tests/inner_test.gd', ['test_from_inner', 'test_mine']],
+      ],
+      'the inner suite is the base, with its cases, and an inner helper of a suite class is not',
+    );
+    assert.deepEqual(
+      scripts.uncollectedUnder(['res://tests']),
+      [
+        { path: 'res://tests/helper_child.gd', cases: ['test_not_run'] },
+        { path: 'res://tests/missing_test.gd', cases: ['test_lost'] },
+      ],
+      'and a script whose base is no suite is named as one gdUnit4 never runs',
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * Suites are found from the scripts and dealt to engines by what their cases cost.
  *
  * A suite is a script whose chain of bases reaches gdUnit4's, by name, by path or relative path, and
@@ -54879,6 +56581,84 @@ function writeTree(root: string, files: Readonly<Record<string, string>>): void 
  * list, which holds the inherited ones. A suite costing more than the split goes out case by case,
  * except one needing a window, since those all share the one windowed engine.
  */
+/**
+ * A suite declaring GDHARNESS_ACCESSIBILITY, itself, through a base or through a class's constant,
+ * is dealt to the windowed engine, which alone starts with the tree on. One that also says it runs
+ * headless is refused, since the tree needs a window.
+ */
+function testASuiteAskingForTheAccessibilityTreeGetsAWindowWithItOn(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-tree-'));
+  const cases = (...names: string[]): string =>
+    names.map((name) => `\nfunc ${name}() -> void:\n\tpass\n`).join('');
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'addons/gdUnit4/src/GdUnitTestSuite.gd': 'class_name GdUnitTestSuite\nextends Node\n',
+      'shared.gd': 'class_name Shared\nextends RefCounted\nconst TREE: bool = true\n',
+      'tests/tree_test.gd': `extends GdUnitTestSuite\nconst GDHARNESS_ACCESSIBILITY: bool = true\n${cases('test_t')}`,
+      'tests/tree_child_test.gd': `extends "res://tests/tree_test.gd"\n${cases('test_c')}`,
+      'tests/shared_test.gd': `extends GdUnitTestSuite\nconst GDHARNESS_ACCESSIBILITY: bool = Shared.TREE\n${cases('test_s')}`,
+      'tests/off_test.gd': `extends "res://tests/tree_test.gd"\nconst GDHARNESS_ACCESSIBILITY := false\n${cases('test_o')}`,
+      'tests/plain_test.gd': `extends GdUnitTestSuite\n${cases('test_p', 'test_q')}`,
+    });
+    const scripts = new ProjectScripts(project);
+    const found = scripts.suitesUnder(['res://tests']);
+    assert.deepEqual(
+      found.map((suite) => [suite.path, suite.windowed, suite.accessible, suite.headless]),
+      [
+        ['res://tests/off_test.gd', false, false, false],
+        ['res://tests/plain_test.gd', false, false, false],
+        ['res://tests/shared_test.gd', true, true, false],
+        ['res://tests/tree_child_test.gd', true, true, false],
+        ['res://tests/tree_test.gd', true, true, false],
+      ],
+      'the tree asked for by the suite, by a base and by a class constant, and given a window; the nearest false turns it off',
+    );
+    assert.deepEqual(windowNeedsOf(scripts, ['res://tests']).accessible, [
+      'res://tests/shared_test.gd',
+      'res://tests/tree_child_test.gd',
+      'res://tests/tree_test.gd',
+    ]);
+    const declared = new Map(found.map((suite) => [suite.path, suite.cases]));
+    const plans = dealt(unitsOf(found, {}), declared, 4);
+    assert.deepEqual(
+      plans.map((plan) => [
+        plan.windowed,
+        plan.accessible,
+        plan.suites.map((suite) => suite.path).toSorted(),
+      ]),
+      [
+        [
+          true,
+          true,
+          ['res://tests/shared_test.gd', 'res://tests/tree_child_test.gd', 'res://tests/tree_test.gd'],
+        ],
+        ...plans
+          .filter((plan) => !plan.windowed)
+          .map((plan) => [false, false, plan.suites.map((suite) => suite.path).toSorted()]),
+      ],
+      'only the windowed engine starts with the tree on',
+    );
+    assert.ok(
+      plans.some((plan) => !plan.windowed),
+      'and the other suites go to a headless one',
+    );
+
+    writeTree(project, {
+      'tests/both_test.gd': `extends GdUnitTestSuite\nconst GDHARNESS_ACCESSIBILITY: bool = true\nconst GDHARNESS_NEEDS_WINDOW: bool = false\n${cases('test_b')}`,
+    });
+    assert.throws(
+      () => new ProjectScripts(project).suite('res://tests/both_test.gd'),
+      (error: unknown) =>
+        error instanceof Refusal &&
+        error.message ===
+          'res://tests/both_test.gd declares GDHARNESS_ACCESSIBILITY true and GDHARNESS_NEEDS_WINDOW false. Godot builds the accessibility tree only with a window. Remove GDHARNESS_NEEDS_WINDOW, since GDHARNESS_ACCESSIBILITY already gives the suite one.',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
 async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-suites-'));
   const cases = (...names: string[]): string =>
@@ -55012,6 +56792,7 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       windowed,
       headless,
       together,
+      accessible: false,
     });
     // Past the split and with a case timed row by row, kept whole when it says its cases belong
     // together, and dealt out case by case and row by row when it does not.
@@ -55224,6 +57005,7 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       cost,
       timed: true,
       windowed: isWindowed,
+      accessible: false,
       headless: isHeadless,
     });
     const quick = [
@@ -55747,6 +57529,39 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
       { seconds: 3, cases: { test_only: 1 }, rows: { test_only: [1] } },
       'every engine holding it having finished, a case with fewer rows is timed as it is now',
     );
+    const plainRun = readRun(
+      [
+        `Run Test Suite: ${lone_.path}`,
+        caseLine(lone_.path, 'test_only', 'PASSED', '12s 0ms'),
+        'Statistics: 1 test cases | PASSED 12s 500ms',
+      ].join('\n'),
+    );
+    const noLongerRows = timesAfter(rowTimes, [lone_], [plainRun], declaredNow);
+    assert.deepEqual(
+      noLongerRows[lone_.path],
+      { seconds: 12.5, cases: { test_only: 12 } },
+      'a case that ran with no row is not parameterised now, and keeps no rows',
+    );
+    assert.deepEqual(
+      unitsOf([lone_], noLongerRows).map((planned) => planned.row),
+      [undefined],
+      'so it is dealt whole, to one engine',
+    );
+    assert.deepEqual(
+      timesAfter({}, [lone_], [plainRun], declaredNow)[lone_.path],
+      { seconds: 12.5, cases: { test_only: 12 } },
+      'with no times before it is timed whole',
+    );
+    assert.deepEqual(
+      timesAfter(noLongerRows, [lone_], [rowRun(lone_.path, [[0, '1s 0ms']])], declaredNow)[lone_.path],
+      { seconds: 3, cases: { test_only: 1 }, rows: { test_only: [1] } },
+      'and a case that gained rows is timed by them',
+    );
+    assert.deepEqual(
+      timesAfter(rowTimes, [], [], () => null),
+      {},
+      'a suite renamed away is forgotten, with its rows',
+    );
     assert.deepEqual(
       timesAfter(
         rowTimes,
@@ -55907,9 +57722,10 @@ async function testSuitesAreFoundAndDealtByWhatTheyCost(): Promise<void> {
         ended: null,
       },
     );
-    assert.ok(
-      !shrunk.faults.some((fault) => fault.includes('closed without running')),
-      `and one dealt rows the case no longer has is not faulted for running none: ${shrunk.faults.join(' | ')}`,
+    assert.deepEqual(
+      shrunk.faults,
+      ['the run never printed its summary'],
+      'one dealt rows the case no longer has is faulted for the missing summary and not for running none',
     );
   } finally {
     sweep(project);
@@ -56403,6 +58219,11 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
       '.godot/extension_list.cfg': 'res://ext/native.gdextension\n',
       'ext/native.gdextension': '[configuration]\nentry_symbol = "init"\n',
     });
+    // What the engine reads at start, which every suite depends on and these cases leave aside.
+    const readAtStart = (path: string): boolean =>
+      ['res://project', 'res://ext', 'res://override', 'res://.godot'].some((start) =>
+        path.startsWith(start),
+      );
     const inputsOf = (reached: readonly string[]): string[] =>
       new SuiteInputs(new ProjectScripts(project), ['1']).inputsOf(reached);
     const printOf = (reached: readonly string[], always: readonly string[] = ['1']): string => {
@@ -56420,16 +58241,18 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
     assert.deepEqual(
       inputsOf(suite),
       [
+        'res://.godot/extension_list.cfg',
         'res://addons/gdUnit4/',
         'res://data/icon.png',
         'res://data/table.tres',
         'res://ext/native.gdextension',
         'res://game.gd',
         'res://helper.gd',
+        'res://override.cfg',
         'res://project.godot',
         'res://tests/a_test.gd',
       ],
-      'the class it names, what that preloads and what that names, its addon whole, the project and its extension, and nothing outside the project files',
+      'the class it names, what that preloads and what that names, its addon whole, the project, its overrides, its extensions and their list, and nothing outside the project files',
     );
     assert.deepEqual(
       inputsOf(['res://reader.gd']).filter((path) => path.startsWith('res://data') || path === EVERY_FILE),
@@ -56440,16 +58263,12 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
     assert.deepEqual(inputsOf(['res://computed.gd']), [EVERY_FILE], 'a file read by a computed path');
     assert.deepEqual(inputsOf(['res://by_uid.gd']), [EVERY_FILE], 'and a preload by uid');
     assert.deepEqual(
-      inputsOf(['res://checker.gd']).filter(
-        (path) => !path.startsWith('res://project') && !path.startsWith('res://ext'),
-      ),
+      inputsOf(['res://checker.gd']).filter((path) => !readAtStart(path)),
       [EVERY_NAME, 'res://checker.gd'],
       'a check or listing by a computed path, as the names alone',
     );
     assert.deepEqual(
-      inputsOf(['res://joined.gd']).filter(
-        (path) => !path.startsWith('res://project') && !path.startsWith('res://ext'),
-      ),
+      inputsOf(['res://joined.gd']).filter((path) => !readAtStart(path)),
       ['res://joined.gd', 'res://paths.gd', 'tree:res://data/'],
       'a path joined onto an inherited constant built from literals, read as that folder whole',
     );
@@ -56457,8 +58276,7 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
       inputsOf(['res://formatted.gd']).includes('tree:res://levels/'),
       'and a path formatted into a literal, as the folder it begins in',
     );
-    const own = (script: string): string[] =>
-      inputsOf([script]).filter((path) => !path.startsWith('res://project') && !path.startsWith('res://ext'));
+    const own = (script: string): string[] => inputsOf([script]).filter((path) => !readAtStart(path));
     assert.deepEqual(
       own('res://held.gd'),
       ['res://held.gd', 'tree:res://data/'],
@@ -56492,9 +58310,7 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
       'a parameter left to its default',
     );
     assert.deepEqual(
-      inputsOf(['res://saves.gd']).filter(
-        (path) => !path.startsWith('res://project') && !path.startsWith('res://ext'),
-      ),
+      inputsOf(['res://saves.gd']).filter((path) => !readAtStart(path)),
       ['res://saves.gd', 'res://store.gd'],
       "no file for a path joined onto another class's user:// constant",
     );
@@ -56595,9 +58411,15 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
     const scripts = new ProjectScripts(project);
     const inputs = new SuiteInputs(scripts, ['1']);
     const kept = inputs.inputsOf(suite);
+    // Setting a time back is itself a change to a file, so it is done before the moment the run began.
+    const aged = new Date(Date.now() - 60_000);
+    utimesSync(join(project, 'data', 'icon.png'), aged, aged);
+    utimesSync(join(project, 'helper.gd'), aged, aged);
+    const settled = Date.now() + 25;
+    while (Date.now() < settled) {
+      // The file system's clock moves past the last change.
+    }
     const began = Date.now();
-    utimesSync(join(project, 'data', 'icon.png'), new Date(began - 60_000), new Date(began - 60_000));
-    utimesSync(join(project, 'helper.gd'), new Date(began - 60_000), new Date(began - 60_000));
     assert.equal(new SuiteInputs(scripts, ['1']).modifiedAfter(kept, began), false, 'nothing since');
     utimesSync(join(project, 'data', 'icon.png'), new Date(began + 5000), new Date(began + 5000));
     assert.equal(new SuiteInputs(scripts, ['1']).modifiedAfter(kept, began), true, 'one input since');
@@ -56686,6 +58508,184 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
       Object.fromEntries(recorded),
       'a torn last line',
     );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A suite depends on every file a script, scene, shader or resource names, by whichever spelling the
+ * engine takes: a constant of another script, a sum of strings, a path with a space, a binary
+ * resource, an included shader, an import's materials, a base given to an inner class, a class
+ * declared in lower case, a file opened by a parser, and the settings the engine reads at start.
+ */
+function testASuiteDependsOnEveryFileItsScriptsAndResourcesNameInAnySpelling(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-named-'));
+  try {
+    const script = (body: string): string => `extends Node\n${body}\n`;
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'paths.gd': 'class_name Paths\nextends RefCounted\nconst TABLE = "res://data/t.tres"\n',
+      'data/t.tres': '[gd_resource type="Resource" format=3]\n',
+      'data/inner.tres': '[gd_resource type="Resource" format=3]\n',
+      's_dotted.gd': script('const T = preload(Paths.TABLE)'),
+      's_sum.gd': script('const T = preload("res://data/" + "t.tres")'),
+      's_local.gd': script('const P = "res://data/t.tres"\nconst T = preload(P)'),
+      's_literal.gd': script('const T = preload("res://data/t.tres")'),
+      's_function.gd': script('func f() -> void:\n\tload("res://data/t.tres")'),
+      's_chain.gd': script('const T = preload("res://chain.tres")'),
+      'chain.tres': '[ext_resource type="Resource" path="res://data/t.tres" id="1"]\n',
+      's_space.gd': script('const T = preload("res://scene.tscn")'),
+      'scene.tscn': '[ext_resource type="Texture2D" path="res://my art/icon.png" id="1"]\n',
+      'my art/icon.png': 'a',
+      's_shader.gd': script('const T = preload("res://shaders/main.gdshader")'),
+      'shaders/main.gdshader': 'shader_type canvas_item;\n#include "res://shaders/inc.gdshaderinc"\n',
+      'shaders/inc.gdshaderinc': 'const float A = 1.0;\n',
+      's_res.gd': script('const T = preload("res://pack.res")'),
+      'pack.res': 'RSRC\0\0res://data/inner.tres\0\0',
+      's_import.gd': script('const T = preload("res://model.glb")'),
+      'model.glb': 'glb',
+      'model.glb.import': '[params]\nmaterials/use_external/path="res://mats/m.tres"\n',
+      'mats/m.tres': '[gd_resource type="Material" format=3]\n',
+      's_inner.gd': script('class Inner extends "res://base.gd":\n\tpass'),
+      'base.gd': 'extends RefCounted\n',
+      's_lower.gd': script('func f() -> void:\n\thelper_thing.new()'),
+      'helper_thing.gd': 'class_name helper_thing\nextends RefCounted\n',
+      's_xml.gd': script('func f() -> void:\n\tvar parser := XMLParser.new()\n\tparser.open("res://x.xml")'),
+      'x.xml': '<a/>',
+      's_nothing.gd': script('func f() -> int:\n\treturn 1'),
+    });
+    const printOf = (reached: string): string => {
+      const inputs = new SuiteInputs(new ProjectScripts(project), ['1']);
+      return inputs.printOf(inputs.inputsOf([reached]));
+    };
+    const moves = (reached: string, file: string, content: string): boolean => {
+      const before = printOf(reached);
+      writeTree(project, { [file]: content });
+      return printOf(reached) !== before;
+    };
+    const rules: [string, string, string, string][] = [
+      ['s_literal', 'data/t.tres', '1', 'a literal preload'],
+      ['s_local', 'data/t.tres', '2', 'a preload of a constant of the same script'],
+      ['s_dotted', 'data/t.tres', '3', 'a preload of a constant of another script'],
+      ['s_sum', 'data/t.tres', '4', 'a preload of a sum of strings'],
+      ['s_function', 'data/t.tres', '5', 'a load in a function'],
+      ['s_chain', 'data/t.tres', '6', 'a resource that names another resource'],
+      ['s_space', 'my art/icon.png', '7', 'a path with a space in a scene'],
+      ['s_shader', 'shaders/inc.gdshaderinc', '8', 'an included shader'],
+      ['s_res', 'data/inner.tres', '9', 'a path in a binary resource'],
+      ['s_import', 'mats/m.tres', '10', "an import's external material"],
+      ['s_inner', 'base.gd', '11', 'a base given to an inner class'],
+      ['s_lower', 'helper_thing.gd', '12', 'a class declared in lower case'],
+      ['s_xml', 'x.xml', '13', 'a file opened by a parser'],
+    ];
+    assert.deepEqual(
+      rules
+        .filter(([suite, file, edit]) => !moves(`res://${suite}.gd`, file, `${edit}\n`))
+        .map(([, file, , how]) => `${how}: ${file} is not an input`),
+      [],
+      'every file a script or resource names moves the print of a suite reaching it',
+    );
+    assert.equal(
+      moves('res://s_nothing.gd', 'data/t.tres', 'other\n'),
+      false,
+      'and a script naming no file does not depend on one',
+    );
+    for (const settings of ['override.cfg', '.godot/extension_list.cfg']) {
+      assert.equal(
+        moves('res://s_nothing.gd', settings, '[x]\n'),
+        true,
+        `${settings} read at start is an input`,
+      );
+    }
+    const base = join(project, 'case_probe');
+    writeTree(project, { 'case_probe/low.gd': script('const T = preload("res://data/t.tres")') });
+    if (existsSync(join(base, 'LOW.gd'))) {
+      assert.equal(
+        moves('res://case_probe/LOW.gd', 'data/t.tres', 'cased\n'),
+        true,
+        'a script named in another letter case still names what it preloads',
+      );
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A suite reading a computed path depends on files in a folder holding a `.gdignore` and in a folder
+ * a link leads to, since a script reads the disk and not the engine's file system.
+ */
+function testAComputedReadDependsOnFoldersTheEngineIgnoresAndLinksLeadTo(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-ignored-'));
+  const elsewhere = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-linked-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'raw/.gdignore': '',
+      'raw/a.json': '1\n',
+    });
+    writeTree(elsewhere, { 'shared.json': '1\n' });
+    symlinkSync(elsewhere, join(project, 'linked'), 'junction');
+    symlinkSync(project, join(project, 'raw', 'back'), 'junction');
+    const print = (): string => new SuiteInputs(new ProjectScripts(project), ['1']).printOf([EVERY_FILE]);
+    for (const [file, how] of [
+      [join(project, 'raw', 'a.json'), 'a folder holding a .gdignore'],
+      [join(elsewhere, 'shared.json'), 'a folder a link leads to'],
+    ] as const) {
+      const before = print();
+      writeFileSync(file, 'changed\n');
+      assert.notEqual(print(), before, `a file in ${how} is read by a computed path`);
+    }
+    const names: string[] = [];
+    walkSeen(project, (under) => names.push(under));
+    assert.deepEqual(
+      names,
+      ['linked/shared.json', 'project.godot', 'raw/.gdignore', 'raw/a.json'],
+      'and a link back up the tree is not walked again',
+    );
+  } finally {
+    sweep(project, elsewhere);
+  }
+}
+
+/**
+ * An input replaced with a copy that keeps its old modification time, and an input deleted, count as
+ * changed since a moment, so a pass recorded on a state the suite did not run on is not kept.
+ */
+function testAnInputChangedDuringARunIsSeenWhateverItsTimeStamp(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-during-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      's.gd': 'extends Node\nconst T = preload("res://t.tres")\nconst U = preload("res://u.tres")\n',
+      't.tres': 'one\n',
+      'u.tres': 'two\n',
+    });
+    const longAgo = new Date(Date.now() - 86_400_000);
+    for (const name of ['project.godot', 's.gd', 't.tres', 'u.tres']) {
+      utimesSync(join(project, name), longAgo, longAgo);
+    }
+    const inputs = (): SuiteInputs => new SuiteInputs(new ProjectScripts(project), ['1']);
+    const named = inputs().inputsOf(['res://s.gd']);
+    const since = Date.now();
+    while (Date.now() < since + 25) {
+      // The file system's clock moves on before anything is changed.
+    }
+    assert.equal(inputs().modifiedAfter(named, since), false, 'nothing is changed since');
+    writeFileSync(join(project, 't.tres'), 'new!\n');
+    utimesSync(join(project, 't.tres'), longAgo, longAgo);
+    assert.equal(
+      inputs().modifiedAfter(named, since),
+      true,
+      'a file replaced with the old modification time is changed',
+    );
+    const after = Date.now();
+    while (Date.now() < after + 25) {
+      // As above.
+    }
+    rmSync(join(project, 'u.tres'));
+    assert.equal(inputs().modifiedAfter(named, after), true, 'and a file deleted is');
   } finally {
     sweep(project);
   }
@@ -58146,6 +60146,92 @@ function testTheTestHelpersWaitStepAndPress(): void {
 }
 
 /**
+ * `gdharness spread` reads its command line strictly: no empty value for a valued option, and a
+ * scene that is a file.
+ */
+function testSpreadRefusesAnEmptyValueAndASceneThatIsNoFile(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spread-options-'));
+  try {
+    writeTree(project, { 'project.godot': 'config_version=5\n', 'bench.tscn': '', 'benches/x.tscn': '' });
+    const refused = (...args: string[]): string => {
+      try {
+        spreadOptionsOf([project, ...args], project);
+      } catch (error) {
+        return errorMessage(error);
+      }
+      return 'accepted';
+    };
+    assert.equal(spreadOptionsOf([project, 'bench.tscn'], project).scene, 'res://bench.tscn');
+    for (const flag of ['--slots', '--workers', '--slot-count', '--silence']) {
+      assert.equal(refused('bench.tscn', flag, ''), `${flag} needs a value.`, `an empty ${flag}`);
+    }
+    assert.equal(refused(), 'gdharness spread needs the scene of the bench to play.');
+    assert.equal(
+      refused('bench.tscn', 'benches/x.tscn'),
+      'gdharness spread plays one scene, and was given 2: bench.tscn, benches/x.tscn.',
+    );
+    assert.equal(
+      refused('bench.tscn', '--nope'),
+      'Unknown option --nope for gdharness spread. Run gdharness help.',
+    );
+    assert.equal(refused('bench.tscn', '--workers'), '--workers needs a value.');
+    assert.equal(
+      refused('bench.tscn', '--', '--gdh-share=1'),
+      "--gdh-share=1 is gdharness spread's own to hand each engine, so it cannot be given.",
+    );
+    assert.match(refused('benches'), /^Nothing at res:\/\/benches /, 'a folder is no scene');
+    assert.match(refused(''), /^Nothing at /, 'and an empty name is none');
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
+ * A spread run says how each engine ended and how far each worker has got.
+ *
+ * An engine that ended by a signal has no exit code and is a fault, as is one that exits non-zero
+ * or that gdharness ended itself. A worker with no log, or none that printed progress, has played no
+ * arm yet, and one that did is named by its last progress line.
+ */
+function testASpreadRunNamesHowEachEngineEndedAndHowFarEachWorkerIs(): void {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spread-ended-'));
+  try {
+    const log = join(scratch, 'engine.log');
+    const engine = (code: number | null, ended: string | null = null): EngineLeft => ({
+      name: 'worker 1',
+      log,
+      end: { code, signal: null, ended },
+      seconds: 1,
+    });
+    assert.deepEqual(engineFaults(engine(0), null), [], 'a clean exit with no log is no fault');
+    assert.deepEqual(engineFaults(engine(null), null), ['worker 1: the engine exited without an exit code']);
+    assert.deepEqual(engineFaults(engine(3), null), ['worker 1: the engine exited 3']);
+    assert.deepEqual(engineFaults(engine(0, 'it was stopped after 5 s'), null), [
+      'worker 1: it was stopped after 5 s',
+    ]);
+    assert.deepEqual(engineFaults(engine(-1073741819), null), [
+      'worker 1: the engine exited 0xC0000005 (STATUS_ACCESS_VIOLATION)',
+    ]);
+
+    const first = join(scratch, 'one.log');
+    const second = join(scratch, 'two.log');
+    writeFileSync(first, 'gdharness share: fast 2 of 10 runs\nnoise\ngdharness share: slow 7 of 10 runs\n');
+    assert.equal(
+      progressOf([first, second, join(scratch, 'none.log')]),
+      'still playing: worker 0 at slow 7 of 10, worker 1 has played no arm yet, worker 2 has played no arm yet',
+    );
+    writeFileSync(second, 'nothing printed yet\n');
+    assert.equal(
+      progressOf([second]),
+      'still playing: worker 0 has played no arm yet',
+      'a log with no progress line is no progress',
+    );
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
  * `gdharness spread` against the same bench played on its own: the same table to the last digit,
  * floats included, from three workers and a gathering engine, none of which announces itself as
  * the game. Then each way a fan-out can half work, each refused before or after the gathering with
@@ -58983,6 +61069,72 @@ async function testTheTestCommandRunsAndJudgesAProject(): Promise<void> {
 }
 
 /**
+ * A suite an editor plugin rewrites during the import keeps its pass against what the new text
+ * loads, so a change to a file only the new text names runs it again.
+ */
+function testAScriptEditedDuringTheImportIsFollowedAsTheEngineLoadedIt(): void {
+  const engines = commandTestEngines();
+  if (engines === null) {
+    return;
+  }
+  const { project, slots, checkouts, test } = commandTestProject(engines.godotPath, engines.gdunit);
+  const word = (said: string): string =>
+    `[gd_resource type="Resource" format=3]\n\n[resource]\nmetadata/word = "${said}"\n`;
+  const edits = [
+    '@tool',
+    'extends EditorPlugin',
+    '',
+    '',
+    'func _enter_tree() -> void:',
+    '\tif not FileAccess.file_exists("res://edit_once"):',
+    '\t\treturn',
+    '\tvar suite: FileAccess = FileAccess.open("res://tests/edited_test.gd", FileAccess.WRITE)',
+    '\tsuite.store_string(',
+    '\t\t"extends GdUnitTestSuite\\n\\nconst WORD: Resource = preload(\\"res://data/word.tres\\")\\n\\n"',
+    '\t\t+ "func test_edited() -> void:\\n\\tassert_bool(WORD != null).is_true()\\n"',
+    '\t)',
+    '\tsuite.close()',
+    '\tvar _removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path("res://edit_once"))',
+    '',
+  ].join('\n');
+  try {
+    writeTree(project, {
+      'project.godot': `${readFileSync(join(project, 'project.godot'), 'utf8')}\n[editor_plugins]\n\nenabled=PackedStringArray("res://addons/edits/plugin.cfg")\n`,
+      'addons/edits/plugin.cfg':
+        '[plugin]\n\nname="edits"\ndescription="Rewrites a suite once."\nauthor="gdharness"\nversion="1"\nscript="plugin.gd"\n',
+      'addons/edits/plugin.gd': edits,
+      'data/word.tres': word('one'),
+      edit_once: '',
+      'tests/edited_test.gd':
+        'extends GdUnitTestSuite\n\nfunc test_edited() -> void:\n\tassert_bool(true).is_true()\n',
+    });
+    const first = test('tests/edited_test.gd', '--changed-only', '--import');
+    assert.equal(first.status, 0, first.said);
+    assert.equal(
+      existsSync(join(project, 'edit_once')),
+      false,
+      `the plugin ran in the import: ${first.said}`,
+    );
+    assert.match(
+      readFileSync(join(project, 'tests', 'edited_test.gd'), 'utf8'),
+      /preload\("res:\/\/data\/word\.tres"\)/,
+      'and rewrote the suite',
+    );
+    assert.match(first.said, /^Passed: 1 case in 1 suite across 1 engine, /m, first.said);
+    writeFileSync(join(project, 'data', 'word.tres'), word('two'));
+    const again = test('tests/edited_test.gd', '--changed-only');
+    assert.equal(again.status, 0, again.said);
+    assert.match(
+      again.said,
+      /^Passed: 1 case in 1 suite across 1 engine, /m,
+      `a change to what the rewritten suite loads runs it again: ${again.said}`,
+    );
+  } finally {
+    sweep(project, slots, checkouts);
+  }
+}
+
+/**
  * A case's time is its own: a suite whose script holds the engine 300 ms as it compiles and whose
  * before() holds it 400 ms more still has its first case timed at what the case took. The result
  * puts the compile under the engine's start and the before() under the suite, and so does the line
@@ -59636,6 +61788,23 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
         ),
         shared.said,
       );
+      // A suite asking for the accessibility tree runs with it on. On Linux a window alone builds no
+      // tree, so the same case fails there. A GitHub Windows runner built it for a window alone.
+      writeTree(project, {
+        'tests/tree_test.gd': accessibilityTreeSuite('GDHARNESS_ACCESSIBILITY'),
+        'tests/bare_test.gd': accessibilityTreeSuite('GDHARNESS_NEEDS_WINDOW'),
+      });
+      const tree = test('tests/tree_test.gd');
+      assert.equal(tree.status, 0, tree.said);
+      assert.match(tree.said, /^Passed: 1 case in 1 suite/m, tree.said);
+      const bare = test('tests/bare_test.gd');
+      assert.match(bare.said, /in 1 suite over 1 engine, with a window\./, bare.said);
+      if (process.platform === 'linux') {
+        assert.equal(bare.status, 1, `a window alone builds no tree: ${bare.said}`);
+        assert.match(bare.said, /no accessibility element/, bare.said);
+      }
+      rmSync(join(project, 'tests', 'tree_test.gd'));
+      rmSync(join(project, 'tests', 'bare_test.gd'));
     } else {
       console.log(`test command windowed case skipped: ${windowed}`);
     }
@@ -60559,7 +62728,7 @@ async function testAnEngineStartedDirectlyIsToldByItsWholeExitCode(): Promise<vo
   const ran = await runEngine(cmd, crashing);
   assert.equal(ran.failure, null, howItEnded(ran));
   assert.equal(ran.exitCode, 0xc0000005, howItEnded(ran));
-  assert.match(howItEnded(ran), /0xC0000005, an access violation/);
+  assert.match(howItEnded(ran), /0xC0000005, a crash on an access violation/);
 }
 
 /**
@@ -61304,9 +63473,11 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-project-test-judged-'));
   try {
     writeTree(project, {
-      // File logging off, which the engine's own log file would otherwise follow.
+      // File logging off, which the engine's own log file would otherwise follow. The Compatibility
+      // renderer, because Metal under Forward+ on a GitHub macOS runner prints "timeout waiting for
+      // fence" in most windowed runs, which fails the windowed suites here (docs/test-runs.md).
       'project.godot':
-        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Judged"\n\n[debug]\n\nfile_logging/enable_file_logging=false\n',
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Judged"\n\n[debug]\n\nfile_logging/enable_file_logging=false\n\n[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
       'tests/base_suite.gd':
         'class_name JudgedBaseSuite\nextends GdUnitTestSuite\n\n\nfunc test_shared() -> void:\n\tassert_bool(true).is_true()\n',
       'tests/derived_test.gd':
@@ -61631,7 +63802,7 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
             'win',
           );
           const why =
-            'A suite needs one when it declares const GDHARNESS_NEEDS_WINDOW: bool = true, or calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares it false and runs headless.';
+            'A suite needs one when it declares GDHARNESS_NEEDS_WINDOW or GDHARNESS_ACCESSIBILITY as true. It needs one too when it calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares GDHARNESS_NEEDS_WINDOW false and runs headless.';
           if (noDisplay) {
             // Headless, where the case asserting a window fails, and the answer says why.
             assert.deepEqual(
@@ -61640,7 +63811,7 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
                 false,
                 2,
                 false,
-                `res://win/shown_test.gd needs a window, as gdharness test reads it, and this machine has no display, so the run was headless and input events went nowhere. ${why} Run under xvfb-run to give it a display.`,
+                `res://win/shown_test.gd needs a window, as gdharness test reads it. This machine has no display, so the run was headless. Input events went nowhere. ${why} Run under xvfb-run to give it a display.`,
               ],
               JSON.stringify(shown),
             );
@@ -61651,10 +63822,48 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
                 true,
                 2,
                 true,
-                `res://win/shown_test.gd needs a window, as gdharness test reads it, so the run had one: the engine ran without --headless, at the size project.godot gives its viewport, with no sound${process.platform === 'win32' ? ', on a desktop of its own, where its window neither shows nor takes the keyboard' : ''}. ${why} res://win/quiet_test.gd says it runs headless and ran with the window too, since the run is one engine: run it without the windowed suites to run it headless.`,
+                `res://win/shown_test.gd needs a window, as gdharness test reads it, so the run had one. The engine ran without --headless, at the size project.godot gives its viewport, with no sound.${process.platform === 'win32' ? ' Its window sat on a desktop of its own, so it neither showed nor took the keyboard.' : ''} ${why} res://win/quiet_test.gd says it runs headless and ran with the window too, since the run is one engine: run it without the windowed suites to run it headless.`,
               ],
               JSON.stringify(shown),
             );
+            // A suite asking for the accessibility tree gets a window with the tree on, and its case
+            // sees the element the tree made for a Control. A window alone starts the engine without
+            // the flag. Only Linux shows that the flag is what builds the tree, since a GitHub
+            // Windows runner built it for a window alone.
+            writeTree(project, {
+              'tree/tree_test.gd': accessibilityTreeSuite('GDHARNESS_ACCESSIBILITY'),
+              'bare/bare_test.gd': accessibilityTreeSuite('GDHARNESS_NEEDS_WINDOW'),
+            });
+            const tree = jsonOf(
+              await call('project_test', { projectPath: project, path: 'tree' }, ENGINE_CALL_TIMEOUT_MS * 3),
+              'tree',
+            );
+            assert.deepEqual(
+              [get(tree, 'passed'), get(tree, 'tests'), get(tree, 'windowed')],
+              [true, 1, true],
+              JSON.stringify(tree),
+            );
+            assert.ok(
+              text(get(tree, 'windowNote')).includes(
+                ' The engine also ran with --accessibility always, since res://tree/tree_test.gd declares GDHARNESS_ACCESSIBILITY.',
+              ),
+              JSON.stringify(tree),
+            );
+            const bare = jsonOf(
+              await call('project_test', { projectPath: project, path: 'bare' }, ENGINE_CALL_TIMEOUT_MS * 3),
+              'bare',
+            );
+            assert.equal(get(bare, 'windowed'), true, JSON.stringify(bare));
+            assert.doesNotMatch(text(get(bare, 'windowNote')), /--accessibility/, JSON.stringify(bare));
+            if (process.platform === 'linux') {
+              assert.equal(
+                get(bare, 'passed'),
+                false,
+                `a window alone builds no tree: ${JSON.stringify(bare)}`,
+              );
+            }
+            rmSync(join(project, 'tree'), { recursive: true, force: true });
+            rmSync(join(project, 'bare'), { recursive: true, force: true });
           }
         } else {
           console.log(`project_test windowed case skipped: ${windowRefused}`);
@@ -63786,6 +65995,49 @@ async function testGdUnitRunner(): Promise<void> {
     );
   } finally {
     sweep(projectDir);
+  }
+}
+
+/**
+ * Suites named in another case are one suite where the file system ignores case, and two where it
+ * does not. A null entry is called null, not an object.
+ */
+function testTestPathsMatchTheFileSystemsCase(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-test-paths-case-'));
+  const ignoresCase = process.platform === 'win32' || process.platform === 'darwin';
+  try {
+    mkdirSync(join(project, 'tests'));
+    writeFileSync(join(project, 'tests', 'a_test.gd'), 'extends Node\n');
+    writeFileSync(join(project, 'tests', 'a_tests.gd'), 'extends Node\n');
+    assert.deepEqual(
+      testPathsIn(project, ['tests/a_test.gd', 'tests/A_TEST.gd']),
+      {
+        ok: true,
+        value: ignoresCase ? ['res://tests/a_test.gd'] : ['res://tests/a_test.gd', 'res://tests/A_TEST.gd'],
+      },
+      'one suite spelt in two cases, keeping the first spelling where case does not count',
+    );
+    assert.deepEqual(
+      testPathsIn(project, ['tests/a_test.gd', 'tests/a_tests.gd']),
+      { ok: true, value: ['res://tests/a_test.gd', 'res://tests/a_tests.gd'] },
+      'two different suites both stay',
+    );
+    assert.deepEqual(
+      testPathsIn(project, ['tests/a_test.gd', 'TESTS']),
+      {
+        ok: true,
+        value: ignoresCase ? ['res://TESTS'] : ['res://tests/a_test.gd', 'res://TESTS'],
+      },
+      'a suite inside a folder spelt in another case is dropped where case does not count',
+    );
+    const refused = testPathsIn(project, ['tests/a_test.gd', null]);
+    assert.ok(!refused.ok);
+    assert.equal(refused.reason, 'path[1] is null, not a suite file or a directory in the project.');
+    const scripts = scriptsToDiagnose(project, ['tests/a_test.gd', null]);
+    assert.ok(!scripts.ok);
+    assert.equal(scripts.reason, 'scriptPath[1] is null, not a script or a folder in the project.');
+  } finally {
+    sweep(project);
   }
 }
 
@@ -65977,6 +68229,22 @@ async function testAnUnknownArgumentSaysWhichServerSaysSo(): Promise<void> {
       /^project_settings get does not take project_path, no_such_key\. project_path is spelled projectPath\. It takes: /,
       snaked,
     );
+    // A word every object inherits is no op, so the refusal is not worded for one.
+    for (const inherited of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
+      const refusal =
+        textOf(
+          await server.request('tools/call', {
+            name: 'project_settings',
+            arguments: { projectPath: '/p', op: inherited, nosuchargument: 1 },
+          }),
+        ) ?? '';
+      assert.match(refusal, /^project_settings does not take nosuchargument\. It takes: /, refusal);
+      assert.match(
+        refusal,
+        /\bop \(get, set[^)]*\)/,
+        `${inherited} is not an op, so the ops are listed: ${refusal}`,
+      );
+    }
   } finally {
     await server.stop();
   }
@@ -66268,6 +68536,11 @@ function testACaptureIsSavedOnlyWhereItMayBe(): void {
     );
     assert.match(refused(join(project, 'screen.png')), /is inside the project/);
     assert.match(refused(join(outside, 'taken.png')), /already exists/);
+    assert.match(
+      refused(join(outside, 'taken.png', 'screen.png')),
+      /is a file, not a directory/,
+      'a path under a file',
+    );
   } finally {
     sweep(root);
   }
@@ -66396,6 +68669,7 @@ function testAMovieIsWrittenOnlyWhereACaptureCouldBe(): void {
     );
     writeFileSync(join(outside, 'kept.avi'), 'x');
     assert.match(refused(join(outside, 'kept.avi')), /already exists\. A movie is not written over a file/);
+    assert.match(refused(join(outside, 'kept.avi', 'trailer.avi')), /is a file, not a directory/);
     // The sequence's own files, not the name given, are what a PNG movie would write over.
     writeFileSync(join(outside, 'shot00000000.png'), 'x');
     assert.match(refused(join(outside, 'shot.png')), /would write .*shot00000000\.png, which already exists/);
@@ -69206,6 +71480,12 @@ function testTheNearestNamesKeepEveryOneThatOnlyAddsToTheWord(): void {
   );
   assert.deepEqual(nearestNames('a', ['a', 'ab']), ['a'], 'a one-letter word matches only itself');
   assert.deepEqual(nearestNames('menu', []), [], 'no names offer none');
+  // The picks the engine's GdhRead.nearest is held to, so both halves offer the same names.
+  const attacks = Array.from({ length: 300 }, (_, at) => `attack_${String(at).padStart(3, '0')}`);
+  assert.deepEqual(nearestNames('attack', attacks), attacks.slice(0, 12), 'at most twelve are offered');
+  const ties = 'abcdefghijklmnopqrstuvwyz'.split('').map((letter) => `${letter}ab`);
+  assert.deepEqual(nearestNames('xab', ties), ['aab', 'bab', 'cab'], 'equally near names keep their order');
+  assert.deepEqual(nearestNames('xab', ties.toReversed()), ['zab', 'yab', 'wab'], 'whichever it is');
   assert.equal(
     withNearestFiles(
       'Script file does not exist: res://ui/menu.gd',
@@ -72958,6 +75238,94 @@ async function testARenamedClassChangesItsUsesAndLeavesItsWords(): Promise<void>
     assert.match(loud, /# Told, because it is the whole of what Loud says\./, 'the comment keeps its word');
     assert.match(readFileSync(join(project, 'data.tres'), 'utf8'), /script_class="Phrasing"/);
     assert.equal(readFileSync(join(project, 'shadow.gd'), 'utf8'), RENAME_FIXTURE['shadow.gd']);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A class rename leaves a name that does not mean the class: a dictionary key written bare, a
+ * member a script inherits, and a parameter. A call's argument and a list's entry are the class.
+ */
+async function testAClassRenameLeavesKeysInheritedMembersAndParameters(): Promise<void> {
+  const project = renameProject();
+  const files: Record<string, string> = {
+    'keys.gd': [
+      'extends Node',
+      '',
+      'var table := {Told = 1, other = 2}',
+      'var later := {',
+      '\tother = 1,',
+      '\tTold = 2,',
+      '}',
+      'var listed := [1, Told == null]',
+      'var named := str(Told)',
+      '',
+    ].join('\n'),
+    'holder.gd': ['extends Node', '', 'const Told := 7', ''].join('\n'),
+    'heir.gd': ['extends "res://holder.gd"', '', 'func f() -> int:', '\treturn Told + 1', ''].join('\n'),
+    'params.gd': [
+      'extends Node',
+      '',
+      'func h(Told: int) -> int:',
+      '\treturn Told + 1',
+      '',
+      '',
+      'var lam := func(a: int, Told: int) -> int: return a + Told',
+      '',
+    ].join('\n'),
+  };
+  const lineOf = (file: string, needle: string): number =>
+    (files[file] ?? '').split('\n').findIndex((line) => line.includes(needle)) + 1;
+  try {
+    for (const [name, body] of Object.entries(files)) {
+      writeFileSync(join(project, name), body);
+    }
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'told.gd'),
+        symbol: 'Told',
+        newName: 'Phrasing',
+        newScriptPath: null,
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(outcome.ok, `the rename was refused: ${JSON.stringify(outcome)}`);
+    const { changed, left } = renameReadings(outcome.report);
+    const ours = (lines: readonly string[]): string[] =>
+      lines.filter((one) => Object.keys(files).some((file) => one.startsWith(`res://${file}:`)));
+    assert.deepEqual(
+      ours(changed),
+      [`res://keys.gd:${lineOf('keys.gd', 'listed')}`, `res://keys.gd:${lineOf('keys.gd', 'named')}`],
+      'a list entry and a call argument are the class',
+    );
+    const why = (file: string, line: number): string =>
+      asArray(get(outcome.report, 'leftAlone'))
+        .filter((one) => get(one, 'file') === `res://${file}` && get(one, 'line') === line)
+        .map((one) => text(get(one, 'why')))
+        .join(' | ');
+    for (const needle of ['table', '\tTold = 2']) {
+      const line = lineOf('keys.gd', needle);
+      assert.match(
+        why('keys.gd', line),
+        /\{Told = \.\.\.\} writes the string "Told" as a dictionary key, not the class/,
+        `keys.gd:${line}`,
+      );
+    }
+    assert.match(
+      why('heir.gd', 4),
+      /a class this script inherits from declares something named Told/,
+      'an inherited constant is left',
+    );
+    for (const line of [3, 4, 7]) {
+      assert.match(
+        why('params.gd', line),
+        /this script declares something of its own named Told/,
+        `a parameter, a function's or a lambda's, is left: params.gd:${String(line)}`,
+      );
+    }
+    assert.ok(left.includes('res://holder.gd:3:code'), `the constant itself is left: ${left.join(', ')}`);
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -81395,6 +83763,133 @@ async function testAWriteWaitsForAnotherProcesssTurn(): Promise<void> {
 }
 
 /**
+ * A turn that cannot be given back is reported, since its lock names this live server and every
+ * later write to the file would wait on it for good. A give-back that is refused once is tried
+ * again, and a write that threw gives its turn back and keeps its own error.
+ */
+async function testAWriteReportsATurnItCouldNotGiveBack(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-turns-'));
+  const file = join(project, 'floor.tscn');
+  const lock = writeLockOf(project, file);
+  try {
+    // Refused for good: the lock path is a folder, which a removal of a file never takes.
+    await assert.rejects(
+      inTurnFor(project, file, () => {
+        rmSync(lock, { force: true });
+        mkdirSync(join(lock, 'held'), { recursive: true });
+        return Promise.resolve('written');
+      }),
+      (error: unknown) =>
+        error instanceof Error &&
+        error.message.includes(`lock file ${lock} could not be removed`) &&
+        error.message.includes(`later writes to ${file}`),
+      'a turn that cannot be given back is named, with the lock to remove',
+    );
+    rmSync(lock, { recursive: true, force: true });
+
+    // Refused once and then free: tried again, and the write's answer is returned.
+    const answer = await inTurnFor(project, file, () => {
+      rmSync(lock, { force: true });
+      mkdirSync(join(lock, 'held'), { recursive: true });
+      setTimeout(() => {
+        rmSync(lock, { recursive: true, force: true });
+      }, 150);
+      return Promise.resolve('written');
+    });
+    assert.equal(answer, 'written', 'a give-back that succeeds on a later try is not an error');
+    assert.equal(existsSync(lock), false, 'and the lock is gone');
+
+    // A write that throws keeps its own error, and gives its turn back.
+    await assert.rejects(
+      inTurnFor(project, file, () => Promise.reject(new Error('the write failed'))),
+      /the write failed/,
+    );
+    assert.equal(existsSync(lock), false, 'a failed write gives its turn back');
+    assert.equal(
+      await inTurnFor(project, file, () => Promise.resolve('next')),
+      'next',
+      'and the next one runs',
+    );
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A whole-file write answers at once for a target that refuses for good, and clears the partial
+ * file a dead writer left beside its note in any folder, never one a live process may be writing.
+ */
+async function testAWholeFileWriteAnswersAtOnceWhereTheTargetRefusesAndSweepsDeadPartials(): Promise<void> {
+  const folder = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-whole-'));
+  try {
+    // A file that does not exist, and one that does.
+    const note = join(folder, 'note.json');
+    assert.equal(writeWhole(note, 'first'), true);
+    assert.equal(readFileSync(note, 'utf8'), 'first', 'a new file is written');
+    assert.equal(writeWhole(note, 'second'), true);
+    assert.equal(readFileSync(note, 'utf8'), 'second', 'an existing file is replaced whole');
+    assert.deepEqual(readdirSync(folder), ['note.json'], 'with no partial file left');
+
+    // A folder that does not exist, and a target that is a folder or read-only: each answers false
+    // without waiting out a reader that is not there, and leaves no partial file.
+    const timed = (run: () => boolean): { answer: boolean; ms: number } => {
+      const from = Date.now();
+      return { answer: run(), ms: Date.now() - from };
+    };
+    const missing = timed(() => writeWhole(join(folder, 'absent', 'note.json'), 'x'));
+    assert.deepEqual([missing.answer, missing.ms < 500], [false, true], 'a missing folder answers false');
+    mkdirSync(join(folder, 'a-directory'));
+    const asFolder = timed(() => writeWhole(join(folder, 'a-directory'), 'x'));
+    assert.deepEqual(
+      [asFolder.answer, asFolder.ms < 500],
+      [false, true],
+      `a folder answers false at once: ${String(asFolder.ms)} ms`,
+    );
+    // Only Windows refuses a rename over a read-only file, so elsewhere there is nothing to refuse.
+    const refusedNames = ['a-directory', 'note.json'];
+    if (process.platform === 'win32') {
+      const locked = join(folder, 'read-only.json');
+      writeFileSync(locked, 'old');
+      chmodSync(locked, 0o444);
+      const asLocked = timed(() => writeWhole(locked, 'new'));
+      chmodSync(locked, 0o666);
+      assert.deepEqual(
+        [asLocked.answer, asLocked.ms < 500],
+        [false, true],
+        `a read-only file answers false at once: ${String(asLocked.ms)} ms`,
+      );
+      assert.equal(readFileSync(locked, 'utf8'), 'old', 'and keeps its text');
+      refusedNames.push('read-only.json');
+    }
+    assert.deepEqual(
+      readdirSync(folder).toSorted(),
+      refusedNames.toSorted(),
+      'no refused write leaves a partial file',
+    );
+
+    // A dead writer's partial goes at the next write to that note, a live process's stays.
+    const gone = spawnHidden(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    const live = spawnHidden(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], { stdio: 'ignore' });
+    try {
+      const ended = new Promise((resolved) => gone.once('exit', resolved));
+      await ended;
+      const deadPartial = join(folder, `other.json.${String(gone.pid)}.partial`);
+      const livePartial = join(folder, `other.json.${String(live.pid)}.partial`);
+      const unrelated = join(folder, `unrelated.json.${String(gone.pid)}.partial`);
+      for (const one of [deadPartial, livePartial, unrelated]) writeFileSync(one, 'half');
+      assert.equal(writeWhole(join(folder, 'other.json'), 'whole'), true);
+      assert.equal(existsSync(deadPartial), false, "a dead writer's partial file is removed");
+      assert.equal(existsSync(livePartial), true, "a live process's partial file is kept");
+      assert.equal(existsSync(unrelated), true, 'and so is the partial of another note');
+    } finally {
+      live.kill();
+    }
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+}
+
+/**
  * editor_capture shows what a scene's @tool script draws only in the editor. A game asked to check
  * such a sample had no way to see it: runtime_capture needs a game, which never runs the editor
  * branch, and a headless editor draws nothing. A hidden editor on Windows is a window on a desktop
@@ -84903,6 +87398,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARescanAsTheEditorOpensFindsNothingMissing,
   testAScriptIsReadTheWayItsTokenizerReadsIt,
   testARenamedClassChangesItsUsesAndLeavesItsWords,
+  testAClassRenameLeavesKeysInheritedMembersAndParameters,
   testALongLineIsQuotedAroundTheName,
   testARenameRefusesANameAlreadyTaken,
   testANameOnEveryObjectIsReadOnlyFromTheEnginesAnswer,
@@ -84970,6 +87466,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAHeadlessWriteOfScriptedNodesSavesWhatTheEditorWould,
   testTwoWritesToOneSceneAtOnceBothLand,
   testAWriteWaitsForAnotherProcesssTurn,
+  testAWriteReportsATurnItCouldNotGiveBack,
+  testAWholeFileWriteAnswersAtOnceWhereTheTargetRefusesAndSweepsDeadPartials,
   testTheEditorsViewShowsWhatToolScriptsDrawThere,
   testAnUnusedHiddenEditorQuitsAndOpensAgain,
   testACallWaitsOutTheEditorsProgressTask,
@@ -85024,6 +87522,11 @@ const TESTS: (() => void | Promise<void>)[] = [
   testASupersededServerStandsDown,
   testAPredecessorThatKeepsThePortIsNotWaitedOnForEver,
   testABridgeOnNoPortSaysSo,
+  testABridgeStopsPromptlyWithASilentEditor,
+  testABridgeOnAnIpv6HostTakesItsEditors,
+  testAProcessTurnedAwayRaisesNoConnection,
+  testAFrameFromASocketBeingClosedLeavesTheLiveEditor,
+  testAReplyOfTheWrongShapeIsRefusedAtOnce,
   testATurnedAwayEditorLeavesTheServerUp,
   testATestServerTakesNoRealEditorsPort,
   testAProjectUpgradedUnderTheServerIsSaid,
@@ -85041,6 +87544,9 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnErrorOfSeveralLinesIsOneEntry,
   testAMarkTakesOnlyTheErrorOfItsFile,
   testALongUnfinishedLineIsHeldInLinearTime,
+  testConsoleLinesOfTheTestRunnerAreReadInLinearTime,
+  testAReportIsReadWholeOrRefusedAndRowsAreKnown,
+  testPrintedValuesAreReadBackInLinearTimeAndEachToItsOwnFailure,
   testTheDebuggerNamesTheErrorsItsCallsRaise,
   testTheProfilerReadsWhatTheEngineSends,
   testAFrameReadHalfwayAddsNothingToTheTotals,
@@ -85216,8 +87722,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheProjectPathSentenceNamesEveryCallThatTakesNone,
   testAListingFailureSaysWhichFailureItWas,
   testThePowerShellHelperGoesWithItsProcess,
+  testWindowsAskKeepsEachHelpersAnswersApartAndDoesNotChargeAStart,
   testEveryArgumentInTheReferenceIsDescribed,
   testTheHeadlessListNamesEveryHeadlessTool,
+  testAToolSectionSaysWhatItChangesAndEachOpLineSaysWhatItTakes,
   testTheReferencePrintsEveryShapeOfType,
   testTheSkillNamesEverySettingTheAddonsRead,
   testTheSkillNamesTheSettingThatServesAScriptRun,
@@ -85292,6 +87800,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEditorWritesItsConsoleWhereTheServerLooks,
   testAUidCacheNamingAFileGoneIsMended,
   testAStartMendsOnlyTheProjectItsOwnArgumentsName,
+  testASidecarWithNoFileDeclaresNoUid,
   testAMovedAutoloadBootsFromWhereItIs,
   testACancelledCallEndsTheEngineItStarted,
   testAnErrorReportOutlivesItsGameForAnHour,
@@ -85310,6 +87819,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameThatDoesNotWelcomeIsRefused,
   testAGameOnEveryInterfaceIsReached,
   testACaptureTheWaitRanOutOnKeepsItsFolder,
+  testAnEditorCaptureIsHeldToTheCapturePlaceRules,
   testACaptureSendsTheSmallerPicture,
   testCallsSentTogetherWaitTheirTurnAtTheGame,
   testACallTheSystemHoldsIsNotSent,
@@ -85385,6 +87895,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunOfAnotherProjectOutlivesItsServer,
   testTheResourcesReadOnlyTheProject,
   testGdUnitRunner,
+  testTestPathsMatchTheFileSystemsCase,
   testAnUnresolvedClassIsNamedWhateverLettersItHolds,
   testTheShippedRunnerRunsAFileOfSuites,
   testAnEngineRunIsReadCaseByCase,
@@ -85395,6 +87906,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testGdUnitFailingOnPushErrorsIsSaid,
   testACrashIsReadFromTheCrashHandlersReport,
   testARowSkippedForItsDataIsNoPass,
+  testEveryReaderOfTheConsoleKnowsALineAlike,
+  testAWindowsExitStatusIsNamedTheSameEverywhere,
+  testAnEnginesEndIsJudgedByItsSignalItsOrphansAndItsVersion,
+  testNestedErrorsAndDeclaredErrorsAreRead,
   testTheScriptsGodotNeverFreesAreFound,
   testAnExportAnnotationHoldingACallIsFound,
   testEngineSlotsAreFreedOnlyWhenTheirHolderHasGone,
@@ -85408,11 +87923,17 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineOnASlotLendsItToWhatItStarts,
   testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded,
   testARestartedCountDoesNotTakeWorkFromBeforeTheRestart,
+  testASuiteIsFoundUnderAnySpellingOfItsPath,
+  testAnInnerClassBaseIsFollowedToTheInnerClass,
   testSuitesAreFoundAndDealtByWhatTheyCost,
+  testASuiteAskingForTheAccessibilityTreeGetsAWindowWithItOn,
   testASuiteDeclarationCanNameAClassConstant,
   testAHiddenEditorStartsOnAnEmptyScriptReference,
   testAKeptScriptReferenceOfNoBytesIsMadeAgainNotPlaced,
   testASuitesInputsAreWhatItsEngineLoaded,
+  testASuiteDependsOnEveryFileItsScriptsAndResourcesNameInAnySpelling,
+  testAComputedReadDependsOnFoldersTheEngineIgnoresAndLinksLeadTo,
+  testAnInputChangedDuringARunIsSeenWhateverItsTimeStamp,
   testAReadsCallersAreThoseThatCanReachIt,
   testAFileGoneBetweenTheListingAndTheReadIsPassedOver,
   testTheCompileCheckAndUnattributedFaultsAreJudged,
@@ -85428,9 +87949,12 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAYamlConfigWeCannotReadIsRefusedAndOneWithEmptyKeysIsWritten,
   testAConfigPinNamesOnlyGdharnessWhateverTheEditorWroteTheFileAs,
   testTheTestHelpersWaitStepAndPress,
+  testSpreadRefusesAnEmptyValueAndASceneThatIsNoFile,
+  testASpreadRunNamesHowEachEngineEndedAndHowFarEachWorkerIs,
   testASpreadBenchGathersTheTableItPlaysAlone,
   testASuiteRunHasNoSoundWhicheverWayItStarts,
   testTheTestCommandRunsAndJudgesAProject,
+  testAScriptEditedDuringTheImportIsFollowedAsTheEngineLoadedIt,
   testARunOfSomeCasesKeepsNoPassForTheSuite,
   testAResultFileHoldsTheRunThatWroteIt,
   testTheTestCommandDealsAndReportsARun,
@@ -85493,6 +88017,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStopThatLandsWhileAttachAsksIsTheAnswer,
   testAContinueByAnotherClientIsKnownHere,
   testBreakpointsAreSentAgainBeforeAPlay,
+  testHeldBreakpointsBelongToTheirProject,
   testTheBreakpointNoteIsTheProjects,
   testEveryNoteIsReplacedWholeAndNeverRewrittenInPlace,
   testABreakpointNoteWithBackslashesCannotLeaveTheProject,
@@ -85525,6 +88050,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testEditorOpenRefusesAnOpenUnderWayAndAnEngineThatWillNotStart,
   testEditorOpenOptionsRefuseEachMisuse,
   testAnEditorOfAnotherReleaseIsAskedNothing,
+  testAWriteBesideAnEditorOfAnotherReleaseIsSaidToBeWritten,
   testACurrentAddonLackingAnOpSaysAScriptFailedToLoad,
   testAServerEndsWithAnEditorStillOnTheBridge,
   testABadPortIsReported,
@@ -85580,6 +88106,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAFreshServerAsksRatherThanInheritingAnAnswer,
   testTheUpdateWindowTracksHowOftenThisShips,
   testTheRegistryIsHttpsOrNpm,
+  testAMirrorWithAQueryOrFragmentStillNamesTheDocument,
+  testPrereleasesAndALeadingVOrderAsSemanticVersionsDo,
+  testTheUpdateCheckKeepsItsCacheWithTheOthersAndDistrustsAFutureAnswer,
+  testARegistryThatIsDownIsAskedOnADoublingWindow,
 ];
 
 /**

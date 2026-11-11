@@ -35,8 +35,9 @@ import {
 import { diedAsItStarted, startedUntilItRuns } from './engine-run.js';
 import { nameSlotEngineOf, onTheSlot } from './engine-slots.js';
 import { countedBy, nowSeconds, type Sample, Spent, sampled, watching } from './engine-spent.js';
-import { errorCode, errorMessage, Refusal } from './errors.js';
+import { EngineUsageError, errorCode, errorMessage } from './errors.js';
 import { mainCheckoutOf } from './harnesses.js';
+import { wholeFlag } from './launch.js';
 import { LOG_LIMIT_BYTES, readLog } from './log-read.js';
 import { relativeWithin } from './paths.js';
 import { keepPipelineCache, seedPipelineCache } from './pipeline-cache.js';
@@ -45,16 +46,13 @@ import { askProcessTable } from './process-table.js';
 import { type ChildProcess, runHidden, spawnHidden } from './spawn.js';
 import { type EngineEnd, type RunPrinted, readRun } from './suite-judge.js';
 
-/** A command line `test` or `spread` cannot act on, which the CLI answers with exit code 2. */
-export class EngineUsageError extends Refusal {}
-
 /** Most engines a run starts, whatever the machine has. */
 export const MOST_ENGINES = 4;
 /** The least time an engine may print nothing before it is ended. */
 export const SILENCE_FLOOR_SECONDS = 300;
 
 /** The least exit code that is a Windows exception status, such as 0xC0000005, read unsigned. */
-const WINDOWS_EXCEPTION = 0xc0000000;
+export const WINDOWS_EXCEPTION = 0xc0000000;
 /** Memory left to the rest of the machine, and what each engine is taken to need. */
 const MEMORY_KEPT = 4 * 1024 ** 3;
 const MEMORY_PER_ENGINE = 1.5 * 1024 ** 3;
@@ -70,18 +68,6 @@ const SCAN_BYTES = 1024 * 1024;
 
 export function plural(count: number, noun: string): string {
   return `${String(count)} ${noun}${count === 1 ? '' : 's'}`;
-}
-
-/** [param value] as a whole number above 0, null when [param flag] was not given. */
-export function wholeFlag(value: string | undefined, flag: string): number | null {
-  if (value === undefined) {
-    return null;
-  }
-  const number = Number(value);
-  if (!Number.isInteger(number) || number < 1) {
-    throw new EngineUsageError(`${flag} takes a whole number above 0, not ${value}.`);
-  }
-  return number;
 }
 
 export function godotNamed(value: string | undefined, cwd: string): string | null {
@@ -233,7 +219,7 @@ export function roomForAnother(available: number, starting: number): boolean {
 }
 
 /** The memory the machine can give engines, how the line on room words it, and why a reading failed. */
-export interface MemoryRoom {
+interface MemoryRoom {
   readonly bytes: number;
   readonly said: string;
   readonly unread?: string;

@@ -20,7 +20,7 @@ import { isRecord, isStringList } from './records.js';
 import { type ChildProcess, spawnHidden } from './spawn.js';
 
 /** What to start, and for a run, where its output goes and how its record reads. */
-export interface OutsideSpec {
+interface OutsideSpec {
   readonly command: string;
   readonly args: readonly string[];
   /** The environment it starts with. Absent is the launcher's own, which is the server's. */
@@ -211,7 +211,7 @@ function sentSpecOf(value: unknown): SentSpec | null {
 }
 
 /** What the launcher handed back: the pid of what it started, or why it could not. */
-export type Launched = { readonly pid: number } | { readonly error: string };
+type Launched = { readonly pid: number } | { readonly error: string };
 
 /** Beside the bundle that imports this, which is where the build puts it. */
 export const KEEPER_SCRIPT = fileURLToPath(new URL('./keeper.js', import.meta.url));

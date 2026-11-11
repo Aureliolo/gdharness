@@ -15,7 +15,31 @@ import { installedEditorDigest, shippedEditorDigest } from './setup.js';
 const DEFAULT_PORT = 6505;
 const DEFAULT_HOST = '127.0.0.1';
 const KEEPALIVE_INTERVAL_MS = 10_000;
+/** How long a socket asked to close has to answer before it is ended, as the language server's is. */
+const CLOSE_GRACE_MS = 1000;
 const SECOND_CONNECTION_CLOSE_CODE = 4000;
+
+/** How a tool_result's fields are typed, the optional ones being absent or of that type. */
+const REPLY_FIELDS: readonly (readonly [field: string, type: 'string' | 'boolean', optional: boolean])[] = [
+  ['id', 'string', false],
+  ['success', 'boolean', false],
+  ['error', 'string', true],
+  ['busy', 'boolean', true],
+  ['busyWith', 'string', true],
+  ['progress', 'string', true],
+  ['closing', 'boolean', true],
+];
+
+/** What is wrong with the fields of the tool_result [param message], one phrase a field. */
+function replyFaults(message: Readonly<Record<string, unknown>>): string[] {
+  return REPLY_FIELDS.flatMap(([field, type, optional]) => {
+    const value = message[field];
+    if (typeof value === type || (optional && value === undefined)) {
+      return [];
+    }
+    return [`${field} is ${value === undefined ? 'missing' : JSON.stringify(value)}, not a ${type}`];
+  });
+}
 
 /** The most a WebSocket close frame carries as its reason, in UTF-8 bytes. */
 const MOST_CLOSE_REASON_BYTES = 123;
@@ -62,7 +86,7 @@ const OTHER_PROJECT_CLOSE_CODE = 4001;
 const ONE_SHOT_CLOSE_CODE = 4002;
 
 /** What the bridge last turned away as a one-shot engine run, for editor_status to say. */
-export interface TurnedAway {
+interface TurnedAway {
   readonly pid: number;
   readonly option: string;
   readonly at: Date;
@@ -72,7 +96,7 @@ export interface TurnedAway {
  * The option that makes a process one job that quits, null for none, undefined when it cannot be
  * told. Given to the server's own bridge. A bridge without it takes every editor that greets.
  */
-export type OneShotReader = (pid: number) => Promise<string | null | undefined>;
+type OneShotReader = (pid: number) => Promise<string | null | undefined>;
 
 /** The editor addon reads GDHARNESS_BRIDGE_PORT too, so the two agree by construction. */
 function resolveDefaultBridgePort(): number {
@@ -172,13 +196,6 @@ function servedPort(said: number): number | undefined {
   return Number.isInteger(said) && said > 0 && said <= 65535 ? said : undefined;
 }
 
-interface BridgeEventMap {
-  tool_start: { tool: string; id: string; args: Record<string, unknown> };
-  tool_end: { tool: string; id: string; success: boolean; duration: number };
-  godot_connected: { projectPath?: string | undefined };
-  godot_disconnected: Record<string, never>;
-}
-
 interface PendingRequest {
   toolName: string;
   timeout: NodeJS.Timeout;
@@ -192,7 +209,7 @@ interface PendingRequest {
 }
 
 /** How a request to the editor is sent. */
-export interface InvokeOptions {
+interface InvokeOptions {
   /**
    * False for a question the caller waits on only briefly and then gives up on, such as the ones
    * editor_status asks. Such a question is not reported as pending: an editor busy importing
@@ -593,7 +610,7 @@ export class GodotBridge extends EventEmitter {
     // port is the failure that costs a whole session to find, and silence is what hides it.
     if (this.socket) {
       try {
-        this.socket.close();
+        GodotBridge.closeWithin(this.socket);
       } catch (error) {
         this.log('debug', `Godot socket did not close cleanly: ${errorMessage(error)}`);
       }
@@ -604,18 +621,18 @@ export class GodotBridge extends EventEmitter {
       const godotWss = this.godotWss;
       for (const client of godotWss.clients) {
         try {
-          client.close();
+          GodotBridge.closeWithin(client);
         } catch (error) {
           this.log('debug', `Godot client did not close cleanly: ${errorMessage(error)}`);
         }
       }
-      closeTasks.push(this.closeWebSocketServer(godotWss));
+      closeTasks.push(this.closeServer(godotWss));
       this.godotWss = null;
     }
 
     if (this.httpServer) {
       const httpServer = this.httpServer;
-      closeTasks.push(this.closeHttpServer(httpServer));
+      closeTasks.push(this.closeServer(httpServer));
       this.httpServer = null;
     }
 
@@ -778,34 +795,33 @@ export class GodotBridge extends EventEmitter {
   }
 
   private getRequestPathname(url: string | undefined): string {
+    // Only the path is read, so the base names no host. An IPv6 host such as ::1 is no valid one.
     try {
-      return new URL(url ?? '/', `http://${this.host}:${this.port}`).pathname;
+      return new URL(url ?? '/', 'http://localhost').pathname;
     } catch {
       return '/';
     }
   }
 
-  private closeWebSocketServer(server: WebSocketServer): Promise<void> {
-    return new Promise((resolve) => {
-      let settled = false;
-      const finish = () => {
-        if (!settled) {
-          settled = true;
-          resolve();
-        }
-      };
-
-      try {
-        server.close(() => {
-          finish();
-        });
-      } catch {
-        finish();
-      }
+  /**
+   * Asks [param socket] to close, and ends it if it has not answered within [constant CLOSE_GRACE_MS].
+   * An editor busy importing answers nothing, and `ws` would wait thirty seconds for its close frame,
+   * which held the server's exit as long.
+   */
+  private static closeWithin(socket: WebSocket): void {
+    socket.close();
+    if (socket.readyState === WebSocket.CLOSED) {
+      return;
+    }
+    const ended = setTimeout(() => {
+      socket.terminate();
+    }, CLOSE_GRACE_MS);
+    socket.once('close', () => {
+      clearTimeout(ended);
     });
   }
 
-  private closeHttpServer(server: http.Server): Promise<void> {
+  private closeServer(server: { close(callback: () => void): unknown }): Promise<void> {
     return new Promise((resolve) => {
       let settled = false;
       const finish = () => {
@@ -838,10 +854,16 @@ export class GodotBridge extends EventEmitter {
     };
 
     this.startKeepalive();
+    // godot_connected waits for the greeting: a process turned away once it greets, such as a
+    // gate's --import, is no editor that came.
     this.log('info', 'Godot editor connected');
-    this.emitBridgeEvent('godot_connected', { projectPath: this.connectionInfo.projectPath });
 
     nextSocket.on('message', (data) => {
+      // A socket already turned away or replaced can still deliver a frame while it closes, and it
+      // speaks for its own process, not the live one.
+      if (nextSocket !== this.socket) {
+        return;
+      }
       this.handleRawMessage(data);
     });
 
@@ -859,30 +881,22 @@ export class GodotBridge extends EventEmitter {
     });
   }
 
-  /**
-   * `ws` hands a frame over as one of three shapes, and only one of them survives a bare
-   * `toString()`: an array of chunks comma-joins into nonsense and an ArrayBuffer renders as
-   * "[object ArrayBuffer]". Both then fail to parse, so a payload large enough to be
-   * fragmented (a deep scene tree, a base64 screenshot) is dropped and its caller waits for
-   * the timeout. Which shape arrives depends on size, so the failure is intermittent.
-   */
-  private static rawDataToString(data: RawData): string {
-    if (Array.isArray(data)) return Buffer.concat(data).toString('utf8');
-    if (Buffer.isBuffer(data)) return data.toString('utf8');
-    return Buffer.from(data).toString('utf8');
-  }
-
   private handleRawMessage(data: RawData): void {
     let parsed: unknown;
 
     try {
-      parsed = JSON.parse(GodotBridge.rawDataToString(data));
+      // The server keeps ws's default binaryType, under which every message, however it was
+      // fragmented, arrives as one Buffer. The other shapes come only with another binaryType.
+      parsed = JSON.parse(Buffer.isBuffer(data) ? data.toString('utf8') : '');
     } catch (error) {
       this.log('error', `Invalid JSON from Godot: ${errorMessage(error)}`);
       return;
     }
 
     if (!this.isIncomingMessage(parsed)) {
+      if (this.refusedUnreadable(parsed)) {
+        return;
+      }
       this.log('warn', 'Ignoring unknown Godot message payload');
       return;
     }
@@ -903,12 +917,6 @@ export class GodotBridge extends EventEmitter {
         this.pendingRequests.delete(message.id);
         const duration = Date.now() - pending.startedAt;
         this.log('debug', `Tool ${pending.toolName} finished in ${duration}ms`);
-        this.emitBridgeEvent('tool_end', {
-          tool: pending.toolName,
-          id: message.id,
-          success: message.success,
-          duration,
-        });
 
         if (message.success) {
           pending.resolve(message.result);
@@ -929,7 +937,12 @@ export class GodotBridge extends EventEmitter {
       case 'godot_ready':
         if (this.connectionInfo) {
           if (this.belongsElsewhere(message.project_path)) {
-            this.elsewhereUnlessOneShot(message.project_path, message.editor_pid, message.opened_by_a_server);
+            this.elsewhereUnlessOneShot(
+              message.project_path,
+              message.editor_pid,
+              message.opened_by_a_server,
+              this.connectionInfo,
+            );
             return;
           }
           this.connectionInfo.projectPath = withoutTrailingSeparator(message.project_path);
@@ -945,7 +958,7 @@ export class GodotBridge extends EventEmitter {
             this.connectionInfo.editorPid =
               typeof message.editor_pid === 'number' ? message.editor_pid : undefined;
             this.connectionInfo.greeted = true;
-            this.emitBridgeEvent('godot_connected', { projectPath: message.project_path });
+            this.emit('godot_connected');
             return;
           }
           this.connectionInfo.addonVersion = message.addon_version;
@@ -961,10 +974,10 @@ export class GodotBridge extends EventEmitter {
           this.log('info', `Godot ready: ${message.project_path}`);
           this.connectionInfo.greeted = true;
           if (!message.opened_by_a_server && this.oneShotReader !== null) {
-            this.identify(message.editor_pid);
+            this.identify(message.editor_pid, this.connectionInfo, this.oneShotReader);
             return;
           }
-          this.emitBridgeEvent('godot_connected', { projectPath: message.project_path });
+          this.emit('godot_connected');
         }
         return;
 
@@ -1014,12 +1027,6 @@ export class GodotBridge extends EventEmitter {
         counted,
       });
 
-      this.emitBridgeEvent('tool_start', {
-        tool: toolName,
-        id: requestId,
-        args,
-      });
-
       try {
         this.sendMessage(message);
       } catch (error) {
@@ -1032,7 +1039,7 @@ export class GodotBridge extends EventEmitter {
 
   /** Tells the connected editor calls are being made, so it does not quit as unused. */
   public noteActivity(): void {
-    if (this.isConnected() && this.socket?.readyState === WebSocket.OPEN) {
+    if (this.isConnected()) {
       this.sendMessage({ type: 'activity' });
     }
   }
@@ -1129,16 +1136,16 @@ export class GodotBridge extends EventEmitter {
     theirProject: string,
     pid: number | undefined,
     openedByAServer: boolean,
+    info: GodotConnectionInfo,
   ): void {
     const known = pid === undefined ? undefined : this.oneShots.get(pid);
     if (pid !== undefined && known !== undefined) {
       this.turnAway(pid, known);
       return;
     }
-    const info = this.connectionInfo;
     const socket = this.socket;
     const reader = this.oneShotReader;
-    if (pid === undefined || openedByAServer || info === null || reader === null) {
+    if (pid === undefined || openedByAServer || reader === null) {
       this.sendElsewhere(theirProject);
       return;
     }
@@ -1166,18 +1173,13 @@ export class GodotBridge extends EventEmitter {
    * A command line that cannot be read is taken as an editor's, which is what every connection was
    * before this asked: the bridge errs towards serving a real editor rather than refusing one.
    */
-  private identify(pid: number): void {
+  private identify(pid: number, info: GodotConnectionInfo, reader: OneShotReader): void {
     const known = this.oneShots.get(pid);
     if (known !== undefined) {
       this.turnAway(pid, known);
       return;
     }
-    const info = this.connectionInfo;
     const socket = this.socket;
-    const reader = this.oneShotReader;
-    if (info === null || reader === null) {
-      return;
-    }
     info.identifying = true;
     void reader(pid)
       .catch(() => undefined)
@@ -1192,7 +1194,7 @@ export class GodotBridge extends EventEmitter {
         }
         info.identifying = false;
         this.log('info', `Godot editor identified: pid ${pid}`);
-        this.emitBridgeEvent('godot_connected', { projectPath: info.projectPath });
+        this.emit('godot_connected');
       });
   }
 
@@ -1207,8 +1209,8 @@ export class GodotBridge extends EventEmitter {
     run?.close(ONE_SHOT_CLOSE_CODE, closeReason(said, 'start'));
   }
 
-  private handleDisconnect(disconnectedSocket: WebSocket | null, reason: Error): void {
-    if (disconnectedSocket && this.socket && disconnectedSocket !== this.socket) {
+  private handleDisconnect(disconnectedSocket: WebSocket, reason: Error): void {
+    if (this.socket && disconnectedSocket !== this.socket) {
       this.log('debug', 'Ignoring stale Godot socket disconnect event');
       return;
     }
@@ -1217,14 +1219,9 @@ export class GodotBridge extends EventEmitter {
 
     this.socket = null;
     this.connectionInfo = null;
-    this.emitBridgeEvent('godot_disconnected', {});
 
     this.rejectAllPending(reason);
     this.resourceQueues.clear();
-  }
-
-  private emitBridgeEvent<K extends keyof BridgeEventMap>(eventName: K, payload: BridgeEventMap[K]): void {
-    this.emit(eventName, payload);
   }
 
   private rejectAllPending(error: Error): void {
@@ -1291,15 +1288,30 @@ export class GodotBridge extends EventEmitter {
       return typeof message['project_path'] === 'string';
     }
 
-    return (
-      typeof message['id'] === 'string' &&
-      typeof message['success'] === 'boolean' &&
-      (message['error'] === undefined || typeof message['error'] === 'string') &&
-      (message['busy'] === undefined || typeof message['busy'] === 'boolean') &&
-      (message['busyWith'] === undefined || typeof message['busyWith'] === 'string') &&
-      (message['progress'] === undefined || typeof message['progress'] === 'string') &&
-      (message['closing'] === undefined || typeof message['closing'] === 'boolean')
+    return replyFaults(message).length === 0;
+  }
+
+  /**
+   * Refuses the request a tool_result answers when the reply's fields are the wrong type, and
+   * answers whether it did. Dropped, the caller waited out its whole timeout and was told the
+   * editor was busy.
+   */
+  private refusedUnreadable(message: unknown): boolean {
+    if (!isRecord(message) || message['type'] !== 'tool_result' || typeof message['id'] !== 'string') {
+      return false;
+    }
+    const pending = this.pendingRequests.get(message['id']);
+    if (pending === undefined) {
+      return false;
+    }
+    clearTimeout(pending.timeout);
+    this.pendingRequests.delete(message['id']);
+    pending.reject(
+      new Error(
+        `The editor answered ${pending.toolName} with a reply gdharness cannot read: ${replyFaults(message).join(', ')}. Sending the call again gets the same reply.`,
+      ),
     );
+    return true;
   }
 
   private log(level: 'debug' | 'info' | 'warn' | 'error', message: string): void {

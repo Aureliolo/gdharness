@@ -480,6 +480,22 @@ const WHOLE_CLASS_NAME =
 const WHOLE_MEMBER_NAME =
   "the whole string is the member's name, as call, connect, has_method, get, set or a subscript on an object take it, and it was not changed: if it names this member, it no longer finds it after the rename, and no compile says so";
 
+/**
+ * Whether [param name] at [param offset] is a key of a dictionary in its second form, `{Foe = 1}`,
+ * where the key is the string "Foe" and no name at all.
+ */
+function isWrittenKey(text: string, offset: number, name: string): boolean {
+  let before = offset - 1;
+  while (before >= 0 && /\s/.test(text[before] ?? '')) {
+    before -= 1;
+  }
+  let after = offset + name.length;
+  while (after < text.length && (text[after] === ' ' || text[after] === '\t')) {
+    after += 1;
+  }
+  return (text[before] === '{' || text[before] === ',') && text[after] === '=' && text[after + 1] !== '=';
+}
+
 /** Why a script names the old name as something of its own, if it does, for the mentions there. */
 function declaresItsOwn(script: Script, name: string, except: number | null): boolean {
   return script
@@ -493,7 +509,7 @@ function declaresItsOwn(script: Script, name: string, except: number | null): bo
     );
 }
 
-export interface ClassRenameArguments {
+interface ClassRenameArguments {
   readonly texts: readonly ProjectText[];
   readonly scripts: ReadonlyMap<string, Script>;
   readonly declaring: Script;
@@ -509,14 +525,29 @@ export function planClassRename(args: ClassRenameArguments): Plan {
   const { texts, scripts, declaring, oldName, newName } = args;
   const plan = new PlanBuilder(oldName, newName);
   const declarationAt = declaring.shape.className?.offset ?? null;
+  const graph = new ClassGraph(scripts, declaredIn(scripts));
+  // A member a script inherits hides the class from a bare name, as one it declares itself does.
+  const inherits = (script: Script): boolean =>
+    [...graph.nodes.values()].some(
+      (node) =>
+        node.file === script.path &&
+        graph.ancestors(node.id).some((id) => graph.declaration(id, oldName) !== undefined),
+    );
+  const shadows = (script: Script, except: number | null): boolean =>
+    declaresItsOwn(script, oldName, except) || inherits(script);
   for (const script of scripts.values()) {
     const ownDeclaration = script.path === declaring.path ? declarationAt : null;
-    const shadowed = declaresItsOwn(script, oldName, ownDeclaration);
+    const shadowed = shadows(script, ownDeclaration);
     for (const occurrence of script.occurrences(oldName)) {
       if (occurrence.kind === 'code') {
         if (occurrence.offset === ownDeclaration) {
           plan.edit(script.path, occurrence.offset, 'declaration');
-        } else if (!shadowed && !occurrence.afterDot && occurrence.declaredAs === null) {
+        } else if (
+          !shadowed &&
+          !occurrence.afterDot &&
+          occurrence.declaredAs === null &&
+          !isWrittenKey(script.text, occurrence.offset, oldName)
+        ) {
           plan.edit(script.path, occurrence.offset, 'code');
         }
       } else if (occurrence.kind === 'doc') {
@@ -554,6 +585,12 @@ export function planClassRename(args: ClassRenameArguments): Plan {
     if (occurrence.declaredAs !== null || declaresItsOwn(script, oldName, null)) {
       return `this script declares something of its own named ${oldName}, so which uses mean the class cannot be told from the text`;
     }
+    if (inherits(script)) {
+      return `a class this script inherits from declares something named ${oldName}, so a bare ${oldName} here means that, not the class`;
+    }
+    if (isWrittenKey(script.text, occurrence.offset, oldName)) {
+      return `{${oldName} = ...} writes the string "${oldName}" as a dictionary key, not the class`;
+    }
     if (occurrence.afterDot) {
       return `after a dot, a member of something else rather than the class`;
     }
@@ -568,7 +605,7 @@ export interface Resolved {
   readonly offset: number;
 }
 
-export interface MemberRenameArguments {
+interface MemberRenameArguments {
   readonly texts: readonly ProjectText[];
   readonly scripts: ReadonlyMap<string, Script>;
   readonly graph: ClassGraph;
@@ -891,7 +928,7 @@ function planScenes(
   }
 }
 
-export interface MoveArguments {
+interface MoveArguments {
   readonly texts: readonly ProjectText[];
   readonly scripts: ReadonlyMap<string, Script>;
   /** Each file that moves, by its `res://` path, to where it goes. */

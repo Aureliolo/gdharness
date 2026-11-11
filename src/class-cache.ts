@@ -63,7 +63,7 @@ export function declaredClasses(projectPath: string): Map<string, string> {
 }
 
 /** A `class_name` a project script declares, with what it extends and whether it is abstract. */
-export interface DeclaredClass {
+interface DeclaredClass {
   readonly path: string;
   /**
    * The class it extends: a project class, an engine class, or as written when it names neither,
@@ -411,6 +411,9 @@ export function missingMemberIn(message: string): MissingMember | null {
     : { kind: 'enum member', member, type, enum: enumName };
 }
 
+/** A diagnostic naming only the member of another class it could not resolve. */
+export const EXTERNAL_MEMBER = 'Could not resolve external class member "';
+
 /**
  * The member an "external class member" diagnostic says is missing, and the class it was looked up
  * on, read from [param line], the diagnosed script's line the diagnostic is on.
@@ -426,7 +429,7 @@ export function externalMemberIn(
   line: string | undefined,
   classes: ReadonlyMap<string, string>,
 ): MissingMember | null {
-  const member = /Could not resolve external class member "([A-Za-z_]\w*)"/.exec(message)?.[1];
+  const member = new RegExp(String.raw`${EXTERNAL_MEMBER}([A-Za-z_]\w*)"`).exec(message)?.[1];
   if (member === undefined || line === undefined) {
     return null;
   }
@@ -548,7 +551,7 @@ export function unknownTypeIn(message: string): string | null {
 }
 
 /** A class the project declares that a diagnostic says cannot be resolved, and where to look. */
-export interface UnloadedType {
+interface UnloadedType {
   readonly type: string;
   readonly declaredIn: string;
   /** Whether the cache a launched game reads already lists it, which decides the remedy. */

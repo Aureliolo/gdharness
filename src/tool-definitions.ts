@@ -9,11 +9,12 @@
  * working one.
  */
 
-import type { JSONValue, ToolAnnotations } from '@modelcontextprotocol/server';
+import type { JSONValue, Tool, ToolAnnotations } from '@modelcontextprotocol/server';
 import { dictionary } from './dictionary.js';
 import { IDLE_CLOSE_MINUTES, IDLE_CLOSE_SETTING } from './idle-close.js';
 import { ENGINE_FLAGS, HIDDEN_WINDOW_FPS } from './launch.js';
-import type { MCPToolDefinition } from './server-types.js';
+
+export type MCPToolDefinition = Tool;
 
 type JsonSchema = Readonly<Record<string, JSONValue>>;
 
@@ -989,7 +990,7 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
       '- uidsMissing: each suite the run ran with no .uid beside it, with uidsNote.',
       "- engineNote: the engine the run used and its version, when it was not this server's. A project other than the server's own runs the engine its harness config names under GODOT_PATH.",
       "- savesNote: on macOS, that the run wrote to the player's own user://.",
-      '- windowed and windowNote: a suite needs a window when it declares const GDHARNESS_NEEDS_WINDOW: bool = true, or as a constant of a class that is true, or calls scene_runner and declares nothing. A run holding one has a window, at the size project.godot gives its viewport and with no sound, and windowed is true. windowNote names those suites and any saying it runs headless that shared the window. On a machine with no display such a run is headless, windowed is false, and windowNote says so.',
+      '- windowed and windowNote: a suite needs a window when it declares const GDHARNESS_NEEDS_WINDOW: bool = true, or as a constant of a class that is true, or calls scene_runner and declares nothing. One declaring const GDHARNESS_ACCESSIBILITY: bool = true needs a window too. Its engine starts with --accessibility always, which makes Godot build the accessibility tree. A run holding one has a window, at the size project.godot gives its viewport and with no sound, and windowed is true. windowNote names those suites and any saying it runs headless that shared the window. On a machine with no display such a run is headless, windowed is false, and windowNote says so.',
       `- ${IMPORTED_FIRST}`,
     ].join('\n'),
     parameters: {

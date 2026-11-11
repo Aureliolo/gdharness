@@ -11,7 +11,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, posix } from 'node:path';
 import { declaredClassOf, eachScript } from './class-cache.js';
 import { Refusal } from './errors.js';
-import { codeOf, shapeOf } from './gdscript-source.js';
+import { type ClassBody, codeOf, shapeOf } from './gdscript-source.js';
 import { isRecord } from './records.js';
 import { parseProjectGodot } from './resources.js';
 import type { HandedSuite, RowShare, RunPrinted } from './suite-judge.js';
@@ -25,6 +25,11 @@ const CASE_PREFIX = 'test_';
 const NEEDS_WINDOW = 'GDHARNESS_NEEDS_WINDOW';
 /** A suite saying its cases share work, such as a memoised setup, and belong in one engine. */
 const TOGETHER = 'GDHARNESS_TOGETHER';
+/**
+ * A suite saying it needs the accessibility tree. Godot builds the tree only for a screen reader or
+ * with `--accessibility always`, and only with a window, so such a suite runs windowed with it on.
+ */
+const ACCESSIBILITY = 'GDHARNESS_ACCESSIBILITY';
 
 /** The value a script gives the constant [param name], as written, or undefined when it declares none. */
 function constantIn(code: string, name: string): string | undefined {
@@ -53,7 +58,13 @@ export const GUESS_WINDOW_SETTING = 'gdharness/tests/scene_runner_needs_window';
 
 /** [param path] at or inside the folder [param folder], both `res://` paths. */
 function within(path: string, folder: string): boolean {
-  return path === folder || path.startsWith(`${folder}/`);
+  const [one, other] = [path, folder].map(foldCase);
+  return one === other || (one ?? '').startsWith(`${other ?? ''}/`);
+}
+
+/** Windows finds a file under any letter case, so a path is compared there without one. */
+function foldCase(path: string): string {
+  return process.platform === 'win32' ? path.toLowerCase() : path;
 }
 
 export interface DeclaredSuite {
@@ -77,6 +88,8 @@ export interface DeclaredSuite {
    * spreading it, 394 s whole against 612 s dealt out in one measured project.
    */
   readonly together: boolean;
+  /** Whether it says it needs the accessibility tree, which also gives it a window. */
+  readonly accessible: boolean;
 }
 
 /** One script as read for discovery. */
@@ -85,6 +98,13 @@ interface ReadScript {
   readonly extendsAs: string | null;
   readonly funcs: readonly string[];
   readonly code: string;
+  readonly body: ClassBody;
+}
+
+/** A script, or an inner class in it reached by the names in [param via], outermost first. */
+interface Link {
+  readonly path: string;
+  readonly via: readonly string[];
 }
 
 /** The project's scripts by `res://` path, and its global classes by name, read once. */
@@ -112,7 +132,9 @@ export class ProjectScripts {
     const listed = settings[section ?? ''];
     this.notSearched =
       typeof listed === 'string'
-        ? [...listed.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((found) => (found[1] ?? '').replace(/\/+$/, ''))
+        ? [...listed.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((found) =>
+            (found[1] ?? '').replace(/\/+$/, '').replace(/^(?!res:\/\/)/, 'res://'),
+          )
         : [];
     this.guessWindow = settings[key ?? ''] !== false;
     eachScript(projectPath, (script, source) => {
@@ -139,9 +161,24 @@ export class ProjectScripts {
       extendsAs: shape.body.extendsAs,
       funcs: shape.body.declarations.filter((d) => d.kind === 'func').map((d) => d.name),
       code: codeOf(source),
+      body: shape.body,
     };
     this.read.set(path, read);
     return read;
+  }
+
+  /** [param path] as the project's own script map spells it, or as given when it holds no such script. */
+  spelled(path: string): string {
+    if (this.sources.has(path) || process.platform !== 'win32') {
+      return path;
+    }
+    const folded = foldCase(path);
+    return [...this.sources.keys()].find((key) => foldCase(key) === folded) ?? path;
+  }
+
+  /** Whether the script [param path] is inside the folder [param folder], both `res://` paths. */
+  holds(folder: string, path: string): boolean {
+    return path !== folder && within(path, folder);
   }
 
   /** The script [param path] extends, as a path in the project, the base class's name, or null. */
@@ -206,43 +243,92 @@ export class ProjectScripts {
     // is the one GDScript reads.
     let said: boolean | undefined;
     let together: boolean | undefined;
+    let accessible: boolean | undefined;
     let guessed = false;
     const seen = new Set<string>();
-    let at = path;
-    while (!seen.has(at)) {
-      seen.add(at);
-      const read = this.script(at);
-      if (read === undefined) {
+    let at: Link = { path, via: [] };
+    while (!seen.has(`${at.path}.${at.via.join('.')}`)) {
+      seen.add(`${at.path}.${at.via.join('.')}`);
+      const read = this.script(at.path);
+      const body = read === undefined ? undefined : this.bodyOf(read.body, at.via);
+      if (read === undefined || body === undefined) {
         return null;
       }
-      for (const func of read.funcs.filter((name) => name.startsWith(CASE_PREFIX))) {
-        cases.add(func);
+      for (const func of body.declarations.filter((one) => one.kind === 'func').map((one) => one.name)) {
+        if (func.startsWith(CASE_PREFIX)) {
+          cases.add(func);
+        }
       }
-      said ??= this.declared(path, at, read.code, NEEDS_WINDOW);
-      together ??= this.declared(path, at, read.code, TOGETHER);
+      said ??= this.declared(path, at.path, read.code, NEEDS_WINDOW);
+      together ??= this.declared(path, at.path, read.code, TOGETHER);
+      accessible ??= this.declared(path, at.path, read.code, ACCESSIBILITY);
       guessed ||= this.guessWindow && SCENE_RUNNER.test(read.code);
-      const base = this.base(at);
+      const base = this.baseOf(at.path, body.extendsAs);
       if (base === null) {
         return null;
       }
       // By name, or by the script declaring it: gdUnit4's own class is a global class of the project.
-      if ('name' in base ? base.name === SUITE_BASE : base.path === this.classes.get(SUITE_BASE)) {
-        return cases.size > 0
-          ? {
-              path,
-              cases: [...cases].toSorted(),
-              windowed: said ?? guessed,
-              headless: said === false,
-              together: together === true,
-            }
-          : null;
+      if (
+        'name' in base
+          ? base.name === SUITE_BASE
+          : base.via.length === 0 && base.path === this.classes.get(SUITE_BASE)
+      ) {
+        if (cases.size === 0) {
+          return null;
+        }
+        if (accessible === true && said === false) {
+          throw new Refusal(
+            `${path} declares ${ACCESSIBILITY} true and ${NEEDS_WINDOW} false. Godot builds the accessibility tree only with a window. Remove ${NEEDS_WINDOW}, since ${ACCESSIBILITY} already gives the suite one.`,
+          );
+        }
+        return {
+          path,
+          cases: [...cases].toSorted(),
+          windowed: accessible === true || (said ?? guessed),
+          headless: said === false,
+          together: together === true,
+          accessible: accessible === true,
+        };
       }
       if ('name' in base) {
         return null;
       }
-      at = base.path;
+      at = base;
     }
     return null;
+  }
+
+  /** The class body [param via] names inside [param body], or undefined when there is none. */
+  private bodyOf(body: ClassBody, via: readonly string[]): ClassBody | undefined {
+    let found: ClassBody | undefined = body;
+    for (const name of via) {
+      found = found?.inner.find((one) => one.name === name);
+    }
+    return found;
+  }
+
+  /**
+   * What the class of [param script] extending [param extendsAs] extends: a script, or an inner class
+   * of one when the name is dotted, as `Outer.Inner` is, or the name of a class the project does not
+   * declare.
+   */
+  baseOf(script: string, extendsAs: string | null): (Link & { name?: never }) | { name: string } | null {
+    if (extendsAs === null) {
+      return null;
+    }
+    const quote = extendsAs[0];
+    if (quote === '"' || quote === "'") {
+      const target = extendsAs.slice(1, -1);
+      return {
+        path: target.startsWith('res://')
+          ? target
+          : `res://${posix.join(posix.dirname(script.slice(6)), target)}`,
+        via: [],
+      };
+    }
+    const [name = extendsAs, ...via] = extendsAs.split('.');
+    const declaring = this.classes.get(name);
+    return declaring === undefined ? { name: extendsAs } : { path: declaring, via };
   }
 
   /**
@@ -260,7 +346,10 @@ export class ProjectScripts {
    * of its cases run.
    */
   uncollectedUnder(roots: readonly string[]): { readonly path: string; readonly cases: readonly string[] }[] {
-    const named = roots.filter((root) => root.endsWith('.gd') && this.sources.has(root));
+    const named = roots
+      .filter((root) => root.endsWith('.gd'))
+      .map((root) => this.spelled(root))
+      .filter((root) => this.sources.has(root));
     return [...new Set([...named, ...this.searched(roots)])].flatMap((path) => {
       const cases = this.script(path)?.funcs.filter((name) => name.startsWith(CASE_PREFIX)) ?? [];
       return cases.length === 0 || this.suite(path) !== null ? [] : [{ path, cases: [...cases].toSorted() }];
@@ -273,7 +362,7 @@ export class ProjectScripts {
       .filter((path) =>
         trimmed.some(
           (root) =>
-            path.startsWith(`${root}/`) &&
+            this.holds(root, path) &&
             !this.notSearched.some((folder) => within(path, folder) && !within(root, folder)),
         ),
       )
@@ -290,8 +379,7 @@ export class ProjectScripts {
       ...new Set(
         paths.flatMap((path) => {
           const root = path.replace(/\/+$/, '');
-          return path.endsWith('.gd') ||
-            !this.notSearched.some((folder) => folder.startsWith(`${root}/`) && !within(root, folder))
+          return path.endsWith('.gd') || !this.notSearched.some((folder) => this.holds(root, folder))
             ? [path]
             : this.suitesUnder([root]).map((suite) => suite.path);
         }),
@@ -301,7 +389,7 @@ export class ProjectScripts {
 }
 
 /** What one suite cost the last time it ran: the whole of it, and each case. */
-export interface SuiteTime {
+interface SuiteTime {
   /** Its cases and its hooks together, as it costs when it runs whole. */
   readonly seconds: number;
   /** Each case function's own time, the rows of a parameterised one together. */
@@ -449,9 +537,13 @@ export function timesAfter(
     const rows: Record<string, number[]> = {};
     for (const func of suite?.cases ?? []) {
       const measuredRows = entry.rows.get(func);
+      // A case that ran and printed no row is not parameterised now, whatever it was. Its old rows
+      // would deal it out over engines that each run nothing.
       const keptRows =
         measuredRows === undefined
-          ? times[path]?.rows?.[func]
+          ? entry.cases.has(func)
+            ? undefined
+            : times[path]?.rows?.[func]
           : rowsAfter(times[path]?.rows?.[func], measuredRows, cutShort.has(`${path}:${func}`));
       if (keptRows !== undefined) {
         rows[func] = keptRows.map(round);
@@ -533,6 +625,8 @@ export interface Unit {
   /** Whether every case in it has a time of its own, rather than [member cost] being a guess. */
   readonly timed: boolean;
   readonly windowed: boolean;
+  /** Whether it is a suite that needs the accessibility tree, which only a windowed unit is. */
+  readonly accessible: boolean;
   readonly headless: boolean;
 }
 
@@ -577,6 +671,7 @@ export function unitsOf(
       cost: whole,
       timed: suite.cases.every(timedCase),
       windowed: suite.windowed,
+      accessible: suite.accessible,
       headless: suite.headless,
     };
     if (suite.windowed || suite.together || whole <= splitPast) {
@@ -592,6 +687,7 @@ export function unitsOf(
             cost: around + costOf(func),
             timed: timedCase(func),
             windowed: false,
+            accessible: false,
             headless: suite.headless,
           },
         ];
@@ -603,6 +699,7 @@ export function unitsOf(
         cost: around + seconds,
         timed: true,
         windowed: false,
+        accessible: false,
         headless: suite.headless,
       }));
     });
@@ -617,6 +714,8 @@ export interface EnginePlan {
   readonly skipping: readonly string[];
   readonly cost: number;
   readonly windowed: boolean;
+  /** Whether it starts with the accessibility tree on, for a suite among it that needs it. */
+  readonly accessible: boolean;
   /**
    * The slot it runs in. The engines of one lane run one after another without giving the slot
    * back, which is how a headless engine follows the windowed one.
@@ -842,18 +941,20 @@ function planOf(
     skipping,
     cost: bin.reduce((sum, unit) => sum + unit.cost, 0),
     windowed,
+    accessible: bin.some((unit) => unit.accessible),
     lane,
   };
 }
 
 /**
  * The suites under [param paths], files or directories as `res://` paths, that gdharness test deals
- * to its windowed engine, and those among them saying they run headless, each sorted by path.
+ * to its windowed engine, those among them saying they run headless, and those needing the
+ * accessibility tree, each sorted by path.
  */
 export function windowNeedsOf(
   scripts: ProjectScripts,
   paths: readonly string[],
-): { readonly needing: string[]; readonly headless: string[] } {
+): { readonly needing: string[]; readonly headless: string[]; readonly accessible: string[] } {
   const suites = new Map(
     paths
       .flatMap((path) => (path.endsWith('.gd') ? (scripts.suite(path) ?? []) : scripts.suitesUnder([path])))
@@ -863,6 +964,7 @@ export function windowNeedsOf(
   return {
     needing: sorted.filter((suite) => suite.windowed).map((suite) => suite.path),
     headless: sorted.filter((suite) => suite.headless).map((suite) => suite.path),
+    accessible: sorted.filter((suite) => suite.accessible).map((suite) => suite.path),
   };
 }
 

@@ -26,7 +26,6 @@ import { cachedClasses, staleAgainst } from './class-cache.js';
 import {
   coresNamed,
   type EngineLaunch,
-  EngineUsageError,
   godotNamed,
   heldRunSaid,
   homeOf,
@@ -41,13 +40,13 @@ import {
   sweepRunDirectories,
   versionNamed,
   watchedEngine,
-  wholeFlag,
 } from './engine-launch.js';
 import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
 import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
+import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE } from './game-log.js';
 import { staleImports } from './import-freshness.js';
-import { hiddenWindowFlags } from './launch.js';
+import { hiddenWindowFlags, wholeFlag } from './launch.js';
 import { freeLibraryCopies, seedExtensionList, unlistedExtensions } from './library-copies.js';
 import { prependTo, readLog } from './log-read.js';
 import { isRecord, isStringList } from './records.js';
@@ -98,7 +97,7 @@ import {
 } from './suite-plan.js';
 import { getLocalVersion } from './version.js';
 
-export interface TestOptions {
+interface TestOptions {
   readonly projectPath: string;
   /** The suites, directories and `suite.gd:test_case` cases named, or none for every suite. */
   readonly selected: readonly string[];
@@ -598,6 +597,9 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     }
     // After the import, which writes the .import and .uid files beside what a suite loads.
     const suitesBegan = Date.now();
+    // Read again from here, since a script edited during the import is loaded as it is now, and
+    // one edited from here on is newer than suitesBegan, which keeps its pass unrecorded.
+    const loaded = new ProjectScripts(options.projectPath);
     const always = [
       getLocalVersion(),
       readFileSync(shippedListedRunner(), 'utf8'),
@@ -605,9 +607,11 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       ...reachedAlsoSaid(options.reachAlso),
     ];
     const everySuite = suites;
-    const compileKept = options.changedOnly ? { file: join(state, COMPILED_FILE), scripts, always } : null;
+    const compileKept = options.changedOnly
+      ? { file: join(state, COMPILED_FILE), scripts: loaded, always }
+      : null;
     if (options.changedOnly) {
-      const inputs = new SuiteInputs(scripts, always);
+      const inputs = new SuiteInputs(loaded, always);
       const passedBefore = readPassed(passedFile);
       const unchanged = suites.filter((suite) => {
         const passed = passedBefore[suite.path];
@@ -799,7 +803,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         readTimes(timesFile),
         wholeSuites,
         ran.map((engine) => engine.printed),
-        (path) => scripts.suite(path),
+        (path) => loaded.suite(path),
         new Set(
           ran.flatMap((engine) =>
             engine.plan.suites
@@ -820,7 +824,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       options.projectPath,
       ran,
       new Set(across.map((fault) => fault.suite)),
-      new SuiteInputs(scripts, always),
+      new SuiteInputs(loaded, always),
       suitesBegan,
       declared,
     );
@@ -1068,7 +1072,21 @@ export function engineSaid(godotPath: string): string {
  * and the same pins key the same suites in each.
  */
 export function reachedAlsoSaid(paths: readonly string[]): string[] {
-  return paths.map((path) => (existsSync(path) ? readFileSync(path, 'latin1') : 'missing'));
+  return paths.map((path) => {
+    if (!existsSync(path)) {
+      return 'missing';
+    }
+    if (!statSync(path).isDirectory()) {
+      return readFileSync(path, 'latin1');
+    }
+    // A folder is every file under it, each with where it lies.
+    return readdirSync(path, { recursive: true, withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => join(entry.parentPath, entry.name))
+      .toSorted()
+      .map((file) => `${relative(path, file).split(sep).join('/')}\n${readFileSync(file, 'latin1')}`)
+      .join('\n');
+  });
 }
 
 /** What compiling every script together found wrong, and where its engine's log is. */
@@ -1499,6 +1517,7 @@ async function runEngine(
     ...display,
     '--audio-driver',
     'Dummy',
+    ...(plan.accessible ? ['--accessibility', 'always'] : []),
     '--path',
     launch.projectPath,
     ...(launch.verbose ? ['--verbose'] : []),
@@ -1605,11 +1624,7 @@ function report(
       console.log(
         `--- what engine ${String(engine.index)} printed, running ${named(engine.plan.suites.map((suite) => suite.path))}:`,
       );
-      console.log(
-        existsSync(engine.log)
-          ? readLog(engine.log).replace(CONTROL_SEQUENCE, '').trimEnd()
-          : '(no log was written)',
-      );
+      console.log(readLog(engine.log).replace(CONTROL_SEQUENCE, '').trimEnd());
     }
   }
   const failed = ran.filter((engine) => !engine.verdict.passed);
@@ -1621,13 +1636,8 @@ function report(
       console.log(`  ${fault}`);
     }
     // At the top of the kept log, so the file says why on its own, even when the engine printed nothing.
-    if (existsSync(engine.log)) {
-      const verdict = [
-        `gdharness: ${heading.slice(4)}`,
-        ...engine.verdict.faults.map((fault) => `  ${fault}`),
-      ];
-      prependTo(engine.log, `${verdict.join('\n')}\n---\n`);
-    }
+    const verdict = [`gdharness: ${heading.slice(4)}`, ...engine.verdict.faults.map((fault) => `  ${fault}`)];
+    prependTo(engine.log, `${verdict.join('\n')}\n---\n`);
     if (engine.verdict.shown.length > 0) {
       console.log('');
       for (const line of engine.verdict.shown) {

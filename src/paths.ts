@@ -37,7 +37,7 @@ const RESOURCE_SCHEME = 'res://';
  */
 const OTHER_SCHEME = /^[a-zA-Z][a-zA-Z\d+.-]+:\/\//;
 
-export type Containment =
+type Containment =
   | {
       readonly ok: true;
       /** Absolute, for this process to open. */
@@ -92,6 +92,10 @@ export function realAsFarAsItExists(path: string): string {
  * and this is asked where the answer decides whether two sides belong together.
  */
 export function isSameDirectory(onePath: string, otherPath: string): boolean {
+  // An empty path names no directory, though resolve() would read it as the working directory.
+  if (onePath === '' || otherPath === '') {
+    return false;
+  }
   return relative(realAsFarAsItExists(resolve(onePath)), realAsFarAsItExists(resolve(otherPath))) === '';
 }
 

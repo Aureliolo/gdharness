@@ -11,14 +11,13 @@
  * for the games.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
 import { join, resolve } from 'node:path';
 import process from 'node:process';
 import {
   coresNamed,
   type EngineLaunch,
-  EngineUsageError,
   godotNamed,
   heldRunSaid,
   inTurns,
@@ -30,11 +29,13 @@ import {
   SILENCE_FLOOR_SECONDS,
   sweepRunDirectories,
   versionNamed,
+  WINDOWS_EXCEPTION,
   watchedEngine,
-  wholeFlag,
 } from './engine-launch.js';
 import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
+import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE } from './game-log.js';
+import { wholeFlag } from './launch.js';
 import { readLog } from './log-read.js';
 import { isRecord } from './records.js';
 import { SHARE_SCRIPT } from './setup.js';
@@ -48,8 +49,6 @@ const INTO = '--gdh-share-dir=';
 const PROGRESS = /^gdharness share: (.+) (\d+) of (\d+) runs$/gm;
 /** How often a run says how far its workers have got, between the lines saying one has finished. */
 const PROGRESS_EVERY_MS = 60_000;
-/** The least exit code that is a Windows exception status, read unsigned. */
-const WINDOWS_EXCEPTION = 0xc0000000;
 
 const VALUED = new Set([
   '--workers',
@@ -62,7 +61,7 @@ const VALUED = new Set([
   '--cores',
 ]);
 
-export interface SpreadOptions {
+interface SpreadOptions {
   readonly projectPath: string;
   /** The bench's scene, as a `res://` path. */
   readonly scene: string;
@@ -98,7 +97,7 @@ export function spreadOptionsOf(args: readonly string[], cwd: string): SpreadOpt
       positional.push(arg);
     } else if (VALUED.has(arg)) {
       const value = own[at + 1];
-      if (value === undefined || value.startsWith('--')) {
+      if (value === undefined || value === '' || value.startsWith('--')) {
         throw new EngineUsageError(`${arg} needs a value.`);
       }
       valued.set(arg, value);
@@ -125,7 +124,7 @@ export function spreadOptionsOf(args: readonly string[], cwd: string): SpreadOpt
     );
   }
   const scene = resPathOf(scenes[0] ?? '', projectPath, cwd);
-  if (!existsSync(join(projectPath, scene.slice('res://'.length)))) {
+  if (!statSync(join(projectPath, scene.slice('res://'.length)), { throwIfNoEntry: false })?.isFile()) {
     throw new EngineUsageError(`Nothing at ${scene} in the project at ${projectPath}.`);
   }
   const benchArguments = dashes === -1 ? [] : args.slice(dashes + 1);
@@ -228,7 +227,7 @@ export function shareFaults(played: ReadonlyArray<readonly ArmPlayed[] | null>):
 }
 
 /** What one engine of the run left behind. */
-interface EngineLeft {
+export interface EngineLeft {
   readonly name: string;
   readonly log: string;
   readonly end: EngineEnd;
@@ -396,7 +395,7 @@ async function enginePlayed(
 }
 
 /** What is wrong with how [param engine] ended and what it printed, each naming the engine. */
-function engineFaults(engine: EngineLeft, godotVersion: string | null): string[] {
+export function engineFaults(engine: EngineLeft, godotVersion: string | null): string[] {
   const faults: string[] = [];
   const { code, ended } = engine.end;
   if (ended !== null) {
@@ -428,7 +427,7 @@ function engineFaults(engine: EngineLeft, godotVersion: string | null): string[]
 }
 
 /** How far each worker whose log is at [param logs] has got, by the last progress line it printed. */
-function progressOf(logs: readonly string[]): string {
+export function progressOf(logs: readonly string[]): string {
   const each = logs.map((log, index) => {
     const text = existsSync(log) ? readLog(log) : '';
     const last = [...text.matchAll(PROGRESS)].at(-1);

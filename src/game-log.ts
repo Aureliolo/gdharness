@@ -97,15 +97,43 @@ const HEADLINE = /^(USER )?(SCRIPT ERROR|SHADER ERROR|ERROR|WARNING):\s?(.*)$/;
  * it was a column of info entries, and a run that crashed counted no errors and read as clean.
  * Windows' handler for an exception, such as one in `Main::cleanup` as a game quits, names no signal.
  */
-const CRASH = /^(?:CrashHandlerException|handle_crash): Program crashed(?: with signal \d+)?\s*$/;
+export const CRASH_HEADER =
+  /^(?:CrashHandlerException|handle_crash): Program crashed(?: with signal (\d+))?\s*$/;
+
+/** A gdUnit4 duration such as `1min 2s 30ms`. */
+export const GDUNIT_TIME = String.raw`(?:\d+h )?(?:\d+min )?(?:\d+s )?\d+ms`;
+
+/** The script a `Run Test Suite:` line names, which a coloured line may hold after other text. */
+const SUITE_OPENED = /Run Test Suite:\s*(res:\/\/.+?\.gd)(?=\s|$)/;
+
+/** The suite gdUnit4's line announcing a suite opens, or null for any other line. */
+export function suiteOpenedBy(line: string): string | null {
+  return SUITE_OPENED.exec(line)?.[1] ?? null;
+}
+
+const CASE_HEAD = /^\s*res:\/\/.+?\.gd > (.+)$/;
+const CASE_TAIL = new RegExp(
+  String.raw` (STARTED|PASSED|FAILED|FLAKY|SKIPPED|WARNING)(?: \((?:retry \d+|\d+ retries)\))?(?: (${GDUNIT_TIME}))?$`,
+);
+/** More characters than a case line's verdict, retries and time run to. */
+const CASE_TAIL_MOST = 96;
 
 /**
- * The line gdUnit4 prints as a case starts and ends, indented like an error's detail. A windowed
- * engine on Windows prints its errors on stdout beside these, so a case's script error took every
- * line of the suite after it as its detail: a run cut off by its timeout named one failing case of
- * a suite counting four.
+ * The line gdUnit4 prints as a case starts and ends, indented like an error's detail, or null for any
+ * other line. A windowed engine on Windows prints its errors on stdout beside these, so a case's
+ * script error took every line of the suite after it as its detail: a run cut off by its timeout
+ * named one failing case of a suite counting four.
+ *
+ * Read from the end, and the name from what is left: one pattern for the whole line tried every
+ * split of a long line naming many scripts, and took thirteen seconds over 260,000 characters.
  */
-const GDUNIT_CASE = /^\s+res:\/\/.+?\.(?:gd|cs) > .+? (?:STARTED|PASSED|FAILED|ERROR|SKIPPED|FLAKY)(?:\s|$)/;
+export function caseLineOf(line: string): { name: string; verdict: string; time: string } | null {
+  const trimmed = line.trimEnd();
+  const tail = CASE_TAIL.exec(trimmed.slice(-CASE_TAIL_MOST));
+  const name =
+    tail === null ? undefined : CASE_HEAD.exec(trimmed.slice(0, trimmed.length - tail[0].length))?.[1];
+  return tail === null || name === undefined ? null : { name, verdict: tail[1] ?? '', time: tail[2] ?? '' };
+}
 
 /**
  * Lines of a crash report that say nothing: the rules around its parts, the markers ending them,
@@ -304,7 +332,7 @@ function repeatedCycle(frames: readonly Frame[], from: number): { period: number
 }
 
 /** An entry on its way out: the same fields, with `detail` there only when it says something. */
-export type ReportedEntry = Omit<LogEntry, 'detail'> & {
+type ReportedEntry = Omit<LogEntry, 'detail'> & {
   readonly detail?: readonly string[];
   /** The project script, line and function the entry points at, when it names one. */
   readonly script?: string;
@@ -455,7 +483,7 @@ export class GameLog {
       }
       return;
     }
-    if (CRASH.test(line)) {
+    if (CRASH_HEADER.test(line)) {
       const detail: string[] = [];
       this.entries.push({ index: this.entries.length, severity: 'error', source, text: line.trim(), detail });
       this.crashed[source] = detail;
@@ -463,7 +491,7 @@ export class GameLog {
       return;
     }
     const owner = this.lastHeadline[source];
-    if (owner !== null && /^\s/.test(line) && !GDUNIT_CASE.test(line)) {
+    if (owner !== null && /^\s/.test(line) && caseLineOf(line) === null) {
       this.takeLooseLines(owner);
       owner.detail.push(line.trim());
       owner.continues = false;
@@ -591,7 +619,7 @@ export class GameLog {
    * does not say a run crashed.
    */
   crashReport(): LogEntry | undefined {
-    return this.entries.find((entry) => CRASH.test(entry.text));
+    return this.entries.find((entry) => CRASH_HEADER.test(entry.text));
   }
 
   /**

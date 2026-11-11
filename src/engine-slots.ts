@@ -62,7 +62,7 @@ import { alive } from './alive.js';
 import { cacheHome } from './cache-home.js';
 import { callProgress, callSignal, callSlotWaits } from './call-signal.js';
 import { helperPid } from './desktop.js';
-import { EngineUsageError } from './engine-launch.js';
+import { wholeFlag } from './launch.js';
 import {
   ancestorsIn,
   type ProcessTree,
@@ -97,13 +97,13 @@ export const SLOT_COUNT_VARIABLE = 'GODOT_ENGINE_SLOT_COUNT';
 const PROCESSORS_A_SLOT = 2;
 
 /** Where the slots are and how many there are. */
-export interface SlotsChosen {
+interface SlotsChosen {
   readonly directory: string;
   readonly count: number;
 }
 
 /** What the machine says, handed in so every branch can be asked about without its machine. */
-export interface SlotsMachine {
+interface SlotsMachine {
   readonly env: NodeJS.ProcessEnv;
   readonly platform: NodeJS.Platform;
   readonly processors: number;
@@ -137,10 +137,7 @@ export function machineSlots(
   const counted = nonEmpty(env[SLOT_COUNT_VARIABLE]);
   let count = asked.count;
   if (count === null && counted !== undefined) {
-    count = Number(counted);
-    if (!Number.isInteger(count) || count < 1) {
-      throw new EngineUsageError(`${SLOT_COUNT_VARIABLE} takes a whole number above 0, not ${counted}.`);
-    }
+    count = wholeFlag(counted, SLOT_COUNT_VARIABLE);
   }
   return { directory, count: count ?? Math.max(1, Math.floor(machine.processors / PROCESSORS_A_SLOT)) };
 }
@@ -264,7 +261,7 @@ export const SLOT_YIELD_MS = 5000;
 const MEMORY_TAKER = 'memory';
 
 /** A taker waiting for one of the machine's slots, as its mark names it. */
-export interface SlotWaiter {
+interface SlotWaiter {
   readonly mark: string;
   readonly taker: SlotTaker;
   /** When it began to wait, in milliseconds since the epoch. */
@@ -436,14 +433,21 @@ const SEATED_SUFFIX = '.seated';
 type SlotLimit = 'gate' | 'kept' | 'games' | 'starved';
 
 /** The slot numbers a take may try, in order, and what holds it to them when something does. */
-export interface SlotsDrawn {
-  readonly numbers: readonly number[];
-  readonly limit?: SlotLimit;
-  /** Free ones of them the take leaves to takers waiting longer: see {@link SlotLine}. */
-  readonly left?: readonly number[];
-  /** What a starved measurement's claim holds the take back for: see {@link STARVED_FILE}. */
-  readonly heldFor?: string;
-}
+type SlotsDrawn =
+  | {
+      readonly numbers: readonly number[];
+      readonly limit?: Exclude<SlotLimit, 'starved'>;
+      /** Free ones of them the take leaves to takers waiting longer: see {@link SlotLine}. */
+      readonly left?: readonly number[];
+      readonly heldFor?: undefined;
+    }
+  | {
+      readonly numbers: readonly number[];
+      readonly limit: 'starved';
+      readonly left?: readonly number[];
+      /** What a starved measurement's claim holds the take back for: see {@link STARVED_FILE}. */
+      readonly heldFor: string;
+    };
 
 /**
  * The file in the slots folder a measurement that has waited two hours for its turn writes to claim
@@ -497,13 +501,13 @@ export function starvedSaid(claim: StarvedClaim): string {
 }
 
 /** What takes a slot, as its environment says: see {@link slotsDrawnOn}. */
-export type SlotTaker = 'gate' | 'timing' | 'tier' | 'other';
+type SlotTaker = 'gate' | 'timing' | 'tier' | 'other';
 
 /**
  * The machine's queue as a take reads it: whether a live gate is in it, and `spare` when the
  * queue says some of the gates' free slots are ones no queued gate can take now ({@link SPARE_FILE}).
  */
-export type GateQueue = 'none' | 'queued' | 'spare';
+type GateQueue = 'none' | 'queued' | 'spare';
 
 /**
  * The slot numbers of [param count] a take by [param taker] may try now, in the order it tries
@@ -694,7 +698,7 @@ export interface SlotHolder {
 }
 
 /** An engine a lock names beside its holder. */
-export interface SlotEngine {
+interface SlotEngine {
   readonly pid: number;
   readonly started: number;
 }
@@ -1465,7 +1469,7 @@ export function slotWaitSaid(
 ): string {
   const so = `Waiting${waitedMs >= 1000 ? ` ${String(Math.round(waitedMs / 1000))} s so far` : ''} for an engine`;
   if (drawn.limit === 'starved') {
-    return `${so}: ${drawn.heldFor ?? 'held for a measurement'}. The engine starts once that measurement has run.`;
+    return `${so}: ${drawn.heldFor}. The engine starts once that measurement has run.`;
   }
   const taking = drawn.limit === undefined ? count : drawn.numbers.length;
   const slots = `${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'is' : 'are'} in use`;
@@ -1525,7 +1529,7 @@ export function slotWaitedSaid(
 ): string {
   const waited = `This call waited ${String(Math.round(waitedMs / 1000))} s for an engine slot in all.`;
   if (drawn.limit === 'starved') {
-    return `${waited} When it first waited, it was ${drawn.heldFor ?? 'held for a measurement'}.`;
+    return `${waited} When it first waited, it was ${drawn.heldFor}.`;
   }
   const taking = drawn.limit === undefined ? count : drawn.numbers.length;
   const slots = `${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'was' : 'were'} in use`;

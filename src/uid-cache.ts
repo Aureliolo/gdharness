@@ -29,7 +29,7 @@ import { errorMessage } from './errors.js';
 export type UidEntry = readonly [id: bigint, path: string];
 
 /** What setting a cache right came to: each entry pointed at its file's new place, and each dropped. */
-export interface UidMend {
+interface UidMend {
   readonly moved: readonly (readonly [id: bigint, from: string, to: string])[];
   readonly dropped: readonly UidEntry[];
 }
@@ -137,8 +137,11 @@ function declared(path: string, name: string): readonly [text: string, owner: st
       return null;
     }
   };
+  // A sidecar whose file is gone declares nothing: the editor leaves it behind when a file is
+  // deleted outside it, and the cache must not be pointed at a path with nothing there.
+  const ownerPresent = (sidecar: string): boolean => existsSync(path.slice(0, -sidecar.length));
   if (name.endsWith('.uid')) {
-    const text = read()?.trim();
+    const text = ownerPresent('.uid') ? read()?.trim() : undefined;
     return text === undefined ? null : [text, name.slice(0, -'.uid'.length)];
   }
   const pattern = name.endsWith('.import')
@@ -146,7 +149,10 @@ function declared(path: string, name: string): readonly [text: string, owner: st
     : name.endsWith('.tscn') || name.endsWith('.tres')
       ? HEADER_UID
       : null;
-  const text = pattern === null ? undefined : read()?.match(pattern)?.[1];
+  const text =
+    pattern === null || (name.endsWith('.import') && !ownerPresent('.import'))
+      ? undefined
+      : read()?.match(pattern)?.[1];
   if (text === undefined) {
     return null;
   }

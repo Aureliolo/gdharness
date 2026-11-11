@@ -17,9 +17,15 @@ import { currentRunner, runLine } from './runner.js';
 /** Only https, and nothing built from anything a caller supplies. */
 const REGISTRY_ROOT = 'https://registry.npmjs.org';
 
-/** The one document this reads, wherever the registry is. */
+/**
+ * The one document this reads, wherever the registry is. The path is added to the address's own
+ * path, so a mirror's query stays a query and a fragment is dropped rather than swallowing the path.
+ */
 function packageUrl(root: string): string {
-  return `${root.replace(/\/+$/, '')}/gdharness/latest`;
+  const url = new URL(root);
+  url.hash = '';
+  url.pathname = `${url.pathname.replace(/\/+$/, '')}/gdharness/latest`;
+  return url.toString();
 }
 
 /**
@@ -76,7 +82,7 @@ const MAX_RETRY_MS = 60 * 60 * 1000;
 /** Semantic versions only: anything else is a registry answering something this cannot judge. */
 const VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
-export interface UpdateNotice {
+interface UpdateNotice {
   readonly current: string;
   readonly latest: string;
   readonly releaseNotes: string;
@@ -130,15 +136,42 @@ function writeCache(path: string, entry: Cached): void {
   }
 }
 
-/** Build metadata is not part of the ordering, and a prerelease sorts below its own version. */
-function parts(version: string): { numbers: number[]; prerelease: boolean } {
-  const withoutBuild = version.split('+')[0] ?? version;
+/**
+ * A leading `v` is not part of the number, build metadata is not part of the ordering, and the
+ * dot-separated prerelease identifiers are kept for ordering two prereleases of one version.
+ */
+function parts(version: string): { numbers: number[]; prerelease: string[] | null } {
+  const withoutBuild = (version.split('+')[0] ?? version).trim().replace(/^v/i, '');
   const dash = withoutBuild.indexOf('-');
   const numeric = dash === -1 ? withoutBuild : withoutBuild.slice(0, dash);
   return {
     numbers: numeric.split('.').map((piece) => Number.parseInt(piece, 10) || 0),
-    prerelease: dash !== -1,
+    prerelease: dash === -1 ? null : withoutBuild.slice(dash + 1).split('.'),
   };
+}
+
+/** Semantic-version precedence of two prerelease lists: numbers below words, a shorter list below. */
+function prereleaseNewer(left: string[], right: string[]): boolean {
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const a = left[index];
+    const b = right[index];
+    if (a === undefined || b === undefined) {
+      return a !== undefined;
+    }
+    if (a === b) {
+      continue;
+    }
+    const aNumber = /^\d+$/.test(a);
+    const bNumber = /^\d+$/.test(b);
+    if (aNumber && bNumber) {
+      return Number(a) > Number(b);
+    }
+    if (aNumber !== bNumber) {
+      return bNumber;
+    }
+    return a > b;
+  }
+  return false;
 }
 
 /** Whether the registry is offering something this server is behind. */
@@ -152,7 +185,10 @@ export function isNewer(candidate: string, current: string): boolean {
       return a > b;
     }
   }
-  return !left.prerelease && right.prerelease;
+  if (left.prerelease === null || right.prerelease === null) {
+    return left.prerelease === null && right.prerelease !== null;
+  }
+  return prereleaseNewer(left.prerelease, right.prerelease);
 }
 
 /** The published version, or null when the registry did not answer with one this can trust. */
@@ -218,7 +254,8 @@ export class UpdateCheck {
   ) {
     this.current = current;
     this.enabled = (environment['GDHARNESS_NO_UPDATE_CHECK'] ?? '') === '';
-    this.cachePath = cacheFile(environment);
+    // Only a check that runs has a cache folder to make.
+    this.cachePath = this.enabled ? cacheFile(environment) : '';
     this.ask = ask;
     // Off means off, not "ask nothing but go on repeating the last answer": a cache left behind
     // by a session before the switch was set would otherwise still be reported.
@@ -241,7 +278,9 @@ export class UpdateCheck {
    * to ask is how a reconnect taken to pick up a release reports the version before it.
    */
   refresh(now = Date.now()): void {
-    if (!this.enabled || this.checking || now < this.retryAt || (this.asked && !this.stale(now))) {
+    // A retry window further ahead than the longest one is a clock that was set back.
+    const waiting = now < this.retryAt && this.retryAt - now <= MAX_RETRY_MS;
+    if (!this.enabled || this.checking || waiting || (this.asked && !this.stale(now))) {
       return;
     }
     this.asked = true;
@@ -275,7 +314,10 @@ export class UpdateCheck {
    * goes back to naming a version the fetch beside it was started to replace.
    */
   private stale(now: number): boolean {
-    return now - this.checkedAt >= CACHE_MS;
+    // An answer dated ahead of now, from a clock that was set back or a file written under another
+    // one, is as untrustworthy as an old one: it would otherwise stand until its date.
+    const age = now - this.checkedAt;
+    return age < 0 || age >= CACHE_MS;
   }
 
   private scheduleRetry(now: number): void {

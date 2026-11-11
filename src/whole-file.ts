@@ -8,8 +8,50 @@
  * step.
  */
 
-import { readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { alive } from './alive.js';
 import { errorCode } from './errors.js';
+
+/** The notes whose folder has been looked through for a dead writer's partial file. */
+const sweptNotes = new Set<string>();
+
+/**
+ * Removes the partial files beside [param path] that a writer left when it died between writing and
+ * renaming. Once per note and process, because a folder can hold thousands of files and a live
+ * writer's partial is never touched: only a name carrying the pid of a process that has gone.
+ */
+function sweepDeadPartials(path: string): void {
+  if (sweptNotes.has(path)) {
+    return;
+  }
+  sweptNotes.add(path);
+  const prefix = `${basename(path)}.`;
+  try {
+    for (const entry of readdirSync(dirname(path))) {
+      const found = entry.startsWith(prefix) ? /^(\d+)\.partial$/.exec(entry.slice(prefix.length)) : null;
+      const pid = Number(found?.[1]);
+      if (found !== null && pid !== process.pid && !alive(pid)) {
+        rmSync(join(dirname(path), entry), { force: true });
+      }
+    }
+  } catch {
+    // A folder that cannot be listed has no partials to find, and the write says what it needs to.
+  }
+}
+
+/**
+ * Whether [param path] refuses a rename over it for good rather than while a reader holds it: a
+ * folder, or a file marked read-only. Windows answers both with the code a held file gets.
+ */
+function refusesForGood(path: string): boolean {
+  try {
+    const found = statSync(path);
+    return found.isDirectory() || (found.mode & 0o222) === 0;
+  } catch {
+    return false;
+  }
+}
 
 /** How long a write waits out a reader holding the file, and how long it sleeps between tries. */
 const HELD_FILE_MS = 1000;
@@ -58,6 +100,7 @@ export function readWhole(path: string): string | null {
  */
 export function writeWhole(path: string, text: string): boolean {
   const partial = `${path}.${process.pid}.partial`;
+  sweepDeadPartials(path);
   try {
     writeFileSync(partial, text, 'utf8');
   } catch {
@@ -70,7 +113,7 @@ export function writeWhole(path: string, text: string): boolean {
       return true;
     } catch (error) {
       const code = errorCode(error) ?? '';
-      if (!HELD_BY_A_READER.has(code) || Date.now() >= until) {
+      if (!HELD_BY_A_READER.has(code) || Date.now() >= until || refusesForGood(path)) {
         try {
           rmSync(partial, { force: true });
         } catch {

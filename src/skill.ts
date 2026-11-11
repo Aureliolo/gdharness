@@ -358,7 +358,7 @@ function pruneEmpty(directory: string, projectPath: string): void {
   }
 }
 
-export interface SkillWritten {
+interface SkillWritten {
   readonly path: string;
   readonly replaced: boolean;
 }
