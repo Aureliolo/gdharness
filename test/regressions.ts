@@ -11425,7 +11425,7 @@ function testEveryArgumentNamesOpsItsToolHas(): void {
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 159;
+const READ_IN_WORDS = 161;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -82996,6 +82996,224 @@ async function testAnInstanceKeepsItsOwnValuesWithNoEditor(): Promise<void> {
   });
 }
 
+/** The lines of the section of [file] whose header starts with [head], up to the next header. */
+const linesUnder = (file: string, head: string): string[] => {
+  const lines = file.split('\n');
+  const at = lines.findIndex((line) => line.startsWith(head));
+  assert.ok(at >= 0, `no section starts with ${head} in:\n${file}`);
+  const end = lines.findIndex((line, index) => index > at && line.startsWith('['));
+  return lines.slice(at + 1, end < 0 ? undefined : end).filter((line) => line !== '');
+};
+
+/** A shader whose two uniforms declare defaults, for the unset cases. */
+const FROST_SHADER =
+  'shader_type canvas_item;\n\nuniform vec4 tint : source_color = vec4(0.86, 0.92, 0.98, 1.0);\nuniform float amount = 0.5;\n';
+
+/**
+ * scene_node set unset drops a stored line as the inspector's revert arrow does, so the value is
+ * what the scene the node comes from, its script, class or shader declares. A shader parameter
+ * stored as null could not be written away, and writing the default stored it as a value.
+ */
+async function testASceneNodeUnsetDropsTheStoredLine(): Promise<void> {
+  const files = {
+    'frost.gdshader': FROST_SHADER,
+    'crate.gd': 'extends Sprite2D\n\n@export var speed: float = 4.0\n@export var label: String = "crate"\n',
+    'base.tscn':
+      '[gd_scene format=3]\n\n[node name="Base" type="Node2D"]\nrotation = 1.0\nmodulate = Color(1, 0, 0, 1)\n',
+    'main.tscn':
+      '[gd_scene format=3]\n\n' +
+      '[ext_resource type="Shader" path="res://frost.gdshader" id="1_shader"]\n' +
+      '[ext_resource type="PackedScene" path="res://base.tscn" id="3_base"]\n\n' +
+      '[sub_resource type="ShaderMaterial" id="ShaderMaterial_1"]\nshader = ExtResource("1_shader")\n' +
+      'shader_parameter/tint = null\nshader_parameter/amount = 0.25\n\n' +
+      '[node name="Main" type="Node2D"]\n\n' +
+      '[node name="Frost" type="Sprite2D" parent="."]\nmodulate = Color(0, 1, 0, 1)\nmaterial = SubResource("ShaderMaterial_1")\n\n' +
+      '[node name="Crate" parent="." instance=ExtResource("3_base")]\nmodulate = Color(0, 0, 1, 1)\n',
+    // Apart, since any write saves the whole scene as the packer does, which drops a line holding
+    // the default or a null shader parameter.
+    'scripted.tscn':
+      '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://crate.gd" id="1_script"]\n\n' +
+      '[node name="Scripted" type="Sprite2D"]\nscript = ExtResource("1_script")\nspeed = 4.0\nlabel = "moved"\n',
+  };
+  await withASceneProject('scene node unset', files, async ({ call, written, fileOf }) => {
+    const set = (nodePath: string, unset: string[], scenePath = 'main.tscn'): Record<string, unknown> => ({
+      op: 'set',
+      scenePath,
+      nodePath,
+      unset,
+    });
+    const read = async (nodePath: string, scenePath = 'main.tscn'): Promise<unknown> =>
+      parseTextContent(await call('scene_node', { op: 'get', scenePath, nodePath, includeDefaults: true }));
+
+    // A script variable stored at its default and one stored away from it.
+    const scripted = await written('scene_node', set('.', ['speed', 'label'], 'scripted.tscn'));
+    assert.deepEqual(get(scripted, 'unset'), { speed: 4, label: 'crate' }, JSON.stringify(scripted));
+    assert.equal(get(scripted, 'unsetNote'), undefined, 'a node this scene makes follows no other scene');
+    assert.deepEqual(
+      linesUnder(fileOf('scripted.tscn'), '[node name="Scripted"').map((line) => line.split(' = ')[0]),
+      ['script'],
+      fileOf('scripted.tscn'),
+    );
+    const scriptedRead = await read('.', 'scripted.tscn');
+    assert.deepEqual(
+      [get(scriptedRead, 'properties', 'speed'), get(scriptedRead, 'properties', 'label')],
+      [4, 'crate'],
+      JSON.stringify(scriptedRead),
+    );
+
+    // The shader parameter stored as null, the one stored at a value, and a plain engine property.
+    const frost = await written(
+      'scene_node',
+      set('Frost', ['material/shader_parameter/tint', 'material/shader_parameter/amount', 'modulate']),
+    );
+    assert.deepEqual(
+      get(frost, 'unset'),
+      {
+        'material/shader_parameter/tint': null,
+        'material/shader_parameter/amount': null,
+        modulate: { _type: 'Color', r: 1, g: 1, b: 1, a: 1 },
+      },
+      `each is answered as the node reads it now: ${JSON.stringify(frost)}`,
+    );
+    const after = fileOf('main.tscn');
+    assert.deepEqual(
+      linesUnder(after, '[sub_resource type="ShaderMaterial"').filter(
+        (line) => !line.startsWith('shader = '),
+      ),
+      [],
+      `the material keeps its shader and no parameter line: ${after}`,
+    );
+    assert.match(after, /\[sub_resource type="ShaderMaterial" id="[^"]+"\]\nshader = ExtResource\(/);
+    assert.deepEqual(
+      linesUnder(after, '[node name="Frost"').map((line) => line.split(' = ')[0]),
+      ['material'],
+      `Frost keeps only its material: ${after}`,
+    );
+    const frostRead = await read('Frost');
+    // A headless engine's renderer gives a uniform no default, so the shader's own reads as null.
+    assert.deepEqual(
+      [get(frostRead, 'setHere'), get(frostRead, 'properties', 'modulate')],
+      [['material'], { _type: 'Color', r: 1, g: 1, b: 1, a: 1 }],
+      JSON.stringify(frostRead),
+    );
+
+    // A value this scene keeps on an instance goes back to what the instanced scene gives.
+    const crate = await written('scene_node', set('Crate', ['modulate']));
+    const red = { _type: 'Color', r: 1, g: 0, b: 0, a: 1 };
+    assert.deepEqual(
+      [get(crate, 'unset'), get(crate, 'unsetNote')],
+      [
+        { modulate: red },
+        'modulate now holds what res://base.tscn gives this node, and a change there reaches it.',
+      ],
+      JSON.stringify(crate),
+    );
+    assert.deepEqual(linesUnder(fileOf('main.tscn'), '[node name="Crate"'), [], fileOf('main.tscn'));
+    const crateRead = await read('Crate');
+    assert.deepEqual(
+      [get(crateRead, 'properties', 'modulate'), get(crateRead, 'valuesFrom')],
+      [red, 'res://base.tscn'],
+      JSON.stringify(crateRead),
+    );
+
+    // A path naming no line is refused with the lines there are, and the file is left as it was.
+    const kept = fileOf('main.tscn');
+    assert.equal(
+      textOf(await call('scene_node', set('Frost', ['material/shader_parameter/tint']))),
+      'res://main.tscn holds no line for material/shader_parameter/tint, so there is nothing to unset. It sets material/shader.',
+    );
+    assert.equal(
+      textOf(await call('scene_node', set('Frost', ['modulate']))),
+      'res://main.tscn holds no line for modulate, so there is nothing to unset. It sets material.',
+    );
+    // A value another scene gives is that scene's to unset.
+    assert.equal(
+      textOf(await call('scene_node', set('Crate', ['rotation']))),
+      'res://main.tscn holds no line for rotation on Crate: its value comes from res://base.tscn, so it is unset there, with scene_node set on that scene.',
+    );
+    assert.equal(fileOf('main.tscn'), kept, 'and no refusal changed the file');
+  });
+}
+
+/**
+ * resource_edit modify unset drops a stored line of a .tres file, so the value is what the shader,
+ * the script or the class declares.
+ */
+async function testAResourceUnsetDropsTheStoredLine(): Promise<void> {
+  const files = {
+    'frost.gdshader': FROST_SHADER,
+    'item.gd': 'extends Resource\n\n@export var hp: int = 10\n',
+    'frost.tres':
+      '[gd_resource type="ShaderMaterial" format=3]\n\n' +
+      '[ext_resource type="Shader" path="res://frost.gdshader" id="1_shader"]\n\n' +
+      '[resource]\nresource_name = "Frost"\nshader = ExtResource("1_shader")\n' +
+      'shader_parameter/tint = null\nshader_parameter/amount = 0.25\n',
+    'item.tres':
+      '[gd_resource type="Resource" script_class="" format=3]\n\n' +
+      '[ext_resource type="Script" path="res://item.gd" id="1_script"]\n\n' +
+      '[resource]\nscript = ExtResource("1_script")\nhp = 3\n',
+  };
+  await withASceneProject('resource unset', files, async ({ call, written, fileOf }) => {
+    const modify = (resourcePath: string, unset: string[]): Record<string, unknown> => ({
+      op: 'modify',
+      resourcePath,
+      unset,
+    });
+    const read = async (resourcePath: string): Promise<unknown> =>
+      parseTextContent(await call('resource_edit', { op: 'read', resourcePath, includeDefaults: true }));
+
+    const frost = await written(
+      'resource_edit',
+      modify('res://frost.tres', ['shader_parameter/tint', 'shader_parameter/amount', 'resource_name']),
+    );
+    assert.deepEqual(
+      [get(frost, 'unset'), get(frost, 'notStored'), get(frost, 'alsoSaved')],
+      [
+        { 'shader_parameter/tint': null, 'shader_parameter/amount': null, resource_name: '' },
+        undefined,
+        undefined,
+      ],
+      JSON.stringify(frost),
+    );
+    assert.deepEqual(
+      linesUnder(fileOf('frost.tres'), '[resource]').map((line) => line.split(' = ')[0]),
+      ['shader'],
+      fileOf('frost.tres'),
+    );
+    const frostRead = await read('res://frost.tres');
+    // A headless engine's renderer gives a uniform no default, so the shader's own reads as null.
+    assert.deepEqual(
+      [
+        get(frostRead, 'properties', 'resource_name'),
+        get(frostRead, 'properties', 'shader_parameter/tint'),
+        get(frostRead, 'properties', 'shader_parameter/amount'),
+      ],
+      ['', null, null],
+      JSON.stringify(frostRead),
+    );
+
+    const item = await written('resource_edit', modify('res://item.tres', ['hp']));
+    assert.deepEqual(get(item, 'unset'), { hp: 10 }, JSON.stringify(item));
+    assert.deepEqual(
+      linesUnder(fileOf('item.tres'), '[resource]').map((line) => line.split(' = ')[0]),
+      ['script'],
+      fileOf('item.tres'),
+    );
+    assert.equal(get(await read('res://item.tres'), 'properties', 'hp'), 10);
+
+    const kept = fileOf('frost.tres');
+    assert.equal(
+      textOf(await call('resource_edit', modify('res://frost.tres', ['resource_name']))),
+      'res://frost.tres holds no line for resource_name, so there is nothing to unset. It sets shader.',
+    );
+    assert.equal(
+      textOf(await call('resource_edit', { op: 'modify', resourcePath: 'res://frost.tres' })),
+      'modify takes properties, unset or both.',
+    );
+    assert.equal(fileOf('frost.tres'), kept, 'and no refusal changed the file');
+  });
+}
+
 /**
  * Editable children opened and closed with no editor: an instance nested in an editable one opened
  * in turn, which instances are editable read back through an inherited scene and an instancing one,
@@ -83164,7 +83382,7 @@ async function testEditableChildrenAreOpenedAndClosedWithNoEditor(): Promise<voi
     }
     assert.equal(
       textOf(await call('scene_node', { op: 'set', scenePath: 'main.tscn', nodePath: 'Crate1' })),
-      'set takes properties, editableChildren, placeholder, addGroups or removeGroups.',
+      'set takes properties, unset, editableChildren, placeholder, addGroups or removeGroups.',
     );
 
     const shallow = get(
@@ -88114,6 +88332,8 @@ const TESTS: (() => void | Promise<void>)[] = [
   testA3DLevelIsReadAsItIsWritten,
   testAnInheritedSceneIsMadeWithNoEditor,
   testAnInstanceKeepsItsOwnValuesWithNoEditor,
+  testASceneNodeUnsetDropsTheStoredLine,
+  testAResourceUnsetDropsTheStoredLine,
   testEditableChildrenAreOpenedAndClosedWithNoEditor,
   testAnInheritedSceneFindsItsBaseAsTheEngineDoes,
   testAMovedNodeIsFollowedIntoTheScenesNamingIt,

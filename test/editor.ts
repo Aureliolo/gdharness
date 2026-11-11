@@ -2334,6 +2334,56 @@ async function testASceneKeepsItsOwnValuesInTheEditor({ call, project }: Editor)
 }
 
 /**
+ * An unset through the editor drops a built-in ShaderMaterial's parameter line, the null one and
+ * one at a value, as the inspector's revert arrow does. The editor's renderer runs headless here
+ * and gives a parameter it was never given null, which its save wrote as a line.
+ */
+async function testAShaderParameterIsUnsetInTheEditor({ call, refusal, project }: Editor): Promise<void> {
+  mkdirSync(join(project, 'unset'), { recursive: true });
+  writeFileSync(
+    join(project, 'unset', 'frost.gdshader'),
+    'shader_type canvas_item;\n\nuniform vec4 tint : source_color = vec4(0.86, 0.92, 0.98, 1.0);\nuniform float amount = 0.5;\n',
+  );
+  writeFileSync(
+    join(project, 'unset', 'frost.tscn'),
+    '[gd_scene format=3]\n\n[ext_resource type="Shader" path="res://unset/frost.gdshader" id="1_shader"]\n\n' +
+      '[sub_resource type="ShaderMaterial" id="ShaderMaterial_1"]\nshader = ExtResource("1_shader")\n' +
+      'shader_parameter/tint = null\nshader_parameter/amount = 0.25\n\n' +
+      '[node name="Frost" type="Sprite2D"]\nmaterial = SubResource("ShaderMaterial_1")\n',
+  );
+  const scene = { projectPath: project, scenePath: 'res://unset/frost.tscn', op: 'set', nodePath: '.' };
+  const parameters = (): string[] =>
+    fileText(project, 'unset/frost.tscn')
+      .split('\n')
+      .filter((line) => line.startsWith('shader_parameter/'));
+  try {
+    await call('editor_rescan', { projectPath: project });
+    const unset = await call('scene_node', {
+      ...scene,
+      unset: ['material/shader_parameter/tint', 'material/shader_parameter/amount'],
+    });
+    assert.deepEqual(
+      [get(unset, 'writtenBy'), get(unset, 'unset')],
+      ['the editor', { 'material/shader_parameter/tint': null, 'material/shader_parameter/amount': null }],
+      text(unset),
+    );
+    assert.deepEqual(parameters(), [], fileText(project, 'unset/frost.tscn'));
+    assert.match(
+      fileText(project, 'unset/frost.tscn'),
+      /\[sub_resource type="ShaderMaterial" id="[^"]+"\]\nshader = ExtResource\(/,
+      'the material keeps its shader',
+    );
+    assert.equal(
+      await refusal('scene_node', { ...scene, unset: ['material/shader_parameter/amount'] }),
+      'The editor answered scene_node set with an error: res://unset/frost.tscn holds no line for material/shader_parameter/amount, so there is nothing to unset. It sets material/shader.',
+    );
+  } finally {
+    rmSync(join(project, 'unset'), { recursive: true, force: true });
+    await call('editor_rescan', { projectPath: project });
+  }
+}
+
+/**
  * A rename in a scene open in a tab, whose player plays a library kept in a file of its own. The
  * editor holds that library for the tab, the same copy the write edits, so a write that is then
  * refused puts its tracks back, and one that goes through saves them with the scene.
@@ -8276,6 +8326,7 @@ async function main(): Promise<void> {
     ['testAMethodScriptEditAddsIsSeenByTheEditor', testAMethodScriptEditAddsIsSeenByTheEditor],
     ['testAScenesInstancedAndPlaced', testAScenesInstancedAndPlaced],
     ['testASceneKeepsItsOwnValuesInTheEditor', testASceneKeepsItsOwnValuesInTheEditor],
+    ['testAShaderParameterIsUnsetInTheEditor', testAShaderParameterIsUnsetInTheEditor],
     ['testAMovedNodeKeepsItsPathsInTheEditor', testAMovedNodeKeepsItsPathsInTheEditor],
     ['testAnEnumMemberAddedToAHeldTypeIsPickedUp', testAnEnumMemberAddedToAHeldTypeIsPickedUp],
     [
