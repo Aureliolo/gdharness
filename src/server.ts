@@ -632,6 +632,9 @@ function writtenFileRefusal(
   if (!existsSync(directory)) {
     return `${argument}'s directory ${dirname(path)} does not exist. ${whatOpening} creates no directories.`;
   }
+  if (!isDirectory(directory)) {
+    return `${argument}'s directory ${dirname(path)} is a file, not a directory. Name a path in a folder that exists.`;
+  }
   const where = join(directory, basename(path));
   const inside = rule.projects.find(
     (project) => project !== '' && isWithinRoot(realAsFarAsItExists(project), where),
@@ -1891,6 +1894,9 @@ function describeValue(value: unknown): string {
   // "depth as integer, not a number" names the type it has in common with what was wanted.
   if (typeof value === 'number') {
     return String(value);
+  }
+  if (value === null) {
+    return 'null';
   }
   return VALUE_NAMES[typeof value] ?? typeof value;
 }
@@ -3877,12 +3883,16 @@ export function testPathsIn(
     }
     resolved.push(location.relativePath.replace(/\/+$/, ''));
   }
-  const unique = [...new Set(resolved)];
-  const within = (path: string, directory: string): boolean => path.startsWith(`${directory}/`);
+  // Two spellings of one path are one suite on a file system that ignores case.
+  const folded = (path: string): string =>
+    process.platform === 'win32' || process.platform === 'darwin' ? path.toLowerCase() : path;
+  const unique = resolved.filter((path, at) => resolved.findIndex((one) => folded(one) === folded(path)) === at);
   return {
     ok: true,
     value: unique
-      .filter((path) => !unique.some((other) => other !== path && within(path, other)))
+      .filter(
+        (path) => !unique.some((other) => other !== path && folded(path).startsWith(`${folded(other)}/`)),
+      )
       .map((path) => `res://${path}`),
   };
 }

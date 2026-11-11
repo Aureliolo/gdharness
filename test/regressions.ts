@@ -65847,6 +65847,49 @@ async function testGdUnitRunner(): Promise<void> {
   }
 }
 
+/**
+ * Suites named in another case are one suite where the file system ignores case, and two where it
+ * does not. A null entry is called null, not an object.
+ */
+function testTestPathsMatchTheFileSystemsCase(): void {
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-test-paths-case-'));
+  const ignoresCase = process.platform === 'win32' || process.platform === 'darwin';
+  try {
+    mkdirSync(join(project, 'tests'));
+    writeFileSync(join(project, 'tests', 'a_test.gd'), 'extends Node\n');
+    writeFileSync(join(project, 'tests', 'a_tests.gd'), 'extends Node\n');
+    assert.deepEqual(
+      testPathsIn(project, ['tests/a_test.gd', 'tests/A_TEST.gd']),
+      {
+        ok: true,
+        value: ignoresCase ? ['res://tests/a_test.gd'] : ['res://tests/a_test.gd', 'res://tests/A_TEST.gd'],
+      },
+      'one suite spelt in two cases, keeping the first spelling where case does not count',
+    );
+    assert.deepEqual(
+      testPathsIn(project, ['tests/a_test.gd', 'tests/a_tests.gd']),
+      { ok: true, value: ['res://tests/a_test.gd', 'res://tests/a_tests.gd'] },
+      'two different suites both stay',
+    );
+    assert.deepEqual(
+      testPathsIn(project, ['tests/a_test.gd', 'TESTS']),
+      {
+        ok: true,
+        value: ignoresCase ? ['res://TESTS'] : ['res://tests/a_test.gd', 'res://TESTS'],
+      },
+      'a suite inside a folder spelt in another case is dropped where case does not count',
+    );
+    const refused = testPathsIn(project, ['tests/a_test.gd', null]);
+    assert.ok(!refused.ok);
+    assert.equal(refused.reason, 'path[1] is null, not a suite file or a directory in the project.');
+    const scripts = scriptsToDiagnose(project, ['tests/a_test.gd', null]);
+    assert.ok(!scripts.ok);
+    assert.equal(scripts.reason, 'scriptPath[1] is null, not a script or a folder in the project.');
+  } finally {
+    sweep(project);
+  }
+}
+
 /** A class the engine could not resolve is named whatever letters its name holds. */
 function testAnUnresolvedClassIsNamedWhateverLettersItHolds(): void {
   const said = (name: string): string => `Could not resolve class "${name}", because of a parser error.`;
@@ -68326,6 +68369,11 @@ function testACaptureIsSavedOnlyWhereItMayBe(): void {
     );
     assert.match(refused(join(project, 'screen.png')), /is inside the project/);
     assert.match(refused(join(outside, 'taken.png')), /already exists/);
+    assert.match(
+      refused(join(outside, 'taken.png', 'screen.png')),
+      /is a file, not a directory/,
+      'a path under a file',
+    );
   } finally {
     sweep(root);
   }
@@ -68454,6 +68502,7 @@ function testAMovieIsWrittenOnlyWhereACaptureCouldBe(): void {
     );
     writeFileSync(join(outside, 'kept.avi'), 'x');
     assert.match(refused(join(outside, 'kept.avi')), /already exists\. A movie is not written over a file/);
+    assert.match(refused(join(outside, 'kept.avi', 'trailer.avi')), /is a file, not a directory/);
     // The sequence's own files, not the name given, are what a PNG movie would write over.
     writeFileSync(join(outside, 'shot00000000.png'), 'x');
     assert.match(refused(join(outside, 'shot.png')), /would write .*shot00000000\.png, which already exists/);
@@ -87581,6 +87630,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunOfAnotherProjectOutlivesItsServer,
   testTheResourcesReadOnlyTheProject,
   testGdUnitRunner,
+  testTestPathsMatchTheFileSystemsCase,
   testAnUnresolvedClassIsNamedWhateverLettersItHolds,
   testTheShippedRunnerRunsAFileOfSuites,
   testAnEngineRunIsReadCaseByCase,
