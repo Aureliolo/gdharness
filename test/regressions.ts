@@ -553,7 +553,6 @@ import {
 import { skillFiles } from '../src/skill.js';
 import {
   type ChildProcess,
-  programArgumentsOf,
   runHidden,
   runSyncHidden,
   type SpawnSyncReturns,
@@ -649,6 +648,7 @@ import {
   mendBeforeStart,
   mendClassList,
   mendUidCache,
+  programArgumentsOf,
   type UidEntry,
   uidCacheEntries,
 } from '../src/uid-cache.js';

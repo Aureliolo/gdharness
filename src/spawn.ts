@@ -17,9 +17,8 @@ import {
   spawn,
   spawnSync,
 } from 'node:child_process';
-import { basename } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
-import { mendBeforeStart } from './uid-cache.js';
+import { mendBeforeStart, programArgumentsOf } from './uid-cache.js';
 
 /**
  * The one way this package and its tests start a process, so every one starts with no window.
@@ -42,25 +41,6 @@ function mendProjectOf(command: string, args: readonly string[], cwd: string | U
   const own = programArgumentsOf(command, args);
   const end = own.indexOf('--');
   mendBeforeStart(end < 0 ? own : own.slice(0, end), cwd);
-}
-
-/**
- * The arguments of the program [param command] runs, past the wrappers an engine starts under on
- * Linux: `taskset -c <cores>` and `setpriv <options> --`, each of which runs the command after it.
- * Read as the engine's own, setpriv's `--` hid every engine's `--path`, so no Linux engine was mended.
- */
-export function programArgumentsOf(command: string, args: readonly string[]): readonly string[] {
-  const name = basename(command);
-  const inner = args[2];
-  if (name === 'taskset' && args[0] === '-c' && inner !== undefined) {
-    return programArgumentsOf(inner, args.slice(3));
-  }
-  const end = args.indexOf('--');
-  const wrapped = args[end + 1];
-  if (name === 'setpriv' && end >= 0 && wrapped !== undefined) {
-    return programArgumentsOf(wrapped, args.slice(end + 2));
-  }
-  return args;
 }
 
 type Stdio = StdioNull | StdioPipe;

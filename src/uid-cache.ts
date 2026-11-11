@@ -7,7 +7,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cachedEntries } from './class-cache.js';
 import { errorMessage } from './errors.js';
@@ -343,6 +343,25 @@ export function mendClassList(projectPath: string): readonly GoneClass[] {
     throw error;
   }
   return gone;
+}
+
+/**
+ * The arguments of the program [param command] runs, past the wrappers an engine starts under on
+ * Linux: `taskset -c <cores>` and `setpriv <options> --`, each of which runs the command after it.
+ * Read as the engine's own, setpriv's `--` hid every engine's `--path`, so no Linux engine was mended.
+ */
+export function programArgumentsOf(command: string, args: readonly string[]): readonly string[] {
+  const name = basename(command);
+  const inner = args[2];
+  if (name === 'taskset' && args[0] === '-c' && inner !== undefined) {
+    return programArgumentsOf(inner, args.slice(3));
+  }
+  const end = args.indexOf('--');
+  const wrapped = args[end + 1];
+  if (name === 'setpriv' && end >= 0 && wrapped !== undefined) {
+    return programArgumentsOf(wrapped, args.slice(end + 2));
+  }
+  return args;
 }
 
 /** The project a Godot command line starts on, by its `--path`, or null when it names none. */
