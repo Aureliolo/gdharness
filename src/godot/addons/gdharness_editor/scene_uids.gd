@@ -15,7 +15,8 @@ static var by_path: PackedStringArray = []
 ## for a text scene there, and a new file is given one as the editor gives it.
 static func save_keeping_uid(resource: Resource, file_path: String) -> Error:
 	if Engine.is_editor_hint():
-		return ResourceSaver.save(resource, file_path)
+		var saved: Error = ResourceSaver.save(resource, file_path)
+		return saved if saved != OK else _as_the_editor_writes(file_path)
 	var uid: int = uid_in(file_path)
 	var saving: Error = ResourceSaver.save(resource, file_path)
 	if saving != OK:
@@ -34,9 +35,10 @@ static func save_keeping_uid(resource: Resource, file_path: String) -> Error:
 ## reference by path alone, and each breaks when the file it names is moved: the uid is put back on
 ## each external resource.
 ##
-## The saver leaves out a shader parameter holding the default the renderer gives it, and a headless
-## engine's renderer gives none, so every parameter a ShaderMaterial never set was written as null.
-## Loading null clears the parameter, so the line changes nothing, and the editor drops it again.
+## A ShaderMaterial lists every uniform of its shader, at the default the renderer gives it when it
+## was never set, and the saver writes each one listed. A headless renderer, an editor's as well,
+## gives no default, so every parameter never set or unset was written as null. Loading null clears
+## the parameter, so the line changes nothing, and it is dropped.
 static func _as_the_editor_writes(file_path: String) -> Error:
 	if not (file_path.ends_with(".tscn") or file_path.ends_with(".tres")):
 		return OK

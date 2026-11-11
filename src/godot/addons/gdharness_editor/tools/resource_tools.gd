@@ -11,6 +11,7 @@ const GdhSame = preload("../same_values.gd")
 const GdhSceneFile = preload("../scene_file.gd")
 const GdhSceneUids = preload("../scene_uids.gd")
 const GdhSerialisation = preload("../serialisation.gd")
+const GdhUnset = preload("../unset_values.gd")
 # The minimal shader of a type: its declaration and the one function the engine calls for it.
 const SHADER_EMPTY: String = """shader_type %s;
 
@@ -105,13 +106,15 @@ func _load_theme(theme_path: String) -> Theme:
 ## Read back because a property can be set and still not be saved: one without storage, a
 ## script variable that is not exported. Both were answered as changed. A value the file gives as
 ## asked and the resource's script changes as it loads goes under loadsAs in [param answer], and one
-## the file leaves out at its default under notStored.
+## the file leaves out at its default under notStored. [param unset] are those of [param asked] the
+## call unsets, which the file leaves out because they were asked to be.
 func _save_checked(
 	resource: Resource,
 	path: String,
 	asked: Dictionary,
 	previous: Variant,
 	answer: Dictionary,
+	unset: Array[String] = [],
 ) -> String:
 	var names: Array = asked.keys()
 	var carried: Dictionary = GdhHeadlessCheck.embedded_in(
@@ -160,7 +163,7 @@ func _save_checked(
 	_written(path)
 	_note_loads_as(answer, resource, path, loads_as)
 	if path.ends_with(".tres"):
-		var inside: Array = names.duplicate()
+		var inside: Array = names.filter(func(key: Variant) -> bool: return not unset.has(str(key)))
 		for key: Variant in asked:
 			_given_inside(str(key), asked[key], inside)
 		_note_not_stored(answer, resource, inside, FileAccess.get_file_as_string(path))
@@ -459,22 +462,30 @@ func modify_resource(args: Dictionary) -> Dictionary:
 		}
 
 	var properties: Dictionary = _parse_properties_dict(args.get("properties", ""))
+	var unsetting: Array[String] = GdhUnset.asked(args)
+	if properties.is_empty() and unsetting.is_empty():
+		return { "ok": false, "error": "modify takes properties, unset or both." }
 	var refused: String = _properties.write_all(resource, properties)
 	if refused.is_empty():
 		refused = _holding_itself(resource, res_path, properties.keys())
 	else:
 		refused = GdhHeadlessCheck.setter_ran(resource, _properties.unheld, refused)
+	if refused.is_empty():
+		refused = _unset_on(resource, res_path, unsetting, properties)
 	if not refused.is_empty():
 		return { "ok": false, "error": refused }
 	var answer: Dictionary = { "ok": true, "resourcePath": res_path }
 	_properties.note_write(answer)
 	var previous: PackedByteArray = FileAccess.get_file_as_bytes(res_path)
-	var failed: String = _save_checked(resource, res_path, properties, previous, answer)
+	var checked: Dictionary = properties.duplicate()
+	for path: String in unsetting:
+		checked[path] = null
+	var failed: String = _save_checked(resource, res_path, checked, previous, answer, unsetting)
 	if not failed.is_empty():
 		return { "ok": false, "error": failed }
 	_note_put_back(answer, resource, res_path)
 	var also: Array[Dictionary] = _also_saved(
-		resource, res_path, properties.keys(), previous, answer
+		resource, res_path, checked.keys(), previous, answer
 	)
 	if not also.is_empty():
 		answer["alsoSaved"] = also
@@ -482,7 +493,32 @@ func modify_resource(args: Dictionary) -> Dictionary:
 		func(key: Variant) -> bool: return not _properties.metadata_removed.has(str(key))
 	)
 	answer["properties"] = _held(resource, kept)
+	if not unsetting.is_empty():
+		answer["unset"] = _held(resource, unsetting)
 	return answer
+
+
+## Takes each of [param paths] on [param resource], saved at [param path], back to its default with
+## no line of the file setting it, or answers why not with nothing taken back. [param given] is what
+## the call sets.
+func _unset_on(
+	resource: Resource, path: String, paths: Array[String], given: Dictionary
+) -> String:
+	var places: Array[Array] = []
+	for asked: String in paths:
+		var place: Array = GdhUnset.place_of(resource, asked, given)
+		if place[0] == null:
+			return str(place[1])
+		var holder: Resource = place[0]
+		var leaf: String = place[1]
+		if not GdhUnset.resource_stores(path, holder, resource, leaf):
+			var lines: Array = GdhUnset.resource_lines(path, holder, resource)
+			return GdhUnset.not_stored(asked, leaf, path, lines)
+		places.append([holder, leaf, GdhUnset.resource_default(holder, leaf)])
+	for place: Array in places:
+		var holder: Resource = place[0]
+		holder.set(str(place[1]), place[2])
+	return ""
 
 
 ## Each line of the main resource the save at [param path] changed or dropped that the call did not
