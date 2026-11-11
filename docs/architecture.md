@@ -815,7 +815,7 @@ The keeper writes the note once the game is up, and the exit into it when the ga
 one process that can wait on the game. The server that started the run and any server that picks it
 up both read the exit from there.
 
-Once it listens for a stop, the keeper writes only where no later run's note is. A run is told by its
+After its first write the keeper writes only where no later run's note is. A run is told by its
 transcript.
 
 Every note, and a profiled run's profile, is written to a file of its own and renamed over the old
