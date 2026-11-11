@@ -10048,6 +10048,23 @@ async function testAnEditorCloseWaitsForItToGo(): Promise<void> {
  * the editor in editor_status, and an editor connecting removes it.
  */
 async function testACallMetByAnEditorQuittingUnusedIsAskedAgain(): Promise<void> {
+  await aCallMetByAnEditorQuitting(false);
+}
+
+/**
+ * A call the editor quitting unused never answered is asked again too. Its turning-away reply can
+ * be lost, since Godot sends what it queued on a later frame and the quit can come first. The
+ * record names that editor, which is how the server knows the call was not run.
+ */
+async function testACallAnEditorQuittingUnusedLeftUnansweredIsAskedAgain(): Promise<void> {
+  await aCallMetByAnEditorQuitting(true);
+}
+
+/**
+ * The editor quitting meets a call: it says so, or with [dropsItsReply] it goes with the call
+ * unanswered. Either way the call is asked again of the editor that comes in its place.
+ */
+async function aCallMetByAnEditorQuitting(dropsItsReply: boolean): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-idle-'));
   const spelled = project.replaceAll('\\', '/');
   writeFileSync(
@@ -10145,13 +10162,21 @@ async function testACallMetByAnEditorQuittingUnusedIsAskedAgain(): Promise<void>
     );
 
     const answeredFirst: string[] = [];
-    const heardFirst = await anEditor(first.pid ?? 0, (socket, message) => {
+    // An editor that drops its reply is the one the record names, as only the editor quitting
+    // writes it. One that says it is quitting is told apart by that alone.
+    const firstPid = (dropsItsReply ? quitting.pid : first.pid) ?? 0;
+    const heardFirst = await anEditor(firstPid, (socket, message) => {
       // What the server asks an editor on its own as it connects.
       if (message['tool'] !== 'get_project_setting') {
         socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result: {} }));
         return;
       }
       answeredFirst.push(message['tool']);
+      if (dropsItsReply) {
+        socket.terminate();
+        return;
+      }
+      // Ended once the reply is written, as the addon's goes out before its editor quits.
       socket.send(
         JSON.stringify({
           type: 'tool_result',
@@ -10160,10 +10185,12 @@ async function testACallMetByAnEditorQuittingUnusedIsAskedAgain(): Promise<void>
           closing: true,
           error: `The editor is quitting after going unused, so ${message['tool']} was not run.`,
         }),
+        () => {
+          socket.terminate();
+        },
       );
-      socket.terminate();
     });
-    await greetedBy(first.pid ?? 0);
+    await greetedBy(firstPid);
     assert.equal(existsSync(record), false, 'an editor connecting removes the record');
     assert.equal(get(await status(), 'quitUnused'), undefined, 'and nothing is said to have quit');
     await delay(600);
@@ -90820,6 +90847,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARestartWaitsForTheOldEditorToGo,
   testAnEditorCloseWaitsForItToGo,
   testACallMetByAnEditorQuittingUnusedIsAskedAgain,
+  testACallAnEditorQuittingUnusedLeftUnansweredIsAskedAgain,
   testAReopenAfterAnIdleQuitWaitsOnlyForTheEditorItself,
   testTheIdleRecordAndTheEditorsPortsAreRead,
   testCompletionsAreNarrowedToWhatWasTyped,
