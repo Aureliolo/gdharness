@@ -530,7 +530,16 @@ import {
   spawnShown,
   spawnSyncHidden,
 } from '../src/spawn.js';
-import { type ArmPlayed, armsPlayed, shareFaults, shareOf, spreadOptionsOf } from '../src/spread-run.js';
+import {
+  type ArmPlayed,
+  armsPlayed,
+  type EngineLeft,
+  engineFaults,
+  progressOf,
+  shareFaults,
+  shareOf,
+  spreadOptionsOf,
+} from '../src/spread-run.js';
 import { followSuccessor, RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
 import { EVERY_FILE, EVERY_NAME, reachedBySuite, SuiteInputs, walkSeen } from '../src/suite-inputs.js';
 import {
@@ -18525,6 +18534,29 @@ function testASidecarWithNoFileDeclaresNoUid(): void {
       `uid cache: moved what names a file gone in ${where}: res://z_old/s.gd to res://m_new/s.gd, res://elsewhere/twin.gd to res://first/twin.gd\n`,
       `uid cache: dropped what names a file gone from ${where}: res://gone.gd, res://old.png\n`,
     ]);
+
+    // A directory where the new cache is written cannot be written over, on every platform. The
+    // cache is then left as it was and the reason is said.
+    const stale = encodedUidCache(entries);
+    writeFileSync(cache, stale);
+    mkdirSync(`${cache}.${String(process.pid)}.mending`);
+    const failed: string[] = [];
+    process.stderr.write = (line: string): boolean => {
+      failed.push(line);
+      return true;
+    };
+    try {
+      mendBeforeStart(['--path', project], undefined);
+    } finally {
+      process.stderr.write = write;
+    }
+    assert.equal(failed.length, 1, failed.join(''));
+    assert.ok(
+      failed[0]?.startsWith(`uid cache: could not rewrite ${where}, which names files gone: `),
+      failed.join(''),
+    );
+    assert.ok(failed[0]?.endsWith('\n'));
+    assert.deepEqual(readFileSync(cache), stale, 'and the cache is left as it was');
   } finally {
     rmSync(project, { recursive: true, force: true });
   }
@@ -58528,6 +58560,51 @@ function testSpreadRefusesAnEmptyValueAndASceneThatIsNoFile(): void {
 }
 
 /**
+ * A spread run says how each engine ended and how far each worker has got.
+ *
+ * An engine that ended by a signal has no exit code and is a fault, as is one that exits non-zero
+ * or that gdharness ended itself. A worker with no log, or none that printed progress, has played no
+ * arm yet, and one that did is named by its last progress line.
+ */
+function testASpreadRunNamesHowEachEngineEndedAndHowFarEachWorkerIs(): void {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spread-ended-'));
+  try {
+    const log = join(scratch, 'engine.log');
+    const engine = (code: number | null, ended: string | null = null): EngineLeft => ({
+      name: 'worker 1',
+      log,
+      end: { code, signal: null, ended },
+      seconds: 1,
+    });
+    assert.deepEqual(engineFaults(engine(0), null), [], 'a clean exit with no log is no fault');
+    assert.deepEqual(engineFaults(engine(null), null), ['worker 1: the engine exited without an exit code']);
+    assert.deepEqual(engineFaults(engine(3), null), ['worker 1: the engine exited 3']);
+    assert.deepEqual(engineFaults(engine(0, 'it was stopped after 5 s'), null), [
+      'worker 1: it was stopped after 5 s',
+    ]);
+    assert.deepEqual(engineFaults(engine(-1073741819), null), [
+      'worker 1: the engine exited 0xC0000005 (STATUS_ACCESS_VIOLATION)',
+    ]);
+
+    const first = join(scratch, 'one.log');
+    const second = join(scratch, 'two.log');
+    writeFileSync(first, 'gdharness share: fast 2 of 10 runs\nnoise\ngdharness share: slow 7 of 10 runs\n');
+    assert.equal(
+      progressOf([first, second, join(scratch, 'none.log')]),
+      'still playing: worker 0 at slow 7 of 10, worker 1 has played no arm yet, worker 2 has played no arm yet',
+    );
+    writeFileSync(second, 'nothing printed yet\n');
+    assert.equal(
+      progressOf([second]),
+      'still playing: worker 0 has played no arm yet',
+      'a log with no progress line is no progress',
+    );
+  } finally {
+    sweep(scratch);
+  }
+}
+
+/**
  * `gdharness spread` against the same bench played on its own: the same table to the last digit,
  * floats included, from three workers and a gathering engine, none of which announces itself as
  * the game. Then each way a fan-out can half work, each refused before or after the gathering with
@@ -85814,6 +85891,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAConfigPinNamesOnlyGdharnessWhateverTheEditorWroteTheFileAs,
   testTheTestHelpersWaitStepAndPress,
   testSpreadRefusesAnEmptyValueAndASceneThatIsNoFile,
+  testASpreadRunNamesHowEachEngineEndedAndHowFarEachWorkerIs,
   testASpreadBenchGathersTheTableItPlaysAlone,
   testASuiteRunHasNoSoundWhicheverWayItStarts,
   testTheTestCommandRunsAndJudgesAProject,

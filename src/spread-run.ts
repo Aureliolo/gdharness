@@ -228,7 +228,7 @@ export function shareFaults(played: ReadonlyArray<readonly ArmPlayed[] | null>):
 }
 
 /** What one engine of the run left behind. */
-interface EngineLeft {
+export interface EngineLeft {
   readonly name: string;
   readonly log: string;
   readonly end: EngineEnd;
@@ -396,7 +396,7 @@ async function enginePlayed(
 }
 
 /** What is wrong with how [param engine] ended and what it printed, each naming the engine. */
-function engineFaults(engine: EngineLeft, godotVersion: string | null): string[] {
+export function engineFaults(engine: EngineLeft, godotVersion: string | null): string[] {
   const faults: string[] = [];
   const { code, ended } = engine.end;
   if (ended !== null) {
@@ -428,7 +428,7 @@ function engineFaults(engine: EngineLeft, godotVersion: string | null): string[]
 }
 
 /** How far each worker whose log is at [param logs] has got, by the last progress line it printed. */
-function progressOf(logs: readonly string[]): string {
+export function progressOf(logs: readonly string[]): string {
   const each = logs.map((log, index) => {
     const text = existsSync(log) ? readLog(log) : '';
     const last = [...text.matchAll(PROGRESS)].at(-1);
