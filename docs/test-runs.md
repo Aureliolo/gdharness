@@ -268,7 +268,7 @@ one more. Each engine of the run started in the last 30 seconds counts at its wh
 it has yet to take it. The run's first engine always starts.
 
 A share waiting for memory keeps a mark in the slots' `waiting` folder, as a wait for a slot does.
-It takes its slot only once memory has room, so it holds no slot from anybody else while it waits.
+It takes its slot first and keeps it while it waits, so an engine memory admits never waits for a slot.
 
 ## What fails a run
 

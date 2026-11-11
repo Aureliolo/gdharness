@@ -1,5 +1,5 @@
 /**
- * Properties over the readers that take input nobody here wrote.
+ * Properties over the readers that take input nobody here wrote, and over the order a run's waits come in.
  *
  * The example tests beside these pin one crafted input each. A property states what must hold for
  * every input and lets the generator hunt for the one that breaks it, which is how the cases nobody
@@ -8,6 +8,7 @@
  * reported with the seed and the shrunken input that reproduce it.
  */
 
+import { jest } from 'bun:test';
 import assert from 'node:assert/strict';
 import {
   existsSync,
@@ -20,7 +21,6 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve, sep } from 'node:path';
-
 import fc from 'fast-check';
 
 import { extract } from '../scripts/install-godot.js';
@@ -39,6 +39,8 @@ import {
   sweepTranscripts,
   writeRunRecord,
 } from '../src/run-record.js';
+import { type CasesBySuite, type DeclaredSuite, type SuiteTimes, unitsOf } from '../src/suite-plan.js';
+import { MemoryGate, runShares } from '../src/suite-run.js';
 import { sweep } from './support/sweep.js';
 import { buildZip, DEFLATED, STORED, type ZipEntrySpec } from './support/zip.js';
 
@@ -999,6 +1001,258 @@ function junkIsNeverAReport(): void {
   );
 }
 
+// ---------------------------------------------------------------------------------------------
+// The waits of a run for a machine slot and for memory
+// ---------------------------------------------------------------------------------------------
+
+const GIB = 1024 ** 3;
+const ENGINE_BYTES = 1.5 * GIB;
+const KEPT_BYTES = 4 * GIB;
+const CLOCK_MOVE_MS = 30_000;
+const IDLE_STEPS_BEFORE_HUNG = 100;
+const SETTLE_ROUNDS_BEFORE_STUCK = 1000;
+
+/** Slots handed on in the order they were asked for, taking and giving back with no folder behind. */
+class StandInSlots {
+  private free: number;
+  private readonly waiting: Array<() => void> = [];
+
+  constructor(count: number) {
+    this.free = count;
+  }
+
+  get freeCount(): number {
+    return this.free;
+  }
+
+  takeNow(): string | null {
+    if (this.free === 0) {
+      return null;
+    }
+    this.free -= 1;
+    return 'lock';
+  }
+
+  async take(signal?: AbortSignal): Promise<string> {
+    for (;;) {
+      signal?.throwIfAborted();
+      const lock = this.takeNow();
+      if (lock !== null) {
+        return lock;
+      }
+      await new Promise<void>((woken, refused) => {
+        this.waiting.push(woken);
+        signal?.addEventListener(
+          'abort',
+          () => {
+            refused(new Error('the wait for a slot was ended'));
+          },
+          { once: true },
+        );
+      });
+    }
+  }
+
+  release(_lock: string): void {
+    this.free += 1;
+    this.waiting.shift()?.();
+  }
+
+  markWaiting(): () => void {
+    return () => undefined;
+  }
+}
+
+interface RunSetup {
+  readonly slotCount: number;
+  readonly outsideHolds: boolean;
+  readonly lanes: number;
+  readonly suites: number;
+  readonly freeGiB: number;
+}
+
+interface Ran {
+  readonly index: number;
+  readonly suites: readonly string[];
+}
+
+interface StartedRun {
+  readonly slots: StandInSlots;
+  readonly settled: () => boolean;
+  readonly ran: () => Ran[] | undefined;
+  readonly judgeHung: () => void;
+}
+
+/** The engines memory has room for as a run begins, which is what a run held by memory starts with. */
+function enginesByMemory(freeGiB: number): number {
+  return Math.max(1, Math.floor((freeGiB * GIB - KEPT_BYTES) / ENGINE_BYTES));
+}
+
+/** Suites of one 40 s case each, which `unitsOf` keeps whole, so each is a share of its own or a part of one. */
+function suitesOf(count: number): { units: ReturnType<typeof unitsOf>; declared: CasesBySuite } {
+  const paths = Array.from({ length: count }, (_, at) => `res://suite_${String(at)}.gd`);
+  const suites: DeclaredSuite[] = paths.map((path) => ({
+    path,
+    cases: ['test_one'],
+    windowed: false,
+    headless: false,
+    together: false,
+    accessible: false,
+  }));
+  const times: SuiteTimes = Object.fromEntries(
+    paths.map((path) => [path, { seconds: 40, cases: { test_one: 40 } }]),
+  );
+  return { units: unitsOf(suites, times), declared: new Map(paths.map((path) => [path, ['test_one']])) };
+}
+
+function takeFreeSlots(slots: StandInSlots, count: number): string[] {
+  const taken: string[] = [];
+  while (taken.length < count) {
+    const lock = slots.takeNow();
+    if (lock === null) {
+      break;
+    }
+    taken.push(lock);
+  }
+  return taken;
+}
+
+/** Starts the run the setup describes, with the scheduler deciding when each wait ends. */
+function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number }): StartedRun {
+  const slots = new StandInSlots(setup.slotCount);
+  if (setup.outsideHolds && setup.slotCount > 1) {
+    slots.takeNow();
+    void s.schedule(Promise.resolve(), 'outside run ends').then(() => {
+      slots.release('outside');
+    });
+  }
+  let clock = 0;
+  for (let move = 0; move < 4; move += 1) {
+    void s.schedule(Promise.resolve(), 'clock moves 30 s').then(() => {
+      clock += CLOCK_MOVE_MS;
+    });
+  }
+  let running = 0;
+  let hung = false;
+  const free = (): Promise<number> =>
+    hung
+      ? Promise.reject(new Error('judged hung'))
+      : Promise.resolve(setup.freeGiB * GIB - running * ENGINE_BYTES);
+  const gate = new MemoryGate(slots, free, () => clock, 1);
+  const taken = takeFreeSlots(slots, Math.min(setup.lanes, enginesByMemory(setup.freeGiB)));
+  const { units, declared } = suitesOf(setup.suites);
+  const run = (
+    plan: { readonly suites: ReadonlyArray<{ readonly path: string }> },
+    index: number,
+  ): Promise<Ran> => {
+    running += 1;
+    peak.engines = Math.max(peak.engines, running);
+    const engine: Ran = { index, suites: plan.suites.map((suite) => suite.path) };
+    return s.schedule(Promise.resolve(engine), `engine ${String(index)} ends`).finally(() => {
+      running -= 1;
+    });
+  };
+  let result: Ran[] | undefined;
+  let settled = false;
+  void runShares(slots, units, declared, setup.lanes, taken, run, undefined, gate)
+    .then(
+      (ran) => {
+        result = ran;
+      },
+      () => undefined,
+    )
+    .finally(() => {
+      settled = true;
+    });
+  return {
+    slots,
+    settled: () => settled,
+    ran: () => result,
+    judgeHung: () => {
+      hung = true;
+    },
+  };
+}
+
+function advanceToNextTimer(): void {
+  if (jest.getTimerCount() > 0) {
+    jest.advanceTimersToNextTimer();
+  }
+}
+
+/**
+ * Steps a run: the gate's next look, one await so the lanes the look woke run on, then the
+ * scheduler's next task. Answers whether the run ended before 100 steps in a row had nothing to run.
+ */
+async function stepUntilEnded(s: fc.Scheduler, started: StartedRun): Promise<boolean> {
+  let idle = 0;
+  while (!started.settled() && idle < IDLE_STEPS_BEFORE_HUNG) {
+    advanceToNextTimer();
+    await Promise.resolve();
+    if (s.count() > 0) {
+      idle = 0;
+      await s.waitNext(1);
+    } else {
+      idle += 1;
+    }
+  }
+  return started.settled();
+}
+
+/** Makes the gate's reading fail so a hung run ends, and moves the clock until it has. */
+async function endHungRun(started: StartedRun): Promise<void> {
+  started.judgeHung();
+  for (let rounds = 0; !started.settled(); rounds += 1) {
+    if (rounds >= SETTLE_ROUNDS_BEFORE_STUCK) {
+      throw new Error('a run judged hung never ended');
+    }
+    advanceToNextTimer();
+    await Promise.resolve();
+  }
+}
+
+async function noOrderOfSlotAndMemoryWaitsHangsARun(): Promise<void> {
+  const peak = { engines: 0 };
+  jest.useFakeTimers();
+  try {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.scheduler(),
+        fc.integer({ min: 1, max: 3 }),
+        fc.boolean(),
+        fc.integer({ min: 2, max: 3 }),
+        fc.integer({ min: 2, max: 5 }),
+        fc.constantFrom(4.5, 5, 6.5, 8),
+        async (s, slotCount, outsideHolds, lanes, suites, freeGiB) => {
+          if (enginesByMemory(freeGiB) >= lanes) {
+            return;
+          }
+          const started = startRun(s, { slotCount, outsideHolds, lanes, suites, freeGiB }, peak);
+          if (!(await stepUntilEnded(s, started))) {
+            await endHungRun(started);
+            throw new Error(
+              `hung: ${String(suites)} suites over ${String(lanes)} lanes, ${String(slotCount)} slots`,
+            );
+          }
+          await s.waitIdle();
+          const ran = started.ran() ?? [];
+          assert.deepEqual(
+            ran.flatMap((engine) => engine.suites).toSorted(),
+            suitesOf(suites)
+              .units.map((unit) => unit.suite)
+              .toSorted(),
+          );
+          assert.equal(started.slots.freeCount, slotCount);
+        },
+      ),
+      { numRuns: 150, seed: 42 },
+    );
+  } finally {
+    jest.useRealTimers();
+  }
+  assert.equal(peak.engines, 2);
+}
+
 framesRoundTripUnderAnyChunking();
 everyHeaderSpellingIsRead();
 junkNeverEscapesTheContract();
@@ -1017,5 +1271,6 @@ damagedArchivesFailCleanly();
 logsReadTheSameInAnyPieces();
 reportsRoundTrip();
 junkIsNeverAReport();
+await noOrderOfSlotAndMemoryWaitsHangsARun();
 
 console.log('fuzz properties held');
