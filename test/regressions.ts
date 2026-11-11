@@ -5992,7 +5992,7 @@ async function testHeldBreakpointsBelongToTheirProject(): Promise<void> {
     return;
   }
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-held-per-project-rt-'));
-  const projects = ['a', 'b'].map((name) => {
+  const makeProject = (name: string): string => {
     const path = mkdtempSync(join(tmpdir(), `gdharness-held-${name}-`));
     writeFileSync(
       join(path, 'project.godot'),
@@ -6008,12 +6008,16 @@ async function testHeldBreakpointsBelongToTheirProject(): Promise<void> {
         '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
     );
     return path;
-  });
-  const [a, b] = projects as [string, string];
+  };
+  const a = makeProject('a');
+  const b = makeProject('b');
   const server = new ServerProcess({
     env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: a },
   });
-  const call = async (name: string, args: Record<string, unknown>): Promise<{ said: string; answer: unknown }> => {
+  const call = async (
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ said: string; answer: unknown }> => {
     const answered = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
     const said = textOf(answered) ?? JSON.stringify(answered);
     return { said, answer: get(answered, 'result', 'isError') === true ? null : parseTextContent(answered) };
@@ -6026,7 +6030,12 @@ async function testHeldBreakpointsBelongToTheirProject(): Promise<void> {
     const set = await call('debug_breakpoint', { projectPath: a, op: 'set', scriptPath: 'main.gd', line: 5 });
     assert.deepEqual(get(set.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [5] }], set.said);
     assert.deepEqual(await heldOn(b), [], "another project's list does not answer the first project's lines");
-    const second = await call('debug_breakpoint', { projectPath: b, op: 'set', scriptPath: 'main.gd', line: 7 });
+    const second = await call('debug_breakpoint', {
+      projectPath: b,
+      op: 'set',
+      scriptPath: 'main.gd',
+      line: 7,
+    });
     assert.deepEqual(get(second.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [7] }], second.said);
     assert.deepEqual(
       await heldOn(a),
@@ -6039,9 +6048,19 @@ async function testHeldBreakpointsBelongToTheirProject(): Promise<void> {
       'and the second keeps its own in the other order',
     );
     // A game on the second project is handed the second project's lines and none of the first's.
-    const again = await call('debug_breakpoint', { projectPath: a, op: 'set', scriptPath: 'main.gd', line: 6 });
+    const again = await call('debug_breakpoint', {
+      projectPath: a,
+      op: 'set',
+      scriptPath: 'main.gd',
+      line: 6,
+    });
     assert.deepEqual(get(again.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [5, 6] }], again.said);
-    const start = await call('editor_run', { projectPath: b, op: 'start', headless: true, runtimeWaitMs: 1000 });
+    const start = await call('editor_run', {
+      projectPath: b,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 1000,
+    });
     started = true;
     assert.equal(get(start.answer, 'started'), true, start.said);
     assert.deepEqual(
@@ -6058,7 +6077,7 @@ async function testHeldBreakpointsBelongToTheirProject(): Promise<void> {
       );
     }
     await server.stop();
-    sweep(...projects, runtimeDir);
+    sweep(a, b, runtimeDir);
   }
 }
 
@@ -9399,8 +9418,16 @@ async function testAWriteBesideAnEditorOfAnotherReleaseIsSaidToBeWritten(): Prom
       });
       const shown = JSON.stringify(renamed);
       assert.deepEqual([get(renamed, 'written'), get(renamed, 'ok')], [true, false], shown);
-      assert.match(readFileSync(join(project, 'user.gd'), 'utf8'), /var hero: Champion/, 'the files are written');
-      assert.match(text(get(renamed, 'editor', 'rescanRefused')), /^The editor is running the 1\.0\.0 addon/, shown);
+      assert.match(
+        readFileSync(join(project, 'user.gd'), 'utf8'),
+        /var hero: Champion/,
+        'the files are written',
+      );
+      assert.match(
+        text(get(renamed, 'editor', 'rescanRefused')),
+        /^The editor is running the 1\.0\.0 addon/,
+        shown,
+      );
       assert.match(text(get(renamed, 'note')), /The rename was written/, shown);
       assert.match(text(get(renamed, 'note')), /did not take the written files/, shown);
 
@@ -24899,6 +24926,41 @@ async function testACaptureTheWaitRanOutOnKeepsItsFolder(): Promise<void> {
     });
     sweep(runtimeDir);
     sweep(project);
+  }
+}
+
+/**
+ * The editor's capture is held to the same place rules as the game's: no picture back needs a place
+ * to save, and the place may not be under a file. Both are refused before the editor is asked.
+ */
+async function testAnEditorCaptureIsHeldToTheCapturePlaceRules(): Promise<void> {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-capture-place-'));
+  const outside = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-editor-capture-out-'));
+  writeFileSync(join(project, 'project.godot'), 'config_version=5\n');
+  writeFileSync(join(outside, 'taken.png'), 'x');
+  const server = new ServerProcess({ env: { GDHARNESS_PROJECT: project } });
+  try {
+    await server.initialize('regression-test');
+    const said = async (args: Record<string, unknown>): Promise<string> =>
+      textOf(
+        await server.request('tools/call', {
+          name: 'editor_capture',
+          arguments: { projectPath: project, scenePath: 'sample.tscn', ...args },
+        }),
+      ) ?? '';
+    assert.match(
+      await said({ inline: false }),
+      /^inline: false sends no picture back, so it needs outputPath to save one to\./,
+    );
+    assert.match(
+      await said({ outputPath: join(outside, 'taken.png', 'view.png') }),
+      /is a file, not a directory/,
+    );
+    assert.match(await said({ outputPath: join(outside, 'taken.png') }), /already exists/);
+    assert.match(await said({ outputPath: join(project, 'view.png') }), /is inside the project/);
+  } finally {
+    await server.stop();
+    sweep(project, outside);
   }
 }
 
@@ -68157,15 +68219,19 @@ async function testAnUnknownArgumentSaysWhichServerSaysSo(): Promise<void> {
     );
     // A word every object inherits is no op, so the refusal is not worded for one.
     for (const inherited of ['toString', 'constructor', '__proto__', 'hasOwnProperty']) {
-      const said =
+      const refusal =
         textOf(
           await server.request('tools/call', {
             name: 'project_settings',
             arguments: { projectPath: '/p', op: inherited, nosuchargument: 1 },
           }),
         ) ?? '';
-      assert.match(said, /^project_settings does not take nosuchargument\. It takes: /, said);
-      assert.match(said, /\bop \(get, set[^)]*\)/, `${inherited} is not an op, so the ops are listed: ${said}`);
+      assert.match(refusal, /^project_settings does not take nosuchargument\. It takes: /, refusal);
+      assert.match(
+        refusal,
+        /\bop \(get, set[^)]*\)/,
+        `${inherited} is not an op, so the ops are listed: ${refusal}`,
+      );
     }
   } finally {
     await server.stop();
@@ -87644,6 +87710,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAGameThatDoesNotWelcomeIsRefused,
   testAGameOnEveryInterfaceIsReached,
   testACaptureTheWaitRanOutOnKeepsItsFolder,
+  testAnEditorCaptureIsHeldToTheCapturePlaceRules,
   testACaptureSendsTheSmallerPicture,
   testCallsSentTogetherWaitTheirTurnAtTheGame,
   testACallTheSystemHoldsIsNotSent,
