@@ -5978,6 +5978,91 @@ async function testBreakpointsAreSentAgainBeforeAPlay(): Promise<void> {
 }
 
 /**
+ * Held breakpoints belong to the project that set them. A list or a game start naming another
+ * project answers that project's own note, in either order, and the first project's lines come
+ * back when it is named again.
+ */
+async function testHeldBreakpointsBelongToTheirProject(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('per-project breakpoint regression skipped (Godot not found)');
+    return;
+  }
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-held-per-project-rt-'));
+  const projects = ['a', 'b'].map((name) => {
+    const path = mkdtempSync(join(tmpdir(), `gdharness-held-${name}-`));
+    writeFileSync(
+      join(path, 'project.godot'),
+      `; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Held${name}"\nrun/main_scene="res://main.tscn"\n`,
+    );
+    writeFileSync(
+      join(path, 'main.gd'),
+      'extends Node\n\n\nfunc _ready() -> void:\n\tvar spent: int = 0\n\twhile true:\n\t\tspent += 1\n\t\tOS.delay_usec(1000)\n',
+    );
+    writeFileSync(
+      join(path, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    return path;
+  });
+  const [a, b] = projects as [string, string];
+  const server = new ServerProcess({
+    env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: a },
+  });
+  const call = async (name: string, args: Record<string, unknown>): Promise<{ said: string; answer: unknown }> => {
+    const answered = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+    const said = textOf(answered) ?? JSON.stringify(answered);
+    return { said, answer: get(answered, 'result', 'isError') === true ? null : parseTextContent(answered) };
+  };
+  const heldOn = async (projectPath: string): Promise<unknown> =>
+    get((await call('debug_breakpoint', { projectPath, op: 'list' })).answer, 'held');
+  let started = false;
+  try {
+    await server.initialize('regression-test');
+    const set = await call('debug_breakpoint', { projectPath: a, op: 'set', scriptPath: 'main.gd', line: 5 });
+    assert.deepEqual(get(set.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [5] }], set.said);
+    assert.deepEqual(await heldOn(b), [], "another project's list does not answer the first project's lines");
+    const second = await call('debug_breakpoint', { projectPath: b, op: 'set', scriptPath: 'main.gd', line: 7 });
+    assert.deepEqual(get(second.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [7] }], second.said);
+    assert.deepEqual(
+      await heldOn(a),
+      [{ scriptPath: 'res://main.gd', lines: [5] }],
+      "the first project gets its own note back, not the second's",
+    );
+    assert.deepEqual(
+      await heldOn(b),
+      [{ scriptPath: 'res://main.gd', lines: [7] }],
+      'and the second keeps its own in the other order',
+    );
+    // A game on the second project is handed the second project's lines and none of the first's.
+    const again = await call('debug_breakpoint', { projectPath: a, op: 'set', scriptPath: 'main.gd', line: 6 });
+    assert.deepEqual(get(again.answer, 'held'), [{ scriptPath: 'res://main.gd', lines: [5, 6] }], again.said);
+    const start = await call('editor_run', { projectPath: b, op: 'start', headless: true, runtimeWaitMs: 1000 });
+    started = true;
+    assert.equal(get(start.answer, 'started'), true, start.said);
+    assert.deepEqual(
+      get(start.answer, 'breakpoints'),
+      [{ scriptPath: 'res://main.gd', lines: [7] }],
+      `a game started on one project is handed its own lines and none of another's: ${start.said}`,
+    );
+  } finally {
+    if (started) {
+      await server.request(
+        'tools/call',
+        { name: 'editor_run', arguments: { op: 'stop' } },
+        ENGINE_CALL_TIMEOUT_MS,
+      );
+    }
+    await server.stop();
+    sweep(...projects, runtimeDir);
+  }
+}
+
+/**
  * Setting a breakpoint here never takes away the ones set in the editor by hand, and a breakpoint
  * of this side's clicked off there is not held here either.
  *
@@ -87617,6 +87702,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStopThatLandsWhileAttachAsksIsTheAnswer,
   testAContinueByAnotherClientIsKnownHere,
   testBreakpointsAreSentAgainBeforeAPlay,
+  testHeldBreakpointsBelongToTheirProject,
   testTheBreakpointNoteIsTheProjects,
   testEveryNoteIsReplacedWholeAndNeverRewrittenInPlace,
   testABreakpointNoteWithBackslashesCannotLeaveTheProject,

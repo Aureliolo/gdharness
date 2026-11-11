@@ -4178,8 +4178,8 @@ class GodotServer {
   private dapClient: GodotDAPClient | null = null;
   /** The adapter connection and editor the owner check last passed for. See [adapterBelongsElsewhere]. */
   private adapterPassed: { connection: object; editorPid: number } | null = null;
-  /** Which client has taken on the project's breakpoint note. See [dapHoldingBreakpointsOf]. */
-  private breakpointsSeededOn: GodotDAPClient | null = null;
+  /** Which client has taken on which project's breakpoint note. See [dapHoldingBreakpointsOf]. */
+  private breakpointsSeededOn: { readonly client: GodotDAPClient; readonly project: string } | null = null;
   private bridgeStartupError: string | null = null;
   private bridgeRetry: NodeJS.Timeout | null = null;
   private successorWatch: NodeJS.Timeout | null = null;
@@ -9673,15 +9673,23 @@ class GodotServer {
   /**
    * The adapter client, with the breakpoints noted in [projectPath] as well as its own.
    *
-   * Seeded once per client. What an earlier server set is taken on before this one's first
-   * breakpoint call and before its first play, and a client replaced because its editor moved is
-   * seeded again, since the set it held went with it.
+   * Seeded once per client and project. What an earlier server set is taken on before this one's
+   * first breakpoint call and before its first play, and a client replaced because its editor moved
+   * is seeded again, since the set it held went with it. A call naming another project lets go of
+   * the set held for the first and takes on the other's note, because a breakpoint is a line of one
+   * project's script. Each project's own set stays in its note.
    */
   private dapHoldingBreakpointsOf(projectPath: string): GodotDAPClient {
     const client = this.dap();
-    if (this.breakpointsSeededOn !== client) {
+    const project = realAsFarAsItExists(projectPath);
+    if (this.breakpointsSeededOn?.client !== client || this.breakpointsSeededOn.project !== project) {
+      for (const { scriptPath, lines } of client.breakpointsHeld()) {
+        for (const line of lines) {
+          client.forgetBreakpoint(scriptPath, line);
+        }
+      }
       client.holdBreakpoints(readBreakpointNote(projectPath));
-      this.breakpointsSeededOn = client;
+      this.breakpointsSeededOn = { client, project };
     }
     return client;
   }
