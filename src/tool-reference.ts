@@ -36,6 +36,16 @@ export function namedType(declared: unknown): string {
  */
 export function argumentShape(schema: Readonly<Record<string, unknown>>): string {
   const named = namedType(schema['type']);
+  const values = schema['enum'];
+  // Half the enums leave a value out of their description, and a caller cannot guess the spelling.
+  if (
+    named === 'string' &&
+    Array.isArray(values) &&
+    values.length > 0 &&
+    values.every((v) => typeof v === 'string')
+  ) {
+    return `one of ${values.join(', ')}`;
+  }
   const items = schema['items'];
   const held = isRecord(items) ? namedType(items['type']) : 'any';
   return named

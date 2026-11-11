@@ -29892,6 +29892,19 @@ function testTheReferencePrintsEveryShapeOfType(): void {
     'an array of any values says no more than it knows',
   );
   assert.equal(argumentShape({ type: 'integer' }), 'integer');
+  assert.equal(
+    argumentShape({ type: 'string', enum: ['node', 'physics2d'] }),
+    'one of node, physics2d',
+    'a string with a fixed set names every value',
+  );
+  assert.equal(argumentShape({ type: 'string', enum: [] }), 'string', 'an empty set is a plain string');
+  const classes = renderToolsMarkdown()
+    .split('\n')
+    .filter((line) => line.startsWith('- `category` (one of '));
+  assert.ok(
+    classes.some((line) => line.includes('physics2d')),
+    'and the rendered reference lists the values of editor_classes category',
+  );
   assert.equal(argumentShape({}), 'any');
 
   const markdown = renderToolsMarkdown();
