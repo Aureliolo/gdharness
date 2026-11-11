@@ -802,6 +802,55 @@ function accessibilityTreeSuite(constant: string): string {
   ].join('\n');
 }
 
+let standInEngineBuilt: string | null = null;
+
+/**
+ * A program a server accepts as an engine without a real Godot. It prints a Godot version for
+ * `--version`. A script named first is run, which is how a fixture holds a process open. Any other
+ * arguments end it with exit 1 at once, as a program that does not know the engine's flags would.
+ * Compiled once per run into the OS temp folder, because the locator starts
+ * a path with no shell and a script would not start.
+ */
+function standInEngine(): string {
+  if (standInEngineBuilt !== null) {
+    return standInEngineBuilt;
+  }
+  const directory = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-stand-in-engine-'));
+  const source = join(directory, 'stand-in.ts');
+  const program = join(directory, process.platform === 'win32' ? 'godot-stand-in.exe' : 'godot-stand-in');
+  writeFileSync(
+    source,
+    [
+      "import { existsSync } from 'node:fs';",
+      "if (process.argv.includes('--version')) {",
+      "  process.stdout.write('4.7.2.stable.custom_build\\n');",
+      '  process.exit(0);',
+      '}',
+      'const script = process.argv[2];',
+      "if (script !== undefined && script.endsWith('.js') && existsSync(script)) {",
+      '  await import(script);',
+      '} else {',
+      "  process.stderr.write('stand-in engine: it runs nothing\\n');",
+      '  process.exit(1);',
+      '}',
+      '',
+    ].join('\n'),
+  );
+  const built = spawnSyncHidden(process.execPath, ['build', '--compile', source, '--outfile', program], {
+    encoding: 'utf8',
+  });
+  assert.equal(built.status, 0, `the stand-in engine is compiled: ${built.stdout}${built.stderr}`);
+  process.once('exit', () => {
+    try {
+      rmSync(directory, { recursive: true, force: true });
+    } catch {
+      // A stand-in still running holds its file, so the folder is left for the temp sweep.
+    }
+  });
+  standInEngineBuilt = program;
+  return program;
+}
+
 function resolveGodotPath(): string | null {
   const candidate = process.env['GODOT_PATH'];
   return candidate && existsSync(candidate) ? candidate : null;
@@ -6971,7 +7020,7 @@ async function testAnEditorStillArrivingIsNotOpenedBeside(): Promise<void> {
 
   const port = await reservePort();
   const server = new ServerProcess({
-    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: process.execPath },
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: standInEngine() },
   });
   let standIn: ChildProcess | null = null;
   try {
@@ -7072,9 +7121,9 @@ function aProjectToOpen(prefix: string): { project: string; engine: string; hold
   mkdirSync(join(project, 'addons', 'gdharness_editor'), { recursive: true });
   const engine = join(project, `godot-standin${process.platform === 'win32' ? '.exe' : ''}`);
   try {
-    linkSync(process.execPath, engine);
+    linkSync(standInEngine(), engine);
   } catch {
-    cpSync(process.execPath, engine);
+    cpSync(standInEngine(), engine);
   }
   const hold = join(project, 'hold.js');
   writeFileSync(hold, 'setTimeout(() => {}, 120000);\n');
@@ -7517,7 +7566,7 @@ async function testAnEditorThisServerStartsIsSilentUnlessAsked(): Promise<void> 
       env: {
         GDHARNESS_PROJECT: project,
         GDHARNESS_BRIDGE_PORT: String(port),
-        GODOT_PATH: process.execPath,
+        GODOT_PATH: standInEngine(),
         GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '20000',
       },
     });
@@ -7720,7 +7769,7 @@ async function testARestartLeftHalfDoneIsSaid(): Promise<void> {
   // The engine is a stand-in that exits at once, so a launch guard that fails to refuse starts
   // nothing that outlives the case.
   const server = new ServerProcess({
-    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: process.execPath },
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: standInEngine() },
   });
   let uninformed: ServerProcess | null = null;
   const settings =
@@ -9140,7 +9189,7 @@ async function testARestartWaitsForTheOldEditorToGo(): Promise<void> {
     env: {
       GDHARNESS_BRIDGE_PORT: String(port),
       GDHARNESS_PROJECT: project,
-      GODOT_PATH: process.execPath,
+      GODOT_PATH: standInEngine(),
       GDHARNESS_EDITOR_RESTART_TIMEOUT_MS: '2000',
     },
   });
@@ -12582,7 +12631,7 @@ async function testToolsRefusePathsOutsideTheProject(): Promise<void> {
           'a godot:// URI with an encoded traversal should be refused',
         );
       },
-      { GODOT_PATH: process.execPath },
+      { GODOT_PATH: standInEngine() },
     );
   } finally {
     sweep(sandbox);
@@ -16424,7 +16473,7 @@ async function testEditorOutputChecksTheProjectItIsGiven(): Promise<void> {
     );
     writeFileSync(join(directory, 'main.tscn'), '[gd_scene format=3]\n\n[node name="Main" type="Node"]\n');
   }
-  const server = new ServerProcess({ env: { GODOT_PATH: process.execPath, GDHARNESS_PROJECT: project } });
+  const server = new ServerProcess({ env: { GODOT_PATH: standInEngine(), GDHARNESS_PROJECT: project } });
   const output = async (args: Record<string, unknown>): Promise<JsonRpcMessage> =>
     await server.request('tools/call', { name: 'editor_output', arguments: args });
   try {
@@ -16708,7 +16757,7 @@ async function testACallWaitsForTheEditorThisServerOpened(): Promise<void> {
  */
 async function testALaunchedEditorsConsoleIsReadBeforeItConnects(): Promise<void> {
   const project = mkdtempSync(join(tmpdir(), 'gdharness-console-early-'));
-  const server = new ServerProcess({ env: { GODOT_PATH: process.execPath, GDHARNESS_PROJECT: project } });
+  const server = new ServerProcess({ env: { GODOT_PATH: standInEngine(), GDHARNESS_PROJECT: project } });
   const call = async (name: string, args: Record<string, unknown>): Promise<string> =>
     textOf(await server.request('tools/call', { name, arguments: args })) ?? '';
   try {
@@ -16906,7 +16955,7 @@ async function testAGoneEditorsConsoleIsStillRead(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-console-gone-'));
   const port = await reservePort();
   const server = new ServerProcess({
-    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: process.execPath },
+    env: { GDHARNESS_PROJECT: project, GDHARNESS_BRIDGE_PORT: String(port), GODOT_PATH: standInEngine() },
   });
   let later: ServerProcess | null = null;
   let editor: WebSocket | null = null;
@@ -17033,7 +17082,7 @@ async function testAGoneEditorsConsoleIsStillRead(): Promise<void> {
     await server.stop();
 
     // A server that opened nothing reads the note the launch left.
-    later = new ServerProcess({ env: { GDHARNESS_PROJECT: project, GODOT_PATH: process.execPath } });
+    later = new ServerProcess({ env: { GDHARNESS_PROJECT: project, GODOT_PATH: standInEngine() } });
     await later.initialize('regression-test');
     const fresh = await consoleOf(later);
     assert.deepEqual(
@@ -20786,7 +20835,7 @@ async function aStartLeaves(protocol: number): Promise<void> {
       {
         GDHARNESS_RUNTIME_DIR: announcements,
         GDHARNESS_PROJECT: project,
-        GODOT_PATH: process.execPath,
+        GODOT_PATH: standInEngine(),
       },
     );
 
@@ -25851,7 +25900,7 @@ async function testATestServerWritesWhereNoRealRunIs(): Promise<void> {
   // Read rather than removed: something of this machine's may be running, and a fixture that
   // cleared it would be doing the very thing it is here to prove cannot happen.
   const before = existsSync(shared) ? readFileSync(shared, 'utf8') : null;
-  const server = new ServerProcess({ env: { GODOT_PATH: process.execPath } });
+  const server = new ServerProcess({ env: { GODOT_PATH: standInEngine() } });
   try {
     writeFileSync(
       join(project, 'project.godot'),
@@ -25938,7 +25987,7 @@ async function testAStartStopsWaitingForAGameThatIsOver(): Promise<void> {
         assert.match(String(get(runtime, 'note')), /no longer running/, JSON.stringify(runtime));
         assert.ok(waited < 8_000, `the answer should not wait out the budget: ${waited}ms`);
       },
-      { GODOT_PATH: process.execPath, GDHARNESS_RUNTIME_DIR: runtimeDir },
+      { GODOT_PATH: standInEngine(), GDHARNESS_RUNTIME_DIR: runtimeDir },
     );
   } finally {
     sweep(project);
@@ -28339,7 +28388,7 @@ async function testWhatALaunchedEditorDroppedIsReadAsItArrives(): Promise<void> 
     const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-launch-dropped-'));
     const port = await reservePort();
     const server = new ServerProcess({
-      env: { GDHARNESS_BRIDGE_PORT: String(port), GDHARNESS_PROJECT: project, GODOT_PATH: process.execPath },
+      env: { GDHARNESS_BRIDGE_PORT: String(port), GDHARNESS_PROJECT: project, GODOT_PATH: standInEngine() },
     });
     let editor: WebSocket | null = null;
     try {
@@ -35876,7 +35925,7 @@ async function withAPlayingEditor(
     env: {
       GDHARNESS_BRIDGE_PORT: String(port),
       GDHARNESS_RUNTIME_DIR: runtimeDir,
-      GODOT_PATH: options.engine ?? process.execPath,
+      GODOT_PATH: options.engine ?? standInEngine(),
       // The server's own account of a start, kept in its stderr for the fixture that fails on
       // how long one took: without it a start that sat nine seconds on a played game left
       // nothing behind to say where the time went.
@@ -39953,7 +40002,7 @@ async function testARunGivenEngineFlagsIsStartedHere(): Promise<void> {
         malformed.said,
       );
       // Another engine is the server's own stand-in here, and the editor still plays only on its own.
-      const onAnother = await run({ godot: process.execPath });
+      const onAnother = await run({ godot: standInEngine() });
       assert.equal(get(onAnother.answer, 'through'), 'gdharness', onAnother.said);
       assert.match(
         text(get(onAnother.answer, 'message')),
@@ -50968,7 +51017,7 @@ async function benchThroughAStart(
       async (call) => {
         answer = await call('editor_run', { op: 'start', projectPath: mine, headless: true });
       },
-      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: mine, GODOT_PATH: process.execPath },
+      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: mine, GODOT_PATH: standInEngine() },
     );
 
     // Waited on up to three seconds for one more line rather than read once after a quarter of one:
@@ -51357,7 +51406,7 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
           "a call naming another project leaves the server's own as the one read",
         );
       },
-      { GDHARNESS_PROJECT: ours, GODOT_PATH: process.execPath },
+      { GDHARNESS_PROJECT: ours, GODOT_PATH: standInEngine() },
     );
 
     await withStdioServer(
@@ -51376,7 +51425,7 @@ async function testTheResourcesReadOnlyTheProject(): Promise<void> {
           `a directory with no project.godot is no root: ${underRoot}`,
         );
       },
-      { GODOT_PATH: process.execPath },
+      { GODOT_PATH: standInEngine() },
     );
   } finally {
     sweep(root);
