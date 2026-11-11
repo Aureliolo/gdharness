@@ -10,6 +10,7 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { plainEngineOf } from './process-children.js';
 
 /**
  * The user's home directory, or an empty string when there is not one.
@@ -35,7 +36,6 @@ const WINDOWS_ENGINE = /^godot(?:[_-]?v?\d[^\\/]*)?\.exe$/i;
 const MAC_BUNDLE = /^godot(?:[_-]?v?\d[^\\/]*|_mono)?\.app$/i;
 const NOT_AN_ENGINE =
   /\.(?:exe|zip|tpz|tar(?:\.\w+)?|7z|gz|xz|sh|png|txt|md|json|sig|sha\d*)$|export_templates/i;
-const CONSOLE_WRAPPER = /_console\.exe$/i;
 
 /**
  * Every Godot binary in one directory, newest first.
@@ -73,8 +73,8 @@ export function scanDirectoryForGodotBinaries(directory: string, platform: NodeJ
     // listed when the plain one is not there.
     if (
       platform === 'win32' &&
-      CONSOLE_WRAPPER.test(name) &&
-      plain.has(name.toLowerCase().replace(CONSOLE_WRAPPER, '.exe'))
+      plainEngineOf(name) !== name &&
+      plain.has(plainEngineOf(name).toLowerCase())
     ) {
       continue;
     }

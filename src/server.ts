@@ -254,6 +254,7 @@ import {
   editorsOfProjectIn,
   oneShotOptionOf,
   type ProcessTree,
+  plainEngineOf,
   processTree,
   readCommandLine,
   startTimesOf,
@@ -368,7 +369,7 @@ import {
   shippedOperationsScript,
   shippedRuntimeDigest,
 } from './setup.js';
-import { runHidden, spawnHidden } from './spawn.js';
+import { spawnHidden } from './spawn.js';
 import {
   declaringAdvice,
   failedOnPushErrors,
@@ -1503,9 +1504,30 @@ interface ChildrenEnded {
 
 /** [param executable] and, when it is the console wrapper, the engine it starts. */
 function engineNamesOf(executable: string): string[] {
-  return CONSOLE_WRAPPER.test(executable)
-    ? [executable, executable.replace(CONSOLE_WRAPPER, '$1')]
-    : [executable];
+  const plain = plainEngineOf(executable);
+  return plain === executable ? [executable] : [executable, plain];
+}
+
+/**
+ * The answer to a failure nothing models: the report to send. The engine's version is whatever
+ * [param locator] learned earlier, because asking on the failure path would start a subprocess at
+ * the worst possible moment.
+ */
+export function unmodelledAnswer(
+  where: string,
+  error: unknown,
+  seenBefore: number,
+  locator: GodotLocator,
+): ToolResponse {
+  return {
+    content: [
+      {
+        type: 'text',
+        text: defectReport(where, error, { seenBefore, godotVersion: locator.ownVersion() ?? undefined }),
+      },
+    ],
+    isError: true,
+  };
 }
 
 /**
@@ -4080,7 +4102,9 @@ function ownArguments(params: unknown): OperationParams {
 type Checked<T> = { ok: true; value: T } | { ok: false; response: ToolResponse };
 
 /** The engine a call runs, and what the answer says of it when it is not this server's. */
-type EngineChoice = { ok: true; value: string; note: string | null } | { ok: false; response: ToolResponse };
+type EngineChoice =
+  | { ok: true; value: string; version: string; note: string | null }
+  | { ok: false; response: ToolResponse };
 
 /** What a run was asked to carry: where its saves go, and any variables of its own. */
 interface RunEnvironment {
@@ -4150,15 +4174,6 @@ class GodotServer {
   private callsSinceNotice = 0;
   private callsSinceFeedback = 0;
   private readonly defectsSeen = new DefectsSeen();
-  /**
-   * The engine's version, from the last time anything here asked it.
-   *
-   * Kept because a defect report has a field for it and was filling it in with "not known at the
-   * point this failed" every time: nothing passed it, and asking on the failure path would start a
-   * subprocess at the worst possible moment. Whatever was learned earlier in the session is the
-   * right answer for a report about that session.
-   */
-  private lastGodotVersion: string | null = null;
   private lspClient: GodotLSPClient | null = null;
   private dapClient: GodotDAPClient | null = null;
   /** The adapter connection and editor the owner check last passed for. See [adapterBelongsElsewhere]. */
@@ -4992,18 +5007,7 @@ class GodotServer {
       const where = op === '' ? tool : `${tool} op=${op}`;
       console.error(`[SERVER] Unmodelled failure in ${where}:`, error);
       const seenBefore = this.defectsSeen.before(where, errorMessage(error));
-      return {
-        content: [
-          {
-            type: 'text',
-            text: defectReport(where, error, {
-              seenBefore,
-              godotVersion: this.lastGodotVersion ?? undefined,
-            }),
-          },
-        ],
-        isError: true,
-      };
+      return unmodelledAnswer(where, error, seenBefore, this.locator);
     }
   }
 
@@ -5979,7 +5983,7 @@ class GodotServer {
    * The engine for [param projectPath], or the refusal to send when there is none.
    *
    * A project other than this server's own runs the engine its own harness config names, when that
-   * names one that exists. A second checkout of a game, pinned to an older engine, ran its suites on
+   * names one. A record that is no engine is refused. A second checkout of a game, pinned to an older engine, ran its suites on
    * this server's newer one and printed errors only the newer engine has, with nothing naming it.
    * The note names the engine whenever it is not this server's.
    */
@@ -5990,21 +5994,26 @@ class GodotServer {
         ? null
         : recordedEnginePath(projectPath);
     if (theirs !== null && !(located.ok && isSameDirectory(theirs, located.path))) {
-      const version = await this.versionOf(theirs);
+      const judged = await this.locator.judge(theirs);
+      if (!judged.ok) {
+        const refusal = GodotLocator.refusal(judged, { config: projectPath ?? theirs });
+        return { ok: false, response: this.createErrorResponse(refusal.message, [...refusal.advice]) };
+      }
       return {
         ok: true,
-        value: theirs,
-        note: `This ran ${version === null ? 'the engine' : `Godot ${version}`} at ${theirs}, which the harness config of ${projectPath} names, rather than this server's ${located.ok ? `engine at ${located.path}` : 'GODOT_PATH, which names none'}.`,
+        value: judged.path,
+        version: judged.version,
+        note: `This ran Godot ${judged.version} at ${judged.path}, which the harness config of ${projectPath} names, rather than this server's ${located.ok ? `engine at ${located.path}` : 'GODOT_PATH, which names none'}.`,
       };
     }
     if (!located.ok) {
       const refusal = GodotLocator.refusal(located);
       return { ok: false, response: this.createErrorResponse(refusal.message, [...refusal.advice]) };
     }
-    return { ok: true, value: located.path, note: null };
+    return { ok: true, value: located.path, version: located.version, note: null };
   }
 
-  /** The engine a run names with godot in place of this server's, checked to answer --version. */
+  /** The engine a run names with godot in place of this server's, judged like any other. */
   private async otherEngine(path: string): Promise<EngineChoice> {
     if (!isAbsolute(path)) {
       return {
@@ -6012,17 +6021,17 @@ class GodotServer {
         response: this.createErrorResponse(`godot must be an absolute path, not "${path}".`),
       };
     }
-    const version = existsSync(path) ? await this.versionOf(path) : null;
-    if (version === null) {
-      return {
-        ok: false,
-        response: this.createErrorResponse(
-          `godot names ${path}, which ${existsSync(path) ? 'does not answer --version' : 'does not exist'}.`,
-          ['Point godot at a Godot editor binary', "Or leave it out to run on this server's engine"],
-        ),
-      };
+    const judged = await this.locator.judge(path);
+    if (!judged.ok) {
+      const refusal = GodotLocator.refusal(judged, { argument: 'godot' });
+      return { ok: false, response: this.createErrorResponse(refusal.message, [...refusal.advice]) };
     }
-    return { ok: true, value: path, note: `This ran Godot ${version} at ${path}, which godot names.` };
+    return {
+      ok: true,
+      value: judged.path,
+      version: judged.version,
+      note: `This ran Godot ${judged.version} at ${judged.path}, which godot names.`,
+    };
   }
 
   /** The project the call names, checked to be one. */
@@ -7269,8 +7278,7 @@ class GodotServer {
       name: typeof name === 'string' && name !== '' ? name : basename(project.value.path),
       path: project.value.path,
       mainScene: typeof mainScene === 'string' && mainScene !== '' ? mainScene : null,
-      godotVersion:
-        engine.note === null ? await this.godotVersion(engine.value) : await this.versionOf(engine.value),
+      godotVersion: engine.version,
       engineNote: engine.note ?? undefined,
       structure: projectStructure(project.value.path),
     };
@@ -8817,25 +8825,6 @@ class GodotServer {
     });
   }
 
-  private async godotVersion(godotPath: string): Promise<string | null> {
-    const version = await this.versionOf(godotPath);
-    if (version !== null) {
-      this.lastGodotVersion = version;
-    }
-    return version;
-  }
-
-  /** What [param godotPath] says its version is, without taking it for this server's engine. */
-  private async versionOf(godotPath: string): Promise<string | null> {
-    try {
-      const { stdout } = await runHidden(godotPath, ['--version'], { timeout: 10000 });
-      return stdout.trim();
-    } catch (error) {
-      this.logDebug(`Godot did not answer --version: ${errorMessage(error)}`);
-      return null;
-    }
-  }
-
   // -------------------------------------------------------------------------------------------
   // script
   // -------------------------------------------------------------------------------------------
@@ -10243,7 +10232,7 @@ class GodotServer {
       },
       godot: {
         path: located.ok ? located.path : null,
-        version: located.ok ? await this.godotVersion(located.path) : null,
+        version: located.ok ? located.version : null,
         // Why there is none, when GODOT_PATH names something: a null path beside a null version
         // reads as a machine with no engine, and a variable pointing at the wrong file is not that.
         problem: located.ok ? undefined : GodotLocator.refusal(located).message,
