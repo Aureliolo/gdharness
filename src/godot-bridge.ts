@@ -626,13 +626,13 @@ export class GodotBridge extends EventEmitter {
           this.log('debug', `Godot client did not close cleanly: ${errorMessage(error)}`);
         }
       }
-      closeTasks.push(this.closeWebSocketServer(godotWss));
+      closeTasks.push(this.closeServer(godotWss));
       this.godotWss = null;
     }
 
     if (this.httpServer) {
       const httpServer = this.httpServer;
-      closeTasks.push(this.closeHttpServer(httpServer));
+      closeTasks.push(this.closeServer(httpServer));
       this.httpServer = null;
     }
 
@@ -821,27 +821,7 @@ export class GodotBridge extends EventEmitter {
     });
   }
 
-  private closeWebSocketServer(server: WebSocketServer): Promise<void> {
-    return new Promise((resolve) => {
-      let settled = false;
-      const finish = () => {
-        if (!settled) {
-          settled = true;
-          resolve();
-        }
-      };
-
-      try {
-        server.close(() => {
-          finish();
-        });
-      } catch {
-        finish();
-      }
-    });
-  }
-
-  private closeHttpServer(server: http.Server): Promise<void> {
+  private closeServer(server: { close(callback: () => void): unknown }): Promise<void> {
     return new Promise((resolve) => {
       let settled = false;
       const finish = () => {
@@ -957,7 +937,12 @@ export class GodotBridge extends EventEmitter {
       case 'godot_ready':
         if (this.connectionInfo) {
           if (this.belongsElsewhere(message.project_path)) {
-            this.elsewhereUnlessOneShot(message.project_path, message.editor_pid, message.opened_by_a_server);
+            this.elsewhereUnlessOneShot(
+              message.project_path,
+              message.editor_pid,
+              message.opened_by_a_server,
+              this.connectionInfo,
+            );
             return;
           }
           this.connectionInfo.projectPath = withoutTrailingSeparator(message.project_path);
@@ -989,7 +974,7 @@ export class GodotBridge extends EventEmitter {
           this.log('info', `Godot ready: ${message.project_path}`);
           this.connectionInfo.greeted = true;
           if (!message.opened_by_a_server && this.oneShotReader !== null) {
-            this.identify(message.editor_pid);
+            this.identify(message.editor_pid, this.connectionInfo, this.oneShotReader);
             return;
           }
           this.emit('godot_connected');
@@ -1054,7 +1039,7 @@ export class GodotBridge extends EventEmitter {
 
   /** Tells the connected editor calls are being made, so it does not quit as unused. */
   public noteActivity(): void {
-    if (this.isConnected() && this.socket?.readyState === WebSocket.OPEN) {
+    if (this.isConnected()) {
       this.sendMessage({ type: 'activity' });
     }
   }
@@ -1151,16 +1136,16 @@ export class GodotBridge extends EventEmitter {
     theirProject: string,
     pid: number | undefined,
     openedByAServer: boolean,
+    info: GodotConnectionInfo,
   ): void {
     const known = pid === undefined ? undefined : this.oneShots.get(pid);
     if (pid !== undefined && known !== undefined) {
       this.turnAway(pid, known);
       return;
     }
-    const info = this.connectionInfo;
     const socket = this.socket;
     const reader = this.oneShotReader;
-    if (pid === undefined || openedByAServer || info === null || reader === null) {
+    if (pid === undefined || openedByAServer || reader === null) {
       this.sendElsewhere(theirProject);
       return;
     }
@@ -1188,18 +1173,13 @@ export class GodotBridge extends EventEmitter {
    * A command line that cannot be read is taken as an editor's, which is what every connection was
    * before this asked: the bridge errs towards serving a real editor rather than refusing one.
    */
-  private identify(pid: number): void {
+  private identify(pid: number, info: GodotConnectionInfo, reader: OneShotReader): void {
     const known = this.oneShots.get(pid);
     if (known !== undefined) {
       this.turnAway(pid, known);
       return;
     }
-    const info = this.connectionInfo;
     const socket = this.socket;
-    const reader = this.oneShotReader;
-    if (info === null || reader === null) {
-      return;
-    }
     info.identifying = true;
     void reader(pid)
       .catch(() => undefined)
@@ -1229,8 +1209,8 @@ export class GodotBridge extends EventEmitter {
     run?.close(ONE_SHOT_CLOSE_CODE, closeReason(said, 'start'));
   }
 
-  private handleDisconnect(disconnectedSocket: WebSocket | null, reason: Error): void {
-    if (disconnectedSocket && this.socket && disconnectedSocket !== this.socket) {
+  private handleDisconnect(disconnectedSocket: WebSocket, reason: Error): void {
+    if (this.socket && disconnectedSocket !== this.socket) {
       this.log('debug', 'Ignoring stale Godot socket disconnect event');
       return;
     }
