@@ -191,6 +191,47 @@ export function greetingFaults(message: object): string[] {
 type IncomingMessage = ToolResultMessage | PongMessage | GodotReadyMessage;
 type OutgoingMessage = ToolInvokeMessage | PingMessage | ActivityMessage;
 
+/** What a call kept turned away by a busy editor has told the client and seen of the editor so far. */
+interface BusyWait {
+  readonly began: number;
+  stillAt: number;
+  lastProgress: string | null;
+  readonly progress: ReturnType<typeof callProgress>;
+  toldDoing: string | null;
+}
+
+/** Records a turn-away in [param wait], tells the client what is awaited, and answers why to give up, if so. */
+function noteBusy(wait: BusyWait, error: EditorBusy, waitMs: number): string | null {
+  const now = Date.now();
+  if (wait.progress !== undefined && error.doing !== wait.toldDoing) {
+    wait.toldDoing = error.doing;
+    wait.progress((now - wait.began) / 1000, `Waiting for the editor, which is ${error.doing}.`);
+  }
+  if (error.progress !== '' && error.progress !== wait.lastProgress) {
+    wait.lastProgress = error.progress;
+    wait.stillAt = now;
+  }
+  return busyGiveUpReason(error.doing, { now, began: wait.began, stillAt: wait.stillAt, waitMs });
+}
+
+/**
+ * Why a call turned away by a busy editor is given up on, or null while it is worth asking again.
+ * The editor either has not moved on in [param waits].waitMs, or has been busy ten times as long.
+ */
+function busyGiveUpReason(
+  doing: string,
+  waits: { now: number; began: number; stillAt: number; waitMs: number },
+): string | null {
+  const { now, began, stillAt, waitMs } = waits;
+  if (now - stillAt >= waitMs) {
+    return `The editor was ${doing} and had not moved on in ${Math.round(waitMs / 1000)} s`;
+  }
+  if (now - began >= waitMs * 10) {
+    return `The editor was ${doing} for all of ${Math.round((now - began) / 1000)} s`;
+  }
+  return null;
+}
+
 /** A port an editor says it serves on, or undefined for 0, its word for not knowing, or anything else not a port. */
 function servedPort(said: number): number | undefined {
   return Number.isInteger(said) && said > 0 && said <= 65535 ? said : undefined;
@@ -759,11 +800,14 @@ export class GodotBridge extends EventEmitter {
   ): Promise<unknown> {
     const waitMs = busyWaitMs();
     const began = Date.now();
-    let stillAt = began;
-    let lastProgress: string | null = null;
-    // A wait can run minutes, so the client hears what it is waiting on, not only that the call goes on.
-    const progress = callProgress();
-    let toldDoing: string | null = null;
+    const wait: BusyWait = {
+      began,
+      stillAt: began,
+      lastProgress: null,
+      // A wait can run minutes, so the client hears what it is waiting on, not only that the call goes on.
+      progress: callProgress(),
+      toldDoing: null,
+    };
     for (;;) {
       try {
         return await this.invokeToolDirect(toolName, args, counted, resourceKey);
@@ -771,18 +815,7 @@ export class GodotBridge extends EventEmitter {
         if (!(error instanceof EditorBusy)) {
           throw error;
         }
-        const now = Date.now();
-        if (progress !== undefined && error.doing !== toldDoing) {
-          toldDoing = error.doing;
-          progress((now - began) / 1000, `Waiting for the editor, which is ${error.doing}.`);
-        }
-        if (error.progress !== '' && error.progress !== lastProgress) {
-          lastProgress = error.progress;
-          stillAt = now;
-        }
-        const unchanged = `The editor was ${error.doing} and had not moved on in ${Math.round(waitMs / 1000)} s`;
-        const tooLong = `The editor was ${error.doing} for all of ${Math.round((now - began) / 1000)} s`;
-        const said = now - stillAt >= waitMs ? unchanged : now - began >= waitMs * 10 ? tooLong : null;
+        const said = noteBusy(wait, error, waitMs);
         if (said !== null) {
           throw new Error(
             `${said}, so ${toolName} was not run and nothing it would change was changed. Ask again once the editor is done.`,
@@ -904,80 +937,78 @@ export class GodotBridge extends EventEmitter {
     this.handleMessage(parsed);
   }
 
+  private handleToolResult(message: ToolResultMessage): void {
+    const pending = this.pendingRequests.get(message.id);
+    if (!pending) {
+      this.log('warn', `Received tool_result for unknown id=${message.id}`);
+      return;
+    }
+
+    clearTimeout(pending.timeout);
+    this.pendingRequests.delete(message.id);
+    const duration = Date.now() - pending.startedAt;
+    this.log('debug', `Tool ${pending.toolName} finished in ${duration}ms`);
+
+    if (message.success) {
+      pending.resolve(message.result);
+    } else if (message.busy === true) {
+      pending.reject(new EditorBusy(pending.toolName, message.busyWith ?? 'busy', message.progress ?? ''));
+    } else if (message.closing === true) {
+      pending.reject(
+        new EditorClosing(message.error ?? `The editor is quitting, so ${pending.toolName} was not run.`),
+      );
+    } else {
+      pending.reject(new Error(message.error ?? `Tool ${pending.toolName} failed`));
+    }
+  }
+
+  private handleGodotReady(message: GodotReadyMessage, info: GodotConnectionInfo): void {
+    if (this.belongsElsewhere(message.project_path)) {
+      this.elsewhereUnlessOneShot(message.project_path, message.editor_pid, message.opened_by_a_server, info);
+      return;
+    }
+    info.projectPath = withoutTrailingSeparator(message.project_path);
+    const faults = greetingFaults(message);
+    if (faults.length > 0) {
+      // Another release's addon, which this server asks nothing but to quit. The connection is
+      // kept for that: closed, the addon dials straight back, and only it can quit its editor.
+      this.log('info', `Godot ready from another release's addon, which sent no ${faults.join(', ')}`);
+      info.addonVersion = typeof message.addon_version === 'string' ? message.addon_version : '';
+      info.addonDigest = '';
+      // Read when it is one, so editor_launch close and restart can wait on its process.
+      info.editorPid = typeof message.editor_pid === 'number' ? message.editor_pid : undefined;
+      info.greeted = true;
+      this.emit('godot_connected');
+      return;
+    }
+    info.addonVersion = message.addon_version;
+    info.addonDigest = message.addon_digest;
+    info.editorPid = message.editor_pid;
+    info.lspPort = servedPort(message.lsp_port);
+    info.dapPort = servedPort(message.dap_port);
+    info.debugPort = servedPort(message.debug_port);
+    info.openedByAServer = message.opened_by_a_server;
+    info.startedByAnEditor = message.started_by_an_editor;
+    info.syncsBreakpoints = message.syncs_breakpoints;
+    info.hidden = message.hidden;
+    this.log('info', `Godot ready: ${message.project_path}`);
+    info.greeted = true;
+    if (!message.opened_by_a_server && this.oneShotReader !== null) {
+      this.identify(message.editor_pid, info, this.oneShotReader);
+      return;
+    }
+    this.emit('godot_connected');
+  }
+
   private handleMessage(message: IncomingMessage): void {
     switch (message.type) {
-      case 'tool_result': {
-        const pending = this.pendingRequests.get(message.id);
-        if (!pending) {
-          this.log('warn', `Received tool_result for unknown id=${message.id}`);
-          return;
-        }
-
-        clearTimeout(pending.timeout);
-        this.pendingRequests.delete(message.id);
-        const duration = Date.now() - pending.startedAt;
-        this.log('debug', `Tool ${pending.toolName} finished in ${duration}ms`);
-
-        if (message.success) {
-          pending.resolve(message.result);
-        } else if (message.busy === true) {
-          pending.reject(
-            new EditorBusy(pending.toolName, message.busyWith ?? 'busy', message.progress ?? ''),
-          );
-        } else if (message.closing === true) {
-          pending.reject(
-            new EditorClosing(message.error ?? `The editor is quitting, so ${pending.toolName} was not run.`),
-          );
-        } else {
-          pending.reject(new Error(message.error ?? `Tool ${pending.toolName} failed`));
-        }
+      case 'tool_result':
+        this.handleToolResult(message);
         return;
-      }
 
       case 'godot_ready':
         if (this.connectionInfo) {
-          if (this.belongsElsewhere(message.project_path)) {
-            this.elsewhereUnlessOneShot(
-              message.project_path,
-              message.editor_pid,
-              message.opened_by_a_server,
-              this.connectionInfo,
-            );
-            return;
-          }
-          this.connectionInfo.projectPath = withoutTrailingSeparator(message.project_path);
-          const faults = greetingFaults(message);
-          if (faults.length > 0) {
-            // Another release's addon, which this server asks nothing but to quit. The connection is
-            // kept for that: closed, the addon dials straight back, and only it can quit its editor.
-            this.log('info', `Godot ready from another release's addon, which sent no ${faults.join(', ')}`);
-            this.connectionInfo.addonVersion =
-              typeof message.addon_version === 'string' ? message.addon_version : '';
-            this.connectionInfo.addonDigest = '';
-            // Read when it is one, so editor_launch close and restart can wait on its process.
-            this.connectionInfo.editorPid =
-              typeof message.editor_pid === 'number' ? message.editor_pid : undefined;
-            this.connectionInfo.greeted = true;
-            this.emit('godot_connected');
-            return;
-          }
-          this.connectionInfo.addonVersion = message.addon_version;
-          this.connectionInfo.addonDigest = message.addon_digest;
-          this.connectionInfo.editorPid = message.editor_pid;
-          this.connectionInfo.lspPort = servedPort(message.lsp_port);
-          this.connectionInfo.dapPort = servedPort(message.dap_port);
-          this.connectionInfo.debugPort = servedPort(message.debug_port);
-          this.connectionInfo.openedByAServer = message.opened_by_a_server;
-          this.connectionInfo.startedByAnEditor = message.started_by_an_editor;
-          this.connectionInfo.syncsBreakpoints = message.syncs_breakpoints;
-          this.connectionInfo.hidden = message.hidden;
-          this.log('info', `Godot ready: ${message.project_path}`);
-          this.connectionInfo.greeted = true;
-          if (!message.opened_by_a_server && this.oneShotReader !== null) {
-            this.identify(message.editor_pid, this.connectionInfo, this.oneShotReader);
-            return;
-          }
-          this.emit('godot_connected');
+          this.handleGodotReady(message, this.connectionInfo);
         }
         return;
 
