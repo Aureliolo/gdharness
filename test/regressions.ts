@@ -7980,6 +7980,38 @@ async function testABridgeStopsPromptlyWithASilentEditor(): Promise<void> {
   }
 }
 
+/** A bridge told to listen on an IPv6 host upgrades an editor asking for /godot, as on any other. */
+async function testABridgeOnAnIpv6HostTakesItsEditors(): Promise<void> {
+  const bridge = createBridge(0, 1000, '::1');
+  await bridge.start();
+  const client = createConnection(bridge.port, '::1');
+  try {
+    await new Promise<void>((settle) => {
+      client.once('connect', () => {
+        settle();
+      });
+    });
+    const answered = new Promise<string>((settle) => {
+      client.once('data', (data: Buffer) => {
+        settle(data.toString().split('\r\n')[0] ?? '');
+      });
+      client.once('close', () => {
+        settle('closed with no answer');
+      });
+    });
+    client.write(
+      `GET /godot HTTP/1.1\r\nHost: [::1]:${String(bridge.port)}\r\nUpgrade: websocket\r\n` +
+        'Connection: Upgrade\r\n' +
+        `Sec-WebSocket-Key: ${Buffer.from('the sample nonce').toString('base64')}\r\n` +
+        'Sec-WebSocket-Version: 13\r\n\r\n',
+    );
+    assert.equal(await answered, 'HTTP/1.1 101 Switching Protocols', 'an editor on ::1 is upgraded');
+  } finally {
+    client.destroy();
+    await bridge.stop();
+  }
+}
+
 /**
  * godot_connected waits for the greeting to be taken. A gate's --import dialling the port is
  * turned away once it greets, and raising the event for it cleared the server's note that the
@@ -86402,6 +86434,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAPredecessorThatKeepsThePortIsNotWaitedOnForEver,
   testABridgeOnNoPortSaysSo,
   testABridgeStopsPromptlyWithASilentEditor,
+  testABridgeOnAnIpv6HostTakesItsEditors,
   testAProcessTurnedAwayRaisesNoConnection,
   testAFrameFromASocketBeingClosedLeavesTheLiveEditor,
   testAReplyOfTheWrongShapeIsRefusedAtOnce,

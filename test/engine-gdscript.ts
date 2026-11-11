@@ -6541,6 +6541,8 @@ async function main(): Promise<void> {
     assert.equal(asNumber(get(follows, 'arrivals')), 2, 'the client should have greeted both servers');
     // And an announcement that does not answer is set aside rather than waited on for good.
     runFixture(godotPath, projectDir, 'bridge_leftover');
+    // A refusal a person must act on is said, and a server announced on ::1 is dialled.
+    runFixture(godotPath, projectDir, 'bridge_refusals');
     // The game announces itself under the engine's temporary directory and the server looks
     // under Bun's. A platform where the two differ is one where no game is ever found. Both go
     // through the filesystem's own spelling, because Windows hands one side the 8.3 short name

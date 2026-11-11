@@ -86,7 +86,7 @@ const OTHER_PROJECT_CLOSE_CODE = 4001;
 const ONE_SHOT_CLOSE_CODE = 4002;
 
 /** What the bridge last turned away as a one-shot engine run, for editor_status to say. */
-export interface TurnedAway {
+interface TurnedAway {
   readonly pid: number;
   readonly option: string;
   readonly at: Date;
@@ -96,7 +96,7 @@ export interface TurnedAway {
  * The option that makes a process one job that quits, null for none, undefined when it cannot be
  * told. Given to the server's own bridge. A bridge without it takes every editor that greets.
  */
-export type OneShotReader = (pid: number) => Promise<string | null | undefined>;
+type OneShotReader = (pid: number) => Promise<string | null | undefined>;
 
 /** The editor addon reads GDHARNESS_BRIDGE_PORT too, so the two agree by construction. */
 function resolveDefaultBridgePort(): number {
@@ -196,13 +196,6 @@ function servedPort(said: number): number | undefined {
   return Number.isInteger(said) && said > 0 && said <= 65535 ? said : undefined;
 }
 
-interface BridgeEventMap {
-  tool_start: { tool: string; id: string; args: Record<string, unknown> };
-  tool_end: { tool: string; id: string; success: boolean; duration: number };
-  godot_connected: { projectPath?: string | undefined };
-  godot_disconnected: Record<string, never>;
-}
-
 interface PendingRequest {
   toolName: string;
   timeout: NodeJS.Timeout;
@@ -216,7 +209,7 @@ interface PendingRequest {
 }
 
 /** How a request to the editor is sent. */
-export interface InvokeOptions {
+interface InvokeOptions {
   /**
    * False for a question the caller waits on only briefly and then gives up on, such as the ones
    * editor_status asks. Such a question is not reported as pending: an editor busy importing
@@ -802,8 +795,9 @@ export class GodotBridge extends EventEmitter {
   }
 
   private getRequestPathname(url: string | undefined): string {
+    // Only the path is read, so the base names no host. An IPv6 host such as ::1 is no valid one.
     try {
-      return new URL(url ?? '/', `http://${this.host}:${this.port}`).pathname;
+      return new URL(url ?? '/', 'http://localhost').pathname;
     } catch {
       return '/';
     }
@@ -943,12 +937,6 @@ export class GodotBridge extends EventEmitter {
         this.pendingRequests.delete(message.id);
         const duration = Date.now() - pending.startedAt;
         this.log('debug', `Tool ${pending.toolName} finished in ${duration}ms`);
-        this.emitBridgeEvent('tool_end', {
-          tool: pending.toolName,
-          id: message.id,
-          success: message.success,
-          duration,
-        });
 
         if (message.success) {
           pending.resolve(message.result);
@@ -985,7 +973,7 @@ export class GodotBridge extends EventEmitter {
             this.connectionInfo.editorPid =
               typeof message.editor_pid === 'number' ? message.editor_pid : undefined;
             this.connectionInfo.greeted = true;
-            this.emitBridgeEvent('godot_connected', { projectPath: message.project_path });
+            this.emit('godot_connected');
             return;
           }
           this.connectionInfo.addonVersion = message.addon_version;
@@ -1004,7 +992,7 @@ export class GodotBridge extends EventEmitter {
             this.identify(message.editor_pid);
             return;
           }
-          this.emitBridgeEvent('godot_connected', { projectPath: message.project_path });
+          this.emit('godot_connected');
         }
         return;
 
@@ -1052,12 +1040,6 @@ export class GodotBridge extends EventEmitter {
         startedAt: Date.now(),
         resourceKey,
         counted,
-      });
-
-      this.emitBridgeEvent('tool_start', {
-        tool: toolName,
-        id: requestId,
-        args,
       });
 
       try {
@@ -1232,7 +1214,7 @@ export class GodotBridge extends EventEmitter {
         }
         info.identifying = false;
         this.log('info', `Godot editor identified: pid ${pid}`);
-        this.emitBridgeEvent('godot_connected', { projectPath: info.projectPath });
+        this.emit('godot_connected');
       });
   }
 
@@ -1257,14 +1239,9 @@ export class GodotBridge extends EventEmitter {
 
     this.socket = null;
     this.connectionInfo = null;
-    this.emitBridgeEvent('godot_disconnected', {});
 
     this.rejectAllPending(reason);
     this.resourceQueues.clear();
-  }
-
-  private emitBridgeEvent<K extends keyof BridgeEventMap>(eventName: K, payload: BridgeEventMap[K]): void {
-    this.emit(eventName, payload);
   }
 
   private rejectAllPending(error: Error): void {
