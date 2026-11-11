@@ -7243,12 +7243,6 @@ class GodotServer {
    */
   private async handleProjectInfo(args: OperationParams): Promise<ToolResponse> {
     const include = readStringArray(args, 'include') ?? [];
-    const unknown = include.filter((name) => PROJECT_INFO_SECTIONS[name] === undefined);
-    if (unknown.length > 0) {
-      return this.createErrorResponse(
-        `project_info cannot include ${unknown.join(', ')}. Sections: ${Object.keys(PROJECT_INFO_SECTIONS).join(', ')}.`,
-      );
-    }
     // Read by the validation section alone, so without it they would change nothing and the answer
     // would not say so.
     const forValidation = ['preset', 'detail'].filter((name) => args[name] !== undefined);
@@ -12151,8 +12145,8 @@ class GodotServer {
    * Whether the editor reports its play over within the stop's wait. An answer that does not come
    * is waited past rather than taken as either.
    */
-  private async untilTheEditorStopsPlaying(withinMs = stopWaitMs()): Promise<boolean> {
-    const deadline = Date.now() + withinMs;
+  private async untilTheEditorStopsPlaying(): Promise<boolean> {
+    const deadline = Date.now() + stopWaitMs();
     for (;;) {
       if ((await this.editorPlayingState())?.playing === false) {
         return true;
@@ -12609,10 +12603,10 @@ class GodotServer {
     godotPath: string,
     cmdArgs: string[],
     projectPath: string,
-    env?: NodeJS.ProcessEnv,
-    desktop?: string,
-    profiled = false,
-    debugged = true,
+    env: NodeJS.ProcessEnv | undefined,
+    desktop: string | undefined,
+    profiled: boolean,
+    debugged: boolean,
   ): Promise<GodotProcess | { error: string }> {
     // In one of the machine's engine slots, like every engine started for a call. The keeper takes
     // the lock over once it has handed the game's pid back, and gives it back when the run ends,
@@ -13456,9 +13450,9 @@ class GodotServer {
     args: OperationParams,
     userArgs: readonly string[],
     scanned: ScanWait,
-    asked: RunEnvironment = {},
-    engineArgs: readonly string[] = [],
-    engineNote: string | null = null,
+    asked: RunEnvironment,
+    engineArgs: readonly string[],
+    engineNote: string | null,
   ): Promise<ToolResponse> {
     const frames = readPositiveNumber(args, 'frames') ?? 3;
     const timeoutMs = readPositiveNumber(args, 'timeoutMs') ?? 60000;
@@ -14827,23 +14821,13 @@ class GodotServer {
     const projectPath = readNonEmptyString(args, 'projectPath') ?? '';
     const saveTo = readNonEmptyString(args, 'outputPath') ?? null;
     const sendsThePicture = readBoolean(args, 'inline') !== false;
-    if (!sendsThePicture && saveTo === null) {
-      return this.createErrorResponse(
-        'inline: false sends no picture back, so it needs outputPath to save one to.',
-        [
-          'Pass outputPath, an absolute path ending in .png outside the project',
-          'Or leave inline out to have the picture sent',
-        ],
-      );
-    }
-    if (saveTo !== null) {
-      const refusal = captureDestinationRefusal(saveTo, [
-        ...(projectPath === '' ? [] : [projectPath]),
-        ...(this.ownProject === null ? [] : [this.ownProject]),
-      ]);
-      if (refusal !== null) {
-        return this.createErrorResponse(refusal);
-      }
+    const placeRefused = this.captureTargetRefused(
+      saveTo,
+      sendsThePicture,
+      projectPath === '' ? [] : [projectPath],
+    );
+    if (placeRefused !== null) {
+      return placeRefused;
     }
     const folder = scratchDirectory('editor-capture');
     const picture = join(folder, 'capture.png');
@@ -14866,16 +14850,15 @@ class GodotServer {
           `Rejected capture file path outside the managed capture path: '${returned}'`,
         );
       }
-      if (saveTo !== null) {
-        try {
-          copyFileSync(picture, saveTo, constants.COPYFILE_EXCL);
-        } catch (error) {
-          return this.createErrorResponse(
-            `The capture was taken and could not be saved at ${saveTo}: ${errorMessage(error)}`,
-          );
-        }
+      const kept = this.captureSavedAndSent(
+        picture,
+        saveTo,
+        sendsThePicture,
+        readString(payload, 'jpegPath'),
+      );
+      if (!kept.ok) {
+        return kept.response;
       }
-      const sent = sendsThePicture ? pictureToSend(picture, readString(payload, 'jpegPath')) : null;
       const view = readString(payload, 'view') === '3d' ? '3D' : '2D';
       const drawnAt = payload['drawnAt'];
       const scaled = isRecord(drawnAt)
@@ -14885,24 +14868,77 @@ class GodotServer {
         payload['unsavedInEditor'] === true
           ? ". The picture includes the scene's unsaved changes in the editor"
           : '';
-      const how =
-        sent === null
-          ? '. Not sent, as inline: false asked'
-          : sent.mimeType === 'image/jpeg'
-            ? `. Sent as JPEG, ${kilobytes(sent.bytes)} against the PNG's ${kilobytes(sent.pngBytes)}${saveTo === null ? '' : ', and the saved PNG is lossless'}`
-            : '';
       return {
         content: [
           {
             type: 'text',
-            text: `The editor's ${view} view of ${readString(payload, 'scenePath') ?? 'the scene'}: ${String(readNumber(payload, 'width') ?? 0)}x${String(readNumber(payload, 'height') ?? 0)} png${scaled}${unsaved}${saveTo === null ? '' : `. Saved to ${saveTo}`}${how}`,
+            text: `The editor's ${view} view of ${readString(payload, 'scenePath') ?? 'the scene'}: ${String(readNumber(payload, 'width') ?? 0)}x${String(readNumber(payload, 'height') ?? 0)} png${scaled}${unsaved}${kept.said}`,
           },
-          ...(sent === null ? [] : [{ type: 'image' as const, data: sent.data, mimeType: sent.mimeType }]),
+          ...kept.images,
         ],
       };
     } finally {
       discard(folder);
     }
+  }
+
+  /** Why a capture may not go where it is asked, before anything is captured, or null. */
+  private captureTargetRefused(
+    saveTo: string | null,
+    sendsThePicture: boolean,
+    projects: readonly string[],
+  ): ToolResponse | null {
+    if (!sendsThePicture && saveTo === null) {
+      return this.createErrorResponse(
+        'inline: false sends no picture back, so it needs outputPath to save one to.',
+        [
+          'Pass outputPath, an absolute path ending in .png outside the project',
+          'Or leave inline out to have the picture sent',
+        ],
+      );
+    }
+    if (saveTo === null) {
+      return null;
+    }
+    const refusal = captureDestinationRefusal(saveTo, [
+      ...projects,
+      ...(this.ownProject === null ? [] : [this.ownProject]),
+    ]);
+    return refusal === null ? null : this.createErrorResponse(refusal);
+  }
+
+  /** A taken capture saved and sent as asked: the end of the answer's text and its picture blocks. */
+  private captureSavedAndSent(
+    picture: string,
+    saveTo: string | null,
+    sendsThePicture: boolean,
+    jpegPath: string | undefined,
+  ): { ok: true; said: string; images: ToolResponse['content'] } | { ok: false; response: ToolResponse } {
+    // Exclusive, so a file that appeared since the check is still not written over.
+    if (saveTo !== null) {
+      try {
+        copyFileSync(picture, saveTo, constants.COPYFILE_EXCL);
+      } catch (error) {
+        return {
+          ok: false,
+          response: this.createErrorResponse(
+            `The capture was taken and could not be saved at ${saveTo}: ${errorMessage(error)}`,
+          ),
+        };
+      }
+    }
+    const sent = sendsThePicture ? pictureToSend(picture, jpegPath) : null;
+    const how =
+      sent === null
+        ? '. Not sent, as inline: false asked'
+        : sent.mimeType === 'image/jpeg'
+          ? `. Sent as JPEG, ${kilobytes(sent.bytes)} against the PNG's ${kilobytes(sent.pngBytes)}${saveTo === null ? '' : ', and the saved PNG is lossless'}`
+          : '';
+    return {
+      ok: true,
+      said: `${saveTo === null ? '' : `. Saved to ${saveTo}`}${how}`,
+      images: sent === null ? [] : [{ type: 'image' as const, data: sent.data, mimeType: sent.mimeType }],
+    };
   }
 
   private async handleRescanFilesystem(args: OperationParams): Promise<ToolResponse> {
@@ -15362,7 +15398,7 @@ class GodotServer {
    */
   private async reloadInEditor(
     scripts: readonly NamingScript[],
-    projectPath = '',
+    projectPath: string,
   ): Promise<{
     reloaded: string[];
     notReloaded: NotReloaded[];
@@ -17241,23 +17277,11 @@ class GodotServer {
     // Checked before the game is asked, so a refused place costs no capture.
     const saveTo = expectsScreenshot && typeof outputPath === 'string' ? outputPath : null;
     const sendsThePicture = readBoolean(callArgs, 'inline') !== false;
-    if (expectsScreenshot && !sendsThePicture && saveTo === null) {
-      return this.createErrorResponse(
-        'inline: false sends no picture back, so it needs outputPath to save one to.',
-        [
-          'Pass outputPath, an absolute path ending in .png outside the project',
-          'Or leave inline out to have the picture sent',
-        ],
-      );
-    }
-    if (saveTo !== null) {
-      const refusal = captureDestinationRefusal(saveTo, [
-        choice.endpoint.project.path,
-        ...(this.ownProject === null ? [] : [this.ownProject]),
-      ]);
-      if (refusal !== null) {
-        return this.createErrorResponse(refusal);
-      }
+    const placeRefused = expectsScreenshot
+      ? this.captureTargetRefused(saveTo, sendsThePicture, [choice.endpoint.project.path])
+      : null;
+    if (placeRefused !== null) {
+      return placeRefused;
     }
     // The game is not asked: an answer from another release's runtime is that release's answer.
     const staleNote = this.runtimeStaleNote(choice.endpoint);
@@ -17338,31 +17362,23 @@ class GodotServer {
       const dimensions = `${readNumber(payload, 'width') ?? 0}x${readNumber(payload, 'height') ?? 0} ${
         readString(payload, 'format') ?? 'unknown'
       }`;
-      // Exclusive, so a file that appeared since the check is still not written over.
-      if (saveTo !== null) {
-        try {
-          copyFileSync(screenshotPath, saveTo, constants.COPYFILE_EXCL);
-        } catch (error) {
-          return this.createErrorResponse(
-            `The capture was taken and could not be saved at ${saveTo}: ${errorMessage(error)}`,
-          );
-        }
+      const kept = this.captureSavedAndSent(
+        screenshotPath,
+        saveTo,
+        sendsThePicture,
+        readString(payload, 'jpegPath'),
+      );
+      if (!kept.ok) {
+        return kept.response;
       }
       const ranWith = [...onGame.alongside];
-      const sent = sendsThePicture ? pictureToSend(screenshotPath, readString(payload, 'jpegPath')) : null;
-      const how =
-        sent === null
-          ? '. Not sent, as inline: false asked'
-          : sent.mimeType === 'image/jpeg'
-            ? `. Sent as JPEG, ${kilobytes(sent.bytes)} against the PNG's ${kilobytes(sent.pngBytes)}${saveTo === null ? '' : ', and the saved PNG is lossless'}`
-            : '';
       return {
         content: [
           {
             type: 'text',
-            text: `Screenshot captured: ${dimensions}${chosenAmongSeveral ? ` from pid ${own}, the game this server holds` : ''}${captureDetail(payload)}${saveTo === null ? '' : `. Saved to ${saveTo}`}${how}${ranWith.length === 0 ? '' : `\n\nRan alongside ${ranWith.join(', ')}. ${ALONGSIDE_NOTE}`}`,
+            text: `Screenshot captured: ${dimensions}${chosenAmongSeveral ? ` from pid ${own}, the game this server holds` : ''}${captureDetail(payload)}${kept.said}${ranWith.length === 0 ? '' : `\n\nRan alongside ${ranWith.join(', ')}. ${ALONGSIDE_NOTE}`}`,
           },
-          ...(sent === null ? [] : [{ type: 'image' as const, data: sent.data, mimeType: sent.mimeType }]),
+          ...kept.images,
         ],
       };
     } finally {
