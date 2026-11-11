@@ -2276,11 +2276,15 @@ function testOperations(godotPath: string, projectDir: string): void {
 
   // The global class list, rebuilt from the scripts on disk over a stale one, then read back
   // by a fresh engine: the file is only right if the engine itself lists the classes from it.
+  // The stale entry names a script that is there but declares no class: one whose script is gone
+  // is dropped as every engine starts, before the rebuild could read it.
   writeFileSync(join(projectDir, 'made', 'squire.gd'), 'class_name FixtureSquire\nextends FixtureHero\n');
+  const stale = join(projectDir, 'made', 'stale.gd');
+  writeFileSync(stale, 'extends Node\n');
   mkdirSync(join(projectDir, '.godot'), { recursive: true });
   writeFileSync(
     join(projectDir, '.godot', 'global_script_class_cache.cfg'),
-    'list=[{\n"base": &"Node",\n"class": &"Stale",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"GDScript",\n"path": "res://gone.gd"\n}]\n',
+    'list=[{\n"base": &"Node",\n"class": &"Stale",\n"icon": "",\n"is_abstract": false,\n"is_tool": false,\n"language": &"GDScript",\n"path": "res://made/stale.gd"\n}]\n',
   );
   const rebuilt = operation('refresh_class_cache', {});
   assert.deepEqual(get(rebuilt, 'removed'), ['Stale'], JSON.stringify(rebuilt));
@@ -2295,6 +2299,7 @@ function testOperations(godotPath: string, projectDir: string): void {
   assert.equal(get(known, 'classes', 'FixtureHero', 'base'), 'Node2D');
   assert.equal(get(known, 'classes', 'FixtureHero', 'path'), 'res://made/hero.gd');
   assert.equal(get(known, 'classes', 'Stale'), undefined, 'the stale entry is gone');
+  rmSync(stale);
 
   // Another language's classes are kept while their files are there: the rebuild reads GDScript
   // only and writes the list whole, so a C# project's global classes were dropped and called removed.
@@ -2309,7 +2314,8 @@ function testOperations(godotPath: string, projectDir: string): void {
   try {
     const refreshed = operation('refresh_class_cache', {});
     assert.deepEqual(get(refreshed, 'carried'), ['Foe'], JSON.stringify(refreshed));
-    assert.deepEqual(get(refreshed, 'removed'), ['Lost'], 'one whose file has gone is dropped');
+    // Dropped as the engine started, so the rebuild never saw it: the server answers it as removed.
+    assert.doesNotMatch(readFileSync(cacheFile, 'utf8'), /"Lost"/, 'one whose file has gone is dropped');
     assert.match(
       readFileSync(cacheFile, 'utf8'),
       /"class": &"Foe"[\s\S]*"language": &"C#"/,

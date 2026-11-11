@@ -553,6 +553,7 @@ import {
 import { skillFiles } from '../src/skill.js';
 import {
   type ChildProcess,
+  programArgumentsOf,
   runHidden,
   runSyncHidden,
   type SpawnSyncReturns,
@@ -19660,6 +19661,28 @@ function testAUidCacheNamingAFileGoneIsMended(): void {
 }
 
 /**
+ * An engine started under Linux's wrappers is read by its own arguments: setpriv's `--` came first,
+ * and read as the engine's it hid every `--path`, so no Linux engine's caches were mended.
+ */
+function testAWrappedEngineIsReadByItsOwnArguments(): void {
+  const engine = ['--headless', '--path', '/p', '-s', 'r.gd', '--', '--path', '/game'];
+  const ended = endingWithRunner('/g/godot', engine, 'linux', '/usr/bin/setpriv');
+  const held = heldToCores(4, ended.command, ended.args, 'linux');
+  assert.equal(held.command, 'taskset', 'the case starts under both wrappers');
+  assert.deepEqual(programArgumentsOf(held.command, held.args), engine);
+  assert.deepEqual(programArgumentsOf(ended.command, ended.args), engine);
+  const pinned = heldToCores(2, '/g/godot', engine, 'linux');
+  assert.deepEqual(programArgumentsOf(pinned.command, pinned.args), engine);
+  assert.deepEqual(programArgumentsOf('/g/godot', engine), engine, 'an unwrapped start is its own');
+  assert.deepEqual(programArgumentsOf('C:\\g\\godot.exe', ['--path', 'C:\\p', '--', 'x']), [
+    '--path',
+    'C:\\p',
+    '--',
+    'x',
+  ]);
+}
+
+/**
  * A start sets right the uid cache of the project its own `--path` names, and a `--path` after the
  * bare `--` that begins the game's arguments is the game's and touches nothing.
  */
@@ -19783,7 +19806,16 @@ function testASoundClassListIsLeftByteForByte(): void {
 
     const foreign = `; edited by hand\n${godotClassList([['Gone', 'Node', 'res://game/gone.gd']])}`;
     writeFileSync(list, foreign);
-    assert.deepEqual(mendClassList(project), [], 'a list not in Godot form is not rewritten');
+    const refused = stderrOf(() => {
+      mendBeforeStart(['--path', project], undefined);
+    });
+    assert.deepEqual(
+      refused,
+      [
+        `class list: could not rewrite ${list}, which names files gone: it is not in the form Godot writes, so it is left as it is\n`,
+      ],
+      'a list not in Godot form is not rewritten, and the start says why',
+    );
     assert.equal(readFileSync(list, 'utf8'), foreign);
   } finally {
     rmSync(project, { recursive: true, force: true });
@@ -68744,6 +68776,47 @@ async function testTheErrorsOfAScriptBeforeAChangeAreLeftOutOfTheAnswer(): Promi
 }
 
 /**
+ * A rebuild of the class list answers as removed a class whose script is gone, though the start of
+ * its own engine dropped that entry before the rebuild read the list.
+ */
+async function testARebuiltClassListAnswersAGoneScriptsClassAsRemoved(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('class list rebuild regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-rebuilt-list-'));
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n\n[application]\n\nconfig/name="Rebuilt"\n',
+      'kept.gd': 'class_name KeptClass\nextends Node\n',
+      '.godot/global_script_class_cache.cfg': godotClassList([
+        ['GoneClass', 'Node', 'res://gone.gd'],
+        ['KeptClass', 'Node', 'res://kept.gd'],
+      ]),
+    });
+    const outcome = await runOperation(
+      { godotPath, script: resolve('src', 'godot', 'operations', 'godot_operations.gd'), debug: false },
+      'refresh_class_cache',
+      {},
+      project,
+    );
+    assert.ok(outcome.ok, JSON.stringify(outcome));
+    assert.deepEqual(outcome.payload['removed'], ['GoneClass'], JSON.stringify(outcome.payload));
+    assert.deepEqual(outcome.payload['added'], [], JSON.stringify(outcome.payload));
+    assert.doesNotMatch(
+      readFileSync(join(project, '.godot', 'global_script_class_cache.cfg'), 'utf8'),
+      /GoneClass/,
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * The file an operation answers in keeps a float as it was: a tiny one was written as zero, and a
  * huge or a fractional one lost digits.
  */
@@ -90259,6 +90332,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEditorWritesItsConsoleWhereTheServerLooks,
   testAUidCacheNamingAFileGoneIsMended,
   testAStartMendsOnlyTheProjectItsOwnArgumentsName,
+  testAWrappedEngineIsReadByItsOwnArguments,
   testAClassListEntryWhoseFileIsGoneIsDropped,
   testASoundClassListIsLeftByteForByte,
   testAClassListWithEveryFileGoneOrNoEntriesIsMended,
@@ -90474,6 +90548,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheHeadlessNodePathReaderResolvesWhatTheEngineResolves,
   testTheAnswerFileKeepsAFloatAsItWas,
   testTheErrorsOfAScriptBeforeAChangeAreLeftOutOfTheAnswer,
+  testARebuiltClassListAnswersAGoneScriptsClassAsRemoved,
   testEveryProcessStartsThroughTheHiddenSpawn,
   testTheWrittenConfigNamesAProgramThatStarts,
 

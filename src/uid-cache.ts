@@ -306,8 +306,9 @@ type GoneClass = readonly [name: string, path: string];
  * `Could not find script for class`. An entry whose file is there is kept, even when the file now
  * declares another class, because the engine resolves the name to that file and loads it unharmed.
  *
- * The file is Godot's form, `list=[`, the entries joined by `, `, then `]`. A list not in that form
- * is left byte for byte, and so is a sound one. The new list is written beside the old and renamed
+ * The file is Godot's form, `list=[`, the entries joined by `, `, then `]`. A sound list is left byte
+ * for byte. One naming a file gone in another form is left too, and the mend throws to say why, since
+ * the start it precedes then fails as before. The new list is written beside the old and renamed
  * over it.
  */
 export function mendClassList(projectPath: string): readonly GoneClass[] {
@@ -327,8 +328,11 @@ export function mendClassList(projectPath: string): readonly GoneClass[] {
       kept.push(entry);
     }
   }
-  if (gone.length === 0 || readFileSync(file, 'utf8') !== `list=[${[...entries.values()].join(', ')}]\n`) {
+  if (gone.length === 0) {
     return [];
+  }
+  if (readFileSync(file, 'utf8') !== `list=[${[...entries.values()].join(', ')}]\n`) {
+    throw new Error('it is not in the form Godot writes, so it is left as it is');
   }
   const written = `${file}.${String(process.pid)}.mending`;
   writeFileSync(written, `list=[${kept.join(', ')}]\n`);

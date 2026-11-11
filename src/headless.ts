@@ -9,6 +9,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { cachedClasses } from './class-cache.js';
 import { emptyRecord } from './dictionary.js';
 import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
 import { EXIT_LEAK, projectSelfTypedExports, selfTypedSentence } from './engine-leaks.js';
@@ -483,12 +484,41 @@ export async function runOperation(
   params: OperationParams,
   projectPath: string,
 ): Promise<HeadlessOutcome> {
-  const outcome = await operationOutcome(engine, operation, params, projectPath);
+  // Read before the engine starts, since every start first drops the entries whose script is gone,
+  // and the rebuild could then not answer them as removed.
+  const listedBefore = operation === REFRESH_CLASS_LIST ? cachedClasses(projectPath) : null;
+  const run = await operationOutcome(engine, operation, params, projectPath);
+  const outcome = listedBefore === null ? run : withEveryRemovalAnswered(run, listedBefore, projectPath);
   const heldAtExit = [...outcome.messages, ...(outcome.afterAnswerMessages ?? [])].some((entry) =>
     EXIT_LEAK.test(entry.text),
   );
   const note = heldAtExit ? selfTypedSentence(projectSelfTypedExports(projectPath)) : undefined;
   return note === undefined ? outcome : { ...outcome, exitLeakNote: note };
+}
+
+const REFRESH_CLASS_LIST = 'refresh_class_cache';
+
+/**
+ * [param outcome] of a class list rebuild, its `removed` holding every class [param listedBefore]
+ * held that the list no longer does, whether the rebuild dropped it or the start before it did.
+ */
+function withEveryRemovalAnswered(
+  outcome: HeadlessOutcome,
+  listedBefore: ReadonlyMap<string, string>,
+  projectPath: string,
+): HeadlessOutcome {
+  const answered = outcome.ok ? outcome.payload['removed'] : undefined;
+  if (!(outcome.ok && Array.isArray(answered))) {
+    return outcome;
+  }
+  const listedAfter = cachedClasses(projectPath) ?? new Map<string, string>();
+  const removed = answered.filter((name): name is string => typeof name === 'string');
+  const unanswered = [...listedBefore.keys()].filter(
+    (name) => !listedAfter.has(name) && !removed.includes(name),
+  );
+  return unanswered.length === 0
+    ? outcome
+    : { ...outcome, payload: { ...outcome.payload, removed: [...removed, ...unanswered] } };
 }
 
 async function operationOutcome(

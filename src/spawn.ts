@@ -17,6 +17,7 @@ import {
   spawn,
   spawnSync,
 } from 'node:child_process';
+import { basename } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import { mendBeforeStart } from './uid-cache.js';
 
@@ -33,12 +34,33 @@ import { mendBeforeStart } from './uid-cache.js';
 export type { ChildProcess, ChildProcessWithoutNullStreams, SpawnSyncReturns } from 'node:child_process';
 
 /**
- * Sets the uid cache of the project a start names right. Only the arguments before a bare `--` are
- * the program's own: what follows belongs to the game, whose `--path` is no project of ours.
+ * Sets the uid cache and the class list of the project a start names right. Only the program's
+ * arguments before a bare `--` are its own: what follows belongs to the game, whose `--path` is no
+ * project of ours.
  */
-function mendProjectOf(args: readonly string[], cwd: string | URL | undefined): void {
+function mendProjectOf(command: string, args: readonly string[], cwd: string | URL | undefined): void {
+  const own = programArgumentsOf(command, args);
+  const end = own.indexOf('--');
+  mendBeforeStart(end < 0 ? own : own.slice(0, end), cwd);
+}
+
+/**
+ * The arguments of the program [param command] runs, past the wrappers an engine starts under on
+ * Linux: `taskset -c <cores>` and `setpriv <options> --`, each of which runs the command after it.
+ * Read as the engine's own, setpriv's `--` hid every engine's `--path`, so no Linux engine was mended.
+ */
+export function programArgumentsOf(command: string, args: readonly string[]): readonly string[] {
+  const name = basename(command);
+  const inner = args[2];
+  if (name === 'taskset' && args[0] === '-c' && inner !== undefined) {
+    return programArgumentsOf(inner, args.slice(3));
+  }
   const end = args.indexOf('--');
-  mendBeforeStart(end < 0 ? args : args.slice(0, end), cwd);
+  const wrapped = args[end + 1];
+  if (name === 'setpriv' && end >= 0 && wrapped !== undefined) {
+    return programArgumentsOf(wrapped, args.slice(end + 2));
+  }
+  return args;
 }
 
 type Stdio = StdioNull | StdioPipe;
@@ -61,7 +83,7 @@ export function spawnHidden(
   args: readonly string[],
   options: SpawnOptions = {},
 ): ChildProcess {
-  mendProjectOf(args, options.cwd);
+  mendProjectOf(command, args, options.cwd);
   return spawn(command, [...args], { ...options, windowsHide: true });
 }
 
@@ -75,7 +97,7 @@ export function spawnShown(
   args: readonly string[],
   options: SpawnOptions = {},
 ): ChildProcess {
-  mendProjectOf(args, options.cwd);
+  mendProjectOf(command, args, options.cwd);
   return spawn(command, [...args], { ...options, windowsHide: false });
 }
 
@@ -85,7 +107,7 @@ export function runHidden(
   args: readonly string[],
   options: ExecFileOptions = {},
 ): Promise<{ stdout: string; stderr: string }> {
-  mendProjectOf(args, options.cwd ?? undefined);
+  mendProjectOf(command, args, options.cwd ?? undefined);
   return new Promise((resolve, reject) => {
     execFile(
       command,
@@ -109,7 +131,7 @@ export function runSyncHidden(
   args: readonly string[],
   options: ExecFileSyncOptionsWithStringEncoding,
 ): string {
-  mendProjectOf(args, options.cwd ?? undefined);
+  mendProjectOf(command, args, options.cwd ?? undefined);
   return execFileSync(command, [...args], { ...options, windowsHide: true });
 }
 
@@ -129,6 +151,6 @@ export function spawnSyncHidden(
   args: readonly string[],
   options: SpawnSyncOptions = {},
 ): SpawnSyncReturns<string | Buffer> {
-  mendProjectOf(args, options.cwd);
+  mendProjectOf(command, args, options.cwd);
   return spawnSync(command, [...args], { ...options, windowsHide: true });
 }
