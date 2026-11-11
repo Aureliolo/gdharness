@@ -12,6 +12,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { emptyRecord } from './dictionary.js';
 import { type DebugObserver, RUNTIME_ADDON } from './game-debugger.js';
 import {
@@ -185,6 +186,19 @@ export function frameFunctionsFor(queued: number): number {
 export function queuedMessagesOf(projectGodot: string | null): number {
   const set = projectGodot === null ? undefined : parseProjectGodot(projectGodot)['network']?.[QUEUE_SETTING];
   return typeof set === 'number' && Number.isInteger(set) && set > 0 ? set : QUEUE_DEFAULT;
+}
+
+/** The most functions a frame of [param projectPath]'s game may carry, or the engine default's. */
+export function profileFrameFunctions(projectPath: string | null): number {
+  let projectGodot: string | null = null;
+  if (projectPath !== null) {
+    try {
+      projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
+    } catch {
+      // The engine's default queue is what such a game runs with too.
+    }
+  }
+  return frameFunctionsFor(queuedMessagesOf(projectGodot));
 }
 
 /**

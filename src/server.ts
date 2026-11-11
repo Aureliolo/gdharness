@@ -58,6 +58,7 @@ import {
   declaredClasses,
   declaredClassLines,
   declaredSince,
+  EXTERNAL_MEMBER,
   eachScript,
   externalMemberIn,
   failedReloadNote,
@@ -134,7 +135,7 @@ import {
   WALK_STOPPED_SENTENCE,
   walkStoppedPartWay,
 } from './engine-leaks.js';
-import { type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-run.js';
+import { CONSOLE_CLOSED, type EngineRun, exitCodeText, howItEnded, runEngine } from './engine-run.js';
 import { type CallSlot, onTheSlot, slotEngineNamed, slotForCall } from './engine-slots.js';
 import { errorCode, errorMessage, Refusal } from './errors.js';
 import { applyFileMove, type MoveOutcome, planFileMove } from './file-move.js';
@@ -334,12 +335,11 @@ import {
 } from './script-origins.js';
 import {
   callersOf,
-  frameFunctionsFor,
   PROFILE_FROM_START,
   type ProfileMark,
   type ProfileTotals,
   profiledFunctions,
-  queuedMessagesOf,
+  profileFrameFunctions,
   readProfileFile,
   readProfileMark,
   type SourceOf,
@@ -957,9 +957,6 @@ function cleanVerdict(run: GodotProcess): boolean | undefined {
 
 /** Signals an engine ends on only when it crashes, as against the ones a stop sends. */
 const CRASH_SIGNALS: ReadonlySet<string> = new Set(['SIGSEGV', 'SIGBUS', 'SIGILL', 'SIGFPE', 'SIGABRT']);
-/** The Windows status of a console closed or sent Ctrl+C, which ends a process without a fault. */
-const CONSOLE_CLOSED = 0xc000013a;
-
 /**
  * An error entry for a run that ended in a crash its log holds no report of, entered once. Godot
  * on Windows can crash as it closes with nothing printed: measured, a game closed through the
@@ -1774,9 +1771,6 @@ function lineNothingStopsOn(absolutePath: string, relativePath: string, line: nu
   return `${at} ${why}${after}.`;
 }
 
-/** What the runtime addon prints once it is listening, which a run's output is read for. */
-const RUNTIME_LISTENING_LINE = '[gdharness] runtime listening on ';
-
 /**
  * What a start says about the runtime it waited for.
  *
@@ -1881,7 +1875,6 @@ function isOfType(value: unknown, kind: unknown): boolean {
 /** What arrived, in the words the refusal uses, so a caller can see the two side by side. */
 const VALUE_NAMES: Readonly<Record<string, string>> = {
   string: 'a string',
-  number: 'a number',
   boolean: 'a boolean',
   object: 'an object',
 };
@@ -3345,19 +3338,6 @@ export interface ProfileReading {
   readonly callersOf?: { readonly name: string; readonly scripts: () => Iterable<readonly [string, string]> };
 }
 
-/** The most functions a frame of [param projectPath]'s game may carry. See `frameFunctionsFor`. */
-function profileFrameFunctions(projectPath: string | null): number {
-  let projectGodot: string | null = null;
-  if (projectPath !== null) {
-    try {
-      projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
-    } catch {
-      // The engine's default queue is what such a game runs with too.
-    }
-  }
-  return frameFunctionsFor(queuedMessagesOf(projectGodot));
-}
-
 /** The cap an editor addon's profile reports, none before a session has set one. */
 function playedCap(
   held: OperationParams,
@@ -3886,7 +3866,9 @@ export function testPathsIn(
   // Two spellings of one path are one suite on a file system that ignores case.
   const folded = (path: string): string =>
     process.platform === 'win32' || process.platform === 'darwin' ? path.toLowerCase() : path;
-  const unique = resolved.filter((path, at) => resolved.findIndex((one) => folded(one) === folded(path)) === at);
+  const unique = resolved.filter(
+    (path, at) => resolved.findIndex((one) => folded(one) === folded(path)) === at,
+  );
   return {
     ok: true,
     value: unique
@@ -4058,9 +4040,6 @@ function asWarning(raised: string): string {
   const bare = raised.endsWith(RAISED_WARNING) ? raised.slice(0, -RAISED_WARNING.length) : raised;
   return bare.startsWith(PARSE_ERROR) ? bare.slice(PARSE_ERROR.length) : bare;
 }
-
-/** A diagnostic naming only the member of another class it could not resolve. */
-const EXTERNAL_MEMBER = 'Could not resolve external class member "';
 
 function isDirectory(path: string): boolean {
   try {
@@ -11646,9 +11625,7 @@ class GodotServer {
       servesAProject: this.ownProject !== null,
       ...(going?.throughEditor === true ? { playingSeen: going.seenPlaying === true } : {}),
       runtimeCameUp:
-        going !== null &&
-        !running &&
-        going.log.all.some((entry) => entry.text.startsWith(RUNTIME_LISTENING_LINE)),
+        going !== null && !running && going.log.all.some((entry) => entry.text.startsWith(CONSOLE_BOUNDARY)),
     });
     // Listening is not answering: a game on another build's runtime addon is asked nothing, and a
     // start that says only that it listened leaves the caller to learn it from the first refusal.

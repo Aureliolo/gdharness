@@ -411,6 +411,9 @@ export function missingMemberIn(message: string): MissingMember | null {
     : { kind: 'enum member', member, type, enum: enumName };
 }
 
+/** A diagnostic naming only the member of another class it could not resolve. */
+export const EXTERNAL_MEMBER = 'Could not resolve external class member "';
+
 /**
  * The member an "external class member" diagnostic says is missing, and the class it was looked up
  * on, read from [param line], the diagnosed script's line the diagnostic is on.
@@ -426,7 +429,7 @@ export function externalMemberIn(
   line: string | undefined,
   classes: ReadonlyMap<string, string>,
 ): MissingMember | null {
-  const member = /Could not resolve external class member "([A-Za-z_]\w*)"/.exec(message)?.[1];
+  const member = new RegExp(String.raw`${EXTERNAL_MEMBER}([A-Za-z_]\w*)"`).exec(message)?.[1];
   if (member === undefined || line === undefined) {
     return null;
   }

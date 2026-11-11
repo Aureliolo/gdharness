@@ -44,10 +44,9 @@ import { startTimesOf } from './process-children.js';
 import { type RestartedFrom, type RunRecord, recordRunEnded, writeRunRecord } from './run-record.js';
 import { discard, scratchDirectory } from './scratch.js';
 import {
-  frameFunctionsFor,
   ProfileObserver,
   type ProfileTotals,
-  queuedMessagesOf,
+  profileFrameFunctions,
   withEngineArguments,
   writeProfileFile,
 } from './script-profile.js';
@@ -201,24 +200,15 @@ function profiledBy(path: string, projectPath: string): { observer: ProfileObser
       timer = setTimeout(write, PROFILE_WRITE_MS);
     }
   };
-  let projectGodot: string | null = null;
-  try {
-    projectGodot = readFileSync(join(projectPath, 'project.godot'), 'utf8');
-  } catch {
-    // The engine's default queue is what such a game runs with too.
-  }
-  const observer = new ProfileObserver(
-    (totals) => {
-      const first = latest === null;
-      latest = totals;
-      if (first) {
-        write();
-      } else {
-        timer ??= setTimeout(write, PROFILE_WRITE_MS);
-      }
-    },
-    frameFunctionsFor(queuedMessagesOf(projectGodot)),
-  );
+  const observer = new ProfileObserver((totals) => {
+    const first = latest === null;
+    latest = totals;
+    if (first) {
+      write();
+    } else {
+      timer ??= setTimeout(write, PROFILE_WRITE_MS);
+    }
+  }, profileFrameFunctions(projectPath));
   writeProfileFile(path, { connected: false, listeningSince: Date.now() });
   return {
     observer,

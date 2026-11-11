@@ -46,11 +46,14 @@ export const ENGINE_STARTS = 3;
 /** The wait before the second start, doubled before each one after it. */
 const START_RETRY_MS = 500;
 
+/** The Windows status of a console closed or sent Ctrl+C, which ends a process without a fault. */
+export const CONSOLE_CLOSED = 0xc000013a;
+
 /**
  * The Windows statuses that end an engine for a reason a second start would meet again: its console
  * closed or Ctrl+C, and a library it needs that is not there.
  */
-const NOT_A_START_RACE = new Set([0xc000013a, 0xc0000135]);
+const NOT_A_START_RACE = new Set([CONSOLE_CLOSED, 0xc0000135]);
 
 /**
  * Whether [param run] is an engine that died as it started: ended by a Windows exception status
