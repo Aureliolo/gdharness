@@ -95,8 +95,8 @@ assertion, then disarm again. The causes seen here:
 - Code that runs only when something is wrong is not exercised by runs that go well. Put the system
   into the mismatch, fault or timeout on purpose and read the output.
 - Hold that state by taking the disagreeing thing as an argument, the way `judgeRun` is given the
-  operating system's answer. A fixture asking the real kernel for forty ports gets forty different
-  ones even with the deduplication removed.
+  operating system's answer. A fixture drawing forty ports from the band gets forty different ones
+  even with the deduplication removed.
 - Size a tolerance to what it absorbs, then ask what falls inside it that should not. A
   ninety-second start-time window misses every run shorter than ninety seconds, which is how bench
   workers run.

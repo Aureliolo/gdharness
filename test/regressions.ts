@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once as heardOnce } from 'node:events';
 import {
   chmodSync,
   closeSync,
@@ -674,7 +674,15 @@ import {
 } from './support/json-rpc.js';
 import { endWhatAnnouncedIn, MetProcesses } from './support/met.js';
 import { pixelPng, readPng, solidPng } from './support/png.js';
-import { listenOnAReservedPort, reservePort, ServerProcess, stopServersOf } from './support/server.js';
+import {
+  bandWalk,
+  listenOnAReservedPort,
+  PORT_BAND,
+  reservePort,
+  ServerProcess,
+  stopServersOf,
+  unheldPort,
+} from './support/server.js';
 import { REGRESSION_SECONDS, regressionPart, secondsOn, UNMEASURED_SECONDS } from './support/shards.js';
 import { leftInSlots } from './support/slots.js';
 import {
@@ -6619,7 +6627,7 @@ async function testAnEditorNotReachedYetIsNotAnEditorThatIsGone(): Promise<void>
   // On a bridge port of its own: the default one is held by whatever else this suite has running,
   // and a server whose bridge never listened is the other case entirely, with nothing to time from.
   const server = new ServerProcess({
-    env: { GDHARNESS_BRIDGE_PORT: String(await freePort(0)) },
+    env: { GDHARNESS_BRIDGE_PORT: String(await reservePort()) },
   });
   try {
     await server.initialize('regression-test');
@@ -6855,10 +6863,7 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
     servers.push(started);
     return started;
   };
-  // Held until the server meant for it starts. The two servers before it take whichever port the
-  // kernel offers, and the kernel offers a port this process reserved and let go.
-  const keptFree = createServer();
-  const free = await listenOnAReservedPort(keptFree);
+  const free = await reservePort();
   const letGo = (listener: Server): Promise<void> =>
     new Promise<void>((settle) => {
       listener.close(() => {
@@ -6925,9 +6930,12 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
     assert.equal(get(other, 'bridgeHandover'), undefined, JSON.stringify(other));
     assert.notEqual(get(other, 'port'), wanted, `it moved at once: ${JSON.stringify(other)}`);
     assert.match(text(get(other, 'portNote')), /was held by another process/, JSON.stringify(other));
-    assert.notEqual(get(other, 'port'), free, `the kept port was not offered: ${JSON.stringify(other)}`);
+    assert.notEqual(
+      get(other, 'port'),
+      free,
+      `the next server's port was not offered: ${JSON.stringify(other)}`,
+    );
 
-    await letGo(keptFree);
     const settled = spawn(free);
     await settled.initialize('regression-test');
     const plain = get(
@@ -6957,9 +6965,6 @@ async function testABridgeThatMovedSaysFromWhere(): Promise<void> {
       await started.stop();
     }
     await letGo(holder);
-    if (keptFree.listening) {
-      await letGo(keptFree);
-    }
     sweep(project);
   }
 }
@@ -8123,6 +8128,10 @@ async function testATestServerTakesNoRealEditorsPort(): Promise<void> {
       `the bridge is on a port: ${JSON.stringify(status)}`,
     );
     assert.notEqual(bridge, 6505, 'and not the default a real editor dials');
+    assert.ok(
+      bridge >= PORT_BAND.first && bridge <= PORT_BAND.last,
+      `and from the band, which no port-zero listener is handed: ${bridge}`,
+    );
   } finally {
     await server.stop();
   }
@@ -70649,19 +70658,14 @@ function testTheCopiedHelperReadsTheSameEverywhere(): void {
 /**
  * Two reservations are two ports.
  *
- * A reservation binds port zero, reads the number and closes it, so the number is back in the
- * kernel's pool before the caller has bound anything and the next call can be handed it again. A
- * fixture asking for a bridge, a language server and a debug adapter then gets two of something,
- * and what fails is somewhere else entirely: the harness's own server binds the bridge, the editor
- * comes up, and the check on who really holds the debug adapter port finds the server on it and
- * refuses to play the game. That reached CI as an editor fixture failing over two pids one apart,
- * which is what spawning a server and an editor in a row gives you.
+ * A source that offers one number twice gives a fixture two of something, and the failure shows far
+ * away, in the check on who holds the debug adapter port.
  *
- * The repeating pool is written down rather than waited for. Asking the real kernel for forty ports
- * and finding them all different is a trial with no other side to it: a host that does not repeat
- * gives that reading whether or not anything deduplicates, which is the same answer as no guard at
- * all. Numbers below the ephemeral range, so nothing a real reservation could return collides with
- * them.
+ * Forty ports drawn from the band differ whether or not anything deduplicates, so the repeating
+ * source is written down. The stand-in numbers sit below the band, where no real reservation lands.
+ *
+ * The band is checked against each platform's range for port zero, since a kernel pick inside it
+ * could be a reserved number.
  */
 async function testEveryReservedPortIsItsOwn(): Promise<void> {
   const offers = [1100, 1100, 1101];
@@ -70679,9 +70683,21 @@ async function testEveryReservedPortIsItsOwn(): Promise<void> {
     'a pool that only repeats should fail rather than hand out a duplicate',
   );
 
-  // The real one still answers, so what is asserted above is not the only thing that runs.
-  const real = await reservePort();
-  assert.ok(real > 1024 && real < 65_536, `a real reservation should come back a port: ${real}`);
+  // The real one still answers, so what is asserted above is not the only thing that runs. Each
+  // number is in the band and a few steps along the walk from the one before.
+  const walked = [await reservePort(), await reservePort(), await reservePort()];
+  for (const [index, port] of walked.entries()) {
+    assert.ok(
+      port >= PORT_BAND.first && port <= PORT_BAND.last,
+      `a reservation comes from the band: ${walked.join(', ')}`,
+    );
+    const before = walked[index - 1];
+    if (before !== undefined) {
+      const span = PORT_BAND.last - PORT_BAND.first + 1;
+      const step = (port - before + span) % span;
+      assert.ok(step >= 1 && step <= 200, `each follows the one before along the walk: ${walked.join(', ')}`);
+    }
+  }
 
   // A listener takes its port the same way, so it never sits on one a server has been given: the
   // fake debug adapter on port zero took a reserved bridge port, and the fake editor dialling the
@@ -70713,6 +70729,143 @@ async function testEveryReservedPortIsItsOwn(): Promise<void> {
       listener.close();
     }
   }
+
+  const draws = (...numbers: number[]): (() => number) => {
+    let position = 0;
+    return () => numbers[Math.min(position++, numbers.length - 1)] ?? 0;
+  };
+  const dialAnswers = (...answers: (boolean | null)[]): ((port: number) => Promise<boolean | null>) => {
+    let position = 0;
+    return () => {
+      const answer = answers[Math.min(position++, answers.length - 1)];
+      return Promise.resolve(answer === undefined ? false : answer);
+    };
+  };
+  const holders: Server[] = [];
+  const hold = async (port: number, host: string): Promise<void> => {
+    const holder = createServer();
+    holders.push(holder);
+    await heardOnce(holder.listen(port, host), 'listening');
+  };
+  try {
+    // The proof binds the number itself: a holder on 1111 is passed over even when no dial sees it.
+    await hold(1111, '127.0.0.1');
+    assert.equal(
+      await unheldPort(draws(1111, 1112), undefined, dialAnswers(false)),
+      1112,
+      'a number a listener holds is not proved free',
+    );
+
+    // A bind refused as a Windows excluded range is, moves on, and a band where every bind is
+    // refused gives up, naming the band and the code.
+    const refuseFirst = (port: number): Promise<NodeJS.ErrnoException | null> =>
+      Promise.resolve(port === 1115 ? Object.assign(new Error('excluded'), { code: 'EACCES' }) : null);
+    assert.equal(
+      await unheldPort(draws(1115, 1116), refuseFirst, dialAnswers(false)),
+      1116,
+      'a bind that fails for any reason takes the next draw',
+    );
+    let drawn = 0;
+    await assert.rejects(
+      async () =>
+        await unheldPort(
+          () => {
+            drawn += 1;
+            return 1115;
+          },
+          () => Promise.resolve(Object.assign(new Error('excluded'), { code: 'EACCES' })),
+          dialAnswers(false),
+        ),
+      new RegExp(`${PORT_BAND.first}.*${PORT_BAND.last}.*2000 draws.*EACCES`),
+      'a band that gives nothing is an error naming the band and the last code',
+    );
+    assert.equal(drawn, 2000, 'after 2,000 draws');
+
+    // A holder on every interface binds beside the proof's own bind on Windows, so the dial is what
+    // sees it.
+    const wildHeld = await reservePort();
+    const wildNext = await reservePort();
+    await hold(wildHeld, '0.0.0.0');
+    assert.equal(
+      await unheldPort(draws(wildHeld, wildNext)),
+      wildNext,
+      'a number held on every interface is not proved free',
+    );
+
+    // A dial that neither answers nor refuses leaves the number unproven, and only the third in one
+    // call is an error.
+    const bindTakes = (): Promise<null> => Promise.resolve(null);
+    let tried = 0;
+    const counting = (...numbers: number[]): (() => number) => {
+      const draw = draws(...numbers);
+      return () => {
+        tried += 1;
+        return draw();
+      };
+    };
+    assert.equal(
+      await unheldPort(counting(1117, 1118), bindTakes, dialAnswers(null, false)),
+      1118,
+      'one unanswered dial draws the next number',
+    );
+    assert.equal(tried, 2, 'and draws exactly twice');
+    tried = 0;
+    let counted = 1117;
+    await assert.rejects(
+      async () =>
+        await unheldPort(
+          () => {
+            tried += 1;
+            return counted++;
+          },
+          bindTakes,
+          dialAnswers(null),
+        ),
+      /port 1119 /,
+      'the third unanswered dial rejects, naming its port',
+    );
+    assert.equal(tried, 3, 'after exactly three draws');
+  } finally {
+    for (const holder of holders) {
+      holder.close();
+    }
+  }
+
+  const walk = bandWalk(29_998);
+  assert.deepEqual([walk(), walk(), walk()], [29_998, 29_999, 10_000], 'the walk wraps inside the band');
+
+  const kernelStarts: number[] = [];
+  if (process.platform === 'win32') {
+    for (const family of ['ipv4', 'ipv6']) {
+      const shown = spawnSyncHidden('netsh', ['int', family, 'show', 'dynamicport', 'tcp'], {
+        encoding: 'utf8',
+      });
+      kernelStarts.push(Number(/Start Port\s*:\s*(\d+)/.exec(shown.stdout)?.[1]));
+    }
+  } else if (process.platform === 'linux') {
+    kernelStarts.push(Number(readFileSync('/proc/sys/net/ipv4/ip_local_port_range', 'utf8').split(/\s+/)[0]));
+  } else {
+    const shown = spawnSyncHidden('sysctl', ['-n', 'net.inet.ip.portrange.first'], { encoding: 'utf8' });
+    kernelStarts.push(Number(shown.stdout.trim()));
+  }
+  for (const start of kernelStarts) {
+    assert.ok(start > PORT_BAND.last, `port zero starts above the band: ${kernelStarts.join(', ')}`);
+  }
+
+  // Each process starts its walk somewhere of its own, so two suites on one machine meet rarely.
+  const firsts = new Set<string>();
+  for (let count = 0; count < 3; count += 1) {
+    const printed = spawnSyncHidden(
+      process.execPath,
+      ['-e', "import { reservePort } from './test/support/server.ts'; console.log(await reservePort());"],
+      { encoding: 'utf8' },
+    );
+    assert.equal(printed.status, 0, `a process prints its first port: ${printed.stderr}`);
+    const first = Number(printed.stdout.trim());
+    assert.ok(first >= PORT_BAND.first && first <= PORT_BAND.last, `from the band: ${printed.stdout}`);
+    firsts.add(printed.stdout.trim());
+  }
+  assert.ok(firsts.size > 1, `three processes do not all start at one number: ${[...firsts].join(', ')}`);
 }
 
 /**
