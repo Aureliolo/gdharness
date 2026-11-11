@@ -55120,6 +55120,48 @@ function testASuiteIsFoundUnderAnySpellingOfItsPath(): void {
 }
 
 /**
+ * A script extending an inner class of another script is a suite when that inner class is one.
+ *
+ * `extends Outer.InnerSuite` was read as `extends Outer`, so a suite built on an inner base suite was
+ * called no suite, and a script extending an inner helper of a suite class was called a suite with
+ * cases it does not run.
+ */
+function testAnInnerClassBaseIsFollowedToTheInnerClass(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-inner-base-'));
+  const cases = (...names: string[]): string =>
+    names.map((name) => `\nfunc ${name}() -> void:\n\tpass\n`).join('');
+  try {
+    writeTree(project, {
+      'project.godot': 'config_version=5\n',
+      'tests/inner_base.gd': `class_name Outer\nextends RefCounted\n\nclass InnerSuite extends GdUnitTestSuite:\n\tfunc test_from_inner() -> void:\n\t\tpass\n\nclass Deeper extends InnerSuite:\n\tpass\n`,
+      'tests/inner_test.gd': `extends Outer.InnerSuite\n${cases('test_mine')}`,
+      'tests/holder.gd': `class_name SuiteHolder\nextends GdUnitTestSuite\n\nclass Helper extends RefCounted:\n\tpass\n${cases('test_holder')}`,
+      'tests/helper_child.gd': `extends SuiteHolder.Helper\n${cases('test_not_run')}`,
+      'tests/missing_test.gd': `extends Outer.NoSuchClass\n${cases('test_lost')}`,
+    });
+    const scripts = new ProjectScripts(project);
+    assert.deepEqual(
+      scripts.suitesUnder(['res://tests']).map((one) => [one.path, one.cases]),
+      [
+        ['res://tests/holder.gd', ['test_holder']],
+        ['res://tests/inner_test.gd', ['test_from_inner', 'test_mine']],
+      ],
+      'the inner suite is the base, with its cases, and an inner helper of a suite class is not',
+    );
+    assert.deepEqual(
+      scripts.uncollectedUnder(['res://tests']),
+      [
+        { path: 'res://tests/helper_child.gd', cases: ['test_not_run'] },
+        { path: 'res://tests/missing_test.gd', cases: ['test_lost'] },
+      ],
+      'and a script whose base is no suite is named as one gdUnit4 never runs',
+    );
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * Suites are found from the scripts and dealt to engines by what their cases cost.
  *
  * A suite is a script whose chain of bases reaches gdUnit4's, by name, by path or relative path, and
@@ -85718,6 +85760,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded,
   testARestartedCountDoesNotTakeWorkFromBeforeTheRestart,
   testASuiteIsFoundUnderAnySpellingOfItsPath,
+  testAnInnerClassBaseIsFollowedToTheInnerClass,
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testASuiteDeclarationCanNameAClassConstant,
   testAHiddenEditorStartsOnAnEmptyScriptReference,
