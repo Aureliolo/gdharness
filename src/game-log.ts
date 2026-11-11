@@ -104,14 +104,14 @@ export const CRASH_HEADER =
 export const GDUNIT_TIME = String.raw`(?:\d+h )?(?:\d+min )?(?:\d+s )?\d+ms`;
 
 /** The script a `Run Test Suite:` line names, which a coloured line may hold after other text. */
-const SUITE_OPENED = /Run Test Suite:\s*(res:\/\/.+?\.(?:gd|cs))(?=\s|$)/;
+const SUITE_OPENED = /Run Test Suite:\s*(res:\/\/.+?\.gd)(?=\s|$)/;
 
 /** The suite gdUnit4's line announcing a suite opens, or null for any other line. */
 export function suiteOpenedBy(line: string): string | null {
   return SUITE_OPENED.exec(line)?.[1] ?? null;
 }
 
-const CASE_HEAD = /^\s*res:\/\/.+?\.(?:gd|cs) > (.+)$/;
+const CASE_HEAD = /^\s*res:\/\/.+?\.gd > (.+)$/;
 const CASE_TAIL = new RegExp(
   String.raw` (STARTED|PASSED|FAILED|FLAKY|SKIPPED|WARNING)(?: \((?:retry \d+|\d+ retries)\))?(?: (${GDUNIT_TIME}))?$`,
 );
