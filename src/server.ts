@@ -1304,7 +1304,7 @@ export function ourRunEnded(
 type Ending = 'gone' | 'lingering' | 'refused' | 'unreached';
 
 /** What a stop answers about the run it was asked to end, apart from what that run had started. */
-export interface StopVerdict {
+interface StopVerdict {
   readonly stopped: boolean;
   readonly endedPid?: number | null;
   readonly notSignalled?: number | null;
@@ -2985,7 +2985,7 @@ export function autoloadNotCompiledNote(
 }
 
 /** One script error a run printed over and over: its text, where it was raised, and how often. */
-export interface RepeatedError {
+interface RepeatedError {
   readonly text: string;
   readonly where: string | null;
   readonly times: number;
@@ -3314,7 +3314,7 @@ export function profileOnStart(profiled: boolean, through: 'gdharness' | 'editor
 const PROFILER_ON_MS = 3000;
 
 /** What a profile is read from, for the answer to say what it covers. */
-export interface ProfileReading {
+interface ProfileReading {
   /** Who was the game's debugger: the process that keeps a run this server started, or the editor. */
   readonly through: 'gdharness' | 'editor';
   readonly running: boolean;
