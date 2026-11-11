@@ -518,7 +518,10 @@ export interface HookFailure {
 
 // Printed under the suite's `finalize()` report, the location after a tab on the message's last
 // line once colours are off: `  Expecting: 'true' but is 'false'	at 'before' in res://test/hooked_test.gd:5`.
-const HOOK_FAILURE = /^\s*(.*?)\s*\tat '(before|after)' in (res:\/\/.+?):(\d+)\s*$/;
+const HOOK_LOCATION = "\tat '";
+// Matched on the text after the tab. A pattern opening on a lazy message and white space tries every
+// split of a long run of blanks, which took seconds on a padded line.
+const HOOK_FAILURE = /^at '(before|after)' in (res:\/\/.+?):(\d+)\s*$/;
 const REPORT_HEADING = /\bfinalize\(\)\s+Report:\s*$/;
 const REPORT_END = /^\s*Statistics:/;
 
@@ -540,14 +543,15 @@ export function hookFailuresPrinted(printed: readonly string[]): HookFailure[] {
       above = null;
       return [];
     }
-    const found = HOOK_FAILURE.exec(line);
+    const tab = line.lastIndexOf(HOOK_LOCATION);
+    const found = tab === -1 ? null : HOOK_FAILURE.exec(line.slice(tab + 1));
     if (found === null) {
       above?.push(line.trim());
       return [];
     }
-    const message = [...(above ?? []), found[1] ?? ''].filter((part) => part !== '').join(' ');
+    const message = [...(above ?? []), line.slice(0, tab).trim()].filter((part) => part !== '').join(' ');
     above = [];
-    return [{ hook: found[2] ?? '', path: found[3] ?? '', line: Number(found[4]), message }];
+    return [{ hook: found[1] ?? '', path: found[2] ?? '', line: Number(found[3]), message }];
   });
 }
 
@@ -1028,7 +1032,9 @@ export interface OrphanReport {
 
 // Up to the script's own extension rather than the first space, for the same reason.
 const RUNNING_SUITE = /Run Test Suite:\s*(res:\/\/.+?\.(?:gd|cs))(?=\s|$)/;
-const ORPHANS = /(\d+)\s+orphans/;
+// Hung on the bar before the count, since a count with nothing before it is tried from every digit
+// of a long number. It also keeps out a line the game prints itself, such as "took in 12 orphans".
+const ORPHANS = /\|\s*(\d+)\s+orphans/;
 const OVERALL = 'Overall Summary';
 
 /**
@@ -1054,7 +1060,12 @@ export function orphansPrinted(printed: readonly string[]): OrphanReport {
   for (const line of printed) {
     const left = orphansLeftOn(line);
     if (left !== null) {
-      named.set(left.suite, [...(named.get(left.suite) ?? []), left]);
+      const known = named.get(left.suite);
+      if (known === undefined) {
+        named.set(left.suite, [left]);
+      } else {
+        known.push(left);
+      }
       continue;
     }
     const started = RUNNING_SUITE.exec(line);
@@ -1097,7 +1108,8 @@ export interface SuiteFinished {
   readonly failed: readonly string[];
 }
 
-const SUITE_COUNTS = /(\d+)\s+test cases\s*\|\s*(\d+)\s+errors\s*\|\s*(\d+)\s+failures/;
+// The lookbehind keeps a long number from being tried from each of its digits.
+const SUITE_COUNTS = /(?<!\d)(\d+)\s+test cases\s*\|\s*(\d+)\s+errors\s*\|\s*(\d+)\s+failures/;
 const CASE_FAILED = /^\s*res:\/\/.+?\.(?:gd|cs) > (.+?) (?:FAILED|ERROR)(?:\s|$)/;
 
 /** Whether [param line] is the statistics line gdUnit4 prints as a suite ends. */

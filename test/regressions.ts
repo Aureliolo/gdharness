@@ -265,7 +265,14 @@ import { EDITOR_READS, HEADLESS_OPERATIONS, HEADLESS_TOOLS } from '../src/headle
 import { idleClosed, idleSettled, portsIn } from '../src/idle-close.js';
 import { IMPORTABLE_EXTENSIONS, importedIntoTheProject, staleImports } from '../src/import-freshness.js';
 import { defectReport, defectSignature, withoutMachinePaths } from '../src/issues.js';
-import { RENDERED_AWAY_NOTE, type ScriptError, withActualsPrinted } from '../src/junit.js';
+import {
+  finishesASuite,
+  hookFailuresPrinted,
+  orphansPrinted,
+  RENDERED_AWAY_NOTE,
+  type ScriptError,
+  withActualsPrinted,
+} from '../src/junit.js';
 import { askTheKeepersDebugger, askTheKeeperToStop, listenForTheServer } from '../src/keeper-channel.js';
 import {
   editorArguments,
@@ -1352,6 +1359,88 @@ function printedStringDiffs(
 /** A failing string equality as the report writes it: both strings merged. */
 function mergedStringFailure(expected: string, merged: string, at: string): { detail: string } {
   return { detail: `Expecting:\n '${expected}'\n but was\n '${merged}'\n\tat ${at}` };
+}
+
+/** How long [run] takes, in milliseconds. */
+function timedMs(run: () => void): number {
+  const began = performance.now();
+  run();
+  return performance.now() - began;
+}
+
+/**
+ * The runner's console lines are read in time in proportion to their length, and only its own
+ * statistics lines count orphans.
+ */
+function testConsoleLinesOfTheTestRunnerAreReadInLinearTime(): void {
+  const hookLine = (blanks: number): string[] => [
+    'finalize() Report:',
+    `${' '.repeat(blanks)}x`,
+    "Expecting: 'true' but is 'false'\tat 'before' in res://test/hooked_test.gd:5",
+  ];
+  assert.deepEqual(
+    orphansPrinted([
+      'Run Test Suite: res://test/home_test.gd',
+      'the home took in 12 orphans today',
+      'Statistics: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED',
+      'Overall Summary: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans |',
+    ]),
+    { total: 0, suites: [] },
+    'a line the game prints with a count and the word is not the suite statistics',
+  );
+  const hookBase = timedMs(() => hookFailuresPrinted(hookLine(200)));
+  const hooks = hookFailuresPrinted(hookLine(4000));
+  assert.deepEqual(
+    hooks.map((one) => [
+      one.hook,
+      one.path,
+      one.line,
+      one.message.endsWith("Expecting: 'true' but is 'false'"),
+    ]),
+    [['before', 'res://test/hooked_test.gd', 5, true]],
+    'a hook failure is read with a padded line above it',
+  );
+  const hookTook = timedMs(() => hookFailuresPrinted(hookLine(4000)));
+  assert.ok(
+    hookTook < 40 * hookBase + 500,
+    `4000 blanks took ${Math.round(hookTook)} ms against ${Math.round(hookBase)} ms`,
+  );
+
+  const statistics = (count: string): string =>
+    `Statistics: ${count} test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 0 orphans | PASSED`;
+  const digits = '1'.repeat(60_000);
+  const orphanBase = timedMs(() =>
+    orphansPrinted(['Run Test Suite: res://t/a_test.gd', `Statistics: ${'1'.repeat(200)}`]),
+  );
+  const orphanTook = timedMs(() =>
+    orphansPrinted(['Run Test Suite: res://t/a_test.gd', `Statistics: ${digits}`]),
+  );
+  assert.ok(
+    orphanTook < 40 * orphanBase + 500,
+    `a number of 60,000 digits took ${Math.round(orphanTook)} ms in orphansPrinted`,
+  );
+  const countedBase = timedMs(() => finishesASuite(statistics('1'.repeat(200))));
+  const countedTook = timedMs(() => finishesASuite(digits));
+  assert.ok(
+    countedTook < 40 * countedBase + 500,
+    `a number of 60,000 digits took ${Math.round(countedTook)} ms in finishesASuite`,
+  );
+  assert.equal(finishesASuite(statistics('3')), true, 'and a statistics line still ends a suite');
+
+  const same = Array.from(
+    { length: 100_000 },
+    (_, index) => `gdharness orphans: res://t/a_test.gd > test_${index} left 1: Node`,
+  );
+  const lines = [
+    'Run Test Suite: res://t/a_test.gd',
+    ...same,
+    'Statistics: 1 test cases | 0 errors | 0 failures | 0 flaky | 0 skipped | 2 orphans |	WARNING',
+  ];
+  const began = performance.now();
+  const named = orphansPrinted(lines);
+  const namedTook = performance.now() - began;
+  assert.equal(named.suites[0]?.left.length, 100_000, 'every case that left nodes is named');
+  assert.ok(namedTook < 2000, `100,000 named cases took ${Math.round(namedTook)} ms`);
 }
 
 /**
@@ -85131,6 +85220,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnErrorOfSeveralLinesIsOneEntry,
   testAMarkTakesOnlyTheErrorOfItsFile,
   testALongUnfinishedLineIsHeldInLinearTime,
+  testConsoleLinesOfTheTestRunnerAreReadInLinearTime,
   testPrintedValuesAreReadBackInLinearTimeAndEachToItsOwnFailure,
   testTheDebuggerNamesTheErrorsItsCallsRaise,
   testTheProfilerReadsWhatTheEngineSends,
