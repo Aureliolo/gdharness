@@ -49264,19 +49264,16 @@ async function testAStopTakesTheEndedGamesAnnouncementDown(): Promise<void> {
 }
 
 /**
- * A stop takes the announcement down by the number the game announced under, which is not always
- * the run's own.
+ * A GODOT_PATH naming the Windows console build starts the engine beside it, so the run holds the
+ * engine's own process and a stop ends the game it plays.
  *
- * The Windows console build is a wrapper: the run holds the wrapper's process and the engine is
- * its child, so the announcement is written under a number the run does not hold. A stop that
- * took announcements down by the run's number alone left this one to the sweep, which is the gap
- * the number can come round in. Measured before this was written: the engine was listed under the
- * wrapper, and gone two seconds after the wrapper was killed, so the file is the stop's to take.
+ * The console build is a wrapper whose child is the engine. Held as the run, it would put the
+ * game's announcement under a number the run does not hold, and a stop by the run's number would
+ * leave that file to the sweep.
  *
- * Only where that build is, beside the engine the tier was given. Elsewhere the run's number and
- * the announced one are the same process and the case above holds it.
+ * Only where that build is, beside the engine the tier was given.
  */
-async function testAStopTakesTheWrappedEnginesAnnouncementDown(): Promise<void> {
+async function testAConsoleWrapperRunsAsTheEngineBesideIt(): Promise<void> {
   const godotPath = resolveGodotPath();
   const wrapper = godotPath === null ? null : godotPath.replace(/\.exe$/i, '_console.exe');
   if (
@@ -49317,10 +49314,10 @@ async function testAStopTakesTheWrappedEnginesAnnouncementDown(): Promise<void> 
         assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
         const runPid = asNumber(get(started, 'pid'), 'the run holds a process');
         const gamePid = asNumber(get(started, 'runtime', 'pid'), 'the game announced under a number');
-        assert.notEqual(
+        assert.equal(
           runPid,
           gamePid,
-          'the console build holds the wrapper, and the engine announces as its child',
+          'the run holds the engine beside the console build, which announces under its own number',
         );
         const announcement = join(runtimeDir, `runtime-${gamePid}.json`);
         assert.ok(existsSync(announcement), 'the announcement is there for the stop to take');
@@ -88365,7 +88362,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testChildrenAreListedWhileTheParentLives,
   testAStopCanEndWhatTheGameStarted,
   testAStopTakesTheEndedGamesAnnouncementDown,
-  testAStopTakesTheWrappedEnginesAnnouncementDown,
+  testAConsoleWrapperRunsAsTheEngineBesideIt,
   testASettingTheEditorDroppedIsNamed,
   testACleanupThatCannotFinishStillFinishes,
   testAHeldScratchDirectoryGoesOnceLetGo,
