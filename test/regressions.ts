@@ -78501,6 +78501,69 @@ async function testANodeIsAddedByClassNameWithNoEditor(): Promise<void> {
 }
 
 /**
+ * Writes made one on another, each loading the file the write before it saved. The other cases
+ * start from files written by hand, so this is the one where a save meets a headless engine's own
+ * output: the uid, the root's script and each earlier write stay, and what _init sets stays out.
+ */
+async function testAWriteOnASceneAWriteSavedKeepsWhatItHeldWithNoEditor(): Promise<void> {
+  await withASceneProject(
+    'chained writes',
+    {
+      'project.godot': writeProjectFile,
+      'score.gd': scoreScript,
+      'hero.gd': heroScript,
+      'busy.gd': busyScript,
+    },
+    async ({ written, fileOf }) => {
+      const sets = setsOf(fileOf);
+      await written('scene_create', {
+        op: 'create',
+        scenePath: 'chain.tscn',
+        rootNodeType: 'Node2D',
+        script: 'busy.gd',
+      });
+      const uid = /^\[gd_scene format=3 uid="(uid:\/\/[a-y0-8]+)"\]/.exec(fileOf('chain.tscn'))?.[1];
+      assert.ok(uid !== undefined, `the create gives a uid:\n${fileOf('chain.tscn')}`);
+      await written('scene_node', { op: 'add', scenePath: 'chain.tscn', nodeName: 'Boss', nodeType: 'Hero' });
+      await written('scene_node', {
+        op: 'set',
+        scenePath: 'chain.tscn',
+        nodePath: 'Boss',
+        properties: { position: [3, 4] },
+      });
+      await written('scene_signal', {
+        op: 'connect',
+        scenePath: 'chain.tscn',
+        sourceNodePath: 'Boss',
+        signalName: 'visibility_changed',
+        targetNodePath: '.',
+        methodName: 'queue_free',
+      });
+      const file = fileOf('chain.tscn');
+      assert.ok(
+        file.startsWith(`[gd_scene format=3 uid="${uid}"]`),
+        `every later save keeps the uid:\n${file}`,
+      );
+      assert.deepEqual(
+        sets('chain.tscn', '[node name="Node2D"'),
+        ['script = ExtResource'],
+        `the root keeps its script, and what its _init sets is still left out:\n${file}`,
+      );
+      assert.deepEqual(
+        sets('chain.tscn', '[node name="Boss" type="Node2D"').toSorted(),
+        ['position = Vector2(3, 4)', 'script = ExtResource'],
+        `the added node keeps its script through the set, and the set through the connect:\n${file}`,
+      );
+      assert.match(
+        file,
+        /\[connection signal="visibility_changed" from="Boss" to="\." method="queue_free"\]/,
+        `the connection is saved:\n${file}`,
+      );
+    },
+  );
+}
+
+/**
  * A scene_create that cannot be done says why before anything loads, and writes nothing. A path
  * with a folder in it makes the folder.
  */
@@ -87826,6 +87889,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAWriteKeepsConnectionsTheEngineCannotMakeWithNoEditor,
   testASceneIsCreatedWithAScriptOrAClassWithNoEditor,
   testANodeIsAddedByClassNameWithNoEditor,
+  testAWriteOnASceneAWriteSavedKeepsWhatItHeldWithNoEditor,
   testASceneCreateThatCannotBeDoneIsRefusedWithNoEditor,
   testAMovedNodeStaysOwnedByItsSceneWithNoEditor,
   testAScriptedResourceIsWrittenByClassNameWithNoEditor,
