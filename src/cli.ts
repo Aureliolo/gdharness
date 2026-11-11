@@ -42,7 +42,7 @@ import { nearest } from './nearest.js';
 import { isSameDirectory } from './paths.js';
 import { editorsOfProjectIn, processTree } from './process-children.js';
 import { Ask, interactive } from './prompt.js';
-import { DEBUG_MODE, SERVER_VERSION } from './server-version.js';
+import { DEBUG_MODE } from './server-version.js';
 import {
   autoloadIsOurs,
   disablePlugins,
@@ -65,6 +65,7 @@ import {
 import { everySkillDirectory, removeSkill, skillDirectories, writeSkill } from './skill.js';
 import { runSpreadCommand, spreadOptionsOf } from './spread-run.js';
 import { runTestCommand, testOptionsOf, wholeTreeSaid, writeRefusedResult } from './suite-run.js';
+import { getLocalVersion } from './version.js';
 import { prepareWholeExits } from './whole-exit.js';
 
 const args = process.argv.slice(2);
@@ -416,7 +417,7 @@ async function setup(): Promise<void> {
 
   if (!args.includes('--no-connect')) {
     // The version is the running one, so the config pins the server that installed these addons.
-    const launch = launchFor(SERVER_VERSION, godot.godotPath, projectPath);
+    const launch = launchFor(getLocalVersion(), godot.godotPath, projectPath);
     const ask = new Ask();
     let chosen: { harnesses: readonly Harness[]; skipped: readonly Candidate[] };
     try {
@@ -436,7 +437,7 @@ async function setup(): Promise<void> {
 
     if (!args.includes('--no-skill')) {
       const directories = skillDirectories(chosen.harnesses, projectPath, existsSync);
-      for (const written of writeSkill(directories, SERVER_VERSION)) {
+      for (const written of writeSkill(directories, getLocalVersion())) {
         console.log(`skill: ${written.replaced ? 'replaced' : 'written'} ${written.path}`);
       }
     }
@@ -564,7 +565,7 @@ async function uninstall(): Promise<void> {
  */
 async function upgrade(): Promise<void> {
   const projectPath = projectArgument(1);
-  const version = SERVER_VERSION;
+  const version = getLocalVersion();
   const before = inspectProject(projectPath);
   // Present and unmarked is still installed: a copy made by hand, or a checkout that dropped
   // dot-files, carries no version marker, and was told gdharness was not installed at all.
@@ -852,7 +853,7 @@ function printHarnesses(): void {
 function printHelp(): void {
   console.log(
     `
-gdharness v${SERVER_VERSION}, a harness for driving a Godot 4 project from an agent
+gdharness v${getLocalVersion()}, a harness for driving a Godot 4 project from an agent
 
 Usage:
   gdharness                          Start the MCP server (default)
@@ -1050,7 +1051,7 @@ async function main(): Promise<void> {
     case 'version':
     case '--version':
     case '-v':
-      console.log(`gdharness v${SERVER_VERSION}`);
+      console.log(`gdharness v${getLocalVersion()}`);
       return;
     case 'help':
     case '--help':

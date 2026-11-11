@@ -52,7 +52,6 @@ import { freeLibraryCopies, seedExtensionList, unlistedExtensions } from './libr
 import { prependTo, readLog } from './log-read.js';
 import { isRecord, isStringList } from './records.js';
 import { forceNextImport } from './reimport.js';
-import { SERVER_VERSION } from './server-version.js';
 import { gdUnit4Unusable, shippedListedRunner } from './setup.js';
 import { EVERY_FILE, type PassedSuite, reachedBySuite, SuiteInputs } from './suite-inputs.js';
 import {
@@ -97,6 +96,7 @@ import {
   windowedSaid,
   writeJson,
 } from './suite-plan.js';
+import { getLocalVersion } from './version.js';
 
 export interface TestOptions {
   readonly projectPath: string;
@@ -599,7 +599,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     // After the import, which writes the .import and .uid files beside what a suite loads.
     const suitesBegan = Date.now();
     const always = [
-      SERVER_VERSION,
+      getLocalVersion(),
       readFileSync(shippedListedRunner(), 'utf8'),
       engineSaid(godotPath),
       ...reachedAlsoSaid(options.reachAlso),
