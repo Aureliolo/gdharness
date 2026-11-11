@@ -13228,7 +13228,7 @@ class GodotServer {
         (one) =>
           one.servedBy !== undefined &&
           isSameDirectory(one.servedBy, project) &&
-          !(one.projectPath !== '' && isSameDirectory(one.projectPath, project)),
+          !isSameDirectory(one.projectPath, project),
       ) ?? null
     );
   }
@@ -13364,7 +13364,7 @@ class GodotServer {
     if (project === null) {
       return this.allAnnouncedForOurProject(announced);
     }
-    return announced.filter((one) => one.project.path !== '' && isSameDirectory(project, one.project.path));
+    return announced.filter((one) => isSameDirectory(project, one.project.path));
   }
 
   private allAnnouncedForOurProject<T extends { project: { path: string } }>(announced: readonly T[]): T[] {
@@ -13373,7 +13373,7 @@ class GodotServer {
     if (mine === null) {
       return [];
     }
-    return announced.filter((one) => one.project.path !== '' && isSameDirectory(mine, one.project.path));
+    return announced.filter((one) => isSameDirectory(mine, one.project.path));
   }
 
   /**
@@ -13424,7 +13424,7 @@ class GodotServer {
     // A note from a version that did not record the project. It cannot be shown to be this
     // server's, and the reason to keep reading it is the same reason it is not killed by pid
     // alone: the cost of being wrong lands on somebody else.
-    return project !== '' && isSameDirectory(mine, project);
+    return isSameDirectory(mine, project);
   }
 
   /**

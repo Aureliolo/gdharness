@@ -805,8 +805,10 @@ export function chooseRuntime(
     const named = endpoints.find((endpoint) => endpoint.pid === pid);
     if (named !== undefined) {
       if (projectPath !== undefined && !isSameDirectory(named.project.path, projectPath)) {
+        const running =
+          named.project.path === '' ? 'announced no project path' : `is running ${named.project.path}`;
         return {
-          problem: `The game with pid ${pid} is running ${named.project.path}, not ${resolve(projectPath)}. Running: ${endpoints.map(describe).join('; ')}.`,
+          problem: `The game with pid ${pid} ${running}, not ${resolve(projectPath)}. Running: ${endpoints.map(describe).join('; ')}.`,
         };
       }
       return { endpoint: named };

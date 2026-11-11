@@ -596,20 +596,26 @@ export async function listeningPid(port: number): Promise<number | null> {
 /**
  * The pid holding [param port] open for listening in [param printed], as `netstat -ano` prints
  * the table: protocol, local address, foreign address, state, pid, on IPv4 and on IPv6 alike,
- * with the port after the last colon of the address. Null when no line says so.
+ * with the port after the last colon of the address. Only an address a loopback client reaches
+ * counts: loopback itself or every address. Null when no line says so, or when two processes do.
  */
 export function listeningPidInNetstat(printed: string, port: number): number | null {
+  const holders = new Set<number>();
   for (const line of printed.split(/\r?\n/)) {
     const fields = /^\s*TCP\s+(\S+)\s+\S+\s+LISTENING\s+(\d+)\s*$/i.exec(line);
     if (fields === null) {
       continue;
     }
     const local = fields[1] ?? '';
-    if (Number(local.slice(local.lastIndexOf(':') + 1)) === port) {
-      return Number(fields[2]);
+    const at = local.lastIndexOf(':');
+    const host = local.slice(0, at).replace(/^\[(.*)\]$/, '$1');
+    const reached = host.startsWith('127.') || host === '::1' || host === '0.0.0.0' || host === '::';
+    if (reached && Number(local.slice(at + 1)) === port) {
+      holders.add(Number(fields[2]));
     }
   }
-  return null;
+  const [only] = holders;
+  return holders.size === 1 ? (only ?? null) : null;
 }
 
 /**

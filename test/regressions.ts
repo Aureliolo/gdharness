@@ -19544,6 +19544,19 @@ function testAPidPicksOneOfSeveralGames(): void {
   for (const pid of [61, 62]) {
     assert.match(unnamed, new RegExp(`pid ${pid} on `), unnamed);
   }
+  // Nor is a pathless game the game of the folder this server started in, asked by path or by pid.
+  const here = resolve('.');
+  const byPath = text(get(chooseRuntime([pathless(61)], here), 'problem'));
+  assert.match(byPath, /^No running game is from /, `a pathless game is not this folder's: ${byPath}`);
+  const byPid = text(get(chooseRuntime([pathless(61)], here, [], 61), 'problem'));
+  assert.match(
+    byPid,
+    /^The game with pid 61 announced no project path, not /,
+    `nor when its pid is named: ${byPid}`,
+  );
+  assert.equal(isSameDirectory('', here), false, 'an empty path names no directory');
+  assert.equal(isSameDirectory(here, ''), false, 'on either side');
+  assert.equal(isSameDirectory('.', here), true, 'while a relative path still resolves');
 
   // Two projects is the other side of that, where projectPath is worth offering because it does
   // narrow, and pid still settles it outright.
@@ -34499,6 +34512,32 @@ async function testWhoIsHoldingAPortIsAskable(): Promise<void> {
   assert.equal(listeningPidInNetstat(table, 135), 1234);
   assert.equal(listeningPidInNetstat(table, 6007), null, 'a port nobody listens on names nobody');
   assert.equal(listeningPidInNetstat(table, 600), null, 'and a port that is a prefix of one is not it');
+  const holders = (...listeners: (readonly [string, number])[]): number | null =>
+    listeningPidInNetstat(
+      listeners
+        .map(
+          ([address, pid]) => `  TCP    ${address.padEnd(23)}0.0.0.0:0              LISTENING       ${pid}`,
+        )
+        .join('\r\n'),
+      6006,
+    );
+  assert.equal(
+    holders(['192.168.1.5:6006', 1111], ['127.0.0.1:6006', 2222]),
+    2222,
+    'a listener on another network address is not the one a loopback client reaches',
+  );
+  assert.equal(holders(['[::1]:6006', 3333]), 3333, 'IPv6 loopback is reached');
+  assert.equal(holders(['192.168.1.5:6006', 1111]), null, 'and nothing else on that port is');
+  assert.equal(
+    holders(['127.0.0.1:6006', 2222], ['[::1]:6006', 3333]),
+    null,
+    'two loopback holders are not told apart',
+  );
+  assert.equal(
+    holders(['127.0.0.1:6006', 2222], ['[::]:6006', 2222]),
+    2222,
+    'one process on two addresses is still one holder',
+  );
   // A Windows 11 preview build gives some listeners the state 0, which netstat leaves out.
   const rows = [
     { state: 5, localPort: 6006, remotePort: 51000, pid: 4321 },
