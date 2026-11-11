@@ -69227,6 +69227,11 @@ function testCommandLineSetup(): void {
       /Commit it with project\.godot/,
       'and setup says the loader is to be committed',
     );
+    assert.match(
+      setup.stdout,
+      /^ {2}commit res:\/\/gdharness\/loader\.gd with project\.godot, since the entry names it$/m,
+      'a loader that setup wrote is named as the file to commit',
+    );
     assert.doesNotMatch(setup.stdout, /runtime off/, 'rather than to turn it off before an export');
     const ships =
       /^ {2}a debug export carries gdharness\/\. A check or export filter that keeps unknown top-level folders out of a debug pack has to allow it$/m;
@@ -69515,6 +69520,11 @@ function testCommandLineSetup(): void {
       setupAgain.stdout,
       /GdharnessRuntime autoload already registered at /,
       'a setup over one already done says so, as the plugins do, rather than reporting a registration',
+    );
+    assert.doesNotMatch(
+      setupAgain.stdout,
+      /commit res:\/\/gdharness\/loader\.gd/,
+      'and a loader already current is not asked to be committed again',
     );
     assert.ok(existsSync(join(projectDir, '.agents', 'skills', 'gdharness', 'SKILL.md')), 'the skill is in');
 
