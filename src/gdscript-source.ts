@@ -230,6 +230,48 @@ function wholeWord(name: string, flags = 'gu'): RegExp {
   return new RegExp(`(?<![\\p{L}\\p{N}_])${escapedForPattern(name)}(?![\\p{L}\\p{N}_])`, flags);
 }
 
+/** The word of [param code] ending at [param end] after any spaces, and where it starts. */
+function wordBefore(code: string, end: number): { word: string; start: number } {
+  let last = end;
+  while (last >= 0 && /\s/.test(code[last] ?? '')) {
+    last -= 1;
+  }
+  let start = last + 1;
+  while (start > 0 && isIdentifierPart(code[start - 1])) {
+    start -= 1;
+  }
+  return { word: code.slice(start, last + 1), start };
+}
+
+/**
+ * Whether a name whose code before it ends at [param back] opens a parameter: it follows the `(` or
+ * a `,` of a parameter list, as in `func h(Foe: int)` or a lambda's `func(Foe)`.
+ */
+function isParameterAt(code: string, back: number): boolean {
+  if (code[back] !== '(' && code[back] !== ',') {
+    return false;
+  }
+  let open = back;
+  for (let depth = 0; open >= 0; open -= 1) {
+    const at = code[open];
+    if (at === ')' || at === ']' || at === '}') {
+      depth += 1;
+    } else if (at === '[' || at === '{' || (at === '(' && depth > 0)) {
+      if (depth === 0) {
+        return false;
+      }
+      depth -= 1;
+    } else if (at === '(') {
+      break;
+    }
+  }
+  if (open < 0) {
+    return false;
+  }
+  const callee = wordBefore(code, open - 1);
+  return callee.word === 'func' || (callee.word !== '' && wordBefore(code, callee.start - 1).word === 'func');
+}
+
 /** Every whole-word occurrence of [param name] in [param source], in any region. */
 export function occurrencesOf(
   source: string,
@@ -262,7 +304,7 @@ export function occurrencesOf(
         wordStart -= 1;
       }
       const word = code.slice(wordStart, back + 1);
-      declaredAs = DECLARING.has(word) ? word : null;
+      declaredAs = DECLARING.has(word) ? word : isParameterAt(code, back) ? 'parameter' : null;
     }
     found.push({ offset, kind, afterDot, declaredAs });
   }

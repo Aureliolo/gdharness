@@ -74937,6 +74937,90 @@ async function testARenamedClassChangesItsUsesAndLeavesItsWords(): Promise<void>
 }
 
 /**
+ * A class rename leaves a name that does not mean the class: a dictionary key written bare, a
+ * member a script inherits, and a parameter. A call's argument and a list's entry are the class.
+ */
+async function testAClassRenameLeavesKeysInheritedMembersAndParameters(): Promise<void> {
+  const project = renameProject();
+  const files: Record<string, string> = {
+    'keys.gd': [
+      'extends Node',
+      '',
+      'var table := {Told = 1, other = 2}',
+      'var later := {',
+      '\tother = 1,',
+      '\tTold = 2,',
+      '}',
+      'var listed := [1, Told == null]',
+      'var named := str(Told)',
+      '',
+    ].join('\n'),
+    'holder.gd': ['extends Node', '', 'const Told := 7', ''].join('\n'),
+    'heir.gd': ['extends "res://holder.gd"', '', 'func f() -> int:', '\treturn Told + 1', ''].join('\n'),
+    'params.gd': [
+      'extends Node',
+      '',
+      'func h(Told: int) -> int:',
+      '\treturn Told + 1',
+      '',
+      '',
+      'var lam := func(a: int, Told: int) -> int: return a + Told',
+      '',
+    ].join('\n'),
+  };
+  const lineOf = (file: string, needle: string): number =>
+    (files[file] ?? '').split('\n').findIndex((line) => line.includes(needle)) + 1;
+  try {
+    for (const [name, body] of Object.entries(files)) {
+      writeFileSync(join(project, name), body);
+    }
+    const outcome = await renameSymbol(
+      {
+        projectPath: project,
+        scriptPath: join(project, 'told.gd'),
+        symbol: 'Told',
+        newName: 'Phrasing',
+        newScriptPath: null,
+      },
+      { namesTaken: engineSaying(), ...NO_LANGUAGE_SERVER },
+    );
+    assert.ok(outcome.ok, `the rename was refused: ${JSON.stringify(outcome)}`);
+    const { changed, left } = renameReadings(outcome.report);
+    const ours = (lines: readonly string[]): string[] =>
+      lines.filter((one) => Object.keys(files).some((file) => one.startsWith(`res://${file}:`)));
+    assert.deepEqual(
+      ours(changed),
+      [`res://keys.gd:${lineOf('keys.gd', 'listed')}`, `res://keys.gd:${lineOf('keys.gd', 'named')}`],
+      'a list entry and a call argument are the class',
+    );
+    const why = (file: string, line: number): string =>
+      asArray(get(outcome.report, 'leftAlone'))
+        .filter((one) => get(one, 'file') === `res://${file}` && get(one, 'line') === line)
+        .map((one) => text(get(one, 'why')))
+        .join(' | ');
+    for (const needle of ['table', '\tTold = 2']) {
+      const line = lineOf('keys.gd', needle);
+      assert.match(why('keys.gd', line), /a dictionary key written as \{Told = \.\.\.\}/, `keys.gd:${line}`);
+    }
+    assert.match(
+      why('heir.gd', 4),
+      /a class this script inherits from declares something named Told/,
+      'an inherited constant is left',
+    );
+    for (const line of [3, 4, 7]) {
+      assert.match(
+        why('params.gd', line),
+        /this script declares something of its own named Told/,
+        `a parameter, a function's or a lambda's, is left: params.gd:${String(line)}`,
+      );
+    }
+    assert.ok(left.includes('res://holder.gd:3:code'), `the constant itself is left: ${left.join(', ')}`);
+  } finally {
+    rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
  * A rename onto a name that is already something is refused, naming what it is, for every kind of
  * taken: another class, an autoload, an identifier in code, and what the engine says. So is a
  * member the engine declares, and a new member name already declared in the class's chain.
@@ -87001,6 +87085,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARescanAsTheEditorOpensFindsNothingMissing,
   testAScriptIsReadTheWayItsTokenizerReadsIt,
   testARenamedClassChangesItsUsesAndLeavesItsWords,
+  testAClassRenameLeavesKeysInheritedMembersAndParameters,
   testALongLineIsQuotedAroundTheName,
   testARenameRefusesANameAlreadyTaken,
   testANameOnEveryObjectIsReadOnlyFromTheEnginesAnswer,
