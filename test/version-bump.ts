@@ -22,7 +22,7 @@ try {
   await writeFile(path.join(fixtureRoot, 'package.json'), '{"name":"gdharness","version":"0.1.0"}\n');
   await writeFile(
     path.join(fixtureRoot, 'server.json'),
-    '{"name":"io.github.Aureliolo/gdharness","version":"0.1.0"}\n',
+    '{"name":"io.github.Aureliolo/gdharness","version":"0.1.0","packages":[{"registryType":"npm","version":"0.1.0"},"stray"]}\n',
   );
   for (const fileName of maintainedFiles) {
     await writeFile(
@@ -42,6 +42,12 @@ try {
     const parsed: unknown = JSON.parse(await readFile(path.join(fixtureRoot, manifest), 'utf8'));
     assert.equal(get(parsed, 'version'), '0.2.0', `${manifest} should carry the new version`);
   }
+  const server: unknown = JSON.parse(await readFile(path.join(fixtureRoot, 'server.json'), 'utf8'));
+  assert.equal(
+    get(server, 'packages', 0, 'version'),
+    '0.2.0',
+    'the registry entry carries the npm version beside the server version',
+  );
   for (const fileName of maintainedFiles) {
     const content = await readFile(path.join(fixtureRoot, fileName), 'utf8');
     assert.doesNotMatch(content, /0\.1\.0/, `${fileName} should not retain the previous release version`);

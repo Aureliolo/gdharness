@@ -66,6 +66,23 @@ function quotedOf(text: string): string {
   return printed.length > QUOTED_CHARACTERS ? `${printed.slice(0, QUOTED_CHARACTERS)}...` : printed;
 }
 
+/** The refusal for a path that is not there or is a folder, or null. The file system is asked each time. */
+function unusableProgram(program: string): Asked['answer'] | null {
+  if (!existsSync(program)) {
+    return { ok: false, reason: 'does not exist' };
+  }
+  return statSync(program).isDirectory() ? { ok: false, reason: 'is a folder, not a program' } : null;
+}
+
+/** What [param program] says its build is without starting it, or null when it cannot be read. */
+function buildOf(program: string): string | null {
+  try {
+    return engineSaid(program);
+  } catch {
+    return null;
+  }
+}
+
 /** [param ms] as a limit a reason names. */
 function limitSaid(ms: number): string {
   return ms % 1000 === 0 ? `${String(ms / 1000)} seconds` : `${String(ms)} ms`;
@@ -208,23 +225,12 @@ export class GodotLocator {
     // The file system is asked each time and never remembered, because an engine installed after the
     // server started, or deleted since it was found, changes the answer.
     const bare = program === 'godot';
-    if (!bare) {
-      if (!existsSync(program)) {
-        return { ok: false, reason: 'does not exist' };
-      }
-      if (statSync(program).isDirectory()) {
-        return { ok: false, reason: 'is a folder, not a program' };
-      }
+    const unusable = bare ? null : unusableProgram(program);
+    if (unusable !== null) {
+      return unusable;
     }
     // A bare name is looked up on PATH by the system alone, so what it prints is never remembered.
-    let build: string | null = null;
-    if (!bare) {
-      try {
-        build = engineSaid(program);
-      } catch {
-        build = null;
-      }
-    }
+    const build = bare ? null : buildOf(program);
     const known = build === null ? undefined : this.kept.get(build);
     if (known !== undefined) {
       return known;
@@ -234,6 +240,15 @@ export class GodotLocator {
     if (going !== undefined) {
       return (await going).answer;
     }
+    return await this.askAsTheFirst(program, build, shared);
+  }
+
+  /** Starts the asking for [param program] and shares it under [param shared] while it runs. */
+  private async askAsTheFirst(
+    program: string,
+    build: string | null,
+    shared: string | null,
+  ): Promise<Asked['answer']> {
     const starting = this.ask(program);
     if (shared !== null) {
       this.asking.set(shared, starting);
@@ -251,29 +266,36 @@ export class GodotLocator {
     }
   }
 
+  /** One `--version` start: the answer it came to, or how it failed to give one. */
+  private async startOnce(program: string): Promise<Asked | VersionStart> {
+    try {
+      const { stdout } = await this.start(program, this.answerMs);
+      const version = versionPrinted(stdout);
+      if (version === null) {
+        const printed = quotedOf(stdout);
+        return {
+          final: true,
+          answer: {
+            ok: false,
+            reason: `is not a Godot engine: --version printed ${printed === '' ? 'nothing' : JSON.stringify(printed)}`,
+          },
+        };
+      }
+      return { final: true, answer: { ok: true, version } };
+    } catch (error) {
+      return versionStartOf(error);
+    }
+  }
+
   private async ask(program: string): Promise<Asked> {
     let crashed = '';
     for (let started = 1; started <= VERSION_STARTS; started += 1) {
       if (started > 1) {
         await this.sleep(FIRST_RETRY_MS * 2 ** (started - 2));
       }
-      let went: VersionStart;
-      try {
-        const { stdout } = await this.start(program, this.answerMs);
-        const version = versionPrinted(stdout);
-        if (version === null) {
-          const printed = quotedOf(stdout);
-          return {
-            final: true,
-            answer: {
-              ok: false,
-              reason: `is not a Godot engine: --version printed ${printed === '' ? 'nothing' : JSON.stringify(printed)}`,
-            },
-          };
-        }
-        return { final: true, answer: { ok: true, version } };
-      } catch (error) {
-        went = versionStartOf(error);
+      const went = await this.startOnce(program);
+      if (!('kind' in went)) {
+        return went;
       }
       if (went.kind === 'hung') {
         return {

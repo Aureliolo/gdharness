@@ -753,8 +753,8 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       plans.flatMap((plan, index) => (plan.lane === lane ? [{ plan, index }] : [])),
     );
     // A slot for each lane, taken only where one is free now: what the run was dealt holds only when
-    // every lane starts at once. Held by memory, only the lanes memory has room for take one now, so
-    // a lane waiting for memory keeps no slot from anybody else.
+    // every lane starts at once. Held by memory, only the lanes memory has room for take one now.
+    // The rest take theirs in the slots' queue, then wait for memory holding them.
     const startable = memoryHeld ? Math.min(byMemory.engines, lanes.length) : lanes.length;
     const taken: string[] = [];
     while (taken.length < startable) {
@@ -778,12 +778,12 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     compiling.catch(() => undefined);
     let ran = shared
       ? await runShares(
-          launch,
+          slots,
           units,
           declared,
           lanes.length,
           taken,
-          times,
+          (plan, index, lock) => runEngine(launch, plan, index, times, '', lock),
           handed,
           memoryHeld ? new MemoryGate(slots, async () => (await memoryAvailable()).bytes) : undefined,
         )
@@ -1141,9 +1141,9 @@ class HandedSlot {
 }
 
 /** Gives [param lock] to the compile check waiting on [param handed], or back to the machine. */
-function doneWith(launch: Launch, lock: string, handed: HandedSlot | undefined): void {
+function doneWith(slots: Pick<EngineSlots, 'release'>, lock: string, handed: HandedSlot | undefined): void {
   if (handed?.give(lock) !== true) {
-    launch.slots.release(lock);
+    slots.release(lock);
   }
 }
 
@@ -1422,7 +1422,7 @@ async function runLane(
     }
     return ran;
   } finally {
-    doneWith(launch, lock, handed);
+    doneWith(launch.slots, lock, handed);
   }
 }
 
@@ -1431,33 +1431,33 @@ async function runLane(
  * lanes holding the slots in [param taken] at once and the rest as slots come free, and each engine
  * starting only once [param memory] has room for it when the run is held by memory. A lane still
  * waiting once every share is handed out stops waiting: a slot somebody else holds is not to keep a
- * run open that has nothing left to give it. Memory is waited for before a slot, so a lane waiting
- * for it holds no slot from anybody else.
+ * run open that has nothing left to give it. A lane takes its slot before it waits for memory, so
+ * an engine memory admits never waits for one.
  */
-async function runShares(
-  launch: Launch,
+export async function runShares<T extends { readonly index: number }>(
+  slots: Pick<EngineSlots, 'take' | 'release'>,
   units: readonly Unit[],
   declared: CasesBySuite,
   lanes: number,
   taken: readonly string[],
-  times: SuiteTimes,
+  run: (plan: EnginePlan, index: number, lock: string) => Promise<T>,
   handed?: HandedSlot,
   memory?: MemoryGate,
-): Promise<EngineRan[]> {
+): Promise<T[]> {
   const shares = new Shares(units, declared, lanes);
   const handedOut = new AbortController();
   let engines = 0;
   // Asked through a call, since another lane empties it while this one waits.
   const empty = (): boolean => shares.empty;
-  const lane = async (at: number): Promise<EngineRan[]> => {
+  const lane = async (at: number): Promise<T[]> => {
     let lock = taken[at] ?? null;
-    const ran: EngineRan[] = [];
+    const ran: T[] = [];
     try {
       while (!empty()) {
         let ended: (() => void) | undefined;
         try {
+          lock ??= await slots.take(handedOut.signal);
           ended = await memory?.admit(handedOut.signal);
-          lock ??= await launch.slots.take(handedOut.signal);
         } catch (error) {
           ended?.();
           if (handedOut.signal.aborted) {
@@ -1476,7 +1476,7 @@ async function runShares(
         const index = engines;
         engines += 1;
         try {
-          ran.push(await runEngine(launch, plan, index, times, '', lock));
+          ran.push(await run(plan, index, lock));
         } finally {
           ended?.();
         }
@@ -1484,7 +1484,7 @@ async function runShares(
       return ran;
     } finally {
       if (lock !== null) {
-        doneWith(launch, lock, handed);
+        doneWith(slots, lock, handed);
       }
     }
   };

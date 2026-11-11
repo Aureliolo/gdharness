@@ -115,24 +115,30 @@ export async function download(
       await waiting(wait);
     }
     try {
-      const response = await fetching(url);
-      if (!response.ok) {
-        throw new Error(`${url} answered ${response.status} ${response.statusText}`);
-      }
-      return Buffer.from(await response.arrayBuffer());
+      return await fetchOnce(url, fetching);
     } catch (failure) {
       lastFailure = failure;
       const next = DOWNLOAD_WAITS_MS[attempt];
-      const reason = failure instanceof Error ? failure.message : String(failure);
       console.error(
-        `attempt ${attempt + 1} of ${DOWNLOAD_WAITS_MS.length + 1} failed: ${reason}` +
+        `attempt ${attempt + 1} of ${DOWNLOAD_WAITS_MS.length + 1} failed: ${reasonOf(failure)}` +
           (next === undefined ? '' : `; trying again in ${next / 1000}s`),
       );
     }
   }
 
-  const reason = lastFailure instanceof Error ? lastFailure.message : String(lastFailure);
-  throw new Error(`Could not download ${url}: ${reason}`);
+  throw new Error(`Could not download ${url}: ${reasonOf(lastFailure)}`);
+}
+
+async function fetchOnce(url: string, fetching: (url: string) => Promise<Response>): Promise<Buffer> {
+  const response = await fetching(url);
+  if (!response.ok) {
+    throw new Error(`${url} answered ${response.status} ${response.statusText}`);
+  }
+  return Buffer.from(await response.arrayBuffer());
+}
+
+function reasonOf(failure: unknown): string {
+  return failure instanceof Error ? failure.message : String(failure);
 }
 
 /**

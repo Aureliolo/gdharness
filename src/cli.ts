@@ -103,51 +103,63 @@ function projectArgument(at: number): string {
  */
 async function engine(projectPath?: string, flag?: string): Promise<HeadlessEngine> {
   const locator = new GodotLocator();
-  const headless = (godotPath: string): HeadlessEngine => ({
-    godotPath,
-    script: shippedOperationsScript(),
-    debug: DEBUG_MODE,
-  });
-  const refused = (refusal: { message: string; advice: readonly string[] }): UsageError =>
-    new UsageError(`${refusal.message} ${refusal.advice.join('. ')}.`);
   if (flag !== undefined) {
     const named = await locator.judge(flag);
     if (!named.ok) {
-      throw refused(GodotLocator.refusal(named, { argument: '--godot' }));
+      throw engineRefusal(GodotLocator.refusal(named, { argument: '--godot' }));
     }
-    return headless(named.path);
+    return headlessAt(named.path);
   }
   const located = await locator.find();
   if (located.ok) {
-    return headless(located.path);
+    return headlessAt(located.path);
   }
-  // The recorded engine is for a machine where nothing is set and nothing is where it usually is.
-  // A GODOT_PATH that names something broken is not that: falling back past it would run some
-  // other engine in silence under a variable somebody set on purpose.
+  return await engineFromConfig(locator, located, projectPath);
+}
+
+function headlessAt(godotPath: string): HeadlessEngine {
+  return { godotPath, script: shippedOperationsScript(), debug: DEBUG_MODE };
+}
+
+function engineRefusal(refusal: { message: string; advice: readonly string[] }): UsageError {
+  return new UsageError(`${refusal.message} ${refusal.advice.join('. ')}.`);
+}
+
+/**
+ * The engine a project's configuration names, or its main checkout's, once the search found none.
+ * The recorded engine is for a machine where nothing is set and nothing is where it usually is.
+ * A GODOT_PATH that names something broken is not that: falling back past it would run some
+ * other engine in silence under a variable somebody set on purpose.
+ */
+async function engineFromConfig(
+  locator: GodotLocator,
+  located: Extract<Awaited<ReturnType<GodotLocator['find']>>, { ok: false }>,
+  projectPath: string | undefined,
+): Promise<HeadlessEngine> {
   const recorded =
     located.named === null && projectPath !== undefined ? recordedEnginePath(projectPath) : null;
   if (recorded !== null && projectPath !== undefined) {
     const judged = await locator.judge(recorded);
     if (!judged.ok) {
-      throw refused(GodotLocator.refusal(judged, { config: projectPath }));
+      throw engineRefusal(GodotLocator.refusal(judged, { config: projectPath }));
     }
-    return headless(judged.path);
+    return headlessAt(judged.path);
   }
   const mainCheckout =
     located.named === null && projectPath !== undefined ? mainCheckoutOf(projectPath) : null;
   const theirs = mainCheckout === null ? null : recordedEnginePath(mainCheckout);
   if (mainCheckout === null || theirs === null) {
-    throw refused(GodotLocator.refusal(located));
+    throw engineRefusal(GodotLocator.refusal(located));
   }
   const judged = await locator.judge(theirs);
   if (!judged.ok) {
-    throw refused(GodotLocator.refusal(judged, { config: mainCheckout }));
+    throw engineRefusal(GodotLocator.refusal(judged, { config: mainCheckout }));
   }
   // Said, because it is an engine this project's own files do not name.
   console.error(
     `engine: ${judged.path}, which the harness config of ${mainCheckout} names. This project is a git worktree of it`,
   );
-  return headless(judged.path);
+  return headlessAt(judged.path);
 }
 
 /** The outcome as a line for a person, and a throw when the engine refused. */
@@ -165,6 +177,39 @@ function said(outcome: HeadlessOutcome, what: string): void {
 /** What a project with a loader of its own does to use the shipped one instead. */
 function useTheShippedLoader(name: string, path: string): string {
   return `gdharness ships a loader that does the same: take the ${name} entry out of project.godot's [autoload] and delete res://${path}, then run gdharness runtime on, which writes res://${RUNTIME_AUTOLOAD.path} and points ${RUNTIME_AUTOLOAD.name} at it`;
+}
+
+/** The line saying what became of the autoload entry [param named], which is ours to rewrite. */
+function registrationLine(named: string | null, before: ReturnType<typeof loaderState>): string {
+  const at = `res://${RUNTIME_AUTOLOAD.path}`;
+  if (named === null) {
+    return `${RUNTIME_AUTOLOAD.name} autoload registered at ${at}, the loader gdharness ships`;
+  }
+  if (named === `res://${RUNTIME_SCRIPT}`) {
+    return `${RUNTIME_AUTOLOAD.name} autoload moved from the addon's own script to ${at}, the loader gdharness ships, so a build without addons/ no longer boots with a missing script`;
+  }
+  return `${RUNTIME_AUTOLOAD.name} autoload already registered at ${at}${before === 'current' ? '' : before === 'missing' ? ', and the loader written, since it was not there' : ', and the loader written again, since it differed from the one gdharness ships'}`;
+}
+
+/** Registers the shipped loader over the entry [param named], which is ours, and says what happened. */
+async function registerOurRuntime(
+  godot: HeadlessEngine,
+  projectPath: string,
+  named: string | null,
+): Promise<void> {
+  const before = loaderState(projectPath);
+  said(await setRuntime(godot, projectPath, true), 'registering the runtime autoload');
+  console.log(registrationLine(named, before));
+  if (before !== 'current') {
+    console.log(`  commit res://${RUNTIME_AUTOLOAD.path} with project.godot, since the entry names it`);
+  }
+  // Two games' gates refused their first export after the loader came in: each allows only the
+  // top-level folders it knows into a pack.
+  if (before === 'missing') {
+    console.log(
+      `  a debug export carries ${dirname(RUNTIME_AUTOLOAD.path)}/. A check or export filter that keeps unknown top-level folders out of a debug pack has to allow it`,
+    );
+  }
 }
 
 /**
@@ -194,30 +239,7 @@ async function registerRuntime(godot: HeadlessEngine, projectPath: string): Prom
     return;
   }
   if (autoloadIsOurs(named)) {
-    const before = loaderState(projectPath);
-    said(await setRuntime(godot, projectPath, true), 'registering the runtime autoload');
-    const at = `res://${RUNTIME_AUTOLOAD.path}`;
-    if (named === null) {
-      console.log(`${RUNTIME_AUTOLOAD.name} autoload registered at ${at}, the loader gdharness ships`);
-    } else if (named === `res://${RUNTIME_SCRIPT}`) {
-      console.log(
-        `${RUNTIME_AUTOLOAD.name} autoload moved from the addon's own script to ${at}, the loader gdharness ships, so a build without addons/ no longer boots with a missing script`,
-      );
-    } else {
-      console.log(
-        `${RUNTIME_AUTOLOAD.name} autoload already registered at ${at}${before === 'current' ? '' : before === 'missing' ? ', and the loader written, since it was not there' : ', and the loader written again, since it differed from the one gdharness ships'}`,
-      );
-    }
-    if (before !== 'current') {
-      console.log(`  commit ${at} with project.godot, since the entry names it`);
-    }
-    // Two games' gates refused their first export after the loader came in: each allows only the
-    // top-level folders it knows into a pack.
-    if (before === 'missing') {
-      console.log(
-        `  a debug export carries ${dirname(RUNTIME_AUTOLOAD.path)}/. A check or export filter that keeps unknown top-level folders out of a debug pack has to allow it`,
-      );
-    }
+    await registerOurRuntime(godot, projectPath, named);
     return;
   }
   const path = (named ?? '').replace(/^res:\/\//, '');
@@ -407,60 +429,73 @@ function nextSteps(projectPath: string, withRuntime: boolean): void {
   }
 }
 
+/** Rebuilds the class list and says how many classes it holds. */
+async function rebuildClassList(godot: HeadlessEngine, projectPath: string): Promise<void> {
+  const refreshed = await runOperation(godot, 'refresh_class_cache', {}, projectPath);
+  said(refreshed, 'rebuilding the class list');
+  if (refreshed.ok) {
+    console.log(`class list rebuilt: ${String(refreshed.payload['classes'])} classes`);
+  }
+}
+
+/** The engine steps of setup, which share one slot. */
+async function installIntoProject(projectPath: string, withRuntime: boolean): Promise<HeadlessEngine> {
+  const found = await engine(projectPath);
+  for (const addon of installAddons(projectPath)) {
+    console.log(`${addon.replaced ? 'replaced' : 'installed'} ${addon.path}`);
+  }
+  const enabled = await enablePlugins(found, projectPath, EDITOR_PLUGINS);
+  for (const [index, outcome] of enabled.entries()) {
+    const name = EDITOR_PLUGINS[index] ?? '';
+    said(outcome, `enabling ${name}`);
+    console.log(`${name}: ${outcome.ok ? String(outcome.payload['action']) : 'failed'}`);
+  }
+  if (withRuntime) {
+    await registerRuntime(found, projectPath);
+  }
+  await rebuildClassList(found, projectPath);
+  return found;
+}
+
+/** Writes the harness configs setup was asked for, and the skill beside them unless it is declined. */
+async function connectHarnesses(godot: HeadlessEngine, projectPath: string): Promise<void> {
+  // The version is the running one, so the config pins the server that installed these addons.
+  const launch = launchFor(getLocalVersion(), godot.godotPath, projectPath);
+  const ask = new Ask();
+  let chosen: { harnesses: readonly Harness[]; skipped: readonly Candidate[] };
+  try {
+    chosen = await chosenHarnesses(projectPath, ask);
+  } finally {
+    ask.close();
+  }
+  for (const group of groupByFile(chosen.harnesses, projectPath)) {
+    reportConnection(group, launch, projectPath);
+  }
+  for (const candidate of chosen.skipped) {
+    reportSkipped(candidate);
+  }
+  if (chosen.harnesses.length === 0) {
+    console.log('no harness configured. Pass one by flag. gdharness harnesses lists them');
+  }
+
+  if (!args.includes('--no-skill')) {
+    const directories = skillDirectories(chosen.harnesses, projectPath, existsSync);
+    for (const written of writeSkill(directories, getLocalVersion())) {
+      console.log(`skill: ${written.replaced ? 'replaced' : 'written'} ${written.path}`);
+    }
+  }
+}
+
 async function setup(): Promise<void> {
   const projectPath = projectArgument(1);
   // The runtime addon is per-project like everything else setup installs, so it is not something
   // to opt into: without it a third of the tools have nothing to talk to.
   const withRuntime = !args.includes('--no-runtime');
   // The engine steps share one slot, and the harness question below holds none while it waits.
-  const godot = await inOneSlot(async () => {
-    const found = await engine(projectPath);
-    for (const addon of installAddons(projectPath)) {
-      console.log(`${addon.replaced ? 'replaced' : 'installed'} ${addon.path}`);
-    }
-    const enabled = await enablePlugins(found, projectPath, EDITOR_PLUGINS);
-    for (const [index, outcome] of enabled.entries()) {
-      const name = EDITOR_PLUGINS[index] ?? '';
-      said(outcome, `enabling ${name}`);
-      console.log(`${name}: ${outcome.ok ? String(outcome.payload['action']) : 'failed'}`);
-    }
-    if (withRuntime) {
-      await registerRuntime(found, projectPath);
-    }
-    const refreshed = await runOperation(found, 'refresh_class_cache', {}, projectPath);
-    said(refreshed, 'rebuilding the class list');
-    if (refreshed.ok) {
-      console.log(`class list rebuilt: ${String(refreshed.payload['classes'])} classes`);
-    }
-    return found;
-  });
+  const godot = await inOneSlot(async () => await installIntoProject(projectPath, withRuntime));
 
   if (!args.includes('--no-connect')) {
-    // The version is the running one, so the config pins the server that installed these addons.
-    const launch = launchFor(getLocalVersion(), godot.godotPath, projectPath);
-    const ask = new Ask();
-    let chosen: { harnesses: readonly Harness[]; skipped: readonly Candidate[] };
-    try {
-      chosen = await chosenHarnesses(projectPath, ask);
-    } finally {
-      ask.close();
-    }
-    for (const group of groupByFile(chosen.harnesses, projectPath)) {
-      reportConnection(group, launch, projectPath);
-    }
-    for (const candidate of chosen.skipped) {
-      reportSkipped(candidate);
-    }
-    if (chosen.harnesses.length === 0) {
-      console.log('no harness configured. Pass one by flag. gdharness harnesses lists them');
-    }
-
-    if (!args.includes('--no-skill')) {
-      const directories = skillDirectories(chosen.harnesses, projectPath, existsSync);
-      for (const written of writeSkill(directories, getLocalVersion())) {
-        console.log(`skill: ${written.replaced ? 'replaced' : 'written'} ${written.path}`);
-      }
-    }
+    await connectHarnesses(godot, projectPath);
   }
 
   doctorReport(projectPath);
@@ -469,65 +504,61 @@ async function setup(): Promise<void> {
   }
 }
 
-/**
- * Everything setup put in, taken back out.
- *
- * Only our own entry is removed from a harness config, and a machine-wide one is left alone unless
- * it is named, because that entry may be serving another project: the same reason writing it needs
- * a flag or an answer.
- */
-async function uninstall(): Promise<void> {
-  const projectPath = projectArgument(1);
-  const godot = await engine(projectPath);
-
-  const named = namedHarnesses();
-  const from = named.length > 0 ? named : HARNESSES;
-
-  for (const harness of from) {
-    // Asked before anything is taken out: removing is not a probe, and a machine-wide entry removed
-    // and then reported as left alone was another project's server, or the whole file.
-    if (harness.scope === 'home' && named.length === 0) {
-      if (registered(harness, projectPath)) {
-        console.log(
-          `${harness.name}: left alone. Its config is machine-wide and may serve another project. Pass --${harness.id} to remove it.`,
-        );
-      }
-      continue;
-    }
-    const removal = disconnect(harness, projectPath);
-    if (removal.action === 'absent') {
-      continue;
-    }
-    if (removal.action === 'manual') {
+/** Takes gdharness out of one harness's config, or says why it is left. */
+function disconnectHarness(harness: Harness, wasNamed: boolean, projectPath: string): void {
+  // Asked before anything is taken out: removing is not a probe, and a machine-wide entry removed
+  // and then reported as left alone was another project's server, or the whole file.
+  if (harness.scope === 'home' && !wasNamed) {
+    if (registered(harness, projectPath)) {
       console.log(
-        removal.command === undefined
-          ? `${harness.name}: take gdharness out of ${removal.path} by hand.`
-          : `${harness.name}: run  ${removal.command.join(' ')}`,
+        `${harness.name}: left alone. Its config is machine-wide and may serve another project. Pass --${harness.id} to remove it.`,
       );
-      continue;
     }
-    console.log(`${harness.name}: ${removal.action} ${removal.path}`);
+    return;
   }
-
-  for (const directory of removeSkill(everySkillDirectory(projectPath, HARNESSES), projectPath)) {
-    console.log(`skill: removed ${directory}`);
+  const removal = disconnect(harness, projectPath);
+  if (removal.action === 'absent') {
+    return;
   }
+  if (removal.action === 'manual') {
+    console.log(
+      removal.command === undefined
+        ? `${harness.name}: take gdharness out of ${removal.path} by hand.`
+        : `${harness.name}: run  ${removal.command.join(' ')}`,
+    );
+    return;
+  }
+  console.log(`${harness.name}: ${removal.action} ${removal.path}`);
+}
 
-  // What was actually there, read before anything is taken out. Without it the engine's no-ops
-  // were reported as work: run in a project that never had gdharness, this said it had disabled
-  // the plugins, removed the autoload, and that a harness should stop spawning a server.
-  const before = inspectProject(projectPath);
-
-  // Only what is actually there is taken out. The engine refuses to remove an autoload that is
-  // not registered, which made a second uninstall fail where the first had succeeded, and made
-  // one on a project that never had gdharness fail outright.
-  const enabled = EDITOR_PLUGINS.filter((name) => before.pluginsEnabled.includes(name));
+/**
+ * Disables the editor plugins that are on, and returns them.
+ *
+ * Only what is actually there is taken out. The engine refuses to remove an autoload that is
+ * not registered, which made a second uninstall fail where the first had succeeded, and made
+ * one on a project that never had gdharness fail outright.
+ */
+async function disableEnabledPlugins(
+  godot: HeadlessEngine,
+  projectPath: string,
+  pluginsEnabled: readonly string[],
+): Promise<string[]> {
+  const enabled = EDITOR_PLUGINS.filter((name) => pluginsEnabled.includes(name));
   const disabled = await disablePlugins(godot, projectPath, enabled);
   for (const [index, outcome] of disabled.entries()) {
     const name = enabled[index] ?? '';
     said(outcome, `disabling ${name}`);
     console.log(`${name}: ${outcome.ok ? String(outcome.payload['action']) : 'failed'}`);
   }
+  return enabled;
+}
+
+/** Takes the runtime autoload and its loader out, and names a loader that is the project's own. */
+async function removeRuntimeParts(
+  godot: HeadlessEngine,
+  projectPath: string,
+  before: ReturnType<typeof inspectProject>,
+): Promise<void> {
   // Our entry and not any loader: runtimeAutoload is true for a loader under a name of the
   // project's, and asking the engine to remove GdharnessRuntime from such a project failed here on
   // every run, after the harness entries had gone and before the addons did.
@@ -547,6 +578,37 @@ async function uninstall(): Promise<void> {
       `${loader.name} names res://${loader.path}, which brings the runtime up its own way. That line is this project's, so it is left in place. The addon it brings up is gone now, so take the entry out unless that file does nothing without it.`,
     );
   }
+}
+
+/**
+ * Everything setup put in, taken back out.
+ *
+ * Only our own entry is removed from a harness config, and a machine-wide one is left alone unless
+ * it is named, because that entry may be serving another project: the same reason writing it needs
+ * a flag or an answer.
+ */
+async function uninstall(): Promise<void> {
+  const projectPath = projectArgument(1);
+  const godot = await engine(projectPath);
+
+  const named = namedHarnesses();
+  const from = named.length > 0 ? named : HARNESSES;
+
+  for (const harness of from) {
+    disconnectHarness(harness, named.length > 0, projectPath);
+  }
+
+  for (const directory of removeSkill(everySkillDirectory(projectPath, HARNESSES), projectPath)) {
+    console.log(`skill: removed ${directory}`);
+  }
+
+  // What was actually there, read before anything is taken out. Without it the engine's no-ops
+  // were reported as work: run in a project that never had gdharness, this said it had disabled
+  // the plugins, removed the autoload, and that a harness should stop spawning a server.
+  const before = inspectProject(projectPath);
+
+  const enabled = await disableEnabledPlugins(godot, projectPath, before.pluginsEnabled);
+  await removeRuntimeParts(godot, projectPath, before);
 
   const addons = removeAddons(projectPath);
   for (const path of addons) {
@@ -555,11 +617,7 @@ async function uninstall(): Promise<void> {
   // The addons declare classes, and a class list still naming their deleted files is what the
   // project's next headless run reads.
   if (addons.length > 0) {
-    const refreshed = await runOperation(godot, 'refresh_class_cache', {}, projectPath);
-    said(refreshed, 'rebuilding the class list');
-    if (refreshed.ok) {
-      console.log(`class list rebuilt: ${String(refreshed.payload['classes'])} classes`);
-    }
+    await rebuildClassList(godot, projectPath);
   }
 
   const anything = addons.length > 0 || before.runtimeAutoloadPath !== null || enabled.length > 0;
@@ -587,17 +645,7 @@ async function upgrade(): Promise<void> {
   const projectPath = projectArgument(1);
   const version = getLocalVersion();
   const before = inspectProject(projectPath);
-  // Present and unmarked is still installed: a copy made by hand, or a checkout that dropped
-  // dot-files, carries no version marker, and was told gdharness was not installed at all.
-  const present = before.addons.find((addon) => addon.installed);
-  if (present === undefined) {
-    // The path only where it is not the directory you are in, so the command the message hands
-    // back is one that can be copied rather than a line carrying its own path twice.
-    const where = projectPath === process.cwd() ? '' : ` ${projectPath}`;
-    throw new UsageError(
-      `gdharness is not installed in ${projectPath}. Run  gdharness setup${where}  instead.`,
-    );
-  }
+  const present = installedAddon(before, projectPath);
   // After the engine is found, not before. A refusal under a line saying which version this is
   // going to reads as a run that got partway and stopped, and this one changes nothing at all.
   const godot = await engine(projectPath);
@@ -610,16 +658,7 @@ async function upgrade(): Promise<void> {
   // Read before the copy replaces it. A copy gdharness did not install has none, and then nothing
   // says the code is the same, so the restart is asked for.
   const digestBefore = installedEditorDigest(projectPath);
-  for (const addon of installAddons(projectPath)) {
-    console.log(`${addon.replaced ? 'replaced' : 'installed'} ${addon.path}`);
-    // An upgrade adding a folder lands it beside the ones a project has already named in its
-    // .gitignore or export filters, which then show it as untracked or ship it.
-    if (!addon.replaced) {
-      console.log(
-        `  addons/${addon.name}/ is new to this project: a .gitignore entry or export filter naming gdharness's addons one by one has to name it too`,
-      );
-    }
-  }
+  reinstallAddons(projectPath);
   const enabled = await enablePlugins(godot, projectPath, EDITOR_PLUGINS);
   for (const [index, outcome] of enabled.entries()) {
     said(outcome, `enabling ${EDITOR_PLUGINS[index] ?? ''}`);
@@ -634,40 +673,8 @@ async function upgrade(): Promise<void> {
   said(await runOperation(godot, 'refresh_class_cache', {}, projectPath), 'rebuilding the class list');
 
   const launch = launchFor(version, godot.godotPath, projectPath);
-  const named = namedHarnesses();
-  // A machine-wide entry is rewritten only when it serves this project already or is named: one
-  // written for another project was pointed at this one, and every session of that project then
-  // spawned a server serving this one, with nothing in the output saying the project had changed.
-  const already = HARNESSES.filter((harness) => {
-    if (!registered(harness, projectPath)) {
-      return false;
-    }
-    if (harness.scope !== 'home' || named.includes(harness)) {
-      return true;
-    }
-    const serves = servedProject(harness, projectPath);
-    if (serves !== null && isSameDirectory(serves, projectPath)) {
-      return true;
-    }
-    console.log(
-      `${harness.name}: left alone. Its config is machine-wide and ${serves === null ? 'names no project' : `serves ${serves}`}. Pass --${harness.id} to point it at this one.`,
-    );
-    return false;
-  });
-  const moved: string[] = [];
-  let written = 0;
-  let byHand = 0;
-  for (const group of groupByFile(already, projectPath)) {
-    const took = reportConnection(group, launch, projectPath);
-    if (took.kind === 'byHand') {
-      byHand += 1;
-      continue;
-    }
-    written += 1;
-    if (took.from !== null && !moved.includes(took.from)) {
-      moved.push(took.from);
-    }
-  }
+  const already = harnessesToRepin(projectPath, namedHarnesses());
+  const repinned = repinHarnesses(already, launch, projectPath);
   // The same rule setup uses, not the one uninstall uses. everySkillDirectory names every place a
   // copy could be, which is what you want when removing them and is how an upgrade came to create
   // two directories the install had deliberately not created.
@@ -686,26 +693,162 @@ async function upgrade(): Promise<void> {
   const serving = await serverServing(projectPath);
   console.log(
     harnessNote(
-      { moved, written, byHand },
+      repinned,
       [launch.command, ...launch.args].join(' '),
       serving === null ? null : { server: serving, isThisVersion: serving.version === version },
     ),
   );
-  // Named rather than upgraded: a worktree pins its own version in its own config and can be on a
-  // branch that wants the one it has, so the upgrade is the caller's to run there.
+  nameTrailingWorktrees(projectPath, version);
+}
+
+/** The addon an upgrade starts from, or a refusal when the project has none. */
+function installedAddon(
+  report: ReturnType<typeof inspectProject>,
+  projectPath: string,
+): ReturnType<typeof inspectProject>['addons'][number] {
+  // Present and unmarked is still installed: a copy made by hand, or a checkout that dropped
+  // dot-files, carries no version marker, and was told gdharness was not installed at all.
+  const present = report.addons.find((addon) => addon.installed);
+  if (present === undefined) {
+    // The path only where it is not the directory you are in, so the command the message hands
+    // back is one that can be copied rather than a line carrying its own path twice.
+    const where = projectPath === process.cwd() ? '' : ` ${projectPath}`;
+    throw new UsageError(
+      `gdharness is not installed in ${projectPath}. Run  gdharness setup${where}  instead.`,
+    );
+  }
+  return present;
+}
+
+/** Copies the addons over the project's and says which were replaced and which are new. */
+function reinstallAddons(projectPath: string): void {
+  for (const addon of installAddons(projectPath)) {
+    console.log(`${addon.replaced ? 'replaced' : 'installed'} ${addon.path}`);
+    // An upgrade adding a folder lands it beside the ones a project has already named in its
+    // .gitignore or export filters, which then show it as untracked or ship it.
+    if (!addon.replaced) {
+      console.log(
+        `  addons/${addon.name}/ is new to this project: a .gitignore entry or export filter naming gdharness's addons one by one has to name it too`,
+      );
+    }
+  }
+}
+
+/**
+ * The harnesses an upgrade rewrites. A machine-wide entry is rewritten only when it serves this
+ * project already or is named: one written for another project was pointed at this one, and every
+ * session of that project then spawned a server serving this one, with nothing in the output saying
+ * the project had changed.
+ */
+function harnessesToRepin(projectPath: string, named: readonly Harness[]): Harness[] {
+  return HARNESSES.filter((harness) => {
+    if (!registered(harness, projectPath)) {
+      return false;
+    }
+    if (harness.scope !== 'home' || named.includes(harness)) {
+      return true;
+    }
+    const serves = servedProject(harness, projectPath);
+    if (serves !== null && isSameDirectory(serves, projectPath)) {
+      return true;
+    }
+    console.log(
+      `${harness.name}: left alone. Its config is machine-wide and ${serves === null ? 'names no project' : `serves ${serves}`}. Pass --${harness.id} to point it at this one.`,
+    );
+    return false;
+  });
+}
+
+/** Writes each harness's config again, and counts what was written, what is left to do by hand and what it moved from. */
+function repinHarnesses(
+  already: readonly Harness[],
+  launch: Launch,
+  projectPath: string,
+): { moved: string[]; written: number; byHand: number } {
+  const moved: string[] = [];
+  let written = 0;
+  let byHand = 0;
+  for (const group of groupByFile(already, projectPath)) {
+    const took = reportConnection(group, launch, projectPath);
+    if (took.kind === 'byHand') {
+      byHand += 1;
+      continue;
+    }
+    written += 1;
+    if (took.from !== null && !moved.includes(took.from)) {
+      moved.push(took.from);
+    }
+  }
+  return { moved, written, byHand };
+}
+
+/**
+ * Named rather than upgraded: a worktree pins its own version in its own config and can be on a
+ * branch that wants the one it has, so the upgrade is the caller's to run there.
+ */
+function nameTrailingWorktrees(projectPath: string, version: string): void {
   const trailing = worktreeCheckoutsOf(projectPath).flatMap((path) => {
     const held = worktreeAddonVersion(path);
     return held === undefined || held === version ? [] : [{ path, version: held }];
   });
-  if (trailing.length > 0) {
+  if (trailing.length === 0) {
+    return;
+  }
+  console.log(
+    '\nGit worktrees of this project keep untracked addons of their own, which this upgrade does not reach:',
+  );
+  for (const worktree of trailing) {
     console.log(
-      '\nGit worktrees of this project keep untracked addons of their own, which this upgrade does not reach:',
+      `  ${worktree.path}: ${worktree.version ?? 'an unmarked copy'}. Run  gdharness upgrade ${worktree.path}`,
     );
-    for (const worktree of trailing) {
-      console.log(
-        `  ${worktree.path}: ${worktree.version ?? 'an unmarked copy'}. Run  gdharness upgrade ${worktree.path}`,
-      );
-    }
+  }
+}
+
+/**
+ * Which entry brings the runtime up, rather than whether ours exists. "not registered" about a
+ * runtime that was answering queries is what sent a project looking, and naming the file is the
+ * half that can be checked from their end: they can open it and see.
+ */
+function runtimeAutoloadLine(report: ReturnType<typeof inspectProject>): string {
+  const loader = report.runtimeLoaderAutoload;
+  const named = report.runtimeAutoloadPath;
+  const shipped = {
+    current: '',
+    differs: ', which differs from the one this gdharness ships',
+    missing: ', which is not in this project',
+  }[loaderState(report.projectPath)];
+  if (loader !== null) {
+    return `registered through res://${loader.path}, as ${loader.name}${loader.exists ? '' : ', and that file is not in this project'}`;
+  }
+  if (named === `res://${RUNTIME_AUTOLOAD.path}`) {
+    return `registered through ${named}, the loader gdharness ships${shipped}`;
+  }
+  if (named === `res://${RUNTIME_SCRIPT}`) {
+    return `registered as the addon's own script, ${named}`;
+  }
+  return named === null ? 'not registered' : `registered through ${named}, this project's own`;
+}
+
+function printDoctorReport(report: ReturnType<typeof inspectProject>): void {
+  for (const addon of report.addons) {
+    console.log(
+      `addons/${addon.name}: ${addon.installed ? `installed, ${addon.version ?? 'unknown version'}${addon.current ? '' : ' (not this version)'}` : 'missing'}`,
+    );
+  }
+  console.log(`editor plugins enabled: ${report.pluginsEnabled.join(', ') || 'none'}`);
+  console.log(`runtime autoload: ${runtimeAutoloadLine(report)}`);
+  console.log(
+    report.classCacheExists
+      ? `class cache: ${report.staleClasses.length === 0 ? 'current' : `stale for ${report.staleClasses.join(', ')}`}`
+      : 'class cache: missing',
+  );
+  for (const { name, path } of report.ignoredAutoloads) {
+    console.log(
+      `autoload ${name}: res://${path} is ignored by git, so a clone has it only once the project's own install step has put it there`,
+    );
+  }
+  for (const problem of report.problems) {
+    console.log(`problem: ${problem}`);
   }
 }
 
@@ -714,48 +857,7 @@ function doctorReport(projectPath: string): void {
   if (args.includes('--json')) {
     console.log(JSON.stringify(report, null, 2));
   } else {
-    for (const addon of report.addons) {
-      console.log(
-        `addons/${addon.name}: ${addon.installed ? `installed, ${addon.version ?? 'unknown version'}${addon.current ? '' : ' (not this version)'}` : 'missing'}`,
-      );
-    }
-    console.log(`editor plugins enabled: ${report.pluginsEnabled.join(', ') || 'none'}`);
-    // Which entry brings it up, rather than whether ours exists. "not registered" about a runtime
-    // that was answering queries is what sent a project looking, and naming the file is the half
-    // that can be checked from their end: they can open it and see.
-    const loader = report.runtimeLoaderAutoload;
-    const named = report.runtimeAutoloadPath;
-    const shipped = {
-      current: '',
-      differs: ', which differs from the one this gdharness ships',
-      missing: ', which is not in this project',
-    }[loaderState(report.projectPath)];
-    console.log(
-      `runtime autoload: ${
-        loader !== null
-          ? `registered through res://${loader.path}, as ${loader.name}${loader.exists ? '' : ', and that file is not in this project'}`
-          : named === `res://${RUNTIME_AUTOLOAD.path}`
-            ? `registered through ${named}, the loader gdharness ships${shipped}`
-            : named === `res://${RUNTIME_SCRIPT}`
-              ? `registered as the addon's own script, ${named}`
-              : named !== null
-                ? `registered through ${named}, this project's own`
-                : 'not registered'
-      }`,
-    );
-    console.log(
-      report.classCacheExists
-        ? `class cache: ${report.staleClasses.length === 0 ? 'current' : `stale for ${report.staleClasses.join(', ')}`}`
-        : 'class cache: missing',
-    );
-    for (const { name, path } of report.ignoredAutoloads) {
-      console.log(
-        `autoload ${name}: res://${path} is ignored by git, so a clone has it only once the project's own install step has put it there`,
-      );
-    }
-    for (const problem of report.problems) {
-      console.log(`problem: ${problem}`);
-    }
+    printDoctorReport(report);
   }
   if (report.problems.length > 0) {
     process.exitCode = 1;

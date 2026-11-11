@@ -361,42 +361,95 @@ function amendNoteIfItCan(record: RunRecord): void {
   }
 }
 
-async function keep(): Promise<void> {
-  const spec = await receivedSpec();
-  const run = spec.run;
-  // The game's debugger, opened before the game so it is listening when the game dials it: the
-  // engine dials once, as it starts, and runs with no debugger if nobody answers.
-  const profiled =
-    run?.profile === undefined ? null : profiledBy(run.profile, run.projectPath, run.engineCalls === true);
-  const debuggerPeer =
-    run === undefined || run.debugged === false
-      ? null
-      : await GameDebugger.open(
-          run.breakpoints ?? [],
-          profiled === null ? [] : [profiled.observer],
-          (by, text, file) => {
-            try {
-              appendFileSync(run.transcript, raisedMark(by, text, file));
-            } catch {
-              // The run's errors then count this one too, as the engine printed it.
-            }
-          },
-        );
-  const exitNotes = run === undefined ? null : scratchDirectory('keeper-exit');
+type KeptRun = NonNullable<SentSpec['run']>;
+type KeptSlot = NonNullable<KeptRun['slot']>;
+type Started = Awaited<ReturnType<typeof startDetached>>;
+type Followed = NonNullable<Awaited<ReturnType<typeof followSuccessor>>>;
+
+/**
+ * What a stop ends: the game, through what this process holds rather than through the pid (the
+ * game's own handle, or the helper's, which ends the game through the handle it holds. Neither can
+ * reach a later process given the same number), and then whatever it restarted itself into.
+ * Held in an object, since the stop the channel hears sets it, which no flow analysis follows.
+ */
+interface Ender {
+  stop: boolean;
+  end: () => 'signalled' | 'gone';
+}
+
+/** How the game stands after each exit that is followed, from the first process to the last. */
+interface KeptEnd {
+  readonly note: RunRecord | null;
+  readonly pid: number;
+  readonly code: number | null;
+  readonly signal: NodeJS.Signals | null;
+  readonly notTold: boolean;
+  readonly exitedAt: number;
+}
+
+/** What the loop that follows a game's restarts is given and does not change. */
+interface Following {
+  readonly command: string;
+  readonly exitNotes: string | null;
+  readonly transcript: string | undefined;
+  readonly slot: KeptSlot | undefined;
+  readonly ender: Ender;
+}
+
+/**
+ * The game's debugger, opened before the game so it is listening when the game dials it: the
+ * engine dials once, as it starts, and runs with no debugger if nobody answers.
+ */
+async function openDebuggerFor(
+  run: KeptRun | undefined,
+  profiled: { observer: ProfileObserver } | null,
+): Promise<GameDebugger | null> {
+  if (run === undefined || run.debugged === false) {
+    return null;
+  }
+  return await GameDebugger.open(
+    run.breakpoints ?? [],
+    profiled === null ? [] : [profiled.observer],
+    (by, text, file) => {
+      try {
+        appendFileSync(run.transcript, raisedMark(by, text, file));
+      } catch {
+        // The run's errors then count this one too, as the engine printed it.
+      }
+    },
+  );
+}
+
+/** [param spec] with the exit notes folder named in its environment and the debugger's flags added. */
+function specToStart(spec: SentSpec, exitNotes: string | null, debuggerPeer: GameDebugger | null): SentSpec {
   const noted =
     exitNotes === null
       ? spec
       : { ...spec, envChanges: { ...spec.envChanges, [EXIT_NOTES_VARIABLE]: exitNotes } };
-  const toStart =
-    debuggerPeer === null
-      ? noted
-      : { ...noted, args: withEngineArguments(noted.args, debuggerPeer.engineArguments) };
+  return debuggerPeer === null
+    ? noted
+    : { ...noted, args: withEngineArguments(noted.args, debuggerPeer.engineArguments) };
+}
+
+/** The game started, with what the keeper made for the helper to watch and for the later reads. */
+async function startTheGame(
+  spec: SentSpec,
+  toStart: SentSpec,
+  run: KeptRun | undefined,
+): Promise<{
+  started: Started;
+  own: string | null;
+  stopFile: string;
+  exitFile: string;
+  keeperStarted: Promise<number> | undefined;
+  spawnedAt: number;
+}> {
   const transcript = run === undefined ? 'ignore' : openSync(run.transcript, 'a');
   // Private to this keeper, for the file a helper watches for its stop.
   const own = run !== undefined && throughTheHelper(spec) ? scratchDirectory('keeper-stop') : null;
   const stopFile = own === null ? '' : join(own, 'stop');
   const exitFile = own === null ? '' : join(own, 'exit');
-  let started: Awaited<ReturnType<typeof startDetached>>;
+  let started: Started;
   // Read beside the start rather than after it: on Windows it is a query of its own.
   const keeperStarted = run?.slot === undefined ? undefined : ownStart();
   // Before the game exists, so anything listed as started after it can be the game's own.
@@ -409,163 +462,250 @@ async function keep(): Promise<void> {
       closeSync(transcript);
     }
   }
-  if ('error' in started) {
-    debuggerPeer?.close();
-    process.stdout.write(`error ${started.error}\n`);
-    process.exit(1);
+  return { started, own, stopFile, exitFile, keeperStarted, spawnedAt };
+}
+
+/** The note a run starts with, or null for a start that is no run. */
+function startingNote(
+  run: KeptRun | undefined,
+  spec: SentSpec,
+  pid: number,
+  args: readonly string[],
+): RunRecord | null {
+  if (run === undefined) {
+    return null;
   }
-  const { child, pid, whole } = started;
-  const record =
-    run === undefined
-      ? null
-      : {
-          pid,
-          transcript: run.transcript,
-          startedAt: run.startedAt,
-          startedBy: Date.now(),
-          projectPath: run.projectPath,
-          keeperPid: process.pid,
-          ...(run.servedBy === undefined ? {} : { servedBy: run.servedBy }),
-          ...(run.profile === undefined ? {} : { profile: run.profile }),
-          arguments: toStart.args,
-          command: spec.command,
-        };
-  if (record !== null) {
-    // Before the pid goes back, and in the same turn as the exit is listened for: a game that ends at
-    // once would otherwise exit before any record held its pid, and the exit would have nowhere to go.
-    writeNoteIfItCan(record);
-  }
-  const exited = exitOf(child);
-  let listening: KeeperListening | null = null;
-  // What a stop ends: the game, through what this process holds rather than through the pid (the
-  // game's own handle, or the helper's, which ends the game through the handle it holds. Neither can
-  // reach a later process given the same number), and then whatever it restarted itself into.
-  let end = (): 'signalled' | 'gone' => {
+  return {
+    pid,
+    transcript: run.transcript,
+    startedAt: run.startedAt,
+    startedBy: Date.now(),
+    projectPath: run.projectPath,
+    keeperPid: process.pid,
+    ...(run.servedBy === undefined ? {} : { servedBy: run.servedBy }),
+    ...(run.profile === undefined ? {} : { profile: run.profile }),
+    arguments: args,
+    command: spec.command,
+  };
+}
+
+/** Ends the game through the helper's stop file where there is one, and through the child's handle otherwise. */
+function endingTheGame(child: ChildProcess, stopFile: string): () => 'signalled' | 'gone' {
+  return () => {
     if (stopFile !== '') {
       writeFileSync(stopFile, '');
       return 'signalled';
     }
     return child.kill() ? 'signalled' : 'gone';
   };
-  // Held in an object, since it is set by the stop the channel hears, which no flow analysis follows.
-  const asked = { stop: false };
-  if (record !== null) {
-    listening = await listenForTheServer(
-      () => {
-        asked.stop = true;
-        return end();
-      },
-      debuggerPeer === null ? null : (request) => debuggerPeer.ask(request),
-    );
-    if (listening !== null) {
-      amendNoteIfItCan({ ...record, keeper: listening.address });
-    }
+}
+
+/** Listens for the server's stop, and notes where, once someone is listening. */
+async function listenAndNote(
+  record: RunRecord,
+  ender: Ender,
+  debuggerPeer: GameDebugger | null,
+): Promise<KeeperListening | null> {
+  const listening = await listenForTheServer(
+    () => {
+      ender.stop = true;
+      return ender.end();
+    },
+    debuggerPeer === null ? null : (request) => debuggerPeer.ask(request),
+  );
+  if (listening !== null) {
+    amendNoteIfItCan({ ...record, keeper: listening.address });
   }
-  // Nobody reads this once the launcher has gone, and a write to a pipe with no reader is an error.
-  // Sent before the end is acted on, so a game that has already quit still has its pid answered.
+  return listening;
+}
+
+/**
+ * Nobody reads this once the launcher has gone, and a write to a pipe with no reader is an error.
+ * Sent before the end is acted on, so a game that has already quit still has its pid answered.
+ */
+async function sayPid(pid: number): Promise<void> {
   await new Promise<void>((resolve) => {
     process.stdout.once('error', () => {
       resolve();
     });
     process.stdout.end(`pid ${pid}\n`, resolve);
   });
-  // After the pid has gone back, since on Windows reading this process's start is a query of its
-  // own, and a start held up by it answered after a game that announces at once had done so.
-  // The pid in the lock is this process's, since a game that restarts itself comes back under
-  // another, so the label says whose it is: a wait would otherwise name it as the game's. The game
-  // is named beside it, so what the game starts runs on its slot rather than taking a second.
-  const slot = run?.slot;
-  if (slot !== undefined && keeperStarted !== undefined) {
-    const gameStarted = (await startTimesOf([pid])).get(pid);
-    handSlot(slot.lock, slot.from, {
-      pid: process.pid,
-      started: await keeperStarted,
-      by: `${slot.by}, through the keeper process that runs it`,
-      ...(gameStarted === undefined ? {} : { engine: { pid, started: gameStarted } }),
-    });
+}
+
+/**
+ * After the pid has gone back, since on Windows reading this process's start is a query of its
+ * own, and a start held up by it answered after a game that announces at once had done so.
+ * The pid in the lock is this process's, since a game that restarts itself comes back under
+ * another, so the label says whose it is: a wait would otherwise name it as the game's. The game
+ * is named beside it, so what the game starts runs on its slot rather than taking a second.
+ */
+async function handTheSlot(
+  slot: KeptSlot | undefined,
+  keeperStarted: Promise<number> | undefined,
+  pid: number,
+): Promise<void> {
+  if (slot === undefined || keeperStarted === undefined) {
+    return;
   }
+  const gameStarted = (await startTimesOf([pid])).get(pid);
+  handSlot(slot.lock, slot.from, {
+    pid: process.pid,
+    started: await keeperStarted,
+    by: `${slot.by}, through the keeper process that runs it`,
+    ...(gameStarted === undefined ? {} : { engine: { pid, started: gameStarted } }),
+  });
+}
+
+/** The look for a successor of [param pid], unless the game said it does not restart. */
+function lookForSuccessor(
+  following: Following,
+  pid: number,
+  notBefore: number,
+  exitedAt: number,
+): Promise<Followed | null> | null {
+  return restartSaid(following.exitNotes, pid) === false
+    ? null
+    : followSuccessor(pid, following.command, notBefore, exitedAt, following.transcript);
+}
+
+/** One process in a chain of restarts, from the game's first to the one it restarted into. */
+function restartedFromOf(ended: KeptEnd): RestartedFrom {
+  return {
+    pid: ended.pid,
+    endedAt: ended.exitedAt,
+    ...(ended.code === null ? {} : { exitCode: ended.code }),
+    ...(ended.code === null && ended.signal !== null ? { exitSignal: ended.signal } : {}),
+  };
+}
+
+/** The note moved onto the successor, with the process it replaced added to its chain. */
+async function followRestart(
+  ended: KeptEnd,
+  note: RunRecord,
+  followed: Followed,
+  following: Following,
+): Promise<KeptEnd> {
+  const next = followed.successor;
+  const moved: RunRecord = {
+    ...note,
+    pid: next.pid,
+    startedBy: next.startedAt,
+    restartedFrom: [...(note.restartedFrom ?? []), restartedFromOf(ended)],
+  };
+  amendNoteIfItCan(moved);
+  if (following.slot !== undefined) {
+    nameSlotEngine(following.slot.lock, process.pid, { pid: next.pid, started: next.startedAt });
+  }
+  following.ender.end = () => {
+    try {
+      process.kill(next.pid);
+      return 'signalled';
+    } catch {
+      return 'gone';
+    }
+  };
+  // Asked while the restart was being looked for, and answered as nothing to end then.
+  if (following.ender.stop) {
+    following.ender.end();
+  }
+  const over = await followed.ended;
+  const exitedAt = Date.now();
+  amendNoteIfItCan({ ...moved, endingAt: exitedAt });
+  return { note: moved, pid: next.pid, code: over.code, signal: null, notTold: over.code === null, exitedAt };
+}
+
+/** Follows the game through each restart it made, and returns how the last process ended. */
+async function followRestarts(
+  first: KeptEnd,
+  firstLook: Promise<Followed | null> | null,
+  following: Following,
+): Promise<KeptEnd> {
+  let ended = first;
+  let looked = firstLook;
+  while (ended.note !== null && looked !== null) {
+    const followed = await looked;
+    if (followed === null) {
+      break;
+    }
+    ended = await followRestart(ended, ended.note, followed, following);
+    const next = followed.successor;
+    looked = lookForSuccessor(following, next.pid, next.startedAt, ended.exitedAt);
+  }
+  return ended;
+}
+
+/** After the profile, so a server told the run ended reads the profile it ended with. */
+function recordTheEnd(ended: KeptEnd): void {
+  if (ended.note === null) {
+    return;
+  }
+  try {
+    recordRunEnded(ended.note, {
+      exitCode: ended.code,
+      exitSignal: ended.code === null ? ended.signal : null,
+      notTold: ended.notTold,
+    });
+  } catch {
+    // The run then has no recorded end, which every reader handles.
+  }
+}
+
+async function keep(): Promise<void> {
+  const spec = await receivedSpec();
+  const run = spec.run;
+  const profiled =
+    run?.profile === undefined ? null : profiledBy(run.profile, run.projectPath, run.engineCalls === true);
+  const debuggerPeer = await openDebuggerFor(run, profiled);
+  const exitNotes = run === undefined ? null : scratchDirectory('keeper-exit');
+  const toStart = specToStart(spec, exitNotes, debuggerPeer);
+  const { started, own, stopFile, exitFile, keeperStarted, spawnedAt } = await startTheGame(
+    spec,
+    toStart,
+    run,
+  );
+  if ('error' in started) {
+    debuggerPeer?.close();
+    process.stdout.write(`error ${started.error}\n`);
+    process.exit(1);
+  }
+  const { child, pid, whole } = started;
+  const record = startingNote(run, spec, pid, toStart.args);
+  if (record !== null) {
+    // Before the pid goes back, and in the same turn as the exit is listened for: a game that ends at
+    // once would otherwise exit before any record held its pid, and the exit would have nowhere to go.
+    writeNoteIfItCan(record);
+  }
+  const exited = exitOf(child);
+  const ender: Ender = { stop: false, end: endingTheGame(child, stopFile) };
+  const listening = record === null ? null : await listenAndNote(record, ender, debuggerPeer);
+  await sayPid(pid);
+  const slot = run?.slot;
+  await handTheSlot(slot, keeperStarted, pid);
   const told = await exited;
-  let code = exitFile === '' ? whole(told.code) : helperExit(exitFile, whole(told.code));
-  let { signal } = told;
-  let exitedAt = Date.now();
-  let note: RunRecord | null =
+  const code = exitFile === '' ? whole(told.code) : helperExit(exitFile, whole(told.code));
+  const exitedAt = Date.now();
+  const note: RunRecord | null =
     record === null ? null : listening === null ? record : { ...record, keeper: listening.address };
   if (note !== null) {
     amendNoteIfItCan({ ...note, endingAt: exitedAt });
   }
   // The game's restart, if it made one, is not this process's child, so the handle is no way to end it.
-  end = () => 'gone';
+  ender.end = () => 'gone';
+  const following: Following = { command: spec.command, exitNotes, transcript: run?.transcript, slot, ender };
   // Looked for at once, beside the drain: a successor that ends before the listing sees it is not
   // followed, and the run ends with the first process's exit.
-  let looked =
-    note === null || restartSaid(exitNotes, pid) === false
-      ? null
-      : followSuccessor(pid, spec.command, spawnedAt, exitedAt, run?.transcript);
+  const looked = note === null ? null : lookForSuccessor(following, pid, spawnedAt, exitedAt);
   // The profile is finished from everything the game sent, which is read after its exit is told.
   if (debuggerPeer !== null) {
     await debuggerPeer.drained(DRAIN_MS);
   }
   profiled?.finish();
-  let carried = pid;
-  let notTold = false;
-  while (note !== null && looked !== null) {
-    const followed = await looked;
-    if (followed === null) {
-      break;
-    }
-    const next = followed.successor;
-    const before: RestartedFrom = {
-      pid: carried,
-      endedAt: exitedAt,
-      ...(code === null ? {} : { exitCode: code }),
-      ...(code === null && signal !== null ? { exitSignal: signal } : {}),
-    };
-    note = {
-      ...note,
-      pid: next.pid,
-      startedBy: next.startedAt,
-      restartedFrom: [...(note.restartedFrom ?? []), before],
-    };
-    amendNoteIfItCan(note);
-    if (slot !== undefined) {
-      nameSlotEngine(slot.lock, process.pid, { pid: next.pid, started: next.startedAt });
-    }
-    end = () => {
-      try {
-        process.kill(next.pid);
-        return 'signalled';
-      } catch {
-        return 'gone';
-      }
-    };
-    // Asked while the restart was being looked for, and answered as nothing to end then.
-    if (asked.stop) {
-      end();
-    }
-    const ended = await followed.ended;
-    carried = next.pid;
-    code = ended.code;
-    signal = null;
-    notTold = ended.code === null;
-    exitedAt = Date.now();
-    amendNoteIfItCan({ ...note, endingAt: exitedAt });
-    looked =
-      restartSaid(exitNotes, next.pid) === false
-        ? null
-        : followSuccessor(next.pid, spec.command, next.startedAt, exitedAt, run?.transcript);
-  }
-  // After the profile, so a server told the run ended reads the profile it ended with.
-  if (note !== null) {
-    try {
-      recordRunEnded(note, {
-        exitCode: code,
-        exitSignal: code === null ? signal : null,
-        notTold,
-      });
-    } catch {
-      // The run then has no recorded end, which every reader handles.
-    }
-  }
+  const last = await followRestarts(
+    { note, pid, code, signal: told.signal, notTold: false, exitedAt },
+    looked,
+    following,
+  );
+  recordTheEnd(last);
   if (slot !== undefined) {
     giveBackSlot(slot.lock, process.pid);
   }

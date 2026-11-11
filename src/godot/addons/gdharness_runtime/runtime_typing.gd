@@ -423,9 +423,16 @@ func choose(params: Dictionary) -> Dictionary:
 ## A choice asked for in the frame a refusal shut the menu found it half shut, and the press it sent
 ## went nowhere: measured on 4.7.2, a MenuButton refused and at once asked again answered that the
 ## menu did not take the item.
-func _shut(menu: PopupMenu, opened: bool) -> void:
-	if opened and is_instance_valid(menu) and menu.visible:
-		menu.hide()
+##
+## [param menu] is a Variant because the press can free it, and a parameter typed PopupMenu refuses
+## a freed object before the check here can run.
+func _shut(menu: Variant, opened: bool) -> void:
+	if not opened or not is_instance_valid(menu):
+		return
+	var held: Object = menu
+	var popup: PopupMenu = held as PopupMenu
+	if popup.visible:
+		popup.hide()
 		await _host.get_tree().process_frame
 
 

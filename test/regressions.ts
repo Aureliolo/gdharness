@@ -23530,6 +23530,202 @@ async function testAClickThatFreesWhatItMissedAnswers(): Promise<void> {
 }
 
 /**
+ * A click, a mouse_click and a touch whose press frees the window it went to still answer.
+ *
+ * Reported from a game whose notice closes itself from its own button: the click answered {} and
+ * the game logged a type error from the runtime addon, since the window was its viewport. A button
+ * acting on the press frees its window before the release is sent. In a native window, which only
+ * the windowed run has, that release goes into the freed window.
+ */
+async function testAClickThatClosesItsWindowAnswers(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('click that closes its window regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-closing-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-closing-rt-'));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Closing"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+        '[display]\n\nwindow/size/viewport_width=320\nwindow/size/viewport_height=180\n' +
+        'window/size/borderless=true\nwindow/size/no_focus=true\n\n' +
+        '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+    );
+    writeFileSync(
+      join(project, 'closer.gd'),
+      [
+        'extends Button',
+        '',
+        'var on_touch: bool = false',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar _closed: int = pressed.connect(_close)',
+        '',
+        '',
+        'func _gui_input(event: InputEvent) -> void:',
+        '\tvar touch: InputEventScreenTouch = event as InputEventScreenTouch',
+        '\tif on_touch and touch != null and touch.pressed:',
+        '\t\t_close()',
+        '',
+        '',
+        'func _close() -> void:',
+        '\tget_window().queue_free()',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      [
+        'extends Control',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar native: bool = DisplayServer.get_name() != "headless"',
+        '\tget_tree().root.gui_embed_subwindows = not native',
+        '\tvar screen: Rect2i = DisplayServer.screen_get_usable_rect() if native else Rect2i()',
+        '\t# The window, its button, and whether the button acts on the press rather than the release.',
+        '\tvar windows: Array = [',
+        '\t\t["Notice", "Close", false], ["Prompt", "Shut", true], ["Panel", "Dismiss", true], ["Toast", "Lift", true]',
+        '\t]',
+        '\tfor at: int in windows.size():',
+        '\t\tvar window: Window = Window.new()',
+        '\t\twindow.name = windows[at][0]',
+        '\t\twindow.borderless = true',
+        '\t\twindow.unfocusable = true',
+        '\t\twindow.size = Vector2i(72, 40)',
+        '\t\tif native:',
+        '\t\t\twindow.position = Vector2i(screen.end.x - 80 * (at + 1), screen.position.y + 16)',
+        '\t\telse:',
+        '\t\t\twindow.position = Vector2i(4 + 80 * at, 40)',
+        '\t\tvar button: Button = load("res://closer.gd").new()',
+        '\t\tbutton.name = windows[at][1]',
+        '\t\tbutton.text = windows[at][1]',
+        '\t\tbutton.position = Vector2(4, 4)',
+        '\t\tbutton.size = Vector2(64, 32)',
+        '\t\tif windows[at][2]:',
+        '\t\t\tbutton.action_mode = BaseButton.ACTION_MODE_BUTTON_PRESS',
+        '\t\tbutton.on_touch = windows[at][0] == "Toast"',
+        '\t\twindow.add_child(button)',
+        '\t\tadd_child(window)',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Control"]\noffset_right = 320.0\noffset_bottom = 180.0\nmouse_filter = 2\nscript = ExtResource("1")\n',
+    );
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      { recursive: true },
+    );
+    await server.initialize('regression-test');
+    const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+      const response = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+      return parseTextContent(response) ?? textOf(response);
+    };
+    const gone = async (how: string, window: string): Promise<void> => {
+      const left = JSON.stringify(
+        await call('runtime_inspect', { op: 'rect', nodePath: `/root/Main/${window}` }),
+      );
+      assert.match(left, /not found|no node/i, `${how}: ${window} is gone: ${left}`);
+    };
+    const run = async (headless: boolean): Promise<void> => {
+      const how = headless ? 'headless' : 'windowed';
+      const started = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless,
+        runtimeWaitMs: headless ? 30_000 : WINDOWED_BOOT_MS,
+      });
+      assert.equal(get(started, 'runtime', 'listening'), true, `${how}: ${JSON.stringify(started)}`);
+
+      const clicked = await call('runtime_input', { op: 'click', says: 'Close' });
+      const shown = `${how}: ${JSON.stringify(clicked)}`;
+      assert.equal(get(clicked, 'type'), 'clicked', `a whole answer: ${shown}`);
+      assert.deepEqual(
+        [get(clicked, 'path'), get(clicked, 'found', 'says'), get(clicked, 'landed')],
+        ['/root/Main/Notice/Close', 'Close', true],
+        shown,
+      );
+      assert.equal(get(clicked, 'control_afterwards'), 'freed', shown);
+      await gone(how, 'Notice');
+
+      const shut = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Prompt/Shut' });
+      const shutShown = `${how}: ${JSON.stringify(shut)}`;
+      assert.deepEqual(
+        [get(shut, 'type'), get(shut, 'landed'), get(shut, 'control_afterwards')],
+        ['clicked', true, 'freed'],
+        `a button acting on the press: ${shutShown}`,
+      );
+      await gone(how, 'Prompt');
+
+      const dismissed = await call('runtime_input', {
+        op: 'mouse_click',
+        nodePath: '/root/Main/Panel/Dismiss',
+        x: 10,
+        y: 10,
+      });
+      const dismissedShown = `${how}: ${JSON.stringify(dismissed)}`;
+      assert.deepEqual(
+        [get(dismissed, 'type'), get(dismissed, 'input_type'), get(dismissed, 'hovered')],
+        ['input_injected', 'mouse_click', null],
+        `a mouse_click, with nothing hovered in a window that is gone: ${dismissedShown}`,
+      );
+      await gone(how, 'Panel');
+
+      // Only a native window takes a touch pushed at it, and only the windowed run has one.
+      if (!headless) {
+        const lifted = await call('runtime_input', {
+          op: 'touch',
+          nodePath: '/root/Main/Toast/Lift',
+          x: 10,
+          y: 10,
+        });
+        const liftedShown = JSON.stringify(lifted);
+        assert.deepEqual(
+          [get(lifted, 'type'), get(lifted, 'input_type')],
+          ['input_injected', 'touch'],
+          `a touch: ${liftedShown}`,
+        );
+        await gone(how, 'Toast');
+      }
+
+      const printed = JSON.stringify(await call('editor_output', { op: 'run' }));
+      assert.doesNotMatch(
+        printed,
+        /gdharness_runtime|previously freed/,
+        `${how}: and the addon raised nothing: ${printed}`,
+      );
+      await stopItsRun(server);
+    };
+    await run(true);
+    const refused = windowedRunRefused();
+    if (refused === null) {
+      await run(false);
+    } else {
+      console.log(`click that closes its window: the windowed half skipped (${refused})`);
+    }
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
  * A pointer call aims at a point in a named node's own space, and reaches it in a native window.
  *
  * Reported from a game with subwindow embedding off whose second window holds one Control that
@@ -50952,6 +51148,30 @@ async function testAPidIsNotAnIdentity(): Promise<void> {
       `this platform should say when pid ${pid} started; it said ${String(began)}`,
     );
 
+    // macOS's ps prints lstart in the words of the caller's locale, which Date.parse cannot read.
+    // Russian, because no month of it is spelt as in English: German fails only in four months.
+    const locale = { all: process.env['LC_ALL'], lang: process.env['LANG'] };
+    process.env['LC_ALL'] = 'ru_RU.UTF-8';
+    process.env['LANG'] = 'ru_RU.UTF-8';
+    try {
+      assert.equal(
+        (await runningAs(pid))?.startedAt,
+        began,
+        'and says it the same way under a locale whose dates are not in English',
+      );
+    } finally {
+      for (const [name, value] of [
+        ['LC_ALL', locale.all],
+        ['LANG', locale.lang],
+      ] as const) {
+        if (value === undefined) {
+          delete process.env[name];
+        } else {
+          process.env[name] = value;
+        }
+      }
+    }
+
     assert.equal(
       await stillTheRecordedRun(record),
       true,
@@ -69227,6 +69447,11 @@ function testCommandLineSetup(): void {
       /Commit it with project\.godot/,
       'and setup says the loader is to be committed',
     );
+    assert.match(
+      setup.stdout,
+      /^ {2}commit res:\/\/gdharness\/loader\.gd with project\.godot, since the entry names it$/m,
+      'a loader that setup wrote is named as the file to commit',
+    );
     assert.doesNotMatch(setup.stdout, /runtime off/, 'rather than to turn it off before an export');
     const ships =
       /^ {2}a debug export carries gdharness\/\. A check or export filter that keeps unknown top-level folders out of a debug pack has to allow it$/m;
@@ -69515,6 +69740,11 @@ function testCommandLineSetup(): void {
       setupAgain.stdout,
       /GdharnessRuntime autoload already registered at /,
       'a setup over one already done says so, as the plugins do, rather than reporting a registration',
+    );
+    assert.doesNotMatch(
+      setupAgain.stdout,
+      /commit res:\/\/gdharness\/loader\.gd/,
+      'and a loader already current is not asked to be committed again',
     );
     assert.ok(existsSync(join(projectDir, '.agents', 'skills', 'gdharness', 'SKILL.md')), 'the skill is in');
 
@@ -90383,6 +90613,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAClickReachesAControlInAScaledWindow,
   testAClickInAWindowNothingEnteredPresses,
   testAClickThatFreesWhatItMissedAnswers,
+  testAClickThatClosesItsWindowAnswers,
   testAPointerAimsInsideANamedNode,
   testATouchReachesTheGameAsAFinger,
   testAHeadlessGameSaysItHasNoWindow,

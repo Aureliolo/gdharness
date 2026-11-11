@@ -3,7 +3,7 @@
  * kinds of file it holds, and where a piece of text occurs.
  */
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { type Dirent, existsSync, readFileSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path';
 import { errorMessage } from './errors.js';
 import { bytesOf, entriesOf } from './listed-reads.js';
@@ -101,37 +101,48 @@ const ASSET_EXTENSIONS = new Set([
   'glsl',
 ]);
 
+/** Which count a file of this extension is in, or null for a sidecar, which is no file of the project's own. */
+function kindOfFile(extension: string): keyof ProjectStructure | null {
+  if (SIDECAR_EXTENSIONS.has(extension)) {
+    return null;
+  }
+  if (SCENE_EXTENSIONS.has(extension)) {
+    return 'scenes';
+  }
+  if (extension === 'gd' || extension === 'cs') {
+    return 'scripts';
+  }
+  return ASSET_EXTENSIONS.has(extension) ? 'assets' : 'other';
+}
+
+function countFilesIn(structure: ProjectStructure, directory: string): void {
+  if (steppedOver(directory)) {
+    return;
+  }
+  for (const entry of entriesOf(directory)) {
+    if (skipped(entry.name)) {
+      continue;
+    }
+    if (entry.isDirectory()) {
+      countFilesIn(structure, join(directory, entry.name));
+    } else if (entry.isFile()) {
+      const kind = kindOfFile(extensionOf(entry.name));
+      if (kind !== null) {
+        structure[kind] += 1;
+      }
+    }
+  }
+}
+
 export function projectStructure(projectPath: string): ProjectStructure {
   const structure: ProjectStructure = { scenes: 0, scripts: 0, assets: 0, other: 0 };
-  const visit = (directory: string): void => {
-    if (steppedOver(directory)) {
-      return;
-    }
-    for (const entry of entriesOf(directory)) {
-      if (skipped(entry.name)) {
-        continue;
-      }
-      if (entry.isDirectory()) {
-        visit(join(directory, entry.name));
-      } else if (entry.isFile()) {
-        const extension = extensionOf(entry.name);
-        if (SIDECAR_EXTENSIONS.has(extension)) {
-          continue;
-        }
-        if (SCENE_EXTENSIONS.has(extension)) {
-          structure.scenes += 1;
-        } else if (extension === 'gd' || extension === 'cs') {
-          structure.scripts += 1;
-        } else if (ASSET_EXTENSIONS.has(extension)) {
-          structure.assets += 1;
-        } else {
-          structure.other += 1;
-        }
-      }
-    }
-  };
-  visit(projectPath);
+  countFilesIn(structure, projectPath);
   return structure;
+}
+
+/** The path of [param name] under [param prefix], a folder spelled with forward slashes or empty. */
+function spelledUnder(prefix: string, name: string): string {
+  return prefix === '' ? name : `${prefix}/${name}`;
 }
 
 /**
@@ -189,19 +200,31 @@ export function steppedOverIn(directory: string): SteppedOver[] {
       if (!entry.isDirectory() || skipped(entry.name)) {
         continue;
       }
-      const spelled = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      const spelled = spelledUnder(prefix, entry.name);
       const path = join(at, entry.name);
-      if (gdignored(path)) {
-        found.push({ folder: spelled, why: 'gdignore' });
-      } else if (installedByUs(path)) {
-        found.push({ folder: spelled, why: 'gdharness' });
-      } else {
+      const why = whySteppedOver(path);
+      if (why === null) {
         visit(path, spelled);
+      } else {
+        found.push({ folder: spelled, why });
       }
     }
   };
   visit(directory, '');
   return found.toSorted((a, b) => a.folder.localeCompare(b.folder));
+}
+
+/** Why [method steppedOverIn] steps over [param directory], or null when it walks it. */
+function whySteppedOver(directory: string): SteppedOver['why'] | null {
+  if (gdignored(directory)) {
+    return 'gdignore';
+  }
+  return installedByUs(directory) ? 'gdharness' : null;
+}
+
+/** Whether [param entry] is a file with one of [param extensions] (with the dot, lower case). */
+function isWantedFile(entry: Dirent, extensions: readonly string[]): boolean {
+  return entry.isFile() && extensions.includes(extname(entry.name).toLowerCase());
 }
 
 function filesBelow(root: string, extensions: readonly string[]): string[] {
@@ -211,13 +234,13 @@ function filesBelow(root: string, extensions: readonly string[]): string[] {
       if (skipped(entry.name)) {
         continue;
       }
-      const spelled = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      const spelled = spelledUnder(prefix, entry.name);
       const path = join(directory, entry.name);
       if (entry.isDirectory()) {
         if (!steppedOver(path)) {
           visit(path, spelled);
         }
-      } else if (entry.isFile() && extensions.includes(extname(entry.name).toLowerCase())) {
+      } else if (isWantedFile(entry, extensions)) {
         found.push(spelled);
       }
     }
@@ -239,6 +262,10 @@ const CARRIES_A_UID = new Set(['gd', 'shader', 'gdshader']);
  */
 export function scriptsWithoutUid(projectPath: string): string[] {
   const found: string[] = [];
+  const lacksItsUid = (directory: string, entry: Dirent): boolean =>
+    entry.isFile() &&
+    CARRIES_A_UID.has(extensionOf(entry.name)) &&
+    !existsSync(join(directory, `${entry.name}.uid`));
   const visit = (directory: string, prefix: string): void => {
     if (steppedOver(directory)) {
       return;
@@ -247,16 +274,10 @@ export function scriptsWithoutUid(projectPath: string): string[] {
       if (skipped(entry.name)) {
         continue;
       }
-      const spelled = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      const spelled = spelledUnder(prefix, entry.name);
       if (entry.isDirectory()) {
         visit(join(directory, entry.name), spelled);
-        continue;
-      }
-      if (!entry.isFile()) {
-        continue;
-      }
-      const extension = extensionOf(entry.name);
-      if (CARRIES_A_UID.has(extension) && !existsSync(join(directory, `${entry.name}.uid`))) {
+      } else if (lacksItsUid(directory, entry)) {
         found.push(spelled);
       }
     }
@@ -358,20 +379,23 @@ function steppedOverAround(projectPath: string, place: string): { folder: string
     if (!statSync(at).isDirectory()) {
       break;
     }
-    const why = skipped(step)
-      ? step.startsWith('.')
-        ? 'its name starts with a dot'
-        : `it is ${step}`
-      : gdignored(at)
-        ? 'it holds a .gdignore'
-        : installedByUs(at)
-          ? 'gdharness installed it'
-          : null;
+    const why = whyAWholeSearchSkips(step, at);
     if (why !== null) {
       return { folder: `res://${relative(projectPath, at).split(sep).join('/')}/`, why };
     }
   }
   return null;
+}
+
+/** Why a whole-project search steps over the folder [param at], named [param step], or null. */
+function whyAWholeSearchSkips(step: string, at: string): string | null {
+  if (skipped(step)) {
+    return step.startsWith('.') ? 'its name starts with a dot' : `it is ${step}`;
+  }
+  if (gdignored(at)) {
+    return 'it holds a .gdignore';
+  }
+  return installedByUs(at) ? 'gdharness installed it' : null;
 }
 
 /** Whether [param bytes] are a binary file's: a NUL in the first eight thousand, as git judges. */
@@ -411,32 +435,39 @@ const BINARY_EXTENSIONS = new Set([
  */
 export function projectTexts(projectPath: string): ProjectText[] {
   const found: ProjectText[] = [];
-  const visit = (directory: string, prefix: string): void => {
-    if (steppedOver(directory)) {
-      return;
-    }
-    for (const entry of entriesOf(directory)) {
-      if (skipped(entry.name)) {
-        continue;
-      }
-      const absolute = join(directory, entry.name);
-      const spelled = `${prefix}${entry.name}`;
-      if (entry.isDirectory()) {
-        visit(absolute, `${spelled}/`);
-        continue;
-      }
-      const extension = extensionOf(entry.name);
-      if (!entry.isFile() || BINARY_EXTENSIONS.has(extension)) {
-        continue;
-      }
-      const bytes = bytesOf(absolute);
-      if (bytes !== null && !isBinary(bytes)) {
-        found.push({ path: `res://${spelled}`, absolute, text: bytes.toString('utf8') });
-      }
-    }
-  };
-  visit(projectPath, '');
+  collectTexts(found, projectPath, '');
   return found;
+}
+
+function collectTexts(found: ProjectText[], directory: string, prefix: string): void {
+  if (steppedOver(directory)) {
+    return;
+  }
+  for (const entry of entriesOf(directory)) {
+    if (skipped(entry.name)) {
+      continue;
+    }
+    const absolute = join(directory, entry.name);
+    const spelled = `${prefix}${entry.name}`;
+    if (entry.isDirectory()) {
+      collectTexts(found, absolute, `${spelled}/`);
+      continue;
+    }
+    const text =
+      entry.isFile() && !BINARY_EXTENSIONS.has(extensionOf(entry.name)) ? textOf(absolute, spelled) : null;
+    if (text !== null) {
+      found.push(text);
+    }
+  }
+}
+
+/** The text file at [param absolute] as a project text, or null when it cannot be read or is binary. */
+function textOf(absolute: string, spelled: string): ProjectText | null {
+  const bytes = bytesOf(absolute);
+  if (bytes === null || isBinary(bytes)) {
+    return null;
+  }
+  return { path: `res://${spelled}`, absolute, text: bytes.toString('utf8') };
 }
 
 /**
@@ -446,33 +477,40 @@ export function projectTexts(projectPath: string): ProjectText[] {
  */
 export function ignoredTexts(projectPath: string): ProjectText[] {
   const found: ProjectText[] = [];
-  const visit = (directory: string, prefix: string, ignored: boolean): void => {
-    if (installedByUs(directory)) {
-      return;
-    }
-    const under = ignored || gdignored(directory);
-    for (const entry of entriesOf(directory)) {
-      if (skipped(entry.name)) {
-        continue;
-      }
-      const absolute = join(directory, entry.name);
-      const spelled = `${prefix}${entry.name}`;
-      if (entry.isDirectory()) {
-        visit(absolute, `${spelled}/`, under);
-        continue;
-      }
-      const extension = extensionOf(entry.name);
-      if (!under || !entry.isFile() || BINARY_EXTENSIONS.has(extension) || entry.name === '.gdignore') {
-        continue;
-      }
-      const bytes = bytesOf(absolute);
-      if (bytes !== null && !isBinary(bytes)) {
-        found.push({ path: `res://${spelled}`, absolute, text: bytes.toString('utf8') });
-      }
-    }
-  };
-  visit(projectPath, '', false);
+  collectIgnoredTexts(found, projectPath, '', false);
   return found;
+}
+
+function collectIgnoredTexts(
+  found: ProjectText[],
+  directory: string,
+  prefix: string,
+  ignored: boolean,
+): void {
+  if (installedByUs(directory)) {
+    return;
+  }
+  const under = ignored || gdignored(directory);
+  for (const entry of entriesOf(directory)) {
+    if (skipped(entry.name)) {
+      continue;
+    }
+    const absolute = join(directory, entry.name);
+    const spelled = `${prefix}${entry.name}`;
+    if (entry.isDirectory()) {
+      collectIgnoredTexts(found, absolute, `${spelled}/`, under);
+      continue;
+    }
+    const wanted =
+      under &&
+      entry.isFile() &&
+      !BINARY_EXTENSIONS.has(extensionOf(entry.name)) &&
+      entry.name !== '.gdignore';
+    const text = wanted ? textOf(absolute, spelled) : null;
+    if (text !== null) {
+      found.push(text);
+    }
+  }
 }
 
 /**
@@ -552,13 +590,112 @@ function stepsBelow(projectPath: string, place: string): string[] | null {
   return steps;
 }
 
-/** Where the query occurs in the project's text files, as res:// paths with line numbers. */
-export function searchProject(projectPath: string, options: SearchOptions): SearchResult {
-  if (options.query === '') {
-    throw new Error(
-      'The query is empty, and an empty query matches every line of every file. Give the text to find.',
-    );
+/** What one search carries from file to file. */
+interface SearchRun {
+  readonly options: SearchOptions;
+  readonly extensions: Set<string> | null;
+  readonly regex: RegExp | null;
+  readonly needle: string;
+  readonly result: SearchResult;
+  /** How many matches are shown so far, against the limit. */
+  shown: number;
+  readonly notSearched: string[];
+  /**
+   * The extensions the walk met, for a search whose fileTypes matched none of them: answered as an
+   * empty search, it read as a project where nothing held the query.
+   */
+  readonly met: Set<string>;
+  readonly within: string;
+  /** Everything the walk meets is below where it starts, so only the start is measured against the project. */
+  readonly start: string[];
+}
+
+function resPathOf(run: SearchRun, place: string): string {
+  return [...run.start, ...relative(run.within, place).split(sep)].filter((step) => step !== '').join('/');
+}
+
+/** The first match in [param line], found or not rather than by what it matched: a lookahead matches the empty string. */
+function matchInLine(run: SearchRun, line: string): { text: string; at: number } | null {
+  if (run.regex === null) {
+    return plainMatch(line, run.needle, run.options.caseSensitive);
   }
+  const exec = run.regex.exec(line);
+  return exec === null ? null : { text: exec[0], at: exec.index };
+}
+
+/** The matches shown in [param bytes], with the summary counting every one. */
+function matchesIn(run: SearchRun, bytes: Buffer): SearchMatch[] {
+  const { summary } = run.result;
+  const matches: SearchMatch[] = [];
+  let matched = false;
+  // Split on either ending, so `$` in a pattern meets the end of a line in a CRLF checkout.
+  for (const [index, line] of bytes.toString('utf8').split(/\r?\n/).entries()) {
+    const found = matchInLine(run, line);
+    if (found === null) {
+      continue;
+    }
+    matched = true;
+    summary.total_matches += 1;
+    if (run.shown >= run.options.maxResults) {
+      summary.truncated = true;
+      continue;
+    }
+    run.shown += 1;
+    matches.push(shownMatch(line, found.at, found.text.length, found.text, index + 1));
+  }
+  if (matched) {
+    summary.files_with_matches += 1;
+  }
+  return matches;
+}
+
+function searchFile(run: SearchRun, entryPath: string, name: string): void {
+  const extension = extensionOf(name);
+  if (extension !== '') {
+    run.met.add(extension);
+  }
+  if (run.extensions !== null && !run.extensions.has(extension)) {
+    return;
+  }
+  const bytes = bytesOf(entryPath);
+  // Every text file by default, told by its content rather than a list of extensions: the list
+  // left out project.godot and C#, so an autoload registered only in project.godot was answered
+  // as used nowhere.
+  if (bytes === null || (run.extensions === null && isBinary(bytes))) {
+    return;
+  }
+
+  run.result.summary.files_searched += 1;
+  const matches = matchesIn(run, bytes);
+  if (matches.length > 0) {
+    run.result.results.push({ file: `res://${resPathOf(run, entryPath)}`, matches });
+  }
+}
+
+function searchDirectory(run: SearchRun, directory: string, named = false): void {
+  if (!named && steppedOver(directory)) {
+    if (gdignored(directory)) {
+      run.notSearched.push(`res://${resPathOf(run, directory)}/`);
+    }
+    return;
+  }
+  // By name, so the matches a search cut at its limit shows are the same on every file system
+  // rather than whichever the directory lists first.
+  for (const entry of entriesOf(directory).toSorted((a, b) => (a.name < b.name ? -1 : 1))) {
+    if (skipped(entry.name)) {
+      continue;
+    }
+    const entryPath = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      searchDirectory(run, entryPath);
+    } else if (entry.isFile()) {
+      searchFile(run, entryPath, entry.name);
+    }
+  }
+}
+
+/** The search for [param options] before it has met a file. */
+function startSearch(projectPath: string, options: SearchOptions): SearchRun {
   const extensions =
     options.fileTypes === undefined
       ? null
@@ -570,107 +707,59 @@ export function searchProject(projectPath: string, options: SearchOptions): Sear
   };
   const regex = options.regex ? compiledQuery(options.query, options.caseSensitive) : null;
   const needle = options.caseSensitive ? options.query : options.query.toLowerCase();
-  // The search goes on past the limit and only stops answering lines, so the summary and
-  // not_searched describe the whole project: a search cut at one line answered total_matches 1 of
-  // five, and left out the ignored folder it had not yet reached. Truncated only once a match past
-  // the limit has been seen, since a search whose matches came to the limit exactly is whole.
-  let shown = 0;
-  const notSearched: string[] = [];
-  // The extensions the walk met, for a search whose fileTypes matched none of them: answered as an
-  // empty search, it read as a project where nothing held the query.
-  const met = new Set<string>();
   const within = options.within ?? projectPath;
   // Everything the walk meets is below where it starts, spelt as that is, so only the start is
   // measured against the project.
   const start = stepsBelow(projectPath, within) ?? relative(projectPath, within).split(sep);
-  const resPathOf = (place: string): string =>
-    [...start, ...relative(within, place).split(sep)].filter((step) => step !== '').join('/');
-
-  const searchFile = (entryPath: string, name: string): void => {
-    const extension = extensionOf(name);
-    if (extension !== '') {
-      met.add(extension);
-    }
-    if (extensions !== null && !extensions.has(extension)) {
-      return;
-    }
-    const bytes = bytesOf(entryPath);
-    // Every text file by default, told by its content rather than a list of extensions: the list
-    // left out project.godot and C#, so an autoload registered only in project.godot was answered
-    // as used nowhere.
-    if (bytes === null || (extensions === null && isBinary(bytes))) {
-      return;
-    }
-
-    result.summary.files_searched += 1;
-    const matches: SearchMatch[] = [];
-    let matched = false;
-    // Split on either ending, so `$` in a pattern meets the end of a line in a CRLF checkout.
-    for (const [index, line] of bytes.toString('utf8').split(/\r?\n/).entries()) {
-      // Found or not, rather than by what it matched: a lookahead matches the empty string.
-      const exec = regex?.exec(line);
-      const found =
-        regex === null
-          ? plainMatch(line, needle, options.caseSensitive)
-          : exec === null || exec === undefined
-            ? null
-            : { text: exec[0], at: exec.index };
-      if (found === null) {
-        continue;
-      }
-      matched = true;
-      result.summary.total_matches += 1;
-      if (shown >= options.maxResults) {
-        result.summary.truncated = true;
-        continue;
-      }
-      shown += 1;
-      matches.push(shownMatch(line, found.at, found.text.length, found.text, index + 1));
-    }
-    if (matched) {
-      result.summary.files_with_matches += 1;
-    }
-    if (matches.length > 0) {
-      result.results.push({ file: `res://${resPathOf(entryPath)}`, matches });
-    }
+  // The search goes on past the limit and only stops answering lines, so the summary and
+  // not_searched describe the whole project: a search cut at one line answered total_matches 1 of
+  // five, and left out the ignored folder it had not yet reached. Truncated only once a match past
+  // the limit has been seen, since a search whose matches came to the limit exactly is whole.
+  return {
+    options,
+    extensions,
+    regex,
+    needle,
+    result,
+    shown: 0,
+    notSearched: [],
+    met: new Set(),
+    within,
+    start,
   };
-  const visit = (directory: string, named = false): void => {
-    if (!named && steppedOver(directory)) {
-      if (gdignored(directory)) {
-        notSearched.push(`res://${resPathOf(directory)}/`);
-      }
-      return;
-    }
-    // By name, so the matches a search cut at its limit shows are the same on every file system
-    // rather than whichever the directory lists first.
-    for (const entry of entriesOf(directory).toSorted((a, b) => (a.name < b.name ? -1 : 1))) {
-      if (skipped(entry.name)) {
-        continue;
-      }
-      const entryPath = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        visit(entryPath);
-      } else if (entry.isFile()) {
-        searchFile(entryPath, entry.name);
-      }
-    }
-  };
-  if (statSync(within).isDirectory()) {
-    visit(within, true);
-  } else {
-    searchFile(within, basename(within));
+}
+
+/** The note on a search that searched no file, or undefined for one that did. */
+function nothingSearchedNote(run: SearchRun): string | undefined {
+  if (run.extensions === null || run.result.summary.files_searched > 0) {
+    return undefined;
   }
-  const answered = notSearched.length === 0 ? result : { ...result, not_searched: notSearched };
+  return run.met.size === 0
+    ? 'No file was searched: there is no file there to search.'
+    : `No file was searched: none there has the extension ${[...run.extensions].join(', ')}. The extensions there are ${[...run.met].toSorted().join(', ')}.`;
+}
+
+/** Where the query occurs in the project's text files, as res:// paths with line numbers. */
+export function searchProject(projectPath: string, options: SearchOptions): SearchResult {
+  if (options.query === '') {
+    throw new Error(
+      'The query is empty, and an empty query matches every line of every file. Give the text to find.',
+    );
+  }
+  const run = startSearch(projectPath, options);
+  const { within, result } = run;
+  if (statSync(within).isDirectory()) {
+    searchDirectory(run, within, true);
+  } else {
+    searchFile(run, within, basename(within));
+  }
+  const answered = run.notSearched.length === 0 ? result : { ...result, not_searched: run.notSearched };
   const around = options.within === undefined ? null : steppedOverAround(projectPath, within);
   const notes = [
     around === null
       ? undefined
       : `${around.folder} is searched because path names it. A search of the whole project steps over it, since ${around.why}.`,
-    extensions === null || result.summary.files_searched > 0
-      ? undefined
-      : met.size === 0
-        ? 'No file was searched: there is no file there to search.'
-        : `No file was searched: none there has the extension ${[...extensions].join(', ')}. The extensions there are ${[...met].toSorted().join(', ')}.`,
+    nothingSearchedNote(run),
   ].filter((note) => note !== undefined);
   return notes.length === 0 ? answered : { ...answered, note: notes.join(' ') };
 }
