@@ -29,12 +29,13 @@ import {
   SILENCE_FLOOR_SECONDS,
   sweepRunDirectories,
   versionNamed,
+  WINDOWS_EXCEPTION,
   watchedEngine,
-  wholeFlag,
 } from './engine-launch.js';
 import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
 import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE } from './game-log.js';
+import { wholeFlag } from './launch.js';
 import { readLog } from './log-read.js';
 import { isRecord } from './records.js';
 import { SHARE_SCRIPT } from './setup.js';
@@ -48,8 +49,6 @@ const INTO = '--gdh-share-dir=';
 const PROGRESS = /^gdharness share: (.+) (\d+) of (\d+) runs$/gm;
 /** How often a run says how far its workers have got, between the lines saying one has finished. */
 const PROGRESS_EVERY_MS = 60_000;
-/** The least exit code that is a Windows exception status, read unsigned. */
-const WINDOWS_EXCEPTION = 0xc0000000;
 
 const VALUED = new Set([
   '--workers',

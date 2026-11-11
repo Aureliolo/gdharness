@@ -62,7 +62,7 @@ import { alive } from './alive.js';
 import { cacheHome } from './cache-home.js';
 import { callProgress, callSignal, callSlotWaits } from './call-signal.js';
 import { helperPid } from './desktop.js';
-import { EngineUsageError } from './errors.js';
+import { wholeFlag } from './launch.js';
 import {
   ancestorsIn,
   type ProcessTree,
@@ -137,10 +137,7 @@ export function machineSlots(
   const counted = nonEmpty(env[SLOT_COUNT_VARIABLE]);
   let count = asked.count;
   if (count === null && counted !== undefined) {
-    count = Number(counted);
-    if (!Number.isInteger(count) || count < 1) {
-      throw new EngineUsageError(`${SLOT_COUNT_VARIABLE} takes a whole number above 0, not ${counted}.`);
-    }
+    count = wholeFlag(counted, SLOT_COUNT_VARIABLE);
   }
   return { directory, count: count ?? Math.max(1, Math.floor(machine.processors / PROCESSORS_A_SLOT)) };
 }
@@ -436,14 +433,21 @@ const SEATED_SUFFIX = '.seated';
 type SlotLimit = 'gate' | 'kept' | 'games' | 'starved';
 
 /** The slot numbers a take may try, in order, and what holds it to them when something does. */
-export interface SlotsDrawn {
-  readonly numbers: readonly number[];
-  readonly limit?: SlotLimit;
-  /** Free ones of them the take leaves to takers waiting longer: see {@link SlotLine}. */
-  readonly left?: readonly number[];
-  /** What a starved measurement's claim holds the take back for: see {@link STARVED_FILE}. */
-  readonly heldFor?: string;
-}
+export type SlotsDrawn =
+  | {
+      readonly numbers: readonly number[];
+      readonly limit?: Exclude<SlotLimit, 'starved'>;
+      /** Free ones of them the take leaves to takers waiting longer: see {@link SlotLine}. */
+      readonly left?: readonly number[];
+      readonly heldFor?: undefined;
+    }
+  | {
+      readonly numbers: readonly number[];
+      readonly limit: 'starved';
+      readonly left?: readonly number[];
+      /** What a starved measurement's claim holds the take back for: see {@link STARVED_FILE}. */
+      readonly heldFor: string;
+    };
 
 /**
  * The file in the slots folder a measurement that has waited two hours for its turn writes to claim
@@ -1465,7 +1469,7 @@ export function slotWaitSaid(
 ): string {
   const so = `Waiting${waitedMs >= 1000 ? ` ${String(Math.round(waitedMs / 1000))} s so far` : ''} for an engine`;
   if (drawn.limit === 'starved') {
-    return `${so}: ${drawn.heldFor ?? 'held for a measurement'}. The engine starts once that measurement has run.`;
+    return `${so}: ${drawn.heldFor}. The engine starts once that measurement has run.`;
   }
   const taking = drawn.limit === undefined ? count : drawn.numbers.length;
   const slots = `${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'is' : 'are'} in use`;
@@ -1525,7 +1529,7 @@ export function slotWaitedSaid(
 ): string {
   const waited = `This call waited ${String(Math.round(waitedMs / 1000))} s for an engine slot in all.`;
   if (drawn.limit === 'starved') {
-    return `${waited} When it first waited, it was ${drawn.heldFor ?? 'held for a measurement'}.`;
+    return `${waited} When it first waited, it was ${drawn.heldFor}.`;
   }
   const taking = drawn.limit === undefined ? count : drawn.numbers.length;
   const slots = `${slotsSaid(taking, count, directory, drawn.limit)} ${taking === 1 ? 'was' : 'were'} in use`;

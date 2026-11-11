@@ -40,14 +40,13 @@ import {
   sweepRunDirectories,
   versionNamed,
   watchedEngine,
-  wholeFlag,
 } from './engine-launch.js';
 import { type SelfTypedExport, selfTypedExports } from './engine-leaks.js';
 import { EngineSlots, machineSlots, ownStart } from './engine-slots.js';
 import { EngineUsageError } from './errors.js';
 import { CONTROL_SEQUENCE } from './game-log.js';
 import { staleImports } from './import-freshness.js';
-import { hiddenWindowFlags } from './launch.js';
+import { hiddenWindowFlags, wholeFlag } from './launch.js';
 import { freeLibraryCopies, seedExtensionList, unlistedExtensions } from './library-copies.js';
 import { prependTo, readLog } from './log-read.js';
 import { isRecord, isStringList } from './records.js';
