@@ -194,8 +194,8 @@ func _init(host: Node) -> void:
 	_host = host
 
 
-## The game's windows as a screen reader is told them, each a tree of elements.
-func get_accessibility(params: Dictionary) -> Dictionary:
+## Why this game's tree cannot be read where it runs, or "" when it can.
+static func _unreadable_here() -> String:
 	if DisplayServer.get_name() == "headless":
 		# Both needs at once: told only the window, a caller started a windowed run and was then
 		# refused for the tree the engine had not been asked to build.
@@ -209,25 +209,131 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 				)
 				% _setting()
 			)
-		return _refused(
+		return (
 			(
-				(
-					"A headless run has no window, so a screen reader is told nothing: start the "
-					+ "run with headless: false%s."
-				)
-				% also
+				"A headless run has no window, so a screen reader is told nothing: start the "
+				+ "run with headless: false%s."
 			)
+			% also
 		)
 	if OS.get_name() != "Windows":
-		return _refused(
+		return (
 			(
-				(
-					"The tree is read through UI Automation, the interface a Windows screen reader "
-					+ "uses, and this game runs on %s, whose screen readers ask it through another"
-				)
-				% OS.get_name()
+				"The tree is read through UI Automation, the interface a Windows screen reader "
+				+ "uses, and this game runs on %s, whose screen readers ask it through another"
 			)
+			% OS.get_name()
 		)
+	return ""
+
+
+## Waits out the client [param pid] walking [param windows] windows, a frame at a time rather than
+## blocking: the client's questions are answered on the game's main thread, which a blocking wait
+## would hold, and neither side would move. Two budgets, so a slow start is never charged to the
+## walk: one for PowerShell to begin and load UI Automation, and once it has, one for the walks.
+## Answers why it was stopped, or "" once the walk is done.
+func _walk_waited(pid: int, progress: String, windows: int, started_ms: int) -> String:
+	var began_at: int = Time.get_ticks_msec()
+	var deadline: int = _deadline(began_at, -1, windows)
+	var walking: bool = false
+	var looked_at: int = began_at
+	while OS.is_process_running(pid):
+		var now: int = Time.get_ticks_msec()
+		# Read again at the deadline too, so an answer marked since the last look is taken rather
+		# than stopped.
+		if now - looked_at >= LOOK_MS or now > deadline:
+			looked_at = now
+			var marked: String = FileAccess.get_file_as_string(progress)
+			if not walking and marked.contains("loaded "):
+				walking = true
+				deadline = _deadline(began_at, now, windows)
+			# The answer is whole once it is marked, so the read is done whatever the client does
+			# after it, and a client slow to exit costs the read nothing.
+			if marked.contains("answered "):
+				var _ended: Error = OS.kill(pid)
+				return ""
+		if now > deadline:
+			var _killed: Error = OS.kill(pid)
+			var reached: String = _reached(
+				FileAccess.get_file_as_string(progress),
+				started_ms,
+				int(Time.get_unix_time_from_system() * 1000.0)
+			)
+			var _gone: Error = DirAccess.remove_absolute(progress)
+			return (
+				"UI Automation had not read the tree after %d ms, so it was stopped: %s"
+				% [now - began_at, reached]
+			)
+		await _host.get_tree().process_frame
+	return ""
+
+
+## Gives each of [param windows] the id in [param ids] at its place, -1 past their end, and matches
+## its elements to the nodes [param made_by] says made them.
+func _match_windows(
+	windows: Array, ids: Array[int], made_by: Dictionary, placing: GdhPlacing
+) -> void:
+	for at: int in windows.size():
+		var window: Dictionary = windows[at]
+		window["window_id"] = ids[at] if at < ids.size() else -1
+		_match(window, made_by, placing)
+
+
+## Notes in [param result] what [param placing] could not place and what [param answer], the
+## client's, could not read.
+static func _note_reading(result: Dictionary, placing: GdhPlacing, answer: Dictionary) -> void:
+	if placing.tooltips > 0:
+		result["tooltip_note"] = (
+			"tooltip is the node's tooltip_text, which the engine puts in the tree, and UI "
+			+ "Automation, as AccessKit fills it in, has no property that carries it (measured on "
+			+ "4.7.2), so a screen reader on Windows is not told it. Say what a reader needs in "
+			+ "accessibility_description."
+		)
+	if placing.asked > 0 and placing.placed == 0:
+		# Nothing at all matched: the element ids are not the engine's element RIDs any more, which
+		# an AccessKit that numbers its elements another way would do, and every node would read
+		# null.
+		result["node_note"] = (
+			"No element could be matched to the node that made it: UI Automation's runtime ids did "
+			+ "not carry the engine's element ids, so node and part_of are the windows' alone."
+		)
+	if answer.has("description_unread"):
+		result["description_note"] = (
+			"Descriptions could not be read, so none is shown: %s"
+			% str(answer["description_unread"])
+		)
+
+
+## Why the windows hold nothing because the engine was not asked to build the tree, or "" when it
+## was. The command line's --accessibility is consumed by the engine and not handed on, so only
+## the setting and a screen reader can say the tree is built. Otherwise an empty window is most
+## likely a game that builds none.
+static func _tree_unbuilt() -> String:
+	var setting: String = _setting()
+	# 1 is a screen reader running, 0 none and -1 a platform that cannot say.
+	var read_aloud: bool = (
+		setting == "auto" and DisplayServer.accessibility_screen_reader_active() == 1
+	)
+	if setting == "always" or read_aloud:
+		return ""
+	return (
+		(
+			"UI Automation found nothing in the game's windows: the engine builds the "
+			+ "tree a screen reader reads only with "
+			+ "accessibility/general/accessibility_support at Always Active, or at "
+			+ "Auto with a screen reader running when it starts, and this project's "
+			+ "is %s. "
+			+ 'Start the run with engineArgs ["--accessibility", "always"].'
+		)
+		% setting
+	)
+
+
+## The game's windows as a screen reader is told them, each a tree of elements.
+func get_accessibility(params: Dictionary) -> Dictionary:
+	var unread: String = _unreadable_here()
+	if not unread.is_empty():
+		return _refused(unread)
 	var handles: Array[String] = []
 	var ids: Array[int] = []
 	for id: int in DisplayServer.get_window_list():
@@ -276,44 +382,9 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 	)
 	if pid <= 0:
 		return _refused("PowerShell could not be started from %s to read the tree" % shell)
-	# Waited out a frame at a time rather than blocking: the client's questions are answered on the
-	# game's main thread, which a blocking wait would hold, and neither side would move. Two
-	# budgets, so a slow start is never charged to the walk: one for PowerShell to begin and load UI
-	# Automation, and once it has, one for the walks.
-	var began_at: int = Time.get_ticks_msec()
-	var deadline: int = _deadline(began_at, -1, handles.size())
-	var walking: bool = false
-	var looked_at: int = began_at
-	while OS.is_process_running(pid):
-		var now: int = Time.get_ticks_msec()
-		# Read again at the deadline too, so an answer marked since the last look is taken rather
-		# than stopped.
-		if now - looked_at >= LOOK_MS or now > deadline:
-			looked_at = now
-			var marked: String = FileAccess.get_file_as_string(progress)
-			if not walking and marked.contains("loaded "):
-				walking = true
-				deadline = _deadline(began_at, now, handles.size())
-			# The answer is whole once it is marked, so the read is done whatever the client does
-			# after it, and a client slow to exit costs the read nothing.
-			if marked.contains("answered "):
-				var _ended: Error = OS.kill(pid)
-				break
-		if now > deadline:
-			var _killed: Error = OS.kill(pid)
-			var reached: String = _reached(
-				FileAccess.get_file_as_string(progress),
-				started_ms,
-				int(Time.get_unix_time_from_system() * 1000.0)
-			)
-			var _gone: Error = DirAccess.remove_absolute(progress)
-			return _refused(
-				(
-					"UI Automation had not read the tree after %d ms, so it was stopped: %s"
-					% [now - began_at, reached]
-				)
-			)
-		await _host.get_tree().process_frame
+	var stopped: String = await _walk_waited(pid, progress, handles.size(), started_ms)
+	if not stopped.is_empty():
+		return _refused(stopped)
 
 	var text: String = FileAccess.get_file_as_string(out)
 	var took: Dictionary = _took(
@@ -339,11 +410,7 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 	var placing: GdhPlacing = GdhPlacing.new()
 	var elements: int = 0
 	var unnamed: int = 0
-	for at: int in windows.size():
-		var window: Dictionary = windows[at]
-		var window_id: int = ids[at] if at < ids.size() else -1
-		window["window_id"] = window_id
-		_match(window, made_by, placing)
+	_match_windows(windows, ids, made_by, placing)
 	for at: int in windows.size():
 		var window: Dictionary = windows[at]
 		var window_id: int = window["window_id"]
@@ -358,49 +425,11 @@ func get_accessibility(params: Dictionary) -> Dictionary:
 	var result: Dictionary = { "windows": windows, "elements": elements }
 	if not took.is_empty():
 		result["tookMsBy"] = took
-	if placing.tooltips > 0:
-		result["tooltip_note"] = (
-			"tooltip is the node's tooltip_text, which the engine puts in the tree, and UI "
-			+ "Automation, as AccessKit fills it in, has no property that carries it (measured on "
-			+ "4.7.2), so a screen reader on Windows is not told it. Say what a reader needs in "
-			+ "accessibility_description."
-		)
-	if placing.asked > 0 and placing.placed == 0:
-		# Nothing at all matched: the element ids are not the engine's element RIDs any more, which
-		# an AccessKit that numbers its elements another way would do, and every node would read
-		# null.
-		result["node_note"] = (
-			"No element could be matched to the node that made it: UI Automation's runtime ids did "
-			+ "not carry the engine's element ids, so node and part_of are the windows' alone."
-		)
-	if answer.has("description_unread"):
-		result["description_note"] = (
-			"Descriptions could not be read, so none is shown: %s"
-			% str(answer["description_unread"])
-		)
+	_note_reading(result, placing, answer)
 	if elements <= windows.size():
-		var setting: String = _setting()
-		# The command line's --accessibility is consumed by the engine and not handed on, so only
-		# the setting and a screen reader can say the tree is built. Otherwise an empty window is
-		# most likely a game that builds none.
-		# 1 is a screen reader running, 0 none and -1 a platform that cannot say.
-		var read_aloud: bool = (
-			setting == "auto" and DisplayServer.accessibility_screen_reader_active() == 1
-		)
-		if setting != "always" and not read_aloud:
-			return _refused(
-				(
-					(
-						"UI Automation found nothing in the game's windows: the engine builds the "
-						+ "tree a screen reader reads only with "
-						+ "accessibility/general/accessibility_support at Always Active, or at "
-						+ "Auto with a screen reader running when it starts, and this project's "
-						+ "is %s. "
-						+ 'Start the run with engineArgs ["--accessibility", "always"].'
-					)
-					% setting
-				)
-			)
+		var unbuilt: String = _tree_unbuilt()
+		if not unbuilt.is_empty():
+			return _refused(unbuilt)
 		result["_note"] = (
 			"The windows hold nothing a screen reader is told: Controls are in the tree, and "
 			+ "Node2D and Node3D are not unless the game creates elements for them."

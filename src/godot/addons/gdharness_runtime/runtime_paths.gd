@@ -1030,48 +1030,9 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 		if not container_call.is_empty():
 			return container_calls_refused(called_as, "a map", container_call, given_count)
 		var map: Dictionary = holder
-		var keys: Array = map.keys()
-		# A key reading as the step and still not reached is one of a type a step cannot spell, and
-		# saying the map has no key 3 while listing 3 among its keys contradicts itself.
-		var word: String = key_written(named)
-		for key: Variant in keys:
-			if str(key) == word:
-				return (
-					"%s has a key that reads %s, but it is %s, which a path step cannot name"
-					% [called_as, named, type_string(typeof(key))]
-				)
-		# Eight of them, because a map keyed by something unexpected is told by the first few and a
-		# map of two hundred would bury the sentence saying which key was missing. Each written as a
-		# step reaching it, so the list says how to name a key holding a colon.
-		var some: Array[String] = []
-		for key: Variant in keys.slice(0, 8):
-			some.append(step_naming(key))
-		var rest: String = ""
-		if keys.size() > 8:
-			rest = " and %d more" % [keys.size() - 8]
-		return "%s has no key %s. It is keyed by %s%s" % [called_as, named, ", ".join(some), rest]
+		return _no_key(map, named, called_as)
 	if composite(holder):
-		var kind: String = type_string(typeof(holder))
-		var sort: String = GdhRead.with_article(kind)
-		var has: String = ", ".join(GdhSerialisation.components_of(holder))
-		if not container_call.is_empty():
-			var calls: Array = value_calls(holder)
-			if given_count > 0 and container_call in calls:
-				return (
-					"%s is %s, and a path calls %s() on one with no arguments"
-					% [called_as, sort, container_call]
-				)
-			var spelled: Array[String] = []
-			for each: Variant in calls:
-				spelled.append(str(each) + "()")
-			return (
-				(
-					"%s is %s, and %s() is not one of the calls a path makes on one, which read it"
-					+ " and take no arguments: %s. Its components are %s"
-				)
-				% [called_as, sort, container_call, ", ".join(spelled), has]
-			)
-		return "%s is %s, so it has no %s. It has %s" % [called_as, sort, named, has]
+		return _nothing_in_value(holder, named, called_as, container_call, given_count)
 	if not holder is Object:
 		return (
 			"%s is %s, which has nothing to read %s off"
@@ -1081,6 +1042,11 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 	var method: String = method_of(named)
 	if not method.is_empty():
 		return call_refused(object, method, called_as, given_count)
+	return _no_property(object, named, called_as)
+
+
+## Why [param object] has no property [param named], with the method most likely meant.
+static func _no_property(object: Object, named: String, called_as: String) -> String:
 	# A method spelled as a property is the likeliest thing behind a name the object has no property
 	# for, and the caller is one pair of brackets away from what they meant.
 	if object.has_method(named):
@@ -1097,6 +1063,58 @@ static func nothing_there(holder: Variant, named: String, called_as: String) -> 
 				% [called_as, named, getter, getter]
 			)
 	return GdhRead.near_property("%s has no property %s" % [called_as, named], object, named)
+
+
+## Why the map [param map] has no key [param named], with the keys it has.
+static func _no_key(map: Dictionary, named: String, called_as: String) -> String:
+	var keys: Array = map.keys()
+	# A key reading as the step and still not reached is one of a type a step cannot spell, and
+	# saying the map has no key 3 while listing 3 among its keys contradicts itself.
+	var word: String = key_written(named)
+	for key: Variant in keys:
+		if str(key) == word:
+			return (
+				"%s has a key that reads %s, but it is %s, which a path step cannot name"
+				% [called_as, named, type_string(typeof(key))]
+			)
+	# Eight of them, because a map keyed by something unexpected is told by the first few and a
+	# map of two hundred would bury the sentence saying which key was missing. Each written as a
+	# step reaching it, so the list says how to name a key holding a colon.
+	var some: Array[String] = []
+	for key: Variant in keys.slice(0, 8):
+		some.append(step_naming(key))
+	var rest: String = ""
+	if keys.size() > 8:
+		rest = " and %d more" % [keys.size() - 8]
+	return "%s has no key %s. It is keyed by %s%s" % [called_as, named, ", ".join(some), rest]
+
+
+## Why the value [param holder], a vector, colour or another value of components, has nothing
+## named [param named], with the calls a path makes on it and its components.
+static func _nothing_in_value(
+	holder: Variant, named: String, called_as: String, container_call: String, given_count: int
+) -> String:
+	var kind: String = type_string(typeof(holder))
+	var sort: String = GdhRead.with_article(kind)
+	var has: String = ", ".join(GdhSerialisation.components_of(holder))
+	if container_call.is_empty():
+		return "%s is %s, so it has no %s. It has %s" % [called_as, sort, named, has]
+	var calls: Array = value_calls(holder)
+	if given_count > 0 and container_call in calls:
+		return (
+			"%s is %s, and a path calls %s() on one with no arguments"
+			% [called_as, sort, container_call]
+		)
+	var spelled: Array[String] = []
+	for each: Variant in calls:
+		spelled.append(str(each) + "()")
+	return (
+		(
+			"%s is %s, and %s() is not one of the calls a path makes on one, which read it"
+			+ " and take no arguments: %s. Its components are %s"
+		)
+		% [called_as, sort, container_call, ", ".join(spelled), has]
+	)
 
 
 ## Why [param method] is not a call a path makes on [param sort] ("a list" or "a map", or another
