@@ -23530,6 +23530,101 @@ async function testAClickThatFreesWhatItMissedAnswers(): Promise<void> {
 }
 
 /**
+ * A click whose press frees the window the button is on still answers the click.
+ *
+ * Reported from a game whose notice closes itself from its own button: the click answered {} and
+ * the game logged a type error from the runtime addon, since the window was its viewport.
+ */
+async function testAClickThatClosesItsWindowAnswers(): Promise<void> {
+  const godotPath = resolveGodotPath();
+  if (!godotPath) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('click that closes its window regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-closing-'));
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-closing-rt-'));
+  const server = new ServerProcess({
+    env: { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime },
+  });
+  try {
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Closing"\n' +
+        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
+        '[display]\n\nwindow/size/viewport_width=320\nwindow/size/viewport_height=180\n\n' +
+        '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+    );
+    writeFileSync(
+      join(project, 'main.gd'),
+      [
+        'extends Control',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar _closed: int = $Notice/Close.pressed.connect($Notice.queue_free)',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Control"]\noffset_right = 320.0\noffset_bottom = 180.0\nmouse_filter = 2\nscript = ExtResource("1")\n\n' +
+        '[node name="Notice" type="Window" parent="."]\nposition = Vector2i(40, 40)\nsize = Vector2i(160, 80)\n\n' +
+        '[node name="Close" type="Button" parent="Notice"]\noffset_left = 20.0\noffset_top = 20.0\noffset_right = 120.0\noffset_bottom = 50.0\ntext = "Close"\n',
+    );
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      { recursive: true },
+    );
+    await server.initialize('regression-test');
+    const call = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
+      const response = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
+      return parseTextContent(response) ?? textOf(response);
+    };
+    const started = await call('editor_run', {
+      projectPath: project,
+      op: 'start',
+      headless: true,
+      runtimeWaitMs: 30_000,
+    });
+    assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+
+    const clicked = await call('runtime_input', { op: 'click', says: 'Close' });
+    const shown = JSON.stringify(clicked);
+    assert.equal(get(clicked, 'type'), 'clicked', `a whole answer: ${shown}`);
+    assert.deepEqual(
+      [get(clicked, 'path'), get(clicked, 'found', 'says'), get(clicked, 'landed')],
+      ['/root/Main/Notice/Close', 'Close', true],
+      shown,
+    );
+    assert.equal(get(clicked, 'control_afterwards'), 'freed', shown);
+
+    const notice = await call('runtime_inspect', { op: 'rect', nodePath: '/root/Main/Notice' });
+    assert.match(
+      JSON.stringify(notice),
+      /not found|no node/i,
+      `the window is gone: ${JSON.stringify(notice)}`,
+    );
+    const printed = JSON.stringify(await call('editor_output', { op: 'run' }));
+    assert.doesNotMatch(
+      printed,
+      /runtime_input\.gd|previously freed/,
+      `and the addon raised nothing: ${printed}`,
+    );
+    await stopItsRun(server);
+  } finally {
+    await server.stop();
+    sweep(project);
+    sweep(runtime);
+  }
+}
+
+/**
  * A pointer call aims at a point in a named node's own space, and reaches it in a native window.
  *
  * Reported from a game with subwindow embedding off whose second window holds one Control that
@@ -90416,6 +90511,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAClickReachesAControlInAScaledWindow,
   testAClickInAWindowNothingEnteredPresses,
   testAClickThatFreesWhatItMissedAnswers,
+  testAClickThatClosesItsWindowAnswers,
   testAPointerAimsInsideANamedNode,
   testATouchReachesTheGameAsAFinger,
   testAHeadlessGameSaysItHasNoWindow,

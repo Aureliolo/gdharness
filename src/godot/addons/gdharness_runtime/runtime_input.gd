@@ -114,10 +114,14 @@ static func _focus_of(gui: Viewport) -> String:
 ## [param answer] with focused_after when a click moved [param gui]'s focus from [param before]. A
 ## click into a field focused it with nothing in the answer saying so, so a caller typing next
 ## learnt where the text went only from the typing's own answer.
-static func _focus_moved(answer: Dictionary, gui: Viewport, before: String) -> Dictionary:
+##
+## [param gui] is a Variant because the click can free it, as a button closing the window it is on
+## does, and a parameter typed Viewport refuses a freed object before the check here can run.
+static func _focus_moved(answer: Dictionary, gui: Variant, before: String) -> Dictionary:
 	if not is_instance_valid(gui):
 		return answer
-	var now: String = _focus_of(gui)
+	var held: Object = gui
+	var now: String = _focus_of(held as Viewport)
 	if now.is_empty() and not before.is_empty():
 		answer["focused_after"] = null
 	elif now != before:
