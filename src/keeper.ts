@@ -449,7 +449,7 @@ async function keep(): Promise<void> {
       debuggerPeer === null ? null : (request) => debuggerPeer.ask(request),
     );
     if (listening !== null) {
-      amendNoteIfItCan({ ...record, keeper: listening.address });
+      writeNoteIfItCan({ ...record, keeper: listening.address });
     }
   }
   // Nobody reads this once the launcher has gone, and a write to a pipe with no reader is an error.
