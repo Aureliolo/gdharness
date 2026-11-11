@@ -12118,6 +12118,25 @@ function testProjectGodotReadsQuotedKeys(): void {
   );
 }
 
+/** The keys above the first header are their own section, apart from one a file calls `[root]`. */
+function testProjectGodotKeepsTopLevelKeysApartFromARootSection(): void {
+  const file = 'config_version=5\n\n[root]\nconfig_version=9\nx=1\n\n[a]\nx=2\n';
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(parseProjectGodot(file)).map(([name, keys]) => [name, { ...keys }])),
+    { '': { config_version: 5 }, root: { config_version: 9, x: 1 }, a: { x: 2 } },
+  );
+  assert.deepEqual(
+    [...settingKeys(file)],
+    [
+      ['config_version', 5],
+      ['root/config_version', 9],
+      ['root/x', 1],
+      ['a/x', 2],
+    ],
+    'a top-level key is named alone, as Godot names it',
+  );
+}
+
 /** A float Godot wrote with an exponent is a number, and one past a double stays text. */
 function testProjectGodotReadsExponentFloats(): void {
   const physics = parseProjectGodot(
@@ -88008,6 +88027,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testProjectGodotKeepsIndentInsideMultilineStrings,
   testProjectGodotReadsQuotedKeys,
   testProjectGodotReadsExponentFloats,
+  testProjectGodotKeepsTopLevelKeysApartFromARootSection,
   testLettingGoOfTheAdapterSendsItNothing,
   testAVariablesReadSaysWhatItCouldNotRead,
   testAnEvaluateIsAskedOnlyWhereTheGameCanAnswer,
