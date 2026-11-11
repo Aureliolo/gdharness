@@ -341,33 +341,52 @@ function editorNoteAt(path: string): EditorRunNote | null {
  * so without this a bench that had finished cleanly came back as one whose exit code "was never
  * collected". The keeper is the one process that can wait on the game, so it is the one that says.
  *
- * Only when the note is still this run's: a later run of the same project replaces it, and writing
- * an exit code over that note would end the later run on paper.
+ * Only while no later run's note is there. A run is told by its transcript, since a pid comes round
+ * again.
  */
 export function recordRunEnded(
-  projectPath: string,
-  pid: number,
+  record: RunRecord,
   ending: {
     readonly exitCode: number | null;
     readonly exitSignal: string | null;
     readonly notTold?: boolean;
   },
-): void {
-  const path = runRecordPath(projectPath);
-  const record = recordAt(path);
-  if (record === null || record.pid !== pid) {
-    return;
-  }
+): boolean {
   const { endingAt: _looked, ...kept } = record;
-  const written = {
+  // Unwritable leaves the note as it was, a run with no recorded end, which every reader handles.
+  return amendRunRecord({
     ...kept,
     ...(ending.exitCode === null ? {} : { exitCode: ending.exitCode }),
     ...(ending.exitSignal === null ? {} : { exitSignal: ending.exitSignal }),
     ...(ending.notTold === true ? { exitNotTold: true } : {}),
     endedAt: Date.now(),
-  };
-  // Unwritable leaves the note as it was, a run with no recorded end, which every reader handles.
-  writeWhole(path, JSON.stringify(written, null, 2));
+  });
+}
+
+/** Whether both name one transcript, which only the run that opened it can. */
+export function sameRun(
+  one: { readonly transcript: string | null },
+  other: { readonly transcript: string | null },
+): boolean {
+  return one.transcript !== null && one.transcript === other.transcript;
+}
+
+/**
+ * Writes [param record] as its project's note unless the note there is another run's, and says
+ * whether it wrote.
+ *
+ * A note that is missing is written: a stop clears the note of a game still running, and the keeper's
+ * later words about its run must still land. A run is told by its transcript because a restart
+ * changes the pid, and a later run can be handed the same pid and the same start.
+ */
+export function amendRunRecord(record: RunRecord): boolean {
+  const path = runRecordPath(record.projectPath);
+  const there = recordAt(path);
+  if (there !== null && !sameRun(there, record)) {
+    return false;
+  }
+  mkdirSync(runsDirectory(), { recursive: true });
+  return writeWhole(path, JSON.stringify(record, null, 2));
 }
 
 /**
@@ -379,8 +398,11 @@ export function recordRunEnded(
  * announced itself in the system temporary directory while the server watched the user's own, and
  * answered that nothing was running while something was.
  */
-export function readRunRecord(projectPath: string): RunRecord | null {
-  for (const directory of runtimeDirectories()) {
+export function readRunRecord(
+  projectPath: string,
+  directories: readonly string[] = runtimeDirectories(),
+): RunRecord | null {
+  for (const directory of directories) {
     const own = recordAt(runRecordPath(projectPath, directory));
     if (own !== null) {
       return own;
@@ -390,9 +412,9 @@ export function readRunRecord(projectPath: string): RunRecord | null {
 }
 
 /** Every run note on the machine, whichever project it is for, newest first. */
-export function everyRunRecord(): RunRecord[] {
+export function everyRunRecord(directories: readonly string[] = runtimeDirectories()): RunRecord[] {
   const found: RunRecord[] = [];
-  for (const directory of runtimeDirectories()) {
+  for (const directory of directories) {
     let entries: string[];
     try {
       entries = readdirSync(join(directory, 'runs'));
@@ -892,8 +914,11 @@ export function judgeAnnouncedGame(
  *
  * Every candidate directory is looked in, for the same reason they are read.
  */
-export function clearRunRecord(projectPath: string): void {
-  for (const directory of runtimeDirectories()) {
+export function clearRunRecord(
+  projectPath: string,
+  directories: readonly string[] = runtimeDirectories(),
+): void {
+  for (const directory of directories) {
     try {
       rmSync(runRecordPath(projectPath, directory), { force: true });
     } catch {
@@ -920,12 +945,16 @@ function ageMs(path: string, now: number): number {
  */
 export function sweepTranscripts(keepMs = 24 * 60 * 60 * 1000, now = Date.now()): void {
   const directory = runsDirectory();
+  // Compared as the files they are: a note can spell the runs folder through a link or in another
+  // case than the listing does, and the same file under two spellings would be swept.
   const kept = new Set(
-    everyRunRecord().flatMap((record) => [
-      record.transcript,
-      profileMarkPath(record),
-      ...(record.profile === undefined ? [] : [record.profile]),
-    ]),
+    everyRunRecord().flatMap((record) =>
+      [
+        record.transcript,
+        profileMarkPath(record),
+        ...(record.profile === undefined ? [] : [record.profile]),
+      ].map((file) => realAsFarAsItExists(resolve(file))),
+    ),
   );
   let entries: string[];
   try {
@@ -942,7 +971,7 @@ export function sweepTranscripts(keepMs = 24 * 60 * 60 * 1000, now = Date.now())
       continue;
     }
     const path = join(directory, entry);
-    if (kept.has(path) || ageMs(path, now) < keepMs) {
+    if (kept.has(realAsFarAsItExists(resolve(path))) || ageMs(path, now) < keepMs) {
       continue;
     }
     try {

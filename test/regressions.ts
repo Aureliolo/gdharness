@@ -372,6 +372,7 @@ import {
 import { parseProjectGodot, settingKeys, settingsDroppedReport } from '../src/resources.js';
 import { noteRestartBegun, restartNotePath, restartOwed } from '../src/restart-note.js';
 import {
+  amendRunRecord,
   clearRunRecord,
   couldStillBeTheRecordedRun,
   judgeAnnouncedGame,
@@ -381,6 +382,7 @@ import {
   openTranscript,
   profileMarkPath,
   profilePath,
+  type RunRecord,
   readLatestRun,
   readRunRecord,
   readWindowsCommandLine,
@@ -49333,13 +49335,14 @@ function testRunNotesAreKeptPerProject(): void {
       command: 'godot',
     });
     writeRunRecord(note(shop, 22520, shopLog));
-    writeRunRecord(note(bench, 31337, benchLog));
+    const benchNote = note(bench, 31337, benchLog);
+    writeRunRecord(benchNote);
     assert.equal(readRunRecord(shop)?.pid, 22520, 'the shop run is still its note after the bench started');
     assert.equal(readRunRecord(bench)?.pid, 31337, 'and the bench has its own');
     // The same project spelled the way an editor reports it, with forward slashes.
     assert.equal(readRunRecord(shop.replaceAll('\\', '/'))?.pid, 22520, 'whichever way the path is spelled');
 
-    recordRunEnded(bench, 31337, { exitCode: 0, exitSignal: null });
+    recordRunEnded(benchNote, { exitCode: 0, exitSignal: null });
     assert.equal(readRunRecord(bench)?.exitCode, 0, "the bench's ending goes into the bench's note");
     assert.equal(readRunRecord(shop)?.exitCode, undefined, 'and not into the shop run');
 
@@ -49379,6 +49382,448 @@ function testRunNotesAreKeptPerProject(): void {
 }
 
 /**
+ * A keeper writes into its own run's note and into no later run's.
+ *
+ * The keeper rewrote its note as it listened, as the game exited and as it restarted, whatever the
+ * project's note held by then, so a run started after it was ended on paper by the run before. A
+ * keeper holds a sleeping process while a later run's note is written, and the process is ended: the
+ * later note must read whole afterwards. The same is asked of the guarded write directly, where a
+ * restart changes the pid and a missing note is written. A keeper whose game restarts itself after the
+ * later note is written covers the listening, restart and ending writes of one that follows a
+ * successor, and needs the engine.
+ */
+async function testAKeeperLeavesALaterRunsNoteAlone(): Promise<void> {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-later-note-'));
+  const runtime = join(scratch, 'runtime');
+  const project = join(scratch, 'project');
+  const met = new MetProcesses();
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  process.env['GDHARNESS_RUNTIME_DIR'] = runtime;
+  const launch = (
+    command: string,
+    args: readonly string[],
+    transcript: string,
+    projectPath: string,
+  ): number => {
+    const answer = join(scratch, `launched-${basename(transcript)}.json`);
+    const launcher = join(scratch, `launch-${basename(transcript)}.mjs`);
+    const spec = {
+      command,
+      args,
+      run: { transcript, startedAt: Date.now(), projectPath, debugged: false },
+    };
+    writeFileSync(
+      launcher,
+      [
+        `import { writeFileSync } from 'node:fs';`,
+        `import { launchOutsideTheTree } from ${JSON.stringify(pathToFileURL(resolve('build', 'outside.js')).href)};`,
+        `const launched = await launchOutsideTheTree(${JSON.stringify(spec)}, process.execPath, ${JSON.stringify(resolve('build', 'keeper.js'))});`,
+        `writeFileSync(${JSON.stringify(answer)}, JSON.stringify(launched));`,
+      ].join('\n'),
+    );
+    const ran = spawnSyncHidden(process.execPath, [launcher], {
+      encoding: 'utf8',
+      timeout: 60_000,
+      env: { ...process.env, GDHARNESS_RUNTIME_DIR: runtime },
+    });
+    const said: unknown = existsSync(answer) ? JSON.parse(readFileSync(answer, 'utf8')) : null;
+    const pid = get(said, 'pid');
+    assert.ok(
+      typeof pid === 'number',
+      `the launch answers with the pid: ${JSON.stringify(said)} ${ran.stderr}`,
+    );
+    return pid;
+  };
+  const keeperGone = async (keeperPid: number): Promise<void> => {
+    for (let waited = 0; waited < 60_000 && isAlive(keeperPid); waited += 250) {
+      await delay(250);
+    }
+    assert.ok(!isAlive(keeperPid), 'the keeper ended with its run');
+  };
+  try {
+    mkdirSync(project, { recursive: true });
+    const runs = join(runtime, 'runs');
+    mkdirSync(runs, { recursive: true });
+    const startedAt = Date.now();
+    const pid = launch(
+      process.execPath,
+      ['-e', 'setTimeout(() => {}, 60000)'],
+      join(runs, 'run-1.log'),
+      project,
+    );
+    await met.meet(pid);
+    const first = readRunRecord(project, [runtime]);
+    assert.ok(first !== null, 'the keeper wrote its run');
+    assert.equal(first.pid, pid, 'the note names the run before the next one');
+    assert.ok(first.keeper !== undefined && first.keeperPid !== undefined, 'and the keeper that listens');
+    const { keeper: _listens, keeperPid: _holds, ...bare } = first;
+    const later = { ...bare, pid: 2222, transcript: join(runs, 'run-2.log'), startedAt: startedAt + 1 };
+    writeFileSync(runRecordPath(project, runtime), JSON.stringify(later), 'utf8');
+    const second = readRunRecord(project, [runtime]);
+    assert.ok(second?.pid === 2222, 'the later run is the note');
+    process.kill(pid);
+    await keeperGone(first.keeperPid);
+    assert.deepEqual(readRunRecord(project, [runtime]), second, "the later run's note is whole");
+
+    // The guarded write: a restart moves the pid and keeps the transcript, so the run is told by
+    // the transcript.
+    const restarted = { ...first, pid: 3333, restartedFrom: [{ pid, endedAt: 4000 }] };
+    assert.equal(
+      amendRunRecord(restarted),
+      false,
+      "a restart of the earlier run leaves the later run's note",
+    );
+    assert.deepEqual(readRunRecord(project, [runtime]), second, 'and the note reads whole');
+    writeFileSync(runRecordPath(project, runtime), JSON.stringify(first), 'utf8');
+    assert.equal(amendRunRecord(restarted), true, 'a restart of the run the note is of is written');
+    assert.equal(readRunRecord(project, [runtime])?.pid, 3333, 'and the note reads with the new pid');
+    clearRunRecord(project, [runtime]);
+    assert.equal(amendRunRecord({ ...first, endingAt: 5000 }), true, 'a cleared note is written again');
+    assert.equal(readRunRecord(project, [runtime])?.endingAt, 5000, 'with what the keeper said');
+    clearRunRecord(project, [runtime]);
+
+    // A game that restarts itself after the later run's note is written.
+    const godotPath = resolveGodotPath();
+    if (!godotPath) {
+      if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+        throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+      }
+      console.log('restarting keeper regression skipped (Godot not found)');
+      return;
+    }
+    const game = join(scratch, 'game');
+    mkdirSync(game);
+    writeFileSync(
+      join(game, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Later"\n' +
+        'run/main_scene="res://main.tscn"\n',
+    );
+    writeFileSync(
+      join(game, 'main.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    writeFileSync(
+      join(game, 'main.gd'),
+      [
+        'extends Node',
+        '',
+        '',
+        'func _process(_delta: float) -> void:',
+        '\tif "--restarted" in OS.get_cmdline_user_args():',
+        '\t\tif not FileAccess.file_exists("res://successor_up"):',
+        '\t\t\tvar mark := FileAccess.open("res://successor_up.part", FileAccess.WRITE)',
+        '\t\t\tmark.store_string(str(OS.get_process_id()))',
+        '\t\t\tmark.close()',
+        '\t\t\tDirAccess.rename_absolute(',
+        '\t\t\t\tProjectSettings.globalize_path("res://successor_up.part"),',
+        '\t\t\t\tProjectSettings.globalize_path("res://successor_up")',
+        '\t\t\t)',
+        '\t\tif FileAccess.file_exists("res://quit_now"):',
+        '\t\t\tget_tree().quit()',
+        '\t\treturn',
+        '\tif FileAccess.file_exists("res://go"):',
+        '\t\tvar again: PackedStringArray = [',
+        '\t\t\t"--headless", "--path", ProjectSettings.globalize_path("res://"), "--", "--restarted"',
+        '\t\t]',
+        '\t\tOS.set_restart_on_exit(true, again)',
+        '\t\tget_tree().quit()',
+        '',
+      ].join('\n'),
+    );
+    const gamePid = launch(godotPath, ['--headless', '--path', game], join(runs, 'run-3.log'), game);
+    await met.meet(gamePid);
+    const running = readRunRecord(game, [runtime]);
+    assert.ok(running?.keeper !== undefined, 'the keeper of the restarting game listens');
+    const { keeper: _address, ...unlistened } = running;
+    const newer = {
+      ...unlistened,
+      pid: 4444,
+      transcript: join(runs, 'run-4.log'),
+      startedAt: Date.now() + 1,
+    };
+    writeFileSync(runRecordPath(game, runtime), JSON.stringify(newer), 'utf8');
+    const newest = readRunRecord(game, [runtime]);
+    writeFileSync(join(game, 'go'), '');
+    const mark = join(game, 'successor_up');
+    for (let waited = 0; waited < 60_000 && !existsSync(mark); waited += 250) {
+      await delay(250);
+    }
+    assert.ok(existsSync(mark), 'the game restarted itself');
+    await met.meet(Number(readFileSync(mark, 'utf8')));
+    // Long enough for the keeper to have found the successor and written what it found.
+    await delay(4_000);
+    writeFileSync(join(game, 'quit_now'), '');
+    await keeperGone(running.keeperPid ?? 0);
+    assert.deepEqual(
+      readRunRecord(game, [runtime]),
+      newest,
+      "the later run's note is whole after the restart",
+    );
+  } finally {
+    await met.end();
+    if (had === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = had;
+    }
+    sweep(scratch);
+  }
+}
+
+/**
+ * An ending goes into the note of the run that ended, which is told by its transcript.
+ *
+ * A pid comes round again, and two servers can start runs of one project in one millisecond, so
+ * neither the pid nor the start tells two runs apart. Only the transcript, opened for one run alone,
+ * does.
+ */
+function testAnEndingGoesToItsOwnRunAlone(): void {
+  const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-own-ending-'));
+  const project = join(runtime, 'project');
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  process.env['GDHARNESS_RUNTIME_DIR'] = runtime;
+  try {
+    const noted = (startedAt: number, name: string): RunRecord => ({
+      pid: 4242,
+      transcript: join(runtime, 'runs', name),
+      startedAt,
+      startedBy: startedAt,
+      projectPath: project,
+      arguments: ['--headless'],
+      command: 'godot',
+    });
+    const first = noted(1000, 'run-1000.log');
+    const second = noted(2000, 'run-2000.log');
+    writeRunRecord(first);
+    writeRunRecord(second);
+    assert.equal(recordRunEnded(first, { exitCode: 3, exitSignal: null }), false, 'the pid is not the run');
+    const read = readRunRecord(project);
+    assert.equal(read?.startedAt, 2000, 'the later run is still the note');
+    assert.deepEqual(
+      [read.exitCode, read.endedAt],
+      [undefined, undefined],
+      "and the earlier run's ending is not in it",
+    );
+
+    const tied = noted(1000, 'run-1000-1.log');
+    writeRunRecord(first);
+    writeRunRecord(tied);
+    const before = readRunRecord(project);
+    assert.equal(recordRunEnded(first, { exitCode: 3, exitSignal: null }), false, 'nor are pid and start');
+    assert.deepEqual(readRunRecord(project), before, 'the later note is whole');
+    assert.equal(before?.transcript, tied.transcript, 'and it is the second run');
+
+    const looking = { ...tied, endingAt: 5000 };
+    assert.equal(
+      recordRunEnded(looking, { exitCode: 0, exitSignal: null }),
+      true,
+      'its own ending is written',
+    );
+    const ended = readRunRecord(project);
+    assert.equal(ended?.exitCode, 0, 'with its code');
+    assert.ok(typeof ended.endedAt === 'number', 'and the moment');
+    assert.equal(ended.endingAt, undefined, 'and no longer looking for a successor');
+
+    clearRunRecord(project);
+    assert.equal(
+      recordRunEnded(tied, { exitCode: 0, exitSignal: null }),
+      true,
+      'an ending after a clear lands',
+    );
+    const after = readRunRecord(project);
+    assert.equal(after?.exitCode, 0, 'as the code of the note written');
+    assert.ok(typeof after.endedAt === 'number', 'with its moment');
+  } finally {
+    if (had === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = had;
+    }
+    sweep(runtime);
+  }
+}
+
+/**
+ * The exit a server reads is its own run's, and the restart it follows is too.
+ *
+ * Run A's note names a live process. Run B then takes the note over with the same pid and an exit
+ * code, which is B's. A server asked about A must not answer B's code. And a run whose keeper wrote
+ * a restart is followed only where the note names A's transcript: a note of another run with the same
+ * start that names A's pid among its restarts is not a restart of A.
+ */
+async function testAnotherRunsExitIsNotThisRuns(): Promise<void> {
+  const ended: SpawnSyncReturns<string> = spawnSyncHidden(process.execPath, ['-e', ''], { encoding: 'utf8' });
+  assert.ok(ended.pid > 0, 'the fixture needs a process that has been and gone');
+  const runtimeDir = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-another-exit-'));
+  const project = join(runtimeDir, 'project');
+  const runs = join(runtimeDir, 'runs');
+  mkdirSync(runs, { recursive: true });
+  const where = runRecordPath(project, runtimeDir);
+  const standIns: ReturnType<typeof spawnHidden>[] = [];
+  const standIn = (): ReturnType<typeof spawnHidden> => {
+    // The long spelling of the eval flag, since `-e` is how the engine is told to come up as an editor.
+    const one = spawnHidden(
+      process.execPath,
+      ['--eval', 'setInterval(() => {}, 1000)', '--', '--path', project],
+      {
+        stdio: 'ignore',
+      },
+    );
+    standIns.push(one);
+    return one;
+  };
+  try {
+    const live = standIn();
+    const pid = live.pid ?? 0;
+    assert.ok(pid > 0, 'the stand-in should have started');
+    const began = (await startTimesOf([pid])).get(pid);
+    assert.ok(began !== undefined, 'the platform should date the stand-in');
+    const startedAt = Date.now() - 10_000;
+    const noteA = {
+      pid,
+      transcript: join(runs, 'run-1.log'),
+      startedAt,
+      startedBy: began,
+      projectPath: project,
+      arguments: ['--headless', '--path', project],
+      command: process.execPath,
+    };
+    writeFileSync(noteA.transcript, 'run A\n');
+    writeFileSync(join(runs, 'run-2.log'), 'run B\n');
+    writeFileSync(where, JSON.stringify(noteA), 'utf8');
+    await withStdioServer(
+      async (call) => {
+        const going: unknown = jsonOf(await call('editor_output', {}), 'editor_output');
+        assert.deepEqual(
+          [get(going, 'running'), get(going, 'pid')],
+          [true, pid],
+          `run A is adopted while it runs: ${JSON.stringify(going)}`,
+        );
+        writeFileSync(
+          where,
+          JSON.stringify({ ...noteA, transcript: join(runs, 'run-2.log'), exitCode: 3, endedAt: Date.now() }),
+          'utf8',
+        );
+        live.kill();
+        await new Promise((settle) => live.once('close', settle));
+        const gone: unknown = jsonOf(await call('editor_output', {}), 'editor_output');
+        assert.deepEqual(
+          [get(gone, 'running'), get(gone, 'exitCode'), get(gone, 'endedUnwatched')],
+          [false, null, true],
+          `run B's code is not run A's: ${JSON.stringify(gone)}`,
+        );
+      },
+      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    );
+
+    // Another run with the same start names A's pid among its restarts.
+    const successor = standIn();
+    const successorPid = successor.pid ?? 0;
+    const successorBegan = (await startTimesOf([successorPid])).get(successorPid);
+    assert.ok(successorBegan !== undefined, 'the platform should date the second stand-in');
+    const noteGone = { ...noteA, pid: ended.pid, startedBy: startedAt };
+    writeFileSync(where, JSON.stringify(noteGone), 'utf8');
+    await withStdioServer(
+      async (call) => {
+        const answered = delay(1_000).then(() => {
+          writeFileSync(
+            where,
+            JSON.stringify({
+              ...noteGone,
+              pid: successorPid,
+              startedBy: successorBegan,
+              transcript: join(runs, `run-${String(startedAt)}-1.log`),
+              restartedFrom: [{ pid: ended.pid, exitCode: 0, endedAt: Date.now() }],
+            }),
+            'utf8',
+          );
+        });
+        const output: unknown = jsonOf(await call('editor_output', {}), 'editor_output');
+        await answered;
+        assert.deepEqual(
+          [get(output, 'running'), get(output, 'pid')],
+          [false, ended.pid],
+          `another run's restart is not this run's: ${JSON.stringify(output)}`,
+        );
+      },
+      { GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    );
+  } finally {
+    for (const one of standIns) {
+      one.kill();
+    }
+    sweep(runtimeDir);
+  }
+}
+
+/**
+ * A sweep keeps the files a note names however the note and the listing spell the folder.
+ *
+ * The note's paths and the folder's entries were compared as text, so a runtime folder spelt in
+ * another case (Windows) or reached through a link kept nothing a note named.
+ */
+function testASweepKeepsWhatANoteNamesUnderAnySpelling(): void {
+  const scratch = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-sweep-spelling-'));
+  const had = process.env['GDHARNESS_RUNTIME_DIR'];
+  try {
+    const project = join(scratch, 'project');
+    const threeDays = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000);
+    const sweepFrom = (spelling: string, real: string): void => {
+      const runs = join(real, 'runs');
+      mkdirSync(runs, { recursive: true });
+      const transcript = join(runs, 'run-1.log');
+      const profile = profilePath(transcript);
+      const stray = join(runs, 'run-9.log');
+      for (const file of [transcript, profile, stray]) {
+        writeFileSync(file, '');
+        utimesSync(file, threeDays, threeDays);
+      }
+      process.env['GDHARNESS_RUNTIME_DIR'] = spelling;
+      writeRunRecord({
+        pid: 4242,
+        transcript,
+        startedAt: Date.now(),
+        startedBy: Date.now(),
+        projectPath: project,
+        profile,
+        arguments: [],
+        command: 'godot',
+      });
+      sweepTranscripts(24 * 60 * 60 * 1000, Date.now() + 2 * 24 * 60 * 60 * 1000);
+      assert.deepEqual(
+        [existsSync(transcript), existsSync(profile), existsSync(stray)],
+        [true, true, false],
+        `the files a note names are kept and a stray one is swept, through ${spelling}`,
+      );
+    };
+    const flipped = (path: string): string => {
+      const letter = path.charAt(0);
+      return (letter === letter.toLowerCase() ? letter.toUpperCase() : letter.toLowerCase()) + path.slice(1);
+    };
+    const respelt = join(scratch, 'respelt');
+    mkdirSync(respelt);
+    if (process.platform === 'win32') {
+      sweepFrom(flipped(respelt), respelt);
+    } else {
+      console.log('respelt drive letter case skipped (Windows only)');
+    }
+    const real = join(scratch, 'real');
+    mkdirSync(real);
+    const link = join(scratch, 'link');
+    symlinkSync(real, link, 'junction');
+    sweepFrom(link, real);
+  } finally {
+    if (had === undefined) {
+      delete process.env['GDHARNESS_RUNTIME_DIR'];
+    } else {
+      process.env['GDHARNESS_RUNTIME_DIR'] = had;
+    }
+    sweep(scratch);
+  }
+}
+
+/**
  * What a run ended with outlives the server that watched it end.
  *
  * A run is spawned detached so a reconnect cannot take it, and the next server reads the note on
@@ -49388,7 +49833,8 @@ function testRunNotesAreKeptPerProject(): void {
  * whose exit code "was never collected", which is true of the reading and false of the run.
  *
  * A later run of the same project replaces the note, so the half that matters as much is the one
- * where the pid is not the note's: writing an ending into it would end the later run on paper.
+ * where the transcript is not the note's: writing an ending into it would end the later run on
+ * paper. That is the half where the note is a later run's.
  */
 function testAnExitCodeOutlivesTheServerThatSawIt(): void {
   const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-ending-'));
@@ -49396,7 +49842,7 @@ function testAnExitCodeOutlivesTheServerThatSawIt(): void {
   const had = process.env['GDHARNESS_RUNTIME_DIR'];
   process.env['GDHARNESS_RUNTIME_DIR'] = runtimeDir;
   try {
-    writeRunRecord({
+    const run = {
       pid: 4242,
       transcript: join(runtimeDir, 'run.log'),
       startedAt: Date.now(),
@@ -49404,10 +49850,12 @@ function testAnExitCodeOutlivesTheServerThatSawIt(): void {
       projectPath: project,
       arguments: ['--headless'],
       command: 'godot',
-    });
+    };
+    writeRunRecord(run);
     assert.equal(readRunRecord(project)?.exitCode, undefined, 'a run still going has no ending to report');
 
-    recordRunEnded(project, 9999, { exitCode: 3, exitSignal: null });
+    const another = { ...run, pid: 9999, transcript: join(runtimeDir, 'run-another.log') };
+    assert.equal(recordRunEnded(another, { exitCode: 3, exitSignal: null }), false, 'it wrote nothing');
     assert.equal(
       readRunRecord(project)?.exitCode,
       undefined,
@@ -49415,7 +49863,7 @@ function testAnExitCodeOutlivesTheServerThatSawIt(): void {
     );
 
     const before = Date.now();
-    recordRunEnded(project, 4242, { exitCode: 3, exitSignal: null });
+    recordRunEnded(run, { exitCode: 3, exitSignal: null });
     const after = readRunRecord(project);
     assert.ok(after !== null, 'the note should still be there to read');
     assert.equal(after.exitCode, 3, 'the code its own server saw is kept for whoever reads next');
@@ -51771,7 +52219,7 @@ async function testARunNoteIsNeverReadHalfWritten(): Promise<void> {
         'for (const end = Date.now() + 60000; Date.now() < end && !existsSync(stop); rewrites += 1) {\n' +
         '  const startedAt = record.startedAt + rewrites;\n' +
         '  writeRunRecord({ ...record, startedAt });\n' +
-        '  recordRunEnded(record.projectPath, record.pid, { exitCode: 0, exitSignal: null });\n' +
+        '  recordRunEnded({ ...record, startedAt }, { exitCode: 0, exitSignal: null });\n' +
         '  writeEditorRunNote({ projectPath: record.projectPath, transcript: record.transcript, startedAt });\n' +
         '  writeLatestRun(record.projectPath, { projectPath: record.projectPath, pid: record.pid, startedAt });\n' +
         "  if (rewrites === 0) console.log('rewriting');\n" +
@@ -87872,6 +88320,10 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheLoaderPassesAGamesOwnLint,
   testAFailedRunsLogsOutlastTheNextRun,
   testAnExitCodeOutlivesTheServerThatSawIt,
+  testAKeeperLeavesALaterRunsNoteAlone,
+  testAnEndingGoesToItsOwnRunAlone,
+  testAnotherRunsExitIsNotThisRuns,
+  testASweepKeepsWhatANoteNamesUnderAnySpelling,
   testRunNotesAreKeptPerProject,
   testTwoRunsStartedInOneMillisecondKeepTheirOwnFiles,
   testAStopThatSignalsNothingSaysSo,

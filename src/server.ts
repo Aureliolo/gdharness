@@ -298,6 +298,7 @@ import {
   readLatestRun,
   readRunRecord,
   runningAs,
+  sameRun,
   stillTheAnnouncedGame,
   sweepTranscripts,
   whyNotStillTheRecordedRun,
@@ -904,7 +905,7 @@ function followTheRestart(run: GodotProcess): boolean {
   const record = readRunRecord(run.projectPath);
   const from = record?.restartedFrom ?? [];
   const at = from.findIndex((one) => one.pid === run.pid);
-  if (record === null || record.startedAt !== run.startedAt || record.pid === run.pid || at === -1) {
+  if (record === null || !sameRun(run, record) || record.pid === run.pid || at === -1) {
     return false;
   }
   for (const [index, one] of from.slice(at).entries()) {
@@ -13942,9 +13943,10 @@ class GodotServer {
         return true;
       }
       const record = run.projectPath === null ? null : readRunRecord(run.projectPath);
+      const ours = record !== null && record.pid === run.pid && sameRun(run, record);
       if (
         record !== null &&
-        record.pid === run.pid &&
+        ours &&
         (record.exitCode !== undefined || record.exitSignal !== undefined || record.exitNotTold === true)
       ) {
         run.exitCode = record.exitCode ?? null;
@@ -13956,17 +13958,12 @@ class GodotServer {
         return true;
       }
       // The keeper looking for a process the game restarted itself into, which takes a listing.
-      if (record !== null && record.pid === run.pid && record.endingAt !== undefined) {
+      if (record !== null && ours && record.endingAt !== undefined) {
         until = Math.max(until, record.endingAt + SUCCESSOR_SOUGHT_WITHIN_MS);
       }
       // A keeper still alive is on its way to writing the exit, however late it heard of it. One that
       // has gone will write nothing, and the run is settled as the two seconds say.
-      if (
-        record !== null &&
-        record.pid === run.pid &&
-        record.keeperPid !== undefined &&
-        alive(record.keeperPid)
-      ) {
+      if (record !== null && ours && record.keeperPid !== undefined && alive(record.keeperPid)) {
         until = Math.max(until, asked + SUCCESSOR_SOUGHT_WITHIN_MS);
       }
       if (Date.now() >= until) {
