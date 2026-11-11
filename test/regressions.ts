@@ -600,6 +600,7 @@ import {
   toolSpec,
 } from '../src/tool-definitions.js';
 import { argumentShape, headlessSection, namedType, renderToolsMarkdown } from '../src/tool-reference.js';
+import { scriptsWithoutCases, selectTests, suiteFilesUnder } from '../src/test-selection.js';
 import {
   encodedUidCache,
   mendBeforeStart,
@@ -54986,6 +54987,72 @@ function writeTree(root: string, files: Readonly<Record<string, string>>): void 
 }
 
 /**
+ * A suite is found under any spelling of its path the file system accepts, and a folder under any
+ * trailing slash. Folders kept out of a search are named with or without `res://`.
+ *
+ * Windows opens `Tests/A_Test.gd` for `tests/a_test.gd`, and the script map is keyed as the disk spells
+ * it, so a suite asked for in another letter case read as holding no case.
+ */
+function testASuiteIsFoundUnderAnySpellingOfItsPath(): void {
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-spelled-'));
+  const cases = (...names: string[]): string =>
+    names.map((name) => `\nfunc ${name}() -> void:\n\tpass\n`).join('');
+  try {
+    writeTree(project, {
+      'project.godot': [
+        'config_version=5',
+        '',
+        '[gdharness]',
+        '',
+        'tests/not_searched=PackedStringArray("tests/bench")',
+        '',
+      ].join('\n'),
+      'tests/a_test.gd': `extends GdUnitTestSuite\n${cases('test_a', 'test_ab')}`,
+      'tests/bench/b_test.gd': `extends GdUnitTestSuite\n${cases('test_bench')}`,
+    });
+    assert.deepEqual(new ProjectScripts(project).notSearched, ['res://tests/bench']);
+    assert.deepEqual(
+      new ProjectScripts(project).suitesUnder(['res://tests']).map((one) => one.path),
+      ['res://tests/a_test.gd'],
+      'a folder named without res:// is kept out of the search',
+    );
+    assert.deepEqual(suiteFilesUnder(project, ['res://tests']), [
+      'res://tests/a_test.gd',
+      'res://tests/bench/b_test.gd',
+    ]);
+    assert.deepEqual(
+      suiteFilesUnder(project, ['res://tests/']),
+      suiteFilesUnder(project, ['res://tests']),
+      'a trailing slash names the same folder',
+    );
+    const spelled = process.platform === 'win32' ? 'res://Tests/A_Test.gd' : 'res://tests/a_test.gd';
+    assert.deepEqual(scriptsWithoutCases(project, [spelled]), [], 'a suite with cases is not caseless');
+    assert.deepEqual(selectTests(project, [spelled], ['test_a']), {
+      ok: true,
+      value: {
+        suites: ['res://tests/a_test.gd'],
+        ignore: ['res://tests/a_test.gd:test_ab'],
+        selected: [{ entry: 'test_a', suite: 'res://tests/a_test.gd', test: 'test_a' }],
+      },
+    });
+    if (process.platform === 'win32') {
+      assert.deepEqual(
+        suiteFilesUnder(project, ['res://Tests']),
+        ['res://tests/a_test.gd', 'res://tests/bench/b_test.gd'],
+        'a folder in another letter case holds the suites the disk spells in its own',
+      );
+      assert.deepEqual(
+        new ProjectScripts(project).suitesUnder(['res://Tests']).map((one) => one.path),
+        ['res://tests/a_test.gd'],
+        'and the folders kept out stay out',
+      );
+    }
+  } finally {
+    sweep(project);
+  }
+}
+
+/**
  * Suites are found from the scripts and dealt to engines by what their cases cost.
  *
  * A suite is a script whose chain of bases reaches gdUnit4's, by name, by path or relative path, and
@@ -85556,6 +85623,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAnEngineOnASlotLendsItToWhatItStarts,
   testAnEngineIsTimedByItsOwnWorkWhileTheMachineIsCrowded,
   testARestartedCountDoesNotTakeWorkFromBeforeTheRestart,
+  testASuiteIsFoundUnderAnySpellingOfItsPath,
   testSuitesAreFoundAndDealtByWhatTheyCost,
   testASuiteDeclarationCanNameAClassConstant,
   testAHiddenEditorStartsOnAnEmptyScriptReference,
