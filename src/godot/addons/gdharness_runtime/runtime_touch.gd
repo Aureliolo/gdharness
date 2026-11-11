@@ -167,10 +167,14 @@ static func _finger_of(params: Dictionary) -> Variant:
 ## Sends [param event] into [param viewport]: through Input for the game's window, and pushed into
 ## any other, since Input reaches only the game's window. Answers whether the engine makes a mouse
 ## event from it, which it does in Input, with the setting on, for one finger at a time.
-func _send(viewport: Viewport, event: InputEvent) -> bool:
+##
+## [param viewport] is a Variant because a touch can close the window it went to, and a parameter
+## typed Viewport refuses that freed window before the check here can run.
+func _send(viewport: Variant, event: InputEvent) -> bool:
 	if viewport != _host.get_tree().root:
 		if is_instance_valid(viewport):
-			viewport.push_input(event)
+			var held: Object = viewport
+			(held as Viewport).push_input(event)
 		return false
 	Input.parse_input_event(event)
 	if not GdhRead.as_bool(ProjectSettings.get_setting(EMULATE_SETTING, true), true):

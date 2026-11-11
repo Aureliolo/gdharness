@@ -137,20 +137,25 @@ func _follow_in(viewport: Viewport, position: Vector2) -> bool:
 ## for the game's own window, and pushed into any other, as a click sends one, since Input reaches
 ## only the game's window. Input keeps the buttons held from the events it is given, so the ones a
 ## pushed press holds are kept here for the motions and the release after it.
-func _send(viewport: Viewport, event: InputEventMouse) -> void:
+##
+## [param viewport] is a Variant because a press can close the window it went to, and its release
+## then has nowhere to go. A parameter typed Viewport refuses that freed window before the check
+## here can run.
+func _send(viewport: Variant, event: InputEventMouse) -> void:
+	if not is_instance_valid(viewport):
+		return
 	if viewport == _host.get_tree().root:
 		Input.parse_input_event(event)
 		return
-	# A press can close the window it went to, and its release then has nowhere to go.
-	if not is_instance_valid(viewport):
-		return
 	if event is InputEventMouseButton:
 		_pushed_held = event.button_mask
-	viewport.push_input(event)
+	var held: Object = viewport
+	(held as Viewport).push_input(event)
 
 
-## The buttons held in [param viewport] before the next event sent there.
-func _held_in(viewport: Viewport) -> int:
+## The buttons held in [param viewport] before the next event sent there. A Variant for the reason
+## [method _send] gives.
+func _held_in(viewport: Variant) -> int:
 	return Input.get_mouse_button_mask() if viewport == _host.get_tree().root else _pushed_held
 
 
@@ -166,11 +171,12 @@ static func _own_of(aim: Dictionary, viewport: Viewport) -> Viewport:
 
 ## The path of the control under the pointer in [param own], or null, read once the events are
 ## handled: a motion and a drag answered nothing of where they left the pointer, so a hover could be
-## checked only by what the game did about it.
-func _hovered_path(own: Viewport) -> Variant:
+## checked only by what the game did about it. A Variant for the reason [method _send] gives.
+func _hovered_path(own: Variant) -> Variant:
 	if not is_instance_valid(own):
 		return null
-	var hovered: Control = _hover.hovered_in(own)
+	var held: Object = own
+	var hovered: Control = _hover.hovered_in(held as Viewport)
 	if hovered == null:
 		return null
 	return str(hovered.get_path())
@@ -910,14 +916,18 @@ func _click_button(
 	return press
 
 
-func _press_button(viewport: Viewport, event: InputEventMouseButton) -> void:
+## A Variant for the reason [method _send] gives.
+func _press_button(viewport: Variant, event: InputEventMouseButton) -> void:
+	if not is_instance_valid(viewport):
+		return
 	if viewport == _host.get_tree().root:
 		Input.parse_input_event(event)
 		# Delivered now, as a push is, rather than at the next frame: the answer is read a frame
 		# after the release, and a button that frees itself on it has to be gone by then.
 		Input.flush_buffered_events()
 	else:
-		viewport.push_input(event)
+		var held: Object = viewport
+		(held as Viewport).push_input(event)
 
 
 ## A whole click aimed at where a 3D node is drawn, for a game that picks with a ray out of the

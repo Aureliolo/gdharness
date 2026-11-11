@@ -23530,10 +23530,12 @@ async function testAClickThatFreesWhatItMissedAnswers(): Promise<void> {
 }
 
 /**
- * A click whose press frees the window the button is on still answers the click.
+ * A click, a mouse_click and a touch whose press frees the window it went to still answer.
  *
  * Reported from a game whose notice closes itself from its own button: the click answered {} and
- * the game logged a type error from the runtime addon, since the window was its viewport.
+ * the game logged a type error from the runtime addon, since the window was its viewport. A button
+ * acting on the press frees its window before the release is sent. In a native window, which only
+ * the windowed run has, that release goes into the freed window.
  */
 async function testAClickThatClosesItsWindowAnswers(): Promise<void> {
   const godotPath = resolveGodotPath();
@@ -23555,8 +23557,32 @@ async function testAClickThatClosesItsWindowAnswers(): Promise<void> {
       '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Closing"\n' +
         'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
         'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n\n' +
-        '[display]\n\nwindow/size/viewport_width=320\nwindow/size/viewport_height=180\n\n' +
+        '[display]\n\nwindow/size/viewport_width=320\nwindow/size/viewport_height=180\n' +
+        'window/size/borderless=true\nwindow/size/no_focus=true\n\n' +
         '[rendering]\n\nrenderer/rendering_method="gl_compatibility"\n',
+    );
+    writeFileSync(
+      join(project, 'closer.gd'),
+      [
+        'extends Button',
+        '',
+        'var on_touch: bool = false',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar _closed: int = pressed.connect(_close)',
+        '',
+        '',
+        'func _gui_input(event: InputEvent) -> void:',
+        '\tvar touch: InputEventScreenTouch = event as InputEventScreenTouch',
+        '\tif on_touch and touch != null and touch.pressed:',
+        '\t\t_close()',
+        '',
+        '',
+        'func _close() -> void:',
+        '\tget_window().queue_free()',
+        '',
+      ].join('\n'),
     );
     writeFileSync(
       join(project, 'main.gd'),
@@ -23565,16 +23591,40 @@ async function testAClickThatClosesItsWindowAnswers(): Promise<void> {
         '',
         '',
         'func _ready() -> void:',
-        '\tvar _closed: int = $Notice/Close.pressed.connect($Notice.queue_free)',
+        '\tvar native: bool = DisplayServer.get_name() != "headless"',
+        '\tget_tree().root.gui_embed_subwindows = not native',
+        '\tvar screen: Rect2i = DisplayServer.screen_get_usable_rect() if native else Rect2i()',
+        '\t# The window, its button, and whether the button acts on the press rather than the release.',
+        '\tvar windows: Array = [',
+        '\t\t["Notice", "Close", false], ["Prompt", "Shut", true], ["Panel", "Dismiss", true], ["Toast", "Lift", true]',
+        '\t]',
+        '\tfor at: int in windows.size():',
+        '\t\tvar window: Window = Window.new()',
+        '\t\twindow.name = windows[at][0]',
+        '\t\twindow.borderless = true',
+        '\t\twindow.unfocusable = true',
+        '\t\twindow.size = Vector2i(72, 40)',
+        '\t\tif native:',
+        '\t\t\twindow.position = Vector2i(screen.end.x - 80 * (at + 1), screen.position.y + 16)',
+        '\t\telse:',
+        '\t\t\twindow.position = Vector2i(4 + 80 * at, 40)',
+        '\t\tvar button: Button = load("res://closer.gd").new()',
+        '\t\tbutton.name = windows[at][1]',
+        '\t\tbutton.text = windows[at][1]',
+        '\t\tbutton.position = Vector2(4, 4)',
+        '\t\tbutton.size = Vector2(64, 32)',
+        '\t\tif windows[at][2]:',
+        '\t\t\tbutton.action_mode = BaseButton.ACTION_MODE_BUTTON_PRESS',
+        '\t\tbutton.on_touch = windows[at][0] == "Toast"',
+        '\t\twindow.add_child(button)',
+        '\t\tadd_child(window)',
         '',
       ].join('\n'),
     );
     writeFileSync(
       join(project, 'main.tscn'),
       '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
-        '[node name="Main" type="Control"]\noffset_right = 320.0\noffset_bottom = 180.0\nmouse_filter = 2\nscript = ExtResource("1")\n\n' +
-        '[node name="Notice" type="Window" parent="."]\nposition = Vector2i(40, 40)\nsize = Vector2i(160, 80)\n\n' +
-        '[node name="Close" type="Button" parent="Notice"]\noffset_left = 20.0\noffset_top = 20.0\noffset_right = 120.0\noffset_bottom = 50.0\ntext = "Close"\n',
+        '[node name="Main" type="Control"]\noffset_right = 320.0\noffset_bottom = 180.0\nmouse_filter = 2\nscript = ExtResource("1")\n',
     );
     cpSync(
       join('src', 'godot', 'addons', 'gdharness_runtime'),
@@ -23586,37 +23636,88 @@ async function testAClickThatClosesItsWindowAnswers(): Promise<void> {
       const response = await server.request('tools/call', { name, arguments: args }, ENGINE_CALL_TIMEOUT_MS);
       return parseTextContent(response) ?? textOf(response);
     };
-    const started = await call('editor_run', {
-      projectPath: project,
-      op: 'start',
-      headless: true,
-      runtimeWaitMs: 30_000,
-    });
-    assert.equal(get(started, 'runtime', 'listening'), true, JSON.stringify(started));
+    const gone = async (how: string, window: string): Promise<void> => {
+      const left = JSON.stringify(
+        await call('runtime_inspect', { op: 'rect', nodePath: `/root/Main/${window}` }),
+      );
+      assert.match(left, /not found|no node/i, `${how}: ${window} is gone: ${left}`);
+    };
+    const run = async (headless: boolean): Promise<void> => {
+      const how = headless ? 'headless' : 'windowed';
+      const started = await call('editor_run', {
+        projectPath: project,
+        op: 'start',
+        headless,
+        runtimeWaitMs: headless ? 30_000 : WINDOWED_BOOT_MS,
+      });
+      assert.equal(get(started, 'runtime', 'listening'), true, `${how}: ${JSON.stringify(started)}`);
 
-    const clicked = await call('runtime_input', { op: 'click', says: 'Close' });
-    const shown = JSON.stringify(clicked);
-    assert.equal(get(clicked, 'type'), 'clicked', `a whole answer: ${shown}`);
-    assert.deepEqual(
-      [get(clicked, 'path'), get(clicked, 'found', 'says'), get(clicked, 'landed')],
-      ['/root/Main/Notice/Close', 'Close', true],
-      shown,
-    );
-    assert.equal(get(clicked, 'control_afterwards'), 'freed', shown);
+      const clicked = await call('runtime_input', { op: 'click', says: 'Close' });
+      const shown = `${how}: ${JSON.stringify(clicked)}`;
+      assert.equal(get(clicked, 'type'), 'clicked', `a whole answer: ${shown}`);
+      assert.deepEqual(
+        [get(clicked, 'path'), get(clicked, 'found', 'says'), get(clicked, 'landed')],
+        ['/root/Main/Notice/Close', 'Close', true],
+        shown,
+      );
+      assert.equal(get(clicked, 'control_afterwards'), 'freed', shown);
+      await gone(how, 'Notice');
 
-    const notice = await call('runtime_inspect', { op: 'rect', nodePath: '/root/Main/Notice' });
-    assert.match(
-      JSON.stringify(notice),
-      /not found|no node/i,
-      `the window is gone: ${JSON.stringify(notice)}`,
-    );
-    const printed = JSON.stringify(await call('editor_output', { op: 'run' }));
-    assert.doesNotMatch(
-      printed,
-      /runtime_input\.gd|previously freed/,
-      `and the addon raised nothing: ${printed}`,
-    );
-    await stopItsRun(server);
+      const shut = await call('runtime_input', { op: 'click', nodePath: '/root/Main/Prompt/Shut' });
+      const shutShown = `${how}: ${JSON.stringify(shut)}`;
+      assert.deepEqual(
+        [get(shut, 'type'), get(shut, 'landed'), get(shut, 'control_afterwards')],
+        ['clicked', true, 'freed'],
+        `a button acting on the press: ${shutShown}`,
+      );
+      await gone(how, 'Prompt');
+
+      const dismissed = await call('runtime_input', {
+        op: 'mouse_click',
+        nodePath: '/root/Main/Panel/Dismiss',
+        x: 10,
+        y: 10,
+      });
+      const dismissedShown = `${how}: ${JSON.stringify(dismissed)}`;
+      assert.deepEqual(
+        [get(dismissed, 'type'), get(dismissed, 'input_type'), get(dismissed, 'hovered')],
+        ['input_injected', 'mouse_click', null],
+        `a mouse_click, with nothing hovered in a window that is gone: ${dismissedShown}`,
+      );
+      await gone(how, 'Panel');
+
+      // Only a native window takes a touch pushed at it, and only the windowed run has one.
+      if (!headless) {
+        const lifted = await call('runtime_input', {
+          op: 'touch',
+          nodePath: '/root/Main/Toast/Lift',
+          x: 10,
+          y: 10,
+        });
+        const liftedShown = JSON.stringify(lifted);
+        assert.deepEqual(
+          [get(lifted, 'type'), get(lifted, 'input_type')],
+          ['input_injected', 'touch'],
+          `a touch: ${liftedShown}`,
+        );
+        await gone(how, 'Toast');
+      }
+
+      const printed = JSON.stringify(await call('editor_output', { op: 'run' }));
+      assert.doesNotMatch(
+        printed,
+        /gdharness_runtime|previously freed/,
+        `${how}: and the addon raised nothing: ${printed}`,
+      );
+      await stopItsRun(server);
+    };
+    await run(true);
+    const refused = windowedRunRefused();
+    if (refused === null) {
+      await run(false);
+    } else {
+      console.log(`click that closes its window: the windowed half skipped (${refused})`);
+    }
   } finally {
     await server.stop();
     sweep(project);
