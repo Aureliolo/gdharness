@@ -7,8 +7,9 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { cachedEntries } from './class-cache.js';
 import { errorMessage } from './errors.js';
 
 /**
@@ -38,6 +39,7 @@ const CACHE = join('.godot', 'uid_cache.bin');
 const RES = 'res://';
 const UID = 'uid://';
 const NOTHING: UidMend = { moved: [], dropped: [] };
+const CLASS_LIST = join('.godot', 'global_script_class_cache.cfg');
 
 /** Each id's last entry, in the order each id first stood, or null when [param data] is not a cache. */
 export function uidCacheEntries(data: Buffer): UidEntry[] | null {
@@ -166,38 +168,56 @@ function declared(path: string, name: string): readonly [text: string, owner: st
  */
 function declaringFiles(projectPath: string, wanted: ReadonlySet<bigint>): Map<bigint, string> {
   const found = new Map<bigint, string>();
-  const visit = (directory: string, prefix: string): void => {
-    let entries: Dirent[];
-    try {
-      entries = readdirSync(directory, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    if (entries.some((entry) => entry.name === '.gdignore')) {
-      return;
-    }
-    for (const entry of entries) {
-      if (found.size === wanted.size) {
-        return;
-      }
-      if (entry.name.startsWith('.')) {
-        continue;
-      }
-      const path = join(directory, entry.name);
-      const spelled = `${prefix}${entry.name}`;
-      if (entry.isDirectory()) {
-        visit(path, `${spelled}/`);
-        continue;
-      }
-      const declaration = entry.isFile() ? declared(path, spelled) : null;
-      const id = declaration === null ? null : uidOfText(declaration[0]);
-      if (declaration !== null && id !== null && wanted.has(id) && !found.has(id)) {
-        found.set(id, `${RES}${declaration[1]}`);
-      }
-    }
-  };
-  visit(projectPath, '');
+  findDeclarations(projectPath, '', wanted, found);
   return found;
+}
+
+function findDeclarations(
+  directory: string,
+  prefix: string,
+  wanted: ReadonlySet<bigint>,
+  found: Map<bigint, string>,
+): void {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  if (entries.some((entry) => entry.name === '.gdignore')) {
+    return;
+  }
+  for (const entry of entries) {
+    if (found.size === wanted.size) {
+      return;
+    }
+    if (entry.name.startsWith('.')) {
+      continue;
+    }
+    const path = join(directory, entry.name);
+    const spelled = `${prefix}${entry.name}`;
+    if (entry.isDirectory()) {
+      findDeclarations(path, `${spelled}/`, wanted, found);
+      continue;
+    }
+    if (entry.isFile()) {
+      recordDeclaration(path, spelled, wanted, found);
+    }
+  }
+}
+
+/** Notes [param path] in [param found] when it declares a wanted id that no earlier file declared. */
+function recordDeclaration(
+  path: string,
+  spelled: string,
+  wanted: ReadonlySet<bigint>,
+  found: Map<bigint, string>,
+): void {
+  const declaration = declared(path, spelled);
+  const id = declaration === null ? null : uidOfText(declaration[0]);
+  if (declaration !== null && id !== null && wanted.has(id) && !found.has(id)) {
+    found.set(id, `${RES}${declaration[1]}`);
+  }
 }
 
 /**
@@ -276,6 +296,74 @@ export function mendUidCache(projectPath: string): UidMend {
   return { moved, dropped };
 }
 
+/** One class of the class list that names a file gone: its name and the `res://` path it is listed at. */
+type GoneClass = readonly [name: string, path: string];
+
+/**
+ * Sets [param projectPath]'s class list, `.godot/global_script_class_cache.cfg`, right: an entry whose
+ * path names a file that is gone is dropped, and the dropped ones are answered. A list copied from
+ * another checkout names scripts this one lacks, and compiling every script together then fails on
+ * `Could not find script for class`. An entry whose file is there is kept, even when the file now
+ * declares another class, because the engine resolves the name to that file and loads it unharmed.
+ *
+ * The file is Godot's form, `list=[`, the entries joined by `, `, then `]`. A sound list is left byte
+ * for byte. One naming a file gone in another form is left too, and the mend throws to say why, since
+ * the start it precedes then fails as before. The new list is written beside the old and renamed
+ * over it.
+ */
+export function mendClassList(projectPath: string): readonly GoneClass[] {
+  const file = join(projectPath, CLASS_LIST);
+  const entries = cachedEntries(projectPath);
+  if (entries === null) {
+    return [];
+  }
+  const present = presenceIn(projectPath);
+  const gone: GoneClass[] = [];
+  const kept: string[] = [];
+  for (const [name, entry] of entries) {
+    const path = /"path":\s*"([^"]*)"/.exec(entry)?.[1];
+    if (path?.startsWith(RES) === true && !present(path)) {
+      gone.push([name, path]);
+    } else {
+      kept.push(entry);
+    }
+  }
+  if (gone.length === 0) {
+    return [];
+  }
+  if (readFileSync(file, 'utf8') !== `list=[${[...entries.values()].join(', ')}]\n`) {
+    throw new Error('it is not in the form Godot writes, so it is left as it is');
+  }
+  const written = `${file}.${String(process.pid)}.mending`;
+  writeFileSync(written, `list=[${kept.join(', ')}]\n`);
+  try {
+    renameSync(written, file);
+  } catch (error) {
+    rmSync(written, { force: true });
+    throw error;
+  }
+  return gone;
+}
+
+/**
+ * The arguments of the program [param command] runs, past the wrappers an engine starts under on
+ * Linux: `taskset -c <cores>` and `setpriv <options> --`, each of which runs the command after it.
+ * Read as the engine's own, setpriv's `--` hid every engine's `--path`, so no Linux engine was mended.
+ */
+export function programArgumentsOf(command: string, args: readonly string[]): readonly string[] {
+  const name = basename(command);
+  const inner = args[2];
+  if (name === 'taskset' && args[0] === '-c' && inner !== undefined) {
+    return programArgumentsOf(inner, args.slice(3));
+  }
+  const end = args.indexOf('--');
+  const wrapped = args[end + 1];
+  if (name === 'setpriv' && end >= 0 && wrapped !== undefined) {
+    return programArgumentsOf(wrapped, args.slice(end + 2));
+  }
+  return args;
+}
+
 /** The project a Godot command line starts on, by its `--path`, or null when it names none. */
 function projectStarted(args: readonly string[], cwd: string | URL | undefined): string | null {
   const at = args.indexOf('--path');
@@ -312,5 +400,21 @@ export function mendBeforeStart(args: readonly string[], cwd: string | URL | und
   } catch (error) {
     const said = errorMessage(error);
     process.stderr.write(`uid cache: could not rewrite ${where}, which names files gone: ${said}\n`);
+  }
+  mendClassListBeforeStart(project);
+}
+
+/** Says on stderr which classes were dropped from [param project]'s class list, or why none could be. */
+function mendClassListBeforeStart(project: string): void {
+  const where = join(project, CLASS_LIST);
+  try {
+    const dropped = mendClassList(project);
+    if (dropped.length > 0) {
+      const named = dropped.map(([name, path]) => `${name} at ${path}`).join(', ');
+      process.stderr.write(`class list: dropped what names a file gone from ${where}: ${named}\n`);
+    }
+  } catch (error) {
+    const said = errorMessage(error);
+    process.stderr.write(`class list: could not rewrite ${where}, which names files gone: ${said}\n`);
   }
 }

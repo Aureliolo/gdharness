@@ -201,13 +201,7 @@ export function lspOptionsOf(args: readonly string[], cwd: string): LspOptions {
   for (let at = 0; at < args.length; at += 1) {
     const arg = args[at] ?? '';
     if (arg === '--port' || arg === '--wait') {
-      const given = args[at + 1];
-      const value = given === undefined ? null : arg === '--port' ? portIn(given) : secondsIn(given);
-      if (given === undefined || value === null) {
-        throw new EngineUsageError(
-          `${arg} takes ${arg === '--port' ? 'a port, 1 to 65535' : 'a number of seconds'}, not ${given ?? 'nothing'}.`,
-        );
-      }
+      const value = flagNumberOf(arg, args[at + 1]);
       if (arg === '--port') {
         port = value;
       } else {
@@ -216,10 +210,8 @@ export function lspOptionsOf(args: readonly string[], cwd: string): LspOptions {
       at += 1;
     } else if (arg.startsWith('--')) {
       throw new EngineUsageError(`Unknown option ${arg}. gdharness lsp takes --port N and --wait S.`);
-    } else if (named === undefined) {
-      named = arg;
     } else {
-      throw new EngineUsageError(`gdharness lsp takes one project, and was given ${named} and ${arg}.`);
+      named = onlyProject(named, arg);
     }
   }
   const projectPath = resolve(cwd, named ?? '.');
@@ -228,6 +220,25 @@ export function lspOptionsOf(args: readonly string[], cwd: string): LspOptions {
     throw new EngineUsageError(refused);
   }
   return { projectPath, port, waitSeconds };
+}
+
+/** The number [param given] spells for [param flag], which is `--port` or `--wait`, or a refusal naming it. */
+function flagNumberOf(flag: string, given: string | undefined): number {
+  const value = given === undefined ? null : flag === '--port' ? portIn(given) : secondsIn(given);
+  if (given === undefined || value === null) {
+    throw new EngineUsageError(
+      `${flag} takes ${flag === '--port' ? 'a port, 1 to 65535' : 'a number of seconds'}, not ${given ?? 'nothing'}.`,
+    );
+  }
+  return value;
+}
+
+/** The project word [param arg], refused when [param named] already holds one. */
+function onlyProject(named: string | undefined, arg: string): string {
+  if (named !== undefined) {
+    throw new EngineUsageError(`gdharness lsp takes one project, and was given ${named} and ${arg}.`);
+  }
+  return arg;
 }
 
 /** A line on standard error, which is the only place anything but LSP traffic may go. */

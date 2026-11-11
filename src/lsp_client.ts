@@ -405,22 +405,7 @@ export class GodotLSPClient {
     }
 
     if (typeof message['id'] === 'number') {
-      const pending = this.pendingRequests.get(message['id']);
-      if (pending) {
-        clearTimeout(pending.timer);
-        this.pendingRequests.delete(message['id']);
-
-        const errorPayload = message['error'];
-        if (errorPayload && typeof errorPayload === 'object') {
-          const errorObject = asRecord(errorPayload);
-          const code = typeof errorObject['code'] === 'number' ? errorObject['code'] : 'unknown';
-          const messageText =
-            typeof errorObject['message'] === 'string' ? errorObject['message'] : 'Unknown LSP error';
-          pending.reject(new Error(`LSP error (${code}): ${messageText}`));
-        } else {
-          pending.resolve(message['result']);
-        }
-      }
+      this.settleRequest(message['id'], message);
     }
 
     if (message['method'] === 'gdscript_client/changeWorkspace') {
@@ -429,21 +414,46 @@ export class GodotLSPClient {
     }
 
     if (message['method'] === 'textDocument/publishDiagnostics') {
-      const params = message['params'];
-      const paramsObject = isRecord(params) ? params : null;
-      const uri = paramsObject && typeof paramsObject['uri'] === 'string' ? paramsObject['uri'] : null;
-      const diagnostics =
-        paramsObject && Array.isArray(paramsObject['diagnostics'])
-          ? (paramsObject['diagnostics'] as unknown[])
-          : [];
-      if (typeof uri === 'string') {
-        const key = diagnosticsKey(uri);
-        const waiter = this.diagnosticsWaiters.get(key);
-        if (waiter) {
-          clearTimeout(waiter.timer);
-          this.diagnosticsWaiters.delete(key);
-          waiter.resolve(diagnostics);
-        }
+      this.settleDiagnosticsWaiter(message['params']);
+    }
+  }
+
+  /** Answers the request [param id] with [param message], as its result or as its error. */
+  private settleRequest(id: number, message: Record<string, unknown>): void {
+    const pending = this.pendingRequests.get(id);
+    if (!pending) {
+      return;
+    }
+    clearTimeout(pending.timer);
+    this.pendingRequests.delete(id);
+
+    const errorPayload = message['error'];
+    if (errorPayload && typeof errorPayload === 'object') {
+      const errorObject = asRecord(errorPayload);
+      const code = typeof errorObject['code'] === 'number' ? errorObject['code'] : 'unknown';
+      const messageText =
+        typeof errorObject['message'] === 'string' ? errorObject['message'] : 'Unknown LSP error';
+      pending.reject(new Error(`LSP error (${code}): ${messageText}`));
+    } else {
+      pending.resolve(message['result']);
+    }
+  }
+
+  /** Resolves whoever waits for the diagnostics that [param params] publish. */
+  private settleDiagnosticsWaiter(params: unknown): void {
+    const paramsObject = isRecord(params) ? params : null;
+    const uri = paramsObject && typeof paramsObject['uri'] === 'string' ? paramsObject['uri'] : null;
+    const diagnostics =
+      paramsObject && Array.isArray(paramsObject['diagnostics'])
+        ? (paramsObject['diagnostics'] as unknown[])
+        : [];
+    if (typeof uri === 'string') {
+      const key = diagnosticsKey(uri);
+      const waiter = this.diagnosticsWaiters.get(key);
+      if (waiter) {
+        clearTimeout(waiter.timer);
+        this.diagnosticsWaiters.delete(key);
+        waiter.resolve(diagnostics);
       }
     }
   }
@@ -1233,40 +1243,55 @@ export async function handleLSPTool(
 
     await client.initialize(projectPath);
 
-    switch (toolName) {
-      case 'lsp_get_diagnostics': {
-        const diagnostics = await client.getDiagnostics(scriptPath, content);
-        return asToolResponse({ diagnostics: diagnostics.map(shownDiagnostic) });
-      }
-
-      case 'lsp_get_completions': {
-        const { line, character } = protocolPosition(parsedArgs);
-        const completions = await client.getCompletions(scriptPath, content, line, character);
-        return asToolResponse(narrowedCompletions(completions, typedBefore(content, line, character)));
-      }
-
-      case 'lsp_get_hover': {
-        const { line, character } = protocolPosition(parsedArgs);
-        const hover = await client.getHover(scriptPath, content, line, character);
-        return asToolResponse({ hover: shownHover(hover) });
-      }
-
-      case 'lsp_get_symbols': {
-        const symbols = await client.getDocumentSymbols(scriptPath, content);
-        return asToolResponse({ symbols: symbols.map((symbol) => shownSymbol(symbol, linesIn(content))) });
-      }
-
-      default:
-        return asToolResponse({ error: `Unknown LSP tool: ${toolName}` });
-    }
+    return await runLspTool(client, toolName, parsedArgs, scriptPath, content);
   } catch (error) {
-    return asToolResponse({
-      error: normalizeLSPError(error, client.port),
-      ...(error instanceof AnotherProjectsServer ? { serves: error.serves } : {}),
-      ...(error instanceof ArgumentRefusal ? { refusedArguments: true } : {}),
-      ...(error instanceof NoDiagnosticsPublished ? { aboutThisFile: true } : {}),
-      ...(error instanceof LSPTimeout && error.method === 'initialize' ? { stillReading: true } : {}),
-      ...(error instanceof LanguageServerNotListening ? { stillReading: true } : {}),
-    });
+    return lspFailure(error, client.port);
   }
+}
+
+async function runLspTool(
+  client: GodotLSPClient,
+  toolName: string,
+  parsedArgs: Record<string, unknown>,
+  scriptPath: string,
+  content: string,
+): Promise<ToolResponse> {
+  switch (toolName) {
+    case 'lsp_get_diagnostics': {
+      const diagnostics = await client.getDiagnostics(scriptPath, content);
+      return asToolResponse({ diagnostics: diagnostics.map(shownDiagnostic) });
+    }
+
+    case 'lsp_get_completions': {
+      const { line, character } = protocolPosition(parsedArgs);
+      const completions = await client.getCompletions(scriptPath, content, line, character);
+      return asToolResponse(narrowedCompletions(completions, typedBefore(content, line, character)));
+    }
+
+    case 'lsp_get_hover': {
+      const { line, character } = protocolPosition(parsedArgs);
+      const hover = await client.getHover(scriptPath, content, line, character);
+      return asToolResponse({ hover: shownHover(hover) });
+    }
+
+    case 'lsp_get_symbols': {
+      const symbols = await client.getDocumentSymbols(scriptPath, content);
+      return asToolResponse({ symbols: symbols.map((symbol) => shownSymbol(symbol, linesIn(content))) });
+    }
+
+    default:
+      return asToolResponse({ error: `Unknown LSP tool: ${toolName}` });
+  }
+}
+
+/** The tool response for a failed call: the message, and a flag for each kind of failure that has one. */
+function lspFailure(error: unknown, port: number): ToolResponse {
+  return asToolResponse({
+    error: normalizeLSPError(error, port),
+    ...(error instanceof AnotherProjectsServer ? { serves: error.serves } : {}),
+    ...(error instanceof ArgumentRefusal ? { refusedArguments: true } : {}),
+    ...(error instanceof NoDiagnosticsPublished ? { aboutThisFile: true } : {}),
+    ...(error instanceof LSPTimeout && error.method === 'initialize' ? { stillReading: true } : {}),
+    ...(error instanceof LanguageServerNotListening ? { stillReading: true } : {}),
+  });
 }

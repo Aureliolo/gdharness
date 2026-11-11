@@ -188,48 +188,63 @@ export function renderToolsMarkdown(): string {
   ];
 
   for (const tool of TOOL_SPECS) {
-    lines.push(
-      `## ${tool.name}`,
-      '',
-      whatItCanChange(tool),
-      '',
-      withSharedParagraphsLinked(tool.description),
-      '',
-    );
-    if (tool.answer !== undefined) {
-      lines.push(`The answer: ${withSharedParagraphsLinked(tool.answer)}`, '');
-    }
-
-    const operations = Object.entries(tool.operations ?? {});
-    if (operations.length > 0) {
-      for (const [op, spec] of operations) {
-        const needs = [...tool.requires, ...spec.requires];
-        const isDefault = tool.defaultOperation === op ? ' (default)' : '';
-        const wants = needs.length > 0 ? ` Needs: ${needs.map((name) => `\`${name}\``).join(', ')}.` : '';
-        // What else the op will take, because an argument meant for another op is refused. The
-        // list below says which ops each argument belongs to. This says it the way round somebody
-        // writing one call wants it.
-        const spare = argumentsOf(tool, op).filter((name) => !needs.includes(name) && name !== 'projectPath');
-        const takes = spare.length > 0 ? ` Takes: ${spare.map((name) => `\`${name}\``).join(', ')}.` : '';
-        lines.push(`- \`op: ${op}\`${isDefault}: ${spec.summary}.${wants}${takes}`);
-      }
-      lines.push('');
-    } else if (tool.requires.length > 0) {
-      lines.push(`Needs: ${tool.requires.map((name) => `\`${name}\``).join(', ')}.`, '');
-    }
-
-    const parameters = Object.entries(tool.parameters).filter(([name]) => name !== 'projectPath');
-    if (parameters.length > 0) {
-      lines.push('Arguments:', '');
-      for (const [name, schema] of parameters) {
-        const type = argumentShape(schema);
-        // The colon goes with the description rather than with the name. Ten arguments had none and
-        // rendered as a line ending in a colon, in the page and in the skill an agent reads.
-        const note = typeof schema['description'] === 'string' ? `: ${schema['description']}` : '';
-        lines.push(`- \`${name}\` (${type})${note}`);
-      }
-      lines.push('');
-    }
+    lines.push(...toolSection(tool));
   }
   return lines.join('\n');
+}
+
+/** The markdown lines of one tool: what it can change, its description, its ops and its arguments. */
+function toolSection(tool: ToolSpec): string[] {
+  const lines = [
+    `## ${tool.name}`,
+    '',
+    whatItCanChange(tool),
+    '',
+    withSharedParagraphsLinked(tool.description),
+    '',
+  ];
+  if (tool.answer !== undefined) {
+    lines.push(`The answer: ${withSharedParagraphsLinked(tool.answer)}`, '');
+  }
+
+  const operations = Object.entries(tool.operations ?? {});
+  if (operations.length > 0) {
+    for (const [op, spec] of operations) {
+      lines.push(operationLine(tool, op, spec));
+    }
+    lines.push('');
+  } else if (tool.requires.length > 0) {
+    lines.push(`Needs: ${tool.requires.map((name) => `\`${name}\``).join(', ')}.`, '');
+  }
+
+  const parameters = Object.entries(tool.parameters).filter(([name]) => name !== 'projectPath');
+  if (parameters.length > 0) {
+    lines.push('Arguments:', '');
+    for (const [name, schema] of parameters) {
+      const type = argumentShape(schema);
+      // The colon goes with the description rather than with the name. Ten arguments had none and
+      // rendered as a line ending in a colon, in the page and in the skill an agent reads.
+      const note = typeof schema['description'] === 'string' ? `: ${schema['description']}` : '';
+      lines.push(`- \`${name}\` (${type})${note}`);
+    }
+    lines.push('');
+  }
+  return lines;
+}
+
+/** The bullet for op [param op] of [param tool], with what it needs and what else it takes. */
+function operationLine(
+  tool: ToolSpec,
+  op: string,
+  spec: { summary: string; requires: readonly string[] },
+): string {
+  const needs = [...tool.requires, ...spec.requires];
+  const isDefault = tool.defaultOperation === op ? ' (default)' : '';
+  const wants = needs.length > 0 ? ` Needs: ${needs.map((name) => `\`${name}\``).join(', ')}.` : '';
+  // What else the op will take, because an argument meant for another op is refused. The
+  // list below says which ops each argument belongs to. This says it the way round somebody
+  // writing one call wants it.
+  const spare = argumentsOf(tool, op).filter((name) => !needs.includes(name) && name !== 'projectPath');
+  const takes = spare.length > 0 ? ` Takes: ${spare.map((name) => `\`${name}\``).join(', ')}.` : '';
+  return `- \`op: ${op}\`${isDefault}: ${spec.summary}.${wants}${takes}`;
 }

@@ -9,6 +9,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { cachedClasses } from './class-cache.js';
 import { emptyRecord } from './dictionary.js';
 import { docCacheCrash, docCachesWritten, editorCacheDirectory } from './doc-cache.js';
 import { EXIT_LEAK, projectSelfTypedExports, selfTypedSentence } from './engine-leaks.js';
@@ -483,12 +484,41 @@ export async function runOperation(
   params: OperationParams,
   projectPath: string,
 ): Promise<HeadlessOutcome> {
-  const outcome = await operationOutcome(engine, operation, params, projectPath);
+  // Read before the engine starts, since every start first drops the entries whose script is gone,
+  // and the rebuild could then not answer them as removed.
+  const listedBefore = operation === REFRESH_CLASS_LIST ? cachedClasses(projectPath) : null;
+  const run = await operationOutcome(engine, operation, params, projectPath);
+  const outcome = listedBefore === null ? run : withEveryRemovalAnswered(run, listedBefore, projectPath);
   const heldAtExit = [...outcome.messages, ...(outcome.afterAnswerMessages ?? [])].some((entry) =>
     EXIT_LEAK.test(entry.text),
   );
   const note = heldAtExit ? selfTypedSentence(projectSelfTypedExports(projectPath)) : undefined;
   return note === undefined ? outcome : { ...outcome, exitLeakNote: note };
+}
+
+const REFRESH_CLASS_LIST = 'refresh_class_cache';
+
+/**
+ * [param outcome] of a class list rebuild, its `removed` holding every class [param listedBefore]
+ * held that the list no longer does, whether the rebuild dropped it or the start before it did.
+ */
+function withEveryRemovalAnswered(
+  outcome: HeadlessOutcome,
+  listedBefore: ReadonlyMap<string, string>,
+  projectPath: string,
+): HeadlessOutcome {
+  const answered = outcome.ok ? outcome.payload['removed'] : undefined;
+  if (!(outcome.ok && Array.isArray(answered))) {
+    return outcome;
+  }
+  const listedAfter = cachedClasses(projectPath) ?? new Map<string, string>();
+  const removed = answered.filter((name): name is string => typeof name === 'string');
+  const unanswered = [...listedBefore.keys()].filter(
+    (name) => !listedAfter.has(name) && !removed.includes(name),
+  );
+  return unanswered.length === 0
+    ? outcome
+    : { ...outcome, payload: { ...outcome.payload, removed: [...removed, ...unanswered] } };
 }
 
 async function operationOutcome(
@@ -538,6 +568,60 @@ async function operationOutcome(
   } finally {
     discard(paramsDir);
   }
+  const seen = operationLogOf(ran);
+  const { problems, afterAnswered } = seen;
+
+  if (answer.kind === 'unreadable') {
+    return {
+      ok: false,
+      message: `${operation} wrote an answer that could not be read (${answer.why})`,
+      ...reported(problems),
+      ...afterAnswered,
+    };
+  }
+  // No answer is an operation that refused or an engine that never reached the script, whatever
+  // the exit status says.
+  if (answer.kind === 'none') {
+    return unansweredOutcome(operation, ran, seen);
+  }
+  const fault = scriptFault(problems, engine.script);
+  if (fault !== undefined) {
+    return {
+      ok: false,
+      message:
+        `${operation} hit an error in the operations script, so its answer is left out: part of it was ` +
+        `never computed. ${fault.text} (${fault.at})`,
+      ...reported(problems),
+      ...afterAnswered,
+    };
+  }
+  const afterAnswer = unclean(ran, seen);
+  return {
+    ok: true,
+    payload: answer.payload,
+    ...reported(problems),
+    ...afterAnswered,
+    ...(afterAnswer === undefined ? {} : { afterAnswer }),
+  };
+}
+
+/** What an operation's run printed, cut at the marks the script writes around the operation. */
+interface OperationLog {
+  readonly problems: readonly LogEntry[];
+  readonly startup: readonly LogEntry[];
+  readonly after: readonly LogEntry[];
+  readonly answered: number;
+  readonly waiting: number;
+  readonly begun: number;
+  readonly afterAnswered: Asides;
+}
+
+type Asides = Pick<
+  Reported,
+  'afterAnswerMessages' | 'afterAnswerOmitted' | 'beforeOperationMessages' | 'beforeOperationOmitted'
+>;
+
+function operationLogOf(ran: EngineRun): OperationLog {
   const everything = withoutAsides(ran.log.everything());
   const marked = (text: string): number =>
     everything.findIndex((entry) => entry.source === 'stderr' && entry.text === text);
@@ -557,83 +641,65 @@ async function operationOutcome(
   const startup =
     waiting === -1 ? [] : problemsAmong(everything.slice(waiting + 1, begun === -1 ? ended : begun));
   const after = answered === -1 ? [] : problemsAmong(everything.slice(answered + 1));
-  const afterAnswered = {
+  return { problems, startup, after, answered, waiting, begun, afterAnswered: asidesOf(after, startup) };
+}
+
+/** The messages kept from before the operation and after its answer, with how many were left out. */
+function asidesOf(after: readonly LogEntry[], startup: readonly LogEntry[]): Asides {
+  return {
     ...(after.length === 0 ? {} : { afterAnswerMessages: after.slice(-MESSAGES_KEPT) }),
     ...(after.length > MESSAGES_KEPT ? { afterAnswerOmitted: after.length - MESSAGES_KEPT } : {}),
     ...(startup.length === 0 ? {} : { beforeOperationMessages: startup.slice(-MESSAGES_KEPT) }),
     ...(startup.length > MESSAGES_KEPT ? { beforeOperationOmitted: startup.length - MESSAGES_KEPT } : {}),
   };
+}
 
-  if (answer.kind === 'unreadable') {
-    return {
-      ok: false,
-      message: `${operation} wrote an answer that could not be read (${answer.why})`,
-      ...reported(problems),
-      ...afterAnswered,
-    };
-  }
-  // No answer is an operation that refused or an engine that never reached the script, whatever
-  // the exit status says.
-  if (answer.kind === 'none') {
-    if (waiting !== -1 && begun === -1) {
-      return {
-        ok: false,
-        message:
-          `${operation} never ran: the engine ended (${howItEnded(ran)}) while it started the project's ` +
-          `autoloads, which this operation waits for. The last it reported: ${reason(ran.log, startup)}`,
-        ...reported(problems),
-        ...afterAnswered,
-      };
-    }
-    // A refusal the script made is the whole message. Prefixed with the script's own name for the
-    // operation and its exit status, it read as a crash in something the caller never called, and
-    // it came back a second time under engine_messages.
-    const refusals = refusalsIn(ran.log);
-    if (refusals.length > 0) {
-      const said = new Set(refusals.map((entry) => entry.index));
-      return {
-        ok: false,
-        message: refusals.map((entry) => entry.text.slice(OWN_ERROR.length)).join('; '),
-        ...reported(problems.filter((entry) => !said.has(entry.index))),
-      };
-    }
-    const ending =
-      ran.exitCode === 0 && ran.failure === null ? 'produced no result' : `failed (${howItEnded(ran)})`;
-    return {
-      ok: false,
-      message: `${operation} ${ending}: ${reason(ran.log, problems)}`,
-      ...reported(problems),
-    };
-  }
-  const fault = scriptFault(problems, engine.script);
-  if (fault !== undefined) {
+/** The failure for an operation that wrote no answer. */
+function unansweredOutcome(operation: string, ran: EngineRun, seen: OperationLog): HeadlessOutcome {
+  const { problems, startup, waiting, begun, afterAnswered } = seen;
+  if (waiting !== -1 && begun === -1) {
     return {
       ok: false,
       message:
-        `${operation} hit an error in the operations script, so its answer is left out: part of it was ` +
-        `never computed. ${fault.text} (${fault.at})`,
+        `${operation} never ran: the engine ended (${howItEnded(ran)}) while it started the project's ` +
+        `autoloads, which this operation waits for. The last it reported: ${reason(ran.log, startup)}`,
       ...reported(problems),
       ...afterAnswered,
     };
   }
+  // A refusal the script made is the whole message. Prefixed with the script's own name for the
+  // operation and its exit status, it read as a crash in something the caller never called, and
+  // it came back a second time under engine_messages.
+  const refusals = refusalsIn(ran.log);
+  if (refusals.length > 0) {
+    const said = new Set(refusals.map((entry) => entry.index));
+    return {
+      ok: false,
+      message: refusals.map((entry) => entry.text.slice(OWN_ERROR.length)).join('; '),
+      ...reported(problems.filter((entry) => !said.has(entry.index))),
+    };
+  }
+  const ending =
+    ran.exitCode === 0 && ran.failure === null ? 'produced no result' : `failed (${howItEnded(ran)})`;
+  return {
+    ok: false,
+    message: `${operation} ${ending}: ${reason(ran.log, problems)}`,
+    ...reported(problems),
+  };
+}
+
+/** The note for an engine that did not exit cleanly after the operation answered, or undefined. */
+function unclean(ran: EngineRun, seen: OperationLog): string | undefined {
   // The answer is written before the engine shuts down and the project's autoloads run, so a
   // failure after it did not undo it: a setting it answered as saved is saved.
-  const onTheWayOut = answered === -1 ? problems : after;
-  const afterAnswer =
-    ran.exitCode === 0 && ran.failure === null
-      ? undefined
-      : `The operation finished and wrote this answer, and then the engine did not exit cleanly (${howItEnded(ran)}). ${
-          onTheWayOut.length === 0
-            ? 'It printed no error or warning on the way out.'
-            : `What it reported on the way out is under ${answered === -1 ? 'engine_messages' : 'engine_messages_after_answer'}.`
-        }`;
-  return {
-    ok: true,
-    payload: answer.payload,
-    ...reported(problems),
-    ...afterAnswered,
-    ...(afterAnswer === undefined ? {} : { afterAnswer }),
-  };
+  const onTheWayOut = seen.answered === -1 ? seen.problems : seen.after;
+  return ran.exitCode === 0 && ran.failure === null
+    ? undefined
+    : `The operation finished and wrote this answer, and then the engine did not exit cleanly (${howItEnded(ran)}). ${
+        onTheWayOut.length === 0
+          ? 'It printed no error or warning on the way out.'
+          : `What it reported on the way out is under ${seen.answered === -1 ? 'engine_messages' : 'engine_messages_after_answer'}.`
+      }`;
 }
 
 /** The answer the script wrote, null when it wrote none, or why what it wrote is not one. */

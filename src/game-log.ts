@@ -259,30 +259,35 @@ function framesCollapsed(detail: readonly string[]): readonly string[] {
       at += 1;
       continue;
     }
-    let index = 0;
-    while (index < frames.length) {
-      const cycle = repeatedCycle(frames, index);
-      const first = frames[index];
-      if (cycle === null || first === undefined) {
-        out.push(`[${first?.number ?? ''}] ${first?.frame ?? ''}`);
-        index += 1;
-        continue;
-      }
-      const last = frames[index + cycle.period * cycle.times - 1];
-      const span = `[${first.number}-${last?.number ?? first.number}]`;
-      if (cycle.period === 1) {
-        out.push(`${span} ${first.frame}`);
-      } else {
-        out.push(`${span} these ${cycle.period} frames, ${cycle.times} times over:`);
-        for (const frame of frames.slice(index, index + cycle.period)) {
-          out.push(`  ${frame.frame}`);
-        }
-      }
-      index += cycle.period * cycle.times;
-    }
+    collapseRun(frames, out);
     at += frames.length;
   }
   return out;
+}
+
+/** Writes [param frames], which follow one another, to [param out] with each repeated cycle once. */
+function collapseRun(frames: readonly Frame[], out: string[]): void {
+  let index = 0;
+  while (index < frames.length) {
+    const cycle = repeatedCycle(frames, index);
+    const first = frames[index];
+    if (cycle === null || first === undefined) {
+      out.push(`[${first?.number ?? ''}] ${first?.frame ?? ''}`);
+      index += 1;
+      continue;
+    }
+    const last = frames[index + cycle.period * cycle.times - 1];
+    const span = `[${first.number}-${last?.number ?? first.number}]`;
+    if (cycle.period === 1) {
+      out.push(`${span} ${first.frame}`);
+    } else {
+      out.push(`${span} these ${cycle.period} frames, ${cycle.times} times over:`);
+      for (const frame of frames.slice(index, index + cycle.period)) {
+        out.push(`  ${frame.frame}`);
+      }
+    }
+    index += cycle.period * cycle.times;
+  }
 }
 
 interface Frame {
@@ -469,25 +474,7 @@ export class GameLog {
     if (line.trim() === '') {
       return;
     }
-    const mark = RAISED_MARK.exec(line);
-    const by = mark === null ? null : raisedBy(mark[1] ?? '');
-    if (by !== null) {
-      this.raisedByCall(by, mark?.[3] ?? '', mark?.[2] ?? '');
-      return;
-    }
-    const report = this.crashed[source];
-    if (report !== null) {
-      const said = line.trim();
-      if (!CRASH_FILLER.test(said)) {
-        report.push(said);
-      }
-      return;
-    }
-    if (CRASH_HEADER.test(line)) {
-      const detail: string[] = [];
-      this.entries.push({ index: this.entries.length, severity: 'error', source, text: line.trim(), detail });
-      this.crashed[source] = detail;
-      this.lastHeadline[source] = null;
+    if (this.takenAsMarkOrCrash(source, line)) {
       return;
     }
     const owner = this.lastHeadline[source];
@@ -503,6 +490,42 @@ export class GameLog {
       owner.detail.push(line.trim());
       return;
     }
+    this.recordEntry(source, line, headline, owner);
+  }
+
+  /** Takes [param line] when it is a call's mark or part of a crash report, and says whether it did. */
+  private takenAsMarkOrCrash(source: Stream, line: string): boolean {
+    const mark = RAISED_MARK.exec(line);
+    const by = mark === null ? null : raisedBy(mark[1] ?? '');
+    if (by !== null) {
+      this.raisedByCall(by, mark?.[3] ?? '', mark?.[2] ?? '');
+      return true;
+    }
+    const report = this.crashed[source];
+    if (report !== null) {
+      const said = line.trim();
+      if (!CRASH_FILLER.test(said)) {
+        report.push(said);
+      }
+      return true;
+    }
+    if (CRASH_HEADER.test(line)) {
+      const detail: string[] = [];
+      this.entries.push({ index: this.entries.length, severity: 'error', source, text: line.trim(), detail });
+      this.crashed[source] = detail;
+      this.lastHeadline[source] = null;
+      return true;
+    }
+    return false;
+  }
+
+  /** Adds [param line] as an entry of its own, and notes it as the headline later lines may continue. */
+  private recordEntry(
+    source: Stream,
+    line: string,
+    headline: ReturnType<typeof announced>,
+    owner: Headed | null,
+  ): void {
     const detail: string[] = [];
     const entry: LogEntry = {
       index: this.entries.length,

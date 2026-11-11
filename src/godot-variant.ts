@@ -255,25 +255,9 @@ function decodeValue(reader: Reader, depth: number, how: Decoding = { faithful: 
   const header = reader.u32();
   const type = header & 0xff;
   const wide = (header & FLAG_64) !== 0;
-  const math = MATH[type];
-  if (math !== undefined) {
-    return {
-      kind: math.name,
-      values: Array.from({ length: math.count }, () =>
-        math.ints === true ? reader.i32() : reader.real(wide),
-      ),
-    };
-  }
-  const vectorWidth = PACKED_VECTORS[type];
-  if (vectorWidth !== undefined) {
-    const count = reader.u32();
-    return packed(
-      type,
-      Array.from({ length: count }, () => ({
-        kind: `Vector${vectorWidth}`,
-        values: Array.from({ length: vectorWidth }, () => reader.real(wide)),
-      })),
-    );
+  const fixed = decodeMathOrVector(reader, type, wide);
+  if (fixed !== undefined) {
+    return fixed;
   }
   switch (type) {
     case NIL:
@@ -294,23 +278,8 @@ function decodeValue(reader: Reader, depth: number, how: Decoding = { faithful: 
     }
     case 20:
       return { kind: 'Color', values: [reader.f32(), reader.f32(), reader.f32(), reader.f32()] };
-    case 22: {
-      const first = reader.u32();
-      if ((first & 0x80000000) === 0) {
-        throw new RangeError('a node path in the format before 3.0');
-      }
-      const names = first & 0x7fffffff;
-      let subnames = reader.u32();
-      const flags = reader.u32();
-      if ((flags & 2) !== 0) {
-        subnames += 1;
-      }
-      const named = Array.from({ length: names }, () => reader.string());
-      const sub = Array.from({ length: subnames }, () => reader.string());
-      // As NodePath's own text: absolute with a leading slash, then the names, then each subname.
-      const path = `${(flags & 1) !== 0 ? '/' : ''}${named.join('/')}${sub.map((one) => `:${one}`).join('')}`;
-      return { kind: 'NodePath', values: [path] };
-    }
+    case 22:
+      return decodeNodePath(reader);
     case 23:
       return { kind: 'RID', values: [reader.id()] };
     case 24:
@@ -323,30 +292,95 @@ function decodeValue(reader: Reader, depth: number, how: Decoding = { faithful: 
       return { kind: 'Callable', values: [] };
     case 26:
       return { kind: 'Signal', values: [reader.string(), reader.id()] };
-    case 27: {
-      const keys = containerType(reader, (header >> 16) & 0b11);
-      const values = containerType(reader, (header >> 18) & 0b11);
-      const count = reader.u32() & 0x7fffffff;
-      const entries: [GodotValue, GodotValue][] = [];
-      for (let index = 0; index < count; index += 1) {
-        const key = decodeValue(reader, depth + 1, how);
-        entries.push([key, decodeValue(reader, depth + 1, how)]);
-      }
-      const dictionary: GodotDictionary = { kind: 'dictionary', entries };
-      if (keys !== null || values !== null) {
-        CONTAINER_TYPES.set(dictionary, `Dictionary[${keys ?? 'Variant'}, ${values ?? 'Variant'}]`);
-      }
-      return dictionary;
-    }
-    case ARRAY: {
-      const element = containerType(reader, (header >> 16) & 0b11);
-      const count = reader.u32() & 0x7fffffff;
-      const array = Array.from({ length: count }, () => decodeValue(reader, depth + 1, how));
-      if (element !== null) {
-        CONTAINER_TYPES.set(array, `Array[${element}]`);
-      }
-      return array;
-    }
+    case 27:
+      return decodeDictionary(reader, header, depth, how);
+    case ARRAY:
+      return decodeTypedArray(reader, header, depth, how);
+    case 29:
+    case 30:
+    case 31:
+    case 32:
+    case 33:
+    case 34:
+    case 37:
+      return decodePacked(reader, type);
+    default:
+      throw new RangeError(`a value of type ${type}, which Godot 4.7 does not have`);
+  }
+}
+
+/** A vector, matrix or other fixed run of numbers of type [param type], or undefined for any other type. */
+function decodeMathOrVector(reader: Reader, type: number, wide: boolean): GodotValue | undefined {
+  const math = MATH[type];
+  if (math !== undefined) {
+    return {
+      kind: math.name,
+      values: Array.from({ length: math.count }, () =>
+        math.ints === true ? reader.i32() : reader.real(wide),
+      ),
+    };
+  }
+  const vectorWidth = PACKED_VECTORS[type];
+  if (vectorWidth !== undefined) {
+    const count = reader.u32();
+    return packed(
+      type,
+      Array.from({ length: count }, () => ({
+        kind: `Vector${vectorWidth}`,
+        values: Array.from({ length: vectorWidth }, () => reader.real(wide)),
+      })),
+    );
+  }
+  return undefined;
+}
+
+function decodeNodePath(reader: Reader): GodotValue {
+  const first = reader.u32();
+  if ((first & 0x80000000) === 0) {
+    throw new RangeError('a node path in the format before 3.0');
+  }
+  const names = first & 0x7fffffff;
+  let subnames = reader.u32();
+  const flags = reader.u32();
+  if ((flags & 2) !== 0) {
+    subnames += 1;
+  }
+  const named = Array.from({ length: names }, () => reader.string());
+  const sub = Array.from({ length: subnames }, () => reader.string());
+  // As NodePath's own text: absolute with a leading slash, then the names, then each subname.
+  const path = `${(flags & 1) !== 0 ? '/' : ''}${named.join('/')}${sub.map((one) => `:${one}`).join('')}`;
+  return { kind: 'NodePath', values: [path] };
+}
+
+function decodeDictionary(reader: Reader, header: number, depth: number, how: Decoding): GodotValue {
+  const keys = containerType(reader, (header >> 16) & 0b11);
+  const values = containerType(reader, (header >> 18) & 0b11);
+  const count = reader.u32() & 0x7fffffff;
+  const entries: [GodotValue, GodotValue][] = [];
+  for (let index = 0; index < count; index += 1) {
+    const key = decodeValue(reader, depth + 1, how);
+    entries.push([key, decodeValue(reader, depth + 1, how)]);
+  }
+  const dictionary: GodotDictionary = { kind: 'dictionary', entries };
+  if (keys !== null || values !== null) {
+    CONTAINER_TYPES.set(dictionary, `Dictionary[${keys ?? 'Variant'}, ${values ?? 'Variant'}]`);
+  }
+  return dictionary;
+}
+
+function decodeTypedArray(reader: Reader, header: number, depth: number, how: Decoding): GodotValue {
+  const element = containerType(reader, (header >> 16) & 0b11);
+  const count = reader.u32() & 0x7fffffff;
+  const array = Array.from({ length: count }, () => decodeValue(reader, depth + 1, how));
+  if (element !== null) {
+    CONTAINER_TYPES.set(array, `Array[${element}]`);
+  }
+  return array;
+}
+
+/** A packed array of bytes, ints, floats, strings or colours, by its [param type]. */
+function decodePacked(reader: Reader, type: number): GodotValue {
+  switch (type) {
     case 29: {
       const count = reader.u32();
       const bytes = [...reader.bytes(count)];
@@ -379,7 +413,7 @@ function decodeValue(reader: Reader, depth: number, how: Decoding = { faithful: 
         type,
         Array.from({ length: reader.u32() }, () => reader.string().replace(/\0$/, '')),
       );
-    case 37:
+    default:
       return packed(
         type,
         Array.from({ length: reader.u32() }, () => ({
@@ -387,8 +421,6 @@ function decodeValue(reader: Reader, depth: number, how: Decoding = { faithful: 
           values: [reader.f32(), reader.f32(), reader.f32(), reader.f32()],
         })),
       );
-    default:
-      throw new RangeError(`a value of type ${type}, which Godot 4.7 does not have`);
   }
 }
 
@@ -412,6 +444,32 @@ function pushU32(out: number[], value: number): void {
   out.push(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
 }
 
+function encodeNumber(out: number[], value: number): void {
+  const view = new DataView(new ArrayBuffer(8));
+  // A negative zero and a whole number past 64 bits are floats: an INT would send another number.
+  const whole = Number.isInteger(value) && !Object.is(value, -0);
+  if (whole && value >= -0x80000000 && value <= 0x7fffffff) {
+    pushU32(out, INT);
+    view.setInt32(0, value, true);
+    out.push(...new Uint8Array(view.buffer, 0, 4));
+  } else if (whole && value >= -(2 ** 63) && value < 2 ** 63) {
+    pushU32(out, INT | FLAG_64);
+    view.setBigInt64(0, BigInt(value), true);
+    out.push(...new Uint8Array(view.buffer));
+  } else {
+    pushU32(out, FLOAT | FLAG_64);
+    view.setFloat64(0, value, true);
+    out.push(...new Uint8Array(view.buffer));
+  }
+}
+
+function encodeString(out: number[], value: string): void {
+  const bytes = new TextEncoder().encode(value);
+  pushU32(out, STRING);
+  pushU32(out, bytes.length);
+  out.push(...bytes, ...Array.from({ length: (4 - (bytes.length % 4)) % 4 }, () => 0));
+}
+
 function encodeInto(out: number[], value: SentValue): void {
   if (value === null) {
     pushU32(out, NIL);
@@ -419,27 +477,9 @@ function encodeInto(out: number[], value: SentValue): void {
     pushU32(out, BOOL);
     pushU32(out, value ? 1 : 0);
   } else if (typeof value === 'number') {
-    const view = new DataView(new ArrayBuffer(8));
-    // A negative zero and a whole number past 64 bits are floats: an INT would send another number.
-    const whole = Number.isInteger(value) && !Object.is(value, -0);
-    if (whole && value >= -0x80000000 && value <= 0x7fffffff) {
-      pushU32(out, INT);
-      view.setInt32(0, value, true);
-      out.push(...new Uint8Array(view.buffer, 0, 4));
-    } else if (whole && value >= -(2 ** 63) && value < 2 ** 63) {
-      pushU32(out, INT | FLAG_64);
-      view.setBigInt64(0, BigInt(value), true);
-      out.push(...new Uint8Array(view.buffer));
-    } else {
-      pushU32(out, FLOAT | FLAG_64);
-      view.setFloat64(0, value, true);
-      out.push(...new Uint8Array(view.buffer));
-    }
+    encodeNumber(out, value);
   } else if (typeof value === 'string') {
-    const bytes = new TextEncoder().encode(value);
-    pushU32(out, STRING);
-    pushU32(out, bytes.length);
-    out.push(...bytes, ...Array.from({ length: (4 - (bytes.length % 4)) % 4 }, () => 0));
+    encodeString(out, value);
   } else {
     pushU32(out, ARRAY);
     pushU32(out, value.length);

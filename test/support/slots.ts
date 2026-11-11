@@ -6,7 +6,7 @@
  * Set here, on import, before any server or command is spawned: each inherits the variables. A run
  * that names its own keeps them.
  */
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { availableParallelism, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import process from 'node:process';
@@ -31,4 +31,49 @@ export function leftInSlots(slots: string): string[] {
           .map((name) => `${WAITING_FOLDER}/${name}`)
       : []),
   ].toSorted();
+}
+
+/**
+ * Every lock and mark in the suite's slot directory with what it holds and whether its process
+ * lives, for a call that stalled: a take waiting on held slots answers nothing until they free.
+ */
+export function slotsSaid(): string {
+  const slots = process.env[SLOTS_VARIABLE];
+  if (slots === undefined || !existsSync(slots)) {
+    return 'The slot directory holds nothing.';
+  }
+  const said = (path: string, name: string): string[] => {
+    try {
+      return readdirSync(path).flatMap((inner) => said(join(path, inner), `${name}/${inner}`));
+    } catch {
+      // Not a folder, so a lock or a mark.
+    }
+    let text: string;
+    try {
+      text = readFileSync(path, 'utf8').trim();
+    } catch {
+      return [`${name} went while it was read`];
+    }
+    const pid = /"pid":(\d+)/.exec(text)?.[1];
+    return [`${name} (${pid === undefined ? 'no pid' : livesSaid(Number(pid))}): ${text}`];
+  };
+  const lines = readdirSync(slots)
+    .toSorted()
+    .flatMap((name) => said(join(slots, name), name))
+    .filter((line) => !line.includes(ENDED_SUFFIX));
+  return lines.length === 0
+    ? `The slot directory ${slots} holds nothing.`
+    : `The slot directory ${slots} holds:\n${lines.join('\n')}`;
+}
+
+function livesSaid(pid: number): string {
+  try {
+    process.kill(pid, 0);
+    return `pid ${String(pid)} lives`;
+  } catch (error) {
+    // EPERM is a live process of another user's.
+    return error instanceof Error && 'code' in error && error.code === 'ESRCH'
+      ? `pid ${String(pid)} has gone`
+      : `pid ${String(pid)} lives`;
+  }
 }

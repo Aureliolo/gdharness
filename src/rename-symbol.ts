@@ -162,7 +162,32 @@ function autoloadNames(texts: readonly ProjectText[]): string[] {
   return settings === undefined ? [] : Object.keys(parseProjectGodot(settings.text)['autoload'] ?? {});
 }
 
-export async function renameSymbol(request: RenameRequest, services: RenameServices): Promise<RenameOutcome> {
+type Refused = Extract<RenameOutcome, { ok: false }>;
+
+/** Everything the two kinds of rename read: the request, the services and the project's scripts. */
+interface RenameContext {
+  readonly request: RenameRequest;
+  readonly services: RenameServices;
+  readonly declaringPath: string;
+  readonly texts: readonly ProjectText[];
+  readonly scripts: ReadonlyMap<string, Script>;
+  readonly declaring: Script;
+  readonly declared: ReturnType<typeof declaredIn>;
+}
+
+/** A rename worked out: the edits, and what the report says about how they were found. */
+interface Planned {
+  readonly plan: Plan;
+  readonly what: string;
+  readonly resolvedBy: string;
+  readonly took: LanguageServerTook | null;
+  readonly overrides: string[];
+  /** The scripts whose own interface the rename changes, which every other script is checked against. */
+  readonly declaringFiles: string[];
+}
+
+/** The refusal for a request that cannot be a rename, or where the declaring script is and where it moves. */
+function checkedRename(request: RenameRequest): Refused | { declaringPath: string; moveTo: string | null } {
   const { projectPath, symbol, newName } = request;
   if (!isIdentifier(newName)) {
     return {
@@ -198,6 +223,16 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
       return { ok: false, reason: `${moveTo} already exists, so the script cannot be moved there.` };
     }
   }
+  return { declaringPath, moveTo };
+}
+
+export async function renameSymbol(request: RenameRequest, services: RenameServices): Promise<RenameOutcome> {
+  const { projectPath, symbol } = request;
+  const checked = checkedRename(request);
+  if ('ok' in checked) {
+    return checked;
+  }
+  const { declaringPath, moveTo } = checked;
 
   const texts = projectTexts(projectPath);
   const scripts = scriptsOf(texts);
@@ -210,169 +245,114 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
   }
   const declared = declaredIn(scripts);
   const isClass = declaring.shape.className?.name === symbol;
+  const context: RenameContext = { request, services, declaringPath, texts, scripts, declaring, declared };
+  const step = isClass ? await classRenameStep(context) : await memberRenameStep(context);
+  if ('ok' in step) {
+    return step;
+  }
+  return renamed(context, step, { moveTo, isClass });
+}
 
-  let plan: Plan;
-  let what: string;
-  let resolvedBy: string;
-  let took: LanguageServerTook | null = null;
-  let overrides: string[] = [];
-  // The scripts whose own interface the rename changes, which every other script is checked against.
-  let declaringFiles: string[] = [declaringPath];
-  if (isClass) {
-    what = 'class';
-    resolvedBy = 'the files';
-    const conflicts: string[] = [];
-    const holder = declared.get(newName);
-    if (holder !== undefined) {
-      conflicts.push(`${newName} is already the class_name of ${holder}`);
-    }
-    if (autoloadNames(texts).includes(newName)) {
-      conflicts.push(`${newName} is already an autoload in project.godot`);
-    }
-    for (const place of usedAsIdentifier(scripts, newName, 10)) {
-      conflicts.push(`${newName} is already used in code at ${place}`);
-    }
-    const taken = answerFor(await services.namesTaken([newName], null), newName);
-    if (taken !== undefined && taken.as.length > 0) {
-      conflicts.push(`${newName} is ${taken.as.join(' and ')}`);
-    }
-    if (conflicts.length > 0) {
-      return {
-        ok: false,
-        reason: `${symbol} cannot be renamed to ${newName}: the name is taken.`,
-        conflicts,
-      };
-    }
-    plan = planClassRename({ texts, scripts, declaring, oldName: symbol, newName });
-  } else {
-    const declaration = declaring.shape.body.declarations.find((one) => one.name === symbol);
-    if (declaration === undefined) {
-      const names = [
-        ...(declaring.shape.className === null ? [] : [declaring.shape.className.name]),
-        ...declaring.shape.body.declarations.map((one) => one.name),
-      ];
-      return {
-        ok: false,
-        reason: `${declaringPath} declares no ${symbol} at its top level. What it declares there: ${names.join(', ') || 'nothing'}. A local variable or a member of an inner class is not renamed by this call.`,
-      };
-    }
-    const kind = declaration.kind;
-    what = WHAT[kind];
-    resolvedBy = "the editor's language server";
-    const graph = new ClassGraph(scripts, declared);
-    const own: ClassId = `${declaringPath}#`;
-    let root = own;
-    if (kind === 'func') {
-      for (const ancestor of graph.ancestors(own)) {
-        if (graph.declaration(ancestor, symbol)?.kind === 'func') {
-          root = ancestor;
-        }
-      }
-    }
-    const native = graph.nativeBase(root);
-    const taken = await services.namesTaken([symbol, newName], native);
-    const engineOwned = answerFor(taken, symbol)?.declaredBy ?? null;
-    if (engineOwned !== null) {
-      return {
-        ok: false,
-        reason: `${symbol} is declared by the engine's ${engineOwned}, which ${root === own ? declaringPath : fileOf(root)} inherits from, so the script ${kind === 'func' ? 'overrides' : 'shadows'} an engine name rather than declaring its own, and the engine calls it by that name.`,
-      };
-    }
-    const conflicts: string[] = [];
-    const newOwner = answerFor(taken, newName)?.declaredBy ?? null;
-    if (newOwner !== null) {
-      conflicts.push(`${newName} is declared by the engine's ${newOwner}, which this class inherits from`);
-    }
-    for (const id of new Set([root, ...graph.ancestors(root), ...graph.descendants(root)])) {
-      if (graph.declaration(id, newName) !== undefined) {
-        conflicts.push(
-          `${newName} is already declared in ${id.endsWith('#') ? fileOf(id) : `${fileOf(id)}, class ${id.slice(id.lastIndexOf('#') + 1)}`}`,
-        );
-      }
-    }
-    // A bare use of the new name inside a class that inherits the member is a local, a parameter,
-    // or a global the member would hide. Each either shadows the renamed member or is shadowed by
-    // it, and a project treating SHADOWED_VARIABLE as an error stops compiling. In a class whose
-    // chain declares the new name as a member, a bare use is that member's, which the declaration
-    // above already names: `return weight * stack` was offered as a local beside `stack` declared.
-    const heirs = graph.descendants(root);
-    const declaresNewName = (body: ClassId): boolean =>
-      [body, ...graph.ancestors(body)].some((id) => graph.declaration(id, newName) !== undefined);
-    const inUse: { file: string; line: number }[] = [];
-    for (const script of scripts.values()) {
-      for (const occurrence of script.occurrences(newName)) {
-        const body = graph.bodyAt(script.path, occurrence.offset);
-        if (occurrence.kind === 'code' && !occurrence.afterDot && heirs.has(body) && !declaresNewName(body)) {
-          inUse.push({ file: script.path, line: script.lines.positionOf(occurrence.offset).line + 1 });
-        }
-      }
-    }
-    if (inUse.length > 0) {
-      const places = inUse
-        .toSorted((a, b) => a.file.localeCompare(b.file) || a.line - b.line)
-        .slice(0, 10)
-        .map((place) => `${place.file}:${place.line}`);
-      conflicts.push(
-        `${newName} is already used in code in a class that declares or inherits ${symbol}, as a local, a parameter or another name the renamed ${what} would shadow or be shadowed by, at ${places.join(', ')}${inUse.length > places.length ? ` and ${inUse.length - places.length} more` : ''}`,
-      );
-    }
-    if (conflicts.length > 0) {
-      return {
-        ok: false,
-        reason: `${symbol} cannot be renamed to ${newName}: the name is taken.`,
-        conflicts,
-      };
-    }
+/** The class rename, or the conflicts that stop it. */
+async function classRenameStep(context: RenameContext): Promise<Planned | Refused> {
+  const { request, services, texts, scripts, declaring, declared } = context;
+  const { symbol, newName } = request;
+  const conflicts: string[] = [];
+  const holder = declared.get(newName);
+  if (holder !== undefined) {
+    conflicts.push(`${newName} is already the class_name of ${holder}`);
+  }
+  if (autoloadNames(texts).includes(newName)) {
+    conflicts.push(`${newName} is already an autoload in project.godot`);
+  }
+  for (const place of usedAsIdentifier(scripts, newName, 10)) {
+    conflicts.push(`${newName} is already used in code at ${place}`);
+  }
+  const taken = answerFor(await services.namesTaken([newName], null), newName);
+  if (taken !== undefined && taken.as.length > 0) {
+    conflicts.push(`${newName} is ${taken.as.join(' and ')}`);
+  }
+  if (conflicts.length > 0) {
+    return nameTaken(symbol, newName, conflicts);
+  }
+  return {
+    plan: planClassRename({ texts, scripts, declaring, oldName: symbol, newName }),
+    what: 'class',
+    resolvedBy: 'the files',
+    took: null,
+    overrides: [],
+    declaringFiles: [context.declaringPath],
+  };
+}
 
-    const family: Resolved[] = [];
-    if (kind === 'func') {
-      for (const id of graph.descendants(root)) {
-        const found = graph.declaration(id, symbol);
-        if (found?.kind === 'func') {
-          family.push({ file: fileOf(id), offset: found.offset });
-        }
-      }
-    } else {
-      family.push({ file: declaringPath, offset: declaration.offset });
-    }
-    overrides = family.map((one) => one.file).filter((file) => file !== fileOf(root));
-    declaringFiles = family.map((one) => one.file);
+function nameTaken(symbol: string, newName: string, conflicts: string[]): Refused {
+  return { ok: false, reason: `${symbol} cannot be renamed to ${newName}: the name is taken.`, conflicts };
+}
 
-    took = { references: { asked: 0, ms: 0 }, definitions: { asked: 0, ms: 0 } };
-    const heirFiles = new Set([...graph.descendants(root)].map(fileOf));
-    let resolved: Resolution | null;
-    try {
-      resolved = await resolveMember(projectPath, texts, scripts, family, symbol, services, took, heirFiles);
-    } catch (error) {
-      if (!(error instanceof LSPTimeout)) {
-        throw error;
-      }
-      // The server took the request in and is working on it, which is not the editor missing, and
-      // the advice for a missing editor would send a caller to open one that is open.
-      return {
-        ok: false,
-        reason: `The editor's language server took the ${error.method} request for ${symbol} and had not answered it after ${String(error.seconds)}s, so nothing was renamed.${error.method === 'textDocument/references' ? " Godot answers a references request by looking for the name's text in every script and resolving each match, so a name also written as a common local takes longest." : ''}`,
-        advice: [
-          'script_diagnostics on the declaring script says whether the language server is answering other requests',
-          'The request that ran out is still being answered by the editor, and another sent now waits behind it',
-        ],
-      };
+/** The farthest ancestor of [param own] that declares the method [param name], or [param own] itself. */
+function topmostMethod(graph: ClassGraph, own: ClassId, name: string): ClassId {
+  let root = own;
+  for (const ancestor of graph.ancestors(own)) {
+    if (graph.declaration(ancestor, name)?.kind === 'func') {
+      root = ancestor;
     }
-    if (resolved === null) {
-      const first = family[0];
-      const script = first === undefined ? undefined : scripts.get(first.file);
-      const line =
-        first === undefined || script === undefined ? 0 : script.lines.positionOf(first.offset).line + 1;
-      return {
-        ok: false,
-        reason: `The language server resolved nothing at ${first?.file ?? declaringPath}:${line}, where ${symbol} is declared, not even the declaration, so it is not analysing that script and its answer would rename nothing.`,
-        advice: [
-          'script_diagnostics on that script says whether the editor can parse it',
-          "editor_status says whether the editor connected is this project's",
-        ],
-      };
-    }
-    plan = planMemberRename({
+  }
+  return root;
+}
+
+/** The refusal for a symbol the declaring script does not declare at its top level. */
+function undeclaredRefusal(context: RenameContext): Refused {
+  const { declaring, declaringPath } = context;
+  const names = [
+    ...(declaring.shape.className === null ? [] : [declaring.shape.className.name]),
+    ...declaring.shape.body.declarations.map((one) => one.name),
+  ];
+  return {
+    ok: false,
+    reason: `${declaringPath} declares no ${context.request.symbol} at its top level. What it declares there: ${names.join(', ') || 'nothing'}. A local variable or a member of an inner class is not renamed by this call.`,
+  };
+}
+
+/** The member rename, or the reason the engine, a conflict or the language server stops it. */
+async function memberRenameStep(context: RenameContext): Promise<Planned | Refused> {
+  const { request, services, declaringPath, texts, scripts, declaring, declared } = context;
+  const { symbol, newName } = request;
+  const declaration = declaring.shape.body.declarations.find((one) => one.name === symbol);
+  if (declaration === undefined) {
+    return undeclaredRefusal(context);
+  }
+  const kind = declaration.kind;
+  const what = WHAT[kind];
+  const graph = new ClassGraph(scripts, declared);
+  const own: ClassId = `${declaringPath}#`;
+  const root = kind === 'func' ? topmostMethod(graph, own, symbol) : own;
+  const native = graph.nativeBase(root);
+  const taken = await services.namesTaken([symbol, newName], native);
+  const engineOwned = answerFor(taken, symbol)?.declaredBy ?? null;
+  if (engineOwned !== null) {
+    const holder = root === own ? declaringPath : fileOf(root);
+    return {
+      ok: false,
+      reason: `${symbol} is declared by the engine's ${engineOwned}, which ${holder} inherits from, so the script ${kind === 'func' ? 'overrides' : 'shadows'} an engine name rather than declaring its own, and the engine calls it by that name.`,
+    };
+  }
+  const conflicts = memberConflicts(context, { graph, root, what, newOwner: answerFor(taken, newName) });
+  if (conflicts.length > 0) {
+    return nameTaken(symbol, newName, conflicts);
+  }
+
+  const family =
+    kind === 'func'
+      ? overridingFamily(graph, root, symbol)
+      : [{ file: declaringPath, offset: declaration.offset }];
+  const took: LanguageServerTook = { references: { asked: 0, ms: 0 }, definitions: { asked: 0, ms: 0 } };
+  const heirFiles = new Set([...graph.descendants(root)].map(fileOf));
+  const resolved = await resolvedOrRefused(context, { family, took, heirFiles });
+  if ('ok' in resolved) {
+    return resolved;
+  }
+  return {
+    plan: planMemberRename({
       texts,
       scripts,
       graph,
@@ -384,9 +364,141 @@ export async function renameSymbol(request: RenameRequest, services: RenameServi
       resolved: resolved.ours,
       elsewhere: resolved.elsewhere,
       heirFiles,
-    });
-  }
+    }),
+    what,
+    resolvedBy: "the editor's language server",
+    took,
+    overrides: family.map((one) => one.file).filter((file) => file !== fileOf(root)),
+    declaringFiles: family.map((one) => one.file),
+  };
+}
 
+/** Every bare use of [param newName] in code inside a class below [param root] that does not declare it. */
+function usesInHeirs(
+  scripts: ReadonlyMap<string, Script>,
+  graph: ClassGraph,
+  root: ClassId,
+  newName: string,
+): { file: string; line: number }[] {
+  const heirs = graph.descendants(root);
+  const declaresNewName = (body: ClassId): boolean =>
+    [body, ...graph.ancestors(body)].some((id) => graph.declaration(id, newName) !== undefined);
+  const inUse: { file: string; line: number }[] = [];
+  for (const script of scripts.values()) {
+    for (const occurrence of script.occurrences(newName)) {
+      const body = graph.bodyAt(script.path, occurrence.offset);
+      if (occurrence.kind === 'code' && !occurrence.afterDot && heirs.has(body) && !declaresNewName(body)) {
+        inUse.push({ file: script.path, line: script.lines.positionOf(occurrence.offset).line + 1 });
+      }
+    }
+  }
+  return inUse;
+}
+
+/** Where the method [param name] is declared in [param root] and every class below it. */
+function overridingFamily(graph: ClassGraph, root: ClassId, name: string): Resolved[] {
+  const family: Resolved[] = [];
+  for (const id of graph.descendants(root)) {
+    const found = graph.declaration(id, name);
+    if (found?.kind === 'func') {
+      family.push({ file: fileOf(id), offset: found.offset });
+    }
+  }
+  return family;
+}
+
+/** What stops [param context]'s member being renamed to its new name: the engine, a declaration or a use. */
+function memberConflicts(
+  context: RenameContext,
+  found: { graph: ClassGraph; root: ClassId; what: string; newOwner: NameTaken | undefined },
+): string[] {
+  const { request, scripts } = context;
+  const { symbol, newName } = request;
+  const { graph, root, what } = found;
+  const conflicts: string[] = [];
+  const newOwner = found.newOwner?.declaredBy ?? null;
+  if (newOwner !== null) {
+    conflicts.push(`${newName} is declared by the engine's ${newOwner}, which this class inherits from`);
+  }
+  for (const id of new Set([root, ...graph.ancestors(root), ...graph.descendants(root)])) {
+    if (graph.declaration(id, newName) !== undefined) {
+      conflicts.push(
+        `${newName} is already declared in ${id.endsWith('#') ? fileOf(id) : `${fileOf(id)}, class ${id.slice(id.lastIndexOf('#') + 1)}`}`,
+      );
+    }
+  }
+  // A bare use of the new name inside a class that inherits the member is a local, a parameter,
+  // or a global the member would hide. Each either shadows the renamed member or is shadowed by
+  // it, and a project treating SHADOWED_VARIABLE as an error stops compiling. In a class whose
+  // chain declares the new name as a member, a bare use is that member's, which the declaration
+  // above already names: `return weight * stack` was offered as a local beside `stack` declared.
+  const inUse = usesInHeirs(scripts, graph, root, newName);
+  if (inUse.length > 0) {
+    const places = inUse
+      .toSorted((a, b) => a.file.localeCompare(b.file) || a.line - b.line)
+      .slice(0, 10)
+      .map((place) => `${place.file}:${place.line}`);
+    conflicts.push(
+      `${newName} is already used in code in a class that declares or inherits ${symbol}, as a local, a parameter or another name the renamed ${what} would shadow or be shadowed by, at ${places.join(', ')}${inUse.length > places.length ? ` and ${inUse.length - places.length} more` : ''}`,
+    );
+  }
+  return conflicts;
+}
+
+/** What the language server resolves the member to, or the refusal when it times out or resolves nothing. */
+async function resolvedOrRefused(
+  context: RenameContext,
+  asked: { family: Resolved[]; took: LanguageServerTook; heirFiles: ReadonlySet<string> },
+): Promise<Resolution | Refused> {
+  const { request, services, declaringPath, texts, scripts } = context;
+  const { projectPath, symbol } = request;
+  const { family, took, heirFiles } = asked;
+  let resolved: Resolution | null;
+  try {
+    resolved = await resolveMember(projectPath, texts, scripts, family, symbol, services, took, heirFiles);
+  } catch (error) {
+    if (!(error instanceof LSPTimeout)) {
+      throw error;
+    }
+    // The server took the request in and is working on it, which is not the editor missing, and
+    // the advice for a missing editor would send a caller to open one that is open.
+    return {
+      ok: false,
+      reason: `The editor's language server took the ${error.method} request for ${symbol} and had not answered it after ${String(error.seconds)}s, so nothing was renamed.${error.method === 'textDocument/references' ? " Godot answers a references request by looking for the name's text in every script and resolving each match, so a name also written as a common local takes longest." : ''}`,
+      advice: [
+        'script_diagnostics on the declaring script says whether the language server is answering other requests',
+        'The request that ran out is still being answered by the editor, and another sent now waits behind it',
+      ],
+    };
+  }
+  if (resolved === null) {
+    const first = family[0];
+    const script = first === undefined ? undefined : scripts.get(first.file);
+    const line =
+      first === undefined || script === undefined ? 0 : script.lines.positionOf(first.offset).line + 1;
+    return {
+      ok: false,
+      reason: `The language server resolved nothing at ${first?.file ?? declaringPath}:${line}, where ${symbol} is declared, not even the declaration, so it is not analysing that script and its answer would rename nothing.`,
+      advice: [
+        'script_diagnostics on that script says whether the editor can parse it',
+        "editor_status says whether the editor connected is this project's",
+      ],
+    };
+  }
+  return resolved;
+}
+
+/** The outcome of a rename that has its edits: the move of the script, the rewrites and the report. */
+function renamed(
+  context: RenameContext,
+  step: Planned,
+  where: { moveTo: string | null; isClass: boolean },
+): RenameOutcome {
+  const { request, declaringPath, texts, scripts, declared } = context;
+  const { projectPath, symbol, newName } = request;
+  const { moveTo, isClass } = where;
+  const { what, resolvedBy, took, overrides, declaringFiles } = step;
+  let plan = step.plan;
   if (moveTo !== null) {
     plan = planMove(
       {
@@ -466,62 +578,134 @@ async function resolveMember(
   took: LanguageServerTook,
   heirFiles: ReadonlySet<string>,
 ): Promise<Resolution | null> {
-  const absoluteOf = new Map(texts.map((file) => [file.path, file.absolute]));
-  const key = (place: Resolved): string => `${place.file}:${place.offset}`;
-  const toResolved = (located: Located): Resolved | null => {
-    const file = resourcePathOf(projectPath, located.file);
-    const offset = file === null ? null : scripts.get(file)?.lines.offsetOf(located);
-    return file === null || offset === null || offset === undefined ? null : { file, offset };
+  const asking: Asking = {
+    projectPath,
+    scripts,
+    absoluteOf: new Map(texts.map((file) => [file.path, file.absolute])),
+    services,
+    took,
   };
-  const ask = async (question: 'references' | 'definitions', place: Resolved): Promise<Resolved[]> => {
-    const script = scripts.get(place.file);
-    const absolute = absoluteOf.get(place.file);
-    if (script === undefined || absolute === undefined) {
-      return [];
-    }
-    const started = performance.now();
-    try {
-      const answered = await services[question](absolute, script.text, script.lines.positionOf(place.offset));
-      return answered.map(toResolved).filter((one): one is Resolved => one !== null);
-    } finally {
-      took[question].asked += 1;
-      took[question].ms += Math.round(performance.now() - started);
-    }
-  };
-
   const ours = new Map<string, Resolved>();
   const elsewhere = new Set<string>();
   const root = family[0];
   if (root === undefined) {
     return { ours: [], elsewhere };
   }
-  const seeded = await ask('references', root);
+  const seeded = await askServer(asking, 'references', root);
   if (seeded.length === 0) {
     return null;
   }
   for (const place of seeded) {
-    ours.set(key(place), place);
+    ours.set(placeKey(place), place);
   }
-  const declarations = new Set(family.map(key));
-  for (const script of scripts.values()) {
-    for (const occurrence of script.occurrences(name)) {
-      const place = { file: script.path, offset: occurrence.offset };
-      if (occurrence.kind !== 'code' || ours.has(key(place))) {
-        continue;
-      }
-      if (!occurrence.afterDot && !heirFiles.has(script.path)) {
-        continue;
-      }
-      const declared = await ask('definitions', place);
-      const only = declared.length === 1 ? declared[0] : undefined;
-      if (only !== undefined && declarations.has(key(only))) {
-        ours.set(key(place), place);
-      } else if (only !== undefined) {
-        elsewhere.add(key(place));
-      }
+  await sweepDefinitions(asking, {
+    name,
+    declarations: new Set(family.map(placeKey)),
+    heirFiles,
+    ours,
+    elsewhere,
+  });
+  return { ours: [...ours.values()], elsewhere };
+}
+
+/**
+ * Asks where each remaining occurrence of the name in code is declared, and sorts it into
+ * [param sweep].ours or [param sweep].elsewhere.
+ */
+async function sweepDefinitions(
+  asking: Asking,
+  sweep: {
+    name: string;
+    declarations: ReadonlySet<string>;
+    heirFiles: ReadonlySet<string>;
+    ours: Map<string, Resolved>;
+    elsewhere: Set<string>;
+  },
+): Promise<void> {
+  for (const script of asking.scripts.values()) {
+    for (const occurrence of script.occurrences(sweep.name)) {
+      await sortOccurrence(asking, sweep, { file: script.path, offset: occurrence.offset }, occurrence);
     }
   }
-  return { ours: [...ours.values()], elsewhere };
+}
+
+/** Asks where one occurrence is declared when that is worth a request, and sorts it by the answer. */
+async function sortOccurrence(
+  asking: Asking,
+  sweep: {
+    declarations: ReadonlySet<string>;
+    heirFiles: ReadonlySet<string>;
+    ours: Map<string, Resolved>;
+    elsewhere: Set<string>;
+  },
+  place: Resolved,
+  occurrence: { kind: string; afterDot: boolean },
+): Promise<void> {
+  const { declarations, heirFiles, ours, elsewhere } = sweep;
+  if (occurrence.kind !== 'code' || ours.has(placeKey(place))) {
+    return;
+  }
+  if (!occurrence.afterDot && !heirFiles.has(place.file)) {
+    return;
+  }
+  const only = soleDefinition(await askServer(asking, 'definitions', place));
+  if (only === undefined) {
+    return;
+  }
+  if (declarations.has(placeKey(only))) {
+    ours.set(placeKey(place), place);
+  } else {
+    elsewhere.add(placeKey(place));
+  }
+}
+
+/** What a request to the language server is asked of and where it is counted. */
+interface Asking {
+  readonly projectPath: string;
+  readonly scripts: ReadonlyMap<string, Script>;
+  readonly absoluteOf: ReadonlyMap<string, string>;
+  readonly services: RenameServices;
+  readonly took: LanguageServerTook;
+}
+
+function placeKey(place: Resolved): string {
+  return `${place.file}:${place.offset}`;
+}
+
+function soleDefinition(declared: readonly Resolved[]): Resolved | undefined {
+  return declared.length === 1 ? declared[0] : undefined;
+}
+
+/** [param located] as a place in a script of the project, or null when it is elsewhere. */
+function resolvedPlace(asking: Asking, located: Located): Resolved | null {
+  const file = resourcePathOf(asking.projectPath, located.file);
+  const offset = file === null ? null : asking.scripts.get(file)?.lines.offsetOf(located);
+  return file === null || offset === null || offset === undefined ? null : { file, offset };
+}
+
+/** Puts one question to the language server about [param place], and counts it and its time. */
+async function askServer(
+  asking: Asking,
+  question: 'references' | 'definitions',
+  place: Resolved,
+): Promise<Resolved[]> {
+  const script = asking.scripts.get(place.file);
+  const absolute = asking.absoluteOf.get(place.file);
+  if (script === undefined || absolute === undefined) {
+    return [];
+  }
+  const started = performance.now();
+  try {
+    const answered = await asking.services[question](
+      absolute,
+      script.text,
+      script.lines.positionOf(place.offset),
+    );
+    return answered.map((one) => resolvedPlace(asking, one)).filter((one): one is Resolved => one !== null);
+  } finally {
+    asking.took[question].asked += 1;
+    asking.took[question].ms += Math.round(performance.now() - started);
+  }
 }
 
 /**
@@ -614,43 +798,7 @@ export function asWritten(mentions: readonly Mention[], rewrites: readonly Rewri
  * still be the member, a value whose type the analyser could not tell.
  */
 export function leftAloneReport(mentions: readonly Mention[], terms: readonly string[]): LeftAlone {
-  const full: Mention[] = [];
-  const prose = new Map<string, { file: string; kind: string; lines: number[] }>();
-  // By reason first, so a reason is said once however many files it covers: said per file, the
-  // same sentence ran to 233 copies and was the bulk of an answer still too big to read inline.
-  const others = new Map<string, Map<string, number[]>>();
-  const counts = { quoted: 0, inProse: 0, otherSymbols: 0 };
-  const add = (lines: number[], line: number): void => {
-    if (!lines.includes(line)) {
-      lines.push(line);
-    }
-  };
-  const textOf = new Map<string, string>();
-  for (const mention of mentions) {
-    textOf.set(`${mention.file}:${String(mention.line)}`, mention.text);
-  }
-  for (const mention of mentions) {
-    if (PROSE_KINDS.has(mention.kind) && mention.why === undefined) {
-      const key = `${mention.file}\n${mention.kind}`;
-      const group = prose.get(key) ?? { file: mention.file, kind: mention.kind, lines: [] };
-      add(group.lines, mention.line);
-      prose.set(key, group);
-      counts.inProse += 1;
-    } else if (
-      mention.kind === 'code' &&
-      (mention.why === NOT_INHERITED || mention.why === RESOLVED_ELSEWHERE)
-    ) {
-      const files = others.get(mention.why) ?? new Map<string, number[]>();
-      const lines = files.get(mention.file) ?? [];
-      add(lines, mention.line);
-      files.set(mention.file, lines);
-      others.set(mention.why, files);
-      counts.otherSymbols += 1;
-    } else {
-      full.push({ ...mention, text: quotedAround(mention.text, terms) });
-      counts.quoted += 1;
-    }
-  }
+  const { full, prose, others, counts, textOf } = groupMentions(mentions, terms);
   // A string with a why names the thing by its name whole, or was resolved to it, and is the
   // likeliest entry to break something silently, so it is put where a reader starts.
   const loudFirst = (mention: Mention): number =>
@@ -702,6 +850,57 @@ export function leftAloneReport(mentions: readonly Mention[], terms: readonly st
       })),
     },
   };
+}
+
+/** The mentions sorted into those quoted whole, those given by file and line, and the text of each line. */
+function groupMentions(
+  mentions: readonly Mention[],
+  terms: readonly string[],
+): {
+  full: Mention[];
+  prose: Map<string, { file: string; kind: string; lines: number[] }>;
+  others: Map<string, Map<string, number[]>>;
+  counts: { quoted: number; inProse: number; otherSymbols: number };
+  textOf: Map<string, string>;
+} {
+  const full: Mention[] = [];
+  const prose = new Map<string, { file: string; kind: string; lines: number[] }>();
+  // By reason first, so a reason is said once however many files it covers: said per file, the
+  // same sentence ran to 233 copies and was the bulk of an answer still too big to read inline.
+  const others = new Map<string, Map<string, number[]>>();
+  const counts = { quoted: 0, inProse: 0, otherSymbols: 0 };
+  const add = (lines: number[], line: number): void => {
+    if (!lines.includes(line)) {
+      lines.push(line);
+    }
+  };
+  const textOf = new Map<string, string>();
+  for (const mention of mentions) {
+    textOf.set(`${mention.file}:${String(mention.line)}`, mention.text);
+  }
+  for (const mention of mentions) {
+    if (PROSE_KINDS.has(mention.kind) && mention.why === undefined) {
+      const key = `${mention.file}\n${mention.kind}`;
+      const group = prose.get(key) ?? { file: mention.file, kind: mention.kind, lines: [] };
+      add(group.lines, mention.line);
+      prose.set(key, group);
+      counts.inProse += 1;
+    } else if (
+      mention.kind === 'code' &&
+      (mention.why === NOT_INHERITED || mention.why === RESOLVED_ELSEWHERE)
+    ) {
+      const files = others.get(mention.why) ?? new Map<string, number[]>();
+      const lines = files.get(mention.file) ?? [];
+      add(lines, mention.line);
+      files.set(mention.file, lines);
+      others.set(mention.why, files);
+      counts.otherSymbols += 1;
+    } else {
+      full.push({ ...mention, text: quotedAround(mention.text, terms) });
+      counts.quoted += 1;
+    }
+  }
+  return { full, prose, others, counts, textOf };
 }
 
 /**

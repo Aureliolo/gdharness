@@ -7,6 +7,7 @@ import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type ChildProcess, spawnHidden } from '../../src/spawn.js';
 import { isRecord, type JsonRpcMessage, parseJsonLines } from './json-rpc.js';
+import { slotsSaid } from './slots.js';
 import { fixtureNow, sweep } from './sweep.js';
 
 /** A runtime directory nothing else on this machine is using. */
@@ -234,6 +235,12 @@ function enveloped(params: unknown): unknown {
   return { ...params, _meta: { ...ENVELOPE, ...meta } };
 }
 
+/** How a child ended, as Node reports it: a signal when one ended it, otherwise its exit code. */
+function describeExit(code: number | null, signal: NodeJS.Signals | null): string {
+  if (signal !== null) return `killed by signal ${signal}`;
+  return `exit code ${code === null ? 'unknown' : String(code)}`;
+}
+
 /** The name and version a server gave in the `_meta` of its opening answer. */
 export function serverIdentity(opening: JsonRpcMessage): Record<string, unknown> {
   const meta = isRecord(opening.result) ? opening.result['_meta'] : undefined;
@@ -373,9 +380,9 @@ export class ServerProcess {
     });
     // One exit listener for every request in flight, rather than one per request: a test that
     // makes dozens of calls would otherwise pile listeners onto the child until Node warns.
-    this.child.once('exit', () => {
+    this.child.once('exit', (code, signal) => {
       for (const reject of this.abandoned) {
-        reject(new Error(`Server exited before answering.\n${this.stderr}`));
+        reject(new Error(`Server exited before answering, ${describeExit(code, signal)}.\n${this.stderr}`));
       }
       this.abandoned.clear();
       this.waiting.clear();
@@ -408,12 +415,18 @@ export class ServerProcess {
     const id = this.nextId;
     this.nextId += 1;
     if (this.exited) {
-      throw new Error(`Server already exited; cannot send ${method}.\n${this.stderr}`);
+      throw new Error(
+        `Server already exited, ${describeExit(this.child.exitCode, this.child.signalCode)}, so it cannot send ${method}.\n${this.stderr}`,
+      );
     }
     const response = new Promise<JsonRpcMessage>((resolve, reject) => {
       const timer = setTimeout(() => {
         settle();
-        reject(new Error(`No response to ${method} (id ${id}) within ${timeoutMs} ms.\n${this.stderr}`));
+        reject(
+          new Error(
+            `No response to ${method} (id ${id}) within ${timeoutMs} ms.\n${slotsSaid()}\n${this.stderr}`,
+          ),
+        );
       }, timeoutMs);
       timer.unref();
       const settle = (): void => {

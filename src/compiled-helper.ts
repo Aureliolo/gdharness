@@ -30,6 +30,39 @@ import { spawnHidden } from './spawn.js';
  */
 export const HELPER_COMPILE_MS = 180_000;
 
+/** Takes the compile lock at [param lock], or says who has it or why it cannot be taken. */
+function claimLock(lock: string): 'mine' | 'taken' | { refused: string } {
+  try {
+    const held = openSync(lock, 'wx');
+    writeSync(held, String(process.pid));
+    closeSync(held);
+    return 'mine';
+  } catch (error) {
+    // Only an existing lock means another process is compiling it. Anything else, such as a
+    // folder that is not there, would otherwise wait out the whole budget with nothing tried.
+    return errorCode(error) === 'EEXIST' ? 'taken' : { refused: errorMessage(error) };
+  }
+}
+
+/**
+ * Removes a lock whose process has gone, or older than a whole compile, and says whether it did.
+ * Nothing else takes such a lock down: a process ended mid-compile takes its compiler with it, and
+ * its lock would hold every later one for the whole budget.
+ */
+function removedDeadLock(lock: string, budgetMs: number): boolean {
+  try {
+    const holder = Number(readFileSync(lock, 'utf8').trim());
+    const old = Date.now() - statSync(lock).mtimeMs > budgetMs;
+    if (old || (Number.isInteger(holder) && holder > 0 && !alive(holder))) {
+      rmSync(lock, { force: true });
+      return true;
+    }
+  } catch {
+    // Gone between the reads, which is the compile finishing.
+  }
+  return false;
+}
+
 /** One C# source compiled on demand, and where its assembly is kept. */
 export class CompiledHelper {
   private readonly named: string;
@@ -77,38 +110,19 @@ export class CompiledHelper {
       if (existsSync(assembly)) {
         return null;
       }
-      let mine = false;
-      try {
-        const held = openSync(lock, 'wx');
-        writeSync(held, String(process.pid));
-        closeSync(held);
-        mine = true;
-      } catch (error) {
-        // Only an existing lock means another process is compiling it. Anything else, such as a
-        // folder that is not there, would otherwise wait out the whole budget with nothing tried.
-        if (errorCode(error) !== 'EEXIST') {
-          return `the ${this.named} cannot be compiled into ${directory}: ${errorMessage(error)}`;
-        }
-      }
-      if (mine) {
+      const claim = claimLock(lock);
+      if (claim === 'mine') {
         try {
           return await this.compile(directory, assembly, until - Date.now());
         } finally {
           rmSync(lock, { force: true });
         }
       }
-      // A lock whose process has gone, or older than a whole compile, is one nothing will take down:
-      // a process ended mid-compile takes its compiler with it, and its lock would hold every later
-      // one for the whole budget.
-      try {
-        const holder = Number(readFileSync(lock, 'utf8').trim());
-        const old = Date.now() - statSync(lock).mtimeMs > budgetMs;
-        if (old || (Number.isInteger(holder) && holder > 0 && !alive(holder))) {
-          rmSync(lock, { force: true });
-          continue;
-        }
-      } catch {
-        // Gone between the reads, which is the compile finishing.
+      if (claim !== 'taken') {
+        return `the ${this.named} cannot be compiled into ${directory}: ${claim.refused}`;
+      }
+      if (removedDeadLock(lock, budgetMs)) {
+        continue;
       }
       if (!wait) {
         return null;
