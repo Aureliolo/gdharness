@@ -321,25 +321,34 @@ export function parseProjectGodot(content: string): Record<string, Record<string
       continue;
     }
 
-    const key = named.key;
-    let rawValue = named.value;
-
-    while (index + 1 < lines.length && !isValueComplete(rawValue)) {
-      index += 1;
-      // Inside a string the indentation is content, and between a dictionary's entries it is not.
-      const next = lines[index] ?? '';
-      const carried = scanValue(rawValue).inString;
-      rawValue += `\n${carried ? next : next.trimStart()}`;
-      // A line that ends outside a string has nothing after its last character worth keeping.
-      if (!scanValue(rawValue).inString) {
-        rawValue = rawValue.trimEnd();
-      }
-    }
-
-    section[key] = parseIniLikeValue(rawValue.trimEnd());
+    const whole = completeValue(lines, index, named.value);
+    index = whole.last;
+    section[named.key] = parseIniLikeValue(whole.value.trimEnd());
   }
 
   return result;
+}
+
+/** The value starting as [param first] on line [param from], taken on across lines until it is whole. */
+function completeValue(
+  lines: readonly string[],
+  from: number,
+  first: string,
+): { value: string; last: number } {
+  let index = from;
+  let rawValue = first;
+  while (index + 1 < lines.length && !isValueComplete(rawValue)) {
+    index += 1;
+    // Inside a string the indentation is content, and between a dictionary's entries it is not.
+    const next = lines[index] ?? '';
+    const carried = scanValue(rawValue).inString;
+    rawValue += `\n${carried ? next : next.trimStart()}`;
+    // A line that ends outside a string has nothing after its last character worth keeping.
+    if (!scanValue(rawValue).inString) {
+      rawValue = rawValue.trimEnd();
+    }
+  }
+  return { value: rawValue, last: index };
 }
 
 /**

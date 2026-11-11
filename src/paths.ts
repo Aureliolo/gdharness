@@ -194,6 +194,37 @@ function insideProject(root: string, candidate: string): string | null {
   );
 }
 
+/** Why a path starting with the scheme [param scheme] is refused. */
+function otherSchemeReason(trimmed: string, scheme: string): string {
+  // Said for user:// above all, which is where a game writes its saves and settings: a caller
+  // checking what one wrote had nothing to go on.
+  const elsewhere =
+    scheme.toLowerCase() === 'user://'
+      ? " A game's user:// is a directory of its own outside the project: a running game's is under userDir in editor_status runtimes and in editor_run start's runtime, where a file reader of your own reads it."
+      : '';
+  return `Path '${trimmed}' uses the '${scheme}' scheme, which names somewhere other than this project.${elsewhere}`;
+}
+
+/** Why an absolute path is refused, with an example of a path that would be taken. */
+function absolutePathReason(trimmed: string, withoutScheme: string, root: string): string {
+  // A file that is there is one the caller meant, such as a game's save under its user://, so an
+  // example made of its path's end names a project file that is not.
+  if (isAbsolute(trimmed) && isLocalFile(trimmed)) {
+    return `Path '${trimmed}' names a file outside the project, and only paths inside it are taken here. Read that file with a file reader of your own, or give a path inside the project.`;
+  }
+  // The example is the end of the path given, so a build output is offered a build path and a
+  // scene a scene path. A fixed scene path was offered for an export's .exe.
+  // A file beside the project or above it keeps only its name: its folder holds the project, so
+  // offered as one inside it, it names a folder the project does not have. Compared with the links
+  // in both resolved: a macOS temporary directory given under /var holds a project under /private/var.
+  const tail = withoutScheme.split(/[\\/]+/).filter((step) => step !== '' && !step.endsWith(':'));
+  const besideIt =
+    isAbsolute(trimmed) &&
+    isWithinRoot(realAsFarAsItExists(dirname(resolve(trimmed))), realAsFarAsItExists(root));
+  const example = tail.slice(besideIt ? -1 : -2).join('/') || 'scenes/main.tscn';
+  return `Path '${trimmed}' is absolute and outside the project. Give a path inside it, such as '${example}'.`;
+}
+
 /**
  * A caller-supplied path read as a location inside the project.
  *
@@ -250,43 +281,13 @@ export function resolveWithinProject(
   }
   const scheme = OTHER_SCHEME.exec(withoutScheme);
   if (scheme) {
-    // Said for user:// above all, which is where a game writes its saves and settings: a caller
-    // checking what one wrote had nothing to go on.
-    const elsewhere =
-      scheme[0].toLowerCase() === 'user://'
-        ? " A game's user:// is a directory of its own outside the project: a running game's is under userDir in editor_status runtimes and in editor_run start's runtime, where a file reader of your own reads it."
-        : '';
-    return {
-      ok: false,
-      reason: `Path '${trimmed}' uses the '${scheme[0]}' scheme, which names somewhere other than this project.${elsewhere}`,
-    };
+    return { ok: false, reason: otherSchemeReason(trimmed, scheme[0]) };
   }
 
   // Refused here rather than left to the containment check below, which would accept a leading
   // separator on the platform where node:path does not read it as absolute.
   if (withoutScheme.startsWith('/') || withoutScheme.startsWith('\\') || isAbsolute(withoutScheme)) {
-    // A file that is there is one the caller meant, such as a game's save under its user://, so an
-    // example made of its path's end names a project file that is not.
-    if (isAbsolute(trimmed) && isLocalFile(trimmed)) {
-      return {
-        ok: false,
-        reason: `Path '${trimmed}' names a file outside the project, and only paths inside it are taken here. Read that file with a file reader of your own, or give a path inside the project.`,
-      };
-    }
-    // The example is the end of the path given, so a build output is offered a build path and a
-    // scene a scene path. A fixed scene path was offered for an export's .exe.
-    // A file beside the project or above it keeps only its name: its folder holds the project, so
-    // offered as one inside it, it names a folder the project does not have. Compared with the links
-    // in both resolved: a macOS temporary directory given under /var holds a project under /private/var.
-    const tail = withoutScheme.split(/[\\/]+/).filter((step) => step !== '' && !step.endsWith(':'));
-    const besideIt =
-      isAbsolute(trimmed) &&
-      isWithinRoot(realAsFarAsItExists(dirname(resolve(trimmed))), realAsFarAsItExists(root));
-    const example = tail.slice(besideIt ? -1 : -2).join('/') || 'scenes/main.tscn';
-    return {
-      ok: false,
-      reason: `Path '${trimmed}' is absolute and outside the project. Give a path inside it, such as '${example}'.`,
-    };
+    return { ok: false, reason: absolutePathReason(trimmed, withoutScheme, root) };
   }
 
   // Windows reads a colon as a drive (`C:name` is relative to that drive's current directory,

@@ -57,32 +57,33 @@ function engineBuild(godotPath: string): string | null {
 
 /** The pipeline cache under [param user], as its path from there, or null for none. */
 function cacheUnder(user: string): string | null {
-  const walk = (folder: string, depth: number): string | null => {
-    let entries: Dirent[];
-    try {
-      entries = readdirSync(folder, { withFileTypes: true });
-    } catch {
-      return null;
-    }
-    for (const entry of entries) {
-      if (entry.isDirectory() && entry.name === NAME) {
-        return relative(user, join(folder, entry.name));
-      }
-    }
-    if (depth === 0) {
-      return null;
-    }
-    for (const entry of entries) {
-      if (entry.isDirectory()) {
-        const found = walk(join(folder, entry.name), depth - 1);
-        if (found !== null) {
-          return found;
-        }
-      }
-    }
+  return findCache(user, user, DEPTH);
+}
+
+function findCache(user: string, folder: string, depth: number): string | null {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(folder, { withFileTypes: true });
+  } catch {
     return null;
-  };
-  return walk(user, DEPTH);
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory() && entry.name === NAME) {
+      return relative(user, join(folder, entry.name));
+    }
+  }
+  if (depth === 0) {
+    return null;
+  }
+  for (const entry of entries) {
+    if (entry.isDirectory()) {
+      const found = findCache(user, join(folder, entry.name), depth - 1);
+      if (found !== null) {
+        return found;
+      }
+    }
+  }
+  return null;
 }
 
 function bytesIn(folder: string): number {

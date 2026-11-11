@@ -190,19 +190,11 @@ const SET_BY_ARGUMENT: Readonly<Record<string, string>> = Object.freeze({
 
 /** [param given] as the engine flags a run is handed, or why it cannot be. */
 export function engineFlags(given: readonly string[]): { ok: true } | { ok: false; reason: string } {
-  const offered = Object.keys(ENGINE_FLAGS).join(', ');
   for (let at = 0; at < given.length; at += 1) {
     const flag = given[at] ?? '';
     const takes = Object.hasOwn(ENGINE_FLAGS, flag) ? ENGINE_FLAGS[flag] : undefined;
     if (takes === undefined) {
-      const setBy = Object.hasOwn(SET_BY_ARGUMENT, flag) ? SET_BY_ARGUMENT[flag] : undefined;
-      return {
-        ok: false,
-        reason:
-          setBy !== undefined
-            ? `${flag} is set by this tool's own argument, ${setBy}, rather than through engineArgs.`
-            : `${flag} is not one of the engine flags engineArgs takes, which are those that change what the engine logs, draws for debugging, checks on the GPU, which renderer draws, how it times frames or whether it builds the tree a screen reader reads, and Movie Maker's --write-movie: ${offered}. A value goes as the next entry, as in ["--max-fps", "60"].`,
-      };
+      return { ok: false, reason: unknownFlagReason(flag) };
     }
     if (takes === 'none') {
       continue;
@@ -218,6 +210,16 @@ export function engineFlags(given: readonly string[]): { ok: true } | { ok: fals
     at += 1;
   }
   return { ok: true };
+}
+
+/** Why [param flag] is not taken: this tool sets it itself, or it is not an engine flag it passes. */
+function unknownFlagReason(flag: string): string {
+  const setBy = Object.hasOwn(SET_BY_ARGUMENT, flag) ? SET_BY_ARGUMENT[flag] : undefined;
+  if (setBy !== undefined) {
+    return `${flag} is set by this tool's own argument, ${setBy}, rather than through engineArgs.`;
+  }
+  const offered = Object.keys(ENGINE_FLAGS).join(', ');
+  return `${flag} is not one of the engine flags engineArgs takes, which are those that change what the engine logs, draws for debugging, checks on the GPU, which renderer draws, how it times frames or whether it builds the tree a screen reader reads, and Movie Maker's --write-movie: ${offered}. A value goes as the next entry, as in ["--max-fps", "60"].`;
 }
 
 /**

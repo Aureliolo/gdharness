@@ -138,26 +138,27 @@ export function declaredClassOf(source: string): string | null {
  * path and its source. A directory holding a `.gdignore` is stepped over, as the engine steps over it.
  */
 export function eachScript(projectPath: string, each: (script: string, source: string) => void): void {
-  const visit = (directory: string, prefix: string): void => {
-    if (existsSync(join(directory, '.gdignore'))) {
-      return;
+  visitScripts(projectPath, '', each);
+}
+
+function visitScripts(directory: string, prefix: string, each: (script: string, source: string) => void): void {
+  if (existsSync(join(directory, '.gdignore'))) {
+    return;
+  }
+  for (const entry of entriesOf(directory)) {
+    if (entry.name.startsWith('.')) {
+      continue;
     }
-    for (const entry of entriesOf(directory)) {
-      if (entry.name.startsWith('.')) {
-        continue;
-      }
-      const path = join(directory, entry.name);
-      if (entry.isDirectory()) {
-        visit(path, `${prefix}${entry.name}/`);
-      } else if (entry.isFile() && entry.name.endsWith('.gd')) {
-        const source = bytesOf(path);
-        if (source !== null) {
-          each(`res://${prefix}${entry.name}`, source.toString('utf8'));
-        }
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      visitScripts(path, `${prefix}${entry.name}/`, each);
+    } else if (entry.isFile() && entry.name.endsWith('.gd')) {
+      const source = bytesOf(path);
+      if (source !== null) {
+        each(`res://${prefix}${entry.name}`, source.toString('utf8'));
       }
     }
-  };
-  visit(projectPath, '');
+  }
 }
 
 /** A script naming a class, and whether it is a `@tool` script, which runs inside the editor. */

@@ -46,35 +46,52 @@ export function freeLibraryCopies(
   for (const library of windowsLibraries(projectPath)) {
     const folder = dirname(library);
     const copy = `~${basename(library)}`;
-    if (existsSync(join(folder, copy))) {
-      const aside = join(folder, `${copy}.aside-${process.pid}-${Date.now()}`);
+    const aside = setAsideCopy(folder, copy);
+    if (aside !== null) {
+      setAside.push(aside);
+    }
+    swept.push(...sweepLeftovers(folder, copy));
+  }
+  return { setAside, swept };
+}
+
+/** Moves the copy [param copy] in [param folder] aside and answers where, or null when there is none to move. */
+function setAsideCopy(folder: string, copy: string): string | null {
+  if (!existsSync(join(folder, copy))) {
+    return null;
+  }
+  const aside = join(folder, `${copy}.aside-${process.pid}-${Date.now()}`);
+  try {
+    renameSync(join(folder, copy), aside);
+    return aside;
+  } catch {
+    // Not checked further: the engine says "Error copying library" if it still cannot copy,
+    // and the answer reads that.
+    return null;
+  }
+}
+
+/** Deletes what is named after [param copy] in [param folder] and answers the paths it deleted. */
+function sweepLeftovers(folder: string, copy: string): string[] {
+  const swept: string[] = [];
+  let names: string[];
+  try {
+    names = readdirSync(folder);
+  } catch {
+    return swept;
+  }
+  for (const name of names) {
+    // The copy set aside a moment ago included: an engine that has let it go since is done with it.
+    if (name.length > copy.length && name.toLowerCase().startsWith(copy.toLowerCase())) {
       try {
-        renameSync(join(folder, copy), aside);
-        setAside.push(aside);
+        unlinkSync(join(folder, name));
+        swept.push(join(folder, name));
       } catch {
-        // Not checked further: the engine says "Error copying library" if it still cannot copy,
-        // and the answer reads that.
-      }
-    }
-    let names: string[];
-    try {
-      names = readdirSync(folder);
-    } catch {
-      continue;
-    }
-    for (const name of names) {
-      // The copy set aside a moment ago included: an engine that has let it go since is done with it.
-      if (name.length > copy.length && name.toLowerCase().startsWith(copy.toLowerCase())) {
-        try {
-          unlinkSync(join(folder, name));
-          swept.push(join(folder, name));
-        } catch {
-          // Still mapped by the engine that made it, which is the one case left for a later run.
-        }
+        // Still mapped by the engine that made it, which is the one case left for a later run.
       }
     }
   }
-  return { setAside, swept };
+  return swept;
 }
 
 /**
@@ -140,29 +157,30 @@ export function unlistedExtensions(projectPath: string): string[] {
     return [];
   }
   const found: string[] = [];
-  const visit = (directory: string, resDirectory: string): void => {
-    if (existsSync(join(directory, '.gdignore'))) {
-      return;
-    }
-    let entries: Dirent[];
-    try {
-      entries = readdirSync(directory, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (entry.name.startsWith('.')) {
-        continue;
-      }
-      if (entry.isDirectory()) {
-        visit(join(directory, entry.name), `${resDirectory}${entry.name}/`);
-      } else if (entry.name.endsWith('.gdextension')) {
-        found.push(`${resDirectory}${entry.name}`);
-      }
-    }
-  };
-  visit(projectPath, 'res://');
+  collectExtensions(projectPath, 'res://', found);
   return found.toSorted();
+}
+
+function collectExtensions(directory: string, resDirectory: string, found: string[]): void {
+  if (existsSync(join(directory, '.gdignore'))) {
+    return;
+  }
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    if (entry.name.startsWith('.')) {
+      continue;
+    }
+    if (entry.isDirectory()) {
+      collectExtensions(join(directory, entry.name), `${resDirectory}${entry.name}/`, found);
+    } else if (entry.name.endsWith('.gdextension')) {
+      found.push(`${resDirectory}${entry.name}`);
+    }
+  }
 }
 
 /**
@@ -181,22 +199,31 @@ function windowsLibraries(projectPath: string): string[] {
     if (manifest === null || text === null) {
       continue;
     }
-    let inLibraries = false;
-    for (const row of text.split(/\r?\n/)) {
-      const section = /^\s*\[([^\]]+)\]/.exec(row)?.[1];
-      if (section !== undefined) {
-        inLibraries = section.trim() === 'libraries';
-        continue;
-      }
-      const named = inLibraries ? /^\s*windows[\w.]*\s*=\s*"([^"]+)"/.exec(row)?.[1] : undefined;
-      // A path without res:// is the engine's to read beside the manifest.
-      const library = named === undefined ? null : resolveResource(projectPath, dirname(manifest), named);
-      if (library !== null) {
-        libraries.add(library);
-      }
+    for (const library of manifestLibraries(projectPath, manifest, text)) {
+      libraries.add(library);
     }
   }
   return [...libraries];
+}
+
+/** The Windows libraries the `[libraries]` section of the manifest at [param manifest] names, in order. */
+function manifestLibraries(projectPath: string, manifest: string, text: string): string[] {
+  const libraries: string[] = [];
+  let inLibraries = false;
+  for (const row of text.split(/\r?\n/)) {
+    const section = /^\s*\[([^\]]+)\]/.exec(row)?.[1];
+    if (section !== undefined) {
+      inLibraries = section.trim() === 'libraries';
+      continue;
+    }
+    const named = inLibraries ? /^\s*windows[\w.]*\s*=\s*"([^"]+)"/.exec(row)?.[1] : undefined;
+    // A path without res:// is the engine's to read beside the manifest.
+    const library = named === undefined ? null : resolveResource(projectPath, dirname(manifest), named);
+    if (library !== null) {
+      libraries.push(library);
+    }
+  }
+  return libraries;
 }
 
 function resolveResource(projectPath: string, relativeTo: string, path: string): string | null {

@@ -269,23 +269,38 @@ export function editorOpenOptionsOf(args: readonly string[], cwd: string): Edito
     } else if (arg === '--silent') {
       silent = true;
     } else if (arg === '--until') {
-      const value = Number(args[at + 1]);
-      if (args[at + 1] === undefined || !Number.isInteger(value) || value <= 0) {
-        throw new EngineUsageError(`--until takes a process id, not ${args[at + 1] ?? 'nothing'}.`);
-      }
-      until = value;
+      until = untilPidOf(args[at + 1]);
       at += 1;
     } else if (arg.startsWith('--')) {
       throw new EngineUsageError(`Unknown option ${arg}. Usage: ${EDITOR_OPEN_USAGE}`);
-    } else if (named === undefined) {
-      named = arg;
     } else {
-      throw new EngineUsageError(
-        `gdharness editor open takes one project, and was given ${named} and ${arg}.`,
-      );
+      named = onlyProject(named, arg);
     }
   }
   const projectPath = resolve(cwd, named ?? '.');
+  checkOpenable(projectPath, until);
+  return { projectPath, start: { hidden, silent: silent || hidden, until } };
+}
+
+/** The project word [param arg], refused when [param named] already holds one. */
+function onlyProject(named: string | undefined, arg: string): string {
+  if (named !== undefined) {
+    throw new EngineUsageError(`gdharness editor open takes one project, and was given ${named} and ${arg}.`);
+  }
+  return arg;
+}
+
+/** The process id after `--until`, or a refusal naming what followed it. */
+function untilPidOf(given: string | undefined): number {
+  const value = Number(given);
+  if (given === undefined || !Number.isInteger(value) || value <= 0) {
+    throw new EngineUsageError(`--until takes a process id, not ${given ?? 'nothing'}.`);
+  }
+  return value;
+}
+
+/** Refuses a project that cannot be opened, or an editor held by a process that is not running. */
+function checkOpenable(projectPath: string, until: number | null): void {
   const refused = commandProjectRefusal(projectPath);
   if (refused !== null) {
     throw new EngineUsageError(refused);
@@ -295,7 +310,6 @@ export function editorOpenOptionsOf(args: readonly string[], cwd: string): Edito
       `Process ${String(until)} is not running, so an editor held by it would quit at once.`,
     );
   }
-  return { projectPath, start: { hidden, silent: silent || hidden, until } };
 }
 
 /**

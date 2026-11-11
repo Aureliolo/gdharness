@@ -166,38 +166,56 @@ function declared(path: string, name: string): readonly [text: string, owner: st
  */
 function declaringFiles(projectPath: string, wanted: ReadonlySet<bigint>): Map<bigint, string> {
   const found = new Map<bigint, string>();
-  const visit = (directory: string, prefix: string): void => {
-    let entries: Dirent[];
-    try {
-      entries = readdirSync(directory, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    if (entries.some((entry) => entry.name === '.gdignore')) {
-      return;
-    }
-    for (const entry of entries) {
-      if (found.size === wanted.size) {
-        return;
-      }
-      if (entry.name.startsWith('.')) {
-        continue;
-      }
-      const path = join(directory, entry.name);
-      const spelled = `${prefix}${entry.name}`;
-      if (entry.isDirectory()) {
-        visit(path, `${spelled}/`);
-        continue;
-      }
-      const declaration = entry.isFile() ? declared(path, spelled) : null;
-      const id = declaration === null ? null : uidOfText(declaration[0]);
-      if (declaration !== null && id !== null && wanted.has(id) && !found.has(id)) {
-        found.set(id, `${RES}${declaration[1]}`);
-      }
-    }
-  };
-  visit(projectPath, '');
+  findDeclarations(projectPath, '', wanted, found);
   return found;
+}
+
+function findDeclarations(
+  directory: string,
+  prefix: string,
+  wanted: ReadonlySet<bigint>,
+  found: Map<bigint, string>,
+): void {
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  if (entries.some((entry) => entry.name === '.gdignore')) {
+    return;
+  }
+  for (const entry of entries) {
+    if (found.size === wanted.size) {
+      return;
+    }
+    if (entry.name.startsWith('.')) {
+      continue;
+    }
+    const path = join(directory, entry.name);
+    const spelled = `${prefix}${entry.name}`;
+    if (entry.isDirectory()) {
+      findDeclarations(path, `${spelled}/`, wanted, found);
+      continue;
+    }
+    if (entry.isFile()) {
+      recordDeclaration(path, spelled, wanted, found);
+    }
+  }
+}
+
+/** Notes [param path] in [param found] when it declares a wanted id that no earlier file declared. */
+function recordDeclaration(
+  path: string,
+  spelled: string,
+  wanted: ReadonlySet<bigint>,
+  found: Map<bigint, string>,
+): void {
+  const declaration = declared(path, spelled);
+  const id = declaration === null ? null : uidOfText(declaration[0]);
+  if (declaration !== null && id !== null && wanted.has(id) && !found.has(id)) {
+    found.set(id, `${RES}${declaration[1]}`);
+  }
 }
 
 /**
