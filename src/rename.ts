@@ -273,6 +273,20 @@ interface DocLink {
   readonly index: number;
 }
 
+/** Where the text of a `##` line starting at [param lineStart] begins, or null for any other line. */
+function docContentAt(text: string, lineStart: number): number | null {
+  let at = lineStart;
+  while (text[at] === ' ' || text[at] === '\t') {
+    at += 1;
+  }
+  return text.startsWith('##', at) ? at + 2 : null;
+}
+
+/** [param end], one earlier when a carriage return sits before it. */
+function withoutReturn(text: string, end: number): number {
+  return text[end - 1] === '\r' ? end - 1 : end;
+}
+
 /**
  * The documentation comment holding [param offset], its `##` lines joined by a space the way Godot
  * reads one, with where in [param text] each joined character came from (-1 for a joining space).
@@ -280,13 +294,7 @@ interface DocLink {
  */
 function docBlockAt(text: string, offset: number): { joined: string; from: number[] } | null {
   const lineStartOf = (at: number): number => text.lastIndexOf('\n', at - 1) + 1;
-  const contentOf = (lineStart: number): number | null => {
-    let at = lineStart;
-    while (text[at] === ' ' || text[at] === '\t') {
-      at += 1;
-    }
-    return text.startsWith('##', at) ? at + 2 : null;
-  };
+  const contentOf = (lineStart: number): number | null => docContentAt(text, lineStart);
   let top = lineStartOf(offset);
   if (contentOf(top) === null) {
     return null;
@@ -302,16 +310,13 @@ function docBlockAt(text: string, offset: number): { joined: string; from: numbe
       break;
     }
     const nextBreak = text.indexOf('\n', line);
-    let end = nextBreak < 0 ? text.length : nextBreak;
-    if (text[end - 1] === '\r') {
-      end -= 1;
-    }
+    const end = withoutReturn(text, nextBreak < 0 ? text.length : nextBreak);
     if (joined.length > 0) {
       joined += ' ';
       from.push(-1);
     }
+    joined += text.slice(content, end);
     for (let at = content; at < end; at += 1) {
-      joined += text[at];
       from.push(at);
     }
     if (nextBreak < 0) {
@@ -421,15 +426,8 @@ class PlanBuilder {
     for (const file of texts) {
       const script = scripts.get(file.path);
       const lines = script?.lines ?? new Lines(file.text);
-      const occurrences =
-        script?.occurrences(this.oldName) ??
-        occurrencesOf(file.text, this.oldName, [{ kind: 'code', start: 0, end: file.text.length }]);
-      for (const occurrence of occurrences) {
-        if (this.edited(file.path, occurrence.offset)) {
-          continue;
-        }
-        const kind: MentionKind =
-          script !== undefined ? occurrence.kind : /\.(tscn|tres)$/.test(file.path) ? 'scene' : 'text';
+      for (const occurrence of this.unedited(file, script)) {
+        const kind: MentionKind = script !== undefined ? occurrence.kind : sceneOrText(file.path);
         const why = whyFor(file.path, occurrence, kind);
         const key = `${file.path}:${lines.positionOf(occurrence.offset).line + 1}:${kind}:${lines.lineAt(occurrence.offset).trim()}`;
         if (already.has(key)) {
@@ -439,6 +437,14 @@ class PlanBuilder {
         this.mention(file.path, lines, occurrence.offset, kind, why);
       }
     }
+  }
+
+  /** The whole-word occurrences of the old name in [param file] that no edit covers. */
+  private unedited(file: ProjectText, script: Script | undefined): Occurrence[] {
+    const occurrences =
+      script?.occurrences(this.oldName) ??
+      occurrencesOf(file.text, this.oldName, [{ kind: 'code', start: 0, end: file.text.length }]);
+    return occurrences.filter((occurrence) => !this.edited(file.path, occurrence.offset));
   }
 
   build(): Plan {
@@ -526,38 +532,62 @@ export function planClassRename(args: ClassRenameArguments): Plan {
   const plan = new PlanBuilder(oldName, newName);
   const declarationAt = declaring.shape.className?.offset ?? null;
   const graph = new ClassGraph(scripts, declaredIn(scripts));
-  // A member a script inherits hides the class from a bare name, as one it declares itself does.
-  const inherits = (script: Script): boolean =>
-    [...graph.nodes.values()].some(
-      (node) =>
-        node.file === script.path &&
-        graph.ancestors(node.id).some((id) => graph.declaration(id, oldName) !== undefined),
-    );
-  const shadows = (script: Script, except: number | null): boolean =>
-    declaresItsOwn(script, oldName, except) || inherits(script);
+  const inherits = (script: Script): boolean => inheritsMember(graph, script, oldName);
   for (const script of scripts.values()) {
     const ownDeclaration = script.path === declaring.path ? declarationAt : null;
-    const shadowed = shadows(script, ownDeclaration);
+    const shadowed = declaresItsOwn(script, oldName, ownDeclaration) || inherits(script);
     for (const occurrence of script.occurrences(oldName)) {
-      if (occurrence.kind === 'code') {
-        if (occurrence.offset === ownDeclaration) {
-          plan.edit(script.path, occurrence.offset, 'declaration');
-        } else if (
-          !shadowed &&
-          !occurrence.afterDot &&
-          occurrence.declaredAs === null &&
-          !isWrittenKey(script.text, occurrence.offset, oldName)
-        ) {
-          plan.edit(script.path, occurrence.offset, 'code');
-        }
-      } else if (occurrence.kind === 'doc') {
-        const link = docLinkAt(script.text, occurrence.offset);
-        if (link?.index === 0 && !shadowed) {
-          plan.edit(script.path, occurrence.offset, 'doc link');
-        }
+      const kind = classUseKind(script, occurrence, oldName, ownDeclaration, shadowed);
+      if (kind !== null) {
+        plan.edit(script.path, occurrence.offset, kind);
       }
     }
   }
+  planResourceClasses(plan, texts, oldName);
+  plan.mentionTheRest(texts, scripts, (file, occurrence, kind) =>
+    classMentionWhy(scripts.get(file), occurrence, kind, oldName, inherits),
+  );
+  return plan.build();
+}
+
+/** Whether a class [param script] holds inherits a member named [param name]. */
+function inheritsMember(graph: ClassGraph, script: Script, name: string): boolean {
+  return [...graph.nodes.values()].some(
+    (node) =>
+      node.file === script.path &&
+      graph.ancestors(node.id).some((id) => graph.declaration(id, name) !== undefined),
+  );
+}
+
+/** What renaming the class does to one occurrence of its name in a script, or null for nothing. */
+function classUseKind(
+  script: Script,
+  occurrence: Occurrence,
+  oldName: string,
+  ownDeclaration: number | null,
+  shadowed: boolean,
+): EditKind | null {
+  if (occurrence.kind === 'code') {
+    if (occurrence.offset === ownDeclaration) {
+      return 'declaration';
+    }
+    // A member a script inherits hides the class from a bare name, as one it declares itself does.
+    const isBareUse =
+      !shadowed &&
+      !occurrence.afterDot &&
+      occurrence.declaredAs === null &&
+      !isWrittenKey(script.text, occurrence.offset, oldName);
+    return isBareUse ? 'code' : null;
+  }
+  if (occurrence.kind === 'doc') {
+    const link = docLinkAt(script.text, occurrence.offset);
+    return link?.index === 0 && !shadowed ? 'doc link' : null;
+  }
+  return null;
+}
+
+/** The `script_class` a scene or resource file records for the class. */
+function planResourceClasses(plan: PlanBuilder, texts: readonly ProjectText[], oldName: string): void {
   for (const file of texts) {
     if (!/\.(tscn|tres)$/.test(file.path)) {
       continue;
@@ -571,32 +601,38 @@ export function planClassRename(args: ClassRenameArguments): Plan {
       }
     }
   }
-  plan.mentionTheRest(texts, scripts, (file, occurrence, kind) => {
-    const script = scripts.get(file);
-    if (kind === 'string' && script !== undefined && isWholeString(script.text, occurrence.offset, oldName)) {
-      return WHOLE_CLASS_NAME;
-    }
-    if (kind !== 'code' || script === undefined) {
-      return undefined;
-    }
-    if (occurrence.declaredAs === 'class_name') {
-      return `this script declares a class of the same name`;
-    }
-    if (occurrence.declaredAs !== null || declaresItsOwn(script, oldName, null)) {
-      return `this script declares something of its own named ${oldName}, so which uses mean the class cannot be told from the text`;
-    }
-    if (inherits(script)) {
-      return `a class this script inherits from declares something named ${oldName}, so a bare ${oldName} here means that, not the class`;
-    }
-    if (isWrittenKey(script.text, occurrence.offset, oldName)) {
-      return `{${oldName} = ...} writes the string "${oldName}" as a dictionary key, not the class`;
-    }
-    if (occurrence.afterDot) {
-      return `after a dot, a member of something else rather than the class`;
-    }
+}
+
+/** Why an occurrence of the class's name that the rename left alone was left. */
+function classMentionWhy(
+  script: Script | undefined,
+  occurrence: Occurrence,
+  kind: MentionKind,
+  oldName: string,
+  inherits: (script: Script) => boolean,
+): string | undefined {
+  if (kind === 'string' && script !== undefined && isWholeString(script.text, occurrence.offset, oldName)) {
+    return WHOLE_CLASS_NAME;
+  }
+  if (kind !== 'code' || script === undefined) {
     return undefined;
-  });
-  return plan.build();
+  }
+  if (occurrence.declaredAs === 'class_name') {
+    return `this script declares a class of the same name`;
+  }
+  if (occurrence.declaredAs !== null || declaresItsOwn(script, oldName, null)) {
+    return `this script declares something of its own named ${oldName}, so which uses mean the class cannot be told from the text`;
+  }
+  if (inherits(script)) {
+    return `a class this script inherits from declares something named ${oldName}, so a bare ${oldName} here means that, not the class`;
+  }
+  if (isWrittenKey(script.text, occurrence.offset, oldName)) {
+    return `{${oldName} = ...} writes the string "${oldName}" as a dictionary key, not the class`;
+  }
+  if (occurrence.afterDot) {
+    return `after a dot, a member of something else rather than the class`;
+  }
+  return undefined;
 }
 
 /** A place the language server resolved to the member, in a file of the project. */
@@ -648,57 +684,16 @@ export function planMemberRename(args: MemberRenameArguments): Plan {
   }
   for (const one of resolved) {
     const script = scripts.get(one.file);
-    if (script === undefined || script.text.slice(one.offset, one.offset + oldName.length) !== oldName) {
-      continue;
-    }
-    const occurrence = script.occurrences(oldName).find((each) => each.offset === one.offset);
-    if (occurrence === undefined) {
-      continue;
-    }
-    if (occurrence.kind === 'code') {
-      plan.edit(one.file, one.offset, familyAt.has(`${one.file}:${one.offset}`) ? 'declaration' : 'code');
-    } else if (occurrence.kind === 'doc' && docLinkAt(script.text, one.offset) !== null) {
-      plan.edit(one.file, one.offset, 'doc link');
-    } else {
-      plan.mention(
-        one.file,
-        script.lines,
-        one.offset,
-        occurrence.kind,
-        `the language server resolved this word to the ${kind === 'func' ? 'method' : 'member'}, but it is inside ${occurrence.kind === 'string' ? 'a string' : occurrence.kind === 'nodePath' ? 'a node path' : 'a comment'}, which no rename changes: read it, and change the word by hand if it names the ${kind === 'func' ? 'method' : 'member'}`,
-      );
+    const occurrence = script === undefined ? undefined : occurrenceAt(script, one.offset, oldName);
+    if (script !== undefined && occurrence !== undefined) {
+      planResolved(plan, script, occurrence, familyAt.has(`${one.file}:${one.offset}`), kind);
     }
   }
 
   // Doc links the language server does not follow: one naming the member through a class that
   // inherits it, or in a script other than the declaring one.
   for (const script of scripts.values()) {
-    for (const occurrence of script.occurrences(oldName)) {
-      if (occurrence.kind !== 'doc') {
-        continue;
-      }
-      const link = docLinkAt(script.text, occurrence.offset);
-      if (
-        link === null ||
-        link.index !== link.parts.length - 1 ||
-        link.kind !== docKind ||
-        docKind === null
-      ) {
-        continue;
-      }
-      const qualifiers = link.parts.slice(0, -1);
-      let owner: ClassId | null = null;
-      if (qualifiers.length === 0) {
-        owner = graph.bodyAt(script.path, occurrence.offset);
-      } else {
-        const [first = '', ...rest] = qualifiers;
-        const file = graph.declared.get(first);
-        owner = file === undefined ? null : `${file}#${rest.join('.')}`;
-      }
-      if (owner !== null && heirs.has(owner)) {
-        plan.edit(script.path, occurrence.offset, 'doc link');
-      }
-    }
+    planInheritedDocLinks(plan, graph, script, heirs, docKind, oldName);
   }
 
   planScenes(texts, heirs, kind, oldName, plan);
@@ -715,17 +710,107 @@ export function planMemberRename(args: MemberRenameArguments): Plan {
     if (mentionKind !== 'code') {
       return undefined;
     }
-    if (!occurrence.afterDot && !heirFiles.has(file)) {
-      return NOT_INHERITED;
-    }
-    if (elsewhere.has(`${file}:${String(occurrence.offset)}`)) {
-      return RESOLVED_ELSEWHERE;
-    }
-    return occurrence.afterDot
-      ? 'not resolved to this member by the language server: a value whose type the analyser could not tell, so it may be this member and is left for you'
-      : 'not resolved to this member by the language server, which gave no single declaration for it';
+    return codeMentionWhy(file, occurrence, heirFiles, elsewhere);
   });
   return plan.build();
+}
+
+/** An edit for each doc link in [param script] naming the member through one of [param heirs]. */
+function planInheritedDocLinks(
+  plan: PlanBuilder,
+  graph: ClassGraph,
+  script: Script,
+  heirs: ReadonlySet<ClassId>,
+  docKind: string | null,
+  oldName: string,
+): void {
+  for (const occurrence of script.occurrences(oldName)) {
+    const owner = occurrence.kind === 'doc' ? docLinkOwner(graph, script, occurrence, docKind) : null;
+    if (owner !== null && heirs.has(owner)) {
+      plan.edit(script.path, occurrence.offset, 'doc link');
+    }
+  }
+}
+
+/** The occurrence of [param name] that starts at [param offset] of [param script], if there is one. */
+function occurrenceAt(script: Script, offset: number, name: string): Occurrence | undefined {
+  if (script.text.slice(offset, offset + name.length) !== name) {
+    return undefined;
+  }
+  return script.occurrences(name).find((each) => each.offset === offset);
+}
+
+/** The edit, or the mention, for a place the language server resolved to the member. */
+function planResolved(
+  plan: PlanBuilder,
+  script: Script,
+  occurrence: Occurrence,
+  isDeclaration: boolean,
+  kind: DeclarationKind,
+): void {
+  const { offset } = occurrence;
+  if (occurrence.kind === 'code') {
+    plan.edit(script.path, offset, isDeclaration ? 'declaration' : 'code');
+  } else if (occurrence.kind === 'doc' && docLinkAt(script.text, offset) !== null) {
+    plan.edit(script.path, offset, 'doc link');
+  } else {
+    const noun = kind === 'func' ? 'method' : 'member';
+    plan.mention(
+      script.path,
+      script.lines,
+      offset,
+      occurrence.kind,
+      `the language server resolved this word to the ${noun}, but it is inside ${insideWhat(occurrence.kind)}, which no rename changes: read it, and change the word by hand if it names the ${noun}`,
+    );
+  }
+}
+
+function insideWhat(kind: RegionKind): string {
+  if (kind === 'string') {
+    return 'a string';
+  }
+  return kind === 'nodePath' ? 'a node path' : 'a comment';
+}
+
+/**
+ * The class a doc link at [param occurrence] names the member through, or null where it is not a
+ * link to a member of [param docKind]'s kind written on its last part.
+ */
+function docLinkOwner(
+  graph: ClassGraph,
+  script: Script,
+  occurrence: Occurrence,
+  docKind: string | null,
+): ClassId | null {
+  const link = docLinkAt(script.text, occurrence.offset);
+  if (link === null || link.index !== link.parts.length - 1 || link.kind !== docKind || docKind === null) {
+    return null;
+  }
+  const qualifiers = link.parts.slice(0, -1);
+  if (qualifiers.length === 0) {
+    return graph.bodyAt(script.path, occurrence.offset);
+  }
+  const [first = '', ...rest] = qualifiers;
+  const file = graph.declared.get(first);
+  return file === undefined ? null : `${file}#${rest.join('.')}`;
+}
+
+/** Why a code occurrence the language server did not resolve to the member was left. */
+function codeMentionWhy(
+  file: string,
+  occurrence: Occurrence,
+  heirFiles: ReadonlySet<string>,
+  elsewhere: ReadonlySet<string>,
+): string {
+  if (!occurrence.afterDot && !heirFiles.has(file)) {
+    return NOT_INHERITED;
+  }
+  if (elsewhere.has(`${file}:${String(occurrence.offset)}`)) {
+    return RESOLVED_ELSEWHERE;
+  }
+  return occurrence.afterDot
+    ? 'not resolved to this member by the language server: a value whose type the analyser could not tell, so it may be this member and is left for you'
+    : 'not resolved to this member by the language server, which gave no single declaration for it';
 }
 
 /** A section of a scene or resource file: its header's attributes and its property lines. */
@@ -739,56 +824,80 @@ interface Section {
 function sectionsOf(text: string): Section[] {
   const sections: Section[] = [];
   let current: Section | null = null;
-  let depth = 0;
-  let inString = false;
+  const scan: BracketState = { depth: 0, inString: false };
   let offset = 0;
   for (const line of text.split('\n')) {
-    const atTop = depth === 0 && !inString;
+    const atTop = scan.depth === 0 && !scan.inString;
     const header = atTop ? /^\[([a-z_]+)(.*)\]\s*$/.exec(line.replace(/\r$/, '')) : null;
     if (header !== null) {
-      const attributes = new Map<string, { value: string; offset: number }>();
-      const rest = header[2] ?? '';
-      const restAt = offset + 1 + (header[1]?.length ?? 0);
-      for (const attribute of rest.matchAll(
-        /([a-z_]+)=("(?:[^"\\]|\\.)*"|[A-Za-z]+\("(?:[^"\\]|\\.)*"\)|[^\s\]]+)/g,
-      )) {
-        const raw = attribute[2] ?? '';
-        const quoted = raw.startsWith('"');
-        attributes.set(attribute[1] ?? '', {
-          value: quoted ? raw.slice(1, -1) : raw,
-          offset: restAt + attribute.index + (attribute[1]?.length ?? 0) + 1 + (quoted ? 1 : 0),
-        });
-      }
-      current = { kind: header[1] ?? '', attributes, properties: [] };
+      current = sectionOfHeader(header, offset);
       sections.push(current);
     } else if (atTop && current !== null) {
-      const property = /^([A-Za-z_][\w/:]*) = (.*)$/.exec(line.replace(/\r$/, ''));
+      const property = propertyOf(line, offset);
       if (property !== null) {
-        current.properties.push({ key: property[1] ?? '', offset, value: property[2] ?? '' });
+        current.properties.push(property);
       }
     }
-    for (let at = 0; at < line.length; at += 1) {
-      const character = line[at];
-      if (inString) {
-        if (character === '\\') {
-          at += 1;
-        } else if (character === '"') {
-          inString = false;
-        }
-      } else if (character === '"') {
-        inString = true;
-      } else if (character === '[' || character === '{' || character === '(') {
-        depth += 1;
-      } else if (character === ']' || character === '}' || character === ')') {
-        depth = Math.max(0, depth - 1);
-      }
-    }
+    scanBrackets(line, scan);
     if (header !== null) {
-      depth = 0;
+      scan.depth = 0;
     }
     offset += line.length + 1;
   }
   return sections;
+}
+
+/** The `key = value` property a line of a section holds, with the offset of the line. */
+function propertyOf(line: string, offset: number): Section['properties'][number] | null {
+  const property = /^([A-Za-z_][\w/:]*) = (.*)$/.exec(line.replace(/\r$/, ''));
+  return property === null ? null : { key: property[1] ?? '', offset, value: property[2] ?? '' };
+}
+
+/** The section a header line opens, with the offset of each attribute's value. */
+function sectionOfHeader(header: RegExpExecArray, offset: number): Section {
+  const attributes = new Map<string, { value: string; offset: number }>();
+  const rest = header[2] ?? '';
+  const restAt = offset + 1 + (header[1]?.length ?? 0);
+  for (const attribute of rest.matchAll(
+    /([a-z_]+)=("(?:[^"\\]|\\.)*"|[A-Za-z]+\("(?:[^"\\]|\\.)*"\)|[^\s\]]+)/g,
+  )) {
+    const raw = attribute[2] ?? '';
+    const quoted = raw.startsWith('"');
+    attributes.set(attribute[1] ?? '', {
+      value: quoted ? raw.slice(1, -1) : raw,
+      offset: restAt + attribute.index + (attribute[1]?.length ?? 0) + 1 + (quoted ? 1 : 0),
+    });
+  }
+  return { kind: header[1] ?? '', attributes, properties: [] };
+}
+
+/** How deep in brackets a scan is, and whether it is inside a string, carried between lines. */
+interface BracketState {
+  depth: number;
+  inString: boolean;
+}
+
+const OPENING_BRACKETS = new Set(['[', '{', '(']);
+const CLOSING_BRACKETS = new Set([']', '}', ')']);
+
+/** Moves [param state] across [param line], so a value wrapping onto later lines stays one value. */
+function scanBrackets(line: string, state: BracketState): void {
+  for (let at = 0; at < line.length; at += 1) {
+    const character = line.charAt(at);
+    if (state.inString) {
+      if (character === '\\') {
+        at += 1;
+      } else if (character === '"') {
+        state.inString = false;
+      }
+    } else if (character === '"') {
+      state.inString = true;
+    } else if (OPENING_BRACKETS.has(character)) {
+      state.depth += 1;
+    } else if (CLOSING_BRACKETS.has(character)) {
+      state.depth = Math.max(0, state.depth - 1);
+    }
+  }
 }
 
 /** The id inside `ExtResource("id")` or `SubResource("id")`, with which of the two it is. */
@@ -890,40 +999,61 @@ function planScenes(
       uids.set(file.text.trim(), file.path.slice(0, -'.uid'.length));
     }
   }
-  const reader = new SceneReader(byPath, uids);
-  const inherits = (script: string | null): boolean => script !== null && heirs.has(`${script}#`);
+  const scene: SceneRename = {
+    reader: new SceneReader(byPath, uids),
+    inherits: (script) => script !== null && heirs.has(`${script}#`),
+    oldName,
+    plan,
+  };
   for (const file of texts) {
     if (!/\.(tscn|tres)$/.test(file.path) || !file.text.includes(oldName)) {
       continue;
     }
-    const sections = reader.sections(file.path);
     if (kind === 'var') {
-      for (const section of sections) {
-        if (!['node', 'resource', 'sub_resource'].includes(section.kind)) {
-          continue;
-        }
-        const property = section.properties.find((one) => one.key === oldName);
-        if (property !== undefined && inherits(reader.scriptOf(file.path, section))) {
-          plan.edit(file.path, property.offset, 'scene property');
-        }
-      }
+      planSceneProperties(scene, file.path);
     }
     if (kind === 'signal' || kind === 'func') {
-      const nodes = reader.nodesByPath(file.path);
-      for (const section of sections) {
-        if (section.kind !== 'connection') {
-          continue;
-        }
-        const attribute = section.attributes.get(kind === 'signal' ? 'signal' : 'method');
-        const node = nodes.get(section.attributes.get(kind === 'signal' ? 'from' : 'to')?.value ?? '');
-        if (
-          attribute?.value === oldName &&
-          node !== undefined &&
-          inherits(reader.scriptOf(file.path, node))
-        ) {
-          plan.edit(file.path, attribute.offset, 'scene connection');
-        }
-      }
+      planSceneConnections(scene, file.path, kind);
+    }
+  }
+}
+
+interface SceneRename {
+  readonly reader: SceneReader;
+  /** Whether the script at a `res://` path is one of the classes inheriting the member. */
+  readonly inherits: (script: string | null) => boolean;
+  readonly oldName: string;
+  readonly plan: PlanBuilder;
+}
+
+/** A property saved under the member's name on a node or resource running an inheriting script. */
+function planSceneProperties(scene: SceneRename, path: string): void {
+  for (const section of scene.reader.sections(path)) {
+    if (!['node', 'resource', 'sub_resource'].includes(section.kind)) {
+      continue;
+    }
+    const property = section.properties.find((one) => one.key === scene.oldName);
+    if (property !== undefined && scene.inherits(scene.reader.scriptOf(path, section))) {
+      scene.plan.edit(path, property.offset, 'scene property');
+    }
+  }
+}
+
+/** A connection naming the signal on its emitter or the method on its receiver. */
+function planSceneConnections(scene: SceneRename, path: string, kind: 'signal' | 'func'): void {
+  const nodes = scene.reader.nodesByPath(path);
+  for (const section of scene.reader.sections(path)) {
+    if (section.kind !== 'connection') {
+      continue;
+    }
+    const attribute = section.attributes.get(kind === 'signal' ? 'signal' : 'method');
+    const node = nodes.get(section.attributes.get(kind === 'signal' ? 'from' : 'to')?.value ?? '');
+    if (
+      attribute?.value === scene.oldName &&
+      node !== undefined &&
+      scene.inherits(scene.reader.scriptOf(path, node))
+    ) {
+      scene.plan.edit(path, attribute.offset, 'scene connection');
     }
   }
 }
@@ -989,76 +1119,130 @@ export function planMove(args: MoveArguments, plan: Plan): Plan {
     const script = scripts.get(file.path);
     const goesTo = moves.get(file.path);
     for (const literal of literalsOf(file, script)) {
-      const autoload = literal.value.startsWith('*') ? '*' : '';
-      const written = literal.value.slice(autoload.length);
-      if (written === '' || written.startsWith('uid://') || written.includes('\n')) {
-        continue;
-      }
-      const isAbsolute = written.startsWith('res://');
-      const target = resolvedPath(written, file.path);
-      const targetGoesTo = moves.get(target);
-      const replacement =
-        targetGoesTo !== undefined
-          ? isAbsolute
-            ? targetGoesTo
-            : relativeTo(targetGoesTo, goesTo ?? file.path)
-          : goesTo !== undefined && !isAbsolute && /\.[a-z0-9]+$/i.test(written) && exists(target)
-            ? relativeTo(target, goesTo)
-            : null;
-      // A relative path between two files that moved together reads the same afterwards, and is
-      // not an edit: counted as one, the answer listed files as changed that were written as they were.
-      if (replacement !== null && replacement !== written) {
-        add(file.path, literal.offset + autoload.length, written.length, replacement);
+      const moved = movedLiteral(literal, file.path, goesTo, moves, exists);
+      if (moved !== null) {
+        add(file.path, moved.offset, moved.length, moved.replacement);
       }
     }
-    const lines = script?.lines ?? new Lines(file.text);
-    for (const path of named) {
-      // Not a longer name that only begins with it: res://levels is not res://levels_old or
-      // res://levels.old, and a full stop ending a sentence after it is not part of it.
-      const after = String.raw`(?![\w-]|\.\w)`;
-      const escaped = (text: string): string => text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
-      // And as a path from the project's root, the way a build script or a note names a file: a
-      // move left a game's Python gate naming the folder it had moved, with nothing under leftAlone.
-      // Not the end of a longer path, which is another file or the res:// spelling above.
-      const fromRoot = path.startsWith('res://') ? path.slice('res://'.length) : '';
-      const spellings = [
-        {
-          pattern: new RegExp(`${escaped(path)}${after}`, 'g'),
-          why: `names ${path} outside a string the engine reads as a path`,
-        },
-        ...(fromRoot === ''
-          ? []
-          : [
-              {
-                pattern: new RegExp(`(?<![\\w./-])${escaped(fromRoot)}${after}`, 'g'),
-                why: `names ${path} as ${fromRoot}, a path from the project's root without res://, which the engine does not read as one`,
-              },
-            ]),
-      ];
-      for (const { pattern, why } of spellings) {
-        for (const match of file.text.matchAll(pattern)) {
-          const offset = match.index;
-          const covered = edits.some(
-            (one) => one.file === file.path && one.offset <= offset && offset < one.offset + one.length,
-          );
-          if (!covered) {
-            const region = script?.regions.find((one) => one.start <= offset && offset < one.end);
-            mentions.push({
-              file: file.path,
-              line: lines.positionOf(offset).line + 1,
-              kind: region !== undefined ? region.kind : /\.(tscn|tres)$/.test(file.path) ? 'scene' : 'text',
-              text: lines.lineAt(offset).trim(),
-              why,
-            });
-          }
-        }
-      }
-    }
+    mentionNamedPaths(file, script, named, edits, mentions);
   }
   return {
     edits: edits.toSorted((a, b) => a.file.localeCompare(b.file) || a.offset - b.offset),
     mentions: mentions.toSorted((a, b) => a.file.localeCompare(b.file) || a.line - b.line),
   };
+}
+
+/** Adds a mention to [param mentions] for each place [param file] names a path of [param named] unedited. */
+function mentionNamedPaths(
+  file: ProjectText,
+  script: Script | undefined,
+  named: readonly string[],
+  edits: readonly Edit[],
+  mentions: Mention[],
+): void {
+  const lines = script?.lines ?? new Lines(file.text);
+  for (const path of named) {
+    for (const { pattern, why } of namedSpellings(path)) {
+      for (const match of file.text.matchAll(pattern)) {
+        const offset = match.index;
+        if (isEdited(edits, file.path, offset)) {
+          continue;
+        }
+        mentions.push({
+          file: file.path,
+          line: lines.positionOf(offset).line + 1,
+          kind: mentionKindAt(script, file.path, offset),
+          text: lines.lineAt(offset).trim(),
+          why,
+        });
+      }
+    }
+  }
+}
+
+/** The path edit for a string literal of [param from], or null where it needs none. */
+function movedLiteral(
+  literal: { offset: number; value: string },
+  from: string,
+  goesTo: string | undefined,
+  moves: ReadonlyMap<string, string>,
+  exists: (path: string) => boolean,
+): { offset: number; length: number; replacement: string } | null {
+  const autoload = literal.value.startsWith('*') ? '*' : '';
+  const written = literal.value.slice(autoload.length);
+  if (written === '' || written.startsWith('uid://') || written.includes('\n')) {
+    return null;
+  }
+  const replacement = movedPath(written, from, goesTo, moves, exists);
+  // A relative path between two files that moved together reads the same afterwards, and is
+  // not an edit: counted as one, the answer listed files as changed that were written as they were.
+  if (replacement === null || replacement === written) {
+    return null;
+  }
+  return { offset: literal.offset + autoload.length, length: written.length, replacement };
+}
+
+/** [param written] as it must read once [param from] or the file it names has moved, or null. */
+function movedPath(
+  written: string,
+  from: string,
+  goesTo: string | undefined,
+  moves: ReadonlyMap<string, string>,
+  exists: (path: string) => boolean,
+): string | null {
+  const isAbsolute = written.startsWith('res://');
+  const target = resolvedPath(written, from);
+  const targetGoesTo = moves.get(target);
+  if (targetGoesTo !== undefined) {
+    return isAbsolute ? targetGoesTo : relativeTo(targetGoesTo, goesTo ?? from);
+  }
+  if (goesTo !== undefined && !isAbsolute && /\.[a-z0-9]+$/i.test(written) && exists(target)) {
+    return relativeTo(target, goesTo);
+  }
+  return null;
+}
+
+function escapedForPattern(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&');
+}
+
+/** The ways a text can name [param path] outside a string the engine reads as a path. */
+function namedSpellings(path: string): { pattern: RegExp; why: string }[] {
+  // Not a longer name that only begins with it: res://levels is not res://levels_old or
+  // res://levels.old, and a full stop ending a sentence after it is not part of it.
+  const after = String.raw`(?![\w-]|\.\w)`;
+  const spellings = [
+    {
+      pattern: new RegExp(`${escapedForPattern(path)}${after}`, 'g'),
+      why: `names ${path} outside a string the engine reads as a path`,
+    },
+  ];
+  // And as a path from the project's root, the way a build script or a note names a file: a
+  // move left a game's Python gate naming the folder it had moved, with nothing under leftAlone.
+  // Not the end of a longer path, which is another file or the res:// spelling above.
+  const fromRoot = path.startsWith('res://') ? path.slice('res://'.length) : '';
+  if (fromRoot !== '') {
+    spellings.push({
+      pattern: new RegExp(`(?<![\\w./-])${escapedForPattern(fromRoot)}${after}`, 'g'),
+      why: `names ${path} as ${fromRoot}, a path from the project's root without res://, which the engine does not read as one`,
+    });
+  }
+  return spellings;
+}
+
+/** Whether an edit of [param file] covers [param offset]. */
+function isEdited(edits: readonly Edit[], file: string, offset: number): boolean {
+  return edits.some((one) => one.file === file && one.offset <= offset && offset < one.offset + one.length);
+}
+
+/** Where [param offset] of [param file] sits: the script's region there, else its file kind. */
+function mentionKindAt(script: Script | undefined, file: string, offset: number): MentionKind {
+  const region = script?.regions.find((one) => one.start <= offset && offset < one.end);
+  return region !== undefined ? region.kind : sceneOrText(file);
+}
+
+function sceneOrText(file: string): 'scene' | 'text' {
+  return /\.(tscn|tres)$/.test(file) ? 'scene' : 'text';
 }
 
 /**
@@ -1163,48 +1347,62 @@ export function rewritesOf(
  */
 export function applyRewrites(rewrites: readonly Rewrite[]): void {
   for (const rewrite of rewrites) {
-    const now = readFileSync(rewrite.absolute, 'utf8');
-    if (now !== rewrite.before) {
-      throw new Error(
-        `${rewrite.path} changed on disk while the rename was being worked out, so nothing was written`,
-      );
-    }
-    if (rewrite.writeTo !== rewrite.absolute && existsSync(rewrite.writeTo)) {
-      throw new Error(`${rewrite.writeTo} already exists, so nothing was written`);
-    }
+    refuseIfStale(rewrite);
   }
   const done: { rewrite: Rewrite; movedUid: boolean }[] = [];
   try {
     for (const rewrite of rewrites) {
-      mkdirSync(dirname(rewrite.writeTo), { recursive: true });
-      const staging = `${rewrite.writeTo}.gdharness-rename`;
-      writeFileSync(staging, rewrite.after, 'utf8');
-      renameSync(staging, rewrite.writeTo);
-      let movedUid = false;
-      if (rewrite.writeTo !== rewrite.absolute) {
-        unlinkSync(rewrite.absolute);
-        if (existsSync(`${rewrite.absolute}.uid`)) {
-          renameSync(`${rewrite.absolute}.uid`, `${rewrite.writeTo}.uid`);
-          movedUid = true;
-        }
-      }
-      done.push({ rewrite, movedUid });
+      done.push({ rewrite, movedUid: writeRewrite(rewrite) });
     }
   } catch (error) {
     for (const { rewrite, movedUid } of done.reverse()) {
-      try {
-        writeFileSync(rewrite.absolute, rewrite.before, 'utf8');
-        if (rewrite.writeTo !== rewrite.absolute) {
-          unlinkSync(rewrite.writeTo);
-          if (movedUid) {
-            renameSync(`${rewrite.writeTo}.uid`, `${rewrite.absolute}.uid`);
-          }
-        }
-      } catch {
-        // Putting back is best done for every file, so one that will not go back does not stop the
-        // rest. The error below says the write failed, which is the thing to act on.
-      }
+      putBack(rewrite, movedUid);
     }
     throw error;
+  }
+}
+
+/** Throws when [param rewrite] was made from a file that has changed, or would land on another. */
+function refuseIfStale(rewrite: Rewrite): void {
+  const now = readFileSync(rewrite.absolute, 'utf8');
+  if (now !== rewrite.before) {
+    throw new Error(
+      `${rewrite.path} changed on disk while the rename was being worked out, so nothing was written`,
+    );
+  }
+  if (rewrite.writeTo !== rewrite.absolute && existsSync(rewrite.writeTo)) {
+    throw new Error(`${rewrite.writeTo} already exists, so nothing was written`);
+  }
+}
+
+/** Writes one rewrite through a staging file, and whether its `.uid` file moved with it. */
+function writeRewrite(rewrite: Rewrite): boolean {
+  mkdirSync(dirname(rewrite.writeTo), { recursive: true });
+  const staging = `${rewrite.writeTo}.gdharness-rename`;
+  writeFileSync(staging, rewrite.after, 'utf8');
+  renameSync(staging, rewrite.writeTo);
+  if (rewrite.writeTo === rewrite.absolute) {
+    return false;
+  }
+  unlinkSync(rewrite.absolute);
+  if (!existsSync(`${rewrite.absolute}.uid`)) {
+    return false;
+  }
+  renameSync(`${rewrite.absolute}.uid`, `${rewrite.writeTo}.uid`);
+  return true;
+}
+
+function putBack(rewrite: Rewrite, movedUid: boolean): void {
+  try {
+    writeFileSync(rewrite.absolute, rewrite.before, 'utf8');
+    if (rewrite.writeTo !== rewrite.absolute) {
+      unlinkSync(rewrite.writeTo);
+      if (movedUid) {
+        renameSync(`${rewrite.writeTo}.uid`, `${rewrite.absolute}.uid`);
+      }
+    }
+  } catch {
+    // Putting back is best done for every file, so one that will not go back does not stop the
+    // rest. The write error rethrown by the caller is the thing to act on.
   }
 }

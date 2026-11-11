@@ -82,63 +82,88 @@ function stringEnd(source: string, at: number): number {
   return Math.min(end + fence.length, source.length);
 }
 
+/** The `#` comment starting at [param at], which is a `doc` comment when it is alone on its line. */
+function commentRegion(source: string, at: number): Region {
+  const lineEnd = source.indexOf('\n', at);
+  const lineStart = source.lastIndexOf('\n', at - 1) + 1;
+  const alone = source.slice(lineStart, at).trim() === '';
+  return {
+    kind: alone && source.startsWith('##', at) ? 'doc' : 'comment',
+    start: at,
+    end: lineEnd === -1 ? source.length : lineEnd,
+  };
+}
+
+/** The string literal whose opening quote is at [param at], with its prefix and any `$` or `%`. */
+function stringRegion(source: string, at: number): Region {
+  // A prefix belongs to the literal: r for raw, & for a StringName, ^ for a NodePath.
+  const prefixed =
+    at > 0 && ['r', '&', '^'].includes(source[at - 1] ?? '') && !isIdentifierPart(source[at - 2]);
+  const start = prefixed ? at - 1 : at;
+  const dollar =
+    source[start - 1] === '$' || (source[start - 1] === '%' && percentIsUniqueNode(source, start - 1));
+  return {
+    kind: dollar ? 'nodePath' : 'string',
+    start: dollar ? start - 1 : start,
+    end: stringEnd(source, at),
+  };
+}
+
+function isNodePathPart(character: string | undefined): boolean {
+  return isIdentifierPart(character) || character === '/' || character === '%';
+}
+
+/** The bare node path starting at the `$` or `%` at [param at], or null when no name follows it. */
+function nodePathRegion(source: string, at: number): Region | null {
+  let end = at + 1;
+  while (end < source.length && isNodePathPart(source[end])) {
+    end += 1;
+  }
+  return end > at + 1 ? { kind: 'nodePath', start: at, end } : null;
+}
+
+/** The comment, string or node path that starts at [param at], or null when code goes on there. */
+function regionStartingAt(source: string, at: number): Region | null {
+  const here = source[at];
+  if (here === '#') {
+    return commentRegion(source, at);
+  }
+  if (here === '"' || here === "'") {
+    return stringRegion(source, at);
+  }
+  if (here === '$' || (here === '%' && percentIsUniqueNode(source, at))) {
+    return nodePathRegion(source, at);
+  }
+  return null;
+}
+
+/** The offset after the identifier starting at [param at]. */
+function identifierEnd(source: string, at: number): number {
+  let end = at;
+  while (end < source.length && isIdentifierPart(source[end])) {
+    end += 1;
+  }
+  return end;
+}
+
 /** Every region of [param source], in order and covering it without gaps. */
 export function regionsOf(source: string): Region[] {
   const regions: Region[] = [];
   let codeStart = 0;
   let at = 0;
-  const close = (kind: RegionKind, start: number, end: number): void => {
-    if (codeStart < start) {
-      regions.push({ kind: 'code', start: codeStart, end: start });
-    }
-    regions.push({ kind, start, end });
-    codeStart = end;
-    at = end;
-  };
   while (at < source.length) {
-    const here = source[at];
-    if (here === '#') {
-      const lineEnd = source.indexOf('\n', at);
-      const end = lineEnd === -1 ? source.length : lineEnd;
-      const lineStart = source.lastIndexOf('\n', at - 1) + 1;
-      const alone = source.slice(lineStart, at).trim() === '';
-      close(alone && source.startsWith('##', at) ? 'doc' : 'comment', at, end);
+    const region = regionStartingAt(source, at);
+    if (region === null) {
+      // A whole identifier is skipped at once, so a quote or `#` is never read from inside a word.
+      at = isIdentifierStart(source[at]) ? identifierEnd(source, at) : at + 1;
       continue;
     }
-    if (here === '"' || here === "'") {
-      // A prefix belongs to the literal: r for raw, & for a StringName, ^ for a NodePath.
-      const prefixed =
-        at > 0 && ['r', '&', '^'].includes(source[at - 1] ?? '') && !isIdentifierPart(source[at - 2]);
-      const start = prefixed ? at - 1 : at;
-      const dollar =
-        source[start - 1] === '$' || (source[start - 1] === '%' && percentIsUniqueNode(source, start - 1));
-      close(dollar ? 'nodePath' : 'string', dollar ? start - 1 : start, stringEnd(source, at));
-      continue;
+    if (codeStart < region.start) {
+      regions.push({ kind: 'code', start: codeStart, end: region.start });
     }
-    if (here === '$' || (here === '%' && percentIsUniqueNode(source, at))) {
-      if (source[at + 1] === '"' || source[at + 1] === "'") {
-        at += 1;
-        continue;
-      }
-      let end = at + 1;
-      while (
-        end < source.length &&
-        (isIdentifierPart(source[end]) || source[end] === '/' || source[end] === '%')
-      ) {
-        end += 1;
-      }
-      if (end > at + 1) {
-        close('nodePath', at, end);
-        continue;
-      }
-    }
-    if (isIdentifierStart(here)) {
-      while (at < source.length && isIdentifierPart(source[at])) {
-        at += 1;
-      }
-      continue;
-    }
-    at += 1;
+    regions.push(region);
+    codeStart = region.end;
+    at = region.end;
   }
   if (codeStart < source.length) {
     regions.push({ kind: 'code', start: codeStart, end: source.length });
@@ -251,25 +276,50 @@ function isParameterAt(code: string, back: number): boolean {
   if (code[back] !== '(' && code[back] !== ',') {
     return false;
   }
-  let open = back;
-  for (let depth = 0; open >= 0; open -= 1) {
-    const at = code[open];
-    if (at === ')' || at === ']' || at === '}') {
-      depth += 1;
-    } else if (at === '[' || at === '{' || (at === '(' && depth > 0)) {
-      if (depth === 0) {
-        return false;
-      }
-      depth -= 1;
-    } else if (at === '(') {
-      break;
-    }
-  }
+  const open = openingParenBefore(code, back);
   if (open < 0) {
     return false;
   }
   const callee = wordBefore(code, open - 1);
   return callee.word === 'func' || (callee.word !== '' && wordBefore(code, callee.start - 1).word === 'func');
+}
+
+/** Where the bracket group holding [param back] opens, or -1 when it sits in a `[` or `{`. */
+function openingParenBefore(code: string, back: number): number {
+  let depth = 0;
+  for (let open = back; open >= 0; open -= 1) {
+    const at = code[open];
+    if (at === ')' || at === ']' || at === '}') {
+      depth += 1;
+    } else if (at === '(' && depth === 0) {
+      return open;
+    } else if (at === '[' || at === '{') {
+      if (depth === 0) {
+        return -1;
+      }
+      depth -= 1;
+    } else if (at === '(') {
+      depth -= 1;
+    }
+  }
+  return -1;
+}
+
+/** What the code before the name at [param offset] says about it, read off [param code]. */
+function codeContextOf(code: string, offset: number): Pick<Occurrence, 'afterDot' | 'declaredAs'> {
+  let back = offset - 1;
+  while (back >= 0 && /[\s\\]/.test(code[back] ?? '')) {
+    back -= 1;
+  }
+  let wordStart = back + 1;
+  while (wordStart > 0 && isIdentifierPart(code[wordStart - 1])) {
+    wordStart -= 1;
+  }
+  const word = code.slice(wordStart, back + 1);
+  return {
+    afterDot: code[back] === '.' && code[back - 1] !== '.',
+    declaredAs: DECLARING.has(word) ? word : isParameterAt(code, back) ? 'parameter' : null,
+  };
 }
 
 /** Every whole-word occurrence of [param name] in [param source], in any region. */
@@ -290,23 +340,12 @@ export function occurrencesOf(
       index += 1;
     }
     const kind = regions[index]?.kind ?? 'code';
-    let afterDot = false;
-    let declaredAs: string | null = null;
     if (kind === 'code') {
       code ??= codeOf(source, regions);
-      let back = offset - 1;
-      while (back >= 0 && /[\s\\]/.test(code[back] ?? '')) {
-        back -= 1;
-      }
-      afterDot = code[back] === '.' && code[back - 1] !== '.';
-      let wordStart = back + 1;
-      while (wordStart > 0 && isIdentifierPart(code[wordStart - 1])) {
-        wordStart -= 1;
-      }
-      const word = code.slice(wordStart, back + 1);
-      declaredAs = DECLARING.has(word) ? word : isParameterAt(code, back) ? 'parameter' : null;
+      found.push({ offset, kind, ...codeContextOf(code, offset) });
+    } else {
+      found.push({ offset, kind, afterDot: false, declaredAs: null });
     }
-    found.push({ offset, kind, afterDot, declaredAs });
   }
   return found;
 }
@@ -375,141 +414,218 @@ function extendsTarget(source: string, code: string, after: number): string | nu
   return dotted?.[0] ?? null;
 }
 
+interface SourceLine {
+  readonly start: number;
+  readonly text: string;
+  readonly indent: number;
+}
+
+/** What reading a script's lines needs, and the class_name found along the way. */
+interface ShapeReader {
+  readonly source: string;
+  readonly code: string;
+  readonly lines: readonly SourceLine[];
+  className: ScriptShape['className'];
+}
+
+/** A body being read: what it holds so far and the line the reader is at. */
+interface BodyState {
+  readonly declarations: Declaration[];
+  readonly inner: ClassBody[];
+  openEnum: { from: number; text: string } | null;
+  index: number;
+  extendsAs: string | null;
+}
+
+/** A line at its body's own level, with the text after its indentation and where that starts. */
+interface MemberLine {
+  readonly line: SourceLine;
+  readonly text: string;
+  readonly at: number;
+}
+
+/** The enum as it stands: its values collected where it holds the closing brace, else still open. */
+function settleEnum(
+  open: { from: number; text: string },
+  declarations: Declaration[],
+): BodyState['openEnum'] {
+  if (!open.text.includes('}')) {
+    return open;
+  }
+  collectEnumValues(open.text, open.from, declarations);
+  return null;
+}
+
+/** Adds one more line to an enum left open. */
+function continueEnum(
+  open: { from: number; text: string },
+  lineText: string,
+  declarations: Declaration[],
+): BodyState['openEnum'] {
+  open.text += `\n${lineText}`;
+  return settleEnum(open, declarations);
+}
+
+/** Starts reading the enum whose opening brace is at [param brace] of the member's text. */
+function startEnum(member: MemberLine, brace: number, declarations: Declaration[]): BodyState['openEnum'] {
+  return settleEnum({ from: member.at + brace, text: member.text.slice(brace) }, declarations);
+}
+
+/**
+ * Reads a line of the script's own body for its class_name and extends clause. The first extends
+ * clause wins, and the class_name of the last line naming one.
+ */
+function readHeaderLine(reader: ShapeReader, member: MemberLine, extendsAs: string | null): string | null {
+  const { text, at } = member;
+  const named = CLASS_NAME_LINE.exec(text);
+  if (named?.[1] !== undefined) {
+    reader.className = { name: named[1], offset: at + named[0].length - named[1].length };
+  }
+  if (extendsAs !== null || !(EXTENDS_LINE.test(text) || named !== null)) {
+    return extendsAs;
+  }
+  const clause = EXTENDS_CLAUSE.exec(text);
+  return clause === null
+    ? null
+    : extendsTarget(reader.source, reader.code, at + clause.index + clause[0].length);
+}
+
+/** Reads the inner class declared on [param member], and returns the index of the line after it. */
+function readInnerClass(
+  reader: ShapeReader,
+  state: BodyState,
+  member: MemberLine,
+  declared: RegExpExecArray,
+  name: string,
+  indent: number,
+): number {
+  const [whole] = declared;
+  const clause = EXTENDS_CLAUSE.exec(member.text.slice(whole.length));
+  const innerExtends =
+    clause === null
+      ? null
+      : extendsTarget(reader.source, reader.code, member.at + whole.length + clause.index + clause[0].length);
+  const childIndent =
+    reader.lines.slice(state.index + 1).find((next) => next.text.trim() !== '')?.indent ?? indent + 1;
+  if (childIndent > indent) {
+    const parsed = parseBody(reader, name, innerExtends, state.index + 1, childIndent, member.line.start);
+    state.inner.push(parsed.body);
+    return parsed.next;
+  }
+  state.inner.push({
+    name,
+    extendsAs: innerExtends,
+    declarations: [],
+    inner: [],
+    start: member.line.start,
+    end: member.line.start + member.line.text.length,
+  });
+  return state.index + 1;
+}
+
+/** Reads the declaration on [param member] into [param state], and returns the next line's index. */
+function readDeclaration(
+  reader: ShapeReader,
+  state: BodyState,
+  member: MemberLine,
+  declared: RegExpExecArray,
+  indent: number,
+): number {
+  const [whole, , isStatic, keyword, name] = declared;
+  const kind = DECLARATION_KEYWORDS.find((one) => one === keyword);
+  if (kind === undefined || name === undefined) {
+    return state.index + 1;
+  }
+  const offset = member.at + whole.length - name.length;
+  state.declarations.push({ name, kind, offset, isStatic: isStatic !== undefined });
+  if (kind === 'class') {
+    return readInnerClass(reader, state, member, declared, name, indent);
+  }
+  const brace = member.text.indexOf('{');
+  if (kind === 'enum' && brace !== -1) {
+    state.openEnum = startEnum(member, brace, state.declarations);
+  }
+  return state.index + 1;
+}
+
+/** Reads one line at the body's own level into [param state], and moves it to the next line. */
+function readMemberLine(
+  reader: ShapeReader,
+  state: BodyState,
+  line: SourceLine,
+  isScriptBody: boolean,
+  indent: number,
+): void {
+  const member: MemberLine = { line, text: line.text.slice(line.indent), at: line.start + line.indent };
+  if (isScriptBody) {
+    state.extendsAs = readHeaderLine(reader, member, state.extendsAs);
+  }
+  const declared = DECLARATION_LINE.exec(member.text);
+  if (declared !== null) {
+    state.index = readDeclaration(reader, state, member, declared, indent);
+    return;
+  }
+  if (/^enum\s*\{/u.test(member.text)) {
+    // An unnamed enum's values are constants of the class itself.
+    state.openEnum = startEnum(member, member.text.indexOf('{'), state.declarations);
+  }
+  state.index += 1;
+}
+
+/** Reads the class body whose members sit at [param indent], from line [param from] onwards. */
+function parseBody(
+  reader: ShapeReader,
+  name: string | null,
+  extendsAs: string | null,
+  from: number,
+  indent: number,
+  bodyStart: number,
+): { body: ClassBody; next: number } {
+  const state: BodyState = { declarations: [], inner: [], openEnum: null, index: from, extendsAs };
+  while (state.index < reader.lines.length) {
+    const line = reader.lines[state.index];
+    if (line === undefined) {
+      break;
+    }
+    // Before blank lines are passed over, because the enum's text has to keep every line for its
+    // offsets to stay those of the file.
+    if (state.openEnum !== null) {
+      state.openEnum = continueEnum(state.openEnum, line.text, state.declarations);
+      state.index += 1;
+    } else if (line.text.trim() === '' || line.indent > indent) {
+      state.index += 1;
+    } else if (line.indent < indent) {
+      break;
+    } else {
+      readMemberLine(reader, state, line, name === null, indent);
+    }
+  }
+  const last = reader.lines[state.index - 1];
+  return {
+    body: {
+      name,
+      extendsAs: state.extendsAs,
+      declarations: state.declarations,
+      inner: state.inner,
+      start: bodyStart,
+      end: last === undefined ? bodyStart : last.start + last.text.length,
+    },
+    next: state.index,
+  };
+}
+
 /** What [param source] declares: its class_name, its own members, and its inner classes, nested. */
 export function shapeOf(source: string): ScriptShape {
-  const regions = regionsOf(source);
-  const code = codeOf(source, regions);
-  const lines: { start: number; text: string; indent: number }[] = [];
+  const code = codeOf(source, regionsOf(source));
+  const lines: SourceLine[] = [];
   let start = 0;
   for (const text of code.split('\n')) {
-    const indent = /^[ \t]*/.exec(text)?.[0].length ?? 0;
-    lines.push({ start, text, indent });
+    lines.push({ start, text, indent: indentOf(text) });
     start += text.length + 1;
   }
-
-  let className: ScriptShape['className'] = null;
-  const parseBody = (
-    name: string | null,
-    extendsAs: string | null,
-    from: number,
-    indent: number,
-    bodyStart: number,
-  ): { body: ClassBody; next: number } => {
-    const declarations: Declaration[] = [];
-    const inner: ClassBody[] = [];
-    let index = from;
-    let openEnum: { from: number; text: string } | null = null;
-    let topExtends = extendsAs;
-    while (index < lines.length) {
-      const line = lines[index];
-      if (line === undefined) {
-        break;
-      }
-      // Before blank lines are passed over, because the enum's text has to keep every line for its
-      // offsets to stay those of the file.
-      if (openEnum !== null) {
-        openEnum.text += `\n${line.text}`;
-        if (line.text.includes('}')) {
-          collectEnumValues(openEnum.text, openEnum.from, declarations);
-          openEnum = null;
-        }
-        index += 1;
-        continue;
-      }
-      if (line.text.trim() === '') {
-        index += 1;
-        continue;
-      }
-      if (line.indent < indent) {
-        break;
-      }
-      if (line.indent > indent) {
-        index += 1;
-        continue;
-      }
-      const body = line.text.slice(line.indent);
-      const at = line.start + line.indent;
-      if (name === null) {
-        const declared = CLASS_NAME_LINE.exec(body);
-        if (declared?.[1] !== undefined) {
-          className = { name: declared[1], offset: at + declared[0].length - declared[1].length };
-        }
-        if (EXTENDS_LINE.test(body) || CLASS_NAME_LINE.test(body)) {
-          const clause = EXTENDS_CLAUSE.exec(body);
-          if (clause !== null && topExtends === null) {
-            topExtends = extendsTarget(source, code, at + clause.index + clause[0].length);
-          }
-        }
-      }
-      const declared = DECLARATION_LINE.exec(body);
-      if (declared !== null) {
-        const [whole, , isStatic, keyword, declaredName] = declared;
-        const kind = DECLARATION_KEYWORDS.find((one) => one === keyword);
-        if (kind !== undefined && declaredName !== undefined) {
-          const offset = at + whole.length - declaredName.length;
-          declarations.push({ name: declaredName, kind, offset, isStatic: isStatic !== undefined });
-          if (kind === 'enum') {
-            const brace = body.indexOf('{');
-            if (brace !== -1) {
-              openEnum = { from: at + brace, text: body.slice(brace) };
-              if (body.includes('}', brace)) {
-                collectEnumValues(openEnum.text, openEnum.from, declarations);
-                openEnum = null;
-              }
-            }
-          }
-          if (kind === 'class') {
-            const rest = body.slice(whole.length);
-            const clause = EXTENDS_CLAUSE.exec(rest);
-            const innerExtends =
-              clause === null
-                ? null
-                : extendsTarget(source, code, at + whole.length + clause.index + clause[0].length);
-            const childIndent =
-              lines.slice(index + 1).find((next) => next.text.trim() !== '')?.indent ?? indent + 1;
-            if (childIndent > indent) {
-              const parsed = parseBody(declaredName, innerExtends, index + 1, childIndent, line.start);
-              inner.push(parsed.body);
-              index = parsed.next;
-              continue;
-            }
-            inner.push({
-              name: declaredName,
-              extendsAs: innerExtends,
-              declarations: [],
-              inner: [],
-              start: line.start,
-              end: line.start + line.text.length,
-            });
-          }
-        }
-      } else if (/^enum\s*\{/u.test(body)) {
-        // An unnamed enum's values are constants of the class itself.
-        const brace = body.indexOf('{');
-        openEnum = { from: at + brace, text: body.slice(brace) };
-        if (body.includes('}', brace)) {
-          collectEnumValues(openEnum.text, openEnum.from, declarations);
-          openEnum = null;
-        }
-      }
-      index += 1;
-    }
-    const last = lines[index - 1];
-    return {
-      body: {
-        name,
-        extendsAs: topExtends,
-        declarations,
-        inner,
-        start: bodyStart,
-        end: last === undefined ? bodyStart : last.start + last.text.length,
-      },
-      next: index,
-    };
-  };
-
-  const { body } = parseBody(null, null, 0, 0, 0);
-  return { className, body };
+  const reader: ShapeReader = { source, code, lines, className: null };
+  const { body } = parseBody(reader, null, null, 0, 0, 0);
+  return { className: reader.className, body };
 }
 
 const FUNC_LINE = new RegExp(`^[ \\t]*${ANNOTATIONS}(?:static\\s+)?func\\s+(${NAME})\\s*\\(`, 'u');
@@ -598,28 +714,42 @@ function continuationLines(lines: readonly string[]): Array<number | null> {
     if (!backslash && depth === 0) {
       start = index;
     }
-    for (let at = 0; at < text.length; at += 1) {
-      const character = text[at];
-      if (character === '(' || character === '[' || character === '{') {
-        depth += 1;
-      } else if (character === ')' || character === ']' || character === '}') {
-        depth = Math.max(0, depth - 1);
-      }
-      if (
-        depth > 0 &&
-        character === 'f' &&
-        !/[\p{L}\p{N}_]/u.test(text[at - 1] ?? '') &&
-        LAMBDA_HEADER.exec(text.slice(at))?.index === 0
-      ) {
-        lambda = true;
-      }
-    }
-    if (depth === 0) {
-      lambda = false;
-    }
+    const scanned = scanBrackets(text, depth, lambda);
+    depth = scanned.depth;
+    lambda = depth > 0 && scanned.lambda;
     backslash = text.trimEnd().endsWith('\\');
   }
   return inside;
+}
+
+/** +1 for an opening bracket, -1 for a closing one, 0 for anything else. */
+function bracketDelta(character: string | undefined): number {
+  if (character === '(' || character === '[' || character === '{') {
+    return 1;
+  }
+  return character === ')' || character === ']' || character === '}' ? -1 : 0;
+}
+
+/** Whether the word `func` starting at [param at] of [param text] opens a lambda. */
+function lambdaStartsAt(text: string, at: number): boolean {
+  return (
+    text[at] === 'f' &&
+    !/[\p{L}\p{N}_]/u.test(text[at - 1] ?? '') &&
+    LAMBDA_HEADER.exec(text.slice(at))?.index === 0
+  );
+}
+
+/** The bracket depth after [param text], and whether a lambda opened inside brackets on the way. */
+function scanBrackets(text: string, depth: number, lambda: boolean): { depth: number; lambda: boolean } {
+  let open = depth;
+  let inLambda = lambda;
+  for (let at = 0; at < text.length; at += 1) {
+    open = Math.max(0, open + bracketDelta(text[at]));
+    if (open > 0 && lambdaStartsAt(text, at)) {
+      inLambda = true;
+    }
+  }
+  return { depth: open, lambda: inLambda };
 }
 
 /**
@@ -672,40 +802,62 @@ export function neverStopsOn(source: string, line: number, code = codeOf(source)
   }
   const rest = trimmed.replace(new RegExp(`^${ANNOTATIONS}`, 'u'), '');
   const word = /^(?:static\s+)?([a-z_]+)/u.exec(rest)?.[1] ?? '';
-  switch (word) {
-    case 'signal':
-    case 'enum':
-      return { kind: 'declaration' };
-    case 'extends':
-    case 'class_name':
-      // The class's own line is marked for a call of _static_init.
-      return /\b_static_init\b/u.test(code) ? null : { kind: 'declaration' };
-    case 'class':
-      return new RegExp(`^class\\s+${NAME}[^:]*:\\s*$`, 'u').test(rest) ? { kind: 'declaration' } : null;
-    case 'func': {
-      if (!new RegExp(`^(?:static\\s+)?func\\s+${NAME}`, 'u').test(rest)) {
-        return null;
-      }
-      const body = afterHeader(rest, 0);
-      return body === -1 || rest.slice(body).trim() === '' ? { kind: 'declaration' } : null;
-    }
-    case 'get':
-    case 'set':
-      // A property's get or set header, which no call ends with a colon alone on its line.
-      return /^(?:get|set\s*\([^)]*\))\s*:\s*$/u.test(rest) ? { kind: 'declaration' } : null;
-    case 'else':
-      return /^else\s*:\s*$/u.test(rest) ? { kind: 'else' } : null;
-    case 'const':
-      return atClassLevel(lines, line - 1) ? { kind: 'declaration' } : null;
-    case 'var':
-      return atClassLevel(lines, line - 1) &&
-        new RegExp(`^(?:static\\s+)?var\\s+${NAME}\\s*$`, 'u').test(rest)
-        ? { kind: 'declaration' }
-        : null;
-    default:
-      return null;
-  }
+  return NO_STOP_BY_WORD.get(word)?.(rest, { code, lines, index: line - 1 }) ?? null;
 }
+
+interface NoStopContext {
+  readonly code: string;
+  readonly lines: readonly string[];
+  /** Zero-based. */
+  readonly index: number;
+}
+
+/** The answer for a line whose first word decides it, [param rest] being the line after annotations. */
+type NoStopRule = (rest: string, context: NoStopContext) => NoStop | null;
+
+function declarationWhen(applies: boolean): NoStop | null {
+  return applies ? { kind: 'declaration' } : null;
+}
+
+// The class's own line is marked for a call of _static_init.
+const classHeadingRule: NoStopRule = (_rest, { code }) => declarationWhen(!/\b_static_init\b/u.test(code));
+
+const classRule: NoStopRule = (rest) =>
+  declarationWhen(new RegExp(`^class\\s+${NAME}[^:]*:\\s*$`, 'u').test(rest));
+
+const funcRule: NoStopRule = (rest) => {
+  if (!new RegExp(`^(?:static\\s+)?func\\s+${NAME}`, 'u').test(rest)) {
+    return null;
+  }
+  const body = afterHeader(rest, 0);
+  return declarationWhen(body === -1 || rest.slice(body).trim() === '');
+};
+
+// A property's get or set header, which no call ends with a colon alone on its line.
+const accessorRule: NoStopRule = (rest) => declarationWhen(/^(?:get|set\s*\([^)]*\))\s*:\s*$/u.test(rest));
+
+const elseRule: NoStopRule = (rest) => (/^else\s*:\s*$/u.test(rest) ? { kind: 'else' } : null);
+
+const constRule: NoStopRule = (_rest, { lines, index }) => declarationWhen(atClassLevel(lines, index));
+
+const varRule: NoStopRule = (rest, { lines, index }) =>
+  declarationWhen(
+    atClassLevel(lines, index) && new RegExp(`^(?:static\\s+)?var\\s+${NAME}\\s*$`, 'u').test(rest),
+  );
+
+const NO_STOP_BY_WORD: ReadonlyMap<string, NoStopRule> = new Map([
+  ['signal', () => declarationWhen(true)],
+  ['enum', () => declarationWhen(true)],
+  ['extends', classHeadingRule],
+  ['class_name', classHeadingRule],
+  ['class', classRule],
+  ['func', funcRule],
+  ['get', accessorRule],
+  ['set', accessorRule],
+  ['else', elseRule],
+  ['const', constRule],
+  ['var', varRule],
+]);
 
 /**
  * Whether the function whose body's first statement is on one-based [param line] of [param code]
@@ -719,17 +871,17 @@ export function bodyCallsSuper(code: string, line: number, lambda: boolean): boo
   if (first === undefined) {
     return false;
   }
-  // A body written on its header's line, which is then the line recorded for it.
-  const header = lambda ? LAMBDA_HEADER.exec(first) : FUNC_LINE.exec(first);
-  if (header !== null) {
-    const body = afterHeader(first, header.index);
-    if (body !== -1 && first.slice(body).trim() !== '') {
-      return SUPER_CALL.test(first.slice(body));
-    }
+  const inline = bodyOnHeaderLine(first, lambda);
+  if (inline !== null) {
+    return SUPER_CALL.test(inline);
   }
-  const indent = indentOf(first);
+  return superInBlock(lines, line - 1, indentOf(first));
+}
+
+/** Whether `super` is called in the block at [param indent] that starts at zero-based [param from]. */
+function superInBlock(lines: readonly string[], from: number, indent: number): boolean {
   let lambdaIndent: number | null = null;
-  for (let index = line - 1; index < lines.length; index += 1) {
+  for (let index = from; index < lines.length; index += 1) {
     const text = lines[index] ?? '';
     if (text.trim() === '') {
       continue;
@@ -738,25 +890,37 @@ export function bodyCallsSuper(code: string, line: number, lambda: boolean): boo
     if (at < indent) {
       break;
     }
-    if (lambdaIndent !== null) {
-      if (at > lambdaIndent) {
-        continue;
-      }
-      lambdaIndent = null;
+    if (lambdaIndent !== null && at > lambdaIndent) {
+      continue;
     }
+    lambdaIndent = null;
     // A lambda's code is its own row: what comes before its header is this function's.
     const inner = LAMBDA_HEADER.exec(text);
-    if (SUPER_CALL.test(inner === null ? text : text.slice(0, inner.index))) {
+    if (SUPER_CALL.test(text.slice(0, inner?.index))) {
       return true;
     }
-    if (inner !== null) {
-      const body = afterHeader(text, inner.index);
-      if (body !== -1 && text.slice(body).trim() === '') {
-        lambdaIndent = at;
-      }
+    if (inner !== null && headerEndsLine(text, inner.index)) {
+      lambdaIndent = at;
     }
   }
   return false;
+}
+
+/** The body written after the function or lambda header on [param first], or null when it has none. */
+function bodyOnHeaderLine(first: string, lambda: boolean): string | null {
+  // A body written on its header's line, which is then the line recorded for it.
+  const header = lambda ? LAMBDA_HEADER.exec(first) : FUNC_LINE.exec(first);
+  if (header === null) {
+    return null;
+  }
+  const body = afterHeader(first, header.index);
+  return body !== -1 && first.slice(body).trim() !== '' ? first.slice(body) : null;
+}
+
+/** Whether the header at [param from] in [param text] is all of its line, its body starting below. */
+function headerEndsLine(text: string, from: number): boolean {
+  const body = afterHeader(text, from);
+  return body !== -1 && text.slice(body).trim() === '';
 }
 
 /** A place in a script that names a function, outside its declaration. */
@@ -788,11 +952,7 @@ function parametersOf(text: string, from: number): string[] {
   let start = open + 1;
   for (let at = open; at < text.length; at += 1) {
     const here = text[at];
-    if (here === '(' || here === '[' || here === '{') {
-      depth += 1;
-    } else if (here === ')' || here === ']' || here === '}') {
-      depth -= 1;
-    }
+    depth += bracketDelta(here);
     if ((here === ',' && depth === 1) || depth === 0) {
       const named = new RegExp(`^\\s*(${NAME})`, 'u').exec(text.slice(start, at));
       if (named?.[1] !== undefined) {
@@ -849,32 +1009,50 @@ function localAt(lines: readonly string[], index: number, name: string): { type:
   let depth = indentOf(own);
   for (let at = index - 1; at >= 0; at -= 1) {
     const text = lines[at] ?? '';
-    if (text.trim() === '') {
-      continue;
-    }
     const indent = indentOf(text);
-    if (indent > depth) {
+    if (text.trim() === '' || indent > depth) {
       continue;
     }
-    const named = FUNC_LINE.exec(text);
-    if (indent < depth) {
-      depth = indent;
-      if (named !== null) {
-        return parametersOf(text, named.index).includes(name) ? local(text) : null;
-      }
-      const lambda = LAMBDA_HEADER.exec(text);
-      if ((lambda !== null && parametersOf(text, lambda.index).includes(name)) || iterates.test(text)) {
-        return local(text);
-      }
-    }
-    if (named !== null || depth === 0) {
-      return null;
-    }
-    if (declares.test(text)) {
+    const enclosing = indent < depth;
+    depth = indent;
+    const verdict = scopeVerdict(text, name, enclosing, depth === 0, { declares, iterates });
+    if (verdict === 'binds') {
       return local(text);
+    }
+    if (verdict === 'ends') {
+      return null;
     }
   }
   return null;
+}
+
+/**
+ * What the line [param text], above the line asked about, says of the local [param name]: that it
+ * binds it, that the walk upwards ends there, or neither. [param enclosing] is whether the line
+ * holds the asked-about line in a block, and [param atTop] whether it is at a class's own level.
+ */
+function scopeVerdict(
+  text: string,
+  name: string,
+  enclosing: boolean,
+  atTop: boolean,
+  patterns: { readonly declares: RegExp; readonly iterates: RegExp },
+): 'binds' | 'ends' | 'passes' {
+  const named = FUNC_LINE.exec(text);
+  if (named !== null) {
+    return enclosing && parametersOf(text, named.index).includes(name) ? 'binds' : 'ends';
+  }
+  const lambda = LAMBDA_HEADER.exec(text);
+  const bindsAsHeader =
+    enclosing &&
+    ((lambda !== null && parametersOf(text, lambda.index).includes(name)) || patterns.iterates.test(text));
+  if (bindsAsHeader) {
+    return 'binds';
+  }
+  if (atTop) {
+    return 'ends';
+  }
+  return patterns.declares.test(text) ? 'binds' : 'passes';
 }
 
 /**
@@ -945,76 +1123,123 @@ export function callSitesOf(
   const codeLines = code.split('\n');
   const lines = new Lines(source);
   const shape = shapeOf(source);
-  // The class a variable of the class body holding [at] is declared as, read off its own line.
-  const memberClass = (member: string, at: number): string | null => {
-    const declared = bodyHolding(shape.body, at).declarations.find(
-      (one) => one.name === member && (one.kind === 'var' || one.kind === 'const'),
-    );
-    return declared === undefined
-      ? null
-      : declaredClass(codeLines[lines.positionOf(declared.offset).line] ?? '', member);
+  const scan: CallScan = {
+    source,
+    name,
+    property,
+    otherClasses,
+    code,
+    codeLines,
+    lines,
+    shape,
+    accessors: property ? accessorsIn(codeLines, lines, name, shape.body) : [],
   };
-  // The lines of the property's own get and set blocks: those indented under its declaration.
-  const blockUnder = (declared: number): readonly [number, number] => {
-    const indent = (codeLines[declared] ?? '').search(/\S|$/);
-    let last = declared;
-    for (let index = declared + 1; index < codeLines.length; index += 1) {
-      const text = codeLines[index] ?? '';
-      if (text.trim() === '') {
-        continue;
-      }
-      if (text.search(/\S/) <= indent) {
-        break;
-      }
-      last = index;
-    }
-    return [declared, last];
-  };
-  const accessorsIn = (body: ClassBody): (readonly [number, number])[] => [
-    ...body.declarations
-      .filter((one) => one.kind === 'var' && one.name === name)
-      .map((one) => blockUnder(lines.positionOf(one.offset).line)),
-    ...body.inner.flatMap(accessorsIn),
-  ];
-  const accessors = property ? accessorsIn(shape.body) : [];
   return occurrencesOf(source, name, regions)
     .filter((one) => one.kind === 'code' && one.declaredAs === null)
-    .filter((one) => {
-      const index = lines.positionOf(one.offset).line;
-      if (!one.afterDot && accessors.some(([declared, last]) => index > declared && index <= last)) {
-        return false;
-      }
-      if (one.afterDot) {
-        const receiver = receiverBefore(code, one.offset);
-        if (receiver === null || otherClasses.size === 0) {
-          return true;
-        }
-        if (otherClasses.has(receiver.name)) {
-          return false;
-        }
-        if (receiver.dotted) {
-          return true;
-        }
-        const typed =
-          localAt(codeLines, index, receiver.name)?.type ?? memberClass(receiver.name, one.offset);
-        return typed === null || !otherClasses.has(typed);
-      }
-      if (localAt(codeLines, index, name) !== null) {
-        return false;
-      }
-      return !bodyHolding(shape.body, one.offset).declarations.some(
-        (declared) =>
-          declared.name === name && MEMBER_KINDS.has(declared.kind) && !(property && declared.kind === 'var'),
-      );
-    })
-    .map((one) => {
-      const line = lines.positionOf(one.offset).line + 1;
-      const after = code.slice(one.offset + name.length).trimStart();
-      const within = enclosingFunction(source, line, code);
-      return property
-        ? { line, within, access: ASSIGNED.test(after) ? ('write' as const) : ('read' as const) }
-        : { line, within, called: after.startsWith('(') };
-    });
+    .filter((one) => isCallSiteKept(scan, one))
+    .map((one) => callSiteAt(scan, one));
+}
+
+/** What one `callSitesOf` call reads from, worked out once. */
+interface CallScan {
+  readonly source: string;
+  readonly name: string;
+  readonly property: boolean;
+  readonly otherClasses: ReadonlySet<string>;
+  readonly code: string;
+  readonly codeLines: readonly string[];
+  readonly lines: Lines;
+  readonly shape: ScriptShape;
+  /** The zero-based line ranges of the property's own get and set blocks. */
+  readonly accessors: readonly (readonly [number, number])[];
+}
+
+/** The class a variable of the class body holding [param at] is declared as, read off its own line. */
+function memberClass(scan: CallScan, member: string, at: number): string | null {
+  const declared = bodyHolding(scan.shape.body, at).declarations.find(
+    (one) => one.name === member && (one.kind === 'var' || one.kind === 'const'),
+  );
+  return declared === undefined
+    ? null
+    : declaredClass(scan.codeLines[scan.lines.positionOf(declared.offset).line] ?? '', member);
+}
+
+/** The lines of the property's own get and set blocks: those indented under its declaration. */
+function blockUnder(codeLines: readonly string[], declared: number): readonly [number, number] {
+  const indent = (codeLines[declared] ?? '').search(/\S|$/);
+  let last = declared;
+  for (let index = declared + 1; index < codeLines.length; index += 1) {
+    const text = codeLines[index] ?? '';
+    if (text.trim() === '') {
+      continue;
+    }
+    if (text.search(/\S/) <= indent) {
+      break;
+    }
+    last = index;
+  }
+  return [declared, last];
+}
+
+function accessorsIn(
+  codeLines: readonly string[],
+  lines: Lines,
+  name: string,
+  body: ClassBody,
+): (readonly [number, number])[] {
+  return [
+    ...body.declarations
+      .filter((one) => one.kind === 'var' && one.name === name)
+      .map((one) => blockUnder(codeLines, lines.positionOf(one.offset).line)),
+    ...body.inner.flatMap((inner) => accessorsIn(codeLines, lines, name, inner)),
+  ];
+}
+
+/** Whether a member call is this class's: not another class's method of the same name. */
+function isOwnMemberCall(scan: CallScan, offset: number, index: number): boolean {
+  const receiver = receiverBefore(scan.code, offset);
+  if (receiver === null || scan.otherClasses.size === 0) {
+    return true;
+  }
+  if (scan.otherClasses.has(receiver.name)) {
+    return false;
+  }
+  if (receiver.dotted) {
+    return true;
+  }
+  const typed =
+    localAt(scan.codeLines, index, receiver.name)?.type ?? memberClass(scan, receiver.name, offset);
+  return typed === null || !scan.otherClasses.has(typed);
+}
+
+/** Whether a bare use of the name at [param offset] is the function, not a local or another member. */
+function isBareFunctionUse(scan: CallScan, offset: number, index: number): boolean {
+  if (localAt(scan.codeLines, index, scan.name) !== null) {
+    return false;
+  }
+  return !bodyHolding(scan.shape.body, offset).declarations.some(
+    (declared) =>
+      declared.name === scan.name &&
+      MEMBER_KINDS.has(declared.kind) &&
+      !(scan.property && declared.kind === 'var'),
+  );
+}
+
+function isCallSiteKept(scan: CallScan, one: Occurrence): boolean {
+  const index = scan.lines.positionOf(one.offset).line;
+  if (!one.afterDot && scan.accessors.some(([declared, last]) => index > declared && index <= last)) {
+    return false;
+  }
+  return one.afterDot ? isOwnMemberCall(scan, one.offset, index) : isBareFunctionUse(scan, one.offset, index);
+}
+
+function callSiteAt(scan: CallScan, one: Occurrence): CallSite {
+  const line = scan.lines.positionOf(one.offset).line + 1;
+  const after = scan.code.slice(one.offset + scan.name.length).trimStart();
+  const within = enclosingFunction(scan.source, line, scan.code);
+  return scan.property
+    ? { line, within, access: ASSIGNED.test(after) ? 'write' : 'read' }
+    : { line, within, called: after.startsWith('(') };
 }
 
 /** The values of an enum whose braces open at [param from], as declarations of their own. */
