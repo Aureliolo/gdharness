@@ -3793,13 +3793,13 @@ function windowNoteFor(
 ): string {
   const one = needing.length === 1;
   const why =
-    'A suite needs one when it declares const GDHARNESS_NEEDS_WINDOW: bool = true or const GDHARNESS_ACCESSIBILITY: bool = true, or calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares GDHARNESS_NEEDS_WINDOW false and runs headless.';
+    'A suite needs one when it declares GDHARNESS_NEEDS_WINDOW or GDHARNESS_ACCESSIBILITY as true. It needs one too when it calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares GDHARNESS_NEEDS_WINDOW false and runs headless.';
   if (sharing === null) {
     const noTree =
       accessible.length === 0
         ? ''
         : ` No accessibility tree was built, so what ${named(accessible)} ${accessible.length === 1 ? 'checks' : 'check'} in it never ran.`;
-    return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}, and this machine has no display, so the run was headless and input events went nowhere.${noTree} ${why} Run under xvfb-run to give it a display.`;
+    return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}. This machine has no display, so the run was headless. Input events went nowhere.${noTree} ${why} Run under xvfb-run to give it a display.`;
   }
   const tree =
     accessible.length === 0
@@ -3809,7 +3809,7 @@ function windowNoteFor(
     sharing.length === 0
       ? ''
       : ` ${named(sharing)} ${sharing.length === 1 ? 'says it runs' : 'say they run'} headless and ran with the window too, since the run is one engine: run ${sharing.length === 1 ? 'it' : 'them'} without the windowed suites to run ${sharing.length === 1 ? 'it' : 'them'} headless.`;
-  return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}, so the run had one: the engine ran without --headless, at the size project.godot gives its viewport, with no sound${process.platform === 'win32' ? ', on a desktop of its own, where its window neither shows nor takes the keyboard' : ''}.${tree} ${why}${shared}`;
+  return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}, so the run had one. The engine ran without --headless, at the size project.godot gives its viewport, with no sound.${process.platform === 'win32' ? ' Its window sat on a desktop of its own, so it neither showed nor took the keyboard.' : ''}${tree} ${why}${shared}`;
 }
 
 /**

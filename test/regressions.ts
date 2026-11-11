@@ -63797,7 +63797,7 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
             'win',
           );
           const why =
-            'A suite needs one when it declares const GDHARNESS_NEEDS_WINDOW: bool = true or const GDHARNESS_ACCESSIBILITY: bool = true, or calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares GDHARNESS_NEEDS_WINDOW false and runs headless.';
+            'A suite needs one when it declares GDHARNESS_NEEDS_WINDOW or GDHARNESS_ACCESSIBILITY as true. It needs one too when it calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares GDHARNESS_NEEDS_WINDOW false and runs headless.';
           if (noDisplay) {
             // Headless, where the case asserting a window fails, and the answer says why.
             assert.deepEqual(
@@ -63806,7 +63806,7 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
                 false,
                 2,
                 false,
-                `res://win/shown_test.gd needs a window, as gdharness test reads it, and this machine has no display, so the run was headless and input events went nowhere. ${why} Run under xvfb-run to give it a display.`,
+                `res://win/shown_test.gd needs a window, as gdharness test reads it. This machine has no display, so the run was headless. Input events went nowhere. ${why} Run under xvfb-run to give it a display.`,
               ],
               JSON.stringify(shown),
             );
@@ -63817,7 +63817,7 @@ async function testProjectTestJudgesItsRunAsTheGateDoes(): Promise<void> {
                 true,
                 2,
                 true,
-                `res://win/shown_test.gd needs a window, as gdharness test reads it, so the run had one: the engine ran without --headless, at the size project.godot gives its viewport, with no sound${process.platform === 'win32' ? ', on a desktop of its own, where its window neither shows nor takes the keyboard' : ''}. ${why} res://win/quiet_test.gd says it runs headless and ran with the window too, since the run is one engine: run it without the windowed suites to run it headless.`,
+                `res://win/shown_test.gd needs a window, as gdharness test reads it, so the run had one. The engine ran without --headless, at the size project.godot gives its viewport, with no sound.${process.platform === 'win32' ? ' Its window sat on a desktop of its own, so it neither showed nor took the keyboard.' : ''} ${why} res://win/quiet_test.gd says it runs headless and ran with the window too, since the run is one engine: run it without the windowed suites to run it headless.`,
               ],
               JSON.stringify(shown),
             );
