@@ -573,12 +573,12 @@ export async function announcementEnded(
  * announcement, which goes the moment the game does: the report is what the run's last errors are
  * read from, and the server reading the run may not look until after the game has gone.
  */
-function sweepErrorReport(path: string, pid: number, now = Date.now()): void {
+function sweepErrorReport(path: string, pid: number): void {
   if (alive(pid)) {
     return;
   }
   try {
-    if (now - statSync(path).mtimeMs >= ERROR_REPORT_KEEP_MS) {
+    if (Date.now() - statSync(path).mtimeMs >= ERROR_REPORT_KEEP_MS) {
       unlinkSync(path);
     }
   } catch {
