@@ -184,7 +184,8 @@ func _switch_on(session_id: int) -> void:
 	_session = session_id
 	_started_msec = Time.get_ticks_msec()
 	var session: EditorDebuggerSession = _sessions.get_session(session_id)
-	session.toggle_profiler("servers", true, [_frame_functions, false])
+	# Native calls on, so a call through an engine method leaves the caller's self time.
+	session.toggle_profiler("servers", true, [_frame_functions, true])
 
 
 ## A play that was asked to be profiled is switched on as it starts. Any other play drops what is
@@ -233,6 +234,13 @@ func _on_debug_data(message: String, data: Array, session_id: int) -> void:
 		var whole: Dictionary[String, PackedFloat64Array] = {}
 		var carried: int = _add(data, whole)
 		if carried >= 0:
+			# Apart from engine time: GDScript clears a function's engine calls at each frame's
+			# end, so its totals hold only those since the last frame, and the frames hold the rest.
+			for signature: String in whole:
+				if _totals.has(signature):
+					var sum: PackedFloat64Array = whole[signature]
+					sum[3] += _totals[signature][3]
+					whole[signature] = sum
 			_totals = whole
 			_complete = true
 			_total_capped = carried >= _frame_functions
@@ -263,11 +271,12 @@ func _add(data: Array, into: Dictionary[String, PackedFloat64Array]) -> int:
 		var id: int = GdhRead.as_int(data[index])
 		var signature: String = _names[id] if _names.has(id) else "#%d" % id
 		var sum: PackedFloat64Array = (
-			into[signature] if into.has(signature) else PackedFloat64Array([0, 0, 0])
+			into[signature] if into.has(signature) else PackedFloat64Array([0, 0, 0, 0])
 		)
 		sum[0] += GdhRead.as_float(data[index + 1])
 		sum[1] += GdhRead.as_float(data[index + 2])
 		sum[2] += GdhRead.as_float(data[index + 3])
+		sum[3] += GdhRead.as_float(data[index + 4])
 		into[signature] = sum
 		carried += 1
 	return carried

@@ -338,6 +338,7 @@ import {
 } from './script-origins.js';
 import {
   callersOf,
+  isEngineMethod,
   PROFILE_FROM_START,
   type ProfileMark,
   type ProfileTotals,
@@ -3482,7 +3483,7 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
   }
   if (table.superCallers > 0) {
     notes.push(
-      `${table.superCallers === 1 ? 'One function calls' : `${table.superCallers} functions call`} through super, marked selfIncludesSuper: the engine takes every other call out of the caller's self time, and not a super call, so ${table.superCallers === 1 ? 'its' : 'their'} selfMs holds the overridden function's time, which that function's own row counts again. Self time therefore cannot be added along an override chain, and scriptMs counts the time under a super call once more for each level above it.`,
+      `${table.superCallers === 1 ? 'One function calls' : `${table.superCallers} functions call`} through super, marked selfIncludesSuper: the engine takes a call to another script function or an engine method out of the caller's self time, but not a super call, so ${table.superCallers === 1 ? 'its' : 'their'} selfMs holds the overridden function's time, which that function's own row counts again. Self time therefore cannot be added along an override chain, and scriptMs counts the time under a super call once more for each level above it.`,
     );
   }
   if (table.overheadDominated > 0 && table.perCallUs !== null) {
@@ -3591,6 +3592,12 @@ function cappedNotes(totals: ProfileTotals): string[] {
     if (unrun > 0) {
       notes.push(
         `${unrun === 1 ? 'One' : String(unrun)} of the ${most} ${unrun === 1 ? 'is a function' : 'are functions'} counted as never called: the engine lists every function it has compiled, run or not, busiest first, so where the time runs out they take places that functions run too quickly to measure could have had.`,
+      );
+    }
+    const engineMethods = totals.totalEngineMethods ?? 0;
+    if (engineMethods > 0) {
+      notes.push(
+        `${engineMethods === 1 ? 'One' : String(engineMethods)} of the ${most} ${engineMethods === 1 ? 'is an engine method' : 'are engine methods'} the scripts called, which ${engineMethods === 1 ? 'is no row' : 'are no rows'}: that time is the callers' engineMs.`,
       );
     }
   } else if (most !== undefined && !totals.complete && (totals.cappedFrames ?? 0) > 0) {
@@ -13661,27 +13668,33 @@ class GodotServer {
       });
     }
     const functions = asParams(held['functions']);
+    const complete = readBoolean(held, 'complete') === true;
+    const engineMethods = Object.keys(functions).filter(isEngineMethod).length;
     const totals: ProfileTotals | null =
       readBoolean(held, 'profiled') === true
         ? {
             startedAt: 0,
             lastFrameAt: null,
             frames: readNonNegativeNumber(held, 'frames') ?? 0,
-            complete: readBoolean(held, 'complete') === true,
+            complete,
             unreadable: 0,
             ...playedCap(held),
+            ...(complete && engineMethods > 0 ? { totalEngineMethods: engineMethods } : {}),
             functions: Object.fromEntries(
-              Object.entries(functions).map(([signature, sum]) => {
-                const [calls, self, total] = Array.isArray(sum) ? (sum as unknown[]) : [];
-                return [
-                  signature,
-                  {
-                    calls: Number(calls ?? 0),
-                    selfSeconds: Number(self ?? 0),
-                    totalSeconds: Number(total ?? 0),
-                  },
-                ];
-              }),
+              Object.entries(functions)
+                .filter(([signature]) => !isEngineMethod(signature))
+                .map(([signature, sum]) => {
+                  const [calls, self, total, internal] = Array.isArray(sum) ? (sum as unknown[]) : [];
+                  return [
+                    signature,
+                    {
+                      calls: Number(calls ?? 0),
+                      selfSeconds: Number(self ?? 0),
+                      totalSeconds: Number(total ?? 0),
+                      engineSeconds: Number(internal ?? 0),
+                    },
+                  ];
+                }),
             ),
           }
         : null;

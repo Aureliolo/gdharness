@@ -2046,7 +2046,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
     command.length - 4,
     'its length, little-endian',
   );
-  assert.deepEqual(decodeVariant(command.subarray(4)), ['profiler:servers', 1, [true, [1536, false]]]);
+  assert.deepEqual(decodeVariant(command.subarray(4)), ['profiler:servers', 1, [true, [1536, true]]]);
 
   // The most functions a frame may carry, kept below the game's debugger queue, which drops the
   // messages naming functions past its size: the engine's default queue, and a project's own.
@@ -2843,7 +2843,7 @@ function testTheProfilerReadsWhatTheEngineSends(): void {
   );
   assert.match(
     String(answer({ totals: overridden, sourceOf: overrideSource })['note']),
-    /^5 functions call through super, marked selfIncludesSuper: the engine takes every other call out of the caller's self time, and not a super call, so their selfMs holds the overridden function's time, which that function's own row counts again\. Self time therefore cannot be added along an override chain, and scriptMs counts the time under a super call once more for each level above it\.$/,
+    /^5 functions call through super, marked selfIncludesSuper: the engine takes a call to another script function or an engine method out of the caller's self time, but not a super call, so their selfMs holds the overridden function's time, which that function's own row counts again\. Self time therefore cannot be added along an override chain, and scriptMs counts the time under a super call once more for each level above it\.$/,
   );
   assert.match(
     String(answer({ totals: overrideRows([[6, '_begin_match']]), sourceOf: overrideSource })['note']),
@@ -3258,12 +3258,12 @@ function testAFrameReadHalfwayAddsNothingToTheTotals(): void {
     thread: 1,
     data: [number, 0, 0, 0, 0, 0, 0, rows.length, ...rows],
   });
-  aggregate.take(frame(9, [7, 1, 0.25, 0.25, 0]), 1001);
+  aggregate.take(frame(9, [7, 1, 0.25, 0.3, 0.05]), 1001);
   aggregate.take(frame(10, [7, 2, 0.5, 0.5, 0, 'not a number', 1, 0.1, 0.1, 0]), 1002);
   const read = aggregate.snapshot();
   assert.deepEqual(
     [read.frames, read.unreadable, read.functions['#7']],
-    [1, 1, { calls: 1, selfSeconds: 0.25, totalSeconds: 0.25 }],
+    [1, 1, { calls: 1, selfSeconds: 0.25, totalSeconds: 0.3, engineSeconds: 0.05 }],
     JSON.stringify(read),
   );
 }
@@ -52516,10 +52516,15 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
           String(get(burst, 'note')),
         )?.[1];
       const unrun = unrunSaid === undefined ? 0 : unrunSaid === 'One' ? 1 : Number(unrunSaid);
-      const placed = burstRows.length + asNumber(get(burst, 'runtimeAddonFunctions')) + unrun;
+      const methodsSaid =
+        /(?:^|\. )(One|\d+) of the 1536 (?:is an engine method|are engine methods) the scripts called/.exec(
+          String(get(burst, 'note')),
+        )?.[1];
+      const methodPlaces = methodsSaid === undefined ? 0 : methodsSaid === 'One' ? 1 : Number(methodsSaid);
+      const placed = burstRows.length + asNumber(get(burst, 'runtimeAddonFunctions')) + unrun + methodPlaces;
       assert.ok(
         burstRows.length > 0 && placed >= most - 2 && placed <= most,
-        `the totals' ${String(most)} places are all accounted for: ${burstRows.length} rows, ${String(get(burst, 'runtimeAddonFunctions'))} addon functions, ${String(unrun)} never called; note: ${String(get(burst, 'note'))}, ${burstShown}`,
+        `the totals' ${String(most)} places are all accounted for: ${burstRows.length} rows, ${String(get(burst, 'runtimeAddonFunctions'))} addon functions, ${String(unrun)} never called, ${String(methodPlaces)} engine methods; note: ${String(get(burst, 'note'))}, ${burstShown}`,
       );
       // A sentence of the note rather than its start: the notes before it depend on timing, and on a
       // fast runner a runtime function called a dozen times in two microseconds is mostly overhead.
@@ -52692,6 +52697,237 @@ async function testAProfiledRunNamesWhereItsTimeWent(): Promise<void> {
         asArray(get(afterRead, 'callers', 'sites')).map((one) => [get(one, 'line'), get(one, 'within')]),
         [[12, 'each_frame']],
         after,
+      );
+    } finally {
+      await server.stop();
+    }
+  } finally {
+    sweep(project);
+    sweep(runtimeDir);
+  }
+}
+
+/**
+ * A call through an engine method leaves the caller's self time and is given apart, as engineMs.
+ *
+ * `outer` reaches `inner` through `callv` on a typed variable, the shape of a dispatch table. The
+ * engine takes such a call out of the caller's self time only when it profiles native calls, and
+ * lists each engine method the script called as a row of its own whose time holds the script it
+ * reached. Read as a script function, that row counts `inner` a second time.
+ *
+ * Three runs: one that quits, read from the engine's totals, and one read while it plays, from the
+ * frames summed. Only the frames carry every engine method's row, since GDScript clears them at
+ * each frame's end and its totals hold those since the last frame alone. The third reaches outer
+ * through callv in turn, and the engine files both calls under outer.
+ */
+async function testACallThroughAnEngineMethodLeavesTheCallersSelfTime(): Promise<void> {
+  const engine = resolveGodotPath();
+  if (!engine) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+    }
+    console.log('engine method profile regression skipped (Godot not found)');
+    return;
+  }
+  const project = mkdtempSync(join(tmpdir(), 'gdharness-profiled-native-'));
+  const runtimeDir = mkdtempSync(join(tmpdir(), 'gdharness-profiled-native-rt-'));
+  try {
+    cpSync(
+      join('src', 'godot', 'addons', 'gdharness_runtime'),
+      join(project, 'addons', 'gdharness_runtime'),
+      { recursive: true },
+    );
+    writeFileSync(
+      join(project, 'project.godot'),
+      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Native"\n' +
+        '\n[autoload]\n\nGdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+    );
+    writeFileSync(
+      join(project, 'dispatch.gd'),
+      [
+        'extends Node',
+        '',
+        '',
+        'func inner() -> int:',
+        '\tvar sum := 0',
+        '\tfor i in 400000:',
+        '\t\tsum += i % 7',
+        '\treturn sum',
+        '',
+        '',
+        // Typed, so the compiler calls callv by its method bind. On self it would be a dynamic call,
+        // which the engine times whatever it profiles.
+        'func outer() -> int:',
+        '\tvar target: Object = self',
+        '\treturn target.callv(&"inner", [])',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tvar sum := 0',
+        '\tfor round in 10:',
+        '\t\tsum += outer()',
+        '\tprint(sum)',
+        '\tget_tree().quit()',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'dispatch.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://dispatch.gd" id="1"]\n\n' +
+        '[node name="Dispatch" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    writeFileSync(
+      join(project, 'looped.gd'),
+      [
+        'extends "res://dispatch.gd"',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tpass',
+        '',
+        '',
+        'func _process(_delta: float) -> void:',
+        '\touter()',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'looped.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://looped.gd" id="1"]\n\n' +
+        '[node name="Looped" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    // outer reached through callv in turn: the engine files outer's own callv under relay's too.
+    writeFileSync(
+      join(project, 'relayed.gd'),
+      [
+        'extends "res://dispatch.gd"',
+        '',
+        '',
+        'func relay() -> Variant:',
+        '\tvar target: Object = self',
+        '\treturn target.callv(&"outer", [])',
+        '',
+        '',
+        'func _ready() -> void:',
+        '\tfor round in 5:',
+        '\t\trelay()',
+        '\tget_tree().quit()',
+        '',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(project, 'relayed.tscn'),
+      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://relayed.gd" id="1"]\n\n' +
+        '[node name="Relayed" type="Node"]\nscript = ExtResource("1")\n',
+    );
+    // What both runs must answer: inner's work once, as its own self time and as outer's engine time.
+    const judged = (answered: string, outerCalls: number | null): void => {
+      const profile: unknown = JSON.parse(answered);
+      const rows = asArray(get(profile, 'functions'));
+      const row = (name: string): unknown => rows.find((one) => get(one, 'function') === name);
+      const inner = row('inner');
+      const outer = row('outer');
+      if (outerCalls !== null) {
+        assert.deepEqual([get(inner, 'calls'), get(outer, 'calls')], [outerCalls, outerCalls], answered);
+      }
+      const innerSelf = asNumber(get(inner, 'selfMs'), `inner has a self time: ${answered}`);
+      const outerSelf = asNumber(get(outer, 'selfMs'), `outer has a self time: ${answered}`);
+      const outerEngine = asNumber(get(outer, 'engineMs'), `outer has engine time: ${answered}`);
+      assert.ok(innerSelf > 20, `inner did the work: ${answered}`);
+      assert.ok(
+        outerSelf < innerSelf / 5,
+        `outer's self time is its own, without the call through callv: ${answered}`,
+      );
+      assert.ok(
+        outerEngine >= innerSelf * 0.9,
+        `outer's call through callv is its engine time, inner's work included: ${answered}`,
+      );
+      assert.equal(get(inner, 'engineMs'), undefined, `inner calls no engine method: ${answered}`);
+      assert.deepEqual(
+        rows.map((one) => String(get(one, 'function'))).filter((name) => /callv|get_tree|quit/.test(name)),
+        [],
+        `no engine method is a row: ${answered}`,
+      );
+      const scriptMs = asNumber(get(profile, 'scriptMs'), `the profile sums its script time: ${answered}`);
+      assert.ok(scriptMs < innerSelf * 1.5, `scriptMs counts inner's work once: ${answered}`);
+    };
+    const server = new ServerProcess({
+      env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
+    });
+    try {
+      await server.initialize('regression-test');
+      const call = async (args: Record<string, unknown>): Promise<string> =>
+        textOf(
+          await server.request('tools/call', { name: 'editor_run', arguments: args }, ENGINE_CALL_TIMEOUT_MS),
+        ) ?? '';
+      const started = await call({
+        op: 'start',
+        projectPath: project,
+        scene: 'dispatch.tscn',
+        headless: true,
+        profile: true,
+        runtimeWaitMs: 0,
+      });
+      assert.match(started, /"started": true/, started);
+      const waited = await call({ op: 'wait', timeoutMs: 60_000 });
+      assert.match(waited, /"running": false/, `the run ended: ${waited}`);
+      const answered = await call({ op: 'profile', limit: 100 });
+      assert.equal(get(JSON.parse(answered), 'complete'), true, answered);
+      judged(answered, 10);
+
+      const looped = await call({
+        op: 'start',
+        projectPath: project,
+        scene: 'looped.tscn',
+        headless: true,
+        profile: true,
+        runtimeWaitMs: 60_000,
+      });
+      assert.match(looped, /"started": true/, looped);
+      let playing = '';
+      const deadline = Date.now() + 60_000;
+      while (Date.now() < deadline) {
+        playing = await call({ op: 'profile', limit: 100 });
+        if (Number(get(JSON.parse(playing), 'frames')) >= 20) {
+          break;
+        }
+        await delay(250);
+      }
+      assert.equal(get(JSON.parse(playing), 'complete'), false, `read while it plays: ${playing}`);
+      judged(playing, null);
+      const stopped = await call({ op: 'stop' });
+      assert.match(stopped, /"stopped": true/, stopped);
+
+      const relayedStart = await call({
+        op: 'start',
+        projectPath: project,
+        scene: 'relayed.tscn',
+        headless: true,
+        profile: true,
+        runtimeWaitMs: 0,
+      });
+      assert.match(relayedStart, /"started": true/, relayedStart);
+      const relayedWait = await call({ op: 'wait', timeoutMs: 60_000 });
+      assert.match(relayedWait, /"running": false/, `the run ended: ${relayedWait}`);
+      const relayed = await call({ op: 'profile', limit: 100 });
+      const relayedRows = asArray(get(JSON.parse(relayed), 'functions'));
+      const relayedInner = asNumber(
+        get(
+          relayedRows.find((one) => get(one, 'function') === 'inner'),
+          'selfMs',
+        ),
+        `inner did the work: ${relayed}`,
+      );
+      // The engine filed both calls through callv under outer, twice what its own took. No row's
+      // engine time is more than its calls took, and none counts inner's work twice.
+      const overstated = relayedRows.filter(
+        (one) =>
+          Number(get(one, 'engineMs') ?? 0) > Number(get(one, 'totalMs')) - Number(get(one, 'selfMs')) + 0.01,
+      );
+      assert.deepEqual(overstated, [], `no engine time beyond what the calls took: ${relayed}`);
+      assert.ok(
+        relayedRows.every((one) => Number(get(one, 'engineMs') ?? 0) < relayedInner * 1.5),
+        `inner's work is in no row's engine time twice: ${relayed}`,
       );
     } finally {
       await server.stop();
@@ -88128,6 +88364,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARunNoteIsNeverReadHalfWritten,
   testAKeeperHoldsARunWhoseNoteItCannotWrite,
   testAProfiledRunNamesWhereItsTimeWent,
+  testACallThroughAnEngineMethodLeavesTheCallersSelfTime,
   testSuitesPlayInASceneTheProfilerSees,
   testAProfileSinceAMarkAnswersForOneAction,
   testAProfileFromTheStartWaitsForTheProfiler,
