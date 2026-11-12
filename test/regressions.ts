@@ -39941,8 +39941,11 @@ async function testAnEngineSingletonIsReachedAndOSIsNot(): Promise<void> {
       const waited = await call('runtime_wait', { op: 'seconds', seconds: 0.5 });
       assert.match(waited, /^\{/, `the game waits seconds: ${waited}`);
       const halfASecond = JSON.parse(waited) as unknown;
+      // A timer counts whole frame steps, and its first includes the part of its frame before it
+      // was made. On a loaded macOS runner that part ran past 50 ms, so half a second of game time
+      // ended after 448 ms of the clock. A wait that never waited answers within one frame.
       assert.ok(
-        Number(get(halfASecond, 'elapsed_ms')) >= 450 &&
+        Number(get(halfASecond, 'elapsed_ms')) >= 250 &&
           Number(get(halfASecond, 'process_frames')) > 0 &&
           get(halfASecond, 'seconds') === 0.5,
         `half a second of game time passes: ${JSON.stringify(halfASecond)}`,
