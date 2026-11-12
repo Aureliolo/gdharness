@@ -4408,6 +4408,79 @@ const STATIC_LIST_HINT = { ttlMs: 5 * 60_000, cacheScope: 'private' } as const;
 /** A class cache rebuild's outcome: the classes it listed, or the engine's failure. */
 type ClassRebuild = { ok: true; listed: string[] } | { ok: false; outcome: HeadlessOutcome };
 
+/** The note on scenes the editor holds with unsaved edits and so did not read again, none when there are none. */
+function unsavedScenesNote(unsavedScenes: readonly string[]): { note?: string } {
+  if (unsavedScenes.length === 0) {
+    return {};
+  }
+  const one = unsavedScenes.length === 1;
+  return {
+    note: `${unsavedScenes.join(', ')} ${one ? 'is' : 'are'} open in the editor with unsaved edits, so ${one ? 'it was' : 'they were'} not read again from the file and still ${one ? 'gives' : 'give'} the old bus. Saving there writes it back.`,
+  };
+}
+
+/** When the last scan ended: [param since] before [param answered] when the editor says, else when a scan was seen. */
+function scanEndFrom(since: number | undefined, answered: number, sawAScan: boolean): number | null {
+  if (since !== undefined && since >= 0) {
+    return answered - since;
+  }
+  return sawAScan ? answered : null;
+}
+
+/** Whether the editor's scan status says a scan, an import or a pending scan is under way. */
+function editorIsScanning(status: OperationParams): boolean {
+  return status['scanning'] === true || status['importing'] === true || status['pending'] === true;
+}
+
+/** What a reimport answers: the payload, or the refusal. */
+type ImportAnswer = { ok: true; payload: OperationParams } | { ok: false; response: ToolResponse };
+
+/** What a reimport knows once it has found the files behind. */
+interface ImportTargets {
+  readonly projectPath: string;
+  readonly resourcePath: string | undefined;
+  readonly force: boolean;
+  readonly timeoutMs: number;
+  readonly sourceless: { missingSource?: string[] };
+  readonly targets: string[];
+}
+
+/** What a reimport is working on once it has chosen the editor or the engine, passed from step to step. */
+interface ImportRun {
+  readonly projectPath: string;
+  readonly timeoutMs: number;
+  readonly force: boolean;
+  readonly sourceless: { missingSource?: string[] };
+  readonly targets: string[];
+  readonly statusAsk: OperationParams;
+  readonly extra: OperationParams;
+  readonly viaEditor: boolean;
+  readonly behindElsewhere: string[];
+}
+
+/** What a project_settings write is working on, passed from step to step. */
+interface SettingsWrite {
+  readonly op: string;
+  readonly args: OperationParams;
+  readonly projectPath: string;
+  readonly before: Parameters<typeof changedSettings>[0];
+  readonly written: ToolResponse;
+  readonly renamed: ReturnType<typeof rewriteBusNamed> | null;
+}
+
+/** What a project_import set_options call is working on, passed from step to step. */
+interface ImportOptionsWrite {
+  readonly project: { readonly value: { readonly path: string } };
+  readonly contained: { readonly value: OperationParams };
+  readonly args: OperationParams;
+  readonly written: { readonly payload: Record<string, unknown> };
+  readonly params: OperationParams;
+  readonly given: string;
+  readonly resource: string;
+  readonly sidecar: string;
+  readonly before: string | null;
+}
+
 /** What setting or removing one breakpoint is working on, passed from step to step. */
 interface BreakpointCall {
   readonly op: string;
@@ -6659,6 +6732,14 @@ class GodotServer {
         ),
       };
     }
+    return await this.debuggedGameStillGoing(game, intent);
+  }
+
+  /** The game of a run still going, held for the debugger when it is one the editor plays. */
+  private async debuggedGameStillGoing(
+    game: GodotProcess,
+    intent: 'read' | 'move',
+  ): Promise<Checked<GodotProcess>> {
     // A run the editor plays keeps `exitCode` null for as long as the record lasts, so the refusal
     // above never fires for one that has ended. The editor is asked instead: attaching to the
     // adapter of a game that has gone answered "the editor is playing the game but its debug
@@ -6705,6 +6786,15 @@ class GodotServer {
         ),
       };
     }
+    return await this.debuggedGameIfStopped(game, going, intent);
+  }
+
+  /** The game when the adapter has it stopped, and otherwise what is known of why it cannot be read. */
+  private async debuggedGameIfStopped(
+    game: GodotProcess,
+    going: true,
+    intent: 'read' | 'move',
+  ): Promise<Checked<GodotProcess>> {
     if (!this.dap().isStopped()) {
       // Not held as far as this session knows, and whether it knows is the question: a session
       // that attached after the stop is shown no stack by the adapter, so the runtime is asked
@@ -6896,7 +6986,7 @@ class GodotServer {
         return { waitedMs: Date.now() - started, stillScanning: false };
       }
       const answered = Date.now();
-      if (status['scanning'] === true || status['importing'] === true || status['pending'] === true) {
+      if (editorIsScanning(status)) {
         sawAScan = true;
         if (Date.now() - started >= scanWaitMs()) {
           return { waitedMs: Date.now() - started, stillScanning: true };
@@ -6912,9 +7002,18 @@ class GodotServer {
       // late, a write in that stretch is waited past to the end of the window, which costs up to
       // that window and still reads the right file.
       const since = readNumber(status, 'sinceScanFinishedMs');
-      scanEndedAt = since !== undefined && since >= 0 ? answered - since : sawAScan ? answered : null;
+      scanEndedAt = scanEndFrom(since, answered, sawAScan);
       break;
     }
+    return await this.untilTheCacheIsWritten(projectPath, { started, sawAScan, scanEndedAt });
+  }
+
+  /** The wait for the editor's class cache to be written after the scan [param scan] saw end. */
+  private async untilTheCacheIsWritten(
+    projectPath: string,
+    scan: { readonly started: number; readonly sawAScan: boolean; readonly scanEndedAt: number | null },
+  ): Promise<ScanWait> {
+    const { started, sawAScan, scanEndedAt } = scan;
     let waitedForTheWrite = false;
     if (scanEndedAt !== null) {
       const writeDue = scanEndedAt + CACHE_WRITE_MS;
@@ -6957,6 +7056,15 @@ class GodotServer {
       }
       contained[key] = `res://${location.relativePath}`;
     }
+    return this.containNestedFiles(args, projectPath, contained);
+  }
+
+  /** The file paths a call carries one level down, in its properties and tile set sources, and its plugin name. */
+  private containNestedFiles(
+    args: OperationParams,
+    projectPath: string,
+    contained: OperationParams,
+  ): Checked<OperationParams> {
     // A property whose type is a Resource takes the path of one, so `properties` carries file
     // paths that no argument name announces. Only the engine knows which of them are paths, so
     // what is judged here is the one thing a path can do that a caption cannot: leave the
@@ -6993,6 +7101,15 @@ class GodotServer {
       contained['sources'] = resolved;
     }
 
+    return this.containPluginName(args, projectPath, contained);
+  }
+
+  /** The plugin name of a call, judged as the directory under addons/ it names. */
+  private containPluginName(
+    args: OperationParams,
+    projectPath: string,
+    contained: OperationParams,
+  ): Checked<OperationParams> {
     const pluginName = readNonEmptyString(args, 'pluginName');
     if (pluginName !== undefined) {
       const plugin = resolveWithinProject(projectPath, `addons/${pluginName}/plugin.cfg`);
@@ -7194,6 +7311,12 @@ class GodotServer {
             ...renamed.report,
           });
     }
+    return await this.settingsTakenByTheEditor({ op, args, projectPath, before, written, renamed });
+  }
+
+  /** The editor told to take up what a project_settings write changed, once the file holds it. */
+  private async settingsTakenByTheEditor(write: SettingsWrite): Promise<ToolResponse> {
+    const { op, written, renamed } = write;
     const answer = asParams(JSON.parse(written.content[0]?.text ?? '{}'));
     if (AUDIO_BUS_OPS.has(op)) {
       const adopted = await this.editorTakes('adopt_audio_bus_layout', {});
@@ -7213,13 +7336,15 @@ class GodotServer {
           reloadedScenes: (readArray(told, 'reloadedScenes') ?? []).map(String),
           ...(unsavedScenes.length > 0 ? { unsavedScenes } : {}),
         },
-        ...(unsavedScenes.length > 0
-          ? {
-              note: `${unsavedScenes.join(', ')} ${unsavedScenes.length === 1 ? 'is' : 'are'} open in the editor with unsaved edits, so ${unsavedScenes.length === 1 ? 'it was' : 'they were'} not read again from the file and still ${unsavedScenes.length === 1 ? 'gives' : 'give'} the old bus. Saving there writes it back.`,
-            }
-          : {}),
+        ...unsavedScenesNote(unsavedScenes),
       });
     }
+    return await this.adoptChangedSettings(write, answer);
+  }
+
+  /** The settings a write changed, handed to the editor, and what it says it took. */
+  private async adoptChangedSettings(write: SettingsWrite, answer: OperationParams): Promise<ToolResponse> {
+    const { op, args, projectPath, before, written } = write;
     const diffed = changedSettings(before, this.settingKeysOf(projectPath));
     const changed =
       diffed === null ? null : [...new Set([...diffed, ...settingsNamedBy(op, args)])].toSorted();
@@ -7329,6 +7454,22 @@ class GodotServer {
           : written,
       );
     }
+    return await this.reimportAfterSetOptions({
+      project,
+      contained,
+      args,
+      written,
+      params,
+      given,
+      resource,
+      sidecar,
+      before,
+    });
+  }
+
+  /** The reimport that applies options written to a sidecar, and what is said when it fails. */
+  private async reimportAfterSetOptions(write: ImportOptionsWrite): Promise<ToolResponse> {
+    const { project, contained, args, written } = write;
     const applied = await this.reimport(
       project.value.path,
       readNonEmptyString(contained.value, 'resourcePath'),
@@ -7355,6 +7496,15 @@ class GodotServer {
         ],
       };
     }
+    return await this.checkImporterAfterSetOptions(write, applied);
+  }
+
+  /** The importer a reimport used, put back when it is not the one asked for, and the options it dropped. */
+  private async checkImporterAfterSetOptions(
+    write: ImportOptionsWrite,
+    applied: { readonly payload: OperationParams },
+  ): Promise<ToolResponse> {
+    const { project, args, written, params, given, resource, sidecar, before } = write;
     const asked = readNonEmptyString(args, 'importer');
     // An importer the engine lacks is passed over for the default one, and the options cleared for
     // the switch would then be lost, so the file is put back and imported as it was.
@@ -7474,6 +7624,12 @@ class GodotServer {
       };
     }
 
+    return await this.reimportTargets({ projectPath, resourcePath, force, timeoutMs, sourceless, targets });
+  }
+
+  /** The import of the files behind, through the editor when one has the project open and else the engine. */
+  private async reimportTargets(start: ImportTargets): Promise<ImportAnswer> {
+    const { projectPath, resourcePath, force, timeoutMs, sourceless, targets } = start;
     const viaEditor = this.editorHasOpen(projectPath);
     const extra: OperationParams = {};
     const statusAsk: OperationParams =
@@ -7496,83 +7652,125 @@ class GodotServer {
           .map((one) => one.path);
       }
     }
-    if (viaEditor) {
-      // A scan first: the editor's reimport passes over a file its own file system has not taken in,
-      // without a word. Downstream, 143 images an installer had just written came back as 143 files
-      // not reimported, each needing the import it had just been asked for, and a rescan straight
-      // after imported every one. The scan imports what it finds, so only what is still behind
-      // afterwards is handed to the reimport, unless force asks for everything again.
-      const scan = await this.handleRescanFilesystem({ projectPath, timeoutMs });
-      if (scan.isError === true) {
-        return { ok: false, response: scan };
-      }
-      const scanned = asParams(JSON.parse(scan.content[0]?.text ?? '{}'));
-      if (scanned['stillWorking'] === true) {
-        return {
-          ok: true,
-          payload: {
-            via: 'editor',
-            stillImporting: true,
-            asked: targets,
-            ...sourceless,
-            note: `The editor's scan of the project had not finished after ${timeoutMs} ms, and the reimport waits for it. project_import status says what it has done so far. Pass a longer timeoutMs to wait it out.`,
-          },
-        };
-      }
-      let remaining = targets;
-      if (!force) {
-        const between = await this.operation('get_import_status', statusAsk, projectPath);
-        if (!between.ok) {
-          return { ok: false, response: this.answer(between) };
-        }
-        const fresh = new Map(importStatuses(between.payload).map((one) => [one.path, one.status]));
-        const caughtUp = targets.filter((path) => fresh.get(path) === 'up_to_date');
-        remaining = targets.filter((path) => !caughtUp.includes(path));
-        if (caughtUp.length > 0) {
-          extra['importedByTheScan'] = caughtUp;
-        }
-      }
-      const inEditor =
-        remaining.length === 0
-          ? { ok: true as const, finished: true }
-          : await this.reimportInTheEditor(remaining, timeoutMs);
-      if (!inEditor.ok) {
-        return inEditor;
-      }
-      if (!inEditor.finished) {
-        return {
-          ok: true,
-          payload: {
-            via: 'editor',
-            stillImporting: true,
-            asked: targets,
-            ...sourceless,
-            note: `The editor had not finished after ${timeoutMs} ms. project_import status says what it has done so far. Pass a longer timeoutMs to wait it out.`,
-          },
-        };
-      }
-    } else {
-      const engine = await this.engine(projectPath);
-      if (!engine.ok) {
-        return { ok: false, response: engine.response };
-      }
-      const scanned = await this.untilTheEditorsScanIsWritten(projectPath);
-      const imported = withEngineNote(
-        await runImport(engine.value, projectPath, { forcing: targets }),
-        engine.note,
-      );
-      if (!imported.ok) {
-        return { ok: false, response: this.answer(withScanWait(imported, scanned)) };
-      }
-      Object.assign(extra, engineExtras(imported));
-      if (imported.extensionNote !== undefined) {
-        extra['extensionNote'] = imported.extensionNote;
-      }
-      if (imported.docCacheNote !== undefined) {
-        extra['docCacheNote'] = imported.docCacheNote;
-      }
+    const run: ImportRun = {
+      projectPath,
+      timeoutMs,
+      force,
+      sourceless,
+      targets,
+      statusAsk,
+      extra,
+      viaEditor,
+      behindElsewhere,
+    };
+    const through = viaEditor
+      ? await this.reimportThroughTheEditor(run)
+      : await this.reimportThroughTheEngine(run);
+    if (through !== null) {
+      return through;
     }
+    return await this.readBackReimport(run);
+  }
 
+  /** The reimport run in the editor: its scan first, then what is still behind. Null once it has finished. */
+  private async reimportThroughTheEditor(run: ImportRun): Promise<ImportAnswer | null> {
+    const { projectPath, timeoutMs, sourceless, targets } = run;
+    // A scan first: the editor's reimport passes over a file its own file system has not taken in,
+    // without a word. Downstream, 143 images an installer had just written came back as 143 files
+    // not reimported, each needing the import it had just been asked for, and a rescan straight
+    // after imported every one. The scan imports what it finds, so only what is still behind
+    // afterwards is handed to the reimport, unless force asks for everything again.
+    const scan = await this.handleRescanFilesystem({ projectPath, timeoutMs });
+    if (scan.isError === true) {
+      return { ok: false, response: scan };
+    }
+    const scanned = asParams(JSON.parse(scan.content[0]?.text ?? '{}'));
+    if (scanned['stillWorking'] === true) {
+      return {
+        ok: true,
+        payload: {
+          via: 'editor',
+          stillImporting: true,
+          asked: targets,
+          ...sourceless,
+          note: `The editor's scan of the project had not finished after ${timeoutMs} ms, and the reimport waits for it. project_import status says what it has done so far. Pass a longer timeoutMs to wait it out.`,
+        },
+      };
+    }
+    const behind = await this.stillBehindAfterTheScan(run);
+    if (!behind.ok) {
+      return behind;
+    }
+    const inEditor =
+      behind.remaining.length === 0
+        ? { ok: true as const, finished: true }
+        : await this.reimportInTheEditor(behind.remaining, timeoutMs);
+    if (!inEditor.ok) {
+      return inEditor;
+    }
+    if (!inEditor.finished) {
+      return {
+        ok: true,
+        payload: {
+          via: 'editor',
+          stillImporting: true,
+          asked: targets,
+          ...sourceless,
+          note: `The editor had not finished after ${timeoutMs} ms. project_import status says what it has done so far. Pass a longer timeoutMs to wait it out.`,
+        },
+      };
+    }
+    return null;
+  }
+
+  /** The targets the editor's scan did not already import, unless force asks for all of them again. */
+  private async stillBehindAfterTheScan(
+    run: ImportRun,
+  ): Promise<{ ok: true; remaining: string[] } | { ok: false; response: ToolResponse }> {
+    const { projectPath, force, targets, statusAsk, extra } = run;
+    if (force) {
+      return { ok: true, remaining: targets };
+    }
+    const between = await this.operation('get_import_status', statusAsk, projectPath);
+    if (!between.ok) {
+      return { ok: false, response: this.answer(between) };
+    }
+    const fresh = new Map(importStatuses(between.payload).map((one) => [one.path, one.status]));
+    const caughtUp = targets.filter((path) => fresh.get(path) === 'up_to_date');
+    if (caughtUp.length > 0) {
+      extra['importedByTheScan'] = caughtUp;
+    }
+    return { ok: true, remaining: targets.filter((path) => !caughtUp.includes(path)) };
+  }
+
+  /** The reimport run by the engine on the project. Null once it has imported. */
+  private async reimportThroughTheEngine(run: ImportRun): Promise<ImportAnswer | null> {
+    const { projectPath, targets, extra } = run;
+    const engine = await this.engine(projectPath);
+    if (!engine.ok) {
+      return { ok: false, response: engine.response };
+    }
+    const scanned = await this.untilTheEditorsScanIsWritten(projectPath);
+    const imported = withEngineNote(
+      await runImport(engine.value, projectPath, { forcing: targets }),
+      engine.note,
+    );
+    if (!imported.ok) {
+      return { ok: false, response: this.answer(withScanWait(imported, scanned)) };
+    }
+    Object.assign(extra, engineExtras(imported));
+    if (imported.extensionNote !== undefined) {
+      extra['extensionNote'] = imported.extensionNote;
+    }
+    if (imported.docCacheNote !== undefined) {
+      extra['docCacheNote'] = imported.docCacheNote;
+    }
+    return null;
+  }
+
+  /** What a reimport answers, read back from the import status once the files have been imported. */
+  private async readBackReimport(run: ImportRun): Promise<ImportAnswer> {
+    const { projectPath, targets, statusAsk, extra, viaEditor, behindElsewhere, sourceless } = run;
     const after = await this.operation('get_import_status', statusAsk, projectPath);
     if (!after.ok) {
       return { ok: false, response: this.answer(after) };
@@ -7663,6 +7861,15 @@ class GodotServer {
       }
       await new Promise((settle) => setTimeout(settle, 100));
     }
+    return await this.untilTheReimportsAreCounted(timeoutMs, started, completedBefore);
+  }
+
+  /** Waits until the addon's count of finished reimports passes the count from before the call. */
+  private async untilTheReimportsAreCounted(
+    timeoutMs: number,
+    started: number,
+    completedBefore: number | undefined,
+  ): Promise<{ ok: true; finished: boolean }> {
     while (Date.now() - started < timeoutMs) {
       await new Promise((settle) => setTimeout(settle, 250));
       try {
