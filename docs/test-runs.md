@@ -532,7 +532,7 @@ however busy the machine is. Its ending says how it was counted.
 When an engine runs out of memory, every engine that failed runs again, one at a time, and those
 runs are the ones judged. Running out shows as the allocator's null, an image decode failing, or
 Windows' `STATUS_NO_MEMORY` or `STATUS_COMMITMENT_LIMIT`. One that fails again is headed as run
-again alone.
+again alone. The line gives the most each engine held in this run, or unread.
 
 ## Leaving out what passed
 

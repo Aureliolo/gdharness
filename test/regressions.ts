@@ -625,6 +625,7 @@ import {
   importNeeded,
   MemoryGate,
   memorySaid,
+  outOfMemorySaid,
   type RunResult,
   reachedAlsoSaid,
   reportsFault,
@@ -63171,6 +63172,27 @@ async function testAnEngineIsSizedByWhatItWasSeenToHold(): Promise<void> {
   }
 }
 
+/** The out-of-memory line names every engine of the run in index order, with its figure or unread. */
+function testARunOutOfMemoryNamesEveryEngine(): void {
+  const gib = 1024 ** 3;
+  const first = 'An engine ran out of memory, so every engine that failed runs again, one at a time.';
+  assert.equal(
+    outOfMemorySaid([{ index: 0, peakBytes: 3.3 * gib }, { index: 1 }]),
+    `${first} The most each held in this run: engine 0 3.3 GB, engine 1 unread.`,
+  );
+  assert.equal(
+    outOfMemorySaid([
+      { index: 0, peakBytes: 0.4 * gib },
+      { index: 1, peakBytes: 3.3 * gib },
+    ]),
+    `${first} The most each held in this run: engine 0 0.4 GB, engine 1 3.3 GB.`,
+  );
+  assert.equal(
+    outOfMemorySaid([{ index: 0 }, { index: 1, peakBytes: 3.3 * gib }]),
+    `${first} The most each held in this run: engine 0 unread, engine 1 3.3 GB.`,
+  );
+}
+
 /**
  * A test run is held to what its suites were seen to hold: an engine starts once memory covers the
  * most any suite of the run was seen to hold, and the run keeps what each engine held.
@@ -63282,6 +63304,37 @@ function testATestRunIsHeldToWhatItsSuitesWereSeenToHold(): void {
       Object.keys(readTimes(gateTimes)).toSorted(),
       [a, b],
       'and its record is gone, the suites that ran recorded',
+    );
+
+    // An engine running out of memory in a held run says what each engine held, not the kept peak.
+    const starving =
+      'extends GdUnitTestSuite\n\nfunc test_a() -> void:\n\tawait get_tree().create_timer(2.0).timeout\n\tprinterr("ERROR: Parameter \\"mem\\" is null.\\n   at: alloc_static (core/os/memory.cpp:75)")\n\tassert_int(1).is_equal(2)\n';
+    const beside =
+      'extends GdUnitTestSuite\n\nfunc test_b() -> void:\n\tawait get_tree().create_timer(2.0).timeout\n\tassert_int(1).is_equal(1)\n';
+    writeTree(project, { 'tests/a_held_test.gd': starving, 'tests/b_beside_test.gd': beside });
+    keep({
+      [a]: { seconds: 40, cases: { test_a: 40 }, peak: huge },
+      [b]: { seconds: 40, cases: { test_b: 40 } },
+    });
+    const starved = test('--engines', '2', '--slot-count', '2');
+    assert.notEqual(starved.status, 0, starved.said);
+    const heldAt = starved.said.search(
+      /1048576\.0 GB taken for each engine, the most one holding these suites was seen to hold, so/,
+    );
+    const outAt = starved.said.indexOf('An engine ran out of memory');
+    assert.ok(
+      heldAt >= 0 && outAt > heldAt,
+      `the memory line comes before the out-of-memory line: ${starved.said}`,
+    );
+    assert.match(
+      starved.said,
+      /The most each held in this run: engine 0 \d+\.\d GB, engine 1 \d+\.\d GB\./,
+      `every engine has the figure it was read holding: ${starved.said}`,
+    );
+    assert.doesNotMatch(
+      starved.said.slice(outAt),
+      /1048576\.0 GB/,
+      'the line gives what was read, not the peak kept',
     );
   } finally {
     rmSync(project, { recursive: true, force: true });
@@ -91479,6 +91532,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testARegistryThatIsDownIsAskedOnADoublingWindow,
   testAnEngineIsReadForWhatItHolds,
   testAnEngineIsSizedByWhatItWasSeenToHold,
+  testARunOutOfMemoryNamesEveryEngine,
   testATestRunIsHeldToWhatItsSuitesWereSeenToHold,
 ];
 

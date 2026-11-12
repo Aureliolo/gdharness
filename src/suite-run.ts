@@ -27,6 +27,7 @@ import {
   coresNamed,
   type EngineLaunch,
   godotNamed,
+  gigabytes,
   heldRunSaid,
   homeOf,
   KEPT_RUN_DIRECTORIES,
@@ -812,7 +813,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
           .flat()
           .toSorted((a, b) => a.index - b.index);
     if (ran.some((engine) => engine.verdict.starved) && ran.some((engine) => !engine.verdict.passed)) {
-      say('An engine ran out of memory, so every engine that failed runs again, one at a time.');
+      say(outOfMemorySaid(ran));
       const again: EngineRan[] = [];
       for (const engine of ran) {
         again.push(
@@ -889,6 +890,20 @@ export function sharesSaid(free: number, lanes: number): string {
  */
 export function memorySaid(room: number, lanes: number, held: string): string {
   return `Memory had room for ${room === 1 ? 'one' : String(room)} of these ${String(lanes)} engines at once as the run began, since ${held}, so its engines are handed the suites a share at a time, and another starts whenever memory has room for it.`;
+}
+
+/**
+ * What a run says when an engine ran out of memory: the failed engines run again, and each
+ * engine's most held in this run, or that it was not read, shows what else held the machine.
+ */
+export function outOfMemorySaid(engines: readonly Pick<EngineRan, 'index' | 'peakBytes'>[]): string {
+  const held = engines
+    .map(
+      (engine) =>
+        `engine ${String(engine.index)} ${engine.peakBytes === undefined ? 'unread' : gigabytes(engine.peakBytes)}`,
+    )
+    .join(', ');
+  return `An engine ran out of memory, so every engine that failed runs again, one at a time. The most each held in this run: ${held}.`;
 }
 
 /** How often a share held back for memory reads it again. */

@@ -193,6 +193,9 @@ export function heldRunSaid(directory: string): string {
   return `left ${directory}, which another process holds, such as an engine of that run still going`;
 }
 
+/** [param bytes] as gigabytes to one decimal place. */
+export const gigabytes = (bytes: number): string => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+
 /**
  * How many of the [param most] engines asked for the machine has room for, given its [param
  * processors] and the memory [param available] past what it keeps, with what held it below
@@ -214,7 +217,6 @@ export function roomFor(
   if (engines >= most) {
     return { engines, held: undefined };
   }
-  const gigabytes = (bytes: number): string => `${(bytes / 1024 ** 3).toFixed(1)} GB`;
   return {
     engines,
     held:
