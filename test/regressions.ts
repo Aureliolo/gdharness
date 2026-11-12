@@ -58644,7 +58644,9 @@ async function testAnEngineIsReadForWhatItHolds(): Promise<void> {
     assert.equal('peakBytes' in zero, false, `an engine read at 0 has no peak: ${JSON.stringify(zero)}`);
     assert.deepEqual(none, [], 'and a reading of 0 is told to nobody');
 
-    // The engine's own watch loop flags its pid for memory, so the shared sampler reads it.
+    // The engine's own watch loop flags its pid for memory, so the shared sampler reads it. Its
+    // first reading can come before the process has loaded, at a few hundred kilobytes on Linux, so
+    // the watch is ended by the first reading of a loaded process.
     const real = join(scratch, 'real');
     mkdirSync(real);
     const seen: number[] = [];
@@ -58660,6 +58662,9 @@ async function testAnEngineIsReadForWhatItHolds(): Promise<void> {
         undefined,
         (bytes) => {
           seen.push(bytes);
+          if (bytes <= MIB) {
+            return;
+          }
           for (const stop of sampling.running) {
             stop();
           }

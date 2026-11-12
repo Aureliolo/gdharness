@@ -1,9 +1,8 @@
-import type { SpawnSyncReturns } from 'node:child_process';
 import { isAbsolute } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from '../../src/alive.js';
-import { spawnSyncHidden } from '../../src/spawn.js';
+import { type SpawnSyncReturns, spawnSyncHidden } from '../../src/spawn.js';
 
 /** One engine ended because it was still holding a fixture's directory, and the directory it held. */
 export interface EndedEngine {
