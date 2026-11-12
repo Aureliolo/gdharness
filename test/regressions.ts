@@ -72081,30 +72081,41 @@ function testEveryEngineParameterCanBeSent(): void {
     ),
   );
   assert.ok(declared.size >= 40, `only ${declared.size} tool parameters were read`);
-  // What the server adds on the way through, which no tool declares.
+  // What the server adds on the way through, which no tool declares: a key and its value, or a
+  // shorthand name after a spread of the arguments.
+  const server = readFileSync('src/server.ts', 'utf8');
+  const shorthand = [...server.matchAll(/\{ ?\.\.\.[A-Za-z_.]+((?:, ?[a-z][A-Za-z0-9]*)+) ?\}/g)].flatMap(
+    (match) =>
+      firstGroup(match)
+        .split(',')
+        .map((name) => name.trim()),
+  );
   const added = new Set(
-    [...readFileSync('src/server.ts', 'utf8').matchAll(/\b([a-z][A-Za-z0-9]*): /g)].map((match) =>
-      snakeCased(firstGroup(match)),
-    ),
+    [...[...server.matchAll(/\b([a-z][A-Za-z0-9]*): /g)].map(firstGroup), ...shorthand]
+      .filter((name) => name !== '')
+      .map(snakeCased),
   );
 
   let read = 0;
+  const routed = new Set<string>();
   for (const route of dispatcher.matchAll(
     /"([a-z_]+)":\s*\n[^\n]*?([A-Za-z]+)\.new\([^)]*\)\.([a-z_]+)\(/g,
   )) {
     const [, operation = '', module = '', method = ''] = route;
     const source = files.get(module);
     assert.ok(source, `${operation} is answered by ${module}, which is not preloaded`);
-    const at = source.indexOf(`\nfunc ${method}(`);
-    assert.ok(at !== -1, `${module} has no ${method} for ${operation}`);
-    const next = source.indexOf('\nfunc ', at + 1);
-    const body = source.slice(at, next === -1 ? source.length : next);
-    for (const key of body.matchAll(/params(?:\.get\(|\[)"([a-z_]+)"/g)) {
+    assert.ok(source.includes(`\nfunc ${method}(`), `${module} has no ${method} for ${operation}`);
+    routed.add(module);
+  }
+  // The whole module rather than the routed method, since a method hands its params to helpers
+  // that read them, and a read may be laid over two lines.
+  for (const module of routed) {
+    for (const key of (files.get(module) ?? '').matchAll(/params(?:\.get\(\s*|\[)"([a-z_]+)"/g)) {
       read += 1;
       const name = firstGroup(key);
       assert.ok(
         declared.has(name) || added.has(name),
-        `${operation} reads ${name}, which no tool parameter spells`,
+        `${module} reads ${name}, which no tool parameter spells`,
       );
     }
   }

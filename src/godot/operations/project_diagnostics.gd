@@ -25,24 +25,21 @@ func _init(p_log: GdhLog) -> void:
 
 # Get comprehensive project health check with scoring
 func get_project_health(params: Dictionary) -> Dictionary:
-	var check_categories: Array = params.get("categories", CATEGORIES)
-
 	_log.info("Performing project health check")
 
 	var checks: Dictionary = {}
 	var recommendations: Array[String] = []
 	var deductions: int = 0
 	for category: String in CATEGORIES:
-		if category in check_categories:
-			var found: Array = _checked(category, params, recommendations)
-			checks[category] = found[0]
-			deductions += GdhRead.as_int(found[1])
+		var found: Array = _checked(category, params, recommendations)
+		checks[category] = found[0]
+		deductions += GdhRead.as_int(found[1])
 
 	var score: int = maxi(0, 100 - deductions)
 	if score < 70:
 		recommendations.append("Address critical issues to improve project stability")
 	# A project still being made has no presets yet, which is no fault in it.
-	if "config" in check_categories and not FileAccess.file_exists("res://export_presets.cfg"):
+	if not FileAccess.file_exists("res://export_presets.cfg"):
 		recommendations.append(
 			"No export presets are configured: project_export add_preset adds one before exporting"
 		)

@@ -2038,11 +2038,7 @@ function checksImportOptions({ godotPath, projectDir, operation }: OperationsRig
     // importer for and the one only Blender imports left out.
     const neverImported =
       'res://fresh.png has never been imported, so nothing can load it until project_import reimport imports it';
-    const resources = get(
-      operation('get_project_health', { categories: ['resources'] }),
-      'checks',
-      'resources',
-    );
+    const resources = get(operation('get_project_health', {}), 'checks', 'resources');
     assert.deepEqual(get(resources, 'details'), [neverImported], JSON.stringify(resources));
     const unimported = asArray(get(operation('validate_project', {}), 'warnings')).filter(
       (warning) => get(warning, 'check') === 'imports',
@@ -2246,7 +2242,7 @@ function checksProjectDiagnostics({ projectDir, operation }: OperationsRig): voi
       .filter((warning) => get(warning, 'check') === 'scripts')
       .map((warning) => Number.parseInt(asString(get(warning, 'message')), 10))
       .find(Boolean) ?? 0;
-  const unnoted = notedCount(operation('get_project_health', { categories: ['scripts'] }));
+  const unnoted = notedCount(operation('get_project_health', {}));
   const unvalidated = validatedIssues();
   const noted = join(projectDir, 'noted_for_later.gd');
   // An addon's notes are its authors' work, so one there moves neither count.
@@ -2261,7 +2257,7 @@ function checksProjectDiagnostics({ projectDir, operation }: OperationsRig): voi
       unvalidated + 1,
       'validation counts the noted script outside addons/ alone',
     );
-    const withNotes = operation('get_project_health', { categories: ['scripts'] });
+    const withNotes = operation('get_project_health', {});
     assert.equal(
       get(withNotes, 'checks', 'scripts', 'passed'),
       true,
@@ -2280,7 +2276,7 @@ function checksProjectDiagnostics({ projectDir, operation }: OperationsRig): voi
   // A main scene named by a UID nothing resolves is said to be that, not a file that does not exist.
   operation('set_project_setting', { setting: 'application/run/main_scene', value: 'uid://b0gusb0gusb0g' });
   try {
-    const unresolved = operation('get_project_health', { categories: ['config'] });
+    const unresolved = operation('get_project_health', {});
     assert.equal(get(unresolved, 'checks', 'config', 'passed'), false, JSON.stringify(unresolved));
     assert.ok(
       asArray(get(unresolved, 'checks', 'config', 'details')).includes(
@@ -5265,7 +5261,7 @@ function testAConnectionNamesWhatItReaches(godotPath: string): void {
       .map((warning) => asString(get(warning, 'message')))
       .toSorted();
     assert.deepEqual(warned, expected, JSON.stringify(get(validated, 'warnings')));
-    const health = runOperation(godotPath, dir, 'get_project_health', { categories: ['scenes'] });
+    const health = runOperation(godotPath, dir, 'get_project_health', {});
     const noted = asArray(get(health, 'checks', 'scenes', 'details'))
       .map((detail) => asString(detail))
       .filter((detail) => detail.includes(' connects '))
@@ -5430,7 +5426,7 @@ function testAConnectionPassesWhatItsMethodTakes(godotPath: string): void {
       .map((warning) => asString(get(warning, 'message')))
       .toSorted();
     assert.deepEqual(warned, expected, JSON.stringify(get(validated, 'warnings')));
-    const health = runOperation(godotPath, dir, 'get_project_health', { categories: ['scenes'] });
+    const health = runOperation(godotPath, dir, 'get_project_health', {});
     const noted = asArray(get(health, 'checks', 'scenes', 'details'))
       .map((detail) => asString(detail))
       .filter((detail) => detail.includes(' connects '))
@@ -5991,12 +5987,7 @@ function testTheOperationsSurviveEveryWarning(godotPath: string): void {
 function testBinaryScenesAreScenes(godotPath: string, projectDir: string): void {
   const counted = (): number =>
     asNumber(
-      get(
-        runOperation(godotPath, projectDir, 'get_project_health', { categories: ['scenes'] }),
-        'checks',
-        'scenes',
-        'total_scenes',
-      ),
+      get(runOperation(godotPath, projectDir, 'get_project_health', {}), 'checks', 'scenes', 'total_scenes'),
     );
   const before = counted();
   const binary = join(projectDir, 'only_binary.scn');
