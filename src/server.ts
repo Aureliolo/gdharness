@@ -11471,6 +11471,15 @@ class GodotServer {
       );
     }
 
+    return await this.restartWithTheStartItHad(args, before, mine);
+  }
+
+  /** A restart once an editor is connected: how it was started is read first, and a restart that cannot say is refused. */
+  private async restartWithTheStartItHad(
+    args: OperationParams,
+    before: ReturnType<GodotBridge['getStatus']>,
+    mine: boolean,
+  ): Promise<ToolResponse> {
     // What project.godot says before the editor is asked to go, because saving it on the way out
     // is not a copy: Godot writes only what differs from its own defaults, so a key named on
     // purpose at its default value is redundant to the editor and is dropped. A project that pins
@@ -11487,26 +11496,74 @@ class GodotServer {
     // command line only, and an editor opened to end with a session keeps ending with it.
     let until: number | null = null;
     if (mine) {
-      const was = before.editorPid === undefined ? null : await runningAs(before.editorPid);
-      if (was?.kind === 'commandLine') {
-        const as = startedAs(was.text);
-        hidden = typeof args['hidden'] === 'boolean' ? args['hidden'] : as.hidden;
-        silent = typeof args['silent'] === 'boolean' ? args['silent'] : as.silent;
-        until = as.until;
-      } else if (typeof args['hidden'] !== 'boolean') {
-        const why =
-          was === null ? 'the operating system would not say' : (was.unread ?? 'it gave no command line');
-        return this.createErrorResponse(
-          `How the editor (pid ${before.editorPid ?? 'unknown'}) was started could not be read (${why}), so whether it was hidden cannot be told and it was left running.`,
-          ['Pass hidden: true to bring it back with no window, or hidden: false to bring it back visible'],
-        );
+      const read = await this.howTheEditorWasStarted(args, before);
+      if ('refusal' in read) {
+        return read.refusal;
       }
+      ({ hidden, silent, until } = read);
     }
 
-    if (hidden && args['silent'] === false) {
+    return await this.restartUnlessSilentIsRefused(args, before, { mine, hidden, silent, until });
+  }
+
+  /**
+   * How the running editor was started, read off its command line, with what the call says taking
+   * precedence, or the refusal when it cannot be read and the call does not say.
+   */
+  private async howTheEditorWasStarted(
+    args: OperationParams,
+    before: ReturnType<GodotBridge['getStatus']>,
+  ): Promise<{ hidden: boolean; silent: boolean; until: number | null } | { refusal: ToolResponse }> {
+    const was = before.editorPid === undefined ? null : await runningAs(before.editorPid);
+    if (was?.kind === 'commandLine') {
+      const as = startedAs(was.text);
+      return {
+        hidden: typeof args['hidden'] === 'boolean' ? args['hidden'] : as.hidden,
+        silent: typeof args['silent'] === 'boolean' ? args['silent'] : as.silent,
+        until: as.until,
+      };
+    }
+    if (typeof args['hidden'] === 'boolean') {
+      return { hidden: args['hidden'], silent: resolveSilent(args['silent']), until: null };
+    }
+    const why =
+      was === null ? 'the operating system would not say' : (was.unread ?? 'it gave no command line');
+    return {
+      refusal: this.createErrorResponse(
+        `How the editor (pid ${before.editorPid ?? 'unknown'}) was started could not be read (${why}), so whether it was hidden cannot be told and it was left running.`,
+        ['Pass hidden: true to bring it back with no window, or hidden: false to bring it back visible'],
+      ),
+    };
+  }
+
+  /** The restart, refused when a hidden editor was asked to keep its sound. */
+  private async restartUnlessSilentIsRefused(
+    args: OperationParams,
+    before: ReturnType<GodotBridge['getStatus']>,
+    plan: {
+      readonly mine: boolean;
+      readonly hidden: boolean;
+      readonly silent: boolean;
+      readonly until: number | null;
+    },
+  ): Promise<ToolResponse> {
+    if (plan.hidden && args['silent'] === false) {
       return this.createErrorResponse(HIDDEN_WITH_SOUND, [HIDDEN_WITH_SOUND_FIX]);
     }
+    return await this.restartAndWait(before, plan);
+  }
 
+  /** The editor asked to restart and waited for until a newer connection is up. */
+  private async restartAndWait(
+    before: ReturnType<GodotBridge['getStatus']>,
+    plan: {
+      readonly mine: boolean;
+      readonly hidden: boolean;
+      readonly silent: boolean;
+      readonly until: number | null;
+    },
+  ): Promise<ToolResponse> {
+    const { mine, hidden, silent, until } = plan;
     const settingsBefore = this.settingKeysOf(before.projectPath);
     const asked = mine
       ? await this.startItAgain(before.projectPath ?? '', before.editorPid, { hidden, silent, until })
@@ -11536,6 +11593,21 @@ class GodotServer {
       );
     }
 
+    return await this.restartAnswer(before, { mine, hidden, asked, settingsBefore, began });
+  }
+
+  /** What a restart that came back answers: the editor now connected, what it saved and what it dropped. */
+  private async restartAnswer(
+    before: ReturnType<GodotBridge['getStatus']>,
+    done: {
+      readonly mine: boolean;
+      readonly hidden: boolean;
+      readonly asked: ToolResponse;
+      readonly settingsBefore: ReturnType<GodotServer['settingKeysOf']>;
+      readonly began: number;
+    },
+  ): Promise<ToolResponse> {
+    const { mine, hidden, asked, settingsBefore, began } = done;
     const { servers, report: rebinding } = await this.rebindTheDebugAdapter(
       await this.editorServersOnceStarted(),
     );
