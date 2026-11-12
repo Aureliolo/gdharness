@@ -218,6 +218,34 @@ func reimport_files(args: Dictionary) -> Dictionary:
 	}
 
 
+## The files [param args] says moved, by the path each one was at and the path it is at now.
+static func _renames_of(args: Dictionary) -> Dictionary[String, String]:
+	var renames: Dictionary[String, String] = {}
+	var given: Variant = args.get("moved", [])
+	if given is Array:
+		var pairs: Array = given
+		for pair: Variant in pairs:
+			if pair is Dictionary:
+				var named: Dictionary = pair
+				renames[str(named.get("from", ""))] = str(named.get("to", ""))
+	return renames
+
+
+## Adds to [param reread] each open scene the [code]changed[/code] list of [param args] names that
+## it
+## does not name yet.
+static func _add_changed_open_scenes(args: Dictionary, reread: Array[String]) -> void:
+	var open: Array[String] = []
+	for root: Node in EditorInterface.get_open_scene_roots():
+		open.append(root.scene_file_path)
+	var changed: Variant = args.get("changed", [])
+	if changed is Array:
+		var paths: Array = changed
+		for path: Variant in paths:
+			if open.has(str(path)) and not reread.has(str(path)):
+				reread.append(str(path))
+
+
 ## Brings the editor up to files moved under it, the way its FileSystem dock brings itself up after
 ## a move of its own: each cached resource and each open scene named for where it now is, so what
 ## holds them saves the new path, the editor's file list told of both ends, and each open scene that
@@ -228,14 +256,7 @@ func reimport_files(args: Dictionary) -> Dictionary:
 ## twice, on the root and in its own list, and a script can set only the first. The second is what
 ## [method EditorInterface.get_open_scenes] answers, and reading the scene again is what writes it.
 func files_moved(args: Dictionary) -> Dictionary:
-	var renames: Dictionary[String, String] = {}
-	var given: Variant = args.get("moved", [])
-	if given is Array:
-		var pairs: Array = given
-		for pair: Variant in pairs:
-			if pair is Dictionary:
-				var named: Dictionary = pair
-				renames[str(named.get("from", ""))] = str(named.get("to", ""))
+	var renames: Dictionary[String, String] = _renames_of(args)
 	for from: String in renames:
 		if ResourceLoader.has_cached(from):
 			var held: Resource = ResourceLoader.get_cached_ref(from)
@@ -256,15 +277,7 @@ func files_moved(args: Dictionary) -> Dictionary:
 	for from: String in renames:
 		filesystem.update_file(from)
 		filesystem.update_file(renames[from])
-	var open: Array[String] = []
-	for root: Node in EditorInterface.get_open_scene_roots():
-		open.append(root.scene_file_path)
-	var changed: Variant = args.get("changed", [])
-	if changed is Array:
-		var paths: Array = changed
-		for path: Variant in paths:
-			if open.has(str(path)) and not reread.has(str(path)):
-				reread.append(str(path))
+	_add_changed_open_scenes(args, reread)
 	var reloaded: Array[String] = []
 	var unsaved: Array[String] = []
 	for scene: String in reread:

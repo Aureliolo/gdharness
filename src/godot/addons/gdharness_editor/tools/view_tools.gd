@@ -38,24 +38,10 @@ func _on_main_screen_changed(screen_name: String) -> void:
 ## server names. The editor is left showing the scene and the screen it showed before.
 func capture_editor_view(args: Dictionary) -> Dictionary:
 	var output_path: String = str(args.get("output_path", ""))
-	if output_path.is_empty():
-		return { "ok": false, "error": "output_path required" }
-	if DisplayServer.get_name() == HEADLESS_DISPLAY:
-		return {
-			"ok": false,
-			"error":
-			(
-				"This editor runs headless, so it draws nothing to capture. Use a visible "
-				+ "editor, or a hidden one on Windows."
-			),
-		}
 	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
-	if not ResourceLoader.exists(scene_path, "PackedScene"):
-		return {
-			"ok": false,
-			"error":
-			GdhFileWalk.new().with_nearest_files("Scene not found: " + scene_path, scene_path),
-		}
+	var unavailable: Dictionary = _capture_unavailable(output_path, scene_path)
+	if not unavailable.is_empty():
+		return unavailable
 	var view: String = str(args.get("view", ""))
 	var shown: Node = EditorInterface.get_edited_scene_root()
 	var previous: String = shown.scene_file_path if shown != null else ""
@@ -81,6 +67,41 @@ func capture_editor_view(args: Dictionary) -> Dictionary:
 	var image: Image = viewport.get_texture().get_image()
 	var unsaved: bool = GdhSceneFile.unsaved(scene_path)
 
+	_restore_editor(scene_path, was_open, previous, screen_before, view)
+	capturing = false
+
+	return _save_capture(image, args, output_path, [scene_path, view], unsaved)
+
+
+## The refusal when no capture of [param scene_path] can be saved at [param output_path], or an
+## empty answer.
+static func _capture_unavailable(output_path: String, scene_path: String) -> Dictionary:
+	if output_path.is_empty():
+		return { "ok": false, "error": "output_path required" }
+	if DisplayServer.get_name() == HEADLESS_DISPLAY:
+		return {
+			"ok": false,
+			"error":
+			(
+				"This editor runs headless, so it draws nothing to capture. Use a visible "
+				+ "editor, or a hidden one on Windows."
+			),
+		}
+	if not ResourceLoader.exists(scene_path, "PackedScene"):
+		return {
+			"ok": false,
+			"error":
+			GdhFileWalk.new().with_nearest_files("Scene not found: " + scene_path, scene_path),
+		}
+	return {}
+
+
+## Leaves the editor as the capture of [param scene_path] found it: the scene closed unless it was
+## [param was_open], [param previous] shown again, and the screen [param screen_before] back, unless
+## it is the one [param view] needs.
+static func _restore_editor(
+	scene_path: String, was_open: bool, previous: String, screen_before: String, view: String
+) -> void:
 	if not was_open:
 		var closing: Error = EditorInterface.close_scene()
 		if closing != OK:
@@ -91,10 +112,19 @@ func capture_editor_view(args: Dictionary) -> Dictionary:
 		EditorInterface.open_scene_from_path(previous)
 	if not screen_before.is_empty() and screen_before != ("3D" if view == "3d" else "2D"):
 		EditorInterface.set_main_screen_editor(screen_before)
-	capturing = false
 
+
+## Scales [param image] to the width and height of [param args], saves it at [param output_path] and
+## answers where it went. [param shown] holds the scene path and the view that were captured, and
+## [param unsaved] whether the editor held edits to the scene.
+static func _save_capture(
+	image: Image, args: Dictionary, output_path: String, shown: Array[String], unsaved: bool
+) -> Dictionary:
 	if image == null or image.is_empty():
-		return { "ok": false, "error": "The editor's %s view held no picture." % view.to_upper() }
+		return {
+			"ok": false,
+			"error": "The editor's %s view held no picture." % shown[1].to_upper(),
+		}
 	var drawn: Vector2i = image.get_size()
 	var target: Vector2i = GdhPictures.scaled_to(
 		drawn, GdhRead.as_int(args.get("width", 0)), GdhRead.as_int(args.get("height", 0))
@@ -116,8 +146,8 @@ func capture_editor_view(args: Dictionary) -> Dictionary:
 	if answer.get("type", "") == "error":
 		return { "ok": false, "error": str(answer.get("message", "")) }
 	answer["ok"] = true
-	answer["scenePath"] = scene_path
-	answer["view"] = view
+	answer["scenePath"] = shown[0]
+	answer["view"] = shown[1]
 	if target != drawn:
 		answer["drawnAt"] = { "width": drawn.x, "height": drawn.y }
 	if unsaved:

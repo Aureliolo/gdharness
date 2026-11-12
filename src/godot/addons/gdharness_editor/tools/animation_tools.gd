@@ -284,20 +284,10 @@ func create_animation(args: Dictionary) -> Dictionary:
 	var player_node_path: String = str(args.get("playerNodePath", "."))
 	var animation_name: String = str(args.get("animationName", ""))
 	var loop_mode_name: String = str(args.get("loopMode", "none"))
-
-	if scene_path.strip_edges() == "res://":
-		return { "ok": false, "error": "Missing scenePath" }
-	if animation_name.strip_edges().is_empty():
-		return { "ok": false, "error": "Missing animationName" }
-	var named: String = _name_refusal(animation_name)
-	if not named.is_empty():
-		return { "ok": false, "error": named }
 	var loop_modes: Dictionary = LOOP_MODES
-	if not loop_modes.has(loop_mode_name):
-		return { "ok": false, "error": "Unsupported loopMode: " + loop_mode_name }
-	var timing: String = _timing_refusal(args)
-	if not timing.is_empty():
-		return { "ok": false, "error": timing }
+	var refusal: String = _create_refusal(args, scene_path, animation_name, loop_mode_name)
+	if not refusal.is_empty():
+		return { "ok": false, "error": refusal }
 
 	var opened: Array = _open_at(scene_path, player_node_path, "AnimationPlayer")
 	var scene: GdhSceneFile = opened[0]
@@ -352,6 +342,24 @@ func create_animation(args: Dictionary) -> Dictionary:
 		)
 	var files: Dictionary = homes[1]
 	return _finish(scene, check, files, answer)
+
+
+## Why create_animation refuses [param args] before opening the scene, or "". The scene path, the
+## name, the loop mode and the timing are checked in that order.
+static func _create_refusal(
+	args: Dictionary, scene_path: String, animation_name: String, loop_mode_name: String
+) -> String:
+	if scene_path.strip_edges() == "res://":
+		return "Missing scenePath"
+	if animation_name.strip_edges().is_empty():
+		return "Missing animationName"
+	var named: String = _name_refusal(animation_name)
+	if not named.is_empty():
+		return named
+	var loop_modes: Dictionary = LOOP_MODES
+	if not loop_modes.has(loop_mode_name):
+		return "Unsupported loopMode: " + loop_mode_name
+	return _timing_refusal(args)
 
 
 ## Why [param animation_name] cannot name an animation, or "". The player refuses : , and [ in an
@@ -525,6 +533,48 @@ func set_animation(args: Dictionary) -> Dictionary:
 	return _finish(scene, check, files, answer)
 
 
+## Which of the arguments rename_animation needs is missing, as the refusal says it, or "".
+static func _missing_rename_argument(
+	scene_path: String, animation_name: String, new_name: String
+) -> String:
+	if scene_path.strip_edges() == "res://":
+		return "Missing scenePath"
+	if animation_name.strip_edges().is_empty():
+		return "Missing animationName"
+	if new_name.is_empty():
+		return "Missing newName"
+	return ""
+
+
+## Points every state of [param states] at [param new_full], and answers the path of each one that
+## followed, as [method GdhAnimationReads.states_playing] gives them.
+static func _follow_rename(states: Array, new_full: String) -> Array:
+	var followed: Array = []
+	for state: Array in states:
+		var plays: AnimationNodeAnimation = state[0]
+		plays.animation = StringName(new_full)
+		followed.append(state[1])
+	return followed
+
+
+## Why [param new_name], what rename_animation was given once its library's prefix is dropped,
+## cannot
+## name an animation in the library [param library_name], or "".
+static func _new_name_refusal(new_name: String, library_name: String) -> String:
+	if new_name.contains("/"):
+		return (
+			(
+				"rename keeps an animation in its library (%s), so newName is its name there, "
+				+ "with no library before a slash."
+			)
+			% ("the default one" if library_name.is_empty() else library_name)
+		)
+	for forbidden: String in [":", ",", "["]:
+		if new_name.contains(forbidden):
+			return "An animation's name cannot hold : , or [, and %s does." % new_name
+	return ""
+
+
 ## Renames an animation within its library, taking along the player's autoplay and every state of
 ## the scene's trees that plays it, since a state naming an animation the player lacks plays nothing
 ## and says so only in the editor's log.
@@ -533,36 +583,18 @@ func rename_animation(args: Dictionary) -> Dictionary:
 	var player_node_path: String = str(args.get("playerNodePath", "."))
 	var animation_name: String = str(args.get("animationName", ""))
 	var new_name: String = str(args.get("newName", "")).strip_edges()
-	if scene_path.strip_edges() == "res://":
-		return { "ok": false, "error": "Missing scenePath" }
-	if animation_name.strip_edges().is_empty():
-		return { "ok": false, "error": "Missing animationName" }
-	if new_name.is_empty():
-		return { "ok": false, "error": "Missing newName" }
+	var missing: String = _missing_rename_argument(scene_path, animation_name, new_name)
+	if not missing.is_empty():
+		return { "ok": false, "error": missing }
 	var library_name: String = (
 		animation_name.get_slice("/", 0) if animation_name.contains("/") else ""
 	)
 	var prefix: String = "" if library_name.is_empty() else library_name + "/"
 	if not prefix.is_empty() and new_name.begins_with(prefix):
 		new_name = new_name.trim_prefix(prefix)
-	if new_name.contains("/"):
-		return {
-			"ok": false,
-			"error":
-			(
-				(
-					"rename keeps an animation in its library (%s), so newName is its name there, "
-					+ "with no library before a slash."
-				)
-				% ("the default one" if library_name.is_empty() else library_name)
-			),
-		}
-	for forbidden: String in [":", ",", "["]:
-		if new_name.contains(forbidden):
-			return {
-				"ok": false,
-				"error": "An animation's name cannot hold : , or [, and %s does." % new_name,
-			}
+	var misnamed: String = _new_name_refusal(new_name, library_name)
+	if not misnamed.is_empty():
+		return { "ok": false, "error": misnamed }
 	var new_full: String = prefix + new_name
 
 	var found: Array = _animation_at(scene_path, player_node_path, animation_name)
@@ -595,11 +627,7 @@ func rename_animation(args: Dictionary) -> Dictionary:
 	var answer: Dictionary = { "ok": true, "animationName": new_full, "was": animation_name }
 	if autoplayed:
 		answer["autoplay"] = new_full
-	var followed: Array = []
-	for state: Array in states:
-		var plays: AnimationNodeAnimation = state[0]
-		plays.animation = StringName(new_full)
-		followed.append(state[1])
+	var followed: Array = _follow_rename(states, new_full)
 	if not followed.is_empty():
 		answer["statesFollowed"] = followed
 

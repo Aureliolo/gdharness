@@ -415,62 +415,98 @@ static func settle_saved(
 	for attempt: int in 2:
 		var after: String = FileAccess.get_file_as_string(path)
 		var by_id: Dictionary = embedded_in(values, {})
-		var embedded: Array[Array] = []
 		# The properties to take out of the save, by the section setting them.
 		var unwritten: Dictionary = {}
-		for found: Array in embedded_changes(before, after, reached_ids):
-			var holder: Resource = by_id.get(found[0])
-			if (
-				not carried.has(found[0])
-				or (holder != null and not is_same(holder, carried[found[0]]))
-			):
-				continue
-			var name: String = str(found[1])
-			if not found[2] and holder != null and left_out_by_editor(holder, name):
-				var in_section: Dictionary = unwritten.get_or_add("sub:" + str(found[0]), {})
-				in_section[name] = true
-			elif holder != null and _unchanged(holder, found.slice(1)):
-				continue
-			elif found[2] or holder == null or not at_default(holder, name):
-				embedded.append(found)
+		var embedded: Array[Array] = _embedded_to_put_back(
+			before, after, reached_ids, [by_id, carried], unwritten
+		)
 		var top: Array[Array] = []
 		if main != null:
-			for found: Array in main_changes(before, after, asked):
-				var name: String = str(found[0])
-				if not found[1] and left_out_by_editor(main, name):
-					var in_main: Dictionary = unwritten.get_or_add("resource", {})
-					in_main[name] = true
-				elif _unchanged(main, found):
-					continue
-				elif found[1] or not at_default(main, name):
-					top.append(found)
+			top = _main_to_put_back(main, before, after, asked, unwritten)
 		if embedded.is_empty() and top.is_empty():
 			return _leave_out(path, after, unwritten)
 		if attempt == 1:
 			if not embedded.is_empty():
 				return unasked("The embedded resource " + str(embedded[0][0]), str(embedded[0][1]))
 			return unasked(path, str(top[0][0]))
-		for found: Array in embedded:
-			var id: String = found[0]
-			var name: String = found[1]
-			var was_set: bool = found[2]
-			var held: String = found[3]
-			var resource: Resource = by_id.get(id)
-			var refused: String = "it was not found to be put back."
-			if resource != null:
-				refused = put_back_value(resource, name, was_set, held)
-			if not refused.is_empty():
-				return unasked("The embedded resource " + id, name, refused)
-		for found: Array in top:
-			var name: String = found[0]
-			var was_set: bool = found[1]
-			var held: String = found[2]
-			var refused: String = put_back_value(main, name, was_set, held)
-			if not refused.is_empty():
-				return unasked(path, name, refused)
+		var refused: String = _put_back_all(path, main, by_id, embedded, top)
+		if not refused.is_empty():
+			return refused
 		var saving: Error = saved.resave.call()
 		if saving != OK:
 			return "Failed to save %s again: %s." % [path, error_string(saving)]
+	return ""
+
+
+## The changes a script that is not a tool made to the embedded resources, which [param lookup]
+## holds by id as its first entry and the [param carried] resources as its second, that are still to
+## be put back. A property the editor leaves out is added to [param unwritten] instead.
+static func _embedded_to_put_back(
+	before: String, after: String, reached_ids: Dictionary, lookup: Array[Dictionary],
+	unwritten: Dictionary
+) -> Array[Array]:
+	var by_id: Dictionary = lookup[0]
+	var carried: Dictionary = lookup[1]
+	var embedded: Array[Array] = []
+	for found: Array in embedded_changes(before, after, reached_ids):
+		var holder: Resource = by_id.get(found[0])
+		if (
+			not carried.has(found[0])
+			or (holder != null and not is_same(holder, carried[found[0]]))
+		):
+			continue
+		var name: String = str(found[1])
+		if not found[2] and holder != null and left_out_by_editor(holder, name):
+			var in_section: Dictionary = unwritten.get_or_add("sub:" + str(found[0]), {})
+			in_section[name] = true
+		elif holder != null and _unchanged(holder, found.slice(1)):
+			continue
+		elif found[2] or holder == null or not at_default(holder, name):
+			embedded.append(found)
+	return embedded
+
+
+## The changes a script that is not a tool made to the main resource [param main] that are still to
+## be put back. A property the editor leaves out is added to [param unwritten] instead.
+static func _main_to_put_back(
+	main: Object, before: String, after: String, asked: Dictionary, unwritten: Dictionary
+) -> Array[Array]:
+	var top: Array[Array] = []
+	for found: Array in main_changes(before, after, asked):
+		var name: String = str(found[0])
+		if not found[1] and left_out_by_editor(main, name):
+			var in_main: Dictionary = unwritten.get_or_add("resource", {})
+			in_main[name] = true
+		elif _unchanged(main, found):
+			continue
+		elif found[1] or not at_default(main, name):
+			top.append(found)
+	return top
+
+
+## Puts back the [param embedded] and [param top] changes, found by id in [param by_id] and in
+## [param main]. Answers "" or the refusal of the first one that cannot be put back.
+static func _put_back_all(
+	path: String, main: Object, by_id: Dictionary, embedded: Array[Array], top: Array[Array]
+) -> String:
+	for found: Array in embedded:
+		var id: String = found[0]
+		var name: String = found[1]
+		var was_set: bool = found[2]
+		var held: String = found[3]
+		var resource: Resource = by_id.get(id)
+		var refused: String = "it was not found to be put back."
+		if resource != null:
+			refused = put_back_value(resource, name, was_set, held)
+		if not refused.is_empty():
+			return unasked("The embedded resource " + id, name, refused)
+	for found: Array in top:
+		var name: String = found[0]
+		var was_set: bool = found[1]
+		var held: String = found[2]
+		var refused: String = put_back_value(main, name, was_set, held)
+		if not refused.is_empty():
+			return unasked(path, name, refused)
 	return ""
 
 

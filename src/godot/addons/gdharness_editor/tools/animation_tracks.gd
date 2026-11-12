@@ -35,18 +35,10 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 	var player_node_path: String = str(args.get("playerNodePath", "."))
 	var animation_name: String = str(args.get("animationName", ""))
 	var given_track: Variant = args.get("track", {})
-
-	if scene_path.strip_edges() == "res://":
-		return { "ok": false, "error": "Missing scenePath" }
-	if animation_name.strip_edges().is_empty():
-		return { "ok": false, "error": "Missing animationName" }
 	var track: Dictionary = given_track if given_track is Dictionary else {}
-	if track.is_empty():
-		return { "ok": false, "error": "Missing track" }
-	# The schema leaves keyframes out of what track requires, since remove_track finds a track
-	# without them.
-	if not track.has("keyframes"):
-		return { "ok": false, "error": "Missing track.keyframes" }
+	var missing: String = _missing_track_argument(scene_path, animation_name, track)
+	if not missing.is_empty():
+		return { "ok": false, "error": missing }
 	var keyed: Array = _keyframes(track)
 	if not keyed[0]:
 		return { "ok": false, "error": keyed[1] }
@@ -65,30 +57,11 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 	if not homes[0]:
 		return scene.refuse(str(homes[1]))
 
-	var target_path: String = str(track.get("nodePath", ""))
-	# Godot writes a property track's path as "Sprite2D:position", the node and then the property.
-	var colon: int = target_path.find(":")
-	if colon >= 0:
-		var after: String = target_path.substr(colon + 1)
-		target_path = target_path.substr(0, colon)
-		var given: String = str(track.get("property", ""))
-		if str(track.get("type", "")) != "property":
-			return scene.refuse(
-				"track.nodePath names %s after its colon, and only a property track has a property."
-				% after
-			)
-		if not given.is_empty() and given != after:
-			return scene.refuse(
-				(
-					"track.nodePath names the property %s after its colon and track.property "
-					+ "names %s. Give one."
-				)
-				% [after, given]
-			)
-		track = track.duplicate()
-		track["property"] = after
-	if target_path.is_empty():
-		target_path = "."
+	var split: Array = _split_node_path(track)
+	if not str(split[0]).is_empty():
+		return scene.refuse(str(split[0]))
+	var target_path: String = split[1]
+	track = split[2]
 	var target: Node = _animated(player, target_path)
 	if target == null:
 		return (
@@ -120,11 +93,87 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 		if loaded.get_track_count() <= track_idx or loaded.track_get_key_count(track_idx) != keys:
 			return "the track would not be in %s when the scene loads." % animation_name
 		return ""
+	var answer: Dictionary = _track_answer(anim, track, keyframes, built)
+	var past: String = _past_sentence(
+		anim, animation_name, _written_past_the_end(anim, track_idx, keyframes)
+	)
+	if not past.is_empty():
+		answer["pastLength"] = past
+	var files: Dictionary = homes[1]
+	return _finish(scene, check, files, answer)
+
+
+## Which argument add_animation_track needs is missing, as the refusal says it, or "".
+static func _missing_track_argument(
+	scene_path: String, animation_name: String, track: Dictionary
+) -> String:
+	if scene_path.strip_edges() == "res://":
+		return "Missing scenePath"
+	if animation_name.strip_edges().is_empty():
+		return "Missing animationName"
+	if track.is_empty():
+		return "Missing track"
+	# The schema leaves keyframes out of what track requires, since remove_track finds a track
+	# without them.
+	if not track.has("keyframes"):
+		return "Missing track.keyframes"
+	return ""
+
+
+## Splits the node path of [param track] at its colon. Answers the refusal or "", the node path and
+## the track, which holds the property the colon named. The node path is "." when the track names
+## none.
+static func _split_node_path(track: Dictionary) -> Array:
+	var target_path: String = str(track.get("nodePath", ""))
+	# Godot writes a property track's path as "Sprite2D:position", the node and then the property.
+	var colon: int = target_path.find(":")
+	if colon >= 0:
+		var after: String = target_path.substr(colon + 1)
+		target_path = target_path.substr(0, colon)
+		var given: String = str(track.get("property", ""))
+		if str(track.get("type", "")) != "property":
+			return [
+				(
+					(
+						"track.nodePath names %s after its colon, "
+						+ "and only a property track has a property."
+					)
+					% after
+				),
+				target_path,
+				track,
+			]
+		if not given.is_empty() and given != after:
+			return [
+				(
+					(
+						"track.nodePath names the property %s after its colon and track.property "
+						+ "names %s. Give one."
+					)
+					% [after, given]
+				),
+				target_path,
+				track,
+			]
+		track = track.duplicate()
+		track["property"] = after
+	if target_path.is_empty():
+		target_path = "."
+	return ["", target_path, track]
+
+
+## The answer of add_animation_track for [param track], whose [param keyframes] went into [param
+## anim]
+## as [param built], what [method _add_track] answered.
+static func _track_answer(
+	anim: Animation, track: Dictionary, keyframes: Array, built: Array
+) -> Dictionary:
+	var track_idx: int = built[0]
 	var answer: Dictionary = {
 		"ok": true,
 		"trackType": str(track.get("type", "")),
 		"trackIndex": track_idx,
-		"keys": keys,
+		"keys": anim.track_get_key_count(track_idx),
 		"keysAdded": keyframes.size(),
 	}
 	if anim.track_get_type(track_idx) == Animation.TYPE_VALUE:
@@ -146,8 +195,16 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 			answer["argumentsFit"] = str(built[4]).is_empty()
 	if not str(built[4]).is_empty():
 		answer["misfit"] = built[4]
-	# Only the keys this call wrote: a key left past the end by an earlier call was named again on
-	# every later one, as though the key just written were past it.
+	return answer
+
+
+## What this call wrote at [param track_idx] of [param anim] from [param keyframes] past the end of
+## the animation. Only the keys this call wrote: a key left past the end by an earlier call was
+## named
+## again on every later one, as though the key just written were past it.
+static func _written_past_the_end(
+	anim: Animation, track_idx: int, keyframes: Array
+) -> PackedStringArray:
 	var written: PackedStringArray = []
 	for keyframe: Dictionary in keyframes:
 		var time: float = GdhRead.as_float(keyframe["time"])
@@ -155,11 +212,7 @@ func add_animation_track(args: Dictionary) -> Dictionary:
 			var _added: bool = written.append(
 				"%s at %s s" % [str(anim.track_get_path(track_idx)), _seconds(time)]
 			)
-	var past: String = _past_sentence(anim, animation_name, written)
-	if not past.is_empty():
-		answer["pastLength"] = past
-	var files: Dictionary = homes[1]
-	return _finish(scene, check, files, answer)
+	return written
 
 
 ## Adds [param track] to [param anim] of [param player], on the node at [param target_path] from the
@@ -182,126 +235,175 @@ func _add_track(
 	replacing: bool
 ) -> Array:
 	var target: Node = _animated(player, target_path)
-	var track_type: String = str(track.get("type", ""))
-	var keys: Array = []
-	var method_found: Variant = null
-	var misfit: String = ""
-	var kind: Animation.TrackType = Animation.TYPE_VALUE
-	var path: NodePath = NodePath(target_path)
-	var update: int = -1
-	var interpolation: int = -1
-	if track_type == "property":
-		var prop_name: String = str(track.get("property", ""))
-		if prop_name.is_empty():
-			return _not_added("track.property is required for property track")
-		# The server has refused any name but these.
-		var named: Variant = GdhAnimationReads.UPDATE_MODE_NAMES.find_key(
-			str(track.get("update", ""))
-		)
-		if named != null:
-			update = GdhRead.as_int(named)
-		var blended: Variant = GdhAnimationReads.INTERPOLATION_NAMES.find_key(
-			str(track.get("interpolation", ""))
-		)
-		if blended != null:
-			interpolation = GdhRead.as_int(blended)
-		var values: Array = _key_values(target, prop_name, keyframes)
-		if not values[0]:
-			return _not_added(str(values[1]))
-		keys = values[1]
-		path = NodePath(target_path + ":" + prop_name)
-	elif track_type == "method":
-		var method_name: String = str(track.get("method", ""))
-		if method_name.is_empty():
-			return _not_added("track.method is required for method track")
-		for index: int in keyframes.size():
-			var keyframe: Dictionary = keyframes[index]
-			if keyframe.has("transition"):
-				return _not_added(
-					"keyframes[%d].transition is for property tracks. A method key is not eased."
-					% index
-				)
-			var given: Variant = keyframe.get("args", [])
-			if not given is Array:
-				return _not_added("keyframes[%d].args must be a list." % index)
-			var raw: Array = given
-			var arguments: Array = _fitted(target, method_name, _parse_method_args(raw))
-			keys.append({ "method": method_name, "args": arguments })
-			if misfit.is_empty():
-				misfit = _key_misfit(target, method_name, arguments, index)
-		method_found = target.has_method(method_name)
-		kind = Animation.TYPE_METHOD
-		# A method key is called at its time and never blended, so neither has anything to set.
-		for blending: String in ["interpolation", "loopWrap"]:
-			if track.has(blending):
-				return _not_added(
-					"track.%s is for property tracks. A method key is not blended." % blending
-				)
-	else:
-		return _not_added(
-			(
-				(
-					"add_track makes property and method tracks, and track.type is %s. "
-					+ "remove_track takes any."
-				)
-				% track_type
-			)
-		)
+	var plan: GdhTrackPlan = _plan_track(target, track, target_path, keyframes)
+	if not plan.refusal.is_empty():
+		return _not_added(plan.refusal)
 
-	var track_idx: int = anim.find_track(path, kind)
+	var track_idx: int = anim.find_track(plan.path, plan.kind)
 	var existing: bool = track_idx >= 0
 	var replaced: Array[Dictionary] = []
 	if existing:
-		# Checked before any key goes in, since track_insert_key replaces a key at the same time
-		# without a word, and a refusal partway would leave the editor's scene half changed.
-		var values: GdhSerialisation = GdhSerialisation.new()
-		for index: int in keyframes.size():
-			var keyframe: Dictionary = keyframes[index]
-			var time: float = GdhRead.as_float(keyframe["time"])
-			var key: int = anim.track_find_key(track_idx, time, Animation.FIND_MODE_APPROX)
-			if key < 0:
-				continue
-			if not replacing:
-				return _not_added(
-					(
-						(
-							"Track %d already animates %s and has a key at %s s, which "
-							+ "keyframes[%d] would replace. Nothing was written. replaceKeys true "
-							+ "replaces it."
-						)
-						% [track_idx, str(path), _seconds(time), index]
-					)
-				)
-			# A method key's value is its call, {"method": ..., "args": [...]}. The time is as
-			# asked: the key's own, read back from a scene's 32-bit times, puts 0.1 at
-			# 0.100000001490116.
-			(
-				replaced
-				. append(
-					{
-						"time": time,
-						"was": values.serialize_value(anim.track_get_key_value(track_idx, key)),
-					}
-				)
-			)
+		var checked: Array = _replaced_keys(anim, track_idx, plan.path, keyframes, replacing)
+		if not str(checked[0]).is_empty():
+			return _not_added(str(checked[0]))
+		replaced = checked[1]
 	else:
-		track_idx = anim.add_track(kind)
-		anim.track_set_path(track_idx, path)
-		if kind == Animation.TYPE_VALUE:
+		track_idx = anim.add_track(plan.kind)
+		anim.track_set_path(track_idx, plan.path)
+		if plan.kind == Animation.TYPE_VALUE:
 			_as_the_editor_makes(anim, track_idx, player, target)
-	if update >= 0:
-		anim.value_track_set_update_mode(track_idx, update as Animation.UpdateMode)
-	if interpolation >= 0:
-		anim.track_set_interpolation_type(track_idx, interpolation as Animation.InterpolationType)
+	var failed: String = _insert_keys(anim, track_idx, plan, track, keyframes)
+	if not failed.is_empty():
+		return _not_added(failed)
+	return [track_idx, "", plan.method_found, existing, plan.misfit, replaced]
+
+
+## Plans [param track] on [param target] by its type, with [param keyframes].
+func _plan_track(
+	target: Node, track: Dictionary, target_path: String, keyframes: Array
+) -> GdhTrackPlan:
+	var plan: GdhTrackPlan = GdhTrackPlan.new()
+	plan.path = NodePath(target_path)
+	var track_type: String = str(track.get("type", ""))
+	if track_type == "property":
+		_plan_property(plan, target, track, target_path, keyframes)
+	elif track_type == "method":
+		_plan_method(plan, target, track, keyframes)
+	else:
+		plan.refusal = (
+			(
+				"add_track makes property and method tracks, and track.type is %s. "
+				+ "remove_track takes any."
+			)
+			% track_type
+		)
+	return plan
+
+
+## Fills [param plan] for a property track of [param track] on [param target].
+func _plan_property(
+	plan: GdhTrackPlan, target: Node, track: Dictionary, target_path: String, keyframes: Array
+) -> void:
+	var prop_name: String = str(track.get("property", ""))
+	if prop_name.is_empty():
+		plan.refusal = "track.property is required for property track"
+		return
+	# The server has refused any name but these.
+	var named: Variant = GdhAnimationReads.UPDATE_MODE_NAMES.find_key(str(track.get("update", "")))
+	if named != null:
+		plan.update = GdhRead.as_int(named)
+	var blended: Variant = GdhAnimationReads.INTERPOLATION_NAMES.find_key(
+		str(track.get("interpolation", ""))
+	)
+	if blended != null:
+		plan.interpolation = GdhRead.as_int(blended)
+	var values: Array = _key_values(target, prop_name, keyframes)
+	if not values[0]:
+		plan.refusal = str(values[1])
+		return
+	plan.keys = values[1]
+	plan.path = NodePath(target_path + ":" + prop_name)
+
+
+## Fills [param plan] for a method track of [param track] on [param target].
+func _plan_method(
+	plan: GdhTrackPlan, target: Node, track: Dictionary, keyframes: Array
+) -> void:
+	var method_name: String = str(track.get("method", ""))
+	if method_name.is_empty():
+		plan.refusal = "track.method is required for method track"
+		return
+	for index: int in keyframes.size():
+		var keyframe: Dictionary = keyframes[index]
+		if keyframe.has("transition"):
+			plan.refusal = (
+				"keyframes[%d].transition is for property tracks. A method key is not eased."
+				% index
+			)
+			return
+		var given: Variant = keyframe.get("args", [])
+		if not given is Array:
+			plan.refusal = "keyframes[%d].args must be a list." % index
+			return
+		var raw: Array = given
+		var arguments: Array = _fitted(target, method_name, _parse_method_args(raw))
+		plan.keys.append({ "method": method_name, "args": arguments })
+		if plan.misfit.is_empty():
+			plan.misfit = _key_misfit(target, method_name, arguments, index)
+	plan.method_found = target.has_method(method_name)
+	plan.kind = Animation.TYPE_METHOD
+	# A method key is called at its time and never blended, so neither has anything to set.
+	for blending: String in ["interpolation", "loopWrap"]:
+		if track.has(blending):
+			plan.refusal = (
+				"track.%s is for property tracks. A method key is not blended." % blending
+			)
+			return
+
+
+## The keys [param keyframes] would replace in the track [param track_idx] of [param anim], at
+## [param path], answered as the refusal or "" and the keys replaced as their time and what they
+## held.
+## Checked before any key goes in, since track_insert_key replaces a key at the same time without a
+## word, and a refusal partway would leave the editor's scene half changed.
+func _replaced_keys(
+	anim: Animation, track_idx: int, path: NodePath, keyframes: Array, replacing: bool
+) -> Array:
+	var replaced: Array[Dictionary] = []
+	var values: GdhSerialisation = GdhSerialisation.new()
+	for index: int in keyframes.size():
+		var keyframe: Dictionary = keyframes[index]
+		var time: float = GdhRead.as_float(keyframe["time"])
+		var key: int = anim.track_find_key(track_idx, time, Animation.FIND_MODE_APPROX)
+		if key < 0:
+			continue
+		if not replacing:
+			return [
+				(
+					(
+						"Track %d already animates %s and has a key at %s s, which "
+						+ "keyframes[%d] would replace. Nothing was written. replaceKeys true "
+						+ "replaces it."
+					)
+					% [track_idx, str(path), _seconds(time), index]
+				),
+				replaced,
+			]
+		# A method key's value is its call, {"method": ..., "args": [...]}. The time is as
+		# asked: the key's own, read back from a scene's 32-bit times, puts 0.1 at
+		# 0.100000001490116.
+		(
+			replaced
+			. append(
+				{
+					"time": time,
+					"was": values.serialize_value(anim.track_get_key_value(track_idx, key)),
+				}
+			)
+		)
+	return ["", replaced]
+
+
+## Sets [param plan]'s update mode, interpolation and loop wrap on the track [param track_idx] of
+## [param anim] and inserts [param keyframes]. Answers "" or why a key could not go in.
+func _insert_keys(
+	anim: Animation, track_idx: int, plan: GdhTrackPlan, track: Dictionary, keyframes: Array
+) -> String:
+	if plan.update >= 0:
+		anim.value_track_set_update_mode(track_idx, plan.update as Animation.UpdateMode)
+	if plan.interpolation >= 0:
+		anim.track_set_interpolation_type(
+			track_idx, plan.interpolation as Animation.InterpolationType
+		)
 	if track.has("loopWrap"):
 		anim.track_set_interpolation_loop_wrap(track_idx, GdhRead.as_bool(track["loopWrap"]))
 	for index: int in keyframes.size():
 		var keyframe: Dictionary = keyframes[index]
 		var eased: float = GdhRead.as_float(keyframe.get("transition", 1.0))
 		var time: float = GdhRead.as_float(keyframe["time"])
-		if anim.track_insert_key(track_idx, time, keys[index], eased) < 0:
-			return _not_added("Keyframe %d could not be inserted." % index)
-	return [track_idx, "", method_found, existing, misfit, replaced]
+		if anim.track_insert_key(track_idx, time, plan.keys[index], eased) < 0:
+			return "Keyframe %d could not be inserted." % index
+	return ""
 
 
 ## Sets the new property track [param index] up as the editor sets up a track it makes: as the
@@ -439,6 +541,89 @@ static func _key_misfit(target: Node, method: String, arguments: Array, index: i
 	return ""
 
 
+## Which argument remove_animation_track needs is missing or unsupported, as the refusal says it, or
+## "".
+static func _missing_removal_argument(
+	scene_path: String, animation_name: String, track: Dictionary
+) -> String:
+	if scene_path.strip_edges() == "res://":
+		return "Missing scenePath"
+	if animation_name.strip_edges().is_empty():
+		return "Missing animationName"
+	if track.is_empty():
+		return "Missing track"
+	var track_type: String = str(track.get("type", ""))
+	if not track_type in GdhAnimationReads.TRACK_TYPE_NAMES.values():
+		return "Unsupported track.type: " + track_type
+	return ""
+
+
+## The node path of a track as the refusals name it, with its [param property] after a colon.
+static func _track_on(node_path: String, property: String) -> String:
+	if property.is_empty():
+		return node_path
+	return "%s:%s" % [node_path, property]
+
+
+## The tracks of [param anim] whose type, node path and property are [param shape], as their
+## indexes,
+## and every track of it as its path and type.
+static func _tracks_of_shape(anim: Animation, shape: Array) -> Array:
+	var matching: Array[int] = []
+	var held: PackedStringArray = []
+	for index: int in anim.get_track_count():
+		var of: Array = _track_shape(anim, index)
+		if of == shape:
+			matching.append(index)
+		var _listed: bool = held.append("%s (%s)" % [str(anim.track_get_path(index)), of[0]])
+	return [matching, held]
+
+
+## Why [param animation_name] has no track of [param shape], with the tracks it has in [param held].
+static func _no_such_track(
+	animation_name: String, shape: Array, held: PackedStringArray
+) -> String:
+	var said: String = (
+		"%s has no %s track on %s"
+		% [animation_name, str(shape[0]), _track_on(str(shape[1]), str(shape[2]))]
+	)
+	if held.is_empty():
+		return "%s. It has no tracks." % said
+	return "%s. Its tracks are %s." % [said, ", ".join(held)]
+
+
+## Removes the keys of [param calling], as [method _keys_calling] gives them, from [param anim], and
+## the tracks that are left with none. Answers the keys and the tracks removed.
+static func _remove_calling(anim: Animation, calling: Array) -> Array[int]:
+	var keys: int = 0
+	var tracks_removed: int = 0
+	calling.reverse()
+	for pair: Array in calling:
+		var index: int = pair[0]
+		if pair[1] < 0:
+			keys += anim.track_get_key_count(index)
+			anim.remove_track(index)
+			tracks_removed += 1
+			continue
+		var key: int = pair[1]
+		anim.track_remove_key(index, key)
+		keys += 1
+		if anim.track_get_key_count(index) == 0:
+			anim.remove_track(index)
+			tracks_removed += 1
+	return [keys, tracks_removed]
+
+
+## The track remove_animation_track answers it took out, by [param shape] and [param method].
+static func _removed_track(shape: Array, method: String) -> Dictionary:
+	var removed: Dictionary = { "type": shape[0], "nodePath": shape[1] }
+	if not str(shape[2]).is_empty():
+		removed["property"] = shape[2]
+	if not method.is_empty():
+		removed["method"] = method
+	return removed
+
+
 ## Takes out the track [code]track[/code] names by its type, nodePath and property as read answers
 ## them, so a track read back can be passed as it stands. Its keyframes are not looked at. Every
 ## track of that shape goes, since the editor can make two for one path and both play. A method
@@ -449,16 +634,11 @@ func remove_animation_track(args: Dictionary) -> Dictionary:
 	var player_node_path: String = str(args.get("playerNodePath", "."))
 	var animation_name: String = str(args.get("animationName", ""))
 	var given_track: Variant = args.get("track", {})
-	if scene_path.strip_edges() == "res://":
-		return { "ok": false, "error": "Missing scenePath" }
-	if animation_name.strip_edges().is_empty():
-		return { "ok": false, "error": "Missing animationName" }
 	var track: Dictionary = given_track if given_track is Dictionary else {}
-	if track.is_empty():
-		return { "ok": false, "error": "Missing track" }
+	var missing: String = _missing_removal_argument(scene_path, animation_name, track)
+	if not missing.is_empty():
+		return { "ok": false, "error": missing }
 	var track_type: String = str(track.get("type", ""))
-	if not track_type in GdhAnimationReads.TRACK_TYPE_NAMES.values():
-		return { "ok": false, "error": "Unsupported track.type: " + track_type }
 	var node_path: String = str(track.get("nodePath", ""))
 	var property: String = str(track.get("property", ""))
 	var shape: Array = [track_type, node_path, property]
@@ -479,25 +659,11 @@ func remove_animation_track(args: Dictionary) -> Dictionary:
 	)
 	if not homes[0]:
 		return scene.refuse(str(homes[1]))
-	var matching: Array[int] = []
-	var held: PackedStringArray = []
-	for index: int in anim.get_track_count():
-		var of: Array = _track_shape(anim, index)
-		if of == shape:
-			matching.append(index)
-		var _listed: bool = held.append("%s (%s)" % [str(anim.track_get_path(index)), of[0]])
+	var tracks: Array = _tracks_of_shape(anim, shape)
+	var matching: Array[int] = tracks[0]
 	if matching.is_empty():
-		var said: String = (
-			"%s has no %s track on %s"
-			% [
-				animation_name,
-				track_type,
-				node_path if property.is_empty() else "%s:%s" % [node_path, property],
-			]
-		)
-		if held.is_empty():
-			return scene.refuse("%s. It has no tracks." % said)
-		return scene.refuse("%s. Its tracks are %s." % [said, ", ".join(held)])
+		var held: PackedStringArray = tracks[1]
+		return scene.refuse(_no_such_track(animation_name, shape, held))
 	var calling: Array = _keys_calling(anim, matching, method)
 	if calling.is_empty():
 		return scene.refuse(
@@ -509,27 +675,14 @@ func remove_animation_track(args: Dictionary) -> Dictionary:
 	if not times.is_empty():
 		var timed: Array = _keys_at(anim, calling, times)
 		if timed[1] != "":
-			var on: String = node_path if property.is_empty() else "%s:%s" % [node_path, property]
+			var on: String = _track_on(node_path, property)
 			return scene.refuse(
 				"%s's %s track on %s %s" % [animation_name, track_type, on, timed[1]]
 			)
 		calling = timed[0]
-	var keys: int = 0
-	var tracks_removed: int = 0
-	calling.reverse()
-	for pair: Array in calling:
-		var index: int = pair[0]
-		if pair[1] < 0:
-			keys += anim.track_get_key_count(index)
-			anim.remove_track(index)
-			tracks_removed += 1
-			continue
-		var key: int = pair[1]
-		anim.track_remove_key(index, key)
-		keys += 1
-		if anim.track_get_key_count(index) == 0:
-			anim.remove_track(index)
-			tracks_removed += 1
+	var gone: Array[int] = _remove_calling(anim, calling)
+	var keys: int = gone[0]
+	var tracks_removed: int = gone[1]
 
 	var at: String = scene.path_of(player)
 	var left: int = anim.get_track_count()
@@ -542,15 +695,10 @@ func remove_animation_track(args: Dictionary) -> Dictionary:
 		if loaded.get_track_count() != left or _key_total(loaded) != keys_left:
 			return "the track would still be in %s when the scene loads." % animation_name
 		return ""
-	var removed: Dictionary = { "type": track_type, "nodePath": node_path }
-	if not property.is_empty():
-		removed["property"] = property
-	if not method.is_empty():
-		removed["method"] = method
 	var answer: Dictionary = {
 		"ok": true,
 		"animationName": animation_name,
-		"removed": removed,
+		"removed": _removed_track(shape, method),
 		"tracksRemoved": tracks_removed,
 		"keysRemoved": keys,
 		"tracks": left,
@@ -705,3 +853,18 @@ func _key_values(target: Node, prop_name: String, keyframes: Array) -> Array:
 			return [false, "keyframes[%d]: %s" % [index, value[1]]]
 		values.append(value[1])
 	return [true, values]
+
+
+## What a track is made of before it is written: the keys to insert, the path and kind of the track,
+## the update mode and interpolation its [code]track[/code] asked for, or -1 for none, and
+## [member refusal] when it cannot be made. [member method_found] is null for a property track and
+## [member misfit] says why a method key's arguments cannot reach the method, or "".
+class GdhTrackPlan:
+	var refusal: String = ""
+	var keys: Array = []
+	var method_found: Variant = null
+	var misfit: String = ""
+	var kind: Animation.TrackType = Animation.TYPE_VALUE
+	var path: NodePath = NodePath()
+	var update: int = -1
+	var interpolation: int = -1

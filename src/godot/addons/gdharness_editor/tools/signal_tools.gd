@@ -45,12 +45,7 @@ func connect_signal(args: Dictionary) -> Dictionary:
 	var given_flags: int = GdhRead.as_int(args.get("flags", 0))
 	var flags: int = given_flags | Object.CONNECT_PERSIST
 
-	if (
-		source_node_path.is_empty()
-		or signal_name.is_empty()
-		or target_node_path.is_empty()
-		or method_name.is_empty()
-	):
+	if _any_empty([source_node_path, signal_name, target_node_path, method_name]):
 		return { "ok": false, "error": "Missing required signal connection arguments" }
 	var unasked: String = _unasked(given_flags)
 	if not unasked.is_empty():
@@ -73,23 +68,12 @@ func connect_signal(args: Dictionary) -> Dictionary:
 	# callable, so comparing callables missed it, and the engine's is_connected then found it, took
 	# it out and put a bare one in its place, losing the binds without a word.
 	var before: Dictionary = _held(source, signal_name, target, method_name)
-	var binds: Array = []
-	var unbinds: int = 0
-	if not before.is_empty():
-		binds = before["binds"]
-		unbinds = before["unbinds"]
-		# Kept as the binds are when the call gives none. Read as 0, a connect changing only the
-		# binds took one_shot and deferred off the connection it replaced.
-		if not args.has("flags"):
-			var held_flags: int = before["flags"]
-			flags = (held_flags & GIVEN_FLAGS) | Object.CONNECT_PERSIST
-	if args.has("unbinds"):
-		unbinds = GdhRead.as_int(args["unbinds"])
-	if args.has("binds"):
-		var given: Array = args["binds"]
-		binds = _bound_values(
-			given, source, signal_name, Callable(target, method_name), unbinds, flags
-		)
+	var ask: GdhConnectionAsk = GdhConnectionAsk.new()
+	ask.flags = flags
+	_resolve_ask(ask, args, before, [source, target], [signal_name, method_name])
+	flags = ask.flags
+	var binds: Array = ask.binds
+	var unbinds: int = ask.unbinds
 	var callable: Callable = Callable(target, method_name)
 	if not binds.is_empty():
 		callable = callable.bindv(binds)
@@ -97,18 +81,7 @@ func connect_signal(args: Dictionary) -> Dictionary:
 		callable = callable.unbind(unbinds)
 	var method_found: bool = target.has_method(method_name)
 	if not method_found and (not binds.is_empty() or unbinds > 0):
-		var named_to: String = str(target.name) if target == scene.root else target_node_path
-		return scene.refuse(
-			(
-				(
-					"%s has no method %s, and the engine connects a signal that binds or unbinds "
-					+ "arguments only to a method its target has, so the scene would load without "
-					+ "the connection. Add the method to the target's script first, or connect "
-					+ "without binds and unbinds."
-				)
-				% [named_to, method_name]
-			)
-		)
+		return scene.refuse(_missing_method_said(scene, target, target_node_path, method_name))
 	var misfit: String = _misfit(source, signal_name, callable, flags)
 	if not before.is_empty():
 		var held: Callable = before["callable"]
@@ -155,16 +128,72 @@ func connect_signal(args: Dictionary) -> Dictionary:
 	# looked like a lost write.
 	_bound_into(answer, saved)
 	if not before.is_empty():
-		answer["alreadyConnected"] = true
-		var flags_before: int = before["flags"]
-		if flags_before != saved_flags:
-			answer["flagsBefore"] = flag_names(flags_before)
-		var binds_before: Variant = _values.serialize_value(before["binds"])
-		if JSON.stringify(binds_before) != JSON.stringify(answer.get("binds", [])):
-			answer["bindsBefore"] = binds_before
-		if before["unbinds"] != saved["unbinds"]:
-			answer["unbindsBefore"] = before["unbinds"]
+		_already_connected_into(answer, before, saved)
 	return answer
+
+
+## Whether any of [param texts] is empty.
+static func _any_empty(texts: PackedStringArray) -> bool:
+	for text: String in texts:
+		if text.is_empty():
+			return true
+	return false
+
+
+## Fills [param ask] from [param args] and [param before], the connection already there or {}.
+## [param ends] holds the source and the target, and [param names] the signal and the method.
+func _resolve_ask(
+	ask: GdhConnectionAsk, args: Dictionary, before: Dictionary, ends: Array, names: Array[String]
+) -> void:
+	var source: Node = ends[0]
+	var target: Node = ends[1]
+	if not before.is_empty():
+		ask.binds = before["binds"]
+		ask.unbinds = before["unbinds"]
+		# Kept as the binds are when the call gives none. Read as 0, a connect changing only the
+		# binds took one_shot and deferred off the connection it replaced.
+		if not args.has("flags"):
+			var held_flags: int = before["flags"]
+			ask.flags = (held_flags & GIVEN_FLAGS) | Object.CONNECT_PERSIST
+	if args.has("unbinds"):
+		ask.unbinds = GdhRead.as_int(args["unbinds"])
+	if args.has("binds"):
+		var given: Array = args["binds"]
+		ask.binds = _bound_values(
+			given, source, names[0], Callable(target, names[1]), ask.unbinds, ask.flags
+		)
+
+
+## Why a connection that binds or unbinds arguments cannot go to [param method_name], which the
+## [param target] at [param target_node_path] of [param scene] lacks.
+static func _missing_method_said(
+	scene: GdhSceneFile, target: Node, target_node_path: String, method_name: String
+) -> String:
+	var named_to: String = str(target.name) if target == scene.root else target_node_path
+	return (
+		(
+			"%s has no method %s, and the engine connects a signal that binds or unbinds "
+			+ "arguments only to a method its target has, so the scene would load without "
+			+ "the connection. Add the method to the target's script first, or connect "
+			+ "without binds and unbinds."
+		)
+		% [named_to, method_name]
+	)
+
+
+## Adds to [param answer] what [param before], the connection that was already there, held that
+## [param saved] does not.
+func _already_connected_into(answer: Dictionary, before: Dictionary, saved: Dictionary) -> void:
+	answer["alreadyConnected"] = true
+	var flags_before: int = before["flags"]
+	var saved_flags: int = saved["flags"]
+	if flags_before != saved_flags:
+		answer["flagsBefore"] = flag_names(flags_before)
+	var binds_before: Variant = _values.serialize_value(before["binds"])
+	if JSON.stringify(binds_before) != JSON.stringify(answer.get("binds", [])):
+		answer["bindsBefore"] = binds_before
+	if before["unbinds"] != saved["unbinds"]:
+		answer["unbindsBefore"] = before["unbinds"]
 
 
 ## Why [param given_flags] cannot be connected with, or "" when it can: a bit no flag a scene
@@ -308,19 +337,10 @@ static func _saved(
 static func _misfit(source: Node, signal_name: String, callable: Callable, flags: int) -> String:
 	var target: Object = callable.get_object()
 	var method: String = str(callable.get_method())
-	var taken: Dictionary = {}
-	for info: Dictionary in target.get_method_list() if target != null else []:
-		if str(info.get("name", "")) == method:
-			taken = info
-			break
+	var taken: Dictionary = _method_info(target, method)
 	if taken.is_empty() or GdhRead.as_int(taken.get("flags", 0)) & METHOD_FLAG_VARARG:
 		return ""
-	var passed: Array[Dictionary] = []
-	for info: Dictionary in source.get_signal_list():
-		if str(info.get("name", "")) == signal_name:
-			for argument: Dictionary in info.get("args", []):
-				passed.append(argument)
-			break
+	var passed: Array[Dictionary] = _signal_arguments(source, signal_name)
 	var emitted: int = passed.size()
 	var unbound: int = callable.get_unbound_arguments_count()
 	passed = passed.slice(0, maxi(emitted - unbound, 0))
@@ -342,13 +362,7 @@ static func _misfit(source: Node, signal_name: String, callable: Callable, flags
 	# arguments among the signal's said the signal passed more than it declares.
 	var called: String = "%s passes %s" % [signal_name, _count(emitted)]
 	if unbound > 0 or appended or binds > 0:
-		var changed: Array[String] = []
-		if unbound > 0:
-			changed.append("unbinds %d" % unbound)
-		if appended:
-			changed.append("appends its source")
-		if binds > 0:
-			changed.append("binds %d" % binds)
+		var changed: Array[String] = _changes_said(unbound, appended, binds)
 		called += (
 			" and the connection %s, so %s is called with %s, and"
 			% [" and ".join(PackedStringArray(changed)), method, _count(passed.size())]
@@ -367,43 +381,101 @@ static func _misfit(source: Node, signal_name: String, callable: Callable, flags
 			% [called, needed, FAILS, "1 value" if short == 1 else "%d values" % short]
 		)
 	if passed.size() > parameters.size():
-		var most: String = "none" if parameters.is_empty() else "at most %d" % parameters.size()
-		# Said with the misfit, since unbinds is what a connection to a method wanting less is for,
-		# and only when the extra arguments are the signal's: a scene's connection unbinds the
-		# arguments the signal passes before it adds the bound ones, so a bound one is never
-		# dropped.
-		var extra: int = passed.size() - parameters.size()
-		var remedies: Array[String] = []
-		if extra <= from_signal:
-			remedies.append(
-				(
-					"connect it with unbinds %d to leave out the last %s the signal passes"
-					% [extra + unbound, "argument" if extra == 1 else "%d arguments" % extra]
-				)
+		var counts: Array[int] = [passed.size(), parameters.size(), from_signal, unbound]
+		return _too_many_said(called, target, method, counts)
+	return _unrelated_said(passed, parameters, signal_name, method, [from_signal, before_binds])
+
+
+## The engine method [param method] of [param target] as its method list gives it, or {} when
+## [param target] is gone or has none.
+static func _method_info(target: Object, method: String) -> Dictionary:
+	if target == null:
+		return {}
+	for info: Dictionary in target.get_method_list():
+		if str(info.get("name", "")) == method:
+			return info
+	return {}
+
+
+## The arguments [param signal_name] of [param source] passes, as its signal list gives them.
+static func _signal_arguments(source: Node, signal_name: String) -> Array[Dictionary]:
+	var passed: Array[Dictionary] = []
+	for info: Dictionary in source.get_signal_list():
+		if str(info.get("name", "")) == signal_name:
+			for argument: Dictionary in info.get("args", []):
+				passed.append(argument)
+			break
+	return passed
+
+
+## What a connection does to the arguments the signal passes, in the parts [method _misfit] says.
+static func _changes_said(unbound: int, appended: bool, binds: int) -> Array[String]:
+	var changed: Array[String] = []
+	if unbound > 0:
+		changed.append("unbinds %d" % unbound)
+	if appended:
+		changed.append("appends its source")
+	if binds > 0:
+		changed.append("binds %d" % binds)
+	return changed
+
+
+## Why a method given more arguments than it takes cannot be called, after what the connection
+## [param called]. [param counts] holds the arguments passed, the parameters taken, the arguments
+## the signal passes of those passed and the ones unbound, in that order.
+static func _too_many_said(
+	called: String, target: Object, method: String, counts: Array[int]
+) -> String:
+	var parameters: int = counts[1]
+	var most: String = "none" if parameters == 0 else "at most %d" % parameters
+	# Said with the misfit, since unbinds is what a connection to a method wanting less is for,
+	# and only when the extra arguments are the signal's: a scene's connection unbinds the
+	# arguments the signal passes before it adds the bound ones, so a bound one is never
+	# dropped.
+	var extra: int = counts[0] - parameters
+	var remedies: Array[String] = []
+	if extra <= counts[2]:
+		remedies.append(
+			(
+				"connect it with unbinds %d to leave out the last %s the signal passes"
+				% [extra + counts[3], "argument" if extra == 1 else "%d arguments" % extra]
 			)
-		# Only a script's own method can be given room for them, and dropping the signal's last
-		# argument to make room for a bound one hands the method the bound value in its place.
-		if target != null and not ClassDB.class_has_method(target.get_class(), method):
-			remedies.append(
-				"give %s %s" % [
-					method,
-					"1 more parameter" if extra == 1 else "%d more parameters" % extra,
-				]
-			)
-		var remedy: String = ""
-		if not remedies.is_empty():
-			var joined: String = ", or ".join(PackedStringArray(remedies))
-			remedy = " %s%s." % [joined.left(1).to_upper(), joined.substr(1)]
-		return "%s takes %s%s%s" % [called, most, FAILS, remedy]
+		)
+	# Only a script's own method can be given room for them, and dropping the signal's last
+	# argument to make room for a bound one hands the method the bound value in its place.
+	if target != null and not ClassDB.class_has_method(target.get_class(), method):
+		remedies.append(
+			"give %s %s" % [
+				method,
+				"1 more parameter" if extra == 1 else "%d more parameters" % extra,
+			]
+		)
+	var remedy: String = ""
+	if not remedies.is_empty():
+		var joined: String = ", or ".join(PackedStringArray(remedies))
+		remedy = " %s%s." % [joined.left(1).to_upper(), joined.substr(1)]
+	return "%s takes %s%s%s" % [called, most, FAILS, remedy]
+
+
+## Why the first argument of [param passed] cannot be given to the parameter of [param parameters]
+## it lands on, or "". [param ends] holds how many of them the signal passes and how many are in
+## front of the bound ones.
+static func _unrelated_said(
+	passed: Array[Dictionary],
+	parameters: Array,
+	signal_name: String,
+	method: String,
+	ends: Array[int]
+) -> String:
 	for at: int in passed.size():
 		var given: Dictionary = passed[at]
 		var parameter: Dictionary = parameters[at]
 		if not _unrelated(given, parameter):
 			continue
 		var whose: String = "the connection binds argument %d" % (at + 1)
-		if at < from_signal:
+		if at < ends[0]:
 			whose = "%s passes argument %d" % [signal_name, at + 1]
-		elif at < before_binds:
+		elif at < ends[1]:
 			whose = "the connection appends its source, argument %d," % (at + 1)
 		return (
 			"%s as %s, and %s takes it as %s: %s%s"
@@ -645,3 +717,11 @@ func _collect_nodes_recursive(node: Node, path: String, out_nodes: Array) -> voi
 	for child: Node in node.get_children():
 		var child_path: String = str(child.name) if path == "." else path + "/" + str(child.name)
 		_collect_nodes_recursive(child, child_path, out_nodes)
+
+
+## What a connect asks for once the connection it replaces is taken into account: its flags, its
+## binds and the arguments it unbinds.
+class GdhConnectionAsk:
+	var flags: int = 0
+	var binds: Array = []
+	var unbinds: int = 0
