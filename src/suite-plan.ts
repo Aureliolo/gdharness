@@ -629,6 +629,29 @@ function addPrinted(
   }
 }
 
+/** The rows and seconds kept for the case [param func], where [param cutShort] says an engine stopped early. */
+function caseTimeAfter(
+  func: string,
+  before: SuiteTime | undefined,
+  entry: Measured,
+  cutShort: boolean,
+): { readonly keptRows: readonly number[] | undefined; readonly seconds: number | undefined } {
+  const measuredRows = entry.rows.get(func);
+  // A case that ran and printed no row is not parameterised now, whatever it was. Its old rows
+  // would deal it out over engines that each run nothing.
+  const keptRows =
+    measuredRows === undefined
+      ? entry.cases.has(func)
+        ? undefined
+        : before?.rows?.[func]
+      : rowsAfter(before?.rows?.[func], measuredRows, cutShort);
+  const seconds =
+    measuredRows === undefined || keptRows === undefined
+      ? (entry.cases.get(func) ?? before?.cases[func])
+      : keptRows.reduce((sum, row) => sum + row, 0);
+  return { keptRows, seconds };
+}
+
 /** A suite's time kept in [param before], with what [param entry] measured of its [param declaredCases] put in. */
 function suiteTimeAfter(
   before: SuiteTime | undefined,
@@ -639,22 +662,10 @@ function suiteTimeAfter(
   const cases: Record<string, number> = {};
   const rows: Record<string, number[]> = {};
   for (const func of declaredCases) {
-    const measuredRows = entry.rows.get(func);
-    // A case that ran and printed no row is not parameterised now, whatever it was. Its old rows
-    // would deal it out over engines that each run nothing.
-    const keptRows =
-      measuredRows === undefined
-        ? entry.cases.has(func)
-          ? undefined
-          : before?.rows?.[func]
-        : rowsAfter(before?.rows?.[func], measuredRows, cutShort(func));
+    const { keptRows, seconds } = caseTimeAfter(func, before, entry, cutShort(func));
     if (keptRows !== undefined) {
       rows[func] = keptRows.map(round);
     }
-    const seconds =
-      measuredRows === undefined || keptRows === undefined
-        ? (entry.cases.get(func) ?? before?.cases[func])
-        : keptRows.reduce((sum, row) => sum + row, 0);
     if (seconds !== undefined) {
       cases[func] = round(seconds);
     }

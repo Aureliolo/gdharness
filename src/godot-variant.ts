@@ -259,6 +259,34 @@ function decodeValue(reader: Reader, depth: number, how: Decoding = { faithful: 
   if (fixed !== undefined) {
     return fixed;
   }
+  const simple = decodeSimple(reader, type, wide, how);
+  if (simple !== undefined) {
+    return simple;
+  }
+  const named = decodeNamedType(reader, type, header);
+  if (named !== undefined) {
+    return named;
+  }
+  switch (type) {
+    case 27:
+      return decodeDictionary(reader, header, depth, how);
+    case ARRAY:
+      return decodeTypedArray(reader, header, depth, how);
+    case 29:
+    case 30:
+    case 31:
+    case 32:
+    case 33:
+    case 34:
+    case 37:
+      return decodePacked(reader, type);
+    default:
+      throw new RangeError(`a value of type ${type}, which Godot 4.7 does not have`);
+  }
+}
+
+/** A null, boolean, number or string of type [param type], or undefined for any other type. */
+function decodeSimple(reader: Reader, type: number, wide: boolean, how: Decoding): GodotValue | undefined {
   switch (type) {
     case NIL:
       return null;
@@ -276,6 +304,14 @@ function decodeValue(reader: Reader, depth: number, how: Decoding = { faithful: 
       const name = reader.string();
       return how.faithful ? { kind: 'StringName', values: [name] } : name;
     }
+    default:
+      return undefined;
+  }
+}
+
+/** A colour, path, handle or other engine type of type [param type], or undefined for any other type. */
+function decodeNamedType(reader: Reader, type: number, header: number): GodotValue | undefined {
+  switch (type) {
     case 20:
       return { kind: 'Color', values: [reader.f32(), reader.f32(), reader.f32(), reader.f32()] };
     case 22:
@@ -292,20 +328,8 @@ function decodeValue(reader: Reader, depth: number, how: Decoding = { faithful: 
       return { kind: 'Callable', values: [] };
     case 26:
       return { kind: 'Signal', values: [reader.string(), reader.id()] };
-    case 27:
-      return decodeDictionary(reader, header, depth, how);
-    case ARRAY:
-      return decodeTypedArray(reader, header, depth, how);
-    case 29:
-    case 30:
-    case 31:
-    case 32:
-    case 33:
-    case 34:
-    case 37:
-      return decodePacked(reader, type);
     default:
-      throw new RangeError(`a value of type ${type}, which Godot 4.7 does not have`);
+      return undefined;
   }
 }
 

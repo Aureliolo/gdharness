@@ -151,11 +151,28 @@ export interface UnspokenRuntime {
   readonly announcedAt?: number;
 }
 
-function parseAnnouncement(file: string, pid: number): Announced {
-  let fields: Record<string, unknown>;
+/** The fields of the announcement file, or null when it cannot be read as an object. */
+function announcedFields(file: string): Record<string, unknown> | null {
   try {
-    fields = asParams(JSON.parse(readFileSync(file, 'utf8')));
+    return asParams(JSON.parse(readFileSync(file, 'utf8')));
   } catch {
+    return null;
+  }
+}
+
+/** When the file was written, as the field an endpoint carries, and nothing when it cannot be told. */
+function announcedAtOf(file: string): { readonly announcedAt?: number } {
+  try {
+    return { announcedAt: statSync(file).mtimeMs };
+  } catch {
+    // Taken by another reader since it was read, and then nothing is held to its time.
+    return {};
+  }
+}
+
+function parseAnnouncement(file: string, pid: number): Announced {
+  const fields = announcedFields(file);
+  if (fields === null) {
     return { kind: 'rubbish' };
   }
   const project = readParams(fields, 'project');
@@ -177,13 +194,7 @@ function parseAnnouncement(file: string, pid: number): Announced {
     name: readString(project, 'name') ?? '',
     path: readString(project, 'path') ?? '',
   };
-  let announcedAt: number | undefined;
-  try {
-    announcedAt = statSync(file).mtimeMs;
-  } catch {
-    // Taken by another reader since it was read, and then nothing is held to its time.
-  }
-  const when = announcedAt === undefined ? {} : { announcedAt };
+  const when = announcedAtOf(file);
   // A protocol this server does not speak is a running game, not rubbish, and the difference
   // decides whether its announcement survives. Deleting it takes the game away from the newer
   // server that is about to replace this one as well: `setup.py` upgrades the addon on disk the
@@ -194,8 +205,6 @@ function parseAnnouncement(file: string, pid: number): Announced {
   if (protocol !== RUNTIME_PROTOCOL) {
     return { kind: 'unspoken', unspoken: { pid, protocol: protocol ?? 0, project: named, ...when } };
   }
-  const editorPid = readNumber(fields, 'editor_pid');
-  const userDir = readString(fields, 'user_dir');
   const addonVersion = readString(fields, 'addon_version');
   const addonDigest = readString(fields, 'addon_digest');
   if (addonVersion === undefined || addonDigest === undefined) {
@@ -209,11 +218,22 @@ function parseAnnouncement(file: string, pid: number): Announced {
       address,
       project: named,
       file,
-      ...(editorPid !== undefined && Number.isInteger(editorPid) && editorPid > 0 ? { editorPid } : {}),
-      ...(userDir === undefined || userDir === '' ? {} : { userDir }),
+      ...editorPidAndUserDirOf(fields),
       ...when,
       addon: { version: addonVersion, digest: addonDigest },
     },
+  };
+}
+
+/** The editor that started the game and the game's user folder, each only where the file names one. */
+function editorPidAndUserDirOf(
+  fields: Record<string, unknown>,
+): Pick<RuntimeEndpoint, 'editorPid' | 'userDir'> {
+  const editorPid = readNumber(fields, 'editor_pid');
+  const userDir = readString(fields, 'user_dir');
+  return {
+    ...(editorPid !== undefined && Number.isInteger(editorPid) && editorPid > 0 ? { editorPid } : {}),
+    ...(userDir === undefined || userDir === '' ? {} : { userDir }),
   };
 }
 

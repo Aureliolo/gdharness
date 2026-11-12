@@ -603,6 +603,30 @@ export class GameDebugger {
         ...(this.outputDropped > 0 ? { notShown: this.outputDropped } : {}),
       };
     }
+    const unreachable = this.unreachableRefusal();
+    if (unreachable !== null) {
+      return unreachable;
+    }
+    switch (request.op) {
+      case 'breakpoint':
+        return await this.setBreakpoint(request);
+      case 'pause':
+        return await this.pause();
+      case 'resume':
+        return await this.resume(request.how);
+      case 'stack':
+        return await this.stackAnswer();
+      case 'variables':
+        return await this.variables(request.frame);
+      case 'evaluate':
+        return await this.evaluate(request.frame, request.expression);
+      default:
+        return { refused: `Nothing here answers ${JSON.stringify(request)}.` };
+    }
+  }
+
+  /** The refusal for a game whose debugger connection is not there, or null when it is. */
+  private unreachableRefusal(): DebugAnswer | null {
     if (this.connection === null) {
       return {
         refused:
@@ -612,48 +636,40 @@ export class GameDebugger {
     if (this.ended) {
       return { refused: 'The game has closed its debugger connection, which it does as it exits.' };
     }
-    switch (request.op) {
-      case 'breakpoint':
-        if (request.set) {
-          this.breakpointLines.add(`${request.script}:${String(request.line)}`);
-        } else {
-          this.breakpointLines.delete(`${request.script}:${String(request.line)}`);
-        }
-        this.send(
-          'breakpoint',
-          [request.script, request.line, request.set],
-          this.held?.thread ?? MAIN_THREAD,
-        );
-        return { sent: true, taken: await this.taken() };
-      case 'pause':
-        return await this.pause();
-      case 'resume':
-        return await this.resume(request.how);
-      case 'stack': {
-        if (this.held !== null && this.unreadable !== null) {
-          return { refused: this.unreadable };
-        }
-        const frames = await this.stack();
-        if (frames === null) {
-          return this.notHeld('stack to read');
-        }
-        return {
-          held: this.heldState(),
-          stack: frames,
-          ...(frames.length === 0
-            ? {
-                note: 'The game is held between frames, where no script runs, so there is no stack: debug_control step_over takes it to the next line of script it runs.',
-              }
-            : {}),
-        };
-      }
-      case 'variables':
-        return await this.variables(request.frame);
-      case 'evaluate':
-        return await this.evaluate(request.frame, request.expression);
-      default:
-        return { refused: `Nothing here answers ${JSON.stringify(request)}.` };
+    return null;
+  }
+
+  /** Sets or clears a breakpoint and answers once the game has taken it. */
+  private async setBreakpoint(
+    request: Extract<DebugRequest, { readonly op: 'breakpoint' }>,
+  ): Promise<DebugAnswer> {
+    if (request.set) {
+      this.breakpointLines.add(`${request.script}:${String(request.line)}`);
+    } else {
+      this.breakpointLines.delete(`${request.script}:${String(request.line)}`);
     }
+    this.send('breakpoint', [request.script, request.line, request.set], this.held?.thread ?? MAIN_THREAD);
+    return { sent: true, taken: await this.taken() };
+  }
+
+  /** The held game's stack, or the refusal that says why it has none to read. */
+  private async stackAnswer(): Promise<DebugAnswer> {
+    if (this.held !== null && this.unreadable !== null) {
+      return { refused: this.unreadable };
+    }
+    const frames = await this.stack();
+    if (frames === null) {
+      return this.notHeld('stack to read');
+    }
+    return {
+      held: this.heldState(),
+      stack: frames,
+      ...(frames.length === 0
+        ? {
+            note: 'The game is held between frames, where no script runs, so there is no stack: debug_control step_over takes it to the next line of script it runs.',
+          }
+        : {}),
+    };
   }
 
   private heldState(): Readonly<Record<string, unknown>> | null {

@@ -125,6 +125,27 @@ export function readProfileFile(path: string): ProfileFile | null {
   }
 }
 
+/**
+ * Where a frame's functions begin in [param data]: past the six leading fields and the servers'
+ * section, or null when that section cannot be read.
+ */
+function functionsSectionAt(data: readonly GodotValue[]): number | null {
+  let at = 6;
+  const servers = data[at];
+  if (typeof servers !== 'number') {
+    return null;
+  }
+  at += 1;
+  for (let server = 0; server < servers; server += 1) {
+    const fields = data[at + 1];
+    if (typeof fields !== 'number') {
+      return null;
+    }
+    at += 2 + fields;
+  }
+  return at;
+}
+
 function isFunctionTotals(value: unknown): value is FunctionTotals {
   return (
     isRecord(value) &&
@@ -159,7 +180,31 @@ function profileTotalsOf(value: unknown): ProfileTotals | null {
     }
     summed[signature] = totals;
   }
-  // The parts a file can be without, each taken where it has its type and left out where it has not.
+  return {
+    startedAt,
+    lastFrameAt,
+    frames,
+    complete,
+    functions: summed,
+    unreadable,
+    ...optionalTotalsOf(value),
+  };
+}
+
+/** The parts a file can be without, each taken where it has its type and left out where it has not. */
+function optionalTotalsOf(
+  value: Readonly<Record<string, unknown>>,
+): Pick<
+  ProfileTotals,
+  | 'frameFunctions'
+  | 'cappedFrames'
+  | 'totalCapped'
+  | 'engineCalls'
+  | 'totalEngineMethods'
+  | 'dropped'
+  | 'firstFrame'
+  | 'lastFrame'
+> {
   const {
     frameFunctions,
     cappedFrames,
@@ -171,12 +216,6 @@ function profileTotalsOf(value: unknown): ProfileTotals | null {
     lastFrame,
   } = value;
   return {
-    startedAt,
-    lastFrameAt,
-    frames,
-    complete,
-    functions: summed,
-    unreadable,
     ...(typeof frameFunctions === 'number' ? { frameFunctions } : {}),
     ...(typeof cappedFrames === 'number' ? { cappedFrames } : {}),
     ...(typeof totalCapped === 'boolean' ? { totalCapped } : {}),
@@ -393,37 +432,17 @@ export class ProfileAggregate {
     into: Map<string, FunctionSums>,
   ): { readonly carried: number; readonly engineMethods: number } | null {
     // Read in full before anything is added, so a frame that fails halfway leaves [param into] as it was.
-    const read: [string, number, number, number, number][] = [];
-    let at = 6;
-    const servers = data[at];
-    if (typeof servers !== 'number') {
+    const at = functionsSectionAt(data);
+    if (at === null) {
       return null;
-    }
-    at += 1;
-    for (let server = 0; server < servers; server += 1) {
-      const fields = data[at + 1];
-      if (typeof fields !== 'number') {
-        return null;
-      }
-      at += 2 + fields;
     }
     const values = data[at];
     if (typeof values !== 'number' || values % 5 !== 0) {
       return null;
     }
-    at += 1;
-    for (let index = 0; index < values; index += 5) {
-      const [id, calls, self, total, internal] = data.slice(at + index, at + index + 5);
-      if (
-        typeof id !== 'number' ||
-        typeof calls !== 'number' ||
-        typeof self !== 'number' ||
-        typeof total !== 'number' ||
-        typeof internal !== 'number'
-      ) {
-        return null;
-      }
-      read.push([this.names.get(id) ?? `${UNNAMED_PREFIX}${id}`, calls, self, total, internal]);
+    const read = this.frameRowsOf(data, at + 1, values);
+    if (read === null) {
+      return null;
     }
     let engineMethods = 0;
     for (const [name, calls, self, total, internal] of read) {
@@ -439,6 +458,29 @@ export class ProfileAggregate {
       into.set(name, sum);
     }
     return { carried: values / 5, engineMethods };
+  }
+
+  /** The named rows of a frame's [param values] numbers from [param at], or null when any is not a number. */
+  private frameRowsOf(
+    data: readonly GodotValue[],
+    at: number,
+    values: number,
+  ): [string, number, number, number, number][] | null {
+    const read: [string, number, number, number, number][] = [];
+    for (let index = 0; index < values; index += 5) {
+      const [id, calls, self, total, internal] = data.slice(at + index, at + index + 5);
+      if (
+        typeof id !== 'number' ||
+        typeof calls !== 'number' ||
+        typeof self !== 'number' ||
+        typeof total !== 'number' ||
+        typeof internal !== 'number'
+      ) {
+        return null;
+      }
+      read.push([this.names.get(id) ?? `${UNNAMED_PREFIX}${id}`, calls, self, total, internal]);
+    }
+    return read;
   }
 
   snapshot(): ProfileTotals {

@@ -51,18 +51,38 @@ function percentIsUniqueNode(source: string, at: number): boolean {
   if (before === undefined || before === '\n') {
     return true;
   }
-  if (isIdentifierPart(before) || before === ')' || before === ']' || before === '"' || before === "'") {
+  if (endsAnOperand(before)) {
     // An operand ends here, unless the word is a keyword that takes an expression after it.
-    let wordStart = back;
-    while (wordStart > 0 && isIdentifierPart(source[wordStart - 1])) {
-      wordStart -= 1;
-    }
-    const word = source.slice(wordStart, back + 1);
-    return ['return', 'and', 'or', 'not', 'in', 'is', 'as', 'if', 'elif', 'else', 'while', 'await'].includes(
-      word,
-    );
+    return takesAnExpression(source.slice(wordStartAt(source, back), back + 1));
   }
   return true;
+}
+
+/** Whether [param character] can be the last one of an operand. */
+function endsAnOperand(character: string): boolean {
+  return (
+    isIdentifierPart(character) ||
+    character === ')' ||
+    character === ']' ||
+    character === '"' ||
+    character === "'"
+  );
+}
+
+/** Where the identifier word ending at [param back] starts. */
+function wordStartAt(source: string, back: number): number {
+  let wordStart = back;
+  while (wordStart > 0 && isIdentifierPart(source[wordStart - 1])) {
+    wordStart -= 1;
+  }
+  return wordStart;
+}
+
+/** Whether [param word] is a keyword that takes an expression after it. */
+function takesAnExpression(word: string): boolean {
+  return ['return', 'and', 'or', 'not', 'in', 'is', 'as', 'if', 'elif', 'else', 'while', 'await'].includes(
+    word,
+  );
 }
 
 /** The end of the string literal whose opening quote is at [param at]. */
