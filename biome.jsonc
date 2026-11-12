@@ -55,7 +55,12 @@
         // index signature, so that a typo is a visible lookup rather than a silent undefined;
         // useLiteralKeys asks for obj.key back. One of them has to yield and correctness wins.
         // Neither fires once the tool arguments are real types instead of index signatures.
-        "useLiteralKeys": "off"
+        "useLiteralKeys": "off",
+        // The same ceiling of 15 that lizard holds the GDScript to (`lint:gd:complexity`).
+        "noExcessiveCognitiveComplexity": {
+          "level": "error",
+          "options": { "maxAllowedComplexity": 15 }
+        }
       }
     }
   },
