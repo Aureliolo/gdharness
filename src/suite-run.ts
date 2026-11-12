@@ -26,8 +26,8 @@ import { cachedClasses, staleAgainst } from './class-cache.js';
 import {
   coresNamed,
   type EngineLaunch,
-  godotNamed,
   gigabytes,
+  godotNamed,
   heldRunSaid,
   homeOf,
   KEPT_RUN_DIRECTORIES,
