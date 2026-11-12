@@ -103,6 +103,7 @@ export function headlessSection(): string[] {
     '`project_settings get` with `from: "editor"` asks the open editor instead of the file and',
     'starts no engine. A CI job leaves it alone, because there is no editor on a build machine and',
     'the call is refused rather than answered from the file.',
+    '`scene_create save` with `from` set to "editor" saves the editor\'s copy of a scene and is refused the same way.',
     '',
   ];
 }

@@ -20,7 +20,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import fc from 'fast-check';
 
 import { extract } from '../scripts/install-godot.js';
@@ -39,7 +39,13 @@ import {
   sweepTranscripts,
   writeRunRecord,
 } from '../src/run-record.js';
-import { type CasesBySuite, type DeclaredSuite, type SuiteTimes, unitsOf } from '../src/suite-plan.js';
+import {
+  type CasesBySuite,
+  type DeclaredSuite,
+  peakOf,
+  type SuiteTimes,
+  unitsOf,
+} from '../src/suite-plan.js';
 import { MemoryGate, runShares } from '../src/suite-run.js';
 import { sweep } from './support/sweep.js';
 import { buildZip, DEFLATED, STORED, type ZipEntrySpec } from './support/zip.js';
@@ -600,7 +606,7 @@ function aRunNoteHoldsOnlyItsOwnRun(): void {
     startedAt: fc.constantFrom(1000, 2000),
     name: fc.constantFrom('run-1000.log', 'run-1000-1.log', 'run-2000.log'),
   });
-  const aStep = fc.record({
+  const aStep: fc.Arbitrary<RunStep> = fc.record({
     kind: fc.constantFrom('start', 'amend', 'end', 'clear', 'sweep'),
     directory: fc.constantFrom(0, 1),
     project: fc.constantFrom(0, 1),
@@ -608,124 +614,15 @@ function aRunNoteHoldsOnlyItsOwnRun(): void {
     restarted: fc.boolean(),
     looking: fc.boolean(),
   });
-  const normal = <Note extends RunRecord | null>(note: Note): Note | RunRecord =>
-    note?.endedAt === undefined ? note : { ...note, endedAt: 0 };
-  // A note as text with its fields in a fixed order, since a note read back orders them its own way.
-  const keyed = (note: RunRecord): string =>
-    JSON.stringify(Object.entries(normal(note)).toSorted(([one], [other]) => one.localeCompare(other)));
   const had = process.env['GDHARNESS_RUNTIME_DIR'];
   fc.assert(
     fc.property(fc.array(aStep, { maxLength: 14 }), (steps) => {
       inTemp((root) => {
-        const directories = [join(root, 'a'), join(root, 'b')] as const;
-        const projects = [join(root, 'project-0'), join(root, 'project-1')] as const;
-        const notes: (RunRecord | null)[][] = [
-          [null, null],
-          [null, null],
-        ];
-        const files: Set<string>[] = [new Set(), new Set()];
-        const noteOf = (directory: number, project: number): RunRecord | null =>
-          notes[directory]?.[project] ?? null;
-        const setNote = (directory: number, project: number, note: RunRecord | null): void => {
-          const row = notes[directory];
-          if (row !== undefined) {
-            row[project] = note;
-          }
-        };
+        const model = newRunModel(root);
         try {
           for (const step of steps) {
-            const directory = directories[step.directory];
-            const project = projects[step.project];
-            process.env['GDHARNESS_RUNTIME_DIR'] = step.kind === 'sweep' ? directories[0] : directory;
-            const runs = join(directory, 'runs');
-            const base: RunRecord = {
-              pid: step.run.pid,
-              transcript: join(runs, step.run.name),
-              startedAt: step.run.startedAt,
-              startedBy: step.run.startedAt,
-              projectPath: project,
-              arguments: [],
-              command: 'godot',
-            };
-            const said: RunRecord = {
-              ...base,
-              ...(step.restarted ? { pid: 3333, restartedFrom: [{ pid: step.run.pid, endedAt: 7 }] } : {}),
-              ...(step.looking ? { endingAt: 5000 } : {}),
-            };
-            const there = noteOf(step.directory, step.project);
-            const own = there === null || there.transcript === said.transcript;
-            if (step.kind === 'start') {
-              mkdirSync(runs, { recursive: true });
-              writeFileSync(base.transcript, '');
-              files[step.directory]?.add(step.run.name);
-              writeRunRecord(base);
-              setNote(step.directory, step.project, base);
-            } else if (step.kind === 'amend') {
-              assert.equal(amendRunRecord(said), own, 'an amend writes unless the note is another run');
-              if (own) {
-                setNote(step.directory, step.project, said);
-              }
-            } else if (step.kind === 'end') {
-              assert.equal(recordRunEnded(said, { exitCode: 0, exitSignal: null }), own);
-              if (own) {
-                const { endingAt: _looked, ...kept } = said;
-                setNote(step.directory, step.project, { ...kept, exitCode: 0, endedAt: 0 });
-              }
-            } else if (step.kind === 'clear') {
-              clearRunRecord(project, directories);
-              setNote(0, step.project, null);
-              setNote(1, step.project, null);
-            } else {
-              sweepTranscripts(24 * 60 * 60 * 1000, Date.now() + 2 * 24 * 60 * 60 * 1000);
-              const noted = new Set(
-                [0, 1].flatMap((which) => {
-                  const note = noteOf(0, which);
-                  return note === null ? [] : [basename(note.transcript)];
-                }),
-              );
-              files[0] = new Set([...(files[0] ?? [])].filter((name) => noted.has(name)));
-              const left = existsSync(join(directories[0], 'runs'))
-                ? readdirSync(join(directories[0], 'runs')).filter((entry) => entry.endsWith('.log'))
-                : [];
-              assert.deepEqual(
-                left.toSorted(),
-                [...files[0]].toSorted(),
-                'the sweep keeps what a note names',
-              );
-              const other = existsSync(join(directories[1], 'runs'))
-                ? readdirSync(join(directories[1], 'runs')).filter((entry) => entry.endsWith('.log'))
-                : [];
-              assert.deepEqual(
-                other.toSorted(),
-                [...(files[1] ?? [])].toSorted(),
-                'and leaves the other directory',
-              );
-            }
-            for (const which of [0, 1]) {
-              const wanted = noteOf(0, which) ?? noteOf(1, which);
-              assert.deepEqual(normal(readRunRecord(projects[which] ?? '', directories)), normal(wanted));
-            }
-            const every = [0, 1]
-              .flatMap((d) => [0, 1].map((p) => noteOf(d, p)))
-              .filter((note) => note !== null);
-            const listed = everyRunRecord(directories);
-            assert.deepEqual(
-              listed.map(keyed).toSorted(),
-              every.map(keyed).toSorted(),
-              'every note is listed',
-            );
-            for (let index = 1; index < listed.length; index += 1) {
-              assert.ok(
-                (listed[index - 1]?.startedAt ?? 0) >= (listed[index]?.startedAt ?? 0),
-                'newest first',
-              );
-            }
-            for (const note of listed) {
-              assert.ok(
-                note.endedAt === undefined || note.endingAt === undefined,
-                'an ended run is not ending',
-              );
-            }
+            applyRunStep(model, step);
+            checkRunModel(model);
           }
         } finally {
           if (had === undefined) {
@@ -738,6 +635,148 @@ function aRunNoteHoldsOnlyItsOwnRun(): void {
     }),
     { numRuns: 60 },
   );
+}
+
+/** One step of the run-note model: an action on one of two runtime directories and two projects. */
+interface RunStep {
+  kind: 'start' | 'amend' | 'end' | 'clear' | 'sweep';
+  directory: 0 | 1;
+  project: 0 | 1;
+  run: { pid: number; startedAt: number; name: string };
+  restarted: boolean;
+  looking: boolean;
+}
+
+/** The notes and transcript files the real ones must match, per runtime directory and project. */
+interface RunModel {
+  directories: readonly [string, string];
+  projects: readonly [string, string];
+  notes: (RunRecord | null)[][];
+  files: Set<string>[];
+}
+
+function newRunModel(root: string): RunModel {
+  return {
+    directories: [join(root, 'a'), join(root, 'b')],
+    projects: [join(root, 'project-0'), join(root, 'project-1')],
+    notes: [
+      [null, null],
+      [null, null],
+    ],
+    files: [new Set(), new Set()],
+  };
+}
+
+function noteOf(model: RunModel, directory: number, project: number): RunRecord | null {
+  return model.notes[directory]?.[project] ?? null;
+}
+
+function setNote(model: RunModel, directory: number, project: number, note: RunRecord | null): void {
+  const row = model.notes[directory];
+  if (row !== undefined) {
+    row[project] = note;
+  }
+}
+
+function normal<Note extends RunRecord | null>(note: Note): Note | RunRecord {
+  return note?.endedAt === undefined ? note : { ...note, endedAt: 0 };
+}
+
+// A note as text with its fields in a fixed order, since a note read back orders them its own way.
+function keyed(note: RunRecord): string {
+  return JSON.stringify(Object.entries(normal(note)).toSorted(([one], [other]) => one.localeCompare(other)));
+}
+
+/** Does [param step] on the real run notes and records what the model expects of it. */
+function applyRunStep(model: RunModel, step: RunStep): void {
+  const { directories, projects } = model;
+  const directory = directories[step.directory];
+  const project = projects[step.project];
+  process.env['GDHARNESS_RUNTIME_DIR'] = step.kind === 'sweep' ? directories[0] : directory;
+  const runs = join(directory, 'runs');
+  const base: RunRecord = {
+    pid: step.run.pid,
+    transcript: join(runs, step.run.name),
+    startedAt: step.run.startedAt,
+    startedBy: step.run.startedAt,
+    projectPath: project,
+    arguments: [],
+    command: 'godot',
+  };
+  const said: RunRecord = {
+    ...base,
+    ...(step.restarted ? { pid: 3333, restartedFrom: [{ pid: step.run.pid, endedAt: 7 }] } : {}),
+    ...(step.looking ? { endingAt: 5000 } : {}),
+  };
+  const there = noteOf(model, step.directory, step.project);
+  const own = there === null || there.transcript === said.transcript;
+  if (step.kind === 'start') {
+    startAModelRun(model, step, base);
+  } else if (step.kind === 'amend') {
+    assert.equal(amendRunRecord(said), own, 'an amend writes unless the note is another run');
+    if (own) {
+      setNote(model, step.directory, step.project, said);
+    }
+  } else if (step.kind === 'end') {
+    assert.equal(recordRunEnded(said, { exitCode: 0, exitSignal: null }), own);
+    if (own) {
+      const { endingAt: _looked, ...kept } = said;
+      setNote(model, step.directory, step.project, { ...kept, exitCode: 0, endedAt: 0 });
+    }
+  } else if (step.kind === 'clear') {
+    clearRunRecord(project, directories);
+    setNote(model, 0, step.project, null);
+    setNote(model, 1, step.project, null);
+  } else {
+    sweepModelTranscripts(model);
+  }
+}
+
+function startAModelRun(model: RunModel, step: RunStep, base: RunRecord): void {
+  mkdirSync(dirname(base.transcript), { recursive: true });
+  writeFileSync(base.transcript, '');
+  model.files[step.directory]?.add(step.run.name);
+  writeRunRecord(base);
+  setNote(model, step.directory, step.project, base);
+}
+
+/** Sweeps old transcripts and checks that the first directory keeps only what a note names. */
+function sweepModelTranscripts(model: RunModel): void {
+  const { directories, files } = model;
+  sweepTranscripts(24 * 60 * 60 * 1000, Date.now() + 2 * 24 * 60 * 60 * 1000);
+  const noted = new Set(
+    [0, 1].flatMap((which) => {
+      const note = noteOf(model, 0, which);
+      return note === null ? [] : [basename(note.transcript)];
+    }),
+  );
+  files[0] = new Set([...(files[0] ?? [])].filter((name) => noted.has(name)));
+  const left = existsSync(join(directories[0], 'runs'))
+    ? readdirSync(join(directories[0], 'runs')).filter((entry) => entry.endsWith('.log'))
+    : [];
+  assert.deepEqual(left.toSorted(), [...files[0]].toSorted(), 'the sweep keeps what a note names');
+  const other = existsSync(join(directories[1], 'runs'))
+    ? readdirSync(join(directories[1], 'runs')).filter((entry) => entry.endsWith('.log'))
+    : [];
+  assert.deepEqual(other.toSorted(), [...(files[1] ?? [])].toSorted(), 'and leaves the other directory');
+}
+
+/** Reads every note back and holds it to the model. */
+function checkRunModel(model: RunModel): void {
+  const { directories, projects } = model;
+  for (const which of [0, 1]) {
+    const wanted = noteOf(model, 0, which) ?? noteOf(model, 1, which);
+    assert.deepEqual(normal(readRunRecord(projects[which] ?? '', directories)), normal(wanted));
+  }
+  const every = [0, 1].flatMap((d) => [0, 1].map((p) => noteOf(model, d, p))).filter((note) => note !== null);
+  const listed = everyRunRecord(directories);
+  assert.deepEqual(listed.map(keyed).toSorted(), every.map(keyed).toSorted(), 'every note is listed');
+  for (let index = 1; index < listed.length; index += 1) {
+    assert.ok((listed[index - 1]?.startedAt ?? 0) >= (listed[index]?.startedAt ?? 0), 'newest first');
+  }
+  for (const note of listed) {
+    assert.ok(note.endedAt === undefined || note.endingAt === undefined, 'an ended run is not ending');
+  }
 }
 
 function archivesRoundTrip(): void {
@@ -1008,7 +1047,6 @@ function junkIsNeverAReport(): void {
 const GIB = 1024 ** 3;
 const ENGINE_BYTES = 1.5 * GIB;
 const KEPT_BYTES = 4 * GIB;
-const CLOCK_MOVE_MS = 30_000;
 const IDLE_STEPS_BEFORE_HUNG = 100;
 const SETTLE_ROUNDS_BEFORE_STUCK = 1000;
 
@@ -1069,6 +1107,8 @@ interface RunSetup {
   readonly lanes: number;
   readonly suites: number;
   readonly freeGiB: number;
+  /** What each suite was seen to hold, in GiB, in suite order. */
+  readonly peaksGiB: readonly number[];
 }
 
 interface Ran {
@@ -1088,8 +1128,14 @@ function enginesByMemory(freeGiB: number): number {
   return Math.max(1, Math.floor((freeGiB * GIB - KEPT_BYTES) / ENGINE_BYTES));
 }
 
-/** Suites of one 40 s case each, which `unitsOf` keeps whole, so each is a share of its own or a part of one. */
-function suitesOf(count: number): { units: ReturnType<typeof unitsOf>; declared: CasesBySuite } {
+/**
+ * Suites of one 40 s case each, which `unitsOf` keeps whole, so each is a share of its own or a part
+ * of one. Suite `at` was seen to hold `peaksGiB[at]`.
+ */
+function suitesOf(
+  count: number,
+  peaksGiB: readonly number[],
+): { units: ReturnType<typeof unitsOf>; declared: CasesBySuite; times: SuiteTimes } {
   const paths = Array.from({ length: count }, (_, at) => `res://suite_${String(at)}.gd`);
   const suites: DeclaredSuite[] = paths.map((path) => ({
     path,
@@ -1100,9 +1146,16 @@ function suitesOf(count: number): { units: ReturnType<typeof unitsOf>; declared:
     accessible: false,
   }));
   const times: SuiteTimes = Object.fromEntries(
-    paths.map((path) => [path, { seconds: 40, cases: { test_one: 40 } }]),
+    paths.map((path, at) => [
+      path,
+      { seconds: 40, cases: { test_one: 40 }, peak: (peaksGiB[at] ?? 1.5) * GIB },
+    ]),
   );
-  return { units: unitsOf(suites, times), declared: new Map(paths.map((path) => [path, ['test_one']])) };
+  return {
+    units: unitsOf(suites, times),
+    declared: new Map(paths.map((path) => [path, ['test_one']])),
+    times,
+  };
 }
 
 function takeFreeSlots(slots: StandInSlots, count: number): string[] {
@@ -1126,35 +1179,47 @@ function startRun(s: fc.Scheduler, setup: RunSetup, peak: { engines: number }): 
       slots.release('outside');
     });
   }
-  let clock = 0;
-  for (let move = 0; move < 4; move += 1) {
-    void s.schedule(Promise.resolve(), 'clock moves 30 s').then(() => {
-      clock += CLOCK_MOVE_MS;
-    });
-  }
-  let running = 0;
+  // Each going engine tells what its share was seen to hold at a point the scheduler picks, and the
+  // memory read falls by what the engines have told.
+  const going = new Map<number, { readonly need: number; held: number }>();
   let hung = false;
+  const told = (): number => [...going.values()].reduce((sum, one) => sum + one.held, 0);
   const free = (): Promise<number> =>
-    hung
-      ? Promise.reject(new Error('judged hung'))
-      : Promise.resolve(setup.freeGiB * GIB - running * ENGINE_BYTES);
-  const gate = new MemoryGate(slots, free, () => clock, 1);
+    hung ? Promise.reject(new Error('judged hung')) : Promise.resolve(setup.freeGiB * GIB - told());
+  const gate = new MemoryGate(slots, free, 1);
   const taken = takeFreeSlots(slots, Math.min(setup.lanes, enginesByMemory(setup.freeGiB)));
-  const { units, declared } = suitesOf(setup.suites);
+  const { units, declared, times } = suitesOf(setup.suites, setup.peaksGiB);
   const run = (
     plan: { readonly suites: ReadonlyArray<{ readonly path: string }> },
     index: number,
+    _lock: string,
+    holds?: (bytes: number) => void,
   ): Promise<Ran> => {
-    running += 1;
-    peak.engines = Math.max(peak.engines, running);
-    const engine: Ran = { index, suites: plan.suites.map((suite) => suite.path) };
-    return s.schedule(Promise.resolve(engine), `engine ${String(index)} ends`).finally(() => {
-      running -= 1;
+    const suites = plan.suites.map((suite) => suite.path);
+    const need = peakOf(suites, times, ENGINE_BYTES).bytes;
+    const owed = [...going.values()].reduce((sum, one) => sum + Math.max(0, one.need - one.held), 0);
+    if (going.size > 0) {
+      assert.ok(
+        setup.freeGiB * GIB - told() - KEPT_BYTES - owed >= need,
+        `engine ${String(index)} started needing ${String(need / GIB)} GiB without room`,
+      );
+    }
+    const engine = { need, held: 0 };
+    going.set(index, engine);
+    peak.engines = Math.max(peak.engines, going.size);
+    void s.schedule(Promise.resolve(), `engine ${String(index)} tells`).then(() => {
+      if (going.get(index) === engine) {
+        engine.held = need;
+        holds?.(need);
+      }
+    });
+    return s.schedule(Promise.resolve({ index, suites }), `engine ${String(index)} ends`).finally(() => {
+      going.delete(index);
     });
   };
   let result: Ran[] | undefined;
   let settled = false;
-  void runShares(slots, units, declared, setup.lanes, taken, run, undefined, gate)
+  void runShares(slots, units, declared, setup.lanes, taken, times, run, undefined, gate)
     .then(
       (ran) => {
         result = ran;
@@ -1223,11 +1288,12 @@ async function noOrderOfSlotAndMemoryWaitsHangsARun(): Promise<void> {
         fc.integer({ min: 2, max: 3 }),
         fc.integer({ min: 2, max: 5 }),
         fc.constantFrom(4.5, 5, 6.5, 8),
-        async (s, slotCount, outsideHolds, lanes, suites, freeGiB) => {
+        fc.array(fc.constantFrom(0.5, 1.5, 3), { minLength: 5, maxLength: 5 }),
+        async (s, slotCount, outsideHolds, lanes, suites, freeGiB, peaksGiB) => {
           if (enginesByMemory(freeGiB) >= lanes) {
             return;
           }
-          const started = startRun(s, { slotCount, outsideHolds, lanes, suites, freeGiB }, peak);
+          const started = startRun(s, { slotCount, outsideHolds, lanes, suites, freeGiB, peaksGiB }, peak);
           if (!(await stepUntilEnded(s, started))) {
             await endHungRun(started);
             throw new Error(
@@ -1238,7 +1304,7 @@ async function noOrderOfSlotAndMemoryWaitsHangsARun(): Promise<void> {
           const ran = started.ran() ?? [];
           assert.deepEqual(
             ran.flatMap((engine) => engine.suites).toSorted(),
-            suitesOf(suites)
+            suitesOf(suites, peaksGiB)
               .units.map((unit) => unit.suite)
               .toSorted(),
           );
@@ -1250,7 +1316,7 @@ async function noOrderOfSlotAndMemoryWaitsHangsARun(): Promise<void> {
   } finally {
     jest.useRealTimers();
   }
-  assert.equal(peak.engines, 2);
+  assert.ok(peak.engines >= 2, `at most ${String(peak.engines)} engine ran at once`);
 }
 
 framesRoundTripUnderAnyChunking();

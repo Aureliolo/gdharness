@@ -66,6 +66,16 @@ const EDITOR_PID_VARIABLE: String = "GDHARNESS_EDITOR_PID"
 ## How many polls in a row the door has to stay connected before the WebSocket dials.
 ## See [member _door].
 const DOOR_POLLS: int = 2
+## The most one answer sent to the server may carry. Godot's default of 64 KiB dropped a played
+## game's profile, and the server waited out its timeout for an answer never sent. Godot reserves
+## nothing for it, so it is as large as the server takes. Kept in step with `EDITOR_ANSWER_BYTES`
+## in src/godot-bridge.ts.
+const ANSWER_BYTES: int = 64 * 1024 * 1024
+## The most one request from the server may carry. Godot reserves twice this as the socket opens,
+## so it is what a request has been seen to need rather than the answer's size. Kept in step with
+## `EDITOR_REQUEST_BYTES` in src/godot-bridge.ts, where a larger request is refused before it is
+## sent.
+const REQUEST_BYTES: int = 4 * 1024 * 1024
 
 ## How long one attempt is given before the address is called a bad one.
 ##
@@ -401,6 +411,8 @@ func _shut_the_door() -> void:
 
 func _dial() -> void:
 	_connecting_for = 0.0
+	socket.outbound_buffer_size = ANSWER_BYTES
+	socket.inbound_buffer_size = REQUEST_BYTES
 	var err: Error = socket.connect_to_url(server_url)
 	if err != OK:
 		push_error("[gdharness] Failed to connect to %s: %s" % [server_url, error_string(err)])
@@ -725,15 +737,37 @@ func send_tool_result(
 	else:
 		response["error"] = error
 
-	_send_message(response)
+	# An answer the socket would not take is said to be one, so the server is not left waiting out
+	# its timeout for it.
+	if _sent(response) == ERR_OUT_OF_MEMORY:
+		var bytes: int = JSON.stringify(response, "", false).to_utf8_buffer().size()
+		var said: String = "The editor's answer was %d bytes, more than the %d" % [
+			bytes,
+			ANSWER_BYTES,
+		]
+		_send_message(
+			{
+				"type": "tool_result",
+				"id": request_id,
+				"success": false,
+				"error": said + " one message to the server carries.",
+			}
+		)
 
 
 func _send_message(message: Dictionary) -> void:
-	if socket.get_ready_state() == WebSocketPeer.STATE_OPEN:
-		# Keys in the order they were put in, which for a map read is the order the project keeps.
-		var sent: Error = socket.send_text(JSON.stringify(message, "", false))
-		if sent != OK:
-			push_error("gdharness: could not send to the server: " + error_string(sent))
+	var _said: Error = _sent(message)
+
+
+## Sends [param message] if the socket is open, and answers what the socket said.
+func _sent(message: Dictionary) -> Error:
+	if socket.get_ready_state() != WebSocketPeer.STATE_OPEN:
+		return OK
+	# Keys in the order they were put in, which for a map read is the order the project keeps.
+	var sent: Error = socket.send_text(JSON.stringify(message, "", false))
+	if sent != OK:
+		push_error("gdharness: could not send to the server: " + error_string(sent))
+	return sent
 
 
 func is_connected_to_server() -> bool:

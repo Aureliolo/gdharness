@@ -258,19 +258,39 @@ func _check_a_declined_quit(directory: String) -> void:
 
 
 func _check(node: Runtime, directory: String) -> void:
+	var announcement: String = _check_the_announcement(node, directory)
+	if announcement.is_empty():
+		return
+	var client: StreamPeerTCP = _greeted_client(node)
+	if client == null:
+		return
+	if not _check_requests_however_they_are_written(node, client):
+		return
+
+	client.disconnect_from_host()
+	if not _pump(node, client, func() -> bool: return node._clients.is_empty()):
+		_fail("a client that hung up was never dropped")
+
+	node._cleanup()
+	if FileAccess.file_exists(announcement):
+		_fail("the announcement should be gone once the runtime stops")
+
+
+## The file a started runtime announces itself in, checked, or "" when there is none to go on with.
+func _check_the_announcement(node: Runtime, directory: String) -> String:
 	node._start_server()
 	if node._port <= 0:
 		_fail("the runtime should have been given a port, got %d" % node._port)
-		return
+		return ""
 
 	var announcement: String = directory.path_join("runtime-%d.json" % OS.get_process_id())
 	if not FileAccess.file_exists(announcement):
 		_fail("no announcement at %s" % announcement)
-		return
+		return ""
 	var announced: Variant = JSON.parse_string(FileAccess.get_file_as_string(announcement))
 	if not announced is Dictionary:
 		_fail("the announcement is not an object")
-		return
+		return ""
 	var fields: Dictionary = announced
 	if fields.get("protocol") != Runtime.PROTOCOL:
 		_fail("the announcement should name protocol %d: %s" % [Runtime.PROTOCOL, str(fields)])
@@ -281,31 +301,39 @@ func _check(node: Runtime, directory: String) -> void:
 	var project: Dictionary = fields.get("project", {})
 	if project.get("path", "") != ProjectSettings.globalize_path("res://").rstrip("/"):
 		_fail("the announcement should carry the project directory: %s" % str(fields))
+	return announcement
 
+
+## A client the runtime accepted and welcomed, with the welcome checked, or null when none was.
+func _greeted_client(node: Runtime) -> StreamPeerTCP:
 	var client: StreamPeerTCP = StreamPeerTCP.new()
 	if client.connect_to_host("127.0.0.1", node._port) != OK:
 		_fail("could not start connecting")
-		return
+		return null
 
 	if not _pump(node, client, func() -> bool: return node._clients.size() == 1):
 		_fail("the runtime never accepted the client")
-		return
+		return null
 
 	var greeted: Callable = func() -> bool:
 		_drain(client)
 		return lines.size() >= 1
 	if not _pump(node, client, greeted):
 		_fail("no welcome arrived")
-		return
+		return null
 	var welcome: Dictionary = _reply(0)
 	if welcome.get("type") != "welcome" or welcome.get("protocol") != Runtime.PROTOCOL:
 		_fail("the first line should be a protocol %d welcome: %s" % [Runtime.PROTOCOL, lines[0]])
 	var commands: Array = welcome.get("commands", [])
 	if not commands.has("ping") or not commands.has("get_tree"):
 		_fail("the welcome should list the commands: %s" % lines[0])
+	return client
 
-	# Two requests in one write, one of them for a command that does not exist, then one with
-	# no id at all, then one request split across two writes.
+
+## Two requests in one write, one of them for a command that does not exist, then one with no id at
+## all, then one request split across two writes. False when the runtime answered too few of them to
+## go on.
+func _check_requests_however_they_are_written(node: Runtime, client: StreamPeerTCP) -> bool:
 	var batch: String = (
 		JSON.stringify({ "id": 7, "command": "ping", "params": {} })
 		+ "\n"
@@ -324,14 +352,14 @@ func _check(node: Runtime, directory: String) -> void:
 		return lines.size() >= 4
 	if not _pump(node, client, three_answered):
 		_fail("the batch was not answered: %s" % str(lines))
-		return
+		return false
 	Checked.done(client.put_data(split.slice(10)), "sending the second half")
 	var fourth_answered: Callable = func() -> bool:
 		_drain(client)
 		return lines.size() >= 5
 	if not _pump(node, client, fourth_answered):
 		_fail("the split request was not answered: %s" % str(lines))
-		return
+		return false
 
 	if _reply(1).get("type") != "pong" or _reply(1).get("id") != 7:
 		_fail("the ping should be answered with a pong carrying its id: %s" % lines[1])
@@ -345,11 +373,4 @@ func _check(node: Runtime, directory: String) -> void:
 		_fail("a request without an id should be refused with a null id: %s" % lines[3])
 	if _reply(4).get("id") != 9:
 		_fail("a request split across writes should be answered once whole: %s" % lines[4])
-
-	client.disconnect_from_host()
-	if not _pump(node, client, func() -> bool: return node._clients.is_empty()):
-		_fail("a client that hung up was never dropped")
-
-	node._cleanup()
-	if FileAccess.file_exists(announcement):
-		_fail("the announcement should be gone once the runtime stops")
+	return true

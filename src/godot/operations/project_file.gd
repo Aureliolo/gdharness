@@ -49,19 +49,65 @@ static func in_order_of(before: String, written: String, changed: PackedStringAr
 	var old_sections: Array[Dictionary] = old["sections"]
 	var all_fresh: Array[Dictionary] = fresh["sections"]
 
-	var old_text: Dictionary[String, Dictionary] = {}
+	var merged: GdhSections = GdhSections.new()
+	var tails: Array[String] = _take_written(merged, all_fresh, _texts_of(old_sections), changed)
+	var old_names: Array[String] = []
+	var old_keys: Dictionary[String, Array] = {}
 	for section: Dictionary in old_sections:
+		var name: String = section["name"]
+		old_names.append(name)
+		var keys: Array[String] = []
+		for entry: Dictionary in section["entries"]:
+			keys.append(str(entry["key"]))
+		old_keys[name] = keys
+		_keep_unwritten(merged, section, changed)
+
+	# The blank lines closing a section belong to its place in the file rather than to the section,
+	# so the last one keeps the ending the engine gave the file wherever it moved from. A section
+	# put back sits between two others, which the engine parts with a blank line.
+	var names: Array[String] = _merged(old_names, merged.names)
+	while tails.size() < names.size():
+		# Not checked: a position inside the array cannot be refused.
+		var _inserted: int = tails.insert(maxi(tails.size() - 1, 0), "\n")
+
+	var text: String = fresh["preamble"]
+	for at: int in names.size():
+		var name: String = names[at]
+		var known: Array = old_keys.get(name, [])
+		var held: Array[String] = []
+		held.assign(known)
+		var listed: Array = merged.keys[name]
+		var wanted: Array[String] = []
+		wanted.assign(listed)
+		text += str(merged.by_name[name]["head"])
+		for key: String in _merged(held, wanted):
+			text += str(merged.entry_of[name][key])
+		text += tails[at]
+	return text
+
+
+## Each section's lines by key, by the section's name.
+static func _texts_of(sections: Array[Dictionary]) -> Dictionary[String, Dictionary]:
+	var by_section: Dictionary[String, Dictionary] = {}
+	for section: Dictionary in sections:
 		var texts: Dictionary[String, String] = {}
 		for entry: Dictionary in section["entries"]:
 			texts[str(entry["key"])] = str(entry["text"])
-		old_text[str(section["name"])] = texts
+		by_section[str(section["name"])] = texts
+	return by_section
 
-	var by_name: Dictionary[String, Dictionary] = {}
-	var fresh_names: Array[String] = []
-	var fresh_sections: Array[Dictionary] = []
-	var entry_of: Dictionary[String, Dictionary] = {}
-	var fresh_keys: Dictionary[String, Array] = {}
-	for section: Dictionary in all_fresh:
+
+## Puts into [param merged] each of [param written]'s sections with the lines the call
+## [param changed] and the lines [param old_text] held for it. A section left with no line is
+## left out. Answers the tail of each section put in, in order.
+static func _take_written(
+	merged: GdhSections,
+	written: Array[Dictionary],
+	old_text: Dictionary[String, Dictionary],
+	changed: PackedStringArray
+) -> Array[String]:
+	var tails: Array[String] = []
+	for section: Dictionary in written:
 		var name: String = section["name"]
 		var held: Dictionary = old_text.get(name, {})
 		var texts: Dictionary[String, String] = {}
@@ -77,65 +123,34 @@ static func in_order_of(before: String, written: String, changed: PackedStringAr
 			keys.append(key)
 		if keys.is_empty():
 			continue
-		by_name[name] = section
-		fresh_names.append(name)
-		fresh_sections.append(section)
-		entry_of[name] = texts
-		fresh_keys[name] = keys
-
-	var old_names: Array[String] = []
-	var old_keys: Dictionary[String, Array] = {}
-	for section: Dictionary in old_sections:
-		var name: String = section["name"]
-		old_names.append(name)
-		var keys: Array[String] = []
-		for entry: Dictionary in section["entries"]:
-			keys.append(str(entry["key"]))
-		old_keys[name] = keys
-		var kept: Array[Dictionary] = []
-		for entry: Dictionary in section["entries"]:
-			var key: String = entry["key"]
-			if (
-				not (by_name.has(name) and entry_of[name].has(key))
-				and not changed.has(_setting_of(name, key))
-			):
-				kept.append(entry)
-		if kept.is_empty():
-			continue
-		if not by_name.has(name):
-			by_name[name] = section
-			fresh_names.append(name)
-			entry_of[name] = {}
-			fresh_keys[name] = []
-		for entry: Dictionary in kept:
-			entry_of[name][str(entry["key"])] = str(entry["text"])
-			fresh_keys[name].append(str(entry["key"]))
-
-	# The blank lines closing a section belong to its place in the file rather than to the section,
-	# so the last one keeps the ending the engine gave the file wherever it moved from. A section
-	# put back sits between two others, which the engine parts with a blank line.
-	var names: Array[String] = _merged(old_names, fresh_names)
-	var tails: Array[String] = []
-	for section: Dictionary in fresh_sections:
+		merged.add(name, section)
+		merged.entry_of[name] = texts
+		merged.keys[name] = keys
 		tails.append(str(section["tail"]))
-	while tails.size() < names.size():
-		# Not checked: a position inside the array cannot be refused.
-		var _inserted: int = tails.insert(maxi(tails.size() - 1, 0), "\n")
+	return tails
 
-	var text: String = fresh["preamble"]
-	for at: int in names.size():
-		var name: String = names[at]
-		var known: Array = old_keys.get(name, [])
-		var held: Array[String] = []
-		held.assign(known)
-		var listed: Array = fresh_keys[name]
-		var wanted: Array[String] = []
-		wanted.assign(listed)
-		text += str(by_name[name]["head"])
-		for key: String in _merged(held, wanted):
-			text += str(entry_of[name][key])
-		text += tails[at]
-	return text
+
+## Puts into [param merged] the lines of the old [param section] the engine left out and the call
+## did not change, after the ones already there.
+static func _keep_unwritten(
+	merged: GdhSections, section: Dictionary, changed: PackedStringArray
+) -> void:
+	var name: String = section["name"]
+	var kept: Array[Dictionary] = []
+	for entry: Dictionary in section["entries"]:
+		var key: String = entry["key"]
+		if (
+			not (merged.by_name.has(name) and merged.entry_of[name].has(key))
+			and not changed.has(_setting_of(name, key))
+		):
+			kept.append(entry)
+	if kept.is_empty():
+		return
+	if not merged.by_name.has(name):
+		merged.add(name, section)
+	for entry: Dictionary in kept:
+		merged.entry_of[name][str(entry["key"])] = str(entry["text"])
+		merged.keys[name].append(str(entry["key"]))
 
 
 ## The setting [param key] in section [param section] stands for, as the engine names it: the
@@ -280,3 +295,18 @@ static func _logical_lines(text: String) -> Array[String]:
 	if start < text.length():
 		lines.append(text.substr(start))
 	return lines
+
+
+## The sections a merged file holds, in the order they were put in: each one's parsed section, its
+## lines by key and its keys in order.
+class GdhSections:
+	var by_name: Dictionary[String, Dictionary] = {}
+	var names: Array[String] = []
+	var entry_of: Dictionary[String, Dictionary] = {}
+	var keys: Dictionary[String, Array] = {}
+
+	func add(name: String, section: Dictionary) -> void:
+		by_name[name] = section
+		names.append(name)
+		entry_of[name] = {}
+		keys[name] = []

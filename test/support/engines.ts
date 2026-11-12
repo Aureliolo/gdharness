@@ -2,7 +2,7 @@ import { isAbsolute } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { alive } from '../../src/alive.js';
-import { spawnSyncHidden } from '../../src/spawn.js';
+import { type SpawnSyncReturns, spawnSyncHidden } from '../../src/spawn.js';
 
 /** One engine ended because it was still holding a fixture's directory, and the directory it held. */
 export interface EndedEngine {
@@ -26,23 +26,7 @@ export async function endEnginesUnder(...given: string[]): Promise<EndedEngine[]
   if (paths.length === 0) {
     return [];
   }
-  // Every process, matched on its command line alone. Filtering by `Name='godot.exe'` first meant
-  // this found nothing at all wherever the engine is not called that, which is every machine using
-  // the pinned build: it is `Godot_v4.7.2-stable_win64.exe` on Windows. Nineteen fixture projects
-  // and eleven engines were left running on this machine before anybody looked. The path is the
-  // discriminator anyway, and a name filter can only subtract from that.
-  const listing =
-    process.platform === 'win32'
-      ? spawnSyncHidden(
-          'powershell',
-          [
-            '-NoProfile',
-            '-Command',
-            'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.CommandLine)" }',
-          ],
-          { encoding: 'utf8', timeout: 30_000 },
-        )
-      : spawnSyncHidden('ps', ['-eo', 'pid=,args='], { encoding: 'utf8', timeout: 30_000 });
+  const listing = listProcesses();
 
   // A listing that did not happen is the failure this had for months, and it looks exactly like a
   // machine with nothing to clean up. Said out loud, because the cost of it lands on the next run
@@ -54,21 +38,7 @@ export async function endEnginesUnder(...given: string[]): Promise<EndedEngine[]
     return [];
   }
 
-  const wanted = paths.map((path) => ({ path, spelled: spelledForMatching(path) }));
-  const ended: EndedEngine[] = [];
-  for (const line of listing.stdout.split('\n')) {
-    const [, pid, rest] = /^\s*(\d+)\s+(.*)$/.exec(line.trim()) ?? [];
-    if (pid === undefined || rest === undefined || Number(pid) === process.pid) continue;
-    const named = spelledForMatching(rest);
-    const held = wanted.find(({ spelled }) => names(named, spelled));
-    if (held === undefined) continue;
-    try {
-      process.kill(Number(pid));
-      ended.push({ pid: Number(pid), under: held.path });
-    } catch {
-      // Gone between the listing and here, which is the outcome this is for.
-    }
-  }
+  const ended = endListed(listing.stdout, paths);
 
   // Waited for, because a signal is not an exit, and an engine on its way out still holds the files
   // and the ports it had: the next fixture reserves a port, is handed that number because nothing
@@ -80,6 +50,47 @@ export async function endEnginesUnder(...given: string[]): Promise<EndedEngine[]
   const holding = ended.filter(({ pid }) => alive(pid)).map(({ pid }) => pid);
   if (holding.length > 0) {
     console.warn(`engines ${holding.join(', ')} were signalled and are still up; the next case may collide`);
+  }
+  return ended;
+}
+
+/**
+ * Every process, matched on its command line alone. Filtering by `Name='godot.exe'` first meant
+ * this found nothing at all wherever the engine is not called that, which is every machine using
+ * the pinned build: it is `Godot_v4.7.2-stable_win64.exe` on Windows. Nineteen fixture projects
+ * and eleven engines were left running on this machine before anybody looked. The path is the
+ * discriminator anyway, and a name filter can only subtract from that.
+ */
+function listProcesses(): SpawnSyncReturns<string> {
+  return process.platform === 'win32'
+    ? spawnSyncHidden(
+        'powershell',
+        [
+          '-NoProfile',
+          '-Command',
+          'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.CommandLine)" }',
+        ],
+        { encoding: 'utf8', timeout: 30_000 },
+      )
+    : spawnSyncHidden('ps', ['-eo', 'pid=,args='], { encoding: 'utf8', timeout: 30_000 });
+}
+
+/** Signals every process of [param listing] whose command line names one of [param paths]. */
+function endListed(listing: string, paths: string[]): EndedEngine[] {
+  const wanted = paths.map((path) => ({ path, spelled: spelledForMatching(path) }));
+  const ended: EndedEngine[] = [];
+  for (const line of listing.split('\n')) {
+    const [, pid, rest] = /^\s*(\d+)\s+(.*)$/.exec(line.trim()) ?? [];
+    if (pid === undefined || rest === undefined || Number(pid) === process.pid) continue;
+    const named = spelledForMatching(rest);
+    const held = wanted.find(({ spelled }) => names(named, spelled));
+    if (held === undefined) continue;
+    try {
+      process.kill(Number(pid));
+      ended.push({ pid: Number(pid), under: held.path });
+    } catch {
+      // Gone between the listing and here, which is the outcome this is for.
+    }
   }
   return ended;
 }

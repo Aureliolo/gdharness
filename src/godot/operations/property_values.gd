@@ -218,20 +218,12 @@ func write_all(target: Object, properties: Dictionary) -> String:
 	for key: Variant in properties:
 		named[str(key).get_slice(":", 0)] = true
 	var before: Dictionary = _stored(target, named)
-	var given: Dictionary = {}
-	var declarations: Dictionary = {}
-	# How many writes had been made when each property was last written. One written last is not
-	# written again: the node is as that write left it, so the engine refuses it the same way and
-	# says so a second time.
-	var written_at: Dictionary[String, int] = {}
-	var writes: int = 0
-	# Which other property's write last changed each one already written, by name. A Gradient keeps
-	# one offset for each colour, so offsets given after `colors` cut them back, and the refusal
-	# said only that the engine had changed the colours.
-	var undone_by: Dictionary[String, String] = {}
+	var writing: GdhWriting = GdhWriting.new()
+	writing.target = target
+	writing.properties = properties
 	# A refusal of one of several leaves the others unwritten too, which a refusal naming only the
 	# one it refused left a caller to guess.
-	var unwritten: String = (
+	writing.unwritten = (
 		""
 		if properties.size() < 2
 		else " None of the %d properties given was written." % properties.size()
@@ -242,121 +234,190 @@ func write_all(target: Object, properties: Dictionary) -> String:
 	if order.has("script"):
 		order.erase("script")
 		order.push_front("script")
-	var home: String = GdhPropertyPaths.home_of(target)
+	writing.home = GdhPropertyPaths.home_of(target)
 	for key: Variant in order:
-		var property: String = str(key)
-		var place: Array = GdhPropertyPaths.holder_of(target, property, home)
-		var holder: Object = place[0]
-		var name: String = place[1]
-		var entry: String = name.trim_prefix("metadata/")
-		if name.begins_with("metadata/") and "/" not in entry and ":" not in entry:
-			if properties[key] == null:
-				if not holder.has_meta(entry):
-					return (
-						(
-							"%s has no metadata entry %s, so there is nothing to remove."
-							% [GdhPropertyPaths.class_called(holder), entry]
-						)
-						+ unwritten
-					)
-				holder.remove_meta(entry)
-				metadata_removed.append(property)
-				continue
-			# A new entry is made as the inspector's Add Metadata makes it, then written as any
-			# other. JSON has one kind of number, so a whole one makes an int, as `2` does in
-			# GDScript.
-			if not holder.has_meta(entry):
-				if not entry.is_valid_ascii_identifier():
-					return (
-						(
-							"metadata/%s is not a name a metadata entry can have: letters, digits "
-							+ "and underscores, not starting with a digit."
-						)
-						% entry
-						+ unwritten
-					)
-				var first: Variant = parse(properties[key])
-				if first is float:
-					var number: float = first
-					if number == roundf(number) and absf(number) < 2.0 ** 53:
-						first = int(number)
-				holder.set_meta(entry, first)
-		var declared: Dictionary = declaration(holder, name)
-		if declared.is_empty():
-			var elsewhere: String = GdhPropertyPaths.held_elsewhere(holder, name, home)
-			if not elsewhere.is_empty():
-				return elsewhere + unwritten
-			var unlisted: String = GdhPropertyPaths.unlisted(holder, name)
-			if not unlisted.is_empty():
-				return unlisted + unwritten
-			var ungrown: String = GdhPropertyPaths.grow(
-				holder, name, GdhPropertyPaths.class_called(holder)
-			)
-			if not ungrown.is_empty():
-				return ungrown + unwritten
-			declared = declaration(holder, name)
-			if declared.is_empty():
-				var unmade: String = GdhPropertyPaths.made_by_setting(holder, name)
-				if not unmade.is_empty():
-					return unmade + unwritten
-				declared = declaration(holder, name)
-		if declared.is_empty() and ":" in name:
-			declared = _component_slot(holder, name)
-			if declared.has("refused"):
-				return str(declared["refused"]) + unwritten
-		if (
-			declared.is_empty()
-			and holder is ShaderMaterial
-			and name.begins_with("shader_parameter/")
-		):
-			return GdhDeclared.no_uniform(holder as ShaderMaterial, name) + unwritten
-		if declared.is_empty() and holder is ShaderMaterial:
-			var bare: String = GdhDeclared.bare_uniform(holder as ShaderMaterial, name)
-			if not bare.is_empty():
-				return bare + unwritten
-		if declared.is_empty():
-			return no_property(holder, name) + unwritten
-		var unscripted: Variant = null
-		if holder == target and not GdhDeclared.runs_script_code(target, name):
-			unscripted = _stored(target, {})
-		if holder is Control:
-			var unplaced: String = _laid_out(holder as Control, name)
-			if not unplaced.is_empty():
-				return unplaced + unwritten
-		var value: Array = value_for(holder, declared, properties[key])
-		if not value[0]:
-			return str(value[1]) + unwritten
-		var outside: String = GdhDeclared.outside(holder, declared, value[1], shown(value[1]))
-		if not outside.is_empty():
-			_outside_declared[property] = outside
-		_write(target, property, value[1])
-		if unscripted is Dictionary:
-			var was: Dictionary = unscripted
-			var now: Dictionary = _stored(target, {})
-			for moved: String in now:
-				if moved != name.get_slice(":", 0) and not GdhSame.same(now[moved], was.get(moved)):
-					moved_by_engine[moved] = true
-		writes += 1
-		written_at[property] = writes
-		_note_undone(target, property, given, undone_by)
-		given[property] = value[1]
-		declarations[property] = declared
+		_write_key(writing, key)
+		if writing.stopped:
+			return writing.refusal
+	_write_again_what_moved(writing)
+	_check_held(writing)
+	if writing.stopped:
+		return writing.refusal
+	for property: String in before:
+		var now: Variant = target.get(property)
+		if not metadata_removed.has(property) and not GdhSame.same(now, before[property]):
+			_also_changed[property] = [before[property], now]
+	if target is Node:
+		_names_no_node = GdhDeclared.naming_nothing(target as Node, writing.given)
+	return ""
 
-	for property: String in given:
+
+## Writes the property [param key] of the call in [param writing], or stops it with a refusal.
+func _write_key(writing: GdhWriting, key: Variant) -> void:
+	var target: Object = writing.target
+	var property: String = str(key)
+	var place: Array = GdhPropertyPaths.holder_of(target, property, writing.home)
+	var holder: Object = place[0]
+	var name: String = place[1]
+	var entry: String = name.trim_prefix("metadata/")
+	if name.begins_with("metadata/") and "/" not in entry and ":" not in entry:
+		if _metadata_entry(writing, holder, entry, key):
+			return
+	var declared: Dictionary = _declared_for_write(writing, holder, name)
+	if writing.stopped:
+		return
+	var unscripted: Variant = null
+	if holder == target and not GdhDeclared.runs_script_code(target, name):
+		unscripted = _stored(target, {})
+	if holder is Control:
+		var unplaced: String = _laid_out(holder as Control, name)
+		if not unplaced.is_empty():
+			writing.refuse(unplaced)
+			return
+	var value: Array = value_for(holder, declared, writing.properties[key])
+	if not value[0]:
+		writing.refuse(str(value[1]))
+		return
+	var outside: String = GdhDeclared.outside(holder, declared, value[1], shown(value[1]))
+	if not outside.is_empty():
+		_outside_declared[property] = outside
+	_write(target, property, value[1])
+	if unscripted is Dictionary:
+		var was: Dictionary = unscripted
+		var now: Dictionary = _stored(target, {})
+		for moved: String in now:
+			if moved != name.get_slice(":", 0) and not GdhSame.same(now[moved], was.get(moved)):
+				moved_by_engine[moved] = true
+	writing.writes += 1
+	writing.written_at[property] = writing.writes
+	_note_undone(target, property, writing.given, writing.undone_by)
+	writing.given[property] = value[1]
+	writing.declarations[property] = declared
+
+
+## Removes or makes the metadata entry [param entry] the property [param key] names on
+## [param holder]. True when nothing more is to be written for the key, either because the entry was
+## removed or because the call is stopped with a refusal.
+func _metadata_entry(writing: GdhWriting, holder: Object, entry: String, key: Variant) -> bool:
+	var property: String = str(key)
+	if writing.properties[key] == null:
+		if not holder.has_meta(entry):
+			writing.refuse(
+				(
+					"%s has no metadata entry %s, so there is nothing to remove."
+					% [GdhPropertyPaths.class_called(holder), entry]
+				)
+			)
+			return true
+		holder.remove_meta(entry)
+		metadata_removed.append(property)
+		return true
+	# A new entry is made as the inspector's Add Metadata makes it, then written as any
+	# other. JSON has one kind of number, so a whole one makes an int, as `2` does in
+	# GDScript.
+	if not holder.has_meta(entry):
+		if not entry.is_valid_ascii_identifier():
+			writing.refuse(
+				(
+					(
+						"metadata/%s is not a name a metadata entry can have: letters, digits "
+						+ "and underscores, not starting with a digit."
+					)
+					% entry
+				)
+			)
+			return true
+		var first: Variant = parse(writing.properties[key])
+		if first is float:
+			var number: float = first
+			if number == roundf(number) and absf(number) < 2.0 ** 53:
+				first = int(number)
+		holder.set_meta(entry, first)
+	return false
+
+
+## What [param holder] declares for [param name], or {} once the call is stopped with a refusal for
+## a name it has no property for.
+func _declared_for_write(writing: GdhWriting, holder: Object, name: String) -> Dictionary:
+	var declared: Dictionary = declaration(holder, name)
+	if declared.is_empty():
+		declared = _grown_declaration(writing, holder, name)
+		if writing.stopped:
+			return declared
+	if declared.is_empty() and ":" in name:
+		declared = _component_slot(holder, name)
+		if declared.has("refused"):
+			writing.refuse(str(declared["refused"]))
+			return declared
+	if declared.is_empty():
+		_refuse_undeclared(writing, holder, name)
+	return declared
+
+
+## What [param holder] declares for [param name] once its property is grown or made by setting it,
+## or {} when it still declares none, or when the call is stopped with the refusal that says why.
+func _grown_declaration(writing: GdhWriting, holder: Object, name: String) -> Dictionary:
+	var elsewhere: String = GdhPropertyPaths.held_elsewhere(holder, name, writing.home)
+	if not elsewhere.is_empty():
+		writing.refuse(elsewhere)
+		return {}
+	var unlisted: String = GdhPropertyPaths.unlisted(holder, name)
+	if not unlisted.is_empty():
+		writing.refuse(unlisted)
+		return {}
+	var ungrown: String = GdhPropertyPaths.grow(holder, name, GdhPropertyPaths.class_called(holder))
+	if not ungrown.is_empty():
+		writing.refuse(ungrown)
+		return {}
+	var declared: Dictionary = declaration(holder, name)
+	if declared.is_empty():
+		var unmade: String = GdhPropertyPaths.made_by_setting(holder, name)
+		if not unmade.is_empty():
+			writing.refuse(unmade)
+			return declared
+		declared = declaration(holder, name)
+	return declared
+
+
+## Stops the call with the refusal for [param name], a property [param holder] does not have.
+func _refuse_undeclared(writing: GdhWriting, holder: Object, name: String) -> void:
+	if holder is ShaderMaterial:
+		if name.begins_with("shader_parameter/"):
+			writing.refuse(GdhDeclared.no_uniform(holder as ShaderMaterial, name))
+			return
+		var bare: String = GdhDeclared.bare_uniform(holder as ShaderMaterial, name)
+		if not bare.is_empty():
+			writing.refuse(bare)
+			return
+	writing.refuse(no_property(holder, name))
+
+
+## Writes again each property a later write of the call left holding something else.
+func _write_again_what_moved(writing: GdhWriting) -> void:
+	var target: Object = writing.target
+	for property: String in writing.given:
 		if (
-			written_at[property] < writes
-			and not GdhSame.same(read_at(target, property), _as_held(target, property, given))
+			writing.written_at[property] < writing.writes
+			and not GdhSame.same(
+				read_at(target, property), _as_held(target, property, writing.given)
+			)
 		):
-			_write(target, property, given[property])
-			writes += 1
-			written_at[property] = writes
-			_note_undone(target, property, given, undone_by)
+			_write(target, property, writing.given[property])
+			writing.writes += 1
+			writing.written_at[property] = writing.writes
+			_note_undone(target, property, writing.given, writing.undone_by)
+
+
+## Stops the call with the refusal for the first property that does not hold the value it was given.
+func _check_held(writing: GdhWriting) -> void:
+	var target: Object = writing.target
+	var given: Dictionary = writing.given
 	for property: String in given:
 		var held: Variant = read_at(target, property)
 		if not GdhSame.same(held, _as_held(target, property, given)):
 			unheld = property
-			if undone_by.has(property):
-				return (
+			if writing.undone_by.has(property):
+				var in_step: String = (
 					(
 						"%s.%s was given %s and holds %s once %s was set as well: the engine keeps "
 						+ "the two in step, so they cannot hold these values together. Nothing was "
@@ -367,25 +428,23 @@ func write_all(target: Object, properties: Dictionary) -> String:
 						property,
 						shown(given[property]),
 						shown(held),
-						undone_by[property],
+						writing.undone_by[property],
 					]
 				)
-			var declared: Dictionary = declarations[property]
-			return GdhDeclared.not_held(
-				GdhPropertyPaths.class_called(target),
-				target.get_class(),
-				property,
-				declared,
-				[given[property], shown(given[property])],
-				shown(held)
+				writing.stop(in_step)
+				return
+			var declared: Dictionary = writing.declarations[property]
+			writing.stop(
+				GdhDeclared.not_held(
+					GdhPropertyPaths.class_called(target),
+					target.get_class(),
+					property,
+					declared,
+					[given[property], shown(given[property])],
+					shown(held)
+				)
 			)
-	for property: String in before:
-		var now: Variant = target.get(property)
-		if not metadata_removed.has(property) and not GdhSame.same(now, before[property]):
-			_also_changed[property] = [before[property], now]
-	if target is Node:
-		_names_no_node = GdhDeclared.naming_nothing(target as Node, given)
-	return ""
+			return
 
 
 ## Notes in [param undone_by] each property of [param given] that writing [param written] on
@@ -645,46 +704,66 @@ func _value_as(target: Object, declared: Dictionary, raw: Variant) -> Array:
 			return found
 		value = found[1]
 	else:
-		var elements: Array = GdhDeclared.elements_of(declared)
-		# Some engine properties declare a bare Array and hold a typed one: NavigationPolygon's
-		# outlines hold PackedVector2Arrays, and points written as {"x", "y"} inside them landed as
-		# zero vectors, since nothing said what the inner lists hold.
-		if elements.is_empty() and expected_type == TYPE_ARRAY:
-			var current: Variant = target.get(property)
-			if current is Array:
-				var typed: Array = current
-				if typed.is_typed() and typed.get_typed_builtin() != TYPE_OBJECT:
-					elements = [typed.get_typed_builtin()]
-		if GdhShapes.fraction(raw, expected_type, elements):
-			return [false, _fraction_refusal(target, property, raw)]
-		var rounded: String = GdhSerialisation.inexact(raw, expected_type)
-		if not rounded.is_empty():
-			return [
-				false,
-				"%s.%s holds int: %s." % [GdhPropertyPaths.class_called(target), property, rounded],
-			]
-		_refused = ""
-		value = parse(raw, expected_type, elements)
-		if not _refused.is_empty():
-			return [false, _refused]
-		if expected_type == TYPE_ARRAY and elements == [TYPE_OBJECT] and value is Array:
-			var listed: Array = value
-			return _object_list(target, declared, listed)
-		if expected_type == TYPE_DICTIONARY and elements.size() == 2 and value is Dictionary:
-			if GdhRead.as_int(elements[1], TYPE_NIL) == TYPE_OBJECT:
-				var mapped: Dictionary = value
-				return _object_entries(target, declared, mapped)
-		var refusal: String = cannot_hold(
-			GdhPropertyPaths.class_called(target), property, value, expected_type, elements
-		)
-		if not refusal.is_empty():
-			return [false, refusal]
+		var parsed: Array = _parse_plain(target, declared, raw)
+		if not parsed[0]:
+			return parsed
+		value = parsed[1]
 	if value is Object:
 		var held: Object = value
 		var wrong: String = _wrong_class(held, declared)
 		if not wrong.is_empty():
 			return [false, wrong]
 	return [true, value]
+
+
+## [param raw] parsed as the type [param declared] takes, as [ok, value] or [false, why not].
+func _parse_plain(target: Object, declared: Dictionary, raw: Variant) -> Array:
+	var property: String = str(declared.get("name", ""))
+	var expected_type: int = GdhRead.as_int(declared.get("type", TYPE_NIL), TYPE_NIL)
+	var elements: Array = _elements_declared(target, declared)
+	if GdhShapes.fraction(raw, expected_type, elements):
+		return [false, _fraction_refusal(target, property, raw)]
+	var rounded: String = GdhSerialisation.inexact(raw, expected_type)
+	if not rounded.is_empty():
+		return [
+			false,
+			"%s.%s holds int: %s." % [GdhPropertyPaths.class_called(target), property, rounded],
+		]
+	_refused = ""
+	var value: Variant = parse(raw, expected_type, elements)
+	if not _refused.is_empty():
+		return [false, _refused]
+	if expected_type == TYPE_ARRAY and elements == [TYPE_OBJECT] and value is Array:
+		var listed: Array = value
+		return _object_list(target, declared, listed)
+	if expected_type == TYPE_DICTIONARY and elements.size() == 2 and value is Dictionary:
+		if GdhRead.as_int(elements[1], TYPE_NIL) == TYPE_OBJECT:
+			var mapped: Dictionary = value
+			return _object_entries(target, declared, mapped)
+	var refusal: String = cannot_hold(
+		GdhPropertyPaths.class_called(target), property, value, expected_type, elements
+	)
+	if not refusal.is_empty():
+		return [false, refusal]
+	return [true, value]
+
+
+## The element types [param declared] names, or the one the array [param target] holds now when it
+## names none.
+func _elements_declared(target: Object, declared: Dictionary) -> Array:
+	var property: String = str(declared.get("name", ""))
+	var expected_type: int = GdhRead.as_int(declared.get("type", TYPE_NIL), TYPE_NIL)
+	var elements: Array = GdhDeclared.elements_of(declared)
+	# Some engine properties declare a bare Array and hold a typed one: NavigationPolygon's
+	# outlines hold PackedVector2Arrays, and points written as {"x", "y"} inside them landed as
+	# zero vectors, since nothing said what the inner lists hold.
+	if elements.is_empty() and expected_type == TYPE_ARRAY:
+		var current: Variant = target.get(property)
+		if current is Array:
+			var typed: Array = current
+			if typed.is_typed() and typed.get_typed_builtin() != TYPE_OBJECT:
+				elements = [typed.get_typed_builtin()]
+	return elements
 
 
 ## A property holding a Node is given the node the path leads to from [param target], as the
@@ -1184,6 +1263,21 @@ func _parse_array(value: Array, expected_type: int, elements: Array) -> Variant:
 	# Read by its places, a word was read as 0 and ["a", "b"] written as (0, 0).
 	if GdhShapes.NUMBER_FIELDS.has(type_string(expected_type)) and not GdhShapes.all_numbers(value):
 		return value
+	var placed: Variant = _placed_by_position(value, expected_type)
+	if placed != null:
+		return placed
+	var element_type: int = TYPE_NIL
+	if expected_type == TYPE_ARRAY and not elements.is_empty():
+		element_type = GdhRead.as_int(elements[0], TYPE_NIL)
+	var items: Array = value.map(
+		func(item: Variant) -> Variant: return _parse_member(item, element_type)
+	)
+	return _fitted_items(items, element_type)
+
+
+## The vector or colour [param value] gives by its places when it has as many as the type
+## [param expected_type] takes, or null.
+func _placed_by_position(value: Array, expected_type: int) -> Variant:
 	match expected_type:
 		TYPE_VECTOR2:
 			if value.size() == 2:
@@ -1220,12 +1314,12 @@ func _parse_array(value: Array, expected_type: int, elements: Array) -> Variant:
 					GdhRead.as_float(value[3]) if value.size() == 4 else 1.0
 				)
 
-	var element_type: int = TYPE_NIL
-	if expected_type == TYPE_ARRAY and not elements.is_empty():
-		element_type = GdhRead.as_int(elements[0], TYPE_NIL)
-	var items: Array = value.map(
-		func(item: Variant) -> Variant: return _parse_member(item, element_type)
-	)
+	return null
+
+
+## [param items] as a typed array of [param element_type] when every item fits it, and as they are
+## when one does not.
+func _fitted_items(items: Array, element_type: int) -> Variant:
 	if element_type == TYPE_NIL or element_type == TYPE_OBJECT:
 		return items
 	if not items.all(
@@ -1246,3 +1340,36 @@ func _parse_array(value: Array, expected_type: int, elements: Array) -> Variant:
 		func(item: Variant) -> Variant: return type_convert(item, element_type)
 	)
 	return Array(fitted, element_type, &"", null)
+
+
+## What one call of write_all has written so far, and the refusal that stopped it, if any.
+class GdhWriting:
+	var target: Object
+	var properties: Dictionary = {}
+	var home: String = ""
+	## The text added to each refusal, saying the other properties of the call were not written.
+	var unwritten: String = ""
+	var given: Dictionary = {}
+	var declarations: Dictionary = {}
+	## How many writes had been made when each property was last written. One written last is not
+	## written again: the node is as that write left it, so the engine refuses it the same way and
+	## says so a second time.
+	var written_at: Dictionary[String, int] = {}
+	var writes: int = 0
+	## Which other property's write last changed each one already written, by name. A Gradient keeps
+	## one offset for each colour, so offsets given after `colors` cut them back, and the refusal
+	## said only that the engine had changed the colours.
+	var undone_by: Dictionary[String, String] = {}
+	var refusal: String = ""
+	var stopped: bool = false
+
+
+	## Stops the call with [param text] followed by the note that nothing else was written.
+	func refuse(text: String) -> void:
+		stop(text + unwritten)
+
+
+	## Stops the call with [param text] as it is.
+	func stop(text: String) -> void:
+		refusal = text
+		stopped = true

@@ -24,18 +24,25 @@ export const STARVED = 8;
 /** The share of the machine others keep busy from which an engine counts as crowded. */
 const BUSY = 0.25;
 
-/** How often the machine, and while it is busy the engines, are read. */
-const SAMPLE_MS = 1000;
+/**
+ * How often the machine and the engines whose memory is watched are read, and while it is busy every
+ * engine. As often as an engine's watch looks, so an engine that lives a second is still read.
+ */
+const SAMPLE_MS = 500;
 
 /** A wait the operating system is given to answer, past which the stretch counts by the clock. */
 const ASK_TIMEOUT_MS = 3000;
 
-/** One reading: when, the machine's busy processor seconds over all cores, and each engine's. */
+/**
+ * One reading: when, the machine's busy processor seconds over all cores, each engine's, and what
+ * each engine watched for memory holds.
+ */
 export interface Sample {
   readonly at: number;
   readonly machine: number;
-  /** Null when the machine was quiet enough that no engine needed reading. */
+  /** Null when the machine was quiet enough that no engine's processor time needed reading. */
   readonly processors: ReadonlyMap<number, number> | null;
+  readonly held?: ReadonlyMap<number, number>;
 }
 
 /**
@@ -142,22 +149,29 @@ function machineSeconds(): number {
 }
 
 const watched = new Set<number>();
+const withMemory = new Set<number>();
 let latest: { readonly taken: number; readonly sample: Promise<Sample> } | null = null;
 let quietAt: Sample | null = null;
 
-/** Includes [param pid] in the samples until [param watching] is false. */
-export function watching(pid: number, on: boolean): void {
+/** Includes [param pid] in the samples until [param on] is false, and what it holds when [param memory]. */
+export function watching(pid: number, on: boolean, memory = false): void {
   if (on) {
     watched.add(pid);
+    if (memory && !withMemory.has(pid)) {
+      withMemory.add(pid);
+      // The newest sample was taken without it, and a short engine may end before the next.
+      latest = null;
+    }
   } else {
     watched.delete(pid);
+    withMemory.delete(pid);
   }
 }
 
 /**
  * The newest sample, taken at most once a [param SAMPLE_MS] for every engine watched in this
  * process together, so a run of thirty engines reads the process table once rather than thirty
- * times. The engines are read only while the machine is busy enough that one could be crowded.
+ * times. Their processor time is read only on a busy machine, their memory every time.
  */
 export function sampled(): Promise<Sample> {
   const now = Date.now();
@@ -176,10 +190,39 @@ async function take(): Promise<Sample> {
     previous === null || at <= previous.at
       ? 1
       : (machine - previous.machine) / ((at - previous.at) * availableParallelism());
-  if (share < BUSY || watched.size === 0) {
-    return quietAt;
+  const busy = share >= BUSY && watched.size > 0;
+  const [processors, held] = await Promise.all([
+    busy ? processorSecondsOf([...watched]) : null,
+    withMemory.size === 0 ? null : heldBy([...withMemory]),
+  ]);
+  return { at, machine, processors, ...(held === null ? {} : { held }) };
+}
+
+/** The bytes each of [param pids] holds, without any the platform does not answer for. */
+export async function heldBy(pids: readonly number[]): Promise<Map<number, number>> {
+  const held = new Map<number, number>();
+  try {
+    if (process.platform === 'win32') {
+      await readWindowsHeld(pids, held);
+    } else if (process.platform === 'linux') {
+      await readProcSeconds(pids, new Map(), held);
+    } else {
+      await readPsSeconds(pids, new Map(), held);
+    }
+  } catch {
+    // Unread, so the engine's figure is left out.
   }
-  return { at, machine, processors: await processorSecondsOf([...watched]) };
+  return held;
+}
+
+async function readWindowsHeld(pids: readonly number[], held: Map<number, number>): Promise<void> {
+  const said = await askProcessTable(`HeldBy('${pids.join(',')}')`, ASK_TIMEOUT_MS);
+  for (const line of said.split(/\r?\n/)) {
+    const [pid, bytes] = line.trim().split(' ').map(Number);
+    if (pid !== undefined && bytes !== undefined && Number.isFinite(pid) && Number.isFinite(bytes)) {
+      held.set(pid, bytes);
+    }
+  }
 }
 
 /** The processor seconds each of [param pids] has used, without any the platform does not answer for. */
@@ -189,9 +232,9 @@ export async function processorSecondsOf(pids: readonly number[]): Promise<Map<n
     if (process.platform === 'win32') {
       await readWindowsSeconds(pids, found);
     } else if (process.platform === 'linux') {
-      await readProcSeconds(pids, found);
+      await readProcSeconds(pids, found, new Map());
     } else {
-      await readPsSeconds(pids, found);
+      await readPsSeconds(pids, found, new Map());
     }
   } catch {
     // Unread, so the stretch counts by the clock.
@@ -209,8 +252,12 @@ async function readWindowsSeconds(pids: readonly number[], found: Map<number, nu
   }
 }
 
-async function readProcSeconds(pids: readonly number[], found: Map<number, number>): Promise<void> {
-  const ticks = await ticksASecond();
+async function readProcSeconds(
+  pids: readonly number[],
+  found: Map<number, number>,
+  held: Map<number, number>,
+): Promise<void> {
+  const [ticks, page] = await Promise.all([ticksASecond(), pageBytes()]);
   for (const pid of pids) {
     try {
       // The fields after the command, which is in brackets and may hold spaces of its own.
@@ -225,6 +272,10 @@ async function readProcSeconds(pids: readonly number[], found: Map<number, numbe
       if (Number.isFinite(used)) {
         found.set(pid, used / ticks);
       }
+      const resident = Number(fields[21]);
+      if (Number.isFinite(resident)) {
+        held.set(pid, resident * page);
+      }
     } catch {
       // Gone between the listing and the read.
     }
@@ -233,7 +284,7 @@ async function readProcSeconds(pids: readonly number[], found: Map<number, numbe
 
 /** What `ps` printed for [param some], also when it exited 1 because one of them had gone. */
 function askedPs(some: readonly number[]): Promise<string> {
-  return run('ps', ['-o', 'pid=,time=', '-p', some.join(',')], { timeout: ASK_TIMEOUT_MS }).then(
+  return run('ps', ['-o', 'pid=,time=,rss=', '-p', some.join(',')], { timeout: ASK_TIMEOUT_MS }).then(
     (done) => done.stdout,
     (error: unknown) => {
       const printed = error instanceof Error && 'stdout' in error ? error.stdout : undefined;
@@ -242,7 +293,11 @@ function askedPs(some: readonly number[]): Promise<string> {
   );
 }
 
-async function readPsSeconds(pids: readonly number[], found: Map<number, number>): Promise<void> {
+async function readPsSeconds(
+  pids: readonly number[],
+  found: Map<number, number>,
+  held: Map<number, number>,
+): Promise<void> {
   // ps exits 1 when any pid it was given has gone, and still prints the rest. One it cannot
   // take at all leaves it printing nothing, so each is then asked alone.
   let stdout = await askedPs(pids);
@@ -250,10 +305,14 @@ async function readPsSeconds(pids: readonly number[], found: Map<number, number>
     stdout = (await Promise.all(pids.map((pid) => askedPs([pid])))).join('\n');
   }
   for (const line of stdout.split('\n')) {
-    const [pid, time] = line.trim().split(/\s+/);
+    const [pid, time, rss] = line.trim().split(/\s+/);
     const seconds = time === undefined ? undefined : secondsFromClock(time);
     if (pid !== undefined && seconds !== undefined) {
       found.set(Number(pid), seconds);
+    }
+    const kibibytes = rss === undefined ? Number.NaN : Number(rss);
+    if (pid !== undefined && Number.isFinite(kibibytes)) {
+      held.set(Number(pid), kibibytes * 1024);
     }
   }
 }
@@ -266,4 +325,14 @@ function ticksASecond(): Promise<number> {
     .then(({ stdout }) => Number(stdout.trim()) || 100)
     .catch(() => 100);
   return ticks;
+}
+
+let pages: Promise<number> | null = null;
+
+/** The bytes in a page of /proc's resident count, asked once. */
+function pageBytes(): Promise<number> {
+  pages ??= run('getconf', ['PAGESIZE'], { timeout: ASK_TIMEOUT_MS })
+    .then(({ stdout }) => Number(stdout.trim()) || 4096)
+    .catch(() => 4096);
+  return pages;
 }

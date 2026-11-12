@@ -221,62 +221,13 @@ func set_import_options(params: Dictionary) -> Dictionary:
 	# Every option checked before any is written, so a refused one leaves the sidecar as it was.
 	var importer: String = str(config.get_value("remap", "importer", ""))
 	var was_importer: String = importer
-	# Switched as the Import dock's Import As switches it: the new importer starts from its own
-	# defaults, which the reimport writes, and the options given are its options.
-	if not switching.is_empty() and switching != importer:
-		config.set_value("remap", "importer", switching)
-		if config.has_section("params"):
-			config.erase_section("params")
-		importer = switching
+	importer = _switch_importer(config, switching, importer)
 	var fitted_values: Dictionary = {}
 	var refused: Array[String] = []
 	for key: Variant in options:
-		var name: String = str(key)
-		# Written under params, these changed nothing, and the answer called them updated.
-		if name in ["importer", "type"] or name.begins_with("remap/") or name.begins_with("deps/"):
-			refused.append(
-				(
-					"%s is not an import option, and the import file's params hold only those. "
-					+ "importer switches the importer the file is imported with"
-				)
-				% name
-			)
-			continue
-		var held: Variant = _held(config, name)
-		var given: Variant = _values.deserialize_value(options[key])
-		var holding_resources: Array = RESOURCE_OPTIONS.get(importer, [])
-		var loaded: Dictionary = _with_resources(options[key], name in holding_resources)
-		if loaded.has("refused"):
-			refused.append("%s names %s" % [name, loaded["refused"]])
-			continue
-		var value: Variant = _as_option(_values.fitted(options[key], typeof(held)), held)
-		if loaded["loaded"]:
-			value = loaded["value"]
-		if value is Dictionary:
-			var entries: Dictionary = value
-			var keyed: Dictionary = _keyed_as_option(name, entries, held, importer)
-			if keyed.has("refused"):
-				refused.append(str(keyed["refused"]))
-				continue
-			value = keyed["value"]
-		# A number the option cannot hold whole is refused rather than truncated: 2.5 fitted to an
-		# enum option became 2, which is another setting.
-		var lossy: bool = (
-			(given is int or given is float)
-			and (value is int or value is float)
-			and type_convert(value, typeof(given)) != given
-		)
-		if held != null and (lossy or not GdhSerialisation.acceptable(value, typeof(held))):
-			var held_type: String = type_string(typeof(held))
-			var article: String = "an" if held_type.to_lower()[0] in "aeiou" else "a"
-			refused.append(
-				(
-					"%s holds %s %s, and %s is not one"
-					% [name, article, held_type, JSON.stringify(options[key])]
-				)
-			)
-			continue
-		fitted_values[name] = value
+		var refusal: String = _fit_option(config, str(key), options[key], importer, fitted_values)
+		if not refusal.is_empty():
+			refused.append(refusal)
 	if not refused.is_empty():
 		return _log.failure("Nothing was written: " + "; ".join(refused))
 
@@ -284,20 +235,7 @@ func set_import_options(params: Dictionary) -> Dictionary:
 	var updated_keys: Array[String] = []
 	var unchanged_keys: Array[String] = []
 	var changes: Dictionary = {}
-	for name: String in fitted_values:
-		var held: Variant = _held(config, name)
-		var value: Variant = fitted_values[name]
-		if held != null and typeof(held) == typeof(value) and held == value:
-			unchanged_keys.append(name)
-			continue
-		config.set_value("params", name, value)
-		updated_keys.append(name)
-		var change: Dictionary = { "now": _values.serialize_value(value) }
-		# The file held none, as after a switch of importer, which a null would read as a value.
-		if held != null:
-			change["was"] = _values.serialize_value(held)
-		changes[name] = change
-		_log.debug("Set " + name + " = " + str(value))
+	_apply_options(config, fitted_values, updated_keys, unchanged_keys, changes)
 
 	var switched: bool = importer != was_importer
 	if switched or not updated_keys.is_empty():
@@ -314,6 +252,89 @@ func set_import_options(params: Dictionary) -> Dictionary:
 	if not unchanged_keys.is_empty():
 		answer["unchanged_options"] = unchanged_keys
 	return answer
+
+
+## Moves [param config] to the importer [param switching] when it names another than
+## [param importer], and answers the importer it holds now.
+static func _switch_importer(config: ConfigFile, switching: String, importer: String) -> String:
+	# Switched as the Import dock's Import As switches it: the new importer starts from its own
+	# defaults, which the reimport writes, and the options given are its options.
+	if switching.is_empty() or switching == importer:
+		return importer
+	config.set_value("remap", "importer", switching)
+	if config.has_section("params"):
+		config.erase_section("params")
+	return switching
+
+
+## Fits [param raw], the value given for the option [param name], to what [param config] holds for
+## it and stores it in [param fitted_values]. Answers why it cannot be written, or "".
+func _fit_option(
+	config: ConfigFile, name: String, raw: Variant, importer: String, fitted_values: Dictionary
+) -> String:
+	# Written under params, these changed nothing, and the answer called them updated.
+	if name in ["importer", "type"] or name.begins_with("remap/") or name.begins_with("deps/"):
+		return (
+			(
+				"%s is not an import option, and the import file's params hold only those. "
+				+ "importer switches the importer the file is imported with"
+			)
+			% name
+		)
+	var held: Variant = _held(config, name)
+	var given: Variant = _values.deserialize_value(raw)
+	var holding_resources: Array = RESOURCE_OPTIONS.get(importer, [])
+	var loaded: Dictionary = _with_resources(raw, name in holding_resources)
+	if loaded.has("refused"):
+		return "%s names %s" % [name, loaded["refused"]]
+	var value: Variant = _as_option(_values.fitted(raw, typeof(held)), held)
+	if loaded["loaded"]:
+		value = loaded["value"]
+	if value is Dictionary:
+		var entries: Dictionary = value
+		var keyed: Dictionary = _keyed_as_option(name, entries, held, importer)
+		if keyed.has("refused"):
+			return str(keyed["refused"])
+		value = keyed["value"]
+	# A number the option cannot hold whole is refused rather than truncated: 2.5 fitted to an
+	# enum option became 2, which is another setting.
+	var lossy: bool = (
+		(given is int or given is float)
+		and (value is int or value is float)
+		and type_convert(value, typeof(given)) != given
+	)
+	if held != null and (lossy or not GdhSerialisation.acceptable(value, typeof(held))):
+		var held_type: String = type_string(typeof(held))
+		var article: String = "an" if held_type.to_lower()[0] in "aeiou" else "a"
+		return "%s holds %s %s, and %s is not one" % [name, article, held_type, JSON.stringify(raw)]
+	fitted_values[name] = value
+	return ""
+
+
+## Sets each of [param fitted_values] in [param config]'s params, sorting the names into
+## [param updated_keys] and [param unchanged_keys], and records in [param changes] what each updated
+## one was and is now.
+func _apply_options(
+	config: ConfigFile,
+	fitted_values: Dictionary,
+	updated_keys: Array[String],
+	unchanged_keys: Array[String],
+	changes: Dictionary
+) -> void:
+	for name: String in fitted_values:
+		var held: Variant = _held(config, name)
+		var value: Variant = fitted_values[name]
+		if held != null and typeof(held) == typeof(value) and held == value:
+			unchanged_keys.append(name)
+			continue
+		config.set_value("params", name, value)
+		updated_keys.append(name)
+		var change: Dictionary = { "now": _values.serialize_value(value) }
+		# The file held none, as after a switch of importer, which a null would read as a value.
+		if held != null:
+			change["was"] = _values.serialize_value(held)
+		changes[name] = change
+		_log.debug("Set " + name + " = " + str(value))
 
 
 ## What the option [param name] holds in [param config]'s params, or null when it holds none. Asked
@@ -618,6 +639,43 @@ func _sidecar_staleness(
 ## Whether the import itself is still the one its sidecar and source describe: an answer for a
 ## stale resource, empty for a current one.
 static func _import_staleness(resource_path: String, sidecar: ConfigFile) -> Dictionary:
+	var by_importer: Dictionary = _importer_staleness(sidecar)
+	if not by_importer.is_empty():
+		return by_importer
+
+	# A tool that writes a sidecar for the engine to import from leaves out what the import writes,
+	# and every load of the resource then fails. The engine's scan without its cache takes such a
+	# sidecar as imported while the record of the last import still matches the source.
+	var outputs: Array[String] = _outputs_of(sidecar)
+	if outputs.is_empty() and not _names_a_path(sidecar):
+		return _stale(
+			(
+				"its import file names no imported output, as one written before the engine "
+				+ "imports from it does"
+			)
+		)
+
+	# The sidecar alone does not say the import is there: deleting the outputs under
+	# .godot/imported is the ordinary way to force one, and a resource whose output is gone was
+	# answered as current, which is what a reimport is then skipped on.
+	var missing: Array[String] = []
+	for output: String in outputs:
+		if not FileAccess.file_exists(output):
+			missing.append(output)
+	if not missing.is_empty():
+		var gone: Dictionary = _stale("its imported output is not on disk")
+		gone["missing_outputs"] = missing
+		return gone
+
+	var changed: Dictionary = _changed_since_import(resource_path, sidecar, outputs)
+	if not changed.is_empty():
+		return changed
+	return _imported_without_images(resource_path, sidecar)
+
+
+## Whether the importer or the project's settings have moved on from the import [param sidecar]
+## describes, or its file lacks a uid: an answer for a stale import, empty for a current one.
+static func _importer_staleness(sidecar: ConfigFile) -> Dictionary:
 	# The importer is asked first, as the editor asks it: whether it still writes this format, and
 	# whether the settings the import was made under still hold. Both are true of an import whose
 	# files are all current, so they were answered as up to date while the editor's next scan
@@ -648,31 +706,14 @@ static func _import_staleness(resource_path: String, sidecar: ConfigFile) -> Dic
 
 	if not sidecar.has_section_key("remap", "uid"):
 		return _stale("its import file has no uid, which the import writes")
+	return {}
 
-	# A tool that writes a sidecar for the engine to import from leaves out what the import writes,
-	# and every load of the resource then fails. The engine's scan without its cache takes such a
-	# sidecar as imported while the record of the last import still matches the source.
-	var outputs: Array[String] = _outputs_of(sidecar)
-	if outputs.is_empty() and not _names_a_path(sidecar):
-		return _stale(
-			(
-				"its import file names no imported output, as one written before the engine "
-				+ "imports from it does"
-			)
-		)
 
-	# The sidecar alone does not say the import is there: deleting the outputs under
-	# .godot/imported is the ordinary way to force one, and a resource whose output is gone was
-	# answered as current, which is what a reimport is then skipped on.
-	var missing: Array[String] = []
-	for output: String in outputs:
-		if not FileAccess.file_exists(output):
-			missing.append(output)
-	if not missing.is_empty():
-		var gone: Dictionary = _stale("its imported output is not on disk")
-		gone["missing_outputs"] = missing
-		return gone
-
+## Whether the source or the outputs [param outputs] differ from what the import recorded, or the
+## sidecar was written for another source: an answer for a stale import, empty for a current one.
+static func _changed_since_import(
+	resource_path: String, sidecar: ConfigFile, outputs: Array[String]
+) -> Dictionary:
 	var source_file: String = str(sidecar.get_value("deps", "source_file", ""))
 	if not source_file.is_empty() and source_file != resource_path:
 		return _stale("its import file was written for " + source_file)
@@ -694,7 +735,12 @@ static func _import_staleness(resource_path: String, sidecar: ConfigFile) -> Dic
 		and _md5_of_all(outputs) != recorded_outputs
 	):
 		return _stale("its imported output changed after it was imported")
+	return {}
 
+
+## Whether the scene [param resource_path] was imported without images it uses: an answer for a
+## stale import, empty for a current one.
+static func _imported_without_images(resource_path: String, sidecar: ConfigFile) -> Dictionary:
 	# A scene built without an image it names: it loads each one as it imports, so one imported
 	# before the image was is built without it. Read off what the imported scene depends on, not off
 	# file times: a texture a 3D scene uses is reimported compressed after the scene, so its outputs

@@ -1011,6 +1011,15 @@ func _check() -> void:
 	ticket.text = "Sign the ticket"
 	level.add_child(ticket)
 
+	await _check_finding_by_filters()
+	await _check_finding_by_what_is_said()
+	await _check_finding_limits_and_reading(panel)
+	await _check_places_and_serialising(hero, button)
+	panel.free()
+	level.free()
+
+
+func _check_finding_by_filters() -> void:
 	var by_class: Dictionary = await node._execute_command(
 		"find_nodes", { "class": "Node2D", "root": "/root/Level" }
 	)
@@ -1036,9 +1045,12 @@ func _check() -> void:
 	)
 	if _paths(by_group) != ["/root/Level/Heroine"]:
 		_fail("filters combine: %s" % str(by_group))
-	# The word on a control, which is what a caller is actually looking at. A screen built in code
-	# is @Button@1412 all the way down, and reaching one meant listing every button on it and
-	# reading them back one at a time to find the one saying "Post".
+
+
+## The word on a control, which is what a caller is actually looking at. A screen built in code is
+## @Button@1412 all the way down, and reaching one meant listing every button on it and reading them
+## back one at a time to find the one saying "Post".
+func _check_finding_by_what_is_said() -> void:
 	var by_words: Dictionary = await node._execute_command("find_nodes", { "says": "sign THE" })
 	if _paths(by_words) != ["/root/Level/Ticket"]:
 		_fail("find by what a node says, in part and whatever the case: %s" % str(by_words))
@@ -1087,6 +1099,9 @@ func _check() -> void:
 	)
 	if its_own.get("count") != 0:
 		_fail("what a node says is its own, not what is said under it: %s" % str(its_own))
+
+
+func _check_finding_limits_and_reading(panel: Panel) -> void:
 	await _check_hidden_nodes_can_be_left_out()
 	await _check_a_label_past_a_plain_node()
 	var limited: Dictionary = await node._execute_command(
@@ -1105,6 +1120,8 @@ func _check() -> void:
 
 	await _check_reading_the_screen(panel)
 
+
+func _check_places_and_serialising(hero: Node2D, button: Button) -> void:
 	var rect: Dictionary = await node._execute_command("get_rect", { "path": "/root/Panel/Go" })
 	var canvas: Dictionary = rect.get("canvas", {})
 	var canvas_position: Dictionary = canvas.get("position", {})
@@ -1149,6 +1166,3 @@ func _check() -> void:
 	if not loose_fields.has("id"):
 		_fail("a plain object carries an id, so two of them read as two: %s" % str(loose_fields))
 	loose.free()
-
-	panel.free()
-	level.free()

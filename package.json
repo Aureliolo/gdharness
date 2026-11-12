@@ -29,6 +29,7 @@
     "lint:prose": "markdownlint-cli2",
     "sync:gd": "bun scripts/sync-shared-gd.ts",
     "lint:gd": "bun scripts/gdstyle.ts --lint src/godot test/support/gd",
+    "lint:gd:complexity": "uv run --locked lizard -l GDScript -C 15 -w src/godot test/support/gd",
     "format:gd": "bun scripts/gdstyle.ts --format src/godot test/support/gd",
     "format:gd:check": "bun scripts/gdstyle.ts --format --check src/godot test/support/gd",
     "test": "bun run test:ci",

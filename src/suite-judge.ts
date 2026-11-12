@@ -173,9 +173,11 @@ const MACHINE_WARNED = /^\s*at: .*\((?:\.\/)?(?:platform|drivers)\//;
 // orphans are reported from the suite's statistics. Read as a warning no suite declared, the line
 // came back as one more fault, with advice to declare it rather than free the nodes.
 const ORPHANS_REPORTED = /^\s*WARNING: Detected \d+ (?:possible )?orphan nodes\.\s*$/;
-// The allocator's null, in its error line and the location under it, and an image decode the same
-// pressure made fail. Both are the machine running out, not the case being wrong.
+// The allocator's null, in its error line and the location under it, an image decode the same
+// pressure made fail, and godot-sandbox failing to allocate a sandbox. All three are the machine
+// running out, not the case being wrong. Other sandbox exceptions are a program the sandbox refuses.
 const STARVED = [
+  /ERROR: Sandbox construction exception: (?:std::bad_alloc|bad allocation)\s*\n\s*at: [\w:]+ \([^)\n]*sandbox\.cpp:/g,
   /Parameter "mem(?:_new)?" is null\.?\s*\n\s*at: \w+ \((?:\.\/)?core\/(?:os\/memory\.cpp|templates\/cowdata\.h):/g,
   /ERROR: Failed decoding WebP image\.\s*\n\s*at: _webp_unpack/g,
 ];
@@ -641,6 +643,8 @@ export interface EngineEnd {
   readonly freeBytes?: number;
   /** How many starts before this one died before printing a line, and were started again. */
   readonly crashedStarts?: number;
+  /** The most bytes the engine was read holding, above 0. Absent when no reading was. */
+  readonly peakBytes?: number;
 }
 
 export interface EngineVerdict {

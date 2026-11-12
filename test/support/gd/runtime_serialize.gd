@@ -32,6 +32,14 @@ func _tag_of(value: Variant) -> String:
 
 
 func _check(values: GdhValues) -> void:
+	_check_shapes(values)
+	_check_containers(values)
+	_check_objects(values)
+	_check_plain(values)
+	_check_fitted(values)
+
+
+func _check_shapes(values: GdhValues) -> void:
 	var vec2: Variant = values.serialize(Vector2(1.5, -2.5))
 	if vec2 != { "_type": "Vector2", "x": 1.5, "y": -2.5 }:
 		_fail("Vector2: %s" % JSON.stringify(vec2))
@@ -61,6 +69,8 @@ func _check(values: GdhValues) -> void:
 	elif _tag_of(transform["origin"]) != "Vector2":
 		_fail("Transform2D origin: %s" % JSON.stringify(transform))
 
+
+func _check_containers(values: GdhValues) -> void:
 	var nested: Variant = values.serialize([Vector2(1, 1), { "inner": Vector3(2, 2, 2) }])
 	var members: Array = []
 	if nested is Array:
@@ -75,6 +85,8 @@ func _check(values: GdhValues) -> void:
 		if restored[0] != Vector2(1, 1) or restored_inner["inner"] != Vector3(2, 2, 2):
 			_fail("nested round trip: %s" % str(restored))
 
+
+func _check_objects(values: GdhValues) -> void:
 	# A Resource is also an Object, so the Resource branch has to be reached first or the path
 	# is dropped and the caller gets a bare class name back.
 	var resource: Resource = Resource.new()
@@ -105,6 +117,8 @@ func _check(values: GdhValues) -> void:
 	if values.serialize(stale) != null:
 		_fail("an object that has been freed: %s" % JSON.stringify(values.serialize(stale)))
 
+
+func _check_plain(values: GdhValues) -> void:
 	if values.serialize(null) != null:
 		_fail("null")
 	if values.serialize(7) != 7:
@@ -120,6 +134,8 @@ func _check(values: GdhValues) -> void:
 	if values.deserialize(unknown) != unknown:
 		_fail("unknown tag: %s" % str(values.deserialize(unknown)))
 
+
+func _check_fitted(values: GdhValues) -> void:
 	# Arguments arrive over the wire as strings and have to be fitted to the parameter the
 	# object itself declares, or callv refuses a number that was written as "2.0".
 	if values.fitted("2.0", TYPE_FLOAT) != 2.0:

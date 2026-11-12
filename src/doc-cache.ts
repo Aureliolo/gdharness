@@ -54,6 +54,11 @@ export function editorCacheDirectory(
       return join(folder, 'editor_data', 'cache');
     }
   }
+  return platformCacheDirectory(platform, env, home);
+}
+
+/** The platform's own cache folder for Godot, where no self-contained marker moves it. */
+function platformCacheDirectory(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, home: string): string {
   if (platform === 'win32') {
     return join(
       envValue('LOCALAPPDATA', env) ?? envValue('TEMP', env) ?? join(home, 'AppData', 'Local'),

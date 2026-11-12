@@ -47,7 +47,7 @@ import { EDITOR_PLUGINS, installAddons, RUNTIME_AUTOLOAD, writeLoader } from '..
 import { type ChildProcess, spawnHidden, spawnSyncHidden } from '../src/spawn.js';
 import { endEnginesUnder } from './support/engines.js';
 import { asArray, asNumber, asObject, asString, get, text } from './support/json.js';
-import { parseTextContent, textOf } from './support/json-rpc.js';
+import { type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { pixelPng, solidPng } from './support/png.js';
 import { reservePort, ServerProcess } from './support/server.js';
 import { sweep } from './support/sweep.js';
@@ -377,9 +377,23 @@ const HOOKS_GD = [
   'const ANSWER: String = "res://.hook/answer.json"',
   '',
   'var _held: Array[Resource] = []',
+  // What a save recorded of the editor's frames, and what the next save is to do meanwhile.
+  'var _trace: Array[Dictionary] = []',
+  'var _recording: bool = false',
+  'var _card: String = ""',
+  'var _base: String = ""',
+  'var _plan: Dictionary = {}',
+  'var _fired: int = 0',
+  'var _was: bool = false',
+  'var _due: bool = false',
+  'var _polled: Array[String] = []',
+  'var _screen_at: int = -1',
+  'var _gate: Node = null',
+  'var _executor: Node = null',
   '',
   '',
   'func _process(_delta: float) -> void:',
+  '\t_watch()',
   '\tif not FileAccess.file_exists(REQUEST):',
   '\t\treturn',
   '\tvar request: Variant = JSON.parse_string(FileAccess.get_file_as_string(REQUEST))',
@@ -390,7 +404,7 @@ const HOOKS_GD = [
   '\tvar removed: Error = DirAccess.remove_absolute(ProjectSettings.globalize_path(REQUEST))',
   '\tvar answer: Dictionary = {"removed": removed == OK}',
   '\tvar fields: Dictionary = request',
-  '\tanswer.merge(_answer(fields))',
+  '\tanswer.merge(await _answer(fields))',
   '\tanswer["op"] = str(fields.get("op", ""))',
   '\tvar file: FileAccess = FileAccess.open(ANSWER, FileAccess.WRITE)',
   '\tif file != null:',
@@ -540,7 +554,146 @@ const HOOKS_GD = [
   '\t\t\t\tif task != null:',
   '\t\t\t\t\ttask.free()',
   '\t\t\treturn {"inATask": scene_file.call("in_a_task")}',
+  // The addon's save of the editor's copy, called past the server with the frames of the editor
+  // recorded meanwhile. `from` empty leaves the argument out.
+  '\t\t"save_from_editor":',
+  '\t\t\t_begin(path)',
+  '\t\t\tvar given: Dictionary = {"scenePath": path}',
+  '\t\t\tvar source: String = str(fields.get("from", "editor"))',
+  '\t\t\tif not source.is_empty():',
+  '\t\t\t\tgiven["from"] = source',
+  '\t\t\tvar scenes: Node = _tool("SceneTools")',
+  '\t\t\tvar saved: Variant = await scenes.call("save_scene", given)',
+  '\t\t\t_recording = false',
+  '\t\t\tvar after: Array = _gate.call("busy_with")',
+  '\t\t\tvar fired: bool = _fired > 0',
+  '\t\t\t_plan = {}',
+  '\t\t\treturn {',
+  '\t\t\t\t"answer": saved,',
+  '\t\t\t\t"fired": fired,',
+  '\t\t\t\t"polled": _polled,',
+  '\t\t\t\t"away": _gate.call("turned_away", "add_node"),',
+  '\t\t\t\t"busy": after[0],',
+  '\t\t\t\t"showing": _executor.call("showing"),',
+  '\t\t\t}',
+  // The same recording for a save made through the server: started before the call and read after.
+  '\t\t"watch":',
+  '\t\t\t_begin(path)',
+  '\t\t\treturn {"watching": true}',
+  '\t\t"watched":',
+  '\t\t\t_recording = false',
+  '\t\t\tvar remaining: Array = _gate.call("busy_with")',
+  '\t\t\tvar acted: bool = _fired > 0',
+  '\t\t\t_plan = {}',
+  '\t\t\treturn {',
+  '\t\t\t\t"fired": acted,',
+  '\t\t\t\t"away": _gate.call("turned_away", "add_node"),',
+  '\t\t\t\t"busy": remaining[0],',
+  '\t\t\t\t"showing": _executor.call("showing"),',
+  '\t\t\t}',
+  // What the next save does at the frame after its card first is in front, or after its file
+  // changes, and again each time the card comes back, `times` in all.
+  '\t\t"during":',
+  '\t\t\t_plan = {',
+  '\t\t\t\t"when": str(fields.get("when", "front")),',
+  '\t\t\t\t"act": str(fields.get("act", "open")),',
+  '\t\t\t\t"other": str(fields.get("other", "")),',
+  '\t\t\t\t"times": int(fields.get("times", 1)),',
+  '\t\t\t}',
+  '\t\t\t_fired = 0',
+  '\t\t\treturn {"armed": true}',
+  // Each frame of the last save: the scene in front, whether its file had changed, and what the
+  // addon's gate said.
+  '\t\t"trace":',
+  '\t\t\treturn {"trace": _trace}',
+  // The frames from asking the view tools for a screen to the editor saying it changed, and to the
+  // call returning.
+  '\t\t"view_frames":',
+  '\t\t\tEditorInterface.set_main_screen_editor("2D")',
+  '\t\t\tfor _settle: int in range(5):',
+  '\t\t\t\tawait get_tree().process_frame',
+  '\t\t\tif not main_screen_changed.is_connected(_on_screen):',
+  '\t\t\t\tvar _joined: int = main_screen_changed.connect(_on_screen)',
+  '\t\t\t_screen_at = -1',
+  '\t\t\tvar started: int = Engine.get_process_frames()',
+  '\t\t\tawait _tool("ViewTools").call("_switch_view", "3d")',
+  '\t\t\tvar returned: int = Engine.get_process_frames() - started',
+  '\t\t\tvar changed: int = _screen_at - started if _screen_at >= 0 else -1',
+  '\t\t\tEditorInterface.set_main_screen_editor("2D")',
+  '\t\t\treturn {"changedAfter": changed, "returnedAfter": returned}',
+  // Each AcceptDialog the editor shows, which it hides when asked.
+  '\t\t"dialogs":',
+  '\t\t\tvar shown: Array[String] = []',
+  '\t\t\tfor found: Node in EditorInterface.get_base_control().get_tree().root.find_children("*", "AcceptDialog", true, false):',
+  '\t\t\t\tvar dialog: AcceptDialog = found as AcceptDialog',
+  '\t\t\t\tif dialog != null and dialog.visible:',
+  '\t\t\t\t\tshown.append(dialog.dialog_text)',
+  '\t\t\t\t\tif bool(fields.get("hide", false)):',
+  '\t\t\t\t\t\tdialog.hide()',
+  '\t\t\treturn {"dialogs": shown}',
   '\treturn _report(path)',
+  '',
+  '',
+  'func _on_screen(_screen: String) -> void:',
+  '\t_screen_at = Engine.get_process_frames()',
+  '',
+  '',
+  'func _tool(named: String) -> Node:',
+  '\treturn EditorInterface.get_base_control().get_tree().root.find_child(named, true, false)',
+  '',
+  '',
+  'func _begin(path: String) -> void:',
+  '\t_card = path',
+  '\t_base = FileAccess.get_file_as_string(path)',
+  '\t_trace.clear()',
+  '\t_polled.clear()',
+  '\t_was = false',
+  '\t_due = false',
+  '\t_gate = _tool("GdharnessBridgeClient").get_parent()',
+  '\t_executor = _tool("GdharnessToolExecutor")',
+  '\t_recording = true',
+  '',
+  '',
+  'func _watch() -> void:',
+  '\tif not _recording:',
+  '\t\treturn',
+  '\tvar current: Node = EditorInterface.get_edited_scene_root()',
+  '\tvar front: String = current.scene_file_path if current != null else ""',
+  '\tvar changed: bool = FileAccess.get_file_as_string(_card) != _base',
+  '\tvar busy: Array = _gate.call("busy_with")',
+  '\t_trace.append({"front": front, "changed": changed, "away": _gate.call("turned_away", "add_node"), "busy": busy[0]})',
+  '\tvar now: bool = front == _card and (changed or str(_plan.get("when", "")) == "front")',
+  '\tif _due:',
+  '\t\t_due = false',
+  '\t\t_fired += 1',
+  '\t\t_perform()',
+  '\telif now and not _was and _fired < int(_plan.get("times", 0)):',
+  '\t\t_due = true',
+  '\t_was = now',
+  '',
+  '',
+  'func _perform() -> void:',
+  '\tif str(_plan.get("act", "")) == "poll":',
+  '\t\tvar busy: Array = _gate.call("busy_with")',
+  '\t\t_polled.append(str(busy[0]))',
+  '\t\t_auto_reload().call("_check_for_changes")',
+  '\t\treturn',
+  '\tEditorInterface.open_scene_from_path(str(_plan.get("other", "")))',
+  '\tvar root: Node = EditorInterface.get_edited_scene_root()',
+  '\tif root.get_node_or_null("Stray") == null:',
+  '\t\tvar stray: Node = Node.new()',
+  '\t\tstray.name = "Stray"',
+  '\t\troot.add_child(stray)',
+  '\t\tstray.owner = root',
+  '\t\tEditorInterface.mark_scene_as_unsaved()',
+  '',
+  '',
+  'func _auto_reload() -> Node:',
+  '\tfor found: Node in EditorInterface.get_base_control().get_tree().root.find_children("*", "EditorPlugin", true, false):',
+  '\t\tvar script: Script = found.get_script()',
+  '\t\tif script != null and script.resource_path.ends_with("auto_reload/auto_reload.gd"):',
+  '\t\t\treturn found',
+  '\treturn null',
   '',
   '',
   'func _code_of(path: String) -> CodeEdit:',
@@ -592,12 +745,98 @@ const HOOKS_GD = [
   '',
 ];
 
+/** How many closed cards `shown/` holds, one for each use of a save of a closed scene. */
+const SHOWN_CARDS = 7;
+
+/**
+ * Closed scenes for the save of the editor's copy: cards 400 by 300 whose Panel's @tool script
+ * stores its size at `_ready` and each time it is resized, as a card laying itself out does, and
+ * a scene the cases open over a card.
+ */
+function shownScenes(): Record<string, string[]> {
+  const card = [
+    '[gd_scene load_steps=2 format=3]',
+    '',
+    '[ext_resource type="Script" path="res://shown/card_frame.gd" id="1_frame"]',
+    '',
+    '[node name="Card" type="VBoxContainer"]',
+    'offset_right = 400.0',
+    'offset_bottom = 300.0',
+    '',
+    '[node name="Panel" type="Panel" parent="."]',
+    'layout_mode = 2',
+    'size_flags_vertical = 3',
+    'script = ExtResource("1_frame")',
+    '',
+  ];
+  const files: Record<string, string[]> = {
+    'shown/card_frame.gd': [
+      '@tool',
+      'extends Panel',
+      '',
+      '@export var shape: PackedVector2Array = PackedVector2Array()',
+      '',
+      '',
+      'func _ready() -> void:',
+      '\tvar _joined: int = resized.connect(_lay)',
+      '\t_lay()',
+      '',
+      '',
+      'func _lay() -> void:',
+      '\tshape = PackedVector2Array([Vector2.ZERO, size])',
+      '',
+    ],
+    'shown/other.tscn': ['[gd_scene format=3]', '', '[node name="Other" type="Node2D"]', ''],
+  };
+  for (let number = 1; number <= SHOWN_CARDS; number += 1) {
+    files[`shown/card_${number}.tscn`] = card;
+  }
+  return files;
+}
+
+/** How many cards `named/` holds, for the saves a caller asks of the editor by name. */
+const NAMED_CARDS = 7;
+
+/** The size card `number` of `named/` is laid out at, which no other card shares. */
+function namedCardSize(number: number): { width: number; height: number } {
+  return { width: 300 + 20 * number, height: 200 + 10 * number };
+}
+
+/**
+ * Cards for the saves asked of the editor through the server: the shown cards' shape, each at a
+ * size of its own, so a file saved by the wrong card is told apart by its shape.
+ */
+function namedScenes(): Record<string, string[]> {
+  const files: Record<string, string[]> = {};
+  for (let number = 1; number <= NAMED_CARDS; number += 1) {
+    const { width, height } = namedCardSize(number);
+    files[`named/card_${number}.tscn`] = [
+      '[gd_scene load_steps=2 format=3]',
+      '',
+      '[ext_resource type="Script" path="res://shown/card_frame.gd" id="1_frame"]',
+      '',
+      '[node name="Card" type="VBoxContainer"]',
+      `offset_right = ${width}.0`,
+      `offset_bottom = ${height}.0`,
+      '',
+      '[node name="Panel" type="Panel" parent="."]',
+      'layout_mode = 2',
+      'size_flags_vertical = 3',
+      'script = ExtResource("1_frame")',
+      '',
+    ];
+  }
+  return files;
+}
+
 /**
  * Scenes and resources for the cases on how a scene is written: one inheriting another, one
  * instancing another, one the editor holds, and an animation library kept in a file of its own.
  * Written as text because what is in them is the fixture, and no tool makes an inherited scene.
  */
 const SCENE_FILES: Record<string, string[]> = {
+  ...shownScenes(),
+  ...namedScenes(),
   'layers/base.tscn': [
     '[gd_scene format=3]',
     '',
@@ -1327,16 +1566,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
   try {
     await server.initialize('editor-fixture');
 
-    const deadline = Date.now() + CONNECT_TIMEOUT_MS;
-    let connected = false;
-    while (!connected && Date.now() < deadline) {
-      if (editor.exitCode !== null) {
-        throw new Error(`the editor exited with ${editor.exitCode}:\n${engineOutput.join('')}`);
-      }
-      connected = get(parseTextContent(await invoke('editor_status', {})), 'editor', 'connected') === true;
-      if (!connected) await delay(250);
-    }
-    assert.ok(connected, `the editor never reached the bridge:\n${engineOutput.join('')}`);
+    await waitForTheBridge({ editor, engineOutput, invoke });
 
     const printed = (): string => engineOutput.join('');
     await body({
@@ -1357,24 +1587,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
       assert.notEqual(thread.account(), '', "the editor's main thread was sampled from /proc");
     }
   } catch (failure) {
-    // What the engine said on its way to failing, which is the half of the evidence a tool
-    // answer does not carry: a fixture that reports only its own assertion sends whoever reads
-    // the run back to guessing about an editor that is no longer there to ask.
-    const said = engineOutput.join('').trim();
-    // Whether the editor this started is still alive, which separates a restart that never
-    // happened from one that happened and never came back: the editor a restart brings up is a
-    // process Godot spawns, and nothing here can read its output.
-    const state =
-      editor.exitCode === null && editor.signalCode === null
-        ? 'still running'
-        : `gone (exit ${editor.exitCode ?? 'none'}, signal ${editor.signalCode ?? 'none'})`;
-    // The tail rather than the whole: a tier's log runs to thousands of lines, and the case that
-    // failed is the last thing in it.
-    const sampled = thread.account();
-    throw new Error(
-      `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${accountOf(server)}${sampled === '' ? '' : `\n\nThe editor's main thread, sampled every quarter second:\n${sampled}`}`,
-      { cause: failure },
-    );
+    throw editorFailure(failure, { editor, engineOutput, thread, server });
   } finally {
     thread.stop();
     // The game first: it is the editor's child and outlives it, so a run that failed part way
@@ -1399,6 +1612,56 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
       console.warn(held);
     }
   }
+}
+
+/** Waits until the addon of [param editor] has dialled the bridge, and fails if it exits first. */
+async function waitForTheBridge(running: {
+  editor: ChildProcess;
+  engineOutput: string[];
+  invoke: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>;
+}): Promise<void> {
+  const { editor, engineOutput, invoke } = running;
+  const deadline = Date.now() + CONNECT_TIMEOUT_MS;
+  let connected = false;
+  while (!connected && Date.now() < deadline) {
+    if (editor.exitCode !== null) {
+      throw new Error(`the editor exited with ${editor.exitCode}:\n${engineOutput.join('')}`);
+    }
+    connected = get(parseTextContent(await invoke('editor_status', {})), 'editor', 'connected') === true;
+    if (!connected) await delay(250);
+  }
+  assert.ok(connected, `the editor never reached the bridge:\n${engineOutput.join('')}`);
+}
+
+/** The error for a case that failed in [param failure], carrying what the editor and server said. */
+function editorFailure(
+  failure: unknown,
+  running: {
+    editor: ChildProcess;
+    engineOutput: string[];
+    thread: ReturnType<typeof sampleThread>;
+    server: ServerProcess;
+  },
+): Error {
+  const { editor, engineOutput, thread, server } = running;
+  // What the engine said on its way to failing, which is the half of the evidence a tool
+  // answer does not carry: a fixture that reports only its own assertion sends whoever reads
+  // the run back to guessing about an editor that is no longer there to ask.
+  const said = engineOutput.join('').trim();
+  // Whether the editor this started is still alive, which separates a restart that never
+  // happened from one that happened and never came back: the editor a restart brings up is a
+  // process Godot spawns, and nothing here can read its output.
+  const state =
+    editor.exitCode === null && editor.signalCode === null
+      ? 'still running'
+      : `gone (exit ${editor.exitCode ?? 'none'}, signal ${editor.signalCode ?? 'none'})`;
+  // The tail rather than the whole: a tier's log runs to thousands of lines, and the case that
+  // failed is the last thing in it.
+  const sampled = thread.account();
+  return new Error(
+    `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${accountOf(server)}${sampled === '' ? '' : `\n\nThe editor's main thread, sampled every quarter second:\n${sampled}`}`,
+    { cause: failure },
+  );
 }
 
 /**
@@ -1445,6 +1708,24 @@ async function testAWriteBesideAViewportTextureSaysNothingOfItsPath({
   assert.doesNotMatch(withoutLooksElsewhere(said), /Path to node is invalid/, said.slice(-3000));
   const theirs = said.replaceAll('res://addons/gdharness_editor/', 'res://game/');
   assert.equal(withoutLooksElsewhere(theirs), theirs, "a game's own load of such a scene is left as printed");
+}
+
+/**
+ * A value of a mebibyte goes to the editor and comes back. Godot's socket takes 64 KiB a message
+ * unless told otherwise, and drops a larger answer, so the server waited out its timeout for it.
+ */
+async function testALargeValueCrossesTheEditorsSocket({ call, project }: Editor): Promise<void> {
+  mkdirSync(join(project, 'large'), { recursive: true });
+  writeFileSync(
+    join(project, 'large', 'note.tscn'),
+    '[gd_scene format=3]\n\n[node name="Root" type="Node"]\n',
+  );
+  const scene = { projectPath: project, scenePath: 'res://large/note.tscn' };
+  await call('editor_rescan', { projectPath: project });
+  const note = 'abcdefgh'.repeat(128 * 1024);
+  await call('scene_node', { ...scene, op: 'set', nodePath: '.', properties: { editor_description: note } });
+  const read = get(await call('scene_node', { ...scene, op: 'get', nodePath: '.' }), 'properties');
+  assert.equal(get(read, 'editor_description'), note, 'the mebibyte comes back whole');
 }
 
 /**
@@ -5821,6 +6102,541 @@ async function testAutoReloadLeavesAGoneScene({ call, project, printed }: Editor
   }
 }
 
+/** One frame of the editor while a save held a scene, as the hook recorded it. */
+interface SaveFrame {
+  front: string;
+  changed: boolean;
+  away: boolean;
+  busy: string;
+}
+
+/**
+ * A scene the editor does not hold is saved as the editor holds it, with the frames the editor
+ * needs between each step.
+ *
+ * A card's @tool script lays out its Panel as it enters the tree and again each frame it is
+ * resized, so a card saved in the frame of its open stores a shape of `(0, 0, 0, 0)` where three
+ * frames later it stores the size the card has. The hook records the editor's frames meanwhile and,
+ * on request, switches the editor to another scene at the frame a save would rely on the card
+ * being in front, or calls auto_reload's poll there.
+ */
+async function testAShownSceneIsSavedAsTheEditorHoldsIt({ project, printed }: Editor): Promise<void> {
+  const mainScene = 'res://main.tscn';
+  const other = 'res://shown/other.tscn';
+  const shaped = /shape = PackedVector2Array\(0, 0, 400, 300\)/;
+  const card = (number: number): string => `res://shown/card_${number}.tscn`;
+  const cardFile = (number: number): string => fileText(project, `shown/card_${number}.tscn`);
+  const save = async (number: number, from = 'editor'): Promise<unknown> =>
+    await hook(project, { op: 'save_from_editor', path: card(number), from });
+  const during = async (request: Record<string, unknown>): Promise<void> => {
+    await hook(project, { op: 'during', other, ...request });
+  };
+  const tabs = async (): Promise<{ open: unknown[]; unsaved: unknown[]; current: unknown }> => {
+    const held = await hook(project, { op: 'report', path: '' });
+    return {
+      open: asArray(get(held, 'open')),
+      unsaved: asArray(get(held, 'unsaved')),
+      current: get(held, 'current'),
+    };
+  };
+  const frames = async (): Promise<SaveFrame[]> =>
+    asArray(get(await hook(project, { op: 'trace' }), 'trace')).map((frame) => ({
+      front: asString(get(frame, 'front'), 'front'),
+      changed: get(frame, 'changed') === true,
+      away: get(frame, 'away') === true,
+      busy: asString(get(frame, 'busy'), 'busy'),
+    }));
+  // The editor as the next case finds it: the main scene alone in front.
+  const reset = async (): Promise<void> => {
+    await hook(project, { op: 'close_all', path: '' });
+    await hook(project, { op: 'open', path: mainScene });
+  };
+  const answerOf = (saved: unknown): unknown => get(saved, 'answer');
+  const refusalOf = (saved: unknown): string => {
+    assert.equal(get(answerOf(saved), 'ok'), false, `the save should be refused: ${JSON.stringify(saved)}`);
+    return asString(get(answerOf(saved), 'error'), 'error');
+  };
+  const left = async (number: number): Promise<void> => {
+    const held = await tabs();
+    assert.ok(!held.open.includes(card(number)), `card ${number} is in no open tab: ${JSON.stringify(held)}`);
+    assert.equal(held.current, mainScene, `and the main scene is in front: ${JSON.stringify(held)}`);
+  };
+  const gateAfter = (saved: unknown): void => {
+    assert.equal(get(saved, 'away'), false, 'and the gate is open again');
+    assert.equal(get(saved, 'showing'), '', 'with nothing shown');
+  };
+
+  await reset();
+
+  // Left out: without `from` a closed scene is saved through its file, which runs no script.
+  const plain = await save(1, '');
+  assert.equal(
+    get(answerOf(plain), 'from'),
+    'file',
+    `a save without from is of the file: ${JSON.stringify(plain)}`,
+  );
+  assert.doesNotMatch(cardFile(1), shaped, 'and stores no laid out shape');
+
+  // Closed.
+  const closed = await save(1);
+  assert.equal(
+    get(answerOf(closed), 'from'),
+    'editor',
+    `a closed card is saved by the editor: ${JSON.stringify(closed)}`,
+  );
+  assert.equal(get(answerOf(closed), 'openedFirst'), true, 'which opened it first');
+  assert.match(cardFile(1), shaped, 'with the shape it has once laid out');
+  await left(1);
+  const run = await frames();
+  const inFront = run.filter((frame) => frame.front === card(1));
+  const before = inFront.filter((frame) => !frame.changed).length;
+  const after = inFront.filter((frame) => frame.changed).length;
+  assert.ok(
+    before >= 3 && after >= 3,
+    `the card is in front for frames either side of the save: ${before}, ${after}`,
+  );
+  assert.ok(
+    run.every((frame) => frame.away && frame.busy === 'saving a scene'),
+    `and every call is turned away throughout: ${JSON.stringify(run)}`,
+  );
+  gateAfter(closed);
+
+  // Second pass: the tab is the person's, so the save leaves it.
+  await hook(project, { op: 'open', path: card(1) });
+  await hook(project, { op: 'open', path: mainScene });
+  const open = await save(1);
+  assert.equal(
+    get(answerOf(open), 'openedFirst'),
+    undefined,
+    `an open card was not opened first: ${JSON.stringify(open)}`,
+  );
+  assert.equal(get(answerOf(open), 'stillOpen'), undefined, 'nor is it held open');
+  assert.ok((await tabs()).open.includes(card(1)), 'and its tab stays');
+  await reset();
+
+  // Switched over once, at the front: the save waits for the card to be back in front.
+  await during({ when: 'front', times: 1 });
+  const once = await save(2);
+  assert.equal(get(once, 'fired'), true, 'the editor was switched away');
+  assert.equal(
+    get(answerOf(once), 'from'),
+    'editor',
+    `and the save still came from the editor: ${JSON.stringify(once)}`,
+  );
+  assert.match(cardFile(2), shaped, 'of the card laid out');
+  const stray = await tabs();
+  assert.ok(
+    stray.unsaved.includes(other),
+    `the other scene's edit is still unsaved: ${JSON.stringify(stray)}`,
+  );
+  assert.doesNotMatch(fileText(project, 'shown/other.tscn'), /Stray/, 'and not saved with the card');
+  await reset();
+
+  // Switched over every time: the save is refused and the card closed again.
+  const untouched = cardFile(3);
+  await during({ when: 'front', times: 3 });
+  const never = await save(3);
+  assert.match(refusalOf(never), /did not keep res:\/\/shown\/card_3.tscn in front/);
+  assert.equal(cardFile(3), untouched, 'a refused save leaves the file');
+  const refused = await tabs();
+  assert.ok(!refused.open.includes(card(3)), `the card's tab is closed: ${JSON.stringify(refused)}`);
+  assert.ok(refused.open.includes(other), 'the other scene stays open');
+  assert.ok(refused.unsaved.includes(other), 'with its edit unsaved');
+  assert.equal(refused.current, mainScene, 'the main scene is in front');
+  gateAfter(never);
+  await reset();
+
+  // Switched over while the editor leaves.
+  await during({ when: 'changed', times: 1 });
+  const leaving = await save(4);
+  assert.equal(
+    get(answerOf(leaving), 'openedFirst'),
+    true,
+    `the card was closed: ${JSON.stringify(leaving)}`,
+  );
+  assert.match(cardFile(4), shaped, 'after its shape was saved');
+  await left(4);
+  const away = await tabs();
+  assert.ok(
+    away.open.includes(other) && away.unsaved.includes(other),
+    'the other scene is open with its edit',
+  );
+  const leave = await frames();
+  const last = leave.map((frame) => frame.front).lastIndexOf(card(4));
+  let reopened = last;
+  while (reopened > 0 && leave[reopened - 1]?.front === card(4)) {
+    reopened -= 1;
+  }
+  assert.equal(leave[reopened - 1]?.front, other, 'the run is of the card coming back after the switch');
+  assert.ok(
+    last - reopened + 1 >= 3,
+    `the card is in front for frames before it is closed: ${last - reopened + 1}`,
+  );
+  // The editor's own close puts the earlier tab back at once, so what is left to measure is that
+  // the call does not return in the close's frame.
+  const settled = leave.length - 1 - last;
+  assert.ok(settled >= 3, `and the call goes on for frames after the close: ${settled}`);
+  await reset();
+
+  // Kept open: the card is switched away from on every try, so it cannot be closed.
+  await during({ when: 'front', times: 6 });
+  const kept = await save(5);
+  assert.match(refusalOf(kept), /still holds res:\/\/shown\/card_5.tscn open/);
+  assert.ok((await tabs()).open.includes(card(5)), 'and its tab is open');
+  await reset();
+  await during({ when: 'changed', times: 4 });
+  const stuck = await save(6);
+  assert.equal(
+    get(answerOf(stuck), 'stillOpen'),
+    true,
+    `a card that cannot be closed is said to be open: ${JSON.stringify(stuck)}`,
+  );
+  assert.equal(get(answerOf(stuck), 'openedFirst'), undefined, 'and not to have been closed');
+  assert.ok((await tabs()).open.includes(card(6)), 'and its tab is open');
+  await reset();
+
+  // Polled: auto_reload's poll, a frame after the file changes, finds the save holding the card.
+  await during({ when: 'changed', act: 'poll', times: 1 });
+  const polled = await save(7);
+  assert.equal(get(polled, 'fired'), true, 'the poll ran');
+  assert.deepEqual(
+    get(polled, 'polled'),
+    ['saving a scene'],
+    `while the save held the card: ${JSON.stringify(polled)}`,
+  );
+  assert.doesNotMatch(printed(), /reloading: res:\/\/shown\/card_7\.tscn/, 'and reloaded nothing');
+  await reset();
+
+  // Screen: the view tools' switch lets the screen draw before it returns.
+  const screen = await hook(project, { op: 'view_frames' });
+  assert.equal(
+    get(screen, 'changedAfter'),
+    0,
+    `the editor changes screen as it is asked: ${JSON.stringify(screen)}`,
+  );
+  assert.ok(
+    asNumber(get(screen, 'returnedAfter'), 'returnedAfter') >= 3,
+    'and the call returns frames later',
+  );
+
+  // A scene that does not load is refused before the editor is asked, which puts up a dialog.
+  writeFileSync(
+    join(project, 'shown', 'broken.tscn'),
+    ['[gd_scene format=3]', '', '[node name="Broken" type="Node"', 'this line is no scene text', ''].join(
+      '\n',
+    ),
+  );
+  writeFileSync(
+    join(project, 'shown', 'missing.tscn'),
+    [
+      '[gd_scene load_steps=2 format=3]',
+      '',
+      '[ext_resource type="PackedScene" path="res://shown/gone.tscn" id="1_gone"]',
+      '',
+      '[node name="Missing" type="Node"]',
+      '',
+      '[node name="Gone" parent="." instance=ExtResource("1_gone")]',
+      '',
+    ].join('\n'),
+  );
+  const tabsBefore = await tabs();
+  const unloaded = async (name: string): Promise<string> =>
+    refusalOf(
+      await hook(project, { op: 'save_from_editor', path: `res://shown/${name}.tscn`, from: 'editor' }),
+    );
+  assert.match(await unloaded('broken'), /Failed to load/);
+  assert.match(await unloaded('missing'), /gone\.tscn/);
+  assert.match(await unloaded('absent'), /Scene not found/);
+  assert.deepEqual(await tabs(), tabsBefore, 'a refusal opens no tab');
+  assert.deepEqual(get(await hook(project, { op: 'dialogs' }), 'dialogs'), [], 'and puts up no dialog');
+  // What the editor would have done, for the case to know the hook sees it.
+  await hook(project, { op: 'open', path: 'res://shown/broken.tscn' });
+  let dialogs: unknown[] = [];
+  for (let attempt = 0; attempt < 40 && dialogs.length === 0; attempt += 1) {
+    await delay(250);
+    dialogs = asArray(get(await hook(project, { op: 'dialogs', hide: true }), 'dialogs'));
+  }
+  assert.equal(
+    dialogs.length,
+    1,
+    `the editor answers a broken scene with a dialog: ${JSON.stringify(dialogs)}`,
+  );
+  assert.deepEqual(get(await hook(project, { op: 'dialogs' }), 'dialogs'), [], 'which is hidden again');
+  await reset();
+}
+
+/**
+ * A capture of a closed scene that does not load is refused before the editor is asked to open it,
+ * and before the headless editor's own refusal, so the editor puts up no dialog and a headless run
+ * can hold the order.
+ */
+async function testACaptureOfASceneThatDoesNotLoadIsRefusedFirst({
+  project,
+  refusal,
+}: Editor): Promise<void> {
+  const mainScene = 'res://main.tscn';
+  const card = 'res://shown/card_1.tscn';
+  const cardPath = join(project, 'shown', 'card_1.tscn');
+  const capture = async (name: string): Promise<string> =>
+    await refusal('editor_capture', { projectPath: project, scenePath: name });
+  const tabs = async (): Promise<{ open: unknown[]; current: unknown }> => {
+    const held = await hook(project, { op: 'report', path: '' });
+    return { open: asArray(get(held, 'open')), current: get(held, 'current') };
+  };
+  const reset = async (): Promise<void> => {
+    await hook(project, { op: 'close_all', path: '' });
+    await hook(project, { op: 'open', path: mainScene });
+  };
+  const noDialog = async (): Promise<void> => {
+    assert.deepEqual(
+      get(await hook(project, { op: 'dialogs' }), 'dialogs'),
+      [],
+      'the editor shows no dialog',
+    );
+  };
+  writeFileSync(
+    join(project, 'shown', 'broken.tscn'),
+    ['[gd_scene format=3]', '', '[node name="Broken" type="Node"', 'this line is no scene text', ''].join(
+      '\n',
+    ),
+  );
+  writeFileSync(
+    join(project, 'shown', 'missing.tscn'),
+    [
+      '[gd_scene load_steps=2 format=3]',
+      '',
+      '[ext_resource type="PackedScene" path="res://shown/gone.tscn" id="1_gone"]',
+      '',
+      '[node name="Missing" type="Node"]',
+      '',
+      '[node name="Gone" parent="." instance=ExtResource("1_gone")]',
+      '',
+    ].join('\n'),
+  );
+  await reset();
+  const before = await tabs();
+  assert.equal(before.current, mainScene, 'the main scene is in front');
+
+  // Does not load.
+  const refusedWith = /answered editor_capture with an error: /;
+  const broken = await capture('res://shown/broken.tscn');
+  assert.match(broken, refusedWith);
+  assert.match(broken, /Failed to load/);
+  const gone = await capture('res://shown/missing.tscn');
+  assert.match(gone, refusedWith);
+  assert.match(gone, /gone\.tscn/);
+  const absent = await capture('res://shown/absent.tscn');
+  assert.match(absent, refusedWith);
+  assert.match(absent, /Scene not found/);
+  assert.deepEqual(await tabs(), before, 'a refusal opens no tab');
+  await noDialog();
+
+  // Wording: a read's, since a capture writes no scene.
+  assert.match(gone, /Not read: \S+ names/);
+  assert.match(gone, /the editor does not open the scene/);
+  assert.doesNotMatch(gone, /Nothing was written/);
+  assert.doesNotMatch(gone, /a save would drop/);
+
+  // Loads.
+  assert.match(
+    await capture('res://shown/card_2.tscn'),
+    /This editor runs headless/,
+    'a scene that loads reaches the headless refusal',
+  );
+  assert.deepEqual(await tabs(), before, 'which opens no tab');
+
+  // Open, then broken on disk: the editor holds its own copy, so the file is not loaded again.
+  const original = readFileSync(cardPath, 'utf8');
+  try {
+    await hook(project, { op: 'open', path: card });
+    await hook(project, { op: 'open', path: mainScene });
+    writeFileSync(cardPath, '[gd_scene format=3]\n\n[node name="Card" type="Node"\nno scene text\n');
+    assert.match(
+      await capture(card),
+      /This editor runs headless/,
+      'a scene the editor holds is not loaded from its file',
+    );
+  } finally {
+    writeFileSync(cardPath, original);
+    await reset();
+  }
+  await noDialog();
+}
+
+/**
+ * `scene_create save` with `from: "editor"` saves the editor's copy of a scene, open or closed,
+ * through the server and the bridge.
+ *
+ * A closed card is opened for the save and closed again, an open one stays open with what the
+ * editor holds unsaved, and a path outside the project never reaches the editor. Each card has a
+ * size of its own, so a file saved from the wrong card shows in its shape.
+ */
+async function testASaveFromTheEditorIsAskedByName({ call, refusal, project }: Editor): Promise<void> {
+  const mainScene = 'res://main.tscn';
+  const other = 'res://shown/other.tscn';
+  const card = (number: number): string => `res://named/card_${number}.tscn`;
+  const cardFile = (number: number): string => fileText(project, `named/card_${number}.tscn`);
+  const shaped = (number: number): RegExp => {
+    const { width, height } = namedCardSize(number);
+    return new RegExp(`shape = PackedVector2Array\\(0, 0, ${width}, ${height}\\)`);
+  };
+  const save = async (number: number, scenePath = `named/card_${number}.tscn`): Promise<unknown> =>
+    await call('scene_create', { projectPath: project, op: 'save', scenePath, from: 'editor' });
+  const tabs = async (): Promise<{ open: unknown[]; unsaved: unknown[]; current: unknown }> => {
+    const held = await hook(project, { op: 'report', path: '' });
+    return {
+      open: asArray(get(held, 'open')),
+      unsaved: asArray(get(held, 'unsaved')),
+      current: get(held, 'current'),
+    };
+  };
+  const reset = async (): Promise<void> => {
+    await hook(project, { op: 'close_all', path: '' });
+    await hook(project, { op: 'open', path: mainScene });
+  };
+  const closed = async (number: number): Promise<void> => {
+    const held = asArray(get(await call('editor_status', {}), 'editor', 'openScenes'));
+    assert.ok(!held.includes(card(number)), `card ${number} is in no open tab: ${JSON.stringify(held)}`);
+  };
+
+  await reset();
+
+  // Closed: opened for the save, laid out, saved and closed again.
+  const untouched = cardFile(1);
+  assert.doesNotMatch(untouched, shaped(1), 'the card is stored with no laid out shape');
+  const first = await save(1);
+  assert.equal(
+    get(first, 'from'),
+    'editor',
+    `a closed card is saved by the editor: ${JSON.stringify(first)}`,
+  );
+  assert.equal(get(first, 'openedFirst'), true, 'which opened it first');
+  assert.equal(get(first, 'writtenBy'), 'the editor', 'and says who wrote it');
+  assert.match(cardFile(1), shaped(1), 'the file holds the shape the card has once laid out');
+  await closed(1);
+  assert.equal((await tabs()).current, mainScene, 'and the main scene is in front again');
+
+  // An absolute path inside the project is the same scene, named as the editor names it.
+  writeFileSync(join(project, 'named', 'card_1.tscn'), untouched);
+  await call('editor_rescan', { projectPath: project });
+  const absolute = await save(1, join(project, 'named', 'card_1.tscn'));
+  assert.equal(
+    get(absolute, 'from'),
+    'editor',
+    `an absolute path is saved by the editor: ${JSON.stringify(absolute)}`,
+  );
+  assert.equal(get(absolute, 'scenePath'), card(1), 'as the scene the editor names');
+  assert.match(cardFile(1), shaped(1), 'with its laid out shape');
+  await closed(1);
+
+  // Open in front, with an edit nobody has saved: the editor's own save writes it, and the tab stays.
+  await hook(project, { op: 'edit', path: card(2), node: 'Late' });
+  const front = await save(2);
+  assert.equal(get(front, 'from'), 'editor', `an open card is saved by the editor: ${JSON.stringify(front)}`);
+  assert.equal(get(front, 'openedFirst'), undefined, 'and was not opened for it');
+  assert.equal(get(front, 'unsavedInEditor'), false, 'with nothing left unsaved');
+  assert.match(cardFile(2), /\[node name="Late"/, 'the edit is in the file');
+  const infront = await tabs();
+  assert.ok(infront.open.includes(card(2)), 'the tab is still open');
+  assert.equal(infront.current, card(2), 'and still in front');
+  await reset();
+
+  // Open behind: the edit is written too, and the tab in front stays where it was.
+  await hook(project, { op: 'edit', path: card(3), node: 'ByHand' });
+  await hook(project, { op: 'open', path: mainScene });
+  const behind = await save(3);
+  assert.equal(
+    get(behind, 'from'),
+    'editor',
+    `a card behind another is saved by the editor: ${JSON.stringify(behind)}`,
+  );
+  assert.equal(get(behind, 'openedFirst'), undefined, 'and was not opened for it');
+  assert.match(cardFile(3), /\[node name="ByHand"/, 'the edit is in the file');
+  const behindTabs = await tabs();
+  assert.ok(behindTabs.open.includes(card(3)), 'the tab is still open');
+  assert.equal(behindTabs.current, mainScene, 'and the main scene is still in front');
+  await reset();
+
+  // Second pass: a scene the person opened is saved from the editor each time and left open.
+  await hook(project, { op: 'open', path: card(4) });
+  await hook(project, { op: 'open', path: mainScene });
+  for (const pass of [1, 2]) {
+    const again = await save(4);
+    assert.equal(get(again, 'from'), 'editor', `pass ${pass} is the editor's: ${JSON.stringify(again)}`);
+    assert.ok((await tabs()).open.includes(card(4)), `and leaves the tab open after pass ${pass}`);
+  }
+  await reset();
+
+  // In a row: the third card is switched away from every time it is brought to the front, so the
+  // save is refused and leaves nothing behind that turns the next save away.
+  const shapes: Record<number, RegExp> = {};
+  for (let number = 2; number <= NAMED_CARDS; number += 1) {
+    shapes[number] = shaped(number);
+    if (number === 4) {
+      await hook(project, { op: 'during', other, when: 'front', times: 3 });
+      await hook(project, { op: 'watch', path: card(4) });
+      const said = await refusal('scene_create', {
+        projectPath: project,
+        op: 'save',
+        scenePath: 'named/card_4.tscn',
+        from: 'editor',
+      });
+      const watched = await hook(project, { op: 'watched' });
+      assert.match(said, /did not keep res:\/\/named\/card_4\.tscn in front/);
+      assert.equal(get(watched, 'fired'), true, 'the editor was switched away');
+      assert.equal(get(watched, 'away'), false, 'and the refusal leaves the gate open');
+      assert.equal(get(watched, 'showing'), '', 'with nothing shown');
+      await closed(4);
+      continue;
+    }
+    const saved = await save(number);
+    assert.equal(
+      get(saved, 'from'),
+      'editor',
+      `card ${number} is saved by the editor: ${JSON.stringify(saved)}`,
+    );
+    assert.match(cardFile(number), shapes[number] ?? /unset/, `with its own shape: ${cardFile(number)}`);
+  }
+  await reset();
+
+  // Scope: only a save takes from, and only the editor is a value of it.
+  const copy = await refusal('scene_create', {
+    projectPath: project,
+    op: 'save_as',
+    scenePath: 'named/card_5.tscn',
+    newPath: 'named/copy.tscn',
+    from: 'editor',
+  });
+  assert.match(copy, /scene_create save_as does not take from/);
+  const before = cardFile(5);
+  const file = await refusal('scene_create', {
+    projectPath: project,
+    op: 'save',
+    scenePath: 'named/card_5.tscn',
+    from: 'file',
+  });
+  assert.match(file, /only as editor, not "file"/, `a value other than editor is refused naming it: ${file}`);
+  assert.equal(cardFile(5), before, 'and the file is as it was');
+
+  // A scene beside the project is refused before the editor is asked.
+  const outside = join(project, '..', 'outside_save.tscn');
+  const outsideText = '[gd_scene format=3]\n\n[node name="Outside" type="Node2D"]\n';
+  writeFileSync(outside, outsideText);
+  try {
+    const refused = await refusal('scene_create', {
+      projectPath: project,
+      op: 'save',
+      scenePath: '../outside_save.tscn',
+      from: 'editor',
+    });
+    assert.match(refused, /resolves outside the project directory/);
+    assert.equal(readFileSync(outside, 'utf8'), outsideText, 'and the scene beside the project is as it was');
+  } finally {
+    rmSync(outside, { force: true });
+  }
+  await reset();
+}
+
 /**
  * auto_reload leaves a scene the editor holds unsaved changes to, and says so.
  *
@@ -6178,190 +6994,239 @@ async function testAPlayedRunOutlivesTheServerUnderIt(godotPath: string): Promis
  */
 async function testAHeldGameIsStillHeldForTheReplacement(godotPath: string): Promise<void> {
   await withEditor(godotPath, async (own) => {
-    const mainScript = { projectPath: own.project, scriptPath: 'res://main.gd' };
-    await own.call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
-    const run = await own.play({ op: 'start', headless: true });
-    assert.equal(get(run, 'through'), 'editor', `the editor should be the one playing: ${text(run)}`);
-    const pid = asNumber(get(run, 'runtime', 'pid'), 'the played run needs a process of its own');
-    await stackWithin(own.attempt, 'the game should stop at the breakpoint', (stack) => stack.length > 0);
-
-    // The server that was sent the event says so, with the reason the event carried. Its session
-    // attached only just now, for the stack read above, and an attach that asked the adapter again
-    // would answer "attached" here in place of what it was told.
-    const before = await own.call('editor_output', {});
-    assert.equal(
-      get(before, 'heldAt', 'reason'),
-      'breakpoint',
-      `held, seen by the first server: ${text(before)}`,
-    );
-    // A held game does not end, so a wait answers where it is held rather than sitting out its time.
-    const waitAsked = Date.now();
-    const waited = await own.call('editor_run', { op: 'wait', timeoutMs: 60_000 });
-    const waitedMs = Date.now() - waitAsked;
-    assert.equal(get(waited, 'heldAt', 'reason'), 'breakpoint', `a wait says where: ${text(waited)}`);
-    assert.ok(waitedMs < 15_000, `and answered in ${waitedMs}ms: ${text(waited)}`);
-
-    // A second session, attached while the first server holds the game. It was never sent the
-    // stopped event, so what it knows it learned by asking on attach. This is the state a server
-    // meets when the editor's own debugger, or another client, has the game at a breakpoint.
-    const second = new GodotDAPClient(own.dapPort);
-    await second.connect();
-    await second.attach();
-    assert.ok(second.isStopped(), 'a session attaching to a held game learns that it is held');
-    assert.equal(second.whereItStopped()?.reason, 'attached', 'and says how it came to know');
-    const seen = await second.getStackTrace();
-    assert.equal(get(seen[0], 'line'), BREAK_LINE, `on the line it is held at: ${JSON.stringify(seen[0])}`);
-    await second.abandon();
-    // The first server still holds it: a second client asking did not let it go.
-    const stillSaid = await own.attempt('debug_state', { op: 'stack' });
-    const still = stillSaid.ok ? asArray(stillSaid.answer, 'stackFrames') : [];
-    assert.equal(get(still[0], 'line'), BREAK_LINE, `and asking did not release it: ${stillSaid.text}`);
-
-    // Now the client holding it goes, the way a harness reconnect ends a server: stdin ends and the
-    // shutdown runs, which closes the adapter socket without a disconnect request.
-    own.server.child.stdin?.end();
-    await exited(own.server.child);
-    assert.ok(own.server.exited, 'the server should be gone, or nothing below is a test of anything');
-    await delay(1500);
-    assert.ok(alive(pid), 'the game outlives the server that was holding it');
-
-    const replacement = new ServerProcess({ env: own.serverEnv });
-    try {
-      await replacement.initialize('held-game-fixture');
-      const answered = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
-        parseTextContent(await replacement.request('tools/call', { name, arguments: args }, TOOL_TIMEOUT_MS));
-      const until = Date.now() + CONNECT_TIMEOUT_MS;
-      let back = false;
-      while (!back && Date.now() < until) {
-        back = get(await answered('editor_status', {}), 'editor', 'connected') === true;
-        if (!back) await delay(500);
-      }
-      assert.ok(back, 'the editor should reach the replacement server, or the rest proves nothing');
-
-      // The adapter shows this session no stack, so what it knows it learned from the runtime: a
-      // held game accepts the connection and never answers. Asserted as held rather than as not
-      // running, and with the reason that says which instrument answered.
-      const output = await answered('editor_output', {});
-      assert.equal(
-        get(output, 'heldAt', 'reason'),
-        'unanswered',
-        `the replacement finds the game held, from the runtime not answering: ${text(output)}`,
-      );
-      assert.equal(get(output, 'heldUnknown'), undefined, 'and does not also say it could not tell');
-      const stack = await replacement.request(
-        'tools/call',
-        { name: 'debug_state', arguments: { op: 'stack' } },
-        TOOL_TIMEOUT_MS,
-      );
-      assert.match(
-        textOf(stack) ?? '',
-        /The game is held, and this server cannot read its stack/,
-        `and the stack refusal says held and why it cannot be read, not running: ${textOf(stack)}`,
-      );
-
-      // A bystander, connected and nothing more, the way the server that played the scene is
-      // connected before its first stack read. It is told when the game is let go by somebody
-      // else, which is what the editor's own debugger or another client does, and what it knows
-      // afterwards is that the game runs: without the event, a session told of the stop went on
-      // answering held about a game that was running.
-      const bystander = new GodotDAPClient(own.dapPort);
-      await bystander.connect();
-      assert.equal(bystander.holdIsKnown(), false, 'a bare connection opened now has been told nothing');
-
-      // Let go through the replacement. That it then ticks is what says the game was held rather
-      // than wedged, and that this session can act on a hold it was never told about.
-      const released = await replacement.request(
-        'tools/call',
-        { name: 'debug_control', arguments: { op: 'continue' } },
-        TOOL_TIMEOUT_MS,
-      );
-      assert.equal(
-        get(parseTextContent(released), 'continued'),
-        true,
-        `continue through the replacement: ${textOf(released)}`,
-      );
-      const afterwards = await answered('editor_output', {});
-      assert.equal(get(afterwards, 'heldAt'), null, `and the session now knows it runs: ${text(afterwards)}`);
-      const toldToo = Date.now() + 5000;
-      while (!bystander.holdIsKnown() && Date.now() < toldToo) {
-        await delay(50);
-      }
-      assert.ok(bystander.holdIsKnown(), 'a continue by another client is reported to every connection');
-      assert.equal(bystander.isStopped(), false, 'as a game that runs');
-      await bystander.abandon();
-      // Polled, because a game let go a moment ago has not ticked yet, and how soon it does is not
-      // a number this fixture can know.
-      const patience = Date.now() + GAME_STOP_TIMEOUT_MS;
-      let ticked = 0;
-      let lastAnswer = '';
-      while (ticked === 0 && Date.now() < patience) {
-        const ticksResponse = await replacement.request(
-          'tools/call',
-          {
-            name: 'runtime_inspect',
-            arguments: {
-              projectPath: own.project,
-              op: 'property',
-              nodePath: '/root/Main',
-              property: 'ticks',
-            },
-          },
-          TOOL_TIMEOUT_MS,
-        );
-        lastAnswer = textOf(ticksResponse) ?? '';
-        const value = get(parseTextContent(ticksResponse), 'value');
-        ticked = typeof value === 'number' ? value : 0;
-        if (ticked === 0) await delay(500);
-      }
-      assert.ok(ticked > 0, `a released game ticks, which a held one cannot: ${lastAnswer}`);
-
-      const ended = parseTextContent(
-        await replacement.request(
-          'tools/call',
-          { name: 'editor_run', arguments: { op: 'stop' } },
-          TOOL_TIMEOUT_MS,
-        ),
-      );
-      assert.equal(get(ended, 'stopped'), true, `the replacement should be able to end it: ${text(ended)}`);
-      await delay(1500);
-      assert.ok(!alive(pid), 'after which the game is gone');
-
-      // The breakpoint the first server set is the replacement's to send as well: the editor
-      // keeps one for a single play, the first server is gone with what it held, and a play
-      // through the replacement used to run straight past the line. The note in the project is
-      // what carries it, and the start answer says it was sent.
-      const one = [{ scriptPath: 'res://main.gd', lines: [BREAK_LINE] }];
-      const replayed = await answered('editor_run', {
-        projectPath: own.project,
-        op: 'start',
-        headless: true,
-      });
-      assert.deepEqual(
-        get(replayed, 'breakpoints'),
-        one,
-        `a play through the replacement sends the breakpoint the first server set: ${text(replayed)}`,
-      );
-      const stopsAgain = Date.now() + GAME_STOP_TIMEOUT_MS;
-      let reason: unknown = null;
-      while (reason !== 'breakpoint' && Date.now() < stopsAgain) {
-        reason = get(await answered('editor_output', {}), 'heldAt', 'reason');
-        if (reason !== 'breakpoint') await delay(500);
-      }
-      assert.equal(reason, 'breakpoint', 'and the game stops on it, for a server that never set it');
-      const cleared = await answered('debug_breakpoint', {
-        projectPath: own.project,
-        scriptPath: 'res://main.gd',
-        op: 'remove',
-        line: BREAK_LINE,
-      });
-      assert.deepEqual(get(cleared, 'held'), [], `the replacement can take it off again: ${text(cleared)}`);
-      await answered('editor_run', { op: 'stop' });
-    } catch (failure) {
-      throw withTheAccountOf(replacement, failure);
-    } finally {
-      await replacement.stop();
-    }
+    const pid = await holdAGameAtABreakpoint(own);
+    await checksTheReplacementOfAHeldGame(own, pid);
   });
+}
+
+/** What a server answers to a tool call, parsed as the first block of its text. */
+type Answered = (name: string, args: Record<string, unknown>) => Promise<unknown>;
+
+/**
+ * Holds a played game at a breakpoint, checks what the first server and a second session learn of
+ * it, ends the first server, and answers the held game's pid.
+ */
+async function holdAGameAtABreakpoint(own: Editor): Promise<number> {
+  const mainScript = { projectPath: own.project, scriptPath: 'res://main.gd' };
+  await own.call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
+  const run = await own.play({ op: 'start', headless: true });
+  assert.equal(get(run, 'through'), 'editor', `the editor should be the one playing: ${text(run)}`);
+  const pid = asNumber(get(run, 'runtime', 'pid'), 'the played run needs a process of its own');
+  await stackWithin(own.attempt, 'the game should stop at the breakpoint', (stack) => stack.length > 0);
+
+  // The server that was sent the event says so, with the reason the event carried. Its session
+  // attached only just now, for the stack read above, and an attach that asked the adapter again
+  // would answer "attached" here in place of what it was told.
+  const before = await own.call('editor_output', {});
+  assert.equal(
+    get(before, 'heldAt', 'reason'),
+    'breakpoint',
+    `held, seen by the first server: ${text(before)}`,
+  );
+  // A held game does not end, so a wait answers where it is held rather than sitting out its time.
+  const waitAsked = Date.now();
+  const waited = await own.call('editor_run', { op: 'wait', timeoutMs: 60_000 });
+  const waitedMs = Date.now() - waitAsked;
+  assert.equal(get(waited, 'heldAt', 'reason'), 'breakpoint', `a wait says where: ${text(waited)}`);
+  assert.ok(waitedMs < 15_000, `and answered in ${waitedMs}ms: ${text(waited)}`);
+
+  // A second session, attached while the first server holds the game. It was never sent the
+  // stopped event, so what it knows it learned by asking on attach. This is the state a server
+  // meets when the editor's own debugger, or another client, has the game at a breakpoint.
+  const second = new GodotDAPClient(own.dapPort);
+  await second.connect();
+  await second.attach();
+  assert.ok(second.isStopped(), 'a session attaching to a held game learns that it is held');
+  assert.equal(second.whereItStopped()?.reason, 'attached', 'and says how it came to know');
+  const seen = await second.getStackTrace();
+  assert.equal(get(seen[0], 'line'), BREAK_LINE, `on the line it is held at: ${JSON.stringify(seen[0])}`);
+  await second.abandon();
+  // The first server still holds it: a second client asking did not let it go.
+  const stillSaid = await own.attempt('debug_state', { op: 'stack' });
+  const still = stillSaid.ok ? asArray(stillSaid.answer, 'stackFrames') : [];
+  assert.equal(get(still[0], 'line'), BREAK_LINE, `and asking did not release it: ${stillSaid.text}`);
+
+  // Now the client holding it goes, the way a harness reconnect ends a server: stdin ends and the
+  // shutdown runs, which closes the adapter socket without a disconnect request.
+  own.server.child.stdin?.end();
+  await exited(own.server.child);
+  assert.ok(own.server.exited, 'the server should be gone, or nothing below is a test of anything');
+  await delay(1500);
+  assert.ok(alive(pid), 'the game outlives the server that was holding it');
+  return pid;
+}
+
+/** A server started after the first one went finds the game held, lets it go and takes over. */
+async function checksTheReplacementOfAHeldGame(own: Editor, pid: number): Promise<void> {
+  const replacement = new ServerProcess({ env: own.serverEnv });
+  try {
+    await replacement.initialize('held-game-fixture');
+    const answered: Answered = async (name, args) =>
+      parseTextContent(await replacement.request('tools/call', { name, arguments: args }, TOOL_TIMEOUT_MS));
+    await waitForTheEditorToReach(answered);
+    await checksTheReplacementFindsItHeld(replacement, answered);
+    await releasesThroughTheReplacement(own, replacement, answered);
+    await waitsForTheGameToTick(own, replacement);
+    await stopsTheReleasedGame(replacement, pid);
+    await replaysTheBreakpoint(own, answered);
+  } catch (failure) {
+    throw withTheAccountOf(replacement, failure);
+  } finally {
+    await replacement.stop();
+  }
+}
+
+/** Waits until the editor has reached the server behind [param answered]. */
+async function waitForTheEditorToReach(answered: Answered): Promise<void> {
+  const until = Date.now() + CONNECT_TIMEOUT_MS;
+  let back = false;
+  while (!back && Date.now() < until) {
+    back = get(await answered('editor_status', {}), 'editor', 'connected') === true;
+    if (!back) await delay(500);
+  }
+  assert.ok(back, 'the editor should reach the replacement server, or the rest proves nothing');
+}
+
+/** The replacement reads the game as held from the runtime, and refuses the stack for that reason. */
+async function checksTheReplacementFindsItHeld(
+  replacement: ServerProcess,
+  answered: Answered,
+): Promise<void> {
+  // The adapter shows this session no stack, so what it knows it learned from the runtime: a
+  // held game accepts the connection and never answers. Asserted as held rather than as not
+  // running, and with the reason that says which instrument answered.
+  const output = await answered('editor_output', {});
+  assert.equal(
+    get(output, 'heldAt', 'reason'),
+    'unanswered',
+    `the replacement finds the game held, from the runtime not answering: ${text(output)}`,
+  );
+  assert.equal(get(output, 'heldUnknown'), undefined, 'and does not also say it could not tell');
+  const stack = await replacement.request(
+    'tools/call',
+    { name: 'debug_state', arguments: { op: 'stack' } },
+    TOOL_TIMEOUT_MS,
+  );
+  assert.match(
+    textOf(stack) ?? '',
+    /The game is held, and this server cannot read its stack/,
+    `and the stack refusal says held and why it cannot be read, not running: ${textOf(stack)}`,
+  );
+}
+
+/** A continue through the replacement is reported to a bystander connection and to the session. */
+async function releasesThroughTheReplacement(
+  own: Editor,
+  replacement: ServerProcess,
+  answered: Answered,
+): Promise<void> {
+  // A bystander, connected and nothing more, the way the server that played the scene is
+  // connected before its first stack read. It is told when the game is let go by somebody
+  // else, which is what the editor's own debugger or another client does, and what it knows
+  // afterwards is that the game runs: without the event, a session told of the stop went on
+  // answering held about a game that was running.
+  const bystander = new GodotDAPClient(own.dapPort);
+  await bystander.connect();
+  assert.equal(bystander.holdIsKnown(), false, 'a bare connection opened now has been told nothing');
+
+  // Let go through the replacement. That it then ticks is what says the game was held rather
+  // than wedged, and that this session can act on a hold it was never told about.
+  const released = await replacement.request(
+    'tools/call',
+    { name: 'debug_control', arguments: { op: 'continue' } },
+    TOOL_TIMEOUT_MS,
+  );
+  assert.equal(
+    get(parseTextContent(released), 'continued'),
+    true,
+    `continue through the replacement: ${textOf(released)}`,
+  );
+  const afterwards = await answered('editor_output', {});
+  assert.equal(get(afterwards, 'heldAt'), null, `and the session now knows it runs: ${text(afterwards)}`);
+  const toldToo = Date.now() + 5000;
+  while (!bystander.holdIsKnown() && Date.now() < toldToo) {
+    await delay(50);
+  }
+  assert.ok(bystander.holdIsKnown(), 'a continue by another client is reported to every connection');
+  assert.equal(bystander.isStopped(), false, 'as a game that runs');
+  await bystander.abandon();
+}
+
+/** A game let go ticks, which a held one cannot. */
+async function waitsForTheGameToTick(own: Editor, replacement: ServerProcess): Promise<void> {
+  // Polled, because a game let go a moment ago has not ticked yet, and how soon it does is not
+  // a number this fixture can know.
+  const patience = Date.now() + GAME_STOP_TIMEOUT_MS;
+  let ticked = 0;
+  let lastAnswer = '';
+  while (ticked === 0 && Date.now() < patience) {
+    const ticksResponse = await replacement.request(
+      'tools/call',
+      {
+        name: 'runtime_inspect',
+        arguments: {
+          projectPath: own.project,
+          op: 'property',
+          nodePath: '/root/Main',
+          property: 'ticks',
+        },
+      },
+      TOOL_TIMEOUT_MS,
+    );
+    lastAnswer = textOf(ticksResponse) ?? '';
+    const value = get(parseTextContent(ticksResponse), 'value');
+    ticked = typeof value === 'number' ? value : 0;
+    if (ticked === 0) await delay(500);
+  }
+  assert.ok(ticked > 0, `a released game ticks, which a held one cannot: ${lastAnswer}`);
+}
+
+/** The replacement ends the released game, which is then actually gone. */
+async function stopsTheReleasedGame(replacement: ServerProcess, pid: number): Promise<void> {
+  const ended = parseTextContent(
+    await replacement.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop' } },
+      TOOL_TIMEOUT_MS,
+    ),
+  );
+  assert.equal(get(ended, 'stopped'), true, `the replacement should be able to end it: ${text(ended)}`);
+  await delay(1500);
+  assert.ok(!alive(pid), 'after which the game is gone');
+}
+
+/** A play through the replacement sends the breakpoint the first server set, and stops on it. */
+async function replaysTheBreakpoint(own: Editor, answered: Answered): Promise<void> {
+  // The breakpoint the first server set is the replacement's to send as well: the editor
+  // keeps one for a single play, the first server is gone with what it held, and a play
+  // through the replacement used to run straight past the line. The note in the project is
+  // what carries it, and the start answer says it was sent.
+  const one = [{ scriptPath: 'res://main.gd', lines: [BREAK_LINE] }];
+  const replayed = await answered('editor_run', {
+    projectPath: own.project,
+    op: 'start',
+    headless: true,
+  });
+  assert.deepEqual(
+    get(replayed, 'breakpoints'),
+    one,
+    `a play through the replacement sends the breakpoint the first server set: ${text(replayed)}`,
+  );
+  const stopsAgain = Date.now() + GAME_STOP_TIMEOUT_MS;
+  let reason: unknown = null;
+  while (reason !== 'breakpoint' && Date.now() < stopsAgain) {
+    reason = get(await answered('editor_output', {}), 'heldAt', 'reason');
+    if (reason !== 'breakpoint') await delay(500);
+  }
+  assert.equal(reason, 'breakpoint', 'and the game stops on it, for a server that never set it');
+  const cleared = await answered('debug_breakpoint', {
+    projectPath: own.project,
+    scriptPath: 'res://main.gd',
+    op: 'remove',
+    line: BREAK_LINE,
+  });
+  assert.deepEqual(get(cleared, 'held'), [], `the replacement can take it off again: ${text(cleared)}`);
+  await answered('editor_run', { op: 'stop' });
 }
 
 /** Every whole LSP message in [param bytes], in order. */
@@ -8303,6 +9168,7 @@ async function main(): Promise<void> {
       'testAWriteBesideAViewportTextureSaysNothingOfItsPath',
       testAWriteBesideAViewportTextureSaysNothingOfItsPath,
     ],
+    ['testALargeValueCrossesTheEditorsSocket', testALargeValueCrossesTheEditorsSocket],
     ['testABranchIsSavedAsItsOwnScene', testABranchIsSavedAsItsOwnScene],
     ['testValuesSurviveBeingRead', testValuesSurviveBeingRead],
     ['testAValueTheSceneCannotHoldIsRefused', testAValueTheSceneCannotHoldIsRefused],
@@ -8356,6 +9222,9 @@ async function main(): Promise<void> {
     ['testAutoReloadMissesNoWrite', testAutoReloadMissesNoWrite],
     ['testAutoReloadKeepsUnsavedEdits', testAutoReloadKeepsUnsavedEdits],
     ['testAutoReloadLeavesAGoneScene', testAutoReloadLeavesAGoneScene],
+    ['testAShownSceneIsSavedAsTheEditorHoldsIt', testAShownSceneIsSavedAsTheEditorHoldsIt],
+    ['testACaptureOfASceneThatDoesNotLoadIsRefusedFirst', testACaptureOfASceneThatDoesNotLoadIsRefusedFirst],
+    ['testASaveFromTheEditorIsAskedByName', testASaveFromTheEditorIsAskedByName],
     ['testAPlayedRunsConsoleArrivesOnItsOwn', testAPlayedRunsConsoleArrivesOnItsOwn],
     ['testDebugging', testDebugging],
     ['testRuntime', testRuntime],

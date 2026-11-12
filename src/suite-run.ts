@@ -26,10 +26,12 @@ import { cachedClasses, staleAgainst } from './class-cache.js';
 import {
   coresNamed,
   type EngineLaunch,
+  gigabytes,
   godotNamed,
   heldRunSaid,
   homeOf,
   KEPT_RUN_DIRECTORIES,
+  MEMORY_PER_ENGINE,
   MOST_ENGINES,
   memoryAvailable,
   plural,
@@ -84,6 +86,7 @@ import {
   inOneEngine,
   lanesOf,
   ProjectScripts,
+  peakOf,
   readTimes,
   Shares,
   SPLIT_PAST_SECONDS,
@@ -177,6 +180,8 @@ export interface RunResult {
     readonly windowed: boolean;
     /** The suites it was handed, a suite dealt by its cases or rows once for each engine holding part. */
     readonly suites: readonly string[];
+    /** The most memory the engine was read holding, or null when it was never read. */
+    readonly peakBytes: number | null;
     /** Where its whole output is kept, or null once a passing run has removed it. */
     readonly log: string | null;
   }[];
@@ -258,8 +263,15 @@ const VALUED = new Set([
 ]);
 const SWITCHES = new Set(['--changed-only', '--whole-tree', '--import', '--print-output', '--verbose']);
 
-/** [param args], everything after `test`, read into options. Relative paths are read from [param cwd]. */
-export function testOptionsOf(args: readonly string[], cwd: string): TestOptions {
+/** The arguments of `gdharness test` sorted into the options with values, the switches and the rest. */
+interface SortedArguments {
+  readonly valued: ReadonlyMap<string, readonly string[]>;
+  readonly switches: ReadonlySet<string>;
+  readonly positional: readonly string[];
+}
+
+/** [param args] sorted by what each is, refusing an unknown option or one missing its value. */
+function sortedArguments(args: readonly string[]): SortedArguments {
   const valued = new Map<string, string[]>();
   const switches = new Set<string>();
   const positional: string[] = [];
@@ -280,6 +292,14 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
       throw new EngineUsageError(`Unknown option ${arg} for gdharness test. Run gdharness help.`);
     }
   }
+  return { valued, switches, positional };
+}
+
+/** The project a run is for: the first argument where it is one, else [param cwd], refused where it is none. */
+function projectOfRun(
+  positional: readonly string[],
+  cwd: string,
+): { readonly projectPath: string; readonly projectNamed: boolean } {
   const first = positional[0];
   const firstPath = first === undefined ? null : resolve(cwd, first);
   const projectNamed = firstPath !== null && isGodotProject(firstPath);
@@ -292,13 +312,32 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
         : `Not a Godot project: neither ${firstPath} nor ${projectPath} holds a project.godot. Name the project directory first, or run from it.`,
     );
   }
+  return { projectPath, projectNamed };
+}
+
+/** [param value] read from [param cwd], or null where the option was not given. */
+function pathNamed(value: string | undefined, cwd: string): string | null {
+  return value === undefined ? null : resolve(cwd, value);
+}
+
+/** The order the `--order` option names: reversed, a seed to shuffle by, or null for the plain one. */
+function orderNamed(order: string | undefined): 'reversed' | number | null {
+  if (order === undefined) {
+    return null;
+  }
+  return order === 'reversed' ? 'reversed' : seedOf(order);
+}
+
+/** [param args], everything after `test`, read into options. Relative paths are read from [param cwd]. */
+export function testOptionsOf(args: readonly string[], cwd: string): TestOptions {
+  const { valued, switches, positional } = sortedArguments(args);
+  const { projectPath, projectNamed } = projectOfRun(positional, cwd);
   const last = (flag: string): string | undefined => valued.get(flag)?.at(-1);
-  const order = last('--order');
   return {
     projectPath,
     selected: positional.slice(projectNamed ? 1 : 0).map((entry) => resPathOf(entry, projectPath, cwd)),
     engines: wholeFlag(last('--engines'), '--engines') ?? MOST_ENGINES,
-    slotsDirectory: last('--slots') === undefined ? null : resolve(cwd, last('--slots') ?? ''),
+    slotsDirectory: pathNamed(last('--slots'), cwd),
     slotCount: wholeFlag(last('--slot-count'), '--slot-count'),
     silenceSeconds: wholeFlag(last('--silence'), '--silence') ?? SILENCE_FLOOR_SECONDS,
     deadlineSeconds: wholeFlag(last('--deadline'), '--deadline'),
@@ -310,11 +349,11 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     wholeTree: switches.has('--whole-tree'),
     reachAlso: (valued.get('--reach-also') ?? []).map((path) => resolve(projectPath, path)),
     importFirst: switches.has('--import'),
-    order: order === undefined ? null : order === 'reversed' ? 'reversed' : seedOf(order),
+    order: orderNamed(last('--order')),
     printOutput: switches.has('--print-output'),
     verbose: switches.has('--verbose'),
-    resultFile: last('--result') === undefined ? null : resolve(cwd, last('--result') ?? ''),
-    timesFile: last('--times') === undefined ? null : resolve(cwd, last('--times') ?? ''),
+    resultFile: pathNamed(last('--result'), cwd),
+    timesFile: pathNamed(last('--times'), cwd),
   };
 }
 
@@ -347,47 +386,17 @@ function searchedRoots(options: TestOptions): readonly string[] {
 
 /** The suites a run is asked for, each with the cases asked of it. */
 function selectedSuites(scripts: ProjectScripts, options: TestOptions): DeclaredSuite[] {
-  const roots = rootsOf(options);
   if (options.selected.length === 0) {
-    const missing = roots.find((root) => !existsSync(join(options.projectPath, root.slice('res://'.length))));
-    if (missing !== undefined) {
-      throw new EngineUsageError(`Nothing at ${missing} in the project at ${options.projectPath}.`);
-    }
-    const found = scripts.suitesUnder(roots);
-    if (found.length === 0) {
-      throw new EngineUsageError(
-        roots.length === 0
-          ? 'The project has no tests or test directory to look for suites in. Name one with --tests.'
-          : `No gdUnit4 suite under ${roots.join(' or ')}: no script there extends GdUnitTestSuite and declares a test_ function.`,
-      );
-    }
-    return found;
+    return suitesOfTheRoots(scripts, options);
   }
   const chosen = new Map<string, { suite: DeclaredSuite; cases: Set<string> }>();
   for (const entry of options.selected) {
     const caseAt = /^(res:\/\/.*\.gd):(\w+)$/.exec(entry);
     const path = caseAt?.[1] ?? entry;
-    const directory = join(options.projectPath, path.slice(6));
-    const suites =
-      existsSync(directory) && statSync(directory).isDirectory()
-        ? scripts.suitesUnder([path.replace(/\/$/, '')])
-        : [scripts.suite(path)].filter((suite) => suite !== null);
-    if (suites.length === 0) {
-      throw new EngineUsageError(
-        existsSync(directory)
-          ? `${path} holds no gdUnit4 suite: nothing there extends GdUnitTestSuite and declares a test_ function.`
-          : `Nothing at ${path} in the project at ${options.projectPath}.`,
-      );
-    }
-    for (const suite of suites) {
+    const asked = caseAt?.[2];
+    for (const suite of suitesOfEntry(scripts, options, path)) {
       const picked = chosen.get(suite.path) ?? { suite, cases: new Set<string>() };
-      const asked = caseAt?.[2];
-      if (asked !== undefined && !suite.cases.includes(asked)) {
-        throw new EngineUsageError(
-          `${suite.path} declares no case ${asked}. It declares ${suite.cases.join(', ')}.`,
-        );
-      }
-      for (const func of asked === undefined ? suite.cases : [asked]) {
+      for (const func of casesAsked(suite, asked)) {
         picked.cases.add(func);
       }
       chosen.set(suite.path, picked);
@@ -397,6 +406,54 @@ function selectedSuites(scripts: ProjectScripts, options: TestOptions): Declared
     ...suite,
     cases: suite.cases.filter((c) => cases.has(c)),
   }));
+}
+
+/** The cases of [param suite] a selection asks for: the one named by [param asked], or all of them. */
+function casesAsked(suite: DeclaredSuite, asked: string | undefined): readonly string[] {
+  if (asked === undefined) {
+    return suite.cases;
+  }
+  if (!suite.cases.includes(asked)) {
+    throw new EngineUsageError(
+      `${suite.path} declares no case ${asked}. It declares ${suite.cases.join(', ')}.`,
+    );
+  }
+  return [asked];
+}
+
+/** Every suite under the directories a run with nothing selected looks in, refusing where there is none. */
+function suitesOfTheRoots(scripts: ProjectScripts, options: TestOptions): DeclaredSuite[] {
+  const roots = rootsOf(options);
+  const missing = roots.find((root) => !existsSync(join(options.projectPath, root.slice('res://'.length))));
+  if (missing !== undefined) {
+    throw new EngineUsageError(`Nothing at ${missing} in the project at ${options.projectPath}.`);
+  }
+  const found = scripts.suitesUnder(roots);
+  if (found.length === 0) {
+    throw new EngineUsageError(
+      roots.length === 0
+        ? 'The project has no tests or test directory to look for suites in. Name one with --tests.'
+        : `No gdUnit4 suite under ${roots.join(' or ')}: no script there extends GdUnitTestSuite and declares a test_ function.`,
+    );
+  }
+  return found;
+}
+
+/** The suites the selected [param path] names, one for a script and every one under a directory. */
+function suitesOfEntry(scripts: ProjectScripts, options: TestOptions, path: string): DeclaredSuite[] {
+  const directory = join(options.projectPath, path.slice(6));
+  const suites =
+    existsSync(directory) && statSync(directory).isDirectory()
+      ? scripts.suitesUnder([path.replace(/\/$/, '')])
+      : [scripts.suite(path)].filter((suite) => suite !== null);
+  if (suites.length === 0) {
+    throw new EngineUsageError(
+      existsSync(directory)
+        ? `${path} holds no gdUnit4 suite: nothing there extends GdUnitTestSuite and declares a test_ function.`
+        : `Nothing at ${path} in the project at ${options.projectPath}.`,
+    );
+  }
+  return suites;
 }
 
 /** [param units] in the order [param order] asks: reversed by path, or shuffled by a seed. */
@@ -439,6 +496,8 @@ interface EngineRan {
   readonly again: boolean;
   /** The file the runner wrote what it loaded into, a line as each suite ended. */
   readonly reached: string;
+  /** The most bytes the engine was read holding, when it was read at all. */
+  readonly peakBytes?: number;
 }
 
 /**
@@ -524,14 +583,62 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
   const scripts = new ProjectScripts(options.projectPath);
   const home = homeOf(options.projectPath);
   const state = join(home, '.godot', 'gdharness');
-  const timesFile = options.timesFile ?? join(state, 'suite-times.json');
-  const passedFile = join(state, 'suite-passed.json');
-  const lastRunFile = join(state, LAST_RUN_FILE);
-  let suites = selectedSuites(scripts, options);
+  const suites = selectedSuites(scripts, options);
   const uncollected = uncollectedSaid(scripts.uncollectedUnder(searchedRoots(options)));
   // Whole, whatever the selection asked of them: the cases an engine is to leave out are the rest.
   const wholeSuites = suites.map((suite) => scripts.suite(suite.path) ?? suite);
   const declared: CasesBySuite = new Map(wholeSuites.map((suite) => [suite.path, suite.cases]));
+  const { launch, interrupted } = await openedRun(options, godotPath, scripts, state, startedAt);
+  try {
+    return await runStages({
+      options,
+      godotPath,
+      startedAt,
+      state,
+      timesFile: options.timesFile ?? join(state, 'suite-times.json'),
+      passedFile: join(state, 'suite-passed.json'),
+      lastRunFile: join(state, LAST_RUN_FILE),
+      suites,
+      uncollected,
+      wholeSuites,
+      declared,
+      launch,
+    });
+  } finally {
+    process.off('SIGINT', interrupted);
+    process.off('SIGTERM', interrupted);
+  }
+}
+
+/** What the stages of one run share. */
+interface RunContext {
+  readonly options: TestOptions;
+  readonly godotPath: string;
+  readonly startedAt: number;
+  /** The folder the project keeps what it learns across runs in. */
+  readonly state: string;
+  readonly timesFile: string;
+  readonly passedFile: string;
+  readonly lastRunFile: string;
+  readonly suites: readonly DeclaredSuite[];
+  readonly uncollected: readonly string[];
+  readonly wholeSuites: readonly DeclaredSuite[];
+  readonly declared: CasesBySuite;
+  readonly launch: Launch;
+}
+
+/**
+ * Opens a run: sweeps the folders old runs left, makes the run's own, takes the slots' directory
+ * and answers the launch every engine starts from, with the handler that ends them on an interrupt,
+ * which the caller takes off once the run is over.
+ */
+async function openedRun(
+  options: TestOptions,
+  godotPath: string,
+  scripts: ProjectScripts,
+  state: string,
+  startedAt: number,
+): Promise<{ readonly launch: Launch; readonly interrupted: () => void }> {
   const testRuns = join(options.projectPath, '.godot', 'gdharness', 'test-runs');
   const keptRuns = join(state, 'test-runs');
   const held = sweepRunDirectories(testRuns);
@@ -579,278 +686,414 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
     verbose: options.verbose,
     failsOnPushErrors: gdUnitFailsOnPushErrors(options.projectPath),
   };
-  try {
-    const needed = options.importFirst ? null : importNeeded(options.projectPath);
-    if (needed !== null) {
-      console.log(needed);
-    }
-    if (options.importFirst || needed !== null) {
-      const imported = await importProject(launch);
-      if (imported !== null) {
-        logs.keep();
-        const unwritten = writeEarlyResult(
-          { resultFile: options.resultFile, lastRunFile, engines: options.engines },
-          startedAt,
-          [`the import failed: ${imported}`],
-          logs.shown,
+  return { launch, interrupted };
+}
+
+/** A run from its import to its report, answering the exit code. */
+async function runStages(context: RunContext): Promise<number> {
+  const { options, launch, godotPath, state, startedAt } = context;
+  const failedImport = await importedFirst(context);
+  if (failedImport !== null) {
+    return failedImport;
+  }
+  // After the import, which writes the .import and .uid files beside what a suite loads.
+  const suitesBegan = Date.now();
+  // Read again from here, since a script edited during the import is loaded as it is now, and
+  // one edited from here on is newer than suitesBegan, which keeps its pass unrecorded.
+  const loaded = new ProjectScripts(options.projectPath);
+  const always = [
+    getLocalVersion(),
+    readFileSync(shippedListedRunner(), 'utf8'),
+    engineSaid(godotPath),
+    ...reachedAlsoSaid(options.reachAlso),
+  ];
+  const compileKept = options.changedOnly
+    ? { file: join(state, COMPILED_FILE), scripts: loaded, always }
+    : null;
+  const suites = options.changedOnly ? withoutTheUnchanged(context, loaded, always) : context.suites;
+  if (options.changedOnly && suites.length === 0) {
+    return await nothingChanged(context, compileKept);
+  }
+  const deal = await dealtRun(context, suites);
+  // What the run said of its deal is kept with its outcome, since a gate keeps a passing step's
+  // output nowhere and a slow pass could not be told from an uneven deal afterwards.
+  const dealing: string[] = [];
+  const say = (line: string): void => {
+    dealing.push(line);
+    console.log(line);
+  };
+  announceDeal(context, suites, deal, say);
+  const started = await takenLanes(context, deal, say);
+  // Once the lanes hold what slots were free, so it takes one only beside them.
+  const handed = new HandedSlot();
+  const compiling = compileUnlessUnchanged(launch, context.suites, compileKept, handed);
+  // Awaited after the suites. A run failing before then reports its own error, not this one too.
+  compiling.catch(() => undefined);
+  const ran = await ranEngines(context, deal, started, handed, say);
+  recordTimes(context, loaded, ran);
+  const across = rowsAcross(ran.map((engine) => ({ handed: engine.plan.suites, printed: engine.printed })));
+  const passKept = recordPassed(
+    context.passedFile,
+    options.projectPath,
+    ran,
+    new Set(across.map((fault) => fault.suite)),
+    new SuiteInputs(loaded, always),
+    suitesBegan,
+    context.declared,
+  );
+  return report(
+    ran,
+    await compiling,
+    across.map((fault) => fault.fault),
+    context.uncollected,
+    passKept ? [] : [unkeptSaid(context.passedFile)],
+    startedAt,
+    launch.logs,
+    options.printOutput,
+    {
+      resultFile: options.resultFile,
+      lastRunFile: context.lastRunFile,
+      dealing,
+      engines: options.engines,
+      slotsFree: started.taken.length,
+    },
+  );
+}
+
+/** Imports the project where the run asks for it or it needs it, answering the exit code of a failed import. */
+async function importedFirst(context: RunContext): Promise<number | null> {
+  const { options, launch, startedAt, lastRunFile } = context;
+  const needed = options.importFirst ? null : importNeeded(options.projectPath);
+  if (needed !== null) {
+    console.log(needed);
+  }
+  if (!options.importFirst && needed === null) {
+    return null;
+  }
+  const imported = await importProject(launch);
+  if (imported === null) {
+    return null;
+  }
+  launch.logs.keep();
+  const unwritten = writeEarlyResult(
+    { resultFile: options.resultFile, lastRunFile, engines: options.engines },
+    startedAt,
+    [`the import failed: ${imported}`],
+    launch.logs.shown,
+  );
+  console.log(`The import failed, so no suite ran: ${imported}`);
+  return exitAfter(1, unwritten);
+}
+
+/** The suites of the run less those that passed on everything their engine loads as it stands now. */
+function withoutTheUnchanged(
+  context: RunContext,
+  loaded: ProjectScripts,
+  always: readonly string[],
+): readonly DeclaredSuite[] {
+  const inputs = new SuiteInputs(loaded, always);
+  const passedBefore = readPassed(context.passedFile);
+  const unchanged = context.suites.filter((suite) => {
+    const passed = passedBefore[suite.path];
+    return passed !== undefined && inputs.printOf(passed.inputs) === passed.print;
+  });
+  if (unchanged.length > 0) {
+    console.log(
+      `${plural(unchanged.length, 'suite')} passed on everything ${unchanged.length === 1 ? 'its engine' : 'their engines'} loaded as it stands now, and ${unchanged.length === 1 ? 'is' : 'are'} not run: ${named(unchanged.map((suite) => suite.path))}.`,
+    );
+  }
+  return context.suites.filter((suite) => !unchanged.includes(suite));
+}
+
+/** Ends a run in which every suite last passed on what it loads now, answering the exit code. */
+async function nothingChanged(context: RunContext, compileKept: CompileKept | null): Promise<number> {
+  const { options, launch, uncollected, startedAt, lastRunFile } = context;
+  console.log('Nothing has changed since every suite last passed.');
+  const compiled = await compileUnlessUnchanged(launch, context.suites, compileKept);
+  const problems = [...compiled.faults.map((fault) => `${COMPILE_CHECK}: ${fault}`), ...uncollected];
+  if (problems.length === 0) {
+    rmSync(launch.runDirectory, { recursive: true, force: true });
+  } else {
+    launch.logs.keep();
+  }
+  const unwritten = writeEarlyResult(
+    { resultFile: options.resultFile, lastRunFile, engines: options.engines },
+    startedAt,
+    problems,
+    problems.length === 0 ? null : launch.logs.shown,
+  );
+  if (problems.length === 0) {
+    return exitAfter(0, unwritten);
+  }
+  printCompiled(compiled, launch.logs);
+  printUncollected(uncollected);
+  console.log('');
+  console.log(`Failed: ${plural(problems.length, 'problem')}, listed above.`);
+  return exitAfter(1, unwritten);
+}
+
+/** How many engines a size of engine has room for, given the memory a run may use. */
+type Room = ReturnType<typeof roomFor>;
+
+/** What a run was dealt: the times it went by, the room there was for engines, and the engines' shares. */
+interface Deal {
+  readonly times: SuiteTimes;
+  /** The room memory leaves, which holds the run to fewer engines than the processors would. */
+  readonly byMemory: Room;
+  /** The room the run is dealt for: what the processors leave when memory holds it. */
+  readonly room: Room;
+  readonly memoryHeld: boolean;
+  readonly units: readonly Unit[];
+  readonly splitPast: number;
+  readonly plans: readonly EnginePlan[];
+}
+
+/** The room [param bytes] of memory leaves for engines of the size the run's suites were seen to hold. */
+function roomFinder(
+  options: TestOptions,
+  memory: Awaited<ReturnType<typeof memoryAvailable>>,
+  suites: readonly DeclaredSuite[],
+  times: SuiteTimes,
+): (bytes: number) => Room {
+  // Every engine is sized by the most any suite of the run was seen to hold, since the start does
+  // not know which suites share an engine.
+  const sized = peakOf(
+    suites.map((suite) => suite.path),
+    times,
+    MEMORY_PER_ENGINE,
+  );
+  const perEngine = {
+    bytes: sized.bytes,
+    said: sized.seen
+      ? 'taken for each engine, the most one holding these suites was seen to hold'
+      : 'taken for each engine',
+  };
+  return (bytes) =>
+    options.cores === null
+      ? roomFor(options.engines, availableParallelism(), bytes, memory.said, undefined, perEngine)
+      : roomFor(
+          options.engines,
+          options.cores,
+          bytes,
+          memory.said,
+          `--cores holds it to ${plural(options.cores, 'processor')}`,
+          perEngine,
         );
-        console.log(`The import failed, so no suite ran: ${imported}`);
-        return exitAfter(1, unwritten);
-      }
-    }
-    // After the import, which writes the .import and .uid files beside what a suite loads.
-    const suitesBegan = Date.now();
-    // Read again from here, since a script edited during the import is loaded as it is now, and
-    // one edited from here on is newer than suitesBegan, which keeps its pass unrecorded.
-    const loaded = new ProjectScripts(options.projectPath);
-    const always = [
-      getLocalVersion(),
-      readFileSync(shippedListedRunner(), 'utf8'),
-      engineSaid(godotPath),
-      ...reachedAlsoSaid(options.reachAlso),
-    ];
-    const everySuite = suites;
-    const compileKept = options.changedOnly
-      ? { file: join(state, COMPILED_FILE), scripts: loaded, always }
-      : null;
-    if (options.changedOnly) {
-      const inputs = new SuiteInputs(loaded, always);
-      const passedBefore = readPassed(passedFile);
-      const unchanged = suites.filter((suite) => {
-        const passed = passedBefore[suite.path];
-        return passed !== undefined && inputs.printOf(passed.inputs) === passed.print;
-      });
-      suites = suites.filter((suite) => !unchanged.includes(suite));
-      if (unchanged.length > 0) {
-        console.log(
-          `${plural(unchanged.length, 'suite')} passed on everything ${unchanged.length === 1 ? 'its engine' : 'their engines'} loaded as it stands now, and ${unchanged.length === 1 ? 'is' : 'are'} not run: ${named(unchanged.map((suite) => suite.path))}.`,
-        );
-      }
-      if (suites.length === 0) {
-        console.log('Nothing has changed since every suite last passed.');
-        const compiled = await compileUnlessUnchanged(launch, everySuite, compileKept);
-        const problems = [...compiled.faults.map((fault) => `${COMPILE_CHECK}: ${fault}`), ...uncollected];
-        if (problems.length === 0) {
-          rmSync(runDirectory, { recursive: true, force: true });
-        } else {
-          logs.keep();
-        }
-        const unwritten = writeEarlyResult(
-          { resultFile: options.resultFile, lastRunFile, engines: options.engines },
-          startedAt,
-          problems,
-          problems.length === 0 ? null : logs.shown,
-        );
-        if (problems.length === 0) {
-          return exitAfter(0, unwritten);
-        }
-        printCompiled(compiled, logs);
-        printUncollected(uncollected);
-        console.log('');
-        console.log(`Failed: ${plural(problems.length, 'problem')}, listed above.`);
-        return exitAfter(1, unwritten);
-      }
-    }
-    const times = readTimes(timesFile);
-    const memory = await memoryAvailable();
-    if (memory.unread !== undefined) {
-      console.log(
-        `Windows did not say how much memory it can still commit (${memory.unread}), so engines are sized by the physical memory free.`,
-      );
-    }
-    const roomWith = (bytes: number): ReturnType<typeof roomFor> =>
-      options.cores === null
-        ? roomFor(options.engines, availableParallelism(), bytes, memory.said)
-        : roomFor(
-            options.engines,
-            options.cores,
-            bytes,
-            memory.said,
-            `--cores holds it to ${plural(options.cores, 'processor')}`,
-          );
-    const byMemory = roomWith(memory.bytes);
-    // What the processors leave room for. Memory held a run to the engines it had room for at the
-    // start for the whole of it, so one engine was dealt nearly everything while memory freed beside
-    // it. Held by memory, the run is dealt for these and its engines start as memory has room.
-    const unheld = roomWith(Number.POSITIVE_INFINITY);
-    const unheldUnits = unitsOf(suites, times, splitPastFor(suites, times, unheld.engines));
-    const heldLanes = lanesOf(dealt(unheldUnits, declared, unheld.engines));
-    const memoryHeld = options.order === null && byMemory.engines < heldLanes;
-    const room = memoryHeld ? unheld : byMemory;
-    if (options.cores !== null && process.platform === 'darwin') {
-      console.log(
-        'macOS offers no way to hold a process to some processors, so --cores holds only the number of engines here.',
-      );
-    }
-    const splitPast = splitPastFor(suites, times, room.engines);
-    const units = memoryHeld ? unheldUnits : unitsOf(suites, times, splitPast);
-    const past =
-      splitPast > SPLIT_PAST_SECONDS
-        ? `an engine's share of this run (${String(Math.round(splitPast))} s)`
-        : `${String(SPLIT_PAST_SECONDS)} s`;
-    const plans =
-      options.order === null
-        ? dealt(units, declared, room.engines)
-        : [inOneEngine(ordered(units, options.order), declared)];
-    const functions = suites.reduce((sum, suite) => sum + suite.cases.length, 0);
-    // Cut for the engines asked: held to fewer, the share grows and keeps whole what they would split.
-    const asked = unitsOf(suites, times, splitPastFor(suites, times, options.engines));
-    const how =
-      options.order === null
-        ? `${windowedSaid(plans)}${roomSaid(plans.length, lanesOf(plans), lanesOf(dealt(asked, declared, options.engines)), room.held, options.engines)}`
-        : options.order === 'reversed'
-          ? ', in reverse order of path'
-          : `, shuffled by ${String(options.order)}`;
-    // What the run said of its deal is kept with its outcome, since a gate keeps a passing step's
-    // output nowhere and a slow pass could not be told from an uneven deal afterwards.
-    const dealing: string[] = [];
-    const say = (line: string): void => {
-      dealing.push(line);
-      console.log(line);
-    };
+}
+
+/** Sizes the engines of the run by the memory there is and deals the suites over them. */
+async function dealtRun(context: RunContext, suites: readonly DeclaredSuite[]): Promise<Deal> {
+  const { options, declared } = context;
+  const times = readTimes(context.timesFile);
+  const memory = await memoryAvailable();
+  if (memory.unread !== undefined) {
+    console.log(
+      `Windows did not say how much memory it can still commit (${memory.unread}), so engines are sized by the physical memory free.`,
+    );
+  }
+  const roomWith = roomFinder(options, memory, suites, times);
+  const byMemory = roomWith(memory.bytes);
+  // What the processors leave room for. Memory held a run to the engines it had room for at the
+  // start for the whole of it, so one engine was dealt nearly everything while memory freed beside
+  // it. Held by memory, the run is dealt for these and its engines start as memory has room.
+  const unheld = roomWith(Number.POSITIVE_INFINITY);
+  const unheldUnits = unitsOf(suites, times, splitPastFor(suites, times, unheld.engines));
+  const heldLanes = lanesOf(dealt(unheldUnits, declared, unheld.engines));
+  const memoryHeld = options.order === null && byMemory.engines < heldLanes;
+  const room = memoryHeld ? unheld : byMemory;
+  if (options.cores !== null && process.platform === 'darwin') {
+    console.log(
+      'macOS offers no way to hold a process to some processors, so --cores holds only the number of engines here.',
+    );
+  }
+  const splitPast = splitPastFor(suites, times, room.engines);
+  const units = memoryHeld ? unheldUnits : unitsOf(suites, times, splitPast);
+  const plans =
+    options.order === null
+      ? dealt(units, declared, room.engines)
+      : [inOneEngine(ordered(units, options.order), declared)];
+  return { times, byMemory, room, memoryHeld, units, splitPast, plans };
+}
+
+/** What the run says of its deal, ahead of the lines for each way the deal was cut. */
+function dealSaid(context: RunContext, suites: readonly DeclaredSuite[], deal: Deal): string {
+  const { options, declared } = context;
+  const { times, room, plans } = deal;
+  // Cut for the engines asked: held to fewer, the share grows and keeps whole what they would split.
+  const asked = unitsOf(suites, times, splitPastFor(suites, times, options.engines));
+  const how =
+    options.order === null
+      ? `${windowedSaid(plans)}${roomSaid(plans.length, lanesOf(plans), lanesOf(dealt(asked, declared, options.engines)), room.held, options.engines)}`
+      : options.order === 'reversed'
+        ? ', in reverse order of path'
+        : `, shuffled by ${String(options.order)}`;
+  const functions = suites.reduce((sum, suite) => sum + suite.cases.length, 0);
+  return `${plural(functions, 'test function')} in ${plural(suites.length, 'suite')} over ${plural(plans.length, 'engine')}${how}.`;
+}
+
+/** Says how the suites were dealt, and which were cut up, kept whole or given a window. */
+function announceDeal(
+  context: RunContext,
+  suites: readonly DeclaredSuite[],
+  deal: Deal,
+  say: (line: string) => void,
+): void {
+  const { options } = context;
+  const { units, plans, room, splitPast } = deal;
+  say(dealSaid(context, suites, deal));
+  const windowedAnyway = headlessInAWindow(plans, units);
+  if (windowedAnyway.length > 0) {
+    const one = windowedAnyway.length === 1;
     say(
-      `${plural(functions, 'test function')} in ${plural(suites.length, 'suite')} over ${plural(plans.length, 'engine')}${how}.`,
+      `${named(windowedAnyway)} ${one ? 'says it runs' : 'say they run'} headless and ${one ? 'runs' : 'run'} with a window here, since an ordered run is one engine and a suite in it needs a window. Run ${one ? 'it' : 'them'} without the windowed suites to run ${one ? 'it' : 'them'} headless.`,
     );
-    const windowedAnyway = headlessInAWindow(plans, units);
-    if (windowedAnyway.length > 0) {
-      const one = windowedAnyway.length === 1;
-      say(
-        `${named(windowedAnyway)} ${one ? 'says it runs' : 'say they run'} headless and ${one ? 'runs' : 'run'} with a window here, since an ordered run is one engine and a suite in it needs a window. Run ${one ? 'it' : 'them'} without the windowed suites to run ${one ? 'it' : 'them'} headless.`,
+  }
+  sayWhatWasCutUp(deal, say);
+  // Said beside the deal, so a suite past the split in one engine reads as asked for, not missed.
+  const keptWhole = units.flatMap((unit) =>
+    unit.cost > splitPast && !unit.windowed && suites.some((s) => s.path === unit.suite && s.together)
+      ? [unit.suite]
+      : [],
+  );
+  // By the engines there was room for rather than those used: kept whole, it may need only one.
+  if (options.order === null && room.engines > 1 && keptWhole.length > 0) {
+    const one = keptWhole.length === 1;
+    say(
+      `Kept whole in one engine, since ${one ? 'it declares' : 'each declares'} GDHARNESS_TOGETHER: ${named(keptWhole)}.`,
+    );
+  }
+}
+
+/** Says which suites were dealt out case by case and which row by row. */
+function sayWhatWasCutUp(deal: Deal, say: (line: string) => void): void {
+  const { units, plans, splitPast } = deal;
+  const past =
+    splitPast > SPLIT_PAST_SECONDS
+      ? `an engine's share of this run (${String(Math.round(splitPast))} s)`
+      : `${String(SPLIT_PAST_SECONDS)} s`;
+  const split = [...new Set(units.map((unit) => unit.suite))].filter(
+    (path) => units.filter((unit) => unit.suite === path && unit.row === undefined).length > 1,
+  );
+  if (plans.length > 1 && split.length > 0) {
+    say(
+      `Dealt out case by case, since ${split.length === 1 ? 'it' : 'each'} took more than ${past} last time: ${named(split)}.`,
+    );
+  }
+  const byRows = [
+    ...new Set(
+      units.flatMap((unit) => (unit.row === undefined ? [] : [`${unit.suite} > ${unit.cases[0] ?? ''}`])),
+    ),
+  ];
+  if (plans.length > 1 && byRows.length > 0) {
+    say(
+      `Dealt out row by row, since ${byRows.length === 1 ? 'it' : 'each'} took more than ${past} last time: ${named(byRows)}.`,
+    );
+  }
+}
+
+/** The lanes of a deal, each engine with its place in the deal, and the slots taken for them. */
+interface StartedLanes {
+  readonly lanes: ReadonlyArray<ReadonlyArray<{ readonly plan: EnginePlan; readonly index: number }>>;
+  readonly taken: readonly string[];
+  /** Whether the engines are handed shares as slots come free, rather than one lane to a slot. */
+  readonly shared: boolean;
+}
+
+/** Takes a slot for each lane where one is free now, and says what that leaves for the rest. */
+async function takenLanes(
+  context: RunContext,
+  deal: Deal,
+  say: (line: string) => void,
+): Promise<StartedLanes> {
+  const { options, launch } = context;
+  const { plans, memoryHeld, byMemory } = deal;
+  const lanes = [...new Set(plans.map((plan) => plan.lane))].map((lane) =>
+    plans.flatMap((plan, index) => (plan.lane === lane ? [{ plan, index }] : [])),
+  );
+  // A slot for each lane, taken only where one is free now: what the run was dealt holds only when
+  // every lane starts at once. Held by memory, only the lanes memory has room for take one now.
+  // The rest take theirs in the slots' queue, then wait for memory holding them.
+  const startable = memoryHeld ? Math.min(byMemory.engines, lanes.length) : lanes.length;
+  const taken: string[] = [];
+  while (taken.length < startable) {
+    const lock = await launch.slots.takeFree();
+    if (lock === null) {
+      break;
+    }
+    taken.push(lock);
+  }
+  if (memoryHeld) {
+    say(memorySaid(byMemory.engines, lanes.length, byMemory.held ?? ''));
+  }
+  const shared = options.order === null && lanes.length > 1 && (memoryHeld || taken.length < lanes.length);
+  if (shared && taken.length < startable) {
+    say(sharesSaid(taken.length, startable));
+  }
+  return { lanes, taken, shared };
+}
+
+/** Runs the engines of the deal, and runs again alone any that failed for want of memory. */
+async function ranEngines(
+  context: RunContext,
+  deal: Deal,
+  started: StartedLanes,
+  handed: HandedSlot,
+  say: (line: string) => void,
+): Promise<EngineRan[]> {
+  const { launch, declared } = context;
+  const { units, times, memoryHeld } = deal;
+  const { lanes, taken, shared } = started;
+  const ran = shared
+    ? await runShares(
+        launch.slots,
+        units,
+        declared,
+        lanes.length,
+        taken,
+        times,
+        (plan, index, lock, holds) => runEngine(launch, plan, index, times, '', lock, holds),
+        handed,
+        memoryHeld ? new MemoryGate(launch.slots, async () => (await memoryAvailable()).bytes) : undefined,
+      )
+    : (await Promise.all(lanes.map((lane, at) => runLane(launch, lane, times, taken[at] ?? null, handed))))
+        .flat()
+        .toSorted((a, b) => a.index - b.index);
+  if (ran.some((engine) => engine.verdict.starved) && ran.some((engine) => !engine.verdict.passed)) {
+    say(outOfMemorySaid(ran));
+    const again: EngineRan[] = [];
+    for (const engine of ran) {
+      again.push(
+        engine.verdict.passed ? engine : await runEngine(launch, engine.plan, engine.index, times, 'again'),
       );
     }
-    const split = [...new Set(units.map((unit) => unit.suite))].filter(
-      (path) => units.filter((unit) => unit.suite === path && unit.row === undefined).length > 1,
-    );
-    if (plans.length > 1 && split.length > 0) {
-      say(
-        `Dealt out case by case, since ${split.length === 1 ? 'it' : 'each'} took more than ${past} last time: ${named(split)}.`,
-      );
-    }
-    const byRows = [
-      ...new Set(
-        units.flatMap((unit) => (unit.row === undefined ? [] : [`${unit.suite} > ${unit.cases[0] ?? ''}`])),
-      ),
-    ];
-    if (plans.length > 1 && byRows.length > 0) {
-      say(
-        `Dealt out row by row, since ${byRows.length === 1 ? 'it' : 'each'} took more than ${past} last time: ${named(byRows)}.`,
-      );
-    }
-    // Said beside the deal, so a suite past the split in one engine reads as asked for, not missed.
-    const keptWhole = units.flatMap((unit) =>
-      unit.cost > splitPast && !unit.windowed && suites.some((s) => s.path === unit.suite && s.together)
-        ? [unit.suite]
-        : [],
-    );
-    // By the engines there was room for rather than those used: kept whole, it may need only one.
-    if (options.order === null && room.engines > 1 && keptWhole.length > 0) {
-      const one = keptWhole.length === 1;
-      say(
-        `Kept whole in one engine, since ${one ? 'it declares' : 'each declares'} GDHARNESS_TOGETHER: ${named(keptWhole)}.`,
-      );
-    }
-    const lanes = [...new Set(plans.map((plan) => plan.lane))].map((lane) =>
-      plans.flatMap((plan, index) => (plan.lane === lane ? [{ plan, index }] : [])),
-    );
-    // A slot for each lane, taken only where one is free now: what the run was dealt holds only when
-    // every lane starts at once. Held by memory, only the lanes memory has room for take one now.
-    // The rest take theirs in the slots' queue, then wait for memory holding them.
-    const startable = memoryHeld ? Math.min(byMemory.engines, lanes.length) : lanes.length;
-    const taken: string[] = [];
-    while (taken.length < startable) {
-      const lock = await slots.takeFree();
-      if (lock === null) {
-        break;
-      }
-      taken.push(lock);
-    }
-    if (memoryHeld) {
-      say(memorySaid(byMemory.engines, lanes.length, byMemory.held ?? ''));
-    }
-    const shared = options.order === null && lanes.length > 1 && (memoryHeld || taken.length < lanes.length);
-    if (shared && taken.length < startable) {
-      say(sharesSaid(taken.length, startable));
-    }
-    // Once the lanes hold what slots were free, so it takes one only beside them.
-    const handed = new HandedSlot();
-    const compiling = compileUnlessUnchanged(launch, everySuite, compileKept, handed);
-    // Awaited after the suites. A run failing before then reports its own error, not this one too.
-    compiling.catch(() => undefined);
-    let ran = shared
-      ? await runShares(
-          slots,
-          units,
-          declared,
-          lanes.length,
-          taken,
-          (plan, index, lock) => runEngine(launch, plan, index, times, '', lock),
-          handed,
-          memoryHeld ? new MemoryGate(slots, async () => (await memoryAvailable()).bytes) : undefined,
-        )
-      : (await Promise.all(lanes.map((lane, at) => runLane(launch, lane, times, taken[at] ?? null, handed))))
-          .flat()
-          .toSorted((a, b) => a.index - b.index);
-    if (ran.some((engine) => engine.verdict.starved) && ran.some((engine) => !engine.verdict.passed)) {
-      say('An engine ran out of memory, so every engine that failed runs again, one at a time.');
-      const again: EngineRan[] = [];
-      for (const engine of ran) {
-        again.push(
-          engine.verdict.passed ? engine : await runEngine(launch, engine.plan, engine.index, times, 'again'),
-        );
-      }
-      ran = again;
-    }
-    const timesKept = writeJson(
-      timesFile,
-      timesAfter(
-        readTimes(timesFile),
-        wholeSuites,
-        ran.map((engine) => engine.printed),
-        (path) => loaded.suite(path),
-        new Set(
-          ran.flatMap((engine) =>
-            engine.plan.suites
-              .filter((suite) => (engine.printed.suites.get(suite.path)?.closed ?? null) === null)
-              .flatMap((suite) => suite.cases.map((func) => `${suite.path}:${func}`)),
-          ),
+    return again;
+  }
+  return ran;
+}
+
+/** Writes the times the engines measured, saying so where they could not be written. */
+function recordTimes(context: RunContext, loaded: ProjectScripts, ran: readonly EngineRan[]): void {
+  const { timesFile } = context;
+  const timesKept = writeJson(
+    timesFile,
+    timesAfter(
+      readTimes(timesFile),
+      context.wholeSuites,
+      ran,
+      (path) => loaded.suite(path),
+      new Set(
+        ran.flatMap((engine) =>
+          engine.plan.suites
+            .filter((suite) => (engine.printed.suites.get(suite.path)?.closed ?? null) === null)
+            .flatMap((suite) => suite.cases.map((func) => `${suite.path}:${func}`)),
         ),
       ),
+    ),
+  );
+  if (!timesKept) {
+    console.log(
+      `The times could not be written to ${timesFile}, so the next run is dealt by what that file held before.`,
     );
-    if (!timesKept) {
-      console.log(
-        `The times could not be written to ${timesFile}, so the next run is dealt by what that file held before.`,
-      );
-    }
-    const across = rowsAcross(ran.map((engine) => ({ handed: engine.plan.suites, printed: engine.printed })));
-    const passKept = recordPassed(
-      passedFile,
-      options.projectPath,
-      ran,
-      new Set(across.map((fault) => fault.suite)),
-      new SuiteInputs(loaded, always),
-      suitesBegan,
-      declared,
-    );
-    return report(
-      ran,
-      await compiling,
-      across.map((fault) => fault.fault),
-      uncollected,
-      passKept ? [] : [unkeptSaid(passedFile)],
-      startedAt,
-      logs,
-      options.printOutput,
-      {
-        resultFile: options.resultFile,
-        lastRunFile,
-        dealing,
-        engines: options.engines,
-        slotsFree: taken.length,
-      },
-    );
-  } finally {
-    process.off('SIGINT', interrupted);
-    process.off('SIGTERM', interrupted);
   }
 }
 
@@ -870,56 +1113,78 @@ export function memorySaid(room: number, lanes: number, held: string): string {
   return `Memory had room for ${room === 1 ? 'one' : String(room)} of these ${String(lanes)} engines at once as the run began, since ${held}, so its engines are handed the suites a share at a time, and another starts whenever memory has room for it.`;
 }
 
+/**
+ * What a run says when an engine ran out of memory: the failed engines run again, and each
+ * engine's most held in this run, or that it was not read, shows what else held the machine.
+ */
+export function outOfMemorySaid(engines: readonly Pick<EngineRan, 'index' | 'peakBytes'>[]): string {
+  const held = engines
+    .map(
+      (engine) =>
+        `engine ${String(engine.index)} ${engine.peakBytes === undefined ? 'unread' : gigabytes(engine.peakBytes)}`,
+    )
+    .join(', ');
+  return `An engine ran out of memory, so every engine that failed runs again, one at a time. The most each held in this run: ${held}.`;
+}
+
 /** How often a share held back for memory reads it again. */
 const MEMORY_LOOK_MS = 2000;
 
-/**
- * How long an engine is counted at its whole allowance against the memory read: one just started
- * has yet to take what it will, so a reading then finds room for the next in what it is about to use.
- */
-const ENGINE_SETTLING_MS = 30_000;
+/** An engine a [class MemoryGate] let start, with what it needs and what it holds now. */
+export interface Admitted {
+  /** The memory it was admitted for. */
+  readonly need: number;
+  /** What it held at its last reading, 0 before the first. */
+  held: number;
+  /** Told once the engine has ended, so the gate stops counting it. */
+  readonly ended: () => void;
+  /** Told each reading of what the engine holds. */
+  readonly holds: (bytes: number) => void;
+}
 
 /**
  * Lets the engines of a run that memory held start one at a time while the machine has room for
  * another, read again before each, so engines join as other work frees memory rather than the run
- * keeping all its life the count it had room for as it began. The first engine of the run always
- * starts, as a run held to one engine did. A wait keeps a mark in the slots, as a wait for a slot does.
+ * keeping all its life the count it had room for as it began. A going engine is counted at what it
+ * has yet to take, its need less what it holds now, since what it holds already shows in the memory
+ * read. The first engine of the run always starts, as a run held to one engine did. A wait keeps a
+ * mark in the slots, as a wait for a slot does.
  */
 export class MemoryGate {
   private readonly slots: Pick<EngineSlots, 'markWaiting'>;
   private readonly read: () => Promise<number>;
-  private readonly now: () => number;
   private readonly lookMs: number;
-  private readonly going = new Set<{ readonly at: number }>();
+  private readonly going = new Set<Admitted>();
   private turn: Promise<unknown> = Promise.resolve();
 
-  constructor(
-    slots: Pick<EngineSlots, 'markWaiting'>,
-    read: () => Promise<number>,
-    now: () => number = Date.now,
-    lookMs = MEMORY_LOOK_MS,
-  ) {
+  constructor(slots: Pick<EngineSlots, 'markWaiting'>, read: () => Promise<number>, lookMs = MEMORY_LOOK_MS) {
     this.slots = slots;
     this.read = read;
-    this.now = now;
     this.lookMs = lookMs;
   }
 
-  /** Waits until another engine has room, one caller at a time, and answers what to call once it ends. */
-  admit(signal: AbortSignal): Promise<() => void> {
-    const admitted = this.turn.then(() => this.room(signal));
+  /**
+   * Waits until an engine needing [param need] has room, one caller at a time, and answers its
+   * admission. [param need] is asked at each look, since the share a caller would draw changes as
+   * others draw theirs.
+   */
+  admit(signal: AbortSignal, need: () => number): Promise<Admitted> {
+    const admitted = this.turn.then(() => this.room(signal, need));
     this.turn = admitted.catch(() => undefined);
     return admitted;
   }
 
-  private async room(signal: AbortSignal): Promise<() => void> {
+  private async room(signal: AbortSignal, need: () => number): Promise<Admitted> {
     let unmark: (() => void) | undefined;
+    let needed = 0;
     try {
       for (;;) {
         signal.throwIfAborted();
-        const at = this.now();
-        const starting = [...this.going].filter((one) => at - one.at < ENGINE_SETTLING_MS).length;
-        if (this.going.size === 0 || roomForAnother(await this.read(), starting)) {
+        needed = need();
+        // Summed before the read, as the memory read is taken before a reading told while it is
+        // out. Summed after, that growth would count as owed no longer and as free memory too.
+        const owed = [...this.going].reduce((sum, one) => sum + Math.max(0, one.need - one.held), 0);
+        if (this.going.size === 0 || roomForAnother(await this.read(), owed, needed)) {
           break;
         }
         unmark ??= this.slots.markWaiting();
@@ -928,11 +1193,18 @@ export class MemoryGate {
     } finally {
       unmark?.();
     }
-    const engine = { at: this.now() };
-    this.going.add(engine);
-    return () => {
-      this.going.delete(engine);
+    const engine: Admitted = {
+      need: needed,
+      held: 0,
+      ended: () => {
+        this.going.delete(engine);
+      },
+      holds: (bytes) => {
+        engine.held = bytes;
+      },
     };
+    this.going.add(engine);
+    return engine;
   }
 }
 
@@ -1003,6 +1275,29 @@ function recordPassed(
       delete passed[path];
     }
   }
+  const { failedSomewhere, reached } = inputsReached(ran, failedAcross, inputs);
+  const handed = casesHanded(ran);
+  for (const path of new Set([...reached.keys(), ...failedSomewhere])) {
+    const ranWhole = (declared.get(path) ?? []).every((func) => handed.get(path)?.has(func) ?? false);
+    if (!ranWhole && !failedSomewhere.has(path)) {
+      continue;
+    }
+    const kept = failedSomewhere.has(path) ? [] : inputsKept(reached.get(path));
+    if (kept.length > 0 && !inputs.modifiedAfter(kept, began)) {
+      passed[path] = { print: inputs.printOf(kept), inputs: kept };
+    } else {
+      delete passed[path];
+    }
+  }
+  return writeJson(file, passed);
+}
+
+/** The inputs each suite of [param ran] loaded, and the suites that failed in some engine or across engines. */
+function inputsReached(
+  ran: readonly EngineRan[],
+  failedAcross: ReadonlySet<string>,
+  inputs: SuiteInputs,
+): { readonly failedSomewhere: Set<string>; readonly reached: Map<string, Set<string>> } {
   const failedSomewhere = new Set<string>(failedAcross);
   const reached = new Map<string, Set<string>>();
   for (const engine of ran) {
@@ -1021,6 +1316,11 @@ function recordPassed(
       reached.set(path, into);
     }
   }
+  return { failedSomewhere, reached };
+}
+
+/** The cases of each suite that the engines of [param ran] were handed, over all of them. */
+function casesHanded(ran: readonly EngineRan[]): Map<string, Set<string>> {
   const handed = new Map<string, Set<string>>();
   for (const suite of ran.flatMap((engine) => engine.plan.suites)) {
     const cases = handed.get(suite.path) ?? new Set<string>();
@@ -1029,25 +1329,15 @@ function recordPassed(
     }
     handed.set(suite.path, cases);
   }
-  for (const path of new Set([...reached.keys(), ...failedSomewhere])) {
-    const ranWhole = (declared.get(path) ?? []).every((func) => handed.get(path)?.has(func) ?? false);
-    if (!ranWhole && !failedSomewhere.has(path)) {
-      continue;
-    }
-    const loaded = reached.get(path);
-    const kept =
-      failedSomewhere.has(path) || loaded === undefined
-        ? []
-        : loaded.has(EVERY_FILE)
-          ? [EVERY_FILE]
-          : [...loaded].toSorted();
-    if (kept.length > 0 && !inputs.modifiedAfter(kept, began)) {
-      passed[path] = { print: inputs.printOf(kept), inputs: kept };
-    } else {
-      delete passed[path];
-    }
+  return handed;
+}
+
+/** The inputs to keep for a suite that passed: every file, or the files it loaded, sorted. */
+function inputsKept(loaded: ReadonlySet<string> | undefined): string[] {
+  if (loaded === undefined) {
+    return [];
   }
-  return writeJson(file, passed);
+  return loaded.has(EVERY_FILE) ? [EVERY_FILE] : [...loaded].toSorted();
 }
 
 /**
@@ -1429,7 +1719,8 @@ async function runLane(
 /**
  * Runs [param units] over [param lanes] lanes handed a share at a time (see [class Shares]), the
  * lanes holding the slots in [param taken] at once and the rest as slots come free, and each engine
- * starting only once [param memory] has room for it when the run is held by memory. A lane still
+ * starting only once [param memory] has room for what its share was seen to hold in [param times],
+ * when the run is held by memory. A lane still
  * waiting once every share is handed out stops waiting: a slot somebody else holds is not to keep a
  * run open that has nothing left to give it. A lane takes its slot before it waits for memory, so
  * an engine memory admits never waits for one.
@@ -1440,7 +1731,8 @@ export async function runShares<T extends { readonly index: number }>(
   declared: CasesBySuite,
   lanes: number,
   taken: readonly string[],
-  run: (plan: EnginePlan, index: number, lock: string) => Promise<T>,
+  times: SuiteTimes,
+  run: (plan: EnginePlan, index: number, lock: string, holds?: (bytes: number) => void) => Promise<T>,
   handed?: HandedSlot,
   memory?: MemoryGate,
 ): Promise<T[]> {
@@ -1449,42 +1741,73 @@ export async function runShares<T extends { readonly index: number }>(
   let engines = 0;
   // Asked through a call, since another lane empties it while this one waits.
   const empty = (): boolean => shares.empty;
+  // The share this lane would draw now, read at each look. Nothing is awaited between the admission
+  // and the draw, so the share it was admitted for is the one it draws.
+  const needed = (): number => peakOf(shares.peek(), times, MEMORY_PER_ENGINE).bytes;
+  /**
+   * Takes the lane's slot and the memory its next share needs, draws the share and numbers its
+   * engine, or answers null once every share is handed out. Nothing is awaited between the
+   * admission and the draw.
+   */
+  const admit = async (
+    at: number,
+    held: { lock: string | null },
+  ): Promise<{
+    readonly lock: string;
+    readonly admitted: Admitted | undefined;
+    readonly plan: EnginePlan;
+    readonly index: number;
+  } | null> => {
+    let admitted: Admitted | undefined;
+    try {
+      held.lock ??= await slots.take(handedOut.signal);
+      admitted = await memory?.admit(handedOut.signal, needed);
+    } catch (error) {
+      if (handedOut.signal.aborted) {
+        return null;
+      }
+      throw error;
+    }
+    const plan = shares.next(at);
+    if (plan === null) {
+      admitted?.ended();
+      return null;
+    }
+    if (empty()) {
+      handedOut.abort();
+    }
+    const index = engines;
+    engines += 1;
+    return { lock: held.lock, admitted, plan, index };
+  };
+  /** Runs a drawn share, ending its admission once it is over. */
+  const runDrawn = async (drawn: {
+    readonly lock: string;
+    readonly admitted: Admitted | undefined;
+    readonly plan: EnginePlan;
+    readonly index: number;
+  }): Promise<T> => {
+    try {
+      return await run(drawn.plan, drawn.index, drawn.lock, drawn.admitted?.holds);
+    } finally {
+      drawn.admitted?.ended();
+    }
+  };
   const lane = async (at: number): Promise<T[]> => {
-    let lock = taken[at] ?? null;
+    const held = { lock: taken[at] ?? null };
     const ran: T[] = [];
     try {
       while (!empty()) {
-        let ended: (() => void) | undefined;
-        try {
-          lock ??= await slots.take(handedOut.signal);
-          ended = await memory?.admit(handedOut.signal);
-        } catch (error) {
-          ended?.();
-          if (handedOut.signal.aborted) {
-            break;
-          }
-          throw error;
-        }
-        const plan = shares.next(at);
-        if (plan === null) {
-          ended?.();
+        const drawn = await admit(at, held);
+        if (drawn === null) {
           break;
         }
-        if (empty()) {
-          handedOut.abort();
-        }
-        const index = engines;
-        engines += 1;
-        try {
-          ran.push(await run(plan, index, lock));
-        } finally {
-          ended?.();
-        }
+        ran.push(await runDrawn(drawn));
       }
       return ran;
     } finally {
-      if (lock !== null) {
-        doneWith(slots, lock, handed);
+      if (held.lock !== null) {
+        doneWith(slots, held.lock, handed);
       }
     }
   };
@@ -1493,29 +1816,28 @@ export async function runShares<T extends { readonly index: number }>(
     .toSorted((a, b) => a.index - b.index);
 }
 
-/**
- * Runs [param plan] in an engine of its own, in the slot [param slot] when its lane holds one and
- * otherwise once a slot is free, and judges what it printed.
- */
-async function runEngine(
-  launch: Launch,
-  plan: EnginePlan,
-  index: number,
-  times: SuiteTimes,
-  again = '',
-  slot: string | null = null,
-): Promise<EngineRan> {
-  const directory = join(launch.runDirectory, `engine-${String(index)}${again === '' ? '' : `-${again}`}`);
-  mkdirSync(join(directory, 'user'), { recursive: true });
-  const suitesFile = join(directory, 'suites.txt');
-  const skippingFile = join(directory, 'skipping.txt');
-  const rowsFile = join(directory, 'rows.txt');
-  const expectedFile = join(directory, 'expected.json');
-  const reached = join(directory, 'reached.jsonl');
-  writeFileSync(suitesFile, `${plan.suites.map((suite) => suite.path).join('\n')}\n`);
-  writeFileSync(skippingFile, `${plan.skipping.join('\n')}\n`);
+/** The files an engine is handed or writes, each named in its arguments. */
+interface EngineFiles {
+  readonly suites: string;
+  readonly skipping: string;
+  readonly rows: string;
+  readonly expected: string;
+  readonly reached: string;
+}
+
+/** Writes what [param plan] hands its engine to read into [param directory], and names the files. */
+function writtenEngineFiles(plan: EnginePlan, directory: string): EngineFiles {
+  const files: EngineFiles = {
+    suites: join(directory, 'suites.txt'),
+    skipping: join(directory, 'skipping.txt'),
+    rows: join(directory, 'rows.txt'),
+    expected: join(directory, 'expected.json'),
+    reached: join(directory, 'reached.jsonl'),
+  };
+  writeFileSync(files.suites, `${plan.suites.map((suite) => suite.path).join('\n')}\n`);
+  writeFileSync(files.skipping, `${plan.skipping.join('\n')}\n`);
   writeFileSync(
-    rowsFile,
+    files.rows,
     `${plan.suites
       .flatMap((suite) =>
         Object.entries(suite.rows ?? {}).map(([func, share]) =>
@@ -1527,18 +1849,26 @@ async function runEngine(
       )
       .join('\n')}\n`,
   );
+  return files;
+}
+
+/** The flags that start an engine headless, or windowed at the project's own size. */
+function displayFlags(launch: Launch, plan: EnginePlan): string[] {
+  if (!plan.windowed) {
+    return ['--headless'];
+  }
   const viewport = viewportOf(launch.projectPath);
   // On Windows every engine runs on the hidden desktop, so a windowed one starts with its flags.
-  const display = plan.windowed
-    ? [
-        ...(viewport === null
-          ? []
-          : ['--resolution', `${String(viewport.width)}x${String(viewport.height)}`]),
-        ...(process.platform === 'win32' ? hiddenWindowFlags([], capsFrames(launch.projectPath)) : []),
-      ]
-    : ['--headless'];
-  const args = [
-    ...display,
+  return [
+    ...(viewport === null ? [] : ['--resolution', `${String(viewport.width)}x${String(viewport.height)}`]),
+    ...(process.platform === 'win32' ? hiddenWindowFlags([], capsFrames(launch.projectPath)) : []),
+  ];
+}
+
+/** The arguments an engine running [param plan] in [param directory] starts with. */
+function engineArguments(launch: Launch, plan: EnginePlan, directory: string, files: EngineFiles): string[] {
+  return [
+    ...displayFlags(launch, plan),
     '--audio-driver',
     'Dummy',
     ...(plan.accessible ? ['--accessibility', 'always'] : []),
@@ -1557,26 +1887,55 @@ async function runEngine(
     '1',
     '--',
     '--suites-in',
-    suitesFile,
+    files.suites,
     '--skipping-in',
-    skippingFile,
+    files.skipping,
     '--rows-in',
-    rowsFile,
+    files.rows,
     '--html-report-off',
     '--junit-report-off',
     '--compile-together',
     '--expected-out',
-    expectedFile,
+    files.expected,
     '--reached-out',
-    reached,
+    files.reached,
   ];
+}
+
+/**
+ * Runs [param plan] in an engine of its own, in the slot [param slot] when its lane holds one and
+ * otherwise once a slot is free, and judges what it printed. [param holds] is told each reading of
+ * what the engine holds.
+ */
+async function runEngine(
+  launch: Launch,
+  plan: EnginePlan,
+  index: number,
+  times: SuiteTimes,
+  again = '',
+  slot: string | null = null,
+  holds?: (bytes: number) => void,
+): Promise<EngineRan> {
+  const directory = join(launch.runDirectory, `engine-${String(index)}${again === '' ? '' : `-${again}`}`);
+  mkdirSync(join(directory, 'user'), { recursive: true });
+  const files = writtenEngineFiles(plan, directory);
+  const args = engineArguments(launch, plan, directory, files);
+  const reached = files.reached;
+  const expectedFile = files.expected;
   const log = join(directory, 'engine.log');
   const lock = slot ?? (await launch.slots.take());
   const began = Date.now();
   let end: EngineEnd;
   try {
-    end = await watchedEngine(launch, lock, args, directory, log, launch.silenceFloorSeconds, (printed) =>
-      silenceWhile(printed.running, times, launch.silenceFloorSeconds),
+    end = await watchedEngine(
+      launch,
+      lock,
+      args,
+      directory,
+      log,
+      launch.silenceFloorSeconds,
+      (printed) => silenceWhile(printed.running, times, launch.silenceFloorSeconds),
+      holds,
     );
   } finally {
     if (slot === null) {
@@ -1603,6 +1962,7 @@ async function runEngine(
     seconds: (Date.now() - began) / 1000,
     again: again !== '',
     reached,
+    ...(end.peakBytes === undefined ? {} : { peakBytes: end.peakBytes }),
   };
 }
 
@@ -1643,99 +2003,19 @@ function report(
 ): number {
   // Ahead of the verdict, so the last lines are still how the run went.
   if (printOutput) {
-    for (const engine of ran) {
-      console.log('');
-      console.log(
-        `--- what engine ${String(engine.index)} printed, running ${named(engine.plan.suites.map((suite) => suite.path))}:`,
-      );
-      console.log(readLog(engine.log).replace(CONTROL_SEQUENCE, '').trimEnd());
-    }
+    printWhatEnginesPrinted(ran);
   }
   const failed = ran.filter((engine) => !engine.verdict.passed);
-  for (const engine of failed) {
-    const heading = `--- engine ${String(engine.index)}: ${plural(engine.plan.suites.length, 'suite')}, ${engine.seconds.toFixed(1)} s${engine.again ? ', run again alone after an engine ran out of memory, and failed again' : ''}`;
-    console.log('');
-    console.log(heading);
-    for (const fault of engine.verdict.faults) {
-      console.log(`  ${fault}`);
-    }
-    // At the top of the kept log, so the file says why on its own, even when the engine printed nothing.
-    const verdict = [`gdharness: ${heading.slice(4)}`, ...engine.verdict.faults.map((fault) => `  ${fault}`)];
-    prependTo(engine.log, `${verdict.join('\n')}\n---\n`);
-    if (engine.verdict.shown.length > 0) {
-      console.log('');
-      for (const line of engine.verdict.shown) {
-        console.log(line);
-      }
-    }
-    console.log(`everything it printed: ${logs.named(engine.log)}`);
-  }
-  for (const engine of ran.filter((one) => one.verdict.notes.length > 0)) {
-    console.log('');
-    console.log(`--- engine ${String(engine.index)}, not counted against the run:`);
-    for (const note of engine.verdict.notes) {
-      console.log(`  ${note}`);
-    }
-  }
-  if (across.length > 0) {
-    console.log('');
-    console.log('--- the cases dealt by their rows, over every engine holding them:');
-    for (const fault of across) {
-      console.log(`  ${fault}`);
-    }
-  }
+  printFailedEngines(failed, logs);
+  printNotCounted(ran);
+  printSection('the cases dealt by their rows, over every engine holding them:', across);
   printCompiled(compiled, logs);
   printUncollected(uncollected);
-  if (unkept.length > 0) {
-    console.log('');
-    console.log('--- what this run keeps for the next:');
-    for (const fault of unkept) {
-      console.log(`  ${fault}`);
-    }
-  }
-  const cases = ran.reduce(
-    (sum, engine) => sum + [...engine.printed.suites.values()].reduce((n, s) => n + s.cases.length, 0),
-    0,
-  );
-  const suites = new Set(ran.flatMap((engine) => engine.plan.suites.map((suite) => suite.path))).size;
-  const longest = Math.max(0, ...ran.map((engine) => engine.seconds));
+  printSection('what this run keeps for the next:', unkept);
   const took = (Date.now() - startedAt) / 1000;
-  // What each engine took beside what it was dealt, so an uneven deal is told from a slow suite.
-  if (ran.length > 1) {
-    console.log('');
-    console.log(
-      `The engines took ${ran.map((engine) => `${engine.seconds.toFixed(1)} s`).join(', ')}, dealt ${ran.map((engine) => `${engine.plan.cost.toFixed(1)} s`).join(', ')}.`,
-    );
-  }
-  const starts = ran.flatMap((engine) => (engine.printed.started === null ? [] : [engine.printed.started]));
-  if (starts.length > 0) {
-    console.log(startsSaid(starts));
-  }
-  const closed = ran
-    .flatMap((engine) =>
-      [...engine.printed.suites.values()].flatMap((suite) =>
-        suite.closed === null
-          ? []
-          : [
-              {
-                path: suite.path,
-                seconds: suite.closed.seconds,
-                loadSeconds: suite.setUp?.loadSeconds ?? null,
-                beforeSeconds: suite.setUp?.beforeSeconds ?? null,
-                verdict: suite.closed.verdict,
-                engine: engine.index,
-              },
-            ],
-      ),
-    )
-    .toSorted((a, b) => b.seconds - a.seconds);
-  const slowest = closed.slice(0, SLOWEST_NAMED);
-  if (slowest.length > 1) {
-    console.log(
-      `The slowest suites: ${slowest.map((suite) => `${suite.path} ${suite.seconds.toFixed(1)} s`).join(', ')}.`,
-    );
-  }
-  const totals = `${plural(cases, 'case')} in ${plural(suites, 'suite')} ${acrossSaid(ran)}, ${took.toFixed(1)} s. The longest engine took ${longest.toFixed(1)} s.`;
+  const closed = closedSuitesOf(ran);
+  printTimings(ran, closed);
+  const totals = totalsSaid(ran, took);
   console.log('');
   const outside = [...across, ...uncollected, ...unkept];
   const passed = failed.length === 0 && compiled.faults.length === 0 && outside.length === 0;
@@ -1755,19 +2035,7 @@ function report(
       ...outside,
     ],
     suites: closed,
-    engines: ran.map((engine) => ({
-      index: engine.index,
-      lane: engine.plan.lane,
-      startedAfter: (engine.began - startedAt) / 1000,
-      seconds: engine.seconds,
-      startSeconds: engine.printed.started?.seconds ?? null,
-      compiledSeconds: engine.printed.started?.compiledSeconds ?? null,
-      dealt: engine.plan.cost,
-      passed: engine.verdict.passed,
-      windowed: engine.plan.windowed,
-      suites: engine.plan.suites.map((suite) => suite.path),
-      log: passed ? null : logs.named(engine.log),
-    })),
+    engines: engineRecordsOf(ran, startedAt, passed ? null : logs),
     logs: passed ? null : logs.shown,
     enginesAsked: targets.engines,
     slotsFree: targets.slotsFree,
@@ -1791,6 +2059,134 @@ function report(
     );
   }
   return exitAfter(1, unwritten);
+}
+
+/** Prints everything each engine printed, headed by the suites it ran. */
+function printWhatEnginesPrinted(ran: readonly EngineRan[]): void {
+  for (const engine of ran) {
+    console.log('');
+    console.log(
+      `--- what engine ${String(engine.index)} printed, running ${named(engine.plan.suites.map((suite) => suite.path))}:`,
+    );
+    console.log(readLog(engine.log).replace(CONTROL_SEQUENCE, '').trimEnd());
+  }
+}
+
+/** Prints what failed in each engine of [param failed], and notes it at the top of its kept log. */
+function printFailedEngines(failed: readonly EngineRan[], logs: RunLogs): void {
+  for (const engine of failed) {
+    const heading = `--- engine ${String(engine.index)}: ${plural(engine.plan.suites.length, 'suite')}, ${engine.seconds.toFixed(1)} s${engine.again ? ', run again alone after an engine ran out of memory, and failed again' : ''}`;
+    console.log('');
+    console.log(heading);
+    for (const fault of engine.verdict.faults) {
+      console.log(`  ${fault}`);
+    }
+    // At the top of the kept log, so the file says why on its own, even when the engine printed nothing.
+    const verdict = [`gdharness: ${heading.slice(4)}`, ...engine.verdict.faults.map((fault) => `  ${fault}`)];
+    prependTo(engine.log, `${verdict.join('\n')}\n---\n`);
+    if (engine.verdict.shown.length > 0) {
+      console.log('');
+      for (const line of engine.verdict.shown) {
+        console.log(line);
+      }
+    }
+    console.log(`everything it printed: ${logs.named(engine.log)}`);
+  }
+}
+
+/** Prints the notes of the engines that have some, which do not count against the run. */
+function printNotCounted(ran: readonly EngineRan[]): void {
+  for (const engine of ran.filter((one) => one.verdict.notes.length > 0)) {
+    console.log('');
+    console.log(`--- engine ${String(engine.index)}, not counted against the run:`);
+    for (const note of engine.verdict.notes) {
+      console.log(`  ${note}`);
+    }
+  }
+}
+
+/** Prints [param lines] under [param heading], or nothing when there are none. */
+function printSection(heading: string, lines: readonly string[]): void {
+  if (lines.length === 0) {
+    return;
+  }
+  console.log('');
+  console.log(`--- ${heading}`);
+  for (const line of lines) {
+    console.log(`  ${line}`);
+  }
+}
+
+/** The suites that ended in [param ran], slowest first, each with its time and the engine it ran in. */
+function closedSuitesOf(ran: readonly EngineRan[]) {
+  return ran
+    .flatMap((engine) =>
+      [...engine.printed.suites.values()].flatMap((suite) =>
+        suite.closed === null
+          ? []
+          : [
+              {
+                path: suite.path,
+                seconds: suite.closed.seconds,
+                loadSeconds: suite.setUp?.loadSeconds ?? null,
+                beforeSeconds: suite.setUp?.beforeSeconds ?? null,
+                verdict: suite.closed.verdict,
+                engine: engine.index,
+              },
+            ],
+      ),
+    )
+    .toSorted((a, b) => b.seconds - a.seconds);
+}
+
+/** Prints what each engine took beside what it was dealt, how they started and the slowest suites. */
+function printTimings(ran: readonly EngineRan[], closed: ReturnType<typeof closedSuitesOf>): void {
+  // What each engine took beside what it was dealt, so an uneven deal is told from a slow suite.
+  if (ran.length > 1) {
+    console.log('');
+    console.log(
+      `The engines took ${ran.map((engine) => `${engine.seconds.toFixed(1)} s`).join(', ')}, dealt ${ran.map((engine) => `${engine.plan.cost.toFixed(1)} s`).join(', ')}.`,
+    );
+  }
+  const starts = ran.flatMap((engine) => (engine.printed.started === null ? [] : [engine.printed.started]));
+  if (starts.length > 0) {
+    console.log(startsSaid(starts));
+  }
+  const slowest = closed.slice(0, SLOWEST_NAMED);
+  if (slowest.length > 1) {
+    console.log(
+      `The slowest suites: ${slowest.map((suite) => `${suite.path} ${suite.seconds.toFixed(1)} s`).join(', ')}.`,
+    );
+  }
+}
+
+/** The line of totals a run ends on: its cases, suites, engines and times. */
+function totalsSaid(ran: readonly EngineRan[], took: number): string {
+  const cases = ran.reduce(
+    (sum, engine) => sum + [...engine.printed.suites.values()].reduce((n, s) => n + s.cases.length, 0),
+    0,
+  );
+  const suites = new Set(ran.flatMap((engine) => engine.plan.suites.map((suite) => suite.path))).size;
+  const longest = Math.max(0, ...ran.map((engine) => engine.seconds));
+  return `${plural(cases, 'case')} in ${plural(suites, 'suite')} ${acrossSaid(ran)}, ${took.toFixed(1)} s. The longest engine took ${longest.toFixed(1)} s.`;
+}
+
+/** What the result file records of each engine, with the log a failed run keeps, named through [param logs]. */
+function engineRecordsOf(ran: readonly EngineRan[], startedAt: number, logs: RunLogs | null) {
+  return ran.map((engine) => ({
+    index: engine.index,
+    lane: engine.plan.lane,
+    startedAfter: (engine.began - startedAt) / 1000,
+    seconds: engine.seconds,
+    startSeconds: engine.printed.started?.seconds ?? null,
+    compiledSeconds: engine.printed.started?.compiledSeconds ?? null,
+    dealt: engine.plan.cost,
+    passed: engine.verdict.passed,
+    windowed: engine.plan.windowed,
+    suites: engine.plan.suites.map((suite) => suite.path),
+    peakBytes: engine.peakBytes ?? null,
+    log: logs === null ? null : logs.named(engine.log),
+  }));
 }
 
 /**

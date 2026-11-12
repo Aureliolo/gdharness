@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict';
+import { randomInt } from 'node:crypto';
+import { once } from 'node:events';
 import { mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve as resolvePath } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
+import { acceptsConnections } from '../../src/port-probe.js';
 import { type ChildProcess, spawnHidden } from '../../src/spawn.js';
 import { isRecord, type JsonRpcMessage, parseJsonLines } from './json-rpc.js';
 import { slotsSaid } from './slots.js';
@@ -49,25 +52,8 @@ export async function stopServersOf(fixture: string): Promise<string[]> {
       continue;
     }
     found.add(directory);
-    let notes: string[];
-    try {
-      notes = readdirSync(join(directory, 'runs')).filter((entry) => entry.endsWith('.json'));
-    } catch {
-      continue;
-    }
-    for (const note of notes) {
-      try {
-        const parsed: unknown = JSON.parse(readFileSync(join(directory, 'runs', note), 'utf8'));
-        const projectPath =
-          typeof parsed === 'object' && parsed !== null && 'projectPath' in parsed
-            ? parsed.projectPath
-            : null;
-        if (typeof projectPath === 'string') {
-          found.add(projectPath);
-        }
-      } catch {
-        // A note half written as its server was stopped names nothing yet.
-      }
+    for (const projectPath of projectsNamedIn(directory)) {
+      found.add(projectPath);
     }
   }
   for (const server of ended) {
@@ -76,28 +62,42 @@ export async function stopServersOf(fixture: string): Promise<string[]> {
   return [...found];
 }
 
+/** The projects the run notes in [param directory] name. */
+function projectsNamedIn(directory: string): string[] {
+  let notes: string[];
+  try {
+    notes = readdirSync(join(directory, 'runs')).filter((entry) => entry.endsWith('.json'));
+  } catch {
+    return [];
+  }
+  const projects: string[] = [];
+  for (const note of notes) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(join(directory, 'runs', note), 'utf8'));
+      const projectPath =
+        typeof parsed === 'object' && parsed !== null && 'projectPath' in parsed ? parsed.projectPath : null;
+      if (typeof projectPath === 'string') {
+        projects.push(projectPath);
+      }
+    } catch {
+      // A note half written as its server was stopped names nothing yet.
+    }
+  }
+  return projects;
+}
+
 /**
- * Ports this process has already handed out, which the kernel is free to offer again.
- *
- * A reservation binds port zero, reads the number and closes, so the port is back in the pool
- * before whoever asked for it has bound anything. Two calls in a row can therefore come back with
- * the same number, and a fixture that asks for three gets a bridge, a language server and a debug
- * adapter that are not necessarily three ports. The failure that follows is nowhere near here: the
- * server binds the bridge, the editor comes up, and the check on who really holds the debug adapter
- * port finds the harness's own server on it and refuses to play the game, naming two pids that are
- * one apart because they were spawned in a row.
+ * Ports this process has already handed out. The walk repeats only after 20,000 numbers, but a
+ * stand-in `offer` can repeat at once.
  */
 const handedOut = new Set<number>();
 
 /**
- * A TCP port nothing is listening on right now, and that this process has not already given away.
- *
- * [offer] is the kernel, apart from asking it, so that a pool which repeats itself is a case that
- * can be written down rather than a machine to be lucky on. Waiting for a real repeat is not a
- * check: it passes on a host that does not give one, which reads exactly like a reservation that
- * never deduplicated at all.
+ * A port in the band that nothing held or answered on 127.0.0.1 when it was proved, and that this
+ * process has not given away. [offer] stands in for the band, so a repeating source can be written
+ * down.
  */
-export async function reservePort(offer: () => Promise<number> = freePort): Promise<number> {
+export async function reservePort(offer: () => Promise<number> = unheldPort): Promise<number> {
   for (let attempt = 0; attempt < 50; attempt += 1) {
     const port = await offer();
     if (!handedOut.has(port)) {
@@ -105,23 +105,17 @@ export async function reservePort(offer: () => Promise<number> = freePort): Prom
       return port;
     }
   }
-  throw new Error('could not reserve a port the kernel had not already offered');
+  throw new Error('could not reserve a port that was not already offered');
 }
 
 /**
- * [param listener] listening on a port from [method reservePort], which is the port it answers.
- *
- * A listener on port zero takes whatever the kernel offers, and the kernel offers ports this
- * process has reserved and released for a server not yet bound to them. The fake debug adapter took
- * a bridge port that way on the Linux leg: the server moved off it, the fake editor dialled it and
- * reached the adapter, and the handshake it never got timed out after two minutes, twice, reported
- * as "[object ErrorEvent]". Another process can still take a reserved port before it is bound here,
- * so a port found in use is given up for the next.
+ * [param listener] listening on a port from [method reservePort], which it answers. Nobody has been
+ * told the number yet, so one found in use is given up for the next.
  */
 export async function listenOnAReservedPort(
   listener: Server,
   host = '127.0.0.1',
-  offer: () => Promise<number> = freePort,
+  offer: () => Promise<number> = unheldPort,
 ): Promise<number> {
   for (let attempt = 0; attempt < 10; attempt += 1) {
     const port = await reservePort(offer);
@@ -145,29 +139,82 @@ export async function listenOnAReservedPort(
   throw new Error('no reserved port could be listened on');
 }
 
-function freePort(): Promise<number> {
-  return new Promise<number>((resolve, reject) => {
-    const server = createServer();
-    server.unref();
-    server.on('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      if (!address || typeof address === 'string') {
-        server.close(() => {
-          reject(new Error('Failed to reserve a TCP port.'));
-        });
-        return;
-      }
-      const { port } = address;
-      server.close((error) => {
-        if (error) {
-          reject(error);
-          return;
-        }
-        resolve(port);
-      });
+/**
+ * The ports a fixture names before its listener exists. Kernels hand out port-zero picks from
+ * 32768 or above on every platform CI runs, so no such pick lands on a number drawn from here.
+ */
+export const PORT_BAND = { first: 10_000, last: 29_999 } as const;
+
+/** A walk through the band from [param start], one number a call, back to the first after the last. */
+export function bandWalk(start: number): () => number {
+  let next = start;
+  return () => {
+    const port = next;
+    next = port >= PORT_BAND.last ? PORT_BAND.first : port + 1;
+    return port;
+  };
+}
+
+const processWalk = bandWalk(randomInt(PORT_BAND.first, PORT_BAND.last + 1));
+
+const DRAWS_LIMIT = 2000;
+const UNANSWERED_LIMIT = 3;
+
+/** The error binding [param port] on 127.0.0.1 gives, or null when the bind took and was closed. */
+async function bindOnce(port: number): Promise<NodeJS.ErrnoException | null> {
+  const listener = createServer();
+  listener.unref();
+  try {
+    await once(listener.listen(port, '127.0.0.1'), 'listening');
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+  await new Promise<void>((settle) => {
+    listener.close(() => {
+      settle();
     });
   });
+  return null;
+}
+
+/**
+ * The next number of the walk that a bind on 127.0.0.1 took and nothing answered a dial on.
+ *
+ * The dial catches a holder on 0.0.0.0 or :: that the bind does not see. A dial that neither
+ * answers nor refuses leaves the number unproven, and a third in one call means no dial is being
+ * answered at all.
+ */
+export async function unheldPort(
+  draw: () => number = processWalk,
+  bind: (port: number) => Promise<NodeJS.ErrnoException | null> = bindOnce,
+  dial: (port: number) => Promise<boolean | null> = acceptsConnections,
+): Promise<number> {
+  let last = 'nothing was drawn';
+  let unanswered = 0;
+  for (let attempt = 0; attempt < DRAWS_LIMIT; attempt += 1) {
+    const port = draw();
+    const failure = await bind(port);
+    if (failure) {
+      last = `${port}: ${failure.code ?? failure.message}`;
+      continue;
+    }
+    const answer = await dial(port);
+    if (answer === false) {
+      return port;
+    }
+    if (answer === true) {
+      last = `${port}: something answered`;
+      continue;
+    }
+    unanswered += 1;
+    last = `${port}: the dial was not answered`;
+    if (unanswered >= UNANSWERED_LIMIT) {
+      throw new Error(`port ${port} neither answered nor refused a dial, so none can be proved free`);
+    }
+  }
+  throw new Error(
+    `no port from ${PORT_BAND.first} to ${PORT_BAND.last} was proved free in ${DRAWS_LIMIT} draws, last ${last}`,
+  );
 }
 
 /**
@@ -184,20 +231,33 @@ function freePort(): Promise<number> {
 const sparePorts: number[] = [];
 const SPARE_PORTS = 24;
 
-async function topUpSparePorts(): Promise<void> {
+async function topUpSparePorts(offer: () => Promise<number> = unheldPort): Promise<void> {
   while (sparePorts.length < SPARE_PORTS) {
-    sparePorts.push(await reservePort());
+    sparePorts.push(await reservePort(offer));
   }
 }
 
 await topUpSparePorts();
 
-function sparePort(): number {
+/** The message of the last top-up that failed in the background, which an empty pool reports. */
+let failedTopUp: string | undefined;
+
+/**
+ * A bridge port from the pool, which a top-up then refills in the background. A top-up that fails is
+ * kept and not thrown, since the pool is a head start and every reservation proves its own number.
+ * [offer] stands in for the band.
+ */
+export function sparePort(offer: () => Promise<number> = unheldPort): number {
   const port = sparePorts.shift();
   if (port === undefined) {
-    throw new Error('no reserved port left for a test server; more were started at once than are kept');
+    const kept = failedTopUp === undefined ? '' : `, or a top-up failed: ${failedTopUp}`;
+    throw new Error(
+      `no reserved port left for a test server; more were started at once than are kept${kept}`,
+    );
   }
-  void topUpSparePorts();
+  void topUpSparePorts(offer).catch((error: unknown) => {
+    failedTopUp = error instanceof Error ? error.message : String(error);
+  });
   return port;
 }
 

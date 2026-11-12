@@ -350,10 +350,13 @@ func _check_typing(input: GdhTyping) -> void:
 		_fail("and without it typing still lands at the caret: %s" % field.text)
 	if str(appended.get("holds", "")) != "89":
 		_fail("which the answer says: %s" % JSON.stringify(appended))
+	_check_emptying_and_a_secret_field(input, field)
 
-	# Emptying a field, which is filling one in with nothing and the one shape of it that types no
-	# characters. Refused as a missing argument, the only way left was a select-all nobody can send
-	# honestly and a key event of the caller's own.
+
+## Emptying a field, which is filling one in with nothing and the one shape of it that types no
+## characters. Refused as a missing argument, the only way left was a select-all nobody can send
+## honestly and a key event of the caller's own.
+func _check_emptying_and_a_secret_field(input: GdhTyping, field: LineEdit) -> void:
 	var cleared: Dictionary = input.inject_text({ "text": "", "replace": true })
 	if field.text != "":
 		_fail("replace with nothing should empty the field: %s" % field.text)
@@ -818,9 +821,12 @@ func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 	for each: Node in [shop, page, partly, caption, strip]:
 		each.queue_free()
 	await root.get_tree().process_frame
+	await _check_a_click_on_a_card_or_a_moved_cover(input)
 
-	# Cards: a title over a description. The card whose title is exactly the words is the exact
-	# match, over the one whose title only starts with them.
+
+## Cards: a title over a description. The card whose title is exactly the words is the exact match,
+## over the one whose title only starts with them.
+func _check_a_click_on_a_card_or_a_moved_cover(input: GdhInputCommands) -> void:
 	var glow: Button = _small_button(root, "GLOW\nglows 3", Vector2(2, 2))
 	var shade: Button = _small_button(root, "GLOWSHADE\ntwo words", Vector2(34, 2))
 	await root.get_tree().process_frame
@@ -862,9 +868,12 @@ func _check_a_click_by_words_ranked(input: GdhInputCommands) -> void:
 	aside.queue_free()
 	side.queue_free()
 	await root.get_tree().process_frame
+	await _check_a_click_scrolled_into_view_or_covered(input)
 
-	# A button scrolled out of its container sits, for now, under whatever is drawn below the
-	# container, and the click scrolls it into view before pressing, so it is not covered.
+
+## A button scrolled out of its container sits, for now, under whatever is drawn below the
+## container, and the click scrolls it into view before pressing, so it is not covered.
+func _check_a_click_scrolled_into_view_or_covered(input: GdhInputCommands) -> void:
 	var scroll: ScrollContainer = ScrollContainer.new()
 	scroll.size = Vector2(64, 32)
 	root.add_child(scroll)

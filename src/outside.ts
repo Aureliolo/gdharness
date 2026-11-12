@@ -151,18 +151,14 @@ function runOf(value: unknown): NonNullable<OutsideSpec['run']> | null {
   if (!isRecord(value)) {
     return null;
   }
-  const { transcript, startedAt, projectPath, servedBy, profile, engineCalls, breakpoints, debugged, slot } =
-    value;
+  const { transcript, startedAt, projectPath, slot } = value;
   const held = slot === undefined ? undefined : slotOf(slot);
+  const optional = optionalRunFieldsOf(value);
   if (
     typeof transcript !== 'string' ||
     typeof startedAt !== 'number' ||
     typeof projectPath !== 'string' ||
-    (servedBy !== undefined && typeof servedBy !== 'string') ||
-    (profile !== undefined && typeof profile !== 'string') ||
-    (engineCalls !== undefined && typeof engineCalls !== 'boolean') ||
-    (breakpoints !== undefined && !isStringList(breakpoints)) ||
-    (debugged !== undefined && typeof debugged !== 'boolean') ||
+    optional === null ||
     held === null
   ) {
     return null;
@@ -171,12 +167,42 @@ function runOf(value: unknown): NonNullable<OutsideSpec['run']> | null {
     transcript,
     startedAt,
     projectPath,
+    ...optional,
+    ...(held === undefined ? {} : { slot: held }),
+  };
+}
+
+type OptionalRunFields = Pick<
+  NonNullable<OutsideSpec['run']>,
+  'servedBy' | 'profile' | 'engineCalls' | 'breakpoints' | 'debugged'
+>;
+
+/** Whether each field of a run part that may be absent is either absent or of its type. */
+function optionalRunFieldsAreTyped(
+  value: Readonly<Record<string, unknown>>,
+): value is Readonly<Record<string, unknown>> & OptionalRunFields {
+  const { servedBy, profile, engineCalls, breakpoints, debugged } = value;
+  return (
+    (servedBy === undefined || typeof servedBy === 'string') &&
+    (profile === undefined || typeof profile === 'string') &&
+    (engineCalls === undefined || typeof engineCalls === 'boolean') &&
+    (breakpoints === undefined || isStringList(breakpoints)) &&
+    (debugged === undefined || typeof debugged === 'boolean')
+  );
+}
+
+/** The fields of a run part that may be absent, as [param value] gives them, or null when one is mistyped. */
+function optionalRunFieldsOf(value: Readonly<Record<string, unknown>>): OptionalRunFields | null {
+  if (!optionalRunFieldsAreTyped(value)) {
+    return null;
+  }
+  const { servedBy, profile, engineCalls, breakpoints, debugged } = value;
+  return {
     ...(servedBy === undefined ? {} : { servedBy }),
     ...(profile === undefined ? {} : { profile }),
     ...(engineCalls === undefined ? {} : { engineCalls }),
     ...(breakpoints === undefined ? {} : { breakpoints }),
     ...(debugged === undefined ? {} : { debugged }),
-    ...(held === undefined ? {} : { slot: held }),
   };
 }
 

@@ -47,7 +47,7 @@ in the same change.
 |              | TypeScript                                                                                                                                                                    | GDScript                                                                                                                                                            | YAML                                                                       | Markdown                               |
 | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- | -------------------------------------- |
 | Formatter    | Biome                                                                                                                                                                         | gdstyle, the fixtures included                                                                                                                                      | Prettier                                                                   | Prettier, prose wrap preserved         |
-| Linter       | Biome, oxlint type-aware                                                                                                                                                      | gdstyle, every finding failing, with `gdstyle.toml`                                                                                                                 | yamllint `--strict`, actionlint and zizmor at `pedantic` for the workflows | markdownlint, every rule, lines at 100 |
+| Linter       | Biome, oxlint type-aware, no function above cognitive complexity 15                                                                                                           | gdstyle, every finding failing, with `gdstyle.toml`, and lizard with no function above complexity 15                                                                | yamllint `--strict`, actionlint and zizmor at `pedantic` for the workflows | markdownlint, every rule, lines at 100 |
 | Type checker | `tsc`, `@tsconfig/strictest`, over `src`, `test` and `scripts` alike                                                                                                          | the engine: `test:engine` parses every shipped script and fixture with all 49 engine warnings (4.7.2) as errors, addons included, and checks a planted one fails it | -                                                                          | -                                      |
 | Dead code    | knip: every file, export and dependency is reached from an entry point                                                                                                        | -                                                                                                                                                                   | -                                                                          | -                                      |
 | Fuzzing      | fast-check properties in `test/fuzz.ts` over every reader of bytes nobody here wrote: the Content-Length framing, `project.godot`, paths inside a project, the engine archive | -                                                                                                                                                                   | -                                                                          | -                                      |
@@ -78,7 +78,7 @@ those checks with it.
 it matches a digest written in this repository:
 
 - the Bun that runs every job (`.github/actions/install-bun`)
-- uv, the interpreter and yamllint under it (`ci.yml`, `uv.lock`)
+- uv, the interpreter, yamllint and lizard under it (`.github/actions/install-uv`, `uv.lock`)
 - gdstyle (`scripts/install-gdstyle.ts`)
 - actionlint (`workflows.yml`)
 - the engine (`scripts/install-godot.ts`)
@@ -92,8 +92,9 @@ with one in the same change.
 
 **Every pin is watched by Renovate, digest included.** `.github/renovate.json` is the whole of it.
 The `bun` and `github-actions` managers cover `package.json`, `bun.lock` and every `uses:`. The `uv`
-manager covers yamllint in `pyproject.toml` and `uv.lock`, hashes included. The regex managers read
-the `renovate:` comment above any other pin, so a new pin is watched once it is annotated.
+manager covers yamllint and lizard in `pyproject.toml` and `uv.lock`, hashes included. The regex
+managers read the `renovate:` comment above any other pin, so a new pin is watched once it is
+annotated.
 
 Renovate opens two pull requests a week and no others. Monday's carries every raise, majors and
 vulnerability fixes included. Tuesday's regenerates `bun.lock` and `uv.lock`, where the transitive
@@ -110,7 +111,7 @@ git clone https://github.com/Aureliolo/gdharness.git
 cd gdharness
 bun install
 bun scripts/install-gdstyle.ts
-uv sync --locked           # yamllint, into .venv
+uv sync --locked           # yamllint and lizard, into .venv
 bun run build
 ```
 
@@ -123,6 +124,7 @@ bun run test:metadata
 bun run lint               # Biome, then oxlint with its type-aware rules, then knip, then markdownlint
 bun run lint:gd            # gdstyle's linter
 bun run format:gd:check    # gdstyle's formatter, checking only
+bun run lint:gd:complexity # lizard, no GDScript function above complexity 15
 uv run yamllint --strict .
 bun run docs               # the public site, into site/; refuses a page nothing links to
 ```

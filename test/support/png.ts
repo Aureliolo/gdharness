@@ -18,36 +18,10 @@ export function readPng(png: Buffer): Picture {
       `readPng reads 8-bit RGB or RGBA without interlacing, not depth ${String(depth)} type ${String(colourType)}`,
     );
   }
-  const parts: Buffer[] = [];
-  for (let at = 8; at < png.length; ) {
-    const length = png.readUInt32BE(at);
-    if (png.toString('ascii', at + 4, at + 8) === 'IDAT') {
-      parts.push(png.subarray(at + 8, at + 8 + length));
-    }
-    at += 12 + length;
-  }
-  const raw = inflateSync(Buffer.concat(parts));
+  const raw = inflateSync(imageData(png));
   const channels = colourType === 6 ? 4 : 3;
   const stride = width * channels;
-  const pixels = Buffer.alloc(height * stride);
-  for (let y = 0; y < height; y += 1) {
-    const filter = raw[y * (stride + 1)] ?? 0;
-    for (let x = 0; x < stride; x += 1) {
-      const byte = raw[y * (stride + 1) + 1 + x] ?? 0;
-      const left = x >= channels ? (pixels[y * stride + x - channels] ?? 0) : 0;
-      const up = y > 0 ? (pixels[(y - 1) * stride + x] ?? 0) : 0;
-      const corner = x >= channels && y > 0 ? (pixels[(y - 1) * stride + x - channels] ?? 0) : 0;
-      const guess = left + up - corner;
-      const nearest =
-        Math.abs(guess - left) <= Math.abs(guess - up) && Math.abs(guess - left) <= Math.abs(guess - corner)
-          ? left
-          : Math.abs(guess - up) <= Math.abs(guess - corner)
-            ? up
-            : corner;
-      const predicted = [0, left, up, (left + up) >> 1, nearest][filter] ?? 0;
-      pixels[y * stride + x] = (byte + predicted) & 0xff;
-    }
-  }
+  const pixels = unfilter(raw, { height, stride, channels });
   return {
     width,
     height,
@@ -61,6 +35,58 @@ export function readPng(png: Buffer): Picture {
       ];
     },
   };
+}
+
+/** The bodies of every IDAT chunk of [param png], joined. */
+function imageData(png: Buffer): Buffer {
+  const parts: Buffer[] = [];
+  for (let at = 8; at < png.length; ) {
+    const length = png.readUInt32BE(at);
+    if (png.toString('ascii', at + 4, at + 8) === 'IDAT') {
+      parts.push(png.subarray(at + 8, at + 8 + length));
+    }
+    at += 12 + length;
+  }
+  return Buffer.concat(parts);
+}
+
+/** The Paeth predictor's pick among its neighbours to the left, above and above left. */
+function paethNearest(left: number, up: number, corner: number): number {
+  const guess = left + up - corner;
+  if (Math.abs(guess - left) <= Math.abs(guess - up) && Math.abs(guess - left) <= Math.abs(guess - corner)) {
+    return left;
+  }
+  return Math.abs(guess - up) <= Math.abs(guess - corner) ? up : corner;
+}
+
+/** The scanlines of [param raw] with their per-row filters undone, as bytes of [param shape]. */
+function unfilter(raw: Buffer, shape: { height: number; stride: number; channels: number }): Buffer {
+  const { height, stride, channels } = shape;
+  const pixels = Buffer.alloc(height * stride);
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[y * (stride + 1)] ?? 0;
+    for (let x = 0; x < stride; x += 1) {
+      const byte = raw[y * (stride + 1) + 1 + x] ?? 0;
+      const { left, up, corner } = neighbours(pixels, { stride, channels }, { x, y });
+      const predicted = [0, left, up, (left + up) >> 1, paethNearest(left, up, corner)][filter] ?? 0;
+      pixels[y * stride + x] = (byte + predicted) & 0xff;
+    }
+  }
+  return pixels;
+}
+
+/** The bytes to the left, above and above left of byte [param at] that are already decoded. */
+function neighbours(
+  pixels: Buffer,
+  shape: { stride: number; channels: number },
+  at: { x: number; y: number },
+): { left: number; up: number; corner: number } {
+  const { stride, channels } = shape;
+  const { x, y } = at;
+  const left = x >= channels ? (pixels[y * stride + x - channels] ?? 0) : 0;
+  const up = y > 0 ? (pixels[(y - 1) * stride + x] ?? 0) : 0;
+  const corner = x >= channels && y > 0 ? (pixels[(y - 1) * stride + x - channels] ?? 0) : 0;
+  return { left, up, corner };
 }
 
 /** A 4 by 4 PNG of one colour. */

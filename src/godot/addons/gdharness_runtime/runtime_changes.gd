@@ -47,35 +47,11 @@ func set_property(params: Dictionary) -> Dictionary:
 
 	var holder: Variant = reached["holder"]
 	var named: String = reached["name"]
-	# A call can be walked through and read, and is not a place: what it returns is the method's
-	# to hand out, and writing "into" it would set nothing the game keeps.
-	if not GdhPaths.method_of(named).is_empty():
-		return {
-			"type": "error",
-			"message":
-			(
-				"%s:%s is a call, and a call is not a place to write: name a property"
-				% [reached["called"], named]
-			),
-		}
-	if not GdhPaths.can_read(holder, named):
-		return {
-			"type": "error",
-			"message": GdhPaths.nothing_there(holder, named, str(reached["called"])),
-		}
-	if GdhPaths.is_constant(holder, named):
-		return {
-			"type": "error",
-			"message":
-			(
-				"%s:%s is a constant its script declares, and a constant cannot be set"
-				% [reached["called"], named]
-			),
-		}
+	var no_place: String = _no_place(reached)
+	if not no_place.is_empty():
+		return { "type": "error", "message": no_place }
 	var old_value: Variant = GdhPaths.read_under(holder, named)
 	var slot: Dictionary = GdhValues.slot_declared(holder, named)
-	var declared: int = slot["type"]
-	var declared_script: Script = slot["script"]
 	var fitting: Dictionary = _value_for(value, slot, old_value, reached, node, node_path)
 	if fitting.has("message"):
 		return fitting
@@ -124,34 +100,10 @@ func set_property(params: Dictionary) -> Dictionary:
 	var already: bool = held_already(given, old_value)
 	var unmoved: bool = GdhValues.comparable(now, old_value) and now == old_value
 	if unmoved and not already:
-		var why: String = (
-			"the write left it as it was, which is what the engine refusing it and a setter "
-			+ "keeping the value both look like"
-		)
-		if declared == TYPE_OBJECT and given is Object and declared_script == null:
-			var refused_object: Object = given
-			why += (
-				(
-					". %s is declared as %s, which is also how the engine names a script class "
-					+ "with no class_name. If it is one, the object given has the right class and "
-					+ "another script: it is %s"
-				)
-				% [named, str(slot["class"]), GdhValues.class_of(refused_object)]
-			)
-		var refused: String = (
-			"%s.%s was given %s and reads %s afterwards, as it did before: %s."
-			% [
-				reached["called"],
-				named,
-				JSON.stringify(_values.serialize(given), "", false),
-				JSON.stringify(_values.serialize(now), "", false),
-				why,
-			]
-		)
-		if not caught.raised.is_empty():
-			var reported: PackedStringArray = PackedStringArray(caught.raised.slice(0, ERRORS_KEPT))
-			refused += " While it was written the game reported: %s" % "; ".join(reported)
-		return { "type": "error", "message": refused }
+		return {
+			"type": "error",
+			"message": _left_as_it_was(reached, given, now, slot, caught.raised),
+		}
 
 	var answer: Dictionary = {
 		"type": "property_set",
@@ -165,17 +117,82 @@ func set_property(params: Dictionary) -> Dictionary:
 		answer["unchanged"] = true
 	_keep_reported(answer, "errors", caught.raised)
 	_keep_reported(answer, "warnings", caught.warned)
-	# The engine stores a number past an export range, or one no enum value has, as given. Only the
-	# inspector holds a property to them, so the game now holds a value its own script never
-	# expected.
 	if holder is Object:
 		var owner: Object = holder
-		var shown: String = JSON.stringify(_values.serialize(now), "", false)
-		var declaration: Dictionary = slot["declared"]
-		var outside: String = GdhDeclared.outside(owner, declaration, now, shown)
-		if not outside.is_empty():
-			answer["outside_declared"] = outside
+		_note_outside(answer, owner, slot, now)
 	return answer
+
+
+## Notes in [param answer] a value [param now] that lies outside what [param slot] of
+## [param owner] declares. The engine stores a number past an export range, or one no enum value
+## has, as given. Only the inspector holds a property to them, so the game now holds a value its
+## own script never expected.
+func _note_outside(answer: Dictionary, owner: Object, slot: Dictionary, now: Variant) -> void:
+	var shown: String = JSON.stringify(_values.serialize(now), "", false)
+	var declaration: Dictionary = slot["declared"]
+	var outside: String = GdhDeclared.outside(owner, declaration, now, shown)
+	if not outside.is_empty():
+		answer["outside_declared"] = outside
+
+
+## Why the end of the walk [param reached] is no place to write, or "" for one that is.
+static func _no_place(reached: Dictionary) -> String:
+	var holder: Variant = reached["holder"]
+	var named: String = reached["name"]
+	# A call can be walked through and read, and is not a place: what it returns is the method's
+	# to hand out, and writing "into" it would set nothing the game keeps.
+	if not GdhPaths.method_of(named).is_empty():
+		return (
+			"%s:%s is a call, and a call is not a place to write: name a property"
+			% [reached["called"], named]
+		)
+	if not GdhPaths.can_read(holder, named):
+		return GdhPaths.nothing_there(holder, named, str(reached["called"]))
+	if GdhPaths.is_constant(holder, named):
+		return (
+			"%s:%s is a constant its script declares, and a constant cannot be set"
+			% [reached["called"], named]
+		)
+	return ""
+
+
+## The refusal of a write of [param given] that left the end of [param reached] reading
+## [param now], as it did before. [param slot] is what the property declares, and [param raised]
+## what the game reported while it was written.
+func _left_as_it_was(
+	reached: Dictionary, given: Variant, now: Variant, slot: Dictionary, raised: Array
+) -> String:
+	var named: String = reached["name"]
+	var declared: int = slot["type"]
+	var declared_script: Script = slot["script"]
+	var why: String = (
+		"the write left it as it was, which is what the engine refusing it and a setter "
+		+ "keeping the value both look like"
+	)
+	if declared == TYPE_OBJECT and given is Object and declared_script == null:
+		var refused_object: Object = given
+		why += (
+			(
+				". %s is declared as %s, which is also how the engine names a script class "
+				+ "with no class_name. If it is one, the object given has the right class and "
+				+ "another script: it is %s"
+			)
+			% [named, str(slot["class"]), GdhValues.class_of(refused_object)]
+		)
+	var refused: String = (
+		"%s.%s was given %s and reads %s afterwards, as it did before: %s."
+		% [
+			reached["called"],
+			named,
+			JSON.stringify(_values.serialize(given), "", false),
+			JSON.stringify(_values.serialize(now), "", false),
+			why,
+		]
+	)
+	if not raised.is_empty():
+		var reported: PackedStringArray = PackedStringArray(raised.slice(0, ERRORS_KEPT))
+		refused += " While it was written the game reported: %s" % "; ".join(reported)
+	return refused
 
 
 ## What [param sent] becomes as argument [param index] of the method [param named] on the holder
@@ -474,30 +491,7 @@ func call_method(params: Dictionary) -> Dictionary:
 	if node_path.is_empty() or method.is_empty():
 		return { "type": "error", "message": "Node path and method required" }
 
-	var root: Node = _host.get_tree().root
-	var standing: Dictionary = GdhValues.class_at(root, node_path)
-	if standing.is_empty():
-		standing = GdhValues.target_at(root, node_path, true, PackedStringArray([method]))
-		if standing.has("message") and node_path.is_valid_ascii_identifier():
-			var classes: Array[String] = []
-			for declared: Dictionary in ProjectSettings.get_global_class_list():
-				classes.append(str(declared.get("class", "")))
-			var close: PackedStringArray = GdhRead.nearest(node_path, PackedStringArray(classes))
-			standing["message"] = (
-				(
-					"%s. No global class is called %s either%s. A static function is called with "
-					+ "its class's name or its script's res:// path as the path."
-				)
-				% [
-					str(standing["message"]).trim_suffix("."),
-					node_path,
-					(
-						""
-						if close.is_empty()
-						else ", and the nearest %s" % GdhRead.are_named(close)
-					),
-				]
-			)
+	var standing: Dictionary = _call_target(node_path, method)
 	if standing.has("message"):
 		return standing
 	var node: Node = standing["node"]
@@ -515,66 +509,10 @@ func call_method(params: Dictionary) -> Dictionary:
 	# to be there, and with the element spelled out, since a method on what it holds is the usual
 	# aim.
 	if not reached["holder"] is Object:
-		var sort: String = "a list"
-		if reached["holder"] is Dictionary:
-			sort = "a map"
-		elif GdhPaths.packed(reached["holder"]):
-			sort = "a packed list"
-		var spelled: String = str(reached["name"])
-		if GdhPaths.method_of(spelled).is_empty():
-			spelled += "()"
-		# A vector or a transform has no element to call a method on, so a call it does not answer
-		# is refused without the advice about elements below.
-		var answers: bool = GdhPaths.can_read(reached["holder"], spelled)
-		var called_on: Variant = reached["holder"]
-		if (
-			(GdhPaths.composite(called_on) or GdhPaths.textual(called_on))
-			and not (args.is_empty() and answers)
-		):
-			return {
-				"type": "error",
-				"message":
-				(
-					"%s:%s takes no arguments" % [reached["called"], spelled]
-					if answers
-					else GdhPaths.nothing_there(reached["holder"], spelled, str(reached["called"]))
-				),
-			}
-		if args.is_empty() and answers:
-			var read_from: int = Time.get_ticks_usec()
-			var answered: Variant = GdhPaths.read_under(reached["holder"], spelled)
-			var read_for: int = Time.get_ticks_usec() - read_from
-			var listed: Dictionary = {
-				"type": "method_result",
-				"path": node_path,
-				"method": method,
-				"result": _values.serialize(answered),
-				"elapsed_usec": read_for,
-			}
-			var asked_of_it: Variant = params.get("properties")
-			if _reads_the_result(asked_of_it):
-				listed.merge(_read_off_result(answered, asked_of_it))
-			return listed
-		var why: String = (
-			"%s:%s takes no arguments" % [reached["called"], spelled]
-			if GdhPaths.can_read(reached["holder"], spelled)
-			else GdhPaths.nothing_there(reached["holder"], spelled, str(reached["called"]))
-		)
-		return {
-			"type": "error", "message": "%s. %s" % [why, _instead_of_a_call(reached, method, sort)],
-		}
+		return _called_on_value(reached, params)
 	var holder: Object = reached["holder"]
 	var named: String = reached["name"]
-	# The method a call ends on is the one being called whether or not it carries the brackets a
-	# step along the way would: "get_viewport():gui_get_focus_owner()" is the same call as without
-	# the last pair.
-	var not_called: String = _instance_method(
-		holder,
-		named if GdhPaths.method_of(named).is_empty() else GdhPaths.method_of(named),
-		str(reached["called"])
-	)
-	if not_called.is_empty():
-		not_called = _not_a_method_to_call(holder, named, str(reached["called"]))
+	var not_called: String = _not_callable(holder, named, str(reached["called"]))
 	if not not_called.is_empty():
 		return { "type": "error", "message": not_called }
 	if not GdhPaths.method_of(named).is_empty():
@@ -587,46 +525,13 @@ func call_method(params: Dictionary) -> Dictionary:
 	var count: String = _argument_count_refused(holder, named, args.size())
 	if not count.is_empty():
 		return { "type": "error", "message": "%s.%s %s" % [reached["called"], named, count] }
-	var deserialized_args: Array = []
-	# The object arguments checked only against the engine class, by position from 1, for the
-	# refusal the engine may still make: see [method GdhValues.slot_declared].
-	var by_engine_class: Dictionary = {}
-	# The enum arguments given a number none of their values has, said beside the answer: the engine
-	# passes any number on, and a write of the same number to a property already said so.
-	var outside: PackedStringArray = []
+	var given: GdhArguments = GdhArguments.new(named, node, node_path)
 	for index: int in args.size():
-		var wants: int = _values.parameter_type(holder, named, index)
-		if wants == TYPE_OBJECT and (args[index] is String or args[index] is Dictionary):
-			var declared: String = _values.parameter_class(holder, named, index)
-			var named_object: Dictionary = _object_named(node, node_path, args[index], declared)
-			if named_object.has("message"):
-				return {
-					"type": "error",
-					"message":
-					(
-						"%s.%s argument %d: %s"
-						% [reached["called"], named, index + 1, named_object["message"]]
-					),
-				}
-			var resolved: Object = named_object["object"]
-			if resolved != null and ClassDB.class_exists(declared):
-				by_engine_class[index + 1] = [declared, GdhValues.class_of(resolved)]
-			deserialized_args.append(named_object["object"])
-			continue
-		var argument: Dictionary = _argument_for(
-			args[index], index, reached, named, node, node_path
-		)
-		if argument.has("message"):
-			return argument
-		deserialized_args.append(argument["value"])
-		var choices: Dictionary = _values.parameter_enum(holder, named, index)
-		if not choices.is_empty():
-			var values: Dictionary = choices["values"]
-			var stray: String = GdhDeclared.outside_enum_argument(
-				index, str(choices["enum"]), argument["value"], values
-			)
-			if not stray.is_empty():
-				var _noted: bool = outside.append(stray)
+		var refused: Dictionary = _take_argument(given, args[index], index, reached)
+		if not refused.is_empty():
+			return refused
+	var deserialized_args: Array = given.values
+	var outside: PackedStringArray = PackedStringArray(given.outside)
 
 	# Timed around the call alone, since the bridge's round trip is a second or more and swamps what
 	# one click's work costs. The frame metrics read whichever frame is last, which is not this one.
@@ -639,31 +544,17 @@ func call_method(params: Dictionary) -> Dictionary:
 	# A method that awaits hands back its state at the first await and its value only when it ends,
 	# so the answer waits for the value. One that takes longer than the server waits is collected by
 	# its requestId like any slow call.
-	var state: Object = result if result is Object else null
-	var awaited: bool = state != null and state.get_class() == "GDScriptFunctionState"
+	var awaited: bool = _awaiting(result)
 	if awaited:
+		var state: Object = result
 		result = await Signal(state, &"completed")
 	var elapsed: int = Time.get_ticks_usec() - began
 
 	if not caught.refused.is_empty():
-		var message: String = (
-			"%s.%s did not run: the engine refused the call: %s"
-			% [reached["called"], named, caught.refused.trim_suffix(".")]
-		)
-		var position: RegExMatch = (
-			RegEx.create_from_string(r"Cannot convert argument (\d+)").search(caught.refused)
-		)
-		if position != null and by_engine_class.has(int(position.get_string(1))):
-			var checked: Array = by_engine_class[int(position.get_string(1))]
-			message += (
-				(
-					". The parameter is declared as %s, which is also how the engine names a "
-					+ "script class with no class_name. If it is one, the object given has the "
-					+ "right class and another script: it is %s"
-				)
-				% checked
-			)
-		return { "type": "error", "message": message + "." }
+		return {
+			"type": "error",
+			"message": _call_refused(reached, named, caught.refused, given.by_engine_class),
+		}
 
 	var answer: Dictionary = {
 		"type": "method_result",
@@ -678,6 +569,45 @@ func call_method(params: Dictionary) -> Dictionary:
 		var named_result: String = _values.returned_enum_name(holder, named, result)
 		if not named_result.is_empty():
 			answer["result_named"] = named_result
+	_note_call(answer, awaited, outside, caught, named)
+	var asked: Variant = params.get("properties")
+	if _reads_the_result(asked):
+		answer.merge(_read_off_result(result, asked))
+	return answer
+
+
+## Whether [param result] is the state a method that awaits hands back. It answers a flag, since
+## the engine refuses a script function that returns the state itself.
+static func _awaiting(result: Variant) -> bool:
+	if not result is Object:
+		return false
+	var state: Object = result
+	return state != null and state.get_class() == "GDScriptFunctionState"
+
+
+## Why [param named] on [param holder] is not a method to call, or "" when it is one. The method a
+## call ends on is the one being called whether or not it carries the brackets a step along the
+## way would: "get_viewport():gui_get_focus_owner()" is the same call as without the last pair.
+func _not_callable(holder: Object, named: String, called: String) -> String:
+	var method: String = GdhPaths.method_of(named)
+	var not_called: String = _instance_method(
+		holder, named if method.is_empty() else method, called
+	)
+	if not_called.is_empty():
+		not_called = _not_a_method_to_call(holder, named, called)
+	return not_called
+
+
+## Notes in [param answer] what the call of [param named] did beside its result: whether it was
+## [param awaited], the enum arguments [param outside] their values, and what [param caught]
+## heard while it ran.
+static func _note_call(
+	answer: Dictionary,
+	awaited: bool,
+	outside: PackedStringArray,
+	caught: GdhCallErrors,
+	named: String
+) -> void:
 	if awaited:
 		answer["awaited"] = true
 	if not outside.is_empty():
@@ -688,10 +618,150 @@ func call_method(params: Dictionary) -> Dictionary:
 	# something.
 	if caught.ended_at.has(named):
 		answer["ended_by_error_at"] = caught.ended_at[named]
-	var asked: Variant = params.get("properties")
-	if _reads_the_result(asked):
-		answer.merge(_read_off_result(result, asked))
-	return answer
+
+
+## The node or class [param node_path] names for a call of [param method], or the refusal. A
+## name no node answers to is looked for as a global class, whose static functions a call reaches.
+func _call_target(node_path: String, method: String) -> Dictionary:
+	var root: Node = _host.get_tree().root
+	var standing: Dictionary = GdhValues.class_at(root, node_path)
+	if not standing.is_empty():
+		return standing
+	standing = GdhValues.target_at(root, node_path, true, PackedStringArray([method]))
+	if not standing.has("message") or not node_path.is_valid_ascii_identifier():
+		return standing
+	var classes: Array[String] = []
+	for declared: Dictionary in ProjectSettings.get_global_class_list():
+		classes.append(str(declared.get("class", "")))
+	var close: PackedStringArray = GdhRead.nearest(node_path, PackedStringArray(classes))
+	standing["message"] = (
+		(
+			"%s. No global class is called %s either%s. A static function is called with "
+			+ "its class's name or its script's res:// path as the path."
+		)
+		% [
+			str(standing["message"]).trim_suffix("."),
+			node_path,
+			"" if close.is_empty() else ", and the nearest %s" % GdhRead.are_named(close),
+		]
+	)
+	return standing
+
+
+## The call [param params] ask for on a value the walk [param reached] ended on, a list, a map, a
+## string or a vector, answered as a read of what the path names there. A list or a map answers
+## the calls a path makes on one, and nothing else: said in those terms rather than as "has no
+## method", which reads as a misspelling of a method that was never going to be there, and with
+## the element spelled out, since a method on what it holds is the usual aim.
+func _called_on_value(reached: Dictionary, params: Dictionary) -> Dictionary:
+	var args: Array = params.get("args", [])
+	var called_on: Variant = reached["holder"]
+	var spelled: String = str(reached["name"])
+	if GdhPaths.method_of(spelled).is_empty():
+		spelled += "()"
+	var answers: bool = GdhPaths.can_read(called_on, spelled)
+	if args.is_empty() and answers:
+		var read_from: int = Time.get_ticks_usec()
+		var answered: Variant = GdhPaths.read_under(called_on, spelled)
+		var read_for: int = Time.get_ticks_usec() - read_from
+		var listed: Dictionary = {
+			"type": "method_result",
+			"path": str(params.get("path", "")),
+			"method": str(params.get("method", "")),
+			"result": _values.serialize(answered),
+			"elapsed_usec": read_for,
+		}
+		var asked_of_it: Variant = params.get("properties")
+		if _reads_the_result(asked_of_it):
+			listed.merge(_read_off_result(answered, asked_of_it))
+		return listed
+	var why: String = (
+		"%s:%s takes no arguments" % [reached["called"], spelled]
+		if answers
+		else GdhPaths.nothing_there(called_on, spelled, str(reached["called"]))
+	)
+	# A vector or a transform has no element to call a method on, so a call it does not answer
+	# is refused without the advice about elements.
+	if GdhPaths.composite(called_on) or GdhPaths.textual(called_on):
+		return { "type": "error", "message": why }
+	var sort: String = "a list"
+	if called_on is Dictionary:
+		sort = "a map"
+	elif GdhPaths.packed(called_on):
+		sort = "a packed list"
+	var method: String = str(params.get("method", ""))
+	return {
+		"type": "error", "message": "%s. %s" % [why, _instead_of_a_call(reached, method, sort)],
+	}
+
+
+## Fits [param arg], argument [param index] of the call [param given] gathers for, at the end of
+## [param reached], and adds it to [param given]. Answers the refusal of one that does not fit, or
+## an empty dictionary.
+func _take_argument(
+	given: GdhArguments, arg: Variant, index: int, reached: Dictionary
+) -> Dictionary:
+	var holder: Object = reached["holder"]
+	var named: String = given.named
+	var node: Node = given.node
+	var node_path: String = given.node_path
+	var wants: int = _values.parameter_type(holder, named, index)
+	if wants == TYPE_OBJECT and (arg is String or arg is Dictionary):
+		var declared: String = _values.parameter_class(holder, named, index)
+		var named_object: Dictionary = _object_named(node, node_path, arg, declared)
+		if named_object.has("message"):
+			return {
+				"type": "error",
+				"message":
+				(
+					"%s.%s argument %d: %s"
+					% [reached["called"], named, index + 1, named_object["message"]]
+				),
+			}
+		var resolved: Object = named_object["object"]
+		if resolved != null and ClassDB.class_exists(declared):
+			given.by_engine_class[index + 1] = [declared, GdhValues.class_of(resolved)]
+		given.values.append(named_object["object"])
+		return {}
+	var argument: Dictionary = _argument_for(arg, index, reached, named, node, node_path)
+	if argument.has("message"):
+		return argument
+	given.values.append(argument["value"])
+	var choices: Dictionary = _values.parameter_enum(holder, named, index)
+	if not choices.is_empty():
+		var values: Dictionary = choices["values"]
+		var stray: String = GdhDeclared.outside_enum_argument(
+			index, str(choices["enum"]), argument["value"], values
+		)
+		if not stray.is_empty():
+			given.outside.append(stray)
+	return {}
+
+
+## Why the engine refused a call of [param named] at the end of [param reached], from what it
+## reported, [param refused]. An object argument checked only against the engine class, in
+## [param by_engine_class], may be the one it refused.
+static func _call_refused(
+	reached: Dictionary, named: String, refused: String, by_engine_class: Dictionary
+) -> String:
+	var message: String = (
+		"%s.%s did not run: the engine refused the call: %s"
+		% [reached["called"], named, refused.trim_suffix(".")]
+	)
+	var position: RegExMatch = (
+		RegEx.create_from_string(r"Cannot convert argument (\d+)").search(refused)
+	)
+	if position != null and by_engine_class.has(int(position.get_string(1))):
+		var checked: Array = by_engine_class[int(position.get_string(1))]
+		message += (
+			(
+				". The parameter is declared as %s, which is also how the engine names a "
+				+ "script class with no class_name. If it is one, the object given has the "
+				+ "right class and another script: it is %s"
+			)
+			% checked
+		)
+	return message + "."
 
 
 ## Puts the first [constant ERRORS_KEPT] of [param reported] in [param answer] under [param field],
@@ -1051,3 +1121,24 @@ func _built(given: Variant, node: Node, node_path: String) -> Dictionary:
 ## wait reads the same text the same way.
 static func names_no_object(given: Variant) -> bool:
 	return given is String and str(given).strip_edges() == "null"
+
+
+## The arguments of one call as they are fitted, with the call they are for.
+class GdhArguments:
+	## The method called, on the node [member node] at [member node_path] or what it holds.
+	var named: String
+	var node: Node
+	var node_path: String
+	## The arguments fitted so far, in order.
+	var values: Array = []
+	## The object arguments checked only against the engine class, by position from 1, for the
+	## refusal the engine may still make: see [method GdhValues.slot_declared].
+	var by_engine_class: Dictionary = {}
+	## The enum arguments given a number none of their values has, said beside the answer: the
+	## engine passes any number on, and a write of the same number to a property already said so.
+	var outside: Array[String] = []
+
+	func _init(p_named: String, p_node: Node, p_node_path: String) -> void:
+		named = p_named
+		node = p_node
+		node_path = p_node_path

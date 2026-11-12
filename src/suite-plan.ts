@@ -426,7 +426,7 @@ export class ProjectScripts {
   }
 }
 
-/** What one suite cost the last time it ran: the whole of it, and each case. */
+/** What one suite cost the last time it ran: the whole of it, each case, and the most memory its engine held. */
 interface SuiteTime {
   /** Its cases and its hooks together, as it costs when it runs whole. */
   readonly seconds: number;
@@ -437,6 +437,11 @@ interface SuiteTime {
    * case too slow for one engine is dealt out by.
    */
   readonly rows?: Readonly<Record<string, readonly number[]>>;
+  /**
+   * The most bytes an engine holding this suite was seen to hold: what Windows had committed to it,
+   * or its resident memory elsewhere.
+   */
+  readonly peak?: number;
 }
 
 export type SuiteTimes = Readonly<Record<string, SuiteTime>>;
@@ -458,7 +463,7 @@ export function readTimes(file: string): SuiteTimes {
 
 /** [param kept] as one suite's time, or null for a suite whose entry is not that shape. */
 function suiteTimeOf(kept: unknown): SuiteTime | null {
-  const { seconds, cases, rows }: Record<string, unknown> = isRecord(kept) ? kept : {};
+  const { seconds, cases, rows, peak }: Record<string, unknown> = isRecord(kept) ? kept : {};
   if (!isSeconds(seconds) || !isRecord(cases)) {
     return null;
   }
@@ -472,7 +477,17 @@ function suiteTimeOf(kept: unknown): SuiteTime | null {
       isNumberList(spent) ? [[name, spent]] : [],
     ),
   );
-  return { seconds, cases: caseSeconds, ...(isRecord(rows) ? { rows: rowSeconds } : {}) };
+  return {
+    seconds,
+    cases: caseSeconds,
+    ...(isRecord(rows) ? { rows: rowSeconds } : {}),
+    ...(isPeak(peak) ? { peak } : {}),
+  };
+}
+
+/** Whether [param value] is a memory an engine could have held: a number above 0 that is not endless. */
+function isPeak(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
 
 function isNumberList(value: unknown): value is number[] {
@@ -506,12 +521,13 @@ export function writeJson(file: string, value: unknown): boolean {
  * [param times] with what [param runs] measured of [param suites] put in, and with what [param now]
  * no longer finds left out: a suite deleted or renamed, and a case its suite no longer declares.
  * Nothing else took them out, so a project's file held 1709 suites for its 147, and a renamed suite
- * went on being named among the slowest by whatever read the file.
+ * went on being named among the slowest by whatever read the file. A suite closed by [param runs]
+ * takes the most their engines held, in place of the peak it had.
  */
 export function timesAfter(
   times: SuiteTimes,
   suites: readonly DeclaredSuite[],
-  runs: readonly RunPrinted[],
+  runs: ReadonlyArray<{ readonly printed: RunPrinted; readonly peakBytes?: number }>,
   now: (path: string) => DeclaredSuite | null,
   cutShort: ReadonlySet<string> = new Set(),
 ): Record<string, SuiteTime> {
@@ -530,6 +546,8 @@ interface Measured {
   readonly cases: Map<string, number>;
   readonly rows: Map<string, Map<number, number>>;
   around: number;
+  /** The most any engine that closed the suite held, when one told. */
+  peak?: number;
 }
 
 /** [param times] without the suites [param now] no longer finds, and without the cases a suite no longer declares. */
@@ -556,6 +574,7 @@ function timesStillDeclared(
       seconds: round(Math.max(0, time.seconds - dropped)),
       cases,
       ...(Object.keys(rows).length > 0 ? { rows } : {}),
+      ...(time.peak === undefined ? {} : { peak: time.peak }),
     };
   }
   return next;
@@ -563,12 +582,12 @@ function timesStillDeclared(
 
 /** What [param runs] measured of each suite in [param declared] they closed. */
 function timesMeasured(
-  runs: readonly RunPrinted[],
+  runs: ReadonlyArray<{ readonly printed: RunPrinted; readonly peakBytes?: number }>,
   declared: ReadonlyMap<string, DeclaredSuite>,
 ): Map<string, Measured> {
   const measured = new Map<string, Measured>();
   for (const run of runs) {
-    for (const printed of run.suites.values()) {
+    for (const printed of run.printed.suites.values()) {
       if (printed.closed === null || !declared.has(printed.path)) {
         continue;
       }
@@ -578,6 +597,9 @@ function timesMeasured(
         around: 0,
       };
       addPrinted(entry, printed.cases, printed.closed.seconds);
+      if (isPeak(run.peakBytes)) {
+        entry.peak = Math.max(entry.peak ?? 0, run.peakBytes);
+      }
       measured.set(printed.path, entry);
     }
   }
@@ -607,6 +629,29 @@ function addPrinted(
   }
 }
 
+/** The rows and seconds kept for the case [param func], where [param cutShort] says an engine stopped early. */
+function caseTimeAfter(
+  func: string,
+  before: SuiteTime | undefined,
+  entry: Measured,
+  cutShort: boolean,
+): { readonly keptRows: readonly number[] | undefined; readonly seconds: number | undefined } {
+  const measuredRows = entry.rows.get(func);
+  // A case that ran and printed no row is not parameterised now, whatever it was. Its old rows
+  // would deal it out over engines that each run nothing.
+  const keptRows =
+    measuredRows === undefined
+      ? entry.cases.has(func)
+        ? undefined
+        : before?.rows?.[func]
+      : rowsAfter(before?.rows?.[func], measuredRows, cutShort);
+  const seconds =
+    measuredRows === undefined || keptRows === undefined
+      ? (entry.cases.get(func) ?? before?.cases[func])
+      : keptRows.reduce((sum, row) => sum + row, 0);
+  return { keptRows, seconds };
+}
+
 /** A suite's time kept in [param before], with what [param entry] measured of its [param declaredCases] put in. */
 function suiteTimeAfter(
   before: SuiteTime | undefined,
@@ -617,31 +662,21 @@ function suiteTimeAfter(
   const cases: Record<string, number> = {};
   const rows: Record<string, number[]> = {};
   for (const func of declaredCases) {
-    const measuredRows = entry.rows.get(func);
-    // A case that ran and printed no row is not parameterised now, whatever it was. Its old rows
-    // would deal it out over engines that each run nothing.
-    const keptRows =
-      measuredRows === undefined
-        ? entry.cases.has(func)
-          ? undefined
-          : before?.rows?.[func]
-        : rowsAfter(before?.rows?.[func], measuredRows, cutShort(func));
+    const { keptRows, seconds } = caseTimeAfter(func, before, entry, cutShort(func));
     if (keptRows !== undefined) {
       rows[func] = keptRows.map(round);
     }
-    const seconds =
-      measuredRows === undefined || keptRows === undefined
-        ? (entry.cases.get(func) ?? before?.cases[func])
-        : keptRows.reduce((sum, row) => sum + row, 0);
     if (seconds !== undefined) {
       cases[func] = round(seconds);
     }
   }
   const inCases = Object.values(cases).reduce((sum, seconds) => sum + seconds, 0);
+  const peak = entry.peak ?? before?.peak;
   return {
     seconds: round(entry.around + inCases),
     cases,
     ...(Object.keys(rows).length > 0 ? { rows } : {}),
+    ...(peak === undefined ? {} : { peak }),
   };
 }
 
@@ -910,6 +945,19 @@ export class Shares {
     if (this.headless.length === 0) {
       return null;
     }
+    const { share, rest } = this.headlessSplit();
+    this.headless = rest;
+    return planOf(share, this.declared, false, lane, this.all);
+  }
+
+  /** The suites [method next] would hand now, handing out nothing. */
+  peek(): readonly string[] {
+    const units = this.windowed.length > 0 ? this.windowed : this.headlessSplit().share;
+    return [...new Set(units.map((unit) => unit.suite))];
+  }
+
+  /** The headless units a share takes, and those left for the shares after it. */
+  private headlessSplit(): { share: Unit[]; rest: Unit[] } {
     const left = this.headless.reduce((sum, unit) => sum + unit.cost, 0);
     const target = Math.max(SHARE_FLOOR_SECONDS, left / this.lanes);
     const share: Unit[] = [];
@@ -923,9 +971,24 @@ export class Shares {
         rest.push(unit);
       }
     }
-    this.headless = rest;
-    return planOf(share, this.declared, false, lane, this.all);
+    return { share, rest };
   }
+}
+
+/**
+ * The memory an engine holding [param paths] is taken to need: the most any of them was seen to
+ * hold, with [param seen] true, or [param unmeasured] when none has a peak kept.
+ */
+export function peakOf(
+  paths: readonly string[],
+  times: SuiteTimes,
+  unmeasured: number,
+): { readonly bytes: number; readonly seen: boolean } {
+  const kept = paths.flatMap((path) => {
+    const peak = times[path]?.peak;
+    return peak === undefined ? [] : [peak];
+  });
+  return kept.length === 0 ? { bytes: unmeasured, seen: false } : { bytes: Math.max(...kept), seen: true };
 }
 
 /** How many slots [param plans] take at once: one a lane. */

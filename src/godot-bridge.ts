@@ -5,6 +5,7 @@ import type { RawData } from 'ws';
 import { WebSocket, WebSocketServer } from 'ws';
 import { callProgress } from './call-signal.js';
 import { errorCode, errorMessage, Refusal, toError } from './errors.js';
+import { idleClosed } from './idle-close.js';
 import { waitFromEnv } from './launch.js';
 import { isSameDirectory } from './paths.js';
 import { portFromEnv } from './ports.js';
@@ -437,6 +438,34 @@ export class AddonOfAnotherRelease extends Error {}
 export class EditorClosing extends Error {}
 
 /**
+ * The most one answer from the editor may carry. Kept in step with `ANSWER_BYTES` in the editor
+ * addon's bridge_client.gd, which sends a larger answer as an error saying its size.
+ */
+const EDITOR_ANSWER_BYTES = 64 * 1024 * 1024;
+
+/**
+ * The most one request to the editor may carry. The editor reserves twice this as its socket
+ * opens and closes the socket on a larger message, so a larger one is refused here. Kept in step
+ * with `REQUEST_BYTES` in the editor addon's bridge_client.gd.
+ */
+export const EDITOR_REQUEST_BYTES = 4 * 1024 * 1024;
+
+const QUIT_UNANSWERED = 'The editor quit after going unused before it answered, so the call was not run.';
+
+/**
+ * Whether the editor [gone] was is the one its project's idle record names. It writes the record
+ * before it quits and turns every call away from then on, so a call it held unanswered was not
+ * run. Its turning-away reply can still be lost: Godot sends what it queued on a later frame, and
+ * the quit can come first.
+ */
+function quitUnused(gone: GodotConnectionInfo | null): boolean {
+  if (gone?.projectPath === undefined || gone.editorPid === undefined) {
+    return false;
+  }
+  return idleClosed(gone.projectPath)?.pid === gone.editorPid;
+}
+
+/**
  * The commands an editor of another release is still sent, since only its addon can end it: the
  * quit editor_launch close and a server's own restart send, and the restart an editor opened by
  * hand does itself.
@@ -590,7 +619,7 @@ export class GodotBridge extends EventEmitter {
         res.writeHead(404);
         res.end();
       });
-      const godotWss = new WebSocketServer({ noServer: true });
+      const godotWss = new WebSocketServer({ noServer: true, maxPayload: EDITOR_ANSWER_BYTES });
       let settled = false;
 
       server.on('upgrade', (request, socket, head) => {
@@ -1080,7 +1109,14 @@ export class GodotBridge extends EventEmitter {
       throw new Refusal('Godot is not connected');
     }
 
-    this.socket.send(JSON.stringify(message));
+    const text = JSON.stringify(message);
+    const bytes = Buffer.byteLength(text);
+    if (bytes > EDITOR_REQUEST_BYTES) {
+      throw new Refusal(
+        `The request is ${String(bytes)} bytes, more than the ${String(EDITOR_REQUEST_BYTES)} one message to the editor carries, so it was not sent.`,
+      );
+    }
+    this.socket.send(text);
   }
 
   private startKeepalive(): void {
@@ -1248,10 +1284,11 @@ export class GodotBridge extends EventEmitter {
 
     this.stopKeepalive();
 
+    const gone = this.connectionInfo;
     this.socket = null;
     this.connectionInfo = null;
 
-    this.rejectAllPending(reason);
+    this.rejectAllPending(quitUnused(gone) ? new EditorClosing(QUIT_UNANSWERED) : reason);
     this.resourceQueues.clear();
   }
 

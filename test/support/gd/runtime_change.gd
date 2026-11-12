@@ -212,6 +212,12 @@ func _invoke(method: String, args: Array) -> Dictionary:
 ## it from the list, so the game's list came out empty behind an answer of success.
 func _check_a_script_class_without_a_name() -> void:
 	var walker: Node = root.get_node("Walker")
+	await _check_a_nameless_class_list(walker)
+	await _check_an_inner_class_list()
+	await _check_a_nameless_class_slot_and_parameter(walker)
+
+
+func _check_a_nameless_class_list(walker: Node) -> void:
 	for stranger: String in ["/root/Plain", "/root/Other"]:
 		var refused: Dictionary = await _write("squad", [stranger])
 		var said: String = str(refused.get("message", ""))
@@ -256,6 +262,8 @@ func _check_a_script_class_without_a_name() -> void:
 	if mapped_right.get("type") != "property_set" or by_name.get("a") != walker:
 		_fail("and takes a Walker: %s" % JSON.stringify(mapped_right))
 
+
+func _check_an_inner_class_list() -> void:
 	# An inner class has no global name and no file either.
 	var parts: Array = holder.get("parts")
 	var part: Object = parts[0]
@@ -268,6 +276,8 @@ func _check_a_script_class_without_a_name() -> void:
 	if holder.get("parts") != [part]:
 		_fail("and keeps the part it held: %s" % str(holder.get("parts")))
 
+
+func _check_a_nameless_class_slot_and_parameter(walker: Node) -> void:
 	# A single slot and a parameter, where the declaration is only the engine class: the write is
 	# refused by what it reads back, and the call by the engine, each saying what the class may be.
 	var slot: Dictionary = await _write("quarrel", "/root/Plain")
@@ -331,6 +341,11 @@ func _check_the_argument_count() -> void:
 			_fail("%s with %s runs: %s" % [method, str(args), JSON.stringify(ran)])
 		if ran.has("errors"):
 			_fail("and reports nothing it did not raise: %s" % JSON.stringify(ran))
+	await _check_what_a_method_reported()
+
+
+## What a method reported on its way through, carried with what it returned.
+func _check_what_a_method_reported() -> void:
 	var noisy: Dictionary = await _invoke("noisy", [])
 	var raised: Array = noisy.get("errors", [])
 	if noisy.get("type") != "method_result" or noisy.get("result") != 1:
@@ -380,6 +395,14 @@ func _check_a_value_given_by_its_fields() -> void:
 				% [JSON.stringify(framed), holder.get("area")]
 			)
 		)
+	await _check_a_value_refused_by_its_fields()
+	await _check_a_colour_by_its_code_or_fields()
+	await _check_an_element_given_by_its_fields()
+
+
+## A value missing a field, or carrying one its type has not, refused naming the shape it is read
+## as. The slot written keeps what it held.
+func _check_a_value_refused_by_its_fields() -> void:
 	var short: Dictionary = await _invoke("press", [{ "x": 140 }, true])
 	var said: String = str(short.get("message", ""))
 	if (
@@ -428,6 +451,9 @@ func _check_a_value_given_by_its_fields() -> void:
 	var counted: Dictionary = await _write("counted", "many")
 	if str(counted.get("message", "")).contains("is sent as"):
 		_fail("a number names no shape: %s" % JSON.stringify(counted))
+
+
+func _check_a_colour_by_its_code_or_fields() -> void:
 	var coded: Dictionary = await _write("tint", "#00ff0080")
 	if coded.get("type") != "property_set" or holder.get("tint") != Color.html("#00ff0080"):
 		_fail(
@@ -453,8 +479,11 @@ func _check_a_value_given_by_its_fields() -> void:
 	if uncoded.get("type") != "error" or holder.get("tint") != Color.html("#00ff0080"):
 		_fail("and a word that is no html code is refused: %s" % JSON.stringify(uncoded))
 
-	# An element of a typed list or map is fitted as a single value is, so its refusal names the
-	# field too: item 0 below has the keys item 1 has but one, and is taken.
+
+## An element of a typed list or map is fitted as a single value is, so its refusal names the field
+## too: item 0 below has the keys item 1 has but one, and is taken.
+func _check_an_element_given_by_its_fields() -> void:
+	var shape: String = 'A Vector2 is sent as {"x": ..., "y": ...}.'
 	var unread: String = (
 		'which cannot become Vector2. A Vector2 has no field called "z", so the value'
 	)
@@ -752,7 +781,21 @@ func _check_packed_lists_enums_and_setters() -> void:
 		_fail("and refuses a word among whole numbers: %s" % JSON.stringify(worded))
 	if holder.get("ids") != PackedInt32Array():
 		_fail("leaving the list as it was: %s" % str(holder.get("ids")))
+	var huge: Dictionary = await _invoke("add_counts", [[9_007_199_254_740_993.0]])
+	var huge_said: String = str(huge.get("message", ""))
+	if (
+		not huge_said.contains("element 0 is too large to be sure of: ")
+		or not huge_said.contains(
+			" is 2^53 or more, where a JSON number holds a whole number only to the nearest"
+		)
+	):
+		_fail("a whole number past 2^53 in a typed list is refused: %s" % JSON.stringify(huge))
+	await _check_an_enum_given_by_name()
+	await _check_what_a_setter_reported()
 
+
+## An enum argument given by its value's name or number, the engine's own and a saved script's.
+func _check_an_enum_given_by_name() -> void:
 	for given: Array in [["ANGRY", 1], ["sleepy", 5], [5, 5]]:
 		var felt: Dictionary = await _invoke("feel", [given[0]])
 		if felt.get("result") != given[1] or felt.has("outside_declared"):
@@ -785,24 +828,6 @@ func _check_packed_lists_enums_and_setters() -> void:
 	if mode.get("result") != Node.PROCESS_MODE_DISABLED:
 		_fail("an engine enum takes its constant's name: %s" % JSON.stringify(mode))
 
-	var below: Dictionary = await _write("health", -1)
-	if not str(below.get("message", "")).ends_with(
-		"both look like. While it was written the game reported: health cannot go below zero"
-	):
-		_fail("a setter keeping its value says what it reported: %s" % JSON.stringify(below))
-	var healed: Dictionary = await _write("health", 5)
-	if healed.get("type") != "property_set" or healed.has("errors") or holder.get("health") != 5:
-		_fail("while one it takes reports nothing: %s" % JSON.stringify(healed))
-	var huge: Dictionary = await _invoke("add_counts", [[9_007_199_254_740_993.0]])
-	var huge_said: String = str(huge.get("message", ""))
-	if (
-		not huge_said.contains("element 0 is too large to be sure of: ")
-		or not huge_said.contains(
-			" is 2^53 or more, where a JSON number holds a whole number only to the nearest"
-		)
-	):
-		_fail("a whole number past 2^53 in a typed list is refused: %s" % JSON.stringify(huge))
-
 	# A saved script's enum, and one of a class inside it, which the engine names by the path and
 	# the inner class: res://change_moods.gd.Inner.Size.
 	var file: FileAccess = FileAccess.open(MOODS_SCRIPT, FileAccess.WRITE)
@@ -833,6 +858,17 @@ func _check_packed_lists_enums_and_setters() -> void:
 		_fail("an inner class's enum takes its name: %s" % JSON.stringify(sized))
 	moody.free()
 
+
+## What a setter reported while it was written, beside the write it refused or took.
+func _check_what_a_setter_reported() -> void:
+	var below: Dictionary = await _write("health", -1)
+	if not str(below.get("message", "")).ends_with(
+		"both look like. While it was written the game reported: health cannot go below zero"
+	):
+		_fail("a setter keeping its value says what it reported: %s" % JSON.stringify(below))
+	var healed: Dictionary = await _write("health", 5)
+	if healed.get("type") != "property_set" or healed.has("errors") or holder.get("health") != 5:
+		_fail("while one it takes reports nothing: %s" % JSON.stringify(healed))
 	var high: Dictionary = await _write("level", 12)
 	if high.get("type") != "property_set" or high.get("warnings") != ["level is high"]:
 		_fail(

@@ -464,28 +464,9 @@ func wait_until(params: Dictionary) -> Dictionary:
 	var standing: Dictionary = GdhValues.node_at(_host.get_tree().root, node_path)
 	if standing.has("message"):
 		return standing
-	# Two different questions, not two ways of asking one: says looks for words anywhere under the
-	# path, a property compares one value on one node. Taking says and dropping the other left a
-	# caller watching a screen while believing they were watching a property, and the answer says
-	# which of them it is about only if you already know that says wins.
-	if (
-		not says.is_empty()
-		and (not property.is_empty() or params.has("value") or params.has("compare"))
-	):
-		var other: String = (
-			property if not property.is_empty() else ("value" if params.has("value") else "compare")
-		)
-		return {
-			"type": "error",
-			"message":
-			(
-				(
-					'A wait takes says or a property, not both: this one has says "%s" and %s as '
-					+ "well. Ask for one of them."
-				)
-				% [says, other]
-			),
-		}
+	var both: String = _says_and_property(says, property, params)
+	if not both.is_empty():
+		return { "type": "error", "message": both }
 	if not says.is_empty():
 		var include_hidden: bool = GdhRead.as_bool(params.get("include_hidden", false))
 		return await _wait_until_said(node_path, says, timeout_ms, include_hidden)
@@ -508,39 +489,12 @@ func wait_until(params: Dictionary) -> Dictionary:
 	if compare in [">=", "<=", ">", "<"]:
 		return await _wait_in_order(node, params, current, timeout_ms)
 	var by_name: Array = _enum_by_name(watched, params["value"], node_path)
-	var sent: Variant = by_name[1] if not by_name.is_empty() and by_name[0] else params["value"]
-	var wanted: Variant = _values.fitted(sent, typeof(current))
-	# Read against what the property is declared as, not only against what it holds this frame: an
-	# object property holding null holds nothing typed, so any value was taken as it came and
-	# compared with null until the time ran out. #772 waited a minute for "null" that way and
-	# answered met false with value null beside it.
-	var declared: int = watched["declared"]
-	# An untyped slot holding null or an object is read the same way, as set reads it: otherwise the
-	# two ops would disagree about one property, and the wait would run out on the text null.
-	var untyped_object: bool = (
-		declared == TYPE_NIL and (current == null or typeof(current) == TYPE_OBJECT)
-	)
-	var holds_objects: bool = declared == TYPE_OBJECT or untyped_object
-	if holds_objects and GdhChanges.names_no_object(wanted):
-		wanted = null
+	var sent: Variant = _named_value(by_name, params["value"])
+	var wanted: Variant = _wanted_value(watched, sent)
 	# A word no value of an enum is called, refused naming the values before it is compared as text.
 	var refused: String = "" if by_name.is_empty() or by_name[0] else str(by_name[1])
 	if refused.is_empty():
-		refused = _not_comparable(current, wanted, node_path, property)
-	if refused.is_empty():
-		refused = _cut_to_fit(sent, typeof(current), node_path, property)
-	var rounded: String = GdhValues.inexact(sent, typeof(current))
-	if refused.is_empty() and not rounded.is_empty():
-		refused = "%s.%s holds int: %s." % [node_path, property, rounded]
-	var never_held: bool = typeof(wanted) != TYPE_NIL and typeof(wanted) != TYPE_OBJECT
-	if refused.is_empty() and declared == TYPE_OBJECT and never_held:
-		refused = (
-			(
-				"%s.%s is declared to hold an object and the value to wait for is %s, which it can"
-				+ " never hold: wait for null, or for the object's own value on a property of it."
-			)
-			% [node_path, property, GdhShapes.kind(wanted)]
-		)
+		refused = _wait_refused(watched, sent, wanted, node_path, property)
 	if not refused.is_empty():
 		return { "type": "error", "message": refused }
 
@@ -565,19 +519,35 @@ func wait_until(params: Dictionary) -> Dictionary:
 		if watched.has("message"):
 			return watched
 		current = watched["value"]
+	return _condition_answer(params, watched, wanted, Time.get_ticks_msec() - started, frames)
 
+
+## The enum value [param by_name] found for [param value], or [param value] as sent when none was.
+static func _named_value(by_name: Array, value: Variant) -> Variant:
+	if not by_name.is_empty() and by_name[0]:
+		return by_name[1]
+	return value
+
+
+## The answer of a property wait [param params] asked for, which last read [param watched], after
+## [param elapsed_ms] and [param frames] of waiting for [param wanted].
+func _condition_answer(
+	params: Dictionary, watched: Dictionary, wanted: Variant, elapsed_ms: int, frames: int
+) -> Dictionary:
+	var current: Variant = watched["value"]
+	var compare: String = str(params.get("compare", "=="))
 	var met: bool = (
 		GdhValues.comparable(current, wanted)
-		and GdhChanges.held_already(wanted, current) != differs
+		and GdhChanges.held_already(wanted, current) != (compare == "!=")
 	)
 	var answer: Dictionary = {
 		"type": "condition",
-		"path": node_path,
-		"property": property,
+		"path": str(params.get("path", "")),
+		"property": str(params.get("property", "")),
 		"compare": compare,
 		"met": met,
 		"value": _values.serialize(current),
-		"elapsed_ms": Time.get_ticks_msec() - started,
+		"elapsed_ms": elapsed_ms,
 		"frames": frames,
 	}
 	# Beside the value read, so a wait that ran out shows what it compared, such as text sent with
@@ -589,12 +559,88 @@ func wait_until(params: Dictionary) -> Dictionary:
 	# met.
 	if watched["holder"] is Object:
 		var owner: Object = watched["holder"]
-		var shown: String = JSON.stringify(_values.serialize(wanted), "", false)
 		var declaration: Dictionary = watched["declaration"]
-		var outside: String = GdhDeclared.outside(owner, declaration, wanted, shown)
+		var outside: String = _outside_declared(owner, declaration, wanted)
 		if not outside.is_empty():
 			answer["outside_declared"] = outside
 	return answer
+
+
+## Why a wait asking for [param says] asks for a property as well, or "". Two different questions,
+## not two ways of asking one: says looks for words anywhere under the path, a property compares
+## one value on one node. Taking says and dropping the other left a caller watching a screen while
+## believing they were watching a property, and the answer says which of them it is about only if
+## you already know that says wins.
+static func _says_and_property(says: String, property: String, params: Dictionary) -> String:
+	if says.is_empty():
+		return ""
+	var other: String = property
+	if other.is_empty() and params.has("value"):
+		other = "value"
+	elif other.is_empty() and params.has("compare"):
+		other = "compare"
+	if other.is_empty():
+		return ""
+	return (
+		(
+			'A wait takes says or a property, not both: this one has says "%s" and %s as '
+			+ "well. Ask for one of them."
+		)
+		% [says, other]
+	)
+
+
+## [param sent] fitted to the property [param watched] reads. Read against what the property is
+## declared as, not only against what it holds this frame: an object property holding null holds
+## nothing typed, so any value was taken as it came and compared with null until the time ran out.
+## A wait of a minute for "null" answered met false with value null beside it.
+func _wanted_value(watched: Dictionary, sent: Variant) -> Variant:
+	var current: Variant = watched["value"]
+	var wanted: Variant = _values.fitted(sent, typeof(current))
+	var declared: int = watched["declared"]
+	# An untyped slot holding null or an object is read the same way, as set reads it: otherwise the
+	# two ops would disagree about one property, and the wait would run out on the text null.
+	var untyped_object: bool = (
+		declared == TYPE_NIL and (current == null or typeof(current) == TYPE_OBJECT)
+	)
+	var holds_objects: bool = declared == TYPE_OBJECT or untyped_object
+	if holds_objects and GdhChanges.names_no_object(wanted):
+		return null
+	return wanted
+
+
+## Why a wait for [param wanted], sent as [param sent], on the property [param watched] reads
+## cannot be met, or "".
+static func _wait_refused(
+	watched: Dictionary, sent: Variant, wanted: Variant, node_path: String, property: String
+) -> String:
+	var current: Variant = watched["value"]
+	var refused: String = _not_comparable(current, wanted, node_path, property)
+	if refused.is_empty():
+		refused = _cut_to_fit(sent, typeof(current), node_path, property)
+	if not refused.is_empty():
+		return refused
+	var rounded: String = GdhValues.inexact(sent, typeof(current))
+	if not rounded.is_empty():
+		return "%s.%s holds int: %s." % [node_path, property, rounded]
+	var declared: int = watched["declared"]
+	var never_held: bool = typeof(wanted) != TYPE_NIL and typeof(wanted) != TYPE_OBJECT
+	if declared == TYPE_OBJECT and never_held:
+		return (
+			(
+				"%s.%s is declared to hold an object and the value to wait for is %s, which it can"
+				+ " never hold: wait for null, or for the object's own value on a property of it."
+			)
+			% [node_path, property, GdhShapes.kind(wanted)]
+		)
+	return ""
+
+
+## What [param owner] declares of the property, [param declaration], says of [param wanted] when
+## no value of it is [param wanted], or "".
+func _outside_declared(owner: Object, declaration: Dictionary, wanted: Variant) -> String:
+	var shown: String = JSON.stringify(_values.serialize(wanted), "", false)
+	return GdhDeclared.outside(owner, declaration, wanted, shown)
 
 
 ## What a property wait is missing or was given wrongly, or "" when it can go ahead.

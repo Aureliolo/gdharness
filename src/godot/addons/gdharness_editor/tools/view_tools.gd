@@ -6,17 +6,11 @@ extends Node
 ## engine draws nothing at all. The editor's own 2D and 3D views are the one place it is drawn.
 
 const GdhRead = preload("../reading.gd")
-const GdhFileWalk = preload("../file_walk.gd")
 const GdhSceneFile = preload("../scene_file.gd")
+const GdhShownScene = preload("../shown_scene.gd")
 const GdhPictures = preload("../picture_saves.gd")
 const HEADLESS_DISPLAY: String = "headless"
-## Frames let pass once the scene is shown: the first lays the screen out, and the next run the
-## redraws its @tool scripts queued as they entered the tree.
-const SETTLING_FRAMES: int = 3
 
-## Whether a capture is under way, during which the editor turns other calls away, since one that
-## switched scenes between the open and the read would be what was captured.
-var capturing: bool = false
 var _editor_plugin: EditorPlugin = null
 ## The main screen the editor shows, as it last said, or "" before it has said.
 var _screen: String = ""
@@ -38,8 +32,56 @@ func _on_main_screen_changed(screen_name: String) -> void:
 ## server names. The editor is left showing the scene and the screen it showed before.
 func capture_editor_view(args: Dictionary) -> Dictionary:
 	var output_path: String = str(args.get("output_path", ""))
+	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
+	var unavailable: Dictionary = _capture_unavailable(output_path, scene_path)
+	if not unavailable.is_empty():
+		return unavailable
+	var view: String = str(args.get("view", ""))
+	var screen_before: String = _screen
+
+	var refusal: String = await GdhShownScene.show(scene_path, "capturing its view")
+	if not refusal.is_empty():
+		return { "ok": false, "error": refusal }
+	if view.is_empty():
+		view = "3d" if EditorInterface.get_edited_scene_root() is Node3D else "2d"
+	await _switch_view(view)
+	if not GdhShownScene.in_front(scene_path):
+		var kept_open: String = "" if await GdhShownScene.leave() else " It still holds it open."
+		_restore_screen(screen_before, view)
+		return {
+			"ok": false,
+			"error": "The editor did not keep %s in front.%s" % [scene_path, kept_open],
+		}
+	var viewport: SubViewport = (
+		EditorInterface.get_editor_viewport_3d(0)
+		if view == "3d"
+		else EditorInterface.get_editor_viewport_2d()
+	)
+	var image: Image = viewport.get_texture().get_image()
+	var unsaved: bool = GdhSceneFile.unsaved(scene_path)
+
+	var left: bool = await GdhShownScene.leave()
+	_restore_screen(screen_before, view)
+	if not left:
+		push_warning("gdharness: %s is still open after its capture" % scene_path)
+
+	return _save_capture(image, args, output_path, [scene_path, view], unsaved)
+
+
+## Sets the editor's main screen for [param view] and lets the screen draw.
+static func _switch_view(view: String) -> void:
+	EditorInterface.set_main_screen_editor("3D" if view == "3d" else "2D")
+	await GdhShownScene.settled()
+
+
+## The refusal when [param scene_path] does not load or no capture of it can be saved at
+## [param output_path], or an empty answer.
+static func _capture_unavailable(output_path: String, scene_path: String) -> Dictionary:
 	if output_path.is_empty():
 		return { "ok": false, "error": "output_path required" }
+	var unloaded: Dictionary = GdhShownScene.loads(scene_path, false)
+	if not unloaded.is_empty():
+		return unloaded
 	if DisplayServer.get_name() == HEADLESS_DISPLAY:
 		return {
 			"ok": false,
@@ -49,52 +91,26 @@ func capture_editor_view(args: Dictionary) -> Dictionary:
 				+ "editor, or a hidden one on Windows."
 			),
 		}
-	var scene_path: String = GdhSceneFile.res_path(str(args.get("scenePath", "")))
-	if not ResourceLoader.exists(scene_path, "PackedScene"):
-		return {
-			"ok": false,
-			"error":
-			GdhFileWalk.new().with_nearest_files("Scene not found: " + scene_path, scene_path),
-		}
-	var view: String = str(args.get("view", ""))
-	var shown: Node = EditorInterface.get_edited_scene_root()
-	var previous: String = shown.scene_file_path if shown != null else ""
-	var was_open: bool = EditorInterface.get_open_scenes().has(scene_path)
-	var screen_before: String = _screen
+	return {}
 
-	capturing = true
-	EditorInterface.open_scene_from_path(scene_path)
-	var root: Node = EditorInterface.get_edited_scene_root()
-	if root == null or root.scene_file_path != scene_path:
-		capturing = false
-		return { "ok": false, "error": "The editor did not open %s." % scene_path }
-	if view.is_empty():
-		view = "3d" if root is Node3D else "2d"
-	EditorInterface.set_main_screen_editor("3D" if view == "3d" else "2D")
-	for frame: int in SETTLING_FRAMES:
-		await get_tree().process_frame
-	var viewport: SubViewport = (
-		EditorInterface.get_editor_viewport_3d(0)
-		if view == "3d"
-		else EditorInterface.get_editor_viewport_2d()
-	)
-	var image: Image = viewport.get_texture().get_image()
-	var unsaved: bool = GdhSceneFile.unsaved(scene_path)
 
-	if not was_open:
-		var closing: Error = EditorInterface.close_scene()
-		if closing != OK:
-			push_warning(
-				"gdharness: closing %s after its capture: %s" % [scene_path, error_string(closing)]
-			)
-	if not previous.is_empty() and previous != scene_path:
-		EditorInterface.open_scene_from_path(previous)
+## Puts the screen [param screen_before] back, unless it is the one [param view] needs.
+static func _restore_screen(screen_before: String, view: String) -> void:
 	if not screen_before.is_empty() and screen_before != ("3D" if view == "3d" else "2D"):
 		EditorInterface.set_main_screen_editor(screen_before)
-	capturing = false
 
+
+## Scales [param image] to the width and height of [param args], saves it at [param output_path] and
+## answers where it went. [param shown] holds the scene path and the view that were captured, and
+## [param unsaved] whether the editor held edits to the scene.
+static func _save_capture(
+	image: Image, args: Dictionary, output_path: String, shown: Array[String], unsaved: bool
+) -> Dictionary:
 	if image == null or image.is_empty():
-		return { "ok": false, "error": "The editor's %s view held no picture." % view.to_upper() }
+		return {
+			"ok": false,
+			"error": "The editor's %s view held no picture." % shown[1].to_upper(),
+		}
 	var drawn: Vector2i = image.get_size()
 	var target: Vector2i = GdhPictures.scaled_to(
 		drawn, GdhRead.as_int(args.get("width", 0)), GdhRead.as_int(args.get("height", 0))
@@ -116,8 +132,8 @@ func capture_editor_view(args: Dictionary) -> Dictionary:
 	if answer.get("type", "") == "error":
 		return { "ok": false, "error": str(answer.get("message", "")) }
 	answer["ok"] = true
-	answer["scenePath"] = scene_path
-	answer["view"] = view
+	answer["scenePath"] = shown[0]
+	answer["view"] = shown[1]
 	if target != drawn:
 		answer["drawnAt"] = { "width": drawn.x, "height": drawn.y }
 	if unsaved:

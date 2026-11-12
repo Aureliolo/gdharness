@@ -274,81 +274,17 @@ static func _lay(
 		var refused: String = _lay(base, prefix, nodes, within)
 		if not refused.is_empty():
 			return refused
-	var ids: Array[int] = _unique_ids(state.get_path(), state.get_node_count())
+	var laying: GdhLaying = GdhLaying.new()
+	laying.state = state
+	laying.prefix = prefix
+	laying.nodes = nodes
+	laying.within = within
+	laying.loaded = loaded
+	laying.ids = _unique_ids(state.get_path(), state.get_node_count())
 	for index: int in state.get_node_count():
-		var path: String = _joined(prefix, str(state.get_node_path(index)))
-		var recovered: bool = false
-		if not nodes.has(path) and index > 0 and _overrides(state, index) and ids[index] >= 0:
-			# The engine finds an entry whose node was renamed or moved in the scene it comes from
-			# by the node's unique_id, and keeps the node's new name.
-			var parent: String = _joined(prefix, str(state.get_node_path(index, true)))
-			var found: String = _by_id(nodes, _owner_of(nodes, parent, prefix), ids[index])
-			recovered = not found.is_empty()
-			if recovered:
-				path = found
-		var fresh: bool = not nodes.has(path)
-		if fresh:
-			var instance: PackedScene = state.get_node_instance(index)
-			if instance != null:
-				if within.has(instance.resource_path):
-					return (
-						"%s instances %s, which holds it" % [within.back(), instance.resource_path]
-					)
-				var refused: String = _lay(
-					instance.get_state(), path, nodes, within + [instance.resource_path]
-				)
-				if not refused.is_empty():
-					return refused
-				if not nodes.has(path):
-					return "%s holds no nodes" % instance.resource_path
-				nodes[path]["instanceOf"] = instance.resource_path
-				nodes[path]["editableChildren"] = false
-			elif state.is_node_instance_placeholder(index):
-				nodes[path] = _made("InstancePlaceholder")
-				nodes[path]["instanceOf"] = state.get_node_instance_placeholder(index)
-				nodes[path]["placeholder"] = true
-			elif str(state.get_node_type(index)).is_empty():
-				# An entry for a node of an instance that no longer has it, which the engine skips
-				# too.
-				continue
-			else:
-				nodes[path] = _made(str(state.get_node_type(index)))
-				nodes[path]["madeHere"] = loaded != null
-			if ids[index] >= 0:
-				nodes[path]["uniqueId"] = ids[index]
-			# Laid at the root with no scene handed in is a scene the one being read inherits, and
-			# the deepest is laid first, so this is the file that makes the node.
-			if prefix == "." and loaded == null:
-				nodes[path]["inheritedFrom"] = state.get_path()
-		# The name is the state's even for an entry laid already, since an inherited scene names its
-		# root itself. A root instanced inside another scene is renamed by that scene once laid.
-		if not recovered:
-			nodes[path]["name"] = str(state.get_node_name(index))
-		if fresh:
-			# The root of what is laid here is placed by whoever instanced it.
-			if path != prefix:
-				_place(
-					nodes,
-					_joined(prefix, str(state.get_node_path(index, true))),
-					path,
-					state.get_node_index(index)
-				)
-		# Every file on the way puts the node in its own groups: the scene making it, and each scene
-		# instancing or inheriting that one.
-		var grouped: Array[String] = nodes[path]["groups"]
-		for group: StringName in state.get_node_groups(index):
-			if not grouped.has(str(group)):
-				grouped.append(str(group))
-		var held: Dictionary = nodes[path]["properties"]
-		# What the file being read sets, kept apart for a node another file makes, whose values read
-		# the same whether this scene changed them or that one gave them.
-		var laid: Dictionary = nodes[path]
-		var set_here: Array = laid.get_or_add("setHere", [])
-		for property: int in state.get_node_property_count(index):
-			var named: String = str(state.get_node_property_name(index, property))
-			held[named] = state.get_node_property_value(index, property)
-			if loaded != null and not set_here.has(named):
-				set_here.append(named)
+		var refused: String = _lay_node(laying, index)
+		if not refused.is_empty():
+			return refused
 	# Only the scene being read and the scenes it inherits share its root, the owner whose editable
 	# instances a write here sets. A file instanced below makes its own owner's editable.
 	if prefix == ".":
@@ -358,6 +294,120 @@ static func _lay(
 			if marked.has("editableChildren"):
 				marked["editableChildren"] = true
 	return ""
+
+
+## Lays node [param index] of the state in [param laying], answering a refusal, or "".
+static func _lay_node(laying: GdhLaying, index: int) -> String:
+	var state: SceneState = laying.state
+	var nodes: Dictionary = laying.nodes
+	var prefix: String = laying.prefix
+	var path: String = _joined(prefix, str(state.get_node_path(index)))
+	var found: String = _recovered_path(laying, index, path)
+	var recovered: bool = not found.is_empty()
+	if recovered:
+		path = found
+	var fresh: bool = not nodes.has(path)
+	if fresh:
+		if _vanished(state, index):
+			return ""
+		var refused: String = _make_node(laying, index, path)
+		if not refused.is_empty():
+			return refused
+	# The name is the state's even for an entry laid already, since an inherited scene names its
+	# root itself. A root instanced inside another scene is renamed by that scene once laid.
+	if not recovered:
+		nodes[path]["name"] = str(state.get_node_name(index))
+	if fresh:
+		# The root of what is laid here is placed by whoever instanced it.
+		if path != prefix:
+			_place(
+				nodes,
+				_joined(prefix, str(state.get_node_path(index, true))),
+				path,
+				state.get_node_index(index)
+			)
+	_add_groups_and_properties(laying, index, path)
+	return ""
+
+
+## The path node [param index] already has under another name, where the scene it comes from moved
+## or renamed it, or "" when it has none.
+static func _recovered_path(laying: GdhLaying, index: int, path: String) -> String:
+	var nodes: Dictionary = laying.nodes
+	if nodes.has(path) or index == 0 or laying.ids[index] < 0:
+		return ""
+	if not _overrides(laying.state, index):
+		return ""
+	# The engine finds an entry whose node moved or took a new name in the scene it comes from
+	# by the node's unique_id, and keeps the node's new name.
+	var parent: String = _joined(laying.prefix, str(laying.state.get_node_path(index, true)))
+	return _by_id(nodes, _owner_of(nodes, parent, laying.prefix), laying.ids[index])
+
+
+## Whether node [param index] is an entry for a node of an instance that no longer has it, which the
+## engine skips too.
+static func _vanished(state: SceneState, index: int) -> bool:
+	if state.get_node_instance(index) != null or state.is_node_instance_placeholder(index):
+		return false
+	return str(state.get_node_type(index)).is_empty()
+
+
+## Makes the entry at [param path] for node [param index], laying the scene it instances first.
+## Answers a refusal, or "".
+static func _make_node(laying: GdhLaying, index: int, path: String) -> String:
+	var state: SceneState = laying.state
+	var nodes: Dictionary = laying.nodes
+	var instance: PackedScene = state.get_node_instance(index)
+	if instance != null:
+		if laying.within.has(instance.resource_path):
+			return (
+				"%s instances %s, which holds it" % [laying.within.back(), instance.resource_path]
+			)
+		var refused: String = _lay(
+			instance.get_state(), path, nodes, laying.within + [instance.resource_path]
+		)
+		if not refused.is_empty():
+			return refused
+		if not nodes.has(path):
+			return "%s holds no nodes" % instance.resource_path
+		nodes[path]["instanceOf"] = instance.resource_path
+		nodes[path]["editableChildren"] = false
+	elif state.is_node_instance_placeholder(index):
+		nodes[path] = _made("InstancePlaceholder")
+		nodes[path]["instanceOf"] = state.get_node_instance_placeholder(index)
+		nodes[path]["placeholder"] = true
+	else:
+		nodes[path] = _made(str(state.get_node_type(index)))
+		nodes[path]["madeHere"] = laying.loaded != null
+	if laying.ids[index] >= 0:
+		nodes[path]["uniqueId"] = laying.ids[index]
+	# Laid at the root with no scene handed in is a scene the one being read inherits, and
+	# the deepest is laid first, so this is the file that makes the node.
+	if laying.prefix == "." and laying.loaded == null:
+		nodes[path]["inheritedFrom"] = state.get_path()
+	return ""
+
+
+## Adds the groups and property values node [param index] holds to the entry at [param path].
+static func _add_groups_and_properties(laying: GdhLaying, index: int, path: String) -> void:
+	var state: SceneState = laying.state
+	var nodes: Dictionary = laying.nodes
+	# Every file on the way puts the node in its own groups: the scene making it, and each scene
+	# instancing or inheriting that one.
+	var grouped: Array[String] = nodes[path]["groups"]
+	for group: StringName in state.get_node_groups(index):
+		if not grouped.has(str(group)):
+			grouped.append(str(group))
+	var held: Dictionary = nodes[path]["properties"]
+	# What the file being read sets, kept apart for a node another file makes, whose values read
+	# the same whether this scene changed them or that one gave them.
+	var laid: Dictionary = nodes[path]
+	var set_here: Array = laid.get_or_add("setHere", [])
+	for property: int in state.get_node_property_count(index):
+		var named: String = str(state.get_node_property_name(index, property))
+		held[named] = state.get_node_property_value(index, property)
+		if laying.loaded != null and not set_here.has(named):
+			set_here.append(named)
 
 
 ## The paths of the instances [param scene_path] gives editable children, from its root. SceneState
@@ -489,6 +539,29 @@ static func _entry(
 		var script: Script = attached
 		if not str(script.get_global_name()).is_empty():
 			data["scriptClass"] = str(script.get_global_name())
+	_add_scene_links(data, node, path)
+	var groups: Array[String] = node["groups"]
+	if not groups.is_empty():
+		var sorted: Array[String] = groups.duplicate()
+		sorted.sort()
+		data["groups"] = sorted
+	if include_properties:
+		_add_stored_properties(data, node, path, include_defaults)
+	var below: Array[String] = node["children"]
+	# Counted rather than left as an empty list, which reads as a node with no children.
+	if depth >= 0 and current_depth >= depth:
+		if not below.is_empty():
+			data["childrenNotListed"] = below.size()
+		return data
+	for child: String in below:
+		children.append(
+			_entry(nodes, child, include_properties, include_defaults, depth, current_depth + 1)
+		)
+	return data
+
+
+## Adds to [param data] the scene the node at [param path] instances and the scene it inherits.
+static func _add_scene_links(data: Dictionary, node: Dictionary, path: String) -> void:
 	# The root's file is the scene being read, so only another node's names a second scene.
 	if path != "." and node.has("instanceOf"):
 		data["instanceOf"] = node["instanceOf"]
@@ -502,40 +575,30 @@ static func _entry(
 		data["inherits"] = node["inherits"]
 	elif node.has("inheritedFrom"):
 		data["inheritedFrom"] = node["inheritedFrom"]
-	var groups: Array[String] = node["groups"]
-	if not groups.is_empty():
-		var sorted: Array[String] = groups.duplicate()
-		sorted.sort()
-		data["groups"] = sorted
-	if include_properties:
-		var given: Dictionary = node["properties"]
-		var stored: Dictionary = _stored(str(node["type"]), given, include_defaults)
-		data["properties"] = stored["properties"]
-		if stored["left_out"] > 0:
-			data["defaultsLeftOut"] = stored["left_out"]
-		var cells: int = _cell_count(str(node["type"]), given)
-		if cells >= 0:
-			data["cellCount"] = cells
-			data["cellsListedBy"] = (
-				"scene_node get with nodePath %s, which lists them as set_tilemap_cells takes them"
-				% path
-			)
-		if not node.get("madeHere", false):
-			var kept: Array = node.get("setHere", [])
-			var set_here: Array = kept.duplicate()
-			set_here.sort()
-			data["setHere"] = set_here
-	var below: Array[String] = node["children"]
-	# Counted rather than left as an empty list, which reads as a node with no children.
-	if depth >= 0 and current_depth >= depth:
-		if not below.is_empty():
-			data["childrenNotListed"] = below.size()
-		return data
-	for child: String in below:
-		children.append(
-			_entry(nodes, child, include_properties, include_defaults, depth, current_depth + 1)
+
+
+## Adds to [param data] the properties of the node at [param path], with the cell count of a tile
+## node and the names of the properties the file sets.
+static func _add_stored_properties(
+	data: Dictionary, node: Dictionary, path: String, include_defaults: bool
+) -> void:
+	var given: Dictionary = node["properties"]
+	var stored: Dictionary = _stored(str(node["type"]), given, include_defaults)
+	data["properties"] = stored["properties"]
+	if stored["left_out"] > 0:
+		data["defaultsLeftOut"] = stored["left_out"]
+	var cells: int = _cell_count(str(node["type"]), given)
+	if cells >= 0:
+		data["cellCount"] = cells
+		data["cellsListedBy"] = (
+			"scene_node get with nodePath %s, which lists them as set_tilemap_cells takes them"
+			% path
 		)
-	return data
+	if not node.get("madeHere", false):
+		var kept: Array = node.get("setHere", [])
+		var set_here: Array = kept.duplicate()
+		set_here.sort()
+		data["setHere"] = set_here
 
 
 ## How many cells a TileMapLayer or TileMap of [param type] holds under the values [param given], or
@@ -681,61 +744,16 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 		}
 
 	var script: Script = loaded.get_script()
-	var scripted: Dictionary = {}
-	if script != null:
-		for declared: Dictionary in script.get_script_property_list():
-			scripted[str(declared.get("name", ""))] = true
-	var serialiser: GdhSerialisation = GdhSerialisation.new()
-	serialiser.with_defaults = include_defaults
-	var properties: Dictionary = {}
-	# A headless engine runs a script that is not a tool as the file loads, so what its _init and
-	# setters gave other properties read as values the file sets. The file's own lines say which it
-	# does. The editor runs no such script.
-	var untooled: bool = script != null and not script.is_tool() and not Engine.is_editor_hint()
-	var from_file: bool = (
-		untooled and file.ends_with(".tres") and not GdhShapes.STORED_APART.has(loaded.get_class())
-	)
-	var set_in_file: Dictionary = (
-		_names_set_in(
-			FileAccess.get_file_as_string(file), res_path.trim_prefix(file).trim_prefix("::")
-		)
-		if from_file
-		else {}
-	)
-	# A Curve's points are read off one with none, since the engine has no default for point_0.
-	var fresh: Object = (
-		ClassDB.instantiate(loaded.get_class())
-		if GdhShapes.STORED_APART.has(loaded.get_class())
-		else null
-	)
-	for p: Dictionary in GdhShapes.read_properties(loaded):
-		var property: String = str(p.get("name", ""))
-		if property.is_empty() or property == "script":
-			continue
-		var value: Variant = loaded.get(property)
-		if not include_defaults:
-			var default: Variant = (
-				script.get_property_default_value(property)
-				if scripted.has(property)
-				else (
-					fresh.get(property)
-					if fresh != null
-					else ClassDB.class_get_property_default_value(loaded.get_class(), property)
-				)
-			)
-			if GdhSame.same(value, default):
-				continue
-			if from_file and not set_in_file.has(property):
-				continue
-		properties[property] = serialiser.serialize_value(value)
+	var properties: Dictionary = _read_properties(loaded, script, file, res_path, include_defaults)
 	var answer: Dictionary = {
 		"ok": true,
 		"resourcePath": res_path,
 		"resourceType": loaded.get_class(),
 		"properties": properties,
 	}
-	# A line the engine does not load, such as a shader parameter whose uniform was renamed, was
-	# left out of the answer without a word, and the next save drops it.
+	# A line the engine does not load, such as a shader parameter whose uniform has another name
+	# now,
+	# was left out of the answer without a word, and the next save drops it.
 	var unloaded: Array[String] = _not_loaded(loaded, file, res_path)
 	if not unloaded.is_empty():
 		answer["notLoaded"] = unloaded
@@ -756,6 +774,77 @@ static func resource(res_path: String, include_defaults: bool) -> Dictionary:
 		if not errors.is_empty():
 			answer["compileErrors"] = errors
 	return answer
+
+
+## The properties of [param loaded], serialised, keeping only what differs from the default unless
+## [param include_defaults] is set. [param script] is its script, or null.
+static func _read_properties(
+	loaded: Resource, script: Script, file: String, res_path: String, include_defaults: bool
+) -> Dictionary:
+	var scripted: Dictionary = {}
+	if script != null:
+		for declared: Dictionary in script.get_script_property_list():
+			scripted[str(declared.get("name", ""))] = true
+	var serialiser: GdhSerialisation = GdhSerialisation.new()
+	serialiser.with_defaults = include_defaults
+	var properties: Dictionary = {}
+	var from_file: bool = _read_from_file_lines(loaded, script, file)
+	var set_in_file: Dictionary = (
+		_names_set_in(
+			FileAccess.get_file_as_string(file), res_path.trim_prefix(file).trim_prefix("::")
+		)
+		if from_file
+		else {}
+	)
+	# A Curve's points are read off one with none, since the engine has no default for point_0.
+	var fresh: Object = (
+		ClassDB.instantiate(loaded.get_class())
+		if GdhShapes.STORED_APART.has(loaded.get_class())
+		else null
+	)
+	for p: Dictionary in GdhShapes.read_properties(loaded):
+		var property: String = str(p.get("name", ""))
+		if property.is_empty() or property == "script":
+			continue
+		var value: Variant = loaded.get(property)
+		if not include_defaults:
+			var default: Variant = _default_of(
+				loaded,
+				script,
+				scripted.has(property),
+				fresh,
+				property,
+			)
+			if GdhSame.same(value, default):
+				continue
+			if from_file and not set_in_file.has(property):
+				continue
+		properties[property] = serialiser.serialize_value(value)
+	return properties
+
+
+## Whether the properties of [param loaded] are read from the lines of [param file], not from the
+## loaded values.
+static func _read_from_file_lines(loaded: Resource, script: Script, file: String) -> bool:
+	# A headless engine runs a script that is not a tool as the file loads, so what its _init and
+	# setters gave other properties read as values the file sets. The file's own lines say which it
+	# does. The editor runs no such script.
+	var untooled: bool = script != null and not script.is_tool() and not Engine.is_editor_hint()
+	return (
+		untooled and file.ends_with(".tres") and not GdhShapes.STORED_APART.has(loaded.get_class())
+	)
+
+
+## The default of [param property] on [param loaded]: its script's when [param scripted], else
+## [param fresh]'s when there is one, else the class's.
+static func _default_of(
+	loaded: Resource, script: Script, scripted: bool, fresh: Object, property: String
+) -> Variant:
+	if scripted:
+		return script.get_property_default_value(property)
+	if fresh != null:
+		return fresh.get(property)
+	return ClassDB.class_get_property_default_value(loaded.get_class(), property)
 
 
 ## The errors the engine raises compiling the shader at [param path], as {line, message} in order.
@@ -925,6 +1014,16 @@ static func _kept_in(value: Variant, file: String, id: String, seen: Dictionary)
 				if found != null:
 					return found
 	return null
+
+
+## What one laying of a scene state into its nodes holds, shared by the helpers laying each node.
+class GdhLaying:
+	var state: SceneState
+	var prefix: String = ""
+	var nodes: Dictionary = {}
+	var within: Array = []
+	var loaded: PackedScene
+	var ids: Array[int] = []
 
 
 ## Every shader error the engine raises while it is attached, in order.

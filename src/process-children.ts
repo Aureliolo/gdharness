@@ -176,6 +176,21 @@ export async function processTree(): Promise<ProcessTree | undefined> {
 
 let lastListingFailure: string | undefined;
 
+/** The clause for how a listing's process ended: killed at the budget, by a signal, with a code, or none of these. */
+function howTheListingEnded(failed: {
+  readonly killed?: boolean;
+  readonly signal?: string | null;
+  readonly code?: string | number | null;
+}): string {
+  if (failed.killed === true) {
+    return `was killed after the ${ASK_TIMEOUT_MS}ms budget${failed.signal ? ` (${failed.signal})` : ''}`;
+  }
+  if (failed.signal) {
+    return `was ended by ${failed.signal}`;
+  }
+  return failed.code !== undefined && failed.code !== null ? `exited with ${failed.code}` : 'failed';
+}
+
 /**
  * What stopped a listing, as one clause naming what was asked and how it failed: not answered in
  * time, the helper gone, refused, killed at the budget, ended by a signal, or exited with a code and
@@ -197,14 +212,7 @@ export function listingFailure(error: unknown): string {
     code?: string | number | null;
     stderr?: unknown;
   };
-  const how =
-    failed.killed === true
-      ? `was killed after the ${ASK_TIMEOUT_MS}ms budget${failed.signal ? ` (${failed.signal})` : ''}`
-      : failed.signal
-        ? `was ended by ${failed.signal}`
-        : failed.code !== undefined && failed.code !== null
-          ? `exited with ${failed.code}`
-          : 'failed';
+  const how = howTheListingEnded(failed);
   const said = typeof failed.stderr === 'string' ? failed.stderr.trim() : '';
   const asked = basename((failed.cmd ?? '').split(' ')[0] ?? '') || 'the listing';
   return `${asked} ${how}${said === '' ? ', with nothing on stderr' : `, and stderr held: ${said.slice(0, 400)}`}`;
@@ -471,35 +479,34 @@ export function readCommandLine(command: string): CommandLineRead {
   const words = separator === -1 ? all : all.slice(0, separator);
   const executable = words[0] === undefined ? '' : basename(words[0].replaceAll('\\', '/'));
   const at = words.indexOf('--path');
-  let projectPath: string | null = null;
-  if (at !== -1 && at + 1 < words.length) {
-    const taken: string[] = [];
-    for (const word of words.slice(at + 1)) {
-      if (
-        taken.length > 0 &&
-        (word.startsWith('-') || /^[a-z]+:\/\//.test(word) || RESOURCE_FILE.test(word))
-      ) {
-        break;
-      }
-      taken.push(word);
-      // A line with a quote is Windows's own, where the directory is the one word the quotes or
-      // the next space ended. Anywhere else the words are an unquoted list and a directory with
-      // spaces in it runs on to the next argument-shaped word.
-      if (command.includes('"')) {
-        break;
-      }
-    }
-    const named = taken.join(' ').replaceAll('%20', ' ');
-    // A relative directory is relative to the folder the process was started in, which no command
-    // line holds, so it names no project that can be told from this process's own folder.
-    projectPath = /^(?:[\\/]|[A-Za-z]:[\\/])/.test(named) ? named : null;
-  }
+  const projectPath = at !== -1 && at + 1 < words.length ? pathAfter(words.slice(at + 1), command) : null;
   return {
     executable,
     projectPath,
     editor: words.some((word) => word === '-e' || word === '--editor'),
     oneShot: words.find((word) => ONE_SHOT_OPTIONS.includes(word)) ?? null,
   };
+}
+
+/** The absolute directory the [param words] after `--path` name in [param command], or null for a relative one. */
+function pathAfter(words: readonly string[], command: string): string | null {
+  const taken: string[] = [];
+  for (const word of words) {
+    if (taken.length > 0 && (word.startsWith('-') || /^[a-z]+:\/\//.test(word) || RESOURCE_FILE.test(word))) {
+      break;
+    }
+    taken.push(word);
+    // A line with a quote is Windows's own, where the directory is the one word the quotes or
+    // the next space ended. Anywhere else the words are an unquoted list and a directory with
+    // spaces in it runs on to the next argument-shaped word.
+    if (command.includes('"')) {
+      break;
+    }
+  }
+  const named = taken.join(' ').replaceAll('%20', ' ');
+  // A relative directory is relative to the folder the process was started in, which no command
+  // line holds, so it names no project that can be told from this process's own folder.
+  return /^(?:[\\/]|[A-Za-z]:[\\/])/.test(named) ? named : null;
 }
 
 /**

@@ -1,7 +1,8 @@
-# gdharness is TypeScript, and nothing here is packaged. This file holds the one Python tool the
-# checks run, yamllint. uv.lock pins every package it pulls in with its hashes, and
-# `uv sync --locked` refuses anything that does not match. The interpreter is pinned here too, and this is the only place
-# it is written: uv installs exactly this one, in CI and on a contributor's machine alike.
+# gdharness is TypeScript, and nothing here is packaged. This file holds the two Python tools the
+# checks run: yamllint, and lizard for the GDScript complexity ceiling. uv.lock pins every package
+# they pull in with its hashes, and `uv sync --locked` refuses anything that does not match. The
+# interpreter is pinned here too, and this is the only place it is written: uv installs exactly this
+# one, in CI and on a contributor's machine alike.
 [project]
 name = "gdharness-checks"
 version = "0"
@@ -9,7 +10,7 @@ requires-python = "==3.15.2"
 dependencies = []
 
 [dependency-groups]
-dev = ["yamllint==1.38.0"]
+dev = ["lizard==1.26.0", "yamllint==1.38.0"]
 
 [tool.uv]
 package = false

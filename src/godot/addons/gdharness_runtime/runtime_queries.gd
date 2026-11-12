@@ -93,93 +93,47 @@ func get_tree(params: Dictionary) -> Dictionary:
 ## than with every line it is holding in case. How many matches that left out is counted and said,
 ## because "none" and "four, all hidden" are different answers and used to read the same.
 func find_nodes(params: Dictionary) -> Dictionary:
-	var root_path: String = str(params.get("root", "/root"))
-	var wanted: Dictionary[String, String] = {}
-	for filter: String in FILTERS:
-		wanted[filter] = str(params.get(filter, ""))
-	var wanted_property: String = str(params.get("property", ""))
-	var include_hidden: bool = GdhRead.as_bool(params.get("include_hidden", true), true)
-	var limit: int = GdhRead.as_int(params.get("limit", FIND_LIMIT), FIND_LIMIT)
-	if limit < 1 or limit > LIMIT_CEILING:
-		return {
-			"type": "error",
-			"message": "limit is from 1 to %d, and %d was asked for" % [LIMIT_CEILING, limit],
-		}
+	var find: GdhFind = GdhFind.new(params)
+	var refused: Dictionary = _find_refusal(find)
+	if refused.has("message"):
+		return refused
 
-	if not _anything_asked(wanted):
-		return {
-			"type": "error", "message": "find_nodes needs at least one of " + ", ".join(FILTERS),
-		}
-	if not wanted["script"].is_empty() and not wanted["script"].begins_with("res://"):
-		wanted["script"] = "res://" + wanted["script"]
-
-	# Split once here rather than for each node the walk passes.
-	var names: Array[String] = GdhSays.split_at_bars(wanted["name"])
-	if not wanted["name"].is_empty() and names.is_empty():
-		var bars_only: String = (
-			'name "%s" is only bars, so it names no node. Write the names between them'
-		)
-		return { "type": "error", "message": bars_only % wanted["name"] }
-
-	var reached: Dictionary = GdhValues.node_at(_host.get_tree().root, root_path)
+	var reached: Dictionary = GdhValues.node_at(_host.get_tree().root, find.root_path)
 	if reached.has("message"):
 		return reached
 	var root: Node = reached["node"]
+	_walk_find(root, find)
+	return _find_answer(find)
 
-	var found: Array[Dictionary] = []
-	var found_nodes: Array[Node] = []
+
+## Why the arguments of a find cannot be answered, or an empty dictionary when they can.
+func _find_refusal(find: GdhFind) -> Dictionary:
+	if find.limit < 1 or find.limit > LIMIT_CEILING:
+		return {
+			"type": "error",
+			"message": "limit is from 1 to %d, and %d was asked for" % [LIMIT_CEILING, find.limit],
+		}
+
+	if not _anything_asked(find.wanted):
+		return {
+			"type": "error", "message": "find_nodes needs at least one of " + ", ".join(FILTERS),
+		}
+	if not find.wanted["name"].is_empty() and find.names.is_empty():
+		var bars_only: String = (
+			'name "%s" is only bars, so it names no node. Write the names between them'
+		)
+		return { "type": "error", "message": bars_only % find.wanted["name"] }
+	return {}
+
+
+## Walks the tree under [param root] breadth-first, recording each node [param find] matches, and
+## the near misses its answer says something about, into [param find].
+func _walk_find(root: Node, find: GdhFind) -> void:
 	var pending: Array[Node] = [root]
-	var truncated: bool = false
-	# Counted while the tree is already being walked, for the answer below: how many nodes this
-	# find would have matched if the name had been read the way it was probably meant.
-	var plain_names: Array[String] = []
-	for named: String in names:
-		if GdhSays.is_plain(named):
-			plain_names.append(named)
-	var nearly: int = 0
-	# The same for the words: a glob is matched against the whole text, and one written as a prefix
-	# by habit, "Taken together*", missed the label whose sentence those words are in the middle of.
-	# Nothing found then read as the words not being on screen, which is the wrong conclusion when
-	# checking that a change to the text landed.
-	var widened_says: String = GdhSays.widened(wanted["says"])
-	var widened: Dictionary[String, String] = {}
-	for filter: String in wanted:
-		widened[filter] = widened_says if filter == "says" else wanted[filter]
-	var nearly_said: int = 0
-	# The near misses the same find would leave out as hidden, kept apart: the note says what a
-	# query would find, and counting these in it named a query that, asked, found none of them.
-	var nearly_hidden: int = 0
-	var nearly_said_hidden: int = 0
-	var hidden: int = 0
-	var out_of_view: int = 0
 	while not pending.is_empty():
 		var node: Node = pending.pop_front()
-		var rest: bool = _matches_apart_from_name(node, wanted)
-		if rest and _named(node, names):
-			if not include_hidden and not shown(node):
-				hidden += 1
-			elif not include_hidden and not GdhScreen.in_view(node):
-				out_of_view += 1
-			elif found.size() >= limit:
-				truncated = true
-				break
-			else:
-				found.append(_found(node, wanted_property))
-				found_nodes.append(node)
-		elif rest and _contains_any(str(node.name), plain_names):
-			if include_hidden or readable(node):
-				nearly += 1
-			else:
-				nearly_hidden += 1
-		elif (
-			not widened_says.is_empty()
-			and _named(node, names)
-			and _matches_apart_from_name(node, widened)
-		):
-			if include_hidden or readable(node):
-				nearly_said += 1
-			else:
-				nearly_said_hidden += 1
+		if _tally(node, find):
+			break
 		# Internal children included, which they were not. A ConfirmationDialog builds its Yes and
 		# its No as internal nodes, and a ScrollContainer its bars, so a find over a screen for
 		# every Button came back without the two buttons the player is being asked to press:
@@ -190,121 +144,179 @@ func find_nodes(params: Dictionary) -> Dictionary:
 		for index: int in range(children.size() - 1, -1, -1):
 			pending.push_front(children[index])
 
+
+## Counts [param node] into [param find] as a match, a near miss or neither. True when the limit
+## is reached and the walk is over.
+func _tally(node: Node, find: GdhFind) -> bool:
+	var rest: bool = _matches_apart_from_name(node, find.wanted)
+	if rest and _named(node, find.names):
+		return _tally_match(node, find)
+	if rest and _contains_any(str(node.name), find.plain_names):
+		if find.include_hidden or readable(node):
+			find.nearly += 1
+		else:
+			find.nearly_hidden += 1
+	elif (
+		not find.widened_says.is_empty()
+		and _named(node, find.names)
+		and _matches_apart_from_name(node, find.widened)
+	):
+		if find.include_hidden or readable(node):
+			find.nearly_said += 1
+		else:
+			find.nearly_said_hidden += 1
+	return false
+
+
+## Records [param node], which matches every filter, as found or as left out, and answers whether
+## the limit stopped the walk.
+func _tally_match(node: Node, find: GdhFind) -> bool:
+	if not find.include_hidden and not shown(node):
+		find.hidden += 1
+	elif not find.include_hidden and not GdhScreen.in_view(node):
+		find.out_of_view += 1
+	elif find.found.size() >= find.limit:
+		find.truncated = true
+		return true
+	else:
+		find.found.append(_found(node, find.wanted_property))
+		find.found_nodes.append(node)
+	return false
+
+
+## The answer to a find that has walked: the nodes, and a note on anything a reader could
+## otherwise misread.
+func _find_answer(find: GdhFind) -> Dictionary:
 	var answer: Dictionary = {
-		"type": "nodes", "count": found.size(), "truncated": truncated, "nodes": found,
+		"type": "nodes",
+		"count": find.found.size(),
+		"truncated": find.truncated,
+		"nodes": find.found,
 	}
 	var notes: Array[String] = []
+	for line: String in [_copies_note(find, answer), _near_name_note(find), _near_says_note(find)]:
+		if not line.is_empty():
+			notes.append(line)
+	notes.append_array(_left_out_notes(find, answer))
+	if not notes.is_empty():
+		answer["note"] = ". ".join(notes) + "."
+	return answer
+
+
+## Marks each match drawn under another match saying the same words, with `copyOf`, and answers
+## the note on it, or "" when there is none. [param answer] gets `distinct` then.
+func _copies_note(find: GdhFind, answer: Dictionary) -> String:
 	# Each still listed, since a caller may mean one of them, and marked, so one sign drawn as a
 	# label and its outline copies is not read as four signs. The outermost match it copies, since a
 	# find under one of the copies has left the label they all copy outside it.
+	var found: Array[Dictionary] = find.found
 	var copies: int = 0
-	for index: int in range(found_nodes.size()):
+	for index: int in range(find.found_nodes.size()):
 		var at: int = -1
-		for original: Node in GdhWords.copied_through(found_nodes[index]):
-			var matched: int = found_nodes.find(original)
+		for original: Node in GdhWords.copied_through(find.found_nodes[index]):
+			var matched: int = find.found_nodes.find(original)
 			if matched != -1:
 				at = matched
 		if at != -1:
 			found[index]["copyOf"] = found[at]["path"]
 			copies += 1
-	if copies > 0:
-		answer["distinct"] = found.size() - copies
+	if copies == 0:
+		return ""
+	answer["distinct"] = found.size() - copies
+	return (
 		(
-			notes
-			. append(
-				(
-					(
-						"%d of the %d matches %s drawn under a match saying the same words, as an "
-						+ "outline or a glow is drawn, and %s it under copyOf: %d distinct"
-					)
-					% [
-						copies,
-						found.size(),
-						"is a copy" if copies == 1 else "are copies",
-						"names" if copies == 1 else "name",
-						found.size() - copies,
-					]
-				)
-			)
+			"%d of the %d matches %s drawn under a match saying the same words, as an "
+			+ "outline or a glow is drawn, and %s it under copyOf: %d distinct"
 		)
+		% [
+			copies,
+			found.size(),
+			"is a copy" if copies == 1 else "are copies",
+			"names" if copies == 1 else "name",
+			found.size() - copies,
+		]
+	)
+
+
+## The note on a find that matched nothing but where a name read as a glob would have matched, or
+## "" when there is none.
+func _near_name_note(find: GdhFind) -> String:
 	# Nothing found is the one answer that cannot be told apart from having asked the wrong
 	# question, and a name written without a wildcard is the way an agent writes "contains".
 	# Said only when it changes the answer, so a genuine nothing stays a plain nothing.
-	if found.is_empty() and nearly + nearly_hidden > 0:
-		var named_near: int = nearly if nearly > 0 else nearly_hidden
-		var holding: String = "names contain" if named_near > 1 else "name contains"
-		var near_words: Array[String] = []
-		for named: String in plain_names:
-			near_words.append('"%s"' % named)
-		var opened: Array[String] = []
-		for named: String in names:
-			opened.append("*%s*" % named if GdhSays.is_plain(named) else named)
+	if not find.found.is_empty() or find.nearly + find.nearly_hidden == 0:
+		return ""
+	var named_near: int = find.nearly if find.nearly > 0 else find.nearly_hidden
+	var holding: String = "names contain" if named_near > 1 else "name contains"
+	var near_words: Array[String] = []
+	for named: String in find.plain_names:
+		near_words.append('"%s"' % named)
+	var opened: Array[String] = []
+	for named: String in find.names:
+		opened.append("*%s*" % named if GdhSays.is_plain(named) else named)
+	return (
 		(
-			notes
-			. append(
-				(
-					(
-						"name is matched as a glob against the whole name. %d %snode %s %s, which "
-						+ '"%s"%s would find'
-					)
-					% [
-						named_near,
-						"" if nearly > 0 else "hidden or out-of-view ",
-						holding,
-						" or ".join(PackedStringArray(near_words)),
-						GdhSays.joined_at_bars(opened),
-						"" if nearly > 0 else " with includeHidden true",
-					]
-				)
-			)
+			"name is matched as a glob against the whole name. %d %snode %s %s, which "
+			+ '"%s"%s would find'
 		)
-	if found.is_empty() and nearly_said + nearly_said_hidden > 0:
-		var said_near: int = nearly_said if nearly_said > 0 else nearly_said_hidden
+		% [
+			named_near,
+			"" if find.nearly > 0 else "hidden or out-of-view ",
+			holding,
+			" or ".join(PackedStringArray(near_words)),
+			GdhSays.joined_at_bars(opened),
+			"" if find.nearly > 0 else " with includeHidden true",
+		]
+	)
+
+
+## The note on a find that matched nothing but where its words widened to a glob would have
+## matched, or "" when there is none.
+func _near_says_note(find: GdhFind) -> String:
+	if not find.found.is_empty() or find.nearly_said + find.nearly_said_hidden == 0:
+		return ""
+	var said_near: int = find.nearly_said if find.nearly_said > 0 else find.nearly_said_hidden
+	return (
 		(
-			notes
-			. append(
-				(
-					(
-						"says with a wildcard is matched as a glob against a node\'s whole text. "
-						+ '"%s"%s would find %d %snode%s'
-					)
-					% [
-						widened_says,
-						"" if nearly_said > 0 else " with includeHidden true",
-						said_near,
-						"" if nearly_said > 0 else "hidden or out-of-view ",
-						"" if said_near == 1 else "s",
-					]
-				)
-			)
+			"says with a wildcard is matched as a glob against a node\'s whole text. "
+			+ '"%s"%s would find %d %snode%s'
 		)
+		% [
+			find.widened_says,
+			"" if find.nearly_said > 0 else " with includeHidden true",
+			said_near,
+			"" if find.nearly_said > 0 else "hidden or out-of-view ",
+			"" if said_near == 1 else "s",
+		]
+	)
+
+
+## The notes on matches the filter took out, which also put `hidden` and `out_of_view` in
+## [param answer].
+func _left_out_notes(find: GdhFind, answer: Dictionary) -> Array[String]:
+	var notes: Array[String] = []
 	# How many the filter took out, so a short answer is not read as a small screen. Left out
 	# entirely when nothing was hidden, which keeps a plain answer plain.
-	if hidden > 0:
-		answer["hidden"] = hidden
+	if find.hidden > 0:
+		answer["hidden"] = find.hidden
 		notes.append(
 			(
 				"%d matching node%s hidden and left out. includeHidden true answers with them too"
-				% [hidden, "" if hidden == 1 else "s"]
+				% [find.hidden, "" if find.hidden == 1 else "s"]
 			)
 		)
-	if out_of_view > 0:
-		answer["out_of_view"] = out_of_view
-		(
-			notes
-			. append(
+	if find.out_of_view > 0:
+		answer["out_of_view"] = find.out_of_view
+		notes.append(
+			(
 				(
-					(
-						"%d matching node%s drawn outside the viewport or scrolled out of a "
-						+ "ScrollContainer and left out. includeHidden true answers with them too"
-					)
-					% [out_of_view, "" if out_of_view == 1 else "s"]
+					"%d matching node%s drawn outside the viewport or scrolled out of a "
+					+ "ScrollContainer and left out. includeHidden true answers with them too"
 				)
+				% [find.out_of_view, "" if find.out_of_view == 1 else "s"]
 			)
 		)
-	if not notes.is_empty():
-		answer["note"] = ". ".join(notes) + "."
-	return answer
+	return notes
 
 
 ## Whether the player can see [param node], by the rule the engine draws by.
@@ -1007,3 +1019,53 @@ func _serialize_node(node: Node, include_properties: bool) -> Dictionary:
 		result["properties"] = properties
 
 	return result
+
+
+## What a find asks for, and what its walk counted for the answer.
+class GdhFind:
+	extends RefCounted
+
+	var root_path: String
+	var wanted: Dictionary[String, String] = {}
+	var wanted_property: String
+	var include_hidden: bool
+	var limit: int
+	## The names split once rather than for each node the walk passes.
+	var names: Array[String]
+	## Counted while the tree is already being walked, for the answer: how many nodes this find
+	## would have matched if the name had been read the way it was probably meant.
+	var plain_names: Array[String] = []
+	## The same for the words: a glob is matched against the whole text, and one written as a
+	## prefix by habit, "Taken together*", missed the label whose sentence those words are in the
+	## middle of. Nothing found then read as the words not being on screen, which is the wrong
+	## conclusion when checking that a change to the text landed.
+	var widened_says: String
+	var widened: Dictionary[String, String] = {}
+	var found: Array[Dictionary] = []
+	var found_nodes: Array[Node] = []
+	var truncated: bool = false
+	var nearly: int = 0
+	var nearly_said: int = 0
+	## The near misses the same find would leave out as hidden, kept apart: the note says what a
+	## query would find, and counting these in it named a query that, asked, found none of them.
+	var nearly_hidden: int = 0
+	var nearly_said_hidden: int = 0
+	var hidden: int = 0
+	var out_of_view: int = 0
+
+	func _init(params: Dictionary) -> void:
+		root_path = str(params.get("root", "/root"))
+		for filter: String in FILTERS:
+			wanted[filter] = str(params.get(filter, ""))
+		wanted_property = str(params.get("property", ""))
+		include_hidden = GdhRead.as_bool(params.get("include_hidden", true), true)
+		limit = GdhRead.as_int(params.get("limit", FIND_LIMIT), FIND_LIMIT)
+		if not wanted["script"].is_empty() and not wanted["script"].begins_with("res://"):
+			wanted["script"] = "res://" + wanted["script"]
+		names = GdhSays.split_at_bars(wanted["name"])
+		for named: String in names:
+			if GdhSays.is_plain(named):
+				plain_names.append(named)
+		widened_says = GdhSays.widened(wanted["says"])
+		for filter: String in wanted:
+			widened[filter] = widened_says if filter == "says" else wanted[filter]
