@@ -258,6 +258,7 @@ import type { GodotProcess } from '../src/godot-process.js';
 import {
   containerTypeOf,
   DebuggerStream,
+  type DebuggerMessage,
   decodeVariant,
   framedCommand,
   type GodotValue,
@@ -19502,426 +19503,520 @@ async function testARunFollowsTheGamesRestart(): Promise<void> {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-restart-'));
   const runtime = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-restart-runtime-'));
   const env = { GODOT_PATH: godotPath, GDHARNESS_PROJECT: project, GDHARNESS_RUNTIME_DIR: runtime };
-  const first = new ServerProcess({ env });
-  let second: ServerProcess | null = null;
-  const met = new MetProcesses();
-  const meet = (pid: number): Promise<void> => met.meet(pid);
-  const runs = (pid: number): Promise<boolean | 'unsaid'> => met.runs(pid);
-  const decoyProject = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-restart-decoy-'));
-  let decoy: ReturnType<typeof spawnHidden> | null = null;
+  const run: RestartRun = {
+    godotPath,
+    project,
+    runtime,
+    env,
+    first: new ServerProcess({ env }),
+    second: null,
+    met: new MetProcesses(),
+    mark: join(project, 'successor_pid'),
+    decoyProject: mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-restart-decoy-')),
+  };
   try {
-    writeFileSync(
-      join(project, 'project.godot'),
-      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Restarts"\n' +
-        'run/main_scene="res://main.tscn"\n',
-    );
-    writeFileSync(
-      join(project, 'main.gd'),
-      [
-        'extends Node',
-        '',
-        '',
-        'func _ready() -> void:',
-        '\tif "--restarted" in OS.get_cmdline_user_args():',
-        '\t\tprint("the successor is up")',
-        '\t\tvar lock := FileAccess.open("res://successor_lock", FileAccess.WRITE)',
-        '\t\tlock.store_string(OS.get_environment("GODOT_ENGINE_HELD"))',
-        '\t\tlock.close()',
-        // Written whole under another name and renamed: a stop can end the successor between
-        // opening its mark and writing it, which left an empty mark that read as pid 0.
-        '\t\tvar mark := FileAccess.open("res://successor_pid.part", FileAccess.WRITE)',
-        '\t\tmark.store_string(str(OS.get_process_id()))',
-        '\t\tmark.close()',
-        '\t\tDirAccess.rename_absolute(',
-        '\t\t\tProjectSettings.globalize_path("res://successor_pid.part"),',
-        '\t\t\tProjectSettings.globalize_path("res://successor_pid")',
-        '\t\t)',
-        '\t\treturn',
-        '\tif "--worker" in OS.get_cmdline_user_args():',
-        '\t\treturn',
-        '\tif FileAccess.file_exists("res://worker_on_start"):',
-        '\t\tvar worker := OS.create_process(',
-        '\t\t\tOS.get_executable_path(),',
-        '\t\t\t["--headless", "--path", ProjectSettings.globalize_path("res://"), "--", "--worker"]',
-        '\t\t)',
-        '\t\tvar noted := FileAccess.open("res://worker_pid", FileAccess.WRITE)',
-        '\t\tnoted.store_string(str(worker))',
-        '\t\tnoted.close()',
-        '\t\tget_tree().quit.call_deferred()',
-        '\t\treturn',
-        '\tprint("the first process restarts")',
-        '\tvar again: PackedStringArray = [',
-        '\t\t"--headless", "--path", ProjectSettings.globalize_path("res://"), "--", "--restarted"',
-        '\t]',
-        '\tOS.set_restart_on_exit(true, again)',
-        '\tif FileAccess.file_exists("res://restart_on_close"):',
-        '\t\treturn',
-        '\tget_tree().quit.call_deferred()',
-        '',
-        '',
-        'func _process(_delta: float) -> void:',
-        '\tif FileAccess.file_exists("res://quit_now"):',
-        '\t\tget_tree().quit(5)',
-        '',
-      ].join('\n'),
-    );
-    writeFileSync(
-      join(project, 'main.tscn'),
-      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
-        '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
-    );
-    const mark = join(project, 'successor_pid');
-    const start = async (server: ServerProcess): Promise<{ first: number; successor: number }> => {
-      rmSync(mark, { force: true });
-      const started = parseTextContent(
-        await server.request(
-          'tools/call',
-          {
-            name: 'editor_run',
-            arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 0 },
-          },
-          ENGINE_CALL_TIMEOUT_MS,
-        ),
-      );
-      const firstPid = asNumber(get(started, 'pid'));
-      for (let waited = 0; waited < 30_000 && !existsSync(mark); waited += 250) {
-        await delay(250);
-      }
-      assert.ok(existsSync(mark), `the game should have restarted itself: ${JSON.stringify(started)}`);
-      await delay(250);
-      const successor = Number(readFileSync(mark, 'utf8'));
-      await meet(successor);
-      assert.notEqual(successor, firstPid, 'into another process');
-      return { first: firstPid, successor };
-    };
-    const output = async (server: ServerProcess): Promise<{ answer: unknown; said: string }> => {
-      const read = await server.request('tools/call', { name: 'editor_output', arguments: {} });
-      return { answer: parseTextContent(read), said: textOf(read) ?? '' };
-    };
-
-    await first.initialize('regression-test');
-    // The closest thing to the successor that is not it: the same engine, started in the same
-    // moments, with its output somewhere else. Taken for it, it is one of two and neither is
-    // followed.
-    writeFileSync(
-      join(decoyProject, 'project.godot'),
-      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Decoy"\n' +
-        'run/main_scene="res://decoy.tscn"\n',
-    );
-    writeFileSync(
-      join(decoyProject, 'decoy.gd'),
-      'extends Node\n\n\nfunc _ready() -> void:\n\tawait get_tree().create_timer(30.0).timeout\n\tget_tree().quit()\n',
-    );
-    writeFileSync(
-      join(decoyProject, 'decoy.tscn'),
-      '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://decoy.gd" id="1"]\n\n' +
-        '[node name="Decoy" type="Node"]\nscript = ExtResource("1")\n',
-    );
-    decoy = spawnHidden(godotPath, ['--headless', '--path', decoyProject], {
-      detached: true,
-      stdio: 'ignore',
-    });
-    if (decoy.pid !== undefined) {
-      await meet(decoy.pid);
-    }
-    const one = await start(first);
-    const going = await output(first);
-    // What the keeper's search met, read once it has answered, for a run that was not followed: the
-    // engines listed with their starts, and where the successor writes its output.
-    const searched = (): string => {
-      if (process.platform === 'win32') {
-        return '';
-      }
-      const listed = spawnSyncHidden('ps', ['-e', '-o', 'pid=,lstart=,args='], {
-        encoding: 'utf8',
-        env: { ...process.env, LC_ALL: 'C' },
-      }).stdout;
-      const engines = listed
-        .split('\n')
-        .filter((line) => line.includes(basename(godotPath)))
-        .join('\n');
-      let writing = 'unread';
-      try {
-        writing = readlinkSync(`/proc/${String(one.successor)}/fd/1`);
-      } catch (error) {
-        writing = String(error);
-      }
-      return `\nengines listed at ${new Date().toISOString()}:\n${engines}\nthe successor writes to ${writing}`;
-    };
-    assert.equal(
-      get(going.answer, 'running'),
-      true,
-      `the run goes on in the successor: ${going.said}${get(going.answer, 'running') === true ? '' : searched()}`,
-    );
-    assert.equal(get(going.answer, 'pid'), one.successor, going.said);
-    // The slot its keeper holds names the successor as its engine, so what it starts rides it.
-    const successorLock = readFileSync(join(project, 'successor_lock'), 'utf8');
-    const lockEngine = (): number | undefined => {
-      try {
-        return holderOf(readFileSync(successorLock, 'utf8'))?.engine?.pid;
-      } catch {
-        return undefined;
-      }
-    };
-    await cameTrue(() => lockEngine() === one.successor, 10_000);
-    assert.equal(lockEngine(), one.successor, `the slot names the successor: ${successorLock}`);
-    assert.deepEqual(
-      asArray(get(going.answer, 'restartedFrom')).map((before) => [
-        get(before, 'pid'),
-        get(before, 'exitCode'),
-      ]),
-      [[one.first, 0]],
-      `naming the first process and its clean exit: ${going.said}`,
-    );
-    assert.match(
-      text(get(going.answer, 'note')),
-      new RegExp(
-        `restarted itself with OS\\.set_restart_on_exit \\(pid ${String(one.first)} into ${String(one.successor)}\\)`,
-      ),
-      going.said,
-    );
-    const printed = asArray(get(going.answer, 'entries')).map((entry) => text(get(entry, 'text')));
-    assert.ok(
-      printed.some((line) => line.includes('the first process restarts')),
-      `the first process's lines are read: ${going.said}`,
-    );
-    if (process.platform === 'win32') {
-      assert.ok(
-        !printed.some((line) => line.includes('the successor is up')),
-        `and on Windows none of the successor's, as the note says: ${going.said}`,
-      );
-    } else {
-      // The output it inherited is what ties the successor to the run there.
-      assert.ok(
-        printed.some((line) => line.includes('the successor is up')),
-        `and elsewhere the successor's as well, into the run's transcript: ${going.said}`,
-      );
-    }
-    const status = parseTextContent(
-      await first.request('tools/call', { name: 'editor_status', arguments: {} }),
-    );
-    assert.equal(get(status, 'game', 'processActive'), true, JSON.stringify(status));
-    assert.equal(get(status, 'game', 'run', 'pid'), one.successor, JSON.stringify(status));
-    assert.equal(get(status, 'game', 'run', 'restartedFrom', 0, 'pid'), one.first, JSON.stringify(status));
-
-    // A replacement server picks the run up in the successor and ends it there.
-    await first.stop();
-    second = new ServerProcess({ env });
-    await second.initialize('regression-test');
-    const picked = await output(second);
-    assert.equal(get(picked.answer, 'running'), true, `picked up going: ${picked.said}`);
-    assert.equal(get(picked.answer, 'pid'), one.successor, picked.said);
-    const stopped = parseTextContent(
-      await second.request(
-        'tools/call',
-        { name: 'editor_run', arguments: { op: 'stop', graceful: false } },
-        ENGINE_CALL_TIMEOUT_MS,
-      ),
-    );
-    assert.equal(
-      get(stopped, 'endedPid'),
-      one.successor,
-      `the stop ends the successor: ${JSON.stringify(stopped)}`,
-    );
-    assert.notEqual(get(stopped, 'exitedBeforeStop'), true, JSON.stringify(stopped));
-    for (let waited = 0; waited < 10_000 && (await runs(one.successor)) !== false; waited += 250) {
-      await delay(250);
-    }
-    assert.equal(
-      await runs(one.successor),
-      false,
-      `pid ${String(one.successor)} should be gone after the stop`,
-    );
-
-    // An end of the successor's own is the run's end.
-    // Once the run is in the successor: a successor gone before the keeper's listing saw it is not
-    // followed, and the run then ends with the first process's exit.
-    const two = await start(second);
-    let carried = await output(second);
-    for (let waited = 0; waited < 30_000 && get(carried.answer, 'pid') !== two.successor; waited += 250) {
-      await delay(250);
-      carried = await output(second);
-    }
-    assert.equal(get(carried.answer, 'pid'), two.successor, carried.said);
-    writeFileSync(join(project, 'quit_now'), '');
-    let ended = await output(second);
-    for (let waited = 0; waited < 30_000 && get(ended.answer, 'running') !== false; waited += 500) {
-      await delay(500);
-      ended = await output(second);
-    }
-    assert.equal(get(ended.answer, 'running'), false, `the run ends with its successor: ${ended.said}`);
-    assert.equal(await runs(two.successor), false, ended.said);
-    if (process.platform === 'win32') {
-      assert.equal(get(ended.answer, 'exitCode'), 5, `with the successor's own exit code: ${ended.said}`);
-      assert.match(
-        text(get(ended.answer, 'note')),
-        /quit on its own|Nothing here ended this run/,
-        ended.said,
-      );
-    } else {
-      assert.equal(get(ended.answer, 'exitNotTold'), true, ended.said);
-      assert.match(
-        text(get(ended.answer, 'note')),
-        /this platform tells a process's exit code only to its parent/,
-        ended.said,
-      );
-    }
-    assert.equal(get(ended.answer, 'endedUnwatched'), undefined, ended.said);
-
-    // A game that restarts as it is asked to close, as a stop asks first: the close starts the
-    // successor, and the stop goes on to end that.
-    rmSync(join(project, 'quit_now'), { force: true });
-    rmSync(mark, { force: true });
-    writeFileSync(join(project, 'restart_on_close'), '');
-    cpSync(
-      join('src', 'godot', 'addons', 'gdharness_runtime'),
-      join(project, 'addons', 'gdharness_runtime'),
-      {
-        recursive: true,
-      },
-    );
-    writeFileSync(
-      join(project, 'project.godot'),
-      '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Restarts"\n' +
-        'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
-        'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
-    );
-    const closing = parseTextContent(
-      await second.request(
-        'tools/call',
-        {
-          name: 'editor_run',
-          arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 20_000 },
-        },
-        ENGINE_CALL_TIMEOUT_MS,
-      ),
-    );
-    assert.equal(get(closing, 'runtime', 'listening'), true, JSON.stringify(closing));
-    const closedFirst = asNumber(get(closing, 'pid'));
-    await meet(closedFirst);
-    assert.equal(
-      await runs(closedFirst),
-      true,
-      `pid ${String(closedFirst)} is met with its start while it runs`,
-    );
-    const closed = parseTextContent(
-      await second.request(
-        'tools/call',
-        { name: 'editor_run', arguments: { op: 'stop' } },
-        ENGINE_CALL_TIMEOUT_MS,
-      ),
-    );
-    // The keeper can end the successor before its script has run, so its mark is not required.
-    // A successor that lived long enough to write one must be the process the stop ended.
-    const closedSuccessor = asNumber(get(closed, 'endedPid'));
-    await meet(closedSuccessor);
-    assert.notEqual(
-      closedSuccessor,
-      closedFirst,
-      `the stop ended the process the close restarted it into: ${JSON.stringify(closed)}`,
-    );
-    assert.equal(
-      await runs(closedFirst),
-      false,
-      `the first process is gone once the stop answers: ${JSON.stringify(closed)}`,
-    );
-    assert.equal(get(closed, 'stopped'), true, JSON.stringify(closed));
-    for (let waited = 0; waited < 10_000 && (await runs(closedSuccessor)) !== false; waited += 250) {
-      await delay(250);
-    }
-    assert.equal(await runs(closedSuccessor), false, `pid ${String(closedSuccessor)} should be gone`);
-    await delay(5000);
-    if (existsSync(mark)) {
-      const marked = Number(readFileSync(mark, 'utf8'));
-      await meet(marked);
-      assert.equal(
-        marked,
-        closedSuccessor,
-        `the successor that ran is the one ended: ${JSON.stringify(closed)}`,
-      );
-      assert.equal(await runs(marked), false, `pid ${String(marked)} should be gone`);
-    }
-    assert.match(
-      text(get(closed, 'note')),
-      /restarted itself as it closed/,
-      `the answer says why the close did not end it: ${JSON.stringify(closed)}`,
-    );
-
-    // Ended without the close: whatever the engine makes of the keeper's signal, nothing of the
-    // run is left. Where a signal ends the engine at once there is no restart. Where the engine
-    // treats it as a quit, it restarts, and the stop ends that too.
-    rmSync(mark, { force: true });
-    const killing = parseTextContent(
-      await second.request(
-        'tools/call',
-        {
-          name: 'editor_run',
-          arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 20_000 },
-        },
-        ENGINE_CALL_TIMEOUT_MS,
-      ),
-    );
-    assert.equal(get(killing, 'runtime', 'listening'), true, JSON.stringify(killing));
-    const killed = parseTextContent(
-      await second.request(
-        'tools/call',
-        { name: 'editor_run', arguments: { op: 'stop', graceful: false } },
-        ENGINE_CALL_TIMEOUT_MS,
-      ),
-    );
-    assert.equal(get(killed, 'stopped'), true, JSON.stringify(killed));
-    await delay(3_000);
-    const restartedAnyway = existsSync(mark) ? Number(readFileSync(mark, 'utf8')) : null;
-    if (restartedAnyway !== null) {
-      await meet(restartedAnyway);
-    }
-    assert.ok(
-      restartedAnyway === null || (await runs(restartedAnyway)) === false,
-      `nothing of the run is left after the stop: ${JSON.stringify(killed)}`,
-    );
-
-    // A worker the game started in its last moments is the same engine, started in the same window,
-    // writing into the same transcript, and the only candidate there is. The game says as it exits
-    // that it set no restart, so the run ends with it and the worker is left to the game's own.
-    rmSync(join(project, 'restart_on_close'), { force: true });
-    writeFileSync(join(project, 'worker_on_start'), '');
-    const workerMark = join(project, 'worker_pid');
-    const working = parseTextContent(
-      await second.request(
-        'tools/call',
-        {
-          name: 'editor_run',
-          arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 0 },
-        },
-        ENGINE_CALL_TIMEOUT_MS,
-      ),
-    );
-    const worked = asNumber(get(working, 'pid'), JSON.stringify(working));
-    for (let waited = 0; waited < 30_000 && !existsSync(workerMark); waited += 250) {
-      await delay(250);
-    }
-    assert.ok(existsSync(workerMark), `the game started its worker: ${JSON.stringify(working)}`);
-    const worker = Number(readFileSync(workerMark, 'utf8'));
-    await meet(worker);
-    let left = await output(second);
-    for (let waited = 0; waited < 30_000 && get(left.answer, 'running') !== false; waited += 500) {
-      await delay(500);
-      left = await output(second);
-    }
-    assert.deepEqual(
-      [get(left.answer, 'running'), get(left.answer, 'pid'), get(left.answer, 'restartedFrom')],
-      [false, worked, undefined],
-      `the run ends with the game, not in its worker: ${left.said}`,
-    );
-    assert.equal(await runs(worker), true, `and nothing ended the worker: ${left.said}`);
+    writeTheGameThatRestartsItself(project);
+    await runADecoyBesideTheRestartingGame(run);
+    const one = await assertARunFollowsTheGamesRestartIntoItsSuccessor(run);
+    const second = await assertAReplacementServerEndsTheRunInTheSuccessor(run, one);
+    await assertAnEndOfTheSuccessorsOwnIsTheRunsEnd(run, second);
+    await assertAStopFollowsAGameThatRestartsAsItCloses(run, second);
+    await assertAStopLeavesNothingOfARunWhoseSignalRestartsIt(run, second);
+    await assertAWorkerStartedAtTheEndIsNotFollowed(run, second);
   } finally {
-    await met.end();
-    sweep(decoyProject);
-    await first.stop().catch(() => undefined);
-    await second?.stop();
+    await run.met.end();
+    sweep(run.decoyProject);
+    await run.first.stop().catch(() => undefined);
+    await run.second?.stop();
     sweep(project);
     sweep(runtime);
   }
+}
+
+/** What the phases of the case of the game that restarts itself share. */
+interface RestartRun {
+  readonly godotPath: string;
+  readonly project: string;
+  readonly runtime: string;
+  readonly env: Record<string, string>;
+  readonly first: ServerProcess;
+  second: ServerProcess | null;
+  readonly met: MetProcesses;
+  /** The file the successor writes its pid to. */
+  readonly mark: string;
+  readonly decoyProject: string;
+}
+
+/** Writes the game: a script that restarts itself, starts a worker or quits on request, by what is beside it. */
+function writeTheGameThatRestartsItself(project: string): void {
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Restarts"\n' +
+      'run/main_scene="res://main.tscn"\n',
+  );
+  writeFileSync(
+    join(project, 'main.gd'),
+    [
+      'extends Node',
+      '',
+      '',
+      'func _ready() -> void:',
+      '\tif "--restarted" in OS.get_cmdline_user_args():',
+      '\t\tprint("the successor is up")',
+      '\t\tvar lock := FileAccess.open("res://successor_lock", FileAccess.WRITE)',
+      '\t\tlock.store_string(OS.get_environment("GODOT_ENGINE_HELD"))',
+      '\t\tlock.close()',
+      // Written whole under another name and renamed: a stop can end the successor between
+      // opening its mark and writing it, which left an empty mark that read as pid 0.
+      '\t\tvar mark := FileAccess.open("res://successor_pid.part", FileAccess.WRITE)',
+      '\t\tmark.store_string(str(OS.get_process_id()))',
+      '\t\tmark.close()',
+      '\t\tDirAccess.rename_absolute(',
+      '\t\t\tProjectSettings.globalize_path("res://successor_pid.part"),',
+      '\t\t\tProjectSettings.globalize_path("res://successor_pid")',
+      '\t\t)',
+      '\t\treturn',
+      '\tif "--worker" in OS.get_cmdline_user_args():',
+      '\t\treturn',
+      '\tif FileAccess.file_exists("res://worker_on_start"):',
+      '\t\tvar worker := OS.create_process(',
+      '\t\t\tOS.get_executable_path(),',
+      '\t\t\t["--headless", "--path", ProjectSettings.globalize_path("res://"), "--", "--worker"]',
+      '\t\t)',
+      '\t\tvar noted := FileAccess.open("res://worker_pid", FileAccess.WRITE)',
+      '\t\tnoted.store_string(str(worker))',
+      '\t\tnoted.close()',
+      '\t\tget_tree().quit.call_deferred()',
+      '\t\treturn',
+      '\tprint("the first process restarts")',
+      '\tvar again: PackedStringArray = [',
+      '\t\t"--headless", "--path", ProjectSettings.globalize_path("res://"), "--", "--restarted"',
+      '\t]',
+      '\tOS.set_restart_on_exit(true, again)',
+      '\tif FileAccess.file_exists("res://restart_on_close"):',
+      '\t\treturn',
+      '\tget_tree().quit.call_deferred()',
+      '',
+      '',
+      'func _process(_delta: float) -> void:',
+      '\tif FileAccess.file_exists("res://quit_now"):',
+      '\t\tget_tree().quit(5)',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(
+    join(project, 'main.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://main.gd" id="1"]\n\n' +
+      '[node name="Main" type="Node"]\nscript = ExtResource("1")\n',
+  );
+}
+
+/** Starts the game on [server] and waits for it to restart itself into a successor, which is met. */
+async function startTheGameThatRestartsItself(
+  { project, mark, met }: RestartRun,
+  server: ServerProcess,
+): Promise<{ first: number; successor: number }> {
+  rmSync(mark, { force: true });
+  const started = parseTextContent(
+    await server.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 0 },
+      },
+      ENGINE_CALL_TIMEOUT_MS,
+    ),
+  );
+  const firstPid = asNumber(get(started, 'pid'));
+  for (let waited = 0; waited < 30_000 && !existsSync(mark); waited += 250) {
+    await delay(250);
+  }
+  assert.ok(existsSync(mark), `the game should have restarted itself: ${JSON.stringify(started)}`);
+  await delay(250);
+  const successor = Number(readFileSync(mark, 'utf8'));
+  await met.meet(successor);
+  assert.notEqual(successor, firstPid, 'into another process');
+  return { first: firstPid, successor };
+}
+
+/** What `editor_output` answers on [server], parsed, with the text it came as. */
+async function outputOfTheRestartingGame(server: ServerProcess): Promise<{ answer: unknown; said: string }> {
+  const read = await server.request('tools/call', { name: 'editor_output', arguments: {} });
+  return { answer: parseTextContent(read), said: textOf(read) ?? '' };
+}
+
+/** Starts the first server and an engine beside the game, which is the closest thing to the successor that is not it. */
+async function runADecoyBesideTheRestartingGame({
+  godotPath,
+  decoyProject,
+  first,
+  met,
+}: RestartRun): Promise<void> {
+  const meet = (pid: number): Promise<void> => met.meet(pid);
+  await first.initialize('regression-test');
+  // The closest thing to the successor that is not it: the same engine, started in the same
+  // moments, with its output somewhere else. Taken for it, it is one of two and neither is
+  // followed.
+  writeFileSync(
+    join(decoyProject, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Decoy"\n' +
+      'run/main_scene="res://decoy.tscn"\n',
+  );
+  writeFileSync(
+    join(decoyProject, 'decoy.gd'),
+    'extends Node\n\n\nfunc _ready() -> void:\n\tawait get_tree().create_timer(30.0).timeout\n\tget_tree().quit()\n',
+  );
+  writeFileSync(
+    join(decoyProject, 'decoy.tscn'),
+    '[gd_scene load_steps=2 format=3]\n\n[ext_resource type="Script" path="res://decoy.gd" id="1"]\n\n' +
+      '[node name="Decoy" type="Node"]\nscript = ExtResource("1")\n',
+  );
+  const decoy = spawnHidden(godotPath, ['--headless', '--path', decoyProject], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  if (decoy.pid !== undefined) {
+    await meet(decoy.pid);
+  }
+}
+
+/** A run that goes on in the successor of a game that restarted itself reads as going, with where it came from. */
+async function assertARunFollowsTheGamesRestartIntoItsSuccessor(
+  run: RestartRun,
+): Promise<{ first: number; successor: number }> {
+  const { godotPath, project, first } = run;
+  const output = outputOfTheRestartingGame;
+  const one = await startTheGameThatRestartsItself(run, first);
+  const going = await output(first);
+  // What the keeper's search met, read once it has answered, for a run that was not followed: the
+  // engines listed with their starts, and where the successor writes its output.
+  const searched = (): string => {
+    if (process.platform === 'win32') {
+      return '';
+    }
+    const listed = spawnSyncHidden('ps', ['-e', '-o', 'pid=,lstart=,args='], {
+      encoding: 'utf8',
+      env: { ...process.env, LC_ALL: 'C' },
+    }).stdout;
+    const engines = listed
+      .split('\n')
+      .filter((line) => line.includes(basename(godotPath)))
+      .join('\n');
+    let writing = 'unread';
+    try {
+      writing = readlinkSync(`/proc/${String(one.successor)}/fd/1`);
+    } catch (error) {
+      writing = String(error);
+    }
+    return `\nengines listed at ${new Date().toISOString()}:\n${engines}\nthe successor writes to ${writing}`;
+  };
+  assert.equal(
+    get(going.answer, 'running'),
+    true,
+    `the run goes on in the successor: ${going.said}${get(going.answer, 'running') === true ? '' : searched()}`,
+  );
+  assert.equal(get(going.answer, 'pid'), one.successor, going.said);
+  // The slot its keeper holds names the successor as its engine, so what it starts rides it.
+  const successorLock = readFileSync(join(project, 'successor_lock'), 'utf8');
+  const lockEngine = (): number | undefined => {
+    try {
+      return holderOf(readFileSync(successorLock, 'utf8'))?.engine?.pid;
+    } catch {
+      return undefined;
+    }
+  };
+  await cameTrue(() => lockEngine() === one.successor, 10_000);
+  assert.equal(lockEngine(), one.successor, `the slot names the successor: ${successorLock}`);
+  assert.deepEqual(
+    asArray(get(going.answer, 'restartedFrom')).map((before) => [
+      get(before, 'pid'),
+      get(before, 'exitCode'),
+    ]),
+    [[one.first, 0]],
+    `naming the first process and its clean exit: ${going.said}`,
+  );
+  assert.match(
+    text(get(going.answer, 'note')),
+    new RegExp(
+      `restarted itself with OS\\.set_restart_on_exit \\(pid ${String(one.first)} into ${String(one.successor)}\\)`,
+    ),
+    going.said,
+  );
+  const printed = asArray(get(going.answer, 'entries')).map((entry) => text(get(entry, 'text')));
+  assert.ok(
+    printed.some((line) => line.includes('the first process restarts')),
+    `the first process's lines are read: ${going.said}`,
+  );
+  if (process.platform === 'win32') {
+    assert.ok(
+      !printed.some((line) => line.includes('the successor is up')),
+      `and on Windows none of the successor's, as the note says: ${going.said}`,
+    );
+  } else {
+    // The output it inherited is what ties the successor to the run there.
+    assert.ok(
+      printed.some((line) => line.includes('the successor is up')),
+      `and elsewhere the successor's as well, into the run's transcript: ${going.said}`,
+    );
+  }
+  const status = parseTextContent(
+    await first.request('tools/call', { name: 'editor_status', arguments: {} }),
+  );
+  assert.equal(get(status, 'game', 'processActive'), true, JSON.stringify(status));
+  assert.equal(get(status, 'game', 'run', 'pid'), one.successor, JSON.stringify(status));
+  assert.equal(get(status, 'game', 'run', 'restartedFrom', 0, 'pid'), one.first, JSON.stringify(status));
+
+  return one;
+}
+
+/** A replacement server picks the run up in the successor and ends it there. Answers that server. */
+async function assertAReplacementServerEndsTheRunInTheSuccessor(
+  run: RestartRun,
+  one: { first: number; successor: number },
+): Promise<ServerProcess> {
+  const { env, first, met } = run;
+  const output = outputOfTheRestartingGame;
+  const runs = (pid: number): Promise<boolean | 'unsaid'> => met.runs(pid);
+  await first.stop();
+  const second = new ServerProcess({ env });
+  run.second = second;
+  await second.initialize('regression-test');
+  const picked = await output(second);
+  assert.equal(get(picked.answer, 'running'), true, `picked up going: ${picked.said}`);
+  assert.equal(get(picked.answer, 'pid'), one.successor, picked.said);
+  const stopped = parseTextContent(
+    await second.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop', graceful: false } },
+      ENGINE_CALL_TIMEOUT_MS,
+    ),
+  );
+  assert.equal(
+    get(stopped, 'endedPid'),
+    one.successor,
+    `the stop ends the successor: ${JSON.stringify(stopped)}`,
+  );
+  assert.notEqual(get(stopped, 'exitedBeforeStop'), true, JSON.stringify(stopped));
+  for (let waited = 0; waited < 10_000 && (await runs(one.successor)) !== false; waited += 250) {
+    await delay(250);
+  }
+  assert.equal(
+    await runs(one.successor),
+    false,
+    `pid ${String(one.successor)} should be gone after the stop`,
+  );
+  return second;
+}
+
+/** An end of the successor's own is the run's end. */
+async function assertAnEndOfTheSuccessorsOwnIsTheRunsEnd(
+  run: RestartRun,
+  second: ServerProcess,
+): Promise<void> {
+  const { project, met } = run;
+  const output = outputOfTheRestartingGame;
+  const runs = (pid: number): Promise<boolean | 'unsaid'> => met.runs(pid);
+  // An end of the successor's own is the run's end.
+  // Once the run is in the successor: a successor gone before the keeper's listing saw it is not
+  // followed, and the run then ends with the first process's exit.
+  const two = await startTheGameThatRestartsItself(run, second);
+  let carried = await output(second);
+  for (let waited = 0; waited < 30_000 && get(carried.answer, 'pid') !== two.successor; waited += 250) {
+    await delay(250);
+    carried = await output(second);
+  }
+  assert.equal(get(carried.answer, 'pid'), two.successor, carried.said);
+  writeFileSync(join(project, 'quit_now'), '');
+  let ended = await output(second);
+  for (let waited = 0; waited < 30_000 && get(ended.answer, 'running') !== false; waited += 500) {
+    await delay(500);
+    ended = await output(second);
+  }
+  assert.equal(get(ended.answer, 'running'), false, `the run ends with its successor: ${ended.said}`);
+  assert.equal(await runs(two.successor), false, ended.said);
+  if (process.platform === 'win32') {
+    assert.equal(get(ended.answer, 'exitCode'), 5, `with the successor's own exit code: ${ended.said}`);
+    assert.match(text(get(ended.answer, 'note')), /quit on its own|Nothing here ended this run/, ended.said);
+  } else {
+    assert.equal(get(ended.answer, 'exitNotTold'), true, ended.said);
+    assert.match(
+      text(get(ended.answer, 'note')),
+      /this platform tells a process's exit code only to its parent/,
+      ended.said,
+    );
+  }
+  assert.equal(get(ended.answer, 'endedUnwatched'), undefined, ended.said);
+}
+
+/** A game that restarts as it is asked to close, as a stop asks first: the close starts the successor, and the stop ends that. */
+async function assertAStopFollowsAGameThatRestartsAsItCloses(
+  run: RestartRun,
+  second: ServerProcess,
+): Promise<void> {
+  const { project, mark, met } = run;
+  const meet = (pid: number): Promise<void> => met.meet(pid);
+  const runs = (pid: number): Promise<boolean | 'unsaid'> => met.runs(pid);
+  // A game that restarts as it is asked to close, as a stop asks first: the close starts the
+  // successor, and the stop goes on to end that.
+  rmSync(join(project, 'quit_now'), { force: true });
+  rmSync(mark, { force: true });
+  writeFileSync(join(project, 'restart_on_close'), '');
+  cpSync(join('src', 'godot', 'addons', 'gdharness_runtime'), join(project, 'addons', 'gdharness_runtime'), {
+    recursive: true,
+  });
+  writeFileSync(
+    join(project, 'project.godot'),
+    '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="Restarts"\n' +
+      'run/main_scene="res://main.tscn"\n\n[autoload]\n\n' +
+      'GdharnessRuntime="*res://addons/gdharness_runtime/runtime_autoload.gd"\n',
+  );
+  const closing = parseTextContent(
+    await second.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 20_000 },
+      },
+      ENGINE_CALL_TIMEOUT_MS,
+    ),
+  );
+  assert.equal(get(closing, 'runtime', 'listening'), true, JSON.stringify(closing));
+  const closedFirst = asNumber(get(closing, 'pid'));
+  await meet(closedFirst);
+  assert.equal(
+    await runs(closedFirst),
+    true,
+    `pid ${String(closedFirst)} is met with its start while it runs`,
+  );
+  const closed = parseTextContent(
+    await second.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop' } },
+      ENGINE_CALL_TIMEOUT_MS,
+    ),
+  );
+  // The keeper can end the successor before its script has run, so its mark is not required.
+  // A successor that lived long enough to write one must be the process the stop ended.
+  const closedSuccessor = asNumber(get(closed, 'endedPid'));
+  await meet(closedSuccessor);
+  assert.notEqual(
+    closedSuccessor,
+    closedFirst,
+    `the stop ended the process the close restarted it into: ${JSON.stringify(closed)}`,
+  );
+  assert.equal(
+    await runs(closedFirst),
+    false,
+    `the first process is gone once the stop answers: ${JSON.stringify(closed)}`,
+  );
+  assert.equal(get(closed, 'stopped'), true, JSON.stringify(closed));
+  for (let waited = 0; waited < 10_000 && (await runs(closedSuccessor)) !== false; waited += 250) {
+    await delay(250);
+  }
+  assert.equal(await runs(closedSuccessor), false, `pid ${String(closedSuccessor)} should be gone`);
+  await delay(5000);
+  if (existsSync(mark)) {
+    const marked = Number(readFileSync(mark, 'utf8'));
+    await meet(marked);
+    assert.equal(
+      marked,
+      closedSuccessor,
+      `the successor that ran is the one ended: ${JSON.stringify(closed)}`,
+    );
+    assert.equal(await runs(marked), false, `pid ${String(marked)} should be gone`);
+  }
+  assert.match(
+    text(get(closed, 'note')),
+    /restarted itself as it closed/,
+    `the answer says why the close did not end it: ${JSON.stringify(closed)}`,
+  );
+}
+
+/** A run ended without the close leaves nothing of itself, whether or not the engine restarts on the keeper's signal. */
+async function assertAStopLeavesNothingOfARunWhoseSignalRestartsIt(
+  run: RestartRun,
+  second: ServerProcess,
+): Promise<void> {
+  const { project, mark, met } = run;
+  const meet = (pid: number): Promise<void> => met.meet(pid);
+  const runs = (pid: number): Promise<boolean | 'unsaid'> => met.runs(pid);
+  // Ended without the close: whatever the engine makes of the keeper's signal, nothing of the
+  // run is left. Where a signal ends the engine at once there is no restart. Where the engine
+  // treats it as a quit, it restarts, and the stop ends that too.
+  rmSync(mark, { force: true });
+  const killing = parseTextContent(
+    await second.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 20_000 },
+      },
+      ENGINE_CALL_TIMEOUT_MS,
+    ),
+  );
+  assert.equal(get(killing, 'runtime', 'listening'), true, JSON.stringify(killing));
+  const killed = parseTextContent(
+    await second.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop', graceful: false } },
+      ENGINE_CALL_TIMEOUT_MS,
+    ),
+  );
+  assert.equal(get(killed, 'stopped'), true, JSON.stringify(killed));
+  await delay(3_000);
+  const restartedAnyway = existsSync(mark) ? Number(readFileSync(mark, 'utf8')) : null;
+  if (restartedAnyway !== null) {
+    await meet(restartedAnyway);
+  }
+  assert.ok(
+    restartedAnyway === null || (await runs(restartedAnyway)) === false,
+    `nothing of the run is left after the stop: ${JSON.stringify(killed)}`,
+  );
+}
+
+/** A worker the game started in its last moments is not followed: the run ends with the game. */
+async function assertAWorkerStartedAtTheEndIsNotFollowed(
+  run: RestartRun,
+  second: ServerProcess,
+): Promise<void> {
+  const { project, met } = run;
+  const output = outputOfTheRestartingGame;
+  const meet = (pid: number): Promise<void> => met.meet(pid);
+  const runs = (pid: number): Promise<boolean | 'unsaid'> => met.runs(pid);
+  // A worker the game started in its last moments is the same engine, started in the same window,
+  // writing into the same transcript, and the only candidate there is. The game says as it exits
+  // that it set no restart, so the run ends with it and the worker is left to the game's own.
+  rmSync(join(project, 'restart_on_close'), { force: true });
+  writeFileSync(join(project, 'worker_on_start'), '');
+  const workerMark = join(project, 'worker_pid');
+  const working = parseTextContent(
+    await second.request(
+      'tools/call',
+      {
+        name: 'editor_run',
+        arguments: { projectPath: project, op: 'start', headless: true, runtimeWaitMs: 0 },
+      },
+      ENGINE_CALL_TIMEOUT_MS,
+    ),
+  );
+  const worked = asNumber(get(working, 'pid'), JSON.stringify(working));
+  for (let waited = 0; waited < 30_000 && !existsSync(workerMark); waited += 250) {
+    await delay(250);
+  }
+  assert.ok(existsSync(workerMark), `the game started its worker: ${JSON.stringify(working)}`);
+  const worker = Number(readFileSync(workerMark, 'utf8'));
+  await meet(worker);
+  let left = await output(second);
+  for (let waited = 0; waited < 30_000 && get(left.answer, 'running') !== false; waited += 500) {
+    await delay(500);
+    left = await output(second);
+  }
+  assert.deepEqual(
+    [get(left.answer, 'running'), get(left.answer, 'pid'), get(left.answer, 'restartedFrom')],
+    [false, worked, undefined],
+    `the run ends with the game, not in its worker: ${left.said}`,
+  );
+  assert.equal(await runs(worker), true, `and nothing ended the worker: ${left.said}`);
 }
 
 /**
@@ -22048,35 +22143,25 @@ async function testAPauseAnswersWithTheGamesOwnScript(): Promise<void> {
   const game = createConnection({ host: '127.0.0.1', port: peer.port });
   try {
     const stream = new DebuggerStream();
+    const view: PausedGameView = {
+      moved,
+      armed,
+      addon,
+      frameEnd,
+      stepToTheNextStop: () => {
+        now = stops.shift() ?? now;
+        return now;
+      },
+      currentStack: () => now,
+      stopAtTheFrameEnd: () => {
+        now = short.shift() ?? [3, addon, frameEnd, '_notification'];
+        return now;
+      },
+    };
     game.on('data', (chunk: Buffer) => {
       for (const received of stream.push(chunk)) {
-        if (!('message' in received)) {
-          continue;
-        }
-        if (['break', 'step', 'next', 'out'].includes(received.message)) {
-          moved.push(received.message);
-          now = stops.shift() ?? now;
-          game.write(framedCommand('debug_enter', [true, '', now.length > 1]));
-        } else if (received.message === 'get_stack_dump') {
-          game.write(framedCommand('stack_dump', now));
-        } else if (received.message === 'breakpoint') {
-          const [script, line, set] = received.data;
-          const where = `${typeof script === 'string' ? script : ''}:${String(Number(line))}`;
-          moved.push(`${set === true ? 'set' : 'clear'} ${String(Number(line))}`);
-          if (set === true) {
-            armed.add(where);
-          } else {
-            armed.delete(where);
-          }
-        } else if (received.message === 'scene:inspect_object') {
-          game.write(framedCommand('scene:inspect_object', []));
-        } else if (received.message === 'continue') {
-          game.write(framedCommand('debug_exit', []));
-          if (armed.has(`${addon}:${String(frameEnd)}`)) {
-            moved.push('continue');
-            now = short.shift() ?? [3, addon, frameEnd, '_notification'];
-            game.write(framedCommand('debug_enter', [true, '', true]));
-          }
+        if ('message' in received) {
+          answerAsAPausedGame(received, game, view);
         }
       }
     });
@@ -22209,6 +22294,52 @@ async function testAPauseAnswersWithTheGamesOwnScript(): Promise<void> {
   } finally {
     game.destroy();
     peer.close();
+  }
+}
+
+/** One message the game's debugger peer sends, as the stand-in game reads it. */
+type GameMessage = Extract<DebuggerMessage, { readonly message: string }>;
+
+/** What the stand-in game of the pause case holds, and the stack changes it makes when it is told to move. */
+interface PausedGameView {
+  readonly moved: string[];
+  readonly armed: Set<string>;
+  readonly addon: string;
+  readonly frameEnd: number;
+  /** Takes the next stop, or keeps the stack it holds, and answers the stack it holds. */
+  readonly stepToTheNextStop: () => readonly SentValue[];
+  readonly currentStack: () => readonly SentValue[];
+  /** Stops at the addon's frame end unless the frame stops short of it first. */
+  readonly stopAtTheFrameEnd: () => readonly SentValue[];
+}
+
+/** Answers one message from the debugger peer as a game paused in its own script would. */
+function answerAsAPausedGame(received: GameMessage, game: Socket, view: PausedGameView): void {
+  const { moved, armed, addon, frameEnd } = view;
+  if (['break', 'step', 'next', 'out'].includes(received.message)) {
+    moved.push(received.message);
+    const now = view.stepToTheNextStop();
+    game.write(framedCommand('debug_enter', [true, '', now.length > 1]));
+  } else if (received.message === 'get_stack_dump') {
+    game.write(framedCommand('stack_dump', view.currentStack()));
+  } else if (received.message === 'breakpoint') {
+    const [script, line, set] = received.data;
+    const where = `${typeof script === 'string' ? script : ''}:${String(Number(line))}`;
+    moved.push(`${set === true ? 'set' : 'clear'} ${String(Number(line))}`);
+    if (set === true) {
+      armed.add(where);
+    } else {
+      armed.delete(where);
+    }
+  } else if (received.message === 'scene:inspect_object') {
+    game.write(framedCommand('scene:inspect_object', []));
+  } else if (received.message === 'continue') {
+    game.write(framedCommand('debug_exit', []));
+    if (armed.has(`${addon}:${String(frameEnd)}`)) {
+      moved.push('continue');
+      view.stopAtTheFrameEnd();
+      game.write(framedCommand('debug_enter', [true, '', true]));
+    }
   }
 }
 
@@ -26224,35 +26355,7 @@ async function testACallTheSystemHoldsIsNotSent(): Promise<void> {
     },
   });
   try {
-    const dial = async (): Promise<Socket | null> =>
-      await new Promise((settled) => {
-        const socket = createConnection({ port, host: '127.0.0.1' });
-        socket.once('connect', () => {
-          settled(socket);
-        });
-        socket.once('error', () => {
-          socket.destroy();
-          settled(null);
-        });
-      });
-    // The first connection accepted says the engine is listening, and stays as the first queued.
-    for (const deadline = Date.now() + 60_000; queued.length === 0; ) {
-      assert.ok(
-        Date.now() < deadline && engine.exitCode === null,
-        `the engine never listened on ${port}: ${printed.join('')}`,
-      );
-      const first = await dial();
-      if (first === null) {
-        await delay(100);
-      } else {
-        queued.push(first);
-      }
-    }
-    for (let more = 0; more < 24; more += 1) {
-      const socket = createConnection({ port, host: '127.0.0.1' });
-      socket.on('error', () => {});
-      queued.push(socket);
-    }
+    await fillTheQueueOfTheHoldingEngine(engine, port, queued, printed);
     await delay(500);
     const pid = engine.pid ?? 0;
     writeFileSync(
@@ -26292,17 +26395,60 @@ async function testACallTheSystemHoldsIsNotSent(): Promise<void> {
     for (const socket of queued) {
       socket.destroy();
     }
-    if (engine.exitCode === null && engine.signalCode === null) {
-      const gone = new Promise<void>((done) => {
-        engine.once('exit', () => {
-          done();
-        });
-      });
-      engine.kill();
-      await gone;
-    }
+    await endTheHoldingEngine(engine);
     sweep(runtimeDir);
     sweep(project);
+  }
+}
+
+/** Dials the engine's port until it accepts, which says it is listening, and then past the eight it queues. */
+async function fillTheQueueOfTheHoldingEngine(
+  engine: ChildProcess,
+  port: number,
+  queued: Socket[],
+  printed: readonly string[],
+): Promise<void> {
+  const dial = async (): Promise<Socket | null> =>
+    await new Promise((settled) => {
+      const socket = createConnection({ port, host: '127.0.0.1' });
+      socket.once('connect', () => {
+        settled(socket);
+      });
+      socket.once('error', () => {
+        socket.destroy();
+        settled(null);
+      });
+    });
+  // The first connection accepted says the engine is listening, and stays as the first queued.
+  for (const deadline = Date.now() + 60_000; queued.length === 0; ) {
+    assert.ok(
+      Date.now() < deadline && engine.exitCode === null,
+      `the engine never listened on ${port}: ${printed.join('')}`,
+    );
+    const first = await dial();
+    if (first === null) {
+      await delay(100);
+    } else {
+      queued.push(first);
+    }
+  }
+  for (let more = 0; more < 24; more += 1) {
+    const socket = createConnection({ port, host: '127.0.0.1' });
+    socket.on('error', () => {});
+    queued.push(socket);
+  }
+}
+
+/** Kills the engine that holds the port, if it still runs, and waits for it to go. */
+async function endTheHoldingEngine(engine: ChildProcess): Promise<void> {
+  if (engine.exitCode === null && engine.signalCode === null) {
+    const gone = new Promise<void>((done) => {
+      engine.once('exit', () => {
+        done();
+      });
+    });
+    engine.kill();
+    await gone;
   }
 }
 
@@ -26515,25 +26661,9 @@ async function testACaptureSendsTheSmallerPicture(): Promise<void> {
           socket.write(`${JSON.stringify({ id: get(request, 'id'), type: 'pong' })}\n`);
           continue;
         }
-        const path = text(get(request, 'params', 'output_path'));
         const jpeg = jpegs[asked] ?? { bytes: null, named: 'beside' };
         asked += 1;
-        writeFileSync(path, png);
-        const beside = path.replace(/\.png$/, '.jpg');
-        if (jpeg.bytes !== null) {
-          writeFileSync(beside, jpeg.bytes);
-        }
-        socket.write(
-          `${JSON.stringify({
-            id: get(request, 'id'),
-            type: 'screenshot_file',
-            path,
-            jpegPath: jpeg.named === 'beside' ? beside : elsewhere,
-            width: 40,
-            height: 25,
-            format: 'png',
-          })}\n`,
-        );
+        answerACaptureWithTwoFiles(socket, request, jpeg, png, elsewhere);
       }
     });
     socket.on('error', () => {});
@@ -26620,6 +26750,33 @@ async function testACaptureSendsTheSmallerPicture(): Promise<void> {
     sweep(project);
     sweep(outside);
   }
+}
+
+/** Writes the PNG, and the JPEG beside it when the game has one, then says where the capture is. */
+function answerACaptureWithTwoFiles(
+  socket: Socket,
+  request: unknown,
+  jpeg: { readonly bytes: Buffer | null; readonly named: 'beside' | 'elsewhere' },
+  png: Buffer,
+  elsewhere: string,
+): void {
+  const path = text(get(request, 'params', 'output_path'));
+  writeFileSync(path, png);
+  const beside = path.replace(/\.png$/, '.jpg');
+  if (jpeg.bytes !== null) {
+    writeFileSync(beside, jpeg.bytes);
+  }
+  socket.write(
+    `${JSON.stringify({
+      id: get(request, 'id'),
+      type: 'screenshot_file',
+      path,
+      jpegPath: jpeg.named === 'beside' ? beside : elsewhere,
+      width: 40,
+      height: 25,
+      format: 'png',
+    })}\n`,
+  );
 }
 
 /**
@@ -26765,21 +26922,7 @@ async function testACallBesideAnotherOnTheGameSaysSo(): Promise<void> {
         for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
           const asked: unknown = JSON.parse(buffered.slice(0, at));
           buffered = buffered.slice(at + 1);
-          const writeTo = get(asked, 'params', 'output_path');
-          if (get(asked, 'command') === 'capture_screenshot' && typeof writeTo === 'string') {
-            writeFileSync(writeTo, Buffer.from(ONE_PIXEL_PNG, 'base64'));
-            socket.write(
-              `${JSON.stringify({ id: get(asked, 'id'), type: 'screenshot_file', path: writeTo, width: 1, height: 1, format: 'png' })}\n`,
-            );
-          } else if (get(asked, 'command') === 'wait_frames') {
-            setTimeout(() => {
-              socket.write(
-                `${JSON.stringify({ id: get(asked, 'id'), type: 'waited', frames: 90, elapsed_ms: 1500 })}\n`,
-              );
-            }, 1500);
-          } else {
-            socket.write(`${JSON.stringify({ id: get(asked, 'id'), type: 'method_result', result: 7 })}\n`);
-          }
+          answerAsAGameBesideAnother(socket, asked, ONE_PIXEL_PNG);
         }
       });
       socket.on('error', () => {});
@@ -26867,6 +27010,25 @@ async function testACallBesideAnotherOnTheGameSaysSo(): Promise<void> {
     }
     sweep(project);
     sweep(runtimeDir);
+  }
+}
+
+/** A fake game's answer to one request: a one-pixel capture, a wait that ends after 1.5s, or a method result of 7. */
+function answerAsAGameBesideAnother(socket: Socket, asked: unknown, onePixelPng: string): void {
+  const writeTo = get(asked, 'params', 'output_path');
+  if (get(asked, 'command') === 'capture_screenshot' && typeof writeTo === 'string') {
+    writeFileSync(writeTo, Buffer.from(onePixelPng, 'base64'));
+    socket.write(
+      `${JSON.stringify({ id: get(asked, 'id'), type: 'screenshot_file', path: writeTo, width: 1, height: 1, format: 'png' })}\n`,
+    );
+  } else if (get(asked, 'command') === 'wait_frames') {
+    setTimeout(() => {
+      socket.write(
+        `${JSON.stringify({ id: get(asked, 'id'), type: 'waited', frames: 90, elapsed_ms: 1500 })}\n`,
+      );
+    }, 1500);
+  } else {
+    socket.write(`${JSON.stringify({ id: get(asked, 'id'), type: 'method_result', result: 7 })}\n`);
   }
 }
 
@@ -29650,7 +29812,7 @@ async function testARestartBindsAnAdapterThatCameBackWithoutItsPort(): Promise<v
       failed.replace('%d', String(dapPort)),
       `--- GDScript language server started on port ${lspPort} ---`,
     ];
-    let adapter: Server | null = null;
+    const fixture: RebindingEditor = { asked, panel, servers, dapPort, listen, adapter: null };
     const greet = async (socket: WebSocket, saying: Record<string, unknown> = {}): Promise<void> => {
       await new Promise<void>((settle, reject) => {
         socket.once('open', () => {
@@ -29666,21 +29828,7 @@ async function testARestartBindsAnAdapterThatCameBackWithoutItsPort(): Promise<v
           }
           let result: Record<string, unknown> = { ok: true };
           if (message['tool'] === 'editor_servers') {
-            const args = message['args'];
-            asked.push(args);
-            const rebind = isRecord(args) && args['rebind'] === true;
-            // The panel as the addon reads it, which keeps every line since the editor started.
-            const said = [...panel];
-            if (rebind) {
-              if (adapter === null) {
-                adapter = await listen(dapPort);
-                servers.push(adapter);
-              } else {
-                panel.push('--- Debug adapter server stopped ---');
-              }
-              panel.push(`--- Debug adapter server started on port ${dapPort} ---`);
-            }
-            result = { ok: true, said, rebound: rebind, saidSince: panel.slice(said.length) };
+            result = await answerTheServersOfAnEditorWhoseAdapterFailed(message['args'], fixture);
           }
           socket.send(JSON.stringify({ type: 'tool_result', id: message['id'], success: true, result }));
         })();
@@ -29757,6 +29905,38 @@ async function testARestartBindsAnAdapterThatCameBackWithoutItsPort(): Promise<v
     }
     sweep(project);
   }
+}
+
+/** What the fixture editor of the rebinding case holds: the calls it was asked, the panel's lines and the adapter once bound. */
+interface RebindingEditor {
+  readonly asked: unknown[];
+  readonly panel: string[];
+  readonly servers: Server[];
+  readonly dapPort: number;
+  readonly listen: (on: number) => Promise<Server>;
+  adapter: Server | null;
+}
+
+/** The fixture editor's answer to `editor_servers`: it binds the adapter only when asked to rebind. */
+async function answerTheServersOfAnEditorWhoseAdapterFailed(
+  args: unknown,
+  editor: RebindingEditor,
+): Promise<Record<string, unknown>> {
+  const { asked, panel, servers, dapPort, listen } = editor;
+  asked.push(args);
+  const rebind = isRecord(args) && args['rebind'] === true;
+  // The panel as the addon reads it, which keeps every line since the editor started.
+  const said = [...panel];
+  if (rebind) {
+    if (editor.adapter === null) {
+      editor.adapter = await listen(dapPort);
+      servers.push(editor.adapter);
+    } else {
+      panel.push('--- Debug adapter server stopped ---');
+    }
+    panel.push(`--- Debug adapter server started on port ${dapPort} ---`);
+  }
+  return { ok: true, said, rebound: rebind, saidSince: panel.slice(said.length) };
 }
 
 /**
