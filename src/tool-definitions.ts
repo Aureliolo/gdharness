@@ -1072,6 +1072,13 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         ops: ['save_as'],
         description: 'save_as: where the copy goes. An existing file is refused.',
       },
+      from: {
+        type: 'string',
+        enum: ['editor'],
+        ops: ['save'],
+        description:
+          "save: editor saves the editor's copy of the scene, a closed one too. The editor opens a closed scene, gives its @tool scripts and layout their frames, saves it and closes it, and openedFirst says so (stillOpen when it could not close it). An open scene stays open, and its unsaved changes are saved with it. Left out, a scene the editor does not have open is saved as the file loads. Asking for editor with none connected is refused rather than saved from the file.",
+      },
     },
     requires: ['projectPath', 'scenePath'],
     operations: {

@@ -576,6 +576,21 @@ const HOOKS_GD = [
   '\t\t\t\t"busy": after[0],',
   '\t\t\t\t"showing": _executor.call("showing"),',
   '\t\t\t}',
+  // The same recording for a save made through the server: started before the call and read after.
+  '\t\t"watch":',
+  '\t\t\t_begin(path)',
+  '\t\t\treturn {"watching": true}',
+  '\t\t"watched":',
+  '\t\t\t_recording = false',
+  '\t\t\tvar remaining: Array = _gate.call("busy_with")',
+  '\t\t\tvar acted: bool = _fired > 0',
+  '\t\t\t_plan = {}',
+  '\t\t\treturn {',
+  '\t\t\t\t"fired": acted,',
+  '\t\t\t\t"away": _gate.call("turned_away", "add_node"),',
+  '\t\t\t\t"busy": remaining[0],',
+  '\t\t\t\t"showing": _executor.call("showing"),',
+  '\t\t\t}',
   // What the next save does at the frame after its card first is in front, or after its file
   // changes, and again each time the card comes back, `times` in all.
   '\t\t"during":',
@@ -779,6 +794,41 @@ function shownScenes(): Record<string, string[]> {
   return files;
 }
 
+/** How many cards `named/` holds, for the saves a caller asks of the editor by name. */
+const NAMED_CARDS = 7;
+
+/** The size card `number` of `named/` is laid out at, which no other card shares. */
+function namedCardSize(number: number): { width: number; height: number } {
+  return { width: 300 + 20 * number, height: 200 + 10 * number };
+}
+
+/**
+ * Cards for the saves asked of the editor through the server: the shown cards' shape, each at a
+ * size of its own, so a file saved by the wrong card is told apart by its shape.
+ */
+function namedScenes(): Record<string, string[]> {
+  const files: Record<string, string[]> = {};
+  for (let number = 1; number <= NAMED_CARDS; number += 1) {
+    const { width, height } = namedCardSize(number);
+    files[`named/card_${number}.tscn`] = [
+      '[gd_scene load_steps=2 format=3]',
+      '',
+      '[ext_resource type="Script" path="res://shown/card_frame.gd" id="1_frame"]',
+      '',
+      '[node name="Card" type="VBoxContainer"]',
+      `offset_right = ${width}.0`,
+      `offset_bottom = ${height}.0`,
+      '',
+      '[node name="Panel" type="Panel" parent="."]',
+      'layout_mode = 2',
+      'size_flags_vertical = 3',
+      'script = ExtResource("1_frame")',
+      '',
+    ];
+  }
+  return files;
+}
+
 /**
  * Scenes and resources for the cases on how a scene is written: one inheriting another, one
  * instancing another, one the editor holds, and an animation library kept in a file of its own.
@@ -786,6 +836,7 @@ function shownScenes(): Record<string, string[]> {
  */
 const SCENE_FILES: Record<string, string[]> = {
   ...shownScenes(),
+  ...namedScenes(),
   'layers/base.tscn': [
     '[gd_scene format=3]',
     '',
@@ -6413,6 +6464,180 @@ async function testACaptureOfASceneThatDoesNotLoadIsRefusedFirst({
 }
 
 /**
+ * `scene_create save` with `from: "editor"` saves the editor's copy of a scene, open or closed,
+ * through the server and the bridge.
+ *
+ * A closed card is opened for the save and closed again, an open one stays open with what the
+ * editor holds unsaved, and a path outside the project never reaches the editor. Each card has a
+ * size of its own, so a file saved from the wrong card shows in its shape.
+ */
+async function testASaveFromTheEditorIsAskedByName({ call, refusal, project }: Editor): Promise<void> {
+  const mainScene = 'res://main.tscn';
+  const other = 'res://shown/other.tscn';
+  const card = (number: number): string => `res://named/card_${number}.tscn`;
+  const cardFile = (number: number): string => fileText(project, `named/card_${number}.tscn`);
+  const shaped = (number: number): RegExp => {
+    const { width, height } = namedCardSize(number);
+    return new RegExp(`shape = PackedVector2Array\\(0, 0, ${width}, ${height}\\)`);
+  };
+  const save = async (number: number, scenePath = `named/card_${number}.tscn`): Promise<unknown> =>
+    await call('scene_create', { projectPath: project, op: 'save', scenePath, from: 'editor' });
+  const tabs = async (): Promise<{ open: unknown[]; unsaved: unknown[]; current: unknown }> => {
+    const held = await hook(project, { op: 'report', path: '' });
+    return {
+      open: asArray(get(held, 'open')),
+      unsaved: asArray(get(held, 'unsaved')),
+      current: get(held, 'current'),
+    };
+  };
+  const reset = async (): Promise<void> => {
+    await hook(project, { op: 'close_all', path: '' });
+    await hook(project, { op: 'open', path: mainScene });
+  };
+  const closed = async (number: number): Promise<void> => {
+    const held = asArray(get(await call('editor_status', {}), 'editor', 'openScenes'));
+    assert.ok(!held.includes(card(number)), `card ${number} is in no open tab: ${JSON.stringify(held)}`);
+  };
+
+  await reset();
+
+  // Closed: opened for the save, laid out, saved and closed again.
+  const untouched = cardFile(1);
+  assert.doesNotMatch(untouched, shaped(1), 'the card is stored with no laid out shape');
+  const first = await save(1);
+  assert.equal(
+    get(first, 'from'),
+    'editor',
+    `a closed card is saved by the editor: ${JSON.stringify(first)}`,
+  );
+  assert.equal(get(first, 'openedFirst'), true, 'which opened it first');
+  assert.equal(get(first, 'writtenBy'), 'the editor', 'and says who wrote it');
+  assert.match(cardFile(1), shaped(1), 'the file holds the shape the card has once laid out');
+  await closed(1);
+  assert.equal((await tabs()).current, mainScene, 'and the main scene is in front again');
+
+  // An absolute path inside the project is the same scene, named as the editor names it.
+  writeFileSync(join(project, 'named', 'card_1.tscn'), untouched);
+  await call('editor_rescan', { projectPath: project });
+  const absolute = await save(1, join(project, 'named', 'card_1.tscn'));
+  assert.equal(
+    get(absolute, 'from'),
+    'editor',
+    `an absolute path is saved by the editor: ${JSON.stringify(absolute)}`,
+  );
+  assert.equal(get(absolute, 'scenePath'), card(1), 'as the scene the editor names');
+  assert.match(cardFile(1), shaped(1), 'with its laid out shape');
+  await closed(1);
+
+  // Open in front, with an edit nobody has saved: the editor's own save writes it, and the tab stays.
+  await hook(project, { op: 'edit', path: card(2), node: 'Late' });
+  const front = await save(2);
+  assert.equal(get(front, 'from'), 'editor', `an open card is saved by the editor: ${JSON.stringify(front)}`);
+  assert.equal(get(front, 'openedFirst'), undefined, 'and was not opened for it');
+  assert.equal(get(front, 'unsavedInEditor'), false, 'with nothing left unsaved');
+  assert.match(cardFile(2), /\[node name="Late"/, 'the edit is in the file');
+  const infront = await tabs();
+  assert.ok(infront.open.includes(card(2)), 'the tab is still open');
+  assert.equal(infront.current, card(2), 'and still in front');
+  await reset();
+
+  // Open behind: the edit is written too, and the tab in front stays where it was.
+  await hook(project, { op: 'edit', path: card(3), node: 'ByHand' });
+  await hook(project, { op: 'open', path: mainScene });
+  const behind = await save(3);
+  assert.equal(
+    get(behind, 'from'),
+    'editor',
+    `a card behind another is saved by the editor: ${JSON.stringify(behind)}`,
+  );
+  assert.equal(get(behind, 'openedFirst'), undefined, 'and was not opened for it');
+  assert.match(cardFile(3), /\[node name="ByHand"/, 'the edit is in the file');
+  const behindTabs = await tabs();
+  assert.ok(behindTabs.open.includes(card(3)), 'the tab is still open');
+  assert.equal(behindTabs.current, mainScene, 'and the main scene is still in front');
+  await reset();
+
+  // Second pass: a scene the person opened is saved from the editor each time and left open.
+  await hook(project, { op: 'open', path: card(4) });
+  await hook(project, { op: 'open', path: mainScene });
+  for (const pass of [1, 2]) {
+    const again = await save(4);
+    assert.equal(get(again, 'from'), 'editor', `pass ${pass} is the editor's: ${JSON.stringify(again)}`);
+    assert.ok((await tabs()).open.includes(card(4)), `and leaves the tab open after pass ${pass}`);
+  }
+  await reset();
+
+  // In a row: the third card is switched away from every time it is brought to the front, so the
+  // save is refused and leaves nothing behind that turns the next save away.
+  const shapes: Record<number, RegExp> = {};
+  for (let number = 2; number <= NAMED_CARDS; number += 1) {
+    shapes[number] = shaped(number);
+    if (number === 4) {
+      await hook(project, { op: 'during', other, when: 'front', times: 3 });
+      await hook(project, { op: 'watch', path: card(4) });
+      const said = await refusal('scene_create', {
+        projectPath: project,
+        op: 'save',
+        scenePath: 'named/card_4.tscn',
+        from: 'editor',
+      });
+      const watched = await hook(project, { op: 'watched' });
+      assert.match(said, /did not keep res:\/\/named\/card_4\.tscn in front/);
+      assert.equal(get(watched, 'fired'), true, 'the editor was switched away');
+      assert.equal(get(watched, 'away'), false, 'and the refusal leaves the gate open');
+      assert.equal(get(watched, 'showing'), '', 'with nothing shown');
+      await closed(4);
+      continue;
+    }
+    const saved = await save(number);
+    assert.equal(
+      get(saved, 'from'),
+      'editor',
+      `card ${number} is saved by the editor: ${JSON.stringify(saved)}`,
+    );
+    assert.match(cardFile(number), shapes[number] ?? /unset/, `with its own shape: ${cardFile(number)}`);
+  }
+  await reset();
+
+  // Scope: only a save takes from, and only the editor is a value of it.
+  const copy = await refusal('scene_create', {
+    projectPath: project,
+    op: 'save_as',
+    scenePath: 'named/card_5.tscn',
+    newPath: 'named/copy.tscn',
+    from: 'editor',
+  });
+  assert.match(copy, /scene_create save_as does not take from/);
+  const before = cardFile(5);
+  const file = await refusal('scene_create', {
+    projectPath: project,
+    op: 'save',
+    scenePath: 'named/card_5.tscn',
+    from: 'file',
+  });
+  assert.match(file, /only as editor, not "file"/, `a value other than editor is refused naming it: ${file}`);
+  assert.equal(cardFile(5), before, 'and the file is as it was');
+
+  // A scene beside the project is refused before the editor is asked.
+  const outside = join(project, '..', 'outside_save.tscn');
+  const outsideText = '[gd_scene format=3]\n\n[node name="Outside" type="Node2D"]\n';
+  writeFileSync(outside, outsideText);
+  try {
+    const refused = await refusal('scene_create', {
+      projectPath: project,
+      op: 'save',
+      scenePath: '../outside_save.tscn',
+      from: 'editor',
+    });
+    assert.match(refused, /resolves outside the project directory/);
+    assert.equal(readFileSync(outside, 'utf8'), outsideText, 'and the scene beside the project is as it was');
+  } finally {
+    rmSync(outside, { force: true });
+  }
+  await reset();
+}
+
+/**
  * auto_reload leaves a scene the editor holds unsaved changes to, and says so.
  *
  * A reload from the file drops the editor's edits without a prompt. A tool's write, taken in by the
@@ -8999,6 +9224,7 @@ async function main(): Promise<void> {
     ['testAutoReloadLeavesAGoneScene', testAutoReloadLeavesAGoneScene],
     ['testAShownSceneIsSavedAsTheEditorHoldsIt', testAShownSceneIsSavedAsTheEditorHoldsIt],
     ['testACaptureOfASceneThatDoesNotLoadIsRefusedFirst', testACaptureOfASceneThatDoesNotLoadIsRefusedFirst],
+    ['testASaveFromTheEditorIsAskedByName', testASaveFromTheEditorIsAskedByName],
     ['testAPlayedRunsConsoleArrivesOnItsOwn', testAPlayedRunsConsoleArrivesOnItsOwn],
     ['testDebugging', testDebugging],
     ['testRuntime', testRuntime],
