@@ -30,6 +30,7 @@ import {
   heldRunSaid,
   homeOf,
   KEPT_RUN_DIRECTORIES,
+  MEMORY_PER_ENGINE,
   MOST_ENGINES,
   memoryAvailable,
   plural,
@@ -84,6 +85,7 @@ import {
   inOneEngine,
   lanesOf,
   ProjectScripts,
+  peakOf,
   readTimes,
   Shares,
   SPLIT_PAST_SECONDS,
@@ -177,6 +179,8 @@ export interface RunResult {
     readonly windowed: boolean;
     /** The suites it was handed, a suite dealt by its cases or rows once for each engine holding part. */
     readonly suites: readonly string[];
+    /** The most memory the engine was read holding, or null when it was never read. */
+    readonly peakBytes: number | null;
     /** Where its whole output is kept, or null once a passing run has removed it. */
     readonly log: string | null;
   }[];
@@ -439,6 +443,8 @@ interface EngineRan {
   readonly again: boolean;
   /** The file the runner wrote what it loaded into, a line as each suite ended. */
   readonly reached: string;
+  /** The most bytes the engine was read holding, when it was read at all. */
+  readonly peakBytes?: number;
 }
 
 /**
@@ -658,15 +664,29 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
         `Windows did not say how much memory it can still commit (${memory.unread}), so engines are sized by the physical memory free.`,
       );
     }
+    // Every engine is sized by the most any suite of the run was seen to hold, since the start does
+    // not know which suites share an engine.
+    const sized = peakOf(
+      suites.map((suite) => suite.path),
+      times,
+      MEMORY_PER_ENGINE,
+    );
+    const perEngine = {
+      bytes: sized.bytes,
+      said: sized.seen
+        ? 'taken for each engine, the most one holding these suites was seen to hold'
+        : 'taken for each engine',
+    };
     const roomWith = (bytes: number): ReturnType<typeof roomFor> =>
       options.cores === null
-        ? roomFor(options.engines, availableParallelism(), bytes, memory.said)
+        ? roomFor(options.engines, availableParallelism(), bytes, memory.said, undefined, perEngine)
         : roomFor(
             options.engines,
             options.cores,
             bytes,
             memory.said,
             `--cores holds it to ${plural(options.cores, 'processor')}`,
+            perEngine,
           );
     const byMemory = roomWith(memory.bytes);
     // What the processors leave room for. Memory held a run to the engines it had room for at the
@@ -783,7 +803,8 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
           declared,
           lanes.length,
           taken,
-          (plan, index, lock) => runEngine(launch, plan, index, times, '', lock),
+          times,
+          (plan, index, lock, holds) => runEngine(launch, plan, index, times, '', lock, holds),
           handed,
           memoryHeld ? new MemoryGate(slots, async () => (await memoryAvailable()).bytes) : undefined,
         )
@@ -805,7 +826,7 @@ export async function runTestCommand(options: TestOptions, godotPath: string): P
       timesAfter(
         readTimes(timesFile),
         wholeSuites,
-        ran.map((engine) => engine.printed),
+        ran,
         (path) => loaded.suite(path),
         new Set(
           ran.flatMap((engine) =>
@@ -873,53 +894,61 @@ export function memorySaid(room: number, lanes: number, held: string): string {
 /** How often a share held back for memory reads it again. */
 const MEMORY_LOOK_MS = 2000;
 
-/**
- * How long an engine is counted at its whole allowance against the memory read: one just started
- * has yet to take what it will, so a reading then finds room for the next in what it is about to use.
- */
-const ENGINE_SETTLING_MS = 30_000;
+/** An engine a [class MemoryGate] let start, with what it needs and what it holds now. */
+export interface Admitted {
+  /** The memory it was admitted for. */
+  readonly need: number;
+  /** What it held at its last reading, 0 before the first. */
+  held: number;
+  /** Told once the engine has ended, so the gate stops counting it. */
+  readonly ended: () => void;
+  /** Told each reading of what the engine holds. */
+  readonly holds: (bytes: number) => void;
+}
 
 /**
  * Lets the engines of a run that memory held start one at a time while the machine has room for
  * another, read again before each, so engines join as other work frees memory rather than the run
- * keeping all its life the count it had room for as it began. The first engine of the run always
- * starts, as a run held to one engine did. A wait keeps a mark in the slots, as a wait for a slot does.
+ * keeping all its life the count it had room for as it began. A going engine is counted at what it
+ * has yet to take, its need less what it holds now, since what it holds already shows in the memory
+ * read. The first engine of the run always starts, as a run held to one engine did. A wait keeps a
+ * mark in the slots, as a wait for a slot does.
  */
 export class MemoryGate {
   private readonly slots: Pick<EngineSlots, 'markWaiting'>;
   private readonly read: () => Promise<number>;
-  private readonly now: () => number;
   private readonly lookMs: number;
-  private readonly going = new Set<{ readonly at: number }>();
+  private readonly going = new Set<Admitted>();
   private turn: Promise<unknown> = Promise.resolve();
 
-  constructor(
-    slots: Pick<EngineSlots, 'markWaiting'>,
-    read: () => Promise<number>,
-    now: () => number = Date.now,
-    lookMs = MEMORY_LOOK_MS,
-  ) {
+  constructor(slots: Pick<EngineSlots, 'markWaiting'>, read: () => Promise<number>, lookMs = MEMORY_LOOK_MS) {
     this.slots = slots;
     this.read = read;
-    this.now = now;
     this.lookMs = lookMs;
   }
 
-  /** Waits until another engine has room, one caller at a time, and answers what to call once it ends. */
-  admit(signal: AbortSignal): Promise<() => void> {
-    const admitted = this.turn.then(() => this.room(signal));
+  /**
+   * Waits until an engine needing [param need] has room, one caller at a time, and answers its
+   * admission. [param need] is asked at each look, since the share a caller would draw changes as
+   * others draw theirs.
+   */
+  admit(signal: AbortSignal, need: () => number): Promise<Admitted> {
+    const admitted = this.turn.then(() => this.room(signal, need));
     this.turn = admitted.catch(() => undefined);
     return admitted;
   }
 
-  private async room(signal: AbortSignal): Promise<() => void> {
+  private async room(signal: AbortSignal, need: () => number): Promise<Admitted> {
     let unmark: (() => void) | undefined;
+    let needed = 0;
     try {
       for (;;) {
         signal.throwIfAborted();
-        const at = this.now();
-        const starting = [...this.going].filter((one) => at - one.at < ENGINE_SETTLING_MS).length;
-        if (this.going.size === 0 || roomForAnother(await this.read(), starting)) {
+        needed = need();
+        // Summed before the read, as the memory read is taken before a reading told while it is
+        // out. Summed after, that growth would count as owed no longer and as free memory too.
+        const owed = [...this.going].reduce((sum, one) => sum + Math.max(0, one.need - one.held), 0);
+        if (this.going.size === 0 || roomForAnother(await this.read(), owed, needed)) {
           break;
         }
         unmark ??= this.slots.markWaiting();
@@ -928,11 +957,18 @@ export class MemoryGate {
     } finally {
       unmark?.();
     }
-    const engine = { at: this.now() };
-    this.going.add(engine);
-    return () => {
-      this.going.delete(engine);
+    const engine: Admitted = {
+      need: needed,
+      held: 0,
+      ended: () => {
+        this.going.delete(engine);
+      },
+      holds: (bytes) => {
+        engine.held = bytes;
+      },
     };
+    this.going.add(engine);
+    return engine;
   }
 }
 
@@ -1429,7 +1465,8 @@ async function runLane(
 /**
  * Runs [param units] over [param lanes] lanes handed a share at a time (see [class Shares]), the
  * lanes holding the slots in [param taken] at once and the rest as slots come free, and each engine
- * starting only once [param memory] has room for it when the run is held by memory. A lane still
+ * starting only once [param memory] has room for what its share was seen to hold in [param times],
+ * when the run is held by memory. A lane still
  * waiting once every share is handed out stops waiting: a slot somebody else holds is not to keep a
  * run open that has nothing left to give it. A lane takes its slot before it waits for memory, so
  * an engine memory admits never waits for one.
@@ -1440,7 +1477,8 @@ export async function runShares<T extends { readonly index: number }>(
   declared: CasesBySuite,
   lanes: number,
   taken: readonly string[],
-  run: (plan: EnginePlan, index: number, lock: string) => Promise<T>,
+  times: SuiteTimes,
+  run: (plan: EnginePlan, index: number, lock: string, holds?: (bytes: number) => void) => Promise<T>,
   handed?: HandedSlot,
   memory?: MemoryGate,
 ): Promise<T[]> {
@@ -1449,17 +1487,20 @@ export async function runShares<T extends { readonly index: number }>(
   let engines = 0;
   // Asked through a call, since another lane empties it while this one waits.
   const empty = (): boolean => shares.empty;
+  // The share this lane would draw now, read at each look. Nothing is awaited between the admission
+  // and the draw, so the share it was admitted for is the one it draws.
+  const needed = (): number => peakOf(shares.peek(), times, MEMORY_PER_ENGINE).bytes;
   const lane = async (at: number): Promise<T[]> => {
     let lock = taken[at] ?? null;
     const ran: T[] = [];
     try {
       while (!empty()) {
-        let ended: (() => void) | undefined;
+        let admitted: Admitted | undefined;
         try {
           lock ??= await slots.take(handedOut.signal);
-          ended = await memory?.admit(handedOut.signal);
+          admitted = await memory?.admit(handedOut.signal, needed);
         } catch (error) {
-          ended?.();
+          admitted?.ended();
           if (handedOut.signal.aborted) {
             break;
           }
@@ -1467,7 +1508,7 @@ export async function runShares<T extends { readonly index: number }>(
         }
         const plan = shares.next(at);
         if (plan === null) {
-          ended?.();
+          admitted?.ended();
           break;
         }
         if (empty()) {
@@ -1476,9 +1517,9 @@ export async function runShares<T extends { readonly index: number }>(
         const index = engines;
         engines += 1;
         try {
-          ran.push(await run(plan, index, lock));
+          ran.push(await run(plan, index, lock, admitted?.holds));
         } finally {
-          ended?.();
+          admitted?.ended();
         }
       }
       return ran;
@@ -1495,7 +1536,8 @@ export async function runShares<T extends { readonly index: number }>(
 
 /**
  * Runs [param plan] in an engine of its own, in the slot [param slot] when its lane holds one and
- * otherwise once a slot is free, and judges what it printed.
+ * otherwise once a slot is free, and judges what it printed. [param holds] is told each reading of
+ * what the engine holds.
  */
 async function runEngine(
   launch: Launch,
@@ -1504,6 +1546,7 @@ async function runEngine(
   times: SuiteTimes,
   again = '',
   slot: string | null = null,
+  holds?: (bytes: number) => void,
 ): Promise<EngineRan> {
   const directory = join(launch.runDirectory, `engine-${String(index)}${again === '' ? '' : `-${again}`}`);
   mkdirSync(join(directory, 'user'), { recursive: true });
@@ -1575,8 +1618,15 @@ async function runEngine(
   const began = Date.now();
   let end: EngineEnd;
   try {
-    end = await watchedEngine(launch, lock, args, directory, log, launch.silenceFloorSeconds, (printed) =>
-      silenceWhile(printed.running, times, launch.silenceFloorSeconds),
+    end = await watchedEngine(
+      launch,
+      lock,
+      args,
+      directory,
+      log,
+      launch.silenceFloorSeconds,
+      (printed) => silenceWhile(printed.running, times, launch.silenceFloorSeconds),
+      holds,
     );
   } finally {
     if (slot === null) {
@@ -1603,6 +1653,7 @@ async function runEngine(
     seconds: (Date.now() - began) / 1000,
     again: again !== '',
     reached,
+    ...(end.peakBytes === undefined ? {} : { peakBytes: end.peakBytes }),
   };
 }
 
@@ -1766,6 +1817,7 @@ function report(
       passed: engine.verdict.passed,
       windowed: engine.plan.windowed,
       suites: engine.plan.suites.map((suite) => suite.path),
+      peakBytes: engine.peakBytes ?? null,
       log: passed ? null : logs.named(engine.log),
     })),
     logs: passed ? null : logs.shown,

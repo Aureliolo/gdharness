@@ -125,6 +125,7 @@ output can still read it there. It holds:
   the part spent compiling its suites together.
 - `passed` and `windowed`.
 - `suites`: the suites it was handed.
+- `peakBytes`: the most memory it was read holding, or null when it was never read.
 - `log`: the file its output is kept in.
 
 `log` and `logs` are null once a passing run has removed them. A run that failed its import, or had
@@ -172,14 +173,16 @@ the gate deals:
   "res://tests/a_test.gd": {
     "seconds": 12.4,
     "cases": { "test_x": 5.1, "test_y": 7.0 },
-    "rows": { "test_y": [3.4, 3.6] }
+    "rows": { "test_y": [3.4, 3.6] },
+    "peak": 1610612736
   }
 }
 ```
 
 `seconds` is the suite run whole, with its `before` and `after`. `cases` holds each function, with
 the rows of a parameterised one added together. `rows` holds what each row of a parameterised case
-took, from row 0.
+took, from row 0. `peak` is the most memory, in bytes, an engine holding the suite was seen to hold.
+A run that closes the suite replaces it.
 
 ### Missing and stale times
 
@@ -187,7 +190,7 @@ A case never timed is taken to cost the median of the cases that have been, or 0
 has. Each run that writes the file drops a suite the project no longer has, deleted or renamed. It
 also drops a case its suite no longer declares and takes its seconds off the suite's. A run that
 printed only some rows of a case, because it was dealt them or cut short, keeps the old times of
-the rest.
+the rest. A suite with no peak kept counts as 1.5 GB.
 
 ### Splitting a suite
 
@@ -225,7 +228,7 @@ engines than the smallest of these:
 
 - `--engines`.
 - The machine's processors, or `--cores`.
-- What its free memory allows at 1.5 GB an engine, once 4 GB is left for everything else.
+- What its free memory allows past 4 GB, at the largest peak kept for any suite of the run.
 - What it takes to keep each engine busy for as long as the slowest unit or 5 seconds, whichever
   is longer. One more is added for each unit with a case never timed.
 
@@ -237,7 +240,8 @@ processors or memory says which on its first line.
 
 On macOS the free memory is the share the system itself counts as free, which includes the cache it
 can give back. On Windows it is the smaller of the physical memory free and what the system can
-still commit. An allocation fails at the commit limit however much physical memory is free.
+still commit. An allocation fails at the commit limit however much physical memory is free. An
+engine's own figure is what Windows has committed to it, and its resident memory on Linux and macOS.
 
 ### When some slots are held
 
@@ -263,9 +267,9 @@ Memory is handed out the same way. The memory free as a run begins may hold it b
 the processors allow. Then the run deals for those engines, says how many memory had room for and
 hands the work out a share at a time.
 
-Before each engine starts, the memory free is read again. The engine starts when there is room for
-one more. Each engine of the run started in the last 30 seconds counts at its whole 1.5 GB, since
-it has yet to take it. The run's first engine always starts.
+Before each engine starts, the memory free is read again. The engine starts once that covers the
+most its share's suites were seen to hold. Each engine going counts at what its share was seen to
+hold, less what it holds now. The run's first engine always starts.
 
 A share waiting for memory keeps a mark in the slots' `waiting` folder, as a wait for a slot does.
 It takes its slot first and keeps it while it waits, so an engine memory admits never waits for a slot.
