@@ -64182,6 +64182,17 @@ function checksThePeaksKeptWithTheTimes(rig: GateRig): void {
   checksPeaksReadBackFromTheTimes(gib, peaks);
 }
 
+/** The report of a run that closed [param path] with its one case passed. */
+function closedSuiteRun(path: string): ReturnType<typeof readRun> {
+  return readRun(
+    [
+      `Run Test Suite: ${path}`,
+      caseLine(path, 'test_one', 'PASSED', '1s 0ms'),
+      'Statistics: 1 test cases | PASSED 1s 0ms',
+    ].join('\n'),
+  );
+}
+
 /** A suite closed this run takes its engines' largest peak, and one not closed keeps its own. */
 function checksAClosedSuiteTakesItsEnginesLargestPeak(rig: GateRig): void {
   const { gib, suite, timed } = rig;
@@ -64195,25 +64206,17 @@ function checksAClosedSuiteTakesItsEnginesLargestPeak(rig: GateRig): void {
     [e?.path ?? '']: timed(1, 3),
     [f?.path ?? '']: timed(1, 2),
   };
-  const closed = (path: string): ReturnType<typeof readRun> =>
-    readRun(
-      [
-        `Run Test Suite: ${path}`,
-        caseLine(path, 'test_one', 'PASSED', '1s 0ms'),
-        'Statistics: 1 test cases | PASSED 1s 0ms',
-      ].join('\n'),
-    );
   const declaredAll = [a, b, c, d, e, f].flatMap((one) => (one === undefined ? [] : [one]));
   const after = timesAfter(
     before,
     declaredAll,
     [
-      { printed: closed(a?.path ?? ''), peakBytes: 1 * gib },
-      { printed: closed(a?.path ?? ''), peakBytes: 3 * gib },
-      { printed: closed(c?.path ?? '') },
-      { printed: closed(d?.path ?? '') },
-      { printed: closed(e?.path ?? ''), peakBytes: 1 * gib },
-      { printed: closed(f?.path ?? ''), peakBytes: 0 },
+      { printed: closedSuiteRun(a?.path ?? ''), peakBytes: 1 * gib },
+      { printed: closedSuiteRun(a?.path ?? ''), peakBytes: 3 * gib },
+      { printed: closedSuiteRun(c?.path ?? '') },
+      { printed: closedSuiteRun(d?.path ?? '') },
+      { printed: closedSuiteRun(e?.path ?? ''), peakBytes: 1 * gib },
+      { printed: closedSuiteRun(f?.path ?? ''), peakBytes: 0 },
     ],
     (path) => declaredAll.find((one) => one.path === path) ?? null,
   );
@@ -64222,12 +64225,19 @@ function checksAClosedSuiteTakesItsEnginesLargestPeak(rig: GateRig): void {
     [3 * gib, 2 * gib, 1.2 * gib, undefined, 1 * gib, 2 * gib],
     'the largest of its engines, replacing the old: a kept one not run, one run with no reading, and one read as 0 keep theirs, and a smaller one replaces',
   );
-  assert.equal(
-    Object.hasOwn(after[d?.path ?? ''] ?? {}, 'peak'),
-    false,
-    'a suite never read has no peak key',
-  );
-  assert.deepEqual(after[b?.path ?? ''], before[b?.path ?? ''], 'a suite not run keeps its record whole');
+  checksSuitesNeverReadOrNotRunKeepWhatTheyHad(names, before, after);
+}
+
+/** The fourth suite was never read and so has no peak key, and the second was not run and keeps its record whole. */
+function checksSuitesNeverReadOrNotRunKeepWhatTheyHad(
+  names: string[],
+  before: SuiteTimes,
+  after: SuiteTimes,
+): void {
+  const neverRead = names[3] ?? '';
+  const notRun = names[1] ?? '';
+  assert.equal(Object.hasOwn(after[neverRead] ?? {}, 'peak'), false, 'a suite never read has no peak key');
+  assert.deepEqual(after[notRun], before[notRun], 'a suite not run keeps its record whole');
 }
 
 /** A peak kept with the times is read back as written, and one that is no number above 0 reads as none. */
