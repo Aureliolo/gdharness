@@ -55545,7 +55545,13 @@ async function testACallThroughAnEngineMethodLeavesTheCallersSelfTime(): Promise
         `no engine method is a row: ${answered}`,
       );
       const scriptMs = asNumber(get(profile, 'scriptMs'), `the profile sums its script time: ${answered}`);
-      assert.ok(scriptMs < innerSelf * 1.5, `scriptMs counts inner's work once: ${answered}`);
+      // The functions that start the dispatch keep print, which the engine never times apart, and any
+      // pause of the machine in their self time. The bound is on what the dispatch itself adds.
+      const startersSelf = rows
+        .filter((one) => !['inner', 'outer'].includes(String(get(one, 'function'))))
+        .map((one) => asNumber(get(one, 'selfMs'), `every row has a self time: ${answered}`))
+        .reduce((sum, self) => sum + self, 0);
+      assert.ok(scriptMs - startersSelf < innerSelf * 1.5, `scriptMs counts inner's work once: ${answered}`);
     };
     const server = new ServerProcess({
       env: { GODOT_PATH: engine, GDHARNESS_RUNTIME_DIR: runtimeDir, GDHARNESS_PROJECT: project },
