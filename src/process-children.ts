@@ -66,7 +66,7 @@ export async function startTimesOf(pids: readonly number[]): Promise<Map<number,
  * run. A boot instant worked out as now less the uptime is finer, but each process works out its own
  * a few milliseconds apart, and a start one server noted and another compares has to be one number.
  */
-export async function linuxStartTimes(pids: readonly number[]): Promise<Map<number, number>> {
+async function linuxStartTimes(pids: readonly number[]): Promise<Map<number, number>> {
   const began = new Map<number, number>();
   const hertz = await ticksPerSecond();
   let booted: number;
