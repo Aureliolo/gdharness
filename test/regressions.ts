@@ -257,8 +257,8 @@ import {
 import type { GodotProcess } from '../src/godot-process.js';
 import {
   containerTypeOf,
-  DebuggerStream,
   type DebuggerMessage,
+  DebuggerStream,
   decodeVariant,
   framedCommand,
   type GodotValue,
@@ -47201,32 +47201,16 @@ function pngPixels(png: Buffer): PngPixels {
     `an 8-bit RGB or RGBA PNG, not ${png[24]}/${colourType}`,
   );
   const step = colourType === 6 ? 4 : 3;
-  const chunks: Buffer[] = [];
-  for (let at = 8; at < png.length; ) {
-    const length = png.readUInt32BE(at);
-    if (png.toString('ascii', at + 4, at + 8) === 'IDAT') {
-      chunks.push(png.subarray(at + 8, at + 8 + length));
-    }
-    at += 12 + length;
-  }
-  const raw = inflateSync(Buffer.concat(chunks));
+  const raw = inflateSync(Buffer.concat(imageDataChunksOf(png)));
   const stride = width * step;
   const pixels = Buffer.alloc(stride * height);
   for (let row = 0; row < height; row += 1) {
     const filter = raw[row * (stride + 1)];
     for (let index = 0; index < stride; index += 1) {
       const value = raw[row * (stride + 1) + 1 + index] ?? 0;
-      const left = index >= step ? (pixels[row * stride + index - step] ?? 0) : 0;
-      const up = row > 0 ? (pixels[(row - 1) * stride + index] ?? 0) : 0;
-      const corner = row > 0 && index >= step ? (pixels[(row - 1) * stride + index - step] ?? 0) : 0;
-      const guess = left + up - corner;
-      const nearest =
-        Math.abs(guess - left) <= Math.abs(guess - up) && Math.abs(guess - left) <= Math.abs(guess - corner)
-          ? left
-          : Math.abs(guess - up) <= Math.abs(guess - corner)
-            ? up
-            : corner;
-      const predicted = [0, left, up, Math.floor((left + up) / 2), nearest][filter ?? 0] ?? 0;
+      const [left, up, corner] = neighboursOfAPngByte(pixels, row, index, stride, step);
+      const predicted =
+        [0, left, up, Math.floor((left + up) / 2), paethNeighbour(left, up, corner)][filter ?? 0] ?? 0;
       pixels[row * stride + index] = (value + predicted) & 0xff;
     }
   }
@@ -47235,6 +47219,42 @@ function pngPixels(png: Buffer): PngPixels {
     height,
     rgb: (x, y) => [...pixels.subarray((y * width + x) * step, (y * width + x) * step + 3)],
   };
+}
+
+/** The data of every IDAT chunk of a PNG, in order. */
+function imageDataChunksOf(png: Buffer): Buffer[] {
+  const chunks: Buffer[] = [];
+  for (let at = 8; at < png.length; ) {
+    const length = png.readUInt32BE(at);
+    if (png.toString('ascii', at + 4, at + 8) === 'IDAT') {
+      chunks.push(png.subarray(at + 8, at + 8 + length));
+    }
+    at += 12 + length;
+  }
+  return chunks;
+}
+
+/** Of the pixel to the left, above and diagonally above-left, the one nearest their sum less the corner, as the Paeth filter picks. */
+function paethNeighbour(left: number, up: number, corner: number): number {
+  const guess = left + up - corner;
+  if (Math.abs(guess - left) <= Math.abs(guess - up) && Math.abs(guess - left) <= Math.abs(guess - corner)) {
+    return left;
+  }
+  return Math.abs(guess - up) <= Math.abs(guess - corner) ? up : corner;
+}
+
+/** The decoded bytes to the left of, above and diagonally above-left of a byte of a row, each 0 off the edge. */
+function neighboursOfAPngByte(
+  pixels: Buffer,
+  row: number,
+  index: number,
+  stride: number,
+  step: number,
+): [number, number, number] {
+  const left = index >= step ? (pixels[row * stride + index - step] ?? 0) : 0;
+  const up = row > 0 ? (pixels[(row - 1) * stride + index] ?? 0) : 0;
+  const corner = row > 0 && index >= step ? (pixels[(row - 1) * stride + index - step] ?? 0) : 0;
+  return [left, up, corner];
 }
 
 /**
@@ -48334,38 +48354,13 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       const started = await start(20_000);
       assert.equal(get(started.answer, 'runtime', 'listening'), true, JSON.stringify(started.answer));
 
-      const invoke = async (method: string, args: unknown[]): Promise<{ result: unknown; said: string }> => {
-        const response = await server.request(
-          'tools/call',
-          { name: 'runtime_invoke', arguments: { op: 'call', nodePath: '/root/Main', method, args } },
-          ENGINE_CALL_TIMEOUT_MS,
-        );
-        const parsed = parseTextContent(response);
-        return {
-          result: parsed === null ? undefined : get(parsed, 'result'),
-          said: textOf(response) ?? '',
-        };
-      };
+      const invoke = (method: string, args: unknown[]): Promise<{ result: unknown; said: string }> =>
+        invokeOnTheGameMain(server, method, args);
       const wearing = async (index: number): Promise<unknown> => (await invoke('mounted_is', [index])).result;
 
       // A result a method declares as an enum is named as well: emit_signal answered 37 with nothing
       // saying it is Error's "Method not found".
-      const namedResults: unknown[] = [];
-      for (const [method, args] of [
-        // The engine answers ERR_UNAVAILABLE for a signal nothing is connected to.
-        ['emit_signal', ['ready']],
-        ['get_process_mode', []],
-        ['mood', []],
-        ['total', [[1, 2]]],
-      ] as const) {
-        const response = await server.request(
-          'tools/call',
-          { name: 'runtime_invoke', arguments: { op: 'call', nodePath: '/root/Main', method, args } },
-          ENGINE_CALL_TIMEOUT_MS,
-        );
-        const parsed = parseTextContent(response);
-        namedResults.push([get(parsed, 'result'), get(parsed, 'result_named')]);
-      }
+      const namedResults = await resultsOfCallsThatReturnAnEnum(server);
       assert.deepEqual(
         namedResults,
         [
@@ -48397,14 +48392,8 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       assert.equal(node.result, 'Main', `a node is named by its path alone: ${node.said}`);
 
       // A static function of a class no node carries, named by the class or by its script's path.
-      const onClass = async (nodePath: string, method: string, args: unknown[]): Promise<string> =>
-        textOf(
-          await server.request(
-            'tools/call',
-            { name: 'runtime_invoke', arguments: { op: 'call', nodePath, method, args } },
-            ENGINE_CALL_TIMEOUT_MS,
-          ),
-        ) ?? '';
+      const onClass = (nodePath: string, method: string, args: unknown[]): Promise<string> =>
+        callOnTheGameAt(server, nodePath, method, args);
       // A refusal is prose, so it is matched before being read as an answer and is shown whole.
       const answered = (said: string): unknown => {
         assert.match(said, /^\{/, `an answer rather than a refusal: ${said}`);
@@ -49039,52 +49028,7 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
       );
       const longFrame = invoke('slow', [1500]);
       await delay(500);
-      const welcomedAt: number[] = [];
-      let answeredAt = 0;
-      const dialled = Array.from(
-        { length: 8 },
-        async (_, index) =>
-          await new Promise<string>((answer) => {
-            const socket = createConnection({ host: '127.0.0.1', port: recordPort });
-            socket.setEncoding('utf8');
-            let buffered = '';
-            let first: string | null = null;
-            const end = (): void => {
-              socket.destroy();
-              answer(first?.includes('"welcome"') === true ? 'welcome' : (first ?? 'nothing'));
-            };
-            socket.setTimeout(20_000, () => {
-              socket.destroy();
-              answer('no welcome within 20s');
-            });
-            socket.on('data', (chunk: string) => {
-              buffered += chunk;
-              for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
-                const line = buffered.slice(0, at);
-                buffered = buffered.slice(at + 1);
-                if (first === null) {
-                  first = line;
-                  welcomedAt.push(Date.now());
-                  if (index !== 0) {
-                    end();
-                    return;
-                  }
-                  socket.write(
-                    `${JSON.stringify({ id: 1, command: 'call_method', params: { path: '/root/Main', method: 'slow', args: [1000] } })}\n`,
-                  );
-                } else if (line.includes('"id":1')) {
-                  answeredAt = Date.now();
-                  end();
-                  return;
-                }
-              }
-            });
-            socket.on('error', (error: NodeJS.ErrnoException) => {
-              answer(error.code ?? error.message);
-            });
-          }),
-      );
-      const told = await Promise.all(dialled);
+      const { told, welcomedAt, answeredAt } = await dialTheHeldGameEightTimes(recordPort);
       await longFrame;
       assert.deepEqual(
         told,
@@ -49129,6 +49073,133 @@ async function testACallTakesAnObjectByItsPath(): Promise<void> {
     },
     { realAddon: true, engine, held },
   );
+}
+
+/**
+ * Dials the held game's port eight times at once. The first connection sends a one-second call on
+ * its welcome. Answers what each was told, when each was welcomed and when the call was answered.
+ */
+async function dialTheHeldGameEightTimes(
+  recordPort: number,
+): Promise<{ told: string[]; welcomedAt: number[]; answeredAt: number }> {
+  const shared = { welcomedAt: [] as number[], answeredAt: 0 };
+  const dialled = Array.from(
+    { length: 8 },
+    async (_, index) =>
+      await new Promise<string>((answer) => {
+        const socket = createConnection({ host: '127.0.0.1', port: recordPort });
+        socket.setEncoding('utf8');
+        let buffered = '';
+        const dial: { first: string | null } = { first: null };
+        const end = (): void => {
+          socket.destroy();
+          answer(dial.first?.includes('"welcome"') === true ? 'welcome' : (dial.first ?? 'nothing'));
+        };
+        socket.setTimeout(20_000, () => {
+          socket.destroy();
+          answer('no welcome within 20s');
+        });
+        socket.on('data', (chunk: string) => {
+          buffered += chunk;
+          for (let at = buffered.indexOf('\n'); at !== -1; at = buffered.indexOf('\n')) {
+            const line = buffered.slice(0, at);
+            buffered = buffered.slice(at + 1);
+            if (readALineOfTheHeldGame(line, index, dial, shared, socket) === 'finished') {
+              end();
+              return;
+            }
+          }
+        });
+        socket.on('error', (error: NodeJS.ErrnoException) => {
+          answer(error.code ?? error.message);
+        });
+      }),
+  );
+  const told = await Promise.all(dialled);
+  return { told, welcomedAt: shared.welcomedAt, answeredAt: shared.answeredAt };
+}
+
+/** Takes one line the held game sent a dial: the first is the welcome, and the first dial answers it with the call. */
+function readALineOfTheHeldGame(
+  line: string,
+  index: number,
+  dial: { first: string | null },
+  shared: { readonly welcomedAt: number[]; answeredAt: number },
+  socket: Socket,
+): 'finished' | 'going' {
+  if (dial.first === null) {
+    dial.first = line;
+    shared.welcomedAt.push(Date.now());
+    if (index !== 0) {
+      return 'finished';
+    }
+    socket.write(
+      `${JSON.stringify({ id: 1, command: 'call_method', params: { path: '/root/Main', method: 'slow', args: [1000] } })}\n`,
+    );
+    return 'going';
+  }
+  if (line.includes('"id":1')) {
+    shared.answeredAt = Date.now();
+    return 'finished';
+  }
+  return 'going';
+}
+
+/** A `runtime_invoke call` on the game's Main node, answered with its result and the text it came as. */
+async function invokeOnTheGameMain(
+  server: ServerProcess,
+  method: string,
+  args: unknown[],
+): Promise<{ result: unknown; said: string }> {
+  const response = await server.request(
+    'tools/call',
+    { name: 'runtime_invoke', arguments: { op: 'call', nodePath: '/root/Main', method, args } },
+    ENGINE_CALL_TIMEOUT_MS,
+  );
+  const parsed = parseTextContent(response);
+  return {
+    result: parsed === null ? undefined : get(parsed, 'result'),
+    said: textOf(response) ?? '',
+  };
+}
+
+/** A `runtime_invoke call` at [nodePath], answered as the text it came as. */
+async function callOnTheGameAt(
+  server: ServerProcess,
+  nodePath: string,
+  method: string,
+  args: unknown[],
+): Promise<string> {
+  return (
+    textOf(
+      await server.request(
+        'tools/call',
+        { name: 'runtime_invoke', arguments: { op: 'call', nodePath, method, args } },
+        ENGINE_CALL_TIMEOUT_MS,
+      ),
+    ) ?? ''
+  );
+}
+
+/** What each call that returns an enum answers: its number and the name the server gives it. */
+async function resultsOfCallsThatReturnAnEnum(server: ServerProcess): Promise<unknown[]> {
+  const namedResults: unknown[] = [];
+  for (const [method, args] of [
+    // The engine answers ERR_UNAVAILABLE for a signal nothing is connected to.
+    ['emit_signal', ['ready']],
+    ['get_process_mode', []],
+    ['mood', []],
+    ['total', [[1, 2]]],
+  ] as const) {
+    const response = await server.request(
+      'tools/call',
+      { name: 'runtime_invoke', arguments: { op: 'call', nodePath: '/root/Main', method, args } },
+      ENGINE_CALL_TIMEOUT_MS,
+    );
+    const parsed = parseTextContent(response);
+    namedResults.push([get(parsed, 'result'), get(parsed, 'result_named')]);
+  }
+  return namedResults;
 }
 
 /**
