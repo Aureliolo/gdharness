@@ -53,6 +53,13 @@ const TREE = 'tree:';
 /** What stands for the content of a file that is there and cannot be opened. Never a digest. */
 const UNOPENED = 'unopened';
 
+/**
+ * How far a file's time can read behind the moment it was written. Windows and Linux stamp files
+ * from a clock that moves once a tick, up to about 16 ms, so a write just after a run began can
+ * carry a time from before it.
+ */
+export const FILE_TIME_LAG_MS = 50;
+
 /** A suite that passed, with what its verdict depended on and their print as they stood then. */
 export interface PassedSuite {
   readonly print: string;
@@ -291,9 +298,12 @@ export class SuiteInputs {
     return hash.digest('hex');
   }
 
-  /** Whether any of [param inputs] was modified after [param since], in milliseconds. */
+  /**
+   * Whether any of [param inputs] may have been modified after [param since], in milliseconds: one
+   * whose time reads up to [constant FILE_TIME_LAG_MS] before it counts.
+   */
   modifiedAfter(inputs: readonly string[], since: number): boolean {
-    return inputs.some((path) => this.read(path).modified > since);
+    return inputs.some((path) => this.read(path).modified > since - FILE_TIME_LAG_MS);
   }
 
   private read(path: string): Read {
