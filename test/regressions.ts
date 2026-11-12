@@ -93068,6 +93068,7 @@ function testTheUidCacheStepsOverAFolderHoldingAProject(): void {
   const project = projectWithANestedOne({
     'gdharness/loader.gd': 'extends Node\n',
     'gdharness/loader.gd.uid': 'uid://bil88s3xjahd0\n',
+    'game_copy/copy.gd': 'extends Node\n',
     'game_copy/copy.gd.uid': 'uid://i\n',
   });
   try {
