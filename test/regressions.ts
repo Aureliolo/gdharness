@@ -580,7 +580,14 @@ import {
   spreadOptionsOf,
 } from '../src/spread-run.js';
 import { followSuccessor, RESTARTED_WITHIN_MS, successorAmong } from '../src/successor.js';
-import { EVERY_FILE, EVERY_NAME, reachedBySuite, SuiteInputs, walkSeen } from '../src/suite-inputs.js';
+import {
+  EVERY_FILE,
+  EVERY_NAME,
+  FILE_TIME_LAG_MS,
+  reachedBySuite,
+  SuiteInputs,
+  walkSeen,
+} from '../src/suite-inputs.js';
 import {
   COMPILED_SAID,
   exitNamed,
@@ -61623,9 +61630,9 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
     const aged = new Date(Date.now() - 60_000);
     utimesSync(join(project, 'data', 'icon.png'), aged, aged);
     utimesSync(join(project, 'helper.gd'), aged, aged);
-    const settled = Date.now() + 25;
+    const settled = Date.now() + FILE_TIME_LAG_MS + 25;
     while (Date.now() < settled) {
-      // The file system's clock moves past the last change.
+      // The last change reads further back than a file's time can lag.
     }
     const began = Date.now();
     assert.equal(new SuiteInputs(scripts, ['1']).modifiedAfter(kept, began), false, 'nothing since');
@@ -61937,7 +61944,8 @@ async function testAFileHeldShutReadsAsChangedNow(): Promise<void> {
 
 /**
  * An input replaced with a copy that keeps its old modification time, and an input deleted, count as
- * changed since a moment, so a pass recorded on a state the suite did not run on is not kept.
+ * changed since a moment, so a pass recorded on a state the suite did not run on is not kept. So does
+ * one whose time reads a tick before the moment, as a coarse file clock stamps it.
  */
 function testAnInputChangedDuringARunIsSeenWhateverItsTimeStamp(): void {
   const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-during-'));
@@ -61954,10 +61962,15 @@ function testAnInputChangedDuringARunIsSeenWhateverItsTimeStamp(): void {
     }
     const inputs = (): SuiteInputs => new SuiteInputs(new ProjectScripts(project), ['1']);
     const named = inputs().inputsOf(['res://s.gd']);
-    const since = Date.now();
-    while (Date.now() < since + 25) {
-      // The file system's clock moves on before anything is changed.
-    }
+    // Every time the setup left reads further before the moment than a file's time can lag.
+    const settled = (): number => {
+      const at = Date.now() + FILE_TIME_LAG_MS + 25;
+      while (Date.now() < at) {
+        // Busy, since the case is synchronous.
+      }
+      return Date.now();
+    };
+    const since = settled();
     assert.equal(inputs().modifiedAfter(named, since), false, 'nothing is changed since');
     writeFileSync(join(project, 't.tres'), 'new!\n');
     utimesSync(join(project, 't.tres'), longAgo, longAgo);
@@ -61966,12 +61979,16 @@ function testAnInputChangedDuringARunIsSeenWhateverItsTimeStamp(): void {
       true,
       'a file replaced with the old modification time is changed',
     );
-    const after = Date.now();
-    while (Date.now() < after + 25) {
-      // As above.
-    }
+    const after = settled();
     rmSync(join(project, 'u.tres'));
-    assert.equal(inputs().modifiedAfter(named, after), true, 'and a file deleted is');
+    // The folder's time a tick before the moment, as a file clock that moves once a tick stamps it.
+    const tick = new Date(after - 16);
+    utimesSync(project, tick, tick);
+    assert.equal(
+      inputs().modifiedAfter(named, after),
+      true,
+      'and a file deleted is, its folder stamped a tick early',
+    );
   } finally {
     sweep(project);
   }
