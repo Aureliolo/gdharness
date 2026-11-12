@@ -215,7 +215,14 @@ import { EngineUsageError, errorCode, errorMessage, Refusal, toError } from '../
 import { applyFileMove, planFileMove } from '../src/file-move.js';
 import { fileNoCaseCompare } from '../src/file-order.js';
 import { FrameReader, OversizedStreamError, frame as wireFrame } from '../src/framing.js';
-import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
+import {
+  DEBUG_REQUESTS,
+  type DebugRequest,
+  debugRequestOf,
+  framesOf,
+  GameDebugger,
+  shownValue,
+} from '../src/game-debugger.js';
 import {
   ALREADY_HELD,
   answersTo,
@@ -22534,6 +22541,84 @@ async function testTheKeeperAnswersItsDebuggersQuestions(): Promise<void> {
     });
   } finally {
     garbled.close();
+  }
+}
+
+/**
+ * A request is checked field by field against the table both the type and the wire check read: every
+ * op keeps its fields and only those, a field of another type or a missing one refuses it, and the
+ * keeper's listener and sender use the same check.
+ */
+async function testADebugRequestIsCheckedAgainstItsTable(): Promise<void> {
+  // @ts-expect-error `how` takes the four values of the table, not any string.
+  const widened: DebugRequest = { op: 'resume', how: 'jump' };
+  assert.equal(widened.op, 'resume');
+  const valid: Readonly<Record<string, unknown>> = {
+    breakpoint: { op: 'breakpoint', script: 'res://main.gd', line: 3, set: true },
+    pause: { op: 'pause' },
+    resume: { op: 'resume', how: 'step' },
+    stack: { op: 'stack' },
+    variables: { op: 'variables', frame: 0 },
+    evaluate: { op: 'evaluate', frame: 1, expression: 'a + 1' },
+    output: { op: 'output' },
+  };
+  assert.deepEqual(
+    Object.keys(valid).toSorted(),
+    Object.keys(DEBUG_REQUESTS).toSorted(),
+    'every op is covered',
+  );
+  const wrong: Readonly<Record<string, unknown>> = {
+    script: 1,
+    line: '3',
+    set: 1,
+    how: 'jump',
+    frame: '0',
+    expression: 7,
+  };
+  for (const [op, request] of Object.entries(valid)) {
+    assert.ok(isRecord(request), `${op} is a record`);
+    assert.deepEqual(debugRequestOf(request), request, `${op} with every field valid`);
+    for (const field of Object.keys(request).filter((name) => name !== 'op')) {
+      assert.equal(
+        debugRequestOf({ ...request, [field]: wrong[field] }),
+        null,
+        `${op} with ${field} of another type`,
+      );
+      const { [field]: _left, ...without } = request;
+      assert.equal(debugRequestOf(without), null, `${op} without ${field}`);
+    }
+  }
+  assert.deepEqual(
+    debugRequestOf({ op: 'pause', how: 'next', extra: 1 }),
+    { op: 'pause' },
+    'fields the table does not name are dropped',
+  );
+  for (const asked of [null, [], 'pause', {}, { op: 'state' }, { op: 'toString' }]) {
+    assert.equal(debugRequestOf(asked), null, `${JSON.stringify(asked)} is no request`);
+  }
+
+  const calls: unknown[] = [];
+  const listening = await listenForTheServer(
+    () => 'gone',
+    (request) => {
+      calls.push(request);
+      return Promise.resolve({ paused: true });
+    },
+  );
+  assert.ok(listening !== null, 'the keeper listens');
+  try {
+    const said = await saidToPieces(listening.address, ['debug {"op":"variables","frame":"0"}\n']);
+    assert.match(said, /^\{"refused":"The debugger takes no request like /u, 'a request of the wrong type');
+    assert.equal(said.split('\n').length, 2, 'is one line');
+    assert.equal(calls.length, 0, 'never reaches the debugger');
+    assert.deepEqual(
+      await askTheKeepersDebugger(listening.address, { op: 'resume', how: 'out' }, 30_000),
+      { paused: true },
+      'a request the sender and the listener agree on is answered',
+    );
+    assert.deepEqual(calls, [{ op: 'resume', how: 'out' }], 'and reaches the debugger as it was sent');
+  } finally {
+    listening.close();
   }
 }
 
@@ -93412,6 +93497,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testTheKeepersListenerAnswersTheFirstLineOnly,
   testTheLauncherSaysWhyARunDidNotStart,
   testTheKeeperAnswersItsDebuggersQuestions,
+  testADebugRequestIsCheckedAgainstItsTable,
   testAKeptGamesStackAndValuesRead,
   testAPauseAnswersWithTheGamesOwnScript,
   testAnExitedGamesLastMessagesAreRead,
