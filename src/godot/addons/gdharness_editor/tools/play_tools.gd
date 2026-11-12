@@ -20,6 +20,9 @@ const DESKTOP_VARIABLE: String = "GDHARNESS_DESKTOP"
 const RUN_ARGS_SETTING: String = "editor/run/main_run_args"
 ## Kept in step with `HIDDEN_WINDOW_FPS` in the server's launch module.
 const HIDDEN_WINDOW_FPS: int = 60
+## Where the editor keeps its open scenes between sessions, and the section it keeps them under.
+const LAYOUT_FILE: String = "editor_layout.cfg"
+const LAYOUT_SECTION: String = "EditorNode"
 
 var _editor_plugin: EditorPlugin = null
 ## Which play this is, counted up for every one the editor starts, whoever starts it. What a server
@@ -330,9 +333,42 @@ static func _debug_adapter() -> Node:
 
 ## Asked of the tree the editor's own window is in, because this object is not in one.
 static func _leave() -> void:
+	_keep_open_scenes()
 	var base: Control = EditorInterface.get_base_control()
 	if base != null and base.get_tree() != null:
 		base.get_tree().quit()
+
+
+## Writes the open scenes and the one in front into the editor's layout file, as the editor's own
+## exit does. A quit of the tree skips that exit, which can stop on a dialog nobody sees in a hidden
+## editor. Otherwise the editor writes the file only half a second after some changes, so a switch
+## of tabs after the last of them would be lost. An editor showing no scene leaves the file alone.
+static func _keep_open_scenes() -> void:
+	var open: PackedStringArray = EditorInterface.get_open_scenes()
+	if open.is_empty():
+		return
+	var path: String = (
+		EditorInterface.get_editor_paths().get_project_settings_dir().path_join(LAYOUT_FILE)
+	)
+	var layout: ConfigFile = ConfigFile.new()
+	# A layout that does not read yet is written with the scenes alone.
+	var _read: Error = layout.load(path)
+	var saved_scenes: PackedStringArray = []
+	for scene: String in open:
+		if not scene.is_empty():
+			var _added: bool = saved_scenes.append(scene)
+	var front: Node = EditorInterface.get_edited_scene_root()
+	layout.set_value(LAYOUT_SECTION, "open_scenes", saved_scenes)
+	layout.set_value(
+		LAYOUT_SECTION,
+		"current_scene",
+		front.scene_file_path if front != null else "",
+	)
+	var saved: Error = layout.save(path)
+	if saved != OK:
+		push_warning(
+			"gdharness: the open scenes were not kept in %s: %s" % [path, error_string(saved)]
+		)
 
 
 func playing_status(_args: Dictionary) -> Dictionary:

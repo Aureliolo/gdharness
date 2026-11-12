@@ -213,6 +213,7 @@ import {
 } from '../src/engine-spent.js';
 import { EngineUsageError, errorCode, errorMessage, Refusal, toError } from '../src/errors.js';
 import { applyFileMove, planFileMove } from '../src/file-move.js';
+import { fileNoCaseCompare } from '../src/file-order.js';
 import { FrameReader, OversizedStreamError, frame as wireFrame } from '../src/framing.js';
 import { framesOf, GameDebugger, shownValue } from '../src/game-debugger.js';
 import {
@@ -20482,20 +20483,20 @@ function testASidecarWithNoFileDeclaresNoUid(): void {
       {
         moved: [
           [28n, 'res://z_old/s.gd', 'res://m_new/s.gd'],
-          [29n, 'res://elsewhere/twin.gd', 'res://first/twin.gd'],
+          [29n, 'res://elsewhere/twin.gd', 'res://second/twin.gd'],
         ],
         dropped: [
           [26n, 'res://gone.gd'],
           [27n, 'res://old.png'],
         ],
       },
-      'only a sidecar beside its file declares, and of two files claiming one uid the first walked wins',
+      'only a sidecar beside its file declares, and of two files claiming one uid the later scanned wins',
     );
     assert.deepEqual(
       readFileSync(cache),
       encodedUidCache([
         [28n, 'res://m_new/s.gd'],
-        [29n, 'res://first/twin.gd'],
+        [29n, 'res://second/twin.gd'],
         [30n, 'res://beside/kept.gd'],
       ]),
     );
@@ -20515,7 +20516,7 @@ function testASidecarWithNoFileDeclaresNoUid(): void {
     }
     const where = join(project, '.godot', 'uid_cache.bin');
     assert.deepEqual(said, [
-      `uid cache: moved what names a file gone in ${where}: res://z_old/s.gd to res://m_new/s.gd, res://elsewhere/twin.gd to res://first/twin.gd\n`,
+      `uid cache: moved what names a file gone in ${where}: res://z_old/s.gd to res://m_new/s.gd, res://elsewhere/twin.gd to res://second/twin.gd\n`,
       `uid cache: dropped what names a file gone from ${where}: res://gone.gd, res://old.png\n`,
     ]);
 
@@ -20543,6 +20544,126 @@ function testASidecarWithNoFileDeclaresNoUid(): void {
     assert.deepEqual(readFileSync(cache), stale, 'and the cache is left as it was');
   } finally {
     rmSync(project, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Of two files claiming one uid, the mend keeps the one the editor's scan keeps, on every platform.
+ *
+ * The walk took the order the file system lists a folder in, which is sorted on Windows and is not
+ * on Linux. The editor sorts each folder's subfolders and files without case and with numbers read
+ * as numbers, takes the subfolders first, and the later file it meets wins. Each pair below is
+ * ordered one way by that rule and the other way by a plain sort.
+ */
+function testTwinUidsSettleAsTheEditorScans(): void {
+  const scene = (uid: string): string => `[gd_scene format=3 uid="${uid}"]\n\n[node name="X" type="Node"]\n`;
+  const tree = {
+    'project.godot': 'config_version=5\n',
+    'apple/c.gd': 'extends Node\n',
+    'apple/c.gd.uid': 'uid://1\n',
+    'Banana/c.gd': 'extends Node\n',
+    'Banana/c.gd.uid': 'uid://1\n',
+    'v9/n.gd': 'extends Node\n',
+    'v9/n.gd.uid': 'uid://2\n',
+    'v10/n.gd': 'extends Node\n',
+    'v10/n.gd.uid': 'uid://2\n',
+    '_u/u.gd': 'extends Node\n',
+    '_u/u.gd.uid': 'uid://3\n',
+    'Z/u.gd': 'extends Node\n',
+    'Z/u.gd.uid': 'uid://3\n',
+    'a.gd': 'extends Node\n',
+    'a.gd.uid': 'uid://4\n',
+    'y/a.gd': 'extends Node\n',
+    'y/a.gd.uid': 'uid://4\n',
+    'k/x.gd': 'extends Node\n',
+    'k/x.gd.uid': 'uid://5\n',
+    'k/x.gd.tscn': scene('uid://5'),
+  };
+  // A digit in a uid text is its value plus 25, so uid://1 is 26n and uid://5 is 30n.
+  const ids = [26n, 27n, 28n, 29n, 30n];
+  const settled = (project: string): Map<bigint, string> =>
+    new Map(
+      (uidCacheEntries(readFileSync(join(project, '.godot', 'uid_cache.bin'))) ?? []).filter(([id]) =>
+        ids.includes(id),
+      ),
+    );
+  const projectWith = (prefix: string, cached: readonly UidEntry[]): string => {
+    const project = mkdtempSync(join(realpathSync(tmpdir()), prefix));
+    writeTree(project, tree);
+    mkdirSync(join(project, '.godot'));
+    writeFileSync(join(project, '.godot', 'uid_cache.bin'), encodedUidCache(cached));
+    return project;
+  };
+  const mended = projectWith(
+    'gdharness-uid-twins-',
+    ids.map((id): UidEntry => [id, `res://gone/${String(id)}.gd`]),
+  );
+  // The editor's copy names the twin the scan meets first, so the mend that runs before every
+  // engine start finds nothing gone and the scan alone moves each entry.
+  const scanned = projectWith('gdharness-uid-twins-scanned-', [
+    [26n, 'res://apple/c.gd'],
+    [27n, 'res://v9/n.gd'],
+    [28n, 'res://_u/u.gd'],
+    [29n, 'res://y/a.gd'],
+    [30n, 'res://k/x.gd'],
+  ]);
+  try {
+    mendUidCache(mended);
+    const expected = new Map<bigint, string>([
+      [26n, 'res://Banana/c.gd'],
+      [27n, 'res://v10/n.gd'],
+      [28n, 'res://Z/u.gd'],
+      [29n, 'res://a.gd'],
+      [30n, 'res://k/x.gd.tscn'],
+    ]);
+    assert.deepEqual(settled(mended), expected, 'each twin settles on the file the scan meets later');
+
+    const godotPath = resolveGodotPath();
+    if (!godotPath) {
+      if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+        throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH names no existing file.');
+      }
+      console.log('twin uid regression: the editor half skipped (Godot not found)');
+      return;
+    }
+    const run = spawnSyncHidden(godotPath, ['--headless', '--path', scanned, '--import'], {
+      encoding: 'utf8',
+      timeout: ENGINE_CALL_TIMEOUT_MS,
+    });
+    assert.equal(run.status, 0, `the project should import: ${run.stdout}\n${run.stderr}`);
+
+    // Names that part every step of the comparison, sorted by the engine and by the port.
+    const names = ['_a', '.b', 'a10', 'a9', 'A2', 'a01', 'a1', 'b', 'é', 'É', 'ß', '..x', 'a_b', 'a-b'];
+    names.push('__z', 'Z', 'x.gd', 'x.gd.tscn', 'x.gd.uid', 'v007', 'v7a', '_.c', '9', 'Ab', 'aB', 'ab');
+    writeFileSync(
+      join(scanned, 'order.gd'),
+      `extends SceneTree\n\n\nfunc _init() -> void:\n\tvar names: Array = ${JSON.stringify(names)}\n\tnames.sort_custom(func(a: String, b: String) -> bool: return a.filenocasecmp_to(b) < 0)\n\tprint("ORDER=" + "|".join(PackedStringArray(names)))\n\tquit()\n`,
+    );
+    const sorting = spawnSyncHidden(
+      godotPath,
+      ['--headless', '--path', scanned, '--script', 'res://order.gd'],
+      {
+        encoding: 'utf8',
+        timeout: ENGINE_CALL_TIMEOUT_MS,
+      },
+    );
+    const engineOrder = /ORDER=(.+)/.exec(sorting.stdout)?.[1]?.trim();
+    assert.ok(engineOrder, `the engine should print its order:\n${sorting.stdout}\n${sorting.stderr}`);
+    const ported = names.toSorted(fileNoCaseCompare);
+    const sorted = engineOrder.split('|');
+    assert.equal(sorted.length, names.length, engineOrder);
+    for (const [index, name] of sorted.entries()) {
+      const tied = fileNoCaseCompare(name, ported[index] ?? '') === 0;
+      assert.ok(tied, `the port sorts as the engine: ${engineOrder} against ${ported.join('|')}`);
+    }
+    assert.deepEqual(
+      settled(scanned),
+      expected,
+      `the editor's own scan keeps the same files:\n${run.stderr}`,
+    );
+  } finally {
+    rmSync(mended, { recursive: true, force: true });
+    rmSync(scanned, { recursive: true, force: true });
   }
 }
 
@@ -73306,7 +73427,7 @@ function testEveryToolNamedInProseIsATool(): void {
   // gdUnit4 setting a test run obeys on script errors, and the signal and the messages the engine's
   // debugger speaks in, which the keeper's debugger reads, a key the editor writes in
   // export_presets.cfg, the directory a self-contained editor keeps its data in, the file the
-  // editor caches its class and script references in, the name every resource stores, and the gdUnit4 call a
+  // editor keeps its open scenes in, the file the editor caches its class and script references in, the name every resource stores, and the gdUnit4 call a
   // suite that drives a scene makes, which is what puts it in the windowed engine, and the project
   // setting that turns that guess off, and the engine setting naming a file laid over the project's
   // settings, which a write keeps out of project.godot. Named one by one rather than matched by a
@@ -73339,6 +73460,7 @@ function testEveryToolNamedInProseIsATool(): void {
     'editor_data',
     'editor_doc_cache',
     'editor_script_doc_cache',
+    'editor_layout',
     'resource_name',
     'editor_servers',
     'scene_runner',
@@ -89322,7 +89444,23 @@ async function testAnUnusedHiddenEditorQuitsAndOpensAgain(): Promise<void> {
     const shown = ['res://main.tscn', ['res://main.tscn', 'res://other.tscn']];
     assert.deepEqual(scenes(first), shown, JSON.stringify(first));
 
+    // A layout the editor wrote half a second after a change, before a switch of tabs it never
+    // writes. Past the write it makes once its restored scenes are open.
+    const layout = join(project, '.godot', 'editor', 'editor_layout.cfg');
+    await delay(2000);
+    const written = readFileSync(layout, 'utf8');
+    assert.match(
+      written,
+      /^current_scene="res:\/\/main\.tscn"$/m,
+      `the layout names the scene in front: ${written}`,
+    );
+    writeFileSync(layout, written.replace(/^current_scene=.*$/m, 'current_scene="res://other.tscn"'));
     await anUnusedEditorQuitsAndWritesItsRecord({ call, firstPid, record, editor });
+    assert.match(
+      readFileSync(layout, 'utf8'),
+      /^current_scene="res:\/\/main\.tscn"$/m,
+      'the editor quitting keeps the scene that was in front',
+    );
     const secondPid = await aSaveFromTheEditorIsTheFirstCallAfterTheQuit({
       call,
       project,
@@ -93135,6 +93273,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAStartMendsNoClassListWhereThereIsNoneOrNoProjectIsNamed,
   testAnEngineReadsAClassListMendedOfAGoneScript,
   testASidecarWithNoFileDeclaresNoUid,
+  testTwinUidsSettleAsTheEditorScans,
   testAMovedAutoloadBootsFromWhereItIs,
   testACancelledCallEndsTheEngineItStarted,
   testAnErrorReportOutlivesItsGameForAnHour,
