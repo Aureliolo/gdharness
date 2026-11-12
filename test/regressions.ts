@@ -10408,7 +10408,11 @@ async function aCallMetByAnEditorQuitting(dropsItsReply: boolean): Promise<void>
         socket.terminate();
         return;
       }
-      // Ended once the reply is written, as the addon's goes out before its editor quits.
+      // Closed once the reply is out, so the reply arrives, as this case is about an editor whose
+      // word that it quits reaches the server. A socket destroyed with the server's messages unread
+      // is reset, and on Windows the reset can drop the reply before the server reads it. A real
+      // editor's reply can be lost that way too, and the record it wrote naming itself, which the
+      // other case holds, is what has it asked again then. Here the record names another editor.
       socket.send(
         JSON.stringify({
           type: 'tool_result',
@@ -10418,7 +10422,7 @@ async function aCallMetByAnEditorQuitting(dropsItsReply: boolean): Promise<void>
           error: `The editor is quitting after going unused, so ${message['tool']} was not run.`,
         }),
         () => {
-          socket.terminate();
+          socket.close();
         },
       );
     });
