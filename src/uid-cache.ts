@@ -11,6 +11,7 @@ import { basename, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { cachedEntries } from './class-cache.js';
 import { errorMessage } from './errors.js';
+import { fileNoCaseCompare } from './file-order.js';
 
 /**
  * A project's uid cache, `.godot/uid_cache.bin`, set right before an engine starts on it: an entry
@@ -162,9 +163,11 @@ function declared(path: string, name: string): readonly [text: string, owner: st
 }
 
 /**
- * The `res://` path of the file declaring each of [param wanted], walked as the engine's scan walks:
+ * The `res://` path of the file declaring each of [param wanted], as the engine's scan settles it:
  * a folder or file spelled with a leading dot, and a folder holding a `.gdignore`, are stepped over.
- * The walk ends once every id is found, and the first file declaring an id wins.
+ * The scan takes a folder's subfolders first, then its files, each in `fileNoCaseCompare` order, and
+ * of two files declaring one id the later wins. The walk goes in the reverse order and keeps the
+ * first, so it ends once every id is found.
  */
 function declaringFiles(projectPath: string, wanted: ReadonlySet<bigint>): Map<bigint, string> {
   const found = new Map<bigint, string>();
@@ -187,26 +190,38 @@ function findDeclarations(
   if (entries.some((entry) => entry.name === '.gdignore')) {
     return;
   }
-  for (const entry of entries) {
+  const shown = entries.filter((entry) => !entry.name.startsWith('.'));
+  const files = shown
+    .filter((entry) => entry.isFile())
+    .toSorted((a, b) => fileNoCaseCompare(declaredFor(b.name), declaredFor(a.name)));
+  const folders = shown
+    .filter((entry) => entry.isDirectory())
+    .toSorted((a, b) => fileNoCaseCompare(b.name, a.name));
+  for (const file of files) {
     if (found.size === wanted.size) {
       return;
     }
-    if (entry.name.startsWith('.')) {
-      continue;
+    recordDeclaration(join(directory, file.name), `${prefix}${file.name}`, wanted, found);
+  }
+  for (const folder of folders) {
+    if (found.size === wanted.size) {
+      return;
     }
-    const path = join(directory, entry.name);
-    const spelled = `${prefix}${entry.name}`;
-    if (entry.isDirectory()) {
-      findDeclarations(path, `${spelled}/`, wanted, found);
-      continue;
-    }
-    if (entry.isFile()) {
-      recordDeclaration(path, spelled, wanted, found);
-    }
+    findDeclarations(join(directory, folder.name), `${prefix}${folder.name}/`, wanted, found);
   }
 }
 
-/** Notes [param path] in [param found] when it declares a wanted id that no earlier file declared. */
+/** The name of the file [param name] declares a uid for, which is where the engine's scan meets it. */
+function declaredFor(name: string): string {
+  for (const sidecar of ['.uid', '.import']) {
+    if (name.endsWith(sidecar)) {
+      return name.slice(0, -sidecar.length);
+    }
+  }
+  return name;
+}
+
+/** Notes [param path] in [param found] when it declares a wanted id that no file walked before declared. */
 function recordDeclaration(
   path: string,
   spelled: string,
