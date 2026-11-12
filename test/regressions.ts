@@ -31822,6 +31822,14 @@ function testForcingAReimportTouchesOnlyThatResource(): void {
  * key, in a cache directory the fixture owns.
  */
 async function testAnImportOrExportOverAStaleDocCacheRunsAgain(): Promise<void> {
+  assertACrashOverAStaleDocCacheIsNamed();
+  assertTheEditorCacheDirectoryIsFoundWhereTheEngineLooks();
+  await assertAnImportThatCrashedOverAStaleDocCacheRunsAgain();
+  await assertAnImportOverAStaleDocCacheRunsAgainOnARealEngine();
+}
+
+/** A run that rebuilt the doc cache and then crashed is named, and one that did not rebuild it, or was ended here, is not. */
+function assertACrashOverAStaleDocCacheIsNamed(): void {
   const ran = (
     exitCode: number | null,
     exitSignal: string | null = null,
@@ -31871,8 +31879,12 @@ async function testAnImportOrExportOverAStaleDocCacheRunsAgain(): Promise<void> 
     exitedZero || 'a crash the handler reported, followed by exit code 0, gave no note',
   );
 
+}
+
+/** The cache directory is the platform's folder, or beside a self-contained engine or its app bundle. */
+function assertTheEditorCacheDirectoryIsFoundWhereTheEngineLooks(): void {
   const home = join('home', 'someone');
-  const sc = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-sc-'));
+  const sc =mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-sc-'));
   try {
     writeFileSync(join(sc, '._sc_'), '');
     mkdirSync(join(sc, 'mac', 'Godot.app', 'Contents', 'MacOS'), { recursive: true });
@@ -31911,8 +31923,12 @@ async function testAnImportOrExportOverAStaleDocCacheRunsAgain(): Promise<void> 
     sweep(sc);
   }
 
+}
+
+/** An import pass that failed over a stale doc cache is run again, and its note is carried to the answer. */
+async function assertAnImportThatCrashedOverAStaleDocCacheRunsAgain(): Promise<void> {
   const outcomes: ImportOutcome[] = [];
-  const stand = (): Promise<ImportOutcome> => {
+  const stand =(): Promise<ImportOutcome> => {
     const next = outcomes.shift();
     assert.ok(next !== undefined, 'no more passes were expected');
     return Promise.resolve(next);
@@ -31941,7 +31957,10 @@ async function testAnImportOrExportOverAStaleDocCacheRunsAgain(): Promise<void> 
     'and a second pass that fails carries the note in the message it is answered with',
   );
   assert.equal(outcomes.length, 0, 'each was run twice');
+}
 
+/** A real engine over a cache whose key was rewritten crashes on its way out, and the import and the export run again. */
+async function assertAnImportOverAStaleDocCacheRunsAgainOnARealEngine(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
     if (process.env['GDHARNESS_REQUIRE_GODOT']) {
@@ -32316,26 +32335,47 @@ function testTheProjectPathSentenceNamesEveryCallThatTakesNone(): void {
   // Nor editor_output, which reads the one run this server holds and takes the project as a check
   // on it, since sessions sent it there as they do to every runtime tool beside it.
   assert.ok(!without.includes('editor_output'), `nor editor_output: ${without.join(', ')}`);
+  assertTheCallsWithoutProjectPathAreWalkedFromEveryOp(without);
+  assertEveryCallWithoutProjectPathRefusesIt(without);
+  assertTheGeneratedClauseIsCarriedUnaltered(without);
+  assertTheGamePickIsCarriedUnaltered();
+}
+
+/** The list of calls that take no projectPath is the same as a walk of every op's own arguments. */
+function assertTheCallsWithoutProjectPathAreWalkedFromEveryOp(without: readonly string[]): void {
   // The whole set, walked from every op's own arguments rather than from the function under test:
   // a call takes projectPath when its op does, and a tool without ops when the tool does.
-  const walked: string[] = [];
-  for (const spec of TOOL_SPECS) {
-    const ops = Object.keys(spec.operations ?? {});
-    if (ops.length === 0) {
-      if (!argumentsOf(spec, '').includes('projectPath')) walked.push(spec.name);
-      continue;
-    }
-    for (const op of ops) {
-      if (!argumentsOf(spec, op).includes('projectPath')) {
-        walked.push(Object.hasOwn(spec.parameters, 'projectPath') ? `${spec.name} ${op}` : spec.name);
-      }
-    }
-  }
+  const walked = callsWalkedWithoutProjectPath();
   assert.deepEqual(
     without,
     [...new Set(walked)].toSorted(),
     'the sentence names exactly the calls whose op takes none',
   );
+}
+
+/** Every op, or tool without ops, whose own arguments leave projectPath out, named as the sentence names it. */
+function callsWalkedWithoutProjectPath(): string[] {
+  return TOOL_SPECS.flatMap((spec) => callsOfAToolWithoutProjectPath(spec));
+}
+
+/** The calls of one tool whose op, or the tool itself where it has no ops, takes no projectPath. */
+function callsOfAToolWithoutProjectPath(spec: (typeof TOOL_SPECS)[number]): string[] {
+  const walked: string[] = [];
+  const ops = Object.keys(spec.operations ?? {});
+  if (ops.length === 0) {
+    if (!argumentsOf(spec, '').includes('projectPath')) walked.push(spec.name);
+    return walked;
+  }
+  for (const op of ops) {
+    if (!argumentsOf(spec, op).includes('projectPath')) {
+      walked.push(Object.hasOwn(spec.parameters, 'projectPath') ? `${spec.name} ${op}` : spec.name);
+    }
+  }
+  return walked;
+}
+
+/** Every call the sentence names refuses a projectPath, which is what makes the sentence matter. */
+function assertEveryCallWithoutProjectPathRefusesIt(without: readonly string[]): void {
   // Every one of them genuinely refuses the argument, which is what makes the sentence matter. A
   // call that merely ignored it would leave the old wording harmless.
   for (const call of without) {
@@ -32357,6 +32397,10 @@ function testTheProjectPathSentenceNamesEveryCallThatTakesNone(): void {
     }
   }
 
+}
+
+/** The tool reference and the skill carry the generated clause as it is, naming each call as a code span. */
+function assertTheGeneratedClauseIsCarriedUnaltered(without: readonly string[]): void {
   const shared = projectPathSentence();
   for (const [what, content] of [
     ['the tool reference', renderToolsMarkdown()],
@@ -32389,6 +32433,10 @@ function testTheProjectPathSentenceNamesEveryCallThatTakesNone(): void {
     'and one of them reads as one',
   );
 
+}
+
+/** The sentence about which game answers a call that names neither is the same in both renderings. */
+function assertTheGamePickIsCarriedUnaltered(): void {
   // The other sentence both renderings share, and the schema with them: which game answers a
   // call that names neither. It was written three times and said a different amount each time,
   // which is how a session with a second project's game listed beside its own was left with
@@ -34871,32 +34919,7 @@ async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
   const sent: { tool: string; args: Record<string, unknown> }[] = [];
   const editor = { refuses: false, passOver: [] as string[], unsaved: false };
   await withAPlayingEditor(
-    () => (tool, args) => {
-      if (tool === 'files_moved') {
-        sent.push({ tool, args });
-        const changed = asArray(args['changed'] ?? []).map(String);
-        return editor.unsaved
-          ? { ok: true, reloadedScenes: [], unsavedScenes: changed }
-          : { ok: true, reloadedScenes: changed, unsavedScenes: [] };
-      }
-      if (tool.startsWith('adopt_')) {
-        sent.push({ tool, args });
-        if (editor.refuses) {
-          return { ok: false, error: `Unknown tool: ${tool}` };
-        }
-      }
-      // What the addon answers: each name it could place in a section, which is every name with one,
-      // less any the case has it pass over.
-      if (tool === 'adopt_project_settings') {
-        return {
-          ok: true,
-          adopted: asArray(args['settings'] ?? []).filter(
-            (name) => String(name).includes('/') && !editor.passOver.includes(String(name)),
-          ),
-        };
-      }
-      return { ok: true };
-    },
+    () => (tool, args) => answerAsAnEditorTakingSettings(tool, args, sent, editor),
     async ({ server, project }) => {
       const call = async (args: Record<string, unknown>): Promise<unknown> =>
         parseTextContent(
@@ -35073,6 +35096,39 @@ async function testASettingsWriteIsTakenUpByTheEditor(): Promise<void> {
     },
     { engine },
   );
+}
+
+/** The fake editor's answer to one tool call of the settings case, recording the ones it is sent. */
+function answerAsAnEditorTakingSettings(
+  tool: string,
+  args: Record<string, unknown>,
+  sent: { tool: string; args: Record<string, unknown> }[],
+  editor: { readonly refuses: boolean; readonly passOver: readonly string[]; readonly unsaved: boolean },
+): Record<string, unknown> {
+  if (tool === 'files_moved') {
+    sent.push({ tool, args });
+    const changed = asArray(args['changed'] ?? []).map(String);
+    return editor.unsaved
+      ? { ok: true, reloadedScenes: [], unsavedScenes: changed }
+      : { ok: true, reloadedScenes: changed, unsavedScenes: [] };
+  }
+  if (tool.startsWith('adopt_')) {
+    sent.push({ tool, args });
+    if (editor.refuses) {
+      return { ok: false, error: `Unknown tool: ${tool}` };
+    }
+  }
+  // What the addon answers: each name it could place in a section, which is every name with one,
+  // less any the case has it pass over.
+  if (tool === 'adopt_project_settings') {
+    return {
+      ok: true,
+      adopted: asArray(args['settings'] ?? []).filter(
+        (name) => String(name).includes('/') && !editor.passOver.includes(String(name)),
+      ),
+    };
+  }
+  return { ok: true };
 }
 
 /**
@@ -35829,37 +35885,7 @@ async function testAReimportReimportsThroughTheEngine(): Promise<void> {
       }
 
       // Current, with and then without the cache.
-      const goodOutput = outputOf('good.png');
-      for (const cached of [true, false]) {
-        if (!cached) {
-          const editorDir = join(project, '.godot', 'editor');
-          const caches = readdirSync(editorDir).filter((name) => name.startsWith('filesystem_cache'));
-          assert.ok(
-            caches.length > 0,
-            `the pass should have written the cache: ${readdirSync(editorDir).join(', ')}`,
-          );
-          for (const cache of caches) {
-            rmSync(join(editorDir, cache));
-          }
-        }
-        const past = new Date(Date.now() - 60_000);
-        utimesSync(goodOutput, past, past);
-        const forced = await call({ op: 'reimport', resourcePath: 'good.png', force: true });
-        assert.deepEqual(
-          asArray(get(forced, 'reimported')),
-          ['res://good.png'],
-          `a current resource reimported with force (cache ${cached}): ${JSON.stringify(forced)}`,
-        );
-        assert.equal(
-          get(forced, 'missingSource'),
-          undefined,
-          `one resourcePath walks nothing else, so it says nothing of the rest: ${JSON.stringify(forced)}`,
-        );
-        assert.ok(
-          statSync(goodOutput).mtimeMs > past.getTime() + 1000,
-          `the import should have rewritten ${goodOutput} (cache ${cached})`,
-        );
-      }
+      await assertAForcedReimportOfACurrentResourceRewritesItsOutput(project, call, outputOf('good.png'));
 
       // Two new files and one asked for: the engine's pass imports both, so the answer names the
       // other, which the next reimport of it answered as current with nothing to show what had.
@@ -36107,6 +36133,44 @@ async function testAReimportReimportsThroughTheEngine(): Promise<void> {
     }
   } finally {
     sweep(project);
+  }
+}
+
+/** A current resource reimported with force rewrites its output, with the filesystem cache there and then removed. */
+async function assertAForcedReimportOfACurrentResourceRewritesItsOutput(
+  project: string,
+  call: (args: Record<string, unknown>) => Promise<unknown>,
+  goodOutput: string,
+): Promise<void> {
+  for (const cached of [true, false]) {
+    if (!cached) {
+      const editorDir = join(project, '.godot', 'editor');
+      const caches = readdirSync(editorDir).filter((name) => name.startsWith('filesystem_cache'));
+      assert.ok(
+        caches.length > 0,
+        `the pass should have written the cache: ${readdirSync(editorDir).join(', ')}`,
+      );
+      for (const cache of caches) {
+        rmSync(join(editorDir, cache));
+      }
+    }
+    const past = new Date(Date.now() - 60_000);
+    utimesSync(goodOutput, past, past);
+    const forced = await call({ op: 'reimport', resourcePath: 'good.png', force: true });
+    assert.deepEqual(
+      asArray(get(forced, 'reimported')),
+      ['res://good.png'],
+      `a current resource reimported with force (cache ${cached}): ${JSON.stringify(forced)}`,
+    );
+    assert.equal(
+      get(forced, 'missingSource'),
+      undefined,
+      `one resourcePath walks nothing else, so it says nothing of the rest: ${JSON.stringify(forced)}`,
+    );
+    assert.ok(
+      statSync(goodOutput).mtimeMs > past.getTime() + 1000,
+      `the import should have rewritten ${goodOutput} (cache ${cached})`,
+    );
   }
 }
 
