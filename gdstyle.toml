@@ -25,8 +25,8 @@ large_number_threshold = 1_000_000
 # gdstyle 0.5.0 flags an `elif` after a branch that returns only on some paths (`if a:` holding
 # `if b: return 1`), where obeying it changes what the function does.
 "quality/no-else-return" = "off"
-# A function's size is held by a complexity ceiling of 10 and a script's by its code size. A second
-# budget counted another way would argue with them.
+# A function's size is held by lizard's complexity ceiling (`lint:gd:complexity`). A second budget
+# counted another way would argue with it.
 "quality/max-function-length" = "off"
 "quality/max-local-variables" = "off"
 "quality/max-nesting-depth" = "off"
