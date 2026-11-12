@@ -4580,6 +4580,56 @@ function tallyEngineAnswer(tally: DiagnosticsTally, answer: OperationParams): vo
   }
 }
 
+/** The members the diagnostics name without a class, read against the line of the diagnosed script they are on. */
+function deniedExternalMembers(
+  diagnostics: readonly unknown[],
+  scriptPath: string,
+  cached: ReturnType<typeof cachedClasses>,
+  sourceOf: (resourcePath: string) => string | null,
+): MissingMember[] {
+  const external = diagnostics.filter((entry) =>
+    String(asParams(entry)['message']).includes(EXTERNAL_MEMBER),
+  );
+  if (cached === null) {
+    return [];
+  }
+  const diagnosed = external.length === 0 ? null : sourceOf(scriptPath);
+  const lines = diagnosed?.split('\n') ?? [];
+  return external
+    .map((entry) => {
+      const { message, line } = asParams(entry);
+      return externalMemberIn(
+        String(message),
+        typeof line === 'number' ? lines[line - 1] : undefined,
+        cached,
+      );
+    })
+    .filter((missing): missing is MissingMember => missing !== null);
+}
+
+/** Counts [param scriptPath] as unread and says so when neither the language server nor an engine can read it. */
+function tallyUnreadableScript(tally: DiagnosticsTally, projectPath: string, scriptPath: string): boolean {
+  const unreadable = unreadableScript(projectPath, scriptPath);
+  if (unreadable === null) {
+    return false;
+  }
+  tally.unread += 1;
+  tally.reported.push({ scriptPath, error: unreadable });
+  return true;
+}
+
+/** What editor_status read of this server and the bridge in one moment, passed to each part of its answer. */
+interface EditorStatusContext {
+  readonly status: ReturnType<GodotBridge['getStatus']>;
+  readonly arriving: readonly unknown[];
+  readonly unfinished: { note: RestartNote; underway: boolean } | null;
+  readonly launchedIsUp: boolean;
+  readonly cannotConnect: { why: string; remedies: string[] } | null;
+  readonly staleNote: ReturnType<GodotBridge['anotherRelease']>;
+  readonly greeted: boolean;
+  readonly isPortConflict: boolean;
+}
+
 /** What a reimport answers: the payload, or the refusal. */
 type ImportAnswer = { ok: true; payload: OperationParams } | { ok: false; response: ToolResponse };
 
@@ -9823,10 +9873,7 @@ class GodotServer {
         return this.createErrorResponse(`Cancelled after ${at} of ${scripts.length} scripts.`);
       }
       progress?.(at + 1, `${at + 1} of ${scripts.length}: ${scriptPath}`);
-      const unreadable = project.ok ? unreadableScript(project.value.path, scriptPath) : null;
-      if (unreadable !== null) {
-        tally.unread += 1;
-        tally.reported.push({ scriptPath, error: unreadable });
+      if (project.ok && tallyUnreadableScript(tally, project.value.path, scriptPath)) {
         continue;
       }
       const one = await this.diagnosticsOf({ ...args, scriptPath });
@@ -9838,10 +9885,7 @@ class GodotServer {
           tally,
           at + 1,
         );
-        if (refusal !== null) {
-          return refusal;
-        }
-        break;
+        return refusal ?? this.severalScriptsAnswer(project, scripts, tally);
       }
       if ('refusal' in one) {
         const stop = tallyRefusedScript(tally, scriptPath, one);
@@ -9852,6 +9896,15 @@ class GodotServer {
       }
       tallyLanguageServerAnswer(tally, scriptPath, one.answer);
     }
+    return this.severalScriptsAnswer(project, scripts, tally);
+  }
+
+  /** The answer of a check of several scripts: the tally, and the scripts under a `.gdignore`. */
+  private severalScriptsAnswer(
+    project: Checked<{ path: string; file: string }>,
+    scripts: readonly string[],
+    tally: DiagnosticsTally,
+  ): ToolResponse {
     return this.jsonTextResponse({
       ...diagnosticsSummary(tally, scripts.length),
       ...(project.ok ? scriptsUnderGdignore(project.value.path, scripts) : {}),
@@ -10165,24 +10218,12 @@ class GodotServer {
 
     // The diagnostics that name only a member, read against the line of the diagnosed script they
     // are on to find the class it was looked up on.
-    const external = diagnostics.filter((entry) =>
-      String(asParams(entry)['message']).includes(EXTERNAL_MEMBER),
+    const alsoDenied = deniedExternalMembers(
+      diagnostics,
+      readString(args, 'scriptPath') ?? '',
+      cached,
+      sourceOf,
     );
-    const diagnosed = external.length === 0 ? null : sourceOf(readString(args, 'scriptPath') ?? '');
-    const lines = diagnosed?.split('\n') ?? [];
-    const alsoDenied =
-      cached === null
-        ? []
-        : external
-            .map((entry) => {
-              const { message, line } = asParams(entry);
-              return externalMemberIn(
-                String(message),
-                typeof line === 'number' ? lines[line - 1] : undefined,
-                cached,
-              );
-            })
-            .filter((missing): missing is MissingMember => missing !== null);
 
     const contradicted =
       cached === null ? [] : contradictedDiagnostics(messages, cached, sourceOf, alsoDenied);
@@ -10193,27 +10234,19 @@ class GodotServer {
       ? unloadedTypes(messages, declaredClasses(projectPath), cached)
       : [];
 
+    return this.staleAnalysisAnswer(projectPath, cached, contradicted, unloaded);
+  }
+
+  /** What the diagnostics the file contradicts and the types the editor has not loaded add to an answer. */
+  private staleAnalysisAnswer(
+    projectPath: string,
+    cached: ReturnType<typeof cachedClasses>,
+    contradicted: ReturnType<typeof contradictedDiagnostics>,
+    unloaded: ReturnType<typeof unloadedTypes>,
+  ): OperationParams {
     const notes: string[] = [];
     if (contradicted.length > 0) {
-      // What the stale types are built from, which is the lever rather than a detail: a held copy
-      // is refreshed when one of its own dependencies changes and not when it changes itself, so
-      // the useful thing to hand a caller is the list of files worth touching. Only the methods' and
-      // properties' scripts, which are the ones the lever is offered for.
-      const dependsOn = new Set<string>();
-      for (const one of contradicted.filter(
-        (entry) => entry.kind === 'method' || entry.kind === 'property',
-      )) {
-        const source = cached === null ? null : this.sourceOfClass(projectPath, one.declaredIn);
-        if (source === null || cached === null) {
-          continue;
-        }
-        for (const name of classesNamedIn(source, cached)) {
-          if (name !== one.type) {
-            dependsOn.add(name);
-          }
-        }
-      }
-      notes.push(staleAnalysisNote(contradicted, [...dependsOn]));
+      notes.push(staleAnalysisNote(contradicted, this.staleDependencies(projectPath, cached, contradicted)));
     }
     const uncached = unloaded.filter((type) => !type.inTheClassCache);
     if (uncached.length > 0) {
@@ -10238,6 +10271,32 @@ class GodotServer {
       ...(unloaded.length === 0 ? {} : { typesTheEditorHasNotLoaded: unloaded }),
       ...(notes.length === 0 ? {} : { staleAnalysis: notes.join(' ') }),
     };
+  }
+
+  /**
+   * What the stale types are built from, which is the lever rather than a detail: a held copy
+   * is refreshed when one of its own dependencies changes and not when it changes itself, so
+   * the useful thing to hand a caller is the list of files worth touching. Only the methods' and
+   * properties' scripts, which are the ones the lever is offered for.
+   */
+  private staleDependencies(
+    projectPath: string,
+    cached: ReturnType<typeof cachedClasses>,
+    contradicted: ReturnType<typeof contradictedDiagnostics>,
+  ): string[] {
+    const dependsOn = new Set<string>();
+    for (const one of contradicted.filter((entry) => entry.kind === 'method' || entry.kind === 'property')) {
+      const source = cached === null ? null : this.sourceOfClass(projectPath, one.declaredIn);
+      if (source === null || cached === null) {
+        continue;
+      }
+      for (const name of classesNamedIn(source, cached)) {
+        if (name !== one.type) {
+          dependsOn.add(name);
+        }
+      }
+    }
+    return [...dependsOn];
   }
 
   /**
@@ -10769,7 +10828,17 @@ class GodotServer {
     // mayYetConnect true for such a project while editor_launch refused to open one.
     const cannotConnect =
       status.connected || this.ownProject === null ? null : editorAddonMissing(this.ownProject);
-    return {
+    const context: EditorStatusContext = {
+      status,
+      arriving,
+      unfinished,
+      launchedIsUp,
+      cannotConnect,
+      staleNote,
+      greeted,
+      isPortConflict,
+    };
+    const first = {
       ...status,
       serverVersion: SERVER_VERSION,
       addonIsStale: greeted ? staleNote !== undefined : undefined,
@@ -10788,17 +10857,7 @@ class GodotServer {
       // positive evidence about the editor it would otherwise be waiting for: it was asked to quit,
       // and the launch that would have replaced it never ran. Nothing is coming, and a young server
       // answering from its own age sent a caller into a wait that could not end.
-      mayYetConnect: status.connected
-        ? undefined
-        : cannotConnect !== null
-          ? false
-          : arriving.length > 0
-            ? true
-            : unfinished !== null
-              ? unfinished.underway
-              : this.closedHere !== null
-                ? false
-                : anEditorIsStillComing(status.listeningSince, launchedIsUp),
+      mayYetConnect: this.mayYetConnect(context),
       editorsNotYetConnected: arriving.length > 0 ? arriving : undefined,
       editorCannotConnect:
         cannotConnect === null
@@ -10807,6 +10866,37 @@ class GodotServer {
               note: `No editor of this project can connect: ${cannotConnect.why}.`,
               remedies: cannotConnect.remedies,
             },
+    };
+    return {
+      ...first,
+      ...this.editorStatusClosed(context),
+      ...this.editorStatusLaunch(context),
+      ...this.editorStatusBridge(context),
+    };
+  }
+
+  /** Whether an editor that is not connected may still connect, from what this server knows of it. */
+  private mayYetConnect(context: EditorStatusContext): boolean | undefined {
+    const { status, cannotConnect, arriving, unfinished, launchedIsUp } = context;
+    if (status.connected) {
+      return undefined;
+    }
+    if (cannotConnect !== null) {
+      return false;
+    }
+    if (arriving.length > 0) {
+      return true;
+    }
+    if (unfinished !== null) {
+      return unfinished.underway;
+    }
+    return this.closedHere !== null ? false : anEditorIsStillComing(status.listeningSince, launchedIsUp);
+  }
+
+  /** The editor_status fields on an editor this server closed, quit unused, or left mid-restart. */
+  private editorStatusClosed(context: EditorStatusContext) {
+    const { status, arriving, unfinished } = context;
+    return {
       closedHere:
         status.connected || arriving.length > 0 || this.closedHere === null
           ? undefined
@@ -10844,6 +10934,13 @@ class GodotServer {
               byServerPid: unfinished.note.byPid,
               note: `A restart of this project's editor is under way: gdharness server pid ${unfinished.note.byPid} asked it to quit at ${unfinished.note.quitAt} and is starting it again. Wait for it rather than opening another.`,
             },
+    };
+  }
+
+  /** The editor_status fields on the editor this server launched. */
+  private editorStatusLaunch(context: EditorStatusContext) {
+    const { status, launchedIsUp } = context;
+    return {
       // Which of the two reasons the line above is true, when it is the launch. A caller told only
       // "yes" cannot tell a window that will close in seconds from an import that will take
       // minutes, and the pid is the thing they can watch.
@@ -10875,6 +10972,13 @@ class GodotServer {
               port: this.godotBridge.configuredPort,
               note: `The gdharness server this one replaced, pid ${this.handingOverFrom}, still holds port ${this.godotBridge.configuredPort} and is standing down. This server takes the port when it lets go, and takes another after ${HANDOVER_MS / 1000} seconds if it does not.`,
             },
+    };
+  }
+
+  /** The editor_status fields on the bridge: its port, its handover, the addon's release and the retries. */
+  private editorStatusBridge(context: EditorStatusContext) {
+    const { status, greeted, staleNote, isPortConflict } = context;
+    return {
       staleNote,
       addonNote:
         greeted && staleNote === undefined
