@@ -51,6 +51,9 @@ when the command line itself is wrong.
   is still imported first [when it is out of date](#when-a-run-imports-first).
 - `--order reversed` or `--order SEED`: every suite in one engine, in reverse order of path or
   shuffled by a number. It finds suites that depend on the order they run in.
+- `--order named`: the suites named, in one engine, in the order they are named. A case that fails
+  only after others is replayed by naming an engine's `suites` from the result file, then halving
+  the list until one suite before it is left.
 
 ## Reuse options
 

@@ -62170,6 +62170,7 @@ function testTheTestCommandReadsItsOwnOptions(): void {
       [2, ['res://tests'], 7, true, false, 300],
     );
     assert.equal(testOptionsOf(['--order', 'reversed'], project).order, 'reversed');
+    assert.equal(testOptionsOf(['tests/b_test.gd', '--order', 'named'], project).order, 'named');
     assert.equal(testOptionsOf([], project).projectPath, project, 'the directory you are in');
     assert.equal(testOptionsOf(['--cores', '1'], project).cores, 1);
     assert.equal(testOptionsOf([], project).cores, null, 'every processor unless asked');
@@ -62189,7 +62190,11 @@ function testTheTestCommandReadsItsOwnOptions(): void {
       [['--times', ''], /--times needs a value/],
       [['--slots', ''], /--slots needs a value/],
       [['--engines', '0'], /whole number above 0/],
-      [['--order', 'sideways'], /reversed or a whole number/],
+      [['--order', 'sideways'], /reversed, named or a whole number/],
+      [
+        ['--order', 'named'],
+        /--order named runs the suites named in the order they are named, so it needs them named/,
+      ],
       [['../elsewhere.gd'], /is not inside the project/],
     ] as const) {
       assert.throws(
@@ -65463,6 +65468,15 @@ async function testTheTestCommandDealsAndReportsARun(): Promise<void> {
         shuffled.said,
         /over 1 engine, shuffled by 7\.$/m,
         'the seed, so the order can be had again',
+      );
+      // Neither the order of path, its reverse nor a shuffle by 0, which a number not read gives.
+      const replayed = ['res://tests/says_test.gd', 'res://tests/declared_test.gd', 'res://tests/ok_test.gd'];
+      const named = test(...replayed.map((path) => path.slice('res://'.length)), '--order', 'named');
+      assert.match(named.said, /over 1 engine, in the order named\.$/m, named.said);
+      assert.deepEqual(
+        readRunResult(lastRunFile).engines.map((engine) => engine.suites),
+        [replayed],
+        'one engine runs the suites as named',
       );
 
       const timesFile = join(state, 'suite-times.json');
