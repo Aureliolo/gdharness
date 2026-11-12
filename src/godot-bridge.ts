@@ -5,6 +5,7 @@ import type { RawData } from 'ws';
 import { WebSocket, WebSocketServer } from 'ws';
 import { callProgress } from './call-signal.js';
 import { errorCode, errorMessage, Refusal, toError } from './errors.js';
+import { idleClosed } from './idle-close.js';
 import { waitFromEnv } from './launch.js';
 import { isSameDirectory } from './paths.js';
 import { portFromEnv } from './ports.js';
@@ -435,6 +436,21 @@ export class AddonOfAnotherRelease extends Error {}
 
 /** The editor turned a tool away unrun because it is quitting after going unused. */
 export class EditorClosing extends Error {}
+
+const QUIT_UNANSWERED = 'The editor quit after going unused before it answered, so the call was not run.';
+
+/**
+ * Whether the editor [gone] was is the one its project's idle record names. It writes the record
+ * before it quits and turns every call away from then on, so a call it held unanswered was not
+ * run. Its turning-away reply can still be lost: Godot sends what it queued on a later frame, and
+ * the quit can come first.
+ */
+function quitUnused(gone: GodotConnectionInfo | null): boolean {
+  if (gone?.projectPath === undefined || gone.editorPid === undefined) {
+    return false;
+  }
+  return idleClosed(gone.projectPath)?.pid === gone.editorPid;
+}
 
 /**
  * The commands an editor of another release is still sent, since only its addon can end it: the
@@ -1248,10 +1264,11 @@ export class GodotBridge extends EventEmitter {
 
     this.stopKeepalive();
 
+    const gone = this.connectionInfo;
     this.socket = null;
     this.connectionInfo = null;
 
-    this.rejectAllPending(reason);
+    this.rejectAllPending(quitUnused(gone) ? new EditorClosing(QUIT_UNANSWERED) : reason);
     this.resourceQueues.clear();
   }
 

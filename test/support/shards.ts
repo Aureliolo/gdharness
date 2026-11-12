@@ -353,6 +353,7 @@ export const REGRESSION_SECONDS: Readonly<
     testTakersWaitTheirTurn: 5,
     testADeleteDropsWhatOtherScenesKeptBelowIt: 5,
     testACallMetByAnEditorQuittingUnusedIsAskedAgain: 5,
+    testACallAnEditorQuittingUnusedLeftUnansweredIsAskedAgain: 5,
     testAnIntegerPastTwoToThe53IsWrittenAsSentWithNoEditor: 5,
   },
   darwin: {
@@ -536,6 +537,7 @@ export const REGRESSION_SECONDS: Readonly<
     testDiagnosticsTimeoutIsNotAnEmptyResult: 5,
     testTakersWaitTheirTurn: 5,
     testACallMetByAnEditorQuittingUnusedIsAskedAgain: 5,
+    testACallAnEditorQuittingUnusedLeftUnansweredIsAskedAgain: 5,
   },
 };
 
