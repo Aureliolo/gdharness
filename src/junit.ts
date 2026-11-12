@@ -412,6 +412,14 @@ function addCasesLeftOut(
 }
 
 /**
+ * A frame of gdharness's own runner in a stack gdUnit4 wrote, with the line break before it. The
+ * runner begins each case from a stage of its own, so that stage stands under every case's frames,
+ * and gdUnit4 leaves out only its own. The runner is started by its full path, never a res:// one.
+ */
+const RUNNER_FRAME =
+  /\r?\n[ \t]*at '[^']*' in (?!res:\/\/)[^\n]*\/godot\/tests\/listed\.gd:\d+[ \t]*(?=\r?\n|$)/g;
+
+/**
  * A case with every report gdUnit4 wrote for it.
  *
  * gdUnit4 goes on past a failed assertion and writes one child per report, so a case can carry
@@ -426,7 +434,7 @@ function caseOf(suite: XmlElement, element: XmlElement): TestCase {
     element.children
       .filter((child) => child.name === kind)
       .map((child) => {
-        const detail = child.text.trim();
+        const detail = child.text.replace(RUNNER_FRAME, '').trim();
         const message = child.attributes['message'] ?? null;
         return {
           kind,

@@ -67486,7 +67486,7 @@ async function testAnOrphanIsNamedWithTheCaseThatLeftIt(): Promise<void> {
     assert.deepEqual(
       named.map((line) => line.trim()),
       [
-        `res://tests/leak_test.gd > test_leaks left 2 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: Timer, Node "Sandbox" of res://tests/sandbox.gd. ${free}`,
+        `res://tests/leak_test.gd > test_leaks left 2 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: Node "Sandbox" of res://tests/sandbox.gd, Timer. ${free}`,
         `res://tests/leak_test.gd > test_many left 10 nodes neither freed nor in the tree, which gdUnit4 counts as orphans: ${Array.from({ length: 8 }, (_, at) => `Node "Each${String(at)}"`).join(', ')}, and 2 more. ${free}`,
         `res://tests/leak_test.gd's before() left 1 node neither freed nor in the tree, which gdUnit4 counts as orphans: Node2D "SetUp". ${freeHooked}`,
         `res://tests/leak_test.gd's after() left 1 node neither freed nor in the tree, which gdUnit4 counts as orphans: Node3D "TearDown". ${freeHooked}`,
@@ -67521,7 +67521,7 @@ async function testAnOrphanIsNamedWithTheCaseThatLeftIt(): Promise<void> {
     assert.deepEqual(
       get(warning, 'left'),
       [
-        { case: 'test_leaks', count: 2, nodes: 'Timer, Node "Sandbox" of res://tests/sandbox.gd' },
+        { case: 'test_leaks', count: 2, nodes: 'Node "Sandbox" of res://tests/sandbox.gd, Timer' },
         {
           case: 'test_many',
           count: 10,
@@ -67539,6 +67539,73 @@ async function testAnOrphanIsNamedWithTheCaseThatLeftIt(): Promise<void> {
     );
   } finally {
     await server.stop();
+    sweep(project, slots);
+  }
+}
+
+/**
+ * Each case begins on an engine frame after the one the case before it ended on, rows of a
+ * parameterised case included. gdUnit4 ends a case with a deferred call, so a suite ran inside one
+ * flush of deferred calls: a guard counting work per frame saw thirty-two cases' work in one frame
+ * and warned on a later case than the one doing it.
+ */
+function testEachCaseBeginsOnAFrameOfItsOwn(): void {
+  const godotPath = resolveGodotPath();
+  const gdunit = process.env['GDUNIT4_PATH'];
+  if (!godotPath || !gdunit || !existsSync(join(gdunit, 'bin', 'GdUnitCmdTool.gd'))) {
+    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+      throw new Error('GDHARNESS_REQUIRE_GODOT is set and GODOT_PATH or GDUNIT4_PATH names nothing usable.');
+    }
+    console.log('case frame regression skipped (Godot or gdUnit4 not found)');
+    return;
+  }
+  const project = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-case-frames-'));
+  const slots = mkdtempSync(join(realpathSync(tmpdir()), 'gdharness-case-frames-slots-'));
+  const aCase = (name: string): string[] => [
+    `func ${name} -> void:`,
+    '\tassert_int(began).override_failure_message("began on frame %d, the frame the case before ended on" % began).is_greater(ended)',
+    '',
+    '',
+  ];
+  try {
+    writeTree(project, {
+      'project.godot':
+        '; Engine configuration file.\nconfig_version=5\n\n[application]\nconfig/name="CaseFrames"\n',
+      'tests/frames_test.gd': [
+        'extends GdUnitTestSuite',
+        '',
+        'static var ended: int = -1',
+        'var began: int = -1',
+        '',
+        '',
+        'func before_test() -> void:',
+        '\tbegan = Engine.get_process_frames()',
+        '',
+        '',
+        'func after_test() -> void:',
+        '\tended = Engine.get_process_frames()',
+        '',
+        '',
+        ...aCase('test_first()'),
+        ...aCase('test_second()'),
+        ...aCase('test_rows(row: int, test_parameters: Array = [[1], [2], [3]])'),
+        ...aCase('test_last()'),
+      ].join('\n'),
+    });
+    cpSync(gdunit, join(project, 'addons', 'gdUnit4'), { recursive: true });
+    const ran = spawnSyncHidden(
+      process.execPath,
+      ['build/cli.js', 'test', project, '--slots', slots, '--import'],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, GODOT_PATH: godotPath },
+        timeout: 4 * ENGINE_CALL_TIMEOUT_MS,
+      },
+    );
+    const said = `${ran.stdout}${ran.stderr}`;
+    assert.equal(ran.status, 0, said);
+    assert.match(said, /Passed: 6 cases in 1 suite/, said);
+  } finally {
     sweep(project, slots);
   }
 }
@@ -93456,6 +93523,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testAParameterisedCaseIsDealtByItsRows,
   testAnInheritedCaseIsLeftOutOfItsOwnSuiteOnly,
   testAnOrphanIsNamedWithTheCaseThatLeftIt,
+  testEachCaseBeginsOnAFrameOfItsOwn,
   testAFreshCloneHasItsExtensionsListed,
   testAnEngineIsHeldToTheProcessorsAsked,
   testAnEngineEndsWithTheRunnerThatStartedIt,
