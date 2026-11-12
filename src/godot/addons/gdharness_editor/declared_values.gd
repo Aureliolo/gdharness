@@ -284,67 +284,106 @@ static func outside(target: Object, declared: Dictionary, value: Variant, shown:
 		hint == PROPERTY_HINT_ENUM
 		and (typeof(value) == TYPE_STRING or typeof(value) == TYPE_STRING_NAME)
 	):
-		var names: PackedStringArray = PackedStringArray(enum_values(hint_string).keys())
-		if names.is_empty() or names.has(str(value)):
-			return ""
-		return (
-			(
-				"%s is none of the names %s lists: %s, which the inspector holds it to. The engine "
-				+ "stores it as given."
-			)
-			% [shown, property, ", ".join(names)]
-		)
+		return _outside_names(hint_string, property, value, shown)
 	if hint == PROPERTY_HINT_FILE and typeof(value) == TYPE_STRING:
-		var filters: PackedStringArray = []
-		for filter: String in hint_string.split(",", false):
-			var _added: bool = filters.append(filter.get_slice(";", 0).strip_edges())
-		var file: String = str(value).get_file()
-		if file.is_empty() or filters.is_empty():
-			return ""
-		for filter: String in filters:
-			if file.matchn(filter):
-				return ""
-		return (
-			(
-				"%s is none of the files %s takes, %s, which the inspector's file dialog holds it "
-				+ "to. The engine stores it as given."
-			)
-			% [shown, property, ", ".join(filters)]
-		)
+		return _outside_files(hint_string, property, value, shown)
 	if hint == PROPERTY_HINT_COLOR_NO_ALPHA and value is Color:
-		var colour: Color = value
-		if is_equal_approx(colour.a, 1.0):
-			return ""
-		return (
-			(
-				"%s is declared with no alpha, so the inspector neither shows nor sets one, and "
-				+ "the colour given has alpha %s. The engine stores it as given."
-			)
-			% [property, _bound(snappedf(colour.a, 0.001))]
-		)
+		return _outside_alpha(property, value)
 	if typeof(value) != TYPE_INT and typeof(value) != TYPE_FLOAT:
 		return ""
-	var number: float = GdhRead.as_float(value)
 	if hint == PROPERTY_HINT_ENUM and typeof(value) == TYPE_INT:
-		var choices: Dictionary = enum_of(target, declared)
-		if choices.is_empty() or choices.values().has(value):
-			return ""
-		return "%d is none of the values %s declares: %s." % [value, property, _listed(choices)]
+		return _outside_values(target, declared, property, value)
 	if hint == PROPERTY_HINT_FLAGS and typeof(value) == TYPE_INT:
-		var flags: Dictionary = flags_of(hint_string)
-		var known: int = 0
-		for bit: int in flags.values():
-			known |= bit
-		var whole: int = value
-		var stray: int = whole & ~known
-		if flags.is_empty() or stray == 0:
-			return ""
-		return (
-			"%d holds bits no flag of %s has (%d): its flags are %s. The engine stores it as given."
-			% [whole, property, stray, _listed(flags)]
-		)
+		return _outside_flags(hint_string, property, value)
 	if hint != PROPERTY_HINT_RANGE:
 		return ""
+	return _outside_range(hint_string, property, value, shown)
+
+
+## Why the name [param value] is none of the names an enum hint lists, or "" when it is one.
+static func _outside_names(
+	hint_string: String, property: String, value: Variant, shown: String
+) -> String:
+	var names: PackedStringArray = PackedStringArray(enum_values(hint_string).keys())
+	if names.is_empty() or names.has(str(value)):
+		return ""
+	return (
+		(
+			"%s is none of the names %s lists: %s, which the inspector holds it to. The engine "
+			+ "stores it as given."
+		)
+		% [shown, property, ", ".join(names)]
+	)
+
+
+## Why the path [param value] matches none of the filters of a file hint, or "" when it matches one.
+static func _outside_files(
+	hint_string: String, property: String, value: Variant, shown: String
+) -> String:
+	var filters: PackedStringArray = []
+	for filter: String in hint_string.split(",", false):
+		var _added: bool = filters.append(filter.get_slice(";", 0).strip_edges())
+	var file: String = str(value).get_file()
+	if file.is_empty() or filters.is_empty():
+		return ""
+	for filter: String in filters:
+		if file.matchn(filter):
+			return ""
+	return (
+		(
+			"%s is none of the files %s takes, %s, which the inspector's file dialog holds it "
+			+ "to. The engine stores it as given."
+		)
+		% [shown, property, ", ".join(filters)]
+	)
+
+
+## Why [param value] carries an alpha a no-alpha colour hint does not take, or "" when it has none.
+static func _outside_alpha(property: String, value: Variant) -> String:
+	var colour: Color = value
+	if is_equal_approx(colour.a, 1.0):
+		return ""
+	return (
+		(
+			"%s is declared with no alpha, so the inspector neither shows nor sets one, and "
+			+ "the colour given has alpha %s. The engine stores it as given."
+		)
+		% [property, _bound(snappedf(colour.a, 0.001))]
+	)
+
+
+## Why the number [param value] is none of the values the enum of [param declared] holds, or ""
+## when it is one.
+static func _outside_values(
+	target: Object, declared: Dictionary, property: String, value: Variant
+) -> String:
+	var choices: Dictionary = enum_of(target, declared)
+	if choices.is_empty() or choices.values().has(value):
+		return ""
+	return "%d is none of the values %s declares: %s." % [value, property, _listed(choices)]
+
+
+## Why the number [param value] sets a bit no flag of a flags hint has, or "" when it sets none.
+static func _outside_flags(hint_string: String, property: String, value: Variant) -> String:
+	var flags: Dictionary = flags_of(hint_string)
+	var known: int = 0
+	for bit: int in flags.values():
+		known |= bit
+	var whole: int = value
+	var stray: int = whole & ~known
+	if flags.is_empty() or stray == 0:
+		return ""
+	return (
+		"%d holds bits no flag of %s has (%d): its flags are %s. The engine stores it as given."
+		% [whole, property, stray, _listed(flags)]
+	)
+
+
+## Why the number [param value] lies outside a range hint or off its step, or "" when it does not.
+static func _outside_range(
+	hint_string: String, property: String, value: Variant, shown: String
+) -> String:
+	var number: float = GdhRead.as_float(value)
 	var parts: PackedStringArray = []
 	for part: String in hint_string.split(","):
 		var _added: bool = parts.append(part.strip_edges())

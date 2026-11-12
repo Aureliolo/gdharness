@@ -35,24 +35,9 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 
 	_log.info("Creating GDScript: " + script_path)
 
-	# Content is the whole file, so a header written above it would be a second one: a content that
-	# starts with its own `extends` did not parse, and one without it was not the file that was
-	# sent.
-	if not content.is_empty():
-		var alongside: Array[String] = []
-		for name: String in ["class_name", "extends", "template"]:
-			if not str(params.get(name, "")).is_empty():
-				alongside.append(name)
-		if not alongside.is_empty():
-			return _log.failure(
-				(
-					"content is the whole file, so "
-					+ " and ".join(alongside)
-					+ " cannot be given with it: write "
-					+ ("them" if alongside.size() > 1 else "it")
-					+ " into content instead"
-				)
-			)
+	var conflict: String = _content_conflict(params, content)
+	if not conflict.is_empty():
+		return _log.failure(conflict)
 
 	var full_script_path: String = script_path
 	if not full_script_path.begins_with("res://"):
@@ -80,15 +65,9 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 		if not header.is_empty():
 			return _log.failure(header + " Nothing was written.")
 
-	var dir: DirAccess = DirAccess.open("res://")
-	var script_dir: String = full_script_path.get_base_dir()
-	if script_dir != "res://" and not dir.dir_exists(script_dir.substr(6)):
-		_log.debug("Creating directory: " + script_dir)
-		var error: Error = dir.make_dir_recursive(script_dir.substr(6))
-		if error != OK:
-			return _log.failure(
-				"Failed to create directory: " + script_dir + ", error: " + str(error)
-			)
+	var directory_refusal: String = _make_directory(full_script_path.get_base_dir())
+	if not directory_refusal.is_empty():
+		return _log.failure(directory_refusal)
 
 	var script_content: String = content
 	if content.is_empty():
@@ -112,7 +91,53 @@ func create_gdscript(params: Dictionary) -> Dictionary:
 	# The editor gives a script it makes a .uid beside it. A headless engine writes none until the
 	# project is imported, so a script made here was missing from every check tracking the sidecars.
 	var uid: String = _uid_beside(full_script_path)
+	return _created_answer(script_path, full_script_path, template, script_content, uid)
 
+
+## Why [param content], the whole file, cannot be given with the header or template arguments of
+## [param params], or "" when it can.
+static func _content_conflict(params: Dictionary, content: String) -> String:
+	# Content is the whole file, so a header written above it would be a second one: a content that
+	# starts with its own `extends` did not parse, and one without it was not the file that was
+	# sent.
+	if content.is_empty():
+		return ""
+	var alongside: Array[String] = []
+	for name: String in ["class_name", "extends", "template"]:
+		if not str(params.get(name, "")).is_empty():
+			alongside.append(name)
+	if alongside.is_empty():
+		return ""
+	return (
+		"content is the whole file, so "
+		+ " and ".join(alongside)
+		+ " cannot be given with it: write "
+		+ ("them" if alongside.size() > 1 else "it")
+		+ " into content instead"
+	)
+
+
+## Makes [param script_dir] under res:// when it is not there. Answers the refusal for a directory
+## that could not be made, or "".
+func _make_directory(script_dir: String) -> String:
+	var dir: DirAccess = DirAccess.open("res://")
+	if script_dir != "res://" and not dir.dir_exists(script_dir.substr(6)):
+		_log.debug("Creating directory: " + script_dir)
+		var error: Error = dir.make_dir_recursive(script_dir.substr(6))
+		if error != OK:
+			return "Failed to create directory: " + script_dir + ", error: " + str(error)
+	return ""
+
+
+## What create answers once [param script_content] is written to [param full_script_path], read back
+## as the engine loads it.
+static func _created_answer(
+	script_path: String,
+	full_script_path: String,
+	template: String,
+	script_content: String,
+	uid: String
+) -> Dictionary:
 	var load_of: GdhWatchedLoad = GdhWatchedLoad.new(full_script_path)
 	var written: Script = load_of.loaded
 	var parses: bool = load_of.parses
@@ -244,55 +269,10 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 	# it, so the numbers answered are where the lines are in the file written, not where each went
 	# at the moment it was placed.
 	var placed: Array[Dictionary] = []
-
-	for mod: Variant in modifications:
-		var fields: Dictionary = mod
-		var mod_type: String = str(fields.get("type", ""))
-		var at: int = -1
-		match mod_type:
-			"add_constant":
-				at = _add_constant(lines, fields, placed)
-			"add_variable":
-				at = _add_variable(lines, fields, placed)
-			"add_signal":
-				at = _add_signal(lines, fields, placed)
-			"add_function":
-				at = _add_function(lines, fields, placed)
-			"add_enum":
-				at = _add_enum(lines, fields, placed)
-		if at == -1:
-			return _log.failure(
-				(
-					"Nothing was changed: "
-					+ mod_type
-					+ " "
-					+ str(fields.get("name"))
-					+ " could not be placed"
-				)
-			)
-		placed.append(
-			{
-				"type": mod_type,
-				"name": str(fields.get("name")),
-				"index": at,
-				"exported": mod_type == "add_variable" and lines[at].begins_with("@export"),
-			}
-		)
-
-	var modifications_applied: Array[Dictionary] = []
-	for entry: Dictionary in placed:
-		var index: int = entry["index"]
-		var applied: Dictionary = {
-			"type": entry["type"],
-			"name": entry["name"],
-			"line": index + 1,
-		}
-		# An export lands in the group open above it, so the answer names that group.
-		if entry["exported"]:
-			var group: String = group_open_at(lines, index)
-			if not group.is_empty():
-				applied["group"] = group
-		modifications_applied.append(applied)
+	var unplaced: String = _place_all(lines, modifications, placed)
+	if not unplaced.is_empty():
+		return _log.failure(unplaced)
+	var modifications_applied: Array[Dictionary] = _applied(lines, placed)
 
 	file = FileAccess.open(full_script_path, FileAccess.WRITE)
 	if not file:
@@ -316,24 +296,7 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 	# every scene that uses it, so it goes back as it was. One already broken is written, as the
 	# addition can be what mends it.
 	if parsed_before and not parses:
-		file = FileAccess.open(full_script_path, FileAccess.WRITE)
-		var restored: bool = file != null and file.store_string(original_content)
-		if file != null:
-			file.close()
-		if not restored:
-			return _log.failure(
-				(
-					"%s would not parse with these additions, and could not be put back as it was"
-					% script_path
-				)
-			)
-		var refusal: String = (
-			"Nothing was changed: %s parses now, and would not with these additions: %s"
-			% [script_path, _reasons(made.raised, full_script_path, lines)]
-		)
-		if not made.others.is_empty():
-			refusal += " The engine raised errors in %s." % ", ".join(made.others)
-		return _log.failure(refusal)
+		return _log.failure(_put_back(full_script_path, original_content, script_path, made, lines))
 	var answer: Dictionary = {
 		"success": true,
 		"script_path": script_path,
@@ -344,6 +307,93 @@ func modify_gdscript(params: Dictionary) -> Dictionary:
 	if not dependencies.is_empty():
 		answer["dependencies_with_errors"] = dependencies
 	return answer
+
+
+## Makes each of [param modifications] in [param lines] and appends where each landed to
+## [param placed]. Answers the refusal for the first that could not be placed, or "".
+func _place_all(
+	lines: Array[String], modifications: Array, placed: Array[Dictionary]
+) -> String:
+	for mod: Variant in modifications:
+		var fields: Dictionary = mod
+		var mod_type: String = str(fields.get("type", ""))
+		var at: int = -1
+		match mod_type:
+			"add_constant":
+				at = _add_constant(lines, fields, placed)
+			"add_variable":
+				at = _add_variable(lines, fields, placed)
+			"add_signal":
+				at = _add_signal(lines, fields, placed)
+			"add_function":
+				at = _add_function(lines, fields, placed)
+			"add_enum":
+				at = _add_enum(lines, fields, placed)
+		if at == -1:
+			return (
+				"Nothing was changed: "
+				+ mod_type
+				+ " "
+				+ str(fields.get("name"))
+				+ " could not be placed"
+			)
+		placed.append(
+			{
+				"type": mod_type,
+				"name": str(fields.get("name")),
+				"index": at,
+				"exported": mod_type == "add_variable" and lines[at].begins_with("@export"),
+			}
+		)
+	return ""
+
+
+## What each of [param placed] answers: its type, name and one-based line, and the group it lands
+## in.
+static func _applied(lines: Array[String], placed: Array[Dictionary]) -> Array[Dictionary]:
+	var modifications_applied: Array[Dictionary] = []
+	for entry: Dictionary in placed:
+		var index: int = entry["index"]
+		var applied: Dictionary = {
+			"type": entry["type"],
+			"name": entry["name"],
+			"line": index + 1,
+		}
+		# An export lands in the group open above it, so the answer names that group.
+		if entry["exported"]:
+			var group: String = group_open_at(lines, index)
+			if not group.is_empty():
+				applied["group"] = group
+		modifications_applied.append(applied)
+	return modifications_applied
+
+
+## Writes [param original_content] back to [param full_script_path], the script as it was before
+## the additions. Answers the refusal for the additions that broke [param made], or for the failure
+## to put the script back.
+static func _put_back(
+	full_script_path: String,
+	original_content: String,
+	script_path: String,
+	made: GdhWatchedLoad,
+	lines: Array[String]
+) -> String:
+	var file: FileAccess = FileAccess.open(full_script_path, FileAccess.WRITE)
+	var restored: bool = file != null and file.store_string(original_content)
+	if file != null:
+		file.close()
+	if not restored:
+		return (
+			"%s would not parse with these additions, and could not be put back as it was"
+			% script_path
+		)
+	var refusal: String = (
+		"Nothing was changed: %s parses now, and would not with these additions: %s"
+		% [script_path, _reasons(made.raised, full_script_path, lines)]
+	)
+	if not made.others.is_empty():
+		refusal += " The engine raised errors in %s." % ", ".join(made.others)
+	return refusal
 
 
 # The engine's errors in [param raised] for [param path], each with its line, as one sentence part.
