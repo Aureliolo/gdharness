@@ -6315,6 +6315,104 @@ async function testAShownSceneIsSavedAsTheEditorHoldsIt({ project, printed }: Ed
 }
 
 /**
+ * A capture of a closed scene that does not load is refused before the editor is asked to open it,
+ * and before the headless editor's own refusal, so the editor puts up no dialog and a headless run
+ * can hold the order.
+ */
+async function testACaptureOfASceneThatDoesNotLoadIsRefusedFirst({
+  project,
+  refusal,
+}: Editor): Promise<void> {
+  const mainScene = 'res://main.tscn';
+  const card = 'res://shown/card_1.tscn';
+  const cardPath = join(project, 'shown', 'card_1.tscn');
+  const capture = async (name: string): Promise<string> =>
+    await refusal('editor_capture', { projectPath: project, scenePath: name });
+  const tabs = async (): Promise<{ open: unknown[]; current: unknown }> => {
+    const held = await hook(project, { op: 'report', path: '' });
+    return { open: asArray(get(held, 'open')), current: get(held, 'current') };
+  };
+  const reset = async (): Promise<void> => {
+    await hook(project, { op: 'close_all', path: '' });
+    await hook(project, { op: 'open', path: mainScene });
+  };
+  const noDialog = async (): Promise<void> => {
+    assert.deepEqual(
+      get(await hook(project, { op: 'dialogs' }), 'dialogs'),
+      [],
+      'the editor shows no dialog',
+    );
+  };
+  writeFileSync(
+    join(project, 'shown', 'broken.tscn'),
+    ['[gd_scene format=3]', '', '[node name="Broken" type="Node"', 'this line is no scene text', ''].join(
+      '\n',
+    ),
+  );
+  writeFileSync(
+    join(project, 'shown', 'missing.tscn'),
+    [
+      '[gd_scene load_steps=2 format=3]',
+      '',
+      '[ext_resource type="PackedScene" path="res://shown/gone.tscn" id="1_gone"]',
+      '',
+      '[node name="Missing" type="Node"]',
+      '',
+      '[node name="Gone" parent="." instance=ExtResource("1_gone")]',
+      '',
+    ].join('\n'),
+  );
+  await reset();
+  const before = await tabs();
+  assert.equal(before.current, mainScene, 'the main scene is in front');
+
+  // Does not load.
+  const refusedWith = /answered editor_capture with an error: /;
+  const broken = await capture('res://shown/broken.tscn');
+  assert.match(broken, refusedWith);
+  assert.match(broken, /Failed to load/);
+  const gone = await capture('res://shown/missing.tscn');
+  assert.match(gone, refusedWith);
+  assert.match(gone, /gone\.tscn/);
+  const absent = await capture('res://shown/absent.tscn');
+  assert.match(absent, refusedWith);
+  assert.match(absent, /Scene not found/);
+  assert.deepEqual(await tabs(), before, 'a refusal opens no tab');
+  await noDialog();
+
+  // Wording: a read's, since a capture writes no scene.
+  assert.match(gone, /Not read: \S+ names/);
+  assert.match(gone, /the editor does not open the scene/);
+  assert.doesNotMatch(gone, /Nothing was written/);
+  assert.doesNotMatch(gone, /a save would drop/);
+
+  // Loads.
+  assert.match(
+    await capture('res://shown/card_2.tscn'),
+    /This editor runs headless/,
+    'a scene that loads reaches the headless refusal',
+  );
+  assert.deepEqual(await tabs(), before, 'which opens no tab');
+
+  // Open, then broken on disk: the editor holds its own copy, so the file is not loaded again.
+  const original = readFileSync(cardPath, 'utf8');
+  try {
+    await hook(project, { op: 'open', path: card });
+    await hook(project, { op: 'open', path: mainScene });
+    writeFileSync(cardPath, '[gd_scene format=3]\n\n[node name="Card" type="Node"\nno scene text\n');
+    assert.match(
+      await capture(card),
+      /This editor runs headless/,
+      'a scene the editor holds is not loaded from its file',
+    );
+  } finally {
+    writeFileSync(cardPath, original);
+    await reset();
+  }
+  await noDialog();
+}
+
+/**
  * auto_reload leaves a scene the editor holds unsaved changes to, and says so.
  *
  * A reload from the file drops the editor's edits without a prompt. A tool's write, taken in by the
@@ -8900,6 +8998,7 @@ async function main(): Promise<void> {
     ['testAutoReloadKeepsUnsavedEdits', testAutoReloadKeepsUnsavedEdits],
     ['testAutoReloadLeavesAGoneScene', testAutoReloadLeavesAGoneScene],
     ['testAShownSceneIsSavedAsTheEditorHoldsIt', testAShownSceneIsSavedAsTheEditorHoldsIt],
+    ['testACaptureOfASceneThatDoesNotLoadIsRefusedFirst', testACaptureOfASceneThatDoesNotLoadIsRefusedFirst],
     ['testAPlayedRunsConsoleArrivesOnItsOwn', testAPlayedRunsConsoleArrivesOnItsOwn],
     ['testDebugging', testDebugging],
     ['testRuntime', testRuntime],

@@ -88932,6 +88932,11 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
     '[gd_scene format=3]\n\n[ext_resource type="Script" path="res://sample.gd" id="1_sample"]\n\n' +
       '[node name="Sample" type="Node2D"]\nscript = ExtResource("1_sample")\n',
   );
+  // A scene of broken text, which the editor answers with a dialog that stays up.
+  writeFileSync(
+    join(project, 'broken.tscn'),
+    '[gd_scene format=3]\n\n[node name="Broken" type="Node"\nthis line is no scene text\n',
+  );
   // The scene the editor shows when the capture is asked for, which it shows again after.
   writeFileSync(join(project, 'other.tscn'), '[gd_scene format=3]\n\n[node name="Other" type="Node3D"]\n');
   // Open beside it, so closing the captured scene's tab alone lands on a scene other than the one shown.
@@ -88997,6 +89002,7 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
       `the editor shows the other scene: ${JSON.stringify(status)}`,
     );
 
+    await theEditorsViewRefusesABrokenScene({ call, project, saved });
     const picture = join(saved, 'view.png');
     const captured = await call('editor_capture', {
       projectPath: project,
@@ -89023,6 +89029,26 @@ async function testTheEditorsViewShowsWhatToolScriptsDrawThere(): Promise<void> 
     rmSync(project, { recursive: true, force: true });
     rmSync(saved, { recursive: true, force: true });
   }
+}
+
+/** A scene of broken text is refused on every platform, before the editor is asked to open it. */
+async function theEditorsViewRefusesABrokenScene(fixture: {
+  call: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>;
+  project: string;
+  saved: string;
+}): Promise<void> {
+  const { call, project, saved } = fixture;
+  const refused = await call('editor_capture', {
+    projectPath: project,
+    scenePath: 'broken.tscn',
+    outputPath: join(saved, 'broken.png'),
+  });
+  assert.equal(get(refused.result, 'isError'), true, textOf(refused) ?? '');
+  assert.match(
+    textOf(refused) ?? '',
+    /^The editor answered editor_capture with an error: Failed to load res:\/\/broken\.tscn as a scene$/,
+    textOf(refused) ?? '',
+  );
 }
 
 /** What the editor view case hands the checks of the picture it captured. */

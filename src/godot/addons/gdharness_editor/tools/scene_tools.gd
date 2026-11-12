@@ -2162,7 +2162,9 @@ func save_scene(args: Dictionary) -> Dictionary:
 
 	var open_root: Node = _open_root(scene_path)
 	if target_path == scene_path and (open_root != null or _asked_of_the_editor(args)):
-		var unloaded: Dictionary = {} if open_root != null else GdhShownScene.loads(scene_path)
+		var unloaded: Dictionary = (
+			{} if open_root != null else GdhShownScene.loads(scene_path, true)
+		)
 		if not unloaded.is_empty():
 			return unloaded
 		return await _save_open_scene(scene_path)

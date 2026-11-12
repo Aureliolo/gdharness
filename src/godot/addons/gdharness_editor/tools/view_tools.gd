@@ -6,7 +6,6 @@ extends Node
 ## engine draws nothing at all. The editor's own 2D and 3D views are the one place it is drawn.
 
 const GdhRead = preload("../reading.gd")
-const GdhFileWalk = preload("../file_walk.gd")
 const GdhSceneFile = preload("../scene_file.gd")
 const GdhShownScene = preload("../shown_scene.gd")
 const GdhPictures = preload("../picture_saves.gd")
@@ -75,11 +74,14 @@ static func _switch_view(view: String) -> void:
 	await GdhShownScene.settled()
 
 
-## The refusal when no capture of [param scene_path] can be saved at [param output_path], or an
-## empty answer.
+## The refusal when [param scene_path] does not load or no capture of it can be saved at
+## [param output_path], or an empty answer.
 static func _capture_unavailable(output_path: String, scene_path: String) -> Dictionary:
 	if output_path.is_empty():
 		return { "ok": false, "error": "output_path required" }
+	var unloaded: Dictionary = GdhShownScene.loads(scene_path, false)
+	if not unloaded.is_empty():
+		return unloaded
 	if DisplayServer.get_name() == HEADLESS_DISPLAY:
 		return {
 			"ok": false,
@@ -88,12 +90,6 @@ static func _capture_unavailable(output_path: String, scene_path: String) -> Dic
 				"This editor runs headless, so it draws nothing to capture. Use a visible "
 				+ "editor, or a hidden one on Windows."
 			),
-		}
-	if not ResourceLoader.exists(scene_path, "PackedScene"):
-		return {
-			"ok": false,
-			"error":
-			GdhFileWalk.new().with_nearest_files("Scene not found: " + scene_path, scene_path),
 		}
 	return {}
 

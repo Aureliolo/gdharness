@@ -101,11 +101,19 @@ static func leave() -> bool:
 
 ## {} when [param scene_path] is open in the editor or loads as a scene, otherwise the refusal.
 ## The editor answers a scene that does not load with a dialog that stays up, so it is not asked.
-static func loads(scene_path: String) -> Dictionary:
+## [param for_writing] says whether the call writes: a read answers a gone file in a read's words.
+static func loads(scene_path: String, for_writing: bool) -> Dictionary:
 	if EditorInterface.get_open_scenes().has(scene_path):
 		return {}
+	if not for_writing and FileAccess.file_exists(scene_path):
+		var as_text: String = (
+			FileAccess.get_file_as_string(scene_path) if scene_path.ends_with(".tscn") else ""
+		)
+		var gone: String = GdhSceneFile.missing_said(scene_path, as_text, false)
+		if not gone.is_empty():
+			return { "ok": false, "error": gone }
 	var scene: GdhSceneFile = GdhSceneFile.new()
-	var refused: Dictionary = scene.open(scene_path, true)
+	var refused: Dictionary = scene.open(scene_path, for_writing)
 	scene.close()
 	return refused
 

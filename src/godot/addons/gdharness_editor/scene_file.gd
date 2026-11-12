@@ -161,7 +161,7 @@ func _barred_from_writing() -> String:
 	if not held_back.is_empty():
 		return held_back
 	var as_text: String = FileAccess.get_file_as_string(path) if path.ends_with(".tscn") else ""
-	return missing_said(path, as_text)
+	return missing_said(path, as_text, true)
 
 
 ## Loads the scene at [member path] and sets [member root] from it. A write outside an editor has
@@ -494,8 +494,9 @@ static func _lines_using(text: String, gone: Dictionary) -> PackedStringArray:
 ## Why a write to the scene at [param scene_path], whose text is [param text], is refused, or "":
 ## an [ext_resource] naming no file the project has, by its uid or by its path. The engine loads the
 ## scene without it, so a save drops the entry and every value set from it, and the answer could
-## only call those values empty.
-static func missing_said(scene_path: String, text: String) -> String:
+## only call those values empty. With [param for_writing] false the refusal is a read's, since the
+## editor does not open such a scene.
+static func missing_said(scene_path: String, text: String, for_writing: bool) -> String:
 	var gone: Dictionary = (
 		_gone_in_text(scene_path, text)
 		if scene_path.ends_with(".tscn")
@@ -507,6 +508,8 @@ static func missing_said(scene_path: String, text: String) -> String:
 	var paths: PackedStringArray = []
 	for id: String in gone:
 		var _named: bool = paths.append(str(gone[id]))
+	if not for_writing:
+		return _gone_read_said(scene_path, paths)
 	var one_file: bool = paths.size() == 1
 	return (
 		(
@@ -523,6 +526,28 @@ static func missing_said(scene_path: String, text: String) -> String:
 			"" if uses.is_empty() else " and what is set from %s: %s" % [
 				"it" if one_file else "them", "; ".join(uses),
 			],
+			"file" if one_file else "files",
+			"that path" if one_file else "those paths",
+			"line" if one_file else "lines",
+			"one" if one_file else "ones",
+		]
+	)
+
+
+## The refusal of a read of the scene at [param scene_path], which names the files [param paths],
+## none of them there.
+static func _gone_read_said(scene_path: String, paths: PackedStringArray) -> String:
+	var one_file: bool = paths.size() == 1
+	return (
+		(
+			"Not read: %s names %s, which %s not there, so the editor does not open the scene. "
+			+ "Put the %s back at %s, or change the [ext_resource] %s in the scene to %s that "
+			+ "exists."
+		)
+		% [
+			scene_path,
+			", ".join(paths),
+			"is" if one_file else "are",
 			"file" if one_file else "files",
 			"that path" if one_file else "those paths",
 			"line" if one_file else "lines",
