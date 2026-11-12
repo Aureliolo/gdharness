@@ -1284,21 +1284,30 @@ export function ourRunEnded(
   const which = `${run.throughEditor ? 'played in the editor' : 'started'}${run.pid === null ? '' : ` (pid ${run.pid})`}`;
   const when =
     run.endedAt === undefined ? '' : ` ${Math.max(0, Math.round((now - run.endedAt) / 1000))}s ago`;
-  const how =
-    run.endedThrough === 'close'
-      ? 'this server asked it to close'
-      : run.endedThrough === 'keeper'
-        ? 'this server ended it through the keeper holding it'
-        : run.endedThrough === 'signal'
-          ? 'this server signalled it'
-          : run.endedThrough === 'editor'
-            ? 'this server asked the editor to stop it'
-            : run.exitCode !== null
-              ? `it exited by itself with ${exitCodeText(run.exitCode)}`
-              : run.exitSignal === null
-                ? 'it is no longer running'
-                : `it was ended by ${run.exitSignal}`;
+  const how = howOurRunEnded(run);
   return `No game with the runtime addon is running: the game this server ${which} ended${when}, and ${how}. editor_output has what it printed, and editor_run start runs it again.`;
+}
+
+const ENDED_THROUGH_TEXT: Readonly<Record<EndedThrough, string>> = {
+  close: 'this server asked it to close',
+  keeper: 'this server ended it through the keeper holding it',
+  signal: 'this server signalled it',
+  editor: 'this server asked the editor to stop it',
+};
+
+/** How an ended run came to its end, as the clause that closes a runtime refusal. */
+function howOurRunEnded(run: {
+  readonly endedThrough?: EndedThrough;
+  readonly exitCode: number | null;
+  readonly exitSignal: string | null;
+}): string {
+  if (run.endedThrough !== undefined) {
+    return ENDED_THROUGH_TEXT[run.endedThrough];
+  }
+  if (run.exitCode !== null) {
+    return `it exited by itself with ${exitCodeText(run.exitCode)}`;
+  }
+  return run.exitSignal === null ? 'it is no longer running' : `it was ended by ${run.exitSignal}`;
 }
 
 /**
@@ -1385,6 +1394,13 @@ export function stopVerdict(stop: {
       withChildren: true,
     };
   }
+  return endedStopVerdict(stop, notClosed);
+}
+
+type StopFacts = Parameters<typeof stopVerdict>[0];
+
+/** The verdict of a stop that signalled the run and found it gone, with the note on how it went. */
+function endedStopVerdict(stop: StopFacts, notClosed: string): StopVerdict {
   if (stop.endedThrough === 'close') {
     return {
       stopped: true,
@@ -1591,10 +1607,19 @@ function aboutTheChildren(ended: ChildrenEnded | null, throughEditor: boolean): 
   if (ended.unknown === 'no process') {
     return 'andChildren was asked for and this run has no process id to list under: the editor plays it and its game announced none, so nothing else was ended.';
   }
-  const counted = (n: number): string => `${n} ${n === 1 ? 'process' : 'processes'}`;
-  const announced = ended.ended.filter((one) => one.how === 'announced').length;
-  const byCommandLine = ended.ended.length - announced;
-  const how = [
+  return aboutTheChildrenEnded(ended);
+}
+
+/** The processes of a name, counted with the noun in its right number. */
+function countedProcesses(n: number): string {
+  return `${n} ${n === 1 ? 'process' : 'processes'}`;
+}
+
+/** What identified [param games] as games of the project: their announcement or their command line. */
+function howTheGamesWereIdentified(games: readonly GameUnderTheRun[]): string {
+  const announced = games.filter((one) => one.how === 'announced').length;
+  const byCommandLine = games.length - announced;
+  return [
     announced === 0
       ? ''
       : `${announced} announced as ${announced === 1 ? 'a game' : 'games'} of this project`,
@@ -1604,6 +1629,12 @@ function aboutTheChildren(ended: ChildrenEnded | null, throughEditor: boolean): 
   ]
     .filter((part) => part !== '')
     .join(' and ');
+}
+
+/** What a stop says it ended among the game's own processes, and what it left. */
+function aboutTheChildrenEnded(ended: ChildrenEnded): string {
+  const counted = countedProcesses;
+  const how = howTheGamesWereIdentified(ended.ended);
   const endedToo =
     ended.ended.length === 0
       ? "The game had started nothing that is a game of this project, announced as one or this project's engine run with --path on it, so nothing else was ended."
@@ -2031,19 +2062,26 @@ function outsideTheirRanges(spec: ToolSpec, args: OperationParams): string[] {
     if (typeof value !== 'number' || schema === undefined) {
       continue;
     }
-    const least = typeof schema['minimum'] === 'number' ? schema['minimum'] : undefined;
-    const most = typeof schema['maximum'] === 'number' ? schema['maximum'] : undefined;
-    if ((least !== undefined && value < least) || (most !== undefined && value > most)) {
-      const range =
-        least !== undefined && most !== undefined
-          ? `from ${least} to ${most}`
-          : least !== undefined
-            ? `of ${least} or more`
-            : `of ${most} or less`;
+    const range = outsideRange(schema, value);
+    if (range !== undefined) {
       complaints.push(`${name} ${range}, not ${value}`);
     }
   }
   return complaints;
+}
+
+/** The range [param schema] declares, worded for a refusal, when [param value] falls outside it. */
+function outsideRange(schema: Record<string, unknown>, value: number): string | undefined {
+  const least = typeof schema['minimum'] === 'number' ? schema['minimum'] : undefined;
+  const most = typeof schema['maximum'] === 'number' ? schema['maximum'] : undefined;
+  if (!((least !== undefined && value < least) || (most !== undefined && value > most))) {
+    return undefined;
+  }
+  return least !== undefined && most !== undefined
+    ? `from ${least} to ${most}`
+    : least !== undefined
+      ? `of ${least} or more`
+      : `of ${most} or less`;
 }
 
 /**
@@ -2232,23 +2270,16 @@ function presetsIn(projectPath: string): { name: string; platform: string; bakes
   const byNumber = new Map<string, { name: string; platform: string; bakes: boolean }>();
   let held: { name: string; platform: string; bakes: boolean } | null = null;
   let options: string | null = null;
-  const quoted = (line: string, key: string): string | undefined =>
-    new RegExp(`^\\s*${key}\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(line)?.[1]?.replace(/\\(.)/g, '$1');
   for (const line of text.split(/\r?\n/)) {
     const section = /^\s*\[([^\]]+)\]/.exec(line)?.[1]?.trim();
     if (section !== undefined) {
-      const number = /^preset\.(\d+)$/.exec(section)?.[1];
-      held = number === undefined ? null : { name: '', platform: '', bakes: false };
-      if (held !== null && number !== undefined) {
-        presets.push(held);
-        byNumber.set(number, held);
-      }
+      held = openedPreset(section, presets, byNumber);
       options = /^preset\.(\d+)\.options$/.exec(section)?.[1] ?? null;
       continue;
     }
     if (held !== null) {
-      held.name = quoted(line, 'name') ?? held.name;
-      held.platform = quoted(line, 'platform') ?? held.platform;
+      held.name = quotedPresetValue(line, 'name') ?? held.name;
+      held.platform = quotedPresetValue(line, 'platform') ?? held.platform;
     }
     const owner = options === null ? undefined : byNumber.get(options);
     if (owner !== undefined && /^\s*shader_baker\/enabled\s*=\s*true\s*$/.test(line)) {
@@ -2256,6 +2287,27 @@ function presetsIn(projectPath: string): { name: string; platform: string; bakes
     }
   }
   return presets;
+}
+
+/** The preset a `[preset.N]` section starts, recorded in both collections, or null for any other section. */
+function openedPreset(
+  section: string,
+  presets: { name: string; platform: string; bakes: boolean }[],
+  byNumber: Map<string, { name: string; platform: string; bakes: boolean }>,
+): { name: string; platform: string; bakes: boolean } | null {
+  const number = /^preset\.(\d+)$/.exec(section)?.[1];
+  if (number === undefined) {
+    return null;
+  }
+  const held = { name: '', platform: '', bakes: false };
+  presets.push(held);
+  byNumber.set(number, held);
+  return held;
+}
+
+/** The string [param key] is set to on [param line] of export_presets.cfg, unescaped, if it is set there. */
+function quotedPresetValue(line: string, key: string): string | undefined {
+  return new RegExp(`^\\s*${key}\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(line)?.[1]?.replace(/\\(.)/g, '$1');
 }
 
 /**
@@ -2391,18 +2443,58 @@ export function exportAnswer(
     // Exported says the file was written, not what it holds: a filter that leaves nearly
     // everything out still writes a pack, and only its size shows it.
     ...(written && bytes !== null ? { bytes } : {}),
-    ...(beside.length === 0 ? {} : { alsoWritten: beside }),
-    ...imports,
-    ...(notCopied.length === 0
-      ? {}
-      : {
-          librariesNotLoaded: notCopied,
-          extensionNote: `The export could not load ${notCopied.join(' and ')}: on Windows an engine running as the editor, which an export is, loads a GDExtension from a ~ copy beside the library, and another engine on this project held that copy: it could not be moved aside before the export, or another engine made a new one in between. Export again once that engine has loaded or exited.`,
-        }),
-    ...(docCacheNote === null ? {} : { docCacheNote }),
-    ...(engineNote === null ? {} : { engineNote }),
+    ...exportNotes({ beside, imports, notCopied, docCacheNote, engineNote }),
     ...foldedEntriesAnswer(log),
   };
+  return exportResponse(ending, asked, verdict, after, written);
+}
+
+/** The export's answer fields that say what else happened around it, each absent when nothing did. */
+function exportNotes(notes: {
+  readonly beside: readonly string[];
+  readonly imports: ReturnType<typeof importedFirstAnswer>;
+  readonly notCopied: readonly string[];
+  readonly docCacheNote: string | null;
+  readonly engineNote: string | null;
+}): {
+  alsoWritten?: readonly string[];
+  librariesNotLoaded?: readonly string[];
+  extensionNote?: string;
+  docCacheNote?: string;
+  engineNote?: string;
+} {
+  return {
+    ...(notes.beside.length === 0 ? {} : { alsoWritten: notes.beside }),
+    ...notes.imports,
+    ...librariesNotLoadedAnswer(notes.notCopied),
+    ...(notes.docCacheNote === null ? {} : { docCacheNote: notes.docCacheNote }),
+    ...(notes.engineNote === null ? {} : { engineNote: notes.engineNote }),
+  };
+}
+
+/** The fields an export answers with for libraries it could not load, none when it loaded them all. */
+function librariesNotLoadedAnswer(notCopied: readonly string[]): {
+  librariesNotLoaded?: readonly string[];
+  extensionNote?: string;
+} {
+  if (notCopied.length === 0) {
+    return {};
+  }
+  return {
+    librariesNotLoaded: notCopied,
+    extensionNote: `The export could not load ${notCopied.join(' and ')}: on Windows an engine running as the editor, which an export is, loads a GDExtension from a ~ copy beside the library, and another engine on this project held that copy: it could not be moved aside before the export, or another engine made a new one in between. Export again once that engine has loaded or exited.`,
+  };
+}
+
+/** The export's answer for its verdict:the verdict alone when exported, else a line saying why not. */
+function exportResponse(
+  ending: EngineRun,
+  asked: { readonly preset: string; readonly outputPath: string },
+  verdict: { readonly exported: boolean },
+  after: number | null,
+  written: boolean,
+): ToolResponse {
+  const { log } = ending;
   if (verdict.exported) {
     return { content: [{ type: 'text', text: answerJson(verdict) }] };
   }
@@ -2873,15 +2965,23 @@ export function finishedBeforeTheEnd(finished: number, failing: number, running:
   if (finished === 0 && running === null) {
     return '';
   }
-  const got =
-    finished === 0
-      ? 'no suite had finished'
-      : `${finished === 1 ? 'one suite' : `${finished} suites`} finished${failing === 0 ? '' : finished === 1 ? ', with failures' : `, ${failing} of them with failures`}`;
-  const listed =
-    finished === 0
-      ? ''
-      : `. ${finished === 1 ? 'It is' : 'They are'} under suitesFinished${failing === 0 ? '' : ', with the failing cases under suitesFailing'}, so a run of the rest need not repeat ${finished === 1 ? 'it' : 'them'}`;
+  const got = suitesFinishedSaid(finished, failing);
+  const listed = suitesListedSaid(finished, failing);
   return ` Before it ended, ${got}${running === null ? '' : `${finished === 0 ? ' and' : ', and'} ${running} was running`}${listed}.`;
+}
+
+/** The clause saying how many suites a run had finished and how many of them failed. */
+function suitesFinishedSaid(finished: number, failing: number): string {
+  return finished === 0
+    ? 'no suite had finished'
+    : `${finished === 1 ? 'one suite' : `${finished} suites`} finished${failing === 0 ? '' : finished === 1 ? ', with failures' : `, ${failing} of them with failures`}`;
+}
+
+/** The clause saying where the finished suites are listed, empty when none finished. */
+function suitesListedSaid(finished: number, failing: number): string {
+  return finished === 0
+    ? ''
+    : `. ${finished === 1 ? 'It is' : 'They are'} under suitesFinished${failing === 0 ? '' : ', with the failing cases under suitesFailing'}, so a run of the rest need not repeat ${finished === 1 ? 'it' : 'them'}`;
 }
 
 /**
@@ -2921,9 +3021,45 @@ export function scriptErrorsNote(
     }
   }
   const scripts = causes.size + dependents.length;
-  const at = (error: ScriptError): string =>
-    error.line === null ? error.path : `${error.path}:${error.line}`;
-  const sentence = (text: string): string => `${text}${/[.!?]\)?$/.test(text) ? '' : '.'}`;
+  // A declaring script that itself could not resolve a class is a step on the way, and the one
+  // that failed on something else is the one to open, so it is named first.
+  const first = [...new Map(origins.map((origin) => [origin.path, origin])).values()].toSorted(
+    (a, b) => Number(unresolvedClassIn(a.message) !== null) - Number(unresolvedClassIn(b.message) !== null),
+  );
+  const causesSaid = causesSaidIn(causes, first, unconfirmed);
+  const around = scriptErrorsAround({
+    dependents,
+    causeCount: causes.size,
+    ownCount: own.length,
+    consequenceCount: consequences.length,
+    // Counted with the declaring scripts gdUnit4 did not name, so the head and the verdict beside it,
+    // which counts every script with an error, give one number for one run.
+    unnamed: first.length,
+    scripts,
+  });
+  return [around.opening, causesSaid, around.following, around.rest, around.after]
+    .filter((part) => part !== '')
+    .join(' ');
+}
+
+/** [param error]'s script and line, as the notes about script errors name it. */
+function scriptErrorAt(error: ScriptError): string {
+  return error.line === null ? error.path : `${error.path}:${error.line}`;
+}
+
+/** [param text] ended with a full stop unless it already ends a sentence. */
+function sentenceOf(text: string): string {
+  return `${text}${/[.!?]\)?$/.test(text) ? '' : '.'}`;
+}
+
+/** What a script-errors note says about the scripts that caused the others to fail. */
+function causesSaidIn(
+  causes: ReadonlyMap<string, ScriptError>,
+  first: readonly ScriptOrigin[],
+  unconfirmed: readonly UnconfirmedOrigin[],
+): string {
+  const at = scriptErrorAt;
+  const sentence = sentenceOf;
   const traced = new Set<string>();
   const failedOn = (declares: string): string => {
     const through = [...causes.values()].filter((error) => unresolvedClassIn(error.message) === declares);
@@ -2934,12 +3070,7 @@ export function scriptErrorsNote(
       ? ''
       : ` ${through.map(at).join(', ')} could not resolve ${declares} because of it.`;
   };
-  // A declaring script that itself could not resolve a class is a step on the way, and the one
-  // that failed on something else is the one to open, so it is named first.
-  const first = [...new Map(origins.map((origin) => [origin.path, origin])).values()].toSorted(
-    (a, b) => Number(unresolvedClassIn(a.message) !== null) - Number(unresolvedClassIn(b.message) !== null),
-  );
-  const causesSaid = [
+  return [
     ...first.map(
       (origin) =>
         `${at(origin)} ${sentence(origin.message)} gdUnit4 did not name this script, which declares ${origin.declares}. The engine's own check of it found the error.${failedOn(origin.declares)}`,
@@ -2952,29 +3083,50 @@ export function scriptErrorsNote(
       .filter((error) => !traced.has(error.path))
       .map((error) => `${at(error)} ${sentence(error.message)}`),
   ].join(' ');
+}
+
+/** The sentences of a script-errors note that count scripts and errors rather than naming them. */
+function scriptErrorsAround(counts: {
+  readonly dependents: readonly string[];
+  readonly causeCount: number;
+  readonly ownCount: number;
+  readonly consequenceCount: number;
+  readonly unnamed: number;
+  readonly scripts: number;
+}): { opening: string; following: string; rest: string; after: string } {
+  const { dependents, causeCount } = counts;
   const following =
     dependents.length === 0
       ? ''
-      : causes.size === 0
+      : causeCount === 0
         ? `${dependents.join(', ')} ${dependents.length === 1 ? 'depends' : 'depend'} on a script that did not compile, and gdUnit4 named none with an error of its own: script_diagnostics on one of them finds it.`
         : `${dependents.length === 1 ? 'One more' : `${dependents.length} more`} failed only because a script ${dependents.length === 1 ? 'it depends' : 'they depend'} on did: ${dependents.join(', ')}.`;
-  const more = own.length - causes.size;
+  return { following, ...errorsLeftSaid(counts), opening: scriptsNotLoadedSaid(counts) };
+}
+
+type ScriptErrorCounts = Parameters<typeof scriptErrorsAround>[0];
+
+/** The sentences saying how many more errors there are and where they are listed. */
+function errorsLeftSaid(counts: ScriptErrorCounts): { rest: string; after: string } {
+  const { causeCount, consequenceCount } = counts;
+  const more = counts.ownCount - causeCount;
   const rest =
     more > 0
-      ? `${more === 1 ? 'One more error' : `${more} more errors`} in ${causes.size === 1 ? 'that script' : 'those scripts'} ${more === 1 ? 'is' : 'are'} under scriptErrors.`
+      ? `${more === 1 ? 'One more error' : `${more} more errors`} in ${causeCount === 1 ? 'that script' : 'those scripts'} ${more === 1 ? 'is' : 'are'} under scriptErrors.`
       : '';
   const after =
-    consequences.length > 0
-      ? `${consequences.length === 1 ? 'One more error comes' : `${consequences.length} more errors come`} only from a class that did not resolve, which the engine reads as Variant, and ${consequences.length === 1 ? 'is' : 'are'} under followFromUnresolved.`
+    consequenceCount > 0
+      ? `${consequenceCount === 1 ? 'One more error comes' : `${consequenceCount} more errors come`} only from a class that did not resolve, which the engine reads as Variant, and ${consequenceCount === 1 ? 'is' : 'are'} under followFromUnresolved.`
       : '';
-  // Counted with the declaring scripts gdUnit4 did not name, so the head and the verdict beside it,
-  // which counts every script with an error, give one number for one run.
-  const unnamed = first.length;
-  const opening =
-    unnamed === 0
-      ? `No tests ran: gdUnit4 could not load ${scripts === 1 ? 'one script' : `${scripts} scripts`} while looking for suites, and it runs no suite at all when one fails to load.`
-      : `No tests ran: ${scripts + unnamed} scripts did not compile, and gdUnit4 runs no suite at all when one fails to load. It could not load ${scripts === 1 ? 'one' : scripts} of them while looking for suites, and ${unnamed === 1 ? 'the one it did not name comes' : `the ${unnamed} it did not name come`} first.`;
-  return [opening, causesSaid, following, rest, after].filter((part) => part !== '').join(' ');
+  return { rest, after };
+}
+
+/** The opening sentence of a script-errors note: that no tests ran and how many scripts did not load. */
+function scriptsNotLoadedSaid(counts: ScriptErrorCounts): string {
+  const { unnamed, scripts } = counts;
+  return unnamed === 0
+    ? `No tests ran: gdUnit4 could not load ${scripts === 1 ? 'one script' : `${scripts} scripts`} while looking for suites, and it runs no suite at all when one fails to load.`
+    : `No tests ran: ${scripts + unnamed} scripts did not compile, and gdUnit4 runs no suite at all when one fails to load. It could not load ${scripts === 1 ? 'one' : scripts} of them while looking for suites, and ${unnamed === 1 ? 'the one it did not name comes' : `the ${unnamed} it did not name come`} first.`;
 }
 
 /**
@@ -3444,7 +3596,37 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
     };
   }
   const table = profiledFunctions(totals, limit, reading.sourceOf);
-  const notes: string[] = [];
+  const notes = [
+    ...profileRunNotes(reading, totals),
+    ...profileFrameNotes(reading, totals),
+    ...profileTableNotes(table),
+    ...profileTotalsNotes(reading, totals, table),
+  ];
+  return {
+    through: reading.through,
+    running: reading.running,
+    connected: true,
+    complete: totals.complete,
+    frames: totals.frames,
+    firstFrame: totals.firstFrame,
+    lastFrame: totals.lastFrame,
+    coveredMs: reading.coveredMs,
+    scriptMs: table.scriptMs,
+    perCallOverheadUs: table.perCallUs ?? undefined,
+    functionsCounted: table.counted,
+    runtimeAddonMs: table.addonFunctions > 0 ? table.addonMs : undefined,
+    runtimeAddonFunctions: table.addonFunctions > 0 ? table.addonFunctions : undefined,
+    omitted: table.omitted > 0 ? table.omitted : undefined,
+    functions: table.functions,
+    callers: reading.callersOf === undefined ? undefined : callersAnswer(totals, reading.callersOf),
+    note: notes.length > 0 ? notes.join(' ') : undefined,
+  };
+}
+
+type ProfiledTable = ReturnType<typeof profiledFunctions>;
+
+/** The notes on how far the run is and what that does to the totals: still going, ended, or cut short. */
+function profileRunNotes(reading: ProfileReading, totals: ProfileTotals): string[] {
   const addonNote =
     reading.runtimeAddon === true
       ? ''
@@ -3463,6 +3645,16 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
       : reading.runtimeAddon === true
         ? ' The runtime addon switches the profiler off as the game quits, and did not here, for one of three reasons. It may no longer have been running in this game by then, which a project can arrange for some scenes. The game may have ended without taking its tree down, as a crash or a kill does. Or the totals did not reach the debugger before the game exited, which the game then says in its output.'
         : addonNote;
+  return profileRunStateNotes(reading, totals, { addonNote, totalsWithheld });
+}
+
+/** The note on the state the run was read in, given what to say when the engine's totals are missing. */
+function profileRunStateNotes(
+  reading: ProfileReading,
+  totals: ProfileTotals,
+  { addonNote, totalsWithheld }: { readonly addonNote: string; readonly totalsWithheld: string },
+): string[] {
+  const notes: string[] = [];
   if (totals.complete && reading.running) {
     notes.push(
       `The engine's totals arrived while the game is still running, which it sends only when the profiler is switched off, so ${reading.through === 'editor' ? "the editor's Profiler tab or the game itself, through EngineDebugger," : 'the game itself, through EngineDebugger,'} switched it off before the game ended. They cover the run up to then and nothing after.`,
@@ -3477,15 +3669,23 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
     notes.push(
       `The run is still going, so these are the ${totals.frames === 1 ? 'one frame' : `${totals.frames} frames`} summed so far${reading.through === 'gdharness' ? ', written at most half a second behind' : ''}.`,
     );
-  } else if (totals.frames === 0) {
-    notes.push(
-      `The game connected and ended before a frame of the profile reached ${reading.through === 'editor' ? 'the editor' : 'this server'}: the engine sends its totals only when the profiler is switched off, and stops sending as it exits without emptying what it has queued.${totalsWithheld}`,
-    );
   } else {
-    notes.push(
-      `These are the ${totals.frames === 1 ? 'one frame' : `${totals.frames} frames`} that arrived, summed, without the engine's own totals, which it sends only when the profiler is switched off.${totalsWithheld} Not in them is any script time after the last frame sent: a frame still queued as the game exited, since the engine stops sending without emptying its queue, and what scripts did as it quit, such as in _exit_tree. That can be nothing: a scene that does its work in _ready and quits has all of it in its first frame.`,
-    );
+    notes.push(endedProfileNote(reading, totals, totalsWithheld));
   }
+  return notes;
+}
+
+/** The note on a run that has ended without the engine's own totals: none arrived, or only frames. */
+function endedProfileNote(reading: ProfileReading, totals: ProfileTotals, totalsWithheld: string): string {
+  if (totals.frames === 0) {
+    return `The game connected and ended before a frame of the profile reached ${reading.through === 'editor' ? 'the editor' : 'this server'}: the engine sends its totals only when the profiler is switched off, and stops sending as it exits without emptying what it has queued.${totalsWithheld}`;
+  }
+  return `These are the ${totals.frames === 1 ? 'one frame' : `${totals.frames} frames`} that arrived, summed, without the engine's own totals, which it sends only when the profiler is switched off.${totalsWithheld} Not in them is any script time after the last frame sent: a frame still queued as the game exited, since the engine stops sending without emptying its queue, and what scripts did as it quit, such as in _exit_tree. That can be nothing: a scene that does its work in _ready and quits has all of it in its first frame.`;
+}
+
+/** The notes on frames the profile is missing: the start it missed and those that never arrived. */
+function profileFrameNotes(reading: ProfileReading, totals: ProfileTotals): string[] {
+  const notes: string[] = [];
   // The engine numbers a game's frames from 0, so a profile of a run started profiled whose first
   // frame is numbered above that missed the start, which nothing else in it shows.
   const unprofiled = totals.firstFrame ?? 0;
@@ -3504,6 +3704,12 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
       `${howMany} of the game's frames between the first and the last that arrived did not arrive, so ${unarrived === 1 ? 'its' : 'their'} script time is not in these.`,
     );
   }
+  return notes;
+}
+
+/** The notes on what the profiler's own work does to the rows: super calls and per-call overhead. */
+function profileTableNotes(table: ProfiledTable): string[] {
+  const notes: string[] = [];
   if (table.superCallers > 0) {
     notes.push(
       `${table.superCallers === 1 ? 'One function calls' : `${table.superCallers} functions call`} through super, marked selfIncludesSuper: the engine takes a call to another script function or an engine method out of the caller's self time, but not a super call, so ${table.superCallers === 1 ? 'its' : 'their'} selfMs holds the overridden function's time, which that function's own row counts again. Self time therefore cannot be added along an override chain, and scriptMs counts the time under a super call once more for each level above it.`,
@@ -3515,6 +3721,12 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
       `The profiler costs about ${table.perCallUs}µs a call in this run, measured on an empty function the runtime addon calls as it goes on, and that time lands in the self time of the function called. ${one ? 'One function has' : `${table.overheadDominated} functions have`} at least half ${one ? 'its' : 'their'} selfMs in it: ${namedFew(table.overheadNamed)}.${overheadRowsReturned(table, one)} That much of ${one ? 'its' : 'their'} time is the profiler's and goes once the profiler is off, whether the function is inlined or not. What inlining saves is the call itself, which costs something without the profiler too, not the work inside it.`,
     );
   }
+  return notes;
+}
+
+/** The notes on time the totals count twice or leave out: threads, the runtime addon, engine calls. */
+function profileTotalsNotes(reading: ProfileReading, totals: ProfileTotals, table: ProfiledTable): string[] {
+  const notes: string[] = [];
   if (reading.coveredMs > 0 && table.scriptMs > reading.coveredMs) {
     notes.push(
       `scriptMs, ${table.scriptMs}ms, is more than the ${reading.coveredMs}ms the profile covers.${table.superCallers > 0 ? ' The super calls above, counted twice, can account for some or all of that. Whatever they do not is' : ' One thread cannot spend more time than passes, so that is'} functions running on several threads at once, through WorkerThreadPool or Thread. The engine adds every thread's time to the same function and does not say which thread a call ran on, so a function's selfMs is summed over every thread it ran on rather than taken out of frames, and a function that waits for the others, through wait_for_group_task_completion or wait_to_finish, has the wait in its own selfMs as well.`,
@@ -3536,25 +3748,7 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
       `${totals.unreadable} message${totals.unreadable === 1 ? '' : 's'} from the game could not be read, so the totals have that many gaps.`,
     );
   }
-  return {
-    through: reading.through,
-    running: reading.running,
-    connected: true,
-    complete: totals.complete,
-    frames: totals.frames,
-    firstFrame: totals.firstFrame,
-    lastFrame: totals.lastFrame,
-    coveredMs: reading.coveredMs,
-    scriptMs: table.scriptMs,
-    perCallOverheadUs: table.perCallUs ?? undefined,
-    functionsCounted: table.counted,
-    runtimeAddonMs: table.addonFunctions > 0 ? table.addonMs : undefined,
-    runtimeAddonFunctions: table.addonFunctions > 0 ? table.addonFunctions : undefined,
-    omitted: table.omitted > 0 ? table.omitted : undefined,
-    functions: table.functions,
-    callers: reading.callersOf === undefined ? undefined : callersAnswer(totals, reading.callersOf),
-    note: notes.length > 0 ? notes.join(' ') : undefined,
-  };
+  return notes;
 }
 
 /**
@@ -3602,42 +3796,55 @@ function cappedNotes(totals: ProfileTotals): string[] {
   const most = totals.frameFunctions;
   const why = `${most} is kept below the game's debugger queue (network/limits/debugger/max_queued_messages), which drops the message naming a function when one frame names more than it holds, and a function whose name is dropped is never named afterwards.`;
   if (most !== undefined && totals.complete && totals.totalCapped === true) {
-    // The engine sends its totals busiest first, measured on 4.7.2: of a hundred functions with
-    // rising work under a cap of 64, the busiest were kept. It lists every compiled function, called
-    // or not, so when the last one kept took no measurable time, nothing left out took any: no time
-    // is missing, only the calls of functions too quick for the clock, if any were made. game-b's
-    // totals reached 1536 with 324 functions counted and were read as having lost some of their time.
-    const leastKept = Math.min(...Object.values(totals.functions).map((one) => one.totalSeconds));
-    // Counted, since functions that never ran tie with those too quick for the clock and the
-    // engine's order among them decides how many of each are kept: 2500 called once on macOS kept
-    // 1000 of them, on the same code where Windows and Linux kept more.
-    const unrun = Object.values(totals.functions).filter((one) => one.calls === 0).length;
-    notes.push(
-      leastKept > 0
-        ? `The engine's totals carried the most functions the profiler asks for, ${most}, so the functions with the least time are not in them: ${why}`
-        : `The engine's totals carried the most functions the profiler asks for, ${most}, and the last of them took no measurable time, so neither did any left out: the time is all here, and only a function too quick for the clock can be missing, with its calls. ${why}`,
-    );
-    if (unrun > 0) {
-      notes.push(
-        `${unrun === 1 ? 'One' : String(unrun)} of the ${most} ${unrun === 1 ? 'is a function' : 'are functions'} counted as never called: the engine lists every function it has compiled, run or not, busiest first, so where the time runs out they take places that functions run too quickly to measure could have had.`,
-      );
-    }
-    const engineMethods = totals.totalEngineMethods ?? 0;
-    if (engineMethods > 0) {
-      notes.push(
-        `${engineMethods === 1 ? 'One' : String(engineMethods)} of the ${most} ${engineMethods === 1 ? 'is an engine method' : 'are engine methods'} the scripts called, which ${engineMethods === 1 ? 'is no row' : 'are no rows'}: that time is the callers' engineMs.`,
-      );
-    }
+    notes.push(...totalCappedNotes(totals, most, why));
   } else if (most !== undefined && !totals.complete && (totals.cappedFrames ?? 0) > 0) {
     const capped = totals.cappedFrames ?? 0;
     notes.push(
       `${capped === totals.frames ? (capped === 1 ? 'The one frame' : `All ${capped} frames`) : `${capped} of the ${totals.frames} frames`} carried the most functions the profiler asks for in one, ${most}, so the functions with the least time in ${capped === 1 ? 'it' : 'them'} are not counted there: ${why}`,
     );
   }
+  notes.push(...unnamedFunctionNotes(totals));
+  return notes;
+}
+
+/** The note on functions that arrived called but unnamed, none when every one has its name. */
+function unnamedFunctionNotes(totals: ProfileTotals): string[] {
   const unnamed = unnamedCalled(totals);
-  if (unnamed > 0) {
+  if (unnamed === 0) {
+    return [];
+  }
+  return [
+    `${unnamed === 1 ? 'One function' : `${unnamed} functions`} arrived without ${unnamed === 1 ? 'its name' : 'their names'}, shown as ${UNNAMED_PREFIX} and the number the engine gave ${unnamed === 1 ? 'it' : 'them'}: the engine names a function once, as it first appears, and the game's debugger queue was full when that message was sent. They are script functions of the game. Which ones they are cannot be recovered from this profile.`,
+  ];
+}
+
+/** The notes on engine totals that carried the most functions the profiler asks for, [param most]. */
+function totalCappedNotes(totals: ProfileTotals, most: number, why: string): string[] {
+  const notes: string[] = [];
+  // The engine sends its totals busiest first, measured on 4.7.2: of a hundred functions with
+  // rising work under a cap of 64, the busiest were kept. It lists every compiled function, called
+  // or not, so when the last one kept took no measurable time, nothing left out took any: no time
+  // is missing, only the calls of functions too quick for the clock, if any were made. game-b's
+  // totals reached 1536 with 324 functions counted and were read as having lost some of their time.
+  const leastKept = Math.min(...Object.values(totals.functions).map((one) => one.totalSeconds));
+  // Counted, since functions that never ran tie with those too quick for the clock and the
+  // engine's order among them decides how many of each are kept: 2500 called once on macOS kept
+  // 1000 of them, on the same code where Windows and Linux kept more.
+  const unrun = Object.values(totals.functions).filter((one) => one.calls === 0).length;
+  notes.push(
+    leastKept > 0
+      ? `The engine's totals carried the most functions the profiler asks for, ${most}, so the functions with the least time are not in them: ${why}`
+      : `The engine's totals carried the most functions the profiler asks for, ${most}, and the last of them took no measurable time, so neither did any left out: the time is all here, and only a function too quick for the clock can be missing, with its calls. ${why}`,
+  );
+  if (unrun > 0) {
     notes.push(
-      `${unnamed === 1 ? 'One function' : `${unnamed} functions`} arrived without ${unnamed === 1 ? 'its name' : 'their names'}, shown as ${UNNAMED_PREFIX} and the number the engine gave ${unnamed === 1 ? 'it' : 'them'}: the engine names a function once, as it first appears, and the game's debugger queue was full when that message was sent. They are script functions of the game. Which ones they are cannot be recovered from this profile.`,
+      `${unrun === 1 ? 'One' : String(unrun)} of the ${most} ${unrun === 1 ? 'is a function' : 'are functions'} counted as never called: the engine lists every function it has compiled, run or not, busiest first, so where the time runs out they take places that functions run too quickly to measure could have had.`,
+    );
+  }
+  const engineMethods = totals.totalEngineMethods ?? 0;
+  if (engineMethods > 0) {
+    notes.push(
+      `${engineMethods === 1 ? 'One' : String(engineMethods)} of the ${most} ${engineMethods === 1 ? 'is an engine method' : 'are engine methods'} the scripts called, which ${engineMethods === 1 ? 'is no row' : 'are no rows'}: that time is the callers' engineMs.`,
     );
   }
   return notes;
@@ -3818,6 +4025,19 @@ function elsewhereIn(projectPath: string, asked: string): string {
   return near.length === 0 ? '' : ` The project does have ${there}.`;
 }
 
+const WINDOW_NEEDED_WHY =
+  'A suite needs one when it declares GDHARNESS_NEEDS_WINDOW or GDHARNESS_ACCESSIBILITY as true. It needs one too when it calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares GDHARNESS_NEEDS_WINDOW false and runs headless.';
+
+/** What a test run says about windowed suites on a machine with no display, where it ran headless. */
+function headlessWindowNote(needing: readonly string[], accessible: readonly string[]): string {
+  const one = needing.length === 1;
+  const noTree =
+    accessible.length === 0
+      ? ''
+      : ` No accessibility tree was built, so what ${named(accessible)} ${accessible.length === 1 ? 'checks' : 'check'} in it never ran.`;
+  return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}. This machine has no display, so the run was headless. Input events went nowhere.${noTree} ${WINDOW_NEEDED_WHY} Run under xvfb-run to give it a display.`;
+}
+
 /**
  * What a test run says about [param needing], the suites gdharness test would give a window: that
  * the run had one, beside [param sharing], those that say they run headless and shared it, or, when
@@ -3829,14 +4049,9 @@ function windowNoteFor(
   accessible: readonly string[],
 ): string {
   const one = needing.length === 1;
-  const why =
-    'A suite needs one when it declares GDHARNESS_NEEDS_WINDOW or GDHARNESS_ACCESSIBILITY as true. It needs one too when it calls scene_runner and declares nothing. One that uses the scene runner only to stand a scene up declares GDHARNESS_NEEDS_WINDOW false and runs headless.';
+  const why = WINDOW_NEEDED_WHY;
   if (sharing === null) {
-    const noTree =
-      accessible.length === 0
-        ? ''
-        : ` No accessibility tree was built, so what ${named(accessible)} ${accessible.length === 1 ? 'checks' : 'check'} in it never ran.`;
-    return `${named(needing)} ${one ? 'needs' : 'need'} a window, as gdharness test reads ${one ? 'it' : 'them'}. This machine has no display, so the run was headless. Input events went nowhere.${noTree} ${why} Run under xvfb-run to give it a display.`;
+    return headlessWindowNote(needing, accessible);
   }
   const tree =
     accessible.length === 0
@@ -3880,12 +4095,26 @@ export function testPathsIn(
       reason: `${argument} is an empty list: name a suite file or a directory${argument === 'path' ? ', or leave path out for tests and test' : ''}.`,
     };
   }
+  const resolved = resolveTestEntries(projectPath, listed, argument, Array.isArray(entries));
+  if (!resolved.ok) {
+    return resolved;
+  }
+  return { ok: true, value: withoutNestedPaths(resolved.value) };
+}
+
+/** Each of [param listed] held inside the project as a path without a trailing slash, or the refusal. */
+function resolveTestEntries(
+  projectPath: string,
+  listed: readonly unknown[],
+  argument: 'path' | 'suites',
+  wasList: boolean,
+): { ok: true; value: string[] } | { ok: false; reason: string } {
   const resolved: string[] = [];
   for (const [index, entry] of listed.entries()) {
     if (typeof entry !== 'string' || entry.trim() === '') {
       return {
         ok: false,
-        reason: `${argument}${Array.isArray(entries) ? `[${index}]` : ''} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a suite file or a directory in the project.`,
+        reason: `${argument}${wasList ? `[${index}]` : ''} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a suite file or a directory in the project.`,
       };
     }
     const location = resolveWithinProject(projectPath, entry);
@@ -3894,20 +4123,20 @@ export function testPathsIn(
     }
     resolved.push(location.relativePath.replace(/\/+$/, ''));
   }
+  return { ok: true, value: resolved };
+}
+
+/** [param resolved] as `res://` paths, without a repeat and without a suite inside a directory also given. */
+function withoutNestedPaths(resolved: readonly string[]): string[] {
   // Two spellings of one path are one suite on a file system that ignores case.
   const folded = (path: string): string =>
     process.platform === 'win32' || process.platform === 'darwin' ? path.toLowerCase() : path;
   const unique = resolved.filter(
     (path, at) => resolved.findIndex((one) => folded(one) === folded(path)) === at,
   );
-  return {
-    ok: true,
-    value: unique
-      .filter(
-        (path) => !unique.some((other) => other !== path && folded(path).startsWith(`${folded(other)}/`)),
-      )
-      .map((path) => `res://${path}`),
-  };
+  return unique
+    .filter((path) => !unique.some((other) => other !== path && folded(path).startsWith(`${folded(other)}/`)))
+    .map((path) => `res://${path}`);
 }
 
 /**
@@ -3945,34 +4174,51 @@ export function scriptsToDiagnose(
   const found: string[] = [];
   const empty: string[] = [];
   for (const [index, entry] of entries.entries()) {
-    if (typeof entry !== 'string' || entry.trim() === '') {
-      return {
-        ok: false,
-        reason: `scriptPath${listed ? `[${index}]` : ''} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a script or a folder in the project.`,
-      };
+    const entryScripts = scriptsNamedBy(projectPath, entry, listed ? `[${index}]` : '');
+    if (!entryScripts.ok) {
+      return entryScripts;
     }
-    const location = resolveWithinProject(projectPath, entry, { root: true });
-    if (!location.ok) {
-      return { ok: false, reason: location.reason };
-    }
-    const fromRoot = location.relativePath.replace(/\/+$/, '');
-    if (!isDirectory(location.absolutePath)) {
-      found.push(`res://${fromRoot}`);
-      continue;
-    }
-    const inside = folderFiles(location.absolutePath, ['.gd']).map((script) =>
-      fromRoot === '' ? `res://${script}` : `res://${fromRoot}/${script}`,
-    );
-    if (inside.length === 0) {
-      empty.push(noScriptUnder(entry, location.absolutePath, fromRoot));
-    }
-    found.push(...inside);
+    found.push(...entryScripts.scripts);
+    empty.push(...entryScripts.empty);
   }
   const unique = [...new Set(found)];
   if (unique.length === 0) {
     return { ok: false, reason: empty.join(' ') };
   }
   return { ok: true, value: unique };
+}
+
+/**
+ * The scripts one entry of a script_diagnostics call names: the script itself, or the `.gd` files of
+ * a folder, with a sentence for a folder that holds none. [param at] is the entry's place in a list.
+ */
+function scriptsNamedBy(
+  projectPath: string,
+  entry: unknown,
+  at: string,
+): { ok: true; scripts: string[]; empty: string[] } | { ok: false; reason: string } {
+  if (typeof entry !== 'string' || entry.trim() === '') {
+    return {
+      ok: false,
+      reason: `scriptPath${at} is ${typeof entry === 'string' ? 'empty' : describeValue(entry)}, not a script or a folder in the project.`,
+    };
+  }
+  const location = resolveWithinProject(projectPath, entry, { root: true });
+  if (!location.ok) {
+    return { ok: false, reason: location.reason };
+  }
+  const fromRoot = location.relativePath.replace(/\/+$/, '');
+  if (!isDirectory(location.absolutePath)) {
+    return { ok: true, scripts: [`res://${fromRoot}`], empty: [] };
+  }
+  const inside = folderFiles(location.absolutePath, ['.gd']).map((script) =>
+    fromRoot === '' ? `res://${script}` : `res://${fromRoot}/${script}`,
+  );
+  return {
+    ok: true,
+    scripts: inside,
+    empty: inside.length === 0 ? [noScriptUnder(entry, location.absolutePath, fromRoot)] : [],
+  };
 }
 
 /**
@@ -4161,6 +4407,655 @@ const STATIC_LIST_HINT = { ttlMs: 5 * 60_000, cacheScope: 'private' } as const;
 
 /** A class cache rebuild's outcome: the classes it listed, or the engine's failure. */
 type ClassRebuild = { ok: true; listed: string[] } | { ok: false; outcome: HeadlessOutcome };
+
+/** The note on scenes the editor holds with unsaved edits and so did not read again, none when there are none. */
+function unsavedScenesNote(unsavedScenes: readonly string[]): { note?: string } {
+  if (unsavedScenes.length === 0) {
+    return {};
+  }
+  const one = unsavedScenes.length === 1;
+  return {
+    note: `${unsavedScenes.join(', ')} ${one ? 'is' : 'are'} open in the editor with unsaved edits, so ${one ? 'it was' : 'they were'} not read again from the file and still ${one ? 'gives' : 'give'} the old bus. Saving there writes it back.`,
+  };
+}
+
+/** When the last scan ended: [param since] before [param answered] when the editor says, else when a scan was seen. */
+function scanEndFrom(since: number | undefined, answered: number, sawAScan: boolean): number | null {
+  if (since !== undefined && since >= 0) {
+    return answered - since;
+  }
+  return sawAScan ? answered : null;
+}
+
+/** Whether the editor's scan status says a scan, an import or a pending scan is under way. */
+function editorIsScanning(status: OperationParams): boolean {
+  return status['scanning'] === true || status['importing'] === true || status['pending'] === true;
+}
+
+/**
+ * The classes section of project_info with the classes of the addons asked for counted apart, or the
+ * refusal text when addonClasses names an addon that declares none.
+ */
+function classesSectionOf(
+  args: OperationParams,
+  payload: Record<string, unknown>,
+  extras: Record<string, unknown>,
+): Record<string, unknown> | string {
+  const declared: unknown[] = Array.isArray(payload['classes']) ? payload['classes'] : [];
+  const asked = readStringArray(args, 'addonClasses') ?? [];
+  const addons = Object.keys(classesWithAddonsCounted(declared, new Set()).inAddons).toSorted();
+  const unknownAddons = asked.filter((addon) => !addons.includes(addon));
+  if (unknownAddons.length > 0) {
+    return `addonClasses names ${unknownAddons.join(', ')}, and no folder of that name under res://addons declares a class. ${addons.length === 0 ? 'No addon declares one.' : `The addons declaring classes are ${addons.join(', ')}.`}`;
+  }
+  const counted = classesWithAddonsCounted(declared, new Set(asked));
+  return {
+    ...payload,
+    classes: counted.classes,
+    ...(Object.keys(counted.inAddons).length > 0 ? { inAddons: counted.inAddons } : {}),
+    ...extras,
+  };
+}
+
+/** The refusal for a search place that does not exist, naming the folders found where it should be. */
+function nothingToSearchAt(projectPath: string, relativePath: string): string {
+  // The folders inside the deepest part of the path that is a folder, since a typo under game/
+  // answered with the project's top-level folders named nothing near it.
+  const parts = relativePath.split('/').filter((part) => part !== '');
+  let kept = parts.length - 1;
+  while (
+    kept > 0 &&
+    statSync(join(projectPath, ...parts.slice(0, kept)), {
+      throwIfNoEntry: false,
+    })?.isDirectory() !== true
+  ) {
+    kept -= 1;
+  }
+  const within = parts.slice(0, kept).join('/');
+  const folders = readdirSync(join(projectPath, within), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+    .map((entry) => entry.name)
+    .toSorted();
+  const listed = within === '' ? "The project's folders are" : `The folders in res://${within}/ are`;
+  return `There is nothing at res://${relativePath} to search.${folders.length === 0 ? '' : ` ${listed} ${folders.join(', ')}.`}`;
+}
+
+/** The parameters of a project_info section, with the compiled scripts added for the sections that judge them. */
+function sectionParamsOf(
+  params: OperationParams,
+  compiled: OperationParams | undefined,
+  section: string,
+): OperationParams {
+  return {
+    ...params,
+    ...(compiled !== undefined && (section === 'health' || section === 'validation') ? { compiled } : {}),
+  };
+}
+
+/** What a project_export run is working on once its checks pass, passed from step to step. */
+interface ExportCall {
+  readonly project: { readonly value: { readonly path: string } };
+  readonly preset: string;
+  readonly output: { readonly relativePath: string; readonly absolutePath: string };
+  readonly baking: string | null;
+  readonly engine: Extract<EngineChoice, { ok: true }>;
+  readonly debug: boolean;
+  readonly pack: boolean;
+  readonly folder: string;
+}
+
+/** What a check of several scripts has found so far, added to as each script is answered. */
+interface DiagnosticsTally {
+  readonly reported: OperationParams[];
+  readonly nothingReported: string[];
+  errors: number;
+  warnings: number;
+  engineWarned: number | null;
+  unread: number;
+  byEngine: string | null;
+  rebuilt: string[];
+  byServer: number;
+}
+
+/** The answer of a check of several scripts, from what [param tally] found in [param checked] of them. */
+function diagnosticsSummary(tally: DiagnosticsTally, checked: number): Record<string, unknown> {
+  return {
+    clean: tally.errors === 0 && tally.unread === 0,
+    scriptsChecked: checked,
+    errors: tally.errors,
+    warnings: tally.engineWarned === null ? null : tally.warnings + tally.engineWarned,
+    ...(tally.unread > 0 ? { scriptsNotRead: tally.unread } : {}),
+    scripts: tally.reported,
+    nothingReported: tally.nothingReported,
+    ...(tally.byEngine === null ? { checkedBy: 'language server' } : engineChecked(tally.byEngine)),
+    ...nonEmpty({ classesRebuiltFirst: tally.rebuilt }),
+    ...(tally.byEngine !== null && tally.byServer > 0
+      ? { checkedBy: 'language server, then engine', checkedByLanguageServer: tally.byServer }
+      : {}),
+  };
+}
+
+/** A script the language server refused, counted as unread, or the refusal when it ends the whole check. */
+function tallyRefusedScript(
+  tally: DiagnosticsTally,
+  scriptPath: string,
+  one: { readonly refusal: ToolResponse; readonly perScript: boolean },
+): ToolResponse | null {
+  if (!one.perScript) {
+    return one.refusal;
+  }
+  tally.unread += 1;
+  tally.reported.push({ scriptPath, error: one.refusal.content[0]?.text ?? 'not read' });
+  return null;
+}
+
+/** What the language server said of one script, added to [param tally]. */
+function tallyLanguageServerAnswer(
+  tally: DiagnosticsTally,
+  scriptPath: string,
+  answer: OperationParams,
+): void {
+  tally.byServer += 1;
+  tally.errors += Number(answer['errors']);
+  tally.warnings += Number(answer['warnings']);
+  // Every note an answer can carry is about a diagnostic, so none means nothing else either.
+  if (readArray(answer, 'diagnostics')?.length === 0) {
+    tally.nothingReported.push(scriptPath);
+  } else {
+    tally.reported.push(answer);
+  }
+}
+
+/** What the engine said of one script, added to [param tally]. */
+function tallyEngineAnswer(tally: DiagnosticsTally, answer: OperationParams): void {
+  tally.errors += Number(answer['errors']);
+  tally.engineWarned =
+    answer['warnings'] === null || tally.engineWarned === null
+      ? null
+      : tally.engineWarned + Number(answer['warnings']);
+  if (readArray(answer, 'diagnostics')?.length === 0) {
+    tally.nothingReported.push(String(answer['scriptPath']));
+  } else {
+    tally.reported.push(answer);
+  }
+}
+
+/** The members the diagnostics name without a class, read against the line of the diagnosed script they are on. */
+function deniedExternalMembers(
+  diagnostics: readonly unknown[],
+  scriptPath: string,
+  cached: ReturnType<typeof cachedClasses>,
+  sourceOf: (resourcePath: string) => string | null,
+): MissingMember[] {
+  const external = diagnostics.filter((entry) =>
+    String(asParams(entry)['message']).includes(EXTERNAL_MEMBER),
+  );
+  if (cached === null) {
+    return [];
+  }
+  const diagnosed = external.length === 0 ? null : sourceOf(scriptPath);
+  const lines = diagnosed?.split('\n') ?? [];
+  return external
+    .map((entry) => {
+      const { message, line } = asParams(entry);
+      return externalMemberIn(
+        String(message),
+        typeof line === 'number' ? lines[line - 1] : undefined,
+        cached,
+      );
+    })
+    .filter((missing): missing is MissingMember => missing !== null);
+}
+
+/** Counts [param scriptPath] as unread and says so when neither the language server nor an engine can read it. */
+function tallyUnreadableScript(tally: DiagnosticsTally, projectPath: string, scriptPath: string): boolean {
+  const unreadable = unreadableScript(projectPath, scriptPath);
+  if (unreadable === null) {
+    return false;
+  }
+  tally.unread += 1;
+  tally.reported.push({ scriptPath, error: unreadable });
+  return true;
+}
+
+/** What editor_status read of this server and the bridge in one moment, passed to each part of its answer. */
+interface EditorStatusContext {
+  readonly status: ReturnType<GodotBridge['getStatus']>;
+  readonly arriving: readonly unknown[];
+  readonly unfinished: { note: RestartNote; underway: boolean } | null;
+  readonly launchedIsUp: boolean;
+  readonly cannotConnect: { why: string; remedies: string[] } | null;
+  readonly staleNote: ReturnType<GodotBridge['anotherRelease']>;
+  readonly greeted: boolean;
+  readonly isPortConflict: boolean;
+}
+
+/** What every step of a start knows once the head checks have passed. */
+interface RunBase {
+  args: OperationParams;
+  op: string;
+  project: { value: { path: string; file: string } };
+  suites: string[] | null;
+  scene: string | undefined;
+  sceneToRun: ReturnType<typeof resolveWithinProject> | null;
+}
+
+/** A start whose executable has been judged. */
+interface RunExported extends RunBase {
+  exported: ReturnType<typeof exportedBuild> | null;
+}
+
+/** A start whose engine arguments have been read. */
+interface RunOptions extends RunExported {
+  engineCalls: boolean;
+  own: string[];
+  given: string[];
+  flags: readonly string[];
+}
+
+/** A start whose environment and engine are known. */
+interface RunEngine extends RunOptions {
+  asked: RunEnvironment;
+  otherGodot: string | undefined;
+  engine: { value: string; note: string | null };
+}
+
+/** A start whose classes and imports are brought up to date. */
+interface RunReady extends RunEngine {
+  refreshed: readonly string[];
+  scanned: ScanWait;
+  sceneArgument: string | null;
+}
+
+/** A start whose run is chosen: what it ended, what was here first and how it will be played. */
+interface RunPlayed extends RunReady {
+  ended: EndedRun | null;
+  alreadyPlaying: Set<number>;
+  wereHereFirst: { pid: number; protocol: number | null }[];
+  headless: boolean;
+  runtimeWaitMs: AnnounceBudget;
+  editorWouldPlay: boolean;
+  silent: boolean;
+  silentOnlyHere: boolean;
+  profiled: boolean;
+}
+
+/** What every step of a test run knows once the project and the paths asked for are read. */
+interface TestBase {
+  args: OperationParams;
+  project: { value: { path: string; file: string } };
+  paths: string[];
+}
+
+/** A test run whose flags are checked and whose paths are sorted into present and missing. */
+interface TestFlags extends TestBase {
+  flags: Extract<Checked<readonly string[]>, { ok: true }>;
+  missing: string[];
+  scripts: ProjectScripts;
+  present: string[];
+  asked: ReturnType<ProjectScripts['searchedAsTold']>;
+}
+
+/** A test run whose paths hold no script that is no suite. */
+interface TestCollected extends TestFlags {
+  uncollected: ReturnType<ProjectScripts['uncollectedUnder']>;
+}
+
+/** A test run whose cases are chosen and whose engine is found. */
+interface TestEngine extends TestCollected {
+  selection: Extract<ReturnType<typeof selectTests>, { ok: true }>;
+  notSuites: string[];
+  leftOut: Set<string>;
+  needs: ReturnType<typeof windowNeedsOf>;
+  needing: string[];
+  accessible: string[];
+  windowed: boolean;
+  engine: Extract<EngineChoice, { ok: true }>;
+}
+
+/** A test run whose class cache is rebuilt and whose imports are done. */
+interface TestScanned extends TestEngine {
+  began: number;
+  classes: Extract<HeadlessOutcome, { ok: true }>;
+  rebuiltAt: number;
+  importedAt: number;
+  scanned: ReturnType<typeof scanWaitAnswer>;
+}
+
+/** The engine of a test run, with the way to wait for it and to stop it. */
+type SpawnedTest = SpawnedGame & { readonly settled: Promise<void>; readonly stop: () => void };
+
+/** What a test run ran as: the first of the reasons its result does not count, else the engine's own word. */
+function ranAsOf(facts: {
+  notCompiled: ReturnType<typeof autoloadNotCompiled>;
+  cutShort: ReturnType<typeof timedOutVerdict> | null;
+  nothingRan: string | null | undefined;
+  brokenScripts: number;
+  uncaught: number;
+  exitCode: SpawnedTest['exitCode'];
+  verdicts: Readonly<Record<number, string>>;
+  run: SpawnedTest;
+}): string {
+  const { notCompiled, cutShort, nothingRan, brokenScripts, uncaught, exitCode, verdicts, run } = facts;
+  if (notCompiled !== null) {
+    return `the autoload ${notCompiled.name} (${notCompiled.path}) did not compile, so no result counts`;
+  }
+  if (cutShort !== null) {
+    return cutShort.verdict;
+  }
+  return (
+    nothingRan ??
+    (brokenScripts > 0
+      ? `script errors in ${brokenScripts === 1 ? 'one script' : `${brokenScripts} scripts`}, so no suite ran`
+      : undefined) ??
+    (uncaught > 0
+      ? `${uncaught === 1 ? 'one script error' : `${uncaught} script errors`} that failed no case`
+      : undefined) ??
+    (exitCode === null ? undefined : verdicts[exitCode]) ??
+    howItExited(run)
+  );
+}
+
+/** The sentence a test run that wrote no report opens its answer with, by the first reason that holds. */
+function noReportWhy(facts: {
+  notCompiled: ReturnType<typeof autoloadNotCompiled>;
+  scriptErrors: ScriptError[];
+  stoppedFor: boolean;
+  nothingRan: string | null | undefined;
+  printedErrors: ScriptError[];
+  declaring: Awaited<ReturnType<typeof originsOf>>;
+  reportProblem: string | null;
+  ranAs: string;
+  finished: number;
+  failing: number;
+  running: string | null;
+}): string {
+  const { notCompiled, scriptErrors, nothingRan, reportProblem, ranAs } = facts;
+  if (notCompiled !== null) {
+    return autoloadNotCompiledNote(notCompiled, foldedScriptErrors(scriptErrors), facts.stoppedFor);
+  }
+  if (nothingRan !== null) {
+    return `No tests ran: ${ranAs}.`;
+  }
+  if (scriptErrors.length > 0) {
+    return scriptErrorsNote(facts.printedErrors, facts.declaring);
+  }
+  if (reportProblem !== null) {
+    return `The test run's report could not be read (${reportProblem}). The engine's own verdict was ${ranAs}.`;
+  }
+  return `The test run wrote no report (${ranAs}).${finishedBeforeTheEnd(facts.finished, facts.failing, facts.running)}`;
+}
+
+/** The suites of the scripts and folders named, each folder as the suites gdharness test finds in it. */
+function suitesUnderPaths(scripts: ProjectScripts, paths: readonly string[]) {
+  return paths.flatMap((path) =>
+    path.endsWith('.gd') ? (scripts.suite(path) ?? []) : scripts.suitesUnder([path]),
+  );
+}
+
+/** The engine arguments that choose a window at the project's size, or no window at all. */
+function displayArguments(windowed: boolean, viewport: { width: number; height: number } | null): string[] {
+  if (!windowed) {
+    return ['--headless'];
+  }
+  return viewport === null ? [] : ['--resolution', `${String(viewport.width)}x${String(viewport.height)}`];
+}
+
+/** A test run whose command line and files are made. */
+interface TestPrepared extends TestScanned {
+  ours: string;
+  ignored: string[];
+  declaredUnder: ReturnType<ProjectScripts['suitesUnder']>;
+  userData: string;
+  engineLog: string;
+  expectedFile: string;
+  windowSaid: { windowed?: boolean; windowNote?: string };
+  cmdArgs: string[];
+  timeoutMs: number;
+  helperFiles: HelperFiles;
+}
+
+/** A test run whose engine has ended. */
+interface TestRan extends TestPrepared {
+  run: SpawnedTest;
+  console: Buffer[];
+  timedOut: boolean;
+  silentForMs: number;
+  saidAnything: boolean;
+  autoloaded: ReturnType<typeof scriptsAutoloaded>;
+  stopped: { for: { name: string; path: string } | null };
+}
+
+/** A test run whose report and logs are read. */
+interface TestReadOut extends TestRan {
+  tookMs: number;
+  tookMsBy: {
+    classes: number;
+    import: number;
+    engine: number;
+    engineStart?: number | undefined;
+    engineCompile?: number | undefined;
+  };
+  casePrinted: ReturnType<typeof withNestedErrors>;
+  notCompiled: ReturnType<typeof autoloadNotCompiled>;
+  report: TestReport | null;
+  reportProblem: string | null;
+  declaredErrors: ReturnType<typeof readExpected>;
+}
+
+/** A test run whose engine log is judged. */
+interface TestJudged extends TestReadOut {
+  engineEntries: ReturnType<typeof foldedRepeats>;
+  exitCode: SpawnedTest['exitCode'];
+  uncaught: SpawnedTest['log']['all'];
+  printed: SpawnedTest['log']['all'];
+  said: string[];
+  nothingRan: ReturnType<typeof whyNoReport> | null;
+  hung: boolean;
+  printedErrors: ScriptError[];
+  declaring: Awaited<ReturnType<typeof originsOf>>;
+  scriptErrors: ScriptError[];
+  ranAs: string;
+}
+
+/** A test run whose verdict is worded. */
+interface TestWorded extends TestJudged {
+  verdict: string;
+  missingNote: string | undefined;
+  savesNote: string | undefined;
+  printedLines: { printed?: string[]; printedOmitted?: number };
+}
+
+/** A test run that wrote a report. */
+interface TestWithReport extends TestWorded {
+  report: TestReport;
+}
+
+/** An engine error no suite declared, folded with how often it printed. */
+interface UndeclaredError {
+  suite: string | undefined;
+  case: string | undefined;
+  text: string;
+  warning: true | undefined;
+  times: number | undefined;
+}
+
+/** A declared engine error or warning the case never printed. */
+interface DeclaredNotPrinted {
+  suite: string;
+  case: string;
+  text: string;
+  warning: boolean | undefined;
+  printedInstead: string | undefined;
+}
+
+/** A test run whose printed engine errors are judged against what the suites declared. */
+interface TestErrorsJudged extends TestWithReport {
+  failed: ReturnType<typeof failedWithin>['failed'];
+  briefed: number;
+  orphans: ReturnType<typeof orphansPrinted>;
+  orphansIn: (path: string | null) => number;
+  warnings: Record<string, unknown>[];
+  judgedErrors: ReturnType<typeof unexpectedErrors>;
+  undeclaredPrinted: ReturnType<typeof unexpectedErrors>['printed'];
+  undeclaredAll: UndeclaredError[];
+  undeclaredErrors: UndeclaredError[];
+  leakedAtExit: string[];
+  walkStopped: boolean;
+  countedLeaks: string[];
+  heldNamed: string | undefined;
+  declaredNotPrinted: DeclaredNotPrinted[];
+  erring: (path: string | null) => { undeclared: number; notPrinted: number };
+}
+
+/** A test run with everything its answer is put together from. */
+interface TestAnswer extends TestErrorsJudged {
+  declaredAndPrinted: number;
+  ranIn: (suite: TestReport['suites'][number]) => number;
+  notRunIn: (suite: TestReport['suites'][number]) => number;
+  unclean: TestReport['suites'];
+  hookFailures: Record<string, unknown>[];
+  notRun: number;
+  uncaughtFolded: ReturnType<typeof foldedRepeats>;
+  listedAsUncaught: Set<number>;
+  notApplied: ReturnType<typeof ignoredYetRan>;
+  ignoreRead: ReturnType<typeof ignoredLeftOut>;
+  unmatched: string[];
+  testsNotRun: string[];
+  casesNotRun: string[];
+  declaredAs: string;
+  rowsMismatched: { test: string; reason: string }[];
+  casesUnrunnable: { test: string; reason: string }[];
+  engineEntriesShown: ReturnType<typeof foldedRepeats>;
+}
+
+/** What a reimport answers: the payload, or the refusal. */
+type ImportAnswer = { ok: true; payload: OperationParams } | { ok: false; response: ToolResponse };
+
+/** What a reimport knows once it has found the files behind. */
+interface ImportTargets {
+  readonly projectPath: string;
+  readonly resourcePath: string | undefined;
+  readonly force: boolean;
+  readonly timeoutMs: number;
+  readonly sourceless: { missingSource?: string[] };
+  readonly targets: string[];
+}
+
+/** What a reimport is working on once it has chosen the editor or the engine, passed from step to step. */
+interface ImportRun {
+  readonly projectPath: string;
+  readonly timeoutMs: number;
+  readonly force: boolean;
+  readonly sourceless: { missingSource?: string[] };
+  readonly targets: string[];
+  readonly statusAsk: OperationParams;
+  readonly extra: OperationParams;
+  readonly viaEditor: boolean;
+  readonly behindElsewhere: string[];
+}
+
+/** What a project_settings write is working on, passed from step to step. */
+interface SettingsWrite {
+  readonly op: string;
+  readonly args: OperationParams;
+  readonly projectPath: string;
+  readonly before: Parameters<typeof changedSettings>[0];
+  readonly written: ToolResponse;
+  readonly renamed: ReturnType<typeof rewriteBusNamed> | null;
+}
+
+/** What a project_import set_options call is working on, passed from step to step. */
+interface ImportOptionsWrite {
+  readonly project: { readonly value: { readonly path: string } };
+  readonly contained: { readonly value: OperationParams };
+  readonly args: OperationParams;
+  readonly written: { readonly payload: Record<string, unknown> };
+  readonly params: OperationParams;
+  readonly given: string;
+  readonly resource: string;
+  readonly sidecar: string;
+  readonly before: string | null;
+}
+
+/** What setting or removing one breakpoint is working on, passed from step to step. */
+interface BreakpointCall {
+  readonly op: string;
+  readonly args: OperationParams;
+  readonly project: { readonly value: { readonly path: string } };
+  readonly session: GodotDAPClient;
+  readonly located: { readonly relativePath: string; readonly absolutePath: string };
+  readonly scriptPath: string;
+  readonly line: number;
+}
+
+/** What a breakpoint answer says of the game this server started: not told, not taken, or taken. */
+function runningGameSaid(
+  told: NonNullable<Awaited<ReturnType<typeof askTheKeepersDebugger>>>,
+  op: string,
+  pid: number | string,
+): string {
+  if ('unreached' in told || typeof told['refused'] === 'string') {
+    return `The game this server started is running, and its debugger was not told: ${String('unreached' in told ? told.unreached : told['refused'])}. It takes the line when it is started again.`;
+  }
+  if (told['taken'] === false) {
+    return `Told to the running game (pid ${pid}), which this server started, and not taken by it within ${READ_MS / 1000}s: a game reads its debugger between frames and every 2048 lines of script, so one inside a long frame takes the change once that frame ends.`;
+  }
+  return op === 'set'
+    ? `Told to the running game (pid ${pid}), which this server started, and taken by it: anything it runs from now on stops there.`
+    : `Told to the running game (pid ${pid}), which this server started, and taken by it: it no longer stops on that line.`;
+}
+
+/** An editor command, and whether it only reads what the editor or the file holds or writes it. */
+type EditorCall = readonly [command: string, effect: 'reads' | 'writes'];
+
+/** The editor command each scene_node op runs. An op not listed is set_tilemap_cells. */
+const SCENE_NODE_CALLS = dictionary<EditorCall>({
+  add: ['add_node', 'writes'],
+  get: ['get_node_properties', 'reads'],
+  set: ['set_node_properties', 'writes'],
+  duplicate: ['duplicate_node', 'writes'],
+  reparent: ['reparent_node', 'writes'],
+  save_branch: ['save_branch', 'writes'],
+  delete: ['delete_node', 'writes'],
+  change_type: ['change_node_type', 'writes'],
+  bake_navigation: ['bake_navigation', 'writes'],
+});
+
+/** The editor command each scene_signal op runs. An op not listed is list_connections. */
+const SCENE_SIGNAL_CALLS = dictionary<EditorCall>({
+  connect: ['connect_signal', 'writes'],
+  disconnect: ['disconnect_signal', 'writes'],
+});
+
+/** The editor command each scene_animation op runs that is not a read. An op not listed is connect_animation_states. */
+const SCENE_ANIMATION_CALLS = dictionary<EditorCall>({
+  create: ['create_animation', 'writes'],
+  add_track: ['add_animation_track', 'writes'],
+  remove_track: ['remove_animation_track', 'writes'],
+  set: ['set_animation', 'writes'],
+  rename: ['rename_animation', 'writes'],
+  remove: ['remove_animation', 'writes'],
+  add_state: ['add_animation_state', 'writes'],
+  remove_state: ['remove_animation_state', 'writes'],
+  disconnect_states: ['disconnect_animation_states', 'writes'],
+});
+
+/** The editor command each resource_edit op runs that is not a move or a read. An op not listed is set_theme_font_size. */
+const RESOURCE_EDIT_CALLS = dictionary<EditorCall>({
+  create: ['create_resource', 'writes'],
+  modify: ['modify_resource', 'writes'],
+  create_shader: ['create_shader', 'writes'],
+  create_tileset: ['create_tileset', 'writes'],
+  set_theme_color: ['set_theme_color', 'writes'],
+  remove_theme_item: ['remove_theme_item', 'writes'],
+});
+
+/** The language server request and the word for it that each script_info op uses. An op not listed is hover. */
+const SCRIPT_INFO_CALLS = dictionary<readonly [request: string, label: string]>({
+  symbols: ['lsp_get_symbols', 'Symbols'],
+  completion: ['lsp_get_completions', 'Completion'],
+});
 
 class GodotServer {
   private stdio: StdioServerHandle | null = null;
@@ -5233,7 +6128,14 @@ class GodotServer {
         ),
       };
     }
+    return this.validateValues(spec, args);
+  }
 
+  /** The values of a call's arguments checked against their schemas, then the op and what it requires. */
+  private validateValues(
+    spec: ToolSpec,
+    args: OperationParams,
+  ): { ok: true; op: string | null } | { ok: false; response: ToolResponse } {
     const wrong = [
       ...wrongTypes(spec, args),
       ...outsideTheirLists(spec, args),
@@ -5242,7 +6144,14 @@ class GodotServer {
     if (wrong.length > 0) {
       return { ok: false, response: this.createErrorResponse(`${spec.name} takes ${wrong.join('; ')}.`) };
     }
+    return this.validateOp(spec, args);
+  }
 
+  /** The op a call asked for, or the tool's default, checked against the tool's ops. */
+  private validateOp(
+    spec: ToolSpec,
+    args: OperationParams,
+  ): { ok: true; op: string | null } | { ok: false; response: ToolResponse } {
     let op: string | null = null;
     if (spec.operations) {
       const valid = Object.keys(spec.operations);
@@ -5266,7 +6175,15 @@ class GodotServer {
         };
       }
     }
+    return this.validateOpArguments(spec, args, op);
+  }
 
+  /** The arguments of a call checked against what its op takes, then against what the op requires. */
+  private validateOpArguments(
+    spec: ToolSpec,
+    args: OperationParams,
+    op: string | null,
+  ): { ok: true; op: string | null } | { ok: false; response: ToolResponse } {
     // An argument named for a different op. The tool-level check above passes it, because the tool
     // does take it, and then the op reads nothing of the sort and answers as though it had: a limit
     // on a screen read, a property list on a find. That is the same fault as an argument nothing
@@ -5286,7 +6203,15 @@ class GodotServer {
         };
       }
     }
+    return this.validateRequired(spec, args, op);
+  }
 
+  /** The arguments the tool and its op require, each checked as present and not blank. */
+  private validateRequired(
+    spec: ToolSpec,
+    args: OperationParams,
+    op: string | null,
+  ): { ok: true; op: string | null } | { ok: false; response: ToolResponse } {
     const required = [...spec.requires, ...(op !== null ? (spec.operations?.[op]?.requires ?? []) : [])];
     const missing = required.filter((field) => {
       const value = Object.hasOwn(args, field) ? args[field] : undefined;
@@ -5324,6 +6249,11 @@ class GodotServer {
     if (tool !== 'editor_status' && this.godotBridge.isArriving()) {
       await this.waitForBridge(() => !this.godotBridge.isArriving(), Date.now() + greetingWaitMs());
     }
+    return await this.dispatchPasses(tool, op, args);
+  }
+
+  /** The calls that run the engine over a project as a whole, before the headless operations are tried. */
+  private async dispatchPasses(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
     if (ENGINE_PASSES[tool]?.includes(op) === true) {
       return op === 'reimport' ? await this.handleReimport(args) : await this.handleRefreshUids(args);
     }
@@ -5344,6 +6274,11 @@ class GodotServer {
     if (tool === 'project_export' && op === 'remove_preset') {
       return await this.handleRemoveExportPreset(args);
     }
+    return await this.dispatchHeadless(tool, op, args);
+  }
+
+  /** A call to an operation the engine runs headless, or on to the tools that have none. */
+  private async dispatchHeadless(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
     const headless = HEADLESS_OPERATIONS[tool]?.[op];
     if (headless !== undefined) {
       // Asked of the editor instead, when the caller said so. The two are not the same reading and
@@ -5354,55 +6289,85 @@ class GodotServer {
       // know, which is the ambiguity the argument exists to remove.
       const { from: asked, ...answerable } = args;
       if (asked === 'editor') {
-        const editorSide = EDITOR_READS[tool]?.[op];
-        if (editorSide === undefined) {
-          return this.createErrorResponse(`${tool} ${op} cannot be read from the editor, only from disk.`, [
-            'Leave from unset, or pass from: "disk"',
-          ]);
-        }
-        if (!this.godotBridge.isConnected()) {
-          const refused = await this.noEditorYet(answerable, [
-            `${tool} ${op} was asked of the editor. from: "disk" reads the file instead`,
-          ]);
-          if (refused !== null) {
-            return refused;
-          }
-        }
-        const { op: _dropped, ...asks } = answerable;
-        const contained = this.containProjectFiles(asks);
-        return contained.ok ? await this.handleViaBridge(editorSide, contained.value) : contained.response;
+        return await this.readHeadlessFromEditor(tool, op, answerable);
       }
-      if (headless === 'create_script') {
-        return await this.handleCreateScript(answerable);
+      return await this.dispatchHeadlessOperation(tool, headless, answerable, args);
+    }
+    return await this.dispatchTool(tool, op, args);
+  }
+
+  /** A headless operation asked of the editor with `from: "editor"`, refused where the editor cannot answer it. */
+  private async readHeadlessFromEditor(
+    tool: string,
+    op: string,
+    answerable: OperationParams,
+  ): Promise<ToolResponse> {
+    const editorSide = EDITOR_READS[tool]?.[op];
+    if (editorSide === undefined) {
+      return this.createErrorResponse(`${tool} ${op} cannot be read from the editor, only from disk.`, [
+        'Leave from unset, or pass from: "disk"',
+      ]);
+    }
+    if (!this.godotBridge.isConnected()) {
+      const refused = await this.noEditorYet(answerable, [
+        `${tool} ${op} was asked of the editor. from: "disk" reads the file instead`,
+      ]);
+      if (refused !== null) {
+        return refused;
       }
-      if (headless === 'modify_script') {
-        return await this.handleModifyScript(answerable);
-      }
-      if (tool === 'editor_classes') {
-        // A refusal names a class a script declares as the script's, and offers the nearest of them,
-        // from the scripts on disk: the engine knows them only from the class cache, which lags them.
-        const project = this.project(answerable);
-        if (!project.ok) {
-          return project.response;
-        }
-        const projectClasses = Object.fromEntries(declaredClassLines(project.value.path));
-        return await this.headless(headless, { ...answerable, projectClasses });
-      }
-      if (headless !== REFRESH_CLASS_CACHE) {
-        return await this.headless(headless, answerable);
-      }
+    }
+    const { op: _dropped, ...asks } = answerable;
+    const contained = this.containProjectFiles(asks);
+    return contained.ok ? await this.handleViaBridge(editorSide, contained.value) : contained.response;
+  }
+
+  /** A headless operation read from disk: a script written, the class cache rebuilt, or the engine run. */
+  private async dispatchHeadlessOperation(
+    tool: string,
+    headless: string,
+    answerable: OperationParams,
+    args: OperationParams,
+  ): Promise<ToolResponse> {
+    if (headless === 'create_script') {
+      return await this.handleCreateScript(answerable);
+    }
+    if (headless === 'modify_script') {
+      return await this.handleModifyScript(answerable);
+    }
+    if (tool === 'editor_classes') {
+      // A refusal names a class a script declares as the script's, and offers the nearest of them,
+      // from the scripts on disk: the engine knows them only from the class cache, which lags them.
       const project = this.project(answerable);
       if (!project.ok) {
         return project.response;
       }
-      const answered = this.answer(await this.rebuildClassCache(project.value.path));
-      // The one answer that reads most like a clean bill of health and is not: "added: []" means
-      // the file on disk was already right, which is exactly the state an editor goes blind in.
-      return this.godotBridge.isConnected()
-        ? await this.alsoSayWhatTheEditorCannotSee(answered, args)
-        : answered;
+      const projectClasses = Object.fromEntries(declaredClassLines(project.value.path));
+      return await this.headless(headless, { ...answerable, projectClasses });
     }
+    if (headless !== REFRESH_CLASS_CACHE) {
+      return await this.headless(headless, answerable);
+    }
+    const project = this.project(answerable);
+    if (!project.ok) {
+      return project.response;
+    }
+    const answered = this.answer(await this.rebuildClassCache(project.value.path));
+    // The one answer that reads most like a clean bill of health and is not: "added: []" means
+    // the file on disk was already right, which is exactly the state an editor goes blind in.
+    return this.godotBridge.isConnected()
+      ? await this.alsoSayWhatTheEditorCannotSee(answered, args)
+      : answered;
+  }
 
+  /** The two ways a tool's call reaches the editor: the bridge as it is, or the editor with the engine as the fallback. */
+  private editorCallers(
+    tool: string,
+    op: string,
+    args: OperationParams,
+  ): {
+    bridge: (command: string, extra?: OperationParams) => Promise<ToolResponse>;
+    editorOrEngine: (command: string, effect: 'reads' | 'writes') => Promise<ToolResponse>;
+  } {
     const { op: _op, ...arguments_ } = args;
     const bridge = async (command: string, extra: OperationParams = {}): Promise<ToolResponse> => {
       const contained = this.containProjectFiles({ ...arguments_, ...extra });
@@ -5412,7 +6377,12 @@ class GodotServer {
     };
     const editorOrEngine = async (command: string, effect: 'reads' | 'writes'): Promise<ToolResponse> =>
       await this.editorOrEngine(command, arguments_, `${tool} ${op}`, effect);
+    return { bridge, editorOrEngine };
+  }
 
+  /** One tool call to the code that does it, for the project tools and for scene_create. */
+  private async dispatchTool(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
+    const { editorOrEngine } = this.editorCallers(tool, op, args);
     switch (tool) {
       case 'project_info':
         return await this.handleProjectInfo(args);
@@ -5432,6 +6402,15 @@ class GodotServer {
         return op === 'create'
           ? await editorOrEngine('create_scene', 'writes')
           : await editorOrEngine('save_scene', 'writes');
+      default:
+        return await this.dispatchSceneTool(tool, op, args);
+    }
+  }
+
+  /** One tool call to the code that does it, for the scene tree, nodes and signals. */
+  private async dispatchSceneTool(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
+    const { bridge, editorOrEngine } = this.editorCallers(tool, op, args);
+    switch (tool) {
       case 'scene_tree': {
         // includeDefaults names which properties to list, so given alone it can mean only that the
         // properties are wanted: read without them, it answered the bare tree and said nothing.
@@ -5457,37 +6436,22 @@ class GodotServer {
         );
       }
       case 'scene_node':
-        switch (op) {
-          case 'add':
-            return await editorOrEngine('add_node', 'writes');
-          case 'get':
-            return await editorOrEngine('get_node_properties', 'reads');
-          case 'set':
-            return await editorOrEngine('set_node_properties', 'writes');
-          case 'duplicate':
-            return await editorOrEngine('duplicate_node', 'writes');
-          case 'reparent':
-            return await editorOrEngine('reparent_node', 'writes');
-          case 'save_branch':
-            return await editorOrEngine('save_branch', 'writes');
-          case 'delete':
-            return await editorOrEngine('delete_node', 'writes');
-          case 'change_type':
-            return await editorOrEngine('change_node_type', 'writes');
-          case 'bake_navigation':
-            return await editorOrEngine('bake_navigation', 'writes');
-          default:
-            return await editorOrEngine('set_tilemap_cells', 'writes');
-        }
+        return await editorOrEngine(...(SCENE_NODE_CALLS[op] ?? ['set_tilemap_cells', 'writes']));
       case 'scene_signal':
-        switch (op) {
-          case 'connect':
-            return await editorOrEngine('connect_signal', 'writes');
-          case 'disconnect':
-            return await editorOrEngine('disconnect_signal', 'writes');
-          default:
-            return await editorOrEngine('list_connections', 'reads');
-        }
+        return await editorOrEngine(...(SCENE_SIGNAL_CALLS[op] ?? ['list_connections', 'reads']));
+      default:
+        return await this.dispatchAnimationAndScriptTool(tool, op, args);
+    }
+  }
+
+  /** One tool call to the code that does it, for scene_animation and the script tools. */
+  private async dispatchAnimationAndScriptTool(
+    tool: string,
+    op: string,
+    args: OperationParams,
+  ): Promise<ToolResponse> {
+    const { bridge, editorOrEngine } = this.editorCallers(tool, op, args);
+    switch (tool) {
       case 'scene_animation':
         switch (op) {
           case 'read':
@@ -5514,42 +6478,28 @@ class GodotServer {
               }),
               async () => await bridge('read_animation_states'),
             );
-          case 'create':
-            return await editorOrEngine('create_animation', 'writes');
-          case 'add_track':
-            return await editorOrEngine('add_animation_track', 'writes');
-          case 'remove_track':
-            return await editorOrEngine('remove_animation_track', 'writes');
-          case 'set':
-            return await editorOrEngine('set_animation', 'writes');
-          case 'rename':
-            return await editorOrEngine('rename_animation', 'writes');
-          case 'remove':
-            return await editorOrEngine('remove_animation', 'writes');
-          case 'add_state':
-            return await editorOrEngine('add_animation_state', 'writes');
-          case 'remove_state':
-            return await editorOrEngine('remove_animation_state', 'writes');
-          case 'disconnect_states':
-            return await editorOrEngine('disconnect_animation_states', 'writes');
           default:
-            return await editorOrEngine('connect_animation_states', 'writes');
+            return await editorOrEngine(
+              ...(SCENE_ANIMATION_CALLS[op] ?? ['connect_animation_states', 'writes']),
+            );
         }
 
       case 'script_edit':
         return await this.handleRenameSymbol(args);
       case 'script_info':
-        switch (op) {
-          case 'symbols':
-            return await this.askScriptInfo('lsp_get_symbols', 'Symbols', args);
-          case 'completion':
-            return await this.askScriptInfo('lsp_get_completions', 'Completion', args);
-          default:
-            return await this.askScriptInfo('lsp_get_hover', 'Hover', args);
-        }
+        return await this.askScriptInfo(...(SCRIPT_INFO_CALLS[op] ?? ['lsp_get_hover', 'Hover']), args);
       case 'script_diagnostics':
         return await this.handleScriptDiagnostics(args);
 
+      default:
+        return await this.dispatchResourceTool(tool, op, args);
+    }
+  }
+
+  /** One tool call to the code that does it, for resource_edit. */
+  private async dispatchResourceTool(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
+    const { bridge, editorOrEngine } = this.editorCallers(tool, op, args);
+    switch (tool) {
       case 'resource_edit':
         switch (op) {
           case 'move':
@@ -5569,22 +6519,18 @@ class GodotServer {
               async () => await bridge('read_resource', kept),
             );
           }
-          case 'create':
-            return await editorOrEngine('create_resource', 'writes');
-          case 'modify':
-            return await editorOrEngine('modify_resource', 'writes');
-          case 'create_shader':
-            return await editorOrEngine('create_shader', 'writes');
-          case 'create_tileset':
-            return await editorOrEngine('create_tileset', 'writes');
-          case 'set_theme_color':
-            return await editorOrEngine('set_theme_color', 'writes');
-          case 'remove_theme_item':
-            return await editorOrEngine('remove_theme_item', 'writes');
           default:
-            return await editorOrEngine('set_theme_font_size', 'writes');
+            return await editorOrEngine(...(RESOURCE_EDIT_CALLS[op] ?? ['set_theme_font_size', 'writes']));
         }
 
+      default:
+        return await this.dispatchEditorTool(tool, op, args);
+    }
+  }
+
+  /** One tool call to the code that does it, for the tools that launch, run and read the editor. */
+  private async dispatchEditorTool(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
+    switch (tool) {
       case 'editor_launch':
         if (op === 'close') {
           return await this.handleCloseEditor();
@@ -5611,9 +6557,33 @@ class GodotServer {
       case 'editor_rescan':
         return await this.handleRescanFilesystem(args);
 
+      default:
+        return await this.dispatchCaptureAndInspectTool(tool, op, args);
+    }
+  }
+
+  /** One tool call to the code that does it, for editor_capture and runtime_inspect. */
+  private async dispatchCaptureAndInspectTool(
+    tool: string,
+    op: string,
+    args: OperationParams,
+  ): Promise<ToolResponse> {
+    switch (tool) {
       case 'editor_capture':
         return await this.handleEditorCapture(args);
 
+      default:
+        return await this.dispatchRuntimeInspectTool(tool, op, args);
+    }
+  }
+
+  /** One tool call to the code that does it, for runtime_inspect. */
+  private async dispatchRuntimeInspectTool(
+    tool: string,
+    op: string,
+    args: OperationParams,
+  ): Promise<ToolResponse> {
+    switch (tool) {
       case 'runtime_inspect': {
         const patience = readPositiveNumber(args, 'timeoutMs') ?? this.runtimeTimeoutMs();
         switch (op) {
@@ -5647,52 +6617,72 @@ class GodotServer {
               },
               { tool: 'runtime_inspect', op, patience },
             );
-          case 'rect':
-            return await this.handleRuntimeCommand(
-              'get_rect',
-              { ...whichGame(args), path: readNonEmptyString(args, 'nodePath') ?? '' },
-              { tool: 'runtime_inspect', op, patience },
-            );
-          case 'property':
-            return await this.handleRuntimeCommand(
-              'get_property',
-              {
-                ...whichGame(args),
-                path: readNonEmptyString(args, 'nodePath') ?? '',
-                property: readNonEmptyString(args, 'property') ?? '',
-              },
-              { tool: 'runtime_inspect', op, patience },
-            );
-          case 'accessibility':
-            // Starting PowerShell and walking the tree until it settles takes longer than a query: the
-            // game allows 45 s for a cold PowerShell and 15 s a window for the walks, and waiting
-            // that out answers a slow machine's read rather than a pending one.
-            return await this.handleRuntimeCommand(
-              'get_accessibility',
-              {
-                ...whichGame(args),
-                // Only what was given, so the game's defaults stay the game's.
-                ...withDefined({
-                  node_path: readNonEmptyString(args, 'nodePath'),
-                  says: readNonEmptyString(args, 'says'),
-                  properties: readStringArray(args, 'properties'),
-                  limit: readPositiveNumber(args, 'limit'),
-                }),
-              },
-              {
-                tool: 'runtime_inspect',
-                op,
-                patience: readPositiveNumber(args, 'timeoutMs') ?? Math.max(75_000, this.runtimeTimeoutMs()),
-              },
-            );
           default:
-            return await this.handleRuntimeCommand(
-              'get_metrics',
-              { ...whichGame(args), metrics: readArray(args, 'metrics') ?? [] },
-              { tool: 'runtime_inspect', op, patience },
-            );
+            return await this.inspectRuntimeMore(op, args, patience);
         }
       }
+      default:
+        return await this.dispatchRuntimeTool(tool, op, args);
+    }
+  }
+
+  /** The runtime_inspect ops that read one node or the game's metrics. */
+  private async inspectRuntimeMore(
+    op: string,
+    args: OperationParams,
+    patience: number,
+  ): Promise<ToolResponse> {
+    switch (op) {
+      case 'rect':
+        return await this.handleRuntimeCommand(
+          'get_rect',
+          { ...whichGame(args), path: readNonEmptyString(args, 'nodePath') ?? '' },
+          { tool: 'runtime_inspect', op, patience },
+        );
+      case 'property':
+        return await this.handleRuntimeCommand(
+          'get_property',
+          {
+            ...whichGame(args),
+            path: readNonEmptyString(args, 'nodePath') ?? '',
+            property: readNonEmptyString(args, 'property') ?? '',
+          },
+          { tool: 'runtime_inspect', op, patience },
+        );
+      case 'accessibility':
+        // Starting PowerShell and walking the tree until it settles takes longer than a query: the
+        // game allows 45 s for a cold PowerShell and 15 s a window for the walks, and waiting
+        // that out answers a slow machine's read rather than a pending one.
+        return await this.handleRuntimeCommand(
+          'get_accessibility',
+          {
+            ...whichGame(args),
+            // Only what was given, so the game's defaults stay the game's.
+            ...withDefined({
+              node_path: readNonEmptyString(args, 'nodePath'),
+              says: readNonEmptyString(args, 'says'),
+              properties: readStringArray(args, 'properties'),
+              limit: readPositiveNumber(args, 'limit'),
+            }),
+          },
+          {
+            tool: 'runtime_inspect',
+            op,
+            patience: readPositiveNumber(args, 'timeoutMs') ?? Math.max(75_000, this.runtimeTimeoutMs()),
+          },
+        );
+      default:
+        return await this.handleRuntimeCommand(
+          'get_metrics',
+          { ...whichGame(args), metrics: readArray(args, 'metrics') ?? [] },
+          { tool: 'runtime_inspect', op, patience },
+        );
+    }
+  }
+
+  /** One tool call to the code that does it, for the runtime tools that act on the running game. */
+  private async dispatchRuntimeTool(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
+    switch (tool) {
       case 'runtime_invoke': {
         if (op === 'result') {
           return this.handleLateAnswer(args);
@@ -5723,269 +6713,332 @@ class GodotServer {
               { tool: 'runtime_invoke', op, patience },
             );
       }
+      default:
+        return await this.dispatchRuntimeCaptureTool(tool, op, args);
+    }
+  }
+
+  /** One tool call to the code that does it, for runtime_capture and the tools after it. */
+  private async dispatchRuntimeCaptureTool(
+    tool: string,
+    op: string,
+    args: OperationParams,
+  ): Promise<ToolResponse> {
+    switch (tool) {
       case 'runtime_capture':
         return await this.handleRuntimeCommand(
           op === 'screenshot' ? 'capture_screenshot' : 'capture_viewport',
           args,
           { tool: 'runtime_capture', op },
         );
+      default:
+        return await this.dispatchRuntimeInputTool(tool, op, args);
+    }
+  }
+
+  /** One tool call to the code that does it, for runtime_input and runtime_wait. */
+  private async dispatchRuntimeInputTool(
+    tool: string,
+    op: string,
+    args: OperationParams,
+  ): Promise<ToolResponse> {
+    switch (tool) {
       case 'runtime_input':
         if (op === 'click') {
-          if (
-            readNonEmptyString(args, 'nodePath') === undefined &&
-            readNonEmptyString(args, 'says') === undefined
-          ) {
-            return this.createErrorResponse(
-              'runtime_input click needs nodePath, or says with the words on the control to click.',
-            );
-          }
-          return await this.handleRuntimeCommand(
-            'click',
-            {
-              ...whichGame(args),
-              path: readNonEmptyString(args, 'nodePath') ?? '',
-              // As given, a number included: the addon names a button either way and refuses what is
-              // neither, and read as a string alone a right click given as 2 went as the left button.
-              button: args['button'] ?? 'left',
-              double: readBoolean(args, 'doubleClick') ?? false,
-              ...(readNonEmptyString(args, 'says') === undefined
-                ? {}
-                : { says: readNonEmptyString(args, 'says') }),
-              ...(args['index'] === undefined ? {} : { index: args['index'] }),
-              ...(args['x'] === undefined ? {} : { x: args['x'] }),
-              ...(args['y'] === undefined ? {} : { y: args['y'] }),
-            },
-            { tool: 'runtime_input', op },
-          );
+          return await this.clickInGame(op, args);
         }
-        if (op === 'choose') {
-          // `index` is passed on only when it was given, because the addon reads whether it is
-          // there as which of the two ways the caller named the item.
-          return await this.handleRuntimeCommand(
-            'choose',
-            {
-              ...whichGame(args),
-              path: readNonEmptyString(args, 'nodePath') ?? '',
-              text: readString(args, 'text') ?? '',
-              ...(args['index'] === undefined ? {} : { index: args['index'] }),
-            },
-            { tool: 'runtime_input', op },
-          );
-        }
-        {
-          // A held press answers once it has let go, and a drag once its stroke is over, so each is
-          // given as long as a frames wait of the same length.
-          const holding =
-            op === 'mouse_drag' || op === 'touch_drag'
-              ? (readPositiveNumber(args, 'frames') ?? 1) + 2
-              : readPositiveNumber(args, 'holdFrames');
-          return await this.handleRuntimeCommand(`inject_${op}`, args, {
-            tool: 'runtime_input',
-            op,
-            ...(holding === undefined
-              ? {}
-              : { patience: patienceForFrames(holding, this.runtimeTimeoutMs()) }),
-          });
-        }
+        return await this.chooseOrInjectInput(op, args);
       case 'runtime_wait':
         return await this.handleRuntimeWait(op, args);
 
-      case 'debug_breakpoint': {
-        // The adapter names the file the way this machine spells it, not the way the project
-        // does, so the projectPath every other tool takes is what turns `res://main.gd` into one.
-        const project = this.project(args);
-        if (!project.ok) {
-          return project.response;
-        }
-        if (op === 'list') {
-          const session = this.dapHoldingBreakpointsOf(project.value.path);
-          const editor = this.godotBridge.isConnected();
-          return this.jsonTextResponse({
-            held: this.breakpointsAsProjectSpells(project.value.path, session.breakpointsHeld()),
-            ...(editor
-              ? {
-                  setInEditor: this.breakpointsAsProjectSpells(
-                    project.value.path,
-                    session.breakpointsInEditor(),
-                  ),
-                  ...this.breakpointsAtRisk(),
-                }
-              : {}),
-          });
-        }
-        const located = resolveWithinProject(project.value.path, readString(args, 'scriptPath') ?? '');
-        if (!located.ok) {
-          return this.createErrorResponse(located.reason, PATH_SOLUTIONS);
-        }
-        // Resolved, because the adapter refuses a path that does not start with the project as
-        // it holds it, and a symlink on the way makes two spellings of the same file: on macOS
-        // every /var/folders path is really /private/var/folders.
-        const session = this.dapHoldingBreakpointsOf(project.value.path);
-        const scriptPath = realAsFarAsItExists(located.absolutePath);
-        const line = readPositiveNumber(args, 'line');
-        if (line === undefined) {
-          return this.createErrorResponse('line is required: the one-based line to stop on.');
-        }
-        // Neither the adapter nor a game refuses a line nothing stops on, and a breakpoint held there
-        // is kept in the project's set and never stops anything. Removing one is left alone, so a
-        // breakpoint on a script since deleted or shortened can still be taken off.
-        if (op === 'set') {
-          if (!existsSync(located.absolutePath)) {
-            return this.missingScript(project.value.path, located.relativePath);
-          }
-          const nothing = lineNothingStopsOn(located.absolutePath, located.relativePath, line);
-          if (nothing !== null) {
-            return this.createErrorResponse(nothing);
-          }
-        }
-        const editor = this.godotBridge.isConnected();
-        let answer: Record<string, unknown>;
-        if (editor) {
-          const answered = await this.handleDAP(
-            op === 'set' ? 'dap_set_breakpoint' : 'dap_remove_breakpoint',
-            {
-              ...args,
-              scriptPath,
-            },
-          );
-          if (answered.isError === true) {
-            return answered;
-          }
-          answer = asParams(JSON.parse(answered.content[0]?.text ?? '{}'));
-        } else {
-          // Held here for whoever plays next: a game this server starts takes them as it starts, and
-          // an editor that connects is given them before its first play.
-          if (op === 'set') {
-            session.holdBreakpoints([{ scriptPath, lines: [line] }]);
-            answer = { set: true };
-          } else {
-            answer = session.forgetBreakpoint(scriptPath, line)
-              ? { removed: true }
-              : {
-                  removed: false,
-                  why: `No breakpoint was held on line ${line} of res://${located.relativePath}, so there was nothing to remove. held lists the ones that are.`,
-                };
-          }
-        }
-        // Written after the adapter has taken it, so the note never claims a line the editor
-        // refused, and beside the adapter's answer so the caller sees the whole set it now holds.
-        const held = session.breakpointsHeld();
-        writeBreakpointNote(project.value.path, held);
-        const kept = this.keptRun();
-        const told =
-          kept === null
-            ? null
-            : await askTheKeepersDebugger(
-                kept.keeper,
-                {
-                  op: 'breakpoint',
-                  script: projectSpelling(project.value.path, scriptPath),
-                  line,
-                  set: op === 'set',
-                },
-                KEEPER_DEBUG_MS,
-              );
-        return this.jsonTextResponse({
-          ...answer,
-          held: this.breakpointsAsProjectSpells(project.value.path, held),
-          // The editor's own, as it reported them to this session, so a caller reading the whole
-          // set sees the lines the user set by hand as well as the ones set here.
-          ...(editor
-            ? {
-                setInEditor: this.breakpointsAsProjectSpells(
-                  project.value.path,
-                  session.breakpointsInEditor(),
-                ),
-              }
-            : {}),
-          ...(told === null
-            ? {}
-            : 'unreached' in told || typeof told['refused'] === 'string'
-              ? {
-                  runningGame: `The game this server started is running, and its debugger was not told: ${String('unreached' in told ? told.unreached : told['refused'])}. It takes the line when it is started again.`,
-                }
-              : {
-                  runningGame:
-                    told['taken'] === false
-                      ? `Told to the running game (pid ${kept?.pid ?? '?'}), which this server started, and not taken by it within ${READ_MS / 1000}s: a game reads its debugger between frames and every 2048 lines of script, so one inside a long frame takes the change once that frame ends.`
-                      : op === 'set'
-                        ? `Told to the running game (pid ${kept?.pid ?? '?'}), which this server started, and taken by it: anything it runs from now on stops there.`
-                        : `Told to the running game (pid ${kept?.pid ?? '?'}), which this server started, and taken by it: it no longer stops on that line.`,
-                }),
-          note: editor
-            ? 'The editor keeps a breakpoint set this way for one play. Every breakpoint held here is sent again before each play editor_run starts, handed to every game this server starts itself, and kept in the project for the server after a reconnect.'
-            : held.length === 0
-              ? 'No editor is connected and no breakpoint is held here, so the next game this server starts and the next editor to connect are given none.'
-              : 'No editor is connected, so the breakpoints under held are kept here: every game this server starts is handed them as it starts, an editor that connects is sent them before its first play, and they are kept in the project for the server after a reconnect.',
-          ...(editor ? this.breakpointsAtRisk() : {}),
-        });
-      }
-      case 'debug_control':
-      case 'debug_state': {
-        if (op === 'evaluate') {
-          for (const requestId of this.heldWhilePending) {
-            if (lateAnswer(requestId)?.state === 'waiting') {
-              this.evaluatedWhilePending.add(requestId);
-            }
-          }
-        }
-        // A game this server started has its keeper for a debugger, which answers everything the
-        // editor's adapter does and also breaks into a game and steps out of a function.
-        const kept = this.keptRun();
-        if (kept !== null) {
-          return await this.askTheKeptGame(
-            kept.keeper,
-            keptGameRequest(tool, op, args),
-            kept.projectPath ?? '',
-          );
-        }
-        // A kept game's console lived in its keeper, which ends with it. The adapter's buffer holds
-        // nothing of that run, so reading it answered no lines, or an earlier played run's.
-        const last = this.activeProcess;
-        if (
-          tool === 'debug_state' &&
-          op === 'output' &&
-          last !== null &&
-          !last.throughEditor &&
-          last.keeper !== undefined
-        ) {
-          return this.createErrorResponse(
-            'The game this server started has ended, and its debugger, which held its console output, ended with it.',
-            ['editor_output reads what the game printed, with the errors and warnings it reported'],
-          );
-        }
-        // The console the adapter buffered outlives the game it came from, so reading it needs
-        // no session. A stack, a scope and a step all need one, and one that is stopped.
-        if (tool === 'debug_state' && op === 'output') {
-          return await this.handleDAP('dap_get_output', args);
-        }
-        const played = this.activeProcess;
-        if ((op === 'pause' || op === 'step_out') && played?.throughEditor === true && !exited(played)) {
-          return this.createErrorResponse(
-            op === 'pause'
-              ? "A game the editor plays cannot be paused from here: Godot's debug adapter answers a pause by reporting the game stopped and leaving it running."
-              : "A game the editor plays cannot be stepped out of a function from here: Godot's debug adapter implements no stepOut.",
-            [
-              'Set a breakpoint where it should stop, then step over or into from there',
-              'A game this server starts, as editor_run start does with args, savesIn or env, has a debugger here that pauses and steps out',
-            ],
-          );
-        }
-        const held = await this.debuggedGame(tool === 'debug_control' ? 'move' : 'read');
-        if (!held.ok) {
-          return held.response;
-        }
-        if (tool === 'debug_state' && op === 'evaluate') {
-          return await this.evaluateInAPlayedGame(played?.throughEditor === true ? played : null, args);
-        }
-        return tool === 'debug_control'
-          ? await this.handleDAP(`dap_${op}`, args)
-          : await this.handleDAP(DEBUG_STATE_CALLS[op] ?? 'dap_get_stack_trace', args);
-      }
+      default:
+        return await this.dispatchDebugTool(tool, op, args);
+    }
+  }
 
+  /** A click in the running game, on a node or on the control that says the words given. */
+  private async clickInGame(op: string, args: OperationParams): Promise<ToolResponse> {
+    if (
+      readNonEmptyString(args, 'nodePath') === undefined &&
+      readNonEmptyString(args, 'says') === undefined
+    ) {
+      return this.createErrorResponse(
+        'runtime_input click needs nodePath, or says with the words on the control to click.',
+      );
+    }
+    return await this.handleRuntimeCommand(
+      'click',
+      {
+        ...whichGame(args),
+        path: readNonEmptyString(args, 'nodePath') ?? '',
+        // As given, a number included: the addon names a button either way and refuses what is
+        // neither, and read as a string alone a right click given as 2 went as the left button.
+        button: args['button'] ?? 'left',
+        double: readBoolean(args, 'doubleClick') ?? false,
+        ...(readNonEmptyString(args, 'says') === undefined ? {} : { says: readNonEmptyString(args, 'says') }),
+        ...(args['index'] === undefined ? {} : { index: args['index'] }),
+        ...(args['x'] === undefined ? {} : { x: args['x'] }),
+        ...(args['y'] === undefined ? {} : { y: args['y'] }),
+      },
+      { tool: 'runtime_input', op },
+    );
+  }
+
+  /** A runtime_input op that is not a click: choosing an item, or injecting a press, a stroke or a key. */
+  private async chooseOrInjectInput(op: string, args: OperationParams): Promise<ToolResponse> {
+    if (op === 'choose') {
+      // `index` is passed on only when it was given, because the addon reads whether it is
+      // there as which of the two ways the caller named the item.
+      return await this.handleRuntimeCommand(
+        'choose',
+        {
+          ...whichGame(args),
+          path: readNonEmptyString(args, 'nodePath') ?? '',
+          text: readString(args, 'text') ?? '',
+          ...(args['index'] === undefined ? {} : { index: args['index'] }),
+        },
+        { tool: 'runtime_input', op },
+      );
+    }
+    {
+      // A held press answers once it has let go, and a drag once its stroke is over, so each is
+      // given as long as a frames wait of the same length.
+      const holding =
+        op === 'mouse_drag' || op === 'touch_drag'
+          ? (readPositiveNumber(args, 'frames') ?? 1) + 2
+          : readPositiveNumber(args, 'holdFrames');
+      return await this.handleRuntimeCommand(`inject_${op}`, args, {
+        tool: 'runtime_input',
+        op,
+        ...(holding === undefined ? {} : { patience: patienceForFrames(holding, this.runtimeTimeoutMs()) }),
+      });
+    }
+  }
+
+  /** One tool call to the code that does it, for the debug tools. */
+  private async dispatchDebugTool(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
+    switch (tool) {
+      case 'debug_breakpoint':
+        return await this.handleDebugBreakpoint(op, args);
+      case 'debug_control':
+      case 'debug_state':
+        return await this.handleDebugSession(tool, op, args);
       default:
         throw new ProtocolError(ProtocolErrorCode.MethodNotFound, `Unknown tool: ${tool}`);
     }
+  }
+
+  /** The breakpoints of the debug adapter and of a game this server started, listed, set or removed. */
+  private async handleDebugBreakpoint(op: string, args: OperationParams): Promise<ToolResponse> {
+    // The adapter names the file the way this machine spells it, not the way the project
+    // does, so the projectPath every other tool takes is what turns `res://main.gd` into one.
+    const project = this.project(args);
+    if (!project.ok) {
+      return project.response;
+    }
+    if (op === 'list') {
+      const session = this.dapHoldingBreakpointsOf(project.value.path);
+      const editor = this.godotBridge.isConnected();
+      return this.jsonTextResponse({
+        held: this.breakpointsAsProjectSpells(project.value.path, session.breakpointsHeld()),
+        ...(editor
+          ? {
+              setInEditor: this.breakpointsAsProjectSpells(project.value.path, session.breakpointsInEditor()),
+              ...this.breakpointsAtRisk(),
+            }
+          : {}),
+      });
+    }
+    return await this.setOrRemoveBreakpoint(op, args, project);
+  }
+
+  /** A breakpoint set on one line of a script, or taken off it. */
+  private async setOrRemoveBreakpoint(
+    op: string,
+    args: OperationParams,
+    project: { readonly value: { readonly path: string } },
+  ): Promise<ToolResponse> {
+    const located = resolveWithinProject(project.value.path, readString(args, 'scriptPath') ?? '');
+    if (!located.ok) {
+      return this.createErrorResponse(located.reason, PATH_SOLUTIONS);
+    }
+    // Resolved, because the adapter refuses a path that does not start with the project as
+    // it holds it, and a symlink on the way makes two spellings of the same file: on macOS
+    // every /var/folders path is really /private/var/folders.
+    const session = this.dapHoldingBreakpointsOf(project.value.path);
+    const scriptPath = realAsFarAsItExists(located.absolutePath);
+    const line = readPositiveNumber(args, 'line');
+    if (line === undefined) {
+      return this.createErrorResponse('line is required: the one-based line to stop on.');
+    }
+    // Neither the adapter nor a game refuses a line nothing stops on, and a breakpoint held there
+    // is kept in the project's set and never stops anything. Removing one is left alone, so a
+    // breakpoint on a script since deleted or shortened can still be taken off.
+    if (op === 'set') {
+      if (!existsSync(located.absolutePath)) {
+        return this.missingScript(project.value.path, located.relativePath);
+      }
+      const nothing = lineNothingStopsOn(located.absolutePath, located.relativePath, line);
+      if (nothing !== null) {
+        return this.createErrorResponse(nothing);
+      }
+    }
+    return await this.applyBreakpoint({ op, args, project, session, located, scriptPath, line });
+  }
+
+  /** A breakpoint handed to the editor's adapter when one is connected, and otherwise held here. */
+  private async applyBreakpoint(call: BreakpointCall): Promise<ToolResponse> {
+    const { op, args, session, located, scriptPath, line } = call;
+    const editor = this.godotBridge.isConnected();
+    let answer: Record<string, unknown>;
+    if (editor) {
+      const answered = await this.handleDAP(op === 'set' ? 'dap_set_breakpoint' : 'dap_remove_breakpoint', {
+        ...args,
+        scriptPath,
+      });
+      if (answered.isError === true) {
+        return answered;
+      }
+      answer = asParams(JSON.parse(answered.content[0]?.text ?? '{}'));
+    } else {
+      // Held here for whoever plays next: a game this server starts takes them as it starts, and
+      // an editor that connects is given them before its first play.
+      if (op === 'set') {
+        session.holdBreakpoints([{ scriptPath, lines: [line] }]);
+        answer = { set: true };
+      } else {
+        answer = session.forgetBreakpoint(scriptPath, line)
+          ? { removed: true }
+          : {
+              removed: false,
+              why: `No breakpoint was held on line ${line} of res://${located.relativePath}, so there was nothing to remove. held lists the ones that are.`,
+            };
+      }
+    }
+    return await this.breakpointResponse(call, editor, answer);
+  }
+
+  /** What a set or removed breakpoint answers: the adapter's answer, every breakpoint held and what a running game was told. */
+  private async breakpointResponse(
+    call: BreakpointCall,
+    editor: boolean,
+    answer: Record<string, unknown>,
+  ): Promise<ToolResponse> {
+    const { op, project, session, scriptPath, line } = call;
+    // Written after the adapter has taken it, so the note never claims a line the editor
+    // refused, and beside the adapter's answer so the caller sees the whole set it now holds.
+    const held = session.breakpointsHeld();
+    writeBreakpointNote(project.value.path, held);
+    const kept = this.keptRun();
+    const told =
+      kept === null
+        ? null
+        : await askTheKeepersDebugger(
+            kept.keeper,
+            {
+              op: 'breakpoint',
+              script: projectSpelling(project.value.path, scriptPath),
+              line,
+              set: op === 'set',
+            },
+            KEEPER_DEBUG_MS,
+          );
+    return this.jsonTextResponse({
+      ...answer,
+      held: this.breakpointsAsProjectSpells(project.value.path, held),
+      // The editor's own, as it reported them to this session, so a caller reading the whole
+      // set sees the lines the user set by hand as well as the ones set here.
+      ...(editor
+        ? {
+            setInEditor: this.breakpointsAsProjectSpells(project.value.path, session.breakpointsInEditor()),
+          }
+        : {}),
+      ...(told === null ? {} : { runningGame: runningGameSaid(told, op, kept?.pid ?? '?') }),
+      note: editor
+        ? 'The editor keeps a breakpoint set this way for one play. Every breakpoint held here is sent again before each play editor_run starts, handed to every game this server starts itself, and kept in the project for the server after a reconnect.'
+        : held.length === 0
+          ? 'No editor is connected and no breakpoint is held here, so the next game this server starts and the next editor to connect are given none.'
+          : 'No editor is connected, so the breakpoints under held are kept here: every game this server starts is handed them as it starts, an editor that connects is sent them before its first play, and they are kept in the project for the server after a reconnect.',
+      ...(editor ? this.breakpointsAtRisk() : {}),
+    });
+  }
+
+  /** The debug controls and the debug state, answered by the game's keeper or by the editor's adapter. */
+  private async handleDebugSession(tool: string, op: string, args: OperationParams): Promise<ToolResponse> {
+    if (op === 'evaluate') {
+      for (const requestId of this.heldWhilePending) {
+        if (lateAnswer(requestId)?.state === 'waiting') {
+          this.evaluatedWhilePending.add(requestId);
+        }
+      }
+    }
+    // A game this server started has its keeper for a debugger, which answers everything the
+    // editor's adapter does and also breaks into a game and steps out of a function.
+    const kept = this.keptRun();
+    if (kept !== null) {
+      return await this.askTheKeptGame(kept.keeper, keptGameRequest(tool, op, args), kept.projectPath ?? '');
+    }
+    return await this.debugWithoutAKeptGame(tool, op, args);
+  }
+
+  /** A debug call when no game this server started is running: its console, or the editor's adapter. */
+  private async debugWithoutAKeptGame(
+    tool: string,
+    op: string,
+    args: OperationParams,
+  ): Promise<ToolResponse> {
+    // A kept game's console lived in its keeper, which ends with it. The adapter's buffer holds
+    // nothing of that run, so reading it answered no lines, or an earlier played run's.
+    const last = this.activeProcess;
+    if (
+      tool === 'debug_state' &&
+      op === 'output' &&
+      last !== null &&
+      !last.throughEditor &&
+      last.keeper !== undefined
+    ) {
+      return this.createErrorResponse(
+        'The game this server started has ended, and its debugger, which held its console output, ended with it.',
+        ['editor_output reads what the game printed, with the errors and warnings it reported'],
+      );
+    }
+    // The console the adapter buffered outlives the game it came from, so reading it needs
+    // no session. A stack, a scope and a step all need one, and one that is stopped.
+    if (tool === 'debug_state' && op === 'output') {
+      return await this.handleDAP('dap_get_output', args);
+    }
+    const played = this.activeProcess;
+    if ((op === 'pause' || op === 'step_out') && played?.throughEditor === true && !exited(played)) {
+      return this.createErrorResponse(
+        op === 'pause'
+          ? "A game the editor plays cannot be paused from here: Godot's debug adapter answers a pause by reporting the game stopped and leaving it running."
+          : "A game the editor plays cannot be stepped out of a function from here: Godot's debug adapter implements no stepOut.",
+        [
+          'Set a breakpoint where it should stop, then step over or into from there',
+          'A game this server starts, as editor_run start does with args, savesIn or env, has a debugger here that pauses and steps out',
+        ],
+      );
+    }
+    return await this.debugAnAdapterSession(tool, op, args, played);
+  }
+
+  /** A debug call to the editor's adapter, once a game is held stopped for it. */
+  private async debugAnAdapterSession(
+    tool: string,
+    op: string,
+    args: OperationParams,
+    played: GodotProcess | null,
+  ): Promise<ToolResponse> {
+    const held = await this.debuggedGame(tool === 'debug_control' ? 'move' : 'read');
+    if (!held.ok) {
+      return held.response;
+    }
+    if (tool === 'debug_state' && op === 'evaluate') {
+      return await this.evaluateInAPlayedGame(played?.throughEditor === true ? played : null, args);
+    }
+    return tool === 'debug_control'
+      ? await this.handleDAP(`dap_${op}`, args)
+      : await this.handleDAP(DEBUG_STATE_CALLS[op] ?? 'dap_get_stack_trace', args);
   }
 
   // -------------------------------------------------------------------------------------------
@@ -6176,6 +7229,14 @@ class GodotServer {
         ),
       };
     }
+    return await this.debuggedGameStillGoing(game, intent);
+  }
+
+  /** The game of a run still going, held for the debugger when it is one the editor plays. */
+  private async debuggedGameStillGoing(
+    game: GodotProcess,
+    intent: 'read' | 'move',
+  ): Promise<Checked<GodotProcess>> {
     // A run the editor plays keeps `exitCode` null for as long as the record lasts, so the refusal
     // above never fires for one that has ended. The editor is asked instead: attaching to the
     // adapter of a game that has gone answered "the editor is playing the game but its debug
@@ -6222,6 +7283,15 @@ class GodotServer {
         ),
       };
     }
+    return await this.debuggedGameIfStopped(game, going, intent);
+  }
+
+  /** The game when the adapter has it stopped, and otherwise what is known of why it cannot be read. */
+  private async debuggedGameIfStopped(
+    game: GodotProcess,
+    going: true,
+    intent: 'read' | 'move',
+  ): Promise<Checked<GodotProcess>> {
     if (!this.dap().isStopped()) {
       // Not held as far as this session knows, and whether it knows is the question: a session
       // that attached after the stop is shown no stack by the adapter, so the runtime is asked
@@ -6413,7 +7483,7 @@ class GodotServer {
         return { waitedMs: Date.now() - started, stillScanning: false };
       }
       const answered = Date.now();
-      if (status['scanning'] === true || status['importing'] === true || status['pending'] === true) {
+      if (editorIsScanning(status)) {
         sawAScan = true;
         if (Date.now() - started >= scanWaitMs()) {
           return { waitedMs: Date.now() - started, stillScanning: true };
@@ -6429,9 +7499,18 @@ class GodotServer {
       // late, a write in that stretch is waited past to the end of the window, which costs up to
       // that window and still reads the right file.
       const since = readNumber(status, 'sinceScanFinishedMs');
-      scanEndedAt = since !== undefined && since >= 0 ? answered - since : sawAScan ? answered : null;
+      scanEndedAt = scanEndFrom(since, answered, sawAScan);
       break;
     }
+    return await this.untilTheCacheIsWritten(projectPath, { started, sawAScan, scanEndedAt });
+  }
+
+  /** The wait for the editor's class cache to be written after the scan [param scan] saw end. */
+  private async untilTheCacheIsWritten(
+    projectPath: string,
+    scan: { readonly started: number; readonly sawAScan: boolean; readonly scanEndedAt: number | null },
+  ): Promise<ScanWait> {
+    const { started, sawAScan, scanEndedAt } = scan;
     let waitedForTheWrite = false;
     if (scanEndedAt !== null) {
       const writeDue = scanEndedAt + CACHE_WRITE_MS;
@@ -6474,6 +7553,15 @@ class GodotServer {
       }
       contained[key] = `res://${location.relativePath}`;
     }
+    return this.containNestedFiles(args, projectPath, contained);
+  }
+
+  /** The file paths a call carries one level down, in its properties and tile set sources, and its plugin name. */
+  private containNestedFiles(
+    args: OperationParams,
+    projectPath: string,
+    contained: OperationParams,
+  ): Checked<OperationParams> {
     // A property whose type is a Resource takes the path of one, so `properties` carries file
     // paths that no argument name announces. Only the engine knows which of them are paths, so
     // what is judged here is the one thing a path can do that a caption cannot: leave the
@@ -6510,6 +7598,15 @@ class GodotServer {
       contained['sources'] = resolved;
     }
 
+    return this.containPluginName(args, projectPath, contained);
+  }
+
+  /** The plugin name of a call, judged as the directory under addons/ it names. */
+  private containPluginName(
+    args: OperationParams,
+    projectPath: string,
+    contained: OperationParams,
+  ): Checked<OperationParams> {
     const pluginName = readNonEmptyString(args, 'pluginName');
     if (pluginName !== undefined) {
       const plugin = resolveWithinProject(projectPath, `addons/${pluginName}/plugin.cfg`);
@@ -6711,6 +7808,12 @@ class GodotServer {
             ...renamed.report,
           });
     }
+    return await this.settingsTakenByTheEditor({ op, args, projectPath, before, written, renamed });
+  }
+
+  /** The editor told to take up what a project_settings write changed, once the file holds it. */
+  private async settingsTakenByTheEditor(write: SettingsWrite): Promise<ToolResponse> {
+    const { op, written, renamed } = write;
     const answer = asParams(JSON.parse(written.content[0]?.text ?? '{}'));
     if (AUDIO_BUS_OPS.has(op)) {
       const adopted = await this.editorTakes('adopt_audio_bus_layout', {});
@@ -6730,13 +7833,15 @@ class GodotServer {
           reloadedScenes: (readArray(told, 'reloadedScenes') ?? []).map(String),
           ...(unsavedScenes.length > 0 ? { unsavedScenes } : {}),
         },
-        ...(unsavedScenes.length > 0
-          ? {
-              note: `${unsavedScenes.join(', ')} ${unsavedScenes.length === 1 ? 'is' : 'are'} open in the editor with unsaved edits, so ${unsavedScenes.length === 1 ? 'it was' : 'they were'} not read again from the file and still ${unsavedScenes.length === 1 ? 'gives' : 'give'} the old bus. Saving there writes it back.`,
-            }
-          : {}),
+        ...unsavedScenesNote(unsavedScenes),
       });
     }
+    return await this.adoptChangedSettings(write, answer);
+  }
+
+  /** The settings a write changed, handed to the editor, and what it says it took. */
+  private async adoptChangedSettings(write: SettingsWrite, answer: OperationParams): Promise<ToolResponse> {
+    const { op, args, projectPath, before, written } = write;
     const diffed = changedSettings(before, this.settingKeysOf(projectPath));
     const changed =
       diffed === null ? null : [...new Set([...diffed, ...settingsNamedBy(op, args)])].toSorted();
@@ -6846,6 +7951,22 @@ class GodotServer {
           : written,
       );
     }
+    return await this.reimportAfterSetOptions({
+      project,
+      contained,
+      args,
+      written,
+      params,
+      given,
+      resource,
+      sidecar,
+      before,
+    });
+  }
+
+  /** The reimport that applies options written to a sidecar, and what is said when it fails. */
+  private async reimportAfterSetOptions(write: ImportOptionsWrite): Promise<ToolResponse> {
+    const { project, contained, args, written } = write;
     const applied = await this.reimport(
       project.value.path,
       readNonEmptyString(contained.value, 'resourcePath'),
@@ -6872,6 +7993,15 @@ class GodotServer {
         ],
       };
     }
+    return await this.checkImporterAfterSetOptions(write, applied);
+  }
+
+  /** The importer a reimport used, put back when it is not the one asked for, and the options it dropped. */
+  private async checkImporterAfterSetOptions(
+    write: ImportOptionsWrite,
+    applied: { readonly payload: OperationParams },
+  ): Promise<ToolResponse> {
+    const { project, args, written, params, given, resource, sidecar, before } = write;
     const asked = readNonEmptyString(args, 'importer');
     // An importer the engine lacks is passed over for the default one, and the options cleared for
     // the switch would then be lost, so the file is put back and imported as it was.
@@ -6991,6 +8121,12 @@ class GodotServer {
       };
     }
 
+    return await this.reimportTargets({ projectPath, resourcePath, force, timeoutMs, sourceless, targets });
+  }
+
+  /** The import of the files behind, through the editor when one has the project open and else the engine. */
+  private async reimportTargets(start: ImportTargets): Promise<ImportAnswer> {
+    const { projectPath, resourcePath, force, timeoutMs, sourceless, targets } = start;
     const viaEditor = this.editorHasOpen(projectPath);
     const extra: OperationParams = {};
     const statusAsk: OperationParams =
@@ -7013,83 +8149,125 @@ class GodotServer {
           .map((one) => one.path);
       }
     }
-    if (viaEditor) {
-      // A scan first: the editor's reimport passes over a file its own file system has not taken in,
-      // without a word. Downstream, 143 images an installer had just written came back as 143 files
-      // not reimported, each needing the import it had just been asked for, and a rescan straight
-      // after imported every one. The scan imports what it finds, so only what is still behind
-      // afterwards is handed to the reimport, unless force asks for everything again.
-      const scan = await this.handleRescanFilesystem({ projectPath, timeoutMs });
-      if (scan.isError === true) {
-        return { ok: false, response: scan };
-      }
-      const scanned = asParams(JSON.parse(scan.content[0]?.text ?? '{}'));
-      if (scanned['stillWorking'] === true) {
-        return {
-          ok: true,
-          payload: {
-            via: 'editor',
-            stillImporting: true,
-            asked: targets,
-            ...sourceless,
-            note: `The editor's scan of the project had not finished after ${timeoutMs} ms, and the reimport waits for it. project_import status says what it has done so far. Pass a longer timeoutMs to wait it out.`,
-          },
-        };
-      }
-      let remaining = targets;
-      if (!force) {
-        const between = await this.operation('get_import_status', statusAsk, projectPath);
-        if (!between.ok) {
-          return { ok: false, response: this.answer(between) };
-        }
-        const fresh = new Map(importStatuses(between.payload).map((one) => [one.path, one.status]));
-        const caughtUp = targets.filter((path) => fresh.get(path) === 'up_to_date');
-        remaining = targets.filter((path) => !caughtUp.includes(path));
-        if (caughtUp.length > 0) {
-          extra['importedByTheScan'] = caughtUp;
-        }
-      }
-      const inEditor =
-        remaining.length === 0
-          ? { ok: true as const, finished: true }
-          : await this.reimportInTheEditor(remaining, timeoutMs);
-      if (!inEditor.ok) {
-        return inEditor;
-      }
-      if (!inEditor.finished) {
-        return {
-          ok: true,
-          payload: {
-            via: 'editor',
-            stillImporting: true,
-            asked: targets,
-            ...sourceless,
-            note: `The editor had not finished after ${timeoutMs} ms. project_import status says what it has done so far. Pass a longer timeoutMs to wait it out.`,
-          },
-        };
-      }
-    } else {
-      const engine = await this.engine(projectPath);
-      if (!engine.ok) {
-        return { ok: false, response: engine.response };
-      }
-      const scanned = await this.untilTheEditorsScanIsWritten(projectPath);
-      const imported = withEngineNote(
-        await runImport(engine.value, projectPath, { forcing: targets }),
-        engine.note,
-      );
-      if (!imported.ok) {
-        return { ok: false, response: this.answer(withScanWait(imported, scanned)) };
-      }
-      Object.assign(extra, engineExtras(imported));
-      if (imported.extensionNote !== undefined) {
-        extra['extensionNote'] = imported.extensionNote;
-      }
-      if (imported.docCacheNote !== undefined) {
-        extra['docCacheNote'] = imported.docCacheNote;
-      }
+    const run: ImportRun = {
+      projectPath,
+      timeoutMs,
+      force,
+      sourceless,
+      targets,
+      statusAsk,
+      extra,
+      viaEditor,
+      behindElsewhere,
+    };
+    const through = viaEditor
+      ? await this.reimportThroughTheEditor(run)
+      : await this.reimportThroughTheEngine(run);
+    if (through !== null) {
+      return through;
     }
+    return await this.readBackReimport(run);
+  }
 
+  /** The reimport run in the editor: its scan first, then what is still behind. Null once it has finished. */
+  private async reimportThroughTheEditor(run: ImportRun): Promise<ImportAnswer | null> {
+    const { projectPath, timeoutMs, sourceless, targets } = run;
+    // A scan first: the editor's reimport passes over a file its own file system has not taken in,
+    // without a word. Downstream, 143 images an installer had just written came back as 143 files
+    // not reimported, each needing the import it had just been asked for, and a rescan straight
+    // after imported every one. The scan imports what it finds, so only what is still behind
+    // afterwards is handed to the reimport, unless force asks for everything again.
+    const scan = await this.handleRescanFilesystem({ projectPath, timeoutMs });
+    if (scan.isError === true) {
+      return { ok: false, response: scan };
+    }
+    const scanned = asParams(JSON.parse(scan.content[0]?.text ?? '{}'));
+    if (scanned['stillWorking'] === true) {
+      return {
+        ok: true,
+        payload: {
+          via: 'editor',
+          stillImporting: true,
+          asked: targets,
+          ...sourceless,
+          note: `The editor's scan of the project had not finished after ${timeoutMs} ms, and the reimport waits for it. project_import status says what it has done so far. Pass a longer timeoutMs to wait it out.`,
+        },
+      };
+    }
+    const behind = await this.stillBehindAfterTheScan(run);
+    if (!behind.ok) {
+      return behind;
+    }
+    const inEditor =
+      behind.remaining.length === 0
+        ? { ok: true as const, finished: true }
+        : await this.reimportInTheEditor(behind.remaining, timeoutMs);
+    if (!inEditor.ok) {
+      return inEditor;
+    }
+    if (!inEditor.finished) {
+      return {
+        ok: true,
+        payload: {
+          via: 'editor',
+          stillImporting: true,
+          asked: targets,
+          ...sourceless,
+          note: `The editor had not finished after ${timeoutMs} ms. project_import status says what it has done so far. Pass a longer timeoutMs to wait it out.`,
+        },
+      };
+    }
+    return null;
+  }
+
+  /** The targets the editor's scan did not already import, unless force asks for all of them again. */
+  private async stillBehindAfterTheScan(
+    run: ImportRun,
+  ): Promise<{ ok: true; remaining: string[] } | { ok: false; response: ToolResponse }> {
+    const { projectPath, force, targets, statusAsk, extra } = run;
+    if (force) {
+      return { ok: true, remaining: targets };
+    }
+    const between = await this.operation('get_import_status', statusAsk, projectPath);
+    if (!between.ok) {
+      return { ok: false, response: this.answer(between) };
+    }
+    const fresh = new Map(importStatuses(between.payload).map((one) => [one.path, one.status]));
+    const caughtUp = targets.filter((path) => fresh.get(path) === 'up_to_date');
+    if (caughtUp.length > 0) {
+      extra['importedByTheScan'] = caughtUp;
+    }
+    return { ok: true, remaining: targets.filter((path) => !caughtUp.includes(path)) };
+  }
+
+  /** The reimport run by the engine on the project. Null once it has imported. */
+  private async reimportThroughTheEngine(run: ImportRun): Promise<ImportAnswer | null> {
+    const { projectPath, targets, extra } = run;
+    const engine = await this.engine(projectPath);
+    if (!engine.ok) {
+      return { ok: false, response: engine.response };
+    }
+    const scanned = await this.untilTheEditorsScanIsWritten(projectPath);
+    const imported = withEngineNote(
+      await runImport(engine.value, projectPath, { forcing: targets }),
+      engine.note,
+    );
+    if (!imported.ok) {
+      return { ok: false, response: this.answer(withScanWait(imported, scanned)) };
+    }
+    Object.assign(extra, engineExtras(imported));
+    if (imported.extensionNote !== undefined) {
+      extra['extensionNote'] = imported.extensionNote;
+    }
+    if (imported.docCacheNote !== undefined) {
+      extra['docCacheNote'] = imported.docCacheNote;
+    }
+    return null;
+  }
+
+  /** What a reimport answers, read back from the import status once the files have been imported. */
+  private async readBackReimport(run: ImportRun): Promise<ImportAnswer> {
+    const { projectPath, targets, statusAsk, extra, viaEditor, behindElsewhere, sourceless } = run;
     const after = await this.operation('get_import_status', statusAsk, projectPath);
     if (!after.ok) {
       return { ok: false, response: this.answer(after) };
@@ -7180,6 +8358,15 @@ class GodotServer {
       }
       await new Promise((settle) => setTimeout(settle, 100));
     }
+    return await this.untilTheReimportsAreCounted(timeoutMs, started, completedBefore);
+  }
+
+  /** Waits until the addon's count of finished reimports passes the count from before the call. */
+  private async untilTheReimportsAreCounted(
+    timeoutMs: number,
+    started: number,
+    completedBefore: number | undefined,
+  ): Promise<{ ok: true; finished: boolean }> {
     while (Date.now() - started < timeoutMs) {
       await new Promise((settle) => setTimeout(settle, 250));
       try {
@@ -7284,6 +8471,16 @@ class GodotServer {
       return engine.response;
     }
 
+    return await this.projectInfoOf(args, include, project, engine);
+  }
+
+  /** The answer of project_info: the project's name, structure and engine, and each section asked for. */
+  private async projectInfoOf(
+    args: OperationParams,
+    include: readonly string[],
+    project: { readonly value: { readonly path: string; readonly file: string } },
+    engine: Extract<EngineChoice, { ok: true }>,
+  ): Promise<ToolResponse> {
     const application = parseProjectGodot(readFileSync(project.value.file, 'utf8'))['application'] ?? {};
     const name = application['config/name'];
     const mainScene = application['run/main_scene'];
@@ -7295,6 +8492,16 @@ class GodotServer {
       engineNote: engine.note ?? undefined,
       structure: projectStructure(project.value.path),
     };
+    return await this.projectInfoSections(args, include, project, info);
+  }
+
+  /** Each section project_info was asked for, run and written into [param info]. */
+  private async projectInfoSections(
+    args: OperationParams,
+    include: readonly string[],
+    project: { readonly value: { readonly path: string } },
+    info: Record<string, unknown>,
+  ): Promise<ToolResponse> {
     // Named once above rather than again in every section.
     const sectionExtras = (outcome: HeadlessOutcome): Record<string, unknown> => {
       const { engineNote: _named, ...rest } = outcome;
@@ -7313,30 +8520,14 @@ class GodotServer {
       if (spec === undefined) {
         continue;
       }
-      const params = {
-        ...spec.params(args, detailed),
-        ...(compiledScripts !== undefined && (section === 'health' || section === 'validation')
-          ? { compiled: compiledScripts }
-          : {}),
-      };
+      const params = sectionParamsOf(spec.params(args, detailed), compiledScripts, section);
       const outcome = await this.operation(spec.operation, params, project.value.path);
       if (section === 'classes' && outcome.ok && Array.isArray(outcome.payload['classes'])) {
-        const declared: unknown[] = outcome.payload['classes'];
-        const asked = readStringArray(args, 'addonClasses') ?? [];
-        const addons = Object.keys(classesWithAddonsCounted(declared, new Set()).inAddons).toSorted();
-        const unknownAddons = asked.filter((addon) => !addons.includes(addon));
-        if (unknownAddons.length > 0) {
-          return this.createErrorResponse(
-            `addonClasses names ${unknownAddons.join(', ')}, and no folder of that name under res://addons declares a class. ${addons.length === 0 ? 'No addon declares one.' : `The addons declaring classes are ${addons.join(', ')}.`}`,
-          );
+        const classes = classesSectionOf(args, outcome.payload, sectionExtras(outcome));
+        if (typeof classes === 'string') {
+          return this.createErrorResponse(classes);
         }
-        const counted = classesWithAddonsCounted(declared, new Set(asked));
-        info[section] = {
-          ...outcome.payload,
-          classes: counted.classes,
-          ...(Object.keys(counted.inAddons).length > 0 ? { inAddons: counted.inAddons } : {}),
-          ...sectionExtras(outcome),
-        };
+        info[section] = classes;
         continue;
       }
       info[section] = outcome.ok
@@ -7403,27 +8594,7 @@ class GodotServer {
       return this.createErrorResponse(place.reason);
     }
     if (place !== null && !existsSync(place.absolutePath)) {
-      // The folders inside the deepest part of the path that is a folder, since a typo under game/
-      // answered with the project's top-level folders named nothing near it.
-      const parts = place.relativePath.split('/').filter((part) => part !== '');
-      let kept = parts.length - 1;
-      while (
-        kept > 0 &&
-        statSync(join(project.value.path, ...parts.slice(0, kept)), {
-          throwIfNoEntry: false,
-        })?.isDirectory() !== true
-      ) {
-        kept -= 1;
-      }
-      const within = parts.slice(0, kept).join('/');
-      const folders = readdirSync(join(project.value.path, within), { withFileTypes: true })
-        .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
-        .map((entry) => entry.name)
-        .toSorted();
-      const listed = within === '' ? "The project's folders are" : `The folders in res://${within}/ are`;
-      return this.createErrorResponse(
-        `There is nothing at res://${place.relativePath} to search.${folders.length === 0 ? '' : ` ${listed} ${folders.join(', ')}.`}`,
-      );
+      return this.createErrorResponse(nothingToSearchAt(project.value.path, place.relativePath));
     }
     // The walk steps over links, but the place asked for is opened through them, so a link inside
     // the project naming a folder outside it would be searched whole.
@@ -7435,9 +8606,18 @@ class GodotServer {
         `res://${place.relativePath} leads outside the project through a link, so it is not searched.`,
       );
     }
+    return this.runProjectSearch(args, project.value.path, place);
+  }
+
+  /** The search itself, over the whole project or within [param place], with the options the call gave. */
+  private runProjectSearch(
+    args: OperationParams,
+    projectPath: string,
+    place: { readonly absolutePath: string } | null,
+  ): ToolResponse {
     try {
       return this.jsonTextResponse(
-        searchProject(project.value.path, {
+        searchProject(projectPath, {
           query: readString(args, 'query') ?? '',
           ...this.fileTypes(args),
           ...(place === null ? {} : { within: place.absolutePath }),
@@ -7526,24 +8706,11 @@ class GodotServer {
     if (output !== null && !output.ok) {
       return this.createErrorResponse(output.reason, OUTPUT_PATH_SOLUTIONS);
     }
-    const options = args['options'];
-    let knownOptions: unknown[] = [];
-    let hiddenOptions: unknown = {};
-    if (options !== undefined && options !== null && Object.keys(options).length > 0) {
-      const platform = presetPlatform(project.value.path, preset);
-      if (platform !== null) {
-        const known = await this.exportOptions(project.value.path, platform, {
-          presetsFile: join(project.value.path, 'export_presets.cfg'),
-          preset,
-          asked: options,
-        });
-        if (typeof known === 'string') {
-          return this.createErrorResponse(known);
-        }
-        knownOptions = known.options;
-        hiddenOptions = known.hidden;
-      }
+    const asked = await this.optionsAskedFor(project.value.path, preset, args['options']);
+    if (typeof asked === 'string') {
+      return this.createErrorResponse(asked);
     }
+    const { knownOptions, hiddenOptions } = asked;
     const params: OperationParams = { preset, knownOptions, hiddenOptions };
     if (given !== undefined) {
       params['outputPath'] = output?.relativePath ?? '';
@@ -7562,6 +8729,30 @@ class GodotServer {
     }
     const outcome = await this.operation('set_export_preset', params, project.value.path);
     return this.presetsAnswer(outcome, project.value.path, 'does not have this change');
+  }
+
+  /**
+   * The options the preset's exporter lists for the options a set_preset call gives, with the ones it
+   * hides, or why they could not be read. None are read when no options were given.
+   */
+  private async optionsAskedFor(
+    projectPath: string,
+    preset: string,
+    options: unknown,
+  ): Promise<{ knownOptions: unknown[]; hiddenOptions: unknown } | string> {
+    if (options === undefined || options === null || Object.keys(options).length === 0) {
+      return { knownOptions: [], hiddenOptions: {} };
+    }
+    const platform = presetPlatform(projectPath, preset);
+    if (platform === null) {
+      return { knownOptions: [], hiddenOptions: {} };
+    }
+    const known = await this.exportOptions(projectPath, platform, {
+      presetsFile: join(projectPath, 'export_presets.cfg'),
+      preset,
+      asked: options,
+    });
+    return typeof known === 'string' ? known : { knownOptions: known.options, hiddenOptions: known.hidden };
   }
 
   /** project_export remove_preset. */
@@ -7656,6 +8847,17 @@ class GodotServer {
         ['Or turn shader_baker/enabled off with project_export set_preset to export without baked shaders'],
       );
     }
+    return await this.exportAfterTheChecks(args, project, preset, output, baking);
+  }
+
+  /** The export once the project, preset and output are judged: the engine found and the flags checked. */
+  private async exportAfterTheChecks(
+    args: OperationParams,
+    project: { readonly value: { readonly path: string } },
+    preset: string,
+    output: { readonly relativePath: string; readonly absolutePath: string },
+    baking: string | null,
+  ): Promise<ToolResponse> {
     const engine = await this.engine(project.value.path);
     if (!engine.ok) {
       return engine.response;
@@ -7691,6 +8893,21 @@ class GodotServer {
         `Cannot create ${dirname(output.relativePath)} to export into: ${errorMessage(error)}`,
       );
     }
+    return await this.exportWithImportedFiles({
+      project,
+      preset,
+      output,
+      baking,
+      engine,
+      debug,
+      pack,
+      folder,
+    });
+  }
+
+  /** The export run once the files that changed are imported, with the engine's log kept apart. */
+  private async exportWithImportedFiles(call: ExportCall): Promise<ToolResponse> {
+    const { project, preset, output, baking, engine, debug, pack } = call;
     // The export's own scan imports what changed only by the editor's cache, so in a checkout
     // without it a sidecar a tool wrote, naming no output, went into the build as an asset that
     // fails to load.
@@ -7716,6 +8933,21 @@ class GodotServer {
     ];
     this.logDebug(`Exporting: ${engine.value} ${exportArgs.join(' ')}`);
 
+    return await this.runExportEngine(call, { imported, exportLogs, exportArgs });
+  }
+
+  /** The engine's export, run again once when it crashed writing its doc cache, and the answer built from it. */
+  private async runExportEngine(
+    call: ExportCall,
+    prepared: {
+      readonly imported: Parameters<typeof importedFirstAnswer>[0];
+      readonly exportLogs: string;
+      readonly exportArgs: readonly string[];
+    },
+  ): Promise<ToolResponse> {
+    const { project, preset, output, baking, engine, debug, pack, folder } = call;
+    const { imported, exportLogs, exportArgs } = prepared;
+    const outOfSight = process.platform === 'win32';
     // The file this run writes, told from one an earlier export left there: an export that exited
     // cleanly and wrote nothing read as exported from the last one's file.
     const writtenAt = (): number | null =>
@@ -7873,6 +9105,12 @@ class GodotServer {
         `Refused a run of ${folders.join(' and ')}: GDHARNESS_SUITE_FILES_ONLY is set, so only named suite files run. ${next}`,
       );
     }
+    return await this.testFlagsAndPaths({ args, project, paths: paths.value });
+  }
+
+  /** A test run's engine flags and the paths it was given, checked for what is there and what can run. */
+  private async testFlagsAndPaths(base: TestBase): Promise<ToolResponse> {
+    const { args, project, paths } = base;
     // Before any engine starts, the class rebuild's included: a refused flag costs nothing.
     const flags = this.engineArguments(args);
     if (!flags.ok) {
@@ -7887,41 +9125,19 @@ class GodotServer {
     // nothing: a set of suites named from memory met one wrong name four times in a day, and each
     // time the rest waited a round trip for it. Named in the answer, and never a pass, since a run
     // of fewer suites than were asked for is not the run asked for.
-    const missing = paths.value.filter(
+    const missing = paths.filter(
       (path) => !existsSync(join(project.value.path, path.slice('res://'.length))),
     );
     // gdUnit4 searches a directory it is handed itself, into the folders the project keeps out of
     // every search, so a directory holding one is handed as the suites gdharness test finds in it.
     const scripts = new ProjectScripts(project.value.path);
-    const present = paths.value.filter((path) => !missing.includes(path));
+    const present = paths.filter((path) => !missing.includes(path));
     const asked = scripts.searchedAsTold(present);
     const unusable = gdUnit4Unusable(project.value.path);
     // With nothing missing, an empty list is a directory whose suites all sit in folders the project
     // keeps out of the search, which the refusal below names.
     if (asked.length === 0 && missing.length > 0) {
-      const verdict = `nothing at ${missing.join(' and ')}`;
-      // Both, when both: a project with neither tests nor gdUnit4 was told only about the folder,
-      // and the caller who wrote tests into it next would have been refused again for the runner.
-      const andNoRunner = unusable === null ? '' : `, and ${unusable.reason}`;
-      const runnerFrom = unusable === null ? '' : ` ${gdUnit4From(unusable.missing)}.`;
-      return {
-        content: [
-          {
-            type: 'text',
-            text: `No tests ran: ${verdict}${andNoRunner}.${elsewhereIn(project.value.path, missing[0] ?? '')}${runnerFrom}`,
-          },
-          {
-            type: 'text',
-            text: answerJson({
-              passed: false,
-              verdict,
-              tests: 0,
-              ...(unusable?.missing === true ? { gdUnit4Installed: false } : {}),
-            }),
-          },
-        ],
-        isError: true,
-      };
+      return this.nothingToTestAnswer(project.value.path, missing, unusable);
     }
     if (unusable !== null) {
       return this.createErrorResponse(`${unusable.reason}.`, [gdUnit4From(unusable.missing)]);
@@ -7933,6 +9149,43 @@ class GodotServer {
         `${caseless.join(' and ')} ${one ? 'declares' : 'declare'} no case: gdUnit4 runs the functions named test_ at the top level of a script that extends GdUnitTestSuite, and ${one ? 'it has' : 'they have'} none.`,
       );
     }
+    return await this.testSuiteChecks({ ...base, flags, missing, scripts, present, asked });
+  }
+
+  /** What a test run answers when every path it was given is missing, beside the runner if that is missing too. */
+  private nothingToTestAnswer(
+    projectPath: string,
+    missing: readonly string[],
+    unusable: ReturnType<typeof gdUnit4Unusable>,
+  ): ToolResponse {
+    const verdict = `nothing at ${missing.join(' and ')}`;
+    // Both, when both: a project with neither tests nor gdUnit4 was told only about the folder,
+    // and the caller who wrote tests into it next would have been refused again for the runner.
+    const andNoRunner = unusable === null ? '' : `, and ${unusable.reason}`;
+    const runnerFrom = unusable === null ? '' : ` ${gdUnit4From(unusable.missing)}.`;
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `No tests ran: ${verdict}${andNoRunner}.${elsewhereIn(projectPath, missing[0] ?? '')}${runnerFrom}`,
+        },
+        {
+          type: 'text',
+          text: answerJson({
+            passed: false,
+            verdict,
+            tests: 0,
+            ...(unusable?.missing === true ? { gdUnit4Installed: false } : {}),
+          }),
+        },
+      ],
+      isError: true,
+    };
+  }
+
+  /** A test run's paths checked for suites: the scripts that are no suite, and the folders with none. */
+  private async testSuiteChecks(run: TestFlags): Promise<ToolResponse> {
+    const { scripts, present } = run;
     // gdUnit4 says nothing of a script that declares cases and is no suite, so a suite whose extends
     // named the wrong class passed with none of its cases run. Named in the answer, and never a pass.
     const uncollected = scripts.uncollectedUnder(present);
@@ -7965,6 +9218,12 @@ class GodotServer {
           .join(' '),
       );
     }
+    return await this.testSelected({ ...run, uncollected });
+  }
+
+  /** A test run's cases chosen, the window the suites need found and the engine and class cache made ready. */
+  private async testSelected(run: TestCollected): Promise<ToolResponse> {
+    const { args, project, scripts, asked, uncollected } = run;
     const selection = selectTests(project.value.path, asked, args['tests']);
     if (!selection.ok) {
       return this.createErrorResponse(selection.reason);
@@ -7994,6 +9253,22 @@ class GodotServer {
       }
     }
 
+    return await this.testRebuilt({
+      ...run,
+      selection,
+      notSuites,
+      leftOut,
+      needs,
+      needing,
+      accessible,
+      windowed,
+      engine,
+    });
+  }
+
+  /** A test run's class cache rebuilt and its imports brought up to date, before the engine starts. */
+  private async testRebuilt(run: TestEngine): Promise<ToolResponse> {
+    const { project } = run;
     // The rebuild waits out the editor's scan before it runs, so what it waited is what this run
     // waited, and the engine below starts on the cache the rebuild left.
     const began = Date.now();
@@ -8021,6 +9296,25 @@ class GodotServer {
       ...(scanNote === undefined ? {} : { scanNote }),
     };
 
+    return await this.testPrepared({ ...run, began, classes, rebuiltAt, importedAt, scanned });
+  }
+
+  /** A test run's files and engine command line made, with the report directory under a name of its own. */
+  private async testPrepared(plan: TestScanned): Promise<ToolResponse> {
+    const {
+      args,
+      project,
+      flags,
+      scripts,
+      asked,
+      selection,
+      leftOut,
+      needs,
+      needing,
+      accessible,
+      windowed,
+      engine,
+    } = plan;
     // Under a name of this run's own. The directory is a path in the project rather than in this
     // process, so a second run against the same project wrote its report_1 beside the first's,
     // and the reading below takes the highest-numbered one it finds: whichever run finished first
@@ -8029,12 +9323,7 @@ class GodotServer {
     const ours = `gdharness-reports/${randomUUID()}`;
     const reports = `res://.godot/${ours}`;
     const ignored = readStringArray(args, 'ignore') ?? [];
-    const declaredUnder =
-      ignored.length === 0
-        ? []
-        : asked.flatMap((path) =>
-            path.endsWith('.gd') ? (scripts.suite(path) ?? []) : scripts.suitesUnder([path]),
-          );
+    const declaredUnder = ignored.length === 0 ? [] : suitesUnderPaths(scripts, asked);
     // The engine's application data directory, beside the folder user:// is made in, so the
     // lists are not among what a suite finds there.
     const userData = scratchDirectory('tests');
@@ -8058,11 +9347,7 @@ class GodotServer {
     const cmdArgs = [
       // The engine as gdharness test starts it: windowed at the project's viewport size, and
       // either way with no sound, since a suite can read the driver off the command line.
-      ...(windowed
-        ? viewport === null
-          ? []
-          : ['--resolution', `${String(viewport.width)}x${String(viewport.height)}`]
-        : ['--headless']),
+      ...displayArguments(windowed, viewport),
       '--audio-driver',
       'Dummy',
       ...(windowed && accessible.length > 0 ? ['--accessibility', 'always'] : []),
@@ -8099,6 +9384,24 @@ class GodotServer {
       step: join(userData, 'step'),
       exit: join(userData, 'exit'),
     };
+    return await this.testRunning({
+      ...plan,
+      ours,
+      ignored,
+      declaredUnder,
+      userData,
+      engineLog,
+      expectedFile,
+      windowSaid,
+      cmdArgs,
+      timeoutMs,
+      helperFiles,
+    });
+  }
+
+  /** A test run's engine started and watched until it ends, is cut off or is stopped for an autoload. */
+  private async testRunning(prepared: TestPrepared): Promise<ToolResponse> {
+    const { project, needing, windowed, engine, cmdArgs, timeoutMs, ours, userData, helperFiles } = prepared;
     const onDesktop = windowed && process.platform === 'win32';
     // On a desktop of its own on Windows, where its window neither shows nor takes the keyboard.
     // Elsewhere it uses the display there is.
@@ -8174,6 +9477,33 @@ class GodotServer {
         `No tests ran: ${named(needing)} ${needing.length === 1 ? 'needs' : 'need'} a window, and the engine could not be started on a desktop of its own: ${helperFailed}`,
       );
     }
+    return await this.testRead({
+      ...prepared,
+      run,
+      console,
+      timedOut,
+      silentForMs,
+      saidAnything,
+      autoloaded,
+      stopped,
+    });
+  }
+
+  /** A test run's report, engine log and console read once the engine has ended. */
+  private async testRead(ran: TestRan): Promise<ToolResponse> {
+    const {
+      project,
+      began,
+      rebuiltAt,
+      importedAt,
+      run,
+      autoloaded,
+      stopped,
+      ours,
+      userData,
+      engineLog,
+      expectedFile,
+    } = ran;
     const endedAt = Date.now();
     const tookMs = endedAt - began;
     // A run on a quiet project took nine minutes once, with no import and two seconds of suites, and
@@ -8233,6 +9563,46 @@ class GodotServer {
       }
     }
 
+    return await this.testJudged({
+      ...ran,
+      tookMs,
+      tookMsBy,
+      casePrinted,
+      notCompiled,
+      report,
+      reportProblem,
+      declaredErrors,
+    });
+  }
+
+  /** The files the script errors name, found only on a run that stopped on a class it could not resolve. */
+  private async declaringOrigins(
+    printedErrors: readonly ScriptError[],
+    projectPath: string,
+    engine: string,
+  ): Promise<Awaited<ReturnType<typeof originsOf>>> {
+    // So the engine is started again for nothing on any other answer.
+    if (!printedErrors.some((error) => unresolvedClassIn(error.message) !== null)) {
+      return { origins: [], unconfirmed: [] };
+    }
+    return await originsOf(printedErrors, declaredClasses(projectPath), checkWithEngine(engine, projectPath));
+  }
+
+  /** A test run's engine log and console judged: what it printed, how it exited and what the verdict is. */
+  private async testJudged(read: TestReadOut): Promise<ToolResponse> {
+    const {
+      flags,
+      run,
+      asked,
+      timeoutMs,
+      timedOut,
+      silentForMs,
+      saidAnything,
+      engine,
+      project,
+      notCompiled,
+      report,
+    } = read;
     // A verbose run's additions are ordinary lines, the leaked instances and the resources still in
     // use at exit among them, and they are what the flag was passed for.
     const engineEntries = foldedRepeats(
@@ -8244,7 +9614,6 @@ class GodotServer {
         })
         .entries.map(aboveTheRunner),
     );
-    const engineEntriesShown = engineEntries.slice(-MOST_ENGINE_ENTRIES);
     const verdicts: Readonly<Record<number, string>> = {
       0: 'passed',
       100: failedVerdict(report),
@@ -8291,31 +9660,37 @@ class GodotServer {
         : timedOut || exitCode !== 105
           ? []
           : scriptErrorsPrinted(said);
-    // Only on a run that stopped on a class it could not resolve, so the engine is started again
-    // for nothing on any other answer.
-    const declaring = printedErrors.some((error) => unresolvedClassIn(error.message) !== null)
-      ? await originsOf(
-          printedErrors,
-          declaredClasses(project.value.path),
-          checkWithEngine(engine.value, project.value.path),
-        )
-      : { origins: [], unconfirmed: [] };
+    const declaring = await this.declaringOrigins(printedErrors, project.value.path, engine.value);
     const scriptErrors: ScriptError[] = [...declaring.origins, ...printedErrors];
-    const brokenScripts = new Set(scriptErrors.map((error) => error.path)).size;
-    const ranAs =
-      notCompiled !== null
-        ? `the autoload ${notCompiled.name} (${notCompiled.path}) did not compile, so no result counts`
-        : cutShort !== null
-          ? cutShort.verdict
-          : (nothingRan ??
-            (brokenScripts > 0
-              ? `script errors in ${brokenScripts === 1 ? 'one script' : `${brokenScripts} scripts`}, so no suite ran`
-              : undefined) ??
-            (uncaught.length > 0
-              ? `${uncaught.length === 1 ? 'one script error' : `${uncaught.length} script errors`} that failed no case`
-              : undefined) ??
-            (exitCode === null ? undefined : verdicts[exitCode]) ??
-            howItExited(run));
+    const ranAs = ranAsOf({
+      notCompiled,
+      cutShort,
+      nothingRan,
+      brokenScripts: new Set(scriptErrors.map((error) => error.path)).size,
+      uncaught: uncaught.length,
+      exitCode,
+      verdicts,
+      run,
+    });
+    return this.testVerdict({
+      ...read,
+      engineEntries,
+      exitCode,
+      uncaught,
+      printed,
+      said,
+      nothingRan,
+      hung,
+      printedErrors,
+      declaring,
+      scriptErrors,
+      ranAs,
+    });
+  }
+
+  /** A test run's verdict worded beside what was missing, the saves and the lines it was asked to echo. */
+  private testVerdict(judged: TestJudged): ToolResponse {
+    const { args, project, asked, missing, run, nothingRan, ranAs } = judged;
     const nothingAt = missing.join(' and ');
     // gdUnit4's passed is about the paths that were there, and a run of fewer is not called one.
     const verdict =
@@ -8347,12 +9722,46 @@ class GodotServer {
             ...(echoed.omitted > 0 ? { printedOmitted: echoed.omitted } : {}),
           };
 
+    return this.testWithoutReport({ ...judged, verdict, missingNote, savesNote, printedLines });
+  }
+
+  /** The answer of a test run that wrote no report, or on to the one that did. */
+  private testWithoutReport(worded: TestWorded): ToolResponse {
+    const {
+      project,
+      asked,
+      missing,
+      run,
+      cmdArgs,
+      classes,
+      scanned,
+      windowSaid,
+      report,
+      notCompiled,
+      stopped,
+      declaring,
+      exitCode,
+      hung,
+      missingNote,
+      nothingRan,
+      printed,
+      printedErrors,
+      printedLines,
+      ranAs,
+      reportProblem,
+      said,
+      savesNote,
+      scriptErrors,
+      silentForMs,
+      timedOut,
+      tookMs,
+      tookMsBy,
+      verdict,
+    } = worded;
     // What finished before a run without a report ended, which only the console holds: a run cut
     // off by its timeout or by the client otherwise answers nothing of the suites it got through.
-    const sofar = report === null ? suitesPrinted(said) : null;
     if (report === null) {
-      const finished = sofar?.finished ?? [];
-      const running = sofar?.running ?? null;
+      const { finished, running } = suitesPrinted(said);
       const failing = finished.filter((suite) => suite.errors + suite.failures > 0);
       const atTheEnd = {
         ...nonEmpty({
@@ -8366,16 +9775,19 @@ class GodotServer {
         }),
         ...(running === null ? {} : { suiteRunning: running }),
       };
-      const why =
-        notCompiled !== null
-          ? autoloadNotCompiledNote(notCompiled, foldedScriptErrors(scriptErrors), stopped.for !== null)
-          : nothingRan !== null
-            ? `No tests ran: ${ranAs}.`
-            : scriptErrors.length > 0
-              ? scriptErrorsNote(printedErrors, declaring)
-              : reportProblem !== null
-                ? `The test run's report could not be read (${reportProblem}). The engine's own verdict was ${ranAs}.`
-                : `The test run wrote no report (${ranAs}).${finishedBeforeTheEnd(finished.length, failing.length, running)}`;
+      const why = noReportWhy({
+        notCompiled,
+        scriptErrors,
+        stoppedFor: stopped.for !== null,
+        nothingRan,
+        printedErrors,
+        declaring,
+        reportProblem,
+        ranAs,
+        finished: finished.length,
+        failing: failing.length,
+        running,
+      });
       const note = missingNote === undefined ? why : `${why} ${missingNote}`;
       // Kept in the project when nobody is left to read the answer, for the next run there to
       // hand back: the client that cut this call off is the one that will ask again.
@@ -8421,6 +9833,12 @@ class GodotServer {
       };
     }
 
+    return this.testReported({ ...worded, report });
+  }
+
+  /** The answer of a test run that wrote a report, judged against what the engine printed. */
+  private testReported(reported: TestWithReport): ToolResponse {
+    const { run, console, report, casePrinted, declaredErrors, said, uncaught } = reported;
     const { failed, briefed } = failedWithin(
       failedCases(report, Buffer.concat(console).toString('utf8')),
       FAILED_BUDGET,
@@ -8531,6 +9949,45 @@ class GodotServer {
       undeclared: undeclaredPrinted.filter((error) => error.suite === path).length,
       notPrinted: judgedErrors.neverPrinted.filter((unprinted) => unprinted.suite === path).length,
     });
+    return this.testReportAnswer({
+      ...reported,
+      failed,
+      briefed,
+      orphans,
+      orphansIn,
+      warnings,
+      judgedErrors,
+      undeclaredPrinted,
+      undeclaredAll,
+      undeclaredErrors,
+      leakedAtExit,
+      walkStopped,
+      countedLeaks,
+      heldNamed,
+      declaredNotPrinted,
+      erring,
+    });
+  }
+
+  /** The answer of a test run that wrote a report, from the cases it ran and the errors it printed. */
+  private testReportAnswer(judged: TestErrorsJudged): ToolResponse {
+    const {
+      asked,
+      scripts,
+      selection,
+      casePrinted,
+      declaredUnder,
+      engineEntries,
+      erring,
+      ignored,
+      judgedErrors,
+      orphansIn,
+      report,
+      said,
+      uncaught,
+      undeclaredErrors,
+    } = judged;
+    const engineEntriesShown = engineEntries.slice(-MOST_ENGINE_ENTRIES);
     // Errors only, since what this is taken from is the log's count of errors.
     const declaredAndPrinted =
       casePrinted.errors.filter((error) => !error.warning).length -
@@ -8639,8 +10096,61 @@ class GodotServer {
       test: `${one.suite} > ${one.name}`,
       reason: one.reason,
     }));
+    return this.reportAnswer({
+      ...judged,
+      declaredAndPrinted,
+      ranIn,
+      notRunIn,
+      unclean,
+      hookFailures,
+      notRun,
+      uncaughtFolded,
+      listedAsUncaught,
+      notApplied,
+      ignoreRead,
+      unmatched,
+      testsNotRun,
+      casesNotRun,
+      declaredAs,
+      rowsMismatched,
+      casesUnrunnable,
+      engineEntriesShown,
+    });
+  }
+
+  /** The answer of a test run that wrote a report, put together from what was judged. */
+  private reportAnswer(s: TestAnswer): ToolResponse {
     return this.jsonTextResponse({
-      engineNote: engine.note ?? undefined,
+      ...this.reportPassed(s),
+      ...this.reportVerdict(s),
+      ...this.reportLists(s),
+      ...this.reportCounts(s),
+      ...this.reportNote(s),
+      ...this.reportSuites(s),
+    });
+  }
+
+  /** Whether a test run passed, which every check below can fail. */
+  private reportPassed(s: TestAnswer): Record<string, unknown> {
+    const {
+      casesNotRun,
+      casesUnrunnable,
+      countedLeaks,
+      declaredNotPrinted,
+      exitCode,
+      hookFailures,
+      missing,
+      notSuites,
+      nothingRan,
+      report,
+      rowsMismatched,
+      testsNotRun,
+      timedOut,
+      uncaught,
+      undeclaredPrinted,
+    } = s;
+    return {
+      engineNote: s.engine.note ?? undefined,
       // A report with no cases in it is a run where nothing ran, which exits 0 and was answered
       // passed beside a verdict saying no test cases were found.
       passed:
@@ -8650,17 +10160,36 @@ class GodotServer {
         report.tests > 0 &&
         report.failures === 0 &&
         report.errors === 0 &&
-        hookFailures.length === 0 &&
-        uncaught.length === 0 &&
-        undeclaredPrinted.length === 0 &&
-        declaredNotPrinted.length === 0 &&
-        countedLeaks.length === 0 &&
-        missing.length === 0 &&
-        testsNotRun.length === 0 &&
-        casesNotRun.length === 0 &&
-        rowsMismatched.length === 0 &&
-        casesUnrunnable.length === 0 &&
-        notSuites.length === 0,
+        [
+          hookFailures,
+          uncaught,
+          undeclaredPrinted,
+          declaredNotPrinted,
+          countedLeaks,
+          missing,
+          testsNotRun,
+          casesNotRun,
+          rowsMismatched,
+          casesUnrunnable,
+          notSuites,
+        ].every((found) => found.length === 0),
+    };
+  }
+
+  /** The verdict of a test run, with each kind of undeclared or missing result named once. */
+  private reportVerdict(s: TestAnswer): Record<string, unknown> {
+    const {
+      casesNotRun,
+      casesUnrunnable,
+      countedLeaks,
+      declaredNotPrinted,
+      notSuites,
+      rowsMismatched,
+      testsNotRun,
+      undeclaredPrinted,
+      verdict,
+    } = s;
+    return {
       verdict: [
         // gdUnit4's word for the exit, which is not the run's when something below fails it.
         verdict === 'passed' &&
@@ -8707,6 +10236,23 @@ class GodotServer {
       ]
         .filter((part) => part !== undefined)
         .join('; '),
+    };
+  }
+
+  /** The lists a test run names when something it was asked for did not run as asked. */
+  private reportLists(s: TestAnswer): Record<string, unknown> {
+    const {
+      casesNotRun,
+      casesUnrunnable,
+      hung,
+      missing,
+      notSuites,
+      rowsMismatched,
+      silentForMs,
+      testsNotRun,
+      timedOut,
+    } = s;
+    return {
       ...(missing.length > 0 ? { missing } : {}),
       ...(notSuites.length > 0 ? { notSuites } : {}),
       ...(testsNotRun.length + casesNotRun.length > 0
@@ -8715,6 +10261,37 @@ class GodotServer {
       ...(rowsMismatched.length > 0 ? { rowsMismatched } : {}),
       ...(casesUnrunnable.length > 0 ? { casesUnrunnable } : {}),
       ...(timedOut ? { timedOut, hung, silentForMs } : {}),
+    };
+  }
+
+  /** The counts of a test run, and what it failed, left behind or ignored. */
+  private reportCounts(s: TestAnswer): Record<string, unknown> {
+    const {
+      briefed,
+      declaredNotPrinted,
+      exitCode,
+      failed,
+      hookFailures,
+      ignoreRead,
+      leakedAtExit,
+      notApplied,
+      notRun,
+      orphans,
+      printedLines,
+      report,
+      run,
+      savesNote,
+      scanned,
+      tookMs,
+      tookMsBy,
+      uncaughtFolded,
+      undeclaredAll,
+      undeclaredErrors,
+      unmatched,
+      warnings,
+      windowSaid,
+    } = s;
+    return {
       exitCode,
       exitSignal: run.exitSignal ?? undefined,
       tests: report.tests,
@@ -8747,61 +10324,121 @@ class GodotServer {
       savesNote,
       ...scanned,
       ...windowSaid,
+    };
+  }
+
+  /** The note of a test run, one sentence for each reason it is not a plain pass. */
+  private reportNote(s: TestAnswer): Record<string, unknown> {
+    return {
       // The word on its own was the whole answer, and it named neither what was warned nor where.
       note:
-        [
-          missingNote,
-          testsNotRun.length > 0
-            ? `${testsNotRun.join(', ')} ${testsNotRun.length === 1 ? 'was' : 'were'} asked for and not run, so the run is not called passed: gdUnit4 runs a test_ function only in a script that extends GdUnitTestSuite, and leaves out a suite whose script does not load.`
-            : undefined,
-          casesNotRun.length > 0
-            ? `${casesNotRun.join(', ')} ${casesNotRun.length === 1 ? 'is a case' : 'are cases'} of a suite that ran and passed, and gdUnit4 never ran ${casesNotRun.length === 1 ? 'it' : 'them'} and said nothing of it, so the run is not called passed, as gdharness test judges it.`
-            : undefined,
-          rowsMismatched.length > 0
-            ? `gdUnit4 skipped what rowsMismatched names because the row's data does not fit the case's parameters, though it printed ${rowsMismatched.length === 1 ? 'the row' : 'each row'} passed first. Each entry carries gdUnit4's reason. The run is not called passed, as gdharness test judges it.`
-            : undefined,
-          casesUnrunnable.length > 0
-            ? `gdUnit4 skipped what casesUnrunnable names because it cannot run ${casesUnrunnable.length === 1 ? 'that case' : 'those cases'} as declared, though it printed ${casesUnrunnable.length === 1 ? 'it' : 'each'} passed first. Each entry carries gdUnit4's reason. A parameter is filled only by _test_parameters, a fuzzer or a setting gdUnit4 names (timeout, do_skip, skip_reason, fuzzer_iterations, fuzzer_seed), and fuzzers come before the settings. The run is not called passed, as gdharness test judges it.`
-            : undefined,
-          notSuites.length > 0
-            ? 'What notSuites names declares cases gdUnit4 never runs, so the run is not called passed, as gdharness test judges it.'
-            : undefined,
-          briefed > 0
-            ? `${briefed} of the ${failed.length} failing cases, those with the largest reports, are named with their first message only, since their reports would have made the answer too large to deliver. Pass one case's suite path to see its reports.`
-            : undefined,
-          notApplied.length > 0
-            ? 'An ignore entry named a case that ran all the same: gdUnit4 leaves a case out only as suite_name:test_name, and reads an entry with no colon as a suite name or a piece of a suite path. ignoreNotApplied gives the form for each case that ran.'
-            : undefined,
-          unmatched.length > 0
-            ? `${unmatched.join(', ')} ${unmatched.length === 1 ? 'names' : 'name'} no suite, case or row under the paths run, so ${unmatched.length === 1 ? 'it' : 'they'} left nothing out.`
-            : undefined,
-          uncaughtNote(uncaught),
-          undeclaredErrors.length > 0
-            ? `An engine error or warning a suite does not declare fails the run, as gdharness test judges it. ${declaringAdvice(undeclaredErrors[0]?.case ?? 'test_name', undeclaredErrors[0]?.warning === true)}, once for each time it prints it${undeclaredErrors.some((error) => error.warning !== undeclaredErrors[0]?.warning) ? (undeclaredErrors[0]?.warning === true ? ', and an error in its GDHARNESS_EXPECTED_ERRORS' : ', and a warning in its GDHARNESS_EXPECTED_WARNINGS') : ''}.${declaredAs}`
-            : undefined,
-          declaredNotPrinted.length > 0
-            ? 'A declared error or warning the case did not print fails the run too, since the case no longer reaches what it was written to test.'
-            : undefined,
-          gdUnitFailsOnPushErrors(project.value.path)
-            ? pushErrorsFailedSentence(failedOnPushErrors(casePrinted))
-            : undefined,
-          walkStopped ? WALK_STOPPED_SENTENCE : undefined,
-          countedLeaks.length > 0
-            ? [
-                heldNamed === undefined
-                  ? 'What the engine still held as it exited fails the run, as gdharness test judges it. engineArgs ["--verbose"] has the engine name what it held.'
-                  : `What the engine still held as it exited fails the run, as gdharness test judges it. ${heldNamed}`,
-                selfTypedSentence(projectSelfTypedExports(project.value.path)),
-              ]
-                .filter((part) => part !== undefined)
-                .join(' ')
-            : undefined,
-          ranAs.startsWith('warnings') && warnings.length === 0
-            ? 'gdUnit4 exits 101 for orphan nodes when nothing failed, and this run printed no count of them: orphan reporting may be off in the project settings.'
-            : notRunNote(notRun, readBoolean(args, 'failFast') === true),
-        ]
+        [...this.notRunNotes(s), ...this.ignoredNotes(s), ...this.engineNotes(s)]
           .filter((part) => part !== undefined)
           .join(' ') || undefined,
+    };
+  }
+
+  /** The sentences of a test run's note about what was asked for and did not run. */
+  private notRunNotes(s: TestAnswer): (string | undefined)[] {
+    const { casesNotRun, missingNote, rowsMismatched, testsNotRun } = s;
+    return [
+      missingNote,
+      testsNotRun.length > 0
+        ? `${testsNotRun.join(', ')} ${testsNotRun.length === 1 ? 'was' : 'were'} asked for and not run, so the run is not called passed: gdUnit4 runs a test_ function only in a script that extends GdUnitTestSuite, and leaves out a suite whose script does not load.`
+        : undefined,
+      casesNotRun.length > 0
+        ? `${casesNotRun.join(', ')} ${casesNotRun.length === 1 ? 'is a case' : 'are cases'} of a suite that ran and passed, and gdUnit4 never ran ${casesNotRun.length === 1 ? 'it' : 'them'} and said nothing of it, so the run is not called passed, as gdharness test judges it.`
+        : undefined,
+      rowsMismatched.length > 0
+        ? `gdUnit4 skipped what rowsMismatched names because the row's data does not fit the case's parameters, though it printed ${rowsMismatched.length === 1 ? 'the row' : 'each row'} passed first. Each entry carries gdUnit4's reason. The run is not called passed, as gdharness test judges it.`
+        : undefined,
+    ];
+  }
+
+  /** The sentences of a test run's note about scripts that are no suite, cut reports and ignore entries. */
+  private ignoredNotes(s: TestAnswer): (string | undefined)[] {
+    const { briefed, casesUnrunnable, failed, notApplied, notSuites, uncaught, unmatched } = s;
+    return [
+      casesUnrunnable.length > 0
+        ? `gdUnit4 skipped what casesUnrunnable names because it cannot run ${casesUnrunnable.length === 1 ? 'that case' : 'those cases'} as declared, though it printed ${casesUnrunnable.length === 1 ? 'it' : 'each'} passed first. Each entry carries gdUnit4's reason. A parameter is filled only by _test_parameters, a fuzzer or a setting gdUnit4 names (timeout, do_skip, skip_reason, fuzzer_iterations, fuzzer_seed), and fuzzers come before the settings. The run is not called passed, as gdharness test judges it.`
+        : undefined,
+      notSuites.length > 0
+        ? 'What notSuites names declares cases gdUnit4 never runs, so the run is not called passed, as gdharness test judges it.'
+        : undefined,
+      briefed > 0
+        ? `${briefed} of the ${failed.length} failing cases, those with the largest reports, are named with their first message only, since their reports would have made the answer too large to deliver. Pass one case's suite path to see its reports.`
+        : undefined,
+      notApplied.length > 0
+        ? 'An ignore entry named a case that ran all the same: gdUnit4 leaves a case out only as suite_name:test_name, and reads an entry with no colon as a suite name or a piece of a suite path. ignoreNotApplied gives the form for each case that ran.'
+        : undefined,
+      unmatched.length > 0
+        ? `${unmatched.join(', ')} ${unmatched.length === 1 ? 'names' : 'name'} no suite, case or row under the paths run, so ${unmatched.length === 1 ? 'it' : 'they'} left nothing out.`
+        : undefined,
+      uncaughtNote(uncaught),
+    ];
+  }
+
+  /** The sentences of a test run's note about what the engine printed and what it still held. */
+  private engineNotes(s: TestAnswer): (string | undefined)[] {
+    const {
+      args,
+      casePrinted,
+      countedLeaks,
+      declaredAs,
+      declaredNotPrinted,
+      heldNamed,
+      notRun,
+      project,
+      ranAs,
+      undeclaredErrors,
+      walkStopped,
+      warnings,
+    } = s;
+    return [
+      undeclaredErrors.length > 0
+        ? `An engine error or warning a suite does not declare fails the run, as gdharness test judges it. ${declaringAdvice(undeclaredErrors[0]?.case ?? 'test_name', undeclaredErrors[0]?.warning === true)}, once for each time it prints it${undeclaredErrors.some((error) => error.warning !== undeclaredErrors[0]?.warning) ? (undeclaredErrors[0]?.warning === true ? ', and an error in its GDHARNESS_EXPECTED_ERRORS' : ', and a warning in its GDHARNESS_EXPECTED_WARNINGS') : ''}.${declaredAs}`
+        : undefined,
+      declaredNotPrinted.length > 0
+        ? 'A declared error or warning the case did not print fails the run too, since the case no longer reaches what it was written to test.'
+        : undefined,
+      gdUnitFailsOnPushErrors(project.value.path)
+        ? pushErrorsFailedSentence(failedOnPushErrors(casePrinted))
+        : undefined,
+      walkStopped ? WALK_STOPPED_SENTENCE : undefined,
+      countedLeaks.length > 0
+        ? [
+            heldNamed === undefined
+              ? 'What the engine still held as it exited fails the run, as gdharness test judges it. engineArgs ["--verbose"] has the engine name what it held.'
+              : `What the engine still held as it exited fails the run, as gdharness test judges it. ${heldNamed}`,
+            selfTypedSentence(projectSelfTypedExports(project.value.path)),
+          ]
+            .filter((part) => part !== undefined)
+            .join(' ')
+        : undefined,
+      ranAs.startsWith('warnings') && warnings.length === 0
+        ? 'gdUnit4 exits 101 for orphan nodes when nothing failed, and this run printed no count of them: orphan reporting may be off in the project settings.'
+        : notRunNote(notRun, readBoolean(args, 'failFast') === true),
+    ];
+  }
+
+  /** The suites of a test run that were not clean, and what the engine itself printed. */
+  private reportSuites(s: TestAnswer): Record<string, unknown> {
+    const {
+      classes,
+      declaredAndPrinted,
+      engineEntries,
+      engineEntriesShown,
+      erring,
+      listedAsUncaught,
+      notRunIn,
+      orphansIn,
+      project,
+      ranIn,
+      report,
+      run,
+      unclean,
+    } = s;
+    return {
       suites: unclean.map((suite) => ({
         name: suite.name,
         path: suite.path,
@@ -8835,7 +10472,7 @@ class GodotServer {
           ? engineEntries.length - engineEntriesShown.length
           : undefined,
       classes: withAddonClassesCounted(classes.payload, cachedClasses(project.value.path) ?? new Map()),
-    });
+    };
   }
 
   // -------------------------------------------------------------------------------------------
@@ -8860,151 +10497,167 @@ class GodotServer {
       return this.createErrorResponse(scripts.reason);
     }
     if (scripts?.value == null) {
-      // Judged here rather than by whichever half answers, which named a missing script by its
-      // absolute path and refused a path outside the project with no remedy, while every other
-      // tool given either gave the res:// path and the remedies.
-      const asked = readString(args, 'scriptPath');
-      let ignored: Record<string, unknown> = {};
-      if (project.ok && asked !== undefined) {
-        const location = resolveWithinProject(project.value.path, asked);
-        if (!location.ok) {
-          return this.createErrorResponse(location.reason, PATH_SOLUTIONS);
-        }
-        if (!existsSync(location.absolutePath)) {
-          return this.missingScript(project.value.path, location.relativePath);
-        }
-        ignored = scriptsUnderGdignore(project.value.path, [location.relativePath]);
+      return await this.diagnoseOneScript(args, project);
+    }
+    return await this.diagnoseSeveralScripts(args, project, scripts.value);
+  }
+
+  /** The diagnostics of the one script a call names, or of the scripts it names none of. */
+  private async diagnoseOneScript(
+    args: OperationParams,
+    project: Checked<{ path: string; file: string }>,
+  ): Promise<ToolResponse> {
+    // Judged here rather than by whichever half answers, which named a missing script by its
+    // absolute path and refused a path outside the project with no remedy, while every other
+    // tool given either gave the res:// path and the remedies.
+    const asked = readString(args, 'scriptPath');
+    let ignored: Record<string, unknown> = {};
+    if (project.ok && asked !== undefined) {
+      const location = resolveWithinProject(project.value.path, asked);
+      if (!location.ok) {
+        return this.createErrorResponse(location.reason, PATH_SOLUTIONS);
       }
-      const one = await this.diagnosticsOf(args);
-      if ('noLanguageServer' in one) {
-        const checked = project.ok
-          ? await this.engineDiagnostics(
-              project.value.path,
-              [readString(args, 'scriptPath') ?? ''],
-              one.noLanguageServer,
-            )
-          : { refusal: project.response };
-        return 'refusal' in checked
-          ? checked.refusal
-          : this.jsonTextResponse({
-              ...checked.answers[0],
-              ...engineChecked(one.noLanguageServer.reason),
-              ...nonEmpty({ classesRebuiltFirst: checked.classesRebuiltFirst }),
-              ...ignored,
-            });
+      if (!existsSync(location.absolutePath)) {
+        return this.missingScript(project.value.path, location.relativePath);
       }
-      return 'refusal' in one
-        ? one.refusal
+      ignored = scriptsUnderGdignore(project.value.path, [location.relativePath]);
+    }
+    const one = await this.diagnosticsOf(args);
+    if ('noLanguageServer' in one) {
+      const checked = project.ok
+        ? await this.engineDiagnostics(
+            project.value.path,
+            [readString(args, 'scriptPath') ?? ''],
+            one.noLanguageServer,
+          )
+        : { refusal: project.response };
+      return 'refusal' in checked
+        ? checked.refusal
         : this.jsonTextResponse({
-            ...one.answer,
-            checkedBy: 'language server',
+            ...checked.answers[0],
+            ...engineChecked(one.noLanguageServer.reason),
+            ...nonEmpty({ classesRebuiltFirst: checked.classesRebuiltFirst }),
             ...ignored,
           });
     }
+    return 'refusal' in one
+      ? one.refusal
+      : this.jsonTextResponse({
+          ...one.answer,
+          checkedBy: 'language server',
+          ...ignored,
+        });
+  }
+
+  /** The diagnostics of each of several scripts, the rest handed to one engine when the language server stops answering. */
+  private async diagnoseSeveralScripts(
+    args: OperationParams,
+    project: Checked<{ path: string; file: string }>,
+    scripts: readonly string[],
+  ): Promise<ToolResponse> {
     const progress = callProgress();
     const cancelled = callSignal();
-    const reported: OperationParams[] = [];
-    const nothingReported: string[] = [];
-    let errors = 0;
-    let warnings = 0;
-    // The engine's count of the scripts it checked, null when its warnings could not be read.
-    let engineWarned: number | null = 0;
-    let unread = 0;
-    let byEngine: string | null = null;
-    let rebuilt: string[] = [];
-    // How many the language server answered before it stopped answering, if it did, so a check
-    // that went on in the engine does not call every script the engine's.
-    let byServer = 0;
-    for (const [at, scriptPath] of scripts.value.entries()) {
+    const tally: DiagnosticsTally = {
+      reported: [],
+      nothingReported: [],
+      errors: 0,
+      warnings: 0,
+      // The engine's count of the scripts it checked, null when its warnings could not be read.
+      engineWarned: 0,
+      unread: 0,
+      byEngine: null,
+      rebuilt: [],
+      // How many the language server answered before it stopped answering, if it did, so a check
+      // that went on in the engine does not call every script the engine's.
+      byServer: 0,
+    };
+    for (const [at, scriptPath] of scripts.entries()) {
       // Nobody is left to read the answer, and a folder can take minutes.
       if (cancelled?.aborted === true) {
-        return this.createErrorResponse(`Cancelled after ${at} of ${scripts.value.length} scripts.`);
+        return this.createErrorResponse(`Cancelled after ${at} of ${scripts.length} scripts.`);
       }
-      progress?.(at + 1, `${at + 1} of ${scripts.value.length}: ${scriptPath}`);
-      const unreadable = project.ok ? unreadableScript(project.value.path, scriptPath) : null;
-      if (unreadable !== null) {
-        unread += 1;
-        reported.push({ scriptPath, error: unreadable });
+      progress?.(at + 1, `${at + 1} of ${scripts.length}: ${scriptPath}`);
+      if (project.ok && tallyUnreadableScript(tally, project.value.path, scriptPath)) {
         continue;
       }
       const one = await this.diagnosticsOf({ ...args, scriptPath });
       if ('noLanguageServer' in one) {
-        // The rest in one engine, since what kept the language server from answering this script
-        // keeps it from answering the others. The engine answers a missing file as one it could
-        // not load, which reads as a broken script, so those are named as the language server
-        // names them.
-        const rest: string[] = [];
-        const refusedHere = new Map<string, string>();
-        for (const left of scripts.value.slice(at)) {
-          const refused = project.ok ? unreadableScript(project.value.path, left) : null;
-          if (refused === null) {
-            rest.push(left);
-          } else {
-            refusedHere.set(left, refused);
-          }
-        }
-        progress?.(at + 1, `${rest.length} script(s) left, compiled by a headless engine`);
-        const checked = await this.engineDiagnostics(
-          project.ok ? project.value.path : '',
-          rest,
+        const refusal = await this.diagnoseTheRestByEngine(
+          project,
+          scripts.slice(at),
           one.noLanguageServer,
+          tally,
+          at + 1,
         );
-        if ('refusal' in checked) {
-          return checked.refusal;
-        }
-        rebuilt = checked.classesRebuiltFirst;
-        for (const [left, error] of refusedHere) {
-          unread += 1;
-          reported.push({ scriptPath: left, error });
-        }
-        for (const answer of checked.answers) {
-          errors += Number(answer['errors']);
-          engineWarned =
-            answer['warnings'] === null || engineWarned === null
-              ? null
-              : engineWarned + Number(answer['warnings']);
-          if (readArray(answer, 'diagnostics')?.length === 0) {
-            nothingReported.push(String(answer['scriptPath']));
-          } else {
-            reported.push(answer);
-          }
-        }
-        byEngine = one.noLanguageServer.reason;
-        break;
+        return refusal ?? this.severalScriptsAnswer(project, scripts, tally);
       }
       if ('refusal' in one) {
-        if (!one.perScript) {
-          return one.refusal;
+        const stop = tallyRefusedScript(tally, scriptPath, one);
+        if (stop !== null) {
+          return stop;
         }
-        unread += 1;
-        reported.push({ scriptPath, error: one.refusal.content[0]?.text ?? 'not read' });
         continue;
       }
-      byServer += 1;
-      errors += Number(one.answer['errors']);
-      warnings += Number(one.answer['warnings']);
-      // Every note an answer can carry is about a diagnostic, so none means nothing else either.
-      if (readArray(one.answer, 'diagnostics')?.length === 0) {
-        nothingReported.push(scriptPath);
+      tallyLanguageServerAnswer(tally, scriptPath, one.answer);
+    }
+    return this.severalScriptsAnswer(project, scripts, tally);
+  }
+
+  /** The answer of a check of several scripts: the tally, and the scripts under a `.gdignore`. */
+  private severalScriptsAnswer(
+    project: Checked<{ path: string; file: string }>,
+    scripts: readonly string[],
+    tally: DiagnosticsTally,
+  ): ToolResponse {
+    return this.jsonTextResponse({
+      ...diagnosticsSummary(tally, scripts.length),
+      ...(project.ok ? scriptsUnderGdignore(project.value.path, scripts) : {}),
+    });
+  }
+
+  /**
+   * The scripts [param left] checked in one engine, since what kept the language server from
+   * answering the first keeps it from answering the others, and their answers added to [param tally].
+   * The refusal when the engine could not run, else null.
+   */
+  private async diagnoseTheRestByEngine(
+    project: Checked<{ path: string; file: string }>,
+    left: readonly string[],
+    noLanguageServer: Parameters<GodotServer['engineDiagnostics']>[2],
+    tally: DiagnosticsTally,
+    position: number,
+  ): Promise<ToolResponse | null> {
+    // The engine answers a missing file as one it could not load, which reads as a broken script,
+    // so those are named as the language server names them.
+    const rest: string[] = [];
+    const refusedHere = new Map<string, string>();
+    for (const script of left) {
+      const refused = project.ok ? unreadableScript(project.value.path, script) : null;
+      if (refused === null) {
+        rest.push(script);
       } else {
-        reported.push(one.answer);
+        refusedHere.set(script, refused);
       }
     }
-    return this.jsonTextResponse({
-      clean: errors === 0 && unread === 0,
-      scriptsChecked: scripts.value.length,
-      errors,
-      warnings: engineWarned === null ? null : warnings + engineWarned,
-      ...(unread > 0 ? { scriptsNotRead: unread } : {}),
-      scripts: reported,
-      nothingReported,
-      ...(byEngine === null ? { checkedBy: 'language server' } : engineChecked(byEngine)),
-      ...nonEmpty({ classesRebuiltFirst: rebuilt }),
-      ...(byEngine !== null && byServer > 0
-        ? { checkedBy: 'language server, then engine', checkedByLanguageServer: byServer }
-        : {}),
-      ...(project.ok ? scriptsUnderGdignore(project.value.path, scripts.value) : {}),
-    });
+    callProgress()?.(position, `${rest.length} script(s) left, compiled by a headless engine`);
+    const checked = await this.engineDiagnostics(
+      project.ok ? project.value.path : '',
+      rest,
+      noLanguageServer,
+    );
+    if ('refusal' in checked) {
+      return checked.refusal;
+    }
+    tally.rebuilt = checked.classesRebuiltFirst;
+    for (const [script, error] of refusedHere) {
+      tally.unread += 1;
+      tally.reported.push({ scriptPath: script, error });
+    }
+    for (const answer of checked.answers) {
+      tallyEngineAnswer(tally, answer);
+    }
+    tally.byEngine = noLanguageServer.reason;
+    return null;
   }
 
   /** The refusal for [param relativePath], a script the project does not hold, with the nearest it does. */
@@ -9269,24 +10922,12 @@ class GodotServer {
 
     // The diagnostics that name only a member, read against the line of the diagnosed script they
     // are on to find the class it was looked up on.
-    const external = diagnostics.filter((entry) =>
-      String(asParams(entry)['message']).includes(EXTERNAL_MEMBER),
+    const alsoDenied = deniedExternalMembers(
+      diagnostics,
+      readString(args, 'scriptPath') ?? '',
+      cached,
+      sourceOf,
     );
-    const diagnosed = external.length === 0 ? null : sourceOf(readString(args, 'scriptPath') ?? '');
-    const lines = diagnosed?.split('\n') ?? [];
-    const alsoDenied =
-      cached === null
-        ? []
-        : external
-            .map((entry) => {
-              const { message, line } = asParams(entry);
-              return externalMemberIn(
-                String(message),
-                typeof line === 'number' ? lines[line - 1] : undefined,
-                cached,
-              );
-            })
-            .filter((missing): missing is MissingMember => missing !== null);
 
     const contradicted =
       cached === null ? [] : contradictedDiagnostics(messages, cached, sourceOf, alsoDenied);
@@ -9297,27 +10938,19 @@ class GodotServer {
       ? unloadedTypes(messages, declaredClasses(projectPath), cached)
       : [];
 
+    return this.staleAnalysisAnswer(projectPath, cached, contradicted, unloaded);
+  }
+
+  /** What the diagnostics the file contradicts and the types the editor has not loaded add to an answer. */
+  private staleAnalysisAnswer(
+    projectPath: string,
+    cached: ReturnType<typeof cachedClasses>,
+    contradicted: ReturnType<typeof contradictedDiagnostics>,
+    unloaded: ReturnType<typeof unloadedTypes>,
+  ): OperationParams {
     const notes: string[] = [];
     if (contradicted.length > 0) {
-      // What the stale types are built from, which is the lever rather than a detail: a held copy
-      // is refreshed when one of its own dependencies changes and not when it changes itself, so
-      // the useful thing to hand a caller is the list of files worth touching. Only the methods' and
-      // properties' scripts, which are the ones the lever is offered for.
-      const dependsOn = new Set<string>();
-      for (const one of contradicted.filter(
-        (entry) => entry.kind === 'method' || entry.kind === 'property',
-      )) {
-        const source = cached === null ? null : this.sourceOfClass(projectPath, one.declaredIn);
-        if (source === null || cached === null) {
-          continue;
-        }
-        for (const name of classesNamedIn(source, cached)) {
-          if (name !== one.type) {
-            dependsOn.add(name);
-          }
-        }
-      }
-      notes.push(staleAnalysisNote(contradicted, [...dependsOn]));
+      notes.push(staleAnalysisNote(contradicted, this.staleDependencies(projectPath, cached, contradicted)));
     }
     const uncached = unloaded.filter((type) => !type.inTheClassCache);
     if (uncached.length > 0) {
@@ -9342,6 +10975,32 @@ class GodotServer {
       ...(unloaded.length === 0 ? {} : { typesTheEditorHasNotLoaded: unloaded }),
       ...(notes.length === 0 ? {} : { staleAnalysis: notes.join(' ') }),
     };
+  }
+
+  /**
+   * What the stale types are built from, which is the lever rather than a detail: a held copy
+   * is refreshed when one of its own dependencies changes and not when it changes itself, so
+   * the useful thing to hand a caller is the list of files worth touching. Only the methods' and
+   * properties' scripts, which are the ones the lever is offered for.
+   */
+  private staleDependencies(
+    projectPath: string,
+    cached: ReturnType<typeof cachedClasses>,
+    contradicted: ReturnType<typeof contradictedDiagnostics>,
+  ): string[] {
+    const dependsOn = new Set<string>();
+    for (const one of contradicted.filter((entry) => entry.kind === 'method' || entry.kind === 'property')) {
+      const source = cached === null ? null : this.sourceOfClass(projectPath, one.declaredIn);
+      if (source === null || cached === null) {
+        continue;
+      }
+      for (const name of classesNamedIn(source, cached)) {
+        if (name !== one.type) {
+          dependsOn.add(name);
+        }
+      }
+    }
+    return [...dependsOn];
   }
 
   /**
@@ -9873,7 +11532,17 @@ class GodotServer {
     // mayYetConnect true for such a project while editor_launch refused to open one.
     const cannotConnect =
       status.connected || this.ownProject === null ? null : editorAddonMissing(this.ownProject);
-    return {
+    const context: EditorStatusContext = {
+      status,
+      arriving,
+      unfinished,
+      launchedIsUp,
+      cannotConnect,
+      staleNote,
+      greeted,
+      isPortConflict,
+    };
+    const first = {
       ...status,
       serverVersion: SERVER_VERSION,
       addonIsStale: greeted ? staleNote !== undefined : undefined,
@@ -9892,17 +11561,7 @@ class GodotServer {
       // positive evidence about the editor it would otherwise be waiting for: it was asked to quit,
       // and the launch that would have replaced it never ran. Nothing is coming, and a young server
       // answering from its own age sent a caller into a wait that could not end.
-      mayYetConnect: status.connected
-        ? undefined
-        : cannotConnect !== null
-          ? false
-          : arriving.length > 0
-            ? true
-            : unfinished !== null
-              ? unfinished.underway
-              : this.closedHere !== null
-                ? false
-                : anEditorIsStillComing(status.listeningSince, launchedIsUp),
+      mayYetConnect: this.mayYetConnect(context),
       editorsNotYetConnected: arriving.length > 0 ? arriving : undefined,
       editorCannotConnect:
         cannotConnect === null
@@ -9911,6 +11570,37 @@ class GodotServer {
               note: `No editor of this project can connect: ${cannotConnect.why}.`,
               remedies: cannotConnect.remedies,
             },
+    };
+    return {
+      ...first,
+      ...this.editorStatusClosed(context),
+      ...this.editorStatusLaunch(context),
+      ...this.editorStatusBridge(context),
+    };
+  }
+
+  /** Whether an editor that is not connected may still connect, from what this server knows of it. */
+  private mayYetConnect(context: EditorStatusContext): boolean | undefined {
+    const { status, cannotConnect, arriving, unfinished, launchedIsUp } = context;
+    if (status.connected) {
+      return undefined;
+    }
+    if (cannotConnect !== null) {
+      return false;
+    }
+    if (arriving.length > 0) {
+      return true;
+    }
+    if (unfinished !== null) {
+      return unfinished.underway;
+    }
+    return this.closedHere !== null ? false : anEditorIsStillComing(status.listeningSince, launchedIsUp);
+  }
+
+  /** The editor_status fields on an editor this server closed, quit unused, or left mid-restart. */
+  private editorStatusClosed(context: EditorStatusContext) {
+    const { status, arriving, unfinished } = context;
+    return {
       closedHere:
         status.connected || arriving.length > 0 || this.closedHere === null
           ? undefined
@@ -9948,6 +11638,13 @@ class GodotServer {
               byServerPid: unfinished.note.byPid,
               note: `A restart of this project's editor is under way: gdharness server pid ${unfinished.note.byPid} asked it to quit at ${unfinished.note.quitAt} and is starting it again. Wait for it rather than opening another.`,
             },
+    };
+  }
+
+  /** The editor_status fields on the editor this server launched. */
+  private editorStatusLaunch(context: EditorStatusContext) {
+    const { status, launchedIsUp } = context;
+    return {
       // Which of the two reasons the line above is true, when it is the launch. A caller told only
       // "yes" cannot tell a window that will close in seconds from an import that will take
       // minutes, and the pid is the thing they can watch.
@@ -9979,6 +11676,13 @@ class GodotServer {
               port: this.godotBridge.configuredPort,
               note: `The gdharness server this one replaced, pid ${this.handingOverFrom}, still holds port ${this.godotBridge.configuredPort} and is standing down. This server takes the port when it lets go, and takes another after ${HANDOVER_MS / 1000} seconds if it does not.`,
             },
+    };
+  }
+
+  /** The editor_status fields on the bridge: its port, its handover, the addon's release and the retries. */
+  private editorStatusBridge(context: EditorStatusContext) {
+    const { status, greeted, staleNote, isPortConflict } = context;
+    return {
       staleNote,
       addonNote:
         greeted && staleNote === undefined
@@ -10471,6 +12175,15 @@ class GodotServer {
       );
     }
 
+    return await this.restartWithTheStartItHad(args, before, mine);
+  }
+
+  /** A restart once an editor is connected: how it was started is read first, and a restart that cannot say is refused. */
+  private async restartWithTheStartItHad(
+    args: OperationParams,
+    before: ReturnType<GodotBridge['getStatus']>,
+    mine: boolean,
+  ): Promise<ToolResponse> {
     // What project.godot says before the editor is asked to go, because saving it on the way out
     // is not a copy: Godot writes only what differs from its own defaults, so a key named on
     // purpose at its default value is redundant to the editor and is dropped. A project that pins
@@ -10487,26 +12200,74 @@ class GodotServer {
     // command line only, and an editor opened to end with a session keeps ending with it.
     let until: number | null = null;
     if (mine) {
-      const was = before.editorPid === undefined ? null : await runningAs(before.editorPid);
-      if (was?.kind === 'commandLine') {
-        const as = startedAs(was.text);
-        hidden = typeof args['hidden'] === 'boolean' ? args['hidden'] : as.hidden;
-        silent = typeof args['silent'] === 'boolean' ? args['silent'] : as.silent;
-        until = as.until;
-      } else if (typeof args['hidden'] !== 'boolean') {
-        const why =
-          was === null ? 'the operating system would not say' : (was.unread ?? 'it gave no command line');
-        return this.createErrorResponse(
-          `How the editor (pid ${before.editorPid ?? 'unknown'}) was started could not be read (${why}), so whether it was hidden cannot be told and it was left running.`,
-          ['Pass hidden: true to bring it back with no window, or hidden: false to bring it back visible'],
-        );
+      const read = await this.howTheEditorWasStarted(args, before);
+      if ('refusal' in read) {
+        return read.refusal;
       }
+      ({ hidden, silent, until } = read);
     }
 
-    if (hidden && args['silent'] === false) {
+    return await this.restartUnlessSilentIsRefused(args, before, { mine, hidden, silent, until });
+  }
+
+  /**
+   * How the running editor was started, read off its command line, with what the call says taking
+   * precedence, or the refusal when it cannot be read and the call does not say.
+   */
+  private async howTheEditorWasStarted(
+    args: OperationParams,
+    before: ReturnType<GodotBridge['getStatus']>,
+  ): Promise<{ hidden: boolean; silent: boolean; until: number | null } | { refusal: ToolResponse }> {
+    const was = before.editorPid === undefined ? null : await runningAs(before.editorPid);
+    if (was?.kind === 'commandLine') {
+      const as = startedAs(was.text);
+      return {
+        hidden: typeof args['hidden'] === 'boolean' ? args['hidden'] : as.hidden,
+        silent: typeof args['silent'] === 'boolean' ? args['silent'] : as.silent,
+        until: as.until,
+      };
+    }
+    if (typeof args['hidden'] === 'boolean') {
+      return { hidden: args['hidden'], silent: resolveSilent(args['silent']), until: null };
+    }
+    const why =
+      was === null ? 'the operating system would not say' : (was.unread ?? 'it gave no command line');
+    return {
+      refusal: this.createErrorResponse(
+        `How the editor (pid ${before.editorPid ?? 'unknown'}) was started could not be read (${why}), so whether it was hidden cannot be told and it was left running.`,
+        ['Pass hidden: true to bring it back with no window, or hidden: false to bring it back visible'],
+      ),
+    };
+  }
+
+  /** The restart, refused when a hidden editor was asked to keep its sound. */
+  private async restartUnlessSilentIsRefused(
+    args: OperationParams,
+    before: ReturnType<GodotBridge['getStatus']>,
+    plan: {
+      readonly mine: boolean;
+      readonly hidden: boolean;
+      readonly silent: boolean;
+      readonly until: number | null;
+    },
+  ): Promise<ToolResponse> {
+    if (plan.hidden && args['silent'] === false) {
       return this.createErrorResponse(HIDDEN_WITH_SOUND, [HIDDEN_WITH_SOUND_FIX]);
     }
+    return await this.restartAndWait(before, plan);
+  }
 
+  /** The editor asked to restart and waited for until a newer connection is up. */
+  private async restartAndWait(
+    before: ReturnType<GodotBridge['getStatus']>,
+    plan: {
+      readonly mine: boolean;
+      readonly hidden: boolean;
+      readonly silent: boolean;
+      readonly until: number | null;
+    },
+  ): Promise<ToolResponse> {
+    const { mine, hidden, silent, until } = plan;
     const settingsBefore = this.settingKeysOf(before.projectPath);
     const asked = mine
       ? await this.startItAgain(before.projectPath ?? '', before.editorPid, { hidden, silent, until })
@@ -10536,6 +12297,21 @@ class GodotServer {
       );
     }
 
+    return await this.restartAnswer(before, { mine, hidden, asked, settingsBefore, began });
+  }
+
+  /** What a restart that came back answers: the editor now connected, what it saved and what it dropped. */
+  private async restartAnswer(
+    before: ReturnType<GodotBridge['getStatus']>,
+    done: {
+      readonly mine: boolean;
+      readonly hidden: boolean;
+      readonly asked: ToolResponse;
+      readonly settingsBefore: ReturnType<GodotServer['settingKeysOf']>;
+      readonly began: number;
+    },
+  ): Promise<ToolResponse> {
+    const { mine, hidden, asked, settingsBefore, began } = done;
     const { servers, report: rebinding } = await this.rebindTheDebugAdapter(
       await this.editorServersOnceStarted(),
     );
@@ -11114,6 +12890,12 @@ class GodotServer {
     if (sceneToRun && !sceneToRun.ok) {
       return this.createErrorResponse(sceneToRun.reason, PATH_SOLUTIONS);
     }
+    return await this.runBuildChecks({ args, op, project, suites: suites.value, scene, sceneToRun });
+  }
+
+  /** A start's checks on the build and the scene it names, before the engine arguments are read. */
+  private async runBuildChecks(base: RunBase): Promise<ToolResponse> {
+    const { args, project, scene, sceneToRun } = base;
     const build = readNonEmptyString(args, 'executable');
     // An engine told to play a scene that is not there puts up a modal alert, headless on Windows
     // too, and waits for a click nobody gives. An exported build carries its scenes in its pack, so
@@ -11139,6 +12921,12 @@ class GodotServer {
         'An exported build is started without the debugger, because a release build quits on --remote-debug. A profile needs the debugger, so leave out executable to profile the project.',
       );
     }
+    return await this.runEngineArguments({ ...base, exported });
+  }
+
+  /** A start's checks on the profiler flags and the engine arguments it was given. */
+  private async runEngineArguments(run: RunExported): Promise<ToolResponse> {
+    const { args, op, project, suites } = run;
     const engineCalls = readBoolean(args, 'engineCalls') === true;
     if (engineCalls && readBoolean(args, 'profile') !== true) {
       return this.createErrorResponse(
@@ -11147,8 +12935,7 @@ class GodotServer {
       );
     }
     const own = readStringArray(args, 'args') ?? [];
-    const given =
-      suites.value === null ? own : [...own, ...suitesSceneArgs(project.value.path, suites.value)];
+    const given = suites === null ? own : [...own, ...suitesSceneArgs(project.value.path, suites)];
     const flags = this.engineArguments(args);
     if (!flags.ok) {
       return flags.response;
@@ -11162,6 +12949,12 @@ class GodotServer {
     if (movie !== null) {
       return this.createErrorResponse(movie);
     }
+    return await this.runEnvironmentAndEngine({ ...run, engineCalls, own, given, flags: flags.value });
+  }
+
+  /** A start's checks on its environment, main scene and engine, and the engine it will run on. */
+  private async runEnvironmentAndEngine(run: RunOptions): Promise<ToolResponse> {
+    const { args, op, project, exported, sceneToRun } = run;
     const asked = this.runEnvironment(args);
     if (!asked.ok) {
       return asked.response;
@@ -11200,7 +12993,12 @@ class GodotServer {
     if (!engine.ok) {
       return engine.response;
     }
+    return await this.runAfterTheEngine({ ...run, asked: asked.value, otherGodot, engine });
+  }
 
+  /** A start once its engine is found: the class cache and imports brought up to date, then a boot check or the run. */
+  private async runAfterTheEngine(run: RunEngine): Promise<ToolResponse> {
+    const { args, op, project, sceneToRun, given, flags, asked, engine, exported } = run;
     // The engine fixes its list of global classes when it starts and the editor writes that
     // list back over the cache, so a game launched after a `class_name` was written dies at its
     // first screen on "Could not find type". Rebuilt here from the declarations on disk rather
@@ -11227,12 +13025,17 @@ class GodotServer {
         args,
         given,
         scanned,
-        asked.value,
-        flags.value,
+        asked,
+        flags,
         engine.note,
       );
     }
+    return await this.startAfterTheCheck({ ...run, refreshed: refreshed.value, scanned, sceneArgument });
+  }
 
+  /** A start that ends the run before it, when this server holds one of the same project. */
+  private async startAfterTheCheck(run: RunReady): Promise<ToolResponse> {
+    const { args, project } = run;
     // Asked of the record as well as of this server, because a run started before a reconnect is
     // one this process has never heard of. Starting a second engine beside it would leave the
     // first running with nothing holding it and its note overwritten, which is the one way
@@ -11277,6 +13080,12 @@ class GodotServer {
       this.logDebug(`The running game was ${ended.ending} after ${Date.now() - endingFrom}ms`);
     }
 
+    return await this.startFreshRun(run, ended);
+  }
+
+  /** A start with no run left before it: how it is to be played, and then played. */
+  private async startFreshRun(run: RunReady, ended: EndedRun | null): Promise<ToolResponse> {
+    const { args, project, sceneArgument } = run;
     // Taken before anything starts, so the game waited for below is one nobody had seen: a game
     // that has just been ended can still be dying with its announcement on disk.
     const alreadyPlaying = new Set(discoverRuntimes().map((endpoint) => endpoint.pid));
@@ -11318,19 +13127,45 @@ class GodotServer {
     const silent = resolveSilent(args['silent']) && !headless;
     const silentOnlyHere = silent && !editorPlaysHeadless(project.value.file);
     const profiled = readBoolean(args, 'profile') === true;
-    if (
-      exported === null &&
-      this.godotBridge.isConnected() &&
-      editorWouldPlay &&
-      given.length === 0 &&
-      flags.value.length === 0 &&
-      !needsItsOwnProcess(asked.value) &&
-      !silentOnlyHere &&
-      otherGodot === undefined
-    ) {
+    return await this.playOrSpawn({
+      ...run,
+      ended,
+      alreadyPlaying,
+      wereHereFirst,
+      headless,
+      runtimeWaitMs,
+      editorWouldPlay,
+      silent,
+      silentOnlyHere,
+      profiled,
+    });
+  }
+
+  /** A start played through the editor when it can be, and otherwise spawned here. */
+  private async playOrSpawn(run: RunPlayed): Promise<ToolResponse> {
+    const {
+      args,
+      project,
+      exported,
+      given,
+      flags,
+      asked,
+      engine,
+      engineCalls,
+      sceneArgument,
+      refreshed,
+      scanned,
+      ended,
+      alreadyPlaying,
+      runtimeWaitMs,
+      headless,
+      silent,
+      profiled,
+    } = run;
+    if (this.theEditorPlaysIt(run)) {
       return await this.playThroughEditor(
         sceneArgument,
-        refreshed.value,
+        refreshed,
         scanned,
         project.value.path,
         alreadyPlaying,
@@ -11347,7 +13182,7 @@ class GodotServer {
       headless,
       scene: sceneArgument,
       userArgs: given,
-      engineArgs: flags.value,
+      engineArgs: flags,
       silent,
       ...(onTheHiddenDesktop && process.platform === 'win32'
         ? { hiddenWindow: { projectCapsFrames: exported === null && capsFrames(project.value.path) } }
@@ -11358,8 +13193,8 @@ class GodotServer {
       engine.value,
       cmdArgs,
       project.value.path,
-      needsItsOwnProcess(asked.value)
-        ? environmentFor({ ...asked.value, runtimeDirectory: runtimeDirectory() })
+      needsItsOwnProcess(asked)
+        ? environmentFor({ ...asked, runtimeDirectory: runtimeDirectory() })
         : undefined,
       // A window on a desktop of its own, where it renders and neither shows nor takes the keyboard,
       // unless the caller asked to see it. A headless run has no window to put anywhere.
@@ -11383,24 +13218,82 @@ class GodotServer {
     // game is running" about a run that had just printed its answer. Whether a run is *active* is
     // exitCode === null, which is what the callers below now ask.
     this.activeProcess = started;
-    // Said rather than left to be noticed: a caller who has an editor open and asked for
-    // arguments has been handed a game that editor is not holding, so the debug tools will not
-    // answer about it however connected the editor is.
-    const spawnedInstead =
-      exported !== null
-        ? ' An exported build is started without a debugger, since a release build quits when given one, so breakpoints and debug_state do not reach it.'
-        : this.godotBridge.isConnected() && editorWouldPlay && otherGodot !== undefined
-          ? ` The editor plays a game only on its own engine, so a run on another was started here.${OWN_DEBUGGER}`
-          : this.godotBridge.isConnected() && editorWouldPlay && (given.length > 0 || flags.value.length > 0)
-            ? ` The editor cannot be handed arguments for a game it plays, so this one was started here.${OWN_DEBUGGER}`
-            : this.godotBridge.isConnected() && editorWouldPlay && needsItsOwnProcess(asked.value)
-              ? ` The editor plays a game with its own environment, so a run given one was started here.${OWN_DEBUGGER}`
-              : this.godotBridge.isConnected() && editorWouldPlay && silentOnlyHere
-                ? ' The editor cannot play a game silent, which takes an engine flag, so this one was ' +
-                  `started here, silent as every run is unless asked otherwise, and silent: false plays it through the editor, with sound.${OWN_DEBUGGER}`
-                : this.godotBridge.isConnected() && !editorWouldPlay
-                  ? ` The editor plays this project's games with a window, so a headless run was started here. With --headless in the project's editor/run/main_run_args, which project_settings sets, the editor plays it headless.${OWN_DEBUGGER}`
-                  : '';
+    return await this.spawnedStartAnswer(run, started, cmdArgs);
+  }
+
+  /** Whether the editor itself can play this start, with nothing it cannot be handed. */
+  private theEditorPlaysIt(run: RunPlayed): boolean {
+    const { exported, given, flags, asked, otherGodot, editorWouldPlay, silentOnlyHere } = run;
+    return (
+      exported === null &&
+      this.godotBridge.isConnected() &&
+      editorWouldPlay &&
+      given.length === 0 &&
+      flags.length === 0 &&
+      !needsItsOwnProcess(asked) &&
+      !silentOnlyHere &&
+      otherGodot === undefined
+    );
+  }
+
+  /**
+   * What a start spawned here says about why the editor did not play it. Said rather than left to
+   * be noticed: a caller who has an editor open and asked for arguments has been handed a game
+   * that editor is not holding, so the debug tools will not answer about it however connected the
+   * editor is.
+   */
+  private spawnedInsteadNote(run: RunPlayed): string {
+    const { exported, given, flags, asked, otherGodot, editorWouldPlay, silentOnlyHere } = run;
+    if (exported !== null) {
+      return ' An exported build is started without a debugger, since a release build quits when given one, so breakpoints and debug_state do not reach it.';
+    }
+    const editorWouldHaveIt = this.godotBridge.isConnected() && editorWouldPlay;
+    if (editorWouldHaveIt && otherGodot !== undefined) {
+      return ` The editor plays a game only on its own engine, so a run on another was started here.${OWN_DEBUGGER}`;
+    }
+    if (editorWouldHaveIt && (given.length > 0 || flags.length > 0)) {
+      return ` The editor cannot be handed arguments for a game it plays, so this one was started here.${OWN_DEBUGGER}`;
+    }
+    if (editorWouldHaveIt && needsItsOwnProcess(asked)) {
+      return ` The editor plays a game with its own environment, so a run given one was started here.${OWN_DEBUGGER}`;
+    }
+    if (editorWouldHaveIt && silentOnlyHere) {
+      return (
+        ' The editor cannot play a game silent, which takes an engine flag, so this one was ' +
+        `started here, silent as every run is unless asked otherwise, and silent: false plays it through the editor, with sound.${OWN_DEBUGGER}`
+      );
+    }
+    if (this.godotBridge.isConnected() && !editorWouldPlay) {
+      return ` The editor plays this project's games with a window, so a headless run was started here. With --headless in the project's editor/run/main_run_args, which project_settings sets, the editor plays it headless.${OWN_DEBUGGER}`;
+    }
+    return '';
+  }
+
+  /** The answer of a start spawned here: the process, its command line and what was ended and left. */
+  private async spawnedStartAnswer(
+    run: RunPlayed,
+    started: GodotProcess,
+    cmdArgs: readonly string[],
+  ): Promise<ToolResponse> {
+    const {
+      project,
+      exported,
+      given,
+      own,
+      flags,
+      asked,
+      engine,
+      sceneArgument,
+      refreshed,
+      scanned,
+      ended,
+      wereHereFirst,
+      alreadyPlaying,
+      runtimeWaitMs,
+      headless,
+      profiled,
+    } = run;
+    const spawnedInstead = this.spawnedInsteadNote(run);
     const endedForThis = endedToStartThis(ended);
     // A game of this project that was already running and that this server cannot read. It is not
     // in `ended`, because ending a run goes through the sweep that drops these, so the start left
@@ -11430,7 +13323,7 @@ class GodotServer {
             : `res://${sceneArgument}`,
       arguments: cmdArgs,
       argsNote: engineFlagsNote(own),
-      framesNote: racingNote(headless, flags.value),
+      framesNote: racingNote(headless, flags),
       // Named here rather than only by editor_output, because a caller who wants to watch the
       // file had to make a second call to learn it and a reconstructed name is worse than no
       // name: a tail on a path that does not exist reports nothing, which is exactly what a run
@@ -11443,11 +13336,11 @@ class GodotServer {
           ? undefined
           : this.breakpointsAsProjectSpells(project.value.path, handed),
       profile: profileOnStart(profiled, 'gdharness', runtimeAddonRegistered(project.value.path)),
-      refreshedClasses: refreshed.value,
+      refreshedClasses: refreshed,
       ...scanWaitAnswer(scanned),
       // Said on the start that asked for it rather than left to the player's save list: on macOS
       // the engine reads user:// off HOME, so a run asked to save elsewhere saved where they do.
-      savesNote: asked.value.savesIn !== undefined && savesStayPut() ? SAVES_NOT_MOVED_NOTE : undefined,
+      savesNote: asked.savesIn !== undefined && savesStayPut() ? SAVES_NOT_MOVED_NOTE : undefined,
       // Which run this start ended, when it ended one, so a bench that stopped is answered for
       // here rather than looked for in the engine.
       endedPreviousRun: endedPreviousRun(ended),
