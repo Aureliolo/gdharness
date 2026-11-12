@@ -1284,21 +1284,30 @@ export function ourRunEnded(
   const which = `${run.throughEditor ? 'played in the editor' : 'started'}${run.pid === null ? '' : ` (pid ${run.pid})`}`;
   const when =
     run.endedAt === undefined ? '' : ` ${Math.max(0, Math.round((now - run.endedAt) / 1000))}s ago`;
-  const how =
-    run.endedThrough === 'close'
-      ? 'this server asked it to close'
-      : run.endedThrough === 'keeper'
-        ? 'this server ended it through the keeper holding it'
-        : run.endedThrough === 'signal'
-          ? 'this server signalled it'
-          : run.endedThrough === 'editor'
-            ? 'this server asked the editor to stop it'
-            : run.exitCode !== null
-              ? `it exited by itself with ${exitCodeText(run.exitCode)}`
-              : run.exitSignal === null
-                ? 'it is no longer running'
-                : `it was ended by ${run.exitSignal}`;
+  const how = howOurRunEnded(run);
   return `No game with the runtime addon is running: the game this server ${which} ended${when}, and ${how}. editor_output has what it printed, and editor_run start runs it again.`;
+}
+
+const ENDED_THROUGH_TEXT: Readonly<Record<EndedThrough, string>> = {
+  close: 'this server asked it to close',
+  keeper: 'this server ended it through the keeper holding it',
+  signal: 'this server signalled it',
+  editor: 'this server asked the editor to stop it',
+};
+
+/** How an ended run came to its end, as the clause that closes a runtime refusal. */
+function howOurRunEnded(run: {
+  readonly endedThrough?: EndedThrough;
+  readonly exitCode: number | null;
+  readonly exitSignal: string | null;
+}): string {
+  if (run.endedThrough !== undefined) {
+    return ENDED_THROUGH_TEXT[run.endedThrough];
+  }
+  if (run.exitCode !== null) {
+    return `it exited by itself with ${exitCodeText(run.exitCode)}`;
+  }
+  return run.exitSignal === null ? 'it is no longer running' : `it was ended by ${run.exitSignal}`;
 }
 
 /**
@@ -1385,6 +1394,13 @@ export function stopVerdict(stop: {
       withChildren: true,
     };
   }
+  return endedStopVerdict(stop, notClosed);
+}
+
+type StopFacts = Parameters<typeof stopVerdict>[0];
+
+/** The verdict of a stop that signalled the run and found it gone, with the note on how it went. */
+function endedStopVerdict(stop: StopFacts, notClosed: string): StopVerdict {
   if (stop.endedThrough === 'close') {
     return {
       stopped: true,
@@ -1591,10 +1607,19 @@ function aboutTheChildren(ended: ChildrenEnded | null, throughEditor: boolean): 
   if (ended.unknown === 'no process') {
     return 'andChildren was asked for and this run has no process id to list under: the editor plays it and its game announced none, so nothing else was ended.';
   }
-  const counted = (n: number): string => `${n} ${n === 1 ? 'process' : 'processes'}`;
-  const announced = ended.ended.filter((one) => one.how === 'announced').length;
-  const byCommandLine = ended.ended.length - announced;
-  const how = [
+  return aboutTheChildrenEnded(ended);
+}
+
+/** The processes of a name, counted with the noun in its right number. */
+function countedProcesses(n: number): string {
+  return `${n} ${n === 1 ? 'process' : 'processes'}`;
+}
+
+/** What identified [param games] as games of the project: their announcement or their command line. */
+function howTheGamesWereIdentified(games: readonly GameUnderTheRun[]): string {
+  const announced = games.filter((one) => one.how === 'announced').length;
+  const byCommandLine = games.length - announced;
+  return [
     announced === 0
       ? ''
       : `${announced} announced as ${announced === 1 ? 'a game' : 'games'} of this project`,
@@ -1604,6 +1629,12 @@ function aboutTheChildren(ended: ChildrenEnded | null, throughEditor: boolean): 
   ]
     .filter((part) => part !== '')
     .join(' and ');
+}
+
+/** What a stop says it ended among the game's own processes, and what it left. */
+function aboutTheChildrenEnded(ended: ChildrenEnded): string {
+  const counted = countedProcesses;
+  const how = howTheGamesWereIdentified(ended.ended);
   const endedToo =
     ended.ended.length === 0
       ? "The game had started nothing that is a game of this project, announced as one or this project's engine run with --path on it, so nothing else was ended."
@@ -2031,19 +2062,26 @@ function outsideTheirRanges(spec: ToolSpec, args: OperationParams): string[] {
     if (typeof value !== 'number' || schema === undefined) {
       continue;
     }
-    const least = typeof schema['minimum'] === 'number' ? schema['minimum'] : undefined;
-    const most = typeof schema['maximum'] === 'number' ? schema['maximum'] : undefined;
-    if ((least !== undefined && value < least) || (most !== undefined && value > most)) {
-      const range =
-        least !== undefined && most !== undefined
-          ? `from ${least} to ${most}`
-          : least !== undefined
-            ? `of ${least} or more`
-            : `of ${most} or less`;
+    const range = outsideRange(schema, value);
+    if (range !== undefined) {
       complaints.push(`${name} ${range}, not ${value}`);
     }
   }
   return complaints;
+}
+
+/** The range [param schema] declares, worded for a refusal, when [param value] falls outside it. */
+function outsideRange(schema: Record<string, unknown>, value: number): string | undefined {
+  const least = typeof schema['minimum'] === 'number' ? schema['minimum'] : undefined;
+  const most = typeof schema['maximum'] === 'number' ? schema['maximum'] : undefined;
+  if (!((least !== undefined && value < least) || (most !== undefined && value > most))) {
+    return undefined;
+  }
+  return least !== undefined && most !== undefined
+    ? `from ${least} to ${most}`
+    : least !== undefined
+      ? `of ${least} or more`
+      : `of ${most} or less`;
 }
 
 /**
@@ -2232,23 +2270,16 @@ function presetsIn(projectPath: string): { name: string; platform: string; bakes
   const byNumber = new Map<string, { name: string; platform: string; bakes: boolean }>();
   let held: { name: string; platform: string; bakes: boolean } | null = null;
   let options: string | null = null;
-  const quoted = (line: string, key: string): string | undefined =>
-    new RegExp(`^\\s*${key}\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(line)?.[1]?.replace(/\\(.)/g, '$1');
   for (const line of text.split(/\r?\n/)) {
     const section = /^\s*\[([^\]]+)\]/.exec(line)?.[1]?.trim();
     if (section !== undefined) {
-      const number = /^preset\.(\d+)$/.exec(section)?.[1];
-      held = number === undefined ? null : { name: '', platform: '', bakes: false };
-      if (held !== null && number !== undefined) {
-        presets.push(held);
-        byNumber.set(number, held);
-      }
+      held = openedPreset(section, presets, byNumber);
       options = /^preset\.(\d+)\.options$/.exec(section)?.[1] ?? null;
       continue;
     }
     if (held !== null) {
-      held.name = quoted(line, 'name') ?? held.name;
-      held.platform = quoted(line, 'platform') ?? held.platform;
+      held.name = quotedPresetValue(line, 'name') ?? held.name;
+      held.platform = quotedPresetValue(line, 'platform') ?? held.platform;
     }
     const owner = options === null ? undefined : byNumber.get(options);
     if (owner !== undefined && /^\s*shader_baker\/enabled\s*=\s*true\s*$/.test(line)) {
@@ -2256,6 +2287,27 @@ function presetsIn(projectPath: string): { name: string; platform: string; bakes
     }
   }
   return presets;
+}
+
+/** The preset a `[preset.N]` section starts, recorded in both collections, or null for any other section. */
+function openedPreset(
+  section: string,
+  presets: { name: string; platform: string; bakes: boolean }[],
+  byNumber: Map<string, { name: string; platform: string; bakes: boolean }>,
+): { name: string; platform: string; bakes: boolean } | null {
+  const number = /^preset\.(\d+)$/.exec(section)?.[1];
+  if (number === undefined) {
+    return null;
+  }
+  const held = { name: '', platform: '', bakes: false };
+  presets.push(held);
+  byNumber.set(number, held);
+  return held;
+}
+
+/** The string [param key] is set to on [param line] of export_presets.cfg, unescaped, if it is set there. */
+function quotedPresetValue(line: string, key: string): string | undefined {
+  return new RegExp(`^\\s*${key}\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(line)?.[1]?.replace(/\\(.)/g, '$1');
 }
 
 /**
@@ -2391,18 +2443,58 @@ export function exportAnswer(
     // Exported says the file was written, not what it holds: a filter that leaves nearly
     // everything out still writes a pack, and only its size shows it.
     ...(written && bytes !== null ? { bytes } : {}),
-    ...(beside.length === 0 ? {} : { alsoWritten: beside }),
-    ...imports,
-    ...(notCopied.length === 0
-      ? {}
-      : {
-          librariesNotLoaded: notCopied,
-          extensionNote: `The export could not load ${notCopied.join(' and ')}: on Windows an engine running as the editor, which an export is, loads a GDExtension from a ~ copy beside the library, and another engine on this project held that copy: it could not be moved aside before the export, or another engine made a new one in between. Export again once that engine has loaded or exited.`,
-        }),
-    ...(docCacheNote === null ? {} : { docCacheNote }),
-    ...(engineNote === null ? {} : { engineNote }),
+    ...exportNotes({ beside, imports, notCopied, docCacheNote, engineNote }),
     ...foldedEntriesAnswer(log),
   };
+  return exportResponse(ending, asked, verdict, after, written);
+}
+
+/** The export's answer fields that say what else happened around it, each absent when nothing did. */
+function exportNotes(notes: {
+  readonly beside: readonly string[];
+  readonly imports: ReturnType<typeof importedFirstAnswer>;
+  readonly notCopied: readonly string[];
+  readonly docCacheNote: string | null;
+  readonly engineNote: string | null;
+}): {
+  alsoWritten?: readonly string[];
+  librariesNotLoaded?: readonly string[];
+  extensionNote?: string;
+  docCacheNote?: string;
+  engineNote?: string;
+} {
+  return {
+    ...(notes.beside.length === 0 ? {} : { alsoWritten: notes.beside }),
+    ...notes.imports,
+    ...librariesNotLoadedAnswer(notes.notCopied),
+    ...(notes.docCacheNote === null ? {} : { docCacheNote: notes.docCacheNote }),
+    ...(notes.engineNote === null ? {} : { engineNote: notes.engineNote }),
+  };
+}
+
+/** The fields an export answers with for libraries it could not load, none when it loaded them all. */
+function librariesNotLoadedAnswer(notCopied: readonly string[]): {
+  librariesNotLoaded?: readonly string[];
+  extensionNote?: string;
+} {
+  if (notCopied.length === 0) {
+    return {};
+  }
+  return {
+    librariesNotLoaded: notCopied,
+    extensionNote: `The export could not load ${notCopied.join(' and ')}: on Windows an engine running as the editor, which an export is, loads a GDExtension from a ~ copy beside the library, and another engine on this project held that copy: it could not be moved aside before the export, or another engine made a new one in between. Export again once that engine has loaded or exited.`,
+  };
+}
+
+/** The export's answer for its verdict:the verdict alone when exported, else a line saying why not. */
+function exportResponse(
+  ending: EngineRun,
+  asked: { readonly preset: string; readonly outputPath: string },
+  verdict: { readonly exported: boolean },
+  after: number | null,
+  written: boolean,
+): ToolResponse {
+  const { log } = ending;
   if (verdict.exported) {
     return { content: [{ type: 'text', text: answerJson(verdict) }] };
   }
@@ -2873,15 +2965,23 @@ export function finishedBeforeTheEnd(finished: number, failing: number, running:
   if (finished === 0 && running === null) {
     return '';
   }
-  const got =
-    finished === 0
-      ? 'no suite had finished'
-      : `${finished === 1 ? 'one suite' : `${finished} suites`} finished${failing === 0 ? '' : finished === 1 ? ', with failures' : `, ${failing} of them with failures`}`;
-  const listed =
-    finished === 0
-      ? ''
-      : `. ${finished === 1 ? 'It is' : 'They are'} under suitesFinished${failing === 0 ? '' : ', with the failing cases under suitesFailing'}, so a run of the rest need not repeat ${finished === 1 ? 'it' : 'them'}`;
+  const got = suitesFinishedSaid(finished, failing);
+  const listed = suitesListedSaid(finished, failing);
   return ` Before it ended, ${got}${running === null ? '' : `${finished === 0 ? ' and' : ', and'} ${running} was running`}${listed}.`;
+}
+
+/** The clause saying how many suites a run had finished and how many of them failed. */
+function suitesFinishedSaid(finished: number, failing: number): string {
+  return finished === 0
+    ? 'no suite had finished'
+    : `${finished === 1 ? 'one suite' : `${finished} suites`} finished${failing === 0 ? '' : finished === 1 ? ', with failures' : `, ${failing} of them with failures`}`;
+}
+
+/** The clause saying where the finished suites are listed, empty when none finished. */
+function suitesListedSaid(finished: number, failing: number): string {
+  return finished === 0
+    ? ''
+    : `. ${finished === 1 ? 'It is' : 'They are'} under suitesFinished${failing === 0 ? '' : ', with the failing cases under suitesFailing'}, so a run of the rest need not repeat ${finished === 1 ? 'it' : 'them'}`;
 }
 
 /**
@@ -2921,9 +3021,45 @@ export function scriptErrorsNote(
     }
   }
   const scripts = causes.size + dependents.length;
-  const at = (error: ScriptError): string =>
-    error.line === null ? error.path : `${error.path}:${error.line}`;
-  const sentence = (text: string): string => `${text}${/[.!?]\)?$/.test(text) ? '' : '.'}`;
+  // A declaring script that itself could not resolve a class is a step on the way, and the one
+  // that failed on something else is the one to open, so it is named first.
+  const first = [...new Map(origins.map((origin) => [origin.path, origin])).values()].toSorted(
+    (a, b) => Number(unresolvedClassIn(a.message) !== null) - Number(unresolvedClassIn(b.message) !== null),
+  );
+  const causesSaid = causesSaidIn(causes, first, unconfirmed);
+  const around = scriptErrorsAround({
+    dependents,
+    causeCount: causes.size,
+    ownCount: own.length,
+    consequenceCount: consequences.length,
+    // Counted with the declaring scripts gdUnit4 did not name, so the head and the verdict beside it,
+    // which counts every script with an error, give one number for one run.
+    unnamed: first.length,
+    scripts,
+  });
+  return [around.opening, causesSaid, around.following, around.rest, around.after]
+    .filter((part) => part !== '')
+    .join(' ');
+}
+
+/** [param error]'s script and line, as the notes about script errors name it. */
+function scriptErrorAt(error: ScriptError): string {
+  return error.line === null ? error.path : `${error.path}:${error.line}`;
+}
+
+/** [param text] ended with a full stop unless it already ends a sentence. */
+function sentenceOf(text: string): string {
+  return `${text}${/[.!?]\)?$/.test(text) ? '' : '.'}`;
+}
+
+/** What a script-errors note says about the scripts that caused the others to fail. */
+function causesSaidIn(
+  causes: ReadonlyMap<string, ScriptError>,
+  first: readonly ScriptOrigin[],
+  unconfirmed: readonly UnconfirmedOrigin[],
+): string {
+  const at = scriptErrorAt;
+  const sentence = sentenceOf;
   const traced = new Set<string>();
   const failedOn = (declares: string): string => {
     const through = [...causes.values()].filter((error) => unresolvedClassIn(error.message) === declares);
@@ -2934,12 +3070,7 @@ export function scriptErrorsNote(
       ? ''
       : ` ${through.map(at).join(', ')} could not resolve ${declares} because of it.`;
   };
-  // A declaring script that itself could not resolve a class is a step on the way, and the one
-  // that failed on something else is the one to open, so it is named first.
-  const first = [...new Map(origins.map((origin) => [origin.path, origin])).values()].toSorted(
-    (a, b) => Number(unresolvedClassIn(a.message) !== null) - Number(unresolvedClassIn(b.message) !== null),
-  );
-  const causesSaid = [
+  return [
     ...first.map(
       (origin) =>
         `${at(origin)} ${sentence(origin.message)} gdUnit4 did not name this script, which declares ${origin.declares}. The engine's own check of it found the error.${failedOn(origin.declares)}`,
@@ -2952,29 +3083,50 @@ export function scriptErrorsNote(
       .filter((error) => !traced.has(error.path))
       .map((error) => `${at(error)} ${sentence(error.message)}`),
   ].join(' ');
+}
+
+/** The sentences of a script-errors note that count scripts and errors rather than naming them. */
+function scriptErrorsAround(counts: {
+  readonly dependents: readonly string[];
+  readonly causeCount: number;
+  readonly ownCount: number;
+  readonly consequenceCount: number;
+  readonly unnamed: number;
+  readonly scripts: number;
+}): { opening: string; following: string; rest: string; after: string } {
+  const { dependents, causeCount } = counts;
   const following =
     dependents.length === 0
       ? ''
-      : causes.size === 0
+      : causeCount === 0
         ? `${dependents.join(', ')} ${dependents.length === 1 ? 'depends' : 'depend'} on a script that did not compile, and gdUnit4 named none with an error of its own: script_diagnostics on one of them finds it.`
         : `${dependents.length === 1 ? 'One more' : `${dependents.length} more`} failed only because a script ${dependents.length === 1 ? 'it depends' : 'they depend'} on did: ${dependents.join(', ')}.`;
-  const more = own.length - causes.size;
+  return { following, ...errorsLeftSaid(counts), opening: scriptsNotLoadedSaid(counts) };
+}
+
+type ScriptErrorCounts = Parameters<typeof scriptErrorsAround>[0];
+
+/** The sentences saying how many more errors there are and where they are listed. */
+function errorsLeftSaid(counts: ScriptErrorCounts): { rest: string; after: string } {
+  const { causeCount, consequenceCount } = counts;
+  const more = counts.ownCount - causeCount;
   const rest =
     more > 0
-      ? `${more === 1 ? 'One more error' : `${more} more errors`} in ${causes.size === 1 ? 'that script' : 'those scripts'} ${more === 1 ? 'is' : 'are'} under scriptErrors.`
+      ? `${more === 1 ? 'One more error' : `${more} more errors`} in ${causeCount === 1 ? 'that script' : 'those scripts'} ${more === 1 ? 'is' : 'are'} under scriptErrors.`
       : '';
   const after =
-    consequences.length > 0
-      ? `${consequences.length === 1 ? 'One more error comes' : `${consequences.length} more errors come`} only from a class that did not resolve, which the engine reads as Variant, and ${consequences.length === 1 ? 'is' : 'are'} under followFromUnresolved.`
+    consequenceCount > 0
+      ? `${consequenceCount === 1 ? 'One more error comes' : `${consequenceCount} more errors come`} only from a class that did not resolve, which the engine reads as Variant, and ${consequenceCount === 1 ? 'is' : 'are'} under followFromUnresolved.`
       : '';
-  // Counted with the declaring scripts gdUnit4 did not name, so the head and the verdict beside it,
-  // which counts every script with an error, give one number for one run.
-  const unnamed = first.length;
-  const opening =
-    unnamed === 0
-      ? `No tests ran: gdUnit4 could not load ${scripts === 1 ? 'one script' : `${scripts} scripts`} while looking for suites, and it runs no suite at all when one fails to load.`
-      : `No tests ran: ${scripts + unnamed} scripts did not compile, and gdUnit4 runs no suite at all when one fails to load. It could not load ${scripts === 1 ? 'one' : scripts} of them while looking for suites, and ${unnamed === 1 ? 'the one it did not name comes' : `the ${unnamed} it did not name come`} first.`;
-  return [opening, causesSaid, following, rest, after].filter((part) => part !== '').join(' ');
+  return { rest, after };
+}
+
+/** The opening sentence of a script-errors note: that no tests ran and how many scripts did not load. */
+function scriptsNotLoadedSaid(counts: ScriptErrorCounts): string {
+  const { unnamed, scripts } = counts;
+  return unnamed === 0
+    ? `No tests ran: gdUnit4 could not load ${scripts === 1 ? 'one script' : `${scripts} scripts`} while looking for suites, and it runs no suite at all when one fails to load.`
+    : `No tests ran: ${scripts + unnamed} scripts did not compile, and gdUnit4 runs no suite at all when one fails to load. It could not load ${scripts === 1 ? 'one' : scripts} of them while looking for suites, and ${unnamed === 1 ? 'the one it did not name comes' : `the ${unnamed} it did not name come`} first.`;
 }
 
 /**
@@ -3444,7 +3596,37 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
     };
   }
   const table = profiledFunctions(totals, limit, reading.sourceOf);
-  const notes: string[] = [];
+  const notes = [
+    ...profileRunNotes(reading, totals),
+    ...profileFrameNotes(reading, totals),
+    ...profileTableNotes(table),
+    ...profileTotalsNotes(reading, totals, table),
+  ];
+  return {
+    through: reading.through,
+    running: reading.running,
+    connected: true,
+    complete: totals.complete,
+    frames: totals.frames,
+    firstFrame: totals.firstFrame,
+    lastFrame: totals.lastFrame,
+    coveredMs: reading.coveredMs,
+    scriptMs: table.scriptMs,
+    perCallOverheadUs: table.perCallUs ?? undefined,
+    functionsCounted: table.counted,
+    runtimeAddonMs: table.addonFunctions > 0 ? table.addonMs : undefined,
+    runtimeAddonFunctions: table.addonFunctions > 0 ? table.addonFunctions : undefined,
+    omitted: table.omitted > 0 ? table.omitted : undefined,
+    functions: table.functions,
+    callers: reading.callersOf === undefined ? undefined : callersAnswer(totals, reading.callersOf),
+    note: notes.length > 0 ? notes.join(' ') : undefined,
+  };
+}
+
+type ProfiledTable = ReturnType<typeof profiledFunctions>;
+
+/** The notes on how far the run is and what that does to the totals: still going, ended, or cut short. */
+function profileRunNotes(reading: ProfileReading, totals: ProfileTotals): string[] {
   const addonNote =
     reading.runtimeAddon === true
       ? ''
@@ -3463,6 +3645,16 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
       : reading.runtimeAddon === true
         ? ' The runtime addon switches the profiler off as the game quits, and did not here, for one of three reasons. It may no longer have been running in this game by then, which a project can arrange for some scenes. The game may have ended without taking its tree down, as a crash or a kill does. Or the totals did not reach the debugger before the game exited, which the game then says in its output.'
         : addonNote;
+  return profileRunStateNotes(reading, totals, { addonNote, totalsWithheld });
+}
+
+/** The note on the state the run was read in, given what to say when the engine's totals are missing. */
+function profileRunStateNotes(
+  reading: ProfileReading,
+  totals: ProfileTotals,
+  { addonNote, totalsWithheld }: { readonly addonNote: string; readonly totalsWithheld: string },
+): string[] {
+  const notes: string[] = [];
   if (totals.complete && reading.running) {
     notes.push(
       `The engine's totals arrived while the game is still running, which it sends only when the profiler is switched off, so ${reading.through === 'editor' ? "the editor's Profiler tab or the game itself, through EngineDebugger," : 'the game itself, through EngineDebugger,'} switched it off before the game ended. They cover the run up to then and nothing after.`,
@@ -3477,15 +3669,23 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
     notes.push(
       `The run is still going, so these are the ${totals.frames === 1 ? 'one frame' : `${totals.frames} frames`} summed so far${reading.through === 'gdharness' ? ', written at most half a second behind' : ''}.`,
     );
-  } else if (totals.frames === 0) {
-    notes.push(
-      `The game connected and ended before a frame of the profile reached ${reading.through === 'editor' ? 'the editor' : 'this server'}: the engine sends its totals only when the profiler is switched off, and stops sending as it exits without emptying what it has queued.${totalsWithheld}`,
-    );
   } else {
-    notes.push(
-      `These are the ${totals.frames === 1 ? 'one frame' : `${totals.frames} frames`} that arrived, summed, without the engine's own totals, which it sends only when the profiler is switched off.${totalsWithheld} Not in them is any script time after the last frame sent: a frame still queued as the game exited, since the engine stops sending without emptying its queue, and what scripts did as it quit, such as in _exit_tree. That can be nothing: a scene that does its work in _ready and quits has all of it in its first frame.`,
-    );
+    notes.push(endedProfileNote(reading, totals, totalsWithheld));
   }
+  return notes;
+}
+
+/** The note on a run that has ended without the engine's own totals: none arrived, or only frames. */
+function endedProfileNote(reading: ProfileReading, totals: ProfileTotals, totalsWithheld: string): string {
+  if (totals.frames === 0) {
+    return `The game connected and ended before a frame of the profile reached ${reading.through === 'editor' ? 'the editor' : 'this server'}: the engine sends its totals only when the profiler is switched off, and stops sending as it exits without emptying what it has queued.${totalsWithheld}`;
+  }
+  return `These are the ${totals.frames === 1 ? 'one frame' : `${totals.frames} frames`} that arrived, summed, without the engine's own totals, which it sends only when the profiler is switched off.${totalsWithheld} Not in them is any script time after the last frame sent: a frame still queued as the game exited, since the engine stops sending without emptying its queue, and what scripts did as it quit, such as in _exit_tree. That can be nothing: a scene that does its work in _ready and quits has all of it in its first frame.`;
+}
+
+/** The notes on frames the profile is missing: the start it missed and those that never arrived. */
+function profileFrameNotes(reading: ProfileReading, totals: ProfileTotals): string[] {
+  const notes: string[] = [];
   // The engine numbers a game's frames from 0, so a profile of a run started profiled whose first
   // frame is numbered above that missed the start, which nothing else in it shows.
   const unprofiled = totals.firstFrame ?? 0;
@@ -3504,6 +3704,12 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
       `${howMany} of the game's frames between the first and the last that arrived did not arrive, so ${unarrived === 1 ? 'its' : 'their'} script time is not in these.`,
     );
   }
+  return notes;
+}
+
+/** The notes on what the profiler's own work does to the rows: super calls and per-call overhead. */
+function profileTableNotes(table: ProfiledTable): string[] {
+  const notes: string[] = [];
   if (table.superCallers > 0) {
     notes.push(
       `${table.superCallers === 1 ? 'One function calls' : `${table.superCallers} functions call`} through super, marked selfIncludesSuper: the engine takes a call to another script function or an engine method out of the caller's self time, but not a super call, so ${table.superCallers === 1 ? 'its' : 'their'} selfMs holds the overridden function's time, which that function's own row counts again. Self time therefore cannot be added along an override chain, and scriptMs counts the time under a super call once more for each level above it.`,
@@ -3515,6 +3721,12 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
       `The profiler costs about ${table.perCallUs}µs a call in this run, measured on an empty function the runtime addon calls as it goes on, and that time lands in the self time of the function called. ${one ? 'One function has' : `${table.overheadDominated} functions have`} at least half ${one ? 'its' : 'their'} selfMs in it: ${namedFew(table.overheadNamed)}.${overheadRowsReturned(table, one)} That much of ${one ? 'its' : 'their'} time is the profiler's and goes once the profiler is off, whether the function is inlined or not. What inlining saves is the call itself, which costs something without the profiler too, not the work inside it.`,
     );
   }
+  return notes;
+}
+
+/** The notes on time the totals count twice or leave out: threads, the runtime addon, engine calls. */
+function profileTotalsNotes(reading: ProfileReading, totals: ProfileTotals, table: ProfiledTable): string[] {
+  const notes: string[] = [];
   if (reading.coveredMs > 0 && table.scriptMs > reading.coveredMs) {
     notes.push(
       `scriptMs, ${table.scriptMs}ms, is more than the ${reading.coveredMs}ms the profile covers.${table.superCallers > 0 ? ' The super calls above, counted twice, can account for some or all of that. Whatever they do not is' : ' One thread cannot spend more time than passes, so that is'} functions running on several threads at once, through WorkerThreadPool or Thread. The engine adds every thread's time to the same function and does not say which thread a call ran on, so a function's selfMs is summed over every thread it ran on rather than taken out of frames, and a function that waits for the others, through wait_for_group_task_completion or wait_to_finish, has the wait in its own selfMs as well.`,
@@ -3536,25 +3748,7 @@ export function profileAnswer(reading: ProfileReading, limit: number): Record<st
       `${totals.unreadable} message${totals.unreadable === 1 ? '' : 's'} from the game could not be read, so the totals have that many gaps.`,
     );
   }
-  return {
-    through: reading.through,
-    running: reading.running,
-    connected: true,
-    complete: totals.complete,
-    frames: totals.frames,
-    firstFrame: totals.firstFrame,
-    lastFrame: totals.lastFrame,
-    coveredMs: reading.coveredMs,
-    scriptMs: table.scriptMs,
-    perCallOverheadUs: table.perCallUs ?? undefined,
-    functionsCounted: table.counted,
-    runtimeAddonMs: table.addonFunctions > 0 ? table.addonMs : undefined,
-    runtimeAddonFunctions: table.addonFunctions > 0 ? table.addonFunctions : undefined,
-    omitted: table.omitted > 0 ? table.omitted : undefined,
-    functions: table.functions,
-    callers: reading.callersOf === undefined ? undefined : callersAnswer(totals, reading.callersOf),
-    note: notes.length > 0 ? notes.join(' ') : undefined,
-  };
+  return notes;
 }
 
 /**
@@ -3602,42 +3796,55 @@ function cappedNotes(totals: ProfileTotals): string[] {
   const most = totals.frameFunctions;
   const why = `${most} is kept below the game's debugger queue (network/limits/debugger/max_queued_messages), which drops the message naming a function when one frame names more than it holds, and a function whose name is dropped is never named afterwards.`;
   if (most !== undefined && totals.complete && totals.totalCapped === true) {
-    // The engine sends its totals busiest first, measured on 4.7.2: of a hundred functions with
-    // rising work under a cap of 64, the busiest were kept. It lists every compiled function, called
-    // or not, so when the last one kept took no measurable time, nothing left out took any: no time
-    // is missing, only the calls of functions too quick for the clock, if any were made. game-b's
-    // totals reached 1536 with 324 functions counted and were read as having lost some of their time.
-    const leastKept = Math.min(...Object.values(totals.functions).map((one) => one.totalSeconds));
-    // Counted, since functions that never ran tie with those too quick for the clock and the
-    // engine's order among them decides how many of each are kept: 2500 called once on macOS kept
-    // 1000 of them, on the same code where Windows and Linux kept more.
-    const unrun = Object.values(totals.functions).filter((one) => one.calls === 0).length;
-    notes.push(
-      leastKept > 0
-        ? `The engine's totals carried the most functions the profiler asks for, ${most}, so the functions with the least time are not in them: ${why}`
-        : `The engine's totals carried the most functions the profiler asks for, ${most}, and the last of them took no measurable time, so neither did any left out: the time is all here, and only a function too quick for the clock can be missing, with its calls. ${why}`,
-    );
-    if (unrun > 0) {
-      notes.push(
-        `${unrun === 1 ? 'One' : String(unrun)} of the ${most} ${unrun === 1 ? 'is a function' : 'are functions'} counted as never called: the engine lists every function it has compiled, run or not, busiest first, so where the time runs out they take places that functions run too quickly to measure could have had.`,
-      );
-    }
-    const engineMethods = totals.totalEngineMethods ?? 0;
-    if (engineMethods > 0) {
-      notes.push(
-        `${engineMethods === 1 ? 'One' : String(engineMethods)} of the ${most} ${engineMethods === 1 ? 'is an engine method' : 'are engine methods'} the scripts called, which ${engineMethods === 1 ? 'is no row' : 'are no rows'}: that time is the callers' engineMs.`,
-      );
-    }
+    notes.push(...totalCappedNotes(totals, most, why));
   } else if (most !== undefined && !totals.complete && (totals.cappedFrames ?? 0) > 0) {
     const capped = totals.cappedFrames ?? 0;
     notes.push(
       `${capped === totals.frames ? (capped === 1 ? 'The one frame' : `All ${capped} frames`) : `${capped} of the ${totals.frames} frames`} carried the most functions the profiler asks for in one, ${most}, so the functions with the least time in ${capped === 1 ? 'it' : 'them'} are not counted there: ${why}`,
     );
   }
+  notes.push(...unnamedFunctionNotes(totals));
+  return notes;
+}
+
+/** The note on functions that arrived called but unnamed, none when every one has its name. */
+function unnamedFunctionNotes(totals: ProfileTotals): string[] {
   const unnamed = unnamedCalled(totals);
-  if (unnamed > 0) {
+  if (unnamed === 0) {
+    return [];
+  }
+  return [
+    `${unnamed === 1 ? 'One function' : `${unnamed} functions`} arrived without ${unnamed === 1 ? 'its name' : 'their names'}, shown as ${UNNAMED_PREFIX} and the number the engine gave ${unnamed === 1 ? 'it' : 'them'}: the engine names a function once, as it first appears, and the game's debugger queue was full when that message was sent. They are script functions of the game. Which ones they are cannot be recovered from this profile.`,
+  ];
+}
+
+/** The notes on engine totals that carried the most functions the profiler asks for, [param most]. */
+function totalCappedNotes(totals: ProfileTotals, most: number, why: string): string[] {
+  const notes: string[] = [];
+  // The engine sends its totals busiest first, measured on 4.7.2: of a hundred functions with
+  // rising work under a cap of 64, the busiest were kept. It lists every compiled function, called
+  // or not, so when the last one kept took no measurable time, nothing left out took any: no time
+  // is missing, only the calls of functions too quick for the clock, if any were made. game-b's
+  // totals reached 1536 with 324 functions counted and were read as having lost some of their time.
+  const leastKept = Math.min(...Object.values(totals.functions).map((one) => one.totalSeconds));
+  // Counted, since functions that never ran tie with those too quick for the clock and the
+  // engine's order among them decides how many of each are kept: 2500 called once on macOS kept
+  // 1000 of them, on the same code where Windows and Linux kept more.
+  const unrun = Object.values(totals.functions).filter((one) => one.calls === 0).length;
+  notes.push(
+    leastKept > 0
+      ? `The engine's totals carried the most functions the profiler asks for, ${most}, so the functions with the least time are not in them: ${why}`
+      : `The engine's totals carried the most functions the profiler asks for, ${most}, and the last of them took no measurable time, so neither did any left out: the time is all here, and only a function too quick for the clock can be missing, with its calls. ${why}`,
+  );
+  if (unrun > 0) {
     notes.push(
-      `${unnamed === 1 ? 'One function' : `${unnamed} functions`} arrived without ${unnamed === 1 ? 'its name' : 'their names'}, shown as ${UNNAMED_PREFIX} and the number the engine gave ${unnamed === 1 ? 'it' : 'them'}: the engine names a function once, as it first appears, and the game's debugger queue was full when that message was sent. They are script functions of the game. Which ones they are cannot be recovered from this profile.`,
+      `${unrun === 1 ? 'One' : String(unrun)} of the ${most} ${unrun === 1 ? 'is a function' : 'are functions'} counted as never called: the engine lists every function it has compiled, run or not, busiest first, so where the time runs out they take places that functions run too quickly to measure could have had.`,
+    );
+  }
+  const engineMethods = totals.totalEngineMethods ?? 0;
+  if (engineMethods > 0) {
+    notes.push(
+      `${engineMethods === 1 ? 'One' : String(engineMethods)} of the ${most} ${engineMethods === 1 ? 'is an engine method' : 'are engine methods'} the scripts called, which ${engineMethods === 1 ? 'is no row' : 'are no rows'}: that time is the callers' engineMs.`,
     );
   }
   return notes;
