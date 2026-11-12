@@ -23,7 +23,7 @@ import {
 } from 'node:fs';
 import { basename, dirname, extname, join } from 'node:path';
 import { bytesOf, entriesOf } from './listed-reads.js';
-import { relativeWithin } from './paths.js';
+import { holdsAProject, relativeWithin } from './paths.js';
 import { ignoredTexts, installedByUs, projectTexts } from './project-scan.js';
 import {
   ClassGraph,
@@ -107,6 +107,9 @@ function unseenByTheEngine(projectPath: string, path: string): string | null {
       if (existsSync(join(directory, '.gdignore'))) {
         return `${path} is under a directory holding a .gdignore, which the engine does not load`;
       }
+      if (holdsAProject(directory)) {
+        return `${path} is under a directory holding a project.godot of its own, which the engine does not load as part of this project`;
+      }
     }
   }
   return null;
@@ -144,11 +147,16 @@ function fileInTheWay(absolute: string): string | null {
   }
 }
 
+/** Whether the engine's scan leaves [param directory] out: a `.gdignore`, or below the root a project of its own. */
+function isLeftOut(directory: string, belowTheRoot: boolean): boolean {
+  return existsSync(join(directory, '.gdignore')) || (belowTheRoot && holdsAProject(directory));
+}
+
 /** Every .scn and .res in the project the engine sees. */
 function binaryResources(projectPath: string): string[] {
   const found: string[] = [];
   const visit = (directory: string, prefix: string): void => {
-    if (existsSync(join(directory, '.gdignore'))) {
+    if (isLeftOut(directory, directory !== projectPath)) {
       return;
     }
     for (const entry of entriesOf(directory)) {

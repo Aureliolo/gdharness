@@ -8,9 +8,10 @@ const GdhRead = preload("reading.gd")
 # skips anything beginning with a dot, including .import sidecars that would otherwise answer
 # for the resource they belong to.
 #
-# Both stop at a `.gdignore`, because the engine does: nothing under one is imported, so what is
-# in there is not a resource, not a dependency and not a global class. Walking in anyway hands
-# every caller files the engine will never answer for.
+# Both stop at a `.gdignore` and at a directory below their start holding a project.godot, because
+# the engine does: nothing under one is imported, so what is in there is not a resource, not a
+# dependency and not a global class. Walking in anyway hands every caller files the engine will
+# never answer for.
 
 
 # Why [param path], a res:// or uid:// path a setting names, is not a file the engine can load, or
@@ -114,6 +115,13 @@ func is_stepped_over(path: String) -> bool:
 	return FileAccess.file_exists(path + ".gdignore")
 
 
+# Whether the directory [param path], which ends in a slash, holds a project.godot of its own. The
+# engine steps over such a directory below the project's root, which holds one too, so a walk asks
+# this of the directories below its start and never of the start.
+func holds_a_project(path: String) -> bool:
+	return FileAccess.file_exists(path + "project.godot")
+
+
 # An addon gdharness installed, told by the marker setup writes into it. The engine loads it, but
 # nobody on the project wrote it: the health check counted its thirty-odd scripts as the project's,
 # 39 beside the 5 project_info's own count gave, which the server's walks already step over.
@@ -139,7 +147,8 @@ func find_files(path: String, extension: String, with_ours: bool = false) -> Arr
 
 		while file_name != "":
 			if dir.current_is_dir() and not file_name.begins_with("."):
-				files.append_array(find_files(path + file_name + "/", extension, with_ours))
+				if not holds_a_project(path + file_name + "/"):
+					files.append_array(find_files(path + file_name + "/", extension, with_ours))
 			elif file_name.ends_with(extension):
 				files.append(path + file_name)
 
@@ -168,7 +177,8 @@ func find_files_with_extensions(path: String, extensions: Array) -> Array[String
 
 			var full_path: String = path + file_name
 			if dir.current_is_dir():
-				files.append_array(find_files_with_extensions(full_path + "/", extensions))
+				if not holds_a_project(full_path + "/"):
+					files.append_array(find_files_with_extensions(full_path + "/", extensions))
 			else:
 				var ext: String = file_name.get_extension().to_lower()
 				if ext in extensions:

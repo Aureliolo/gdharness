@@ -577,6 +577,12 @@ func _never_imported(resource_path: String) -> String:
 			return "a .gdignore in " + folder + " keeps the engine from importing anything under it"
 		if folder == "res://":
 			break
+		if _files.holds_a_project(folder if folder.ends_with("/") else folder + "/"):
+			return (
+				"a project.godot in "
+				+ folder
+				+ " makes it a project of its own, which the engine does not import from here"
+			)
 		folder = folder.get_base_dir()
 	var extension: String = resource_path.get_extension().to_lower()
 	if extension in IMPORTABLE_EXTENSIONS:

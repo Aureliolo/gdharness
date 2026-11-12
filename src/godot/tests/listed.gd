@@ -904,7 +904,7 @@ class GdhReached:
 		current = null
 
 	## Every file under res:// the engine sees, as its file system does: no hidden folder, and no
-	## folder holding a `.gdignore`.
+	## folder holding a `.gdignore` or a `project.godot` of its own below the root.
 	static func project_files() -> PackedStringArray:
 		var found: PackedStringArray = []
 		var pending: PackedStringArray = ["res://"]
@@ -917,8 +917,12 @@ class GdhReached:
 				if not file.ends_with(".import") and not file.ends_with(".uid"):
 					var _file_found: bool = found.append(directory.path_join(file))
 			for inner: String in DirAccess.get_directories_at(directory):
-				if not inner.begins_with("."):
-					var _inner: bool = pending.append(directory.path_join(inner))
+				var below: String = directory.path_join(inner)
+				if (
+					not inner.begins_with(".")
+					and not FileAccess.file_exists(below.path_join("project.godot"))
+				):
+					var _inner: bool = pending.append(below)
 		return found
 
 	func _recognize_path(path: String, _type: StringName) -> bool:

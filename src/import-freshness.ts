@@ -10,6 +10,7 @@
 import { createHash } from 'node:crypto';
 import { type Dirent, existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { holdsAProject } from './paths.js';
 import { installedByUs } from './project-scan.js';
 import { importRecord } from './reimport.js';
 
@@ -315,7 +316,8 @@ function kindOf(directory: string, entry: Dirent): 'directory' | 'file' | 'other
 
 /**
  * Every file under [param projectPath] whose import is behind it, walked as `project_import
- * status` walks: past names starting with a dot, folders holding a `.gdignore`, and addons
+ * status` walks: past names starting with a dot, folders holding a `.gdignore` or a `project.godot`
+ * of their own, and addons
  * gdharness installed. A file with an importable extension and no import file has not been
  * imported. A sidecar whose source has gone is left to `project_import status`, since no import
  * can bring it back.
@@ -350,7 +352,9 @@ function collectStale(walk: Walk, directory: string, resDirectory: string): void
     const resPath = `${resDirectory}${entry.name}`;
     const kind = kindOf(directory, entry);
     if (kind === 'directory') {
-      collectStale(walk, join(directory, entry.name), `${resPath}/`);
+      if (!holdsAProject(join(directory, entry.name))) {
+        collectStale(walk, join(directory, entry.name), `${resPath}/`);
+      }
       continue;
     }
     if (kind !== 'file' || entry.name.endsWith('.import')) {
