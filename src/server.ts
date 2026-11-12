@@ -174,8 +174,8 @@ import {
 } from './headless.js';
 import {
   DEPENDENCY_OPERATIONS,
+  EDITOR_ANSWERS,
   EDITOR_CALLS,
-  EDITOR_READS,
   ENGINE_PASSES,
   HEADLESS_OPERATIONS,
 } from './headless-operations.js';
@@ -6258,7 +6258,7 @@ class GodotServer {
     op: string,
     answerable: OperationParams,
   ): Promise<ToolResponse> {
-    const editorSide = EDITOR_READS[tool]?.[op];
+    const editorSide = EDITOR_ANSWERS[tool]?.[op];
     if (editorSide === undefined) {
       return this.createErrorResponse(`${tool} ${op} cannot be read from the editor, only from disk.`, [
         'Leave from unset, or pass from: "disk"',
@@ -6363,9 +6363,12 @@ class GodotServer {
         return await this.handleRunTests(args);
 
       case 'scene_create':
-        return op === 'create'
-          ? await editorOrEngine('create_scene', 'writes')
-          : await editorOrEngine('save_scene', 'writes');
+        if (op === 'create') {
+          return await editorOrEngine('create_scene', 'writes');
+        }
+        return args['from'] === undefined
+          ? await editorOrEngine('save_scene', 'writes')
+          : await this.saveFromTheEditor(args);
       default:
         return await this.dispatchSceneTool(tool, op, args);
     }
@@ -18965,6 +18968,40 @@ class GodotServer {
       answered.content.push({ type: 'text', text: uncachedClassNote([typeName]) });
     }
     return this.byTheEditor(answered, effect);
+  }
+
+  /**
+   * A scene saved as the editor holds it, which only an editor can do: its @tool scripts and layout
+   * are in the file only when the editor made them. Never handed to a headless engine, whose save
+   * would be the file's, so with no editor the call is refused and says what opens one.
+   */
+  private async saveFromTheEditor(args: OperationParams): Promise<ToolResponse> {
+    const { op: _op, ...asks } = args;
+    const contained = this.containProjectFiles(asks);
+    if (!contained.ok) {
+      return contained.response;
+    }
+    const project = this.project(contained.value);
+    if (!project.ok) {
+      return project.response;
+    }
+    const command = EDITOR_ANSWERS['scene_create']?.['save'];
+    if (command === undefined) {
+      throw new Error('scene_create save has no editor command');
+    }
+    if (!this.godotBridge.isConnected()) {
+      const refused = await this.noEditorYet(contained.value, [
+        'Leave from out to save the file as it loads, which needs no editor',
+      ]);
+      if (refused !== null) {
+        return refused;
+      }
+    }
+    return await this.editorToolThroughTheEditor(
+      project.value.path,
+      { command, askedAs: 'scene_create save', effect: 'writes', typeName: '' },
+      contained.value,
+    );
   }
 
   /** An editor tool run by a headless engine, after the class cache holds the class [param typeName] declares. */

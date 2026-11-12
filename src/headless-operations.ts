@@ -73,18 +73,19 @@ export const HEADLESS_TOOLS: Readonly<Record<string, readonly string[]>> = dicti
 });
 
 /**
- * The same reads answered by the open editor instead, for a caller that asked for `from: "editor"`.
+ * What the open editor answers for a caller that asked for `from: "editor"`: a read of what it
+ * holds, or a save of its copy of a scene.
  *
- * Reads only, and only the ones an editor can answer as well as a file can. A write goes to the
- * file whichever way it is phrased, so there is nothing to choose between. An op with no entry here
- * is refused rather than quietly answered from disk, because a caller who asked the editor and got
- * the file would have no way to tell which one they were reading.
+ * A read is here when the editor answers it as well as a file can, and the save because only the
+ * editor holds what its @tool scripts and layout made. An op with no entry is refused rather than
+ * quietly answered from the file, because a caller could not tell which one answered.
  *
  * The name on the right is the addon's command, which is the same name the engine operation has:
  * one question, asked of whichever of the two is holding the answer the caller wants.
  */
-export const EDITOR_READS: Readonly<Record<string, Readonly<Record<string, string>>>> = dictionary({
+export const EDITOR_ANSWERS: Readonly<Record<string, Readonly<Record<string, string>>>> = dictionary({
   project_settings: dictionary({ get: 'get_project_setting' }),
+  scene_create: dictionary({ save: 'save_scene' }),
 });
 
 /** An editor command, and whether it only reads what the editor or the file holds or writes it. */

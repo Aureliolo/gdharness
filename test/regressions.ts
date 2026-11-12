@@ -278,8 +278,8 @@ import {
   withoutAsides,
 } from '../src/headless.js';
 import {
+  EDITOR_ANSWERS,
   EDITOR_CALLS,
-  EDITOR_READS,
   HEADLESS_OPERATIONS,
   HEADLESS_TOOLS,
 } from '../src/headless-operations.js';
@@ -11761,7 +11761,7 @@ function assertTheOpsItsArgumentsNameAreItsOwn(
 }
 
 /** The arguments whose descriptions open by naming the ops that read them, as the table stands. */
-const READ_IN_WORDS = 162;
+const READ_IN_WORDS = 163;
 
 /**
  * An argument whose description opens by naming the ops that read it declares them.
@@ -12867,6 +12867,7 @@ async function testToolsRefusePathsOutsideTheProject(): Promise<void> {
       },
     ],
     ['scene_create', { op: 'save_as', scenePath: 'inside.tscn', newPath: '../copy.tscn' }],
+    ['scene_create', { op: 'save', scenePath: '../outside.tscn', from: 'editor' }],
     ['resource_edit', { op: 'create', resourcePath: '../outside.tres', resourceType: 'Resource' }],
     [
       'resource_edit',
@@ -71969,7 +71970,7 @@ function everyEditorCommandIsSentAndAnswered(): void {
       'editor commands',
       25,
     ),
-    ...Object.values(EDITOR_READS).flatMap((ops) => Object.values(ops)),
+    ...Object.values(EDITOR_ANSWERS).flatMap((ops) => Object.values(ops)),
     ...Object.values(EDITOR_CALLS).flatMap((ops) => Object.values(ops).map(([command]) => command)),
   ]);
   // The server answers the reads and the move from the file, and every other op through its table.
@@ -72992,7 +72993,7 @@ function testAMovieIsWrittenOnlyWhereACaptureCouldBe(): void {
 }
 
 /** How many "`tool op` with `argument`" phrases the skill and the docs hold today, as a floor. */
-const ARGUMENT_MENTIONS = 10;
+const ARGUMENT_MENTIONS = 11;
 
 /**
  * Every argument the skill names for an op is one that op takes.
@@ -73231,7 +73232,7 @@ function testToolTextKeepsASpaceBetweenSentences(): void {
  * Set to what is there rather than to a round number, so removing mentions means lowering this in
  * the same change and somebody confirms the removal was meant.
  */
-const TOOL_NAME_MENTIONS = 1181;
+const TOOL_NAME_MENTIONS = 1488;
 
 /** The same, for phrases naming a tool and one of its multi-word ops. */
 const TOOL_OP_MENTIONS = 51;
@@ -73462,7 +73463,7 @@ function opsNamedInSources(read: {
 /**
  * `from` is offered exactly where there is an editor to ask.
  *
- * The schema says which ops take the argument and `EDITOR_READS` says which ops the editor can
+ * The schema says which ops take the argument and `EDITOR_ANSWERS` says which ops the editor can
  * answer, and they are written in different files. Offered where there is no editor side, a caller
  * reads the schema, asks for the editor and is refused by something they had every reason to think
  * would work. Missing where there is one, the editor's answer is unreachable and the entry is dead.
@@ -73480,7 +73481,7 @@ function testTheEditorIsOfferedWhereItCanAnswer(): void {
     }
   }
   const answerable = new Set(
-    Object.entries(EDITOR_READS).flatMap(([tool, ops]) => Object.keys(ops).map((op) => `${tool} ${op}`)),
+    Object.entries(EDITOR_ANSWERS).flatMap(([tool, ops]) => Object.keys(ops).map((op) => `${tool} ${op}`)),
   );
   assert.ok(answerable.size >= 1, 'no op has an editor side, so this compared two empty sets');
   assert.deepEqual([...offered].toSorted(), [...answerable].toSorted());
@@ -76061,6 +76062,37 @@ async function testAReadAskedOfTheEditorIsNotAnsweredFromDisk(): Promise<void> {
     assert.match(went, /Not a Godot project: \/p/, `the default reading is disk: ${went}`);
   } finally {
     await server.stop();
+  }
+}
+
+/**
+ * A save asked of the editor is refused when no editor serves the project, and never handed to a
+ * headless engine, whose save is the file's own. The scene's bytes stay as they were.
+ */
+async function testASaveFromTheEditorIsRefusedWithNoEditor(): Promise<void> {
+  const project = realpathSync.native(mkdtempSync(join(tmpdir(), 'gdharness-save-no-editor-')));
+  const scene = join(project, 'card.tscn');
+  const bytes = '[gd_scene format=3]\n\n[node name="Card" type="Node2D"]\n';
+  writeFileSync(
+    join(project, 'project.godot'),
+    'config_version=5\n\n[application]\n\nconfig/name="NoEditor"\n',
+  );
+  writeFileSync(scene, bytes);
+  const server = new ServerProcess();
+  try {
+    await server.initialize('regression-test');
+    const asked = await server.request('tools/call', {
+      name: 'scene_create',
+      arguments: { projectPath: project, op: 'save', scenePath: 'card.tscn', from: 'editor' },
+    });
+    const refused = textOf(asked) ?? JSON.stringify(asked);
+    assert.match(refused, /Editor not connected/, `it says no editor is there: ${refused}`);
+    assert.match(refused, /Leave from out/, `and how to save the file instead: ${refused}`);
+    assert.match(refused, /editor_launch/, `and what opens an editor: ${refused}`);
+    assert.equal(readFileSync(scene, 'utf8'), bytes, 'the scene is as it was');
+  } finally {
+    await server.stop();
+    sweep(project);
   }
 }
 
@@ -89220,6 +89252,16 @@ async function testAnUnusedHiddenEditorQuitsAndOpensAgain(): Promise<void> {
     assert.deepEqual(scenes(first), shown, JSON.stringify(first));
 
     await anUnusedEditorQuitsAndWritesItsRecord({ call, firstPid, record, editor });
+    const secondPid = await aSaveFromTheEditorIsTheFirstCallAfterTheQuit({
+      call,
+      project,
+      record,
+      connectedWithScenes,
+      scenes,
+      shown,
+      firstPid,
+    });
+    await anUnusedEditorQuitsAndWritesItsRecord({ call, firstPid: secondPid, record, editor });
     await theUnusedEditorOpensAgainAndAnUnsavedOneStays({
       call,
       project,
@@ -89229,7 +89271,7 @@ async function testAnUnusedHiddenEditorQuitsAndOpensAgain(): Promise<void> {
       scenes,
       untouchedFor,
       shown,
-      firstPid,
+      firstPid: secondPid,
     });
   } finally {
     await call('editor_launch', { op: 'close' }).catch(() => undefined);
@@ -89281,6 +89323,37 @@ async function anUnusedEditorQuitsAndWritesItsRecord(fixture: IdleEditorFirstStr
     [false, firstPid, ['res://main.tscn', 'res://other.tscn']],
     JSON.stringify(gone),
   );
+}
+
+/**
+ * A save of the editor's copy is the call that reopens the quit editor, and it finds the scene open
+ * again as it was left. Answers the pid of the editor it opened.
+ */
+async function aSaveFromTheEditorIsTheFirstCallAfterTheQuit(fixture: {
+  call: IdleEditorFirstStretch['call'];
+  project: string;
+  record: string;
+  connectedWithScenes: () => Promise<unknown>;
+  scenes: (status: unknown) => unknown[];
+  shown: unknown[];
+  firstPid: number;
+}): Promise<number> {
+  const { call, project, record, connectedWithScenes, scenes, shown, firstPid } = fixture;
+  const saved = await call('scene_create', {
+    op: 'save',
+    projectPath: project,
+    scenePath: 'other.tscn',
+    from: 'editor',
+  });
+  const answer = parseTextContent(saved);
+  assert.equal(get(answer, 'from'), 'editor', `the save was the editor's: ${textOf(saved)}`);
+  assert.equal(get(answer, 'writtenBy'), 'the editor', `and said so: ${textOf(saved)}`);
+  const again = await connectedWithScenes();
+  const pid = asNumber(get(again, 'editorPid'));
+  assert.notEqual(pid, firstPid, `the save opened the editor again: ${JSON.stringify(again)}`);
+  assert.deepEqual(scenes(again), shown, `with the scenes it had open: ${JSON.stringify(again)}`);
+  assert.equal(existsSync(record), false, 'and the record gone');
+  return pid;
 }
 
 /** What the idle editor case hands its second stretch. */
@@ -92679,6 +92752,7 @@ const TESTS: (() => void | Promise<void>)[] = [
   testATestRunTakesTheCasesNamed,
   testACaseGdUnitLeavesUnrunIsNoPass,
   testAReadAskedOfTheEditorIsNotAnsweredFromDisk,
+  testASaveFromTheEditorIsRefusedWithNoEditor,
   testAConfigNamingAnotherVersionIsSaid,
   testTheEditorAnswersOnlyForItsOwnProject,
   testAnAnswerTooLargeToSendIsWrittenToAFile,
