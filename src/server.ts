@@ -4432,6 +4432,78 @@ function editorIsScanning(status: OperationParams): boolean {
   return status['scanning'] === true || status['importing'] === true || status['pending'] === true;
 }
 
+/**
+ * The classes section of project_info with the classes of the addons asked for counted apart, or the
+ * refusal text when addonClasses names an addon that declares none.
+ */
+function classesSectionOf(
+  args: OperationParams,
+  payload: Record<string, unknown>,
+  extras: Record<string, unknown>,
+): Record<string, unknown> | string {
+  const declared: unknown[] = Array.isArray(payload['classes']) ? payload['classes'] : [];
+  const asked = readStringArray(args, 'addonClasses') ?? [];
+  const addons = Object.keys(classesWithAddonsCounted(declared, new Set()).inAddons).toSorted();
+  const unknownAddons = asked.filter((addon) => !addons.includes(addon));
+  if (unknownAddons.length > 0) {
+    return `addonClasses names ${unknownAddons.join(', ')}, and no folder of that name under res://addons declares a class. ${addons.length === 0 ? 'No addon declares one.' : `The addons declaring classes are ${addons.join(', ')}.`}`;
+  }
+  const counted = classesWithAddonsCounted(declared, new Set(asked));
+  return {
+    ...payload,
+    classes: counted.classes,
+    ...(Object.keys(counted.inAddons).length > 0 ? { inAddons: counted.inAddons } : {}),
+    ...extras,
+  };
+}
+
+/** The refusal for a search place that does not exist, naming the folders found where it should be. */
+function nothingToSearchAt(projectPath: string, relativePath: string): string {
+  // The folders inside the deepest part of the path that is a folder, since a typo under game/
+  // answered with the project's top-level folders named nothing near it.
+  const parts = relativePath.split('/').filter((part) => part !== '');
+  let kept = parts.length - 1;
+  while (
+    kept > 0 &&
+    statSync(join(projectPath, ...parts.slice(0, kept)), {
+      throwIfNoEntry: false,
+    })?.isDirectory() !== true
+  ) {
+    kept -= 1;
+  }
+  const within = parts.slice(0, kept).join('/');
+  const folders = readdirSync(join(projectPath, within), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+    .map((entry) => entry.name)
+    .toSorted();
+  const listed = within === '' ? "The project's folders are" : `The folders in res://${within}/ are`;
+  return `There is nothing at res://${relativePath} to search.${folders.length === 0 ? '' : ` ${listed} ${folders.join(', ')}.`}`;
+}
+
+/** The parameters of a project_info section, with the compiled scripts added for the sections that judge them. */
+function sectionParamsOf(
+  params: OperationParams,
+  compiled: OperationParams | undefined,
+  section: string,
+): OperationParams {
+  return {
+    ...params,
+    ...(compiled !== undefined && (section === 'health' || section === 'validation') ? { compiled } : {}),
+  };
+}
+
+/** What a project_export run is working on once its checks pass, passed from step to step. */
+interface ExportCall {
+  readonly project: { readonly value: { readonly path: string } };
+  readonly preset: string;
+  readonly output: { readonly relativePath: string; readonly absolutePath: string };
+  readonly baking: string | null;
+  readonly engine: Extract<EngineChoice, { ok: true }>;
+  readonly debug: boolean;
+  readonly pack: boolean;
+  readonly folder: string;
+}
+
 /** What a reimport answers: the payload, or the refusal. */
 type ImportAnswer = { ok: true; payload: OperationParams } | { ok: false; response: ToolResponse };
 
@@ -7974,6 +8046,16 @@ class GodotServer {
       return engine.response;
     }
 
+    return await this.projectInfoOf(args, include, project, engine);
+  }
+
+  /** The answer of project_info: the project's name, structure and engine, and each section asked for. */
+  private async projectInfoOf(
+    args: OperationParams,
+    include: readonly string[],
+    project: { readonly value: { readonly path: string; readonly file: string } },
+    engine: Extract<EngineChoice, { ok: true }>,
+  ): Promise<ToolResponse> {
     const application = parseProjectGodot(readFileSync(project.value.file, 'utf8'))['application'] ?? {};
     const name = application['config/name'];
     const mainScene = application['run/main_scene'];
@@ -7985,6 +8067,16 @@ class GodotServer {
       engineNote: engine.note ?? undefined,
       structure: projectStructure(project.value.path),
     };
+    return await this.projectInfoSections(args, include, project, info);
+  }
+
+  /** Each section project_info was asked for, run and written into [param info]. */
+  private async projectInfoSections(
+    args: OperationParams,
+    include: readonly string[],
+    project: { readonly value: { readonly path: string } },
+    info: Record<string, unknown>,
+  ): Promise<ToolResponse> {
     // Named once above rather than again in every section.
     const sectionExtras = (outcome: HeadlessOutcome): Record<string, unknown> => {
       const { engineNote: _named, ...rest } = outcome;
@@ -8003,30 +8095,14 @@ class GodotServer {
       if (spec === undefined) {
         continue;
       }
-      const params = {
-        ...spec.params(args, detailed),
-        ...(compiledScripts !== undefined && (section === 'health' || section === 'validation')
-          ? { compiled: compiledScripts }
-          : {}),
-      };
+      const params = sectionParamsOf(spec.params(args, detailed), compiledScripts, section);
       const outcome = await this.operation(spec.operation, params, project.value.path);
       if (section === 'classes' && outcome.ok && Array.isArray(outcome.payload['classes'])) {
-        const declared: unknown[] = outcome.payload['classes'];
-        const asked = readStringArray(args, 'addonClasses') ?? [];
-        const addons = Object.keys(classesWithAddonsCounted(declared, new Set()).inAddons).toSorted();
-        const unknownAddons = asked.filter((addon) => !addons.includes(addon));
-        if (unknownAddons.length > 0) {
-          return this.createErrorResponse(
-            `addonClasses names ${unknownAddons.join(', ')}, and no folder of that name under res://addons declares a class. ${addons.length === 0 ? 'No addon declares one.' : `The addons declaring classes are ${addons.join(', ')}.`}`,
-          );
+        const classes = classesSectionOf(args, outcome.payload, sectionExtras(outcome));
+        if (typeof classes === 'string') {
+          return this.createErrorResponse(classes);
         }
-        const counted = classesWithAddonsCounted(declared, new Set(asked));
-        info[section] = {
-          ...outcome.payload,
-          classes: counted.classes,
-          ...(Object.keys(counted.inAddons).length > 0 ? { inAddons: counted.inAddons } : {}),
-          ...sectionExtras(outcome),
-        };
+        info[section] = classes;
         continue;
       }
       info[section] = outcome.ok
@@ -8093,27 +8169,7 @@ class GodotServer {
       return this.createErrorResponse(place.reason);
     }
     if (place !== null && !existsSync(place.absolutePath)) {
-      // The folders inside the deepest part of the path that is a folder, since a typo under game/
-      // answered with the project's top-level folders named nothing near it.
-      const parts = place.relativePath.split('/').filter((part) => part !== '');
-      let kept = parts.length - 1;
-      while (
-        kept > 0 &&
-        statSync(join(project.value.path, ...parts.slice(0, kept)), {
-          throwIfNoEntry: false,
-        })?.isDirectory() !== true
-      ) {
-        kept -= 1;
-      }
-      const within = parts.slice(0, kept).join('/');
-      const folders = readdirSync(join(project.value.path, within), { withFileTypes: true })
-        .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
-        .map((entry) => entry.name)
-        .toSorted();
-      const listed = within === '' ? "The project's folders are" : `The folders in res://${within}/ are`;
-      return this.createErrorResponse(
-        `There is nothing at res://${place.relativePath} to search.${folders.length === 0 ? '' : ` ${listed} ${folders.join(', ')}.`}`,
-      );
+      return this.createErrorResponse(nothingToSearchAt(project.value.path, place.relativePath));
     }
     // The walk steps over links, but the place asked for is opened through them, so a link inside
     // the project naming a folder outside it would be searched whole.
@@ -8125,9 +8181,18 @@ class GodotServer {
         `res://${place.relativePath} leads outside the project through a link, so it is not searched.`,
       );
     }
+    return this.runProjectSearch(args, project.value.path, place);
+  }
+
+  /** The search itself, over the whole project or within [param place], with the options the call gave. */
+  private runProjectSearch(
+    args: OperationParams,
+    projectPath: string,
+    place: { readonly absolutePath: string } | null,
+  ): ToolResponse {
     try {
       return this.jsonTextResponse(
-        searchProject(project.value.path, {
+        searchProject(projectPath, {
           query: readString(args, 'query') ?? '',
           ...this.fileTypes(args),
           ...(place === null ? {} : { within: place.absolutePath }),
@@ -8216,24 +8281,11 @@ class GodotServer {
     if (output !== null && !output.ok) {
       return this.createErrorResponse(output.reason, OUTPUT_PATH_SOLUTIONS);
     }
-    const options = args['options'];
-    let knownOptions: unknown[] = [];
-    let hiddenOptions: unknown = {};
-    if (options !== undefined && options !== null && Object.keys(options).length > 0) {
-      const platform = presetPlatform(project.value.path, preset);
-      if (platform !== null) {
-        const known = await this.exportOptions(project.value.path, platform, {
-          presetsFile: join(project.value.path, 'export_presets.cfg'),
-          preset,
-          asked: options,
-        });
-        if (typeof known === 'string') {
-          return this.createErrorResponse(known);
-        }
-        knownOptions = known.options;
-        hiddenOptions = known.hidden;
-      }
+    const asked = await this.optionsAskedFor(project.value.path, preset, args['options']);
+    if (typeof asked === 'string') {
+      return this.createErrorResponse(asked);
     }
+    const { knownOptions, hiddenOptions } = asked;
     const params: OperationParams = { preset, knownOptions, hiddenOptions };
     if (given !== undefined) {
       params['outputPath'] = output?.relativePath ?? '';
@@ -8252,6 +8304,30 @@ class GodotServer {
     }
     const outcome = await this.operation('set_export_preset', params, project.value.path);
     return this.presetsAnswer(outcome, project.value.path, 'does not have this change');
+  }
+
+  /**
+   * The options the preset's exporter lists for the options a set_preset call gives, with the ones it
+   * hides, or why they could not be read. None are read when no options were given.
+   */
+  private async optionsAskedFor(
+    projectPath: string,
+    preset: string,
+    options: unknown,
+  ): Promise<{ knownOptions: unknown[]; hiddenOptions: unknown } | string> {
+    if (options === undefined || options === null || Object.keys(options).length === 0) {
+      return { knownOptions: [], hiddenOptions: {} };
+    }
+    const platform = presetPlatform(projectPath, preset);
+    if (platform === null) {
+      return { knownOptions: [], hiddenOptions: {} };
+    }
+    const known = await this.exportOptions(projectPath, platform, {
+      presetsFile: join(projectPath, 'export_presets.cfg'),
+      preset,
+      asked: options,
+    });
+    return typeof known === 'string' ? known : { knownOptions: known.options, hiddenOptions: known.hidden };
   }
 
   /** project_export remove_preset. */
@@ -8346,6 +8422,17 @@ class GodotServer {
         ['Or turn shader_baker/enabled off with project_export set_preset to export without baked shaders'],
       );
     }
+    return await this.exportAfterTheChecks(args, project, preset, output, baking);
+  }
+
+  /** The export once the project, preset and output are judged: the engine found and the flags checked. */
+  private async exportAfterTheChecks(
+    args: OperationParams,
+    project: { readonly value: { readonly path: string } },
+    preset: string,
+    output: { readonly relativePath: string; readonly absolutePath: string },
+    baking: string | null,
+  ): Promise<ToolResponse> {
     const engine = await this.engine(project.value.path);
     if (!engine.ok) {
       return engine.response;
@@ -8381,6 +8468,21 @@ class GodotServer {
         `Cannot create ${dirname(output.relativePath)} to export into: ${errorMessage(error)}`,
       );
     }
+    return await this.exportWithImportedFiles({
+      project,
+      preset,
+      output,
+      baking,
+      engine,
+      debug,
+      pack,
+      folder,
+    });
+  }
+
+  /** The export run once the files that changed are imported, with the engine's log kept apart. */
+  private async exportWithImportedFiles(call: ExportCall): Promise<ToolResponse> {
+    const { project, preset, output, baking, engine, debug, pack } = call;
     // The export's own scan imports what changed only by the editor's cache, so in a checkout
     // without it a sidecar a tool wrote, naming no output, went into the build as an asset that
     // fails to load.
@@ -8406,6 +8508,21 @@ class GodotServer {
     ];
     this.logDebug(`Exporting: ${engine.value} ${exportArgs.join(' ')}`);
 
+    return await this.runExportEngine(call, { imported, exportLogs, exportArgs });
+  }
+
+  /** The engine's export, run again once when it crashed writing its doc cache, and the answer built from it. */
+  private async runExportEngine(
+    call: ExportCall,
+    prepared: {
+      readonly imported: Parameters<typeof importedFirstAnswer>[0];
+      readonly exportLogs: string;
+      readonly exportArgs: readonly string[];
+    },
+  ): Promise<ToolResponse> {
+    const { project, preset, output, baking, engine, debug, pack, folder } = call;
+    const { imported, exportLogs, exportArgs } = prepared;
+    const outOfSight = process.platform === 'win32';
     // The file this run writes, told from one an earlier export left there: an export that exited
     // cleanly and wrote nothing read as exported from the last one's file.
     const writtenAt = (): number | null =>
