@@ -47,7 +47,7 @@ import { EDITOR_PLUGINS, installAddons, RUNTIME_AUTOLOAD, writeLoader } from '..
 import { type ChildProcess, spawnHidden, spawnSyncHidden } from '../src/spawn.js';
 import { endEnginesUnder } from './support/engines.js';
 import { asArray, asNumber, asObject, asString, get, text } from './support/json.js';
-import { parseTextContent, textOf } from './support/json-rpc.js';
+import { type JsonRpcMessage, parseTextContent, textOf } from './support/json-rpc.js';
 import { pixelPng, solidPng } from './support/png.js';
 import { reservePort, ServerProcess } from './support/server.js';
 import { sweep } from './support/sweep.js';
@@ -1327,16 +1327,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
   try {
     await server.initialize('editor-fixture');
 
-    const deadline = Date.now() + CONNECT_TIMEOUT_MS;
-    let connected = false;
-    while (!connected && Date.now() < deadline) {
-      if (editor.exitCode !== null) {
-        throw new Error(`the editor exited with ${editor.exitCode}:\n${engineOutput.join('')}`);
-      }
-      connected = get(parseTextContent(await invoke('editor_status', {})), 'editor', 'connected') === true;
-      if (!connected) await delay(250);
-    }
-    assert.ok(connected, `the editor never reached the bridge:\n${engineOutput.join('')}`);
+    await waitForTheBridge({ editor, engineOutput, invoke });
 
     const printed = (): string => engineOutput.join('');
     await body({
@@ -1357,24 +1348,7 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
       assert.notEqual(thread.account(), '', "the editor's main thread was sampled from /proc");
     }
   } catch (failure) {
-    // What the engine said on its way to failing, which is the half of the evidence a tool
-    // answer does not carry: a fixture that reports only its own assertion sends whoever reads
-    // the run back to guessing about an editor that is no longer there to ask.
-    const said = engineOutput.join('').trim();
-    // Whether the editor this started is still alive, which separates a restart that never
-    // happened from one that happened and never came back: the editor a restart brings up is a
-    // process Godot spawns, and nothing here can read its output.
-    const state =
-      editor.exitCode === null && editor.signalCode === null
-        ? 'still running'
-        : `gone (exit ${editor.exitCode ?? 'none'}, signal ${editor.signalCode ?? 'none'})`;
-    // The tail rather than the whole: a tier's log runs to thousands of lines, and the case that
-    // failed is the last thing in it.
-    const sampled = thread.account();
-    throw new Error(
-      `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${accountOf(server)}${sampled === '' ? '' : `\n\nThe editor's main thread, sampled every quarter second:\n${sampled}`}`,
-      { cause: failure },
-    );
+    throw editorFailure(failure, { editor, engineOutput, thread, server });
   } finally {
     thread.stop();
     // The game first: it is the editor's child and outlives it, so a run that failed part way
@@ -1399,6 +1373,56 @@ async function withEditor(godotPath: string, body: (editor: Editor) => Promise<v
       console.warn(held);
     }
   }
+}
+
+/** Waits until the addon of [param editor] has dialled the bridge, and fails if it exits first. */
+async function waitForTheBridge(running: {
+  editor: ChildProcess;
+  engineOutput: string[];
+  invoke: (name: string, args: Record<string, unknown>) => Promise<JsonRpcMessage>;
+}): Promise<void> {
+  const { editor, engineOutput, invoke } = running;
+  const deadline = Date.now() + CONNECT_TIMEOUT_MS;
+  let connected = false;
+  while (!connected && Date.now() < deadline) {
+    if (editor.exitCode !== null) {
+      throw new Error(`the editor exited with ${editor.exitCode}:\n${engineOutput.join('')}`);
+    }
+    connected = get(parseTextContent(await invoke('editor_status', {})), 'editor', 'connected') === true;
+    if (!connected) await delay(250);
+  }
+  assert.ok(connected, `the editor never reached the bridge:\n${engineOutput.join('')}`);
+}
+
+/** The error for a case that failed in [param failure], carrying what the editor and server said. */
+function editorFailure(
+  failure: unknown,
+  running: {
+    editor: ChildProcess;
+    engineOutput: string[];
+    thread: ReturnType<typeof sampleThread>;
+    server: ServerProcess;
+  },
+): Error {
+  const { editor, engineOutput, thread, server } = running;
+  // What the engine said on its way to failing, which is the half of the evidence a tool
+  // answer does not carry: a fixture that reports only its own assertion sends whoever reads
+  // the run back to guessing about an editor that is no longer there to ask.
+  const said = engineOutput.join('').trim();
+  // Whether the editor this started is still alive, which separates a restart that never
+  // happened from one that happened and never came back: the editor a restart brings up is a
+  // process Godot spawns, and nothing here can read its output.
+  const state =
+    editor.exitCode === null && editor.signalCode === null
+      ? 'still running'
+      : `gone (exit ${editor.exitCode ?? 'none'}, signal ${editor.signalCode ?? 'none'})`;
+  // The tail rather than the whole: a tier's log runs to thousands of lines, and the case that
+  // failed is the last thing in it.
+  const sampled = thread.account();
+  return new Error(
+    `${failure instanceof Error ? failure.stack : String(failure)}\n\nThe editor this started is ${state}. It said:\n${said}\n\nThe server's last ${SERVER_ACCOUNT_CHARS} characters:\n${accountOf(server)}${sampled === '' ? '' : `\n\nThe editor's main thread, sampled every quarter second:\n${sampled}`}`,
+    { cause: failure },
+  );
 }
 
 /**
@@ -6178,190 +6202,239 @@ async function testAPlayedRunOutlivesTheServerUnderIt(godotPath: string): Promis
  */
 async function testAHeldGameIsStillHeldForTheReplacement(godotPath: string): Promise<void> {
   await withEditor(godotPath, async (own) => {
-    const mainScript = { projectPath: own.project, scriptPath: 'res://main.gd' };
-    await own.call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
-    const run = await own.play({ op: 'start', headless: true });
-    assert.equal(get(run, 'through'), 'editor', `the editor should be the one playing: ${text(run)}`);
-    const pid = asNumber(get(run, 'runtime', 'pid'), 'the played run needs a process of its own');
-    await stackWithin(own.attempt, 'the game should stop at the breakpoint', (stack) => stack.length > 0);
-
-    // The server that was sent the event says so, with the reason the event carried. Its session
-    // attached only just now, for the stack read above, and an attach that asked the adapter again
-    // would answer "attached" here in place of what it was told.
-    const before = await own.call('editor_output', {});
-    assert.equal(
-      get(before, 'heldAt', 'reason'),
-      'breakpoint',
-      `held, seen by the first server: ${text(before)}`,
-    );
-    // A held game does not end, so a wait answers where it is held rather than sitting out its time.
-    const waitAsked = Date.now();
-    const waited = await own.call('editor_run', { op: 'wait', timeoutMs: 60_000 });
-    const waitedMs = Date.now() - waitAsked;
-    assert.equal(get(waited, 'heldAt', 'reason'), 'breakpoint', `a wait says where: ${text(waited)}`);
-    assert.ok(waitedMs < 15_000, `and answered in ${waitedMs}ms: ${text(waited)}`);
-
-    // A second session, attached while the first server holds the game. It was never sent the
-    // stopped event, so what it knows it learned by asking on attach. This is the state a server
-    // meets when the editor's own debugger, or another client, has the game at a breakpoint.
-    const second = new GodotDAPClient(own.dapPort);
-    await second.connect();
-    await second.attach();
-    assert.ok(second.isStopped(), 'a session attaching to a held game learns that it is held');
-    assert.equal(second.whereItStopped()?.reason, 'attached', 'and says how it came to know');
-    const seen = await second.getStackTrace();
-    assert.equal(get(seen[0], 'line'), BREAK_LINE, `on the line it is held at: ${JSON.stringify(seen[0])}`);
-    await second.abandon();
-    // The first server still holds it: a second client asking did not let it go.
-    const stillSaid = await own.attempt('debug_state', { op: 'stack' });
-    const still = stillSaid.ok ? asArray(stillSaid.answer, 'stackFrames') : [];
-    assert.equal(get(still[0], 'line'), BREAK_LINE, `and asking did not release it: ${stillSaid.text}`);
-
-    // Now the client holding it goes, the way a harness reconnect ends a server: stdin ends and the
-    // shutdown runs, which closes the adapter socket without a disconnect request.
-    own.server.child.stdin?.end();
-    await exited(own.server.child);
-    assert.ok(own.server.exited, 'the server should be gone, or nothing below is a test of anything');
-    await delay(1500);
-    assert.ok(alive(pid), 'the game outlives the server that was holding it');
-
-    const replacement = new ServerProcess({ env: own.serverEnv });
-    try {
-      await replacement.initialize('held-game-fixture');
-      const answered = async (name: string, args: Record<string, unknown>): Promise<unknown> =>
-        parseTextContent(await replacement.request('tools/call', { name, arguments: args }, TOOL_TIMEOUT_MS));
-      const until = Date.now() + CONNECT_TIMEOUT_MS;
-      let back = false;
-      while (!back && Date.now() < until) {
-        back = get(await answered('editor_status', {}), 'editor', 'connected') === true;
-        if (!back) await delay(500);
-      }
-      assert.ok(back, 'the editor should reach the replacement server, or the rest proves nothing');
-
-      // The adapter shows this session no stack, so what it knows it learned from the runtime: a
-      // held game accepts the connection and never answers. Asserted as held rather than as not
-      // running, and with the reason that says which instrument answered.
-      const output = await answered('editor_output', {});
-      assert.equal(
-        get(output, 'heldAt', 'reason'),
-        'unanswered',
-        `the replacement finds the game held, from the runtime not answering: ${text(output)}`,
-      );
-      assert.equal(get(output, 'heldUnknown'), undefined, 'and does not also say it could not tell');
-      const stack = await replacement.request(
-        'tools/call',
-        { name: 'debug_state', arguments: { op: 'stack' } },
-        TOOL_TIMEOUT_MS,
-      );
-      assert.match(
-        textOf(stack) ?? '',
-        /The game is held, and this server cannot read its stack/,
-        `and the stack refusal says held and why it cannot be read, not running: ${textOf(stack)}`,
-      );
-
-      // A bystander, connected and nothing more, the way the server that played the scene is
-      // connected before its first stack read. It is told when the game is let go by somebody
-      // else, which is what the editor's own debugger or another client does, and what it knows
-      // afterwards is that the game runs: without the event, a session told of the stop went on
-      // answering held about a game that was running.
-      const bystander = new GodotDAPClient(own.dapPort);
-      await bystander.connect();
-      assert.equal(bystander.holdIsKnown(), false, 'a bare connection opened now has been told nothing');
-
-      // Let go through the replacement. That it then ticks is what says the game was held rather
-      // than wedged, and that this session can act on a hold it was never told about.
-      const released = await replacement.request(
-        'tools/call',
-        { name: 'debug_control', arguments: { op: 'continue' } },
-        TOOL_TIMEOUT_MS,
-      );
-      assert.equal(
-        get(parseTextContent(released), 'continued'),
-        true,
-        `continue through the replacement: ${textOf(released)}`,
-      );
-      const afterwards = await answered('editor_output', {});
-      assert.equal(get(afterwards, 'heldAt'), null, `and the session now knows it runs: ${text(afterwards)}`);
-      const toldToo = Date.now() + 5000;
-      while (!bystander.holdIsKnown() && Date.now() < toldToo) {
-        await delay(50);
-      }
-      assert.ok(bystander.holdIsKnown(), 'a continue by another client is reported to every connection');
-      assert.equal(bystander.isStopped(), false, 'as a game that runs');
-      await bystander.abandon();
-      // Polled, because a game let go a moment ago has not ticked yet, and how soon it does is not
-      // a number this fixture can know.
-      const patience = Date.now() + GAME_STOP_TIMEOUT_MS;
-      let ticked = 0;
-      let lastAnswer = '';
-      while (ticked === 0 && Date.now() < patience) {
-        const ticksResponse = await replacement.request(
-          'tools/call',
-          {
-            name: 'runtime_inspect',
-            arguments: {
-              projectPath: own.project,
-              op: 'property',
-              nodePath: '/root/Main',
-              property: 'ticks',
-            },
-          },
-          TOOL_TIMEOUT_MS,
-        );
-        lastAnswer = textOf(ticksResponse) ?? '';
-        const value = get(parseTextContent(ticksResponse), 'value');
-        ticked = typeof value === 'number' ? value : 0;
-        if (ticked === 0) await delay(500);
-      }
-      assert.ok(ticked > 0, `a released game ticks, which a held one cannot: ${lastAnswer}`);
-
-      const ended = parseTextContent(
-        await replacement.request(
-          'tools/call',
-          { name: 'editor_run', arguments: { op: 'stop' } },
-          TOOL_TIMEOUT_MS,
-        ),
-      );
-      assert.equal(get(ended, 'stopped'), true, `the replacement should be able to end it: ${text(ended)}`);
-      await delay(1500);
-      assert.ok(!alive(pid), 'after which the game is gone');
-
-      // The breakpoint the first server set is the replacement's to send as well: the editor
-      // keeps one for a single play, the first server is gone with what it held, and a play
-      // through the replacement used to run straight past the line. The note in the project is
-      // what carries it, and the start answer says it was sent.
-      const one = [{ scriptPath: 'res://main.gd', lines: [BREAK_LINE] }];
-      const replayed = await answered('editor_run', {
-        projectPath: own.project,
-        op: 'start',
-        headless: true,
-      });
-      assert.deepEqual(
-        get(replayed, 'breakpoints'),
-        one,
-        `a play through the replacement sends the breakpoint the first server set: ${text(replayed)}`,
-      );
-      const stopsAgain = Date.now() + GAME_STOP_TIMEOUT_MS;
-      let reason: unknown = null;
-      while (reason !== 'breakpoint' && Date.now() < stopsAgain) {
-        reason = get(await answered('editor_output', {}), 'heldAt', 'reason');
-        if (reason !== 'breakpoint') await delay(500);
-      }
-      assert.equal(reason, 'breakpoint', 'and the game stops on it, for a server that never set it');
-      const cleared = await answered('debug_breakpoint', {
-        projectPath: own.project,
-        scriptPath: 'res://main.gd',
-        op: 'remove',
-        line: BREAK_LINE,
-      });
-      assert.deepEqual(get(cleared, 'held'), [], `the replacement can take it off again: ${text(cleared)}`);
-      await answered('editor_run', { op: 'stop' });
-    } catch (failure) {
-      throw withTheAccountOf(replacement, failure);
-    } finally {
-      await replacement.stop();
-    }
+    const pid = await holdAGameAtABreakpoint(own);
+    await checksTheReplacementOfAHeldGame(own, pid);
   });
+}
+
+/** What a server answers to a tool call, parsed as the first block of its text. */
+type Answered = (name: string, args: Record<string, unknown>) => Promise<unknown>;
+
+/**
+ * Holds a played game at a breakpoint, checks what the first server and a second session learn of
+ * it, ends the first server, and answers the held game's pid.
+ */
+async function holdAGameAtABreakpoint(own: Editor): Promise<number> {
+  const mainScript = { projectPath: own.project, scriptPath: 'res://main.gd' };
+  await own.call('debug_breakpoint', { ...mainScript, op: 'set', line: BREAK_LINE });
+  const run = await own.play({ op: 'start', headless: true });
+  assert.equal(get(run, 'through'), 'editor', `the editor should be the one playing: ${text(run)}`);
+  const pid = asNumber(get(run, 'runtime', 'pid'), 'the played run needs a process of its own');
+  await stackWithin(own.attempt, 'the game should stop at the breakpoint', (stack) => stack.length > 0);
+
+  // The server that was sent the event says so, with the reason the event carried. Its session
+  // attached only just now, for the stack read above, and an attach that asked the adapter again
+  // would answer "attached" here in place of what it was told.
+  const before = await own.call('editor_output', {});
+  assert.equal(
+    get(before, 'heldAt', 'reason'),
+    'breakpoint',
+    `held, seen by the first server: ${text(before)}`,
+  );
+  // A held game does not end, so a wait answers where it is held rather than sitting out its time.
+  const waitAsked = Date.now();
+  const waited = await own.call('editor_run', { op: 'wait', timeoutMs: 60_000 });
+  const waitedMs = Date.now() - waitAsked;
+  assert.equal(get(waited, 'heldAt', 'reason'), 'breakpoint', `a wait says where: ${text(waited)}`);
+  assert.ok(waitedMs < 15_000, `and answered in ${waitedMs}ms: ${text(waited)}`);
+
+  // A second session, attached while the first server holds the game. It was never sent the
+  // stopped event, so what it knows it learned by asking on attach. This is the state a server
+  // meets when the editor's own debugger, or another client, has the game at a breakpoint.
+  const second = new GodotDAPClient(own.dapPort);
+  await second.connect();
+  await second.attach();
+  assert.ok(second.isStopped(), 'a session attaching to a held game learns that it is held');
+  assert.equal(second.whereItStopped()?.reason, 'attached', 'and says how it came to know');
+  const seen = await second.getStackTrace();
+  assert.equal(get(seen[0], 'line'), BREAK_LINE, `on the line it is held at: ${JSON.stringify(seen[0])}`);
+  await second.abandon();
+  // The first server still holds it: a second client asking did not let it go.
+  const stillSaid = await own.attempt('debug_state', { op: 'stack' });
+  const still = stillSaid.ok ? asArray(stillSaid.answer, 'stackFrames') : [];
+  assert.equal(get(still[0], 'line'), BREAK_LINE, `and asking did not release it: ${stillSaid.text}`);
+
+  // Now the client holding it goes, the way a harness reconnect ends a server: stdin ends and the
+  // shutdown runs, which closes the adapter socket without a disconnect request.
+  own.server.child.stdin?.end();
+  await exited(own.server.child);
+  assert.ok(own.server.exited, 'the server should be gone, or nothing below is a test of anything');
+  await delay(1500);
+  assert.ok(alive(pid), 'the game outlives the server that was holding it');
+  return pid;
+}
+
+/** A server started after the first one went finds the game held, lets it go and takes over. */
+async function checksTheReplacementOfAHeldGame(own: Editor, pid: number): Promise<void> {
+  const replacement = new ServerProcess({ env: own.serverEnv });
+  try {
+    await replacement.initialize('held-game-fixture');
+    const answered: Answered = async (name, args) =>
+      parseTextContent(await replacement.request('tools/call', { name, arguments: args }, TOOL_TIMEOUT_MS));
+    await waitForTheEditorToReach(answered);
+    await checksTheReplacementFindsItHeld(replacement, answered);
+    await releasesThroughTheReplacement(own, replacement, answered);
+    await waitsForTheGameToTick(own, replacement);
+    await stopsTheReleasedGame(replacement, pid);
+    await replaysTheBreakpoint(own, answered);
+  } catch (failure) {
+    throw withTheAccountOf(replacement, failure);
+  } finally {
+    await replacement.stop();
+  }
+}
+
+/** Waits until the editor has reached the server behind [param answered]. */
+async function waitForTheEditorToReach(answered: Answered): Promise<void> {
+  const until = Date.now() + CONNECT_TIMEOUT_MS;
+  let back = false;
+  while (!back && Date.now() < until) {
+    back = get(await answered('editor_status', {}), 'editor', 'connected') === true;
+    if (!back) await delay(500);
+  }
+  assert.ok(back, 'the editor should reach the replacement server, or the rest proves nothing');
+}
+
+/** The replacement reads the game as held from the runtime, and refuses the stack for that reason. */
+async function checksTheReplacementFindsItHeld(
+  replacement: ServerProcess,
+  answered: Answered,
+): Promise<void> {
+  // The adapter shows this session no stack, so what it knows it learned from the runtime: a
+  // held game accepts the connection and never answers. Asserted as held rather than as not
+  // running, and with the reason that says which instrument answered.
+  const output = await answered('editor_output', {});
+  assert.equal(
+    get(output, 'heldAt', 'reason'),
+    'unanswered',
+    `the replacement finds the game held, from the runtime not answering: ${text(output)}`,
+  );
+  assert.equal(get(output, 'heldUnknown'), undefined, 'and does not also say it could not tell');
+  const stack = await replacement.request(
+    'tools/call',
+    { name: 'debug_state', arguments: { op: 'stack' } },
+    TOOL_TIMEOUT_MS,
+  );
+  assert.match(
+    textOf(stack) ?? '',
+    /The game is held, and this server cannot read its stack/,
+    `and the stack refusal says held and why it cannot be read, not running: ${textOf(stack)}`,
+  );
+}
+
+/** A continue through the replacement is reported to a bystander connection and to the session. */
+async function releasesThroughTheReplacement(
+  own: Editor,
+  replacement: ServerProcess,
+  answered: Answered,
+): Promise<void> {
+  // A bystander, connected and nothing more, the way the server that played the scene is
+  // connected before its first stack read. It is told when the game is let go by somebody
+  // else, which is what the editor's own debugger or another client does, and what it knows
+  // afterwards is that the game runs: without the event, a session told of the stop went on
+  // answering held about a game that was running.
+  const bystander = new GodotDAPClient(own.dapPort);
+  await bystander.connect();
+  assert.equal(bystander.holdIsKnown(), false, 'a bare connection opened now has been told nothing');
+
+  // Let go through the replacement. That it then ticks is what says the game was held rather
+  // than wedged, and that this session can act on a hold it was never told about.
+  const released = await replacement.request(
+    'tools/call',
+    { name: 'debug_control', arguments: { op: 'continue' } },
+    TOOL_TIMEOUT_MS,
+  );
+  assert.equal(
+    get(parseTextContent(released), 'continued'),
+    true,
+    `continue through the replacement: ${textOf(released)}`,
+  );
+  const afterwards = await answered('editor_output', {});
+  assert.equal(get(afterwards, 'heldAt'), null, `and the session now knows it runs: ${text(afterwards)}`);
+  const toldToo = Date.now() + 5000;
+  while (!bystander.holdIsKnown() && Date.now() < toldToo) {
+    await delay(50);
+  }
+  assert.ok(bystander.holdIsKnown(), 'a continue by another client is reported to every connection');
+  assert.equal(bystander.isStopped(), false, 'as a game that runs');
+  await bystander.abandon();
+}
+
+/** A game let go ticks, which a held one cannot. */
+async function waitsForTheGameToTick(own: Editor, replacement: ServerProcess): Promise<void> {
+  // Polled, because a game let go a moment ago has not ticked yet, and how soon it does is not
+  // a number this fixture can know.
+  const patience = Date.now() + GAME_STOP_TIMEOUT_MS;
+  let ticked = 0;
+  let lastAnswer = '';
+  while (ticked === 0 && Date.now() < patience) {
+    const ticksResponse = await replacement.request(
+      'tools/call',
+      {
+        name: 'runtime_inspect',
+        arguments: {
+          projectPath: own.project,
+          op: 'property',
+          nodePath: '/root/Main',
+          property: 'ticks',
+        },
+      },
+      TOOL_TIMEOUT_MS,
+    );
+    lastAnswer = textOf(ticksResponse) ?? '';
+    const value = get(parseTextContent(ticksResponse), 'value');
+    ticked = typeof value === 'number' ? value : 0;
+    if (ticked === 0) await delay(500);
+  }
+  assert.ok(ticked > 0, `a released game ticks, which a held one cannot: ${lastAnswer}`);
+}
+
+/** The replacement ends the released game, which is then actually gone. */
+async function stopsTheReleasedGame(replacement: ServerProcess, pid: number): Promise<void> {
+  const ended = parseTextContent(
+    await replacement.request(
+      'tools/call',
+      { name: 'editor_run', arguments: { op: 'stop' } },
+      TOOL_TIMEOUT_MS,
+    ),
+  );
+  assert.equal(get(ended, 'stopped'), true, `the replacement should be able to end it: ${text(ended)}`);
+  await delay(1500);
+  assert.ok(!alive(pid), 'after which the game is gone');
+}
+
+/** A play through the replacement sends the breakpoint the first server set, and stops on it. */
+async function replaysTheBreakpoint(own: Editor, answered: Answered): Promise<void> {
+  // The breakpoint the first server set is the replacement's to send as well: the editor
+  // keeps one for a single play, the first server is gone with what it held, and a play
+  // through the replacement used to run straight past the line. The note in the project is
+  // what carries it, and the start answer says it was sent.
+  const one = [{ scriptPath: 'res://main.gd', lines: [BREAK_LINE] }];
+  const replayed = await answered('editor_run', {
+    projectPath: own.project,
+    op: 'start',
+    headless: true,
+  });
+  assert.deepEqual(
+    get(replayed, 'breakpoints'),
+    one,
+    `a play through the replacement sends the breakpoint the first server set: ${text(replayed)}`,
+  );
+  const stopsAgain = Date.now() + GAME_STOP_TIMEOUT_MS;
+  let reason: unknown = null;
+  while (reason !== 'breakpoint' && Date.now() < stopsAgain) {
+    reason = get(await answered('editor_output', {}), 'heldAt', 'reason');
+    if (reason !== 'breakpoint') await delay(500);
+  }
+  assert.equal(reason, 'breakpoint', 'and the game stops on it, for a server that never set it');
+  const cleared = await answered('debug_breakpoint', {
+    projectPath: own.project,
+    scriptPath: 'res://main.gd',
+    op: 'remove',
+    line: BREAK_LINE,
+  });
+  assert.deepEqual(get(cleared, 'held'), [], `the replacement can take it off again: ${text(cleared)}`);
+  await answered('editor_run', { op: 'stop' });
 }
 
 /** Every whole LSP message in [param bytes], in order. */

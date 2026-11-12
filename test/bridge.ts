@@ -100,6 +100,80 @@ interface MockRuntime {
   close(): Promise<void>;
 }
 
+/** What the mock runtime named [param name] answers to [param request]. */
+function mockRuntimeAnswer(name: string, request: Record<string, unknown>): unknown {
+  const id = request['id'];
+  const params = isRecord(request['params']) ? request['params'] : {};
+  switch (request['command']) {
+    case 'ping':
+      return { type: 'pong', id, timestamp: Date.now() };
+    case 'get_tree': {
+      const root = typeof params['root'] === 'string' ? params['root'] : '/root';
+      return {
+        type: 'tree',
+        id,
+        root: {
+          name,
+          type: 'Node',
+          path: root,
+          children: [{ name: 'Player', type: 'CharacterBody2D', path: `${root}/Player` }],
+        },
+      };
+    }
+    case 'set_property':
+      return {
+        type: 'property_set',
+        id,
+        path: params['path'],
+        property: params['property'],
+        old_value: false,
+        new_value: params['value'],
+      };
+    case 'call_method':
+      return {
+        type: 'method_result',
+        id,
+        path: params['path'],
+        method: params['method'],
+        result: { echoed_args: params['args'] ?? [] },
+      };
+    case 'get_metrics':
+      return { type: 'metrics', id, data: { fps: 60, object_node_count: 42 } };
+    case 'find_nodes':
+      return {
+        type: 'nodes',
+        id,
+        count: 1,
+        truncated: false,
+        nodes: [{ name: 'Player', type: 'CharacterBody2D', path: '/root/Player' }],
+        // Echoed so the test can see the filters arrived under the names the addon reads.
+        asked: params,
+      };
+    case 'click':
+      return {
+        type: 'clicked',
+        id,
+        path: params['path'],
+        hovered: params['path'],
+        landed: true,
+        control_afterwards: 'in_tree',
+        asked: params,
+      };
+    case 'wait_signal':
+      return { type: 'signal', id, fired: true, args: [3], elapsed_ms: 12, asked: params };
+    case 'wait_until':
+      return { type: 'condition', id, met: true, value: 34, asked: params };
+    case 'capture_screenshot':
+    case 'capture_viewport': {
+      const screenshotPath = text(params['output_path']);
+      writeFileSync(screenshotPath, Buffer.from(ONE_PIXEL_PNG_BASE64, 'base64'));
+      return { type: 'screenshot_file', id, path: screenshotPath, width: 1, height: 1, format: 'png' };
+    }
+    default:
+      return { type: 'error', id, message: `Unknown command: ${String(request['command'])}` };
+  }
+}
+
 /**
  * A mock of the runtime addon: it announces itself the way the addon does, greets a client
  * with a welcome, and answers each request by id on the same line-delimited socket.
@@ -147,86 +221,7 @@ function startMockRuntime(directory: string, options: MockRuntimeOptions): Promi
       if (!isRecord(request)) {
         throw new Error(`the mock runtime was sent a line that is not an object: ${line}`);
       }
-      const id = request['id'];
-      const params = isRecord(request['params']) ? request['params'] : {};
-      switch (request['command']) {
-        case 'ping':
-          reply({ type: 'pong', id, timestamp: Date.now() });
-          break;
-        case 'get_tree': {
-          const root = typeof params['root'] === 'string' ? params['root'] : '/root';
-          reply({
-            type: 'tree',
-            id,
-            root: {
-              name: options.name,
-              type: 'Node',
-              path: root,
-              children: [{ name: 'Player', type: 'CharacterBody2D', path: `${root}/Player` }],
-            },
-          });
-          break;
-        }
-        case 'set_property':
-          reply({
-            type: 'property_set',
-            id,
-            path: params['path'],
-            property: params['property'],
-            old_value: false,
-            new_value: params['value'],
-          });
-          break;
-        case 'call_method':
-          reply({
-            type: 'method_result',
-            id,
-            path: params['path'],
-            method: params['method'],
-            result: { echoed_args: params['args'] ?? [] },
-          });
-          break;
-        case 'get_metrics':
-          reply({ type: 'metrics', id, data: { fps: 60, object_node_count: 42 } });
-          break;
-        case 'find_nodes':
-          reply({
-            type: 'nodes',
-            id,
-            count: 1,
-            truncated: false,
-            nodes: [{ name: 'Player', type: 'CharacterBody2D', path: '/root/Player' }],
-            // Echoed so the test can see the filters arrived under the names the addon reads.
-            asked: params,
-          });
-          break;
-        case 'click':
-          reply({
-            type: 'clicked',
-            id,
-            path: params['path'],
-            hovered: params['path'],
-            landed: true,
-            control_afterwards: 'in_tree',
-            asked: params,
-          });
-          break;
-        case 'wait_signal':
-          reply({ type: 'signal', id, fired: true, args: [3], elapsed_ms: 12, asked: params });
-          break;
-        case 'wait_until':
-          reply({ type: 'condition', id, met: true, value: 34, asked: params });
-          break;
-        case 'capture_screenshot':
-        case 'capture_viewport': {
-          const screenshotPath = text(params['output_path']);
-          writeFileSync(screenshotPath, Buffer.from(ONE_PIXEL_PNG_BASE64, 'base64'));
-          reply({ type: 'screenshot_file', id, path: screenshotPath, width: 1, height: 1, format: 'png' });
-          break;
-        }
-        default:
-          reply({ type: 'error', id, message: `Unknown command: ${String(request['command'])}` });
-      }
+      reply(mockRuntimeAnswer(options.name, request));
     };
   });
 
@@ -341,739 +336,796 @@ async function main(): Promise<void> {
     assert.ok(parsed !== null, `${name} should answer with JSON text, got ${JSON.stringify(response)}`);
     return parsed;
   };
+  const rig: BridgeRig = { server, call, payload, projectPath, bridgePort, runtimeDir };
 
   try {
-    // A mock runtime offered a number that something holds takes the next one, and one offered only
-    // numbers already handed out says so instead of never starting.
-    const takenPort = 1113;
-    const takenBy = createServer();
-    await once(takenBy.listen(takenPort, '127.0.0.1'), 'listening');
-    const offerDir = mkdtempSync(join(tmpdir(), 'gdharness-offer-'));
-    const offered = { pid: process.pid, projectPath, name: 'offered' };
-    try {
-      const numbers = [takenPort, takenPort + 1];
-      const moved = await startMockRuntime(offerDir, {
-        ...offered,
-        offer: () => Promise.resolve(numbers.shift() ?? 0),
-      });
-      try {
-        assert.equal(moved.port, takenPort + 1, 'a held number is passed over for the next one offered');
-      } finally {
-        await moved.close();
-      }
-      let timer: NodeJS.Timeout | undefined;
-      const outOfTime = new Promise<string>((settle) => {
-        timer = setTimeout(() => {
-          settle('unsettled');
-        }, 5000);
-      });
-      const refused = startMockRuntime(offerDir, {
-        ...offered,
-        offer: () => Promise.resolve(takenPort),
-      }).then(
-        async (started) => {
-          await started.close();
-          return 'started';
-        },
-        (error: unknown) => (error instanceof Error ? error.message : String(error)),
-      );
-      const outcome = await Promise.race([refused, outOfTime]);
-      clearTimeout(timer);
-      assert.match(outcome, /already offered/, `a number offered twice is refused: ${outcome}`);
-    } finally {
-      rmSync(offerDir, { recursive: true, force: true });
-      await new Promise<void>((done) => {
-        takenBy.close(() => {
-          done();
-        });
-      });
-    }
-
-    // The protocol handshake.
-    const init = await server.initialize('bridge-test');
-    assert.equal(serverIdentity(init)['name'], 'gdharness', 'the opening names the server');
-    // An advertised capability is one a client will call, so each one advertised is asked here: a
-    // capability the server does not serve is a promise it breaks on the first request.
-    const capabilities = get(init.result, 'capabilities');
-    assert.deepEqual(
-      Object.keys(asObject(capabilities, 'capabilities')).toSorted(),
-      ['completions', 'prompts', 'resources', 'tools'],
-      `the server advertises what it serves and nothing else: ${JSON.stringify(capabilities)}`,
-    );
-    for (const method of ['tools/list', 'resources/list', 'prompts/list']) {
-      const listed = await server.request(method);
-      assert.ok(
-        listed.error === undefined && isRecord(listed.result),
-        `${method} is answered: ${JSON.stringify(listed)}`,
-      );
-    }
-    const completed = await server.request('completion/complete', {
-      ref: { type: 'ref/resource', uri: 'godot://scene/{path}' },
-      argument: { name: 'path', value: '' },
-    });
-    assert.ok(
-      Array.isArray(get(completed.result, 'completion', 'values')),
-      `completion/complete is answered: ${JSON.stringify(completed)}`,
-    );
-
-    // The whole surface in one page, under names a strict client accepts, each refusing what
-    // it does not name.
-    const tools = asArray(get((await server.request('tools/list')).result, 'tools'), 'tools/list');
-    const names = tools.map((tool) => String(get(tool, 'name')));
-    assert.equal(names.length, TOOL_COUNT, `tools/list carries the whole surface: ${names.join(', ')}`);
-    assert.deepEqual(
-      names.filter((name) => !TOOL_NAME_PATTERN.test(name)),
-      [],
-      'every name is domain_verb',
-    );
-    assert.equal(new Set(names).size, names.length, 'no name is listed twice');
-    for (const tool of tools) {
-      assert.equal(
-        get(tool, 'inputSchema', 'additionalProperties'),
-        false,
-        `${text(get(tool, 'name'))} is closed`,
-      );
-    }
-    // An argument only some ops read says which, since the schema cannot: an op names only what it
-    // needs, and editor_launch close refused the projectPath its schema described as for every op.
-    const described = (tool: string, argument: string) =>
-      text(
-        get(
-          tools.find((listed) => get(listed, 'name') === tool),
-          'inputSchema',
-          'properties',
-          argument,
-          'description',
-        ),
-      );
-    assert.match(described('editor_launch', 'projectPath'), /\. Only for op open\.$/, 'one op is named');
-    assert.match(
-      described('scene_node', 'index'),
-      /\. Only for ops add, duplicate, reparent\.$/,
-      'several ops are named',
-    );
-    assert.match(
-      described('editor_launch', 'hidden'),
-      /\. Only for ops open, restart\.$/,
-      'every op but one',
-    );
-    assert.doesNotMatch(
-      described('scene_node', 'scenePath'),
-      /Only for/,
-      'an argument every op reads names none',
-    );
-
-    // Refusals come from the spec, before anything is looked up or spawned.
-    const unknownTool = await call('scene_nodes', {});
-    assert.match(
-      unknownTool.error?.message ?? '',
-      /Unknown tool: scene_nodes\. Tools: /,
-      'an unknown tool is named with the list',
-    );
-    const unknownOp =
-      textOf(await call('scene_node', { projectPath, scenePath: 'a.tscn', op: 'paint' })) ?? '';
-    assert.match(
-      unknownOp,
-      /has no op "paint"\. Valid ops: add, get, set/,
-      'an unknown op is refused with the valid set',
-    );
-    const noOp = textOf(await call('scene_node', { projectPath, scenePath: 'a.tscn' })) ?? '';
-    assert.match(noOp, /scene_node needs op, one of: add/, 'a tool with no default op says so');
-    const stray = textOf(await call('project_search', { projectPath, query: 'x', depth: 2 })) ?? '';
-    assert.match(stray, /project_search does not take depth\. It takes: /, 'a stray argument is refused');
-    // And a tool that takes nothing says so, rather than "It takes: ." over an empty list, which is
-    // the first refusal a session sees: editor_status is the call everything starts with.
-    const takesNothing = textOf(await call('editor_status', { projectPath })) ?? '';
-    assert.match(
-      takesNothing,
-      /editor_status does not take projectPath\. It takes no arguments\./,
-      'a tool with no arguments says that rather than listing none',
-    );
-    const missing = textOf(await call('runtime_invoke', { op: 'set', nodePath: '/root' })) ?? '';
-    assert.match(missing, /runtime_invoke set needs property, value/, 'a missing op argument is named');
-    // Blank is an argument somebody forgot everywhere but the few that carry content: emptying a
-    // field and writing "" to a property are calls a caller means, and both were refused as missing,
-    // which tells them they left out what they deliberately sent.
-    const blankName =
-      textOf(await call('runtime_invoke', { op: 'set', nodePath: '/root', property: ' ', value: 1 })) ?? '';
-    assert.match(blankName, /runtime_invoke set needs property/, 'a blank name is still somebody who forgot');
-    const blankValue =
-      textOf(await call('runtime_invoke', { op: 'set', nodePath: '/root', property: 'name', value: '' })) ??
-      '';
-    assert.doesNotMatch(blankValue, /needs value/, 'a blank value is a value and reaches the game');
-
-    // ClassDB introspection and the project search, which reach the engine.
-    if (HAS_USABLE_GODOT) {
-      const classes = await payload('editor_classes', {
-        projectPath,
-        category: 'node2d',
-        filter: 'sprite',
-        instantiableOnly: true,
-      });
-      assert.ok(asArray(get(classes, 'classes')).length > 0, 'editor_classes query returns classes');
-      const info = await payload('editor_classes', { projectPath, op: 'info', className: 'Node2D' });
-      assert.equal(get(info, 'class_name'), 'Node2D');
-      assert.ok(asArray(get(info, 'methods')).length > 0, 'editor_classes info returns methods');
-
-      // One member by name, wherever in the ancestry it is declared: the whole of Control ran to
-      // seventy thousand characters for a question about one property, and the answer to "does
-      // this engine have it" is the member and who declares it. A property Control declares, a
-      // method Node declares that Control inherits, an enum, and a name nothing declares, which is
-      // refused with the names that contain it.
-      const own = await payload('editor_classes', {
-        projectPath,
-        op: 'info',
-        className: 'Control',
-        member: 'focus_mode',
-      });
-      const ownFound = asArray(get(own, 'found'));
-      assert.equal(get(own, 'member'), 'focus_mode', JSON.stringify(own));
-      assert.ok(
-        ownFound.some((one) => get(one, 'kind') === 'property' && get(one, 'declared_in') === 'Control'),
-        `a property of the class itself, named as its own: ${JSON.stringify(own)}`,
-      );
-      const inherited = await payload('editor_classes', {
-        projectPath,
-        op: 'info',
-        className: 'Control',
-        member: 'add_child',
-      });
-      const inheritedFound = asArray(get(inherited, 'found'));
-      assert.ok(
-        inheritedFound.some((one) => get(one, 'kind') === 'method' && get(one, 'declared_in') === 'Node'),
-        `a method an ancestor declares is found and credited to it: ${JSON.stringify(inherited)}`,
-      );
-      const method = inheritedFound.find((one) => get(one, 'kind') === 'method');
-      assert.ok(
-        asArray(get(method, 'member', 'args')).length >= 1,
-        `with its signature: ${JSON.stringify(method)}`,
-      );
-      const anEnum = await payload('editor_classes', {
-        projectPath,
-        op: 'info',
-        className: 'Control',
-        member: 'FocusMode',
-      });
-      assert.ok(
-        asArray(get(anEnum, 'found')).some(
-          (one) => get(one, 'kind') === 'enum' && get(one, 'member', 'values', 'FOCUS_ALL') !== undefined,
-        ),
-        `an enum, with its values: ${JSON.stringify(anEnum)}`,
-      );
-      const nothing =
-        textOf(
-          await call('editor_classes', { projectPath, op: 'info', className: 'Control', member: 'focus' }),
-        ) ?? '';
-      assert.match(
-        nothing,
-        /declare no member named focus/,
-        `a name nothing declares is refused: ${nothing}`,
-      );
-      assert.match(nothing, /focus_mode/, `naming the members whose names contain it: ${nothing}`);
-
-      // A class a script declares, written a moment ago and in no class cache, is named as that
-      // script's: the engine knows the project's classes only from the cache, so the server hands
-      // the operation what the scripts declare on disk, and one this new was refused as declared
-      // nowhere. Its misspelling is offered it.
-      writeFileSync(join(projectPath, 'fresh_unscanned.gd'), 'class_name FreshUnscanned\nextends Node\n');
-      try {
-        const fresh =
-          textOf(await call('editor_classes', { projectPath, op: 'info', className: 'FreshUnscanned' })) ??
-          '';
-        assert.match(
-          fresh,
-          /FreshUnscanned is not an engine class: it is the class_name res:\/\/fresh_unscanned\.gd declares/,
-          fresh,
-        );
-        const misspelt =
-          textOf(
-            await call('editor_classes', { projectPath, op: 'inheritance', className: 'FreshUnscaned' }),
-          ) ?? '';
-        assert.match(
-          misspelt,
-          /The nearest class a project script declares is FreshUnscanned\. Neither the engine nor a project script declares it\./,
-          misspelt,
-        );
-      } finally {
-        rmSync(join(projectPath, 'fresh_unscanned.gd'), { force: true });
-      }
-    } else if (process.env['GDHARNESS_REQUIRE_GODOT']) {
-      throw new Error('GDHARNESS_REQUIRE_GODOT is set and no executable Godot was found.');
-    }
-
-    const search = textOf(
-      await call('project_search', {
-        projectPath,
-        query: 'extends CharacterBody2D',
-        fileTypes: ['gd'],
-        maxResults: 10,
-      }),
-    );
-    assert.ok(
-      search?.includes('player.gd'),
-      `project_search finds the file that carries the match, got ${search}`,
-    );
-
-    // The runtime tools, relayed to a mock addon found through its announcement.
-    const notRunning = await payload('editor_status', {});
-    assert.equal(
-      get(notRunning, 'game', 'runtimeConnected'),
-      false,
-      'editor_status reports no runtime without an announcement',
-    );
-    assert.equal(get(notRunning, 'game', 'processActive'), false);
-    assert.match(
-      textOf(await call('runtime_inspect', {})) ?? '',
-      /No game with the runtime addon is running/,
-      'a runtime tool with no game says so',
-    );
-
-    // An announcement left behind by a game that is gone is dropped, and deleted on the way.
-    const stale = join(runtimeDir, `runtime-${await deadProcessId()}.json`);
-    writeFileSync(
-      stale,
-      JSON.stringify({ protocol: RUNTIME_PROTOCOL, pid: 0, port: 1, address: '127.0.0.1' }),
-    );
-    assert.equal(get(await payload('editor_status', {}), 'game', 'runtimeConnected'), false);
-    assert.ok(!existsSync(stale), 'a stale announcement is deleted when it is found');
-
-    const runtime = await startMockRuntime(runtimeDir, {
-      pid: process.pid,
-      projectPath,
-      name: 'fixture',
-    });
-    try {
-      const connected = await payload('editor_status', {});
-      assert.equal(
-        get(connected, 'game', 'runtimeConnected'),
-        true,
-        'editor_status reports the runtime once the addon answers a ping',
-      );
-      assert.equal(get(connected, 'game', 'runtimes', 0, 'pid'), process.pid, 'the game is named by pid');
-      assert.equal(get(connected, 'game', 'runtimes', 0, 'port'), runtime.port);
-      assert.equal(get(connected, 'game', 'runtimes', 0, 'addonVersion'), SERVER_VERSION);
-      assert.equal(get(connected, 'game', 'runtimes', 0, 'addonIsStale'), false);
-
-      const tree = await payload('runtime_inspect', { nodePath: '/root', depth: 2 });
-      assert.equal(get(tree, 'type'), 'tree');
-      assert.equal(get(tree, 'addonIsStale'), undefined, "a game on this server's addon is not marked");
-      assert.equal(get(tree, 'root', 'path'), '/root', 'runtime_inspect relays the addon tree');
-      assert.equal(get(tree, 'id'), undefined, 'the request id is the relay business, not the answer');
-
-      const set = await payload('runtime_invoke', {
-        op: 'set',
-        nodePath: '/root/Player',
-        property: 'visible',
-        value: true,
-      });
-      assert.equal(get(set, 'type'), 'property_set');
-      assert.equal(get(set, 'new_value'), true, 'runtime_invoke set relays the addon property update');
-
-      const called = await payload('runtime_invoke', {
-        op: 'call',
-        nodePath: '/root/Player',
-        method: 'jump',
-        args: [1, 2],
-      });
-      assert.equal(get(called, 'type'), 'method_result');
-      assert.deepEqual(
-        get(called, 'result', 'echoed_args'),
-        [1, 2],
-        'runtime_invoke call relays the method result',
-      );
-
-      const metrics = await payload('runtime_inspect', { op: 'metrics', metrics: ['fps'] });
-      assert.equal(get(metrics, 'type'), 'metrics');
-      assert.equal(get(metrics, 'data', 'fps'), 60, 'runtime_inspect metrics relays the addon metrics');
-
-      // The newer questions, each carried to the addon under the names it reads.
-      const found = await payload('runtime_inspect', {
-        op: 'find',
-        className: 'CharacterBody2D',
-        namePattern: 'Play*',
-        says: 'Keep going',
-        limit: 5,
-      });
-      assert.equal(get(found, 'nodes', 0, 'path'), '/root/Player', 'runtime_inspect find relays the paths');
-      assert.deepEqual(
-        get(found, 'asked'),
-        { class: 'CharacterBody2D', name: 'Play*', says: 'Keep going', root: '/root', limit: 5 },
-        'only the filters given are sent, under the addon names',
-      );
-      assert.match(
-        textOf(await call('runtime_inspect', { op: 'find' })) ?? '',
-        /needs at least one of className, script, namePattern, group, says/,
-        'a find with nothing to find by is refused before the game is asked',
-      );
-
-      const clicked = await payload('runtime_input', { op: 'click', nodePath: '/root/Menu/Play' });
-      assert.equal(get(clicked, 'landed'), true, 'runtime_input click relays the addon answer');
-      assert.deepEqual(
-        get(clicked, 'asked'),
-        { path: '/root/Menu/Play', button: 'left', double: false },
-        'click carries the path, the button and whether it is a double click',
-      );
-      // A button given by number, which the schema takes, reaches the game as that number: read as a
-      // string alone it was dropped and the click went as the left button.
-      const numbered = await payload('runtime_input', {
-        op: 'click',
-        nodePath: '/root/Menu/Play',
-        button: 2,
-      });
-      assert.equal(get(numbered, 'asked', 'button'), 2, JSON.stringify(numbered));
-      const byWords = await payload('runtime_input', { op: 'click', says: 'New shop', index: 1 });
-      assert.deepEqual(
-        get(byWords, 'asked'),
-        { path: '', button: 'left', double: false, says: 'New shop', index: 1 },
-        'a click by words carries them and the index, with no path to narrow the search',
-      );
-      assert.match(
-        textOf(await call('runtime_input', { op: 'click' })) ?? '',
-        /runtime_input click needs nodePath, or says with the words on the control to click/,
-        'a click naming no control is refused before the game is asked',
-      );
-
-      const waited = await payload('runtime_wait', {
-        op: 'signal',
-        nodePath: '/root/Player',
-        signal: 'died',
-        timeoutMs: 250,
-      });
-      assert.equal(get(waited, 'fired'), true, 'runtime_wait signal relays the addon answer');
-      assert.deepEqual(
-        get(waited, 'asked'),
-        { path: '/root/Player', signal: 'died', timeout_ms: 250 },
-        'the wait carries its timeout to the game',
-      );
-      // #1007: the comparison reaches the game under the name it reads, and only when one is given.
-      const ordered = await payload('runtime_wait', {
-        op: 'until',
-        nodePath: '/root/Main',
-        property: '_game:run:day',
-        value: 32,
-        compare: '>=',
-        timeoutMs: 250,
-      });
-      assert.deepEqual(
-        get(ordered, 'asked'),
-        { path: '/root/Main', property: '_game:run:day', value: 32, compare: '>=', timeout_ms: 250 },
-        'a property wait carries its comparison to the game',
-      );
-      const plain = await payload('runtime_wait', {
-        op: 'until',
-        nodePath: '/root/Main',
-        property: 'day',
-        value: 32,
-        timeoutMs: 250,
-      });
-      assert.equal(
-        get(plain, 'asked', 'compare'),
-        undefined,
-        `none is sent unless asked: ${JSON.stringify(plain)}`,
-      );
-
-      for (const args of [{}, { op: 'viewport', viewportPath: '/root' }] as const) {
-        const label = `runtime_capture ${JSON.stringify(args)}`;
-        const image = (contentOf(await call('runtime_capture', args)) ?? []).find(
-          (chunk) => chunk.type === 'image',
-        );
-        assert.ok(image, `${label} answers with an image block`);
-        assert.equal(image.mimeType, 'image/png');
-        assert.ok(image.data, `${label} carries the image bytes`);
-        assert.ok(
-          !('text' in image),
-          `${label} image block carries no text field, as the MCP schema requires`,
-        );
-      }
-
-      // A second game: the tools refuse to guess between the two, and projectPath picks one.
-      const otherProject = join(tmpdir(), 'gdharness-other-project');
-      const serverPid = server.child.pid ?? 0;
-      assert.ok(serverPid > 0, 'the server child has a pid to announce under');
-      const other = await startMockRuntime(runtimeDir, {
-        pid: serverPid,
-        projectPath: otherProject,
-        name: 'other',
-      });
-      try {
-        // Two projects, so both arguments can settle it and the refusal offers both. The other
-        // shape, several games of one project, cannot be settled by the path and says so: that
-        // is a pure choice and lives with its neighbours in the regressions.
-        const both = textOf(await call('runtime_inspect', {})) ?? '';
-        assert.match(both, /Several games are running: .*Pass pid to choose one/, both);
-        assert.match(both, /or projectPath when the project you mean is running only one/, both);
-        for (const named of [projectPath, otherProject]) {
-          assert.ok(both.includes(named), `both games are named: ${both}`);
-        }
-        const chosen = await payload('runtime_inspect', { projectPath: otherProject });
-        assert.equal(get(chosen, 'root', 'name'), 'other', 'projectPath picks the game running that project');
-        const first = await payload('runtime_inspect', { projectPath });
-        assert.equal(get(first, 'root', 'name'), 'fixture');
-        assert.match(
-          textOf(await call('runtime_inspect', { projectPath: join(tmpdir(), 'nowhere') })) ?? '',
-          /No running game is from /,
-          'a projectPath no game runs is refused with the games that are',
-        );
-      } finally {
-        await other.close();
-      }
-    } finally {
-      await runtime.close();
-    }
-
-    // The three ways a game that exists can still fail to answer.
-    const silent = await startMockRuntime(runtimeDir, {
-      pid: process.pid,
-      projectPath,
-      name: 'silent',
-      silent: true,
-    });
-    try {
-      assert.match(
-        textOf(await call('runtime_inspect', {})) ?? '',
-        /did not answer 'get_tree' within \d+ms/,
-        'a game that accepts and says nothing is reported as busy',
-      );
-    } finally {
-      await silent.close();
-    }
-
-    const older = await startMockRuntime(runtimeDir, {
-      pid: process.pid,
-      projectPath,
-      name: 'older',
-      protocol: 1,
-    });
-    try {
-      assert.match(
-        textOf(await call('runtime_inspect', {})) ?? '',
-        new RegExp(`speaks runtime protocol 1 and this server speaks ${RUNTIME_PROTOCOL}`),
-        'a game on another protocol is told apart from a broken one',
-      );
-    } finally {
-      await older.close();
-    }
-
-    // A game on another runtime addon, as a second checkout of a project carries: named in the
-    // status, and refused rather than asked, since its answers would be the old code's.
-    const behind = await startMockRuntime(runtimeDir, {
-      pid: process.pid,
-      projectPath,
-      name: 'behind',
-      addon: { version: '1.1.20', digest: 'an older digest' },
-    });
-    try {
-      const listed = await payload('editor_status', {});
-      assert.equal(get(listed, 'game', 'runtimes', 0, 'addonIsStale'), true, JSON.stringify(listed));
-      assert.equal(get(listed, 'game', 'runtimes', 0, 'addonVersion'), '1.1.20');
-      const staleNote = String(get(listed, 'game', 'runtimes', 0, 'staleNote'));
-      assert.match(staleNote, /running the 1\.1\.20 runtime addon, while this server ships/, staleNote);
-      // The fixture project holds no addons, so it is sent to upgrade rather than to a restart.
-      assert.ok(
-        staleNote.includes(
-          `run  ${runLine(currentRunner(), SERVER_VERSION, `upgrade "${projectPath}"`)}  in a shell`,
-        ),
-        staleNote,
-      );
-      const refused = textOf(await call('runtime_inspect', {})) ?? '';
-      assert.ok(refused.startsWith(staleNote), `a call is refused with the note: ${refused}`);
-      assert.match(staleNote, /so this server asks it nothing/, staleNote);
-    } finally {
-      await behind.close();
-    }
-    const unsaid = await startMockRuntime(runtimeDir, {
-      pid: process.pid,
-      projectPath,
-      name: 'unsaid',
-      addon: { version: '', digest: '' },
-    });
-    try {
-      const listed = await payload('editor_status', {});
-      assert.equal(get(listed, 'game', 'runtimes', 0, 'addonVersion'), null, JSON.stringify(listed));
-      assert.equal(get(listed, 'game', 'runtimes', 0, 'addonIsStale'), undefined, 'not guessed');
-      assert.equal(get(await payload('runtime_inspect', {}), 'addonIsStale'), undefined);
-    } finally {
-      await unsaid.close();
-    }
-
-    const closedPort = await reservePort();
-    const nobody = join(runtimeDir, `runtime-${process.pid}.json`);
-    writeFileSync(
-      nobody,
-      JSON.stringify({
-        protocol: RUNTIME_PROTOCOL,
-        pid: process.pid,
-        port: closedPort,
-        address: '127.0.0.1',
-        project: { name: 'nobody', path: projectPath },
-        addon_version: SERVER_VERSION,
-        addon_digest: shippedRuntimeDigest(),
-      }),
-    );
-    try {
-      assert.match(
-        textOf(await call('runtime_inspect', {})) ?? '',
-        /nothing answered on its port/,
-        'an announced port nobody listens on is reported as refused',
-      );
-    } finally {
-      rmSync(nobody, { force: true });
-    }
-
-    // The editor bridge over WebSocket.
-    const disconnected = await payload('editor_status', {});
-    assert.equal(
-      get(disconnected, 'editor', 'connected'),
-      false,
-      'editor_status reports disconnected before any editor connects',
-    );
-
-    const noEditor =
-      textOf(
-        await call('project_settings', {
-          op: 'get',
-          projectPath,
-          setting: 'application/config/name',
-          from: 'editor',
-        }),
-      ) ?? '';
-    assert.match(
-      noEditor,
-      /Editor not connected/,
-      'a read asked of the editor refuses when no editor is connected',
-    );
-
-    // Only the editor's path is served: the bridge port is not a place for a browser tab to
-    // reach anything, over WebSocket or over HTTP.
-    await assert.rejects(
-      connect(`ws://${BRIDGE_HOST}:${bridgePort}/visualizer`),
-      'a socket to another path is closed',
-    );
-    const page = await fetch(`http://${BRIDGE_HOST}:${bridgePort}/`);
-    assert.equal(page.status, 404, 'a plain request gets nothing');
-    assert.equal(page.headers.get('access-control-allow-origin'), null, 'and no CORS header inviting one');
-
-    // A language server port that takes a connection and drops it. One that refused it would be
-    // waited on, since the editor names it, for as long as a language server takes to start.
-    const lspPort = await reservePort();
-    const dropping = createServer((socket: Socket) => {
-      socket.destroy();
-    });
-    await once(dropping.listen(lspPort, '127.0.0.1'), 'listening');
-    const godot = await connect(`ws://${BRIDGE_HOST}:${bridgePort}/godot`);
-    try {
-      // The three ports with it. Godot keeps one language server, one debug adapter and one
-      // debugger per machine rather than per editor, so a second editor is moved off them and
-      // this is how a server learns where it went. Zero is an addon that could not find out,
-      // which is not a port and is not reported as one.
-      godot.send(JSON.stringify(greeting(projectPath, { lsp_port: lspPort, dap_port: 6106, debug_port: 0 })));
-      // Until the greeting lands the socket is connected and the editor has said nothing, and a
-      // greeting without a server's mark then has its process's command line read, to tell an
-      // editor from a one-shot engine run, which can take seconds on Windows.
-      const settled = (status: unknown): boolean =>
-        get(status, 'editor', 'connected') === true && get(status, 'editor', 'greeting') === undefined;
-      let afterReady = await payload('editor_status', {});
-      for (let waited = 0; waited < 15_000 && !settled(afterReady); waited += 200) {
-        await delay(200);
-        afterReady = await payload('editor_status', {});
-      }
-      assert.equal(
-        get(afterReady, 'editor', 'connected'),
-        true,
-        'editor_status reports connected after godot_ready',
-      );
-      assert.equal(get(afterReady, 'editor', 'lspPort'), lspPort, 'and where that editor serves the LSP');
-      assert.equal(get(afterReady, 'editor', 'dapPort'), 6106, 'and its debug adapter');
-      assert.equal(
-        get(afterReady, 'editor', 'debugPort'),
-        undefined,
-        'and nothing at all for a port it could not answer',
-      );
-
-      // Followed rather than reported: the tool that cannot reach the language server names the
-      // port it asked on, and that is the editor's rather than the default.
-      assert.match(
-        textOf(await call('script_diagnostics', { projectPath, scriptPath: 'res://player.gd' })) ?? '',
-        new RegExp(`port ${lspPort}\\b`),
-        'script_diagnostics asks on the port the editor reported',
-      );
-
-      // A tool call becomes a tool_invoke on the editor side, with its arguments normalised.
-      const invoked = new Promise<Record<string, unknown>>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          reject(new Error('No tool_invoke received within 5 s'));
-        }, 5000);
-        godot.on('message', (data) => {
-          const frame = parseFrame(data);
-          if (frame?.['type'] === 'tool_invoke') {
-            clearTimeout(timer);
-            resolve(frame);
-          }
-        });
-      });
-      const pendingCreate = call('scene_create', {
-        projectPath,
-        scenePath: 'res://test_bridge.tscn',
-        rootNodeType: 'Node2D',
-      });
-      const invoke = await invoked;
-      assert.equal(invoke['tool'], 'create_scene', 'the tool is routed to the editor command it stands for');
-      assert.deepEqual(
-        {
-          projectPath: get(invoke, 'args', 'projectPath'),
-          scenePath: get(invoke, 'args', 'scenePath'),
-          rootNodeType: get(invoke, 'args', 'rootNodeType'),
-        },
-        { projectPath, scenePath: 'res://test_bridge.tscn', rootNodeType: 'Node2D' },
-        'bridge arguments reach the editor under the names the tool takes',
-      );
-
-      godot.send(
-        JSON.stringify({
-          type: 'tool_result',
-          id: invoke['id'],
-          success: true,
-          result: {
-            message: 'Scene created successfully',
-            scene_path: 'res://test_bridge.tscn',
-            root_type: 'Node2D',
-          },
-        }),
-      );
-      const created = textOf(await pendingCreate) ?? '';
-      assert.ok(
-        created.includes('test_bridge'),
-        `the editor's result reaches the MCP caller, got ${created}`,
-      );
-
-      // Missing arguments are refused before anything reaches the editor.
-      const unexpected: Record<string, unknown>[] = [];
-      const capture = (data: RawData): void => {
-        const frame = parseFrame(data);
-        if (frame?.['type'] === 'tool_invoke') unexpected.push(frame);
-      };
-      godot.on('message', capture);
-      const startedAt = Date.now();
-      const bare = await call('scene_create', {});
-      const elapsed = Date.now() - startedAt;
-      godot.off('message', capture);
-      assert.match(
-        textOf(bare) ?? '',
-        /scene_create create needs projectPath, scenePath/,
-        `scene_create with no arguments is refused, got ${JSON.stringify(bare)}`,
-      );
-      assert.ok(elapsed < 1000, `the refusal is immediate rather than a timeout (${elapsed} ms)`);
-      assert.deepEqual(unexpected, [], 'a refused call emits no tool_invoke');
-    } finally {
-      godot.close();
-      dropping.close();
-    }
-
+    await checksThePortOffers(rig);
+    await checksTheHandshake(rig);
+    await checksTheToolList(rig);
+    await checksTheRefusals(rig);
+    await checksClassIntrospection(rig);
+    await checksNoGameRunning(rig);
+    await checksTheMockRuntime(rig);
+    await checksGamesThatFailToAnswer(rig);
+    await checksTheEditorBridge(rig);
     console.log('bridge integration tests passed');
   } finally {
     await server.stop();
     sweep(projectPath);
     sweep(runtimeDir);
+  }
+}
+
+/** What each phase of the bridge test works with: the server under test and its fixture. */
+interface BridgeRig {
+  server: ServerProcess;
+  call: (name: string, args: unknown) => Promise<JsonRpcMessage>;
+  payload: (name: string, args: unknown) => Promise<unknown>;
+  projectPath: string;
+  bridgePort: number;
+  runtimeDir: string;
+}
+
+/**
+ * A mock runtime offered a number that something holds takes the next one, and one offered only
+ * numbers already handed out says so instead of never starting.
+ */
+async function checksThePortOffers(rig: BridgeRig): Promise<void> {
+  const { projectPath } = rig;
+  const takenPort = 1113;
+  const takenBy = createServer();
+  await once(takenBy.listen(takenPort, '127.0.0.1'), 'listening');
+  const offerDir = mkdtempSync(join(tmpdir(), 'gdharness-offer-'));
+  const offered = { pid: process.pid, projectPath, name: 'offered' };
+  try {
+    const numbers = [takenPort, takenPort + 1];
+    const moved = await startMockRuntime(offerDir, {
+      ...offered,
+      offer: () => Promise.resolve(numbers.shift() ?? 0),
+    });
+    try {
+      assert.equal(moved.port, takenPort + 1, 'a held number is passed over for the next one offered');
+    } finally {
+      await moved.close();
+    }
+    let timer: NodeJS.Timeout | undefined;
+    const outOfTime = new Promise<string>((settle) => {
+      timer = setTimeout(() => {
+        settle('unsettled');
+      }, 5000);
+    });
+    const refused = startMockRuntime(offerDir, {
+      ...offered,
+      offer: () => Promise.resolve(takenPort),
+    }).then(
+      async (started) => {
+        await started.close();
+        return 'started';
+      },
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+    const outcome = await Promise.race([refused, outOfTime]);
+    clearTimeout(timer);
+    assert.match(outcome, /already offered/, `a number offered twice is refused: ${outcome}`);
+  } finally {
+    rmSync(offerDir, { recursive: true, force: true });
+    await new Promise<void>((done) => {
+      takenBy.close(() => {
+        done();
+      });
+    });
+  }
+}
+
+/** The opening names the server, advertises only what it serves, and answers each listing. */
+async function checksTheHandshake(rig: BridgeRig): Promise<void> {
+  const { server } = rig;
+  // The protocol handshake.
+  const init = await server.initialize('bridge-test');
+  assert.equal(serverIdentity(init)['name'], 'gdharness', 'the opening names the server');
+  // An advertised capability is one a client will call, so each one advertised is asked here: a
+  // capability the server does not serve is a promise it breaks on the first request.
+  const capabilities = get(init.result, 'capabilities');
+  assert.deepEqual(
+    Object.keys(asObject(capabilities, 'capabilities')).toSorted(),
+    ['completions', 'prompts', 'resources', 'tools'],
+    `the server advertises what it serves and nothing else: ${JSON.stringify(capabilities)}`,
+  );
+  for (const method of ['tools/list', 'resources/list', 'prompts/list']) {
+    const listed = await server.request(method);
+    assert.ok(
+      listed.error === undefined && isRecord(listed.result),
+      `${method} is answered: ${JSON.stringify(listed)}`,
+    );
+  }
+  const completed = await server.request('completion/complete', {
+    ref: { type: 'ref/resource', uri: 'godot://scene/{path}' },
+    argument: { name: 'path', value: '' },
+  });
+  assert.ok(
+    Array.isArray(get(completed.result, 'completion', 'values')),
+    `completion/complete is answered: ${JSON.stringify(completed)}`,
+  );
+}
+
+/** The tool list carries the whole surface under strict names, and each tool describes its ops. */
+async function checksTheToolList(rig: BridgeRig): Promise<void> {
+  const { server } = rig;
+  // The whole surface in one page, under names a strict client accepts, each refusing what
+  // it does not name.
+  const tools = asArray(get((await server.request('tools/list')).result, 'tools'), 'tools/list');
+  const names = tools.map((tool) => String(get(tool, 'name')));
+  assert.equal(names.length, TOOL_COUNT, `tools/list carries the whole surface: ${names.join(', ')}`);
+  assert.deepEqual(
+    names.filter((name) => !TOOL_NAME_PATTERN.test(name)),
+    [],
+    'every name is domain_verb',
+  );
+  assert.equal(new Set(names).size, names.length, 'no name is listed twice');
+  for (const tool of tools) {
+    assert.equal(
+      get(tool, 'inputSchema', 'additionalProperties'),
+      false,
+      `${text(get(tool, 'name'))} is closed`,
+    );
+  }
+  // An argument only some ops read says which, since the schema cannot: an op names only what it
+  // needs, and editor_launch close refused the projectPath its schema described as for every op.
+  const described = (tool: string, argument: string) =>
+    text(
+      get(
+        tools.find((listed) => get(listed, 'name') === tool),
+        'inputSchema',
+        'properties',
+        argument,
+        'description',
+      ),
+    );
+  assert.match(described('editor_launch', 'projectPath'), /\. Only for op open\.$/, 'one op is named');
+  assert.match(
+    described('scene_node', 'index'),
+    /\. Only for ops add, duplicate, reparent\.$/,
+    'several ops are named',
+  );
+  assert.match(described('editor_launch', 'hidden'), /\. Only for ops open, restart\.$/, 'every op but one');
+  assert.doesNotMatch(
+    described('scene_node', 'scenePath'),
+    /Only for/,
+    'an argument every op reads names none',
+  );
+}
+
+/** A call the spec refuses is refused before anything is looked up or spawned. */
+async function checksTheRefusals(rig: BridgeRig): Promise<void> {
+  const { call, projectPath } = rig;
+  // Refusals come from the spec, before anything is looked up or spawned.
+  const unknownTool = await call('scene_nodes', {});
+  assert.match(
+    unknownTool.error?.message ?? '',
+    /Unknown tool: scene_nodes\. Tools: /,
+    'an unknown tool is named with the list',
+  );
+  const unknownOp = textOf(await call('scene_node', { projectPath, scenePath: 'a.tscn', op: 'paint' })) ?? '';
+  assert.match(
+    unknownOp,
+    /has no op "paint"\. Valid ops: add, get, set/,
+    'an unknown op is refused with the valid set',
+  );
+  const noOp = textOf(await call('scene_node', { projectPath, scenePath: 'a.tscn' })) ?? '';
+  assert.match(noOp, /scene_node needs op, one of: add/, 'a tool with no default op says so');
+  const stray = textOf(await call('project_search', { projectPath, query: 'x', depth: 2 })) ?? '';
+  assert.match(stray, /project_search does not take depth\. It takes: /, 'a stray argument is refused');
+  // And a tool that takes nothing says so, rather than "It takes: ." over an empty list, which is
+  // the first refusal a session sees: editor_status is the call everything starts with.
+  const takesNothing = textOf(await call('editor_status', { projectPath })) ?? '';
+  assert.match(
+    takesNothing,
+    /editor_status does not take projectPath\. It takes no arguments\./,
+    'a tool with no arguments says that rather than listing none',
+  );
+  const missing = textOf(await call('runtime_invoke', { op: 'set', nodePath: '/root' })) ?? '';
+  assert.match(missing, /runtime_invoke set needs property, value/, 'a missing op argument is named');
+  // Blank is an argument somebody forgot everywhere but the few that carry content: emptying a
+  // field and writing "" to a property are calls a caller means, and both were refused as missing,
+  // which tells them they left out what they deliberately sent.
+  const blankName =
+    textOf(await call('runtime_invoke', { op: 'set', nodePath: '/root', property: ' ', value: 1 })) ?? '';
+  assert.match(blankName, /runtime_invoke set needs property/, 'a blank name is still somebody who forgot');
+  const blankValue =
+    textOf(await call('runtime_invoke', { op: 'set', nodePath: '/root', property: 'name', value: '' })) ?? '';
+  assert.doesNotMatch(blankValue, /needs value/, 'a blank value is a value and reaches the game');
+}
+
+/** ClassDB introspection and the project search, which reach the engine. */
+async function checksClassIntrospection(rig: BridgeRig): Promise<void> {
+  const { call, payload, projectPath } = rig;
+  if (HAS_USABLE_GODOT) {
+    const classes = await payload('editor_classes', {
+      projectPath,
+      category: 'node2d',
+      filter: 'sprite',
+      instantiableOnly: true,
+    });
+    assert.ok(asArray(get(classes, 'classes')).length > 0, 'editor_classes query returns classes');
+    const info = await payload('editor_classes', { projectPath, op: 'info', className: 'Node2D' });
+    assert.equal(get(info, 'class_name'), 'Node2D');
+    assert.ok(asArray(get(info, 'methods')).length > 0, 'editor_classes info returns methods');
+
+    // One member by name, wherever in the ancestry it is declared: the whole of Control ran to
+    // seventy thousand characters for a question about one property, and the answer to "does
+    // this engine have it" is the member and who declares it. A property Control declares, a
+    // method Node declares that Control inherits, an enum, and a name nothing declares, which is
+    // refused with the names that contain it.
+    const own = await payload('editor_classes', {
+      projectPath,
+      op: 'info',
+      className: 'Control',
+      member: 'focus_mode',
+    });
+    const ownFound = asArray(get(own, 'found'));
+    assert.equal(get(own, 'member'), 'focus_mode', JSON.stringify(own));
+    assert.ok(
+      ownFound.some((one) => get(one, 'kind') === 'property' && get(one, 'declared_in') === 'Control'),
+      `a property of the class itself, named as its own: ${JSON.stringify(own)}`,
+    );
+    const inherited = await payload('editor_classes', {
+      projectPath,
+      op: 'info',
+      className: 'Control',
+      member: 'add_child',
+    });
+    const inheritedFound = asArray(get(inherited, 'found'));
+    assert.ok(
+      inheritedFound.some((one) => get(one, 'kind') === 'method' && get(one, 'declared_in') === 'Node'),
+      `a method an ancestor declares is found and credited to it: ${JSON.stringify(inherited)}`,
+    );
+    const method = inheritedFound.find((one) => get(one, 'kind') === 'method');
+    assert.ok(
+      asArray(get(method, 'member', 'args')).length >= 1,
+      `with its signature: ${JSON.stringify(method)}`,
+    );
+    const anEnum = await payload('editor_classes', {
+      projectPath,
+      op: 'info',
+      className: 'Control',
+      member: 'FocusMode',
+    });
+    assert.ok(
+      asArray(get(anEnum, 'found')).some(
+        (one) => get(one, 'kind') === 'enum' && get(one, 'member', 'values', 'FOCUS_ALL') !== undefined,
+      ),
+      `an enum, with its values: ${JSON.stringify(anEnum)}`,
+    );
+    const nothing =
+      textOf(
+        await call('editor_classes', { projectPath, op: 'info', className: 'Control', member: 'focus' }),
+      ) ?? '';
+    assert.match(nothing, /declare no member named focus/, `a name nothing declares is refused: ${nothing}`);
+    assert.match(nothing, /focus_mode/, `naming the members whose names contain it: ${nothing}`);
+
+    // A class a script declares, written a moment ago and in no class cache, is named as that
+    // script's: the engine knows the project's classes only from the cache, so the server hands
+    // the operation what the scripts declare on disk, and one this new was refused as declared
+    // nowhere. Its misspelling is offered it.
+    writeFileSync(join(projectPath, 'fresh_unscanned.gd'), 'class_name FreshUnscanned\nextends Node\n');
+    try {
+      const fresh =
+        textOf(await call('editor_classes', { projectPath, op: 'info', className: 'FreshUnscanned' })) ?? '';
+      assert.match(
+        fresh,
+        /FreshUnscanned is not an engine class: it is the class_name res:\/\/fresh_unscanned\.gd declares/,
+        fresh,
+      );
+      const misspelt =
+        textOf(
+          await call('editor_classes', { projectPath, op: 'inheritance', className: 'FreshUnscaned' }),
+        ) ?? '';
+      assert.match(
+        misspelt,
+        /The nearest class a project script declares is FreshUnscanned\. Neither the engine nor a project script declares it\./,
+        misspelt,
+      );
+    } finally {
+      rmSync(join(projectPath, 'fresh_unscanned.gd'), { force: true });
+    }
+  } else if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+    throw new Error('GDHARNESS_REQUIRE_GODOT is set and no executable Godot was found.');
+  }
+
+  const search = textOf(
+    await call('project_search', {
+      projectPath,
+      query: 'extends CharacterBody2D',
+      fileTypes: ['gd'],
+      maxResults: 10,
+    }),
+  );
+  assert.ok(
+    search?.includes('player.gd'),
+    `project_search finds the file that carries the match, got ${search}`,
+  );
+}
+
+/** With no game running the runtime tools say so, and a stale announcement is dropped. */
+async function checksNoGameRunning(rig: BridgeRig): Promise<void> {
+  const { call, payload, runtimeDir } = rig;
+  // The runtime tools, relayed to a mock addon found through its announcement.
+  const notRunning = await payload('editor_status', {});
+  assert.equal(
+    get(notRunning, 'game', 'runtimeConnected'),
+    false,
+    'editor_status reports no runtime without an announcement',
+  );
+  assert.equal(get(notRunning, 'game', 'processActive'), false);
+  assert.match(
+    textOf(await call('runtime_inspect', {})) ?? '',
+    /No game with the runtime addon is running/,
+    'a runtime tool with no game says so',
+  );
+
+  // An announcement left behind by a game that is gone is dropped, and deleted on the way.
+  const stale = join(runtimeDir, `runtime-${await deadProcessId()}.json`);
+  writeFileSync(stale, JSON.stringify({ protocol: RUNTIME_PROTOCOL, pid: 0, port: 1, address: '127.0.0.1' }));
+  assert.equal(get(await payload('editor_status', {}), 'game', 'runtimeConnected'), false);
+  assert.ok(!existsSync(stale), 'a stale announcement is deleted when it is found');
+}
+
+/** A mock addon announces itself and every runtime tool is relayed to it. */
+async function checksTheMockRuntime(rig: BridgeRig): Promise<void> {
+  const { projectPath, runtimeDir } = rig;
+  const runtime = await startMockRuntime(runtimeDir, {
+    pid: process.pid,
+    projectPath,
+    name: 'fixture',
+  });
+  try {
+    await checksTheRelay(rig, runtime);
+    await checksFindAndClick(rig);
+    await checksWaitsAndCapture(rig);
+    await checksASecondGame(rig);
+  } finally {
+    await runtime.close();
+  }
+}
+
+/** The status, inspect, invoke and metrics tools reach the mock addon and carry its answers back. */
+async function checksTheRelay(rig: BridgeRig, runtime: MockRuntime): Promise<void> {
+  const { payload } = rig;
+  const connected = await payload('editor_status', {});
+  assert.equal(
+    get(connected, 'game', 'runtimeConnected'),
+    true,
+    'editor_status reports the runtime once the addon answers a ping',
+  );
+  assert.equal(get(connected, 'game', 'runtimes', 0, 'pid'), process.pid, 'the game is named by pid');
+  assert.equal(get(connected, 'game', 'runtimes', 0, 'port'), runtime.port);
+  assert.equal(get(connected, 'game', 'runtimes', 0, 'addonVersion'), SERVER_VERSION);
+  assert.equal(get(connected, 'game', 'runtimes', 0, 'addonIsStale'), false);
+
+  const tree = await payload('runtime_inspect', { nodePath: '/root', depth: 2 });
+  assert.equal(get(tree, 'type'), 'tree');
+  assert.equal(get(tree, 'addonIsStale'), undefined, "a game on this server's addon is not marked");
+  assert.equal(get(tree, 'root', 'path'), '/root', 'runtime_inspect relays the addon tree');
+  assert.equal(get(tree, 'id'), undefined, 'the request id is the relay business, not the answer');
+
+  const set = await payload('runtime_invoke', {
+    op: 'set',
+    nodePath: '/root/Player',
+    property: 'visible',
+    value: true,
+  });
+  assert.equal(get(set, 'type'), 'property_set');
+  assert.equal(get(set, 'new_value'), true, 'runtime_invoke set relays the addon property update');
+
+  const called = await payload('runtime_invoke', {
+    op: 'call',
+    nodePath: '/root/Player',
+    method: 'jump',
+    args: [1, 2],
+  });
+  assert.equal(get(called, 'type'), 'method_result');
+  assert.deepEqual(
+    get(called, 'result', 'echoed_args'),
+    [1, 2],
+    'runtime_invoke call relays the method result',
+  );
+
+  const metrics = await payload('runtime_inspect', { op: 'metrics', metrics: ['fps'] });
+  assert.equal(get(metrics, 'type'), 'metrics');
+  assert.equal(get(metrics, 'data', 'fps'), 60, 'runtime_inspect metrics relays the addon metrics');
+}
+
+/** Find and click reach the addon under the names it reads, and refuse what names nothing. */
+async function checksFindAndClick(rig: BridgeRig): Promise<void> {
+  const { call, payload } = rig;
+  // The newer questions, each carried to the addon under the names it reads.
+  const found = await payload('runtime_inspect', {
+    op: 'find',
+    className: 'CharacterBody2D',
+    namePattern: 'Play*',
+    says: 'Keep going',
+    limit: 5,
+  });
+  assert.equal(get(found, 'nodes', 0, 'path'), '/root/Player', 'runtime_inspect find relays the paths');
+  assert.deepEqual(
+    get(found, 'asked'),
+    { class: 'CharacterBody2D', name: 'Play*', says: 'Keep going', root: '/root', limit: 5 },
+    'only the filters given are sent, under the addon names',
+  );
+  assert.match(
+    textOf(await call('runtime_inspect', { op: 'find' })) ?? '',
+    /needs at least one of className, script, namePattern, group, says/,
+    'a find with nothing to find by is refused before the game is asked',
+  );
+
+  const clicked = await payload('runtime_input', { op: 'click', nodePath: '/root/Menu/Play' });
+  assert.equal(get(clicked, 'landed'), true, 'runtime_input click relays the addon answer');
+  assert.deepEqual(
+    get(clicked, 'asked'),
+    { path: '/root/Menu/Play', button: 'left', double: false },
+    'click carries the path, the button and whether it is a double click',
+  );
+  // A button given by number, which the schema takes, reaches the game as that number: read as a
+  // string alone it was dropped and the click went as the left button.
+  const numbered = await payload('runtime_input', {
+    op: 'click',
+    nodePath: '/root/Menu/Play',
+    button: 2,
+  });
+  assert.equal(get(numbered, 'asked', 'button'), 2, JSON.stringify(numbered));
+  const byWords = await payload('runtime_input', { op: 'click', says: 'New shop', index: 1 });
+  assert.deepEqual(
+    get(byWords, 'asked'),
+    { path: '', button: 'left', double: false, says: 'New shop', index: 1 },
+    'a click by words carries them and the index, with no path to narrow the search',
+  );
+  assert.match(
+    textOf(await call('runtime_input', { op: 'click' })) ?? '',
+    /runtime_input click needs nodePath, or says with the words on the control to click/,
+    'a click naming no control is refused before the game is asked',
+  );
+}
+
+/** The wait tools carry their timeouts and comparisons, and a capture answers with an image block. */
+async function checksWaitsAndCapture(rig: BridgeRig): Promise<void> {
+  const { call, payload } = rig;
+  const waited = await payload('runtime_wait', {
+    op: 'signal',
+    nodePath: '/root/Player',
+    signal: 'died',
+    timeoutMs: 250,
+  });
+  assert.equal(get(waited, 'fired'), true, 'runtime_wait signal relays the addon answer');
+  assert.deepEqual(
+    get(waited, 'asked'),
+    { path: '/root/Player', signal: 'died', timeout_ms: 250 },
+    'the wait carries its timeout to the game',
+  );
+  // #1007: the comparison reaches the game under the name it reads, and only when one is given.
+  const ordered = await payload('runtime_wait', {
+    op: 'until',
+    nodePath: '/root/Main',
+    property: '_game:run:day',
+    value: 32,
+    compare: '>=',
+    timeoutMs: 250,
+  });
+  assert.deepEqual(
+    get(ordered, 'asked'),
+    { path: '/root/Main', property: '_game:run:day', value: 32, compare: '>=', timeout_ms: 250 },
+    'a property wait carries its comparison to the game',
+  );
+  const plain = await payload('runtime_wait', {
+    op: 'until',
+    nodePath: '/root/Main',
+    property: 'day',
+    value: 32,
+    timeoutMs: 250,
+  });
+  assert.equal(
+    get(plain, 'asked', 'compare'),
+    undefined,
+    `none is sent unless asked: ${JSON.stringify(plain)}`,
+  );
+
+  for (const args of [{}, { op: 'viewport', viewportPath: '/root' }] as const) {
+    const label = `runtime_capture ${JSON.stringify(args)}`;
+    const image = (contentOf(await call('runtime_capture', args)) ?? []).find(
+      (chunk) => chunk.type === 'image',
+    );
+    assert.ok(image, `${label} answers with an image block`);
+    assert.equal(image.mimeType, 'image/png');
+    assert.ok(image.data, `${label} carries the image bytes`);
+    assert.ok(!('text' in image), `${label} image block carries no text field, as the MCP schema requires`);
+  }
+}
+
+/** With a second game running, the tools refuse to guess between the two. */
+async function checksASecondGame(rig: BridgeRig): Promise<void> {
+  const { server, call, payload, projectPath, runtimeDir } = rig;
+  // A second game: the tools refuse to guess between the two, and projectPath picks one.
+  const otherProject = join(tmpdir(), 'gdharness-other-project');
+  const serverPid = server.child.pid ?? 0;
+  assert.ok(serverPid > 0, 'the server child has a pid to announce under');
+  const other = await startMockRuntime(runtimeDir, {
+    pid: serverPid,
+    projectPath: otherProject,
+    name: 'other',
+  });
+  try {
+    // Two projects, so both arguments can settle it and the refusal offers both. The other
+    // shape, several games of one project, cannot be settled by the path and says so: that
+    // is a pure choice and lives with its neighbours in the regressions.
+    const both = textOf(await call('runtime_inspect', {})) ?? '';
+    assert.match(both, /Several games are running: .*Pass pid to choose one/, both);
+    assert.match(both, /or projectPath when the project you mean is running only one/, both);
+    for (const named of [projectPath, otherProject]) {
+      assert.ok(both.includes(named), `both games are named: ${both}`);
+    }
+    const chosen = await payload('runtime_inspect', { projectPath: otherProject });
+    assert.equal(get(chosen, 'root', 'name'), 'other', 'projectPath picks the game running that project');
+    const first = await payload('runtime_inspect', { projectPath });
+    assert.equal(get(first, 'root', 'name'), 'fixture');
+    assert.match(
+      textOf(await call('runtime_inspect', { projectPath: join(tmpdir(), 'nowhere') })) ?? '',
+      /No running game is from /,
+      'a projectPath no game runs is refused with the games that are',
+    );
+  } finally {
+    await other.close();
+  }
+}
+
+/** A game that exists can still fail to answer in several ways, and each is told apart. */
+async function checksGamesThatFailToAnswer(rig: BridgeRig): Promise<void> {
+  const { call, payload, projectPath, runtimeDir } = rig;
+  // The three ways a game that exists can still fail to answer.
+  const silent = await startMockRuntime(runtimeDir, {
+    pid: process.pid,
+    projectPath,
+    name: 'silent',
+    silent: true,
+  });
+  try {
+    assert.match(
+      textOf(await call('runtime_inspect', {})) ?? '',
+      /did not answer 'get_tree' within \d+ms/,
+      'a game that accepts and says nothing is reported as busy',
+    );
+  } finally {
+    await silent.close();
+  }
+
+  const older = await startMockRuntime(runtimeDir, {
+    pid: process.pid,
+    projectPath,
+    name: 'older',
+    protocol: 1,
+  });
+  try {
+    assert.match(
+      textOf(await call('runtime_inspect', {})) ?? '',
+      new RegExp(`speaks runtime protocol 1 and this server speaks ${RUNTIME_PROTOCOL}`),
+      'a game on another protocol is told apart from a broken one',
+    );
+  } finally {
+    await older.close();
+  }
+
+  // A game on another runtime addon, as a second checkout of a project carries: named in the
+  // status, and refused rather than asked, since its answers would be the old code's.
+  const behind = await startMockRuntime(runtimeDir, {
+    pid: process.pid,
+    projectPath,
+    name: 'behind',
+    addon: { version: '1.1.20', digest: 'an older digest' },
+  });
+  try {
+    const listed = await payload('editor_status', {});
+    assert.equal(get(listed, 'game', 'runtimes', 0, 'addonIsStale'), true, JSON.stringify(listed));
+    assert.equal(get(listed, 'game', 'runtimes', 0, 'addonVersion'), '1.1.20');
+    const staleNote = String(get(listed, 'game', 'runtimes', 0, 'staleNote'));
+    assert.match(staleNote, /running the 1\.1\.20 runtime addon, while this server ships/, staleNote);
+    // The fixture project holds no addons, so it is sent to upgrade rather than to a restart.
+    assert.ok(
+      staleNote.includes(
+        `run  ${runLine(currentRunner(), SERVER_VERSION, `upgrade "${projectPath}"`)}  in a shell`,
+      ),
+      staleNote,
+    );
+    const refused = textOf(await call('runtime_inspect', {})) ?? '';
+    assert.ok(refused.startsWith(staleNote), `a call is refused with the note: ${refused}`);
+    assert.match(staleNote, /so this server asks it nothing/, staleNote);
+  } finally {
+    await behind.close();
+  }
+  const unsaid = await startMockRuntime(runtimeDir, {
+    pid: process.pid,
+    projectPath,
+    name: 'unsaid',
+    addon: { version: '', digest: '' },
+  });
+  try {
+    const listed = await payload('editor_status', {});
+    assert.equal(get(listed, 'game', 'runtimes', 0, 'addonVersion'), null, JSON.stringify(listed));
+    assert.equal(get(listed, 'game', 'runtimes', 0, 'addonIsStale'), undefined, 'not guessed');
+    assert.equal(get(await payload('runtime_inspect', {}), 'addonIsStale'), undefined);
+  } finally {
+    await unsaid.close();
+  }
+
+  const closedPort = await reservePort();
+  const nobody = join(runtimeDir, `runtime-${process.pid}.json`);
+  writeFileSync(
+    nobody,
+    JSON.stringify({
+      protocol: RUNTIME_PROTOCOL,
+      pid: process.pid,
+      port: closedPort,
+      address: '127.0.0.1',
+      project: { name: 'nobody', path: projectPath },
+      addon_version: SERVER_VERSION,
+      addon_digest: shippedRuntimeDigest(),
+    }),
+  );
+  try {
+    assert.match(
+      textOf(await call('runtime_inspect', {})) ?? '',
+      /nothing answered on its port/,
+      'an announced port nobody listens on is reported as refused',
+    );
+  } finally {
+    rmSync(nobody, { force: true });
+  }
+}
+
+/** The editor bridge over WebSocket serves only the editor's path and relays tool calls. */
+async function checksTheEditorBridge(rig: BridgeRig): Promise<void> {
+  const { call, payload, projectPath, bridgePort } = rig;
+  // The editor bridge over WebSocket.
+  const disconnected = await payload('editor_status', {});
+  assert.equal(
+    get(disconnected, 'editor', 'connected'),
+    false,
+    'editor_status reports disconnected before any editor connects',
+  );
+
+  const noEditor =
+    textOf(
+      await call('project_settings', {
+        op: 'get',
+        projectPath,
+        setting: 'application/config/name',
+        from: 'editor',
+      }),
+    ) ?? '';
+  assert.match(
+    noEditor,
+    /Editor not connected/,
+    'a read asked of the editor refuses when no editor is connected',
+  );
+
+  // Only the editor's path is served: the bridge port is not a place for a browser tab to
+  // reach anything, over WebSocket or over HTTP.
+  await assert.rejects(
+    connect(`ws://${BRIDGE_HOST}:${bridgePort}/visualizer`),
+    'a socket to another path is closed',
+  );
+  const page = await fetch(`http://${BRIDGE_HOST}:${bridgePort}/`);
+  assert.equal(page.status, 404, 'a plain request gets nothing');
+  assert.equal(page.headers.get('access-control-allow-origin'), null, 'and no CORS header inviting one');
+
+  // A language server port that takes a connection and drops it. One that refused it would be
+  // waited on, since the editor names it, for as long as a language server takes to start.
+  const lspPort = await reservePort();
+  const dropping = createServer((socket: Socket) => {
+    socket.destroy();
+  });
+  await once(dropping.listen(lspPort, '127.0.0.1'), 'listening');
+  const godot = await connect(`ws://${BRIDGE_HOST}:${bridgePort}/godot`);
+  try {
+    // The three ports with it. Godot keeps one language server, one debug adapter and one
+    // debugger per machine rather than per editor, so a second editor is moved off them and
+    // this is how a server learns where it went. Zero is an addon that could not find out,
+    // which is not a port and is not reported as one.
+    godot.send(JSON.stringify(greeting(projectPath, { lsp_port: lspPort, dap_port: 6106, debug_port: 0 })));
+    // Until the greeting lands the socket is connected and the editor has said nothing, and a
+    // greeting without a server's mark then has its process's command line read, to tell an
+    // editor from a one-shot engine run, which can take seconds on Windows.
+    const settled = (status: unknown): boolean =>
+      get(status, 'editor', 'connected') === true && get(status, 'editor', 'greeting') === undefined;
+    let afterReady = await payload('editor_status', {});
+    for (let waited = 0; waited < 15_000 && !settled(afterReady); waited += 200) {
+      await delay(200);
+      afterReady = await payload('editor_status', {});
+    }
+    assert.equal(
+      get(afterReady, 'editor', 'connected'),
+      true,
+      'editor_status reports connected after godot_ready',
+    );
+    assert.equal(get(afterReady, 'editor', 'lspPort'), lspPort, 'and where that editor serves the LSP');
+    assert.equal(get(afterReady, 'editor', 'dapPort'), 6106, 'and its debug adapter');
+    assert.equal(
+      get(afterReady, 'editor', 'debugPort'),
+      undefined,
+      'and nothing at all for a port it could not answer',
+    );
+
+    // Followed rather than reported: the tool that cannot reach the language server names the
+    // port it asked on, and that is the editor's rather than the default.
+    assert.match(
+      textOf(await call('script_diagnostics', { projectPath, scriptPath: 'res://player.gd' })) ?? '',
+      new RegExp(`port ${lspPort}\\b`),
+      'script_diagnostics asks on the port the editor reported',
+    );
+
+    // A tool call becomes a tool_invoke on the editor side, with its arguments normalised.
+    const invoked = new Promise<Record<string, unknown>>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error('No tool_invoke received within 5 s'));
+      }, 5000);
+      godot.on('message', (data) => {
+        const frame = parseFrame(data);
+        if (frame?.['type'] === 'tool_invoke') {
+          clearTimeout(timer);
+          resolve(frame);
+        }
+      });
+    });
+    const pendingCreate = call('scene_create', {
+      projectPath,
+      scenePath: 'res://test_bridge.tscn',
+      rootNodeType: 'Node2D',
+    });
+    const invoke = await invoked;
+    assert.equal(invoke['tool'], 'create_scene', 'the tool is routed to the editor command it stands for');
+    assert.deepEqual(
+      {
+        projectPath: get(invoke, 'args', 'projectPath'),
+        scenePath: get(invoke, 'args', 'scenePath'),
+        rootNodeType: get(invoke, 'args', 'rootNodeType'),
+      },
+      { projectPath, scenePath: 'res://test_bridge.tscn', rootNodeType: 'Node2D' },
+      'bridge arguments reach the editor under the names the tool takes',
+    );
+
+    godot.send(
+      JSON.stringify({
+        type: 'tool_result',
+        id: invoke['id'],
+        success: true,
+        result: {
+          message: 'Scene created successfully',
+          scene_path: 'res://test_bridge.tscn',
+          root_type: 'Node2D',
+        },
+      }),
+    );
+    const created = textOf(await pendingCreate) ?? '';
+    assert.ok(created.includes('test_bridge'), `the editor's result reaches the MCP caller, got ${created}`);
+
+    // Missing arguments are refused before anything reaches the editor.
+    const unexpected: Record<string, unknown>[] = [];
+    const capture = (data: RawData): void => {
+      const frame = parseFrame(data);
+      if (frame?.['type'] === 'tool_invoke') unexpected.push(frame);
+    };
+    godot.on('message', capture);
+    const startedAt = Date.now();
+    const bare = await call('scene_create', {});
+    const elapsed = Date.now() - startedAt;
+    godot.off('message', capture);
+    assert.match(
+      textOf(bare) ?? '',
+      /scene_create create needs projectPath, scenePath/,
+      `scene_create with no arguments is refused, got ${JSON.stringify(bare)}`,
+    );
+    assert.ok(elapsed < 1000, `the refusal is immediate rather than a timeout (${elapsed} ms)`);
+    assert.deepEqual(unexpected, [], 'a refused call emits no tool_invoke');
+  } finally {
+    godot.close();
+    dropping.close();
   }
 }
 

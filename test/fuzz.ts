@@ -20,7 +20,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join, resolve, sep } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import fc from 'fast-check';
 
 import { extract } from '../scripts/install-godot.js';
@@ -606,7 +606,7 @@ function aRunNoteHoldsOnlyItsOwnRun(): void {
     startedAt: fc.constantFrom(1000, 2000),
     name: fc.constantFrom('run-1000.log', 'run-1000-1.log', 'run-2000.log'),
   });
-  const aStep = fc.record({
+  const aStep: fc.Arbitrary<RunStep> = fc.record({
     kind: fc.constantFrom('start', 'amend', 'end', 'clear', 'sweep'),
     directory: fc.constantFrom(0, 1),
     project: fc.constantFrom(0, 1),
@@ -614,124 +614,15 @@ function aRunNoteHoldsOnlyItsOwnRun(): void {
     restarted: fc.boolean(),
     looking: fc.boolean(),
   });
-  const normal = <Note extends RunRecord | null>(note: Note): Note | RunRecord =>
-    note?.endedAt === undefined ? note : { ...note, endedAt: 0 };
-  // A note as text with its fields in a fixed order, since a note read back orders them its own way.
-  const keyed = (note: RunRecord): string =>
-    JSON.stringify(Object.entries(normal(note)).toSorted(([one], [other]) => one.localeCompare(other)));
   const had = process.env['GDHARNESS_RUNTIME_DIR'];
   fc.assert(
     fc.property(fc.array(aStep, { maxLength: 14 }), (steps) => {
       inTemp((root) => {
-        const directories = [join(root, 'a'), join(root, 'b')] as const;
-        const projects = [join(root, 'project-0'), join(root, 'project-1')] as const;
-        const notes: (RunRecord | null)[][] = [
-          [null, null],
-          [null, null],
-        ];
-        const files: Set<string>[] = [new Set(), new Set()];
-        const noteOf = (directory: number, project: number): RunRecord | null =>
-          notes[directory]?.[project] ?? null;
-        const setNote = (directory: number, project: number, note: RunRecord | null): void => {
-          const row = notes[directory];
-          if (row !== undefined) {
-            row[project] = note;
-          }
-        };
+        const model = newRunModel(root);
         try {
           for (const step of steps) {
-            const directory = directories[step.directory];
-            const project = projects[step.project];
-            process.env['GDHARNESS_RUNTIME_DIR'] = step.kind === 'sweep' ? directories[0] : directory;
-            const runs = join(directory, 'runs');
-            const base: RunRecord = {
-              pid: step.run.pid,
-              transcript: join(runs, step.run.name),
-              startedAt: step.run.startedAt,
-              startedBy: step.run.startedAt,
-              projectPath: project,
-              arguments: [],
-              command: 'godot',
-            };
-            const said: RunRecord = {
-              ...base,
-              ...(step.restarted ? { pid: 3333, restartedFrom: [{ pid: step.run.pid, endedAt: 7 }] } : {}),
-              ...(step.looking ? { endingAt: 5000 } : {}),
-            };
-            const there = noteOf(step.directory, step.project);
-            const own = there === null || there.transcript === said.transcript;
-            if (step.kind === 'start') {
-              mkdirSync(runs, { recursive: true });
-              writeFileSync(base.transcript, '');
-              files[step.directory]?.add(step.run.name);
-              writeRunRecord(base);
-              setNote(step.directory, step.project, base);
-            } else if (step.kind === 'amend') {
-              assert.equal(amendRunRecord(said), own, 'an amend writes unless the note is another run');
-              if (own) {
-                setNote(step.directory, step.project, said);
-              }
-            } else if (step.kind === 'end') {
-              assert.equal(recordRunEnded(said, { exitCode: 0, exitSignal: null }), own);
-              if (own) {
-                const { endingAt: _looked, ...kept } = said;
-                setNote(step.directory, step.project, { ...kept, exitCode: 0, endedAt: 0 });
-              }
-            } else if (step.kind === 'clear') {
-              clearRunRecord(project, directories);
-              setNote(0, step.project, null);
-              setNote(1, step.project, null);
-            } else {
-              sweepTranscripts(24 * 60 * 60 * 1000, Date.now() + 2 * 24 * 60 * 60 * 1000);
-              const noted = new Set(
-                [0, 1].flatMap((which) => {
-                  const note = noteOf(0, which);
-                  return note === null ? [] : [basename(note.transcript)];
-                }),
-              );
-              files[0] = new Set([...(files[0] ?? [])].filter((name) => noted.has(name)));
-              const left = existsSync(join(directories[0], 'runs'))
-                ? readdirSync(join(directories[0], 'runs')).filter((entry) => entry.endsWith('.log'))
-                : [];
-              assert.deepEqual(
-                left.toSorted(),
-                [...files[0]].toSorted(),
-                'the sweep keeps what a note names',
-              );
-              const other = existsSync(join(directories[1], 'runs'))
-                ? readdirSync(join(directories[1], 'runs')).filter((entry) => entry.endsWith('.log'))
-                : [];
-              assert.deepEqual(
-                other.toSorted(),
-                [...(files[1] ?? [])].toSorted(),
-                'and leaves the other directory',
-              );
-            }
-            for (const which of [0, 1]) {
-              const wanted = noteOf(0, which) ?? noteOf(1, which);
-              assert.deepEqual(normal(readRunRecord(projects[which] ?? '', directories)), normal(wanted));
-            }
-            const every = [0, 1]
-              .flatMap((d) => [0, 1].map((p) => noteOf(d, p)))
-              .filter((note) => note !== null);
-            const listed = everyRunRecord(directories);
-            assert.deepEqual(
-              listed.map(keyed).toSorted(),
-              every.map(keyed).toSorted(),
-              'every note is listed',
-            );
-            for (let index = 1; index < listed.length; index += 1) {
-              assert.ok(
-                (listed[index - 1]?.startedAt ?? 0) >= (listed[index]?.startedAt ?? 0),
-                'newest first',
-              );
-            }
-            for (const note of listed) {
-              assert.ok(
-                note.endedAt === undefined || note.endingAt === undefined,
-                'an ended run is not ending',
-              );
-            }
+            applyRunStep(model, step);
+            checkRunModel(model);
           }
         } finally {
           if (had === undefined) {
@@ -744,6 +635,148 @@ function aRunNoteHoldsOnlyItsOwnRun(): void {
     }),
     { numRuns: 60 },
   );
+}
+
+/** One step of the run-note model: an action on one of two runtime directories and two projects. */
+interface RunStep {
+  kind: 'start' | 'amend' | 'end' | 'clear' | 'sweep';
+  directory: 0 | 1;
+  project: 0 | 1;
+  run: { pid: number; startedAt: number; name: string };
+  restarted: boolean;
+  looking: boolean;
+}
+
+/** The notes and transcript files the real ones must match, per runtime directory and project. */
+interface RunModel {
+  directories: readonly [string, string];
+  projects: readonly [string, string];
+  notes: (RunRecord | null)[][];
+  files: Set<string>[];
+}
+
+function newRunModel(root: string): RunModel {
+  return {
+    directories: [join(root, 'a'), join(root, 'b')],
+    projects: [join(root, 'project-0'), join(root, 'project-1')],
+    notes: [
+      [null, null],
+      [null, null],
+    ],
+    files: [new Set(), new Set()],
+  };
+}
+
+function noteOf(model: RunModel, directory: number, project: number): RunRecord | null {
+  return model.notes[directory]?.[project] ?? null;
+}
+
+function setNote(model: RunModel, directory: number, project: number, note: RunRecord | null): void {
+  const row = model.notes[directory];
+  if (row !== undefined) {
+    row[project] = note;
+  }
+}
+
+function normal<Note extends RunRecord | null>(note: Note): Note | RunRecord {
+  return note?.endedAt === undefined ? note : { ...note, endedAt: 0 };
+}
+
+// A note as text with its fields in a fixed order, since a note read back orders them its own way.
+function keyed(note: RunRecord): string {
+  return JSON.stringify(Object.entries(normal(note)).toSorted(([one], [other]) => one.localeCompare(other)));
+}
+
+/** Does [param step] on the real run notes and records what the model expects of it. */
+function applyRunStep(model: RunModel, step: RunStep): void {
+  const { directories, projects } = model;
+  const directory = directories[step.directory];
+  const project = projects[step.project];
+  process.env['GDHARNESS_RUNTIME_DIR'] = step.kind === 'sweep' ? directories[0] : directory;
+  const runs = join(directory, 'runs');
+  const base: RunRecord = {
+    pid: step.run.pid,
+    transcript: join(runs, step.run.name),
+    startedAt: step.run.startedAt,
+    startedBy: step.run.startedAt,
+    projectPath: project,
+    arguments: [],
+    command: 'godot',
+  };
+  const said: RunRecord = {
+    ...base,
+    ...(step.restarted ? { pid: 3333, restartedFrom: [{ pid: step.run.pid, endedAt: 7 }] } : {}),
+    ...(step.looking ? { endingAt: 5000 } : {}),
+  };
+  const there = noteOf(model, step.directory, step.project);
+  const own = there === null || there.transcript === said.transcript;
+  if (step.kind === 'start') {
+    startAModelRun(model, step, base);
+  } else if (step.kind === 'amend') {
+    assert.equal(amendRunRecord(said), own, 'an amend writes unless the note is another run');
+    if (own) {
+      setNote(model, step.directory, step.project, said);
+    }
+  } else if (step.kind === 'end') {
+    assert.equal(recordRunEnded(said, { exitCode: 0, exitSignal: null }), own);
+    if (own) {
+      const { endingAt: _looked, ...kept } = said;
+      setNote(model, step.directory, step.project, { ...kept, exitCode: 0, endedAt: 0 });
+    }
+  } else if (step.kind === 'clear') {
+    clearRunRecord(project, directories);
+    setNote(model, 0, step.project, null);
+    setNote(model, 1, step.project, null);
+  } else {
+    sweepModelTranscripts(model);
+  }
+}
+
+function startAModelRun(model: RunModel, step: RunStep, base: RunRecord): void {
+  mkdirSync(dirname(base.transcript), { recursive: true });
+  writeFileSync(base.transcript, '');
+  model.files[step.directory]?.add(step.run.name);
+  writeRunRecord(base);
+  setNote(model, step.directory, step.project, base);
+}
+
+/** Sweeps old transcripts and checks that the first directory keeps only what a note names. */
+function sweepModelTranscripts(model: RunModel): void {
+  const { directories, files } = model;
+  sweepTranscripts(24 * 60 * 60 * 1000, Date.now() + 2 * 24 * 60 * 60 * 1000);
+  const noted = new Set(
+    [0, 1].flatMap((which) => {
+      const note = noteOf(model, 0, which);
+      return note === null ? [] : [basename(note.transcript)];
+    }),
+  );
+  files[0] = new Set([...(files[0] ?? [])].filter((name) => noted.has(name)));
+  const left = existsSync(join(directories[0], 'runs'))
+    ? readdirSync(join(directories[0], 'runs')).filter((entry) => entry.endsWith('.log'))
+    : [];
+  assert.deepEqual(left.toSorted(), [...files[0]].toSorted(), 'the sweep keeps what a note names');
+  const other = existsSync(join(directories[1], 'runs'))
+    ? readdirSync(join(directories[1], 'runs')).filter((entry) => entry.endsWith('.log'))
+    : [];
+  assert.deepEqual(other.toSorted(), [...(files[1] ?? [])].toSorted(), 'and leaves the other directory');
+}
+
+/** Reads every note back and holds it to the model. */
+function checkRunModel(model: RunModel): void {
+  const { directories, projects } = model;
+  for (const which of [0, 1]) {
+    const wanted = noteOf(model, 0, which) ?? noteOf(model, 1, which);
+    assert.deepEqual(normal(readRunRecord(projects[which] ?? '', directories)), normal(wanted));
+  }
+  const every = [0, 1].flatMap((d) => [0, 1].map((p) => noteOf(model, d, p))).filter((note) => note !== null);
+  const listed = everyRunRecord(directories);
+  assert.deepEqual(listed.map(keyed).toSorted(), every.map(keyed).toSorted(), 'every note is listed');
+  for (let index = 1; index < listed.length; index += 1) {
+    assert.ok((listed[index - 1]?.startedAt ?? 0) >= (listed[index]?.startedAt ?? 0), 'newest first');
+  }
+  for (const note of listed) {
+    assert.ok(note.endedAt === undefined || note.endingAt === undefined, 'an ended run is not ending');
+  }
 }
 
 function archivesRoundTrip(): void {

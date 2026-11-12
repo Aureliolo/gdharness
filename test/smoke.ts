@@ -57,6 +57,38 @@ function listOf(result: unknown, key: string): unknown[] {
   return result[key] as unknown[];
 }
 
+/** Throws unless every tool in [param tools] is named domain_verb and described within the cut. */
+function checkToolList(tools: unknown[]): void {
+  const invalidToolNames = tools
+    .map((tool) => (isRecord(tool) ? tool['name'] : undefined))
+    .filter((name) => typeof name !== 'string' || !TOOL_NAME_PATTERN.test(name));
+  if (invalidToolNames.length > 0) {
+    throw new Error(`tools/list exposed names outside domain_verb: ${invalidToolNames.join(', ')}`);
+  }
+  // Claude Code cuts a description past this length, and the cut fell inside editor_run's list of
+  // ops. Read off what the server sends, since the ops are appended to the prose on the way out.
+  const longest = Math.max(
+    ...tools.map((tool) =>
+      isRecord(tool) && typeof tool['description'] === 'string' ? tool['description'].length : 0,
+    ),
+  );
+  const cut = tools.filter(
+    (tool) =>
+      isRecord(tool) &&
+      typeof tool['description'] === 'string' &&
+      tool['description'].length > MOST_DESCRIPTION_CHARACTERS,
+  );
+  if (cut.length > 0 || longest === 0) {
+    throw new Error(
+      `tools/list descriptions past ${MOST_DESCRIPTION_CHARACTERS} characters, which Claude Code cuts: ${cut
+        .map((tool) =>
+          isRecord(tool) ? `${String(tool['name'])} (${String(tool['description']).length})` : '',
+        )
+        .join(', ')}`,
+    );
+  }
+}
+
 async function main(): Promise<void> {
   const host = process.env['GDHARNESS_BRIDGE_HOST'] ?? '127.0.0.1';
   const configuredPort = Number.parseInt(process.env['GDHARNESS_BRIDGE_PORT'] ?? '', 10);
@@ -81,34 +113,7 @@ async function main(): Promise<void> {
     if (tools.length === 0) {
       throw new Error('missing tools/list response');
     }
-    const invalidToolNames = tools
-      .map((tool) => (isRecord(tool) ? tool['name'] : undefined))
-      .filter((name) => typeof name !== 'string' || !TOOL_NAME_PATTERN.test(name));
-    if (invalidToolNames.length > 0) {
-      throw new Error(`tools/list exposed names outside domain_verb: ${invalidToolNames.join(', ')}`);
-    }
-    // Claude Code cuts a description past this length, and the cut fell inside editor_run's list of
-    // ops. Read off what the server sends, since the ops are appended to the prose on the way out.
-    const longest = Math.max(
-      ...tools.map((tool) =>
-        isRecord(tool) && typeof tool['description'] === 'string' ? tool['description'].length : 0,
-      ),
-    );
-    const cut = tools.filter(
-      (tool) =>
-        isRecord(tool) &&
-        typeof tool['description'] === 'string' &&
-        tool['description'].length > MOST_DESCRIPTION_CHARACTERS,
-    );
-    if (cut.length > 0 || longest === 0) {
-      throw new Error(
-        `tools/list descriptions past ${MOST_DESCRIPTION_CHARACTERS} characters, which Claude Code cuts: ${cut
-          .map((tool) =>
-            isRecord(tool) ? `${String(tool['name'])} (${String(tool['description']).length})` : '',
-          )
-          .join(', ')}`,
-      );
-    }
+    checkToolList(tools);
 
     // The bridge port carries the editor's socket and nothing else.
     if (!(await webSocketOpens(`ws://${host}:${port}/godot`))) {

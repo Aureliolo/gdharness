@@ -52,31 +52,38 @@ export async function stopServersOf(fixture: string): Promise<string[]> {
       continue;
     }
     found.add(directory);
-    let notes: string[];
-    try {
-      notes = readdirSync(join(directory, 'runs')).filter((entry) => entry.endsWith('.json'));
-    } catch {
-      continue;
-    }
-    for (const note of notes) {
-      try {
-        const parsed: unknown = JSON.parse(readFileSync(join(directory, 'runs', note), 'utf8'));
-        const projectPath =
-          typeof parsed === 'object' && parsed !== null && 'projectPath' in parsed
-            ? parsed.projectPath
-            : null;
-        if (typeof projectPath === 'string') {
-          found.add(projectPath);
-        }
-      } catch {
-        // A note half written as its server was stopped names nothing yet.
-      }
+    for (const projectPath of projectsNamedIn(directory)) {
+      found.add(projectPath);
     }
   }
   for (const server of ended) {
     sweep(server.runtimeDir);
   }
   return [...found];
+}
+
+/** The projects the run notes in [param directory] name. */
+function projectsNamedIn(directory: string): string[] {
+  let notes: string[];
+  try {
+    notes = readdirSync(join(directory, 'runs')).filter((entry) => entry.endsWith('.json'));
+  } catch {
+    return [];
+  }
+  const projects: string[] = [];
+  for (const note of notes) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(join(directory, 'runs', note), 'utf8'));
+      const projectPath =
+        typeof parsed === 'object' && parsed !== null && 'projectPath' in parsed ? parsed.projectPath : null;
+      if (typeof projectPath === 'string') {
+        projects.push(projectPath);
+      }
+    } catch {
+      // A note half written as its server was stopped names nothing yet.
+    }
+  }
+  return projects;
 }
 
 /**

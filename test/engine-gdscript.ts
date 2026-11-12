@@ -847,11 +847,58 @@ function writeImportedResource(projectDir: string): void {
  * wired to the wrong place, or a payload that lost a key, reads as success without this.
  */
 function testOperations(godotPath: string, projectDir: string): void {
-  const operation = (name: string, params: unknown): unknown =>
-    runOperation(godotPath, projectDir, name, params);
-  const named = (entries: unknown, name: string): unknown =>
-    asArray(entries).find((entry) => get(entry, 'name') === name);
+  const rig: OperationsRig = {
+    godotPath,
+    projectDir,
+    projectFile: join(projectDir, 'project.godot'),
+    operation: (name, params) => runOperation(godotPath, projectDir, name, params),
+    named: (entries, name) => asArray(entries).find((entry) => get(entry, 'name') === name),
+  };
+  const heroUid = checksScriptCreation(rig);
+  checksRefusedScriptAdditions(rig);
+  checksScriptModifications(rig);
+  checksScriptLineEdits(rig);
+  checksProjectSettings(rig);
+  checksProjectSettingOrder(rig);
+  checksAutoloads(rig);
+  checksImportOptions(rig);
+  checksExportPresets(rig);
+  checksProjectDiagnostics(rig);
+  checksTheClassCache(rig, heroUid);
+  checksPlugins(rig);
+  checksInputActions(rig);
+  checksAudioBuses(rig);
+  checksAudioBusRefusals(rig);
+  checksClassInfo(rig);
+  checksInheritance(rig);
+}
 
+/** What the phases of the operations case share: the project, its settings file and the dispatch. */
+interface OperationsRig {
+  godotPath: string;
+  projectDir: string;
+  projectFile: string;
+  operation: (name: string, params: unknown) => unknown;
+  named: (entries: unknown, name: string) => unknown;
+}
+
+/**
+ * A rewritten project.godot keeps the header the editor writes and every line it did not touch,
+ * in the order the file had them.
+ */
+function keptWhole(original: string, rewritten: string, what: string): void {
+  assert.match(rewritten, /^; Engine configuration file\.$/m, `${what} should keep the editor's header`);
+  const rewrittenLines = rewritten.split('\n');
+  let from = 0;
+  for (const line of original.split('\n')) {
+    const at = rewrittenLines.indexOf(line, from);
+    assert.notEqual(at, -1, `${what} should keep the line ${JSON.stringify(line)}`);
+    from = at + 1;
+  }
+}
+
+/** Script authoring through the dispatch, then the analysis of what it wrote. Answers the hero's uid. */
+function checksScriptCreation({ godotPath, projectDir, operation }: OperationsRig): unknown {
   // GDScript authoring, then the analysis of what it wrote.
   const created = operation('create_script', {
     script_path: 'made/hero.gd',
@@ -1024,6 +1071,11 @@ function testOperations(godotPath: string, projectDir: string): void {
     assert.ok(!existsSync(join(projectDir, 'made', `${file}.gd`)), `${file}: and nothing is written`);
   }
 
+  return heroUid;
+}
+
+/** Additions that would break a script are refused and leave it as it was. */
+function checksRefusedScriptAdditions({ godotPath, projectDir, operation }: OperationsRig): void {
   // An addition that would break a script that parses is the engine's to find, the base class's
   // members and a body that does not compile among it, and the script is left as it was. One that
   // does not parse yet is written to, since the addition can be what mends it.
@@ -1135,7 +1187,10 @@ function testOperations(godotPath: string, projectDir: string): void {
     assert.equal(get(laid.answer, 'parses'), true, `${JSON.stringify(laid.answer)} ${laid.stderr}`);
     rmSync(join(projectDir, 'made', 'documented.gd'));
   }
+}
 
+/** modify_script adds members and keeps the result parsing. */
+function checksScriptModifications({ godotPath, projectDir, operation }: OperationsRig): void {
   // What gets written has to parse where an untyped declaration is an error, which the
   // autoload check further down proves by booting the project with this script as one.
   const modified = operation('modify_script', {
@@ -1258,6 +1313,10 @@ function testOperations(godotPath: string, projectDir: string): void {
   });
   assert.equal(get(constant, 'parses'), true, JSON.stringify(constant));
   onTheirLines(constant);
+}
+
+/** The lines a modification lands on, and the analysis of the script it left. */
+function checksScriptLineEdits({ projectDir, operation, named }: OperationsRig): void {
   const withConstant = readFileSync(join(projectDir, 'made', 'hero.gd'), 'utf8');
   assert.match(withConstant, /^const FLOOR: int = 0$/m, withConstant);
   const lines = withConstant.split('\n');
@@ -1443,7 +1502,10 @@ function testOperations(godotPath: string, projectDir: string): void {
   );
   assert.equal(get(named(get(after, 'variables'), 'x'), 'doc'), undefined);
   rmSync(documentedPath);
+}
 
+/** Project settings, including the value serialisers on both the way in and the way out. */
+function checksProjectSettings({ godotPath, projectDir, operation }: OperationsRig): void {
   // Project settings, including the value serialisers on both the way in and the way out.
   const name = operation('get_project_setting', { setting: 'application/config/name' });
   assert.equal(get(name, 'exists'), true);
@@ -1564,12 +1626,14 @@ function testOperations(godotPath: string, projectDir: string): void {
     `a name the enum lacks is refused with its names:\n${blurry.stderr.trim()}`,
   );
   operation('unset_project_setting', { setting: filter });
+}
 
+/** A write to project.godot keeps the order its sections and keys had. */
+function checksProjectSettingOrder({ projectFile, operation }: OperationsRig): void {
   // The engine writes each section's keys in the order it registered them, and an engine running a
   // script registers them in another order than the editor, so a one-setting change moved lines
   // nobody touched. The file is turned around here, sections and the keys in each, which is an
   // order the engine would not write, and every write after this has to keep it.
-  const projectFile = join(projectDir, 'project.godot');
   const turnedAround = (file: string): string => {
     const [preamble = '', ...sections] = file.split(/\n(?=\[)/);
     const reversed = sections.map((section) => {
@@ -1645,16 +1709,6 @@ function testOperations(godotPath: string, projectDir: string): void {
   // the editor writes and every line it did not touch, in the order the file had them, so from
   // here on a round trip has to give the bytes back and an addition has to keep every line that
   // was there.
-  const keptWhole = (original: string, rewritten: string, what: string): void => {
-    assert.match(rewritten, /^; Engine configuration file\.$/m, `${what} should keep the editor's header`);
-    const rewrittenLines = rewritten.split('\n');
-    let from = 0;
-    for (const line of original.split('\n')) {
-      const at = rewrittenLines.indexOf(line, from);
-      assert.notEqual(at, -1, `${what} should keep the line ${JSON.stringify(line)}`);
-      from = at + 1;
-    }
-  };
 
   // A setting nothing declares has no type to fit a number to, and JSON sends every number as a
   // float, so a whole one was written as 800.0. One named like a declared setting is said to be.
@@ -1728,7 +1782,10 @@ function testOperations(godotPath: string, projectDir: string): void {
     JSON.stringify([unoverridden, overridden]),
   );
   writeFileSync(projectFile, beforeNew);
+}
 
+/** Autoloads written into project.godot by hand. */
+function checksAutoloads({ godotPath, projectDir, projectFile, operation, named }: OperationsRig): void {
   // Autoloads are written into project.godot by hand, so the round trip is the only proof.
   const beforeAutoload = readFileSync(projectFile, 'utf8');
   const added = operation('add_autoload', { name: 'Hero', path: 'made/hero.gd' });
@@ -1850,7 +1907,10 @@ function testOperations(godotPath: string, projectDir: string): void {
     2,
     'the option should have been written into the .import file',
   );
+}
 
+/** Import options are read and written through the sidecar file. */
+function checksImportOptions({ godotPath, projectDir, operation }: OperationsRig): void {
   // An option holding an engine type is read tagged and written back as that type. Straight into
   // JSON it came back as the text "(1, 2, 3)", and writing that back put a string in the sidecar.
   const sidecarFile = join(projectDir, 'art.png.import');
@@ -1999,6 +2059,10 @@ function testOperations(godotPath: string, projectDir: string): void {
     rmSync(join(projectDir, 'layers.psd'), { force: true });
     rmSync(join(projectDir, 'stray.png.import'), { force: true });
   }
+}
+
+/** Scene import options are refused, and export presets are read and written. */
+function checksExportPresets({ godotPath, projectDir, operation }: OperationsRig): void {
   const sceneOptions = runRefusedOperation(godotPath, projectDir, 'get_import_options', {
     resource_path: 'fixture_scene.tscn',
   });
@@ -2129,7 +2193,10 @@ function testOperations(godotPath: string, projectDir: string): void {
   );
   checkTemplatesArePerPlatform(godotPath, projectDir);
   rmSync(presetsFile);
+}
 
+/** The health score and the reverse dependency search. */
+function checksProjectDiagnostics({ projectDir, operation }: OperationsRig): void {
   // Diagnostics: the health score and the reverse dependency search.
   const health = operation('get_project_health', {});
   assert.match(asString(get(health, 'grade')), /^[A-F]$/);
@@ -2283,6 +2350,10 @@ function testOperations(godotPath: string, projectDir: string): void {
 
   // The global class list, rebuilt from the scripts on disk over a stale one, then read back
   // by a fresh engine: the file is only right if the engine itself lists the classes from it.
+}
+
+/** The class cache is rebuilt, and a stale entry is told apart from one whose script is gone. */
+function checksTheClassCache({ godotPath, projectDir, operation }: OperationsRig, heroUid: unknown): void {
   // The stale entry names a script that is there but declares no class: one whose script is gone
   // is dropped as every engine starts, before the rebuild could read it.
   writeFileSync(join(projectDir, 'made', 'squire.gd'), 'class_name FixtureSquire\nextends FixtureHero\n');
@@ -2409,6 +2480,10 @@ function testOperations(godotPath: string, projectDir: string): void {
   }
 
   // Plugins: the shipped addons are installed and none is enabled until one is asked for.
+}
+
+/** Plugins are enabled and disabled in the list project.godot holds. */
+function checksPlugins({ projectDir, projectFile, operation, named }: OperationsRig): void {
   // The enabled list in project.godot is an engine expression the editor reads, so what was
   // written is read back through the same file rather than trusted from the answer.
   const plugins = operation('list_plugins', {});
@@ -2535,7 +2610,10 @@ function testOperations(godotPath: string, projectDir: string): void {
       rmSync(join(projectDir, 'addons', plugin), { recursive: true, force: true });
     }
   }
+}
 
+/** Input actions, which are stored as an engine expression. */
+function checksInputActions({ godotPath, projectDir, projectFile, operation }: OperationsRig): void {
   // Input actions, which are stored as an engine expression rather than as JSON.
   const beforeAction = readFileSync(projectFile, 'utf8');
   const action = operation('add_input_action', {
@@ -2810,7 +2888,10 @@ function testOperations(godotPath: string, projectDir: string): void {
     );
   }
   writeFileSync(projectFile, beforeUi);
+}
 
+/** Audio buses live in the AudioServer and survive a run only through the saved layout. */
+function checksAudioBuses({ godotPath, projectDir, operation, named }: OperationsRig): void {
   // Audio buses live in the AudioServer and only survive the run if the layout is saved. Before any
   // change there is no layout file, and the setting names its path all the same.
   assert.equal(
@@ -2931,6 +3012,16 @@ function testOperations(godotPath: string, projectDir: string): void {
     ],
     'and the layout a fresh process reads has it gone',
   );
+}
+
+/** The bus operations refuse what they cannot do, and the class list follows. */
+function checksAudioBusRefusals({
+  godotPath,
+  projectDir,
+  projectFile,
+  operation,
+  named,
+}: OperationsRig): void {
   const master = runRefusedOperation(godotPath, projectDir, 'remove_audio_bus', { bus_name: 'Master' });
   assert.match(
     master.stderr,
@@ -3034,6 +3125,10 @@ function testOperations(godotPath: string, projectDir: string): void {
   // asked about holds: Button starts focus_mode, which Control declares, at another value.
   const zoom = asArray(get(classInfo, 'properties')).find((one) => get(one, 'name') === 'zoom');
   assert.deepEqual(get(zoom, 'default'), { _type: 'Vector2', x: 1, y: 1 }, JSON.stringify(zoom));
+}
+
+/** Class information for a node class and the members it inherits. */
+function checksClassInfo({ operation, named }: OperationsRig): void {
   assert.deepEqual(
     [
       get(
@@ -3121,7 +3216,10 @@ function testOperations(godotPath: string, projectDir: string): void {
     [['normal'], ['normal', 'const'], ['normal', 'vararg']],
     'a plain method, a const one and one taking any number of arguments',
   );
+}
 
+/** Inheritance of an engine class and the refusals for names a project script declares. */
+function checksInheritance({ godotPath, projectDir, operation }: OperationsRig): void {
   const inheritance = operation('inspect_inheritance', { class_name: 'Node2D' });
   assert.ok(asArray(get(inheritance, 'ancestors')).includes('CanvasItem'));
   assert.ok(asArray(get(inheritance, 'all_descendants')).includes('Camera2D'));
@@ -6491,20 +6589,7 @@ const CASES: Readonly<Record<string, (godotPath: string, projectDir: string) => 
 async function main(): Promise<void> {
   const godotPath = resolveGodotPath();
   if (!godotPath) {
-    // A skip is fine on a machine with no engine and never fine where the job exists to run
-    // this. Without the flag, CI installing Godot wrong would read as a pass.
-    if (process.env['GDHARNESS_REQUIRE_GODOT']) {
-      // The list of what was tried and how each one failed, because the next person to hit
-      // this is looking at a CI log for a platform they cannot reproduce.
-      throw new Error(
-        [
-          'GDHARNESS_REQUIRE_GODOT is set and no Godot could be run.',
-          `GODOT_PATH=${process.env['GODOT_PATH'] ?? '<unset>'} GODOT=${process.env['GODOT'] ?? '<unset>'}`,
-          ...tried.map((line) => `  tried ${line}`),
-        ].join('\n'),
-      );
-    }
-    console.log('engine gdscript tests skipped (no Godot found)');
+    skipWithoutGodot();
     return;
   }
 
@@ -6525,105 +6610,136 @@ async function main(): Promise<void> {
   // some read what an earlier one left in the project: operations reads the chain dependencyWalk writes.
   const one = process.argv.indexOf('case');
   if (one !== -1) {
-    const names = process.argv.slice(one + 1);
-    const unknown = names.filter((name) => CASES[name] === undefined);
-    if (names.length === 0 || unknown.length > 0) {
-      throw new Error(`case needs names from: ${Object.keys(CASES).join(', ')}`);
-    }
-    try {
-      for (const name of names) {
-        await CASES[name]?.(godotPath, projectDir);
-      }
-    } finally {
-      sweep(projectDir);
-    }
-    console.log(`cases ${names.join(', ')} passed`);
+    await runNamedCases(godotPath, projectDir, process.argv.slice(one + 1));
     return;
   }
   // One fixture script by name, for working on the thing it checks without the whole leg.
   const named = process.argv.indexOf('fixture');
   if (named !== -1) {
-    const fixture = process.argv[named + 1];
-    if (fixture === undefined) {
-      throw new Error('fixture needs the name of a script in test/support/gd, without .gd');
-    }
-    try {
-      console.log(JSON.stringify(runFixture(godotPath, projectDir, fixture)));
-    } finally {
-      sweep(projectDir);
-    }
-    console.log(`fixture ${fixture} passed`);
+    runNamedFixture(godotPath, projectDir, process.argv[named + 1]);
     return;
   }
   try {
-    testTypedGate(godotPath, projectDir);
-    runFixture(godotPath, projectDir, 'scene_parse');
-    runFixture(godotPath, projectDir, 'operations_serialize');
-    // Identity rather than equality, and both directions: the pattern cache was argued for in the
-    // source and held by nothing, so taking it away would have broken no answer and failed no case.
-    const cached = runFixture(godotPath, projectDir, 'patterns_cache');
-    for (const claim of [
-      'same_pattern_is_one_object',
-      'different_patterns_are_not',
-      'it_still_matches',
-      'it_still_refuses',
-    ]) {
-      assert.equal(get(cached, claim), true, `${claim}: ${JSON.stringify(cached)}`);
-    }
-    runFixture(godotPath, projectDir, 'runtime_serialize');
-    runFixture(godotPath, projectDir, 'runtime_input');
-    runFixture(godotPath, projectDir, 'runtime_input_said');
-    runFixture(godotPath, projectDir, 'runtime_input_scaled');
-    runFixture(godotPath, projectDir, 'runtime_drag');
-    runFixture(godotPath, projectDir, 'runtime_offers');
-    runFixture(godotPath, projectDir, 'runtime_pad');
-    runFixture(godotPath, projectDir, 'runtime_accessibility');
-    runFixture(godotPath, projectDir, 'runtime_query');
-    runFixture(godotPath, projectDir, 'runtime_view');
-    runFixture(godotPath, projectDir, 'runtime_change');
-    runFixture(godotPath, projectDir, 'reload_script');
-    runFixture(godotPath, projectDir, 'scripts_behind');
-    runFixture(godotPath, projectDir, 'hidden_window_flags');
-    runFixture(godotPath, projectDir, 'runtime_click');
-    runFixture(godotPath, projectDir, 'runtime_click_part');
-    runFixture(godotPath, projectDir, 'runtime_items');
-    runFixture(godotPath, projectDir, 'runtime_hidden');
-    runFixture(godotPath, projectDir, 'runtime_toggle');
-    runFixture(godotPath, projectDir, 'runtime_words');
-    runFixture(godotPath, projectDir, 'runtime_wait');
-    runFixture(godotPath, projectDir, 'runtime_wait_order');
-    runFixture(godotPath, projectDir, 'runtime_signal');
-    runFixture(godotPath, projectDir, 'runtime_calls');
-    runFixture(godotPath, projectDir, 'runtime_lazy');
-    runFixture(godotPath, projectDir, 'runtime_lazy_quit');
-    runFixture(godotPath, projectDir, 'runtime_capture');
-    // The editor's client goes where the project says the bridge is, and moves when that changes,
-    // which is what stops two projects wanting one port and an abandoned server keeping an editor.
-    const follows = runFixture(godotPath, projectDir, 'bridge_follows');
-    assert.equal(asNumber(get(follows, 'arrivals')), 2, 'the client should have greeted both servers');
-    // And an announcement that does not answer is set aside rather than waited on for good.
-    runFixture(godotPath, projectDir, 'bridge_leftover');
-    // A refusal a person must act on is said, and a server announced on ::1 is dialled.
-    runFixture(godotPath, projectDir, 'bridge_refusals');
-    // The game announces itself under the engine's temporary directory and the server looks
-    // under Bun's. A platform where the two differ is one where no game is ever found. Both go
-    // through the filesystem's own spelling, because Windows hands one side the 8.3 short name
-    // and the other the long one for the same directory.
-    const clients = runFixture(godotPath, projectDir, 'runtime_clients');
-    assert.equal(
-      realpathSync.native(asString(get(clients, 'temp_dir'))),
-      realpathSync.native(tmpdir()),
-      'the engine and the server should agree on the temporary directory',
-    );
-    runFixture(godotPath, projectDir, 'input_action');
-    for (const run of Object.values(CASES)) {
-      await run(godotPath, projectDir);
-    }
+    await runEveryCase(godotPath, projectDir);
   } finally {
     sweep(projectDir);
   }
 
   console.log('engine gdscript tests passed');
+}
+
+/** Ends the run where no engine was found: a pass on a machine without one, a failure where one is required. */
+function skipWithoutGodot(): void {
+  // A skip is fine on a machine with no engine and never fine where the job exists to run
+  // this. Without the flag, CI installing Godot wrong would read as a pass.
+  if (process.env['GDHARNESS_REQUIRE_GODOT']) {
+    // The list of what was tried and how each one failed, because the next person to hit
+    // this is looking at a CI log for a platform they cannot reproduce.
+    throw new Error(
+      [
+        'GDHARNESS_REQUIRE_GODOT is set and no Godot could be run.',
+        `GODOT_PATH=${process.env['GODOT_PATH'] ?? '<unset>'} GODOT=${process.env['GODOT'] ?? '<unset>'}`,
+        ...tried.map((line) => `  tried ${line}`),
+      ].join('\n'),
+    );
+  }
+  console.log('engine gdscript tests skipped (no Godot found)');
+}
+
+/** Runs the cases called [param names], in that order, and sweeps the project afterwards. */
+async function runNamedCases(godotPath: string, projectDir: string, names: string[]): Promise<void> {
+  const unknown = names.filter((name) => CASES[name] === undefined);
+  if (names.length === 0 || unknown.length > 0) {
+    throw new Error(`case needs names from: ${Object.keys(CASES).join(', ')}`);
+  }
+  try {
+    for (const name of names) {
+      await CASES[name]?.(godotPath, projectDir);
+    }
+  } finally {
+    sweep(projectDir);
+  }
+  console.log(`cases ${names.join(', ')} passed`);
+}
+
+/** Runs the fixture script called [param fixture] and sweeps the project afterwards. */
+function runNamedFixture(godotPath: string, projectDir: string, fixture: string | undefined): void {
+  if (fixture === undefined) {
+    throw new Error('fixture needs the name of a script in test/support/gd, without .gd');
+  }
+  try {
+    console.log(JSON.stringify(runFixture(godotPath, projectDir, fixture)));
+  } finally {
+    sweep(projectDir);
+  }
+  console.log(`fixture ${fixture} passed`);
+}
+
+/** The typed gate, every fixture script and then every case. */
+async function runEveryCase(godotPath: string, projectDir: string): Promise<void> {
+  testTypedGate(godotPath, projectDir);
+  runFixture(godotPath, projectDir, 'scene_parse');
+  runFixture(godotPath, projectDir, 'operations_serialize');
+  // Identity rather than equality, and both directions: the pattern cache was argued for in the
+  // source and held by nothing, so taking it away would have broken no answer and failed no case.
+  const cached = runFixture(godotPath, projectDir, 'patterns_cache');
+  for (const claim of [
+    'same_pattern_is_one_object',
+    'different_patterns_are_not',
+    'it_still_matches',
+    'it_still_refuses',
+  ]) {
+    assert.equal(get(cached, claim), true, `${claim}: ${JSON.stringify(cached)}`);
+  }
+  runFixture(godotPath, projectDir, 'runtime_serialize');
+  runFixture(godotPath, projectDir, 'runtime_input');
+  runFixture(godotPath, projectDir, 'runtime_input_said');
+  runFixture(godotPath, projectDir, 'runtime_input_scaled');
+  runFixture(godotPath, projectDir, 'runtime_drag');
+  runFixture(godotPath, projectDir, 'runtime_offers');
+  runFixture(godotPath, projectDir, 'runtime_pad');
+  runFixture(godotPath, projectDir, 'runtime_accessibility');
+  runFixture(godotPath, projectDir, 'runtime_query');
+  runFixture(godotPath, projectDir, 'runtime_view');
+  runFixture(godotPath, projectDir, 'runtime_change');
+  runFixture(godotPath, projectDir, 'reload_script');
+  runFixture(godotPath, projectDir, 'scripts_behind');
+  runFixture(godotPath, projectDir, 'hidden_window_flags');
+  runFixture(godotPath, projectDir, 'runtime_click');
+  runFixture(godotPath, projectDir, 'runtime_click_part');
+  runFixture(godotPath, projectDir, 'runtime_items');
+  runFixture(godotPath, projectDir, 'runtime_hidden');
+  runFixture(godotPath, projectDir, 'runtime_toggle');
+  runFixture(godotPath, projectDir, 'runtime_words');
+  runFixture(godotPath, projectDir, 'runtime_wait');
+  runFixture(godotPath, projectDir, 'runtime_wait_order');
+  runFixture(godotPath, projectDir, 'runtime_signal');
+  runFixture(godotPath, projectDir, 'runtime_calls');
+  runFixture(godotPath, projectDir, 'runtime_lazy');
+  runFixture(godotPath, projectDir, 'runtime_lazy_quit');
+  runFixture(godotPath, projectDir, 'runtime_capture');
+  // The editor's client goes where the project says the bridge is, and moves when that changes,
+  // which is what stops two projects wanting one port and an abandoned server keeping an editor.
+  const follows = runFixture(godotPath, projectDir, 'bridge_follows');
+  assert.equal(asNumber(get(follows, 'arrivals')), 2, 'the client should have greeted both servers');
+  // And an announcement that does not answer is set aside rather than waited on for good.
+  runFixture(godotPath, projectDir, 'bridge_leftover');
+  // A refusal a person must act on is said, and a server announced on ::1 is dialled.
+  runFixture(godotPath, projectDir, 'bridge_refusals');
+  // The game announces itself under the engine's temporary directory and the server looks
+  // under Bun's. A platform where the two differ is one where no game is ever found. Both go
+  // through the filesystem's own spelling, because Windows hands one side the 8.3 short name
+  // and the other the long one for the same directory.
+  const clients = runFixture(godotPath, projectDir, 'runtime_clients');
+  assert.equal(
+    realpathSync.native(asString(get(clients, 'temp_dir'))),
+    realpathSync.native(tmpdir()),
+    'the engine and the server should agree on the temporary directory',
+  );
+  runFixture(godotPath, projectDir, 'input_action');
+  for (const run of Object.values(CASES)) {
+    await run(godotPath, projectDir);
+  }
 }
 
 await main();

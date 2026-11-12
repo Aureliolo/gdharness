@@ -67,6 +67,26 @@ function read(pid: number, at: number): Sample | null {
   }
 }
 
+/** How [param sample] differs from [param before], and whether the thread did nothing new between them. */
+function changeSince(
+  before: Sample | undefined,
+  sample: Sample,
+): { user: number; system: number; faults: number; gap: number; same: boolean } {
+  const user = before === undefined ? 0 : sample.utime - before.utime;
+  const system = before === undefined ? 0 : sample.stime - before.stime;
+  const faults = before === undefined ? 0 : sample.majflt - before.majflt;
+  const gap = before === undefined ? SAMPLE_MS : sample.at - before.at;
+  const same =
+    before !== undefined &&
+    before.state === sample.state &&
+    before.wchan === sample.wchan &&
+    user === 0 &&
+    system === 0 &&
+    faults === 0 &&
+    gap < SAMPLE_MS * 2;
+  return { user, system, faults, gap, same };
+}
+
 /**
  * One line per change, in clock ticks since the sample before: a run of samples in which the
  * thread sat in the same state, in the same call, using nothing, is folded into its first.
@@ -75,20 +95,8 @@ function describe(samples: Sample[]): string {
   const lines: string[] = [];
   let quiet = 0;
   for (const [index, sample] of samples.entries()) {
-    const before = samples[index - 1];
-    const user = before === undefined ? 0 : sample.utime - before.utime;
-    const system = before === undefined ? 0 : sample.stime - before.stime;
-    const faults = before === undefined ? 0 : sample.majflt - before.majflt;
-    const gap = before === undefined ? SAMPLE_MS : sample.at - before.at;
-    const same =
-      before !== undefined &&
-      before.state === sample.state &&
-      before.wchan === sample.wchan &&
-      user === 0 &&
-      system === 0 &&
-      faults === 0 &&
-      gap < SAMPLE_MS * 2;
-    if (same) {
+    const change = changeSince(samples[index - 1], sample);
+    if (change.same) {
       quiet += 1;
       continue;
     }
@@ -96,6 +104,7 @@ function describe(samples: Sample[]): string {
       lines.push(`  (the same for ${quiet} more)`);
       quiet = 0;
     }
+    const { user, system, faults, gap } = change;
     lines.push(
       `+${sample.at}ms ${sample.state} in ${sample.wchan}, user +${user} system +${system} ticks, ` +
         `major faults +${faults}${gap >= SAMPLE_MS * 2 ? `, ${gap}ms after the sample before` : ''}`,
