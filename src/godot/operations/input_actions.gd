@@ -223,6 +223,43 @@ static func _take_name(argument: String, names: Array[String]) -> void:
 		names.append(named.get_string(1) if single.is_empty() else single)
 
 
+## Why [param action_name] is no name the engine's Input Map takes, or "" when it is one.
+##
+## The editor's Input Map refuses these, since project.godot keys an action by its name and the
+## characters below are its own syntax there. A name holding one is written escaped and reads back
+## as a name nobody typed.
+static func _name_refusal(action_name: String) -> String:
+	for index: int in action_name.length():
+		var code: int = action_name.unicode_at(index)
+		if code < 32 or action_name[index] in ["/", ":", "=", "\\", '"']:
+			return (
+				(
+					"%s is not an action name the engine's Input Map takes: a name cannot hold / : "
+					+ "= \\ or a double quote, or a control character. jump, move_left or ui_menu "
+					+ "are names it takes."
+				)
+				% JSON.stringify(action_name)
+			)
+	return ""
+
+
+## The configuration of each of [param events], or why one is refused. One bad event fails the
+## whole action: an action written with the events that happened to parse is a binding the caller
+## did not ask for, reported as the one they did.
+func _events_config(events: Array) -> Variant:
+	var events_config: Array[Dictionary] = []
+	for event: Variant in events:
+		if not event is Dictionary:
+			return "Every event must be an object, not " + JSON.stringify(event)
+		var fields: Dictionary = event
+		var built: Variant = _event_config(fields)
+		if built is String:
+			return built
+		var event_config: Dictionary = built
+		events_config.append(event_config)
+	return events_config
+
+
 # Add an input action to the InputMap
 func add_input_action(params: Dictionary) -> Dictionary:
 	var action_name: String = str(params.get("action_name", ""))
@@ -238,40 +275,16 @@ func add_input_action(params: Dictionary) -> Dictionary:
 	var deadzone: float = GdhRead.as_float(params.get("deadzone", old_deadzone), old_deadzone)
 
 	_log.info("Adding input action: " + action_name)
-	# The editor's Input Map refuses these, since project.godot keys an action by its name and
-	# the characters below are its own syntax there. A name holding one is written escaped and
-	# reads back as a name nobody typed.
-	for index: int in action_name.length():
-		var code: int = action_name.unicode_at(index)
-		if code < 32 or action_name[index] in ["/", ":", "=", "\\", '"']:
-			return (
-				_log
-				. failure(
-					(
-						(
-							"%s is not an action name the engine's Input Map takes: a name cannot "
-							+ "hold / : = \\ or a double quote, or a control character. jump, "
-							+ "move_left or ui_menu are names it takes."
-						)
-						% JSON.stringify(action_name)
-					)
-				)
-			)
+	var refused: String = _name_refusal(action_name)
+	if not refused.is_empty():
+		return _log.failure(refused)
 	_log.debug("Events: " + JSON.stringify(events))
 	_log.debug("Deadzone: " + str(deadzone))
 
-	# One bad event fails the whole action: an action written with the events that happened to
-	# parse is a binding the caller did not ask for, reported as the one they did.
-	var events_config: Array[Dictionary] = []
-	for event: Variant in events:
-		if not event is Dictionary:
-			return _log.failure("Every event must be an object, not " + JSON.stringify(event))
-		var fields: Dictionary = event
-		var built: Variant = _event_config(fields)
-		if built is String:
-			return _log.failure(str(built))
-		var event_config: Dictionary = built
-		events_config.append(event_config)
+	var configs: Variant = _events_config(events)
+	if configs is String:
+		return _log.failure(str(configs))
+	var events_config: Array[Dictionary] = configs
 
 	if events_config.is_empty():
 		return _log.failure("events must hold at least one event")

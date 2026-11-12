@@ -72,50 +72,10 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 	# as a path written in the call, and both were left out while project_dependencies named them: a
 	# script extending "frame.gd" did not depend on it, nor one calling load(TYPE_CASE).
 	for written: String in _based_on_paths(extends_name, own.inner_classes):
-		if not written in dependencies:
-			dependencies.append(written)
-	var held: Dictionary = {}
-	for constant: Dictionary in own.constants:
-		held[str(constant.get("name", ""))] = _unquoted(str(constant.get("value", "")))
-	for code: String in GdhDependencies.code_by_line(content):
-		for loading: RegExMatch in (
-			GdhPatterns
-			. compiled("(?<![\\w.])(?:preload|load)\\s*\\(\\s*([A-Za-z_]\\w*)\\s*\\)")
-			. search_all(code)
-		):
-			var written: String = str(held.get(loading.get_string(1), ""))
-			if not written.is_empty() and not written in dependencies:
-				dependencies.append(written)
-
-	# A script typed by its class_name is depended on as surely as one preloaded, and the answer
-	# listed only the preloads: a `var stats: Stats` left stats.gd out, while project_dependencies
-	# named it. The same reading as that tool's, so the two agree.
-	var classes_used: Array[Dictionary] = []
-	if _dependencies == null:
-		_dependencies = GdhDependencies.new(_log)
-	var declared_by: Dictionary = _dependencies.classes_declared()
-	for used: String in GdhDependencies.classes_used_in(content, declared_by):
-		var declaring: String = str(declared_by[used])
-		if declaring == full_script_path:
-			continue
-		classes_used.append({ "name": used, "path": declaring })
-		if not declaring in dependencies:
-			dependencies.append(declaring)
-
-	# An autoload is named the way a class is, and its script is one this one needs to compile, but
-	# the project loads it rather than this script, so it is answered apart from dependencies.
-	var global_autoloads: Dictionary = {}
-	for property: Dictionary in ProjectSettings.get_property_list():
-		var setting: String = str(property.get("name", ""))
-		var value: String = (
-			str(ProjectSettings.get_setting(setting)) if setting.begins_with("autoload/") else ""
-		)
-		if value.begins_with("*"):
-			global_autoloads[setting.trim_prefix("autoload/")] = value.trim_prefix("*")
-	var autoloads_used: Array[Dictionary] = []
-	for used: String in GdhDependencies.classes_used_in(content, global_autoloads):
-		if str(global_autoloads[used]) != full_script_path:
-			autoloads_used.append({ "name": used, "path": str(global_autoloads[used]) })
+		_depend_on(dependencies, written)
+	_add_loaded_constants(dependencies, content, own.constants)
+	var classes_used: Array[Dictionary] = _classes_used(content, full_script_path, dependencies)
+	var autoloads_used: Array[Dictionary] = _autoloads_used(content, full_script_path)
 
 	var answer: Dictionary = {
 		"path": script_path,
@@ -140,6 +100,69 @@ func get_gdscript_info(params: Dictionary) -> Dictionary:
 	if GdhRead.as_bool(params.get("include_inherited", false)):
 		_add_inherited(answer, [full_script_path])
 	return answer
+
+
+## Adds [param path] to [param dependencies] once.
+static func _depend_on(dependencies: Array[String], path: String) -> void:
+	if not path in dependencies:
+		dependencies.append(path)
+
+
+## Adds to [param dependencies] each path a constant of [param constants] holds that [param content]
+## hands to load or preload.
+static func _add_loaded_constants(
+	dependencies: Array[String], content: String, constants: Array[Dictionary]
+) -> void:
+	var held: Dictionary = {}
+	for constant: Dictionary in constants:
+		held[str(constant.get("name", ""))] = _unquoted(str(constant.get("value", "")))
+	var loads: RegEx = GdhPatterns.compiled(
+		"(?<![\\w.])(?:preload|load)\\s*\\(\\s*([A-Za-z_]\\w*)\\s*\\)"
+	)
+	for code: String in GdhDependencies.code_by_line(content):
+		for loading: RegExMatch in loads.search_all(code):
+			var written: String = str(held.get(loading.get_string(1), ""))
+			if not written.is_empty():
+				_depend_on(dependencies, written)
+
+
+## The classes [param content] uses by class_name, other than its own, each added to
+## [param dependencies]. A script typed by its class_name is depended on as surely as one
+## preloaded, and the answer listed only the preloads: a `var stats: Stats` left stats.gd out,
+## while project_dependencies named it. The same reading as that tool's, so the two agree.
+func _classes_used(
+	content: String, own_path: String, dependencies: Array[String]
+) -> Array[Dictionary]:
+	var classes_used: Array[Dictionary] = []
+	if _dependencies == null:
+		_dependencies = GdhDependencies.new(_log)
+	var declared_by: Dictionary = _dependencies.classes_declared()
+	for used: String in GdhDependencies.classes_used_in(content, declared_by):
+		var declaring: String = str(declared_by[used])
+		if declaring == own_path:
+			continue
+		classes_used.append({ "name": used, "path": declaring })
+		_depend_on(dependencies, declaring)
+	return classes_used
+
+
+## The autoloads [param content] names, other than the one that is its own script. An autoload is
+## named the way a class is, and its script is one this one needs to compile, but the project
+## loads it rather than this script, so it is answered apart from dependencies.
+static func _autoloads_used(content: String, own_path: String) -> Array[Dictionary]:
+	var global_autoloads: Dictionary = {}
+	for property: Dictionary in ProjectSettings.get_property_list():
+		var setting: String = str(property.get("name", ""))
+		var value: String = (
+			str(ProjectSettings.get_setting(setting)) if setting.begins_with("autoload/") else ""
+		)
+		if value.begins_with("*"):
+			global_autoloads[setting.trim_prefix("autoload/")] = value.trim_prefix("*")
+	var autoloads_used: Array[Dictionary] = []
+	for used: String in GdhDependencies.classes_used_in(content, global_autoloads):
+		if str(global_autoloads[used]) != own_path:
+			autoloads_used.append({ "name": used, "path": str(global_autoloads[used]) })
+	return autoloads_used
 
 
 ## What one class body declares: the script's own at the left margin, or an inner class's at the
@@ -167,28 +190,22 @@ func _members(
 		# Inside a string the raw line is counted, because a `#` in it is text and taking it for a
 		# comment would cut off the quotes that close the string.
 		if in_multiline_string:
-			if GdhPatterns.triple_quotes(raw) % 2 == 1:
-				in_multiline_string = false
+			in_multiline_string = GdhPatterns.triple_quotes(raw) % 2 == 0
 			continue
 		# A `##` block documents what it sits directly above: the class when that is its class_name
 		# or extends line, or when a blank line follows it before any member, and otherwise the next
 		# member. One at a shallower indent is the outer body's, for what follows this inner class.
 		var trimmed: String = raw.strip_edges()
 		if trimmed.begins_with("##"):
-			if not raw.begins_with(margin):
+			if not _took_doc_line(raw, margin, doc):
 				own.last = i - 1
 				return own
-			if _indentation(raw).length() <= margin.length():
-				var said: String = trimmed.substr(2)
-				doc.append(said.substr(1) if said.begins_with(" ") else said)
 			continue
 		var stripped: String = GdhPatterns.without_comment(raw)
 
 		if stripped.is_empty():
-			if trimmed.is_empty() and not doc.is_empty():
-				if not own.declares_members():
-					own.take_doc(doc)
-				doc.clear()
+			if trimmed.is_empty():
+				_close_doc(own, doc)
 			continue
 
 		# A line back at a shallower indent closes an inner class's body, and is the outer body's
@@ -207,8 +224,7 @@ func _members(
 		# Only a line at this body's own margin declares one of its members. Deeper, it is a
 		# function's local or an inner class's member, and each was answered as the script's own:
 		# every `var` in every body, and an inner class's `extends` taken for the script's base.
-		var indented: String = raw.substr(margin.length())
-		if indented.begins_with(" ") or indented.begins_with("\t"):
+		if _indentation(raw).length() > margin.length():
 			_collect_dependencies(stripped, dependencies)
 			continue
 
@@ -233,93 +249,178 @@ func _members(
 		# declaration that does. Held by the combined case, which nothing else in the fixture
 		# reaches: the single-feature cases each carry one of these and never a second.
 		if _can_wrap(header):
-			while _bracket_depth(stripped) > 0 and i + 1 < lines.size():
-				i += 1
-				stripped = (stripped + " " + GdhPatterns.without_comment(lines[i])).strip_edges()
+			var wrapped: Array = _joined_brackets(lines, i, stripped)
+			i = wrapped[0]
+			stripped = wrapped[1]
 			header = GdhPatterns.without_annotations(stripped)
 		# A value that opens a triple-quoted string ends where the string does, and read from its
 		# first line alone it was the opening quotes and the text up to the line break.
-		if in_multiline_string and (header.begins_with("const ") or _declares_variable(header)):
-			while i + 1 < lines.size():
-				i += 1
-				stripped += "\n" + lines[i]
-				if GdhPatterns.triple_quotes(lines[i]) % 2 == 1:
-					break
+		if in_multiline_string and _declares_value(header):
+			var closed: Array = _joined_string(lines, i, stripped)
+			i = closed[0]
+			stripped = closed[1]
 			in_multiline_string = false
 			header = GdhPatterns.without_annotations(stripped)
 		# An annotation alone on its line belongs to the declaration under it, and read without it
-		# an @export variable answered is_export false and an @abstract func is_abstract false.
+		# an @export variable answered is_export false and an @abstract func is_abstract false. The
+		# line sits between a `##` block and what it documents, so the block stays open.
 		if header.is_empty():
-			for one: String in GdhPatterns.annotations_on(stripped):
-				group = GdhPatterns.group_after(one, group)
-				if not one.get_slice("(", 0) in STANDALONE_ANNOTATIONS:
-					pending += "@" + one + " "
+			group = _group_through(stripped, group)
+			pending += _carried(stripped)
 			_collect_dependencies(stripped, dependencies)
 			continue
 		stripped = pending + stripped
 		pending = ""
-		var declaration: RegExMatch = GdhPatterns.declared_class(header)
-		var entry: Dictionary = {}
-		if (declaration != null or header.begins_with("extends ")) and (
-			"abstract" in GdhPatterns.annotations_on(stripped)
-		):
-			own.is_abstract = true
-		if declaration != null:
-			own.declared_class_name = declaration.get_string(1)
-			# `class_name X extends Y` is also one line, and taking the rest of it as the name
-			# reported `Blade extends Node2D` as the class while `extends` kept its default of
-			# `RefCounted`: the name unusable and the base flatly wrong.
-			if not declaration.get_string(2).is_empty():
-				own.extends_name = declaration.get_string(2)
-			own.take_doc(doc)
-		elif header.begins_with("extends "):
-			own.extends_name = header.substr(8).strip_edges()
-			own.take_doc(doc)
-		elif header.begins_with("signal "):
-			# `at`, not `i`: a wrapped declaration starts where it starts, and `i` is now sitting on
-			# the line that closed it.
-			entry = _parse_signal(header, at + 1)
-			own.signals.append(entry)
-		elif header.begins_with("const "):
-			entry = _parse_constant(header, at + 1)
-			own.constants.append(entry)
-		elif header.begins_with("enum "):
-			entry = _parse_enum(header, at + 1)
-			own.enums.append(entry)
-		elif _declares_variable(header):
-			# The whole line here, not the header: which annotations a variable carries is the
-			# answer rather than noise in front of it, and `@export_range(0, 1)` is the hint.
-			for one: String in GdhPatterns.annotations_on(stripped):
-				group = GdhPatterns.group_after(one, group)
-			entry = _parse_variable(stripped, at + 1)
-			if GdhRead.as_bool(entry.get("is_export", false)) and not group.is_empty():
-				entry["group"] = group
-			own.variables.append(entry)
-		elif header.begins_with("func ") or header.begins_with("static func "):
-			entry = _parse_function(header, at + 1, stripped)
-			own.functions.append(entry)
-		elif header.begins_with("class "):
+		if header.begins_with("class "):
 			_collect_dependencies(stripped, dependencies)
 			var inner: GdhMembers = _inner_class(lines, i, margin, header, dependencies)
-			entry = inner.as_inner()
-			if not doc.is_empty():
-				entry["doc"] = "\n".join(PackedStringArray(doc))
+			var held: Dictionary = inner.as_inner()
+			_document(held, doc)
+			own.inner_classes.append(held)
 			doc.clear()
-			own.inner_classes.append(entry)
 			i = inner.last
 			continue
-
-		if not entry.is_empty() and not doc.is_empty():
-			entry["doc"] = "\n".join(PackedStringArray(doc))
-		# A line of annotations alone, `@tool` or `@export` above its variable, is between a comment
-		# and what it documents rather than after it.
-		if not header.is_empty():
-			doc.clear()
+		if _declares_variable(header):
+			# The whole line here, not the header: which annotations a variable carries is the
+			# answer rather than noise in front of it, and `@export_range(0, 1)` is the hint.
+			group = _group_through(stripped, group)
+		# `at`, not `i`: a wrapped declaration starts where it starts, and `i` is now sitting on
+		# the line that closed it.
+		var entry: Dictionary = _member_entry(own, header, stripped, at + 1, group, doc)
+		_document(entry, doc)
+		doc.clear()
 
 		_collect_dependencies(stripped, dependencies)
 
 	own.last = lines.size() - 1
 	return own
+
+
+## Adds the `##` line [param raw] to [param doc] when it is at the body's own [param margin].
+## False for one at a shallower indent, which closes the body.
+func _took_doc_line(raw: String, margin: String, doc: Array[String]) -> bool:
+	if not raw.begins_with(margin):
+		return false
+	if _indentation(raw).length() <= margin.length():
+		var said: String = raw.strip_edges().substr(2)
+		doc.append(said.substr(1) if said.begins_with(" ") else said)
+	return true
+
+
+## Gives [param entry] the `##` block [param doc] as its doc. An empty entry declares nothing to
+## document.
+static func _document(entry: Dictionary, doc: Array[String]) -> void:
+	if not entry.is_empty() and not doc.is_empty():
+		entry["doc"] = "\n".join(PackedStringArray(doc))
+
+
+## Ends the `##` block [param doc] at a blank line. Before any member it documents the class
+## [param own], and after one it documents nothing.
+static func _close_doc(own: GdhMembers, doc: Array[String]) -> void:
+	if doc.is_empty():
+		return
+	if not own.declares_members():
+		own.take_doc(doc)
+	doc.clear()
+
+
+## The export group open after the annotations on [param stripped], from [param group] before
+## them.
+static func _group_through(stripped: String, group: String) -> String:
+	var open: String = group
+	for one: String in GdhPatterns.annotations_on(stripped):
+		open = GdhPatterns.group_after(one, open)
+	return open
+
+
+## The annotations on [param stripped], a line of annotations alone, that the declaration under
+## it carries, each written `@name ` as they are read in front of it.
+static func _carried(stripped: String) -> String:
+	var carried: String = ""
+	for one: String in GdhPatterns.annotations_on(stripped):
+		if not one.get_slice("(", 0) in STANDALONE_ANNOTATIONS:
+			carried += "@" + one + " "
+	return carried
+
+
+## [code][last line, text][/code] of the declaration [param stripped] opens at line [param i],
+## joined up to the line that closes its brackets.
+func _joined_brackets(lines: PackedStringArray, i: int, stripped: String) -> Array:
+	var at: int = i
+	var joined: String = stripped
+	while _bracket_depth(joined) > 0 and at + 1 < lines.size():
+		at += 1
+		joined = (joined + " " + GdhPatterns.without_comment(lines[at])).strip_edges()
+	return [at, joined]
+
+
+## [code][last line, text][/code] of the declaration [param stripped] opens at line [param i],
+## joined up to the line that closes the triple-quoted string it opens.
+static func _joined_string(lines: PackedStringArray, i: int, stripped: String) -> Array:
+	var at: int = i
+	var joined: String = stripped
+	while at + 1 < lines.size():
+		at += 1
+		joined += "\n" + lines[at]
+		if GdhPatterns.triple_quotes(lines[at]) % 2 == 1:
+			break
+	return [at, joined]
+
+
+## Reads the declaration [param header] into [param own], the class body it is a member of, and
+## answers its entry. The class's own name and base are no member and answer an empty entry.
+## [param stripped] is the whole line with its annotations, and [param group] the export group
+## open there.
+func _member_entry(
+	own: GdhMembers,
+	header: String,
+	stripped: String,
+	line: int,
+	group: String,
+	doc: Array[String]
+) -> Dictionary:
+	var declaration: RegExMatch = GdhPatterns.declared_class(header)
+	if declaration == null and not header.begins_with("extends "):
+		return _declared_member(own, header, stripped, line, group)
+	if "abstract" in GdhPatterns.annotations_on(stripped):
+		own.is_abstract = true
+	if declaration != null:
+		own.declared_class_name = declaration.get_string(1)
+		# `class_name X extends Y` is also one line, and taking the rest of it as the name
+		# reported `Blade extends Node2D` as the class while `extends` kept its default of
+		# `RefCounted`: the name unusable and the base flatly wrong.
+		if not declaration.get_string(2).is_empty():
+			own.extends_name = declaration.get_string(2)
+	else:
+		own.extends_name = header.substr(8).strip_edges()
+	own.take_doc(doc)
+	return {}
+
+
+## Reads the member [param header] declares into [param own] and answers its entry, or an empty
+## entry for a line that declares none.
+func _declared_member(
+	own: GdhMembers, header: String, stripped: String, line: int, group: String
+) -> Dictionary:
+	var entry: Dictionary = {}
+	if header.begins_with("signal "):
+		entry = _parse_signal(header, line)
+		own.signals.append(entry)
+	elif header.begins_with("const "):
+		entry = _parse_constant(header, line)
+		own.constants.append(entry)
+	elif header.begins_with("enum "):
+		entry = _parse_enum(header, line)
+		own.enums.append(entry)
+	elif _declares_variable(header):
+		entry = _parse_variable(stripped, line)
+		if GdhRead.as_bool(entry.get("is_export", false)) and not group.is_empty():
+			entry["group"] = group
+		own.variables.append(entry)
+	elif header.begins_with("func ") or header.begins_with("static func "):
+		entry = _parse_function(header, line, stripped)
+		own.functions.append(entry)
+	return entry
 
 
 ## The inner class whose `class` line is [param at], [param header] with its annotations and
@@ -953,6 +1054,11 @@ static func _unquoted(literal: String) -> String:
 
 static func _declares_variable(header: String) -> bool:
 	return header.begins_with("var ") or header.begins_with("static var ")
+
+
+## Whether [param header] declares a constant or a variable, which a value follows.
+static func _declares_value(header: String) -> bool:
+	return header.begins_with("const ") or _declares_variable(header)
 
 
 func _extract_dependencies(line: String) -> Array[String]:

@@ -79,7 +79,27 @@ func _compiling_usec(file: String) -> int:
 	return Time.get_ticks_usec() - from
 
 
+func _check_every_module_was_seen(
+	waiting: PackedStringArray, seen: Dictionary, frames: int, timeline: Array[String]
+) -> void:
+	if not _every_module_loaded():
+		failures.append("a served game compiles every module: %s" % ", ".join(_loaded()))
+	for file: String in waiting:
+		if not seen.has(file):
+			failures.append(
+				(
+					"%s compiles on a loading thread while frames go on, over %d frames: %s"
+					% [file, frames, "; ".join(timeline)]
+				)
+			)
+
+
 func _run() -> void:
+	await _check_the_last_module_asked_for_early()
+	await _check_the_modules_compile_beside_frames()
+
+
+func _check_the_last_module_asked_for_early() -> void:
 	for answered_by: Array in Runtime.MODULE_COMMANDS.values():
 		var file: String = answered_by[0]
 		if not Runtime.MODULES.has(file):
@@ -108,6 +128,8 @@ func _run() -> void:
 			)
 		)
 
+
+func _check_the_modules_compile_beside_frames() -> void:
 	# The rest come over the frames that follow, each compiling on a thread while the frames go on.
 	# Seen from here, which runs on the main thread: a module compiled in a frame is never caught
 	# part done. Frame times cannot tell it, since a macOS runner's idle frames reached 67 ms.
@@ -147,16 +169,7 @@ func _run() -> void:
 					seen[file] = pulled_in + 1
 		cached_before = cached_after
 		threaded_before = threaded_after
-	if not _every_module_loaded():
-		failures.append("a served game compiles every module: %s" % ", ".join(_loaded()))
-	for file: String in waiting:
-		if not seen.has(file):
-			failures.append(
-				(
-					"%s compiles on a loading thread while frames go on, over %d frames: %s"
-					% [file, frames, "; ".join(timeline)]
-				)
-			)
+	_check_every_module_was_seen(waiting, seen, frames, timeline)
 
 	# A module's first command, once the thread has it, holds the frame for no compile.
 	var held_from: int = Time.get_ticks_usec()

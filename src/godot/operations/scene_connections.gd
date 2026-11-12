@@ -352,6 +352,24 @@ static func _arguments_of(source: String, from: int) -> Dictionary:
 	var opened: int = source.find("(", from)
 	if opened < 0 or not source.substr(from, opened - from).strip_edges().is_empty():
 		return {}
+	var parameters: Variant = _parameter_list(source, opened)
+	if parameters == null:
+		return {}
+	var listed: String = parameters
+	var least: int = 0
+	var most: int = 0
+	for parameter: String in _top_level_items(listed):
+		if parameter.begins_with("..."):
+			return { "least": least, "most": -1 }
+		most += 1
+		if not _has_default(parameter):
+			least = most
+	return { "least": least, "most": most }
+
+
+## The text of the parameter list opened at [param opened] in [param source], without its comments,
+## or null when the list does not close.
+static func _parameter_list(source: String, opened: int) -> Variant:
 	var listed: String = ""
 	var depth: int = 1
 	var quote: String = ""
@@ -380,16 +398,8 @@ static func _arguments_of(source: String, from: int) -> Dictionary:
 		listed += character
 		at += 1
 	if depth != 0:
-		return {}
-	var least: int = 0
-	var most: int = 0
-	for parameter: String in _top_level_items(listed):
-		if parameter.begins_with("..."):
-			return { "least": least, "most": -1 }
-		most += 1
-		if not _has_default(parameter):
-			least = most
-	return { "least": least, "most": most }
+		return null
+	return listed
 
 
 ## Whether [param parameter] gives a default, by an = outside its brackets and strings.

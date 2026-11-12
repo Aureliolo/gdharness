@@ -74,6 +74,12 @@ func _check_serialize() -> void:
 	elif not basis.has("x"):
 		_fail("Transform3D lost its basis: %s" % JSON.stringify(transform))
 
+	_check_serialize_containers()
+	_check_serialize_objects()
+	_check_serialize_plain()
+
+
+func _check_serialize_containers() -> void:
 	# Arrays and dictionaries recurse, so a flattened branch shows up as an untagged member.
 	var nested: Variant = values.serialize_value([Vector2(1, 1), { "inner": Vector3(2, 2, 2) }])
 	if not nested is Array:
@@ -89,6 +95,8 @@ func _check_serialize() -> void:
 			elif _tag_of(inner["inner"]) != "Vector3":
 				_fail("nested dictionary member: %s" % JSON.stringify(members))
 
+
+func _check_serialize_objects() -> void:
 	# A Resource is also an Object, so the Resource branch has to be reached first or the path
 	# is dropped and the caller gets a bare class name back.
 	var resource: Resource = Resource.new()
@@ -124,6 +132,8 @@ func _check_serialize() -> void:
 	if values.serialize_value(stale) != null:
 		_fail("an object that has been freed: %s" % JSON.stringify(values.serialize_value(stale)))
 
+
+func _check_serialize_plain() -> void:
 	if values.serialize_value(null) != null:
 		_fail("null")
 	if values.serialize_value(42) != 42:
@@ -221,7 +231,10 @@ func _check_deserialize() -> void:
 		!= NodePath("Root/Child")
 	):
 		_fail("NodePath round trip")
+	_check_deserialize_containers()
 
+
+func _check_deserialize_containers() -> void:
 	var rect: Rect2 = Rect2(Vector2(1, 2), Vector2(3, 4))
 	if values.deserialize_value(values.serialize_value(rect)) != rect:
 		_fail("Rect2 round trip: %s" % str(values.deserialize_value(values.serialize_value(rect))))
