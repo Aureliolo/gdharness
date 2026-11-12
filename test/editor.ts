@@ -1472,6 +1472,24 @@ async function testAWriteBesideAViewportTextureSaysNothingOfItsPath({
 }
 
 /**
+ * A value of a mebibyte goes to the editor and comes back. Godot's socket takes 64 KiB a message
+ * unless told otherwise, and drops a larger answer, so the server waited out its timeout for it.
+ */
+async function testALargeValueCrossesTheEditorsSocket({ call, project }: Editor): Promise<void> {
+  mkdirSync(join(project, 'large'), { recursive: true });
+  writeFileSync(
+    join(project, 'large', 'note.tscn'),
+    '[gd_scene format=3]\n\n[node name="Root" type="Node"]\n',
+  );
+  const scene = { projectPath: project, scenePath: 'res://large/note.tscn' };
+  await call('editor_rescan', { projectPath: project });
+  const note = 'abcdefgh'.repeat(128 * 1024);
+  await call('scene_node', { ...scene, op: 'set', nodePath: '.', properties: { editor_description: note } });
+  const read = get(await call('scene_node', { ...scene, op: 'get', nodePath: '.' }), 'properties');
+  assert.equal(get(read, 'editor_description'), note, 'the mebibyte comes back whole');
+}
+
+/**
  * save_branch through the editor: the branch, painted cells and all, becomes a scene of its own,
  * and the scene instances it where the branch was and keeps what it named there.
  */
@@ -8376,6 +8394,7 @@ async function main(): Promise<void> {
       'testAWriteBesideAViewportTextureSaysNothingOfItsPath',
       testAWriteBesideAViewportTextureSaysNothingOfItsPath,
     ],
+    ['testALargeValueCrossesTheEditorsSocket', testALargeValueCrossesTheEditorsSocket],
     ['testABranchIsSavedAsItsOwnScene', testABranchIsSavedAsItsOwnScene],
     ['testValuesSurviveBeingRead', testValuesSurviveBeingRead],
     ['testAValueTheSceneCannotHoldIsRefused', testAValueTheSceneCannotHoldIsRefused],

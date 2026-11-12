@@ -13,6 +13,7 @@ import { delimiter, join } from 'node:path';
 import process from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type RawData, WebSocket } from 'ws';
+import { EDITOR_REQUEST_BYTES } from '../src/godot-bridge.js';
 import { currentRunner, runLine } from '../src/runner.js';
 import { RUNTIME_PROTOCOL } from '../src/runtime-client.js';
 import { SERVER_VERSION } from '../src/server-version.js';
@@ -1123,10 +1124,43 @@ async function checksTheEditorBridge(rig: BridgeRig): Promise<void> {
     );
     assert.ok(elapsed < 1000, `the refusal is immediate rather than a timeout (${elapsed} ms)`);
     assert.deepEqual(unexpected, [], 'a refused call emits no tool_invoke');
+    await checksARequestTooLargeForTheEditor(rig, godot);
   } finally {
     godot.close();
     dropping.close();
   }
+}
+
+/**
+ * A request larger than the editor's socket takes is refused with its size, and never sent: the
+ * editor closes its socket on one, and every call in flight would go with it.
+ */
+async function checksARequestTooLargeForTheEditor(rig: BridgeRig, godot: WebSocket): Promise<void> {
+  const { call, projectPath } = rig;
+  const sent: unknown[] = [];
+  const capture = (data: RawData): void => {
+    const frame = parseFrame(data);
+    if (frame?.['type'] === 'tool_invoke') sent.push(frame['tool']);
+  };
+  godot.on('message', capture);
+  const startedAt = Date.now();
+  const large = await call('scene_node', {
+    op: 'set',
+    projectPath,
+    scenePath: 'res://test_bridge.tscn',
+    nodePath: '.',
+    properties: { editor_description: 'x'.repeat(EDITOR_REQUEST_BYTES) },
+  });
+  const elapsed = Date.now() - startedAt;
+  godot.off('message', capture);
+  const said = textOf(large) ?? '';
+  assert.match(
+    said,
+    new RegExp(`more than the ${String(EDITOR_REQUEST_BYTES)} one message to the editor carries`),
+    `a request past the editor's socket is refused with its size, got ${said.slice(0, 300)}`,
+  );
+  assert.ok(elapsed < 5000, `the refusal is immediate rather than a timeout (${elapsed} ms)`);
+  assert.deepEqual(sent, [], 'and nothing reaches the editor');
 }
 
 await main();

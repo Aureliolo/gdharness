@@ -437,6 +437,19 @@ export class AddonOfAnotherRelease extends Error {}
 /** The editor turned a tool away unrun because it is quitting after going unused. */
 export class EditorClosing extends Error {}
 
+/**
+ * The most one answer from the editor may carry. Kept in step with `ANSWER_BYTES` in the editor
+ * addon's bridge_client.gd, which sends a larger answer as an error saying its size.
+ */
+const EDITOR_ANSWER_BYTES = 64 * 1024 * 1024;
+
+/**
+ * The most one request to the editor may carry. The editor reserves twice this as its socket
+ * opens and closes the socket on a larger message, so a larger one is refused here. Kept in step
+ * with `REQUEST_BYTES` in the editor addon's bridge_client.gd.
+ */
+export const EDITOR_REQUEST_BYTES = 4 * 1024 * 1024;
+
 const QUIT_UNANSWERED = 'The editor quit after going unused before it answered, so the call was not run.';
 
 /**
@@ -606,7 +619,7 @@ export class GodotBridge extends EventEmitter {
         res.writeHead(404);
         res.end();
       });
-      const godotWss = new WebSocketServer({ noServer: true });
+      const godotWss = new WebSocketServer({ noServer: true, maxPayload: EDITOR_ANSWER_BYTES });
       let settled = false;
 
       server.on('upgrade', (request, socket, head) => {
@@ -1096,7 +1109,14 @@ export class GodotBridge extends EventEmitter {
       throw new Refusal('Godot is not connected');
     }
 
-    this.socket.send(JSON.stringify(message));
+    const text = JSON.stringify(message);
+    const bytes = Buffer.byteLength(text);
+    if (bytes > EDITOR_REQUEST_BYTES) {
+      throw new Refusal(
+        `The request is ${String(bytes)} bytes, more than the ${String(EDITOR_REQUEST_BYTES)} one message to the editor carries, so it was not sent.`,
+      );
+    }
+    this.socket.send(text);
   }
 
   private startKeepalive(): void {
