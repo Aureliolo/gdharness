@@ -61630,9 +61630,9 @@ function testASuitesInputsAreWhatItsEngineLoaded(): void {
     const aged = new Date(Date.now() - 60_000);
     utimesSync(join(project, 'data', 'icon.png'), aged, aged);
     utimesSync(join(project, 'helper.gd'), aged, aged);
-    const settled = Date.now() + 25;
+    const settled = Date.now() + FILE_TIME_LAG_MS + 25;
     while (Date.now() < settled) {
-      // The file system's clock moves past the last change.
+      // The last change reads further back than a file's time can lag.
     }
     const began = Date.now();
     assert.equal(new SuiteInputs(scripts, ['1']).modifiedAfter(kept, began), false, 'nothing since');
