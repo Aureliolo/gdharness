@@ -1010,7 +1010,7 @@ Usage:
   gdharness test [project] [suite ...] [--engines N] [--slots DIR] [--slot-count N]
                  [--silence S] [--deadline S] [--tests DIR] [--changed-only] [--reach-also PATH]
                  [--whole-tree] [--import] [--godot PATH] [--godot-version V] [--cores N]
-                 [--order reversed|SEED] [--print-output] [--verbose] [--result FILE]
+                 [--order reversed|named|SEED] [--print-output] [--verbose] [--result FILE]
                  [--times FILE] [--runner]
                                      Run the project's gdUnit4 suites over several engines and
                                      judge every line they print: exit 1 on a failing case, an

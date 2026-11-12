@@ -102,6 +102,9 @@ import {
 } from './suite-plan.js';
 import { getLocalVersion } from './version.js';
 
+/** An order `--order` runs every suite in, in one engine. A number is the seed it is shuffled by. */
+type RunOrder = 'reversed' | 'named' | number;
+
 interface TestOptions {
   readonly projectPath: string;
   /** The suites, directories and `suite.gd:test_case` cases named, or none for every suite. */
@@ -125,8 +128,8 @@ interface TestOptions {
   readonly wholeTree: boolean;
   readonly reachAlso: readonly string[];
   readonly importFirst: boolean;
-  /** Every suite in one engine in this order: `reversed`, or shuffled by the seed. */
-  readonly order: 'reversed' | number | null;
+  /** Every suite in one engine in this order: `reversed`, as `named`, or shuffled by the seed. */
+  readonly order: RunOrder | null;
   /** Print what each engine printed, after the run and before its verdict. */
   readonly printOutput: boolean;
   /** Start every engine with `--verbose`, so a leak at exit is named by what was left. */
@@ -320,12 +323,20 @@ function pathNamed(value: string | undefined, cwd: string): string | null {
   return value === undefined ? null : resolve(cwd, value);
 }
 
-/** The order the `--order` option names: reversed, a seed to shuffle by, or null for the plain one. */
-function orderNamed(order: string | undefined): 'reversed' | number | null {
+/**
+ * The order the `--order` option names: reversed, the order [param selected] names the suites in, a
+ * seed to shuffle by, or null for the plain one.
+ */
+function orderNamed(order: string | undefined, selected: readonly string[]): RunOrder | null {
   if (order === undefined) {
     return null;
   }
-  return order === 'reversed' ? 'reversed' : seedOf(order);
+  if (order === 'named' && selected.length === 0) {
+    throw new EngineUsageError(
+      '--order named needs suites named on the command line: gdharness test a_test.gd b_test.gd --order named.',
+    );
+  }
+  return order === 'reversed' || order === 'named' ? order : seedOf(order);
 }
 
 /** [param args], everything after `test`, read into options. Relative paths are read from [param cwd]. */
@@ -333,9 +344,10 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
   const { valued, switches, positional } = sortedArguments(args);
   const { projectPath, projectNamed } = projectOfRun(positional, cwd);
   const last = (flag: string): string | undefined => valued.get(flag)?.at(-1);
+  const selected = positional.slice(projectNamed ? 1 : 0).map((entry) => resPathOf(entry, projectPath, cwd));
   return {
     projectPath,
-    selected: positional.slice(projectNamed ? 1 : 0).map((entry) => resPathOf(entry, projectPath, cwd)),
+    selected,
     engines: wholeFlag(last('--engines'), '--engines') ?? MOST_ENGINES,
     slotsDirectory: pathNamed(last('--slots'), cwd),
     slotCount: wholeFlag(last('--slot-count'), '--slot-count'),
@@ -349,7 +361,7 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
     wholeTree: switches.has('--whole-tree'),
     reachAlso: (valued.get('--reach-also') ?? []).map((path) => resolve(projectPath, path)),
     importFirst: switches.has('--import'),
-    order: orderNamed(last('--order')),
+    order: orderNamed(last('--order'), selected),
     printOutput: switches.has('--print-output'),
     verbose: switches.has('--verbose'),
     resultFile: pathNamed(last('--result'), cwd),
@@ -360,7 +372,9 @@ export function testOptionsOf(args: readonly string[], cwd: string): TestOptions
 function seedOf(value: string): number {
   const seed = Number(value);
   if (!Number.isInteger(seed) || seed < 0) {
-    throw new EngineUsageError(`--order takes reversed or a whole number to shuffle by, not ${value}.`);
+    throw new EngineUsageError(
+      `--order takes reversed, named or a whole number to shuffle by, not ${value}.`,
+    );
   }
   return seed;
 }
@@ -456,11 +470,23 @@ function suitesOfEntry(scripts: ProjectScripts, options: TestOptions, path: stri
   return suites;
 }
 
-/** [param units] in the order [param order] asks: reversed by path, or shuffled by a seed. */
-function ordered(units: readonly Unit[], order: 'reversed' | number): Unit[] {
+/**
+ * [param units] in the order [param order] asks: reversed by path, in the order [param selected]
+ * names them, or shuffled by a seed.
+ */
+function ordered(units: readonly Unit[], order: RunOrder, selected: readonly string[]): Unit[] {
   const sorted = [...units].toSorted((a, b) => a.suite.localeCompare(b.suite));
   if (order === 'reversed') {
     return sorted.reverse();
+  }
+  if (order === 'named') {
+    // A suite comes where the first entry naming it stands, the suites of one folder by path.
+    const rank = (suite: string): number =>
+      selected.findIndex((entry) => {
+        const path = /^(.+\.gd):[^/]*$/.exec(entry)?.[1] ?? entry;
+        return path === suite || suite.startsWith(path.endsWith('/') ? path : `${path}/`);
+      });
+    return sorted.toSorted((a, b) => rank(a.suite) - rank(b.suite));
   }
   // mulberry32, so a seed names the same order on every machine and every run.
   let state = order >>> 0;
@@ -911,7 +937,7 @@ async function dealtRun(context: RunContext, suites: readonly DeclaredSuite[]): 
   const plans =
     options.order === null
       ? dealt(units, declared, room.engines)
-      : [inOneEngine(ordered(units, options.order), declared)];
+      : [inOneEngine(ordered(units, options.order, options.selected), declared)];
   return { times, byMemory, room, memoryHeld, units, splitPast, plans };
 }
 
@@ -926,7 +952,9 @@ function dealSaid(context: RunContext, suites: readonly DeclaredSuite[], deal: D
       ? `${windowedSaid(plans)}${roomSaid(plans.length, lanesOf(plans), lanesOf(dealt(asked, declared, options.engines)), room.held, options.engines)}`
       : options.order === 'reversed'
         ? ', in reverse order of path'
-        : `, shuffled by ${String(options.order)}`;
+        : options.order === 'named'
+          ? ', in the order named'
+          : `, shuffled by ${String(options.order)}`;
   const functions = suites.reduce((sum, suite) => sum + suite.cases.length, 0);
   return `${plural(functions, 'test function')} in ${plural(suites.length, 'suite')} over ${plural(plans.length, 'engine')}${how}.`;
 }
