@@ -526,8 +526,9 @@ however busy the machine is. Its ending says how it was counted.
 ### Running out of memory
 
 When an engine runs out of memory, every engine that failed runs again, one at a time, and those
-runs are the ones judged. Running out shows as the allocator's null, an image decode failing, or
-Windows' `STATUS_NO_MEMORY` or `STATUS_COMMITMENT_LIMIT`. One that fails again is headed as run
+runs are the ones judged. Running out shows as the allocator's null, an image decode failing,
+godot-sandbox failing to allocate a sandbox, or Windows' `STATUS_NO_MEMORY` or
+`STATUS_COMMITMENT_LIMIT`. One that fails again is headed as run
 again alone.
 
 ## Leaving out what passed

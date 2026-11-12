@@ -56216,6 +56216,36 @@ function testAnEngineRunIsJudgedOnEverythingItPrinted(): void {
   );
   assert.equal(starved.starved, true, "the allocator's null is too");
   assert.ok(starved.faults.includes('the engine ran out of memory'), starved.faults.join('\n'));
+  const sandboxStarved = (printed: string): readonly string[] => readRun(`${rows([1])}\n${printed}`).starved;
+  const sandboxLine = 'ERROR: Sandbox construction exception: std::bad_alloc';
+  assert.equal(
+    sandboxStarved(`${sandboxLine}\n   at: load (src/sandbox.cpp:1039)`).length,
+    1,
+    'godot-sandbox failing to allocate, LF',
+  );
+  assert.equal(
+    sandboxStarved(
+      `${sandboxLine.replace('std::bad_alloc', 'bad allocation')}\r\n   at: load (src\\sandbox.cpp:1039)\r\n`,
+    ).length,
+    1,
+    "MSVC's wording, CRLF and backslashes",
+  );
+  assert.equal(
+    sandboxStarved(`${sandboxLine}\r\n   at: load (src/sandbox.cpp:1039)`).length,
+    1,
+    'std::bad_alloc, CRLF',
+  );
+  assert.deepEqual(
+    sandboxStarved(`${sandboxLine}\n   at: push_error (core/variant/variant_utility.cpp:1118)`),
+    [],
+    "another file's location",
+  );
+  assert.deepEqual(sandboxStarved('caught std::bad_alloc'), [], 'the words alone');
+  assert.deepEqual(
+    sandboxStarved('ERROR: Sandbox construction exception: invalid ELF\n   at: load (src/sandbox.cpp:1039)'),
+    [],
+    'an exception that is not an allocation',
+  );
 
   const leaked = judgeEngine(
     readRun(
